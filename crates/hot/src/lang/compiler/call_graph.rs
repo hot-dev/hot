@@ -350,7 +350,7 @@ fn extract_fn_box_from_meta(meta: &Option<Meta>) -> Option<BoxRequirement> {
 }
 
 /// Recursively collect callee FQNs from a Value AST node.
-fn collect_callees_from_value(
+pub(super) fn collect_callees_from_value(
     value: &Value,
     current_ns: &str,
     aliases: &indexmap::IndexMap<NsPath, NsPath>,

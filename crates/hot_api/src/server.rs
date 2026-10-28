@@ -12,7 +12,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::access_log::access_log_middleware;
-use crate::auth::api_key_auth_middleware;
+use crate::auth::authentication_middleware;
 use crate::client_ip::{ClientIpPolicy, client_ip_middleware};
 use crate::domain_resolver::{DomainCache, domain_resolution_middleware};
 use crate::handlers::{
@@ -516,6 +516,9 @@ pub(crate) fn build_router(
             axum::routing::delete(abort_upload),
         )
         .layer(DefaultBodyLimit::max(max_body_size))
+        .route_layer(middleware::from_fn(
+            crate::auth::route_authorization_middleware,
+        ))
         .route_layer(middleware::from_fn_with_state(
             db.clone(),
             access_log_middleware,
@@ -526,7 +529,7 @@ pub(crate) fn build_router(
         ))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            api_key_auth_middleware,
+            authentication_middleware,
         ));
 
     let org_routes =
@@ -536,7 +539,10 @@ pub(crate) fn build_router(
     let domain_cache = DomainCache::new();
 
     // Combine all routes with middleware layers (outermost → innermost):
-    //   Trace → BodyLimit → DomainResolution → Router → (auth → rate_limit → access_log → handler)
+    //   Trace → BodyLimit → DomainResolution → Router →
+    //   (authentication → rate_limit → access_log → route authorization → handler)
+    // Route denials run inside rate limiting and the access log, so a
+    // credential probing actions it lacks is throttled and audited.
     Router::new()
         .merge(public_routes)
         .merge(api_v1_routes)

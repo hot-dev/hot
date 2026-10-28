@@ -195,6 +195,14 @@ pub(super) async fn reap(
         );
         match termination {
             Termination::Unconfirmed if state.is_none() => {
+                // The owning runtime may have settled it since this pass
+                // listed it; then nothing needs recovery.
+                if Task::quota_reservation(db, &task.task_id)
+                    .await
+                    .is_ok_and(|reservation| reservation.duration_ms == 0)
+                {
+                    continue;
+                }
                 tracing::warn!(task_id=%task.task_id, worker_id=%owner, "Cancelled quota needs recovery on its owning runtime; no local ownership evidence");
                 continue;
             }

@@ -20,6 +20,15 @@ pub enum BuildError {
     NotFound,
 }
 
+/// A schedule cap denies an activation; a database failure during schedule
+/// admission doesn't, so callers can retry it instead of failing the build.
+fn schedule_admission_error(error: super::schedule::ScheduleError) -> BuildError {
+    match error {
+        super::schedule::ScheduleError::Database(error) => BuildError::Database(error),
+        error => BuildError::Admission(error.to_string()),
+    }
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct Build {
     pub build_id: Uuid,
@@ -1071,7 +1080,7 @@ impl Build {
 
         let admission = super::schedule::quota::Admission::begin(db, build_id, -1)
             .await
-            .map_err(|e| BuildError::Admission(e.to_string()))?;
+            .map_err(schedule_admission_error)?;
         let activated = match admission {
             super::schedule::quota::Admission::Postgres {
                 mut tx,
@@ -1125,7 +1134,7 @@ impl Build {
 
                 super::schedule::quota::validate_postgres(&mut tx, root, limit)
                     .await
-                    .map_err(|e| BuildError::Admission(e.to_string()))?;
+                    .map_err(schedule_admission_error)?;
                 tx.commit().await?;
                 true
             }
@@ -1181,7 +1190,7 @@ impl Build {
 
                 super::schedule::quota::validate_sqlite(&mut tx, root, limit)
                     .await
-                    .map_err(|e| BuildError::Admission(e.to_string()))?;
+                    .map_err(schedule_admission_error)?;
                 tx.commit().await?;
                 true
             }
@@ -1208,7 +1217,7 @@ impl Build {
 
         let admission = super::schedule::quota::Admission::begin(db, build_id, -1)
             .await
-            .map_err(|e| BuildError::Admission(e.to_string()))?;
+            .map_err(schedule_admission_error)?;
         match admission {
             super::schedule::quota::Admission::Postgres {
                 mut tx,
@@ -1255,7 +1264,7 @@ impl Build {
                 // Commit the transaction
                 super::schedule::quota::validate_postgres(&mut tx, root, limit)
                     .await
-                    .map_err(|e| BuildError::Admission(e.to_string()))?;
+                    .map_err(schedule_admission_error)?;
                 tx.commit().await?;
             }
             super::schedule::quota::Admission::Sqlite {
@@ -1310,7 +1319,7 @@ impl Build {
                 // Commit the transaction
                 super::schedule::quota::validate_sqlite(&mut tx, root, limit)
                     .await
-                    .map_err(|e| BuildError::Admission(e.to_string()))?;
+                    .map_err(schedule_admission_error)?;
                 tx.commit().await?;
             }
         }

@@ -25,6 +25,7 @@ pub mod core_registry;
 pub mod ctx_checker;
 pub mod dependency_graph;
 mod named_args;
+mod namespace_order;
 pub mod placeholder_lowering;
 pub mod refinements;
 pub mod resolver;
@@ -167,6 +168,9 @@ pub struct Compiler {
     /// Pre-extracted set of all known function names (populated before bytecode compilation)
     /// Used to distinguish function references from type/variable references at compile time
     known_functions: AHashSet<String>,
+    /// The known functions that construct a unit enum variant (`::ns/Type.Variant`
+    /// with no payload). A reference to one is the variant's value.
+    unit_variants: AHashSet<String>,
     /// Monotonic counter used to give every emitted cond/match flow a globally
     /// unique branch-name suffix. This is critical because `BytecodeProgram::add_constant`
     /// interns string constants — without a unique suffix, branch names like
@@ -224,6 +228,7 @@ pub struct CompilerSeed {
     lazy_params_registry: IndexMap<String, (Vec<bool>, bool)>,
     core_lazy_function_names: IndexMap<String, String>,
     known_functions: AHashSet<String>,
+    unit_variants: AHashSet<String>,
     next_cond_id: u64,
     constraint_type_defs: AHashMap<String, crate::lang::ast::TypeDef>,
     constraint_ns_aliases: AHashMap<String, crate::lang::ast::NamespaceAliases>,
@@ -316,6 +321,7 @@ impl Compiler {
             lazy_params_registry: IndexMap::new(),
             core_lazy_function_names: IndexMap::new(),
             known_functions: AHashSet::new(),
+            unit_variants: AHashSet::new(),
             next_cond_id: 0,
             diagnostics: crate::lang::errors::CompilerErrors::new(),
             constraint_type_defs: AHashMap::new(),
@@ -347,6 +353,7 @@ impl Compiler {
             lazy_params_registry: self.lazy_params_registry.clone(),
             core_lazy_function_names: self.core_lazy_function_names.clone(),
             known_functions: self.known_functions.clone(),
+            unit_variants: self.unit_variants.clone(),
             next_cond_id: self.next_cond_id,
             constraint_type_defs: self.constraint_type_defs.clone(),
             constraint_ns_aliases: self.constraint_ns_aliases.clone(),
@@ -368,6 +375,7 @@ impl Compiler {
         compiler.lazy_params_registry = seed.lazy_params_registry;
         compiler.core_lazy_function_names = seed.core_lazy_function_names;
         compiler.known_functions = seed.known_functions;
+        compiler.unit_variants = seed.unit_variants;
         compiler.next_cond_id = seed.next_cond_id;
         compiler.constraint_type_defs = seed.constraint_type_defs;
         compiler.constraint_ns_aliases = seed.constraint_ns_aliases;
@@ -476,8 +484,13 @@ impl Compiler {
     /// 3. Imports/aliases in current namespace
     /// 4. Core variables (auto-imported types like Result)
     fn resolve_type_path(&self, type_name: &str) -> (String, bool) {
-        // 1. If already fully qualified, return as-is
+        // 1. If already fully qualified, return it with any namespace alias
+        //    (`::alias/Type`) resolved
         if type_name.starts_with("::") {
+            if let Some((ns, name)) = type_name.rsplit_once('/') {
+                let ns = self.resolve_namespace_alias(&crate::lang::ast::NsPath::from_string(ns));
+                return (format!("{ns}/{name}"), true);
+            }
             return (type_name.to_string(), true);
         }
 
@@ -866,6 +879,9 @@ impl Compiler {
                                 };
                                 let qualified_variant =
                                     format!("{}.{}", qualified_type_name, variant_name);
+                                if variant.type_ref.is_none() {
+                                    self.unit_variants.insert(qualified_variant.clone());
+                                }
                                 self.known_functions.insert(qualified_variant);
                                 variant_count += 1;
                             }
@@ -1040,6 +1056,11 @@ impl Compiler {
         // Select the resolved/lowered copies of extension declarations out of
         // the merged AST. Exact Var identity includes source spans, so this
         // selects a shadowing declaration without re-emitting the base one.
+        // Resolution rewrites the names in meta, so match without it.
+        let without_meta = |var: &Var| Var {
+            meta: None,
+            ..var.clone()
+        };
         let mut emission_program = Program {
             namespaces: IndexMap::new(),
             current_namespace: extension_program.current_namespace.clone(),
@@ -1051,14 +1072,20 @@ impl Compiler {
             let mut emission_namespace = extension_namespace.clone();
             emission_namespace.aliases = validation_namespace.aliases.clone();
             emission_namespace.scope.vars.clear();
+            let resolved_by_declaration: AHashMap<Var, (&Var, &Value)> = validation_namespace
+                .scope
+                .vars
+                .iter()
+                .map(|(var, value)| (without_meta(var), (var, value)))
+                .collect();
             for (var, _) in &extension_namespace.scope.vars {
                 if let Some((resolved_var, resolved_value)) =
-                    validation_namespace.scope.vars.get_key_value(var)
+                    resolved_by_declaration.get(&without_meta(var))
                 {
                     emission_namespace
                         .scope
                         .vars
-                        .insert(resolved_var.clone(), resolved_value.clone());
+                        .insert((*resolved_var).clone(), (*resolved_value).clone());
                 }
             }
             if !emission_namespace.scope.vars.is_empty() {
@@ -1233,8 +1260,9 @@ impl Compiler {
         tracing::debug!("Compiler: Pass 2 - Compiling all other declarations");
         tracing::trace!("Total namespaces to compile: {}", program.namespaces.len());
 
-        // Create a compilation order that ensures ::hot::main (target file namespace) is processed last
-        let mut namespace_order: Vec<_> = program.namespaces.iter().collect();
+        // Namespaces run after the namespaces whose values they read, and
+        // ::hot::main (target file namespace) runs last.
+        let mut namespace_order = namespace_order::initialization_order(program);
 
         // Find ::hot::main namespace and move it to the end if it exists
         if let Some(main_pos) = namespace_order
@@ -2062,8 +2090,11 @@ impl Compiler {
                     // Use the pre-extracted known_functions registry to determine if this
                     // is a function reference. This is populated during Pass 0 and includes
                     // both built-in (hotlib) functions and user-defined functions from all
-                    // namespaces, so it's independent of compilation order.
-                    if self.is_known_function(&target_qualified) {
+                    // namespaces, so it's independent of compilation order. A unit variant
+                    // (`Nothing ::ns/Shape.Dot`) binds its value instead.
+                    if self.is_known_function(&target_qualified)
+                        && !self.unit_variants.contains(&target_qualified)
+                    {
                         // This is a function alias - create the FunctionAlias structure
                         tracing::trace!(
                             "Compiler: Creating function alias '{}' -> '{}'",
@@ -8407,6 +8438,27 @@ impl Compiler {
                 // Namespace reference - construct full name and load
                 // First, resolve any namespace aliases
                 let resolved_ns_ref = self.resolve_ns_ref_alias(ns_ref);
+
+                // An enum variant, `::ns/Type.Variant`: load the type and take
+                // the variant from it, as for `Type.Variant`.
+                if let Some((type_name, variant)) = resolved_ns_ref
+                    .function_name
+                    .as_deref()
+                    .and_then(|name| name.split_once('.'))
+                {
+                    let type_reg = self.allocate_register();
+                    let type_name_constant = self.program.add_constant(Constant::Val(Val::from(
+                        format!("{}/{}", resolved_ns_ref.ns, type_name),
+                    )));
+                    self.emit_instruction(Instruction::LoadVar {
+                        dest: type_reg,
+                        var_name: type_name_constant,
+                    });
+                    return self.compile_deep_path_access(
+                        type_reg,
+                        &crate::lang::ast::DeepPath::Key(variant.to_string()),
+                    );
+                }
 
                 let reg = self.allocate_register();
                 let namespace_parts: Vec<String> = resolved_ns_ref

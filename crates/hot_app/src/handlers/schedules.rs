@@ -101,7 +101,9 @@ pub async fn schedules_list_handler(
             } else {
                 Features::resolve_for_org(&db, &org.org_id).await
             };
-            let active_count = Schedule::get_active_count_by_org(&db, &org.org_id)
+            // The limit counts active schedules across the whole account,
+            // beyond this page's environment scope.
+            let active_count = Schedule::get_active_count_by_account(&db, &org.org_id)
                 .await
                 .unwrap_or_else(|e| {
                     tracing::error!(

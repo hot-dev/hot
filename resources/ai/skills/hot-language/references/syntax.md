@@ -237,6 +237,8 @@ A record type's constructor takes its fields by name:
 
 ```hot
 User type { name: Str, email: Str, age: Int? }
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Point }
 
 ada User(name: "Ada", email: "ada@example.com")   // age may be left out
 circle Shape.Circle(radius: 5.0)                  // enum variant payload

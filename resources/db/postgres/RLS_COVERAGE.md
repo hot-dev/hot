@@ -61,14 +61,14 @@ Reference tables deliberately have no RLS; runtime receives SELECT only:
 `alert_delivery_status`, `alert_destination_type`, `plan`.
 
 SQLx migration metadata is deployment control state and receives no runtime grants.
-Org API key tables carry their own policies. Migration 017 replaced 013's
+Org API key tables carry their own policies. Migration 019 replaced 013's
 management credential tables (`management_key`, `api_key_management_issuer`).
 
 | Added control table | Ownership and operation |
 | --- | --- |
 | `account_request_window` | Exact root; Billing only (013) |
-| `org_api_key` | Exact owning Organization; Authentication read; no delete; immutable org and issuer (017) |
-| `api_key_issuer` | API key environment (writes need an exact environment scope); Authentication read; no update or delete; issued key and issuer deletion restricted (017) |
+| `org_api_key` | Exact owning Organization; Authentication read; no delete; immutable org and issuer (019) |
+| `api_key_issuer` | API key environment (writes need an exact environment scope); Authentication read; no update or delete; issued key and issuer deletion restricted (019) |
 
 `StoreProvisioning` can read only `store_map` configuration; index DDL uses the
 separately supplied schema-owner credentials. `Retention` reads session/plan
@@ -122,6 +122,14 @@ and grants their protected DML privileges. Triggers run with the caller's
 scope and rights, without SECURITY DEFINER or owner bypass. Scope policies on
 the counter rows reject a sibling's env or org. Runtime access to arbitrary SQL
 and construction of maintenance authority remain outside this boundary.
+
+| Service access extension | Coverage |
+| --- | --- |
+| `org_user` (017) | Alerts reads the directory to resolve Org, Team and User recipients; a child Organization scope reads its root's active administrators |
+| `user` (017) | Alerts reads recipients; an Organization scope reads its members, deactivated ones included; Billing reads its account's members; a child Organization scope reads its inherited administrators |
+| `org_note` (017) | Billing reads and inserts its account's notes, which deduplicate compute-unit threshold alerts |
+| `alert_subscription_channel` (017) | An org-wide subscription may link one of its org's environment channels |
+| `parked_event` (018) | Queue operation reads, parks and replays held events; an exact environment scope reads and writes its own |
 
 Migration 013 backfills `call.env_id` from its existing run, makes it required,
 and validates the pair with a composite foreign key. Both ownership fields are

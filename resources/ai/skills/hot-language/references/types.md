@@ -185,6 +185,24 @@ the set (from JSON, say) fails where it enters the type, as a
 values of its base type at runtime, so use `open` for values an external
 service sends, which it may add to.
 
+A `match` on a closed literal union (named or inline) must be
+**exhaustive**, like a closed enum: every member needs an arm, unless a
+`_`, `Any`, or type arm (`Str`) covers the rest. A union arm counts each
+value it names. A nullable subject (`Fruit?`) also needs a `null` arm.
+Otherwise the compiler reports `non-exhaustive-match` with the missing
+values:
+
+<!-- hot-check: skip -->
+```hot
+Severity type "low" | "medium" | "high"
+
+// non-exhaustive-match: missing arms for `"medium"`
+rate fn match (s: Severity): Int {
+    "low" => { 1 }
+    "high" => { 3 }
+}
+```
+
 ### Open Literal Unions
 
 A literal union may be declared `open` to allow other namespaces (or
@@ -233,7 +251,9 @@ seed declaration with `open`:
 ```hot
 // Before — closed (no extension allowed)
 HttpMethod type "GET" | "POST" | "PUT" | "DELETE" | "PATCH"
+```
 
+```hot
 // After — open (additional members can be added in the same namespace)
 HttpMethod type open "GET" | "POST" | "PUT" | "DELETE" | "PATCH"
 ```
@@ -310,9 +330,18 @@ limit: Int fetch-limit() where gt(%, 0)   // binding; `where` may start the next
   `where` needs a declared type (`where-requires-type`); refined `lazy`
   parameters are `unsupported-constraint`; a predicate that isn't a function
   of one value, or a parameter predicate that uses another parameter, is
-  `invalid-constraint`. `hot check` reports literals that fail
-  (`constraint-violation`), non-Bool predicates (`constraint-not-bool`), and
-  impure ones (`impure-constraint`).
+  `invalid-constraint`. `hot check` reports non-Bool predicates
+  (`constraint-not-bool`) and impure ones (`impure-constraint`).
+- `hot check` reports a literal that fails (`constraint-violation`) when it is
+  a typed binding's value (top level or in a body), a refined type's
+  argument (`Port(0)`), an argument to a constrained parameter, or a field of
+  a record constructor call, named or Map form (the error names the field
+  path). A record invariant is checked when every field it reads is a
+  literal. It evaluates core comparisons, `between`, `in`, `and`/`or`/`not`,
+  `if`, `is-null`, `length`, `starts-with`/`ends-with`/`contains`, top-level
+  literal values, and the program's own functions with untyped or
+  `Str`/`Int`/`Dec`/`Bool`/`Any` parameters, within a budget. Anything else
+  (a computed value, another function) is checked only at run time.
 - `where` is reserved: it can't name a binding or a function.
 
 ## Enum Types
@@ -375,6 +404,21 @@ area fn match (shape: Shape): Dec {
 own arm or a `_` default arm catches the rest. The compiler rejects
 non-exhaustive matches (`non-exhaustive-match`).
 
+### Enums from Other Namespaces
+
+Import the enum type (`Shape ::geo/Shape`, then `Shape.Circle(...)`), or name
+the variant in full. Qualified variants work in calls, as values, in `match`
+arms, and as aliases. A variant's payload type can be qualified too:
+
+<!-- hot-check: skip -->
+```hot
+b ::geo/Shape.Circle(radius: 2.0)
+c ::g/Shape.Circle({radius: 3.0})        // ::g is an alias of ::geo
+d ::geo/Shape.Dot                        // unit variant: the value
+Circle ::geo/Shape.Circle                // variant alias: the constructor
+Form enum { Round(::geo/Circle), Flat }  // qualified payload type
+```
+
 ### Open Enums
 
 Add the `open` modifier to make an enum extensible — any module may register
@@ -410,6 +454,7 @@ Arrows do double duty for open enums: they register a new variant **and**
 synthesize the variant constructor. The bodyless form is the most concise:
 
 ```hot
+Animal enum open { Dog, Cat }
 Bird type { species: Str, wingspan: Dec }
 Bird -> Animal.Bird       // enrolls Bird as Animal.Bird
 
@@ -420,6 +465,7 @@ The variant name can differ from the source type name — this is a
 **role-shaped variant**:
 
 ```hot
+Animal enum open { Dog, Cat }
 Lizard type { length-cm: Dec }
 Lizard -> Animal.Reptile  // variant is Animal.Reptile, payload is Lizard
 ```
@@ -545,19 +591,17 @@ distinct.
 
 ## Generic Types
 
-Parameterize types with type variables:
+Hot has no type parameters: in `fn (x: T): T`, `T` is an unresolved type.
+Use `Any`, a union, or a concrete type:
 
 ```hot
-// Generic function
-identity fn (x: T): T { x }
+identity fn (x: Any): Any { x }
 
-// Constrained to specific types
-first fn (items: Vec<T>): T {
+first-item fn (items: Vec<Any>): Any {
     items[0]
 }
 
-// Multiple type parameters
-pair fn (a: A, b: B): Map {
+pair fn (a: Any, b: Any): Map {
     {first: a, second: b}
 }
 ```
@@ -657,7 +701,7 @@ Create aliases for complex types:
 
 ```hot
 // Alias for a complex type
-UserMap Map<Str, User>
+UserMap type Map<Str, User>
 
 // Use the alias
 users: UserMap {}

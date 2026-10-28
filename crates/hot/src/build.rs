@@ -1958,7 +1958,7 @@ pub async fn load_build_manifest_data(
                         )
                         .await
                         {
-                            tracing::error!("Failed to insert schedules: {}", e);
+                            return Err(format!("Failed to insert schedules: {e}"));
                         } else {
                             let count: usize = scheduled_functions.values().map(|v| v.len()).sum();
                             total_schedules += count;

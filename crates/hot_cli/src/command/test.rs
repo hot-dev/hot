@@ -266,7 +266,7 @@ async fn run_integration_test(
 
     // 3. Run DB migrations on the configured database
     let db_uri = merged_conf.get_str("db.uri");
-    if !db_uri.is_empty() && db_uri != "null" {
+    if !db_uri.is_empty() && db_uri != "null" && hot::db::schema_changes_enabled(&merged_conf) {
         info!("hot.test: Running database migrations...");
         if let Err(e) = crate::run_migrations_with_bootstrap(&merged_conf, providers).await {
             crate::report_migration_failure("Failed to run integration test DB migrations", &e);

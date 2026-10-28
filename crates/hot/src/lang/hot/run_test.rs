@@ -224,6 +224,75 @@ make-error(3)"#;
         Val::Vec(values.iter().map(|s| Val::from(*s)).collect())
     }
 
+    /// A value imported from another namespace evaluates in its home
+    /// namespace: its initializer finds that namespace's types, functions,
+    /// and aliases, which the importer need not have.
+    #[test]
+    fn imported_value_evaluates_in_its_home_namespace() {
+        let src = r#"::mp::duty ns
+s4 ::mp::text/s4
+s4-title ::mp::text/s4-title
+s4-loud ::mp::text/s4-loud
+shape ::mp::text/shape
+heading ::mp::text/heading-of-s4()
+probe fn (): Vec {
+    [s4.section, s4-title, s4-loud, shape.section, heading]
+}
+
+::mp::text ns
+::fmt ::mp::fmt
+Clause type { section: Str, heading: Str, text: Str }
+Shape enum { Circle(Clause), Dot }
+title fn (c: Clause): Str { `${c.section} ${c.heading}` }
+s4 Clause(section: "§4", heading: "Reporting", text: "Log it.")
+s4-title title(s4)
+s4-loud ::fmt/loud(s4.heading)
+shape Shape.Circle({section: "§5", heading: "Holds", text: "Hold it."})
+heading-of-s4 fn (): Str { s4.heading }
+
+::mp::fmt ns
+loud fn (s: Str): Str { uppercase(s) }
+
+::mp::main ns
+::mp::duty/probe()
+::mp::duty/probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &strs(&["§4", "§4 Reporting", "REPORTING", "§5", "Reporting"]),
+        );
+        assert_eq!(
+            compile_and_run_with_std_ast(src).as_ref(),
+            Ok(&strs(&["§4", "§4 Reporting", "REPORTING", "§5", "Reporting"])),
+        );
+    }
+
+    /// Namespaces that read each other's values run in source order, so the
+    /// first reads a value its partner has not stored yet. The VM then
+    /// evaluates that value's initializer from the AST, in its home
+    /// namespace.
+    #[test]
+    fn value_read_before_its_namespace_runs_evaluates_in_its_home_namespace() {
+        let src = r#"::mp::a ns
+z "from a"
+x ::mp::b/y
+
+::mp::b ns
+Note type { text: Str }
+y Note(text: "from b")
+w ::mp::a/z
+
+::mp::c ns
+probe fn (): Vec {
+    x ::mp::a/x
+    [x.text, ::mp::b/w]
+}
+probe()"#;
+        assert_eq!(
+            compile_and_run_with_std_ast(src).as_ref(),
+            Ok(&strs(&["from b", "from a"])),
+        );
+    }
+
     /// `Name({...})` inside a custom constructor of a field-less `Name type fn`
     /// type reaches the default Map constructor. These types had no default
     /// constructor, so the inner call resolved back to a custom overload and
@@ -752,7 +821,7 @@ probe fn (): Vec {
     [eq(a, b), is-type(a, User), a.age, c.age, c.name,
      eq(circle.radius, 2.5), is-type(circle, Shape), bird.species, on-value(1),
      is-type(person.address, Address), person.address.city, qualified.name, local.n,
-     names, is-err(Window(start: 5, finish: 1)), aliased.name]
+     names, is-err(Window(start: 5, finish: add(0, 1))), aliased.name]
 }
 probe()
 probe()"#;
@@ -777,6 +846,131 @@ probe()"#;
                 "Ev"
             ]),
         );
+    }
+
+    /// An enum from another namespace can be named in full, as
+    /// `::geo/Shape.Circle`, or through a namespace alias, without importing
+    /// it: to construct a variant with a Map or named arguments, as a unit
+    /// variant's value, in `match`, bound to a name, and as a variant's
+    /// payload type (`Ring(::geo/Round)`). A unit variant bound at the top of
+    /// a namespace is its value; a variant with a payload is its constructor.
+    #[test]
+    fn qualified_enum_variants_construct_and_match() {
+        let src = r#"::geo ns
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+Round type { radius: Dec }
+Bird type { species: Str }
+Animal enum open { Dog }
+Bird -> Animal.Bird
+
+::geo::forms ns
+::gt ::geo
+Form enum { Ring(::geo/Round), Disk(::gt/Round), Flat }
+
+::t ns
+::g ::geo
+::f ::geo::forms
+Nothing ::geo/Shape.Dot
+Round ::geo/Shape.Circle
+
+describe fn (s: ::geo/Shape): Str {
+    match s {
+        ::geo/Shape.Circle => { `circle ${s.radius}` }
+        ::geo/Shape.Dot => { "dot" }
+    }
+}
+
+probe fn (): Vec {
+    mapped ::geo/Shape.Circle({radius: 1.0})
+    named ::g/Shape.Circle(radius: 2.0)
+    dot ::geo/Shape.Dot
+    make ::geo/Shape.Circle
+    [mapped.radius, named.radius, is-type(named, ::geo/Shape),
+     is-type(dot, ::geo/Shape), eq(dot, ::g/Shape.Dot), eq(dot, Nothing),
+     describe(named), describe(dot), describe(Nothing),
+     make({radius: 3.0}).radius, Round({radius: 4.0}).radius,
+     ::geo/Animal.Bird(species: "Eagle").species, is-type(::geo/Animal.Dog, ::geo/Animal),
+     ::f/Form.Ring(radius: 5.0).radius, ::geo::forms/Form.Disk({radius: 6.0}).radius,
+     is-type(::f/Form.Flat, ::f/Form)]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([
+                1.0, 2.0, true, true, true, true, "circle 2.0", "dot", "dot", 3.0, 4.0, "Eagle",
+                true, 5.0, 6.0, true
+            ]),
+        );
+    }
+
+    /// A type from another namespace takes named arguments when it is
+    /// imported in a body, as `Sh ::geo/Shape`, as well as at the top of the
+    /// namespace. The local import names the type it is bound to, even over
+    /// a type of the same name, rather than shadowing types as a local value.
+    #[test]
+    fn named_arguments_build_variants_of_imported_enums() {
+        let src = r#"::geo ns
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+Bird type { species: Str }
+Animal enum open { Dog }
+Bird -> Animal.Bird
+Label type { text: Str }
+
+::t ns
+Shape ::geo/Shape
+::g ::geo
+Label type { name: Str }
+
+probe fn (): Vec {
+    imported Shape.Circle(radius: 1.0)
+    Sh ::geo/Shape
+    local Sh.Circle(radius: 2.0)
+    mapped Sh.Circle({radius: 3.0})
+    Fauna ::g/Animal
+    enrolled Fauna.Bird(species: "Eagle")
+    outer Label(name: "outer")
+    Label ::geo/Label
+    inner Label(text: "inner")
+    [imported.radius, local.radius, mapped.radius, is-type(local, ::geo/Shape),
+     enrolled.species, outer.name, inner.text]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([1.0, 2.0, 3.0, true, "Eagle", "outer", "inner"]),
+        );
+    }
+
+    /// At the top of a namespace, the project pipeline points a reference to
+    /// an import at what it imports. A reference with a path keeps it, so
+    /// `Shape.Circle(...)` on an imported enum builds the variant, by name or
+    /// from a Map, and `config.port` on an imported value reads the field.
+    /// The rewrite used to drop the path, leaving `::geo/Shape(...)`.
+    #[test]
+    fn imported_enum_variants_at_namespace_scope() {
+        let src = r#"::geo ns
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+config {port: 8080}
+
+::t ns
+Shape ::geo/Shape
+config ::geo/config
+named Shape.Circle(radius: 1.0)
+mapped Shape.Circle({radius: 2.0})
+dot Shape.Dot
+port config.port
+[named.radius, mapped.radius, is-type(named, ::geo/Shape), is-type(dot, ::geo/Shape), port]"#;
+        let expected = val!([1.0, 2.0, true, true, 8080]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
     }
 
     /// Like the Map form, a named call on a type with custom constructors goes
@@ -844,6 +1038,11 @@ greet fn (name: Str): Str { name }
             (r#"Shape(radius: 1.0)"#, "`Shape` is an enum."),
             (r#"Shape.Dot(radius: 1.0)"#, "`Shape.Dot` carries no data."),
             (r#"Shape.Square(side: 1.0)"#, "`Shape` has no variant `Square`."),
+            (
+                r#"::t/Shape.Square(side: 1.0)"#,
+                "`::t/Shape` has no variant `Square`.",
+            ),
+            (r#"::t/Shape.Dot(radius: 1.0)"#, "`::t/Shape.Dot` carries no data."),
             (
                 r#""Ada" |> User(email: "a@b.c")"#,
                 "A piped value can't fill a named field.",
@@ -2572,6 +2771,31 @@ caller(true)"#;
         source: &str,
         conf: Option<Val>,
     ) -> Result<Val, String> {
+        run_with_std(source, conf, false, false)
+    }
+
+    /// Like [`compile_and_run_with_std_conf`], but the VM also holds the
+    /// program's AST, as it does when the CLI runs a project.
+    fn compile_and_run_with_std_ast(source: &str) -> Result<Val, String> {
+        run_with_std(source, None, false, true)
+    }
+
+    /// Like [`compile_and_run_with_std_conf`], with the project pipeline's
+    /// namespace-import pass (`resolve_all_variable_references`), which
+    /// rewrites namespace-scope references to imports.
+    fn compile_and_run_project_with_std_conf(
+        source: &str,
+        conf: Option<Val>,
+    ) -> Result<Val, String> {
+        run_with_std(source, conf, true, false)
+    }
+
+    fn run_with_std(
+        source: &str,
+        conf: Option<Val>,
+        resolve_imports: bool,
+        with_ast: bool,
+    ) -> Result<Val, String> {
         use crate::lang::ast::Program;
         use std::path::Path;
 
@@ -2607,15 +2831,22 @@ caller(true)"#;
         for (ns_path, namespace) in test_program.namespaces {
             combined_program.namespaces.insert(ns_path, namespace);
         }
+        if resolve_imports {
+            crate::lang::compiler::resolver::resolve_all_variable_references(
+                &mut combined_program,
+            );
+        }
 
         compiler
             .compile_program(&mut combined_program)
             .map_err(|e| format!("Compile error: {:?}", e))?;
 
+        let hot_ast = with_ast
+            .then(|| Arc::new(crate::lang::ast::HotAst::from_program(combined_program)));
         let program_arc = compiler.get_program_arc();
         let mut vm = VirtualMachine::new(
             program_arc,
-            None,
+            hot_ast,
             compiler.get_function_mapping_arc(),
             compiler.get_core_functions_arc(),
             compiler.get_type_implementations_arc(),

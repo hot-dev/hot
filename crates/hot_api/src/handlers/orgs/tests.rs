@@ -29,7 +29,7 @@ impl App {
             .unwrap();
         let storage = tempfile::tempdir().unwrap();
         let conf = Arc::new(
-            hot::val!({"queue":{"type":"memory"},"webhook":{"timeout":5},"domain":{"mode":"none"}}),
+            hot::val!({"queue":{"type":"memory"},"webhook":{"timeout":5},"domain":{"mode":"none"},"org":{"reserved-slugs":["acme-internal"]}}),
         );
         let state: ApiStateData = (
             db.clone(),
@@ -156,7 +156,7 @@ fn provisioner() -> Value {
 async fn org_keys_provision_children_and_mint_environment_keys() {
     let app = App::new().await;
     let (_, token) = app.org_key(provisioner()).await;
-    let request = json!({"name": "Acme", "slug": "acme", "external_id": "leela-org-1", "idempotency_key": "leela-org-1"});
+    let request = json!({"name": "Globex", "slug": "globex", "external_id": "leela-org-1", "idempotency_key": "leela-org-1"});
     let child = app
         .expect(
             "POST",
@@ -312,6 +312,22 @@ async fn org_keys_provision_children_and_mint_environment_keys() {
 }
 
 #[tokio::test]
+async fn creating_orgs_rejects_reserved_slugs() {
+    let app = App::new().await;
+    let (_, token) = app.org_key(json!({"org:*": ["create"]})).await;
+    for slug in ["api", "acme-internal"] {
+        app.expect(
+            "POST",
+            "/v1/orgs",
+            &token,
+            Some(json!({"name": "Reserved", "slug": slug, "idempotency_key": slug})),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn org_wildcards_never_reach_siblings_the_root_or_mint_authority() {
     let app = App::new().await;
     let (_, token) = app.org_key(provisioner()).await;
@@ -436,7 +452,7 @@ async fn org_keys_administer_child_projects_through_environment_handlers() {
     }
     let app = App::new().await;
     let (_, token) = app.org_key(provisioner()).await;
-    let (org, env) = app.create_child(&token, "acme").await;
+    let (org, env) = app.create_child(&token, "globex").await;
     let base = format!("/v1/orgs/{org}/envs/{env}");
     let project = app
         .expect(
@@ -546,7 +562,7 @@ async fn org_keys_administer_child_projects_through_environment_handlers() {
 async fn rotation_narrowing_and_revocation_follow_lineage() {
     let app = App::new().await;
     let (top, token) = app.org_key(provisioner()).await;
-    let (org, env) = app.create_child(&token, "acme").await;
+    let (org, env) = app.create_child(&token, "globex").await;
     let minted = app
         .expect(
             "POST",
@@ -709,7 +725,7 @@ async fn org_keys_mint_narrower_org_keys_and_suspension_blocks_children() {
     let mut grants = provisioner();
     grants[format!("org:{root}/api-key:*")] = json!(["create", "read", "update", "delete"]);
     let (top, token) = app.org_key(grants).await;
-    let (org, _) = app.create_child(&token, "acme").await;
+    let (org, _) = app.create_child(&token, "globex").await;
     let path = format!("/v1/orgs/{root}/api-keys");
     app.expect(
         "POST",

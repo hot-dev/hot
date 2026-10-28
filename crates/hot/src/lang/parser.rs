@@ -3375,8 +3375,12 @@ impl Parser {
             {
                 self.next(); // consume (
 
-                // Parse type reference
-                let type_name = self.expect_identifier()?;
+                // Parse type reference: `Type` or `::ns/Type`
+                let type_name = if self.check(&TokenType::DoubleColon) {
+                    self.parse_namespaced_type_name()?
+                } else {
+                    self.expect_identifier()?
+                };
 
                 // Consume closing paren
                 if !self.check(&TokenType::RightParen) {
@@ -3460,8 +3464,12 @@ impl Parser {
             {
                 self.next(); // consume (
 
-                // Parse type reference
-                let type_name = self.expect_identifier()?;
+                // Parse type reference: `Type` or `::ns/Type`
+                let type_name = if self.check(&TokenType::DoubleColon) {
+                    self.parse_namespaced_type_name()?
+                } else {
+                    self.expect_identifier()?
+                };
 
                 // Consume closing paren
                 if !self.check(&TokenType::RightParen) {
@@ -4632,9 +4640,9 @@ impl Parser {
     /// Supports:
     /// - `::namespace::path` - bare namespace reference
     /// - `::namespace::path/function` - function reference
-    ///
-    /// Note: Enum variant references like `::namespace/Type.Variant` are NOT supported
-    /// directly. Use type aliasing instead: `MyResult ::hot::type/Result` then `MyResult.Ok(...)`
+    /// - `::namespace::path/Type.Variant` - enum variant reference, kept in
+    ///   `function_name` as `Type.Variant`, the name its constructor is
+    ///   registered under
     fn parse_qualified_reference(&mut self) -> ParseResult<Value> {
         // Capture position of the leading :: for source tracking
         let start_token = self.peek().cloned();
@@ -4660,9 +4668,19 @@ impl Parser {
 
                 // Parse the function/variable name after the slash
                 let func_token = self.peek().cloned();
-                let func_name = self.expect_identifier_or_keyword()?;
+                let mut func_name = self.expect_identifier_or_keyword()?;
                 if let Some(t) = &func_token {
                     last_token_end = Some((t.position, t.length));
+                }
+                // An enum variant: `::ns/Type.Variant`
+                if self.check(&TokenType::Dot) {
+                    self.next(); // consume "."
+                    let variant_token = self.peek().cloned();
+                    let variant = self.expect_identifier()?;
+                    if let Some(t) = &variant_token {
+                        last_token_end = Some((t.position, t.length));
+                    }
+                    func_name = format!("{func_name}.{variant}");
                 }
                 _var_name = Some(func_name);
                 break;

@@ -163,8 +163,13 @@ fn key_error(error: OrgApiKeyError, what: &str) -> ApiError {
 }
 
 fn org_error(error: hot::db::org::OrgError) -> ApiError {
+    use hot::db::org::OrgError;
     match error {
-        hot::db::org::OrgError::Forbidden => denied(),
+        OrgError::NotFound | OrgError::Database(sqlx::Error::RowNotFound) => {
+            not_found("Organization")
+        }
+        OrgError::Database(error) => internal(error),
+        OrgError::Forbidden => denied(),
         other => bad_request(&other.to_string()),
     }
 }
@@ -186,8 +191,14 @@ pub async fn org_key_auth_middleware(
         .and_then(|h| h.strip_prefix("Bearer "))
         .ok_or(StatusCode::UNAUTHORIZED)?
         .to_owned();
+    // A credential the database could not check is unavailable, not invalid:
+    // clients retry a 503 but discard a credential that got a 401.
     let key = match OrgApiKey::verify_token(&db, &token).await {
         Ok(key) => key,
+        Err(OrgApiKeyError::Database(error)) => {
+            tracing::error!(%error, "Org API key lookup failed");
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
         Err(_) if authenticate_token(&db, &token).await.is_ok() => {
             return Ok(key_scope_mismatch(
                 "This route needs an org API key; environment keys, sessions and service keys call runtime routes",
@@ -195,10 +206,10 @@ pub async fn org_key_auth_middleware(
         }
         Err(_) => return Err(StatusCode::UNAUTHORIZED),
     };
-    let effective = key
-        .effective(&db)
-        .await
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let effective = key.effective(&db).await.map_err(|error| match error {
+        OrgApiKeyError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNAUTHORIZED,
+    })?;
     if let Err(exceeded) = crate::rate_limit::check_org_rate_limit(
         &db,
         &key.org_id,
@@ -336,6 +347,8 @@ pub async fn create_org(
     Json(body): Json<CreateOrgRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<CreateOrgResponse>>), ApiError> {
     principal.require(org_urn::CHILDREN, actions::CREATE)?;
+    hot::slug::validate_format_with_extra(&body.slug, &hot::slug::extra_reserved_from_conf(&conf))
+        .map_err(|error| bad_request(error.message()))?;
     let request = CreateChild {
         name: body.name,
         slug: body.slug,

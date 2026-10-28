@@ -7,6 +7,15 @@ use crate::val::Val;
 use crate::validate_args;
 use indexmap::IndexMap;
 
+/// Meta written with names (`clock-from: found-at`, `cites: [::text/s4]`)
+/// reads as the values those names have.
+fn resolved_meta(vm: &mut crate::lang::runtime::vm::VirtualMachine, meta: &Val) -> HotResult<Val> {
+    match vm.resolve_meta_refs(meta) {
+        Ok(val) => HotResult::Ok(val),
+        Err(e) => HotResult::Err(Val::from(format!("::hot::meta/get: {}", e))),
+    }
+}
+
 /// Get metadata for a function by name
 /// This is a VM-aware function that accesses the namespace registry
 pub fn get(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
@@ -152,13 +161,34 @@ pub fn get(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
 
     // If a function or variable name/reference was provided, look up metadata from the Hot AST.
     if let Some(function_name) = function_name_opt {
+        // A short name written in a lazy argument (`get(te-01)`) names the
+        // top-level definition in the namespace it was written in, not the
+        // first one of that name in any namespace.
+        let function_name = match (lazy_arg, vm.get_hot_ast()) {
+            (Some(lambda), Some(hot_ast)) if !function_name.starts_with("::") => {
+                let ns = crate::lang::ast::NsPath::from_string(&lambda.defining_namespace);
+                let declared_there = hot_ast.namespaces.get(&ns).is_some_and(|namespace| {
+                    namespace
+                        .scope
+                        .vars
+                        .keys()
+                        .any(|var| var.sym.name() == function_name && var.meta.is_some())
+                });
+                if declared_there {
+                    format!("{}/{}", ns, function_name)
+                } else {
+                    function_name
+                }
+            }
+            _ => function_name,
+        };
         tracing::debug!(
             "::hot::meta/get: Looking up metadata for function/variable: '{}'",
             function_name
         );
 
         // The AST preserves metadata that is not present in runtime values.
-        if let Some(hot_ast) = vm.get_hot_ast() {
+        if let Some(hot_ast) = vm.get_hot_ast().cloned() {
             // Parse the function name to extract namespace and variable name
             if function_name.starts_with("::")
                 && function_name.contains('/')
@@ -188,7 +218,7 @@ pub fn get(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                                 function_name,
                                 meta.val
                             );
-                            return HotResult::Ok(meta.val.clone());
+                            return resolved_meta(vm, &meta.val);
                         }
                     }
                 }
@@ -196,24 +226,28 @@ pub fn get(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
         }
 
         // Fallback to namespace registry lookup (original approach)
+        let mut registry_meta = None;
         let namespace_registry = &vm.program.namespaces;
-        for namespace_path in namespace_registry.get_namespace_paths() {
+        'registry: for namespace_path in namespace_registry.get_namespace_paths() {
             if let Some(vars) = namespace_registry.get_variables(&namespace_path) {
                 for var_info in vars {
                     let local_name = var_info.name.as_str();
                     if local_name == function_name
                         || format!("{}/{}", namespace_path, local_name) == function_name
                     {
-                        let metadata = var_info.metadata.clone().unwrap_or(Val::Null);
-                        if let Val::Str(json_str) = &metadata
-                            && let Ok(parsed_val) = parse_json_to_val(json_str)
-                        {
-                            return HotResult::Ok(parsed_val);
-                        }
-                        return HotResult::Ok(metadata);
+                        registry_meta = Some(var_info.metadata.clone().unwrap_or(Val::Null));
+                        break 'registry;
                     }
                 }
             }
+        }
+        if let Some(metadata) = registry_meta {
+            if let Val::Str(json_str) = &metadata
+                && let Ok(parsed_val) = parse_json_to_val(json_str)
+            {
+                return HotResult::Ok(parsed_val);
+            }
+            return resolved_meta(vm, &metadata);
         }
         // Not found as a function name; fall through to local var handling
     }

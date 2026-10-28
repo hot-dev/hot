@@ -242,6 +242,14 @@ pub async fn domain_resolution_middleware(
             } else {
                 match hot::db::Env::get_env(&db, &env_id).await {
                     Ok(env) => env.org_id,
+                    // A missing environment is cached as not found below; a
+                    // failed lookup is not, so it can't hide the domain.
+                    Err(hot::db::env::EnvError::Database(error))
+                        if !matches!(error, sqlx::Error::RowNotFound) =>
+                    {
+                        tracing::warn!(%error, "Cannot resolve domain environment");
+                        return Err(StatusCode::SERVICE_UNAVAILABLE);
+                    }
                     Err(_) => {
                         debug!(
                             "Domain {} resolved to env {} but env lookup failed",
@@ -266,6 +274,10 @@ pub async fn domain_resolution_middleware(
             });
 
             Ok(next.run(request).await)
+        }
+        Err(hot::db::domain::DomainError::Database(error)) => {
+            tracing::warn!(%error, "Cannot resolve custom domain");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
         }
         Err(_) => {
             debug!("Domain not found or not verified: {}", host);

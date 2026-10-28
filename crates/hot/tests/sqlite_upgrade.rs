@@ -150,7 +150,7 @@ impl ExistingRows {
         Ok(rows)
     }
 
-    /// A 3.0.0 management credential and the runtime key it issued, before 015.
+    /// A 3.0.0 management credential and the runtime key it issued, before 016.
     async fn add_management_issuer(&self, pool: &SqlitePool) -> TestResult {
         sqlx::query("INSERT INTO management_key(management_key_id,root_org_id,created_by_user_id,name,secret_hash,capabilities,expires_at) VALUES(?,?,?,'existing issuer',x'010203','[\"keys:issue\"]','2099-01-01T00:00:00Z')")
             .bind(self.issuer).bind(self.org).bind(self.user).execute(pool).await?;
@@ -164,7 +164,7 @@ impl ExistingRows {
         Ok(())
     }
 
-    /// An org key and the environment key it minted, after 015.
+    /// An org key and the environment key it minted, after 016.
     async fn add_org_key_issuer(&self, pool: &SqlitePool) -> TestResult {
         sqlx::query("INSERT INTO org_api_key(org_api_key_id,org_id,description,key_data,permissions,created_by_user_id) VALUES(?,?,'existing issuer','{}','{\"org:*\":[\"read\"]}',?)")
             .bind(self.issuer).bind(self.org).bind(self.user).execute(pool).await?;
@@ -176,7 +176,7 @@ impl ExistingRows {
         Ok(())
     }
 
-    /// `retired` says whether a management credential issued the key before 015.
+    /// `retired` says whether a management credential issued the key before 016.
     async fn assert_preserved_and_protected(&self, pool: &SqlitePool, retired: bool) -> TestResult {
         assert_eq!(
             sqlx::query_scalar::<_, Uuid>("SELECT env_id FROM call WHERE call_id=?")
@@ -214,7 +214,7 @@ impl ExistingRows {
                 "retained retry".to_string()
             )
         );
-        // 015 retires management credentials. A key one issued is kept but
+        // 016 retires management credentials. A key one issued is kept but
         // deactivated, never turned into an independent key.
         let key: (Uuid, String, String, bool) = sqlx::query_as(
             "SELECT env_id,key_data,permissions,active FROM api_key WHERE api_key_id=?",

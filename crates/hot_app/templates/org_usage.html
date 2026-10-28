@@ -4,7 +4,7 @@
     <div class="mb-6">
         <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
         <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
-            {% if org.is_child() %}This workspace's usage. Limits are shared with the parent account.{% else %}Account usage and limits{% endif %}
+            {% if account_wide %}Account usage and limits{% else %}This workspace's usage. Limits are shared with the account.{% endif %}
         </p>
 
         {% include "org_tabs.html" %}

@@ -112,12 +112,15 @@ async fn account_overview(
         .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
         .single()
         .expect("valid calendar month");
+    // A GROUP BY over the account's runs read every retained run. These
+    // per-environment subqueries read only run index ranges instead: running
+    // or failed runs, this month's runs, and the latest run.
     macro_rules! overview_queries {
         ($pool:expr,$kind:ty)=>{{
-            let mut activity=sqlx::QueryBuilder::<$kind>::new("SELECT env_id, CAST(COALESCE(SUM(CASE WHEN status_id=1 THEN 1 ELSE 0 END),0) AS BIGINT) AS running, CAST(COALESCE(SUM(CASE WHEN status_id=3 AND COALESCE(stop_time,start_time)>=");
-            activity.push_bind(since).push(" THEN 1 ELSE 0 END),0) AS BIGINT) AS failed_24h, CAST(COALESCE(SUM(CASE WHEN start_time>=").push_bind(month).push(" THEN 1 ELSE 0 END),0) AS BIGINT) AS month_runs, MAX(start_time) AS last_run FROM run WHERE env_id IN (");
+            let mut activity=sqlx::QueryBuilder::<$kind>::new("SELECT e.env_id, (SELECT COUNT(*) FROM run r WHERE r.env_id=e.env_id AND r.status_id=1) AS running, (SELECT COUNT(*) FROM run r WHERE r.env_id=e.env_id AND r.status_id=3 AND COALESCE(r.stop_time,r.start_time)>=");
+            activity.push_bind(since).push(") AS failed_24h, (SELECT COUNT(*) FROM run r WHERE r.env_id=e.env_id AND r.start_time>=").push_bind(month).push(") AS month_runs, (SELECT MAX(r.start_time) FROM run r WHERE r.env_id=e.env_id) AS last_run FROM env e WHERE e.env_id IN (");
             if env_ids.is_empty(){activity.push("NULL");}else{let mut ids=activity.separated(",");for id in &env_ids{ids.push_bind(id);}}
-            activity.push(") GROUP BY env_id");
+            activity.push(")");
             let runs=activity.build_query_as::<RunActivity>().fetch_all($pool).await?;
             let mut storage=sqlx::QueryBuilder::<$kind>::new("SELECT org_id, CAST(COALESCE(SUM(size),0) AS BIGINT) FROM file WHERE active=true AND org_id IN (");
             {let mut ids=storage.separated(",");for id in &org_ids{ids.push_bind(id);}}

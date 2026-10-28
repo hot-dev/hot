@@ -48,6 +48,60 @@ pub enum AuthContext {
     },
 }
 
+// A credential the database could not check is unavailable, not invalid:
+// clients retry a 503 but discard a credential that got a 401.
+fn api_key_status(error: hot::db::api_key::ApiKeyError) -> StatusCode {
+    match error {
+        hot::db::api_key::ApiKeyError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNAUTHORIZED,
+    }
+}
+
+fn session_status(error: hot::db::session::SessionError) -> StatusCode {
+    match error {
+        hot::db::session::SessionError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNAUTHORIZED,
+    }
+}
+
+fn service_key_status(error: hot::db::service_key::ServiceKeyError) -> StatusCode {
+    match error {
+        hot::db::service_key::ServiceKeyError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNAUTHORIZED,
+    }
+}
+
+fn org_api_key_status(error: hot::db::org_api_key::OrgApiKeyError) -> StatusCode {
+    match error {
+        hot::db::org_api_key::OrgApiKeyError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNAUTHORIZED,
+    }
+}
+
+/// A missing or RLS-hidden environment or org is forbidden; any other
+/// database failure is unavailable.
+fn scope_lookup_status(error: &sqlx::Error) -> StatusCode {
+    if matches!(error, sqlx::Error::RowNotFound) {
+        StatusCode::FORBIDDEN
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
+fn env_scope_status(error: hot::db::env::EnvError) -> StatusCode {
+    match error {
+        hot::db::env::EnvError::Database(error) => scope_lookup_status(&error),
+        hot::db::env::EnvError::NotFound => StatusCode::FORBIDDEN,
+    }
+}
+
+fn org_scope_status(error: hot::db::org::OrgError) -> StatusCode {
+    match error {
+        hot::db::org::OrgError::Database(error) => scope_lookup_status(&error),
+        _ => StatusCode::FORBIDDEN,
+    }
+}
+
 impl AuthContext {
     /// Re-read a previously authenticated principal without retaining its secret.
     /// Used by long-lived connections; scope and issuer lineage cannot change.
@@ -59,21 +113,21 @@ impl AuthContext {
             async {
                 let mut parent = ApiKey::get_api_key(db, &self.api_key_id())
                     .await
-                    .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                    .map_err(api_key_status)?;
                 if !parent.active || parent.env_id != self.env_id() {
                     return Err(StatusCode::UNAUTHORIZED);
                 }
                 let issuer_permissions =
                     hot::db::org_api_key::OrgApiKey::effective_env_permissions(db, &parent)
                         .await
-                        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                        .map_err(org_api_key_status)?;
                 parent.permissions = issuer_permissions.to_json();
                 let current = match self {
                     Self::ApiKey(_) => Self::ApiKey(parent),
                     Self::Session { session, .. } => {
                         let current = Session::get_session(db, &session.session_id)
                             .await
-                            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                            .map_err(session_status)?;
                         if current.is_expired()
                             || current.is_revoked()
                             || current.env_id != self.env_id()
@@ -90,7 +144,7 @@ impl AuthContext {
                     Self::ServiceKey { service_key, .. } => {
                         let current = ServiceKey::get_service_key(db, &service_key.service_key_id)
                             .await
-                            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                            .map_err(service_key_status)?;
                         if current.is_expired()
                             || current.is_revoked()
                             || current.env_id != self.env_id()
@@ -298,17 +352,17 @@ pub async fn runtime_database_scope(
         async {
             let env = hot::db::Env::get_env_uncached(db, &env_id)
                 .await
-                .map_err(|_| StatusCode::FORBIDDEN)?;
+                .map_err(env_scope_status)?;
             let org = hot::db::Org::get_org_uncached(db, &env.org_id)
                 .await
-                .map_err(|_| StatusCode::FORBIDDEN)?;
+                .map_err(org_scope_status)?;
             if !env.active || !org.is_admitting() {
                 return Err(StatusCode::FORBIDDEN);
             }
             if let Some(root_id) = org.parent_org_id {
                 let root = hot::db::Org::get_org_uncached(db, &root_id)
                     .await
-                    .map_err(|_| StatusCode::FORBIDDEN)?;
+                    .map_err(org_scope_status)?;
                 if !root.is_admitting() || root.parent_org_id.is_some() {
                     return Err(StatusCode::FORBIDDEN);
                 }
@@ -323,13 +377,39 @@ pub async fn runtime_database_scope(
 }
 
 /// Keep both database scope and revocation checks alive after HTTP middleware
-/// has returned the streaming body. A grant change closes the stream; reconnect
-/// performs the endpoint's full resource authorization against current grants.
+/// has returned the streaming body. The stream closes when its environment
+/// stops admitting or the principal loses one of `requirements` (the
+/// resource/action pairs the endpoint authorized); other grant changes don't
+/// affect it. A check the database can't answer leaves the stream open until
+/// the next one, so an outage doesn't drop every subscriber.
 pub fn guard_stream<S, T>(
     source: S,
     db: Arc<DatabasePool>,
     principal: Option<AuthContext>,
     scope: DatabaseScope,
+    requirements: Vec<(String, String)>,
+) -> impl futures::Stream<Item = T>
+where
+    S: futures::Stream<Item = T> + Send,
+    T: Send,
+{
+    guard_stream_every(
+        source,
+        db,
+        principal,
+        scope,
+        requirements,
+        std::time::Duration::from_secs(30),
+    )
+}
+
+fn guard_stream_every<S, T>(
+    source: S,
+    db: Arc<DatabasePool>,
+    principal: Option<AuthContext>,
+    scope: DatabaseScope,
+    requirements: Vec<(String, String)>,
+    period: std::time::Duration,
 ) -> impl futures::Stream<Item = T>
 where
     S: futures::Stream<Item = T> + Send,
@@ -338,21 +418,25 @@ where
     use futures::StreamExt;
     async_stream::stream! {
         futures::pin_mut!(source);
-        let expected = principal.as_ref().and_then(AuthContext::get_permissions);
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut interval = tokio::time::interval(period);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 biased;
                 _ = interval.tick() => {
                     let admitted = match &scope {
-                        DatabaseScope::Environment { env_id, .. } => runtime_database_scope(&db, *env_id).await.is_ok(),
+                        DatabaseScope::Environment { env_id, .. } => match runtime_database_scope(&db, *env_id).await {
+                            Ok(_) => true,
+                            Err(status) if status.is_server_error() => continue,
+                            Err(_) => false,
+                        },
                         _ => false,
                     };
                     if !admitted { break; }
                     if let Some(principal) = &principal {
                         match principal.revalidate(&db).await {
-                            Ok(current) if current.get_permissions() == expected => {}
+                            Ok(current) if requirements.iter().all(|(resource,action)|current.has_permission(resource,action)) => {}
+                            Err(status) if status.is_server_error() => continue,
                             _ => break,
                         }
                     }
@@ -434,7 +518,7 @@ async fn authenticate_token_inner(
         // ================================================================
         let session = Session::verify_token(db, token).await.map_err(|e| {
             debug!("Session token validation failed: {}", e);
-            StatusCode::UNAUTHORIZED
+            session_status(e)
         })?;
 
         let api_key_id = session.api_key_id;
@@ -442,7 +526,7 @@ async fn authenticate_token_inner(
         // Verify parent API key is still active
         let mut parent_key = ApiKey::get_api_key(db, &api_key_id).await.map_err(|e| {
             debug!("Parent API key not found for session: {:?}", e);
-            StatusCode::UNAUTHORIZED
+            api_key_status(e)
         })?;
 
         if !parent_key.active || parent_key.env_id != session.env_id {
@@ -461,7 +545,7 @@ async fn authenticate_token_inner(
         parent_key.permissions =
             hot::db::org_api_key::OrgApiKey::effective_env_permissions(db, &parent_key)
                 .await
-                .map_err(|_| StatusCode::UNAUTHORIZED)?
+                .map_err(org_api_key_status)?
                 .to_json();
         let auth_ctx = AuthContext::Session {
             session: session.clone(),
@@ -481,7 +565,7 @@ async fn authenticate_token_inner(
                 key.permissions =
                     hot::db::org_api_key::OrgApiKey::effective_env_permissions(db, &key)
                         .await
-                        .map_err(|_| StatusCode::UNAUTHORIZED)?
+                        .map_err(org_api_key_status)?
                         .to_json();
                 debug!("API key validated successfully for env: {}", key.env_id);
 
@@ -504,7 +588,7 @@ async fn authenticate_token_inner(
         // ================================================================
         let service_key = ServiceKey::verify_token(db, token).await.map_err(|e| {
             debug!("Service key validation failed: {}", e);
-            StatusCode::UNAUTHORIZED
+            service_key_status(e)
         })?;
 
         let api_key_id = service_key.api_key_id;
@@ -512,7 +596,7 @@ async fn authenticate_token_inner(
         // Verify parent API key is still active
         let mut parent_key = ApiKey::get_api_key(db, &api_key_id).await.map_err(|e| {
             debug!("Parent API key not found for service key: {:?}", e);
-            StatusCode::UNAUTHORIZED
+            api_key_status(e)
         })?;
 
         if !parent_key.active || parent_key.env_id != service_key.env_id {
@@ -531,7 +615,7 @@ async fn authenticate_token_inner(
         parent_key.permissions =
             hot::db::org_api_key::OrgApiKey::effective_env_permissions(db, &parent_key)
                 .await
-                .map_err(|_| StatusCode::UNAUTHORIZED)?
+                .map_err(org_api_key_status)?
                 .to_json();
         let auth_ctx = AuthContext::ServiceKey {
             service_key: service_key.clone(),
@@ -561,9 +645,27 @@ async fn authenticate_token_inner(
 /// On success, inserts both an `AuthContext` and (for backward compatibility) an `ApiKey`
 /// into the request extensions.
 pub async fn api_key_auth_middleware(
+    state: State<ApiStateData>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    auth_middleware_inner(state, request, next, true).await
+}
+
+/// Production routers place action authorization inside rate limiting and logging.
+pub async fn authentication_middleware(
+    state: State<ApiStateData>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    auth_middleware_inner(state, request, next, false).await
+}
+
+async fn auth_middleware_inner(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
     mut request: Request,
     next: Next,
+    authorize: bool,
 ) -> Result<Response, StatusCode> {
     // Get the Authorization header
     let auth_header = request
@@ -599,21 +701,56 @@ pub async fn api_key_auth_middleware(
         Err(status) => return Err(status),
     };
 
+    let scope = authenticated.scope;
+    request.extensions_mut().insert(scope.clone());
+    // Insert AuthContext for new handlers
+    request.extensions_mut().insert(authenticated.auth_ctx);
+
+    // Also insert ApiKey for backward compatibility with existing handlers
+    request.extensions_mut().insert(authenticated.api_key);
+
+    if authorize {
+        request = match authorize_request(request).await {
+            Ok(request) => request,
+            Err(response) => return Ok(*response),
+        };
+    }
+    Ok(with_database_scope(scope, next.run(request)).await)
+}
+
+/// Action and selector denials pass through the account rate limiter and audit.
+pub async fn route_authorization_middleware(request: Request, next: Next) -> Response {
+    match authorize_request(request).await {
+        Ok(request) => next.run(request).await,
+        Err(response) => *response,
+    }
+}
+
+async fn authorize_request(mut request: Request) -> Result<Request, Box<Response>> {
+    let auth_ctx = request
+        .extensions()
+        .get::<AuthContext>()
+        .cloned()
+        .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+    let scope = request
+        .extensions()
+        .get::<DatabaseScope>()
+        .cloned()
+        .ok_or_else(|| StatusCode::FORBIDDEN.into_response())?;
     // If a custom domain was resolved, verify the credential belongs to the same environment.
     // This prevents using credentials from env A to access a custom domain pointing to env B.
     if let Some(resolved) = request.extensions().get::<ResolvedDomain>()
-        && authenticated.auth_ctx.env_id() != resolved.env_id
+        && auth_ctx.env_id() != resolved.env_id
     {
         debug!(
             "Credential env_id {} does not match custom domain '{}' env_id {}",
-            authenticated.auth_ctx.env_id(),
+            auth_ctx.env_id(),
             resolved.domain,
             resolved.env_id
         );
-        return Err(StatusCode::FORBIDDEN);
+        return Err(Box::new(StatusCode::FORBIDDEN.into_response()));
     }
 
-    let scope = authenticated.scope;
     if let DatabaseScope::Environment { org_id, env_id } = &scope {
         for (name, value) in
             url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
@@ -621,13 +758,14 @@ pub async fn api_key_auth_middleware(
             let expected = match name.as_ref() {
                 "org_id" => Some(*org_id),
                 "env_id" => Some(*env_id),
-                "tenant_id" => return Err(StatusCode::BAD_REQUEST),
+                "tenant_id" => return Err(Box::new(StatusCode::BAD_REQUEST.into_response())),
                 _ => None,
             };
             if let Some(expected) = expected {
-                let supplied = Uuid::parse_str(&value).map_err(|_| StatusCode::BAD_REQUEST)?;
+                let supplied =
+                    Uuid::parse_str(&value).map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
                 if supplied != expected {
-                    return Err(StatusCode::FORBIDDEN);
+                    return Err(Box::new(StatusCode::FORBIDDEN.into_response()));
                 }
             }
         }
@@ -636,19 +774,17 @@ pub async fn api_key_auth_middleware(
     let route = parts
         .extensions
         .get::<MatchedPath>()
-        .ok_or(StatusCode::FORBIDDEN)?
+        .ok_or_else(|| StatusCode::FORBIDDEN.into_response())?
         .as_str()
         .to_owned();
     let params = RawPathParams::from_request_parts(&mut parts, &())
         .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+        .map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
     let params = params
         .iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect();
-    if let Err(status) =
-        route_permissions::authorize(&authenticated.auth_ctx, &parts.method, &route, &params)
-    {
+    if let Err(status) = route_permissions::authorize(&auth_ctx, &parts.method, &route, &params) {
         let error = if status == StatusCode::BAD_REQUEST {
             crate::models::ApiErrorResponse::bad_request("Invalid route parameters")
         } else {
@@ -657,16 +793,10 @@ pub async fn api_key_auth_middleware(
                 "Credential does not authorize this API action",
             )
         };
-        return Ok((status, Json(error)).into_response());
+        return Err(Box::new((status, Json(error)).into_response()));
     }
     request = Request::from_parts(parts, body);
-    // Insert AuthContext for new handlers
-    request.extensions_mut().insert(authenticated.auth_ctx);
-
-    // Also insert ApiKey for backward compatibility with existing handlers
-    request.extensions_mut().insert(authenticated.api_key);
-
-    Ok(with_database_scope(scope, next.run(request)).await)
+    Ok(request)
 }
 
 /// Whether a token that failed environment authentication is a valid org
@@ -745,6 +875,91 @@ mod scope_tests {
         let auth = session_context(json!({"mcp:weather/*": ["execute"]}), json!({"*:*": ["*"]}));
         assert!(auth.has_permission("mcp:weather/forecast", "execute"));
         assert!(!auth.has_permission("mcp:payments/send", "execute"));
+    }
+
+    #[test]
+    fn database_failures_are_unavailable_but_missing_rows_deny() {
+        use hot::db::{env::EnvError, org::OrgError, session::SessionError};
+        assert_eq!(
+            session_status(SessionError::Database(sqlx::Error::PoolTimedOut)),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            session_status(SessionError::NotFound),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            env_scope_status(EnvError::Database(sqlx::Error::RowNotFound)),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            org_scope_status(OrgError::Database(sqlx::Error::PoolTimedOut)),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_guard_tracks_the_required_permission_not_the_whole_grant() {
+        use futures::StreamExt;
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let api_key_id = Uuid::now_v7();
+        let (token, key_data) = ApiKey::generate_api_key(&api_key_id).unwrap();
+        ApiKey::insert_api_key(
+            &db,
+            &api_key_id,
+            &data.env_id,
+            "stream reader",
+            &serde_json::from_str(&key_data).unwrap(),
+            &data.user_id,
+            &json!({"stream:*": ["read"], "project:*": ["read"]}),
+        )
+        .await
+        .unwrap();
+        let authenticated = authenticate_token(&db, &token).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+        let source = async_stream::stream! {
+            while let Some(item) = rx.recv().await {
+                yield item;
+            }
+        };
+        let period = std::time::Duration::from_millis(20);
+        let guarded = guard_stream_every(
+            source,
+            db.clone(),
+            Some(authenticated.auth_ctx),
+            authenticated.scope,
+            vec![("stream:orders".into(), "read".into())],
+            period,
+        );
+        futures::pin_mut!(guarded);
+        tx.send(1).unwrap();
+        assert_eq!(guarded.next().await, Some(1));
+
+        // After a period, the guard re-checks before it yields the next item.
+        ApiKey::update_permissions(
+            &db,
+            &api_key_id,
+            &json!({"stream:*": ["read"]}),
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(period * 3).await;
+        tx.send(2).unwrap();
+        assert_eq!(guarded.next().await, Some(2), "unrelated change");
+
+        ApiKey::update_permissions(
+            &db,
+            &api_key_id,
+            &json!({"project:*": ["read"]}),
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(period * 3).await;
+        tx.send(3).unwrap();
+        assert_eq!(guarded.next().await, None, "required permission removed");
     }
     #[tokio::test]
     async fn authentication_reloads_issuer_and_rejects_cross_environment_lineage() {

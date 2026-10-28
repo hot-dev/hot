@@ -87,6 +87,7 @@ process fn (order: Map): Str {
 
 ### Branch Syntax
 
+<!-- hot-check: skip -->
 ```hot
 condition => { result }     // With condition
 => { result }               // Default (always matches)
@@ -140,6 +141,7 @@ process fn (order: Map): Map {
 
 **Branch names are required** in `cond-all` to key the result map:
 
+<!-- hot-check: skip -->
 ```hot
 condition => name { result }
 => default-name { result }
@@ -176,6 +178,12 @@ bare `=>` default arm. Union arms (`A | B`) count every variant they name
 toward coverage, and an `Any` arm covers everything (it also satisfies
 the open-enum default requirement below). Missing variants produce
 **`non-exhaustive-match`** at compile time.
+
+A `match` on a closed literal union (`Severity type "low" | "medium" |
+"high"`, or an inline `"low" | "high"` parameter) follows the same rule:
+every value needs an arm, or a default, `Any`, or type arm (`Str`) covers
+the rest, and the error lists the missing values. A nullable subject
+(`Severity?`) also needs a `null` arm.
 
 A `match` on an `open enum` MUST include a `_` / bare `=>` default arm,
 because new variants can be enrolled at any time via arrows. Missing the
@@ -315,6 +323,11 @@ process fn (result: Result): Str {
 After matching, access the value directly through the matched variable:
 
 ```hot
+Click type { x: Int, y: Int, target: Str }
+KeyPress type { key: Str }
+Event enum { Click(Click), KeyPress(KeyPress) }
+Action enum { Navigate(Str), Input(Str) }
+
 handle fn (event: Event): Action {
     action match event {
         Event.Click => {

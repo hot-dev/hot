@@ -220,6 +220,7 @@ pub async fn subscribe_to_env(
             )
         })?;
     let stream_auth = auth.clone();
+    let guard_permissions = vec![(format!("env:{}", env_id), "read".into())];
     let stream_db = db.clone();
     let stream = async_stream::stream! {
         let _connection_guard = connection_guard;
@@ -265,6 +266,7 @@ pub async fn subscribe_to_env(
         stream_db,
         Some(stream_auth),
         stream_scope,
+        guard_permissions,
     ))
     .keep_alive(KeepAlive::default()))
 }

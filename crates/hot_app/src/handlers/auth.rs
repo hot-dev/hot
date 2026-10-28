@@ -1155,6 +1155,13 @@ pub async fn claim_handle_post_handler(
     //     before the real user clicked through
     if let Ok(existing) = hot::db::org::Org::get_org_by_slug(&db, org_slug).await
         && existing.created_by_user_id == session.current_user_id()
+        && existing.parent_org_id.is_none()
+        && (hot::db::org::Org::get_orgs_by_user(&db, &session.current_user_id())
+            .await
+            .is_ok_and(|orgs| orgs.iter().any(|org| org.org_id == existing.org_id))
+            || hot::db::org::OrgUser::get_users_with_roles_by_org(&db, &existing.org_id)
+                .await
+                .is_ok_and(|users| users.is_empty()))
     {
         tracing::info!(
             "claim_handle_post_handler: adopting existing org {} for user {}",

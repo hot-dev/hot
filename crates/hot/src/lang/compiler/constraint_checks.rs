@@ -14,12 +14,14 @@
 //!   checks run the predicate instead of comparing a tag.
 
 use ahash::{AHashMap, AHashSet};
+use indexmap::IndexMap;
 
 use super::core_registry::CoreVariableRegistry;
 use super::refinements::error_location;
 use crate::lang::ast::{
-    AstNode, FnCall, FnDef, LiteralType, NamespaceAliases, Program, Ref, Refinement, TemplatePart,
-    TypeDef, TypeExpr, Value, Var, WHERE_TYPE_PREFIX, is_where_predicate,
+    AstNode, DeepPath, Flow, FlowType, FnCall, FnDef, LiteralType, NamespaceAliases, Program, Ref,
+    Refinement, TemplatePart, TypeDef, TypeExpr, Value, Var, VarRef, WHERE_TYPE_PREFIX,
+    is_where_predicate,
 };
 use crate::lang::errors::{CompilerError, ErrorLocation};
 use crate::lang::hot::libmap::is_pure_native;
@@ -152,11 +154,90 @@ fn walk_val<'v>(val: &'v Val, visit: &mut dyn FnMut(&'v Value)) {
 /// A literal value, when `value` is one.
 fn literal(value: &Value) -> Option<&Val> {
     match value {
-        Value::Val(
-            val @ (Val::Int(_) | Val::Dec(_) | Val::Str(_) | Val::Bool(_) | Val::Null),
-            _,
-        ) => Some(val),
+        Value::Val(val, _) => scalar_literal(val),
         _ => None,
+    }
+}
+
+/// A scalar literal, when a Map literal's entry is one.
+fn scalar_literal(val: &Val) -> Option<&Val> {
+    match val {
+        Val::Int(_) | Val::Dec(_) | Val::Str(_) | Val::Bool(_) | Val::Null => Some(val),
+        Val::Box(boxed) => match boxed.as_any().downcast_ref::<AstNode>() {
+            Some(AstNode(value)) => literal(value),
+            None => None,
+        },
+        _ => None,
+    }
+}
+
+/// The reference and value of a local binding, `name value`: as in the
+/// compiler, two values whose first is a reference.
+fn local_binding(values: &[Value]) -> Option<(&VarRef, &Value)> {
+    match values {
+        [Value::Ref(Ref::Var(var_ref)), value] => Some((var_ref, value)),
+        _ => None,
+    }
+}
+
+/// The entries of a Map literal, when `val` is one.
+fn map_literal(val: &Val) -> Option<&IndexMap<Val, Val>> {
+    match val {
+        Val::Map(entries) => Some(entries),
+        Val::Box(boxed) => match boxed.as_any().downcast_ref::<AstNode>() {
+            Some(AstNode(Value::Val(val, _))) => map_literal(val),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The constructor call whose Map literal is being checked, and the path
+/// to the field being checked in it.
+struct RecordSite {
+    shown: String,
+    location: Option<ErrorLocation>,
+    path: Vec<String>,
+}
+
+impl RecordSite {
+    /// Where a field's problem is, for its message: ` at `inner.n` of `Outer``.
+    fn at(&self) -> String {
+        if self.path.is_empty() {
+            String::new()
+        } else {
+            format!(" at `{}` of `{}`", self.path.join("."), self.shown)
+        }
+    }
+}
+
+/// A diagnostic about a literal, before it has a location.
+struct LiteralProblem {
+    code: &'static str,
+    message: String,
+    help: Option<&'static str>,
+    warning: bool,
+}
+
+impl LiteralProblem {
+    fn report(
+        self,
+        suffix: String,
+        location: Option<ErrorLocation>,
+        out: &mut ConstraintDiagnostics,
+    ) {
+        let found = diagnostic(
+            self.code,
+            format!("{}{suffix}", self.message),
+            self.help,
+            self.warning,
+            location,
+        );
+        if self.warning {
+            out.warnings.push(found);
+        } else {
+            out.errors.push(found);
+        }
     }
 }
 
@@ -672,6 +753,7 @@ impl<'a> Index<'a> {
                     self.check_literal_against(&ns, annotation, literal, location, out);
                 }
                 walk(value, &mut |v| match v {
+                    Value::MultipleValues(values) => self.check_local_binding(&ns, values, out),
                     Value::FnCall(call) => {
                         self.check_call(&ns, call, out);
                         self.check_representation_call(&ns, call, &mut representation_warned, out);
@@ -698,6 +780,24 @@ impl<'a> Index<'a> {
         }
     }
 
+    /// A typed binding with a literal value inside a body, `x: Port 0`. Only
+    /// a binding's reference carries a type annotation.
+    fn check_local_binding(&self, ns: &str, values: &[Value], out: &mut ConstraintDiagnostics) {
+        if let Some((var_ref, value)) = local_binding(values)
+            && var_ref.var.deep_set.is_none()
+            && var_ref.var.deep_path.is_none()
+            && let Some(annotation) = var_ref.var.type_annotation.as_deref()
+            && let Some(literal) = literal(value)
+        {
+            let location = var_ref
+                .src
+                .as_ref()
+                .or(var_ref.var.src.as_ref())
+                .map(error_location);
+            self.check_literal_against(ns, annotation, literal, location, out);
+        }
+    }
+
     /// Literal arguments of a call: to a constructor or to refined or
     /// open-union parameters.
     fn check_call(&self, ns: &str, call: &FnCall, out: &mut ConstraintDiagnostics) {
@@ -706,13 +806,25 @@ impl<'a> Index<'a> {
         };
         let location = call.src.as_ref().map(error_location);
         match self.vars.get(&(callee_ns.clone(), callee.clone())) {
-            Some((_, Value::TypeDef(_))) => {
-                if let [arg] = call.args.as_slice()
-                    && let Some(literal) = literal(&arg.value)
-                {
+            Some((_, Value::TypeDef(type_def))) => {
+                let [arg] = call.args.as_slice() else {
+                    return;
+                };
+                let location = arg.src.as_ref().map(error_location).or(location);
+                if let Some(literal) = literal(&arg.value) {
                     let qualified = format!("{callee_ns}/{callee}");
-                    let location = arg.src.as_ref().map(error_location).or(location);
                     self.check_literal_against(&callee_ns, &qualified, literal, location, out);
+                } else if let Value::Val(val, _) = &arg.value
+                    && let Some(entries) = map_literal(val)
+                    && let Some((record_ns, record, shown)) =
+                        self.constructed_record(&callee_ns, &callee, &call.function, type_def)
+                {
+                    let mut site = RecordSite {
+                        shown,
+                        location,
+                        path: Vec::new(),
+                    };
+                    self.check_record_fields(&record_ns, record, entries, &mut site, out);
                 }
             }
             Some((_, Value::Fn(defs))) => {
@@ -745,62 +857,181 @@ impl<'a> Index<'a> {
         location: Option<ErrorLocation>,
         out: &mut ConstraintDiagnostics,
     ) {
-        let Some(TypeExpr::Named(name) | TypeExpr::Simple(name)) =
-            parse_type_annotation(annotation)
-        else {
-            return;
+        if let Some(problem) = self.literal_problem(ns, annotation, literal) {
+            problem.report(String::new(), location, out);
+        }
+    }
+
+    /// What is wrong with a literal for the type an annotation names, in
+    /// `ns`, when bounded constant evaluation can tell.
+    fn literal_problem(&self, ns: &str, annotation: &str, literal: &Val) -> Option<LiteralProblem> {
+        let name = match parse_type_annotation(annotation)? {
+            TypeExpr::Named(name) | TypeExpr::Simple(name) => name,
+            TypeExpr::Optional(inner) if *literal != Val::Null => match *inner {
+                TypeExpr::Named(name) | TypeExpr::Simple(name) => name,
+                _ => return None,
+            },
+            _ => return None,
         };
-        let Some(key) = self.type_key(ns, &name) else {
-            return;
-        };
-        let Some(type_def) = self.types.get(&key).copied() else {
-            return;
-        };
+        let key = self.type_key(ns, &name)?;
+        let type_def = self.types.get(&key).copied()?;
         let short_name = name.rsplit('/').next().unwrap_or(&name);
         if let Some(members) = self.literal_members.get(&key) {
-            if !members.contains(literal) {
-                // An open union accepts unknown values, with a warning for a
-                // literal; a closed one rejects them.
-                if type_def.is_open {
-                    out.warnings.push(diagnostic(
-                        "unknown-literal",
-                        format!(
-                            "{} isn't one of the known values of `{short_name}`",
-                            val_text(literal)
-                        ),
-                        Some("open unions accept unknown values; check the spelling"),
-                        true,
-                        location,
-                    ));
-                } else {
-                    let known = members.iter().map(val_text).collect::<Vec<_>>().join(" | ");
-                    out.errors.push(diagnostic(
-                        "constraint-violation",
-                        format!(
-                            "{} isn't one of the values of `{short_name}` ({known})",
-                            val_text(literal)
-                        ),
-                        Some("declare the union `open` to accept other values"),
-                        false,
-                        location,
-                    ));
-                }
+            if members.contains(literal) {
+                return None;
             }
+            // An open union accepts unknown values, with a warning for a
+            // literal; a closed one rejects them.
+            return Some(if type_def.is_open {
+                LiteralProblem {
+                    code: "unknown-literal",
+                    message: format!(
+                        "{} isn't one of the known values of `{short_name}`",
+                        val_text(literal)
+                    ),
+                    help: Some("open unions accept unknown values; check the spelling"),
+                    warning: true,
+                }
+            } else {
+                let known = members.iter().map(val_text).collect::<Vec<_>>().join(" | ");
+                LiteralProblem {
+                    code: "constraint-violation",
+                    message: format!(
+                        "{} isn't one of the values of `{short_name}` ({known})",
+                        val_text(literal)
+                    ),
+                    help: Some("declare the union `open` to accept other values"),
+                    warning: false,
+                }
+            });
+        }
+        let type_ns = key.rsplit_once('/').map_or(ns, |(n, _)| n);
+        let failed = self.literal_fails(type_ns, type_def, literal, 0)?;
+        let shown = if name.contains(WHERE_TYPE_PREFIX) {
+            format!("`{failed}`")
+        } else {
+            format!("`{short_name}` ({failed})")
+        };
+        Some(LiteralProblem {
+            code: "constraint-violation",
+            message: format!("{} fails {shown}", val_text(literal)),
+            help: None,
+            warning: false,
+        })
+    }
+
+    /// The record a constructor call builds: the type itself, or the payload
+    /// of the enum variant it names (`Shape.Circle`). With its namespace and
+    /// its name for messages.
+    fn constructed_record<'t>(
+        &'t self,
+        callee_ns: &str,
+        callee: &str,
+        function: &Value,
+        type_def: &'t TypeDef,
+    ) -> Option<(String, &'t TypeDef, String)> {
+        let variant = match function {
+            Value::Ref(Ref::Var(var_ref)) => match &var_ref.var.deep_path {
+                None => None,
+                Some(DeepPath::Key(variant)) => Some(variant.as_str()),
+                Some(_) => return None,
+            },
+            _ => None,
+        };
+        let Some(variant) = variant else {
+            return Some((callee_ns.to_string(), type_def, callee.to_string()));
+        };
+        let payload = type_def
+            .variants
+            .as_ref()?
+            .iter()
+            .find(|v| v.name.name() == variant)?
+            .type_ref
+            .as_deref()?;
+        let key = self.type_key(callee_ns, payload)?;
+        let record = self.types.get(&key).copied()?;
+        let record_ns = key.rsplit_once('/')?.0.to_string();
+        let shown = payload.rsplit('/').next().unwrap_or(payload).to_string();
+        Some((record_ns, record, shown))
+    }
+
+    /// Literal fields of a record built from a Map literal, against their
+    /// field types, then the record's invariant when the fields it reads are
+    /// literals. Nested Map literals are records' fields too.
+    fn check_record_fields(
+        &self,
+        ns: &str,
+        record: &TypeDef,
+        entries: &IndexMap<Val, Val>,
+        site: &mut RecordSite,
+        out: &mut ConstraintDiagnostics,
+    ) {
+        let Some(fields) = record.fields.as_ref() else {
+            return;
+        };
+        // A one-argument custom constructor receives the Map and decides
+        // what it means.
+        if record
+            .constructor_functions
+            .as_ref()
+            .is_some_and(|ctors| ctors.iter().any(|c| c.args.args.len() == 1))
+        {
             return;
         }
-        let type_ns = key.rsplit_once('/').map_or(ns, |(n, _)| n).to_string();
-        if let Some(failed) = self.literal_fails(&type_ns, type_def, literal, 0) {
-            let shown = if name.contains(WHERE_TYPE_PREFIX) {
-                format!("`{failed}`")
-            } else {
-                format!("`{}` ({failed})", name.rsplit('/').next().unwrap_or(&name))
+        let mut failed = false;
+        for field in fields {
+            let Some(value) = entries.get(&Val::from(field.name.name())) else {
+                continue;
             };
+            site.path.push(field.name.name().to_string());
+            if let Some(literal) = scalar_literal(value) {
+                if let Some(problem) = self.literal_problem(ns, &field.type_annotation, literal) {
+                    failed |= !problem.warning;
+                    problem.report(site.at(), site.location.clone(), out);
+                }
+            } else if let Some(inner) = map_literal(value)
+                && let Some(TypeExpr::Named(name) | TypeExpr::Simple(name)) =
+                    parse_type_annotation(&field.type_annotation)
+                && let Some(key) = self.type_key(ns, &name)
+                && let Some(inner_record) = self.types.get(&key).copied()
+            {
+                let inner_ns = key.rsplit_once('/').map_or(ns, |(n, _)| n);
+                self.check_record_fields(inner_ns, inner_record, inner, site, out);
+            }
+            site.path.pop();
+        }
+        // A field that fails stops the constructor before its invariant.
+        if failed || record.refinement.is_none() {
+            return;
+        }
+        let known: IndexMap<Val, Val> = fields
+            .iter()
+            .filter_map(|field| {
+                let key = Val::from(field.name.name());
+                let literal = scalar_literal(entries.get(&key)?)?;
+                Some((key, literal.clone()))
+            })
+            .collect();
+        let candidate = Val::Map(Box::new(known.clone()));
+        if let Some(failed) = self.literal_fails(ns, record, &candidate, 0) {
+            let fields = known
+                .iter()
+                .map(|(k, v)| match k {
+                    Val::Str(k) => format!("{k}: {}", val_text(v)),
+                    k => format!("{k}: {}", val_text(v)),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             out.errors.push(diagnostic(
                 "constraint-violation",
-                format!("{} fails {shown}", val_text(literal)),
+                format!(
+                    "{{{fields}}} fails `{}` ({failed}){}",
+                    record.name.name(),
+                    site.at()
+                ),
                 None,
                 false,
-                location,
+                site.location.clone(),
             ));
         }
     }
@@ -830,10 +1061,10 @@ impl<'a> Index<'a> {
         let parameter = def.args.args.first()?.var.sym.name();
         let mut evaluator = Evaluator {
             index: self,
-            ns: predicate_ns,
-            parameter,
-            candidate: literal,
+            ns: predicate_ns.to_string(),
+            locals: AHashMap::from_iter([(parameter.to_string(), literal.clone())]),
             fuel: 256,
+            depth: 0,
         };
         match evaluator.eval(&def.body) {
             Some(Val::Bool(false)) => Some(refinement.source.clone()),
@@ -963,21 +1194,44 @@ fn collect_names(type_expr: &TypeExpr, names: &mut Vec<String>) {
 }
 
 /// Bounded constant evaluation of a predicate on a literal candidate. It
-/// knows the canonical predicate functions and gives up (`None`) on
-/// anything else.
+/// knows the canonical predicate functions and follows calls into the
+/// program's own functions. It interprets rather than runs, and gives up
+/// (`None`) on anything it doesn't know, so it can't report a literal that
+/// would pass.
 struct Evaluator<'i, 'a> {
     index: &'i Index<'a>,
-    ns: &'i str,
-    parameter: &'i str,
-    candidate: &'i Val,
+    /// The namespace of the body being evaluated.
+    ns: String,
+    /// The parameters and local bindings in scope.
+    locals: AHashMap<String, Val>,
+    /// Evaluation steps left, shared by every call.
     fuel: usize,
+    /// Calls into the program's functions in progress.
+    depth: usize,
 }
+
+/// How deep the evaluator follows calls into the program's functions.
+const MAX_CALL_DEPTH: usize = 8;
 
 fn as_number(val: &Val) -> Option<fastnum::D256> {
     match val {
         Val::Int(n) => Some(fastnum::D256::from(*n)),
         Val::Dec(d) => Some(*d),
         _ => None,
+    }
+}
+
+/// Whether a value certainly has the plain type an annotation names. Any
+/// other annotation is unknown, so evaluation gives up.
+fn admits(annotation: Option<&str>, value: &Val) -> bool {
+    match annotation {
+        None | Some("Any") => true,
+        Some("Str") => matches!(value, Val::Str(_)),
+        Some("Int") => matches!(value, Val::Int(_)),
+        Some("Dec") => matches!(value, Val::Dec(_)),
+        Some("Bool") => matches!(value, Val::Bool(_)),
+        Some("Null") => matches!(value, Val::Null),
+        Some(_) => false,
     }
 }
 
@@ -1002,17 +1256,155 @@ impl Evaluator<'_, '_> {
                 )),
                 _ => None,
             },
-            Value::Ref(Ref::Var(var_ref)) if var_ref.var.sym.name() == self.parameter => {
-                Some(self.candidate.clone())
-            }
-            Value::Flow(flow) if flow.expressions.len() == 1 => self.eval(&flow.expressions[0]),
+            Value::Ref(Ref::Var(var_ref)) => self.lookup(&var_ref.var),
+            Value::Flow(flow) => self.eval_flow(flow),
             Value::FnCall(call) => self.eval_call(call),
             _ => None,
         }
     }
 
+    /// A local, or a top-level literal constant of the namespace. A record
+    /// candidate is read only by field (`%.low`), since it holds just the
+    /// fields given as literals.
+    fn lookup(&self, var: &Var) -> Option<Val> {
+        let name = var.sym.name();
+        let value = match self.locals.get(name) {
+            Some(value) => value.clone(),
+            None => match self.index.vars.get(&(self.ns.clone(), name.to_string())) {
+                Some((_, value)) => literal(value)?.clone(),
+                None => return None,
+            },
+        };
+        match (&var.deep_path, value) {
+            (None, Val::Map(_)) => None,
+            (None, value) => Some(value),
+            (Some(DeepPath::Key(key)), Val::Map(entries)) => {
+                scalar_literal(entries.get(&Val::from(key.as_str()))?).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    fn eval_flow(&mut self, flow: &Flow) -> Option<Val> {
+        if !flow.aliases.is_empty() || flow.result_modifier.is_some() {
+            return None;
+        }
+        match flow.flow_type {
+            FlowType::Serial | FlowType::SerialShort => self.eval_serial(&flow.expressions),
+            FlowType::Cond | FlowType::CondShort => self.eval_cond(&flow.expressions),
+            _ => None,
+        }
+    }
+
+    /// A body's bindings, in order, then its last expression.
+    fn eval_serial(&mut self, expressions: &[Value]) -> Option<Val> {
+        let saved = self.locals.clone();
+        let result = self.eval_serial_scoped(expressions);
+        self.locals = saved;
+        result
+    }
+
+    fn eval_serial_scoped(&mut self, expressions: &[Value]) -> Option<Val> {
+        let (last, bindings) = expressions.split_last()?;
+        for binding in bindings {
+            let Value::MultipleValues(values) = binding else {
+                return None;
+            };
+            let (var_ref, value) = local_binding(values)?;
+            let var = &var_ref.var;
+            if var.type_annotation.is_some() || var.deep_set.is_some() || var.deep_path.is_some() {
+                return None;
+            }
+            let value = self.eval(value)?;
+            self.locals.insert(var.sym.name().to_string(), value);
+        }
+        // A body that ends in a binding has that binding's value.
+        if matches!(last, Value::MultipleValues(values) if local_binding(values).is_some()) {
+            return None;
+        }
+        self.eval(last)
+    }
+
+    /// The first arm whose condition is `true`. A non-Bool condition, or no
+    /// arm matching, gives up.
+    fn eval_cond(&mut self, arms: &[Value]) -> Option<Val> {
+        for arm in arms {
+            match arm {
+                Value::Cond(_, condition, body) => match self.eval(condition)? {
+                    Val::Bool(true) => return self.eval_flow_body(body),
+                    Val::Bool(false) => {}
+                    _ => return None,
+                },
+                Value::CondDefault(body) => return self.eval_flow_body(body),
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    fn eval_flow_body(&mut self, body: &Flow) -> Option<Val> {
+        if !body.aliases.is_empty() || body.result_modifier.is_some() {
+            return None;
+        }
+        self.eval_serial(&body.expressions)
+    }
+
+    /// A call to one of the program's functions: its one definition for
+    /// this many arguments, with plain parameter types and no constraints of
+    /// its own, evaluated in its namespace.
+    fn eval_user_call(&mut self, call: &FnCall) -> Option<Val> {
+        if self.depth >= MAX_CALL_DEPTH
+            || call
+                .args
+                .iter()
+                .any(|a| a.lazy || a.spread || a.name.is_some())
+        {
+            return None;
+        }
+        let (callee_ns, callee) = self.index.resolve(&self.ns, &call.function)?;
+        let defs = self.index.function_defs(&callee_ns, &callee)?;
+        let mut matching = defs
+            .iter()
+            .filter(|d| !d.args.variadic && d.args.args.len() == call.args.len());
+        let def = matching.next()?;
+        if matching.next().is_some()
+            || def.precondition.is_some()
+            || def.args.args.iter().any(|a| a.lazy)
+        {
+            return None;
+        }
+        let mut locals = AHashMap::new();
+        for (arg, param) in call.args.iter().zip(&def.args.args) {
+            let value = self.eval(&arg.value)?;
+            if !admits(param.type_annotation.as_deref(), &value) {
+                return None;
+            }
+            locals.insert(param.var.sym.name().to_string(), value);
+        }
+        let saved_locals = std::mem::replace(&mut self.locals, locals);
+        let saved_ns = std::mem::replace(&mut self.ns, callee_ns);
+        self.depth += 1;
+        let result = self.eval(&def.body);
+        self.depth -= 1;
+        self.locals = saved_locals;
+        self.ns = saved_ns;
+        let result = result?;
+        admits(def.return_type.as_deref(), &result).then_some(result)
+    }
+
     fn eval_call(&mut self, call: &FnCall) -> Option<Val> {
-        let name = self.index.core_call(self.ns, call)?;
+        if call.result_path.is_some() {
+            return None;
+        }
+        // A parameter or local named like a function hides it.
+        if let Value::Ref(Ref::Var(callee)) = call.function.as_ref()
+            && (callee.var.deep_path.is_some() || self.locals.contains_key(callee.var.sym.name()))
+        {
+            return None;
+        }
+        let Some(name) = self.index.core_call(&self.ns, call) else {
+            return self.eval_user_call(call);
+        };
         let arg =
             |this: &mut Self, i: usize| -> Option<Val> { this.eval(&call.args.get(i)?.value) };
         let compare = |this: &mut Self| -> Option<std::cmp::Ordering> {

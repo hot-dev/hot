@@ -218,7 +218,7 @@ pub async fn envs_create_handler(
         }
     };
 
-    if existing_envs.iter().any(|env| env.name == form.name) {
+    if existing_envs.iter().any(|env| env.name == name) {
         return Err(render_envs_new_with_error(
             &session,
             "Environment with this name already exists",
@@ -240,9 +240,13 @@ pub async fn envs_create_handler(
             // Redirect to the environments list
             Ok(Redirect::to("/envs"))
         }
-        Err(_) => Err(render_envs_new_with_error(
+        Err(error) => Err(render_envs_new_with_error(
             &session,
-            "Failed to create environment",
+            if matches!(error, hot::db::org::OrgError::LimitReached) {
+                "Account environment limit reached"
+            } else {
+                "Failed to create environment"
+            },
             &form.name,
         )),
     }
@@ -299,7 +303,7 @@ pub async fn envs_update_handler(
     }
 
     // Check if environment with this name already exists in the organization (but allow current name)
-    if form.name != env.name {
+    if name != env.name {
         let existing_envs = match hot::db::Env::get_envs_by_org(&db, &current_org.org_id).await {
             Ok(envs) => envs,
             Err(_) => {
@@ -311,7 +315,7 @@ pub async fn envs_update_handler(
             }
         };
 
-        if existing_envs.iter().any(|e| e.name == form.name) {
+        if existing_envs.iter().any(|e| e.name == name) {
             return Err(render_envs_edit_with_error(
                 &session,
                 &env,
@@ -321,7 +325,7 @@ pub async fn envs_update_handler(
     }
 
     // Update the environment
-    match hot::db::Env::update_env(&db, &env_id, &form.name, &session.current_user_id()).await {
+    match hot::db::Env::update_env(&db, &env_id, &name, &session.current_user_id()).await {
         Ok(_) => {
             // Redirect to the environments list
             Ok(Redirect::to("/envs"))

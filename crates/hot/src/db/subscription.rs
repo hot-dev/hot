@@ -1,6 +1,6 @@
 mod runtime_usage;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
@@ -8,6 +8,39 @@ use sqlx::types::Uuid;
 use thiserror::Error;
 
 use super::DatabasePool;
+
+/// Start of the monthly window that allowances such as runs per month count
+/// from. Billing advances `current_period_start` each month only for monthly
+/// plans; annual plans, and free plans that never renew, keep their first
+/// start. So the window is the latest monthly anniversary of the subscription
+/// start, computed from the original anchor so month-end dates clamp (Jan 31,
+/// Feb 29, Mar 31) without drifting. Accounts without a plan, and a start in
+/// the future, use the calendar month: a window that moved with every request
+/// would reset its counter each time.
+pub fn monthly_usage_start(
+    now: DateTime<Utc>,
+    subscription_start: Option<DateTime<Utc>>,
+) -> DateTime<Utc> {
+    let Some(start) = subscription_start.filter(|start| *start <= now) else {
+        return Utc
+            .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
+            .single()
+            .expect("valid month");
+    };
+    let months = ((now.year() - start.year()) * 12 + now.month() as i32 - start.month() as i32)
+        .max(0) as u32;
+    let anniversary = |months: u32| {
+        start
+            .checked_add_months(chrono::Months::new(months))
+            .unwrap_or(start)
+    };
+    let candidate = anniversary(months);
+    if candidate > now {
+        anniversary(months.saturating_sub(1))
+    } else {
+        candidate
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum PlanError {
@@ -661,6 +694,17 @@ impl OrgPlan {
             .await?),
         }
     }
+
+    /// Every account root, whatever its subscription status. Retention prunes
+    /// an Inactive or Pending account by its plan like any other; a root with
+    /// no plan resolves to unlimited retention and is skipped.
+    pub async fn get_all_root_org_ids(db: &DatabasePool) -> Result<Vec<Uuid>, PlanError> {
+        let sql = "SELECT org_id FROM org WHERE parent_org_id IS NULL";
+        match db {
+            DatabasePool::Postgres(pool) => Ok(sqlx::query_scalar(sql).fetch_all(pool).await?),
+            DatabasePool::Sqlite(pool) => Ok(sqlx::query_scalar(sql).fetch_all(pool).await?),
+        }
+    }
 }
 
 /// Compute the call data deletion cutoff (in days) for an organization.
@@ -695,11 +739,18 @@ pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32
         Err(_) => return -1,
     };
 
-    if let Some(JsonValue::Object(ref map)) = org_features_json
-        && let Some(val) = map.get(keys::CALL_RETENTION_DAYS)
-        && let Some(days) = val.as_i64()
-    {
-        return days as i32;
+    // An override that isn't an object, or a retention that isn't a whole
+    // number of days, is just as unreadable.
+    if let Some(features) = org_features_json {
+        let Some(map) = features.as_object() else {
+            return -1;
+        };
+        if let Some(days) = map.get(keys::CALL_RETENTION_DAYS) {
+            return days
+                .as_i64()
+                .and_then(|days| i32::try_from(days).ok())
+                .unwrap_or(-1);
+        }
     }
 
     // No org override — resolve from plan + dynamic next-tier lookup
@@ -723,13 +774,13 @@ pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32
         Ok(next_plan) => {
             let next_retention = next_plan.get_features().call_retention_days();
             if next_retention < 0 {
-                retention * 2 // next tier is unlimited (Self-Host), use 2x
+                retention.saturating_mul(2) // next tier is unlimited (Self-Host), use 2x
             } else {
                 next_retention
             }
         }
-        Err(PlanError::NotFound) => retention * 2, // top tier, no next plan
-        Err(_) => -1,                              // lookup failed: keep data
+        Err(PlanError::NotFound) => retention.saturating_mul(2), // top tier, no next plan
+        Err(_) => -1,                                            // lookup failed: keep data
     }
 }
 

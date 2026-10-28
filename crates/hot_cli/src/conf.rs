@@ -966,6 +966,19 @@ pub(crate) fn apply_configuration_options(
     conf
 }
 
+/// Copy a project's legacy `profile.set` selector to `set.profile` before
+/// defaults are merged. Otherwise the default `set.profile` would always
+/// disagree with the project's choice and selection would fail as a conflict.
+fn adopt_legacy_profile_selector(conf: Val) -> Val {
+    if conf.get("set.profile").is_some() {
+        return conf;
+    }
+    match conf.get("profile.set") {
+        Some(legacy) => conf.set("set.profile", legacy),
+        None => conf,
+    }
+}
+
 // Function to load and parse configuration file using engine
 pub(crate) fn load_conf(
     conf_paths: &[String],
@@ -1036,7 +1049,7 @@ pub(crate) fn load_conf(
                     "Successfully extracted 'hot' variable from ::hot::conf namespace: {:?}",
                     hot_var
                 );
-                Ok(hot_var)
+                Ok(adopt_legacy_profile_selector(hot_var))
             } else {
                 tracing::warn!("'hot' variable not found in executed configuration");
 
@@ -1825,6 +1838,21 @@ mod tests {
         let invalid = original.set_str("profile.set", Some("different".into()), "");
         let reloaded = preserve_runtime_overrides_after_init(Val::map_empty(), &invalid);
         assert!(hot::profile::selected_profile_identifiers(&reloaded).is_err());
+    }
+
+    #[test]
+    fn legacy_profile_selector_becomes_the_canonical_one() {
+        let project = adopt_legacy_profile_selector(val!({"profile": {"set": "child"}}));
+        assert_eq!(project.get_str("set.profile"), "child");
+        assert_eq!(
+            hot::profile::selected_profile_name(&project).unwrap(),
+            "child"
+        );
+        // A project that sets both and disagrees still fails as a conflict.
+        let both = adopt_legacy_profile_selector(
+            val!({"set": {"profile": "prod"}, "profile": {"set": "child"}}),
+        );
+        assert!(hot::profile::selected_profile_name(&both).is_err());
     }
 
     #[test]

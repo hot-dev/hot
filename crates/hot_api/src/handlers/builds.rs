@@ -467,24 +467,33 @@ pub async fn deploy_build(
         );
     }
 
+    // A schedule-cap denial is the caller's to fix; a database failure is not,
+    // and its text stays in the log.
+    let activation_error = |error: hot::db::build::BuildError| match error {
+        hot::db::build::BuildError::Admission(message) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorResponse::bad_request(&message)),
+        ),
+        hot::db::build::BuildError::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorResponse::not_found("Build")),
+        ),
+        error => {
+            tracing::error!(%error, "Build activation failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error("Build activation failed")),
+            )
+        }
+    };
     if build.is_bundle() {
         Build::request_bundle_deployment(&db, &build_id, &api_key.created_by_user_id)
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiErrorResponse::internal_error(&e.to_string())),
-                )
-            })?;
+            .map_err(activation_error)?;
     } else {
         Build::activate_build_directly(&db, &build_id, &api_key.created_by_user_id)
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiErrorResponse::internal_error(&e.to_string())),
-                )
-            })?;
+            .map_err(activation_error)?;
     }
 
     if build.is_bundle() {

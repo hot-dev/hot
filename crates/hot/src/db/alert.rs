@@ -2549,6 +2549,17 @@ async fn process_email_delivery(
 
     // Determine the recipient email address
     let to_address = if let Some(user_id) = &info.delivery.resolved_user_id {
+        match crate::db::Org::resolve_user_access(db, &info.alert.org_id, user_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return DeliveryResult::PermanentFailure(
+                    "User no longer belongs to the alert organization".into(),
+                );
+            }
+            Err(error) => {
+                return DeliveryResult::Retry(format!("Cannot verify alert recipient: {error}"));
+            }
+        }
         // Dynamic target: look up user's current email
         match crate::db::user::User::get_user(db, user_id).await {
             Ok(user) => {

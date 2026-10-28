@@ -1,4 +1,4 @@
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::Utc;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -16,6 +16,28 @@ pub struct TaskQuotaReservation {
 }
 
 impl Task {
+    pub async fn count_reserved_containers_for_account(
+        db: &DatabasePool,
+        org: &Uuid,
+    ) -> Result<i64, TaskError> {
+        let root = crate::db::Org::billing_owner_id_for(db, org)
+            .await
+            .map_err(|e| TaskError::Database(sqlx::Error::Protocol(e.to_string())))?;
+        let billing = db.with_scope(DatabaseScope::Maintenance {
+            operation: MaintenanceOperation::Billing,
+            org_id: Some(root),
+        });
+        let sql = "SELECT CAST(COALESCE(SUM(u.active_containers),0) AS BIGINT) FROM usage_task u JOIN org o ON o.org_id=u.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1";
+        Ok(match &billing {
+            DatabasePool::Postgres(pool) => {
+                sqlx::query_scalar(sql).bind(root).fetch_one(pool).await?
+            }
+            DatabasePool::Sqlite(pool) => {
+                sqlx::query_scalar(sql).bind(root).fetch_one(pool).await?
+            }
+        })
+    }
+
     pub async fn quota_reservation(
         db: &DatabasePool,
         task_id: &Uuid,
@@ -92,10 +114,6 @@ impl Task {
             org_id: Some(root_id),
         });
         let now = Utc::now();
-        let month_start = Utc
-            .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
-            .single()
-            .expect("valid month");
         match &billing {
             DatabasePool::Postgres(pool) => {
                 // Initialize a new period's counters before taking the account
@@ -117,7 +135,10 @@ impl Task {
                     task.task_type == "container",
                 );
                 if needs_usage {
-                    let period = plan.as_ref().and_then(|p| p.2).unwrap_or(month_start);
+                    let period = crate::db::subscription::monthly_usage_start(
+                        now,
+                        plan.as_ref().and_then(|p| p.2),
+                    );
                     crate::db::usage::prepare_task_period(&billing, root_id, period).await?;
                 }
                 // Lock the account root only for a limit that reads usage. NO KEY
@@ -166,14 +187,15 @@ impl Task {
                 let admitted: bool = sqlx::query_scalar("SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE e.env_id=$1")
                     .bind(task.env_id).fetch_one(&mut *tx).await?;
                 if !admitted {
-                    return Err(TaskError::QuotaExceeded(
-                        "Task environment is suspended".into(),
-                    ));
+                    return Err(TaskError::Suspended);
                 }
                 let plan: Option<TaskAccountPlan<Value>> = sqlx::query_as(
                     "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
                 ).bind(root_id).fetch_optional(&mut *tx).await?;
-                let period = plan.as_ref().and_then(|p| p.2).unwrap_or(month_start);
+                let period = crate::db::subscription::monthly_usage_start(
+                    now,
+                    plan.as_ref().and_then(|p| p.2),
+                );
                 let is_free = plan
                     .as_ref()
                     .is_some_and(|p| p.1.as_deref() == Some("hot-free"));
@@ -223,7 +245,7 @@ impl Task {
             }
             DatabasePool::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
+                sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=?")
                     .bind(root_id)
                     .execute(&mut *tx)
                     .await?;
@@ -244,14 +266,15 @@ impl Task {
                 let admitted: bool = sqlx::query_scalar("SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE e.env_id=?")
                     .bind(task.env_id).fetch_one(&mut *tx).await?;
                 if !admitted {
-                    return Err(TaskError::QuotaExceeded(
-                        "Task environment is suspended".into(),
-                    ));
+                    return Err(TaskError::Suspended);
                 }
                 let plan: Option<TaskAccountPlan<String>> = sqlx::query_as(
                     "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
                 ).bind(root_id).fetch_optional(&mut *tx).await?;
-                let period = plan.as_ref().and_then(|p| p.2).unwrap_or(month_start);
+                let period = crate::db::subscription::monthly_usage_start(
+                    now,
+                    plan.as_ref().and_then(|p| p.2),
+                );
                 let overrides = parse_features(overrides)?;
                 let plan_features = parse_features(plan.as_ref().and_then(|p| p.0.clone()))?;
                 let is_free = plan
@@ -307,7 +330,7 @@ fn parse_features(json: Option<String>) -> Result<Option<Value>, TaskError> {
 fn admission_error(error: crate::db::run::RunError) -> TaskError {
     match error {
         crate::db::run::RunError::Database(error) => TaskError::Database(error),
-        crate::db::run::RunError::Suspended(_) => TaskError::QuotaExceeded(error.to_string()),
+        crate::db::run::RunError::Suspended(_) => TaskError::Suspended,
         _ => TaskError::QuotaExhausted(error.to_string()),
     }
 }
@@ -325,8 +348,8 @@ fn usage_required(
     container: bool,
 ) -> bool {
     let features = claim_features(plan, overrides);
-    (container && features.box_concurrent_tasks() >= 0)
-        || features.compute_units_budget() > 0
+    // Compute units meter containers only; a code task never spends them.
+    (container && (features.box_concurrent_tasks() >= 0 || features.compute_units_budget() > 0))
         || (is_free
             && (features.compute_units_per_month() >= 0 || features.task_minutes_per_month() >= 0))
 }
@@ -341,6 +364,12 @@ fn check_capacity(
 ) -> Result<(), TaskError> {
     let features = claim_features(plan, overrides);
     let concurrent = features.box_concurrent_tasks();
+    // No container capacity will ever free up: fail instead of retrying.
+    if container && concurrent == 0 {
+        return Err(TaskError::QuotaExhausted(
+            "Container tasks are disabled on this account".into(),
+        ));
+    }
     if container && concurrent >= 0 && usage.0 >= concurrent {
         return Err(TaskError::QuotaExceeded(
             "Account concurrent container limit reached".into(),
@@ -357,8 +386,9 @@ fn check_capacity(
         .checked_add(usage.2)
         .and_then(|v| v.checked_add(reserve.compute_units));
     let budget = features.compute_units_budget();
-    if (budget > 0 && total.is_none_or(|v| v > budget))
-        || (is_free && monthly >= 0 && total.is_none_or(|v| v > monthly))
+    if container
+        && ((budget > 0 && total.is_none_or(|v| v > budget))
+            || (is_free && monthly >= 0 && total.is_none_or(|v| v > monthly)))
     {
         // Only running reservations can free capacity during this period.
         let message = "Account compute quota cannot cover this task's maximum execution; reduce its timeout or increase capacity".to_string();
@@ -433,6 +463,22 @@ mod tests {
         .unwrap();
         id
     }
+    #[test]
+    fn code_tasks_ignore_container_compute_budget_and_zero_concurrency_is_final() {
+        let plan = serde_json::json!({"compute_units_budget":1,"box_concurrent_tasks":0,"task_minutes_per_month":-1});
+        let reserve = TaskQuotaReservation {
+            compute_units: 0,
+            duration_ms: 1000,
+        };
+        assert!(
+            check_capacity(Some(&plan), None, false, false, &reserve, (0, 0, 100, 0, 0)).is_ok()
+        );
+        assert!(matches!(
+            check_capacity(Some(&plan), None, false, true, &reserve, (0, 0, 0, 0, 0)),
+            Err(TaskError::QuotaExhausted(_))
+        ));
+    }
+
     #[tokio::test]
     async fn interrupted_containers_charge_their_runtime_not_their_reservation() {
         let (db, _root, e1, e2) = fixture(

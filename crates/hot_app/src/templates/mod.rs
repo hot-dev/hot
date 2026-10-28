@@ -2146,6 +2146,8 @@ pub struct OrgUsage<'a> {
     pub features: hot::db::Features,
     pub month_start: chrono::DateTime<chrono::Utc>,
     pub can_upgrade: bool, // false for Scale plan
+    /// The stats cover the whole account, not just this org.
+    pub account_wide: bool,
 }
 
 /// Partial template for usage stats (loaded via HTMX)

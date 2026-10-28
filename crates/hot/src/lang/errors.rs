@@ -216,6 +216,14 @@ pub enum CompilerError {
         message: String,
         location: Option<ErrorLocation>,
     },
+    /// A `meta {schedule: ...}` string that is not a cron expression or a
+    /// supported English schedule
+    InvalidSchedule {
+        func_name: String,
+        schedule: String,
+        message: String,
+        location: Option<ErrorLocation>,
+    },
     /// Invalid event handler (e.g., missing event parameter)
     InvalidEventHandler {
         func_name: String,
@@ -239,12 +247,16 @@ pub enum CompilerError {
         enum_name: String,
         location: Option<ErrorLocation>,
     },
-    /// `match` on a closed `enum` doesn't cover every declared variant and
-    /// has no `_` default arm. The set of missing variants is included so
-    /// the user can mechanically add the needed arms.
+    /// `match` on a closed `enum` or closed literal union doesn't cover
+    /// every declared variant or value and has no `_` default arm. The set
+    /// of missing variants is included so the user can mechanically add
+    /// the needed arms.
     NonExhaustiveMatch {
         enum_name: String,
         missing_variants: Vec<String>,
+        /// True for a literal union, whose missing entries are rendered
+        /// values (`"medium"`, `2`, `null`) rather than variant names.
+        literal_values: bool,
         location: Option<ErrorLocation>,
     },
     /// A literal-union type was re-declared with mismatched openness, or
@@ -343,6 +355,16 @@ pub enum CompilerError {
         inferred: String,
         location: Option<ErrorLocation>,
     },
+    /// A type declared `core: true` in more than one namespace. Every
+    /// namespace then sees only the last declaration (`winner`), including
+    /// the namespace of the one it overrides (`shadowed`). A *warning*: the
+    /// override is deterministic, but usually unintended.
+    DuplicateCoreName {
+        name: String,
+        shadowed: String,
+        winner: String,
+        location: Option<ErrorLocation>,
+    },
 }
 
 /// "the `func` argument of `map`", or "an argument of `map`" without a name.
@@ -409,6 +431,22 @@ fn nested_placeholder_owner(function: &str) -> String {
     } else {
         format!("`{}`'s", function)
     }
+}
+
+/// The missing arms of a non-exhaustive match, as `` `Enum.Variant` `` or,
+/// for a literal union, `` `"value"` ``.
+fn format_missing_arms(enum_name: &str, missing: &[String], literal_values: bool) -> String {
+    missing
+        .iter()
+        .map(|v| {
+            if literal_values {
+                format!("`{}`", v)
+            } else {
+                format!("`{}.{}`", enum_name, v)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl fmt::Display for CompilerError {
@@ -914,6 +952,28 @@ impl fmt::Display for CompilerError {
                     write!(f, "Invalid scheduled function '{}': {}", func_name, message)
                 }
             }
+            CompilerError::InvalidSchedule {
+                func_name,
+                message,
+                location,
+                ..
+            } => {
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<source>".to_string()),
+                        loc.line,
+                        loc.column,
+                        message
+                    )
+                } else {
+                    write!(f, "Invalid schedule on '{}': {}", func_name, message)
+                }
+            }
             CompilerError::InvalidEventHandler {
                 func_name,
                 event_type,
@@ -994,13 +1054,10 @@ impl fmt::Display for CompilerError {
             CompilerError::NonExhaustiveMatch {
                 enum_name,
                 missing_variants,
+                literal_values,
                 location,
             } => {
-                let missing = missing_variants
-                    .iter()
-                    .map(|v| format!("`{}.{}`", enum_name, v))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let missing = format_missing_arms(enum_name, missing_variants, *literal_values);
                 if let Some(loc) = location {
                     write!(
                         f,
@@ -1235,6 +1292,32 @@ impl fmt::Display for CompilerError {
                     write!(f, "{}", body)
                 }
             }
+            CompilerError::DuplicateCoreName {
+                name,
+                shadowed,
+                winner,
+                location,
+            } => {
+                let body = format!(
+                    "core type `{}` is declared in `{}` and `{}`; `{}/{}` is used everywhere",
+                    name, shadowed, winner, winner, name
+                );
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<source>".to_string()),
+                        loc.line,
+                        loc.column,
+                        body
+                    )
+                } else {
+                    write!(f, "{}", body)
+                }
+            }
         }
     }
 }
@@ -1358,6 +1441,7 @@ impl CompilerErrors {
             CompilerError::InvalidFlowType { location, .. } => location.as_ref(),
             CompilerError::IncompatibleFlowBranches { location, .. } => location.as_ref(),
             CompilerError::InvalidScheduledFunction { location, .. } => location.as_ref(),
+            CompilerError::InvalidSchedule { location, .. } => location.as_ref(),
             CompilerError::InvalidEventHandler { location, .. } => location.as_ref(),
             CompilerError::InvalidFunctionSyntax { location, .. } => location.as_ref(),
             CompilerError::OpenEnumMatchMissingDefault { location, .. } => location.as_ref(),
@@ -1371,6 +1455,7 @@ impl CompilerErrors {
             CompilerError::NamedArgument { location, .. } => location.as_ref(),
             CompilerError::Constraint { location, .. } => location.as_ref(),
             CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
+            CompilerError::DuplicateCoreName { location, .. } => location.as_ref(),
         }?;
 
         let source_name = if let Some(file) = &location.file {
@@ -1692,6 +1777,25 @@ impl CompilerErrors {
                         "Scheduled functions must accept an event parameter: fn (event) { ... }",
                     );
             }
+            CompilerError::InvalidSchedule {
+                func_name,
+                schedule,
+                message,
+                ..
+            } => {
+                report = report
+                    .with_code("invalid-schedule")
+                    .with_message(format!(
+                        "Invalid schedule '{}' on '{}'",
+                        schedule, func_name
+                    ))
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(message)
+                            .with_color(label_color),
+                    )
+                    .with_help(crate::db::RECURRING_SCHEDULE_FORMS);
+            }
             CompilerError::InvalidEventHandler {
                 func_name,
                 event_type,
@@ -1757,13 +1861,17 @@ impl CompilerErrors {
             CompilerError::NonExhaustiveMatch {
                 enum_name,
                 missing_variants,
+                literal_values,
                 ..
             } => {
-                let missing = missing_variants
-                    .iter()
-                    .map(|v| format!("`{}.{}`", enum_name, v))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let missing = format_missing_arms(enum_name, missing_variants, *literal_values);
+                let help = if *literal_values {
+                    "Closed literal unions require every value to be matched. \
+                     Either add the missing arms or add a `_` default arm."
+                } else {
+                    "Closed enums (`enum { ... }`) require every variant to be matched. \
+                     Either add the missing arms or add a `_` default arm."
+                };
                 report = report
                     .with_code("non-exhaustive-match")
                     .with_message(format!("non-exhaustive `match` on `{}`", enum_name))
@@ -1772,10 +1880,7 @@ impl CompilerErrors {
                             .with_message(format!("missing arms for {}", missing))
                             .with_color(label_color),
                     )
-                    .with_help(
-                        "Closed enums (`enum { ... }`) require every variant to be matched. \
-                         Either add the missing arms or add a `_` default arm.",
-                    );
+                    .with_help(help);
             }
             CompilerError::OpenLiteralUnionMismatch {
                 type_name, message, ..
@@ -1962,6 +2067,31 @@ impl CompilerErrors {
                          readers and tooling. Fix the annotation or the value."
                     });
             }
+            CompilerError::DuplicateCoreName {
+                name,
+                shadowed,
+                winner,
+                ..
+            } => {
+                report = report
+                    .with_code("duplicate-core-name")
+                    .with_message(format!(
+                        "Core type `{}` is also declared in `{}`",
+                        name, shadowed
+                    ))
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(format!(
+                                "every namespace now sees `{}/{}`, including `{}`",
+                                winner, name, shadowed
+                            ))
+                            .with_color(label_color),
+                    )
+                    .with_help(
+                        "Rename this type, or drop `core: true` and import it where it is used. \
+                         Only one `core` declaration of a name is visible.",
+                    );
+            }
         }
 
         let mut buffer = Vec::new();
@@ -2019,6 +2149,7 @@ impl CompilerError {
             CompilerError::InvalidFlowType { location, .. } => location.as_ref(),
             CompilerError::IncompatibleFlowBranches { location, .. } => location.as_ref(),
             CompilerError::InvalidScheduledFunction { location, .. } => location.as_ref(),
+            CompilerError::InvalidSchedule { location, .. } => location.as_ref(),
             CompilerError::InvalidEventHandler { location, .. } => location.as_ref(),
             CompilerError::InvalidFunctionSyntax { location, .. } => location.as_ref(),
             CompilerError::OpenEnumMatchMissingDefault { location, .. } => location.as_ref(),
@@ -2032,6 +2163,7 @@ impl CompilerError {
             CompilerError::NamedArgument { location, .. } => location.as_ref(),
             CompilerError::Constraint { location, .. } => location.as_ref(),
             CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
+            CompilerError::DuplicateCoreName { location, .. } => location.as_ref(),
         }
     }
 
@@ -2043,6 +2175,7 @@ impl CompilerError {
             | CompilerError::UnknownField { .. }
             | CompilerError::MissingContext { .. }
             | CompilerError::AnnotationMismatch { .. }
+            | CompilerError::DuplicateCoreName { .. }
             | CompilerError::Constraint { warning: true, .. } => DiagnosticSeverity::Warning,
             _ => DiagnosticSeverity::Error,
         }
@@ -2080,6 +2213,7 @@ impl CompilerError {
             CompilerError::InvalidFlowType { .. } => "invalid-flow-type",
             CompilerError::IncompatibleFlowBranches { .. } => "incompatible-flow-branches",
             CompilerError::InvalidScheduledFunction { .. } => "invalid-scheduled-function",
+            CompilerError::InvalidSchedule { .. } => "invalid-schedule",
             CompilerError::InvalidEventHandler { .. } => "invalid-event-handler",
             CompilerError::InvalidFunctionSyntax { .. } => "invalid-function-syntax",
             CompilerError::OpenEnumMatchMissingDefault { .. } => "open-enum-match-missing-default",
@@ -2093,6 +2227,7 @@ impl CompilerError {
             CompilerError::NamedArgument { .. } => "named-argument",
             CompilerError::Constraint { code, .. } => code,
             CompilerError::AnnotationMismatch { .. } => "annotation-mismatch",
+            CompilerError::DuplicateCoreName { .. } => "duplicate-core-name",
         }
     }
 }

@@ -11,6 +11,8 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use super::api_key::ApiKey;
+use super::env::EnvError;
+use super::org::OrgError;
 use super::{BootstrapOperation, DatabasePool, DatabaseScope, Env, Org};
 use crate::permission::{PermissionError, Permissions, actions, org_urn};
 
@@ -163,6 +165,37 @@ fn validate_expiry(
     }
 }
 
+/// A missing or RLS-hidden row is `missing`; any other database failure is
+/// reported as one, so callers can retry instead of treating it as a denial.
+fn lookup_error(error: sqlx::Error, missing: OrgApiKeyError) -> OrgApiKeyError {
+    match error {
+        sqlx::Error::RowNotFound => missing,
+        error => OrgApiKeyError::Database(error),
+    }
+}
+
+fn org_lookup_error(missing: OrgApiKeyError) -> impl FnOnce(OrgError) -> OrgApiKeyError {
+    move |error| match error {
+        OrgError::Database(error) => lookup_error(error, missing),
+        _ => missing,
+    }
+}
+
+fn env_lookup_error(missing: OrgApiKeyError) -> impl FnOnce(EnvError) -> OrgApiKeyError {
+    move |error| match error {
+        EnvError::Database(error) => lookup_error(error, missing),
+        EnvError::NotFound => missing,
+    }
+}
+
+/// Any failure in an issuer chain denies, except a database failure.
+fn chain_error(error: OrgApiKeyError) -> OrgApiKeyError {
+    match error {
+        OrgApiKeyError::Database(error) => lookup_error(error, OrgApiKeyError::Unauthorized),
+        _ => OrgApiKeyError::Unauthorized,
+    }
+}
+
 async fn require_root_admin(
     db: &DatabasePool,
     root_id: Uuid,
@@ -171,10 +204,10 @@ async fn require_root_admin(
     let lookup = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Membership));
     let root = Org::get_org_uncached(&lookup, &root_id)
         .await
-        .map_err(|_| OrgApiKeyError::Unauthorized)?;
+        .map_err(org_lookup_error(OrgApiKeyError::Unauthorized))?;
     let access = Org::resolve_user_access(&lookup, &root_id, &user_id)
         .await
-        .map_err(|_| OrgApiKeyError::Unauthorized)?;
+        .map_err(org_lookup_error(OrgApiKeyError::Unauthorized))?;
     if root.parent_org_id.is_some()
         || !access.is_some_and(|grant| grant.is_admin && grant.can_manage_account)
     {
@@ -347,7 +380,7 @@ impl OrgApiKey {
         let org = self.resolve_org(&lookup, org_id, true).await?;
         let env = Env::get_env_uncached(&lookup, &env_id)
             .await
-            .map_err(|_| OrgApiKeyError::NotFound)?;
+            .map_err(env_lookup_error(OrgApiKeyError::NotFound))?;
         if env.org_id != org.org_id {
             return Err(OrgApiKeyError::NotFound);
         }
@@ -367,7 +400,7 @@ impl OrgApiKey {
     ) -> Result<Org, OrgApiKeyError> {
         let org = Org::get_org_uncached(&auth_db(db), &org_id)
             .await
-            .map_err(|_| OrgApiKeyError::NotFound)?;
+            .map_err(org_lookup_error(OrgApiKeyError::NotFound))?;
         if org.org_id != self.org_id && org.parent_org_id != Some(self.org_id) {
             return Err(OrgApiKeyError::NotFound);
         }
@@ -474,7 +507,7 @@ impl OrgApiKey {
         let lookup = auth_db(db);
         let org = Org::get_org_uncached(&lookup, &self.org_id)
             .await
-            .map_err(|_| OrgApiKeyError::Unauthorized)?;
+            .map_err(org_lookup_error(OrgApiKeyError::Unauthorized))?;
         if org.parent_org_id.is_some() || !org.is_admitting() || !self.is_usable() {
             return Err(OrgApiKeyError::Unauthorized);
         }
@@ -487,9 +520,7 @@ impl OrgApiKey {
             if depth > MAX_ORG_KEY_DEPTH {
                 return Err(OrgApiKeyError::Unauthorized);
             }
-            let ancestor = Self::get(&lookup, id)
-                .await
-                .map_err(|_| OrgApiKeyError::Unauthorized)?;
+            let ancestor = Self::get(&lookup, id).await.map_err(chain_error)?;
             if ancestor.org_id != self.org_id || !ancestor.is_usable() {
                 return Err(OrgApiKeyError::Unauthorized);
             }
@@ -541,7 +572,12 @@ impl OrgApiKey {
         let lookup = auth_db(db);
         let state = ApiKey::get_credential_state(&lookup, &api_key.api_key_id)
             .await
-            .map_err(|_| OrgApiKeyError::Unauthorized)?;
+            .map_err(|error| match error {
+                super::api_key::ApiKeyError::Database(error) => {
+                    lookup_error(error, OrgApiKeyError::Unauthorized)
+                }
+                _ => OrgApiKeyError::Unauthorized,
+            })?;
         if state.is_expired() {
             return Err(OrgApiKeyError::Unauthorized);
         }
@@ -551,17 +587,15 @@ impl OrgApiKey {
         let Some(issuer_id) = Self::issuer_of_env_key(&lookup, api_key.api_key_id).await? else {
             return Ok(own);
         };
-        let issuer = Self::get(&lookup, issuer_id)
-            .await
-            .map_err(|_| OrgApiKeyError::Unauthorized)?;
+        let issuer = Self::get(&lookup, issuer_id).await.map_err(chain_error)?;
         let effective = issuer.effective(&lookup).await?;
         let env = Env::get_env_uncached(&lookup, &api_key.env_id)
             .await
-            .map_err(|_| OrgApiKeyError::Unauthorized)?;
+            .map_err(env_lookup_error(OrgApiKeyError::Unauthorized))?;
         issuer
             .resolve_org(&lookup, env.org_id, false)
             .await
-            .map_err(|_| OrgApiKeyError::Unauthorized)?;
+            .map_err(chain_error)?;
         Ok(own.intersection(&effective.permissions.project_to_env(
             &issuer.org_id,
             &env.org_id,

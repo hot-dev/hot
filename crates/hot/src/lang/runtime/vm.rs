@@ -600,6 +600,8 @@ pub struct VirtualMachine {
     execution_context: Option<crate::lang::event::ExecutionContext>,
     /// Last durable admission on this VM; retries also deduplicate in SQL.
     admitted_execution: Option<(uuid::Uuid, uuid::Uuid, uuid::Uuid)>,
+    /// When this VM last confirmed its environment admits new durable work.
+    work_admitted_at: Option<std::time::Instant>,
     /// Database pool for file storage and other operations
     database_pool: Option<Arc<crate::db::DatabasePool>>,
     /// File storage backend for file operations
@@ -775,6 +777,7 @@ impl VirtualMachine {
             emitter: None,
             execution_context: None,
             admitted_execution: None,
+            work_admitted_at: None,
             database_pool: None,
             file_storage: None,
             store: None,
@@ -1444,6 +1447,46 @@ impl VirtualMachine {
     /// Admit a host execution before any customer bytecode or run:start side
     /// effect. VM hosts execute on blocking threads, like async storage syscalls.
     /// The durable ledger makes independent VM instances/retries idempotent.
+    /// Refuse to create durable work (tasks, events, schedules) in an
+    /// environment that has stopped admitting it, such as one suspended while
+    /// this run executes: held work would only retry until reactivation. A
+    /// confirmation holds for a few seconds so tight loops don't query each time.
+    pub(crate) fn require_work_admission(&mut self) -> Result<(), String> {
+        const RECHECK_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+        if self
+            .work_admitted_at
+            .is_some_and(|at| at.elapsed() < RECHECK_AFTER)
+        {
+            return Ok(());
+        }
+        let Some(pool) = self.database_pool.clone() else {
+            return Ok(());
+        };
+        let Some(env_id) = self.execution_context.as_ref().and_then(|ctx| ctx.env_id) else {
+            // Like run admission, only PostgreSQL requires a canonical scope.
+            return if matches!(pool.as_ref(), crate::db::DatabasePool::Postgres(_)) {
+                Err("Work creation requires an execution environment".into())
+            } else {
+                Ok(())
+            };
+        };
+        match tokio::runtime::Handle::current().block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                crate::db::Org::is_environment_admitted(&pool, &env_id),
+            )
+            .await
+        }) {
+            Ok(Ok(true)) => {
+                self.work_admitted_at = Some(std::time::Instant::now());
+                Ok(())
+            }
+            Ok(Ok(false)) => Err("Environment is not admitting new work".into()),
+            Ok(Err(error)) => Err(format!("Cannot check work admission: {error}")),
+            Err(_) => Err("Work admission lookup timed out".into()),
+        }
+    }
+
     pub(crate) fn admit_execution(&mut self) -> VmResult<()> {
         let Some(pool) = self.database_pool.as_ref() else {
             return Ok(());
@@ -5037,8 +5080,14 @@ impl VirtualMachine {
                 if let Some(namespace) = hot_ast.namespaces.namespaces.get(&ns_path) {
                     for (var, value) in namespace.scope.vars.iter() {
                         if var.sym.name() == var_name {
+                            // The initializer names things in its own
+                            // namespace, not the reader's.
                             let value_clone = value.clone();
-                            return self.convert_ast_value_to_runtime_val(&value_clone);
+                            let reader_namespace =
+                                std::mem::replace(&mut self.current_namespace, full_namespace);
+                            let result = self.convert_ast_value_to_runtime_val(&value_clone);
+                            self.current_namespace = reader_namespace;
+                            return result;
                         }
                     }
                     // Variable not found in namespace - don't error yet, try function lookup below
@@ -7792,10 +7841,13 @@ impl VirtualMachine {
         );
 
         // Check the core functions registry - this contains all functions with "core" metadata
-        // PRIORITIZE qualified names over unqualified names
+        // PRIORITIZE qualified names over unqualified names. When several
+        // namespaces declare the same core name, take the last one registered,
+        // as the core variable registry does, so `resolve("trim")` and
+        // parallel-flow captures pick the same function as a direct call.
         let mut unqualified_match = None;
 
-        for (registered_name, &function_id) in self.core_functions.iter() {
+        for (registered_name, &function_id) in self.core_functions.iter().rev() {
             // Check if this is a qualified name that ends with our unqualified name (PREFERRED)
             if registered_name.contains('/') && registered_name.ends_with(&format!("/{}", name)) {
                 tracing::trace!(
@@ -9370,6 +9422,53 @@ impl VirtualMachine {
                 }
             }
             _ => Ok(Val::Null),
+        }
+    }
+
+    /// Replace the names in a meta value with the values they name. The
+    /// resolver has already rewritten each one to the qualified name of its
+    /// definition, so this loads it the way compiled code loads that
+    /// qualified name: a function or type constructor as a function ref,
+    /// anything else as the namespace variable. The result does not depend on
+    /// which namespace reads the meta.
+    pub fn resolve_meta_refs(&mut self, val: &Val) -> VmResult<Val> {
+        match val {
+            Val::Map(map) => {
+                let mut resolved = indexmap::IndexMap::with_capacity(map.len());
+                for (key, value) in map.iter() {
+                    resolved.insert(key.clone(), self.resolve_meta_refs(value)?);
+                }
+                Ok(Val::Map(Box::new(resolved)))
+            }
+            Val::Vec(items) => Ok(Val::Vec(
+                items
+                    .iter()
+                    .map(|item| self.resolve_meta_refs(item))
+                    .collect::<VmResult<_>>()?,
+            )),
+            Val::Box(boxed) => match boxed.as_any().downcast_ref::<crate::lang::ast::AstNode>() {
+                Some(crate::lang::ast::AstNode(crate::lang::ast::Value::Ref(
+                    crate::lang::ast::Ref::Ns(ns_ref),
+                ))) if ns_ref.function_name.is_some() => {
+                    let qualified = format!(
+                        "{}/{}",
+                        ns_ref.ns,
+                        ns_ref.function_name.as_deref().unwrap_or_default()
+                    );
+                    if self.function_mapping.contains_key(&qualified)
+                        || self.core_functions.contains_key(&qualified)
+                    {
+                        Ok(crate::lang::runtime::function_ref::function_ref(qualified))
+                    } else {
+                        self.lookup_variable(&qualified)
+                    }
+                }
+                Some(crate::lang::ast::AstNode(
+                    value @ crate::lang::ast::Value::Ref(crate::lang::ast::Ref::Var(_)),
+                )) => self.convert_ast_value_to_runtime_val(value),
+                _ => Ok(val.clone()),
+            },
+            _ => Ok(val.clone()),
         }
     }
 
@@ -11261,6 +11360,47 @@ mod tests {
         assert_eq!(
             VirtualMachine::result_err_message(&Val::Null),
             "Error Result encountered"
+        );
+    }
+
+    // A core function declared in two namespaces must resolve the same way
+    // by name (`resolve`, parallel-flow captures) as through the core
+    // variable registry (direct calls, `map(xs, f)`): the last declaration.
+    #[test]
+    fn test_core_function_lookup_takes_last_declaration() {
+        let source = r#"
+            ::first ns
+
+            shout meta {core: true} fn (s: Str): Str { "first" }
+
+            ::second ns
+
+            shout meta {core: true} fn (s: Str): Str { "second" }
+        "#;
+        let mut program = parse_hot(source).expect("test source should parse");
+        let core_variables =
+            crate::lang::compiler::core_registry::extract_core_variables_from_ast(&program);
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_program_unchecked(&mut program)
+            .expect("test source should compile");
+        let vm = VirtualMachine::new(
+            compiler.get_program_arc(),
+            None,
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            Arc::new(core_variables),
+            None,
+        );
+
+        assert_eq!(
+            vm.lookup_core_function_name("shout").as_deref(),
+            Some("::second/shout")
+        );
+        assert_eq!(
+            vm.lookup_core_variable("shout"),
+            Some(Val::from("::second/shout"))
         );
     }
 

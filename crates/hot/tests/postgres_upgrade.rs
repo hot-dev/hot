@@ -71,6 +71,55 @@ struct UpgradeDatabase {
     owner_role: String,
     runtime_role: String,
     group_role: String,
+    cleaned: bool,
+}
+
+// Cleanup must also run when a test assertion unwinds before explicit cleanup.
+impl Drop for UpgradeDatabase {
+    fn drop(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        let options = self.cluster.connect_options().as_ref().clone();
+        let database = self.database.clone();
+        let roles = [
+            self.runtime_role.clone(),
+            self.group_role.clone(),
+            self.owner_role.clone(),
+        ];
+        let _ = std::thread::spawn(move || {
+            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                runtime.block_on(async {
+                    let cleanup = async {
+                        if let Ok(pool) = PgPoolOptions::new()
+                            .max_connections(1)
+                            .connect_with(options)
+                            .await
+                        {
+                            let _ = pool
+                                .execute(sqlx::AssertSqlSafe(format!(
+                                    "DROP DATABASE IF EXISTS {database} WITH (FORCE)"
+                                )))
+                                .await;
+                            for role in roles {
+                                let _ = pool
+                                    .execute(sqlx::AssertSqlSafe(format!(
+                                        "DROP ROLE IF EXISTS {role}"
+                                    )))
+                                    .await;
+                            }
+                            pool.close().await;
+                        }
+                    };
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), cleanup).await;
+                });
+            }
+        })
+        .join();
+    }
 }
 
 impl UpgradeDatabase {
@@ -136,6 +185,7 @@ impl UpgradeDatabase {
             owner_role,
             runtime_role,
             group_role,
+            cleaned: false,
         })
     }
 
@@ -181,7 +231,7 @@ impl UpgradeDatabase {
         Ok(())
     }
 
-    async fn cleanup(self) -> TestResult {
+    async fn cleanup(mut self) -> TestResult {
         self.owner.close().await;
         self.admin.close().await;
         self.cluster
@@ -196,6 +246,7 @@ impl UpgradeDatabase {
                 .await?;
         }
         self.cluster.close().await;
+        self.cleaned = true;
         Ok(())
     }
 }
@@ -316,7 +367,7 @@ impl ExistingRows {
         Ok(rows)
     }
 
-    /// A 3.0.0 management credential and the runtime key it issued, before 017.
+    /// A 3.0.0 management credential and the runtime key it issued, before 019.
     async fn add_management_issuer(&self, pool: &PgPool) -> TestResult {
         sqlx::query("INSERT INTO management_key(management_key_id,root_org_id,created_by_user_id,name,secret_hash,capabilities,expires_at) VALUES($1,$2,$3,'existing issuer',decode('010203','hex'),'[\"keys:issue\"]','2099-01-01T00:00:00Z')")
             .bind(self.issuer).bind(self.org).bind(self.user).execute(pool).await?;
@@ -330,7 +381,7 @@ impl ExistingRows {
         Ok(())
     }
 
-    /// An org key and the environment key it minted, after 017.
+    /// An org key and the environment key it minted, after 019.
     async fn add_org_key_issuer(&self, pool: &PgPool) -> TestResult {
         sqlx::query("INSERT INTO org_api_key(org_api_key_id,org_id,description,key_data,permissions,created_by_user_id) VALUES($1,$2,'existing issuer','{}','{\"org:*\":[\"read\"]}',$3)")
             .bind(self.issuer).bind(self.org).bind(self.user).execute(pool).await?;
@@ -620,7 +671,7 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
             assert_latest_ledger(&fixture.owner).await?;
             fixture.upgrade().await?;
             assert_eq!(ledger(&fixture.owner).await?, final_ledger);
-            // 017 retires management credentials: the key one issued is kept
+            // 019 retires management credentials: the key one issued is kept
             // but deactivated, and the management tables are gone.
             let retired: (bool, bool, bool) = sqlx::query_as("SELECT active, to_regclass('hot.management_key') IS NULL, to_regclass('hot.api_key_management_issuer') IS NULL FROM api_key WHERE api_key_id=$1")
                 .bind(rows.key).fetch_one(&fixture.admin).await?;

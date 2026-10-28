@@ -437,13 +437,7 @@ impl Call {
                     result.rows_affected() as i64
                 }
                 DatabasePool::Sqlite(pool) => {
-                    let env_ids_str: Vec<String> =
-                        env_ids.iter().map(|id| id.to_string()).collect();
-                    let placeholders = env_ids_str
-                        .iter()
-                        .map(|_| "?")
-                        .collect::<Vec<_>>()
-                        .join(",");
+                    let placeholders = env_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
                     let query = format!(
                         "DELETE FROM call WHERE call_id IN (
                             SELECT c.call_id FROM call c
@@ -454,8 +448,8 @@ impl Call {
                         placeholders
                     );
                     let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str()));
-                    for id_str in &env_ids_str {
-                        q = q.bind(id_str);
+                    for id in env_ids {
+                        q = q.bind(id);
                     }
                     q = q.bind(&days_str).bind(batch_size);
                     let result = q.execute(pool).await?;
@@ -472,5 +466,43 @@ impl Call {
         }
 
         Ok(total_deleted)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sqlite_per_org_retention_deletes_only_expired_calls() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            return;
+        };
+        for start in ["datetime('now','-30 days')", "CURRENT_TIMESTAMP"] {
+            let sql = format!(
+                "INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES(?,?,?,'::retention/test','root','root',0,{start},1)"
+            );
+            sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+                .bind(Uuid::now_v7())
+                .bind(data.run_id)
+                .bind(data.env_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            Call::delete_older_than_for_org(&db, &[data.env_id], 7, 100)
+                .await
+                .unwrap(),
+            1
+        );
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM call WHERE env_id=?")
+            .bind(data.env_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 1);
     }
 }
