@@ -1015,11 +1015,18 @@ fn resolve_var_refs_in_value(
 
 /// Look up `var` in `containing_ns`'s import table; if it names an
 /// imported namespace function, return the resolved `Ref::Ns` value.
+///
+/// A reference with a deep path (`Shape.Circle`, `config.port`) is left for
+/// the compiler, which resolves the import and keeps the path: a `Ref::Ns`
+/// has no path, so rewriting it would drop the `.Circle`.
 fn resolve_variable_to_namespace_function(
     var: &crate::lang::ast::Var,
     containing_ns: &crate::lang::ast::NsPath,
     namespace_data: &AHashMap<crate::lang::ast::NsPath, AHashMap<String, crate::lang::ast::Value>>,
 ) -> Option<crate::lang::ast::Value> {
+    if var.deep_path.is_some() {
+        return None;
+    }
     namespace_data
         .get(containing_ns)
         .and_then(|imported| imported.get(var.sym.name()))
