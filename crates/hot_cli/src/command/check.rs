@@ -40,7 +40,7 @@ async fn run_check_compilation(conf: &Val, global_options: &GlobalOptions) -> Re
     scan_cli_inputs(conf, global_options, &src_paths, &test_paths)?;
 
     let color = hot::env::is_local_dev();
-    let mut warnings = hot::lang::errors::CompilerErrors::new();
+    let mut warnings = hot_lang::lang::errors::CompilerErrors::new();
     hot::lang::engine::Engine::check_sources_pipeline_with_context_warnings(
         &src_paths,
         &test_paths,
@@ -313,7 +313,7 @@ pub(crate) async fn run_check_with_raw(
     // and rendered on success without failing the check unless
     // `--check.deny-warnings` is set.
     let color = hot::env::is_local_dev();
-    let mut warnings = hot::lang::errors::CompilerErrors::new();
+    let mut warnings = hot_lang::lang::errors::CompilerErrors::new();
     match hot::lang::engine::Engine::check_sources_pipeline_with_context_warnings(
         &src_paths,
         &test_paths,

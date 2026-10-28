@@ -9,15 +9,15 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
-pub(crate) const HOT_BYTE_TYPE: &str = "::hot::type/Byte";
-pub(crate) const HOT_BYTES_TYPE: &str = "::hot::type/Bytes";
+pub const HOT_BYTE_TYPE: &str = "::hot::type/Byte";
+pub const HOT_BYTES_TYPE: &str = "::hot::type/Bytes";
 
 /// Return the nominal type carried by Hot's internal tagged-value representation.
 ///
 /// This is an implementation-level lookup. User code should construct types and
 /// inspect them with the language's type operations rather than reading or
 /// writing representation keys directly.
-pub(crate) fn tagged_type_name(map: &IndexMap<Val, Val>) -> Option<&str> {
+pub fn tagged_type_name(map: &IndexMap<Val, Val>) -> Option<&str> {
     static TYPE_KEY: OnceLock<Val> = OnceLock::new();
     match map.get(TYPE_KEY.get_or_init(|| Val::from("$type"))) {
         Some(Val::Str(name)) => Some(name),
@@ -37,7 +37,7 @@ fn tagged_payload_key() -> &'static Val {
 /// `$type`, whose local name has the `Enum.Variant` form. Rejecting every
 /// other sibling field keeps foreign maps stable instead of guessing that
 /// arbitrary `$...` application data is Hot metadata.
-pub(crate) fn is_tagged_wrapper(map: &IndexMap<Val, Val>) -> bool {
+pub fn is_tagged_wrapper(map: &IndexMap<Val, Val>) -> bool {
     let Some(type_name) = tagged_type_name(map) else {
         return false;
     };
@@ -67,7 +67,7 @@ pub(crate) fn is_tagged_wrapper(map: &IndexMap<Val, Val>) -> bool {
 /// (`Server({...base, port: 2})`) to get a typed value back. An `Err` wrapper
 /// is left intact so the error keeps propagating instead of having its
 /// payload merged as data.
-pub(crate) fn map_spread_entries(source: &Val) -> Option<&IndexMap<Val, Val>> {
+pub fn map_spread_entries(source: &Val) -> Option<&IndexMap<Val, Val>> {
     let Val::Map(map) = source else {
         return None;
     };
@@ -100,7 +100,7 @@ fn typed_fields(val: &Val) -> Option<&Val> {
 /// an enum variant with a map payload) is its fields, and anything else is
 /// itself. The tagged wrapper is transparent to field access, and `get`,
 /// `keys`, `length`, `reduce` and the rest follow suit.
-pub(crate) fn as_fields(val: &Val) -> &Val {
+pub fn as_fields(val: &Val) -> &Val {
     typed_fields(val).unwrap_or(val)
 }
 
@@ -109,7 +109,7 @@ pub(crate) fn as_fields(val: &Val) -> &Val {
 /// `update`, `merge`, ...) use this so `assoc(server, "port", 2)` stays a
 /// `Server`, matching deep-path assignment. Custom constructors are not
 /// re-run.
-pub(crate) fn with_type_of(original: &Val, fields: Val) -> Val {
+pub fn with_type_of(original: &Val, fields: Val) -> Val {
     let Val::Map(map) = original else {
         return fields;
     };
@@ -1996,8 +1996,8 @@ impl Val {
     ///
     /// # Example
     /// ```
-    /// use hot::val::Val;
-    /// use hot::val;
+    /// use hot_lang::val::Val;
+    /// use hot_lang::val;
     ///
     /// let val = val!({
     ///     "app": {
@@ -2061,8 +2061,8 @@ impl Val {
     ///
     /// # Example
     /// ```
-    /// use hot::val::Val;
-    /// use hot::val;
+    /// use hot_lang::val::Val;
+    /// use hot_lang::val;
     ///
     /// let val = val!({
     ///     "app": {
@@ -2097,8 +2097,8 @@ impl Val {
     ///
     /// # Example
     /// ```
-    /// use hot::val::Val;
-    /// use hot::val;
+    /// use hot_lang::val::Val;
+    /// use hot_lang::val;
     ///
     /// let val = val!({
     ///     "app": {
@@ -2438,7 +2438,7 @@ impl Val {
     ///
     /// Example:
     /// ```
-    /// use hot::val::Val;
+    /// use hot_lang::val::Val;
     ///
     /// // Create test structure using From implementation
     /// let profile = Val::from([
@@ -2540,7 +2540,7 @@ impl Val {
     ///
     /// Example:
     /// ```
-    /// use hot::val::Val;
+    /// use hot_lang::val::Val;
     ///
     /// // Create test structure using From implementation
     /// let profile = Val::from([
@@ -2746,7 +2746,7 @@ impl Val {
     ///
     /// Example:
     /// ```
-    /// use hot::val;
+    /// use hot_lang::val;
     ///
     /// let map1 = val!({
     ///     "settings": {
