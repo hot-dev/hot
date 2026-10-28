@@ -2344,6 +2344,37 @@ pub async fn get_file_by_id_with_env_check(
     }
 }
 
+/// The account's active file bytes, the root's and its children's, which is
+/// what the storage quota limits. Upload prechecks use it so a child can't pass
+/// a check that the commit-time quota then refuses. PostgreSQL reads the
+/// per-environment counters of migration 016 rather than summing every file.
+pub async fn get_storage_usage_by_account(db: &DatabasePool, org_id: Uuid) -> Result<i64, String> {
+    let root = super::Org::billing_owner_id_for(db, &org_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let billing = db.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Billing,
+        org_id: Some(root),
+    });
+    match &billing {
+        DatabasePool::Postgres(pool) => sqlx::query_scalar(
+            "SELECT COALESCE(SUM(u.active_bytes),0)::bigint FROM usage_file u JOIN org o ON o.org_id=u.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1",
+        )
+        .bind(root)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string()),
+        DatabasePool::Sqlite(pool) => sqlx::query_scalar(
+            "SELECT CAST(COALESCE(SUM(f.size),0) AS INTEGER) FROM file f JOIN org o ON o.org_id=f.org_id WHERE f.active=1 AND (o.org_id=? OR o.parent_org_id=?)",
+        )
+        .bind(root)
+        .bind(root)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string()),
+    }
+}
+
 /// Get total storage usage for an organization
 pub async fn get_storage_usage_by_org(db: &DatabasePool, org_id: Uuid) -> Result<i64, String> {
     let query = match db {
@@ -2425,6 +2456,34 @@ mod tests {
         assert!(!check(150, 11, Some(10)));
         assert!(check(50, 50, None));
         assert!(!check(50, 51, None));
+    }
+
+    /// Upload prechecks must see the same usage the account quota enforces:
+    /// the root's files and every child's.
+    #[tokio::test]
+    async fn account_storage_usage_counts_root_and_children() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            return;
+        };
+        sqlx::query("UPDATE org SET org_type='organization' WHERE org_id=?")
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let child = Uuid::now_v7();
+        sqlx::query("INSERT INTO org (org_id,parent_org_id,name,slug,org_type,created_by_user_id) VALUES (?,?,'Child',?,'organization',?)")
+            .bind(child).bind(data.org_id).bind(child.to_string()).bind(data.user_id)
+            .execute(pool).await.unwrap();
+        for (org, size, active) in [(data.org_id, 100, 1), (child, 25, 1), (child, 1000, 0)] {
+            sqlx::query("INSERT INTO file (file_id,path,size,storage_backend,org_id,active,created_by_user_id) VALUES (?,?,?,'local',?,?,?)")
+                .bind(Uuid::now_v7()).bind(format!("/{}", Uuid::now_v7())).bind(size)
+                .bind(org).bind(active).bind(data.user_id)
+                .execute(pool).await.unwrap();
+        }
+        assert_eq!(get_storage_usage_by_account(&db, child).await.unwrap(), 125);
+        assert_eq!(get_storage_usage_by_org(&db, child).await.unwrap(), 25);
     }
 
     /// SQLite DB with FK enforcement on and a `run` table, mirroring the

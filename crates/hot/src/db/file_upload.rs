@@ -40,6 +40,11 @@ pub struct PartInfo {
     pub etag: String,
 }
 
+/// What `insert_upload` returns when the account has no room for another
+/// pending upload. It is the caller's limit, not a server failure.
+pub const RESERVATION_LIMIT_EXCEEDED: &str =
+    "Pending upload count or byte reservation limit exceeded";
+
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_upload(
     db: &DatabasePool,
@@ -110,7 +115,11 @@ pub async fn insert_upload(
             .bind(max_pending_bytes)
             .fetch_one(&mut *tx)
             .await
-            .map_err(|e| format!("Failed to insert upload: {}", e))?;
+            .map_err(|e| match e {
+                // The guarded INSERT ... SELECT returns no row when a limit fails.
+                sqlx::Error::RowNotFound => RESERVATION_LIMIT_EXCEEDED.to_string(),
+                e => format!("Failed to insert upload: {e}"),
+            })?;
             let record = row_to_upload_pg(&row)?;
             tx.commit()
                 .await
@@ -171,7 +180,7 @@ pub async fn insert_upload(
             .map_err(|e| format!("Failed to insert upload: {}", e))?
             .rows_affected();
             if rows_affected == 0 {
-                return Err("Pending upload count or byte reservation limit exceeded".to_string());
+                return Err(RESERVATION_LIMIT_EXCEEDED.to_string());
             }
             let row = sqlx::query(
                 r#"
