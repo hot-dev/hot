@@ -2581,6 +2581,7 @@ pub struct ApiKeysNew<'a> {
     pub page_context: PrivatePageContext,
     pub generated_key: String,
     pub api_key_id: Uuid,
+    pub handoff_token: String,
     pub error_message: &'a str,
     pub description: &'a str,
     pub access_level: &'a str,
