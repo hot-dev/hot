@@ -40,9 +40,38 @@ fn resolve_local_build_storage_path(
     Ok(Path::new(build_dir).join(storage_path))
 }
 
+pub(crate) fn scan_cli_inputs(
+    conf: &Val,
+    options: &GlobalOptions,
+    src: &[String],
+    tests: &[String],
+) -> Result<(), String> {
+    let project = options
+        .project
+        .clone()
+        .unwrap_or_else(|| hot::project::get_default_project_name(conf));
+    let (paths, respect, excludes) = resource_bundle_options(
+        conf,
+        &project,
+        &options.resource_paths,
+        options.no_gitignore,
+    );
+    let context = hot::build::BuildContext::new(
+        None,
+        None,
+        None,
+        None,
+        project,
+        src.to_vec(),
+        tests.to_vec(),
+    )
+    .with_resources(paths, respect, excludes);
+    hot::build::scan_build_inputs(&context, Some(conf))
+}
+
 pub(crate) fn is_ad_hoc_default_db(conf: &Val) -> bool {
     let db_uri = hot::db::get_db_uri_from_conf(conf);
-    !hot::lang::cache::paths::has_project_config()
+    !Path::new("hot.hot").exists()
         && conf.get_bool_or_default("__host.ad-hoc-default-db", false)
         && (db_uri == hot::db::DEFAULT_DB_URI
             || db_uri.starts_with("sqlite:.hot/")
