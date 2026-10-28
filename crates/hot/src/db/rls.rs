@@ -108,6 +108,13 @@ pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sq
             uncovered.join(", ")
         )));
     }
+    let unsafe_objects:bool=sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind IN ('v','m') AND (c.relkind='m' OR NOT COALESCE(c.reloptions @> ARRAY['security_invoker=true'],false)) AND EXISTS(SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'MEMBER') AND has_table_privilege(r.oid,c.oid,'SELECT,INSERT,UPDATE,DELETE')))
+        OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.prosecdef AND EXISTS(SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'MEMBER') AND has_function_privilege(r.oid,p.oid,'EXECUTE')))"
+    ).bind(schema).fetch_one(pool).await?;
+    if unsafe_objects {
+        return Err(sqlx::Error::Protocol("RLS runtime login must not access owner-executed views, materialized views, or SECURITY DEFINER functions".into()));
+    }
     let helper_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 AND p.proname = 'apply_scope')"
     ).bind(schema).fetch_one(pool).await?;
@@ -137,7 +144,12 @@ pub async fn provision_store_indexes(conf: &crate::val::Val) -> Result<usize, St
     {
         return Err("Store index provisioning requires a PostgreSQL db.migration-uri".into());
     }
-    let schema = conf.get_str_or_default("db.schema", &conf.get_str_or_default("schema", "hot"));
+    let configured = conf.get_str_or_default("db.schema", "");
+    let schema = if configured.is_empty() {
+        conf.get_str_or_default("schema", "hot")
+    } else {
+        configured
+    };
     if schema != "hot" {
         return Err("PostgreSQL RLS currently supports only the hot schema".into());
     }
@@ -159,10 +171,13 @@ pub async fn provision_store_indexes(conf: &crate::val::Val) -> Result<usize, St
             let env_id: uuid::Uuid = store.try_get("env_id").map_err(|e| e.to_string())?;
             let name: String = store.try_get("name").map_err(|e| e.to_string())?;
             let config: serde_json::Value = store.try_get("embedding_conf").map_err(|e| e.to_string())?;
-            let dimensions = config.get("dimensions").and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| format!("Store {name:?} has no positive embedding dimensions"))?;
+            let Some(dimensions) = config.get("dimensions").and_then(serde_json::Value::as_u64) else {
+                tracing::warn!(%org_id, %env_id, %name, "Skipping store with invalid embedding dimensions");
+                continue;
+            };
             if !(1..=2000).contains(&dimensions) {
-                return Err(format!("Store {name:?} uses {dimensions} dimensions; vector HNSW supports 1 through 2000"));
+                tracing::warn!(%org_id, %env_id, %name, dimensions, "Skipping store outside vector HNSW dimension range");
+                continue;
             }
             let identity = format!("{org_id}/{env_id}/{name}/{dimensions}");
             let digest = blake3::hash(identity.as_bytes()).to_hex();
