@@ -397,3 +397,101 @@ async fn environment_names_and_account_limits_report_why_nothing_changed() {
             .active
     );
 }
+
+/// Deploy a new project in `env_id` with `count` active schedules.
+async fn deploy_schedules(client: &TestClient, env_id: &Uuid, user_id: &Uuid, count: usize) {
+    let project_id = Uuid::now_v7();
+    hot::db::Project::insert_project(
+        client.db(),
+        &project_id,
+        env_id,
+        &format!("scheduled-{project_id}"),
+        user_id,
+    )
+    .await
+    .unwrap();
+    let build_id = Uuid::now_v7();
+    hot::db::Build::insert_build(
+        client.db(),
+        &build_id,
+        &project_id,
+        "scheduled-build",
+        1,
+        hot::db::Build::BUILD_TYPE_BUNDLE,
+        user_id,
+    )
+    .await
+    .unwrap();
+    let cron = "0 */5 * * * *";
+    let mut functions = hot::lang::compiler::ScheduledFunctions::new();
+    functions.insert(
+        cron.to_string(),
+        (0..count)
+            .map(|idx| {
+                let fn_name = format!("::demo/task-{idx}");
+                hot::lang::compiler::ScheduledFunction {
+                    cron_expression: cron.to_string(),
+                    scheduled_function: hot::val!({
+                        "fn": fn_name,
+                        "meta": {},
+                        "file": null,
+                        "line": null,
+                        "column": null,
+                        "position": null
+                    }),
+                }
+            })
+            .collect(),
+    );
+    hot::db::Schedule::insert_schedules_for_build(
+        client.db(),
+        &build_id,
+        &functions,
+        &hot::lang::compiler::SendTargets::new(),
+    )
+    .await
+    .unwrap();
+    hot::db::Build::deploy_build(client.db(), &build_id, user_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_schedule_count_covers_the_whole_account() {
+    let mut client = TestClient::new().await;
+    let td = insert_test_data(client.db()).await.unwrap();
+    sqlx::query("UPDATE org SET org_type='organization' WHERE org_id=?")
+        .bind(td.org_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    let child = Org::create_child(
+        client.db(),
+        &td.org_id,
+        &td.user_id,
+        &CreateChild {
+            name: "Customer".into(),
+            slug: "scheduled-customer".into(),
+            external_id: None,
+            idempotency_key: "scheduled-customer".into(),
+            hosted: false,
+        },
+    )
+    .await
+    .unwrap();
+    deploy_schedules(&client, &td.env_id, &td.user_id, 1).await;
+    deploy_schedules(&client, &child.env_id, &td.user_id, 2).await;
+    client.login_as(&td.user_id);
+
+    for (org_id, env_id) in [(td.org_id, td.env_id), (child.org.org_id, child.env_id)] {
+        let page = client
+            .get(&format!("/schedules?org_id={org_id}&env_id={env_id}"))
+            .await;
+        page.assert_status(StatusCode::OK);
+        assert!(
+            page.body.contains("3 active schedules across this org"),
+            "{}",
+            page.body
+        );
+    }
+}
