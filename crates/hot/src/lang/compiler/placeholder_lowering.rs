@@ -469,15 +469,25 @@ fn lower_value_inner(
                     let offset = if is_pipe && i > 0 { 1 } else { 0 };
                     let lowered = lower_value_inner(e, current_ns, aliases, registry, offset);
                     // A local shadows a type of its name from the next
-                    // expression on. Functions and types a body defines don't.
+                    // expression on. Functions and types a body defines don't,
+                    // and a local import names the type it is bound to.
                     if let Value::MultipleValues(binding) = &lowered
                         && let [Value::Ref(Ref::Var(name)), value] = binding.as_slice()
-                        && !matches!(
-                            value,
-                            Value::Fn(_) | Value::TypeDef(_) | Value::TypeImplementation(_)
-                        )
                     {
-                        registry.records.shadow([name.var.sym.name().to_string()]);
+                        let name = name.var.sym.name().to_string();
+                        match value {
+                            Value::Fn(_) | Value::TypeDef(_) | Value::TypeImplementation(_) => {}
+                            Value::Ref(Ref::Ns(NsRef {
+                                ns,
+                                function_name: Some(target),
+                                ..
+                            })) => registry
+                                .records
+                                .import_locally(name, format!("{ns}/{target}")),
+                            _ => {
+                                registry.records.shadow([name]);
+                            }
+                        }
                     }
                     lowered
                 })
