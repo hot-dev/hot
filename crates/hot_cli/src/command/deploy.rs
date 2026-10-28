@@ -703,11 +703,11 @@ async fn upload_via_api(build_uuid: Uuid, conf: &Val) -> Result<Uuid, String> {
         .await
         .map_err(|_| format!("Build {} not found in local database", build_uuid))?;
 
-    // Get profile info (org_id and env_id) for storage operations
-    let (org_id, env_id) =
+    // Get profile info (user, org and env) for attribution and storage operations
+    let (user_id, org_id, env_id) =
         if let Some((user_email, org_slug, env_name)) = extract_profile_identifiers(conf)? {
             match resolve_profile_to_uuids(&db, &user_email, &org_slug, &env_name).await {
-                Ok((_user_uuid, env_uuid, org_uuid)) => (org_uuid, env_uuid),
+                Ok((user_uuid, env_uuid, org_uuid)) => (user_uuid, org_uuid, env_uuid),
                 Err(e) => return Err(format!("Failed to resolve profile: {}", e)),
             }
         } else {
@@ -761,9 +761,12 @@ async fn upload_via_api(build_uuid: Uuid, conf: &Val) -> Result<Uuid, String> {
             })
             .unwrap_or_else(|| vec!["hot/src".to_string()]);
 
-        // Create bundle build - we now have org_id and env_id from earlier
+        // Create bundle build - we now have the profile's user, org and env.
+        // Without a user, build_create falls back to the database's first
+        // user, who can be someone else and whom a child org's scope may not
+        // see at all.
         let build_context = hot::build::BuildContext::new(
-            None, // user_id - will be inferred from context
+            Some(user_id),
             Some(env_id),
             Some(org_id),
             None, // Will generate new project_id if needed
