@@ -338,6 +338,30 @@ fn extract_text_content(value: &Val, config: &StoreMapConfig) -> Option<String> 
     extract_text_for_embedding(value, field)
 }
 
+/// `{limit, offset, prefix}` options for `list` and `keys`.
+fn list_options(function: &str, opts: &Val) -> Result<ListOptions, Val> {
+    let prefix = match opts.get("prefix") {
+        None | Some(Val::Null) => None,
+        Some(Val::Str(prefix)) => Some(prefix.to_string()),
+        Some(other) => {
+            return Err(Val::from(format!(
+                "{function} expects a Str prefix, got {other}"
+            )));
+        }
+    };
+    Ok(ListOptions {
+        limit: opts.get("limit").and_then(|v| match v {
+            Val::Int(i) => Some(i as usize),
+            _ => None,
+        }),
+        offset: opts.get("offset").and_then(|v| match v {
+            Val::Int(i) => Some(i as usize),
+            _ => None,
+        }),
+        prefix,
+    })
+}
+
 fn entry_to_val(entry: &store::StoreEntry) -> Val {
     let mut map = IndexMap::new();
     map.insert(Val::from("key"), json_to_val(entry.key.clone()));
@@ -420,6 +444,73 @@ pub fn put_if_missing(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     }
 }
 
+pub fn put_if(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::store/put-if", args, 4);
+    let (store, config) = match ensure_store(vm, &args[0]) {
+        Ok(v) => v,
+        Err(e) => return HotResult::Err(e),
+    };
+
+    let key_json = val_to_json(&args[1]);
+    let expected_json = val_to_json(&args[2]);
+    let value_json = val_to_json(&args[3]);
+
+    // Avoid a known-unnecessary embedding call. The database still decides:
+    // the value can change between this read and the conditional write.
+    if config.embedding_model.is_some() {
+        match block_on(store.get(&config.name, &key_json)) {
+            Ok(entry) => {
+                let stored = entry.as_ref().map(|entry| &entry.value);
+                if !store::stored_value_matches(stored, &expected_json) {
+                    return HotResult::Ok(Val::Bool(false));
+                }
+            }
+            Err(e) => return HotResult::Err(Val::from(e)),
+        }
+    }
+
+    let embedding = match embed_value(vm, &config, &args[3]) {
+        Ok(v) => v,
+        Err(e) => return HotResult::Err(e),
+    };
+    let text_content = extract_text_content(&args[3], &config);
+
+    match block_on(store.put_if(
+        &config.name,
+        key_json,
+        expected_json,
+        value_json,
+        embedding,
+        text_content,
+    )) {
+        Ok(wrote) => HotResult::Ok(Val::Bool(wrote)),
+        Err(e) => HotResult::Err(Val::from(e)),
+    }
+}
+
+pub fn increment(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    validate_args_range!("::hot::store/increment", args, 2, 3);
+    let (store, config) = match ensure_store(vm, &args[0]) {
+        Ok(v) => v,
+        Err(e) => return HotResult::Err(e),
+    };
+
+    let by = match args.get(2) {
+        None => 1,
+        Some(Val::Int(by)) => *by,
+        Some(other) => {
+            return HotResult::Err(Val::from(format!(
+                "::hot::store/increment expects an Int amount, got {other}"
+            )));
+        }
+    };
+
+    match block_on(store.increment(&config.name, val_to_json(&args[1]), by)) {
+        Ok(next) => HotResult::Ok(Val::Int(next)),
+        Err(e) => HotResult::Err(Val::from(e)),
+    }
+}
+
 pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_args_range!("::hot::store/get", args, 2, 3);
     let (store, config) = match ensure_store(vm, &args[0]) {
@@ -458,11 +549,29 @@ pub fn delete(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 }
 
 pub fn keys(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::store/keys", args, 1);
+    validate_args_range!("::hot::store/keys", args, 1, 2);
     let (store, config) = match ensure_store(vm, &args[0]) {
         Ok(v) => v,
         Err(e) => return HotResult::Err(e),
     };
+
+    if let Some(opts) = args.get(1) {
+        let mut opts = match list_options("::hot::store/keys", opts) {
+            Ok(opts) => opts,
+            Err(e) => return HotResult::Err(e),
+        };
+        // Like `keys(store)`, every matching key unless a limit is given.
+        opts.limit = opts.limit.or(Some(i64::MAX as usize));
+        return match block_on(store.list_info(&config.name, opts)) {
+            Ok(infos) => HotResult::Ok(Val::Vec(
+                infos
+                    .into_iter()
+                    .map(|info| json_to_val(info.key))
+                    .collect(),
+            )),
+            Err(e) => HotResult::Err(Val::from(e)),
+        };
+    }
 
     match block_on(store.keys(&config.name)) {
         Ok(ks) => HotResult::Ok(Val::Vec(ks.into_iter().map(json_to_val).collect())),
@@ -584,20 +693,12 @@ pub fn list(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         Err(e) => return HotResult::Err(e),
     };
 
-    let opts = if args.len() == 2 {
-        let opts_map = &args[1];
-        ListOptions {
-            limit: opts_map.get("limit").and_then(|v| match v {
-                Val::Int(i) => Some(i as usize),
-                _ => None,
-            }),
-            offset: opts_map.get("offset").and_then(|v| match v {
-                Val::Int(i) => Some(i as usize),
-                _ => None,
-            }),
-        }
-    } else {
-        ListOptions::default()
+    let opts = match args.get(1) {
+        Some(opts) => match list_options("::hot::store/list", opts) {
+            Ok(opts) => opts,
+            Err(e) => return HotResult::Err(e),
+        },
+        None => ListOptions::default(),
     };
 
     match block_on(store.list(&config.name, opts)) {
@@ -808,6 +909,7 @@ pub fn slice(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     let opts = ListOptions {
         limit,
         offset: Some(start),
+        prefix: None,
     };
 
     match block_on(store.list(&config.name, opts)) {

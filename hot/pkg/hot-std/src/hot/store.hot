@@ -1,6 +1,10 @@
 ::hot::store ns
 meta {
-    doc: """Persistent ordered maps with optional embedding and semantic search. Available in CLI (`hot run`), event handlers, scheduled functions, and tasks."""
+    doc: """
+    Persistent ordered maps with optional embedding and semantic search. Available in CLI (`hot run`), event handlers, scheduled functions, and tasks.
+
+    Handlers can run at the same time, so a `get` followed by a `put` can lose another handler's write. Change a shared entry with the atomic writes instead: `put-if-missing` creates it once, `put-if` replaces it only if it still holds the value you read, and `increment` counts.
+    """
 }
 
 
@@ -140,6 +144,78 @@ fn (store: Map, key: Any, value: Any): Bool {
 }
 
 
+put-if
+meta {
+    doc: """
+    Atomically replace a key's value only if it still holds `expected`
+    (compare-and-set). Returns `true` when this call wrote `value` and `false`
+    when the stored value had changed, leaving it untouched.
+
+    The database compares and writes in one transaction that holds the
+    entry's lock, so two writers that read the same value cannot both
+    replace it. Values compare as Hot values, as `get` returns them, so pass
+    back the value you read. An `expected` of `null` also matches a missing
+    key, as `get` returns `null` for one, and then `put-if` creates the entry.
+
+    To change a value safely while other handlers change it too, read it,
+    compute the new value, and retry until `put-if` returns `true`. The
+    computation must be pure, since it can run more than once.
+
+    **Example**
+
+    ```hot
+    cases ::store/Map({name: "cases"})
+
+    // Add one answer to a case's records; a concurrent answer is never lost
+    add-answer fn (case-id: Str, answer-id: Str, answer: Any): Map {
+        current ::store/get(cases, case-id)  // null while the case has none
+        next assoc(if(is-null(current), {}, current), answer-id, answer)
+        cond {
+            ::store/put-if(cases, case-id, current, next) => { next }
+            => { add-answer(case-id, answer-id, answer) }  // changed: retry
+        }
+    }
+    ```
+    """
+}
+fn (store: Map, key: Any, expected: Any, value: Any): Bool {
+    call-lib(::hot::store/put-if, [store, key, expected, value])
+}
+
+
+increment
+meta {
+    doc: """
+    Atomically add `by` (default `1`) to the Int stored at a key and return
+    the new value. A missing key counts from `0`, so the first call returns
+    `by`. The database reads and writes the counter in one transaction that
+    holds the entry's lock, so concurrent increments are never lost.
+
+    `by` may be negative. A stored value that is not an Int, or a result
+    beyond the Int range, is an error and leaves the counter unchanged.
+    Counters are not embedded, even in stores with embeddings.
+
+    An increment is not idempotent: a retried or redelivered event increments
+    again.
+
+    **Example**
+
+    ```hot
+    counters ::store/Map({name: "counters"})
+    seq ::store/increment(counters, `case:${case-id}:seq`)
+    ::store/increment(counters, "tickets-closed", 3)
+    ```
+    """
+}
+fn
+(store: Map, key: Any): Int {
+    call-lib(::hot::store/increment, [store, key])
+},
+(store: Map, key: Any, by: Int): Int {
+    call-lib(::hot::store/increment, [store, key, by])
+}
+
+
 get
 meta {
     doc: """
@@ -185,15 +261,25 @@ meta {
     doc: """
     Return all keys in insertion order. Mirrors `::hot::coll/keys`.
 
+    With options, return the keys `list` would for the same options, without
+    reading values: `prefix` keeps the Str keys that start with it (read from
+    an index), and `limit`/`offset` page through them. Unlike `list`, there is
+    no default limit.
+
     **Example**
 
     ```hot
     all-keys ::store/keys(kb)
+    fact-keys ::store/keys(kb, {prefix: `case:${case-id}:`})
     ```
     """
 }
-fn (store: Map): Vec {
+fn
+(store: Map): Vec {
     call-lib(::hot::store/keys, [store])
+},
+(store: Map, opts: Map): Vec {
+    call-lib(::hot::store/keys, [store, opts])
 }
 
 
@@ -315,12 +401,20 @@ fn (store: Map, entries: Map): Int {
 list
 meta {
     doc: """
-    Paginated listing in insertion order.
+    Paginated listing of `{key, value}` entries in insertion order.
+
+    **Options**
+    - `limit` — Most entries to return (default: `1000`)
+    - `offset` — Entries to skip first (default: `0`)
+    - `prefix` — Only entries whose key is a Str starting with this prefix.
+      The database reads the matching keys from an index, not by scanning
+      the store, and `limit`/`offset` page through the matches.
 
     **Example**
 
     ```hot
     page ::store/list(kb, {limit: 20, offset: 0})
+    facts ::store/list(kb, {prefix: `case:${case-id}:`, limit: 100})
     ```
     """
 }
@@ -358,7 +452,8 @@ filter
 meta {
     doc: """
     Filter entries by a predicate `fn(key, value) -> Bool`. Returns a Vec of matching entries.
-    Mirrors `::hot::coll/filter`.
+    Mirrors `::hot::coll/filter`. It reads every entry; to read the keys that share a prefix,
+    use `list` or `keys` with the `prefix` option, which reads only those from an index.
 
     **Example**
 
