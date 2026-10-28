@@ -139,11 +139,11 @@ meta ["test"]
 fn () {
     ::hot::ctx/set("test-notes", [])
     ::test/set-now("2026-10-14T09:00:00Z")
-    ::test/deliver({type: "hot-test:arm", data: {step: "TE-01", schedule: "in 1 day"}})
+    ::test/deliver({type: "hot-test:arm", data: {step: "step-1", schedule: "in 1 day"}})
     armed ::test/schedules()
     assert-eq(1, length(armed), "the handler armed one schedule")
     assert-eq("2026-10-15T09:00:00Z", Str(first(armed).at), "relative times count from the test's clock")
-    assert-eq(["TE-01"], first(armed).args)
+    assert-eq(["step-1"], first(armed).args)
 
     assert(is-empty(::test/run-due()), "nothing is due yet")
     ::test/advance(::time/days(2))
@@ -151,7 +151,7 @@ fn () {
     assert-eq(["::hot::test::test/check", "::hot::test::test/on-pong"], map(runs, %.fn), "the due call, then the handler of what it sent")
     assert-eq("hot:schedule", first(runs).type)
     assert-eq(
-        [{what: "check TE-01", at: "2026-10-15T09:00:00Z"}, {what: "pong TE-01", at: "2026-10-15T09:00:00Z"}],
+        [{what: "check step-1", at: "2026-10-15T09:00:00Z"}, {what: "pong step-1", at: "2026-10-15T09:00:00Z"}],
         ::hot::ctx/get("test-notes"),
         "the call and its events run at the due time")
     assert-eq("2026-10-16T09:00:00Z", Str(::time/now()), "afterwards the clock is where the test left it")
