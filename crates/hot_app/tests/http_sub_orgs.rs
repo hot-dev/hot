@@ -1,7 +1,7 @@
 //! Browser-level scope, hierarchy, and recovery checks through the real router.
 use axum::http::StatusCode;
 use hot::db::org::CreateChild;
-use hot::db::{DatabasePool, Env, Org, insert_test_data, org::OrgUser, user::User};
+use hot::db::{DatabasePool, Env, Org, RunStatus, insert_test_data, org::OrgUser, user::User};
 use hot_app::test_support::TestClient;
 use uuid::Uuid;
 
@@ -494,4 +494,136 @@ async fn the_schedule_count_covers_the_whole_account() {
             page.body
         );
     }
+}
+
+/// Record a run in `env_id` that started at `start` and ended with `status`
+/// at `stop`.
+async fn record_finished_run(
+    client: &TestClient,
+    env_id: &Uuid,
+    build_id: &Uuid,
+    user_id: &Uuid,
+    start: chrono::DateTime<chrono::Utc>,
+    status: RunStatus,
+    stop: chrono::DateTime<chrono::Utc>,
+) {
+    let run_id = Uuid::now_v7();
+    hot::db::Run::insert_run(
+        client.db(),
+        &run_id,
+        env_id,
+        &Uuid::now_v7(),
+        Some(build_id),
+        hot::db::run::RunType::Run.as_id(),
+        None,
+        user_id,
+        Some(start),
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE run SET status_id=?, stop_time=? WHERE run_id=?")
+        .bind(status.as_id())
+        .bind(stop)
+        .bind(run_id)
+        .execute(sqlite(client))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_account_overview_counts_each_environments_runs() {
+    let mut client = TestClient::new().await;
+    let td = insert_test_data(client.db()).await.unwrap();
+    sqlx::query("UPDATE org SET org_type='organization' WHERE org_id=?")
+        .bind(td.org_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    let root = Org::get_org_uncached(client.db(), &td.org_id)
+        .await
+        .unwrap();
+    let child = Org::create_child(
+        client.db(),
+        &td.org_id,
+        &td.user_id,
+        &CreateChild {
+            name: "Customer".into(),
+            slug: "overview-customer".into(),
+            external_id: None,
+            idempotency_key: "overview-customer".into(),
+            hosted: false,
+        },
+    )
+    .await
+    .unwrap();
+    let child_project = Uuid::now_v7();
+    hot::db::Project::insert_project(
+        client.db(),
+        &child_project,
+        &child.env_id,
+        "child-project",
+        &td.user_id,
+    )
+    .await
+    .unwrap();
+    let child_build = Uuid::now_v7();
+    hot::db::Build::insert_build(
+        client.db(),
+        &child_build,
+        &child_project,
+        "child-build",
+        0,
+        hot::db::Build::BUILD_TYPE_LIVE,
+        &td.user_id,
+    )
+    .await
+    .unwrap();
+    let now = chrono::Utc::now();
+    let long_ago = now - chrono::Duration::days(40);
+    // The fixture's own run is still running. Beside it in the root: a failure
+    // outside every window, a long run that failed just now, and a success
+    // this month. The child has only an old failure.
+    let (root_env, root_build) = (td.env_id, td.build_id);
+    for (env, build, start, status, stop) in [
+        (root_env, root_build, long_ago, RunStatus::Failed, long_ago),
+        (root_env, root_build, long_ago, RunStatus::Failed, now),
+        (root_env, root_build, now, RunStatus::Succeeded, now),
+        (
+            child.env_id,
+            child_build,
+            long_ago,
+            RunStatus::Failed,
+            long_ago,
+        ),
+    ] {
+        record_finished_run(&client, &env, &build, &td.user_id, start, status, stop).await;
+    }
+    client.login_as(&td.user_id);
+
+    let page = client.get(&format!("/@{}/children", root.slug)).await;
+    page.assert_status(StatusCode::OK);
+    let row = |org_id: Uuid| {
+        let marker = format!("data-overview-org=\"{org_id}\"");
+        let rest = page.body.split(&marker).nth(1).expect("overview row");
+        rest.split("</tr>").next().unwrap().to_owned()
+    };
+    // Status, running, failed in 24h and runs this month.
+    let cells = |values: [&str; 4]| {
+        values
+            .iter()
+            .map(|value| format!("<td class=\"p-2\">{value}</td>"))
+            .collect::<String>()
+    };
+    let root_row = row(td.org_id);
+    assert!(
+        root_row.contains(&cells(["active", "1", "1", "2"])),
+        "{root_row}"
+    );
+    let child_row = row(child.org.org_id);
+    assert!(
+        child_row.contains(&cells(["active", "0", "0", "0"])),
+        "{child_row}"
+    );
+    assert!(child_row.contains(&long_ago.format("%Y-%m-%d %H:%M UTC").to_string()));
 }

@@ -357,6 +357,20 @@ async fn sub_org_lifecycle_and_browser_scope_use_a_restricted_runtime_login()
             .body
             .contains(&format!("data-overview-org=\"{}\"", b.org))
     );
+    // Each child's one seeded run is still running and started this month.
+    for workspace in [&a, &b] {
+        let marker = format!("data-overview-org=\"{}\"", workspace.org);
+        let row = overview
+            .body
+            .split(&marker)
+            .nth(1)
+            .and_then(|row| row.split("</tr>").next())
+            .unwrap_or_default();
+        assert!(
+            row.contains(r#"<td class="p-2">active</td><td class="p-2">1</td><td class="p-2">0</td><td class="p-2">1</td>"#),
+            "{row}"
+        );
+    }
 
     let scope_a = format!("org_id={}&env_id={}", a.org, a.env);
     let scope_b = format!("org_id={}&env_id={}", b.org, b.env);
