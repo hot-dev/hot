@@ -660,7 +660,7 @@ pub async fn update_file_record_if_storage_path(
 
 /// Update a file record while it is still active, whatever version it holds:
 /// an unconditional write. The location it replaces is retired for
-/// collection by the same statement (migration 019), so concurrent writers
+/// collection by the same statement (migration 021), so concurrent writers
 /// need not know which version they replaced. Ok(None) means a delete
 /// deactivated the record first.
 #[allow(clippy::too_many_arguments)]

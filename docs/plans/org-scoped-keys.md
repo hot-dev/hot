@@ -36,7 +36,7 @@ path cannot load an org key at all. Users still see one kind of key: the same
 routes. Lineage is `org_api_key.issuer_org_api_key_id` for org keys and
 `api_key_issuer` for environment keys an org key minted; issuers are always
 org keys. `api_key` gains only `expires_at` and the rotation columns.
-Migrations: PostgreSQL `019_org_api_keys.sql`, SQLite `016_org_api_keys.sql`.
+Migrations: PostgreSQL `020_org_api_keys.sql`, SQLite `020_org_api_keys.sql`.
 
 **Compatibility: removed, not aliased.** 3.0.0 shipped `/v1/management/*` hours
 before this work, behind a `sub_orgs` limit that defaults to 0, with no
@@ -277,7 +277,7 @@ separate `delegate` map on org keys, is [Q3](#open-questions-for-curt).
 
 ### Files
 
-- A new migration in each backend: `resources/db/postgres/migrations/019_org_api_keys.sql` and `resources/db/sqlite/migrations/016_org_api_keys.sql`.
+- A new migration in each backend: `resources/db/postgres/migrations/020_org_api_keys.sql` and `resources/db/sqlite/migrations/020_org_api_keys.sql`.
 - `crates/hot/src/db/api_key.rs`, a new `crates/hot/src/db/org_api_key.rs`
   (or one module with two types), `crates/hot/src/db/mod.rs`.
 - `crates/hot_api/src/auth.rs`, `crates/hot_api/src/server.rs`.
