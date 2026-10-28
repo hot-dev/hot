@@ -661,6 +661,17 @@ impl OrgPlan {
             .await?),
         }
     }
+
+    /// Every account root, whatever its subscription status. Retention prunes
+    /// an Inactive or Pending account by its plan like any other; a root with
+    /// no plan resolves to unlimited retention and is skipped.
+    pub async fn get_all_root_org_ids(db: &DatabasePool) -> Result<Vec<Uuid>, PlanError> {
+        let sql = "SELECT org_id FROM org WHERE parent_org_id IS NULL";
+        match db {
+            DatabasePool::Postgres(pool) => Ok(sqlx::query_scalar(sql).fetch_all(pool).await?),
+            DatabasePool::Sqlite(pool) => Ok(sqlx::query_scalar(sql).fetch_all(pool).await?),
+        }
+    }
 }
 
 /// Compute the call data deletion cutoff (in days) for an organization.
@@ -695,11 +706,18 @@ pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32
         Err(_) => return -1,
     };
 
-    if let Some(JsonValue::Object(ref map)) = org_features_json
-        && let Some(val) = map.get(keys::CALL_RETENTION_DAYS)
-        && let Some(days) = val.as_i64()
-    {
-        return days as i32;
+    // An override that isn't an object, or a retention that isn't a whole
+    // number of days, is just as unreadable.
+    if let Some(features) = org_features_json {
+        let Some(map) = features.as_object() else {
+            return -1;
+        };
+        if let Some(days) = map.get(keys::CALL_RETENTION_DAYS) {
+            return days
+                .as_i64()
+                .and_then(|days| i32::try_from(days).ok())
+                .unwrap_or(-1);
+        }
     }
 
     // No org override — resolve from plan + dynamic next-tier lookup
@@ -723,13 +741,13 @@ pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32
         Ok(next_plan) => {
             let next_retention = next_plan.get_features().call_retention_days();
             if next_retention < 0 {
-                retention * 2 // next tier is unlimited (Self-Host), use 2x
+                retention.saturating_mul(2) // next tier is unlimited (Self-Host), use 2x
             } else {
                 next_retention
             }
         }
-        Err(PlanError::NotFound) => retention * 2, // top tier, no next plan
-        Err(_) => -1,                              // lookup failed: keep data
+        Err(PlanError::NotFound) => retention.saturating_mul(2), // top tier, no next plan
+        Err(_) => -1,                                            // lookup failed: keep data
     }
 }
 

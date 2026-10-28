@@ -109,13 +109,23 @@ mod tests {
         };
         assert!(days(&db).await > 0, "the plan sets a deletion cutoff");
 
-        // An unreadable override must not fall through to the plan cutoff.
-        sqlx::query("UPDATE org SET features = '{not json' WHERE org_id = ?")
-            .bind(data.org_id)
-            .execute(pool)
-            .await
-            .unwrap();
-        assert_eq!(days(&db).await, -1);
+        // An unreadable override must not fall through to the plan cutoff,
+        // nor may one that isn't an object or a whole number of days.
+        for features in [
+            "{not json",
+            "[]",
+            r#"{"call_retention_days": "7"}"#,
+            r#"{"call_retention_days": 7.5}"#,
+            r#"{"call_retention_days": 4294967303}"#,
+        ] {
+            sqlx::query("UPDATE org SET features = ? WHERE org_id = ?")
+                .bind(features)
+                .bind(data.org_id)
+                .execute(pool)
+                .await
+                .unwrap();
+            assert_eq!(days(&db).await, -1, "{features}");
+        }
 
         // A failed next-tier lookup is not the same as "no next tier".
         sqlx::query("UPDATE org SET features = NULL WHERE org_id = ?")

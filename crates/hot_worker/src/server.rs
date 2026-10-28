@@ -8016,7 +8016,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                     }
                                                                 }
                                                             } else {
-                                                                let mut org_ids = hot::db::subscription::OrgPlan::get_all_active_org_ids(db).await.unwrap_or_default();
+                                                                let mut org_ids = hot::db::subscription::OrgPlan::get_all_root_org_ids(db).await.unwrap_or_default();
                                                                 for root_id in org_ids.clone() {
                                                                     if let Ok(children) = hot::db::Org::list_children(db, &root_id).await {
                                                                         org_ids.extend(children.into_iter().map(|child| child.org_id));
