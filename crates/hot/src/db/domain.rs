@@ -309,7 +309,10 @@ impl Domain {
         let domain_name = domain_name.trim().to_lowercase();
 
         // Check for a soft-deleted domain with the same name still awaiting cleanup
-        if Self::is_pending_deletion(db, &domain_name).await? {
+        let availability = db.with_scope(crate::db::DatabaseScope::Bootstrap(
+            crate::db::BootstrapOperation::Routing,
+        ));
+        if Self::is_pending_deletion(&availability, &domain_name).await? {
             return Err(DomainError::PendingDeletion);
         }
 
