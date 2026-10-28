@@ -295,7 +295,7 @@ impl Org {
                     SELECT o.org_id, o.parent_org_id, o.external_id, o.lifecycle_state, o.name, o.slug, o.org_type::text AS org_type, o.settings, o.active, o.created_at, o.created_by_user_id, o.updated_at, o.updated_by_user_id, o.active_toggle_at, o.active_toggle_by_user_id
                     FROM org o
                     INNER JOIN org_user ou ON o.org_id = ou.org_id
-                    WHERE ou.user_id = $1 AND ou.active = true AND o.active = true AND o.org_type = 'individual'
+                    WHERE ou.user_id = $1 AND ou.active = true AND o.org_type = 'individual'
                     LIMIT 1
                     "#,
                 )
@@ -310,7 +310,7 @@ impl Org {
                     SELECT o.org_id, o.parent_org_id, o.external_id, o.lifecycle_state, o.name, o.slug, o.org_type, o.settings, o.active, o.created_at, o.created_by_user_id, o.updated_at, o.updated_by_user_id, o.active_toggle_at, o.active_toggle_by_user_id
                     FROM org o
                     INNER JOIN org_user ou ON o.org_id = ou.org_id
-                    WHERE ou.user_id = ? AND ou.active = 1 AND o.active = 1 AND o.org_type = 'individual'
+                    WHERE ou.user_id = ? AND ou.active = 1 AND o.org_type = 'individual'
                     LIMIT 1
                     "#,
                 )
@@ -746,5 +746,45 @@ impl OrgUser {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_archived_individual_org_still_counts_as_the_users_one() {
+        let db = crate::db::test_db().await;
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            return;
+        };
+        let user_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO user (user_id,email,created_by_user_id) VALUES (?,?,?)")
+            .bind(user_id)
+            .bind("solo@example.test")
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let org_id = Uuid::now_v7();
+        Org::insert_org(&db, &org_id, "Solo", "solo", "individual", &user_id)
+            .await
+            .unwrap();
+        OrgUser::insert_org_user(&db, &Uuid::now_v7(), &org_id, &user_id, Some(2), &user_id)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE org SET lifecycle_state='archived', active=0 WHERE org_id=?")
+            .bind(org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(
+            Org::get_individual_org_by_user(&db, &user_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "archiving must not free the user's individual org"
+        );
     }
 }
