@@ -969,10 +969,14 @@ pub async fn org_users_invite_post_handler(
             // Success - redirect to users list
             Ok(Redirect::to(&format!("/@{}/users", org_slug)))
         }
-        Err(_) => Err(render_org_users_invite_with_error(
+        Err(error) => Err(render_org_users_invite_with_error(
             &session,
             &org,
-            "Failed to create invite",
+            if matches!(error, hot::db::invite::InviteError::SeatLimit) {
+                "Account team member limit reached"
+            } else {
+                "Failed to create invite"
+            },
             &form.email,
             form.role_id,
         )),
@@ -1135,7 +1139,7 @@ pub async fn org_users_edit_post_handler(
             // Success - redirect to users list
             Ok(Redirect::to(&format!("/@{}/users", org_slug)))
         }
-        Err(_) => {
+        Err(error) => {
             let org_user_display = templates::OrgUserDisplay {
                 user_id: user.user_id.to_string(),
                 email: user.email,
@@ -1161,7 +1165,11 @@ pub async fn org_users_edit_post_handler(
                 &session,
                 &org,
                 &org_user_display,
-                "Failed to update user",
+                if matches!(error, hot::db::org::OrgError::LimitReached) {
+                    "Account team member limit reached"
+                } else {
+                    "Failed to update user"
+                },
             ))
         }
     }

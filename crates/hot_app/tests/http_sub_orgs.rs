@@ -293,3 +293,107 @@ async fn only_a_root_admin_sees_usage_labelled_as_the_account() {
     assert!(page.body.contains(workspace));
     assert!(!page.body.contains(account));
 }
+
+#[tokio::test]
+async fn environment_names_and_account_limits_report_why_nothing_changed() {
+    let mut client =
+        TestClient::new_with_conf(hot::val!({"product":{"experience":"self-host"}})).await;
+    let td = insert_test_data(client.db()).await.unwrap();
+    sqlx::query("UPDATE org SET org_type='organization' WHERE org_id=?")
+        .bind(td.org_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    let root = Org::get_org_uncached(client.db(), &td.org_id)
+        .await
+        .unwrap();
+    client.login_as(&td.user_id);
+    let create = format!("/envs/new?org_id={}", td.org_id);
+
+    // The trimmed name is what gets provisioned, and provisioning an existing
+    // name returns that environment, so a padded duplicate must be refused
+    // instead of reported as created.
+    let response = client.post_form(&create, &[("name", "development ")]).await;
+    response.assert_status(StatusCode::OK);
+    assert!(
+        response
+            .body
+            .contains("Environment with this name already exists"),
+        "{}",
+        response.body
+    );
+    client
+        .post_form(
+            &format!("/envs/{}/edit?org_id={}", td.env_id, td.org_id),
+            &[("name", "staging ")],
+        )
+        .await
+        .assert_status(StatusCode::SEE_OTHER);
+    assert_eq!(
+        Env::get_env(client.db(), &td.env_id).await.unwrap().name,
+        "staging"
+    );
+
+    sqlx::query(r#"UPDATE org SET features='{"environments":1,"team_members":1}' WHERE org_id=?"#)
+        .bind(td.org_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    let response = client.post_form(&create, &[("name", "production")]).await;
+    assert!(
+        response.body.contains("Account environment limit reached"),
+        "{}",
+        response.body
+    );
+    assert_eq!(
+        Env::get_envs_by_org(client.db(), &td.org_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let member = Uuid::now_v7();
+    User::insert_user(
+        client.db(),
+        &member,
+        "seat-member@example.test",
+        Some("Seat member"),
+        Some(&td.user_id),
+    )
+    .await
+    .unwrap();
+    OrgUser::insert_org_user(
+        client.db(),
+        &Uuid::now_v7(),
+        &td.org_id,
+        &member,
+        Some(1),
+        &td.user_id,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE org_user SET active=0 WHERE org_id=? AND user_id=?")
+        .bind(td.org_id)
+        .bind(member)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    let response = client
+        .post_form(
+            &format!("/@{}/users/{member}/edit", root.slug),
+            &[("role_id", "1"), ("active", "true")],
+        )
+        .await;
+    assert!(
+        response.body.contains("Account team member limit reached"),
+        "{}",
+        response.body
+    );
+    assert!(
+        !OrgUser::get_org_user(client.db(), &td.org_id, &member)
+            .await
+            .unwrap()
+            .active
+    );
+}
