@@ -1359,6 +1359,37 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     .fetch_one(&admin)
     .await?;
     assert_eq!(summed, 10, "the counters agree with the files");
+    // The overwrite and the delete retired the objects they replaced, under
+    // the file's own scope. Retention collects only objects no active version
+    // references, and a sibling can't register objects in another environment.
+    let file_retention = db::DatabasePool::Postgres(pool.with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Retention,
+        org_id: None,
+    }));
+    let after_grace = chrono::Utc::now() + chrono::Duration::days(1);
+    let mut retired =
+        db::file::collectable_retired_objects(&file_retention, "local", after_grace, 100).await?;
+    retired.sort();
+    let mut expected = vec![file.storage_path.clone(), "quota/new".to_string()];
+    expected.sort();
+    assert_eq!(retired, expected);
+    let db::DatabasePool::Postgres(other_pg) = other_db else {
+        unreachable!()
+    };
+    let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM hot.retired_file_object")
+        .fetch_one(other_pg)
+        .await?;
+    assert_eq!(visible, 0, "a sibling sees no other environment's objects");
+    assert!(
+        db::file::register_staged_object(other_db, file.org_id, file.env_id, "local", "forged")
+            .await
+            .is_err()
+    );
+    db::file::forget_retired_object(&file_retention, "local", "quota/new", after_grace).await?;
+    assert_eq!(
+        db::file::collectable_retired_objects(&file_retention, "local", after_grace, 100).await?,
+        vec![file.storage_path.clone()]
+    );
 
     // A full trace budget rejects trace payloads while both terminal run writes
     // still persist. The SQL size includes JSONB formatting and UTF-8 errors.

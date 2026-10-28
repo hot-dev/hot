@@ -529,6 +529,33 @@ pub async fn run_for_environment(
                 }
             }
         });
+        // Start the file object cleanup task (runs every 5 minutes)
+        // Deletes file objects retired by overwrites and deletes once their
+        // grace period has passed.
+        let file_object_queue = Arc::clone(&event_queue);
+        let mut file_object_shutdown_rx = shutdown_tx.subscribe();
+
+        tokio::spawn(async move {
+            let mut file_object_timer = interval(Duration::from_secs(300));
+            file_object_timer.tick().await;
+
+            loop {
+                tokio::select! {
+                    _ = file_object_timer.tick() => {
+                        debug!("hot.dev: SCHEDULER enqueuing file object cleanup task");
+                        let msg = hot::lang::event::MaintenanceMessage::single_task("file_object_cleanup");
+                        let message: Message = msg.into();
+                        if let Err(e) = file_object_queue.enqueue(message).await {
+                            error!("hot.dev: SCHEDULER failed to enqueue file object cleanup task: {}", e);
+                        }
+                    }
+                    _ = file_object_shutdown_rx.recv() => {
+                        debug!("hot.dev: SCHEDULER file object cleanup task received shutdown signal");
+                        break;
+                    }
+                }
+            }
+        });
     } else {
         warn!("hot.dev: SCHEDULER running without database - no schedule sync will occur");
     }

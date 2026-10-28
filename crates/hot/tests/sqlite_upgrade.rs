@@ -355,6 +355,43 @@ async fn sqlite_upgrades_preserve_populated_data_and_retire_management_credentia
 }
 
 #[tokio::test]
+async fn sqlite_016_retires_the_objects_deleted_files_left_behind() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("existing.db");
+    let pool = existing_database(&path, 15).await?;
+    let rows = ExistingRows::seed(&pool).await?;
+    // A deleted file, a live one, an older deleted version that still shares
+    // the live version's object, and a deleted file without a storage path.
+    for (name, storage_path, active) in [
+        ("gone.txt", "/files/gone", 0),
+        ("kept.txt", "/files/kept", 1),
+        ("kept.txt", "/files/kept", 0),
+        ("legacy.txt", "", 0),
+    ] {
+        sqlx::query("INSERT INTO file(file_id,path,size,storage_backend,storage_path,org_id,env_id,created_by_user_id,active) VALUES(?,?,1,'local',?,?,?,?,?)")
+            .bind(Uuid::new_v4())
+            .bind(name)
+            .bind(storage_path)
+            .bind(rows.org)
+            .bind(rows.env)
+            .bind(rows.user)
+            .bind(active)
+            .execute(&pool)
+            .await?;
+    }
+    pool.close().await;
+    db::run_migrations(&hot::val!({"uri": format!("sqlite:{}", path.display())})).await?;
+
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", path.display())).await?;
+    let retired: Vec<String> = sqlx::query_scalar("SELECT storage_path FROM retired_file_object")
+        .fetch_all(&pool)
+        .await?;
+    assert_eq!(retired, ["/files/gone"]);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlite_013_rejects_legacy_mismatches_atomically_and_allows_reviewed_retry() -> TestResult {
     for mismatch in ["destination_org", "subscription_org", "subscription_env"] {
         let directory = tempfile::tempdir()?;

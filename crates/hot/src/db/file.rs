@@ -654,6 +654,36 @@ pub async fn update_file_record_if_storage_path(
     .await
 }
 
+/// Update a file record while it is still active, whatever version it holds:
+/// an unconditional write. The location it replaces is retired for
+/// collection by the same statement (migration 019), so concurrent writers
+/// need not know which version they replaced. Ok(None) means a delete
+/// deactivated the record first.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_file_record_if_active(
+    db: &DatabasePool,
+    file_id: Uuid,
+    size: i64,
+    etag: Option<&str>,
+    content_type: Option<&str>,
+    storage_path: &str,
+    updated_by_user_id: Uuid,
+    updated_by_run_id: Option<Uuid>,
+) -> Result<Option<FileRecord>, String> {
+    update_file_record_if(
+        db,
+        file_id,
+        RecordGuard::Active,
+        size,
+        etag,
+        content_type,
+        storage_path,
+        updated_by_user_id,
+        updated_by_run_id,
+    )
+    .await
+}
+
 /// The version a conditional update requires the record to still have.
 #[derive(Clone, Copy)]
 enum RecordGuard<'a> {
@@ -661,6 +691,8 @@ enum RecordGuard<'a> {
     Etag(&'a str),
     /// Exact stored location.
     StoragePath(&'a str),
+    /// Any active version.
+    Active,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -753,10 +785,11 @@ async fn update_file_record_if_attempt(
     };
     let (expected, matches) = match guard {
         RecordGuard::Etag(expected) => (
-            expected,
+            Some(expected),
             current_etag.as_deref().is_none_or(|tag| tag == expected),
         ),
-        RecordGuard::StoragePath(expected) => (expected, current_path == expected),
+        RecordGuard::StoragePath(expected) => (Some(expected), current_path == expected),
+        RecordGuard::Active => (None, true),
     };
     if !matches {
         return Ok(None);
@@ -799,8 +832,25 @@ async fn update_file_record_if_attempt(
                       created_at, updated_at, created_by_user_id, updated_by_user_id
             "#
                 }
+                RecordGuard::Active => {
+                    r#"
+            UPDATE file SET
+                size = $2,
+                etag = $3,
+                content_type = $4,
+                storage_path = $5,
+                updated_by_user_id = $6,
+                updated_by_run_id = $7,
+                updated_at = $8
+            WHERE file_id = $1 AND active = true
+            RETURNING file_id, path, size, etag, content_type,
+                      storage_backend, storage_path, org_id, env_id,
+                      created_by_run_id, updated_by_run_id,
+                      created_at, updated_at, created_by_user_id, updated_by_user_id
+            "#
+                }
             };
-            let row = sqlx::query(query)
+            let mut update = sqlx::query(query)
                 .bind(file_id)
                 .bind(size)
                 .bind(etag)
@@ -808,13 +858,13 @@ async fn update_file_record_if_attempt(
                 .bind(storage_path)
                 .bind(updated_by_user_id)
                 .bind(updated_by_run_id)
-                .bind(now)
-                .bind(expected)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| {
-                    FileWriteError::from_sqlx("Failed to conditionally update file record", e)
-                })?;
+                .bind(now);
+            if let Some(expected) = expected {
+                update = update.bind(expected);
+            }
+            let row = update.fetch_optional(&mut *tx).await.map_err(|e| {
+                FileWriteError::from_sqlx("Failed to conditionally update file record", e)
+            })?;
             tx.commit().await.map_err(fwe)?;
             let Some(row) = row else {
                 return Ok(None);
@@ -865,8 +915,21 @@ async fn update_file_record_if_attempt(
             WHERE file_id = ? AND active = 1 AND storage_path = ?
             "#
                 }
+                RecordGuard::Active => {
+                    r#"
+            UPDATE file SET
+                size = ?,
+                etag = ?,
+                content_type = ?,
+                storage_path = ?,
+                updated_by_user_id = ?,
+                updated_by_run_id = ?,
+                updated_at = ?
+            WHERE file_id = ? AND active = 1
+            "#
+                }
             };
-            let result = sqlx::query(query)
+            let mut update = sqlx::query(query)
                 .bind(size)
                 .bind(etag)
                 .bind(content_type)
@@ -874,13 +937,13 @@ async fn update_file_record_if_attempt(
                 .bind(updated_by_user_id)
                 .bind(updated_by_run_id)
                 .bind(now)
-                .bind(file_id)
-                .bind(expected)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| {
-                    FileWriteError::from_sqlx("Failed to conditionally update file record", e)
-                })?;
+                .bind(file_id);
+            if let Some(expected) = expected {
+                update = update.bind(expected);
+            }
+            let result = update.execute(&mut *tx).await.map_err(|e| {
+                FileWriteError::from_sqlx("Failed to conditionally update file record", e)
+            })?;
             tx.commit().await.map_err(fwe)?;
             if result.rows_affected() == 0 {
                 return Ok(None);
@@ -1220,6 +1283,128 @@ pub async fn mark_file_inactive(
     };
 
     Ok(rows_affected == 1)
+}
+
+/// Register an object a write staged, just before committing it, so a write
+/// that never commits (a crash, or a failure it can't settle) leaves nothing
+/// behind for good: an object no active version references is collected like
+/// a retired one. The commit that references it removes the registration.
+pub async fn register_staged_object(
+    db: &DatabasePool,
+    org_id: Uuid,
+    env_id: Option<Uuid>,
+    storage_backend: &str,
+    storage_path: &str,
+) -> Result<(), String> {
+    let sql = "INSERT INTO retired_file_object (storage_backend, storage_path, org_id, env_id) VALUES ($1, $2, $3, $4) ON CONFLICT (storage_backend, storage_path) DO UPDATE SET retired_at = EXCLUDED.retired_at";
+    match db {
+        DatabasePool::Postgres(pool) => sqlx::query(sql)
+            .bind(storage_backend)
+            .bind(storage_path)
+            .bind(org_id)
+            .bind(env_id)
+            .execute(pool)
+            .await
+            .map(|_| ()),
+        DatabasePool::Sqlite(pool) => sqlx::query(sql)
+            .bind(storage_backend)
+            .bind(storage_path)
+            .bind(org_id)
+            .bind(env_id)
+            .execute(pool)
+            .await
+            .map(|_| ()),
+    }
+    .map_err(|e| format!("Failed to register staged file object: {}", e))
+}
+
+/// Objects of `storage_backend` retired before `retired_before` that no active
+/// file version references, oldest first. `only` narrows the check to one
+/// object.
+async fn collectable_objects(
+    db: &DatabasePool,
+    storage_backend: &str,
+    retired_before: DateTime<Utc>,
+    only: Option<&str>,
+    limit: i64,
+) -> Result<Vec<String>, String> {
+    match db {
+        DatabasePool::Postgres(pool) => sqlx::query_scalar(
+            "SELECT r.storage_path FROM retired_file_object r WHERE r.storage_backend = $1 AND r.retired_at < $2 AND ($3::text IS NULL OR r.storage_path = $3) AND NOT EXISTS (SELECT 1 FROM file f WHERE f.active = true AND f.storage_backend = r.storage_backend AND f.storage_path = r.storage_path) ORDER BY r.retired_at LIMIT $4",
+        )
+        .bind(storage_backend)
+        .bind(retired_before)
+        .bind(only)
+        .bind(limit)
+        .fetch_all(pool)
+        .await,
+        DatabasePool::Sqlite(pool) => sqlx::query_scalar(
+            "SELECT r.storage_path FROM retired_file_object r WHERE r.storage_backend = $1 AND julianday(r.retired_at) < julianday($2) AND ($3 IS NULL OR r.storage_path = $3) AND NOT EXISTS (SELECT 1 FROM file f WHERE f.active = 1 AND f.storage_backend = r.storage_backend AND f.storage_path = r.storage_path) ORDER BY julianday(r.retired_at) LIMIT $4",
+        )
+        .bind(storage_backend)
+        .bind(retired_before)
+        .bind(only)
+        .bind(limit)
+        .fetch_all(pool)
+        .await,
+    }
+    .map_err(|e| format!("Failed to list collectable file objects: {}", e))
+}
+
+/// Retired objects collection may delete; see [`collectable_objects`].
+pub async fn collectable_retired_objects(
+    db: &DatabasePool,
+    storage_backend: &str,
+    retired_before: DateTime<Utc>,
+    limit: i64,
+) -> Result<Vec<String>, String> {
+    collectable_objects(db, storage_backend, retired_before, None, limit).await
+}
+
+/// Whether one retired object is still collectable: nothing referenced it
+/// again, and it wasn't retired or registered again since `retired_before`.
+pub async fn retired_object_collectable(
+    db: &DatabasePool,
+    storage_backend: &str,
+    storage_path: &str,
+    retired_before: DateTime<Utc>,
+) -> Result<bool, String> {
+    Ok(
+        !collectable_objects(db, storage_backend, retired_before, Some(storage_path), 1)
+            .await?
+            .is_empty(),
+    )
+}
+
+/// Forget a collected object, unless it was retired or registered again
+/// since `retired_before`.
+pub async fn forget_retired_object(
+    db: &DatabasePool,
+    storage_backend: &str,
+    storage_path: &str,
+    retired_before: DateTime<Utc>,
+) -> Result<(), String> {
+    match db {
+        DatabasePool::Postgres(pool) => sqlx::query(
+            "DELETE FROM retired_file_object WHERE storage_backend = $1 AND storage_path = $2 AND retired_at < $3",
+        )
+        .bind(storage_backend)
+        .bind(storage_path)
+        .bind(retired_before)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+        DatabasePool::Sqlite(pool) => sqlx::query(
+            "DELETE FROM retired_file_object WHERE storage_backend = $1 AND storage_path = $2 AND julianday(retired_at) < julianday($3)",
+        )
+        .bind(storage_backend)
+        .bind(storage_path)
+        .bind(retired_before)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+    }
+    .map_err(|e| format!("Failed to forget collected file object: {}", e))
 }
 
 /// List files by prefix

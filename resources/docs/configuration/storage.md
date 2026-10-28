@@ -164,6 +164,13 @@ Every file write lands at a new object, and the database record is switched to
 it as the commit point. A failed or losing write never changes what readers
 see, and concurrent writers never overwrite each other's bytes. The database,
 not the bucket, is authoritative for which files exist and who may read them.
+
+The object an overwrite replaces, or a delete removes, is kept for 15 minutes
+so reads already in progress can finish. The database records it in the same
+transaction, along with each object a write is about to commit. A maintenance
+task runs every 5 minutes and deletes the recorded objects that are past those
+15 minutes and that no file version references, so a crash or a failed delete
+only postpones the deletion to its next run.
 Hot's file ETag is an MD5 of the content. A multipart upload's ETag identifies
 the exact parts it was composed from (S3 reports its own multipart ETag). File
 ETags are independent of GCS object generations.
@@ -239,20 +246,19 @@ Interactions with other bucket features:
 
 - **Soft delete** (on by default, 7 days) keeps deleted and overwritten objects
   restorable and billed for the retention window. Every overwrite of a Hot file
-  deletes the previous object, so write-heavy workloads such as
-  `::hot::sqlite` accumulate soft-deleted bytes. Lower or disable soft delete
-  if you do not need it.
+  deletes the previous object once its 15 minutes have passed, so write-heavy
+  workloads such as `::hot::sqlite` accumulate soft-deleted bytes. Lower or
+  disable soft delete if you do not need it.
 - **Object versioning** retains noncurrent copies of every replaced or deleted
   object. Hot does not need it; if enabled, add a lifecycle rule for
   noncurrent versions.
-- **Retention policies and holds** block deletion. Hot logs and continues when
-  cleanup of a superseded or staged object fails, so a locked retention policy
-  makes storage grow until the policy allows deletion. File and blob deletes
-  report an error when the object cannot be removed.
+- **Retention policies and holds** block deletion. Collection logs an object
+  it cannot delete and retries it on every run, so a locked retention policy
+  makes storage grow until the policy allows deletion. Blob deletes report an
+  error when the object cannot be removed.
 
-Failed deletions of superseded objects leave unreferenced bytes behind. They do
-not count against Hot's storage quota (which is computed from database
-records) but are billed by Google Cloud.
+Objects waiting for collection do not count against Hot's storage quota (which
+is computed from database records) but are billed by Google Cloud.
 
 ### Troubleshooting
 
