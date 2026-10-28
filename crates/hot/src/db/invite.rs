@@ -276,7 +276,7 @@ impl Invite {
                     .bind(org_id).bind(email).fetch_one(&mut *tx).await?;
                 if existing_member { return Err(InviteError::AlreadyUsed); }
                 let (plan, overrides): (Option<String>, Option<String>) = sqlx::query_as(
-                    "SELECT CAST(p.features AS TEXT), CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1")
+                    "SELECT CASE WHEN p.plan_uuid IS NULL THEN NULL ELSE CAST(COALESCE(p.features,'{}') AS TEXT) END, CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1")
                     .bind(org_id).fetch_one(&mut *tx).await?;
                 let limit = seat_limit(plan, overrides)?;
                 let seats: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM org_user WHERE org_id=$1 AND active=true) + (SELECT COUNT(DISTINCT lower(email)) FROM invite WHERE org_id=$1 AND active=true AND invite_status_id=1 AND expires_at>$2)")
@@ -356,7 +356,7 @@ impl Invite {
                 let (email, active) = $identity!(tx, invite.org_id);
                 if !active || !email.eq_ignore_ascii_case(&invite.email) { return Err(InviteError::Unauthorized); }
                 let (plan, overrides): (Option<String>, Option<String>) = sqlx::query_as(
-                    "SELECT CAST(p.features AS TEXT), CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1")
+                    "SELECT CASE WHEN p.plan_uuid IS NULL THEN NULL ELSE CAST(COALESCE(p.features,'{}') AS TEXT) END, CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1")
                     .bind(invite.org_id).fetch_one(&mut *tx).await?;
                 let limit = seat_limit(plan, overrides)?;
                 let seats: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM org_user WHERE org_id=$1 AND active=true")

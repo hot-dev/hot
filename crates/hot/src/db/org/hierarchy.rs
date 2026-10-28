@@ -363,7 +363,7 @@ impl Org {
                     (child, env, false)
                 } else {
                     let plan: Option<Value> = sqlx::query_scalar(
-                        "SELECT p.features FROM org_plan op JOIN plan p ON p.plan_uuid = op.plan_uuid WHERE op.org_id = $1"
+                        "SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid = op.plan_uuid WHERE op.org_id = $1"
                     ).bind(root_id).fetch_optional(&mut *tx).await?.flatten();
                     let limit = child_limit(plan.as_ref(), root.3.as_ref(), request.hosted);
                     let count: i64 =
@@ -416,7 +416,7 @@ impl Org {
                     (child, env, false)
                 } else {
                     let plan: Option<String> = sqlx::query_scalar(
-                        "SELECT p.features FROM org_plan op JOIN plan p ON p.plan_uuid = op.plan_uuid WHERE op.org_id = ?"
+                        "SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid = op.plan_uuid WHERE op.org_id = ?"
                     ).bind(root_id).fetch_optional(&mut *tx).await?.flatten();
                     let plan = parse_features(plan)?;
                     let overrides = parse_features(root.3)?;
@@ -509,7 +509,7 @@ impl Org {
                     }
                     id
                 } else {
-                    let plan: Option<Value> = sqlx::query_scalar("SELECT p.features FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1")
+                    let plan: Option<Value> = sqlx::query_scalar("SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1")
                         .bind(root_id).fetch_optional(&mut *tx).await?.flatten();
                     let limit = environment_limit(plan.as_ref(), root.1.as_ref());
                     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM env e JOIN org o ON o.org_id=e.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1")
@@ -560,7 +560,7 @@ impl Org {
                     }
                     id
                 } else {
-                    let plan: Option<String> = sqlx::query_scalar("SELECT p.features FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?")
+                    let plan: Option<String> = sqlx::query_scalar("SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?")
                         .bind(root_id).fetch_optional(&mut *tx).await?.flatten();
                     let plan = parse_features(plan)?;
                     let overrides = parse_features(root.1)?;
@@ -1226,5 +1226,33 @@ mod tests {
     fn hosted_child_creation_is_disabled_without_entitlement() {
         assert_eq!(child_limit(None, None, true), 0);
         assert_eq!(child_limit(None, None, false), -1);
+    }
+
+    /// A plan whose features are NULL is still a plan: it gets the plan
+    /// defaults, as run, task and store admission read it, not the unlimited
+    /// entitlements of an account with no plan.
+    #[tokio::test]
+    async fn a_plan_without_features_gets_plan_defaults() {
+        let (db, root, admin, _member) = fixture().await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let plan = Uuid::now_v7();
+        sqlx::query("INSERT INTO plan (plan_uuid, plan_id, plan_name, base_price_monthly_cents, base_price_annual_cents, sort_order, active, features) VALUES (?, 'no-features', 'No Features', 0, 0, 1000, 1, NULL)")
+            .bind(plan)
+            .execute(pool)
+            .await
+            .unwrap();
+        crate::db::OrgPlan::create(&db, &root, &plan, crate::db::BillingPeriod::Monthly, &admin)
+            .await
+            .unwrap();
+        assert_eq!(
+            Features::resolve(Some(&serde_json::json!({})), None).sub_orgs(),
+            0
+        );
+        assert!(matches!(
+            Org::create_child(&db, &root, &admin, &request("first-child")).await,
+            Err(OrgError::LimitReached)
+        ));
     }
 }
