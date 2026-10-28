@@ -9376,6 +9376,53 @@ impl VirtualMachine {
         }
     }
 
+    /// Replace the names in a meta value with the values they name. The
+    /// resolver has already rewritten each one to the qualified name of its
+    /// definition, so this loads it the way compiled code loads that
+    /// qualified name: a function or type constructor as a function ref,
+    /// anything else as the namespace variable. The result does not depend on
+    /// which namespace reads the meta.
+    pub fn resolve_meta_refs(&mut self, val: &Val) -> VmResult<Val> {
+        match val {
+            Val::Map(map) => {
+                let mut resolved = indexmap::IndexMap::with_capacity(map.len());
+                for (key, value) in map.iter() {
+                    resolved.insert(key.clone(), self.resolve_meta_refs(value)?);
+                }
+                Ok(Val::Map(Box::new(resolved)))
+            }
+            Val::Vec(items) => Ok(Val::Vec(
+                items
+                    .iter()
+                    .map(|item| self.resolve_meta_refs(item))
+                    .collect::<VmResult<_>>()?,
+            )),
+            Val::Box(boxed) => match boxed.as_any().downcast_ref::<crate::lang::ast::AstNode>() {
+                Some(crate::lang::ast::AstNode(crate::lang::ast::Value::Ref(
+                    crate::lang::ast::Ref::Ns(ns_ref),
+                ))) if ns_ref.function_name.is_some() => {
+                    let qualified = format!(
+                        "{}/{}",
+                        ns_ref.ns,
+                        ns_ref.function_name.as_deref().unwrap_or_default()
+                    );
+                    if self.function_mapping.contains_key(&qualified)
+                        || self.core_functions.contains_key(&qualified)
+                    {
+                        Ok(crate::lang::runtime::function_ref::function_ref(qualified))
+                    } else {
+                        self.lookup_variable(&qualified)
+                    }
+                }
+                Some(crate::lang::ast::AstNode(
+                    value @ crate::lang::ast::Value::Ref(crate::lang::ast::Ref::Var(_)),
+                )) => self.convert_ast_value_to_runtime_val(value),
+                _ => Ok(val.clone()),
+            },
+            _ => Ok(val.clone()),
+        }
+    }
+
     fn collect_deep_path_parts(
         dp: &crate::lang::ast::DeepPath,
         out: &mut Vec<crate::lang::ast::DeepPathPart>,
