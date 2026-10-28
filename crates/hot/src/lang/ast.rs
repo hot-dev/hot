@@ -1339,7 +1339,8 @@ pub struct TypeField {
 pub struct VariantDef {
     /// Variant name (e.g., "Circle", "Point")
     pub name: Sym,
-    /// Optional type reference for type-reference variants (None for unit variants)
+    /// The payload type's annotation (`Circle`, `::geo/Circle`, `Vec<Ask>`),
+    /// None for unit variants
     pub type_ref: Option<String>,
 }
 

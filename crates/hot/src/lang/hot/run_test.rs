@@ -905,6 +905,56 @@ probe()"#;
         );
     }
 
+    /// A variant's payload can be any type expression. Its data is checked as
+    /// a record field of that type would be: `Vec<Ask>` builds each item as
+    /// an `Ask` and fails on an item that isn't one.
+    #[test]
+    fn enum_variants_carry_type_expression_payloads() {
+        let src = r#"::t ns
+Ask type { key: Str }
+Status enum { One(Ask), Many(Vec<Ask>), Counts(Map<Str, Int>), Maybe(Ask?), Either(Ask | Str), Done }
+Steps type
+  | Each(Vec<Ask>)
+  | Stop
+
+describe fn match (s: Status): Str {
+    Status.One => { "one" }
+    Status.Many => { "many" }
+    Status.Counts => { "counts" }
+    Status.Maybe => { "maybe" }
+    Status.Either => { "either" }
+    Status.Done => { "done" }
+}
+
+probe fn (): Vec {
+    many Status.Many([Ask(key: "a"), {key: "b"}])
+    [is-type(many, Status), describe(many), map(untype(many), %.key),
+     is-err(Status.Many([{nope: 1}])),
+     get(untype(Status.Counts({a: 1})), "a"), describe(Status.Counts({a: 1})),
+     is-type(Status.Maybe(null), Status), Status.Maybe({key: "c"}).key,
+     untype(Status.Either("s")), Status.Either(Ask(key: "d")).key,
+     map(untype(Steps.Each([{key: "e"}])), %.key)]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([
+                true,
+                "many",
+                ["a", "b"],
+                true,
+                1,
+                "counts",
+                true,
+                "c",
+                "s",
+                "d",
+                ["e"]
+            ]),
+        );
+    }
+
     /// An arrow may name its enum by a namespace alias or in full. The
     /// checker used to read `::k/Kind.Extra` as a type of its own, so the
     /// arrow failed with "Implementation body returns ::geo/Kind, but should

@@ -388,6 +388,17 @@ circle.radius  // 5.0
 rect.width     // 10.0
 ```
 
+A payload can be any type expression (`Vec<Ask>`, `Map<Str, Int>`, `Ask?`,
+`Ask | Str`). Its data is checked as a record field of that type would be:
+
+```hot
+Ask type { key: Str }
+Status enum { One(Ask), Many(Vec<Ask>), Maybe(Ask?), Done }
+
+many Status.Many([Ask(key: "a"), {key: "b"}])  // each item is built as an Ask
+none Status.Maybe(null)
+```
+
 ### Pattern Matching on Enums
 
 Use `match` flow to handle enum variants. Access the matched value directly through the matched variable:

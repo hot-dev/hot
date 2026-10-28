@@ -1864,6 +1864,35 @@ impl Engine {
 mod tests {
     use super::*;
 
+    /// `hot check` accepts a variant whose payload is a type expression, as
+    /// `hot run` builds it (`run_test::enum_variants_carry_type_expression_payloads`).
+    #[test]
+    fn check_accepts_type_expression_variant_payloads() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("status.hot"),
+            r#"::status ns
+
+Ask type { key: Str }
+Status enum { One(Ask), Many(Vec<Ask>), Maybe(Ask?) }
+
+main fn (): Status {
+    Status.Many([Ask(key: "a")])
+}
+"#,
+        )
+        .unwrap();
+        let diagnostics = Engine::check_sources_pipeline_diagnostics(
+            &[src_dir.to_string_lossy().to_string()],
+            &[],
+            None,
+            None,
+        );
+        assert!(diagnostics.is_empty(), "errors: {:?}", diagnostics.errors);
+    }
+
     /// A source dir with one function that requires the `api.key` context value.
     fn write_required_ctx_src(root: &std::path::Path) -> Vec<String> {
         let src_dir = root.join("src");
