@@ -5450,10 +5450,12 @@ impl VirtualMachine {
     /// forced lazy argument) a halt. Unless `fail()`, `cancel()` or a
     /// consumed Err already recorded it, record it here, so the native's
     /// error return escalates at its boundary instead of becoming an Err
-    /// value.
+    /// value. The message is also the halt's data, which a boundary that
+    /// contains the halt (the test runner's) reports.
     pub(crate) fn record_halt(&self, err: &VmError) {
         if !self.has_failed() && !self.has_cancelled() {
-            self.set_failure_plain_vm_error(Self::halt_message(err), Val::Null);
+            let message = Self::halt_message(err);
+            self.set_failure_plain_vm_error(message.clone(), Val::from(message));
         }
     }
 
