@@ -261,6 +261,35 @@ success Result.Ok(42)
 failure Result.Err("Not found")
 ```
 
+### Enums from Other Namespaces
+
+Name an enum from another namespace through an import of its type, or in full. Variants and payload types can be qualified wherever a variant is named:
+
+```hot
+::geo ns
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+
+::app ns
+::g ::geo
+b ::geo/Shape.Circle(radius: 2.0)       // the variant in full
+c ::g/Shape.Circle({radius: 3.0})       // through a namespace alias
+d ::geo/Shape.Dot                       // a unit variant is its value
+
+Circle ::geo/Shape.Circle               // alias one variant
+e Circle({radius: 4.0})
+
+describe fn match (s: ::geo/Shape): Str {
+    ::geo/Shape.Circle => { "circle" }
+    ::geo/Shape.Dot => { "dot" }
+}
+
+Ring type { inner: Dec, outer: Dec }
+Form enum { Round(::geo/Circle), Band(Ring) }   // a qualified payload type
+```
+
+An alias of a variant with a payload is its constructor. An alias of a unit variant is the variant's value.
+
 ### Type-Level and Variant-Level Matching
 
 Use `match` to check variant types (preferred):

@@ -7,11 +7,14 @@ meta ["test"]
 // 1. Function aliases (regular fn)
 // 2. Type constructor aliases (type fn)
 // 3. Type aliases (for enum types, used in construction and match)
+// 4. Enum variant aliases and fully qualified variants
 //
-// NOTE: Individual enum variant aliases (e.g., `MyOk ::hot::type/Result.Ok`)
-// are NOT supported. Instead, alias the enum TYPE and use Type.Variant syntax:
+// An enum's variants can be named through an alias of its TYPE, in full, or
+// one variant at a time:
 //   Result ::hot::type/Result
 //   success Result.Ok(42)
+//   success ::hot::type/Result.Ok(42)
+//   MyOk ::hot::type/Result.Ok
 //   match value { Result.Ok => ... }
 // ============================================================================
 
@@ -257,6 +260,39 @@ fn () {
 
     assert(is-ok(success), "ok() helper should create Result.Ok")
     assert(is-err(failure), "err() helper should create Result.Err")
+}
+
+test-fully-qualified-variants
+meta ["test"]
+fn () {
+    // A variant can be named in full, without an alias of its type
+    success ::hot::type/Result.Ok(7)
+    failure ::hot::type/Result.Err("nope")
+
+    assert(is-type(success, ::hot::type/Result.Ok), "Qualified Ok should create the Ok variant")
+    assert(is-type(failure, Result.Err), "Qualified Err should create the Err variant")
+
+    result match success {
+        ::hot::type/Result.Ok => { success }
+        ::hot::type/Result.Err => { 0 }
+    }
+
+    assert-eq(7, result, "Qualified variants should match")
+}
+
+// A variant alias at namespace level is the variant's constructor
+MyOk ::hot::type/Result.Ok
+
+test-variant-alias
+meta ["test"]
+fn () {
+    success MyOk(42)
+    assert(is-type(success, Result.Ok), "Namespace-level variant alias should construct Ok")
+    assert-eq(42, success, "Variant alias value should be accessible")
+
+    my-err ::hot::type/Result.Err
+    failure my-err("bad")
+    assert(is-type(failure, Result.Err), "Function-body variant alias should construct Err")
 }
 
 // ----------------------------------------------------------------------------

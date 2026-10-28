@@ -505,10 +505,13 @@ impl Resolver {
                     // Qualified reference like ::hot::alert/alert — validate both
                     // namespace and function/variable name
                     let qualified_name = format!("{}/{}", resolved_ns_str, func_name);
-                    if !self
-                        .context
-                        .unified_resolver
-                        .can_resolve_variable(&qualified_name)
+                    // `::ns/Type.Variant` resolves when `::ns/Type` does, as
+                    // `Type.Variant` does when `Type` does.
+                    let member = match func_name.split_once('.') {
+                        Some((type_name, _)) => format!("{}/{}", resolved_ns_str, type_name),
+                        None => qualified_name.clone(),
+                    };
+                    if !self.context.unified_resolver.can_resolve_variable(&member)
                         && !self
                             .context
                             .unified_resolver

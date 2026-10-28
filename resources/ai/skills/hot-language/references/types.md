@@ -404,6 +404,21 @@ area fn match (shape: Shape): Dec {
 own arm or a `_` default arm catches the rest. The compiler rejects
 non-exhaustive matches (`non-exhaustive-match`).
 
+### Enums from Other Namespaces
+
+Import the enum type (`Shape ::geo/Shape`, then `Shape.Circle(...)`), or name
+the variant in full. Qualified variants work in calls, as values, in `match`
+arms, and as aliases. A variant's payload type can be qualified too:
+
+<!-- hot-check: skip -->
+```hot
+b ::geo/Shape.Circle(radius: 2.0)
+c ::g/Shape.Circle({radius: 3.0})        // ::g is an alias of ::geo
+d ::geo/Shape.Dot                        // unit variant: the value
+Circle ::geo/Shape.Circle                // variant alias: the constructor
+Form enum { Round(::geo/Circle), Flat }  // qualified payload type
+```
+
 ### Open Enums
 
 Add the `open` modifier to make an enum extensible — any module may register
