@@ -31,7 +31,7 @@ curl https://api.hot.dev/v1/projects \
   -H "Authorization: Bearer <token>"
 ```
 
-Runtime endpoints support **API keys**, **service keys**, and **sessions**. These credentials are scoped to one environment, and resources are filtered to that environment's context. Separate root [management credentials](/docs/api/management) authenticate only `/v1/management/*`, for child provisioning, environment creation, delegated key issuance, and account usage.
+Runtime endpoints support **API keys**, **service keys**, and **sessions**. These credentials are scoped to one environment, and resources are filtered to that environment's context. An **org API key** is scoped to an organization instead: it calls only `/v1/orgs` and `/v1/api-keys`, to create child organizations, environments, and API keys, and to manage projects, context, and builds in them. See [Sub-organizations](/docs/api/management).
 
 See the [Authentication](/docs/authentication) documentation for full details on credential types, the permissions model, and the permissions builder.
 
@@ -64,11 +64,13 @@ API keys, service keys, and sessions share a granular permission system. Permiss
 | `project` | `create`, `read`, `update`, `delete` | Project management |
 | `build` | `create`, `read`, `execute` | Build management and deployment |
 | `context` | `create`, `read`, `update`, `delete` | Context variable management |
-| `key` | `create`, `read`, `update`, `delete` | API key management |
+| `key` | `create`, `read`, `update`, `delete` | Service key management |
 | `session` | `create`, `read`, `delete` | Session management |
 | `env` | `read` | Environment information |
 
-The wildcard action `*` grants all valid actions for that resource type. The universal wildcard `*:*` with `["*"]` grants unrestricted access.
+The wildcard action `*` grants all valid actions for that resource type. The universal wildcard `*:*` with `["*"]` grants unrestricted access within the environment.
+
+Org API keys use qualified URNs such as `org:*`, `org:{org}/env:*/api-key:*`, and `org:{org}/env:{env}/project:*`; see [Sub-organizations](/docs/api/management#permissions). Environment credentials reject `org:` URNs.
 
 **Validation Rules:**
 

@@ -311,13 +311,11 @@ Root administrators manage children from the organization's **Children** tab:
 - **Change status.** A child is active, suspended, or archived. Suspending a
   child holds its new work. Restore an archived child to suspended before you
   activate it. Suspending the account itself holds new work in every child.
-- **Issue management credentials.** A management credential lets your own
-  systems create and manage children through the
-  [management API](/docs/api/management). Choose its capabilities, the
-  children it can reach (all children is required to create new ones), an
-  expiry of up to 90 days, and a permission ceiling for the runtime keys it
-  issues. The token is shown once. Revoking it also disables the keys issued
-  through it.
+- **Create org API keys.** An org API key lets your own systems create and
+  manage children, their environments, and their API keys through
+  [`/v1/orgs`](/docs/api/management). Give it a description, its permissions
+  as `org:` URNs, and an optional expiry. The key is shown once. Revoking it
+  also stops every key it created.
 
 The tab also shows an account overview: runs, failures, file bytes, and
 environments for the root and each child.
