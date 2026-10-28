@@ -192,6 +192,7 @@ value it names. A nullable subject (`Fruit?`) also needs a `null` arm.
 Otherwise the compiler reports `non-exhaustive-match` with the missing
 values:
 
+<!-- hot-check: skip -->
 ```hot
 Severity type "low" | "medium" | "high"
 
