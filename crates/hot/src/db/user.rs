@@ -182,41 +182,36 @@ impl User {
         Ok(())
     }
 
-    /// Get users by organization ID
+    /// An org's directory: active users who still belong to its account and
+    /// either hold an active grant on the org or administer its root, whose
+    /// access the org inherits. It reads under the membership bootstrap: an
+    /// environment-scoped caller, such as an alert published from code,
+    /// can't see the root's memberships.
     pub async fn get_users_by_org(
         db: &crate::db::DatabasePool,
         org_id: &Uuid,
     ) -> Result<Vec<User>, UserError> {
-        match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => {
-                let users = sqlx::query_as::<_, User>(
-                    r#"
-                    SELECT u.user_id, u.email, u.name, u.settings, u.active, u.created_at, u.created_by_user_id, u.updated_at, u.updated_by_user_id, u.active_toggle_at, u.active_toggle_by_user_id
-                    FROM "user" u
-                    INNER JOIN org_user ou ON u.user_id = ou.user_id
-                    WHERE ou.org_id = $1
-                    ORDER BY u.created_at
-                    "#,
-                )
-                .bind(org_id)
-                .fetch_all(pg_pool)
-                .await?;
-                Ok(users)
+        let directory = db.with_scope(crate::db::DatabaseScope::Bootstrap(
+            crate::db::BootstrapOperation::Membership,
+        ));
+        let query = r#"
+            SELECT u.user_id, u.email, u.name, u.settings, u.active, u.created_at, u.created_by_user_id, u.updated_at, u.updated_by_user_id, u.active_toggle_at, u.active_toggle_by_user_id
+            FROM "user" u
+            JOIN org o ON o.org_id = $1
+            JOIN org_user ru ON ru.org_id = COALESCE(o.parent_org_id, o.org_id)
+                AND ru.user_id = u.user_id AND ru.active = true
+            WHERE u.active = true
+              AND (ru.org_user_role_id = 2 OR o.parent_org_id IS NULL OR EXISTS (
+                  SELECT 1 FROM org_user cu
+                  WHERE cu.org_id = o.org_id AND cu.user_id = u.user_id AND cu.active = true))
+            ORDER BY u.created_at
+        "#;
+        match &directory {
+            crate::db::DatabasePool::Postgres(pool) => {
+                Ok(sqlx::query_as(query).bind(org_id).fetch_all(pool).await?)
             }
-            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let users = sqlx::query_as::<_, User>(
-                    r#"
-                    SELECT u.user_id, u.email, u.name, u.settings, u.active, u.created_at, u.created_by_user_id, u.updated_at, u.updated_by_user_id, u.active_toggle_at, u.active_toggle_by_user_id
-                    FROM user u
-                    INNER JOIN org_user ou ON u.user_id = ou.user_id
-                    WHERE ou.org_id = ?
-                    ORDER BY u.created_at
-                    "#,
-                )
-                .bind(org_id)
-                .fetch_all(sqlite_pool)
-                .await?;
-                Ok(users)
+            crate::db::DatabasePool::Sqlite(pool) => {
+                Ok(sqlx::query_as(query).bind(org_id).fetch_all(pool).await?)
             }
         }
     }
@@ -440,6 +435,14 @@ impl User {
                 .await?
             }
         };
+        let team = crate::db::Team::get_team(db, team_id)
+            .await
+            .map_err(|e| UserError::Database(sqlx::Error::Protocol(e.to_string())))?;
+        let allowed = Self::get_users_by_org(db, &team.org_id).await?;
+        let users: Vec<_> = users
+            .into_iter()
+            .filter(|user| allowed.iter().any(|member| member.user_id == user.user_id))
+            .collect();
         Ok(users
             .into_iter()
             .filter(|u: &User| u.alerts_enabled())
@@ -633,5 +636,62 @@ impl UserAuth {
                 Ok(user_auths)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child org's alert directory reaches the administrators it inherits
+    /// from its root and its active members, not a member whose grant was
+    /// revoked.
+    #[tokio::test]
+    async fn org_directory_includes_inherited_admins_and_excludes_revoked_members() {
+        let db = crate::db::test_db().await;
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            return;
+        };
+        let [admin, member, revoked] = [Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()];
+        for id in [admin, member, revoked] {
+            User::insert_user(&db, &id, &format!("{id}@example.test"), None, Some(&id))
+                .await
+                .unwrap();
+        }
+        let root = Uuid::now_v7();
+        let child = Uuid::now_v7();
+        crate::db::Org::insert_org(
+            &db,
+            &root,
+            "Root",
+            &root.to_string(),
+            "organization",
+            &admin,
+        )
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO org (org_id,parent_org_id,name,slug,org_type,created_by_user_id) VALUES (?,?,'Child',?,'organization',?)")
+            .bind(child).bind(root).bind(child.to_string()).bind(admin).execute(pool).await.unwrap();
+        // A child grant requires an active root membership.
+        for (org, user, role, active) in [
+            (root, admin, 2_i16, true),
+            (root, member, 1, true),
+            (root, revoked, 1, true),
+            (child, member, 1, true),
+            (child, revoked, 1, false),
+        ] {
+            sqlx::query("INSERT INTO org_user (org_user_id,org_id,user_id,org_user_role_id,active,created_by_user_id) VALUES (?,?,?,?,?,?)")
+                .bind(Uuid::now_v7()).bind(org).bind(user).bind(role).bind(active).bind(admin)
+                .execute(pool).await.unwrap();
+        }
+        let directory: Vec<Uuid> = User::get_users_by_org(&db, &child)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|user| user.user_id)
+            .collect();
+        assert!(directory.contains(&admin), "inherited root administrator");
+        assert!(directory.contains(&member));
+        assert!(!directory.contains(&revoked), "revoked child grant");
     }
 }
