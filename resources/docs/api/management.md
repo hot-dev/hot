@@ -99,7 +99,8 @@ reusing the key with different values is rejected. Children do not create
 billing subscriptions. `PATCH /v1/orgs/{org}` accepts `state` equal to
 `active`, `suspended`, or `archived`, for a child only. A suspended or archived
 child can still be read and have its state changed; every other route under it
-is refused.
+is refused. Its environment keys, sessions and service keys get `403`; they
+are not revoked, so reactivating a suspended child restores them.
 
 **Environments.** `POST /v1/orgs/{org}/envs` accepts `name` and is idempotent
 by exact name within that organization.

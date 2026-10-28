@@ -627,6 +627,8 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             work_before,
             "suspended webhook must not persist or queue an event"
         );
+        // Suspension refuses the child's credentials without revoking them, so
+        // they are forbidden rather than invalid until it is reactivated.
         for token in [&a.api_token, &a.service_token] {
             expect(
                 &app,
@@ -634,7 +636,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
                 &format!("/v1/events/{event_id}"),
                 token,
                 None,
-                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
             )
             .await;
         }
