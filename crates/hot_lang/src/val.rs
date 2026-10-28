@@ -1996,8 +1996,8 @@ impl Val {
     ///
     /// # Example
     /// ```
-    /// use hot::val::Val;
-    /// use hot::val;
+    /// use hot_lang::val::Val;
+    /// use hot_lang::val;
     ///
     /// let val = val!({
     ///     "app": {
@@ -2061,8 +2061,8 @@ impl Val {
     ///
     /// # Example
     /// ```
-    /// use hot::val::Val;
-    /// use hot::val;
+    /// use hot_lang::val::Val;
+    /// use hot_lang::val;
     ///
     /// let val = val!({
     ///     "app": {
@@ -2097,8 +2097,8 @@ impl Val {
     ///
     /// # Example
     /// ```
-    /// use hot::val::Val;
-    /// use hot::val;
+    /// use hot_lang::val::Val;
+    /// use hot_lang::val;
     ///
     /// let val = val!({
     ///     "app": {
@@ -2438,7 +2438,7 @@ impl Val {
     ///
     /// Example:
     /// ```
-    /// use hot::val::Val;
+    /// use hot_lang::val::Val;
     ///
     /// // Create test structure using From implementation
     /// let profile = Val::from([
@@ -2540,7 +2540,7 @@ impl Val {
     ///
     /// Example:
     /// ```
-    /// use hot::val::Val;
+    /// use hot_lang::val::Val;
     ///
     /// // Create test structure using From implementation
     /// let profile = Val::from([
@@ -2746,7 +2746,7 @@ impl Val {
     ///
     /// Example:
     /// ```
-    /// use hot::val;
+    /// use hot_lang::val;
     ///
     /// let map1 = val!({
     ///     "settings": {
