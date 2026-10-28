@@ -115,21 +115,29 @@ program counts against it, and until the program has loaded the run has the
 default timeout. Waits inside the run, such as `::hot::task/await`, are capped
 to the time it has left.
 
-When a run reaches its timeout, the worker asks it to stop and gives it 5 more
-seconds to unwind. Then it records the run as `failed` with
-`Run timed out after N seconds` and frees the executor slot. When the cap
-lowered the function's own timeout, the message says so:
+When a run reaches its timeout, the worker asks it to stop and frees the
+executor slot once it has unwound, or after 5 more seconds if it hasn't. Either
+way the run is recorded as `failed` with `Run timed out after N seconds`. When
+the cap lowered the function's own timeout, the message says so:
 `Run timed out after 3600 seconds (its timeout of 7200 seconds is capped by worker.max-run-timeout)`.
 A timed-out run is retried under its `retry` policy, like any other failure.
+For work longer than an hour, start a [task](/docs/tasks) instead.
 
-The cap also sets how long Hot waits before another worker takes over an event
-whose worker stopped responding. A run may legally last up to the cap, so the
-reclaim window (`queue.event-orphan-idle-ms`, raised as needed) always covers
-the cap plus handler setup. A working worker keeps its claim fresh for as long
-as a run executes, so a long run is not handed to another worker while it is
-alive. The cost of a higher cap is that a crashed worker's in-flight events
-wait that much longer to run again. For work longer than an hour, start a
-[task](/docs/tasks) instead.
+A run longer than `worker.run-timeout` outlasts the window after which another
+worker takes over an event whose worker stopped responding
+(`queue.event-orphan-idle-ms`, raised as needed to cover `worker.run-timeout`
+plus handler setup). While the run executes, its worker keeps refreshing its
+claim on the event, so the event stays with it. If the worker can't refresh the
+claim for two thirds of that window, it stops the run the same way and records
+`Run stopped: its worker could not refresh its claim on the event for N seconds`,
+before any other worker could take the event over. Its `retry` policy applies
+as for any failure, and a later redelivery of the event finds the run finished
+and doesn't run it again. If the worker finds the claim already gone, it stops
+the run and leaves its record to the worker that took the event over. Either
+way, a run doesn't keep running alongside a redelivery of its event, unless it
+is stuck in work it can't be cancelled out of, as with timeouts. This guard
+applies to the Redis queue; the SQLite queue renews its leases but doesn't stop
+a run whose lease lapses.
 
 ### Run Data
 

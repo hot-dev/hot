@@ -1233,10 +1233,10 @@ pub const DEFAULT_RUN_TIMEOUT_SECONDS: u64 = 300; // 5 minutes
 ///
 /// One hour is twice the half-hour model loops that motivated per-handler
 /// timeouts, while still bounding how long one run can hold an executor slot
-/// and a blocking VM thread. The cap also sets the hot:event orphan-reclaim
-/// floor (see `min_event_orphan_idle_floor_ms`), so raising it slows the
-/// redelivery of a crashed worker's in-flight events by the same amount.
-/// Longer work belongs in a task, whose timeout goes to 24 hours.
+/// and a blocking VM thread. Longer work belongs in a task, whose timeout
+/// goes to 24 hours. A run longer than `run-timeout` outlives the orphan
+/// reclaim floor, so the keepalive keeps its event claimed and the claim
+/// fence stops it if the claim lapses (see `ClaimFence`).
 pub const DEFAULT_MAX_RUN_TIMEOUT_SECONDS: u64 = 3_600; // 1 hour
 /// Ceiling for `worker.max-run-timeout`: a run must end well before the
 /// maintenance reaper fails runs still `running` after 25 hours.
@@ -1461,12 +1461,9 @@ async fn acquire_blocking_execution_slot(
 /// A handler that claimed an event may legally spend up to
 /// `EVENT_SOURCE_RETRIEVAL_TIMEOUT` resolving sources (including a cold
 /// bundle download), plus `EVENT_SETUP_TIMEOUT` in post-retrieval
-/// preparation (including blocking-slot admission), then its run budget plus
+/// preparation (including blocking-slot admission), then `run-timeout` plus
 /// `RUN_TIMEOUT_HARD_GRACE` executing, before the worker gives up — and the
-/// event is only ACKed after that. A run's budget is its function's `timeout`
-/// meta (else `run-timeout`) up to `max-run-timeout`, and reclaim applies one
-/// idle threshold to every delivery, so the floor takes the cap: no run a
-/// worker allows can outlive it. This floor budgets that FULL legal
+/// event is only ACKed after that. This floor budgets that FULL legal
 /// pre-ACK lifetime: for a SINGLE-handler event, reclaiming below it would
 /// XAUTOCLAIM an un-ACKed event whose handler is still legally live and start
 /// a duplicate execution on another worker. The extra 5s covers result-flush
@@ -1493,8 +1490,16 @@ async fn acquire_blocking_execution_slot(
 /// `queue.event-orphan-idle-ms` (the configured value is only floored here,
 /// never lowered) is therefore no longer required for multi-handler events,
 /// though it remains available for a wider reclaim margin.
-fn min_event_orphan_idle_floor_ms(max_run_timeout: std::time::Duration) -> u64 {
-    max_run_timeout
+///
+/// Long runs: a function's `timeout` meta can give a run more than
+/// `run-timeout`, up to `max-run-timeout`. Like a multi-handler event, such a
+/// run outlives this floor and relies on the keepalive. The floor stays on
+/// `run-timeout` rather than the cap so a crashed worker's events are
+/// redelivered as promptly as before; instead, the claim fence
+/// (`ClaimFence`) stops a run whose worker can no longer vouch for its claim,
+/// before another worker could reclaim the event.
+fn min_event_orphan_idle_floor_ms(run_timeout: std::time::Duration) -> u64 {
+    run_timeout
         .saturating_add(EVENT_SOURCE_RETRIEVAL_TIMEOUT)
         .saturating_add(EVENT_SETUP_TIMEOUT)
         .saturating_add(RUN_TIMEOUT_HARD_GRACE)
@@ -1519,16 +1524,95 @@ fn event_keepalive_interval_ms(effective_orphan_idle_ms: u64) -> u64 {
     (effective_orphan_idle_ms / 3).max(EVENT_KEEPALIVE_MIN_INTERVAL_MS)
 }
 
+/// How long the keepalive may go without confirming a delivery's claim
+/// before the claim fence stops its runs: two thirds of the effective
+/// reclaim idle. Another worker can reclaim the entry only once it has sat a
+/// full idle window since its last touch, so the remaining third leaves time
+/// for a stopped run to unwind (`RUN_TIMEOUT_HARD_GRACE`) and record its
+/// failure before any redelivery could start it again.
+fn event_claim_fence_after(effective_orphan_idle_ms: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(effective_orphan_idle_ms / 3 * 2)
+}
+
+/// Why a worker can no longer vouch for its claim on an event delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimLoss {
+    /// The delivery is no longer pending for this consumer: another worker
+    /// reclaimed it.
+    Lost,
+    /// No touch has confirmed the claim for this long.
+    Unconfirmed(std::time::Duration),
+}
+
+/// The claim fence: from the keepalive's touch results, decide when a worker
+/// can no longer vouch for its claim on an event delivery, and tell that
+/// delivery's runs, which stop (see `run_must_stop`). A run longer than the
+/// orphan-reclaim floor relies on the keepalive alone, so without the fence
+/// a run whose touches failed long enough would keep running while another
+/// worker started it again. The verdict is one-way.
+struct ClaimFence {
+    last_confirmed: tokio::time::Instant,
+    fence_after: std::time::Duration,
+    loss: tokio::sync::watch::Sender<Option<ClaimLoss>>,
+}
+
+impl ClaimFence {
+    fn new(
+        fence_after: std::time::Duration,
+        now: tokio::time::Instant,
+    ) -> (Self, tokio::sync::watch::Receiver<Option<ClaimLoss>>) {
+        let (loss, claim) = tokio::sync::watch::channel(None);
+        (
+            Self {
+                last_confirmed: now,
+                fence_after,
+                loss,
+            },
+            claim,
+        )
+    }
+
+    /// Record one touch: `Some(true)` confirmed the claim, `Some(false)`
+    /// found it gone, `None` failed to reach Redis. Returns the loss when
+    /// this touch trips the fence.
+    fn observe(&mut self, touched: Option<bool>, now: tokio::time::Instant) -> Option<ClaimLoss> {
+        let loss = match touched {
+            Some(true) => {
+                self.last_confirmed = now;
+                None
+            }
+            Some(false) => Some(ClaimLoss::Lost),
+            None => {
+                let unconfirmed = now.saturating_duration_since(self.last_confirmed);
+                (unconfirmed >= self.fence_after).then_some(ClaimLoss::Unconfirmed(unconfirmed))
+            }
+        }
+        .filter(|_| self.loss.borrow().is_none())?;
+        self.loss.send_replace(Some(loss));
+        Some(loss)
+    }
+}
+
 /// Abort-on-drop guard around the keepalive task spawned by
 /// `spawn_event_lease_keepalive`. Dropping the guard aborts the touch loop,
 /// so it stops on EVERY processing exit path — ACK, handler error, executor
 /// panic — and can never keep refreshing an entry the worker is no longer
-/// working on.
-struct EventKeepaliveGuard(tokio::task::JoinHandle<()>);
+/// working on. It also hands the delivery's runs the claim fence's verdict.
+struct EventKeepaliveGuard {
+    touch_loop: tokio::task::JoinHandle<()>,
+    claim: tokio::sync::watch::Receiver<Option<ClaimLoss>>,
+}
+
+impl EventKeepaliveGuard {
+    /// The claim fence's verdict for this delivery, for its runs to watch.
+    fn claim(&self) -> tokio::sync::watch::Receiver<Option<ClaimLoss>> {
+        self.claim.clone()
+    }
+}
 
 impl Drop for EventKeepaliveGuard {
     fn drop(&mut self) {
-        self.0.abort();
+        self.touch_loop.abort();
     }
 }
 
@@ -1548,6 +1632,10 @@ impl Drop for EventKeepaliveGuard {
 /// Returns `None` for memory queues (no PEL, no orphan reclaim — nothing to
 /// keep alive) and for already-consumed leases. The returned guard must live
 /// exactly as long as processing: dropping it aborts the touch task.
+///
+/// The touch results feed the claim fence (`ClaimFence`): when a touch finds
+/// the delivery gone, or none has confirmed it for `event_claim_fence_after`,
+/// the delivery's runs stop.
 ///
 /// Coverage window: from executor pickup (the first touch fires
 /// immediately, resetting any idle accrued in the prefetch buffer or the
@@ -1570,7 +1658,11 @@ fn spawn_event_lease_keepalive(
     };
     let interval =
         std::time::Duration::from_millis(event_keepalive_interval_ms(effective_orphan_idle_ms));
-    let handle = tokio::spawn(async move {
+    let (mut fence, claim) = ClaimFence::new(
+        event_claim_fence_after(effective_orphan_idle_ms),
+        tokio::time::Instant::now(),
+    );
+    let touch_loop = tokio::spawn(async move {
         // First touch immediately: the delivery may have accrued idle in the
         // prefetch buffer or the claimer->executor handoff before this
         // executor picked it up, so the reclaim window is reset at execution
@@ -1579,7 +1671,18 @@ fn spawn_event_lease_keepalive(
         let mut delay = std::time::Duration::ZERO;
         loop {
             tokio::time::sleep(delay).await;
-            match keepalive.touch().await {
+            let touched = keepalive.touch().await;
+            if let Some(loss) =
+                fence.observe(touched.as_ref().ok().copied(), tokio::time::Instant::now())
+            {
+                warn!(
+                    "hot.dev: WORKER {} stopping the runs of event delivery {}: {:?}",
+                    worker_id,
+                    keepalive.msg_id(),
+                    loss
+                );
+            }
+            match touched {
                 Ok(true) => {
                     debug!(
                         "hot.dev: WORKER {} keepalive touched event delivery {}",
@@ -1617,7 +1720,7 @@ fn spawn_event_lease_keepalive(
             }
         }
     });
-    Some(EventKeepaliveGuard(handle))
+    Some(EventKeepaliveGuard { touch_loop, claim })
 }
 
 // Simplified approach: ensure proper build isolation without complex caching
@@ -4096,6 +4199,7 @@ async fn execute_single_event_handler(
     task_queue: Arc<ProcessingQueue<TaskRequest>>,
     execution_services: Arc<WorkerExecutionServices>,
     blocking_execution_slots: Arc<Semaphore>,
+    claim: Option<watch::Receiver<Option<ClaimLoss>>>,
 ) -> Result<(), String> {
     let (setup_complete_tx, setup_complete_rx) = tokio::sync::oneshot::channel();
     let (source_resolved_tx, source_resolved_rx) = tokio::sync::oneshot::channel();
@@ -4118,6 +4222,7 @@ async fn execute_single_event_handler(
         task_queue,
         execution_services,
         blocking_execution_slots,
+        claim,
         source_resolved_tx,
         setup_complete_tx,
     );
@@ -4168,6 +4273,7 @@ async fn execute_single_event_handler_inner(
     task_queue: Arc<ProcessingQueue<TaskRequest>>,
     execution_services: Arc<WorkerExecutionServices>,
     blocking_execution_slots: Arc<Semaphore>,
+    claim: Option<watch::Receiver<Option<ClaimLoss>>>,
     source_resolved: tokio::sync::oneshot::Sender<()>,
     setup_complete: tokio::sync::oneshot::Sender<()>,
 ) -> Result<(), String> {
@@ -4371,7 +4477,16 @@ async fn execute_single_event_handler_inner(
         _execution_context = _execution_context.with_queue_timing(queue_timing);
     }
 
-    let emitter_for_events = emitter.clone();
+    // Set once the worker decides to stop this run (see `run_must_stop`), so
+    // the failure the VM records as it unwinds names the reason.
+    let stopped = Arc::new(OnceLock::new());
+    let emitter_for_events = emitter.clone().map(|inner| {
+        Arc::new(StoppedRunEmitter {
+            inner,
+            run_id,
+            stopped: Arc::clone(&stopped),
+        }) as Arc<dyn EngineEventEmitter>
+    });
 
     // Create event object with type and data structure
     let event_object = val!({
@@ -5216,9 +5331,10 @@ async fn execute_single_event_handler_inner(
     // Hard run-timeout backstop.
     //
     // The run's budget is its function's `timeout` meta, else `run-timeout`,
-    // capped at `max-run-timeout` (see `run_budget_expired`). The cooperative
-    // cancel token (when `worker.cancel-on-timeout` is enabled) fires at the
-    // budget and asks the VM to unwind. This select! guarantees
+    // capped at `max-run-timeout`; the claim fence can also stop it early (see
+    // `run_must_stop`). The cooperative cancel token (when
+    // `worker.cancel-on-timeout` is enabled) fires at the stop and asks the
+    // VM to unwind. This select! guarantees
     // the executor slot is freed even when the VM cannot observe cancellation
     // (tight native loop, blocking syscall, or `cancel-on-timeout` disabled). On
     // the backstop we record the run as failed and detach the blocking thread:
@@ -5230,10 +5346,12 @@ async fn execute_single_event_handler_inner(
     // non-cooperative orphan is still executing. Cooperative VMs unwind promptly
     // and avoid overlap; for non-cooperative ones the two can briefly run
     // concurrently, which is why event handlers must be idempotent.
-    let budget_expired = run_budget_expired(
+    let must_stop = run_must_stop(
         run_started,
         default_budget,
         budget_rx,
+        claim,
+        stopped,
         external_cancel.clone(),
     );
     let vm_wait_started = std::time::Instant::now();
@@ -5258,26 +5376,28 @@ async fn execute_single_event_handler_inner(
             );
             joined_result
         }
-        budget = budget_expired => {
+        stop = must_stop => {
             if let Some(token) = &external_cancel {
                 token.store(true, std::sync::atomic::Ordering::Relaxed);
             }
+            let stop_error = stop.error();
             error!(
-                "Event handler '{}' timed out after {}s for event '{}' (run {}); freeing executor slot",
-                function_name, budget.timeout.as_secs(), event_message.body.event.event_type, run_id
+                "Event handler '{}' stopped for event '{}' (run {}); freeing executor slot: {}",
+                function_name, event_message.body.event.event_type, run_id, stop_error
             );
-            let timeout_error = budget.timeout_error();
             // Route the timeout through the emitter so it is treated like any other
             // run failure: the database writer applies the handler/schedule retry
             // policy (a timed-out run may be retried) and publishes the standard
             // `run:failed` alert. This is intentional — a timeout is a failure.
             // The direct `fail_run` fallback (no emitter, e.g. in tests) is
             // best-effort and applies neither retry nor alerting.
-            if let Some(ref em) = emitter {
+            if !stop.records_failure() {
+                // Another worker took the event over and records how the run ends.
+            } else if let Some(ref em) = emitter {
                 let failure = val!({
                     "$type": "::hot::run/Failure",
                     "$val": {
-                        "msg": timeout_error.clone(),
+                        "msg": stop_error.clone(),
                         "err": Val::Null,
                     },
                 });
@@ -5307,7 +5427,7 @@ async fn execute_single_event_handler_inner(
             } else {
                 match bounded_run_result_write(
                     RUN_RESULT_FLUSH_TIMEOUT,
-                    hot::db::Run::fail_run(db, &run_id, &timeout_error),
+                    hot::db::Run::fail_run(db, &run_id, &stop_error),
                 )
                 .await
                 {
@@ -5327,7 +5447,7 @@ async fn execute_single_event_handler_inner(
             // The RunRegistration guard unregisters the run as this return
             // unwinds — the run stops counting as active now, even though the
             // detached VM thread may keep executing.
-            return Err(timeout_error);
+            return Err(stop_error);
         }
     };
 
@@ -5659,17 +5779,13 @@ impl RunBudget {
     }
 }
 
-/// Time a run against its budget. Until its program loads a run has the
+/// Wait for a run to reach its budget. Until its program loads a run has the
 /// default budget; the blocking thread then sends the function's own budget,
-/// which moves the deadline to `run_started` plus that budget. At the
-/// deadline the cooperative cancel token fires, and after
-/// `RUN_TIMEOUT_HARD_GRACE` more (none without a token) this returns the
-/// budget so the caller frees the executor slot.
-async fn run_budget_expired(
+/// which moves the deadline to `run_started` plus that budget.
+async fn run_budget_reached(
     run_started: tokio::time::Instant,
     default_budget: RunBudget,
     mut budget_rx: tokio::sync::oneshot::Receiver<RunBudget>,
-    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> RunBudget {
     let budget = tokio::select! {
         biased;
@@ -5677,11 +5793,142 @@ async fn run_budget_expired(
         _ = tokio::time::sleep_until(default_budget.deadline(run_started)) => default_budget,
     };
     tokio::time::sleep_until(budget.deadline(run_started)).await;
+    budget
+}
+
+/// Wait for the claim fence to report a loss; never resolves without a fence
+/// (memory and SQLite queues) or once the keepalive ends without one.
+async fn claim_lost(
+    claim: Option<tokio::sync::watch::Receiver<Option<ClaimLoss>>>,
+) -> Option<ClaimLoss> {
+    let Some(mut claim) = claim else {
+        return std::future::pending().await;
+    };
+    let loss = claim
+        .wait_for(Option::is_some)
+        .await
+        .ok()
+        .and_then(|loss| *loss);
+    match loss {
+        Some(loss) => Some(loss),
+        None => std::future::pending().await,
+    }
+}
+
+/// Why the worker stops a run it is executing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunStop {
+    TimedOut(RunBudget),
+    ClaimLost(ClaimLoss),
+}
+
+impl RunStop {
+    /// Whether this worker records the stopped run's failure. Not once
+    /// another worker has taken the event over: that worker runs the event's
+    /// handlers again under the same run ids and records how they end.
+    fn records_failure(&self) -> bool {
+        !matches!(self, RunStop::ClaimLost(ClaimLoss::Lost))
+    }
+
+    /// Why the run stopped, and the failure it records.
+    fn error(&self) -> String {
+        match self {
+            RunStop::TimedOut(budget) => budget.timeout_error(),
+            RunStop::ClaimLost(ClaimLoss::Lost) => {
+                "Run stopped: another worker took over its event".to_string()
+            }
+            RunStop::ClaimLost(ClaimLoss::Unconfirmed(unconfirmed)) => format!(
+                "Run stopped: its worker could not refresh its claim on the event for {} seconds",
+                unconfirmed.as_secs()
+            ),
+        }
+    }
+}
+
+/// Wait until the worker must stop a run: at its budget (see
+/// `run_budget_reached`), or when the claim fence reports its event's claim
+/// lost. Then note the stop in `stopped` (see `StoppedRunEmitter`), fire the
+/// cooperative cancel token, and after `RUN_TIMEOUT_HARD_GRACE` more (none
+/// without a token) return, so the caller frees the executor slot.
+async fn run_must_stop(
+    run_started: tokio::time::Instant,
+    default_budget: RunBudget,
+    budget_rx: tokio::sync::oneshot::Receiver<RunBudget>,
+    claim: Option<tokio::sync::watch::Receiver<Option<ClaimLoss>>>,
+    stopped: Arc<OnceLock<RunStop>>,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> RunStop {
+    let stop = tokio::select! {
+        budget = run_budget_reached(run_started, default_budget, budget_rx) => RunStop::TimedOut(budget),
+        Some(loss) = claim_lost(claim) => RunStop::ClaimLost(loss),
+    };
+    let _ = stopped.set(stop);
     if let Some(token) = cancel {
         token.store(true, std::sync::atomic::Ordering::Relaxed);
         tokio::time::sleep(RUN_TIMEOUT_HARD_GRACE).await;
     }
-    budget
+    stop
+}
+
+/// Wraps a run's emitter so that, once the worker has decided to stop the
+/// run, the failure the VM records as it unwinds from the cancel names the
+/// worker's reason instead of a bare "Execution cancelled". A run whose event
+/// another worker took over records no end at all (see
+/// `RunStop::records_failure`).
+struct StoppedRunEmitter {
+    inner: Arc<dyn EngineEventEmitter>,
+    run_id: Uuid,
+    stopped: Arc<OnceLock<RunStop>>,
+}
+
+impl EngineEventEmitter for StoppedRunEmitter {
+    fn emit(&self, event: hot::lang::emitter::EngineEvent) {
+        if event.execution_context.run_id == self.run_id
+            && let Some(stop) = self.stopped.get()
+        {
+            match event.event_type.as_str() {
+                "run:fail" | "run:stop" | "run:cancel" if !stop.records_failure() => return,
+                "run:fail" => {
+                    self.inner.emit(hot::lang::emitter::EngineEvent::run_fail(
+                        &event.execution_context,
+                        val!({
+                            "$type": "::hot::run/Failure",
+                            "$val": {
+                                "msg": stop.error(),
+                                "err": Val::Null,
+                            },
+                        }),
+                    ));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.inner.emit(event);
+    }
+
+    fn flush(&self) -> Result<(), String> {
+        self.inner.flush()
+    }
+
+    fn flush_async(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        self.inner.flush_async()
+    }
+
+    fn flush_run(
+        &self,
+        run_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        self.inner.flush_run(run_id)
+    }
+
+    fn shutdown(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        self.inner.shutdown()
+    }
 }
 
 /// On the blocking thread, once a run's program has loaded: resolve the run's
@@ -5827,21 +6074,18 @@ pub async fn run_with_components_shared_context_and_db(
     // Invariant: reclaim idle must exceed the longest an un-ACKed
     // single-handler event can legally be alive on a healthy worker —
     // source retrieval plus post-retrieval setup (including blocking-slot
-    // admission) plus run budget plus hard grace. A function's `timeout`
-    // meta can raise its run budget up to `worker.max-run-timeout`, and the
-    // reclaim idle is one value for the whole stream, so it budgets that cap.
-    // Events whose serial multi-handler execution outlives this window stay
-    // reclaim-safe via the PEL-touch keepalive
+    // admission) plus run budget plus hard grace. Events whose serial
+    // multi-handler execution, or whose function's own `timeout`, outlives
+    // this window stay reclaim-safe via the PEL-touch keepalive
     // (`spawn_event_lease_keepalive`), for which this floor is the crash
-    // backstop; see `min_event_orphan_idle_floor_ms`.
-    let min_event_orphan_idle_ms =
-        min_event_orphan_idle_floor_ms(get_max_run_timeout(&worker_conf));
+    // backstop, and the claim fence; see `min_event_orphan_idle_floor_ms`.
+    let min_event_orphan_idle_ms = min_event_orphan_idle_floor_ms(get_run_timeout(&worker_conf));
     let event_orphan_idle_ms = queue_orphan_idle_ms.max(min_event_orphan_idle_ms);
     if event_orphan_idle_ms != queue_orphan_idle_ms {
         tracing::warn!(
             configured_ms = queue_orphan_idle_ms,
             effective_ms = event_orphan_idle_ms,
-            "Raising hot:event orphan reclaim idle to stay beyond blocking-slot admission plus worker.max-run-timeout and avoid duplicate live handler execution"
+            "Raising hot:event orphan reclaim idle to stay beyond blocking-slot admission plus worker.run-timeout and avoid duplicate live handler execution"
         );
     }
 
@@ -7184,6 +7428,9 @@ pub async fn run_with_components_shared_context_and_db(
                                 event_orphan_idle_ms,
                                 worker_id,
                             );
+                            // The claim fence's verdict, for the delivery's
+                            // runs to stop on (see `ClaimFence`).
+                            let claim = _keepalive_guard.as_ref().map(EventKeepaliveGuard::claim);
                             // Process ONE event message (atomic operation)
                             match lease.process(|message| {
                                 let db_ref = db_clone.clone();
@@ -7198,6 +7445,7 @@ pub async fn run_with_components_shared_context_and_db(
                                 let dev_context_storage_ref = dev_context_storage_clone.clone();
                                 let stream_publisher_ref = stream_publisher_clone.clone();
                                 let task_queue_ref = task_queue_clone.clone();
+                                let claim_ref = claim.clone();
                                 let execution_services_ref = execution_services_clone.clone();
                                 let blocking_execution_slots_ref = blocking_execution_slots_clone.clone();
                                 // Daily queue_cleanup admin handles. Each is pinned to w0's
@@ -7629,7 +7877,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 {
                                                                     timing.handler_dispatched_at = Some(chrono::Utc::now());
                                                                 }
-                                                                let execution_future = execute_single_event_handler(db, &handler_build, &env_id, &worker_conf_ref, &event_handler, &handler_event_message, _emitter_ref.clone(), _event_publisher_ref.clone(), encryption_ref.clone(), cache_ref.clone(), shutdown_coord_ref.clone(), run_id, build_path_cache_ref.clone(), dev_context_storage_ref.clone(), stream_publisher_ref.clone(), task_queue_ref.clone(), execution_services_ref.clone(), blocking_execution_slots_ref.clone());
+                                                                let execution_future = execute_single_event_handler(db, &handler_build, &env_id, &worker_conf_ref, &event_handler, &handler_event_message, _emitter_ref.clone(), _event_publisher_ref.clone(), encryption_ref.clone(), cache_ref.clone(), shutdown_coord_ref.clone(), run_id, build_path_cache_ref.clone(), dev_context_storage_ref.clone(), stream_publisher_ref.clone(), task_queue_ref.clone(), execution_services_ref.clone(), blocking_execution_slots_ref.clone(), claim_ref.clone());
 
                                                                                             match execution_future.await {
                                                                                                 Ok(()) => {
@@ -9439,16 +9687,8 @@ mod tests {
 
     #[test]
     fn event_orphan_reclaim_floor_covers_slot_admission_wait() {
-        let worker_conf = val!({"worker": {"max-run-timeout": 7200}});
-        // The longest budget any function's `timeout` meta can get.
-        let longest = RunBudget::new(
-            Some(u64::MAX / 2),
-            get_run_timeout(&worker_conf),
-            get_max_run_timeout(&worker_conf),
-        );
-        assert_eq!(longest.timeout, std::time::Duration::from_secs(7200));
-        let legal_lifetime_ms = longest
-            .timeout
+        let run_timeout = std::time::Duration::from_secs(DEFAULT_RUN_TIMEOUT_SECONDS);
+        let legal_lifetime_ms = run_timeout
             .saturating_add(EVENT_SOURCE_RETRIEVAL_TIMEOUT)
             .saturating_add(EVENT_SETUP_TIMEOUT)
             .saturating_add(RUN_TIMEOUT_HARD_GRACE)
@@ -9457,14 +9697,13 @@ mod tests {
         // The floor must exceed the longest an un-ACKed SINGLE-handler event
         // can legally be alive on a healthy worker (source retrieval +
         // post-retrieval setup incl. admission wait + run budget + hard
-        // grace), or reclaim would start a duplicate live execution. The run
-        // budget is the cap, since reclaim cannot know a delivery's own.
-        // Multi-handler events can legally exceed the floor; the PEL-touch
-        // keepalive keeps those visibly alive, with this floor as its crash
-        // backstop — see `min_event_orphan_idle_floor_ms` docs.
-        assert!(
-            min_event_orphan_idle_floor_ms(get_max_run_timeout(&worker_conf)) > legal_lifetime_ms
-        );
+        // grace), or reclaim would start a duplicate live execution.
+        // Multi-handler events and runs with a longer `timeout` of their own
+        // can legally exceed the floor; the PEL-touch keepalive keeps those
+        // visibly alive, with this floor as its crash backstop and the claim
+        // fence to stop them if the claim lapses — see
+        // `min_event_orphan_idle_floor_ms` docs.
+        assert!(min_event_orphan_idle_floor_ms(run_timeout) > legal_lifetime_ms);
         assert!(min_event_orphan_idle_floor_ms(std::time::Duration::MAX) > 0);
     }
 
@@ -9517,21 +9756,23 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn run_budget_timer_moves_to_the_function_budget_then_grants_the_grace() {
+    async fn run_stops_at_the_function_budget_then_grants_the_grace() {
         let secs = std::time::Duration::from_secs;
         let default = RunBudget::new(None, secs(300), secs(3_600));
         let started = tokio::time::Instant::now();
         let (budget_tx, budget_rx) = tokio::sync::oneshot::channel();
+        let stopped = Arc::new(OnceLock::new());
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let timer = tokio::spawn(run_budget_expired(
+        let stop = tokio::spawn(run_must_stop(
             started,
             default,
             budget_rx,
+            None,
+            Arc::clone(&stopped),
             Some(Arc::clone(&cancel)),
         ));
-        budget_tx
-            .send(RunBudget::new(Some(1_800), secs(300), secs(3_600)))
-            .unwrap();
+        let budget = RunBudget::new(Some(1_800), secs(300), secs(3_600));
+        budget_tx.send(budget).unwrap();
 
         // Past the default, short of the function's own budget.
         tokio::time::sleep(secs(1_799)).await;
@@ -9541,23 +9782,22 @@ mod tests {
             cancel.load(std::sync::atomic::Ordering::Relaxed),
             "the cooperative cancel fires at the function's own budget"
         );
-        assert!(!timer.is_finished(), "the hard grace follows the cancel");
+        assert_eq!(stopped.get(), Some(&RunStop::TimedOut(budget)));
+        assert!(!stop.is_finished(), "the hard grace follows the cancel");
 
-        let budget = timer.await.unwrap();
-        assert_eq!(budget.timeout, secs(1_800));
+        assert_eq!(stop.await.unwrap(), RunStop::TimedOut(budget));
         assert_eq!(started.elapsed(), secs(1_800) + RUN_TIMEOUT_HARD_GRACE);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn run_budget_timer_keeps_the_default_until_a_budget_arrives() {
+    async fn run_budget_keeps_the_default_until_a_budget_arrives() {
         let secs = std::time::Duration::from_secs;
         let default = RunBudget::new(None, secs(300), secs(3_600));
         let started = tokio::time::Instant::now();
-        // A program still loading at the default deadline gets the default,
-        // and without a cancel token there is no grace to wait out.
+        // A program still loading at the default deadline gets the default.
         let (_budget_tx, budget_rx) = tokio::sync::oneshot::channel();
         assert_eq!(
-            run_budget_expired(started, default, budget_rx, None).await,
+            run_budget_reached(started, default, budget_rx).await,
             default
         );
         assert_eq!(started.elapsed(), secs(300));
@@ -9567,10 +9807,189 @@ mod tests {
         let (budget_tx, budget_rx) = tokio::sync::oneshot::channel();
         drop(budget_tx);
         assert_eq!(
-            run_budget_expired(started, default, budget_rx, None).await,
+            run_budget_reached(started, default, budget_rx).await,
             default
         );
         assert_eq!(started.elapsed(), secs(300));
+    }
+
+    #[test]
+    fn claim_fence_trips_once_when_the_claim_is_lost_or_long_unconfirmed() {
+        let secs = std::time::Duration::from_secs;
+        let idle_ms = min_event_orphan_idle_floor_ms(secs(DEFAULT_RUN_TIMEOUT_SECONDS));
+        let fence_after = event_claim_fence_after(idle_ms);
+        // A tripped fence leaves time to unwind and record the failure
+        // before another worker could reclaim the event.
+        assert!(
+            std::time::Duration::from_millis(idle_ms) - fence_after
+                > RUN_TIMEOUT_HARD_GRACE + RUN_RESULT_FLUSH_TIMEOUT
+        );
+
+        let start = tokio::time::Instant::now();
+        let (mut fence, claim) = ClaimFence::new(fence_after, start);
+        // Failed touches short of the fence leave the run alone, and a
+        // confirmed touch restarts the clock.
+        assert_eq!(fence.observe(None, start + fence_after - secs(1)), None);
+        assert_eq!(fence.observe(Some(true), start + fence_after), None);
+        assert_eq!(fence.observe(None, start + fence_after * 2 - secs(1)), None);
+        assert_eq!(*claim.borrow(), None);
+        // Failing for the whole fence window trips it.
+        assert_eq!(
+            fence.observe(None, start + fence_after * 2),
+            Some(ClaimLoss::Unconfirmed(fence_after))
+        );
+        assert_eq!(*claim.borrow(), Some(ClaimLoss::Unconfirmed(fence_after)));
+        // The verdict is one-way.
+        assert_eq!(fence.observe(Some(true), start + fence_after * 3), None);
+        assert_eq!(fence.observe(Some(false), start + fence_after * 3), None);
+        assert_eq!(*claim.borrow(), Some(ClaimLoss::Unconfirmed(fence_after)));
+
+        // A touch that finds the delivery gone trips it at once.
+        let (mut fence, claim) = ClaimFence::new(fence_after, start);
+        assert_eq!(fence.observe(Some(false), start), Some(ClaimLoss::Lost));
+        assert_eq!(*claim.borrow(), Some(ClaimLoss::Lost));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_stops_when_its_claim_is_lost_before_its_budget() {
+        let secs = std::time::Duration::from_secs;
+        let budget = RunBudget::new(Some(1_800), secs(300), secs(3_600));
+        let started = tokio::time::Instant::now();
+        let (budget_tx, budget_rx) = tokio::sync::oneshot::channel();
+        budget_tx.send(budget).unwrap();
+        let (mut fence, claim) = ClaimFence::new(secs(300), started);
+        let stopped = Arc::new(OnceLock::new());
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = tokio::spawn(run_must_stop(
+            started,
+            budget,
+            budget_rx,
+            Some(claim),
+            Arc::clone(&stopped),
+            Some(Arc::clone(&cancel)),
+        ));
+
+        tokio::time::sleep(secs(600)).await;
+        assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+        fence.observe(Some(false), tokio::time::Instant::now());
+        tokio::task::yield_now().await;
+        assert!(
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            "a lost claim cancels the run long before its budget"
+        );
+        assert_eq!(stop.await.unwrap(), RunStop::ClaimLost(ClaimLoss::Lost));
+        assert_eq!(started.elapsed(), secs(600) + RUN_TIMEOUT_HARD_GRACE);
+        assert_eq!(stopped.get(), Some(&RunStop::ClaimLost(ClaimLoss::Lost)));
+        assert_eq!(
+            RunStop::ClaimLost(ClaimLoss::Lost).error(),
+            "Run stopped: another worker took over its event"
+        );
+        assert_eq!(
+            RunStop::ClaimLost(ClaimLoss::Unconfirmed(secs(307))).error(),
+            "Run stopped: its worker could not refresh its claim on the event for 307 seconds"
+        );
+    }
+
+    #[test]
+    fn stopped_run_emitter_records_the_worker_reason_for_its_run() {
+        #[derive(Default)]
+        struct Collect(std::sync::Mutex<Vec<hot::lang::emitter::EngineEvent>>);
+        impl EngineEventEmitter for Collect {
+            fn emit(&self, event: hot::lang::emitter::EngineEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+        let collected = Arc::new(Collect::default());
+        let run_id = Uuid::now_v7();
+        let stopped = Arc::new(OnceLock::new());
+        let emitter = StoppedRunEmitter {
+            inner: collected.clone(),
+            run_id,
+            stopped: Arc::clone(&stopped),
+        };
+        let context = |run_id| {
+            ExecutionContext::new(
+                run_id,
+                Uuid::now_v7(),
+                hot::db::run::RunType::Event.as_id(),
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        let cancelled = hot::lang::emitter::EngineEvent::run_fail(
+            &context(run_id),
+            Val::from("Execution cancelled"),
+        );
+
+        let original = cancelled.event_data.get_str("msg");
+
+        // Before the worker stops the run, its failures pass through.
+        emitter.emit(cancelled.clone());
+        let secs = std::time::Duration::from_secs;
+        stopped
+            .set(RunStop::TimedOut(RunBudget::new(
+                Some(2),
+                secs(300),
+                secs(3_600),
+            )))
+            .unwrap();
+        emitter.emit(cancelled.clone());
+        // Other runs' events, and other events, pass through untouched.
+        emitter.emit(hot::lang::emitter::EngineEvent::run_fail(
+            &context(Uuid::now_v7()),
+            Val::from("Execution cancelled"),
+        ));
+        emitter.emit(hot::lang::emitter::EngineEvent::run_start(&context(run_id)));
+
+        let messages: Vec<_> = collected
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| {
+                let msg = event
+                    .event_data
+                    .get("msg")
+                    .map(|_| event.event_data.get_str("msg"));
+                (event.event_type.clone(), msg.unwrap_or_default())
+            })
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                ("run:fail".to_string(), original.clone()),
+                (
+                    "run:fail".to_string(),
+                    "Run timed out after 2 seconds".to_string()
+                ),
+                ("run:fail".to_string(), original.clone()),
+                ("run:start".to_string(), String::new()),
+            ]
+        );
+
+        // A run whose event another worker took over records no end here.
+        let collected = Arc::new(Collect::default());
+        let lost = StoppedRunEmitter {
+            inner: collected.clone(),
+            run_id,
+            stopped: Arc::new(OnceLock::from(RunStop::ClaimLost(ClaimLoss::Lost))),
+        };
+        lost.emit(cancelled.clone());
+        lost.emit(hot::lang::emitter::EngineEvent::run_stop(
+            &context(run_id),
+            Val::Null,
+        ));
+        lost.emit(hot::lang::emitter::EngineEvent::run_start(&context(run_id)));
+        let types: Vec<_> = collected
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| event.event_type.clone())
+            .collect();
+        assert_eq!(types, ["run:start"]);
     }
 
     #[test]
@@ -9591,7 +10010,7 @@ mod tests {
         // gets at least two touch opportunities per reclaim window, so one
         // missed/failed touch cannot orphan it.
         let floor = min_event_orphan_idle_floor_ms(std::time::Duration::from_secs(
-            DEFAULT_MAX_RUN_TIMEOUT_SECONDS,
+            DEFAULT_RUN_TIMEOUT_SECONDS,
         ));
         assert!(event_keepalive_interval_ms(floor) * 3 <= floor);
     }
@@ -9612,10 +10031,13 @@ mod tests {
         // the future itself: whether the abort lands before or after the
         // task's first poll, dropping the future runs the destructor.
         let signal = SignalOnDrop(Some(dropped_tx));
-        let guard = EventKeepaliveGuard(tokio::spawn(async move {
-            let _signal = signal;
-            std::future::pending::<()>().await;
-        }));
+        let guard = EventKeepaliveGuard {
+            touch_loop: tokio::spawn(async move {
+                let _signal = signal;
+                std::future::pending::<()>().await;
+            }),
+            claim: tokio::sync::watch::channel(None).1,
+        };
         drop(guard);
 
         tokio::time::timeout(std::time::Duration::from_secs(5), dropped_rx)
@@ -9780,6 +10202,7 @@ mod tests {
             task_queue,
             execution_services,
             Arc::new(Semaphore::new(1)),
+            None,
         )
         .await;
 
@@ -9911,6 +10334,7 @@ mod tests {
             task_queue,
             execution_services,
             Arc::new(Semaphore::new(1)),
+            None,
         )
         .await;
 
@@ -10054,7 +10478,11 @@ fn (url: Str, wait: Int): Int {
         );
         // Run one event through the worker, timing it from the moment the
         // handler is handed over.
-        let run = |event_type: &str, handler: (&str, &str), event_data: Val, worker_conf: Val| {
+        let run = |event_type: &str,
+                   handler: (&str, &str),
+                   event_data: Val,
+                   worker_conf: Val,
+                   claim: Option<watch::Receiver<Option<ClaimLoss>>>| {
             let event_id = Uuid::now_v7();
             let stream_id = Uuid::now_v7();
             let event_message = EventMessage {
@@ -10128,6 +10556,7 @@ fn (url: Str, wait: Int): Int {
                     task_queue,
                     execution_services,
                     Arc::new(Semaphore::new(4)),
+                    claim,
                 )
                 .await;
                 (result, started.elapsed())
@@ -10150,6 +10579,7 @@ fn (url: Str, wait: Int): Int {
             ("::timeout-test", "quick"),
             val!({"url": slow_server.clone(), "wait": 30_000}),
             no_cancel(30, 3_600),
+            None,
         )
         .await;
         assert_eq!(result.unwrap_err(), "Run timed out after 2 seconds");
@@ -10161,6 +10591,7 @@ fn (url: Str, wait: Int): Int {
             ("::timeout-test", "patient"),
             val!({"url": slow_server.clone(), "wait": 3_500}),
             no_cancel(2, 3_600),
+            None,
         )
         .await;
         result.unwrap();
@@ -10172,6 +10603,7 @@ fn (url: Str, wait: Int): Int {
             ("::timeout-test", "greedy"),
             val!({"url": slow_server.clone(), "wait": 30_000}),
             no_cancel(2, 3),
+            None,
         )
         .await;
         assert_eq!(
@@ -10187,10 +10619,36 @@ fn (url: Str, wait: Int): Int {
             ("::hot::lang", "call-event-handler"),
             val!({"fn": "::timeout-test/called", "args": [slow_server.clone(), 3_500]}),
             no_cancel(2, 3_600),
+            None,
         )
         .await;
         result.unwrap();
         assert!(elapsed >= secs(3.5), "{elapsed:?}");
+
+        // A run whose worker loses its claim on the event stops at once,
+        // long before its own timeout.
+        let (mut fence, claim) = ClaimFence::new(
+            std::time::Duration::from_secs(300),
+            tokio::time::Instant::now(),
+        );
+        let lose_claim = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            fence.observe(Some(false), tokio::time::Instant::now())
+        });
+        let (result, elapsed) = run(
+            "timeout-test:patient",
+            ("::timeout-test", "patient"),
+            val!({"url": slow_server.clone(), "wait": 30_000}),
+            no_cancel(2, 3_600),
+            Some(claim),
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "Run stopped: another worker took over its event"
+        );
+        assert!(elapsed >= secs(1.0) && elapsed < secs(10.0), "{elapsed:?}");
+        assert_eq!(lose_claim.await.unwrap(), Some(ClaimLoss::Lost));
 
         if let DatabasePool::Sqlite(pool) = &db {
             pool.close().await;
