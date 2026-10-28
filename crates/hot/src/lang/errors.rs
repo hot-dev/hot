@@ -247,12 +247,16 @@ pub enum CompilerError {
         enum_name: String,
         location: Option<ErrorLocation>,
     },
-    /// `match` on a closed `enum` doesn't cover every declared variant and
-    /// has no `_` default arm. The set of missing variants is included so
-    /// the user can mechanically add the needed arms.
+    /// `match` on a closed `enum` or closed literal union doesn't cover
+    /// every declared variant or value and has no `_` default arm. The set
+    /// of missing variants is included so the user can mechanically add
+    /// the needed arms.
     NonExhaustiveMatch {
         enum_name: String,
         missing_variants: Vec<String>,
+        /// True for a literal union, whose missing entries are rendered
+        /// values (`"medium"`, `2`, `null`) rather than variant names.
+        literal_values: bool,
         location: Option<ErrorLocation>,
     },
     /// A literal-union type was re-declared with mismatched openness, or
@@ -427,6 +431,22 @@ fn nested_placeholder_owner(function: &str) -> String {
     } else {
         format!("`{}`'s", function)
     }
+}
+
+/// The missing arms of a non-exhaustive match, as `` `Enum.Variant` `` or,
+/// for a literal union, `` `"value"` ``.
+fn format_missing_arms(enum_name: &str, missing: &[String], literal_values: bool) -> String {
+    missing
+        .iter()
+        .map(|v| {
+            if literal_values {
+                format!("`{}`", v)
+            } else {
+                format!("`{}.{}`", enum_name, v)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl fmt::Display for CompilerError {
@@ -1034,13 +1054,10 @@ impl fmt::Display for CompilerError {
             CompilerError::NonExhaustiveMatch {
                 enum_name,
                 missing_variants,
+                literal_values,
                 location,
             } => {
-                let missing = missing_variants
-                    .iter()
-                    .map(|v| format!("`{}.{}`", enum_name, v))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let missing = format_missing_arms(enum_name, missing_variants, *literal_values);
                 if let Some(loc) = location {
                     write!(
                         f,
@@ -1844,13 +1861,17 @@ impl CompilerErrors {
             CompilerError::NonExhaustiveMatch {
                 enum_name,
                 missing_variants,
+                literal_values,
                 ..
             } => {
-                let missing = missing_variants
-                    .iter()
-                    .map(|v| format!("`{}.{}`", enum_name, v))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let missing = format_missing_arms(enum_name, missing_variants, *literal_values);
+                let help = if *literal_values {
+                    "Closed literal unions require every value to be matched. \
+                     Either add the missing arms or add a `_` default arm."
+                } else {
+                    "Closed enums (`enum { ... }`) require every variant to be matched. \
+                     Either add the missing arms or add a `_` default arm."
+                };
                 report = report
                     .with_code("non-exhaustive-match")
                     .with_message(format!("non-exhaustive `match` on `{}`", enum_name))
@@ -1859,10 +1880,7 @@ impl CompilerErrors {
                             .with_message(format!("missing arms for {}", missing))
                             .with_color(label_color),
                     )
-                    .with_help(
-                        "Closed enums (`enum { ... }`) require every variant to be matched. \
-                         Either add the missing arms or add a `_` default arm.",
-                    );
+                    .with_help(help);
             }
             CompilerError::OpenLiteralUnionMismatch {
                 type_name, message, ..

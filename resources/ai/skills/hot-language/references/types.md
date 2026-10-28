@@ -185,6 +185,24 @@ the set (from JSON, say) fails where it enters the type, as a
 values of its base type at runtime, so use `open` for values an external
 service sends, which it may add to.
 
+A `match` on a closed literal union (named or inline) must be
+**exhaustive**, like a closed enum: every member needs an arm, unless a
+`_`, `Any`, or type arm (`Str`) covers the rest. A union arm counts each
+value it names. A nullable subject (`Fruit?`) also needs a `null` arm.
+Otherwise the compiler reports `non-exhaustive-match` with the missing
+values:
+
+<!-- hot-check: skip -->
+```hot
+Severity type "low" | "medium" | "high"
+
+// non-exhaustive-match: missing arms for `"medium"`
+rate fn match (s: Severity): Int {
+    "low" => { 1 }
+    "high" => { 3 }
+}
+```
+
 ### Open Literal Unions
 
 A literal union may be declared `open` to allow other namespaces (or
@@ -385,6 +403,21 @@ area fn match (shape: Shape): Dec {
 `match` on a closed enum must be **exhaustive**: every variant either has its
 own arm or a `_` default arm catches the rest. The compiler rejects
 non-exhaustive matches (`non-exhaustive-match`).
+
+### Enums from Other Namespaces
+
+Import the enum type (`Shape ::geo/Shape`, then `Shape.Circle(...)`), or name
+the variant in full. Qualified variants work in calls, as values, in `match`
+arms, and as aliases. A variant's payload type can be qualified too:
+
+<!-- hot-check: skip -->
+```hot
+b ::geo/Shape.Circle(radius: 2.0)
+c ::g/Shape.Circle({radius: 3.0})        // ::g is an alias of ::geo
+d ::geo/Shape.Dot                        // unit variant: the value
+Circle ::geo/Shape.Circle                // variant alias: the constructor
+Form enum { Round(::geo/Circle), Flat }  // qualified payload type
+```
 
 ### Open Enums
 

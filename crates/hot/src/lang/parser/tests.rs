@@ -2540,6 +2540,74 @@ fn named_arguments_parse_in_calls() {
     assert_eq!(value.to_string(), "User(age: 3, lazy: true)");
 }
 
+/// `::ns/Type.Variant` is a qualified reference whose name is
+/// `Type.Variant`, the name the variant's constructor is registered under,
+/// whether it is called or not.
+#[test]
+fn qualified_enum_variants_parse_as_qualified_references() {
+    fn variant_name(value: &Value) -> Option<(String, String)> {
+        match value {
+            Value::Ref(Ref::Ns(ns_ref)) => {
+                Some((ns_ref.ns.to_string(), ns_ref.function_name.clone()?))
+            }
+            Value::FnCall(call) => variant_name(&call.function),
+            _ => None,
+        }
+    }
+    for (source, ns, name) in [
+        ("::geo/Shape.Circle(radius: 2.5)", "::geo", "Shape.Circle"),
+        ("::g/Shape.Circle({radius: 2.5})", "::g", "Shape.Circle"),
+        ("::geo::shapes/Shape.Dot", "::geo::shapes", "Shape.Dot"),
+        ("::hot::type/Result.Ok(1)", "::hot::type", "Result.Ok"),
+    ] {
+        let value = parse_hot_expression(source).unwrap_or_else(|e| panic!("{source:?}: {e}"));
+        assert_eq!(
+            variant_name(&value),
+            Some((ns.to_string(), name.to_string())),
+            "{source:?}: {value:?}"
+        );
+    }
+    let err = format!(
+        "{:?}",
+        parse_hot_expression("::geo/Shape.").expect_err("no variant")
+    );
+    assert!(err.contains("Expected identifier"), "{err}");
+}
+
+/// A variant's payload type can be qualified, in both enum forms.
+#[test]
+fn enum_variant_payload_types_can_be_qualified() {
+    let source = r#"::forms ns
+::gt ::geo::types
+Form enum { Ring(::geo::types/Round), Disk(::gt/Round), Square(Square), Dot }
+Path type
+  | Bend(::geo::types/Round)
+  | Flat
+"#;
+    let program = parse_hot(source).unwrap_or_else(|e| panic!("{e}"));
+    let payloads = |name: &str| -> Vec<Option<String>> {
+        find_type_def(&program, name)
+            .and_then(|def| def.variants.as_ref())
+            .unwrap_or_else(|| panic!("{name} has no variants"))
+            .iter()
+            .map(|variant| variant.type_ref.clone())
+            .collect()
+    };
+    assert_eq!(
+        payloads("Form"),
+        vec![
+            Some("::geo::types/Round".to_string()),
+            Some("::gt/Round".to_string()),
+            Some("Square".to_string()),
+            None,
+        ]
+    );
+    assert_eq!(
+        payloads("Path"),
+        vec![Some("::geo::types/Round".to_string()), None]
+    );
+}
+
 #[test]
 fn named_arguments_come_last_and_once() {
     for (source, message) in [
