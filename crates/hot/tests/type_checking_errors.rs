@@ -1424,6 +1424,258 @@ mod integration_tests {
         assert!(violations.iter().any(|m| m.contains("0 fails `Port`")));
     }
 
+    fn violations(source: &str) -> Vec<String> {
+        compile_and_get_type_errors(source)
+            .iter()
+            .filter(|e| constraint_code(e) == Some("constraint-violation"))
+            .map(|e| e.to_string())
+            .collect()
+    }
+
+    /// A predicate that calls a pure function of the program is evaluated
+    /// through it: a single-expression body, local bindings and `cond`.
+    #[test]
+    fn test_where_rejects_failing_literals_through_user_functions() {
+        let source = r#"
+            ::test ns
+            short fn (s: Str): Bool { lte(length(s), 3) }
+            max-len 3
+            fits fn (s: Str): Bool {
+                n length(s)
+                lte(n, max-len)
+            }
+            sized fn cond (n: Int): Bool {
+                lt(n, 0) => { false }
+                => { short-int(n) }
+            }
+            short-int fn (n: Int): Bool { lt(n, 100) }
+            Tiny type Str where short(%)
+            Fitted type Str where fits(%)
+            Sized type Int where sized(%)
+            take fn (s: Str where short(%)): Str { s }
+            t: Tiny "too long"
+            f: Fitted "also too long"
+            s: Sized 100
+            a take("long again")
+        "#;
+        let found = violations(source);
+        assert_eq!(found.len(), 4, "Expected four violations. Got: {:?}", found);
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("\"too long\" fails `Tiny`"))
+        );
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("\"also too long\" fails `Fitted`"))
+        );
+        assert!(found.iter().any(|m| m.contains("100 fails `Sized`")));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("\"long again\" fails `short(%)`"))
+        );
+
+        let passing = r#"
+            ::test ns
+            short fn (s: Str): Bool { lte(length(s), 3) }
+            sized fn cond (n: Int): Bool {
+                lt(n, 0) => { false }
+                => { true }
+            }
+            Tiny type Str where short(%)
+            Sized type Int where sized(%)
+            t: Tiny "abc"
+            s: Sized 7
+        "#;
+        let errors = compile_and_get_type_errors(passing);
+        assert!(
+            errors.is_empty(),
+            "Passing literals compile. Got: {:?}",
+            errors
+        );
+    }
+
+    /// Evaluation gives up, reporting nothing, on what it can't follow:
+    /// recursion past its budget, a refined parameter, a parameter type the
+    /// literal doesn't have, and a function it doesn't know.
+    #[test]
+    fn test_where_user_function_evaluation_gives_up_quietly() {
+        let source = r#"
+            ::test ns
+            countdown fn cond (n: Int): Bool {
+                lte(n, 0) => { false }
+                => { countdown(sub(n, 1)) }
+            }
+            guarded fn (n: Int where gt(%, 0)): Bool { false }
+            typed fn (n: Int): Bool { false }
+            opaque fn (s: Str): Bool { eq(uppercase(s), "X") }
+            Deep type Int where countdown(%)
+            Guarded type Int where guarded(%)
+            Typed type Str where typed(%)
+            Opaque type Str where opaque(%)
+            d: Deep 1000
+            g: Guarded 0
+            t: Typed "x"
+            o: Opaque "y"
+        "#;
+        let found = violations(source);
+        assert!(found.is_empty(), "Expected no violations. Got: {:?}", found);
+    }
+
+    /// Literal fields of a constructor call, named or in Map form, are
+    /// checked against their field types, with the field's path.
+    #[test]
+    fn test_where_rejects_failing_constructor_fields() {
+        let source = r#"
+            ::test ns
+            Pos type Int where gt(%, 0)
+            Fruit type "apple" | "banana"
+            Rec type { n: Int where gt(%, 0) }
+            Typed type { p: Pos, f: Fruit, q: Pos? }
+            Outer type { inner: Rec }
+            Circle type { radius: Dec where gt(%, 0) }
+            Shape enum { Circle(Circle), Point }
+            a Rec(n: 0)
+            b Rec({n: -1})
+            c Typed(p: 0, f: "kiwi", q: 0)
+            d Outer({inner: {n: 0}})
+            e Shape.Circle(radius: 0.0)
+        "#;
+        let found = violations(source);
+        assert_eq!(
+            found.len(),
+            7,
+            "Expected seven violations. Got: {:?}",
+            found
+        );
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("0 fails `gt(%, 0)` at `n` of `Rec`"))
+        );
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("-1 fails `gt(%, 0)` at `n` of `Rec`"))
+        );
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("0 fails `Pos` (gt(%, 0)) at `p` of `Typed`"))
+        );
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("0 fails `Pos` (gt(%, 0)) at `q` of `Typed`"))
+        );
+        assert!(found.iter().any(
+            |m| m.contains("\"kiwi\" isn't one of the values of `Fruit`")
+                && m.contains("at `f` of `Typed`")
+        ));
+        assert!(found.iter().any(|m| m.contains("at `inner.n` of `Outer`")));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("0.0 fails `gt(%, 0)` at `radius` of `Circle`"))
+        );
+
+        let passing = r#"
+            ::test ns
+            Pos type Int where gt(%, 0)
+            Rec type { n: Int where gt(%, 0) }
+            Typed type { p: Pos, q: Pos? }
+            x 0
+            a Rec(n: 1)
+            b Rec({n: x})
+            c Typed(p: 3, q: null)
+        "#;
+        let errors = compile_and_get_type_errors(passing);
+        assert!(
+            errors.is_empty(),
+            "Passing fields compile. Got: {:?}",
+            errors
+        );
+    }
+
+    /// A record's invariant is checked when every field it reads is a literal.
+    #[test]
+    fn test_where_rejects_failing_record_invariants() {
+        let source = r#"
+            ::test ns
+            Range type { low: Int, high: Int } where lte(%.low, %.high)
+            a Range(low: 5, high: 1)
+            b Range({low: 3, high: 2})
+        "#;
+        let found = violations(source);
+        assert_eq!(found.len(), 2, "Expected two violations. Got: {:?}", found);
+        assert!(
+            found
+                .iter()
+                .all(|m| m.contains("fails `Range` (lte(%.low, %.high))"))
+        );
+
+        let passing = r#"
+            ::test ns
+            Range type { low: Int, high: Int } where lte(%.low, %.high)
+            x 0
+            a Range(low: 1, high: 5)
+            b Range(low: 5, high: x)
+        "#;
+        let errors = compile_and_get_type_errors(passing);
+        assert!(
+            errors.is_empty(),
+            "Passing records compile. Got: {:?}",
+            errors
+        );
+    }
+
+    /// Typed bindings inside function bodies are checked like top-level ones.
+    #[test]
+    fn test_where_rejects_failing_literals_in_bodies() {
+        let source = r#"
+            ::test ns
+            Pos type Int where gt(%, 0)
+            Fruit type "apple" | "banana"
+            main fn (): Int {
+                x: Pos 0
+                f: Fruit "kiwi"
+                limit: Int 0 where gt(%, 0)
+                inner (y) {
+                    z: Pos -2
+                    z
+                }
+                x
+            }
+        "#;
+        let found = violations(source);
+        assert_eq!(found.len(), 4, "Expected four violations. Got: {:?}", found);
+        assert!(found.iter().any(|m| m.contains("0 fails `Pos`")));
+        assert!(found.iter().any(|m| m.contains("-2 fails `Pos`")));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("\"kiwi\" isn't one of the values of `Fruit`"))
+        );
+        assert!(found.iter().any(|m| m.contains("0 fails `gt(%, 0)`")));
+
+        let passing = r#"
+            ::test ns
+            Pos type Int where gt(%, 0)
+            main fn (): Int {
+                x: Pos 1
+                x
+            }
+        "#;
+        let errors = compile_and_get_type_errors(passing);
+        assert!(
+            errors.is_empty(),
+            "Passing bindings compile. Got: {:?}",
+            errors
+        );
+    }
+
     /// A literal outside an open union's known values is a warning, and a
     /// refined primitive used with `is-type` warns that it is untagged.
     #[test]
