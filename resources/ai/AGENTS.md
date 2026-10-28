@@ -377,7 +377,7 @@ round fn (x: Int | Dec): Int
 floor fn (x: Int | Dec): Int
 ceil fn (x: Int | Dec): Int
 rand fn (): Dec
-rand fn (n: Int): Dec
+rand fn (n: Int | Dec): Dec
 rand-int fn (): Int
 rand-int fn (n: Int): Int
 
