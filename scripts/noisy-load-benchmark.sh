@@ -10,6 +10,9 @@
 ###     scripts/noisy-load-benchmark.sh
 ###
 ### Outputs are written under target/noisy-load-runs/<timestamp>/.
+###
+### The final binary refuses the schema owner as its PostgreSQL runtime login,
+### so its pg-valkey runs migrate as the owner and run as a restricted login.
 
 set -euo pipefail
 
@@ -29,6 +32,12 @@ DB_USER="${DB_USER:-hot}"
 DB_PASSWORD="${DB_PASSWORD:-hot}"
 DB_NAME="${DB_NAME:-hot}"
 DB_URI="postgres://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/${DB_NAME}"
+RUNTIME_DB_USER="${RUNTIME_DB_USER:-hot_noisy_runtime}"
+RUNTIME_DB_PASSWORD="${RUNTIME_DB_PASSWORD:-hot_noisy_runtime}"
+RUNTIME_DB_URI="postgres://${RUNTIME_DB_USER}:${RUNTIME_DB_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/${DB_NAME}"
+# The login the current case's Hot commands use: the owner, unless the case
+# provisioned the restricted runtime login.
+EXECUTION_DB_URI="$DB_URI"
 VALKEY_URI="redis://127.0.0.1:${VALKEY_PORT}"
 
 DURATION_SECONDS="${DURATION_SECONDS:-82}"
@@ -159,6 +168,28 @@ start_containers() {
     wait_for_valkey
 }
 
+# Migrate the fresh database as the owner, then grant the restricted runtime
+# login what it needs, as a production deployment does.
+provision_runtime_login() {
+    local bin
+    bin="$(binary_for_label final)"
+    docker exec -i "$POSTGRES_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -q \
+        -v role="$RUNTIME_DB_USER" -v password="$RUNTIME_DB_PASSWORD" >/dev/null <<'SQL'
+SELECT format('CREATE ROLE %I', :'role')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'role') \gexec
+SELECT format('ALTER ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE',
+              :'role', :'password') \gexec
+SQL
+    (
+        cd "$NOISY_DIR"
+        HOT_DB_URI="$RUNTIME_DB_URI" HOT_DB_MIGRATION_URI="$DB_URI" "$bin" db migrate
+    )
+    docker exec -i "$POSTGRES_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q \
+        -v runtime_role="$RUNTIME_DB_USER" -v schema=hot \
+        < resources/db/postgres/provision_runtime.sql >/dev/null
+    EXECUTION_DB_URI="$RUNTIME_DB_URI"
+}
+
 cleanup_containers() {
     if [[ "$KEEP_CONTAINERS" == "0" ]]; then
         docker_rm_if_exists "$POSTGRES_CONTAINER"
@@ -224,7 +255,8 @@ run_with_backend_env() {
             "$@"
     else
         env \
-            HOT_DB_URI="$DB_URI" \
+            HOT_DB_URI="$EXECUTION_DB_URI" \
+            HOT_DB_MIGRATION_URI="$DB_URI" \
             HOT_REDIS_URI="$VALKEY_URI" \
             HOT_QUEUE_TYPE="redis" \
             HOT_SERIALIZATION_TYPE="json" \
@@ -302,7 +334,7 @@ deploy_bundle_locally() {
     local -a deploy_cmd
     deploy_cmd=("$bin" deploy --local)
     if [[ "$backend" == "pg-valkey" ]]; then
-        deploy_cmd+=(--db.uri "$DB_URI")
+        deploy_cmd+=(--db.uri "$EXECUTION_DB_URI")
     fi
 
     (
@@ -357,7 +389,7 @@ run_hot_dev() {
 
     if [[ "$backend" == "pg-valkey" ]]; then
         cmd+=(
-            --db.uri "$DB_URI"
+            --db.uri "$EXECUTION_DB_URI"
             --redis.uri "$VALKEY_URI"
             --queue.type redis
             --serialization.type json
@@ -379,7 +411,8 @@ run_hot_dev() {
                 "${cmd[@]}"
         else
             exec env \
-                HOT_DB_URI="$DB_URI" \
+                HOT_DB_URI="$EXECUTION_DB_URI" \
+                HOT_DB_MIGRATION_URI="$DB_URI" \
                 HOT_REDIS_URI="$VALKEY_URI" \
                 HOT_QUEUE_TYPE="redis" \
                 HOT_SERIALIZATION_TYPE="json" \
@@ -596,8 +629,12 @@ run_case() {
     local run_dir="$RUN_ROOT/$run_name"
     mkdir -p "$run_dir"
 
+    EXECUTION_DB_URI="$DB_URI"
     if [[ "$backend" == "pg-valkey" ]]; then
         reset_pg_valkey
+        if [[ "$label" == "final" ]]; then
+            provision_runtime_login
+        fi
     fi
 
     run_hot_dev "$label" "$backend" "$worker_threads" "$task_concurrency" "$run_dir" "$deploy_mode"
