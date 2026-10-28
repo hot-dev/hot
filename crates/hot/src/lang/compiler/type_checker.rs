@@ -701,6 +701,50 @@ impl TypeChecker {
         None
     }
 
+    /// Report unresolved type names in the meta keys that hold type references:
+    /// `agent` and `workflow` (a single type) and `workflows` (a Vec of types)
+    /// on handlers. Meta is a literal, so a bare name there is kept as an
+    /// unevaluated ref and would otherwise only fail when something reads it
+    /// at run time. A Map under `agent`/`workflow` is a type's own config and
+    /// a Str is taken as written, so neither is checked.
+    fn check_meta_type_refs(&mut self, var: &Var) {
+        let Some(Val::Map(meta)) = var.meta.as_ref().map(|m| &m.val) else {
+            return;
+        };
+        for key in ["agent", "workflow", "workflows"] {
+            match meta.get(&Val::from(key)) {
+                Some(Val::Vec(items)) if key == "workflows" => {
+                    for item in items.iter() {
+                        self.check_meta_type_ref(item);
+                    }
+                }
+                Some(value) => self.check_meta_type_ref(value),
+                None => {}
+            }
+        }
+    }
+
+    fn check_meta_type_ref(&mut self, value: &Val) {
+        let Val::Box(boxed) = value else {
+            return;
+        };
+        let Some(node) = boxed.as_any().downcast_ref::<crate::lang::ast::AstNode>() else {
+            return;
+        };
+        let (type_name, src) = match &node.0 {
+            Value::Ref(Ref::Var(var_ref)) => (
+                var_ref.var.sym.name().to_string(),
+                var_ref.src.as_ref().or(var_ref.var.src.as_ref()),
+            ),
+            Value::Ref(Ref::Ns(ns_ref)) => match &ns_ref.function_name {
+                Some(name) => (format!("{}/{}", ns_ref.ns, name), ns_ref.src.as_ref()),
+                None => return,
+            },
+            _ => return,
+        };
+        self.resolve_type_annotation(&type_name, src);
+    }
+
     /// Resolve a call's `lookup_name` to the matched deprecated definition if
     /// the callee was declared deprecated. Returns the resolved definition key
     /// (the `::ns/name` form stored in `deprecated_defs`) alongside its
@@ -2408,6 +2452,7 @@ impl TypeChecker {
         // Second pass: infer types for all variables
         for (var, value) in &namespace.scope.vars {
             let var_name = var.sym.name().to_string();
+            self.check_meta_type_refs(var);
 
             // Track the qualified name of the definition whose body we're about
             // to walk so the deprecation check can suppress self-references.
@@ -6080,5 +6125,86 @@ mod tests {
             "::chain::c/z must resolve through b -> a to Str, got {:?}",
             resolved
         );
+    }
+
+    fn unresolved_meta_types(source: &str) -> Vec<(String, Option<ErrorLocation>)> {
+        use crate::lang::parser::parse_hot;
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&parse_hot(source).expect("parse"));
+        checker
+            .errors
+            .errors
+            .iter()
+            .filter_map(|e| match e {
+                CompilerError::UnresolvedType {
+                    type_name,
+                    location,
+                    ..
+                } => Some((type_name.clone(), location.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_meta_agent_reference_must_resolve() {
+        let source = r#"
+        ::ep::b ns
+        odd meta {agent: NoSuchAgent, on-event: "x:y"}
+        fn (event) { 1 }
+        "#;
+        let errors = unresolved_meta_types(source);
+        assert_eq!(errors.len(), 1, "got {:?}", errors);
+        assert_eq!(errors[0].0, "NoSuchAgent");
+        let location = errors[0].1.as_ref().expect("error has a location");
+        assert_eq!(location.line, 3);
+    }
+
+    #[test]
+    fn test_meta_workflow_references_must_resolve() {
+        let source = r#"
+        ::ep::wf ns
+        Known meta {workflow: {name: "Known"}}
+        type {}
+        one meta {workflow: MissingOne, on-event: "a:b"}
+        fn (event) { 1 }
+        many meta {workflows: [Known, MissingTwo], on-event: "c:d"}
+        fn (event) { 1 }
+        "#;
+        let mut names: Vec<String> = unresolved_meta_types(source)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["MissingOne", "MissingTwo"]);
+    }
+
+    #[test]
+    fn test_meta_type_references_that_resolve_pass() {
+        let source = r#"
+        ::ep::agents ns
+        SharedAgent meta {agent: {name: "Shared"}}
+        type {}
+
+        ::ep::handlers ns
+        ::agents ::ep::agents
+        SharedAgent ::ep::agents/SharedAgent
+        by-alias meta {agent: ::agents/SharedAgent, on-event: "a:b"}
+        fn (event) { 1 }
+        by-path meta {agent: ::ep::agents/SharedAgent, on-event: "a:c"}
+        fn (event) { 1 }
+        by-import meta {agent: SharedAgent, on-event: "a:d"}
+        fn (event) { 1 }
+        by-local meta {agent: LocalAgent, workflows: [LocalFlow], on-event: "a:e"}
+        fn (event) { 1 }
+        by-string meta {agent: "Anything", custom: {rule: "free"}, on-event: "a:f"}
+        fn (event) { 1 }
+        LocalAgent meta {agent: {name: "Local"}}
+        type {}
+        LocalFlow meta {workflow: {name: "Local flow"}}
+        type {}
+        "#;
+        let errors = unresolved_meta_types(source);
+        assert!(errors.is_empty(), "got {:?}", errors);
     }
 }
