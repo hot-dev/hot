@@ -53,7 +53,16 @@ impl Admission {
                     .await?;
                 let (plan,overrides):(Option<String>,Option<String>)=sqlx::query_as("SELECT CASE WHEN p.plan_uuid IS NULL THEN NULL ELSE CAST(COALESCE(p.features,'{}') AS TEXT) END,CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1")
                     .bind(root).fetch_one(&mut *tx).await?;
-                let limit = resolve_limit(plan, overrides, configured_limit)?;
+                let mut limit = resolve_limit(plan, overrides, configured_limit)?;
+                // An account over its cap after a downgrade may redeploy the
+                // schedules it has, or fewer, but not add any.
+                if limit >= 0 {
+                    let current: i64 = sqlx::query_scalar(ACCOUNT_SCHEDULES_POSTGRES)
+                        .bind(root)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                    limit = limit.max(current);
+                }
                 DatabaseScope::Environment {
                     org_id: env.org_id,
                     env_id,
@@ -70,7 +79,15 @@ impl Admission {
                     .await?;
                 let (plan,overrides):(Option<String>,Option<String>)=sqlx::query_as("SELECT CASE WHEN p.plan_uuid IS NULL THEN NULL ELSE CAST(COALESCE(p.features,'{}') AS TEXT) END,CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=?")
                     .bind(root).fetch_one(&mut *tx).await?;
-                let limit = resolve_limit(plan, overrides, configured_limit)?;
+                let mut limit = resolve_limit(plan, overrides, configured_limit)?;
+                if limit >= 0 {
+                    let current: i64 = sqlx::query_scalar(ACCOUNT_SCHEDULES_SQLITE)
+                        .bind(root)
+                        .bind(root)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                    limit = limit.max(current);
+                }
                 Ok(Self::Sqlite { tx, root, limit })
             }
         }
@@ -111,8 +128,10 @@ pub(crate) async fn validate_postgres(
     if limit < 0 {
         return Ok(());
     }
-    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM schedule s JOIN build b ON b.build_id=s.build_id JOIN project p ON p.project_id=b.project_id JOIN env e ON e.env_id=p.env_id JOIN org o ON o.org_id=e.org_id WHERE s.active AND b.deployed  AND (o.org_id=$1 OR o.parent_org_id=$1)")
-        .bind(root).fetch_one(tx).await?;
+    let count: i64 = sqlx::query_scalar(ACCOUNT_SCHEDULES_POSTGRES)
+        .bind(root)
+        .fetch_one(tx)
+        .await?;
     validate_count(count, limit)
 }
 pub(crate) async fn validate_sqlite(
@@ -123,10 +142,18 @@ pub(crate) async fn validate_sqlite(
     if limit < 0 {
         return Ok(());
     }
-    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM schedule s JOIN build b ON b.build_id=s.build_id JOIN project p ON p.project_id=b.project_id JOIN env e ON e.env_id=p.env_id JOIN org o ON o.org_id=e.org_id WHERE s.active=1 AND b.deployed=1  AND (o.org_id=? OR o.parent_org_id=?)")
-        .bind(root).bind(root).fetch_one(tx).await?;
+    let count: i64 = sqlx::query_scalar(ACCOUNT_SCHEDULES_SQLITE)
+        .bind(root)
+        .bind(root)
+        .fetch_one(tx)
+        .await?;
     validate_count(count, limit)
 }
+
+// The account's active schedules on deployed builds, across the root and its
+// children.
+const ACCOUNT_SCHEDULES_POSTGRES: &str = "SELECT COUNT(*) FROM schedule s JOIN build b ON b.build_id=s.build_id JOIN project p ON p.project_id=b.project_id JOIN env e ON e.env_id=p.env_id JOIN org o ON o.org_id=e.org_id WHERE s.active AND b.deployed AND (o.org_id=$1 OR o.parent_org_id=$1)";
+const ACCOUNT_SCHEDULES_SQLITE: &str = "SELECT COUNT(*) FROM schedule s JOIN build b ON b.build_id=s.build_id JOIN project p ON p.project_id=b.project_id JOIN env e ON e.env_id=p.env_id JOIN org o ON o.org_id=e.org_id WHERE s.active=1 AND b.deployed=1 AND (o.org_id=? OR o.parent_org_id=?)";
 fn validate_count(count: i64, limit: i64) -> Result<(), ScheduleError> {
     if count > limit {
         return Err(ScheduleError::PolicyError(format!(
@@ -140,6 +167,99 @@ fn validate_count(count: i64, limit: i64) -> Result<(), ScheduleError> {
 mod tests {
     use super::*;
     use crate::db::{Build, Env, Org, Project, Schedule};
+
+    /// A downgrade can leave an account over its schedule cap. Redeploying
+    /// what it already runs must not silently drop every schedule; growing
+    /// further is still refused.
+    #[tokio::test]
+    async fn over_cap_accounts_can_redeploy_but_not_add_schedules() {
+        let db = crate::db::test_db().await;
+        let root = Uuid::now_v7();
+        let actor = Uuid::now_v7();
+        Org::insert_org(
+            &db,
+            &root,
+            "Root",
+            &root.to_string(),
+            "organization",
+            &actor,
+        )
+        .await
+        .unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let env = Uuid::now_v7();
+        let project = Uuid::now_v7();
+        Env::insert_env(&db, &env, &root, "development", &actor)
+            .await
+            .unwrap();
+        Project::insert_project(&db, &project, &env, "Project", &actor)
+            .await
+            .unwrap();
+        let build_with = |schedules: usize| {
+            let db = &db;
+            async move {
+                let build = Uuid::now_v7();
+                Build::insert_build(
+                    db,
+                    &build,
+                    &project,
+                    "hash",
+                    1,
+                    Build::BUILD_TYPE_BUNDLE,
+                    &actor,
+                )
+                .await
+                .unwrap();
+                for index in 0..schedules {
+                    Schedule::insert_schedule(
+                        db,
+                        &Uuid::now_v7(),
+                        &build,
+                        "0 * * * * *",
+                        "app",
+                        &format!("run-{index}"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                }
+                build
+            }
+        };
+        let first = build_with(2).await;
+        Build::activate_build_directly(&db, &first, &actor)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE org SET features=? WHERE org_id=?")
+            .bind(r#"{"active_schedules_per_org":1}"#)
+            .bind(root)
+            .execute(pool)
+            .await
+            .unwrap();
+        let same = build_with(2).await;
+        Build::activate_build_directly(&db, &same, &actor)
+            .await
+            .unwrap();
+        assert_eq!(
+            Schedule::get_active_count_by_account(&db, &root)
+                .await
+                .unwrap(),
+            2
+        );
+        let more = build_with(3).await;
+        assert!(matches!(
+            Build::activate_build_directly(&db, &more, &actor).await,
+            Err(crate::db::build::BuildError::Admission(_))
+        ));
+    }
+
     #[tokio::test]
     async fn sibling_deployments_atomically_share_schedule_capacity_and_rollback() {
         let db = crate::db::test_db().await;

@@ -1701,8 +1701,6 @@ impl Schedule {
                      JOIN build b ON s.build_id = b.build_id
                      WHERE s.active = true
                        AND b.deployed = true
-                       AND b.runtime_status = 'ready'
-                       AND b.active = true
                        AND b.project_id = $1",
                 )
                 .bind(project_id)
@@ -1716,8 +1714,6 @@ impl Schedule {
                      JOIN build b ON s.build_id = b.build_id
                      WHERE s.active = 1
                        AND b.deployed = 1
-                       AND b.runtime_status = 'ready'
-                       AND b.active = 1
                        AND b.project_id = ?",
                 )
                 .bind(project_id)
@@ -1759,7 +1755,7 @@ impl Schedule {
         let current_org = Self::get_active_count_by_account(db, org_id).await?;
         let current_project = Self::get_active_count_by_project(db, project_id).await?;
         let projected = current_org - current_project + new_project_schedules.max(0);
-        if projected > policy.max_active_per_org {
+        if projected > policy.max_active_per_org.max(current_org) {
             return Err(ScheduleError::PolicyError(format!(
                 "Active schedule limit exceeded: deploying this build would leave {} active schedule(s), above the org limit of {}",
                 projected, policy.max_active_per_org
@@ -1781,7 +1777,7 @@ impl Schedule {
 
         let current = Self::get_active_count_by_account(db, org_id).await?;
         let projected = current + additional_schedules.max(0);
-        if projected > policy.max_active_per_org {
+        if projected > policy.max_active_per_org.max(current) {
             return Err(ScheduleError::PolicyError(format!(
                 "Active schedule limit exceeded: {} active schedule(s) plus {} new schedule(s) would exceed the org limit of {}",
                 current,
@@ -2857,6 +2853,27 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("Active schedule limit exceeded"));
+        // A downgraded account may keep or reduce its schedules. The
+        // projection counts all deployed builds just like atomic activation.
+        if let crate::db::DatabasePool::Sqlite(pool) = &db {
+            sqlx::query("UPDATE build SET active=0 WHERE project_id=?")
+                .bind(data.project_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        Schedule::enforce_active_count_for_org_replacing_project(
+            &db,
+            &data.org_id,
+            &data.project_id,
+            1,
+            SchedulePolicy {
+                max_active_per_org: 1,
+                ..policy
+            },
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
