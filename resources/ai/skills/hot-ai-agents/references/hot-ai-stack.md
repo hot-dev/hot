@@ -144,6 +144,7 @@ Fail closed: an unknown or failed effect classifier must require approval.
 
 Use the normalized tools-aware contract:
 
+<!-- hot-check: skip -->
 ```hot
 (model: Str,
  messages: Vec<::ai::chat/Message>,
@@ -283,6 +284,8 @@ identity fields from the model.
 Use `::ai::agent::stream` for stable labels and safe emission:
 
 ```hot
+::stream ::ai::agent::stream
+
 ::stream/emit-reply-start(AGENT_NAME, payload)
 ::stream/emit-reply-delta(AGENT_NAME, {...payload, delta})
 ::stream/emit-reply-end(AGENT_NAME, {...payload, text})

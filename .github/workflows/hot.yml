@@ -89,8 +89,8 @@ jobs:
 
       # `hot-static-checks.sh check` runs the default project check, the package
       # aggregate check, `hot fmt --check` over all Hot source, validates
-      # {{snippet:...}} references, and compiles bundled Hot-language skill
-      # examples/tests.
+      # {{snippet:...}} references, compiles bundled Hot-language skill
+      # examples/tests, and checks the ```hot blocks in the AI docs.
       - name: Hot static checks
         run: ./scripts/hot-static-checks.sh check
 

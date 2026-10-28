@@ -282,7 +282,7 @@ fn (event) { process(event.data) }
 
 // Scheduled function
 daily-sync meta {schedule: "0 2 * * *", retry: {attempts: 5, delay: 10000}}
-fn () { sync-data() }
+fn (event) { sync-data() }
 ```
 
 ## Testing

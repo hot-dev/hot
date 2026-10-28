@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:fbc003ac8d9c
+<!-- HOT_LANGUAGE_SECTION_START --> hash:0f8479670167
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -135,7 +135,7 @@ fn (event) {
 
 // Scheduled function
 daily-sync meta {schedule: "0 2 * * *", retry: 3}
-fn () {
+fn (event) {
     sync-external-data()
 }
 ```
@@ -314,8 +314,8 @@ result match length(name) {
 
 // Nullable types — Str? is shorthand for Str | Null
 // ? means the TYPE accepts null, NOT that the parameter is omittable
-find-user fn (id: Str): User? { /* returns User or null */ }
-greet fn (name: Str, title: Str?): Str { /* title must be passed, but can be null */ }
+find-user fn (id: Str): User? { ... }              // returns User or null
+greet fn (name: Str, title: Str?): Str { ... }    // title must be passed, but can be null
 
 // Literal unions — restrict to specific values. Closed unions reject other
 // values at runtime too; `open` unions accept unknown values. A `match` on
@@ -363,6 +363,7 @@ plain to-json(untype(alice)) // {"name":"Alice","age":30}
 
 Functions with `meta {core: true}` are available everywhere without namespace qualification. You can also mark your own functions as `core: true` to auto-import them across your project.
 
+<!-- hot-check: skip -->
 ```hot
 // Math — accept Int | Dec, mixing types produces Dec
 add fn (x: Int | Dec, y: Int | Dec): Int | Dec
@@ -624,7 +625,7 @@ name or(get(config, "name"), "Anonymous")
 // Pattern 4: Expected failures are err(...) values; fail() is for
 // broken invariants only — it halts the run/task (there is no catch)
 if(is-empty(data.email), err({field: "email", message: "Email required"}), data)
-if(lt(version, current-version(db)), fail("migration went backwards"), data)
+if(lt(target-version, current-version(db)), fail("migration went backwards"), data)
 
 // Pattern 5: Result combinators — transform Ok or Err selectively
 fetch-user(id)
@@ -800,7 +801,7 @@ fn (event) { process-payment(event.data) }
 
 // Full retry: custom attempts and delay
 daily-sync meta {schedule: "0 2 * * *", retry: {attempts: 5, delay: 10000}}
-fn () { sync-external-data() }
+fn (event) { sync-external-data() }
 ```
 
 ### HTTP Requests
