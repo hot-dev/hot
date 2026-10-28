@@ -383,8 +383,11 @@ mod tests {
         )
         .unwrap();
         let rendered = auth.to_string();
-        assert!(!rendered.contains(TOKEN), "{rendered}");
-        assert!(!rendered.contains("leela-bot"), "{rendered}");
+        assert!(!rendered.contains(TOKEN), "the task args hold the token");
+        assert!(
+            !rendered.contains("leela-bot"),
+            "the task args hold the username"
+        );
         assert_eq!(auth["secret"], "ghcr-pull");
         assert_eq!(auth["registry"], "ghcr.io");
 
@@ -419,10 +422,10 @@ mod tests {
         let args = serde_json::json!({"image": image, "registry_auth": auth});
 
         let other_env = open(&args, image, &Uuid::now_v7(), Some(&org_id), key).unwrap_err();
-        assert!(other_env.contains("another environment"), "{other_env}");
+        assert!(other_env.contains("another environment"));
 
         let other_org = open(&args, image, &env_id, Some(&Uuid::now_v7()), key).unwrap_err();
-        assert!(other_org.contains("could not be opened"), "{other_org}");
+        assert!(other_org.contains("could not be opened"));
         assert!(!other_org.contains(TOKEN));
     }
 
@@ -441,7 +444,7 @@ mod tests {
         .unwrap();
         let args = serde_json::json!({"registry_auth": auth});
         let err = open(&args, "evil.example/steal:1", &env_id, None, key).unwrap_err();
-        assert!(err.contains("is on 'evil.example'"), "{err}");
+        assert!(err.contains("is on 'evil.example'"));
     }
 
     #[test]
@@ -456,7 +459,7 @@ mod tests {
             "registry_auth": {"secret": "ghcr-pull", "registry": "ghcr.io", "sealed": other}
         });
         let err = open(&args, "ghcr.io/a/b", &env_id, Some(&org_id), key).unwrap_err();
-        assert!(err.contains("could not be opened"), "{err}");
+        assert!(err.contains("could not be opened"));
     }
 
     #[test]
@@ -475,7 +478,7 @@ mod tests {
         let image = "ghcr.io/withleela/reglang:1";
         let missing =
             resolve_and_seal(&AHashMap::new(), "ghcr-pull", image, &env_id, None, key).unwrap_err();
-        assert!(missing.contains("is not set"), "{missing}");
+        assert!(missing.contains("is not set"));
 
         let not_a_map = resolve_and_seal(
             &context_with(Val::from(TOKEN)),
@@ -486,7 +489,7 @@ mod tests {
             key,
         )
         .unwrap_err();
-        assert!(not_a_map.contains("must be a map"), "{not_a_map}");
+        assert!(not_a_map.contains("must be a map"));
         assert!(!not_a_map.contains(TOKEN));
 
         let no_token = resolve_and_seal(
@@ -498,7 +501,7 @@ mod tests {
             key,
         )
         .unwrap_err();
-        assert!(no_token.contains("`token`"), "{no_token}");
+        assert!(no_token.contains("`token`"));
 
         let wrong_registry = resolve_and_seal(
             &context_with(ghcr_secret()),
@@ -511,8 +514,7 @@ mod tests {
         .unwrap_err();
         assert!(
             wrong_registry
-                .contains("is for registry 'ghcr.io', but image 'alpine:3.21' is on 'docker.io'"),
-            "{wrong_registry}"
+                .contains("is for registry 'ghcr.io', but image 'alpine:3.21' is on 'docker.io'")
         );
         assert!(!wrong_registry.contains(TOKEN));
     }
