@@ -54,6 +54,10 @@ pub fn spawn_alert_worker(
     config: AlertWorkerConfig,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
+    let db = Arc::new(db.with_scope(hot::db::DatabaseScope::Maintenance {
+        operation: hot::db::MaintenanceOperation::Alerts,
+        org_id: None,
+    }));
     tokio::spawn(async move {
         tracing::info!(
             "Alert delivery worker started (poll interval: {:?}, batch size: {})",
