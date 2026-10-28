@@ -199,6 +199,11 @@ label fn match (a: Animal): Str {
 }
 ```
 
+Arms naming `Result` match the subject as a Result. A `Result` or `Result.Ok`
+arm takes every `Ok`, so nothing else needs covering. A `Result.Err` arm
+covers no value of the subject's type, so the other arms still must cover
+each one.
+
 ### Value Matching
 
 Match against literal values — `Int`, `Dec`, `Str`, `Bool`, `Null`, `Vec`, `Map`:
