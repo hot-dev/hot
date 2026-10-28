@@ -973,6 +973,70 @@ port config.port
         }
     }
 
+    /// Variants that arrows add to a core open enum construct and match from
+    /// any namespace, whether the arrow is in the enum's namespace or in one
+    /// before or after it. Another namespace builds the core enum from its
+    /// declaration, which used to leave the arrow variants out, so
+    /// `Heard.PeriodEnded(...)` failed there with "does not have variant".
+    #[test]
+    fn arrow_variants_of_core_enums_construct_in_other_namespaces() {
+        let src = r#"::rl::a-ext ns
+Missed type { by: Str }
+Missed -> Heard.Missed
+
+::rl::core ns
+Heard meta {core: true} enum open { Changed, Deadline }
+PeriodEnded type { period: Str }
+PeriodEnded -> Heard.PeriodEnded
+q3 Heard.PeriodEnded(period: "Q3")
+
+::rl::z-ext ns
+Lapsed type { days: Int }
+Lapsed -> Heard.Lapsed
+
+::rl::p ns
+why fn match (h: Heard): Str {
+    Heard.Changed => { "changed" }
+    Heard.PeriodEnded => { h.period }
+    Heard.Missed => { h.by }
+    Heard.Lapsed => { Str(h.days) }
+    _ => { "other" }
+}
+
+::rl::t ns
+top Heard.PeriodEnded({period: "Q4"})
+in-body fn (): Vec {
+    [
+        ::rl::p/why(Heard.PeriodEnded(period: "Q1")),
+        ::rl::p/why(Heard.Missed({by: "ops"})),
+        ::rl::p/why(Heard.Lapsed(days: 3)),
+    ]
+}
+concat([::rl::p/why(::rl::core/q3), ::rl::p/why(top)], in-body(), [::rl::p/why(Heard.Changed)])"#;
+        let expected = strs(&["Q3", "Q4", "Q1", "ops", "3", "changed"]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// A runtime error that a native meets while running Hot code reaches a
+    /// containing boundary with its message. The halt used to carry `null`,
+    /// so `hot test` printed "Test execution error: " and nothing more.
+    #[test]
+    fn contained_runtime_error_keeps_its_message() {
+        let src = r#"::t ns
+Color enum { Red, Green }
+bogus fn (): Vec {
+    c Color
+    map([1], (x) { c.Blue })
+}
+attempt ::hot::internal::exec/contain(bogus, [])
+[is-err(attempt), contains(err-message(attempt), "Type '::t/Color' does not have variant 'Blue'")]"#;
+        assert_same_with_and_without_jit(src, &val!([true, true]));
+    }
+
     /// Like the Map form, a named call on a type with custom constructors goes
     /// to the default constructor, which still checks `where` constraints.
     /// A type declared twice takes names in either order, and a one-parameter
