@@ -117,7 +117,8 @@ impl App {
         expected: StatusCode,
     ) -> Value {
         let (status, body) = self.call(method, path, token, body).await;
-        assert_eq!(status, expected, "{method} {path}: {body}");
+        // Paths carry key IDs, so failures name only the method and response.
+        assert_eq!(status, expected, "{method}: {body}");
         body
     }
 
