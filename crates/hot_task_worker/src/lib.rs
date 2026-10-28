@@ -5658,11 +5658,28 @@ async fn check_cus_thresholds(
 async fn check_cus_thresholds_inner(
     db: &DatabasePool,
     org_id: Option<Uuid>,
-    env_id: Uuid,
+    _env_id: Uuid,
     usage_stats_cache: &UsageStatsCache,
 ) {
     let Some(org_id) = org_id else { return };
 
+    let root_id = match hot::db::Org::billing_owner_id_for(db, &org_id).await {
+        Ok(root) => root,
+        Err(_) => return,
+    };
+    let billing = db.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Billing,
+        org_id: Some(root_id),
+    });
+    let db = &billing;
+    let org_id = root_id;
+    let env_id = match hot::db::Env::get_envs_by_org(db, &root_id).await {
+        Ok(envs) => match envs.first() {
+            Some(env) => env.env_id,
+            None => return,
+        },
+        Err(_) => return,
+    };
     let features = hot::db::features::Features::resolve_for_org(db, &org_id).await;
     let cus_limit = features.compute_units_per_month();
     if cus_limit <= 0 {
@@ -5719,7 +5736,13 @@ async fn check_cus_thresholds_inner(
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                 });
 
-                let _ = hot::db::alert::publish_alert(db, &org_id, &env_id, channel, &data).await;
+                let alert_db = db.with_scope(DatabaseScope::Environment { org_id, env_id });
+                if let Err(error) =
+                    hot::db::alert::publish_alert(&alert_db, &org_id, &env_id, channel, &data).await
+                {
+                    tracing::warn!(%error,"Compute usage alert could not be published");
+                    continue;
+                }
                 let _ = hot::db::OrgNote::create_system(
                     db,
                     &org_id,
