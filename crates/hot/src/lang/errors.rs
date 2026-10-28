@@ -347,6 +347,16 @@ pub enum CompilerError {
         inferred: String,
         location: Option<ErrorLocation>,
     },
+    /// A type declared `core: true` in more than one namespace. Every
+    /// namespace then sees only the last declaration (`winner`), including
+    /// the namespace of the one it overrides (`shadowed`). A *warning*: the
+    /// override is deterministic, but usually unintended.
+    DuplicateCoreName {
+        name: String,
+        shadowed: String,
+        winner: String,
+        location: Option<ErrorLocation>,
+    },
 }
 
 /// "the `func` argument of `map`", or "an argument of `map`" without a name.
@@ -1252,6 +1262,32 @@ impl fmt::Display for CompilerError {
                     write!(f, "{}", body)
                 }
             }
+            CompilerError::DuplicateCoreName {
+                name,
+                shadowed,
+                winner,
+                location,
+            } => {
+                let body = format!(
+                    "core type `{}` is declared in `{}` and `{}`; `{}/{}` is used everywhere",
+                    name, shadowed, winner, winner, name
+                );
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<source>".to_string()),
+                        loc.line,
+                        loc.column,
+                        body
+                    )
+                } else {
+                    write!(f, "{}", body)
+                }
+            }
         }
     }
 }
@@ -1388,6 +1424,7 @@ impl CompilerErrors {
             CompilerError::NamedArgument { location, .. } => location.as_ref(),
             CompilerError::Constraint { location, .. } => location.as_ref(),
             CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
+            CompilerError::DuplicateCoreName { location, .. } => location.as_ref(),
         }?;
 
         let source_name = if let Some(file) = &location.file {
@@ -1980,6 +2017,31 @@ impl CompilerErrors {
                          readers and tooling. Fix the annotation or the value."
                     });
             }
+            CompilerError::DuplicateCoreName {
+                name,
+                shadowed,
+                winner,
+                ..
+            } => {
+                report = report
+                    .with_code("duplicate-core-name")
+                    .with_message(format!(
+                        "Core type `{}` is also declared in `{}`",
+                        name, shadowed
+                    ))
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(format!(
+                                "every namespace now sees `{}/{}`, including `{}`",
+                                winner, name, shadowed
+                            ))
+                            .with_color(label_color),
+                    )
+                    .with_help(
+                        "Rename this type, or drop `core: true` and import it where it is used. \
+                         Only one `core` declaration of a name is visible.",
+                    );
+            }
         }
 
         let mut buffer = Vec::new();
@@ -2050,6 +2112,7 @@ impl CompilerError {
             CompilerError::NamedArgument { location, .. } => location.as_ref(),
             CompilerError::Constraint { location, .. } => location.as_ref(),
             CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
+            CompilerError::DuplicateCoreName { location, .. } => location.as_ref(),
         }
     }
 
@@ -2061,6 +2124,7 @@ impl CompilerError {
             | CompilerError::UnknownField { .. }
             | CompilerError::MissingContext { .. }
             | CompilerError::AnnotationMismatch { .. }
+            | CompilerError::DuplicateCoreName { .. }
             | CompilerError::Constraint { warning: true, .. } => DiagnosticSeverity::Warning,
             _ => DiagnosticSeverity::Error,
         }
@@ -2111,6 +2175,7 @@ impl CompilerError {
             CompilerError::NamedArgument { .. } => "named-argument",
             CompilerError::Constraint { code, .. } => code,
             CompilerError::AnnotationMismatch { .. } => "annotation-mismatch",
+            CompilerError::DuplicateCoreName { .. } => "duplicate-core-name",
         }
     }
 }

@@ -26,6 +26,21 @@ Use `meta [...]` for simple tags:
 
 {{snippet:meta#meta-vector-form}}
 
+### Names in Metadata
+
+A bare name in metadata refers to a definition, the same way it would in code
+in that namespace. The compiler resolves it where the metadata is written:
+namespace aliases are expanded and var-imports followed, so `::text/s4`, an
+imported `s4`, and `::myapp::text/s4` all name the same definition. A name that
+resolves to nothing is a compile error, and `hot check` reports it.
+
+{{snippet:meta#meta-names}}
+
+`::hot::meta/get(report-error)` returns the values those names have, whichever
+namespace reads it: `cites` holds the `policy-text` string, and `clock-from` is
+the `found-at` function, which you can call. The `agent`, `workflow`, and
+`workflows` keys must name types.
+
 ## Documentation
 
 The `doc` field provides documentation for functions and types:

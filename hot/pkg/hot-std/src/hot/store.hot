@@ -56,7 +56,6 @@ Embedding -> EmbeddingOptions.Embedding
 
 Map
 meta {
-    core: true,
     doc: """
     A persistent, insertion-ordered map with optional embeddings and search.
 

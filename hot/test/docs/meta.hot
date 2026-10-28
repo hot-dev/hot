@@ -38,6 +38,19 @@ fn () {
 }
 // @end: meta-vector-form
 
+// @doc: meta-names
+policy-text "Log each possible trade error within one business day."
+
+found-at fn (w: Map): Str { w.found-at }
+
+report-error
+meta {
+    cites: [policy-text],
+    clock-from: found-at
+}
+fn (c: Map): Str { "ok" }
+// @end: meta-names
+
 // @doc: meta-doc-field
 add-demo
 meta {doc: "Add two numbers together"}
@@ -71,6 +84,13 @@ fn () {
 // =============================================================================
 // Tests
 // =============================================================================
+
+test-meta-names
+meta ["test"] fn () {
+  m ::hot::meta/get(report-error)
+  assert-eq(policy-text, m.cites[0], "a name in meta reads as its value")
+  assert-eq("2026-10-02", m.clock-from({found-at: "2026-10-02"}), "a function in meta can be called")
+}
 
 test-meta-map-form
 meta ["test"] fn () {

@@ -822,6 +822,311 @@ mod type_checking_tests {
         );
     }
 
+    fn unknown_fields(warnings: &[CompilerError]) -> Vec<(String, String)> {
+        warnings
+            .iter()
+            .filter_map(|w| match w {
+                CompilerError::UnknownField {
+                    type_name,
+                    field_name,
+                    ..
+                } => Some((type_name.clone(), field_name.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn duplicate_core_names(warnings: &[CompilerError]) -> Vec<(String, String, String)> {
+        warnings
+            .iter()
+            .filter_map(|w| match w {
+                CompilerError::DuplicateCoreName {
+                    name,
+                    shadowed,
+                    winner,
+                    ..
+                } => Some((name.clone(), shadowed.clone(), winner.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // hot-std declares a core struct `Next { value, done }` (`::hot::iter`).
+    // A project core enum of the same name overrides it at runtime (the last
+    // core declaration wins), so the checker must read `Next` as the enum too,
+    // and say that hot-std's `Next` is shadowed.
+    #[test]
+    fn test_project_core_enum_overriding_hot_std_type_resolves_as_enum() {
+        let source = r#"
+            ::a ns
+
+            Ask meta {core: true} type { step: Str }
+            Next meta {core: true} enum { Open(Ask), NotYet, Done(Str) }
+
+            ::b ns
+
+            wait fn (): Next { Next.NotYet }
+            is-not-yet fn (n: Next): Bool { eq(n, Next.NotYet) }
+            open-map fn (): Next { Next.Open({step: "review"}) }
+            done fn (): Next { Next.Done("ok") }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert_eq!(
+            unknown_fields(&warnings),
+            vec![],
+            "The overriding enum's variants should not warn. Got: {:?}",
+            warnings
+        );
+        assert_eq!(
+            duplicate_core_names(&warnings),
+            vec![(
+                "Next".to_string(),
+                "::hot::iter".to_string(),
+                "::a".to_string()
+            )],
+            "Overriding hot-std's core Next should warn. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_named_args_reach_project_core_enum_over_hot_std_homonym() {
+        let source = r#"
+            ::a ns
+
+            Ask meta {core: true} type { step: Str }
+            Next meta {core: true} enum { Open(Ask), NotYet, Done(Str) }
+
+            ::b ns
+
+            open-named fn (): Next { Next.Open(step: "review") }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Named arguments should reach the project's core enum. Got: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert_eq!(
+            unknown_fields(&warnings),
+            vec![],
+            "Named variant construction should not warn. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_core_type_declared_in_two_namespaces_warns() {
+        let source = r#"
+            ::first ns
+
+            Verdict meta {core: true} type { ok: Bool }
+
+            ::second ns
+
+            Verdict meta {core: true} enum { Pass, Fail }
+
+            ::third ns
+
+            pass fn (): Verdict { Verdict.Pass }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert_eq!(
+            duplicate_core_names(&warnings),
+            vec![(
+                "Verdict".to_string(),
+                "::first".to_string(),
+                "::second".to_string()
+            )],
+            "A second core Verdict should warn. Got: {:?}",
+            warnings
+        );
+        assert_eq!(
+            unknown_fields(&warnings),
+            vec![],
+            "The last core Verdict is the one used. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_single_core_type_does_not_warn_duplicate() {
+        let source = r#"
+            ::first ns
+
+            Phase meta {core: true} enum { Draft, Final }
+
+            ::second ns
+
+            Phase enum { Open, Closed }
+            open fn (): Phase { Phase.Open }
+        "#;
+
+        let warnings = compile_and_get_warnings(source);
+        assert_eq!(
+            duplicate_core_names(&warnings),
+            vec![],
+            "A non-core homonym is not a duplicate core name. Got: {:?}",
+            warnings
+        );
+    }
+
+    // A core type declared in two hot-std namespaces resolves by load order,
+    // so only deliberate pairs may exist: `::hot::exec` re-declares `run`'s
+    // `Failure` and `Cancellation` as its context-aware forms.
+    #[test]
+    fn test_hot_std_core_types_are_declared_once() {
+        use hot::lang::compiler::core_registry::CoreVariableRegistry;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let program = build_program_with_hot_std(parser::parse_hot("::test ns").unwrap());
+        let mut declared: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (ns_path, namespace) in &program.namespaces {
+            for (var, value) in &namespace.scope.vars {
+                if matches!(value, hot::lang::ast::Value::TypeDef(_))
+                    && CoreVariableRegistry::has_core_metadata(var)
+                {
+                    declared
+                        .entry(var.sym.name().to_string())
+                        .or_default()
+                        .insert(ns_path.to_string());
+                }
+            }
+        }
+        let duplicated: Vec<&str> = declared
+            .iter()
+            .filter(|(_, namespaces)| namespaces.len() > 1)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(
+            duplicated,
+            vec!["Cancellation", "Failure"],
+            "hot-std core types declared in more than one namespace: {:?}",
+            declared
+        );
+    }
+
+    #[test]
+    fn test_core_enum_variant_from_other_namespace_is_not_unknown_field() {
+        let source = r#"
+            ::a ns
+
+            Ask meta {core: true} type { step: Str }
+            Then meta {core: true} enum { Open(Ask), NotYet, Done(Str) }
+
+            ::b ns
+
+            wait fn (): Then { Then.NotYet }
+            open-named fn (): Then { Then.Open(step: "review") }
+            open-map fn (): Then { Then.Open({step: "review"}) }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Core enum variants should not warn. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_match_arm_exposes_variant_payload_fields() {
+        let source = r#"
+            ::a ns
+
+            Ask meta {core: true} type { step: Str }
+            Then meta {core: true} enum { Open(Ask), NotYet, Done(Str) }
+
+            Gate type { level: Int }
+            Check enum { Pass(Gate), Skip }
+
+            local-level fn (c: Check): Int {
+                match c {
+                    Check.Pass => { c.level }
+                    _ => { 0 }
+                }
+            }
+
+            ::b ns
+
+            opens fn (n: Then, step: Str): Bool {
+                match n {
+                    Then.Open => { eq(n.step, step) }
+                    _ => { false }
+                }
+            }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Payload fields inside a variant arm should resolve. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_match_arm_misspelled_payload_field_still_warns() {
+        let source = r#"
+            ::a ns
+
+            Ask meta {core: true} type { step: Str }
+            Then meta {core: true} enum { Open(Ask), NotYet, Done(Str) }
+
+            Gate type { level: Int }
+            Check enum { Pass(Gate), Skip }
+
+            local-level fn (c: Check): Int {
+                match c {
+                    Check.Pass => { c.levle }
+                    _ => { 0 }
+                }
+            }
+
+            ::b ns
+
+            opens fn (n: Then, step: Str): Bool {
+                match n {
+                    Then.Open => { eq(n.stepp, step) }
+                    _ => { false }
+                }
+            }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        let mut found = unknown_fields(&warnings);
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                ("Ask".to_string(), "stepp".to_string()),
+                ("Gate".to_string(), "levle".to_string()),
+            ],
+            "Misspelled payload fields should warn against the payload type. Got: {:?}",
+            warnings
+        );
+    }
+
     #[test]
     fn test_explicit_map_annotation_keeps_dynamic_field_access() {
         let source = r#"

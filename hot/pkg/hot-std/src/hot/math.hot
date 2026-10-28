@@ -324,7 +324,7 @@ meta {
 }
 fn
 (): Dec { call-lib(::hot::math/rand, []) },
-(n: Int): Dec {
+(n: Int | Dec): Dec {
     call-lib(::hot::math/rand, [n])
 }
 
