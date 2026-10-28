@@ -16,6 +16,28 @@ pub struct TaskQuotaReservation {
 }
 
 impl Task {
+    pub async fn count_reserved_containers_for_account(
+        db: &DatabasePool,
+        org: &Uuid,
+    ) -> Result<i64, TaskError> {
+        let root = crate::db::Org::billing_owner_id_for(db, org)
+            .await
+            .map_err(|e| TaskError::Database(sqlx::Error::Protocol(e.to_string())))?;
+        let billing = db.with_scope(DatabaseScope::Maintenance {
+            operation: MaintenanceOperation::Billing,
+            org_id: Some(root),
+        });
+        let sql = "SELECT CAST(COALESCE(SUM(u.active_containers),0) AS BIGINT) FROM usage_task u JOIN org o ON o.org_id=u.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1";
+        Ok(match &billing {
+            DatabasePool::Postgres(pool) => {
+                sqlx::query_scalar(sql).bind(root).fetch_one(pool).await?
+            }
+            DatabasePool::Sqlite(pool) => {
+                sqlx::query_scalar(sql).bind(root).fetch_one(pool).await?
+            }
+        })
+    }
+
     pub async fn quota_reservation(
         db: &DatabasePool,
         task_id: &Uuid,
@@ -330,8 +352,8 @@ fn usage_required(
     container: bool,
 ) -> bool {
     let features = claim_features(plan, overrides);
-    (container && features.box_concurrent_tasks() >= 0)
-        || features.compute_units_budget() > 0
+    // Compute units meter containers only; a code task never spends them.
+    (container && (features.box_concurrent_tasks() >= 0 || features.compute_units_budget() > 0))
         || (is_free
             && (features.compute_units_per_month() >= 0 || features.task_minutes_per_month() >= 0))
 }
@@ -346,6 +368,12 @@ fn check_capacity(
 ) -> Result<(), TaskError> {
     let features = claim_features(plan, overrides);
     let concurrent = features.box_concurrent_tasks();
+    // No container capacity will ever free up: fail instead of retrying.
+    if container && concurrent == 0 {
+        return Err(TaskError::QuotaExhausted(
+            "Container tasks are disabled on this account".into(),
+        ));
+    }
     if container && concurrent >= 0 && usage.0 >= concurrent {
         return Err(TaskError::QuotaExceeded(
             "Account concurrent container limit reached".into(),
@@ -362,8 +390,9 @@ fn check_capacity(
         .checked_add(usage.2)
         .and_then(|v| v.checked_add(reserve.compute_units));
     let budget = features.compute_units_budget();
-    if (budget > 0 && total.is_none_or(|v| v > budget))
-        || (is_free && monthly >= 0 && total.is_none_or(|v| v > monthly))
+    if container
+        && ((budget > 0 && total.is_none_or(|v| v > budget))
+            || (is_free && monthly >= 0 && total.is_none_or(|v| v > monthly)))
     {
         // Only running reservations can free capacity during this period.
         let message = "Account compute quota cannot cover this task's maximum execution; reduce its timeout or increase capacity".to_string();
@@ -438,6 +467,22 @@ mod tests {
         .unwrap();
         id
     }
+    #[test]
+    fn code_tasks_ignore_container_compute_budget_and_zero_concurrency_is_final() {
+        let plan = serde_json::json!({"compute_units_budget":1,"box_concurrent_tasks":0,"task_minutes_per_month":-1});
+        let reserve = TaskQuotaReservation {
+            compute_units: 0,
+            duration_ms: 1000,
+        };
+        assert!(
+            check_capacity(Some(&plan), None, false, false, &reserve, (0, 0, 100, 0, 0)).is_ok()
+        );
+        assert!(matches!(
+            check_capacity(Some(&plan), None, false, true, &reserve, (0, 0, 0, 0, 0)),
+            Err(TaskError::QuotaExhausted(_))
+        ));
+    }
+
     #[tokio::test]
     async fn interrupted_containers_charge_their_runtime_not_their_reservation() {
         let (db, _root, e1, e2) = fixture(
