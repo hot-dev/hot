@@ -30,6 +30,7 @@ pub mod placeholder_lowering;
 pub mod refinements;
 pub mod resolver;
 pub mod type_checker;
+mod variant_payloads;
 
 #[cfg(test)]
 mod tests;
@@ -171,6 +172,10 @@ pub struct Compiler {
     /// The known functions that construct a unit enum variant (`::ns/Type.Variant`
     /// with no payload). A reference to one is the variant's value.
     unit_variants: AHashSet<String>,
+    /// Enum variants (`::ns/Type.Variant`) whose payload is not a record
+    /// (`Open(Vec)`, `NotOwed(Str)`). A `match` arm on one binds the payload
+    /// (see `variant_payloads`).
+    plain_payload_variants: AHashSet<String>,
     /// Monotonic counter used to give every emitted cond/match flow a globally
     /// unique branch-name suffix. This is critical because `BytecodeProgram::add_constant`
     /// interns string constants — without a unique suffix, branch names like
@@ -229,6 +234,7 @@ pub struct CompilerSeed {
     core_lazy_function_names: IndexMap<String, String>,
     known_functions: AHashSet<String>,
     unit_variants: AHashSet<String>,
+    plain_payload_variants: AHashSet<String>,
     next_cond_id: u64,
     constraint_type_defs: AHashMap<String, crate::lang::ast::TypeDef>,
     constraint_ns_aliases: AHashMap<String, crate::lang::ast::NamespaceAliases>,
@@ -322,6 +328,7 @@ impl Compiler {
             core_lazy_function_names: IndexMap::new(),
             known_functions: AHashSet::new(),
             unit_variants: AHashSet::new(),
+            plain_payload_variants: AHashSet::new(),
             next_cond_id: 0,
             diagnostics: crate::lang::errors::CompilerErrors::new(),
             constraint_type_defs: AHashMap::new(),
@@ -354,6 +361,7 @@ impl Compiler {
             core_lazy_function_names: self.core_lazy_function_names.clone(),
             known_functions: self.known_functions.clone(),
             unit_variants: self.unit_variants.clone(),
+            plain_payload_variants: self.plain_payload_variants.clone(),
             next_cond_id: self.next_cond_id,
             constraint_type_defs: self.constraint_type_defs.clone(),
             constraint_ns_aliases: self.constraint_ns_aliases.clone(),
@@ -376,6 +384,7 @@ impl Compiler {
         compiler.core_lazy_function_names = seed.core_lazy_function_names;
         compiler.known_functions = seed.known_functions;
         compiler.unit_variants = seed.unit_variants;
+        compiler.plain_payload_variants = seed.plain_payload_variants;
         compiler.next_cond_id = seed.next_cond_id;
         compiler.constraint_type_defs = seed.constraint_type_defs;
         compiler.constraint_ns_aliases = seed.constraint_ns_aliases;
@@ -409,6 +418,7 @@ impl Compiler {
         compiler.extract_lazy_params(base_program);
         compiler.extract_known_functions(base_program);
         compiler.collect_constraint_types(base_program);
+        compiler.collect_plain_payload_variants(base_program);
         compiler.seed()
     }
 
@@ -1168,6 +1178,7 @@ impl Compiler {
         self.extract_lazy_params(program);
         self.extract_known_functions(program);
         self.collect_constraint_types(program);
+        self.collect_plain_payload_variants(program);
 
         // Pass 0.5: Register namespace imports (type aliases) before type definitions
         // This ensures imports like `FileMeta ::hot::file/FileMeta` are available
@@ -1362,6 +1373,7 @@ impl Compiler {
         // Extract lazy parameter info and known functions before bytecode compilation
         self.extract_lazy_params(program);
         self.extract_known_functions(program);
+        self.collect_plain_payload_variants(program);
 
         // Compile each namespace
         for (ns_path, namespace) in &program.namespaces {
@@ -8711,6 +8723,25 @@ impl Compiler {
         })
     }
 
+    /// Whether `arm` is a single `Enum.Variant` atom whose variant carries a
+    /// payload other than a record.
+    fn arm_binds_plain_payload(&self, arm: &crate::lang::ast::MatchArm) -> bool {
+        let (Some(type_name), Some(variant)) = (&arm.type_name, &arm.variant) else {
+            return false;
+        };
+        if !arm.alternatives.is_empty() {
+            return false;
+        }
+        let (enum_name, _) = self.resolve_type_path(type_name);
+        let enum_name = if enum_name.starts_with("::") {
+            enum_name
+        } else {
+            format!("::{enum_name}")
+        };
+        self.plain_payload_variants
+            .contains(&format!("{enum_name}.{variant}"))
+    }
+
     /// Human-readable name for one match-arm pattern atom, used for match-all
     /// result keys and branch names (union arms join their atoms with " | ").
     fn match_atom_branch_name(
@@ -8903,10 +8934,13 @@ impl Compiler {
         let value_reg = self.compile_value(&match_expr.value)?;
 
         // Extract the match subject variable name (if any) for auto-shadowing
-        // in Result variant arms. When users write `match result { Result.Err => { ... } }`,
+        // in variant arms. When users write `match result { Result.Err => { ... } }`,
         // `result` inside the arm should refer to the unwrapped $val payload.
+        // A path (`match order.status`) names a field, not a variable to shadow.
         let match_subject_var_name = match match_expr.value.as_ref() {
-            crate::lang::ast::Value::Ref(crate::lang::ast::Ref::Var(var_ref)) => {
+            crate::lang::ast::Value::Ref(crate::lang::ast::Ref::Var(var_ref))
+                if var_ref.var.deep_path.is_none() && var_ref.var.deep_set.is_none() =>
+            {
                 Some(var_ref.var.sym.name().to_string())
             }
             _ => None,
@@ -9106,8 +9140,27 @@ impl Compiler {
                 {
                     self.store_variable(var_name, unwrapped_reg);
                 }
+            } else if self.arm_binds_plain_payload(arm) {
+                // An `Enum.Variant` arm whose payload is not a record (a Vec,
+                // a Str): field access can't reach it through the variant,
+                // so the binding and the subject are the payload, as for
+                // Result. A record variant keeps the variant, whose fields
+                // read through to the payload.
+                let payload_reg = self.allocate_register();
+                self.emit_instruction(Instruction::ExtractInnerVal {
+                    dest: payload_reg,
+                    src: value_reg,
+                });
+                if let Some(binding) = &arm.binding {
+                    self.store_variable(binding, payload_reg);
+                }
+                if let Some(ref var_name) = match_subject_var_name
+                    && arm.binding.as_deref() != Some(var_name)
+                {
+                    self.store_variable(var_name, payload_reg);
+                }
             } else {
-                // Non-Result arms: use the full value for bindings
+                // Other arms: use the full value for bindings
                 if let Some(binding) = &arm.binding {
                     self.store_variable(binding, value_reg);
                 }

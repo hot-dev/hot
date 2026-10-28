@@ -3257,20 +3257,23 @@ impl TypeChecker {
     }
 
     /// Walk a match arm's body. Inside an `Enum.Variant` arm the matched name
-    /// holds that variant's payload, so `subject` is rebound to the payload
-    /// type for the arm.
+    /// and the arm's binding hold that variant's payload, so both are bound
+    /// to the payload type for the arm.
     fn infer_match_arm_body(&mut self, arm: &MatchArm, subject: Option<&str>) -> TypeExpr {
-        let narrowed = match (subject, &arm.type_name, &arm.variant) {
-            (Some(subject), Some(type_name), Some(variant)) if arm.alternatives.is_empty() => self
-                .variant_payload_type(type_name, variant)
-                .map(|payload| (subject, payload)),
+        let payload = match (&arm.type_name, &arm.variant) {
+            (Some(type_name), Some(variant)) if arm.alternatives.is_empty() => {
+                self.variant_payload_type(type_name, variant)
+            }
             _ => None,
         };
-        let Some((subject, payload)) = narrowed else {
+        let names: Vec<&str> = subject.into_iter().chain(arm.binding.as_deref()).collect();
+        let Some(payload) = payload.filter(|_| !names.is_empty()) else {
             return self.infer_value_type(&arm.body);
         };
         self.context.push_scope();
-        self.context.add_variable(subject.to_string(), payload);
+        for name in names {
+            self.context.add_variable(name.to_string(), payload.clone());
+        }
         let body_type = self.infer_value_type(&arm.body);
         self.context.pop_scope();
         body_type

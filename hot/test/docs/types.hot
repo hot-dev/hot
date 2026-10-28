@@ -202,6 +202,21 @@ describe-direction(Direction.Up)    // "going up"
 describe-direction(Direction.Down)  // "going down"
 // @end: match-variant
 
+// @doc: match-payload
+Reply enum { Steps(Vec), Declined(Str), Sized(Circle), Pending }
+
+summarize fn match (r: Reply): Str {
+    Reply.Steps => { `${length(r)} steps` }       // r is the Vec
+    Reply.Declined (why) => { `declined: ${why}` } // why is the Str
+    Reply.Sized => { `radius ${r.radius}` }       // r is the variant; fields read through
+    Reply.Pending => { "pending" }
+}
+
+summarize(Reply.Steps(["a", "b"]))       // "2 steps"
+summarize(Reply.Declined("no budget"))   // "declined: no budget"
+summarize(Reply.Sized({radius: 2.0}))    // "radius 2.0"
+// @end: match-payload
+
 // @doc: type-checking
 Coord type {
     x: Int,
@@ -361,6 +376,20 @@ test-match-variant
 meta ["test"] fn () {
   assert-eq("going up", describe-direction(Direction.Up), "match up")
   assert-eq("going down", describe-direction(Direction.Down), "match down")
+}
+
+test-match-payload
+meta ["test"] fn () {
+  assert-eq("2 steps", summarize(Reply.Steps(["a", "b"])), "Vec payload")
+  assert-eq("declined: no budget", summarize(Reply.Declined("no budget")), "Str payload")
+  assert-eq("radius 2.0", summarize(Reply.Sized({radius: 2.0})), "record payload")
+  assert-eq("pending", summarize(Reply.Pending), "unit variant")
+  sized match Reply.Sized({radius: 2.0}) {
+    Reply.Sized (c) => { c }
+    _ => { null }
+  }
+
+  assert(is-type(sized, Reply.Sized), "a record variant arm keeps the variant")
 }
 
 test-type-checking

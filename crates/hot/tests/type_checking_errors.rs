@@ -1127,6 +1127,43 @@ mod type_checking_tests {
         );
     }
 
+    // The arm's binding holds the payload at run time, as the subject does,
+    // so it is checked against the payload type too.
+    #[test]
+    fn test_match_arm_binding_holds_variant_payload() {
+        let source = r#"
+            ::a ns
+
+            Gate type { level: Int }
+            Check enum { Pass(Gate), Skip }
+
+            level fn (c: Check): Int {
+                match c {
+                    Check.Pass (g) => { g.level }
+                    _ => { 0 }
+                }
+            }
+
+            misspelled fn (c: Check): Int {
+                match c {
+                    Check.Pass (g) => { g.levle }
+                    _ => { 0 }
+                }
+            }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert_eq!(
+            unknown_fields(&warnings),
+            vec![("Gate".to_string(), "levle".to_string())],
+            "The binding should be checked against the payload type. Got: {:?}",
+            warnings
+        );
+    }
+
     #[test]
     fn test_explicit_map_annotation_keeps_dynamic_field_access() {
         let source = r#"
