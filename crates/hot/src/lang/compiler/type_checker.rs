@@ -868,6 +868,7 @@ impl TypeChecker {
 
         // First pass: collect all type names from the program
         self.collect_known_types(program);
+        self.warn_duplicate_core_types(program);
 
         // Second pass: collect cross-namespace variable types so that
         // `Ref::Ns` references and var imports resolve to a real type instead
@@ -1001,6 +1002,40 @@ impl TypeChecker {
     /// sees the same row-preserved record shapes as diagnostics.
     pub fn infer_value_type_for_lsp(&mut self, value: &Value) -> TypeExpr {
         self.infer_value_type(value)
+    }
+
+    /// Warn when a type is declared `core: true` in more than one namespace.
+    /// The last declaration wins everywhere, as in the runtime core
+    /// registry, which silently overrides the earlier one. hot-std's own
+    /// overrides (`::hot::exec/Failure` over `::hot::run/Failure`) are
+    /// deliberate, so pairs inside `::hot::*` are left alone.
+    fn warn_duplicate_core_types(&mut self, program: &Program) {
+        let mut declared: AHashMap<String, String> = AHashMap::new();
+        for (ns_path, namespace) in &program.namespaces {
+            let ns = ns_path.to_string();
+            for (var, value) in &namespace.scope.vars {
+                if !matches!(value, Value::TypeDef(_))
+                    || !CoreVariableRegistry::has_core_metadata(var)
+                {
+                    continue;
+                }
+                let name = var.sym.name().to_string();
+                let Some(shadowed) = declared.insert(name.clone(), ns.clone()) else {
+                    continue;
+                };
+                if shadowed == ns || (shadowed.starts_with("::hot::") && ns.starts_with("::hot::"))
+                {
+                    continue;
+                }
+                let location = var.src.as_ref().map(|s| self.source_to_error_location(s));
+                self.errors.add_warning(CompilerError::DuplicateCoreName {
+                    name,
+                    shadowed,
+                    winner: ns.clone(),
+                    location,
+                });
+            }
+        }
     }
 
     /// Collect all type names from the program for type resolution
@@ -2482,13 +2517,13 @@ impl TypeChecker {
                         // `meta {core: true}` in another namespace) resolve to
                         // their qualified type instead of `Any`. If multiple
                         // namespaces declare the same core name, take the
-                        // first registered match — short-name variable
-                        // shadowing across modules is rare; ambiguous cases
-                        // would be flagged by the resolver pass.
+                        // last registered match: the runtime core registry
+                        // keeps the last registration, so a project's core
+                        // `Next` enum overrides hot-std's core `Next` struct.
                         .or_else(|| {
                             self.core_variables
                                 .get(*var_name)
-                                .and_then(|qualifieds| qualifieds.first())
+                                .and_then(|qualifieds| qualifieds.last())
                                 .and_then(|qualified| {
                                     self.qualified_variables.get(qualified).cloned()
                                 })
@@ -2573,9 +2608,17 @@ impl TypeChecker {
 
             Value::Match(match_expr) => {
                 let subject_type = self.infer_value_type(&match_expr.value);
+                let subject_name = match &*match_expr.value {
+                    Value::Ref(Ref::Var(var_ref))
+                        if var_ref.var.deep_path.is_none() && var_ref.var.deep_set.is_none() =>
+                    {
+                        Some(var_ref.var.sym.name().to_string())
+                    }
+                    _ => None,
+                };
                 let mut last_type = TypeExpr::Any;
                 for arm in &match_expr.arms {
-                    last_type = self.infer_value_type(&arm.body);
+                    last_type = self.infer_match_arm_body(arm, subject_name.as_deref());
                 }
                 if !match_expr.match_all {
                     let arm_refs: Vec<&MatchArm> = match_expr.arms.iter().collect();
@@ -2589,7 +2632,7 @@ impl TypeChecker {
                     let arm_types: Vec<TypeExpr> = match_expr
                         .arms
                         .iter()
-                        .map(|arm| self.infer_value_type(&arm.body))
+                        .map(|arm| self.infer_match_arm_body(arm, subject_name.as_deref()))
                         .collect();
                     self.flow_result_type(
                         match_expr.result_modifier.as_ref(),
@@ -2601,7 +2644,7 @@ impl TypeChecker {
                     let arm_types: Vec<TypeExpr> = match_expr
                         .arms
                         .iter()
-                        .map(|arm| self.infer_value_type(&arm.body))
+                        .map(|arm| self.infer_match_arm_body(arm, subject_name.as_deref()))
                         .collect();
                     self.flow_result_type(
                         match_expr.result_modifier.as_ref(),
@@ -2961,6 +3004,49 @@ impl TypeChecker {
             field_name: field_name.to_string(),
             location,
         });
+    }
+
+    /// Walk a match arm's body. Inside an `Enum.Variant` arm the matched name
+    /// holds that variant's payload, so `subject` is rebound to the payload
+    /// type for the arm.
+    fn infer_match_arm_body(&mut self, arm: &MatchArm, subject: Option<&str>) -> TypeExpr {
+        let narrowed = match (subject, &arm.type_name, &arm.variant) {
+            (Some(subject), Some(type_name), Some(variant)) if arm.alternatives.is_empty() => self
+                .variant_payload_type(type_name, variant)
+                .map(|payload| (subject, payload)),
+            _ => None,
+        };
+        let Some((subject, payload)) = narrowed else {
+            return self.infer_value_type(&arm.body);
+        };
+        self.context.push_scope();
+        self.context.add_variable(subject.to_string(), payload);
+        let body_type = self.infer_value_type(&arm.body);
+        self.context.pop_scope();
+        body_type
+    }
+
+    /// The declared payload type of `enum_name.variant`, resolved in the
+    /// enum's own namespace. `None` for payload-free variants and for names
+    /// that are not known enums.
+    fn variant_payload_type(&self, enum_name: &str, variant: &str) -> Option<TypeExpr> {
+        let TypeExpr::Named(enum_fqn) = self
+            .try_resolve_local_type(enum_name)
+            .or_else(|| self.try_resolve_core_type(enum_name))
+            .or_else(|| self.try_resolve_namespaced_type(enum_name))?
+        else {
+            return None;
+        };
+        let td = self
+            .named_type_definition(&enum_fqn)
+            .filter(|td| td.is_enum)?;
+        let payload = td.variant_payloads.get(variant)?.clone();
+        let enum_ns = td.declaring_namespace.clone();
+        if let Some(builtin) = self.try_resolve_builtin_type(&payload) {
+            return Some(builtin);
+        }
+        let payload_fqn = self.resolve_to_fqn(&payload, &enum_ns);
+        self.qualified_types.get(&payload_fqn).cloned()
     }
 
     /// Check if two types are compatible (for assignment, parameter passing, etc.)
