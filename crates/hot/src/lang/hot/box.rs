@@ -634,9 +634,9 @@ fn validate_resource_path(p: &str) -> Result<String, String> {
 /// every invocation — the result is stable on the order of seconds, and the
 /// daily CUS budget can't realistically swing far in 30s.
 ///
-/// We cache `Ok(())` decisions for `CUS_QUOTA_CACHE_TTL` and `Err(reason)`
-/// decisions for `CUS_QUOTA_DENY_CACHE_TTL` (much shorter so an admin who
-/// just bumped the limit unblocks quickly).
+/// Only successful decisions are cached. A failed database lookup or quota
+/// denial is retried on the next call, including after an administrator raises
+/// the account limit.
 static CUS_QUOTA_CACHE: std::sync::OnceLock<
     parking_lot::Mutex<ahash::AHashMap<uuid::Uuid, CachedQuotaDecision>>,
 > = std::sync::OnceLock::new();
@@ -645,7 +645,6 @@ static CUS_QUOTA_LOCKS: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 const CUS_QUOTA_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
-const CUS_QUOTA_DENY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone)]
 struct CachedQuotaDecision {
@@ -678,12 +677,7 @@ async fn cus_quota_org_lock(org_id: uuid::Uuid) -> std::sync::Arc<tokio::sync::M
 fn cached_quota_decision(org_id: &uuid::Uuid) -> Option<Result<(), String>> {
     let cache = cus_quota_cache().lock();
     let entry = cache.get(org_id)?;
-    let ttl = if entry.decision.is_ok() {
-        CUS_QUOTA_CACHE_TTL
-    } else {
-        CUS_QUOTA_DENY_CACHE_TTL
-    };
-    if entry.decided_at.elapsed() < ttl {
+    if entry.decided_at.elapsed() < CUS_QUOTA_CACHE_TTL {
         Some(entry.decision.clone())
     } else {
         None
@@ -732,7 +726,9 @@ async fn enforce_cus_quota(
     }
 
     let decision = enforce_cus_quota_uncached(db, org_id).await;
-    store_quota_decision(org_id, decision.clone());
+    if decision.is_ok() {
+        store_quota_decision(org_id, decision.clone());
+    }
     decision
 }
 
@@ -740,7 +736,9 @@ async fn enforce_cus_quota_uncached(
     db: &crate::db::DatabasePool,
     org_id: &uuid::Uuid,
 ) -> Result<(), String> {
-    let features = crate::db::features::Features::resolve_for_org(db, org_id).await;
+    let features = crate::db::features::Features::try_resolve_for_org(db, org_id)
+        .await
+        .map_err(|e| e.to_string())?;
     let cus_limit = features.compute_units_per_month();
 
     // Unlimited CUS = no enforcement
@@ -1083,7 +1081,9 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
 
     let result = tokio::runtime::Handle::current().block_on(async {
         tokio::time::timeout(BOX_QUOTA_TIMEOUT, async {
-            let features = crate::db::features::Features::resolve_for_org(&db, &org_id).await;
+            let features = crate::db::features::Features::try_resolve_for_org(&db, &org_id)
+                .await
+                .map_err(|e| e.to_string())?;
 
             let subscription = crate::db::subscription::OrgPlan::get_by_org_id(&db, &org_id).await;
 
@@ -1139,13 +1139,10 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                     // in `hot_task_worker::process_task` so the UI doesn't show
                     // "0 remaining" while the periodic reaper is still cleaning
                     // up zombies from a dead worker.
-                    let running = crate::db::Task::count_running_containers_for_org(
-                        &db,
-                        &org_id,
-                        crate::db::task::QUOTA_HEARTBEAT_FRESH_SECS,
-                    )
-                    .await
-                    .unwrap_or(0);
+                    let running =
+                        crate::db::Task::count_reserved_containers_for_account(&db, &org_id)
+                            .await
+                            .unwrap_or(0);
                     (limit).saturating_sub(running).max(0)
                 }
             };
@@ -1190,13 +1187,14 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
             );
             val_map.insert(Val::from("overage"), Val::Bool(overage));
             map.insert(Val::from("$val"), Val::Map(Box::new(val_map)));
-            Val::Map(Box::new(map))
+            Ok::<Val, String>(Val::Map(Box::new(map)))
         })
         .await
     });
 
     match result {
-        Ok(result) => HotResult::Ok(result),
+        Ok(Ok(result)) => HotResult::Ok(result),
+        Ok(Err(error)) => HotResult::Err(Val::from(error)),
         Err(_) => HotResult::Err(Val::from(format!(
             "::hot::box/quota: query timed out after {}s",
             BOX_QUOTA_TIMEOUT.as_secs()
@@ -1231,7 +1229,9 @@ pub fn limits(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
 
     let result = tokio::runtime::Handle::current().block_on(async {
         tokio::time::timeout(BOX_START_IO_TIMEOUT, async {
-            let features = crate::db::features::Features::resolve_for_org(&db, &org_id).await;
+            let features = crate::db::features::Features::try_resolve_for_org(&db, &org_id)
+                .await
+                .map_err(|e| e.to_string())?;
 
             let memory_mb = features.box_memory_mb();
             let cpu_quota = features.box_cpu_quota();
@@ -1258,13 +1258,14 @@ pub fn limits(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             val_map.insert(Val::from("timeout-secs"), Val::Int(timeout_secs));
             val_map.insert(Val::from("network"), Val::Bool(network));
             map.insert(Val::from("$val"), Val::Map(Box::new(val_map)));
-            Val::Map(Box::new(map))
+            Ok::<Val, String>(Val::Map(Box::new(map)))
         })
         .await
     });
 
     match result {
-        Ok(result) => HotResult::Ok(result),
+        Ok(Ok(result)) => HotResult::Ok(result),
+        Ok(Err(error)) => HotResult::Err(Val::from(error)),
         Err(_) => HotResult::Err(Val::from(format!(
             "::hot::box/limits: query timed out after {}s",
             BOX_START_IO_TIMEOUT.as_secs()
