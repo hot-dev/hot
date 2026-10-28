@@ -219,7 +219,7 @@ meta ["test"] fn () {
     assert-eq([], violation(Order(bad-discount)).path, "the record invariant")
     no-items assoc(good, "items", [])
     assert-eq(["items"], violation(Order(no-items)).path, "a refined field")
-    assert-eq("violation", constraint-kind(Window({start: 9, finish: 5})), "default constructor")
+    assert-eq("violation", constraint-kind(Window({start: 9, finish: dynamic(5)})), "default constructor")
     assert-eq("ok", constraint-kind(Window(1, 5)), "custom constructor")
 }
 
