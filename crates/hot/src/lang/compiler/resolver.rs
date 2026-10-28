@@ -282,10 +282,13 @@ impl Resolver {
             .add_source(file_path.display().to_string(), content);
     }
 
-    /// Resolve all variables in a program
-    pub fn resolve_program(&mut self, program: &Program) -> CompilerResult<()> {
+    /// Resolve all variables in a program, and rewrite the names in each
+    /// top-level and namespace `meta` to the definitions they name.
+    pub fn resolve_program(&mut self, program: &mut Program) -> CompilerResult<()> {
         // First pass: collect all variable and function declarations
         self.collect_declarations(program);
+
+        self.resolve_meta_refs(program);
 
         // Second pass: validate all references
         self.validate_references(program)?;
@@ -874,6 +877,324 @@ impl Resolver {
 impl Default for Resolver {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+// Meta references
+// ============================================================================
+//
+// Meta is a literal, so a bare name in it (`clock-from: found-at`,
+// `cites: [::text/s4]`, `agent: SupportAgent`) is kept as an unevaluated
+// ref. Left as written, it would be looked up only when something reads the
+// meta, from the reader's namespace. This pass resolves each name from the
+// namespace that declares the meta and rewrites it to the qualified name of
+// the definition it names: aliases are expanded and var-imports followed, so
+// every spelling of one definition becomes the same `::ns/name` ref. A name
+// that resolves to nothing is a compile error.
+
+/// Top-level meta keys whose bare names must name types.
+const META_TYPE_KEYS: [&str; 3] = ["agent", "workflow", "workflows"];
+
+/// Var-import chains longer than this are treated as cycles.
+const MAX_IMPORT_HOPS: usize = 32;
+
+/// What a top-level definition is, as far as a meta reference cares.
+enum MetaDecl {
+    Type,
+    /// A var-import (`s4 ::mp::text/s4`), with its target's qualified name.
+    Import(String),
+    Other,
+}
+
+/// Top-level definitions of the program by qualified name, plus the core
+/// registry for auto-imported names.
+struct MetaScope {
+    decls: AHashMap<String, MetaDecl>,
+    core: crate::lang::compiler::core_registry::CoreVariableRegistry,
+}
+
+impl MetaScope {
+    fn new(
+        program: &Program,
+        core: crate::lang::compiler::core_registry::CoreVariableRegistry,
+    ) -> Self {
+        let mut decls = AHashMap::new();
+        for (ns_path, namespace) in &program.namespaces {
+            for (var, value) in &namespace.scope.vars {
+                if var.deep_set.is_some() || var.deep_path.is_some() {
+                    continue;
+                }
+                let decl = if let Some(target) = Self::import_target(value, &namespace.aliases) {
+                    MetaDecl::Import(target)
+                } else if matches!(value, Value::TypeDef(_)) {
+                    MetaDecl::Type
+                } else {
+                    MetaDecl::Other
+                };
+                // A name declared more than once (arities, open extensions)
+                // is a type if any of its declarations is.
+                let key = format!("{}/{}", ns_path, var.sym.name());
+                match decls.get(&key) {
+                    Some(MetaDecl::Type) => {}
+                    Some(_) if !matches!(decl, MetaDecl::Type) => {}
+                    _ => {
+                        decls.insert(key, decl);
+                    }
+                }
+            }
+        }
+        Self { decls, core }
+    }
+
+    /// The qualified target of a var-import: `local ::ns/name` parses either
+    /// to the bare ref or to `[VarRef(local), Ref::Ns(target)]`.
+    fn import_target(value: &Value, aliases: &NamespaceAliases) -> Option<String> {
+        match value {
+            Value::Ref(Ref::Ns(ns_ref)) => Self::qualify(ns_ref, aliases),
+            Value::MultipleValues(values) => {
+                let mut target = None;
+                for value in values {
+                    match value {
+                        Value::Ref(Ref::Ns(ns_ref)) if target.is_none() => {
+                            target = Some(Self::qualify(ns_ref, aliases)?);
+                        }
+                        Value::Ref(Ref::Var(_)) => {}
+                        _ => return None,
+                    }
+                }
+                target
+            }
+            _ => None,
+        }
+    }
+
+    fn qualify(ns_ref: &crate::lang::ast::NsRef, aliases: &NamespaceAliases) -> Option<String> {
+        let name = ns_ref.function_name.as_ref()?;
+        let ns = aliases.get(&ns_ref.ns).unwrap_or(&ns_ref.ns);
+        Some(format!("{}/{}", ns, name))
+    }
+
+    /// Follow var-imports to the definition they name.
+    fn follow(&self, qualified: String) -> String {
+        let mut current = qualified;
+        for _ in 0..MAX_IMPORT_HOPS {
+            match self.decls.get(&current) {
+                Some(MetaDecl::Import(target)) if *target != current => current = target.clone(),
+                _ => break,
+            }
+        }
+        current
+    }
+
+    /// Resolve a bare name from `ns`: a top-level definition there, then a
+    /// core name.
+    fn resolve_bare(&self, ns: &str, name: &str) -> Option<String> {
+        let local = format!("{}/{}", ns, name);
+        if self.decls.contains_key(&local) {
+            return Some(self.follow(local));
+        }
+        let core = self.core.get(name)?;
+        let core_ns = if core.namespace_path.starts_with("::") {
+            core.namespace_path.clone()
+        } else {
+            format!("::{}", core.namespace_path)
+        };
+        Some(self.follow(format!("{}/{}", core_ns, name)))
+    }
+
+    /// Whether `qualified` names something other than a type. Only known for
+    /// definitions in this program and core names; anything else is assumed
+    /// to be fine.
+    fn is_known_non_type(&self, qualified: &str) -> bool {
+        match self.decls.get(qualified) {
+            Some(MetaDecl::Type) => false,
+            Some(_) => true,
+            None => qualified.rsplit_once('/').is_some_and(|(ns, name)| {
+                self.core.get(name).is_some_and(|core| {
+                    core.namespace_path.trim_start_matches("::") == ns.trim_start_matches("::")
+                        && core.variable_type
+                            != crate::lang::compiler::core_registry::CoreVariableType::TypeConstructor
+                })
+            }),
+        }
+    }
+}
+
+impl Resolver {
+    /// Rewrite every name in top-level and namespace meta to the qualified
+    /// name of the definition it names, reporting the ones that resolve to
+    /// nothing. Meta on bindings inside function bodies is left alone: it is
+    /// loaded in the body's own frame, where locals are in scope.
+    fn resolve_meta_refs(&mut self, program: &mut Program) {
+        let core = self.context.unified_resolver.core_variables.clone();
+        let scope = MetaScope::new(program, core.unwrap_or_default());
+
+        for (ns_path, namespace) in program.namespaces.iter_mut() {
+            let ns = ns_path.to_string();
+            self.context
+                .unified_resolver
+                .set_current_namespace(ns.clone());
+            self.current_aliases = namespace.aliases.clone();
+
+            if let Some(meta) = namespace.meta.take() {
+                namespace.meta = Some(crate::lang::ast::Meta {
+                    val: self.resolve_meta_val(&scope, &ns, &meta.val, true, false),
+                });
+            }
+
+            if !namespace.scope.vars.keys().any(|var| var.meta.is_some()) {
+                continue;
+            }
+            let vars = std::mem::take(&mut namespace.scope.vars);
+            namespace.scope.vars = vars
+                .into_iter()
+                .map(|(mut var, value)| {
+                    if let Some(meta) = var.meta.take() {
+                        var.meta = Some(crate::lang::ast::Meta {
+                            val: self.resolve_meta_val(&scope, &ns, &meta.val, true, false),
+                        });
+                    }
+                    (var, value)
+                })
+                .collect();
+        }
+    }
+
+    fn resolve_meta_val(
+        &mut self,
+        scope: &MetaScope,
+        ns: &str,
+        val: &crate::val::Val,
+        top_level: bool,
+        type_ref: bool,
+    ) -> crate::val::Val {
+        use crate::val::Val;
+        match val {
+            Val::Map(map) => Val::Map(Box::new(
+                map.iter()
+                    .map(|(key, value)| {
+                        let type_ref = top_level
+                            && matches!(key, Val::Str(k) if META_TYPE_KEYS.contains(&k.as_ref()));
+                        (
+                            key.clone(),
+                            self.resolve_meta_val(scope, ns, value, false, type_ref),
+                        )
+                    })
+                    .collect(),
+            )),
+            Val::Vec(items) => Val::Vec(
+                items
+                    .iter()
+                    .map(|item| self.resolve_meta_val(scope, ns, item, false, type_ref))
+                    .collect(),
+            ),
+            Val::Box(boxed) => match boxed.as_any().downcast_ref::<crate::lang::ast::AstNode>() {
+                Some(crate::lang::ast::AstNode(Value::Ref(ref_val))) => self
+                    .resolve_meta_ref(scope, ns, ref_val, type_ref)
+                    .map(|resolved| Val::Box(Box::new(crate::lang::ast::AstNode(resolved))))
+                    .unwrap_or_else(|| val.clone()),
+                _ => val.clone(),
+            },
+            _ => val.clone(),
+        }
+    }
+
+    /// The canonical ref for one meta name, or `None` (after reporting the
+    /// error) when it does not resolve.
+    fn resolve_meta_ref(
+        &mut self,
+        scope: &MetaScope,
+        ns: &str,
+        ref_val: &Ref,
+        type_ref: bool,
+    ) -> Option<Value> {
+        let (qualified, src, written) = match ref_val {
+            Ref::Var(var_ref) => {
+                let name = var_ref.var.sym.name();
+                let src = var_ref.src.as_ref().or(var_ref.var.src.as_ref());
+                let Some(qualified) = scope.resolve_bare(ns, name) else {
+                    self.report_unresolved_meta_name(name, src, type_ref);
+                    return None;
+                };
+                if var_ref.var.deep_path.is_some() {
+                    // `Enum.Variant`, `config.port`: keep the path, qualify the root.
+                    let mut var_ref = var_ref.clone();
+                    var_ref.var.sym = crate::lang::ast::Sym::String(qualified);
+                    return Some(Value::Ref(Ref::Var(var_ref)));
+                }
+                (qualified, src, name.to_string())
+            }
+            Ref::Ns(ns_ref) => {
+                let Some(qualified) = MetaScope::qualify(ns_ref, &self.current_aliases) else {
+                    // A bare namespace (`::mp::text`): expand its alias.
+                    let mut ns_ref = ns_ref.clone();
+                    if let Some(target) = self.current_aliases.get(&ns_ref.ns) {
+                        ns_ref.ns = target.clone();
+                    }
+                    return Some(Value::Ref(Ref::Ns(ns_ref)));
+                };
+                let errors_before = self.errors.errors.len();
+                let _ = self.validate_ref_references(ref_val);
+                if self.errors.errors.len() > errors_before {
+                    return None;
+                }
+                let written = format!("{}/{}", ns_ref.ns, ns_ref.function_name.as_deref()?);
+                (scope.follow(qualified), ns_ref.src.as_ref(), written)
+            }
+        };
+
+        if type_ref && scope.is_known_non_type(&qualified) {
+            self.errors.add(CompilerError::UnresolvedType {
+                type_name: written.clone(),
+                namespace: ns.to_string(),
+                message: format!("'{}' is not a type", written),
+                location: src.map(Self::src_location),
+            });
+            return None;
+        }
+
+        let (target_ns, name) = qualified.rsplit_once('/')?;
+        Some(Value::Ref(Ref::Ns(crate::lang::ast::NsRef {
+            ns: crate::lang::ast::NsPath::from_string(target_ns),
+            src: src.cloned(),
+            function_name: Some(name.to_string()),
+        })))
+    }
+
+    fn report_unresolved_meta_name(
+        &mut self,
+        name: &str,
+        src: Option<&crate::lang::ast::Source>,
+        type_ref: bool,
+    ) {
+        let namespace = self.context.unified_resolver.current_namespace.clone();
+        let location = src.map(Self::src_location);
+        self.errors.add(if type_ref {
+            CompilerError::UnresolvedType {
+                type_name: name.to_string(),
+                namespace,
+                message: format!("Type '{}' is not defined", name),
+                location,
+            }
+        } else {
+            CompilerError::UnresolvedVariable {
+                var_name: name.to_string(),
+                namespace,
+                message: format!("Variable '{}' cannot be resolved", name),
+                location,
+            }
+        });
+    }
+
+    fn src_location(src: &crate::lang::ast::Source) -> ErrorLocation {
+        ErrorLocation {
+            line: src.line,
+            column: src.column,
+            position: src.position,
+            length: src.length,
+            file: src.file.as_ref().map(PathBuf::from),
+        }
     }
 }
 
