@@ -571,6 +571,13 @@ impl Session {
             Some(plan) => plan.get_plan(db).await.ok().map(|plan| plan.plan_name),
             None => None,
         };
+        // A user without a timezone of their own sees the selected org's.
+        self.display_timezone = crate::timezone::resolve_display_timezone(
+            self.user.get_display_timezone().as_deref(),
+            org.get_display_timezone().as_deref(),
+        );
+        self.timezone_abbreviation =
+            crate::timezone::get_timezone_abbreviation(&self.display_timezone);
         self.current_org = Some(org);
         Ok(())
     }

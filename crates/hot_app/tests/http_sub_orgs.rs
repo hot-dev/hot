@@ -1,8 +1,15 @@
 //! Browser-level scope, hierarchy, and recovery checks through the real router.
 use axum::http::StatusCode;
-use hot::db::{DatabasePool, Org, insert_test_data, org::OrgUser, user::User};
+use hot::db::{DatabasePool, Env, Org, insert_test_data, org::OrgUser, user::User};
 use hot_app::test_support::TestClient;
 use uuid::Uuid;
+
+fn sqlite(client: &TestClient) -> &sqlx::SqlitePool {
+    let DatabasePool::Sqlite(pool) = client.db().as_ref() else {
+        unreachable!()
+    };
+    pool
+}
 
 #[tokio::test]
 async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
@@ -161,4 +168,59 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
         .await
         .assert_status(StatusCode::SEE_OTHER);
     client.get(&page_a).await.assert_status(StatusCode::OK);
+}
+
+#[tokio::test]
+async fn an_explicit_org_selector_shows_that_orgs_timezone() {
+    let mut client = TestClient::new().await;
+    let td = insert_test_data(client.db()).await.unwrap();
+    let tokyo = Uuid::now_v7();
+    Org::insert_org(
+        client.db(),
+        &tokyo,
+        "Tokyo",
+        "tokyo",
+        "organization",
+        &td.user_id,
+    )
+    .await
+    .unwrap();
+    OrgUser::insert_org_user(
+        client.db(),
+        &Uuid::now_v7(),
+        &tokyo,
+        &td.user_id,
+        Some(2),
+        &td.user_id,
+    )
+    .await
+    .unwrap();
+    let tokyo_env = Uuid::now_v7();
+    Env::insert_env(client.db(), &tokyo_env, &tokyo, "production", &td.user_id)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"UPDATE org SET settings='{"display":{"timezone":"Asia/Tokyo"}}' WHERE org_id=?"#,
+    )
+    .bind(tokyo)
+    .execute(sqlite(&client))
+    .await
+    .unwrap();
+    let created = Env::get_env(client.db(), &tokyo_env)
+        .await
+        .unwrap()
+        .created_at;
+    let in_tokyo = format!(
+        "{} JST",
+        hot_app::timezone::format_in_timezone(&created, "Asia/Tokyo", "%Y-%m-%d %H:%M:%S")
+    );
+    client.login_as(&td.user_id);
+
+    // The session defaults to the first org, which has no timezone.
+    let home = client.get(&format!("/envs?org_id={}", td.org_id)).await;
+    home.assert_status(StatusCode::OK);
+    assert!(!home.body.contains("JST"));
+    let page = client.get(&format!("/envs?org_id={tokyo}")).await;
+    page.assert_status(StatusCode::OK);
+    assert!(page.body.contains(&in_tokyo), "{}", page.body);
 }
