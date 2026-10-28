@@ -72,6 +72,45 @@ impl OrgUsageStats {
 mod tests {
     use super::*;
 
+    #[test]
+    fn monthly_windows_follow_anniversaries_and_clamp_month_ends_without_drift() {
+        use crate::db::subscription::monthly_usage_start;
+        let parse = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        // An annual or never-renewing plan keeps its first start, and its
+        // allowance still resets every month from that anniversary.
+        let anchor = parse("2024-01-31T12:00:00Z");
+        assert_eq!(
+            monthly_usage_start(parse("2024-03-15T00:00:00Z"), Some(anchor)),
+            parse("2024-02-29T12:00:00Z")
+        );
+        assert_eq!(
+            monthly_usage_start(parse("2024-04-01T00:00:00Z"), Some(anchor)),
+            parse("2024-03-31T12:00:00Z")
+        );
+        assert_eq!(
+            monthly_usage_start(parse("2025-02-01T00:00:00Z"), Some(anchor)),
+            parse("2025-01-31T12:00:00Z")
+        );
+        // A monthly plan's own period start is already the window.
+        let monthly = parse("2024-09-15T00:00:00Z");
+        assert_eq!(
+            monthly_usage_start(parse("2024-10-05T00:00:00Z"), Some(monthly)),
+            monthly
+        );
+        // No plan, or a start in the future, uses the calendar month rather
+        // than moving the window (and resetting its counter) every request.
+        for start in [None, Some(parse("2024-01-05T00:00:00Z"))] {
+            assert_eq!(
+                monthly_usage_start(parse("2024-01-04T12:00:00Z"), start),
+                parse("2024-01-01T00:00:00Z")
+            );
+        }
+    }
+
     #[tokio::test]
     async fn retention_keeps_data_when_the_account_cannot_be_resolved() {
         let db = crate::db::test_db().await;

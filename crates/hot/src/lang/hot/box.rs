@@ -762,11 +762,13 @@ async fn enforce_cus_quota_uncached(
         Err(_) => false,
     };
 
-    let period_start = subscription
-        .as_ref()
-        .ok()
-        .and_then(|s| s.current_period_start)
-        .unwrap_or_else(chrono::Utc::now);
+    let period_start = crate::db::subscription::monthly_usage_start(
+        chrono::Utc::now(),
+        subscription
+            .as_ref()
+            .ok()
+            .and_then(|s| s.current_period_start),
+    );
 
     let usage = crate::db::subscription::OrgUsageStats::calculate_account(
         db,
@@ -1095,11 +1097,13 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                 Err(_) => false,
             };
 
-            let period_start = subscription
-                .as_ref()
-                .ok()
-                .and_then(|s| s.current_period_start)
-                .unwrap_or_else(chrono::Utc::now);
+            let period_start = crate::db::subscription::monthly_usage_start(
+                chrono::Utc::now(),
+                subscription
+                    .as_ref()
+                    .ok()
+                    .and_then(|s| s.current_period_start),
+            );
 
             let usage = crate::db::subscription::OrgUsageStats::calculate_account(
                 &db,

@@ -1,5 +1,5 @@
 //! Durable account-wide run admission, separate from retention of run history.
-use chrono::{DateTime, Datelike, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -146,8 +146,7 @@ macro_rules! admission {
                 "SELECT CAST(COALESCE(p.features,'{}') AS TEXT),op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
             ).bind(root_id).fetch_optional(&mut *conn).await?;
             let now = Utc::now();
-            let month_start = Utc.with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0).single().expect("valid month");
-            let period = plan.as_ref().and_then(|p| p.1).unwrap_or(month_start);
+            let period = crate::db::subscription::monthly_usage_start(now, plan.as_ref().and_then(|p| p.1));
             let overrides = parse_features(overrides)?;
             let plan_features = parse_features(plan.and_then(|p| p.0))?;
             let limit = run_limit(plan_features.as_ref(), overrides.as_ref())?;
@@ -310,6 +309,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, vec![recent]);
+    }
+
+    /// An annual plan, or a free plan that never renews, keeps its first
+    /// period start. Its monthly allowance must still reset every month.
+    #[tokio::test]
+    async fn monthly_run_allowance_resets_on_the_subscription_anniversary() {
+        let (db, root, children) = fixture(1).await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let plan = Uuid::now_v7();
+        sqlx::query("INSERT INTO plan (plan_uuid, plan_id, plan_name, base_price_monthly_cents, base_price_annual_cents, sort_order, active, features) VALUES (?, 'annual-test', 'Annual Test', 0, 0, 1000, 1, '{\"runs_per_month\":1}')")
+            .bind(plan)
+            .execute(pool)
+            .await
+            .unwrap();
+        crate::db::OrgPlan::create(&db, &root, &plan, crate::db::BillingPeriod::Annual, &root)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE org_plan SET current_period_start=? WHERE org_id=?")
+            .bind(Utc::now() - chrono::Duration::days(40))
+            .bind(root)
+            .execute(pool)
+            .await
+            .unwrap();
+        let (org, env) = children[0];
+        sqlx::query("INSERT INTO run_admission(run_id,root_org_id,org_id,env_id,admitted_at) VALUES (?,?,?,?,?)")
+            .bind(Uuid::now_v7()).bind(root).bind(org).bind(env)
+            .bind(Utc::now() - chrono::Duration::days(35))
+            .execute(pool).await.unwrap();
+        Run::admit_execution(&db, &org, &env, &Uuid::now_v7())
+            .await
+            .expect("last month's run does not count against this month");
+        assert!(
+            Run::admit_execution(&db, &org, &env, &Uuid::now_v7())
+                .await
+                .is_err(),
+            "this month's one run is used"
+        );
     }
 
     #[tokio::test]

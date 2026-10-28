@@ -1,4 +1,4 @@
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::Utc;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -92,10 +92,6 @@ impl Task {
             org_id: Some(root_id),
         });
         let now = Utc::now();
-        let month_start = Utc
-            .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
-            .single()
-            .expect("valid month");
         match &billing {
             DatabasePool::Postgres(pool) => {
                 // Initialize a new period's counters before taking the account
@@ -117,7 +113,10 @@ impl Task {
                     task.task_type == "container",
                 );
                 if needs_usage {
-                    let period = plan.as_ref().and_then(|p| p.2).unwrap_or(month_start);
+                    let period = crate::db::subscription::monthly_usage_start(
+                        now,
+                        plan.as_ref().and_then(|p| p.2),
+                    );
                     crate::db::usage::prepare_task_period(&billing, root_id, period).await?;
                 }
                 // Lock the account root only for a limit that reads usage. NO KEY
@@ -173,7 +172,10 @@ impl Task {
                 let plan: Option<TaskAccountPlan<Value>> = sqlx::query_as(
                     "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
                 ).bind(root_id).fetch_optional(&mut *tx).await?;
-                let period = plan.as_ref().and_then(|p| p.2).unwrap_or(month_start);
+                let period = crate::db::subscription::monthly_usage_start(
+                    now,
+                    plan.as_ref().and_then(|p| p.2),
+                );
                 let is_free = plan
                     .as_ref()
                     .is_some_and(|p| p.1.as_deref() == Some("hot-free"));
@@ -251,7 +253,10 @@ impl Task {
                 let plan: Option<TaskAccountPlan<String>> = sqlx::query_as(
                     "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
                 ).bind(root_id).fetch_optional(&mut *tx).await?;
-                let period = plan.as_ref().and_then(|p| p.2).unwrap_or(month_start);
+                let period = crate::db::subscription::monthly_usage_start(
+                    now,
+                    plan.as_ref().and_then(|p| p.2),
+                );
                 let overrides = parse_features(overrides)?;
                 let plan_features = parse_features(plan.as_ref().and_then(|p| p.0.clone()))?;
                 let is_free = plan

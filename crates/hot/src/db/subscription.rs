@@ -1,6 +1,6 @@
 mod runtime_usage;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
@@ -8,6 +8,39 @@ use sqlx::types::Uuid;
 use thiserror::Error;
 
 use super::DatabasePool;
+
+/// Start of the monthly window that allowances such as runs per month count
+/// from. Billing advances `current_period_start` each month only for monthly
+/// plans; annual plans, and free plans that never renew, keep their first
+/// start. So the window is the latest monthly anniversary of the subscription
+/// start, computed from the original anchor so month-end dates clamp (Jan 31,
+/// Feb 29, Mar 31) without drifting. Accounts without a plan, and a start in
+/// the future, use the calendar month: a window that moved with every request
+/// would reset its counter each time.
+pub fn monthly_usage_start(
+    now: DateTime<Utc>,
+    subscription_start: Option<DateTime<Utc>>,
+) -> DateTime<Utc> {
+    let Some(start) = subscription_start.filter(|start| *start <= now) else {
+        return Utc
+            .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
+            .single()
+            .expect("valid month");
+    };
+    let months = ((now.year() - start.year()) * 12 + now.month() as i32 - start.month() as i32)
+        .max(0) as u32;
+    let anniversary = |months: u32| {
+        start
+            .checked_add_months(chrono::Months::new(months))
+            .unwrap_or(start)
+    };
+    let candidate = anniversary(months);
+    if candidate > now {
+        anniversary(months.saturating_sub(1))
+    } else {
+        candidate
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum PlanError {

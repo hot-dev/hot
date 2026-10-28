@@ -2852,9 +2852,10 @@ async fn process_container_task(
             // usage counters. This early check only gives an exhausted free plan
             // a clear failure, so usage that cannot be read skips it.
             let usage = if is_free {
-                let period_start = subscription
-                    .current_period_start
-                    .unwrap_or_else(chrono::Utc::now);
+                let period_start = hot::db::subscription::monthly_usage_start(
+                    chrono::Utc::now(),
+                    subscription.current_period_start,
+                );
                 cached_usage_stats(
                     &db,
                     *oid,
@@ -5600,11 +5601,13 @@ async fn check_cus_thresholds_inner(
     }
 
     let subscription = hot::db::subscription::OrgPlan::get_by_org_id(db, &org_id).await;
-    let period_start = subscription
-        .as_ref()
-        .ok()
-        .and_then(|s| s.current_period_start)
-        .unwrap_or_else(chrono::Utc::now);
+    let period_start = hot::db::subscription::monthly_usage_start(
+        chrono::Utc::now(),
+        subscription
+            .as_ref()
+            .ok()
+            .and_then(|s| s.current_period_start),
+    );
 
     let Some(usage) = cached_usage_stats(
         db,
