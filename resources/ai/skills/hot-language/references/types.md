@@ -233,7 +233,9 @@ seed declaration with `open`:
 ```hot
 // Before — closed (no extension allowed)
 HttpMethod type "GET" | "POST" | "PUT" | "DELETE" | "PATCH"
+```
 
+```hot
 // After — open (additional members can be added in the same namespace)
 HttpMethod type open "GET" | "POST" | "PUT" | "DELETE" | "PATCH"
 ```
@@ -419,6 +421,7 @@ Arrows do double duty for open enums: they register a new variant **and**
 synthesize the variant constructor. The bodyless form is the most concise:
 
 ```hot
+Animal enum open { Dog, Cat }
 Bird type { species: Str, wingspan: Dec }
 Bird -> Animal.Bird       // enrolls Bird as Animal.Bird
 
@@ -429,6 +432,7 @@ The variant name can differ from the source type name — this is a
 **role-shaped variant**:
 
 ```hot
+Animal enum open { Dog, Cat }
 Lizard type { length-cm: Dec }
 Lizard -> Animal.Reptile  // variant is Animal.Reptile, payload is Lizard
 ```
@@ -554,19 +558,17 @@ distinct.
 
 ## Generic Types
 
-Parameterize types with type variables:
+Hot has no type parameters: in `fn (x: T): T`, `T` is an unresolved type.
+Use `Any`, a union, or a concrete type:
 
 ```hot
-// Generic function
-identity fn (x: T): T { x }
+identity fn (x: Any): Any { x }
 
-// Constrained to specific types
-first fn (items: Vec<T>): T {
+first-item fn (items: Vec<Any>): Any {
     items[0]
 }
 
-// Multiple type parameters
-pair fn (a: A, b: B): Map {
+pair fn (a: Any, b: Any): Map {
     {first: a, second: b}
 }
 ```
@@ -666,7 +668,7 @@ Create aliases for complex types:
 
 ```hot
 // Alias for a complex type
-UserMap Map<Str, User>
+UserMap type Map<Str, User>
 
 // Use the alias
 users: UserMap {}

@@ -216,6 +216,14 @@ pub enum CompilerError {
         message: String,
         location: Option<ErrorLocation>,
     },
+    /// A `meta {schedule: ...}` string that is not a cron expression or a
+    /// supported English schedule
+    InvalidSchedule {
+        func_name: String,
+        schedule: String,
+        message: String,
+        location: Option<ErrorLocation>,
+    },
     /// Invalid event handler (e.g., missing event parameter)
     InvalidEventHandler {
         func_name: String,
@@ -924,6 +932,28 @@ impl fmt::Display for CompilerError {
                     write!(f, "Invalid scheduled function '{}': {}", func_name, message)
                 }
             }
+            CompilerError::InvalidSchedule {
+                func_name,
+                message,
+                location,
+                ..
+            } => {
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<source>".to_string()),
+                        loc.line,
+                        loc.column,
+                        message
+                    )
+                } else {
+                    write!(f, "Invalid schedule on '{}': {}", func_name, message)
+                }
+            }
             CompilerError::InvalidEventHandler {
                 func_name,
                 event_type,
@@ -1394,6 +1424,7 @@ impl CompilerErrors {
             CompilerError::InvalidFlowType { location, .. } => location.as_ref(),
             CompilerError::IncompatibleFlowBranches { location, .. } => location.as_ref(),
             CompilerError::InvalidScheduledFunction { location, .. } => location.as_ref(),
+            CompilerError::InvalidSchedule { location, .. } => location.as_ref(),
             CompilerError::InvalidEventHandler { location, .. } => location.as_ref(),
             CompilerError::InvalidFunctionSyntax { location, .. } => location.as_ref(),
             CompilerError::OpenEnumMatchMissingDefault { location, .. } => location.as_ref(),
@@ -1728,6 +1759,25 @@ impl CompilerErrors {
                     .with_help(
                         "Scheduled functions must accept an event parameter: fn (event) { ... }",
                     );
+            }
+            CompilerError::InvalidSchedule {
+                func_name,
+                schedule,
+                message,
+                ..
+            } => {
+                report = report
+                    .with_code("invalid-schedule")
+                    .with_message(format!(
+                        "Invalid schedule '{}' on '{}'",
+                        schedule, func_name
+                    ))
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(message)
+                            .with_color(label_color),
+                    )
+                    .with_help(crate::db::RECURRING_SCHEDULE_FORMS);
             }
             CompilerError::InvalidEventHandler {
                 func_name,
@@ -2081,6 +2131,7 @@ impl CompilerError {
             CompilerError::InvalidFlowType { location, .. } => location.as_ref(),
             CompilerError::IncompatibleFlowBranches { location, .. } => location.as_ref(),
             CompilerError::InvalidScheduledFunction { location, .. } => location.as_ref(),
+            CompilerError::InvalidSchedule { location, .. } => location.as_ref(),
             CompilerError::InvalidEventHandler { location, .. } => location.as_ref(),
             CompilerError::InvalidFunctionSyntax { location, .. } => location.as_ref(),
             CompilerError::OpenEnumMatchMissingDefault { location, .. } => location.as_ref(),
@@ -2144,6 +2195,7 @@ impl CompilerError {
             CompilerError::InvalidFlowType { .. } => "invalid-flow-type",
             CompilerError::IncompatibleFlowBranches { .. } => "incompatible-flow-branches",
             CompilerError::InvalidScheduledFunction { .. } => "invalid-scheduled-function",
+            CompilerError::InvalidSchedule { .. } => "invalid-schedule",
             CompilerError::InvalidEventHandler { .. } => "invalid-event-handler",
             CompilerError::InvalidFunctionSyntax { .. } => "invalid-function-syntax",
             CompilerError::OpenEnumMatchMissingDefault { .. } => "open-enum-match-missing-default",
