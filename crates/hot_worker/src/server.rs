@@ -2440,25 +2440,80 @@ fn extract_ids_from_orphaned_data(raw_bytes: &[u8]) -> Option<OrphanedMessageIds
     None
 }
 
+/// What queue recovery did with orphaned event messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrphanedEvents {
+    /// Requeued: each event runs again, under the same handler run ids.
+    Requeued,
+    /// Dead-lettered: the events don't run again.
+    DeadLettered,
+}
+
 async fn reconcile_orphaned_event_runs(
     db: &DatabasePool,
     messages: &[RecoveredQueueMessage],
     reason: &str,
+    orphaned: OrphanedEvents,
 ) {
-    let mut stream_ids = ahash::AHashSet::new();
-    let mut event_ids = ahash::AHashSet::new();
-    for message in messages {
-        let Some(ids) = extract_ids_from_orphaned_data(message.payload()) else {
-            continue;
+    let orphans = messages
+        .iter()
+        .filter_map(|message| extract_ids_from_orphaned_data(message.payload()));
+    settle_orphaned_event_runs(db, orphans, reason, orphaned).await;
+}
+
+async fn settle_orphaned_event_runs(
+    db: &DatabasePool,
+    orphans: impl IntoIterator<Item = OrphanedMessageIds>,
+    reason: &str,
+    orphaned: OrphanedEvents,
+) {
+    let orphans: ahash::AHashMap<uuid::Uuid, Option<uuid::Uuid>> = orphans
+        .into_iter()
+        .map(|ids| (ids.event_id, ids.stream_id))
+        .collect();
+
+    // Each event's own runs first: a requeued event's redelivered handlers
+    // reuse their rows, so those are held for them rather than failed.
+    let mut unsettled_streams = ahash::AHashSet::new();
+    for (event_id, stream_id) in &orphans {
+        let own_runs = match orphaned {
+            OrphanedEvents::Requeued => {
+                hot::db::run::Run::hold_orphaned_runs_for_redelivery(db, event_id).await
+            }
+            OrphanedEvents::DeadLettered => {
+                hot::db::run::Run::fail_orphaned_runs_by_event_id(db, event_id, reason).await
+            }
         };
-        if let Some(stream_id) = ids.stream_id {
-            stream_ids.insert(stream_id);
-        } else {
-            event_ids.insert(ids.event_id);
+        match own_runs {
+            Ok(0) => {}
+            Ok(count) => info!(
+                "hot.dev: WORKER marked {} orphaned run(s) as {} for event {}",
+                count,
+                if orphaned == OrphanedEvents::Requeued {
+                    "pending retry"
+                } else {
+                    "failed"
+                },
+                event_id
+            ),
+            Err(error) => {
+                warn!(
+                    "hot.dev: WORKER failed to reconcile orphaned runs for event {}: {}",
+                    event_id, error
+                );
+                // Failing its stream would fail the event's own runs too.
+                unsettled_streams.extend(*stream_id);
+            }
         }
     }
 
-    for stream_id in stream_ids {
+    // Then whatever else in the events' streams is still running.
+    let streams: ahash::AHashSet<uuid::Uuid> = orphans
+        .into_values()
+        .flatten()
+        .filter(|stream_id| !unsettled_streams.contains(stream_id))
+        .collect();
+    for stream_id in streams {
         match hot::db::run::Run::fail_orphaned_runs_by_stream_id(db, &stream_id, reason).await {
             Ok(failed) if failed > 0 => info!(
                 "hot.dev: WORKER marked {} orphaned run(s) as failed for stream {}",
@@ -2471,18 +2526,26 @@ async fn reconcile_orphaned_event_runs(
             ),
         }
     }
-    for event_id in event_ids {
-        match hot::db::run::Run::fail_orphaned_runs_by_event_id(db, &event_id, reason).await {
-            Ok(failed) if failed > 0 => info!(
-                "hot.dev: WORKER marked {} orphaned run(s) as failed for event {}",
-                failed, event_id
-            ),
-            Ok(_) => {}
-            Err(error) => warn!(
-                "hot.dev: WORKER failed to mark orphaned runs as failed for event {}: {}",
-                event_id, error
-            ),
-        }
+}
+
+/// Fail runs crash recovery held for a redelivery that doesn't run their
+/// handlers. Best-effort: the event's own handlers run either way.
+async fn fail_unselected_held_runs(db: &DatabasePool, run_ids: &[uuid::Uuid]) {
+    if run_ids.is_empty() {
+        return;
+    }
+    if let Err(error) = hot::db::run::Run::fail_held_runs(
+        db,
+        run_ids,
+        "Worker stopped during event processing; the redelivered event no longer runs this handler",
+    )
+    .await
+    {
+        warn!(
+            "hot.dev: WORKER could not mark {} held run(s) as failed after their redelivered event dropped the handlers: {}",
+            run_ids.len(),
+            error
+        );
     }
 }
 
@@ -5996,12 +6059,14 @@ pub async fn run_with_components_shared_context_and_db(
                     db_pool,
                     &recovery.requeued_messages,
                     "Worker crashed during event processing - event will be retried",
+                    OrphanedEvents::Requeued,
                 )
                 .await;
                 reconcile_orphaned_event_runs(
                     db_pool,
                     &recovery.dead_lettered_messages,
                     "Worker crashed during event processing and the event exhausted its queue retry limit",
+                    OrphanedEvents::DeadLettered,
                 )
                 .await;
             }
@@ -6550,12 +6615,14 @@ pub async fn run_with_components_shared_context_and_db(
                                         db,
                                         &recovery.requeued_messages,
                                         "Worker lease expired during event processing - event will be retried",
+                                        OrphanedEvents::Requeued,
                                     )
                                     .await;
                                     reconcile_orphaned_event_runs(
                                         db,
                                         &recovery.dead_lettered_messages,
                                         "Worker lease expired during event processing and the event exhausted its queue retry limit",
+                                        OrphanedEvents::DeadLettered,
                                     )
                                     .await;
                                 }
@@ -7231,6 +7298,15 @@ pub async fn run_with_components_shared_context_and_db(
                                                         debug!("hot.dev: WORKER {} executing {} handler(s) for event type '{}'",
                                                             worker_id, handlers_to_execute.len(), event_message.body.event.event_type);
 
+                                                        // A redelivered event derives the same handler run ids, so
+                                                        // the runs of its earlier deliveries say what is left:
+                                                        // handlers that finished don't run again, and runs crash
+                                                        // recovery held are reopened before their handlers execute.
+                                                        let earlier_runs = hot::db::run::Run::earlier_deliveries(db, &event_message.body.event.event_id).await
+                                                            .map_err(|e| worker_infrastructure_retry_error(format!("Cannot read the event's earlier runs: {e}"), infra_retry_backoff_ms.max(5_000)))?;
+                                                        let mut finished_earlier = 0usize;
+                                                        let mut held_runs = Vec::new();
+
                                                         // Resolve and reserve the entire event fan-out before any
                                                         // handler can execute. Durable IDs prevent infra redelivery
                                                         // from consuming additional monthly run slots.
@@ -7255,6 +7331,14 @@ pub async fn run_with_components_shared_context_and_db(
                                                             }
                                                             let identity = format!("{}:{}:{}", event_message.body.event.event_id, event_handler.event_handler_id, event_message.body.execution_context.retry_attempt);
                                                             let run_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, identity.as_bytes());
+                                                            match earlier_runs.get(&run_id) {
+                                                                Some(hot::db::run::EarlierDelivery::Finished) => {
+                                                                    finished_earlier += 1;
+                                                                    continue;
+                                                                }
+                                                                Some(hot::db::run::EarlierDelivery::Held) => held_runs.push(run_id),
+                                                                Some(hot::db::run::EarlierDelivery::Running) | None => {}
+                                                            }
                                                             admitted_handlers.push((event_handler, handler_build, run_id));
                                                         }
                                                         if let Some((build_id, reason)) = awaiting_redeploy.first() {
@@ -7279,6 +7363,22 @@ pub async fn run_with_components_shared_context_and_db(
                                                                     infra_retry_backoff_ms.max(AWAITING_REDEPLOY_BACKOFF_MS),
                                                                 ));
                                                             }
+                                                        }
+                                                        // Held runs of handlers a delivery that settles the event
+                                                        // doesn't run, after a redeploy changed the handlers, would
+                                                        // stay pending.
+                                                        let unselected_held: Vec<Uuid> = earlier_runs
+                                                            .iter()
+                                                            .filter(|(run_id, state)| **state == hot::db::run::EarlierDelivery::Held && !held_runs.contains(run_id))
+                                                            .map(|(run_id, _)| *run_id)
+                                                            .collect();
+                                                        if admitted_handlers.is_empty() && finished_earlier > 0 {
+                                                            debug!(
+                                                                "hot.dev: WORKER {} acknowledges redelivered event {}: its {} handler run(s) finished in an earlier delivery",
+                                                                worker_id, event_message.body.event.event_id, finished_earlier
+                                                            );
+                                                            fail_unselected_held_runs(db, &unselected_held).await;
+                                                            return Ok(());
                                                         }
                                                         let run_ids: Vec<Uuid> = admitted_handlers.iter().map(|(_, _, id)| *id).collect();
                                                         let org_id = event_message.body.execution_context.org_id.ok_or_else(|| worker_error("Hydrated event has no organization"))?;
@@ -7305,6 +7405,14 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 }
                                                                 _ => worker_error(e.to_string()),
                                                             })?;
+                                                        // No handler has started yet, so a failure here can still
+                                                        // leave the whole event for redelivery.
+                                                        hot::db::run::Run::reopen_held_runs(db, &held_runs).await
+                                                            .map_err(|e| worker_infrastructure_retry_error(format!("Cannot reopen the event's held runs: {e}"), infra_retry_backoff_ms.max(5_000)))?;
+                                                        // With no handler to run, the event is delivered again.
+                                                        if !admitted_handlers.is_empty() {
+                                                            fail_unselected_held_runs(db, &unselected_held).await;
+                                                        }
 
                                                         // Step 4: Execute the selected handlers
                                                         let execution_result: (Result<(), String>, bool) = {
@@ -8609,6 +8717,101 @@ mod tests {
                 "ok": true,
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn requeued_orphans_keep_their_handler_runs_for_the_redelivery() {
+        use hot::db::run::{Run, RunStatus, RunType};
+
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        // Two orphaned events in one stream, each with the handler run it was
+        // executing, beside another run of the stream.
+        let mut handler_runs = Vec::new();
+        for _ in 0..2 {
+            let event_id = Uuid::now_v7();
+            hot::db::Event::insert_event(
+                &db,
+                &event_id,
+                &data.env_id,
+                &data.stream_id,
+                "demo:event",
+                &serde_json::json!({}),
+                chrono::Utc::now(),
+                &data.user_id,
+                None,
+            )
+            .await
+            .unwrap();
+            let run_id = Uuid::now_v7();
+            Run::insert_run(
+                &db,
+                &run_id,
+                &data.env_id,
+                &data.stream_id,
+                Some(&data.build_id),
+                RunType::Event.as_id(),
+                None,
+                &data.user_id,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE run SET event_id = ? WHERE run_id = ?")
+                .bind(event_id)
+                .bind(run_id)
+                .execute(pool)
+                .await
+                .unwrap();
+            handler_runs.push((event_id, run_id));
+        }
+        sqlx::query("UPDATE run SET status_id = 1 WHERE run_id = ?")
+            .bind(data.run_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let status = async |run_id: Uuid| Run::get_run(&db, &run_id).await.unwrap().status_id;
+        let orphan = |event_id: Uuid| OrphanedMessageIds {
+            event_id,
+            stream_id: Some(data.stream_id),
+        };
+
+        settle_orphaned_event_runs(
+            &db,
+            handler_runs.iter().map(|(event_id, _)| orphan(*event_id)),
+            "requeued",
+            OrphanedEvents::Requeued,
+        )
+        .await;
+        for (_, run_id) in &handler_runs {
+            assert_eq!(status(*run_id).await, RunStatus::PendingRetry.as_id());
+        }
+        // Nothing redelivers the rest of the stream.
+        assert_eq!(status(data.run_id).await, RunStatus::Failed.as_id());
+
+        // A dead-lettered event is never redelivered: its held run fails.
+        let (dead_event, dead_run) = handler_runs[0];
+        settle_orphaned_event_runs(
+            &db,
+            [orphan(dead_event)],
+            "dead-lettered",
+            OrphanedEvents::DeadLettered,
+        )
+        .await;
+        assert_eq!(status(dead_run).await, RunStatus::Failed.as_id());
+        assert_eq!(
+            status(handler_runs[1].1).await,
+            RunStatus::PendingRetry.as_id()
+        );
+
+        pool.close().await;
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]

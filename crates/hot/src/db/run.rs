@@ -93,6 +93,33 @@ impl FromStr for RunStatus {
     }
 }
 
+/// What a handler run written by an earlier delivery of the same event means
+/// for a redelivery. Event handler run ids derive from the event, so a
+/// redelivered event finds the rows its earlier delivery wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EarlierDelivery {
+    /// Still running: that delivery was cut short. Executing the handler
+    /// again records its outcome on the same row.
+    Running,
+    /// Held for this redelivery by crash recovery
+    /// ([`Run::hold_orphaned_runs_for_redelivery`]): reopen it, then execute.
+    Held,
+    /// Finished, or failed with its retry scheduled as a run of its own: the
+    /// handler must not execute again.
+    Finished,
+}
+
+impl EarlierDelivery {
+    fn of(status_id: i16, next_retry_at: Option<DateTime<Utc>>) -> Self {
+        match RunStatus::from_id(status_id) {
+            Some(RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled) => Self::Finished,
+            Some(RunStatus::PendingRetry) if next_retry_at.is_some() => Self::Finished,
+            Some(RunStatus::PendingRetry) => Self::Held,
+            Some(RunStatus::Running) | None => Self::Running,
+        }
+    }
+}
+
 #[derive(Debug, FromRow)]
 pub struct RunStatusRecord {
     pub status_id: i16,
@@ -1780,7 +1807,9 @@ impl Run {
         Ok(())
     }
 
-    /// Fail all runs for a given event_id that are still in "running" status.
+    /// Fail all runs for a given event_id that are still in "running" status,
+    /// or held for a redelivery that will not come
+    /// ([`Run::hold_orphaned_runs_for_redelivery`]).
     /// This is used during orphaned event recovery to clean up runs that were
     /// interrupted when a worker crashed.
     ///
@@ -1803,13 +1832,14 @@ impl Run {
         let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let result = sqlx::query(
-                    "UPDATE run SET stop_time = $2, status_id = $3, result = $4 WHERE event_id = $1 AND status_id = $5",
+                    "UPDATE run SET stop_time = $2, status_id = $3, result = $4 WHERE event_id = $1 AND (status_id = $5 OR (status_id = $6 AND next_retry_at IS NULL))",
                 )
                 .bind(event_id)
                 .bind(stop_time)
                 .bind(RunStatus::Failed.as_id())
                 .bind(&result_val)
                 .bind(RunStatus::Running.as_id())
+                .bind(RunStatus::PendingRetry.as_id())
                 .execute(pg_pool)
                 .await?;
                 result.rows_affected()
@@ -1817,13 +1847,14 @@ impl Run {
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let result_json = result_val.to_string();
                 let result = sqlx::query(
-                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE event_id = ? AND status_id = ?",
+                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE event_id = ? AND (status_id = ? OR (status_id = ? AND next_retry_at IS NULL))",
                 )
                 .bind(stop_time)
                 .bind(RunStatus::Failed.as_id())
                 .bind(&result_json)
                 .bind(event_id)
                 .bind(RunStatus::Running.as_id())
+                .bind(RunStatus::PendingRetry.as_id())
                 .execute(sqlite_pool)
                 .await?;
                 result.rows_affected()
@@ -1900,6 +1931,115 @@ impl Run {
         }
 
         Ok(rows_affected)
+    }
+
+    /// Hold an event's runs that were still running when its worker stopped
+    /// for the event's redelivery: they become pending retries without a
+    /// retry time, which the retry scheduler never picks up. The redelivered
+    /// handlers derive the same run ids, find these rows and reopen them
+    /// ([`Run::reopen_held_runs`]). Failed runs would stay failed: a run's
+    /// writes only update a running row.
+    ///
+    /// Returns the number of runs held.
+    pub async fn hold_orphaned_runs_for_redelivery(
+        db: &crate::db::DatabasePool,
+        event_id: &Uuid,
+    ) -> Result<u64, RunError> {
+        let sql = "UPDATE run SET status_id = 5, next_retry_at = NULL WHERE event_id = $1 AND status_id = 1";
+        let rows_affected = match db {
+            crate::db::DatabasePool::Postgres(pool) => sqlx::query(sql)
+                .bind(event_id)
+                .execute(pool)
+                .await?
+                .rows_affected(),
+            crate::db::DatabasePool::Sqlite(pool) => sqlx::query(sql)
+                .bind(event_id)
+                .execute(pool)
+                .await?
+                .rows_affected(),
+        };
+        Ok(rows_affected)
+    }
+
+    /// The runs earlier deliveries of an event wrote, by run id.
+    pub async fn earlier_deliveries(
+        db: &crate::db::DatabasePool,
+        event_id: &Uuid,
+    ) -> Result<AHashMap<Uuid, EarlierDelivery>, RunError> {
+        let sql = "SELECT run_id, status_id, next_retry_at FROM run WHERE event_id = $1";
+        let rows: Vec<(Uuid, i16, Option<DateTime<Utc>>)> = match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                sqlx::query_as(sql).bind(event_id).fetch_all(pool).await?
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                sqlx::query_as(sql).bind(event_id).fetch_all(pool).await?
+            }
+        };
+        Ok(rows
+            .into_iter()
+            .map(|(run_id, status_id, next_retry_at)| {
+                (run_id, EarlierDelivery::of(status_id, next_retry_at))
+            })
+            .collect())
+    }
+
+    /// Reopen held runs just before their redelivered handlers execute, so
+    /// the runs can record their outcome.
+    pub async fn reopen_held_runs(
+        db: &crate::db::DatabasePool,
+        run_ids: &[Uuid],
+    ) -> Result<(), RunError> {
+        let sql = "UPDATE run SET status_id = 1, stop_time = NULL, result = NULL WHERE run_id = $1 AND status_id = 5 AND next_retry_at IS NULL";
+        for run_id in run_ids {
+            match db {
+                crate::db::DatabasePool::Postgres(pool) => {
+                    sqlx::query(sql).bind(run_id).execute(pool).await?;
+                }
+                crate::db::DatabasePool::Sqlite(pool) => {
+                    sqlx::query(sql).bind(run_id).execute(pool).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Fail held runs that their redelivered event will not execute, such as
+    /// runs of a handler a redeploy removed meanwhile.
+    pub async fn fail_held_runs(
+        db: &crate::db::DatabasePool,
+        run_ids: &[Uuid],
+        error_message: &str,
+    ) -> Result<(), RunError> {
+        let result_val = serde_json::json!({
+            "$type": "::hot::run/Failure",
+            "$val": {
+                "msg": error_message,
+                "err": serde_json::Value::Null
+            }
+        });
+        let stop_time = Utc::now();
+        let sql = "UPDATE run SET stop_time = $1, status_id = 3, result = $2 WHERE run_id = $3 AND status_id = 5 AND next_retry_at IS NULL";
+        for run_id in run_ids {
+            match db {
+                crate::db::DatabasePool::Postgres(pool) => {
+                    sqlx::query(sql)
+                        .bind(stop_time)
+                        .bind(&result_val)
+                        .bind(run_id)
+                        .execute(pool)
+                        .await?;
+                }
+                crate::db::DatabasePool::Sqlite(pool) => {
+                    sqlx::query(sql)
+                        .bind(stop_time)
+                        .bind(result_val.to_string())
+                        .bind(run_id)
+                        .execute(pool)
+                        .await?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Fail every run still flagged `running` whose `start_time` is older than
@@ -3590,6 +3730,126 @@ mod tests {
                 .await
                 .unwrap();
         assert!(deferred >= now + chrono::Duration::minutes(1));
+    }
+
+    /// The fixture run, as the handler run of a new event.
+    async fn handler_run_of_new_event(
+        db: &crate::db::DatabasePool,
+        data: &crate::db::TestData,
+    ) -> Uuid {
+        let event_id = Uuid::now_v7();
+        crate::db::Event::insert_event(
+            db,
+            &event_id,
+            &data.env_id,
+            &data.stream_id,
+            "demo:event",
+            &serde_json::json!({}),
+            Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE run SET event_id = ?, status_id = 1 WHERE run_id = ?")
+            .bind(event_id)
+            .bind(data.run_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        event_id
+    }
+
+    #[tokio::test]
+    async fn held_runs_wait_for_the_redelivery_that_reopens_them() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let event_id = handler_run_of_new_event(&db, &data).await;
+        let finish = async || {
+            Run::finish_if_running(&db, &data.env_id, &data.run_id, &RunStatus::Succeeded)
+                .await
+                .unwrap();
+            Run::get_run(&db, &data.run_id).await.unwrap().status_id
+        };
+
+        assert_eq!(
+            Run::hold_orphaned_runs_for_redelivery(&db, &event_id)
+                .await
+                .unwrap(),
+            1
+        );
+        let earlier = Run::earlier_deliveries(&db, &event_id).await.unwrap();
+        assert_eq!(earlier.get(&data.run_id), Some(&EarlierDelivery::Held));
+        // A held run is no scheduled retry, and records nothing until reopened.
+        let due = Run::get_pending_retries(&db, 50).await.unwrap();
+        assert!(due.iter().all(|run| run.run_id != data.run_id));
+        assert_eq!(finish().await, RunStatus::PendingRetry.as_id());
+
+        Run::reopen_held_runs(&db, &[data.run_id]).await.unwrap();
+        assert_eq!(finish().await, RunStatus::Succeeded.as_id());
+        let earlier = Run::earlier_deliveries(&db, &event_id).await.unwrap();
+        assert_eq!(earlier.get(&data.run_id), Some(&EarlierDelivery::Finished));
+    }
+
+    #[tokio::test]
+    async fn held_runs_fail_when_their_redelivery_will_not_run_them() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let event_id = handler_run_of_new_event(&db, &data).await;
+        let status = async || Run::get_run(&db, &data.run_id).await.unwrap().status_id;
+
+        Run::hold_orphaned_runs_for_redelivery(&db, &event_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            Run::fail_orphaned_runs_by_event_id(&db, &event_id, "dead-lettered")
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(status().await, RunStatus::Failed.as_id());
+
+        // A scheduled retry is not held: dropping a held handler leaves it alone.
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE run SET status_id = 5, next_retry_at = ? WHERE run_id = ?")
+            .bind(Utc::now())
+            .bind(data.run_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        Run::fail_held_runs(&db, &[data.run_id], "dropped")
+            .await
+            .unwrap();
+        assert_eq!(status().await, RunStatus::PendingRetry.as_id());
+        sqlx::query("UPDATE run SET next_retry_at = NULL WHERE run_id = ?")
+            .bind(data.run_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        Run::fail_held_runs(&db, &[data.run_id], "dropped")
+            .await
+            .unwrap();
+        assert_eq!(status().await, RunStatus::Failed.as_id());
+    }
+
+    #[test]
+    fn earlier_deliveries_only_rerun_unfinished_handlers() {
+        let at = Some(Utc::now());
+        assert_eq!(EarlierDelivery::of(1, None), EarlierDelivery::Running);
+        assert_eq!(EarlierDelivery::of(5, None), EarlierDelivery::Held);
+        // A failed run with its retry scheduled as a run of its own.
+        assert_eq!(EarlierDelivery::of(5, at), EarlierDelivery::Finished);
+        for finished in [2, 3, 4] {
+            assert_eq!(
+                EarlierDelivery::of(finished, None),
+                EarlierDelivery::Finished
+            );
+        }
     }
 
     #[test]
