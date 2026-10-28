@@ -865,6 +865,7 @@ impl TypeChecker {
 
         // First pass: collect all type names from the program
         self.collect_known_types(program);
+        self.warn_duplicate_core_types(program);
 
         // Second pass: collect cross-namespace variable types so that
         // `Ref::Ns` references and var imports resolve to a real type instead
@@ -998,6 +999,40 @@ impl TypeChecker {
     /// sees the same row-preserved record shapes as diagnostics.
     pub fn infer_value_type_for_lsp(&mut self, value: &Value) -> TypeExpr {
         self.infer_value_type(value)
+    }
+
+    /// Warn when a type is declared `core: true` in more than one namespace.
+    /// The last declaration wins everywhere, as in the runtime core
+    /// registry, which silently overrides the earlier one. hot-std's own
+    /// overrides (`::hot::exec/Failure` over `::hot::run/Failure`) are
+    /// deliberate, so pairs inside `::hot::*` are left alone.
+    fn warn_duplicate_core_types(&mut self, program: &Program) {
+        let mut declared: AHashMap<String, String> = AHashMap::new();
+        for (ns_path, namespace) in &program.namespaces {
+            let ns = ns_path.to_string();
+            for (var, value) in &namespace.scope.vars {
+                if !matches!(value, Value::TypeDef(_))
+                    || !CoreVariableRegistry::has_core_metadata(var)
+                {
+                    continue;
+                }
+                let name = var.sym.name().to_string();
+                let Some(shadowed) = declared.insert(name.clone(), ns.clone()) else {
+                    continue;
+                };
+                if shadowed == ns || (shadowed.starts_with("::hot::") && ns.starts_with("::hot::"))
+                {
+                    continue;
+                }
+                let location = var.src.as_ref().map(|s| self.source_to_error_location(s));
+                self.errors.add_warning(CompilerError::DuplicateCoreName {
+                    name,
+                    shadowed,
+                    winner: ns.clone(),
+                    location,
+                });
+            }
+        }
     }
 
     /// Collect all type names from the program for type resolution
@@ -2468,13 +2503,13 @@ impl TypeChecker {
                         // `meta {core: true}` in another namespace) resolve to
                         // their qualified type instead of `Any`. If multiple
                         // namespaces declare the same core name, take the
-                        // first registered match — short-name variable
-                        // shadowing across modules is rare; ambiguous cases
-                        // would be flagged by the resolver pass.
+                        // last registered match: the runtime core registry
+                        // keeps the last registration, so a project's core
+                        // `Next` enum overrides hot-std's core `Next` struct.
                         .or_else(|| {
                             self.core_variables
                                 .get(*var_name)
-                                .and_then(|qualifieds| qualifieds.first())
+                                .and_then(|qualifieds| qualifieds.last())
                                 .and_then(|qualified| {
                                     self.qualified_variables.get(qualified).cloned()
                                 })

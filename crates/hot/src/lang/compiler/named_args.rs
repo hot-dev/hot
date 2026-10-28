@@ -93,11 +93,11 @@ impl RecordTypes {
                 let name = var.sym.name();
                 match value {
                     Value::TypeDef(def) => {
+                        // The last core declaration of a name wins, as in the
+                        // runtime core registry: a project's core `Next`
+                        // overrides hot-std's.
                         if CoreVariableRegistry::has_core_metadata(var) {
-                            types
-                                .core
-                                .entry(name.to_string())
-                                .or_insert_with(|| ns.clone());
+                            types.core.insert(name.to_string(), ns.clone());
                         }
                         match types.declared.get_mut(&(ns.clone(), name.to_string())) {
                             Some(declared) => merge_declaration(declared, def),
