@@ -779,6 +779,63 @@ probe()"#;
         );
     }
 
+    /// An enum from another namespace can be named in full, as
+    /// `::geo/Shape.Circle`, or through a namespace alias, without importing
+    /// it: to construct a variant with a Map or named arguments, as a unit
+    /// variant's value, in `match`, bound to a name, and as a variant's
+    /// payload type (`Ring(::geo/Round)`). A unit variant bound at the top of
+    /// a namespace is its value; a variant with a payload is its constructor.
+    #[test]
+    fn qualified_enum_variants_construct_and_match() {
+        let src = r#"::geo ns
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+Round type { radius: Dec }
+Bird type { species: Str }
+Animal enum open { Dog }
+Bird -> Animal.Bird
+
+::geo::forms ns
+::gt ::geo
+Form enum { Ring(::geo/Round), Disk(::gt/Round), Flat }
+
+::t ns
+::g ::geo
+::f ::geo::forms
+Nothing ::geo/Shape.Dot
+Round ::geo/Shape.Circle
+
+describe fn (s: ::geo/Shape): Str {
+    match s {
+        ::geo/Shape.Circle => { `circle ${s.radius}` }
+        ::geo/Shape.Dot => { "dot" }
+    }
+}
+
+probe fn (): Vec {
+    mapped ::geo/Shape.Circle({radius: 1.0})
+    named ::g/Shape.Circle(radius: 2.0)
+    dot ::geo/Shape.Dot
+    make ::geo/Shape.Circle
+    [mapped.radius, named.radius, is-type(named, ::geo/Shape),
+     is-type(dot, ::geo/Shape), eq(dot, ::g/Shape.Dot), eq(dot, Nothing),
+     describe(named), describe(dot), describe(Nothing),
+     make({radius: 3.0}).radius, Round({radius: 4.0}).radius,
+     ::geo/Animal.Bird(species: "Eagle").species, is-type(::geo/Animal.Dog, ::geo/Animal),
+     ::f/Form.Ring(radius: 5.0).radius, ::geo::forms/Form.Disk({radius: 6.0}).radius,
+     is-type(::f/Form.Flat, ::f/Form)]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([
+                1.0, 2.0, true, true, true, true, "circle 2.0", "dot", "dot", 3.0, 4.0, "Eagle",
+                true, 5.0, 6.0, true
+            ]),
+        );
+    }
+
     /// Like the Map form, a named call on a type with custom constructors goes
     /// to the default constructor, which still checks `where` constraints.
     /// A type declared twice takes names in either order, and a one-parameter
@@ -844,6 +901,11 @@ greet fn (name: Str): Str { name }
             (r#"Shape(radius: 1.0)"#, "`Shape` is an enum."),
             (r#"Shape.Dot(radius: 1.0)"#, "`Shape.Dot` carries no data."),
             (r#"Shape.Square(side: 1.0)"#, "`Shape` has no variant `Square`."),
+            (
+                r#"::t/Shape.Square(side: 1.0)"#,
+                "`::t/Shape` has no variant `Square`.",
+            ),
+            (r#"::t/Shape.Dot(radius: 1.0)"#, "`::t/Shape.Dot` carries no data."),
             (
                 r#""Ada" |> User(email: "a@b.c")"#,
                 "A piped value can't fill a named field.",
