@@ -16,6 +16,7 @@ Prints the agent's report as JSON (or as Markdown with --summary FILE) and
 exits 1 when the agent rejects the command or the deploy fails.
 """
 import argparse
+import base64
 import datetime
 import json
 import secrets
@@ -26,7 +27,10 @@ import time
 OPERATIONS = ("deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop",
               "roll-back")
 # Final states per operation; anything else is progress or another request.
-FAILED = {"failed", "rejected"}
+FAILED = {"failed", "rejected", "migration-failed"}
+# A scalable release rolls roles in this order, after migrating; the
+# scheduler is replaced last, stop-before-start.
+ROLE_ORDER = ("task-worker", "worker", "api", "app", "scheduler")
 STATUS_STREAM = "hot-agent-status"
 
 
@@ -52,6 +56,7 @@ class Installation:
         self.cloud = config["cloud"]
         self.region = config.get("region", "")
         self.project = config.get("project", "")
+        self.scalable = config.get("preset", "single-machine") == "scalable"
         self.cli = cli
         self.clock = clock
         self.sleep = sleep
@@ -70,27 +75,56 @@ class Installation:
             self.cli("gcloud", "pubsub", "topics", "publish", f"hot-{self.name}-commands",
                      "--project", self.project, "--message", message, "--format", "json")
 
-    def point_at(self, release):
+    def point_at(self, release, role=""):
+        """Write the release pointer: the installation's, or on a scalable
+        installation one role's (or "migrate", for the migration host)."""
+        suffix = f"/{role}" if role else ""
         if self.cloud == "aws":
             self.cli("aws", "ssm", "put-parameter", "--region", self.region, "--output", "json",
-                     "--name", f"/hot/{self.name}/release", "--value", release, "--type", "String", "--overwrite")
+                     "--name", f"/hot/{self.name}/release{suffix}", "--value", release, "--type", "String", "--overwrite")
         else:
-            self.cli("gcloud", "secrets", "versions", "add", f"hot-{self.name}-release", "--project", self.project,
-                     "--data-file=-", "--format", "json", stdin=json.dumps({"release": release}))
+            self.cli("gcloud", "secrets", "versions", "add", f"hot-{self.name}-release{suffix.replace('/', '-')}",
+                     "--project", self.project, "--data-file=-", "--format", "json",
+                     stdin=json.dumps({"release": release}))
+
+    def pointer(self, role):
+        try:
+            if self.cloud == "aws":
+                found = self.cli("aws", "ssm", "get-parameter", "--region", self.region, "--output", "json",
+                                 "--name", f"/hot/{self.name}/release/{role}")
+                return found["Parameter"]["Value"]
+            found = self.cli("gcloud", "secrets", "versions", "access", "latest", "--secret",
+                             f"hot-{self.name}-release-{role}", "--project", self.project, "--format", "json")
+            return json.loads(base64.b64decode(found["payload"]["data"]))["release"]
+        except (CliError, KeyError, ValueError):
+            return None
+
+    def instances(self, role):
+        """The running instances in one role's group."""
+        group = f"hot-{self.name}-{role}"
+        if self.cloud == "aws":
+            found = self.cli("aws", "autoscaling", "describe-auto-scaling-groups", "--region", self.region,
+                             "--output", "json", "--auto-scaling-group-names", group)
+            return sorted(i["InstanceId"] for g in found.get("AutoScalingGroups", []) for i in g.get("Instances", [])
+                          if i.get("LifecycleState") == "InService")
+        found = self.cli("gcloud", "compute", "instance-groups", "managed", "list-instances", group,
+                         "--region", self.region, "--project", self.project, "--format", "json") or []
+        return sorted(i["instance"].rsplit("/", 1)[-1] for i in found if i.get("instanceStatus") == "RUNNING")
 
     # -- reports -----------------------------------------------------------------
 
-    def reports(self, request_id, since):
-        """The agent's reports for one request, oldest first."""
+    def reports(self, request_id, since, field="request_id"):
+        """The agent's reports for one request (or, with field="release",
+        about one release), oldest first."""
         if self.cloud == "aws":
             result = self.cli("aws", "logs", "filter-log-events", "--region", self.region, "--output", "json",
                               "--log-group-name", f"/hot/{self.name}", "--log-stream-names", STATUS_STREAM,
                               "--start-time", str(int(since * 1000)),
-                              "--filter-pattern", f'{{ $.request_id = "{request_id}" }}')
+                              "--filter-pattern", f'{{ $.{field} = "{request_id}" }}')
             return [json.loads(event["message"]) for event in (result or {}).get("events", [])]
         started = datetime.datetime.fromtimestamp(since, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         query = (f'logName="projects/{self.project}/logs/hot-{self.name}-status" '
-                 f'AND jsonPayload.request_id="{request_id}" AND timestamp>="{started}"')
+                 f'AND jsonPayload.{field}="{request_id}" AND timestamp>="{started}"')
         entries = self.cli("gcloud", "logging", "read", query, "--project", self.project,
                            "--format", "json", "--order", "asc", "--limit", "20") or []
         return [entry["jsonPayload"] for entry in entries]
@@ -116,12 +150,64 @@ class Installation:
 
     def release(self, version, request_id="", timeout=1800):
         """Point the installation at a release and deploy it now."""
+        if self.scalable:
+            return self.scalable_release(version, timeout)
         self.point_at(version)
         report = self.run("deploy-now", request_id=request_id, timeout=timeout)
         if report.get("state") in ("deployed", "current") and report.get("release") != version:
             report = {**report, "state": "failed",
                       "error": f"The agent reports release {report.get('release')}, not {version}"}
         return report
+
+    def wait_for(self, release, since, timeout, done, poll=10):
+        """Poll the reports about one release until `done(reports)` returns a
+        report, or time runs out."""
+        deadline = self.clock() + timeout
+        while True:
+            result = done(self.reports(release, since, field="release"))
+            if result:
+                return result
+            if self.clock() >= deadline:
+                raise CliError(f"Release {release} did not finish within {timeout} seconds")
+            self.sleep(poll)
+
+    def scalable_release(self, version, timeout):
+        """Migrate once, then roll each role in order, waiting for every
+        instance in its group. The scheduler is last."""
+        since = self.clock() - 120
+
+        def migrated(reports):
+            return next((r for r in reversed(reports) if r.get("state") in ("migrated", "migration-failed")), None)
+        if self.pointer("migrate") == version:
+            # Already released: rely on what the migration host reported.
+            result = migrated(self.reports(version, 0, field="release")) or self.wait_for(version, since, timeout, migrated)
+        else:
+            self.point_at(version, "migrate")
+            result = self.wait_for(version, since, timeout, migrated)
+        if result["state"] != "migrated":
+            return {**result, "state": "failed",
+                    "error": f"{result.get('error', 'Migrations failed')}; after fixing the cause, run deploy-now "
+                             "on the scheduler host to retry, then release again"}
+        rolled = {}
+        for role in ROLE_ORDER:
+            instances = self.instances(role)
+            if not instances or self.pointer(role) == version:
+                rolled[role] = instances
+                continue
+            self.point_at(version, role)
+
+            def deployed(reports, role=role, instances=instances):
+                mine = [r for r in reports if role in (r.get("roles") or []) and r.get("instance") in instances]
+                failed = next((r for r in mine if r.get("state") == "failed"), None)
+                if failed:
+                    return failed
+                done = {r["instance"] for r in mine if r.get("state") in ("deployed", "current")}
+                return {"state": "deployed"} if set(instances) <= done else None
+            result = self.wait_for(version, since, timeout, deployed)
+            if result["state"] == "failed":
+                return {**result, "role": role, "rolled": rolled}
+            rolled[role] = instances
+        return {"installation": self.name, "state": "deployed", "release": version, "rolled": rolled}
 
 
 def markdown(report):

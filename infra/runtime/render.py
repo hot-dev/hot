@@ -43,6 +43,26 @@ GCP_LOAD_BALANCER_RANGES = ("35.191.0.0/16", "130.211.0.0/22")
 LOAD_BALANCER_PORT = 9443
 
 
+def roles(config):
+    """The Hot services this host runs: all of them on a single machine, or
+    one role's share of a scalable installation."""
+    return tuple(role for role in SERVICES if role in (config.get("roles") or SERVICES))
+
+
+def web_roles(config):
+    return tuple(role for role in ("app", "api") if role in roles(config))
+
+
+def runs_migrations(config):
+    """Whether this host migrates the database: the single machine, or the
+    scalable installation's scheduler host."""
+    return config.get("migrations", True)
+
+
+def scalable(config):
+    return config.get("preset", "single-machine") == "scalable"
+
+
 def public_endpoints(config):
     return [role for role in ("app", "api") if config.get(role + "_exposure", "private") == "public"]
 
@@ -59,7 +79,10 @@ RUNTIME_SUBNET = "172.30.0.0/24"
 CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "size", "host_image", "release_pointer", "secret_references", "app_hostname", "api_hostname", "app_exposure", "api_exposure", "storage", "network",
                # Read by the host agent, not by the bundle.
                "data_volume_id", "admin_email", "manifest_base_url", "status_reference", "command_subscription",
-               "settings", "data", "backup", "monitoring", "logging"}
+               "settings", "data", "backup", "monitoring", "logging",
+               # Scalable installations: which roles this host runs, whether it
+               # migrates, and the pointer that releases migrations.
+               "preset", "roles", "migrations", "migration_pointer", "instance_group"}
 # data.postgres settings: the contract's, plus the endpoint a managed
 # database's stack adds for the host.
 POSTGRES_KEYS = {"mode", "runtime_role", "version", "tier", "storage_gb", "high_availability",
@@ -80,6 +103,14 @@ def validate(document):
         raise ValueError("Installation name must be 3-24 lowercase letters/digits/hyphens")
     if config.get("size", "small") not in {"small", "medium", "large"}:
         raise ValueError("Unknown size")
+    if config.get("preset", "single-machine") not in {"single-machine", "scalable"}:
+        raise ValueError("preset must be single-machine or scalable")
+    if config.get("roles") is not None and (not config["roles"] or set(config["roles"]) - set(SERVICES)):
+        raise ValueError("roles must name one or more of " + ", ".join(SERVICES))
+    if scalable(config) and any(data_mode(config, s) == "local" for s in ("postgres", "valkey")):
+        raise ValueError("A scalable installation needs managed or existing PostgreSQL and Valkey")
+    if scalable(config) and any(s.get("backend") == "local" for s in config.get("storage", {}).values()):
+        raise ValueError("A scalable installation needs S3 or GCS for builds and files")
     if config["cloud"] == "gcp" and not config.get("project"):
         raise ValueError("GCP compute requires a project")
     for endpoint in ("app", "api"):
@@ -289,7 +320,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     # Defaults operators may change in `settings`: accounts are by invitation
     # (after the first administrator is bootstrapped) until they open sign-up.
     defaults = {"HOT_APP_SIGNUP": "invite"}
-    for role in SERVICES:
+    for role in roles(config):
         env, mounts = {**common_env, **defaults, **config.get("settings", {})}, []
         if role in {"worker", "task-worker"}:
             env["HOT_NETWORK_DENY_CIDRS"] = ",".join(deny)
@@ -342,17 +373,19 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     # The scheduler rewrites its heartbeat every 30 seconds while it
     # dispatches schedules, so a stalled scheduler turns unhealthy even though
     # its process runs. ($$ escapes Compose interpolation.)
-    scheduler = services["scheduler"]
-    scheduler["environment"]["HOT_SCHEDULER_HEARTBEAT_FILE"] = SCHEDULER_HEARTBEAT
-    scheduler["healthcheck"] = {
-        "test": ["CMD-SHELL", f"test $$(( $$(date +%s) - $$(cat {SCHEDULER_HEARTBEAT} 2>/dev/null || echo 0) )) -lt 120"],
-        "interval": "30s", "timeout": "5s", "retries": 3, "start_period": "90s"}
-    task = services["task-worker"]
-    task.update(user="0:2000", privileged=True, pid="host", read_only=False)
-    task.pop("cap_drop")
-    task.pop("security_opt")
-    for path, readonly in (("/run/kata-containerd", False), ("/run/vc", False), ("/var/run/netns", False), ("/opt/cni/bin", True), ("/var/lib/cni", False), ("/tmp/hot-box-io", False)):
-        task["volumes"].append(bind(path, path, readonly))
+    if "scheduler" in services:
+        scheduler = services["scheduler"]
+        scheduler["environment"]["HOT_SCHEDULER_HEARTBEAT_FILE"] = SCHEDULER_HEARTBEAT
+        scheduler["healthcheck"] = {
+            "test": ["CMD-SHELL", f"test $$(( $$(date +%s) - $$(cat {SCHEDULER_HEARTBEAT} 2>/dev/null || echo 0) )) -lt 120"],
+            "interval": "30s", "timeout": "5s", "retries": 3, "start_period": "90s"}
+    if "task-worker" in services:
+        task = services["task-worker"]
+        task.update(user="0:2000", privileged=True, pid="host", read_only=False)
+        task.pop("cap_drop")
+        task.pop("security_opt")
+        for path, readonly in (("/run/kata-containerd", False), ("/run/vc", False), ("/var/run/netns", False), ("/opt/cni/bin", True), ("/var/lib/cni", False), ("/tmp/hot-box-io", False)):
+            task["volumes"].append(bind(path, path, readonly))
     if pg_local:
         services["postgres"] = {
             "image": images["postgres"], "restart": "unless-stopped", "shm_size": "256m", "mem_limit": memory["postgres"],
@@ -374,13 +407,17 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     services["ingress"] = {
         "image": images["ingress"], "restart": "unless-stopped", "user": "10001:10001", "read_only": True,
         "entrypoint": ["nginx", "-g", "daemon off;"],
-        "ports": ["443:8443"] + ([f"{LOAD_BALANCER_PORT}:{LOAD_BALANCER_PORT}"] if public_endpoints(config) else []),
+        # A scalable installation's hosts are reached only through its load balancer.
+        "ports": ([] if scalable(config) else ["443:8443"])
+                 + ([f"{LOAD_BALANCER_PORT}:{LOAD_BALANCER_PORT}"] if public_endpoints(config) or scalable(config) else []),
         "mem_limit": memory["ingress"],
         "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"], "tmpfs": ["/tmp:size=16777216,uid=10001,gid=10001"],
         "secrets": [secret("ingress", k) for k in ("TLS_CERTIFICATE", "TLS_PRIVATE_KEY")],
         "volumes": [{"type": "bind", "source": "./nginx.conf", "target": "/etc/nginx/nginx.conf", "read_only": True}],
-        "depends_on": ["app", "api"],
+        "depends_on": list(web_roles(config)),
     }
+    if not web_roles(config):
+        del services["ingress"]
     services["migrate"] = {
         "image": images["hot"], "platform": "linux/amd64", "profiles": ["admin"],
         "command": ["db", "migrate"], "user": "10001:10001", "read_only": True,
@@ -462,6 +499,11 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
         }
     services["provision"] = provision
+    if not runs_migrations(config):
+        for job in ("migrate", "provision", "bootstrap-admin", "check-postgres", "prepare-postgres", "restore-postgres"):
+            services.pop(job, None)
+    used = {s["source"] for service in services.values() for s in service.get("secrets", [])}
+    secrets = {name: spec for name, spec in secrets.items() if name in used}
     for service in services.values():
         service["logging"] = log_settings(config)
     # No Docker socket is ever mounted. The separate Kata daemon owns guests.
@@ -475,13 +517,16 @@ def nginx_config(config):
     # Private access on 8443 requires SNI naming an endpoint. A cloud load
     # balancer re-encrypts without SNI, so public endpoints get their own port,
     # routed by Host header, where anything else is refused.
-    listeners = [("8443", "$remote_addr", ("app", "api"))]
-    if public_endpoints(config):
-        listeners.append((str(LOAD_BALANCER_PORT), "$proxy_add_x_forwarded_for", public_endpoints(config)))
+    web = web_roles(config)
+    listeners = [] if scalable(config) else [("8443", "$remote_addr", web)]
+    behind_balancer = web if scalable(config) else tuple(r for r in public_endpoints(config) if r in web)
+    if behind_balancer:
+        listeners.append((str(LOAD_BALANCER_PORT), "$proxy_add_x_forwarded_for", behind_balancer))
+        health = "http://api:4681/status" if "api" in web else "http://app:4680/signin"
         servers.append(f'''server {{
   listen {LOAD_BALANCER_PORT} ssl default_server;
   location = /hot-lb-health {{
-    proxy_pass http://api:4681/status;
+    proxy_pass {health};
   }}
   location / {{
     return 444;

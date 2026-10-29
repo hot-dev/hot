@@ -57,7 +57,7 @@ class FakeCloud:
         return self.snapshot
 
     def get_parameter(self, reference):
-        return self.parameters["pointer"]
+        return self.parameters.get(reference, self.parameters["pointer"])
 
     def get_secret(self, reference):
         return self.secrets.get(reference)
@@ -369,6 +369,75 @@ class Upgrades(UpgradeHarness):
         text = (Path(self.tmp.name) / "releases/history.json").read_text()
         for value in self.cloud.secrets[GENERATED].values():
             self.assertNotIn(value, text)
+
+
+class Scalable(AgentHarness):
+    ADMIN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-0123-abcdef"
+    TOKEN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:hot/hot-example/valkey"
+
+    def host(self, roles, migrations=False):
+        self.config.update(preset="scalable", roles=roles, migrations=migrations,
+                           storage={"build": {"backend": "s3", "bucket": "acme", "region": "us-east-1", "prefix": "builds"},
+                                    "file": {"backend": "s3", "bucket": "acme", "region": "us-east-1", "prefix": "files"}},
+                           data={"postgres": {"mode": "managed", "runtime_role": "hot_runtime", "endpoint": {
+                                     "host": "db.example", "port": 5432, "admin_user": "hot_admin", "admin_secret": self.ADMIN}},
+                                 "valkey": {"mode": "managed", "endpoint": {
+                                     "host": "cache.example", "port": 6379, "auth_secret": self.TOKEN}}})
+        if migrations:
+            self.config["migration_pointer"] = "migrate-pointer"
+        self.cloud.secrets[self.ADMIN] = {"username": "hot_admin", "password": "admin"}
+        self.cloud.secrets[self.TOKEN] = {"password": "token"}
+        self.agent.resolve = lambda hosts: []
+
+    def fake_http(self, method, url, body=None, headers=None, timeout=30):
+        if url.startswith("https://truststore.pki.rds.amazonaws.com/"):
+            return 200, b"-----BEGIN CERTIFICATE-----\nRDS\n-----END CERTIFICATE-----\n"
+        return super().fake_http(method, url, body, headers, timeout)
+
+    def test_an_app_host_deploys_only_its_role(self):
+        self.host(["app"])
+        status = self.agent.reconcile()
+        self.assertEqual(status["state"], "deployed", status)
+        self.assertEqual(status["roles"], ["app"])
+        self.assertIn("instance", status)
+        calls = self.run.compose_calls()
+        self.assertFalse(any("migrate" in c or "scheduler" in c for c in calls), calls)
+        self.assertIn("up -d --remove-orphans app ingress", calls)
+        roles = {p.name for p in (Path(self.tmp.name) / "secrets").iterdir()}
+        self.assertEqual(roles, {"app", "ingress"}, "a host receives only its roles' secrets")
+
+    def test_the_migration_host_migrates_from_its_own_pointer(self):
+        self.host(["scheduler"], migrations=True)
+        self.cloud.parameters.update({"migrate-pointer": "3.0.1", "pointer": None})
+        status = self.agent.reconcile()
+        self.assertEqual((status["state"], status["release"]), ("migrated", "3.0.1"))
+        calls = self.run.compose_calls()
+        order = [calls.index(f"--profile admin run --rm {job}") for job in ("prepare-postgres", "check-postgres", "migrate", "provision")]
+        self.assertEqual(order, sorted(order))
+        self.assertFalse(any(c.startswith(("stop", "up")) for c in calls), "migrating restarts nothing")
+        self.assertIsNone(self.agent.reconcile(), "a release migrates once")
+        # The scheduler role then rolls without migrating again.
+        self.cloud.parameters["pointer"] = "3.0.1"
+        self.run.commands.clear()
+        self.assertEqual(self.agent.reconcile()["state"], "deployed")
+        self.assertFalse(any("run --rm migrate" in c for c in self.run.compose_calls()))
+        self.assertEqual(self.agent.state()["migrated_release"], "3.0.1")
+
+    def test_a_failed_migration_waits_for_deploy_now(self):
+        self.host(["scheduler"], migrations=True)
+        self.cloud.parameters.update({"migrate-pointer": "3.0.1", "pointer": None})
+        failing = self.run
+
+        def run(command, **kwargs):
+            if "migrate" in command:
+                failing.commands.append(command)
+                raise subprocess.CalledProcessError(1, command)
+            return failing(command, **kwargs)
+        self.agent.run_command = run
+        self.assertEqual(self.agent.reconcile()["state"], "migration-failed")
+        self.assertIsNone(self.agent.reconcile())
+        self.agent.run_command = failing
+        self.assertEqual(self.agent.command("deploy-now", request_id="r")["state"], "migrated")
 
 
 class DataMoves(UpgradeHarness):

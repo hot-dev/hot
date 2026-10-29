@@ -312,6 +312,45 @@ class RuntimeContract(unittest.TestCase):
             beat.write_text(str(int(time.time())))
             self.assertEqual(run(), 0)
 
+    def scalable(self, roles, migrations=False):
+        config = dict(renderer.validate(example("aws")), preset="scalable", roles=roles, migrations=migrations,
+                      storage={"build": {"backend": "s3", "bucket": "acme", "region": "us-east-1", "prefix": "builds"},
+                               "file": {"backend": "s3", "bucket": "acme", "region": "us-east-1", "prefix": "files"}},
+                      data={"postgres": {"mode": "managed", "endpoint": {"host": "db.example", "port": 5432,
+                                         "admin_user": "hot_admin", "admin_secret": "arn:aws:secretsmanager:us-east-1:1:secret:a"}},
+                            "valkey": {"mode": "managed", "endpoint": {"host": "cache.example", "port": 6379,
+                                       "auth_secret": "arn:aws:secretsmanager:us-east-1:1:secret:v"}}})
+        return config, renderer.render(config, manifest(), "/data", "/run/hot/secrets")
+
+    def test_a_scalable_host_runs_only_its_roles(self):
+        config, bundle = self.scalable(["app"])
+        self.assertEqual(set(bundle["services"]), {"app", "ingress"})
+        self.assertEqual(bundle["services"]["ingress"]["ports"], [f"{renderer.LOAD_BALANCER_PORT}:{renderer.LOAD_BALANCER_PORT}"])
+        self.assertEqual(bundle["services"]["ingress"]["depends_on"], ["app"])
+        self.assertTrue(all(name.startswith(("app-", "ingress-")) for name in bundle["secrets"]), bundle["secrets"])
+        nginx = renderer.nginx_config(config)
+        self.assertIn("proxy_pass http://app:4680/signin;", nginx)
+        self.assertNotIn("http://api:4681", nginx)
+        self.assertNotIn("listen 8443 ssl;", nginx)
+
+    def test_only_the_migration_host_carries_admin_jobs(self):
+        _, scheduler = self.scalable(["scheduler"], migrations=True)
+        self.assertEqual(set(scheduler["services"]) - {"migrate", "provision", "check-postgres", "prepare-postgres",
+                                                      "restore-postgres", "bootstrap-admin"}, {"scheduler"})
+        self.assertIn("healthcheck", scheduler["services"]["scheduler"])
+        _, worker = self.scalable(["worker", "task-worker"])
+        self.assertEqual(set(worker["services"]), {"worker", "task-worker"})
+        self.assertTrue(worker["services"]["task-worker"]["privileged"])
+
+    def test_scalable_installations_need_shared_data_and_storage(self):
+        config, _ = self.scalable(["app"])
+        with self.assertRaisesRegex(ValueError, "managed or existing"):
+            renderer.validate(dict(config, data={}))
+        with self.assertRaisesRegex(ValueError, "S3 or GCS"):
+            renderer.validate(dict(config, storage={"build": {"backend": "local"}, "file": {"backend": "local"}}))
+        with self.assertRaisesRegex(ValueError, "roles must name"):
+            renderer.validate(dict(config, roles=["ingress"]))
+
     def test_sign_up_is_by_invitation_until_the_operator_opens_it(self):
         config = example("aws", "local")
         app = renderer.render(config, manifest(), "/data", "/run/hot/secrets")["services"]["app"]

@@ -148,6 +148,14 @@ class Aws:
         self.region = region
         self.log_group = log_group
 
+    def instance_name(self):
+        """The EC2 instance ID, which the Auto Scaling group lists."""
+        _, imds_token = http("PUT", self.IMDS + "/latest/api/token",
+                             headers={"X-aws-ec2-metadata-token-ttl-seconds": "300"})
+        _, data = http("GET", self.IMDS + "/latest/meta-data/instance-id",
+                       headers={"X-aws-ec2-metadata-token": imds_token.decode()})
+        return data.decode()
+
     def credentials(self):
         _, imds_token = http("PUT", self.IMDS + "/latest/api/token",
                              headers={"X-aws-ec2-metadata-token-ttl-seconds": "300"})
@@ -332,6 +340,11 @@ class Gcp:
         self.call("POST", "https://logging.googleapis.com/v2/entries:write", {
             "logName": f"projects/{self.project}/logs/{reference or 'hot-agent-status'}",
             "resource": {"type": "global"}, "entries": [{"jsonPayload": status, "severity": "INFO"}]})
+
+    def instance_name(self):
+        """The instance name, which the managed instance group lists."""
+        _, data = http("GET", self.METADATA + "/instance/name", headers={"Metadata-Flavor": "Google"})
+        return data.decode()
 
     def instance(self):
         if self.instance_id is None:
@@ -817,8 +830,12 @@ class Agent:
 
     def deliver_secrets(self):
         generated = self.cloud.put_secret_if_absent(self.references["generated"], generate_secrets())
-        write_secret_files(self.secrets_root,
-                           role_secrets(self.config, generated, self.operator_secrets(), self.managed_data()),
+        files = role_secrets(self.config, generated, self.operator_secrets(), self.managed_data())
+        # A host receives only what the services and jobs it runs read.
+        present = {*self.roles(), "postgres", "valkey"} | ({"ingress"} if render.web_roles(self.config) else set())
+        if render.runs_migrations(self.config):
+            present |= {"migrate", "provision", "bootstrap-admin", "check-postgres", "prepare-postgres"}
+        write_secret_files(self.secrets_root, {role: f for role, f in files.items() if role in present},
                            chown=self.chown)
 
     def deploy(self, release, previous):
@@ -865,40 +882,47 @@ class Agent:
                 dump = self.dump_postgres(self.releases / previous / "bundle", f"move-{release}") / "postgres.dump"
                 record["restore_point"] = {"kind": "dump", "path": str(dump), "time": utc_now()}
                 step("dumped")
-        self.compose(bundle, "stop", "scheduler")
+        if "scheduler" in self.roles():
+            self.compose(bundle, "stop", "scheduler")
         step("scheduler-stopped")
-        local_data = [s for s in ("postgres", "valkey") if render.data_mode(self.config, s) == "local"]
-        if local_data:
-            self.compose(bundle, "up", "-d", "--wait", *local_data)
-        if render.data_mode(self.config, "postgres") == "managed":
-            self.compose(bundle, "--profile", "admin", "run", "--rm", "prepare-postgres")
-        if render.data_mode(self.config, "postgres") != "local":
-            self.compose(bundle, "--profile", "admin", "run", "--rm", "check-postgres")
-        if "postgres" in moves:
-            self.restore_moved_database(bundle, Path(record["restore_point"]["path"]))
-            # From here the data lives in the new database: a later failure
-            # is fixed forward, never by returning to the local copy.
-            self.save_state({**self.state(), "data_modes": self.configured_modes()})
-            step("data-moved")
-        step("data-ready")
-        if state.get("migrations") is not None and record["migrations"] > state["migrations"]:
-            # Hot never migrates down: undoing these migrations means a restore.
-            if not record.get("restore_point"):
-                record["restore_point"] = self.restore_point(bundle, release)
-            step("restore-point")
-        step("migrating")
-        self.compose(bundle, "--profile", "admin", "run", "--rm", "migrate")
-        self.compose(bundle, "--profile", "admin", "run", "--rm", "provision")
-        step("migrated")
-        if self.config.get("admin_email"):
-            self.compose(bundle, "--profile", "admin", "run", "--rm", "bootstrap-admin")
-            step("admin")
+        if render.scalable(self.config):
+            # A scalable installation migrated from its migration pointer
+            # before any role rolled; see reconcile_migrations.
+            step("data-ready")
+        else:
+            local_data = [s for s in ("postgres", "valkey") if render.data_mode(self.config, s) == "local"]
+            if local_data:
+                self.compose(bundle, "up", "-d", "--wait", *local_data)
+            if render.data_mode(self.config, "postgres") == "managed":
+                self.compose(bundle, "--profile", "admin", "run", "--rm", "prepare-postgres")
+            if render.data_mode(self.config, "postgres") != "local":
+                self.compose(bundle, "--profile", "admin", "run", "--rm", "check-postgres")
+            if "postgres" in moves:
+                self.restore_moved_database(bundle, Path(record["restore_point"]["path"]))
+                # From here the data lives in the new database: a later failure
+                # is fixed forward, never by returning to the local copy.
+                self.save_state({**self.state(), "data_modes": self.configured_modes()})
+                step("data-moved")
+            step("data-ready")
+            if state.get("migrations") is not None and record["migrations"] > state["migrations"]:
+                # Hot never migrates down: undoing these migrations means a restore.
+                if not record.get("restore_point"):
+                    record["restore_point"] = self.restore_point(bundle, release)
+                step("restore-point")
+            step("migrating")
+            self.compose(bundle, "--profile", "admin", "run", "--rm", "migrate")
+            self.compose(bundle, "--profile", "admin", "run", "--rm", "provision")
+            step("migrated")
+            if self.config.get("admin_email"):
+                self.compose(bundle, "--profile", "admin", "run", "--rm", "bootstrap-admin")
+                step("admin")
         self.start_services(bundle)
         step("ready")
         record["finished"] = utc_now()
+        migrated = {k: v for k, v in self.state().items() if k == "migrated_release"}
         self.save_state({"release": release, "previous": previous, "migrations": record["migrations"],
                          "dependencies": data_services(self.config, self.operator_secrets()),
-                         "data_modes": self.configured_modes()})
+                         "data_modes": self.configured_modes(), **migrated})
         self.remember(record)
         return record["steps"]
 
@@ -1044,11 +1068,34 @@ class Agent:
     def remember(self, record):
         (self.releases / "history.json").write_text(json.dumps((self.history() + [record])[-HISTORY:], indent=1))
 
+    def roles(self):
+        return render.roles(self.config)
+
+    def instance_name(self):
+        """How the instance group names this host, for the release workflow."""
+        if not getattr(self, "_instance_name", None):
+            try:
+                self._instance_name = self.cloud.instance_name()
+            except (AgentError, OSError, AttributeError):
+                return socket.gethostname()
+        return self._instance_name
+
+    def readiness_targets(self):
+        """The hostnames and paths this host serves, checked through its own
+        ingress: port 443 on a single machine, the load balancer's port on a
+        scalable host."""
+        paths = {"app": "/signin", "api": "/status"}
+        return [(self.config[role + "_hostname"], paths[role]) for role in render.web_roles(self.config)]
+
+    def probe(self, host, path):
+        port = render.LOAD_BALANCER_PORT if render.scalable(self.config) else 443
+        return https_status(host, path, port=port)
+
     def wait_ready(self, attempts=40, probe=None):
         """Check the app and API through the ingress from the host itself, so
         private installations are checked too."""
-        probe = probe or https_status
-        targets = [(self.config["app_hostname"], "/signin"), (self.config["api_hostname"], "/status")]
+        probe = probe or self.probe
+        targets = self.readiness_targets()
         for _ in range(attempts):
             try:
                 if all(probe(host, path) < 400 for host, path in targets):
@@ -1076,6 +1123,8 @@ class Agent:
     def report(self, **status):
         status = {"installation": self.config["name"], "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   **self.state(), **status}
+        if render.scalable(self.config):
+            status.update(instance=self.instance_name(), roles=list(self.roles()))
         print(json.dumps(status), flush=True)
         reference = self.config.get("status_reference", "")
         if reference:
@@ -1119,19 +1168,21 @@ class Agent:
             states = self.service_states(self.releases / release / "bundle")
             healthy = {name for name, (state, health) in states.items()
                        if state == "running" and health in ("", "healthy")}
-            expected = [*HOT_SERVICES, "ingress", *local_data]
+            expected = [*self.roles(), *(["ingress"] if render.web_roles(self.config) else []), *local_data]
             metrics["UnhealthyServices"] = (sum(name not in healthy for name in expected), "Count")
-            metrics["SchedulerRunning"] = (int("scheduler" in healthy), "Count")
+            if "scheduler" in self.roles():
+                metrics["SchedulerRunning"] = (int("scheduler" in healthy), "Count")
             reachable = (all(name in healthy for name in local_data)
                          and all(tcp_reachable(host, port) for host, port in self.state().get("dependencies", [])))
             metrics["DependenciesReachable"] = (int(reachable), "Count")
-            probe = probe or https_status
-            targets = [(self.config["app_hostname"], "/signin"), (self.config["api_hostname"], "/status")]
+            probe = probe or self.probe
+            targets = self.readiness_targets()
             try:
                 ready = all(probe(host, path) < 400 for host, path in targets)
             except OSError:
                 ready = False
-            metrics["Ready"] = (int(ready), "Count")
+            if targets:
+                metrics["Ready"] = (int(ready), "Count")
             try:
                 days = self.certificate_days_left(now)
             except (ValueError, IndexError, subprocess.CalledProcessError):
@@ -1208,14 +1259,53 @@ class Agent:
 
     # -- reconcile and commands ------------------------------------------------
 
+    def reconcile_migrations(self, request_id="", retry=False):
+        """On a scalable installation's migration host: migrate the database
+        to the release the migration pointer names, without restarting
+        anything. The release workflow sets this pointer and waits for the
+        report before it rolls any role; a failure waits for deploy-now."""
+        pointer = self.config.get("migration_pointer")
+        if not pointer:
+            return None
+        desired = self.cloud.get_parameter(pointer)
+        state = self.state()
+        if not desired or desired == state.get("migrated_release"):
+            return None
+        if not retry and (state.get("migration_failed") or {}).get("release") == desired:
+            return None
+        try:
+            manifest = self.fetch_release(desired)
+            check_upgrade(manifest, state.get("migrated_release") or state.get("release"), state.get("migrations"))
+            bundle = self.render_bundle(desired, manifest, self.operator_secrets())
+            self.deliver_secrets()
+            if render.data_mode(self.config, "postgres") == "managed":
+                self.compose(bundle, "--profile", "admin", "run", "--rm", "prepare-postgres")
+            self.compose(bundle, "--profile", "admin", "run", "--rm", "check-postgres")
+            restore_point = {"kind": "point-in-time" if render.data_mode(self.config, "postgres") == "managed"
+                             else "operator", "time": utc_now()}
+            self.compose(bundle, "--profile", "admin", "run", "--rm", "migrate")
+            self.compose(bundle, "--profile", "admin", "run", "--rm", "provision")
+            if self.config.get("admin_email"):
+                self.compose(bundle, "--profile", "admin", "run", "--rm", "bootstrap-admin")
+        except (AgentError, ValueError, subprocess.CalledProcessError) as error:
+            self.save_state({**self.state(), "migration_failed": {"release": desired, "error": describe(error)}})
+            return self.report(state="migration-failed", release=desired, error=describe(error), request_id=request_id)
+        latest = manifest["migrations"]["latest"]
+        self.save_state({**{k: v for k, v in self.state().items() if k != "migration_failed"},
+                         "migrated_release": desired, "migrations": max(latest, state.get("migrations") or 0)})
+        self.remember({"release": desired, "migrated": latest, "restore_point": restore_point, "finished": utc_now()})
+        return self.report(state="migrated", release=desired, restore_point=restore_point, request_id=request_id)
+
     def reconcile(self, request_id="", retry=False):
         """Deploy the release pointer if it changed. A release that failed
         waits for deploy-now (`retry`) or a new pointer; an interrupted one
-        is resumed."""
+        is resumed. A scalable migration host migrates first, from its own
+        pointer."""
+        migrated = self.reconcile_migrations(request_id, retry)
         desired = self.cloud.get_parameter(self.config["release_pointer"])
         state = self.state()
         if not desired or desired == state.get("release"):
-            return None
+            return migrated
         if not retry and (state.get("failed") or {}).get("release") == desired:
             return None
         first_install = self.cloud.get_secret(self.references["generated"]) is None and not state.get("release")
@@ -1244,13 +1334,13 @@ class Agent:
             raise AgentError("Nothing is deployed yet")
         if operation == "logs":
             local_data = tuple(s for s in ("postgres", "valkey") if render.data_mode(self.config, s) == "local")
-            if service not in HOT_SERVICES + ("ingress",) + local_data:
+            if service not in self.roles() + (("ingress",) if render.web_roles(self.config) else ()) + local_data:
                 raise AgentError(f"Unknown service {service!r}")
             output = self.compose(bundle, "logs", "--no-color", "--timestamps", "--tail", str(LOG_LINES), service).stdout
             lines = bounded_lines(output, Redactor.from_files(self.secrets_root))
             return self.report(state="logs", service=service, request_id=request_id, logs=lines)
         if operation == "restart-service":
-            if service not in HOT_SERVICES + ("ingress",):
+            if service not in self.roles() + (("ingress",) if render.web_roles(self.config) else ()):
                 raise AgentError(f"Unknown service {service!r}")
             # Secrets are rendered again, which is how rotation takes effect.
             self.deliver_secrets()
@@ -1275,15 +1365,26 @@ class Agent:
 
     def stop_services(self, bundle):
         """Stop Hot in order: the scheduler, then workers with time to
-        finish, then the app, API, and ingress."""
-        self.compose(bundle, "stop", "scheduler")
-        self.compose(bundle, "stop", "--timeout", "120", "worker", "task-worker")
-        self.compose(bundle, "stop", "app", "api", "ingress")
+        finish, then the app, API, and ingress. A scalable host stops only
+        its own roles."""
+        roles = self.roles()
+        if "scheduler" in roles:
+            self.compose(bundle, "stop", "scheduler")
+        workers = [r for r in ("worker", "task-worker") if r in roles]
+        if workers:
+            self.compose(bundle, "stop", "--timeout", "120", *workers)
+        web = list(render.web_roles(self.config))
+        if web:
+            self.compose(bundle, "stop", *web, "ingress")
 
     def start_services(self, bundle):
-        self.compose(bundle, "up", "-d", "--remove-orphans", "app", "api", "worker", "task-worker", "ingress")
-        self.wait_ready()
-        self.compose(bundle, "up", "-d", "scheduler")
+        roles = self.roles()
+        services = [r for r in roles if r != "scheduler"] + (["ingress"] if render.web_roles(self.config) else [])
+        if services:
+            self.compose(bundle, "up", "-d", "--remove-orphans", *services)
+            self.wait_ready()
+        if "scheduler" in roles:
+            self.compose(bundle, "up", "-d", "scheduler")
 
     def roll_back(self, bundle):
         """Undo a failed upgrade: restore a local database from the dump
@@ -1355,7 +1456,7 @@ class Agent:
                 for e in self.containers(bundle)}
             compose = json.loads((bundle / "compose.json").read_text())
             result["environment"] = {name: dict(sorted(compose["services"][name].get("environment", {}).items()))
-                                     for name in HOT_SERVICES if name in compose["services"]}
+                                     for name in self.roles() if name in compose["services"]}
         try:
             metrics = self.observe(probe)
         except (AgentError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
@@ -1374,14 +1475,14 @@ def provision_sql():
     return Path(render.__file__).resolve().parents[2] / "resources/db/postgres/provision_runtime.sql"
 
 
-def https_status(host, path, address="127.0.0.1"):
+def https_status(host, path, address="127.0.0.1", port=443):
     """GET through the local ingress, sending the hostname as SNI: the
     ingress refuses handshakes that name no configured host."""
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE  # loopback only; certificates name the public hostnames
-    connection = HTTPSConnection(host, 443, timeout=5, context=context)
-    connection.sock = context.wrap_socket(socket.create_connection((address, 443), timeout=5),
+    connection = HTTPSConnection(host, port, timeout=5, context=context)
+    connection.sock = context.wrap_socket(socket.create_connection((address, port), timeout=5),
                                           server_hostname=host)
     try:
         connection.request("GET", path, headers={"Host": host})
