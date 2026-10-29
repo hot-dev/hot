@@ -48,6 +48,7 @@ use hot::stream::{
 use hot::val::Val;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -2161,7 +2162,9 @@ fn task_status_is_terminal(status_id: i16) -> bool {
     )
 }
 
-/// Process a single task request.
+/// Process a single task request. A panic anywhere in processing fails the
+/// task through [`guard_task_panics`] instead of unwinding into the
+/// processor loop.
 #[allow(clippy::too_many_arguments)]
 async fn process_task(
     request: TaskRequest,
@@ -2183,6 +2186,199 @@ async fn process_task(
     task_lease: Arc<dyn task_lease::TaskLease>,
     queue_timing: QueueLeaseTiming,
     worker_id: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ownership = TaskOwnership::default();
+    let recovery = PanicRecovery {
+        request: request.clone(),
+        db: Arc::clone(&db),
+        stream_publisher: Arc::clone(&stream_publisher),
+        coordinator: Arc::clone(&coordinator),
+        container_executor: Some(Arc::clone(&container_executor)),
+        worker_id: worker_id.clone(),
+    };
+    let processing = process_task_inner(
+        request,
+        db,
+        task_queue,
+        stream_publisher,
+        bytecode_cache,
+        code_semaphore,
+        blocking_execution_slots,
+        container_semaphore,
+        container_budget,
+        worker_conf,
+        event_publisher,
+        container_executor,
+        data_vol_base,
+        box_defaults,
+        usage_stats_cache,
+        coordinator,
+        task_lease,
+        queue_timing,
+        worker_id,
+        ownership.clone(),
+    );
+    guard_task_panics(&recovery, &ownership, processing).await
+}
+
+/// How far one delivery got toward owning its task, so a panic is recovered
+/// only by the delivery that owns it.
+#[derive(Clone, Default)]
+struct TaskOwnership {
+    /// The delivery registered the task as in flight on this worker.
+    registered: Arc<AtomicBool>,
+    /// The delivery also holds the task's lease: no other delivery, on any
+    /// worker, is processing it.
+    leased: Arc<AtomicBool>,
+}
+
+/// What [`guard_task_panics`] needs to fail a task whose processing panicked.
+struct PanicRecovery {
+    /// The request as it came off the queue.
+    request: TaskRequest,
+    db: Arc<DatabasePool>,
+    stream_publisher: Arc<StreamPubSub>,
+    coordinator: Arc<shutdown::TaskShutdownCoordinator>,
+    container_executor: Option<Arc<executor::BoxExecutor>>,
+    worker_id: String,
+}
+
+/// Run one delivery's processing and fail its task if processing panics.
+///
+/// Unwinding out of `process_task` would leave the task registered as in
+/// flight on this worker, so every redelivery is dropped as a duplicate, and
+/// its row queued or running until the worker restarts; it would also end
+/// the processor loop that claimed it. The delivery that owns the task (it
+/// holds the lease) instead unregisters it, reaps any container it started,
+/// and fails the row with the panic's location but not its message, which
+/// may carry values. A delivery that panicked before owning the task leaves
+/// the row alone and returns an error, so the queue's poison-message budget
+/// retries it and dead-lettering fails it.
+async fn guard_task_panics<F>(
+    recovery: &PanicRecovery,
+    ownership: &TaskOwnership,
+    processing: F,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+{
+    let panic = match hot::lang::user_code::run_user_code_async("task worker", processing).await {
+        Ok(result) => return result,
+        Err(panic) => panic,
+    };
+    let request = &recovery.request;
+    let location = panic.location.as_deref().unwrap_or("<unknown>");
+    tracing::error!(
+        task_id = %request.task_id,
+        function = %request.function_name,
+        task_type = %request.task_type,
+        location,
+        "Task processing panicked"
+    );
+    let Ok(task_id) = Uuid::parse_str(&request.task_id) else {
+        return Err("task processing panicked".into());
+    };
+    if ownership.registered.load(Ordering::Acquire) {
+        recovery.coordinator.unregister_task(&task_id);
+    }
+    if !ownership.leased.load(Ordering::Acquire) {
+        return Err(format!("task processing panicked at {location}").into());
+    }
+
+    if request.task_type == "container"
+        && let Some(executor) = &recovery.container_executor
+    {
+        let reap = async {
+            executor.cleanup_task_containers(&request.task_id).await;
+            executor.cleanup_after_timeout(&request.task_id, true).await;
+        };
+        if !bounded_cleanup(KATA_TIMEOUT_CLEANUP_ENVELOPE, reap).await {
+            tracing::warn!(task_id = %task_id, "Container cleanup after a task panic timed out");
+        }
+    }
+
+    let db = recovery.db.as_ref();
+    let task = match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, &task_id)).await {
+        Ok(Ok(task)) => task,
+        Ok(Err(db::TaskError::NotFound)) => return Ok(()),
+        Ok(Err(e)) => return Err(Box::new(e)),
+        Err(_) => return Err("timed out reading a panicked task".into()),
+    };
+    // Fail a row this worker claimed, or one still queued; a row another
+    // worker now runs, or a terminal one, is not this delivery's to touch.
+    let fence = if task.task_status_id == TaskStatus::Queued.as_id() {
+        None
+    } else if task.task_status_id == TaskStatus::Running.as_id()
+        && task.worker_id.as_deref() == Some(recovery.worker_id.as_str())
+    {
+        Some(recovery.worker_id.as_str())
+    } else {
+        return Ok(());
+    };
+    let error = task_failure_json(
+        "Task worker failed internally while processing this task",
+        Some(serde_json::json!({"panic": true, "location": location})),
+    );
+    let env_id = task.env_id;
+    if complete_task_with_event(
+        db,
+        &recovery.stream_publisher,
+        &task_id,
+        env_id,
+        task.stream_id,
+        &task.function_name,
+        &task.task_type,
+        TaskStatus::Failed,
+        Some(&error),
+        None,
+        fence,
+    )
+    .await
+    {
+        let org_id = request
+            .org_id
+            .as_deref()
+            .and_then(|s| Uuid::parse_str(s).ok());
+        publish_task_alert(db, org_id, env_id, &task_id, "task:failed", &error).await;
+        return Ok(());
+    }
+    let terminal = matches!(
+        tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, &task_id)).await,
+        Ok(Ok(task)) if task_status_is_terminal(task.task_status_id)
+    );
+    if terminal {
+        Ok(())
+    } else {
+        Err(Box::new(QueueInfrastructureError::new(
+            "could not fail a panicked task",
+            std::time::Duration::from_secs(5),
+        )))
+    }
+}
+
+/// The body of [`process_task`].
+#[allow(clippy::too_many_arguments)]
+async fn process_task_inner(
+    request: TaskRequest,
+    db: Arc<DatabasePool>,
+    task_queue: Arc<ProcessingQueue<TaskRequest>>,
+    stream_publisher: Arc<StreamPubSub>,
+    bytecode_cache: Arc<BytecodeCache>,
+    code_semaphore: Arc<Semaphore>,
+    blocking_execution_slots: Arc<Semaphore>,
+    container_semaphore: Arc<Semaphore>,
+    container_budget: Arc<resource_budget::ResourceBudget>,
+    worker_conf: Val,
+    event_publisher: Option<Arc<dyn EventPublisher>>,
+    container_executor: Arc<executor::BoxExecutor>,
+    data_vol_base: Arc<std::path::PathBuf>,
+    box_defaults: Arc<box_limits::BoxDefaults>,
+    usage_stats_cache: UsageStatsCache,
+    coordinator: Arc<shutdown::TaskShutdownCoordinator>,
+    task_lease: Arc<dyn task_lease::TaskLease>,
+    queue_timing: QueueLeaseTiming,
+    worker_id: String,
+    ownership: TaskOwnership,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let task_id = Uuid::parse_str(&request.task_id)?;
     let stream_id = Uuid::parse_str(&request.stream_id)?;
@@ -2347,6 +2543,7 @@ async fn process_task(
         );
         return Ok(());
     }
+    ownership.registered.store(true, Ordering::Release);
 
     // Cross-pod mutual exclusion. The in-process `try_register_task` above
     // catches duplicate dispatches inside this worker, but cannot see across
@@ -2396,6 +2593,7 @@ async fn process_task(
         }
     };
     let lease_lost_notify = lease_guard.lost_notify();
+    ownership.leased.store(true, Ordering::Release);
 
     let terminal_state_db = Arc::clone(&db);
     let execute_task = async {
@@ -7549,6 +7747,191 @@ mod tests {
                 .result
                 .as_ref()
                 .is_some_and(|result| result.to_string().contains("queue retry limit"))
+        );
+    }
+
+    /// A queued task row in a test database, with a request that matches it.
+    async fn queued_test_task(db: &DatabasePool) -> (TaskRequest, Task) {
+        let data = hot::db::insert_test_data(db).await.unwrap();
+        let (mut request, mut task, _, _, _) = make_task_request_and_row();
+        task.env_id = data.env_id;
+        task.build_id = data.build_id;
+        request.env_id = data.env_id.to_string();
+        request.build_id = data.build_id.to_string();
+        request.org_id = Some(data.org_id.to_string());
+        insert_test_task(db, &task).await;
+        (request, task)
+    }
+
+    fn panic_recovery(
+        db: &DatabasePool,
+        request: &TaskRequest,
+        coordinator: &Arc<shutdown::TaskShutdownCoordinator>,
+    ) -> PanicRecovery {
+        PanicRecovery {
+            request: request.clone(),
+            db: Arc::new(db.clone()),
+            stream_publisher: Arc::new(
+                StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap(),
+            ),
+            coordinator: Arc::clone(coordinator),
+            container_executor: None,
+            worker_id: "worker-test".to_string(),
+        }
+    }
+
+    fn active_task(request: &TaskRequest, task: &Task) -> shutdown::ActiveTask {
+        shutdown::ActiveTask {
+            task_id: task.task_id,
+            env_id: task.env_id,
+            stream_id: task.stream_id,
+            function_name: request.function_name.clone(),
+            task_type: request.task_type.clone(),
+            cancel_token: None,
+            original_request: request.clone(),
+        }
+    }
+
+    const PANIC_PAYLOAD: &str = "payload-that-may-hold-a-secret";
+
+    fn processing_panics() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        panic!("{PANIC_PAYLOAD}")
+    }
+
+    /// Processing that registers and leases the task, as `process_task`
+    /// does, then panics.
+    async fn owned_processing_panics(
+        coordinator: Arc<shutdown::TaskShutdownCoordinator>,
+        ownership: TaskOwnership,
+        active: shutdown::ActiveTask,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        assert!(coordinator.try_register_task(active));
+        ownership.registered.store(true, Ordering::Release);
+        ownership.leased.store(true, Ordering::Release);
+        processing_panics()
+    }
+
+    #[tokio::test]
+    async fn panic_in_an_owned_queued_task_fails_it_and_frees_its_slot() {
+        let db = hot::db::test_db().await;
+        let (request, task) = queued_test_task(&db).await;
+        let coordinator = Arc::new(shutdown::TaskShutdownCoordinator::new());
+        let recovery = panic_recovery(&db, &request, &coordinator);
+        let ownership = TaskOwnership::default();
+
+        let processing = owned_processing_panics(
+            Arc::clone(&coordinator),
+            ownership.clone(),
+            active_task(&request, &task),
+        );
+        let result = guard_task_panics(&recovery, &ownership, processing).await;
+
+        assert!(result.is_ok(), "the delivery should be settled: {result:?}");
+        assert!(!coordinator.is_task_active(&task.task_id));
+        let failed = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(failed.task_status_id, TaskStatus::Failed.as_id());
+        let result = failed.result.unwrap().to_string();
+        assert!(result.contains("failed internally"), "{result}");
+        assert!(result.contains("\"panic\":true"), "{result}");
+        assert!(!result.contains(PANIC_PAYLOAD), "{result}");
+
+        // A redelivery is no longer dropped as a duplicate.
+        assert!(coordinator.try_register_task(active_task(&request, &task)));
+    }
+
+    #[tokio::test]
+    async fn panic_fails_a_running_task_only_when_this_worker_claimed_it() {
+        let db = hot::db::test_db().await;
+        let reservation = hot::db::task::TaskQuotaReservation {
+            compute_units: 0,
+            duration_ms: 1000,
+        };
+
+        let (request, task) = queued_test_task(&db).await;
+        let coordinator = Arc::new(shutdown::TaskShutdownCoordinator::new());
+        assert!(matches!(
+            claim_task_for_execution(
+                &db,
+                &task.task_id,
+                "worker-test",
+                std::time::Duration::ZERO,
+                reservation
+            )
+            .await
+            .unwrap(),
+            TaskClaim::Claimed
+        ));
+        let ownership = TaskOwnership::default();
+        let processing = owned_processing_panics(
+            Arc::clone(&coordinator),
+            ownership.clone(),
+            active_task(&request, &task),
+        );
+        let recovery = panic_recovery(&db, &request, &coordinator);
+        assert!(
+            guard_task_panics(&recovery, &ownership, processing)
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            Task::get(&db, &task.task_id).await.unwrap().task_status_id,
+            TaskStatus::Failed.as_id()
+        );
+
+        let db = hot::db::test_db().await;
+        let (request, task) = queued_test_task(&db).await;
+        assert!(matches!(
+            claim_task_for_execution(
+                &db,
+                &task.task_id,
+                "worker-other",
+                std::time::Duration::ZERO,
+                reservation
+            )
+            .await
+            .unwrap(),
+            TaskClaim::Claimed
+        ));
+        let ownership = TaskOwnership::default();
+        let processing = owned_processing_panics(
+            Arc::clone(&coordinator),
+            ownership.clone(),
+            active_task(&request, &task),
+        );
+        let recovery = panic_recovery(&db, &request, &coordinator);
+        assert!(
+            guard_task_panics(&recovery, &ownership, processing)
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            Task::get(&db, &task.task_id).await.unwrap().task_status_id,
+            TaskStatus::Running.as_id()
+        );
+    }
+
+    /// A delivery that panics before it owns the task (a duplicate, say)
+    /// must not unregister or fail work another delivery owns. It returns an
+    /// error so the queue's poison-message budget retries it.
+    #[tokio::test]
+    async fn panic_before_owning_a_task_leaves_it_to_its_owner() {
+        let db = hot::db::test_db().await;
+        let (request, task) = queued_test_task(&db).await;
+        let coordinator = Arc::new(shutdown::TaskShutdownCoordinator::new());
+        assert!(coordinator.try_register_task(active_task(&request, &task)));
+        let recovery = panic_recovery(&db, &request, &coordinator);
+
+        let result = guard_task_panics(&recovery, &TaskOwnership::default(), async {
+            processing_panics()
+        })
+        .await;
+
+        let error = result.expect_err("an unowned panic is retried by the queue");
+        assert!(!error.to_string().contains(PANIC_PAYLOAD), "{error}");
+        assert!(coordinator.is_task_active(&task.task_id));
+        assert_eq!(
+            Task::get(&db, &task.task_id).await.unwrap().task_status_id,
+            TaskStatus::Queued.as_id()
         );
     }
 
