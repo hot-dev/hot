@@ -1105,6 +1105,34 @@ concat([::rl::p/why(::rl::core/q3), ::rl::p/why(top)], in-body(), [::rl::p/why(H
         }
     }
 
+    /// In a match whose arms name `Result`, the other arms test the value an
+    /// `Ok` holds and never match an `Err`; `Any` and `_` see the Result.
+    /// Those arms used to test the Result itself, so `"a" =>` never matched
+    /// `Ok("a")`.
+    #[test]
+    fn match_arms_beside_result_arms_test_the_ok_value() {
+        let src = r#"::t ns
+S type "a" | "b" | "c"
+get-s fn (x: Str): S { if(eq(x, "bad"), err("a"), x) }
+pick fn (x: Str): Str {
+    match get-s(x) {
+        Result.Err => { "err" }
+        "a" => { "A" }
+        S (s) => { `S ${s}` }
+        _ => { "default" }
+    }
+}
+held fn (): Str {
+    match get-s("bad") {
+        "a" => { "held a" }
+        Result.Ok => { "ok" }
+        Any => { "any" }
+    }
+}
+[pick("a"), pick("b"), pick("bad"), held()]"#;
+        assert_same_with_and_without_jit(src, &strs(&["A", "S b", "err", "any"]));
+    }
+
     /// A runtime error that a native meets while running Hot code reaches a
     /// containing boundary with its message. The halt used to carry `null`,
     /// so `hot test` printed "Test execution error: " and nothing more.

@@ -1,0 +1,148 @@
+// In a match whose arms name `Result`, the subject is matched as a Result.
+// The other arms (values, types, variants of other enums) test the value an
+// `Ok` holds and never match an `Err`; `Any` and `_` still see the Result.
+// Previously those arms tested the Result itself, so `"a" =>` never matched
+// `Ok("a")` and the match fell through to its default.
+::hot::test::match-result-arms ns
+meta ["test"]
+
+S type "a" | "b" | "c"
+
+Dir enum { Up, Down }
+
+Person type {
+    name: Str
+}
+
+get-s fn (x: Str): S {
+    if(eq(x, "bad"), err("a"), x)
+}
+
+get-any fn (x: Any): Any {
+    if(eq(x, "bad"), err("a"), x)
+}
+
+by-value fn (x: Str): Str {
+    match get-s(x) {
+        Result.Err => { "err" }
+        "a" => { "A" }
+        _ => { "default" }
+    }
+}
+
+by-type fn (x: Any): Str {
+    match get-any(x) {
+        Result.Err (e) => { `err ${e}` }
+        Int (n) => { `int ${add(n, 1)}` }
+        Str (s) => { `str ${s}` }
+        Dir.Up => { "up" }
+        Person (p) => { `person ${p.name}` }
+        null => { "null" }
+        _ => { "other" }
+    }
+}
+
+label fn match (s: Str): Str {
+    Result.Err => { "err" }
+    "a" => { "A" }
+    "b" (v) => { `bound ${v}` }
+    _ => { "other" }
+}
+
+test-value-arms-match-the-ok-value
+meta ["test"] fn () {
+    assert-eq("A", by-value("a"), "\"a\" matches Ok(\"a\")")
+    assert-eq("default", by-value("b"), "an Ok no value arm names falls to _")
+    assert-eq("err", by-value("bad"), "an Err takes the Result.Err arm")
+}
+
+test-type-arms-match-the-ok-value
+meta ["test"] fn () {
+    assert-eq("int 2", by-type(1), "Int binds the Int an Ok holds")
+    assert-eq("str s", by-type("s"), "Str binds the Str an Ok holds")
+    assert-eq("up", by-type(Dir.Up), "a variant of another enum")
+    assert-eq("person Al", by-type(Person(name: "Al")), "a record type binds the record")
+    assert-eq("null", by-type(null), "null matches Ok(null)")
+    assert-eq("other", by-type([1]), "an unnamed type falls to _")
+    assert-eq("err a", by-type("bad"), "the Err arm binds the Err's value")
+}
+
+test-closed-literal-union-arm
+meta ["test"] fn () {
+    kind match get-s("c") {
+        Result.Err => { "err" }
+        S => { "an S" }
+    }
+
+    assert-eq("an S", kind, "S matches the S an Ok holds")
+}
+
+test-union-arm-mixing-result-and-values
+meta ["test"] fn () {
+    pick fn (x: Str): Str {
+        match get-s(x) {
+            "a" | "b" => { "ab" }
+            Result.Err | "c" => { "err-or-c" }
+        }
+    }
+
+    assert-eq("ab", pick("b"), "a union of values matches the Ok value")
+    assert-eq("err-or-c", pick("c"), "\"c\" in a union with Result.Err")
+    assert-eq("err-or-c", pick("bad"), "Result.Err in a union with \"c\"")
+}
+
+test-value-arms-never-match-an-err
+meta ["test"] fn () {
+    // The Err holds "a", which the "a" arm doesn't match
+    seen match get-s("bad") {
+        "a" => { "held a" }
+        Str => { "a Str" }
+        Result.Ok => { "ok" }
+        Any => { "any" }
+    }
+
+    assert-eq("any", seen, "only Any and _ see an Err")
+}
+
+test-first-matching-arm-wins
+meta ["test"] fn () {
+    first-ok match get-s("a") {
+        Result.Ok => { "ok" }
+        "a" => { "A" }
+        Result.Err => { "err" }
+    }
+
+    assert-eq("ok", first-ok, "Result.Ok comes before \"a\"")
+}
+
+test-match-all-runs-every-matching-arm
+meta ["test"] fn () {
+    seen match-all get-s("a") {
+        Result.Ok => { "ok" }
+        "a" => { "A" }
+        Str => { "str" }
+        Result.Err => { "err" }
+    }
+
+    assert-eq(["ok", "A", "str"], vals(seen), "the Ok arm and both value arms")
+}
+
+test-matched-variable-is-the-ok-value
+meta ["test"] fn () {
+    r get-s("b")
+    seen match r {
+        Result.Err => { null }
+        Str => { [r, length(r)] }
+    }
+
+    assert-eq(["b", 1], seen, "inside a value arm the variable is the Ok value")
+}
+
+test-fn-match-value-arms
+meta ["test"] fn () {
+    assert-eq("A", label(get-s("a")), "\"a\" matches the Ok a call returns")
+    assert-eq("bound b", label(get-s("b")), "the arm binds the Ok value")
+    assert-eq("other", label(get-s("c")), "an unnamed value falls to _")
+    assert-eq("err", label(get-s("bad")), "an Err takes the Result.Err arm")
+    assert-eq("A", label("a"), "a plain value matches as an Ok")
+}
