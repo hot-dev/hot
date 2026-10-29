@@ -184,6 +184,12 @@ every value needs an arm, or a default, `Any`, or type arm (`Str`) covers
 the rest. The error lists the missing values. A nullable subject
 (`Severity?`) also needs a `null` arm.
 
+The subject's type comes from a `fn match` parameter, a typed binding
+(`s: Severity rate-of(x)`), or, for a `match` on a call (`match rate-of(x)
+{ ... }`), the return type the called function declares. Arms that name
+`Result` (`Result.Ok`, `Result.Err`) match the call's Result instead, so
+that match isn't checked against the declared type.
+
 A `match` on an `open enum` MUST include a `_` / bare `=>` default arm,
 because additional variants can be enrolled later via
 `Source -> Enum.Variant` arrows. Missing the default produces
