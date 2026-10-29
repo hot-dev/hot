@@ -1243,6 +1243,23 @@ jobs:
           hot-selfhost-manifest.json
         cat hot-selfhost-manifest.json
 
+    # A vulnerability report for triage, attached to the release beside the
+    # manifest. It never blocks the release.
+    - name: Scan the runtime image for vulnerabilities
+      continue-on-error: true
+      env:
+        DIGEST: ${{ steps.push.outputs.digest }}
+        TRIVY: docker.io/aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+      run: |
+        set -euo pipefail
+        docker run --rm -v "$PWD:/out" -v "$HOME/.docker/config.json:/root/.docker/config.json:ro" "$TRIVY" \
+          image --quiet --scanners vuln --format json --output /out/hot-runtime-vulnerabilities.json "${IMAGE}@${DIGEST}"
+        {
+          echo "### Runtime image vulnerabilities"
+          jq -r '[.Results[]?.Vulnerabilities[]?.Severity] | group_by(.) | map("- \(.[0]): \(length)") | if length == 0 then "- none found" else join("\n") end' \
+            hot-runtime-vulnerabilities.json
+        } >> "$GITHUB_STEP_SUMMARY"
+
     - name: Upload the release manifest
       uses: actions/upload-artifact@v6
       with:
@@ -1250,6 +1267,7 @@ jobs:
         path: |
           hot-selfhost-manifest.json
           hot-selfhost-manifest.sigstore.json
+          hot-runtime-vulnerabilities.json
 
   # Create GitHub Release with all packages
   create-release:
@@ -1567,6 +1585,6 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         TAG_NAME: ${{ needs.validate-release.outputs.tag_name }}
       run: |
-        gh release upload "$TAG_NAME" \
-          hot-selfhost-manifest.json hot-selfhost-manifest.sigstore.json \
-          --repo "${{ github.repository }}" --clobber
+        files=(hot-selfhost-manifest.json hot-selfhost-manifest.sigstore.json)
+        if [[ -f hot-runtime-vulnerabilities.json ]]; then files+=(hot-runtime-vulnerabilities.json); fi
+        gh release upload "$TAG_NAME" "${files[@]}" --repo "${{ github.repository }}" --clobber

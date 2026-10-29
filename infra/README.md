@@ -471,6 +471,132 @@ Retained resources keep costing money until you delete them yourself:
 
 Purging is always a manual, separate step.
 
+## Trust and identities
+
+**Trust model.**
+- Administrators are trusted: they hold the cloud roles below and Hot's
+  administrator accounts.
+- Code authors are not trusted with the installation: their code runs with
+  mandatory isolation, and box tasks run in Kata VMs. User code has no cloud
+  identity and no secret files. It cannot reach metadata, the host, the data
+  services, or private ranges outside the allowlist; see
+  [Outbound access for user code](../docs/plans/opentofu-cloud-self-hosting.md#outbound-access-for-user-code).
+- Organizations are separated by PostgreSQL row-level security: the runtime
+  login has neither `BYPASSRLS` nor schema rights. Storage keys are scoped
+  per organization and environment.
+- Accounts are by invitation: the bundle sets `HOT_APP_SIGNUP=invite`, and
+  the first administrator is bootstrapped explicitly. To let anyone who can
+  reach the app sign up, set `settings.HOT_APP_SIGNUP` to `open`. Open sign-up
+  also needs SMTP, which verifies addresses.
+
+**Identities.** Each identity can do only what is listed:
+
+| Identity | Used by | Can | Cannot |
+| --- | --- | --- | --- |
+| Plan role | Plan job (OIDC, this repository) | Read the account or project, and read and lock state | Change resources |
+| Apply role | Apply job (OIDC, approved environment only) | Create and change the stack's resources, and write state | Run anything on the host |
+| Release role | Release and command workflows (OIDC, approved environment only) | Write the release pointer, send the Hot command to this host, and read the agent's status and reports | Read secrets, open a shell or Session Manager session, or use SSH |
+| Host identity | The agent, Docker's log drivers, and Hot services | Read the release pointer and this installation's secrets, and create the generated secret once. Write status, logs, and metrics. Read snapshot times, and use objects under its storage prefixes | Delete snapshots, read other secrets, or change infrastructure |
+| `hot_owner` login | `migrate` and `provision` jobs only | Own and migrate the schema, and grant the runtime login | Serve requests |
+| Runtime login | Hot services | Read and write rows, filtered by row-level security | Change the schema or bypass row-level security |
+| Managed database administrator | `prepare-postgres` job only | Create the logins, database, schema, and extensions | Serve requests |
+
+The plan role uses AWS's `ReadOnlyAccess` or GCP's `roles/viewer`; a
+narrower custom policy also works. The apply role's policies are yours to
+choose (`apply_policy_arns`). OIDC trust is limited to the operator
+repository, and for apply and release to the approved environment.
+
+**Shared identity on one machine.** The Hot services share the VM's
+identity: S3 or GCS access and log shipping need it, so AWS allows a
+metadata hop limit of 2. A compromised Hot service container, as opposed to
+isolated user code, could therefore read this installation's secrets. User
+code cannot: its outbound traffic never reaches metadata, and it has no
+secret files. Separate identities per service arrive with the scalable
+preset.
+
+## Security updates
+
+**Supported releases and advisories.** As in
+[SECURITY.md](../SECURITY.md), security fixes ship in the latest release
+only. Watch the repository's releases and security advisories, and report
+vulnerabilities privately as SECURITY.md describes.
+
+**What a release pins:**
+- the runtime image (Debian packages, Hot, and its Rust dependencies), signed
+  with cosign, with build provenance and an SBOM attached by the build;
+- the PostgreSQL, Valkey, and ingress images by digest;
+- a signed manifest naming all of these, which the agent verifies before it
+  deploys.
+
+Each release also attaches `hot-runtime-vulnerabilities.json`, a Trivy scan
+of the runtime image, for triage. The scan never blocks a release.
+
+**Applying a security release.**
+1. Deploy it with the release workflow: the agent verifies the manifest,
+   takes a restore point if the schema changes, migrates, replaces the
+   services, and checks readiness.
+2. If the release notes say the host image changed, rebuild it with
+   `images/build-host.sh` and set `host_image`. The apply replaces the
+   instance and keeps the data disk.
+
+Between host image rebuilds, Ubuntu's unattended security updates (on by
+default) patch the host's packages. Kernel updates take effect when the
+instance is replaced. Rollback follows [Versions and upgrades](#versions-and-upgrades).
+
+Mirroring images to your own registry is not supported yet: manifests name
+`ghcr.io` and Docker Hub images by digest.
+
+## Capacity, retention, and cost
+
+**Sizes.** One VM runs everything. These numbers are the configuration's
+limits; they have not been benchmarked:
+
+| Size | VM | Data disk | Concurrent tasks (code, container) | Box storage |
+| --- | --- | --- | --- | --- |
+| `small` | 2 vCPU, 8 GB (`m8i.large`, `n2-standard-2`) | 100 GB | 2 code, 1 container | 40 GB |
+| `medium` | 4 vCPU, 16 GB (`m8i.xlarge`, `n2-standard-4`) | 200 GB | 4 code, 2 container | 100 GB |
+| `large` | 8 vCPU, 32 GB (`m8i.2xlarge`, `n2-standard-8`) | 500 GB | 8 code, 4 container | 200 GB |
+
+A size is not an availability or throughput promise. The single machine is
+one failure domain.
+
+**At capacity.**
+- Tasks beyond the concurrent limit wait in the queue, and the work queue
+  grows in Valkey, which never evicts (`noeviction`). When Valkey's memory
+  is full, new work is refused with errors rather than dropped.
+- Box tasks cannot exceed their storage pool.
+- Services have memory limits: one that exceeds its limit is restarted
+  without taking the others down.
+- `disk-pressure` alerts at 85% of the data disk.
+
+Move to a larger size (`size`, then apply; the instance is replaced and the
+disk kept), or move builds and files to object storage.
+
+**Retention.**
+
+| What | Kept for | Set by |
+| --- | --- | --- |
+| Data-disk snapshots | 7 days | `backup.retention_days` |
+| Container logs in CloudWatch | 30 days | `logging.retention_days` |
+| Container logs in Cloud Logging | The log bucket's retention (30 days by default) | Cloud Logging |
+| Local container logs | 3 files of 10 MB per container | Fixed |
+| Pre-upgrade database dumps | The last 3 | Fixed |
+| On-demand `backup` dumps | Until you delete them | You |
+| Deploy history | The last 20 deploys | Fixed |
+| Managed database backups | 7 days, with point-in-time recovery | `data.postgres.backup_retention_days` |
+
+Execution history, builds, and files are kept by Hot's own settings.
+
+**Cost drivers.** The VM runs all the time and dominates the cost. Then come:
+- the data disk and its snapshots;
+- NAT for outbound traffic (AWS NAT gateway, GCP Cloud NAT) and, when
+  enabled, the load balancers for public endpoints;
+- managed PostgreSQL and Valkey instances (high availability doubles them);
+- log ingestion and storage, metrics, and alarms;
+- Secrets Manager secrets on AWS.
+
+Use your cloud's budgets and cost alerts. Hot does not cap spending.
+
 ## Local validation
 
 Use OpenTofu 1.13.1 (the tested version) and Python 3.10 or newer. Docker Compose

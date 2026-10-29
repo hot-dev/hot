@@ -278,8 +278,11 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         if (key in common_env or key.endswith(("_STORAGE_TYPE", "_STORAGE_PATH")) or "_AWS_S3_" in key
                 or "_GCS_" in key or key.startswith("HOT_NETWORK_CLIENT_IP_")):
             raise ValueError(f"settings entry {key} is set by the runtime bundle")
+    # Defaults operators may change in `settings`: accounts are by invitation
+    # (after the first administrator is bootstrapped) until they open sign-up.
+    defaults = {"HOT_APP_SIGNUP": "invite"}
     for role in SERVICES:
-        env, mounts = {**common_env, **config.get("settings", {})}, []
+        env, mounts = {**common_env, **defaults, **config.get("settings", {})}, []
         if role in {"worker", "task-worker"}:
             env["HOT_NETWORK_DENY_CIDRS"] = ",".join(deny)
         if role in {"app", "api"}:

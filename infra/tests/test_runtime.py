@@ -276,6 +276,14 @@ class RuntimeContract(unittest.TestCase):
             renderer.render(dict(config["installation"], settings={"HOT_APP_URL": "https://elsewhere.example"}),
                             manifest(), "/data", "/run/hot/secrets")
 
+    def test_sign_up_is_by_invitation_until_the_operator_opens_it(self):
+        config = example("aws", "local")
+        app = renderer.render(config, manifest(), "/data", "/run/hot/secrets")["services"]["app"]
+        self.assertEqual(app["environment"]["HOT_APP_SIGNUP"], "invite")
+        opened = renderer.render(dict(config["installation"], settings={"HOT_APP_SIGNUP": "open"}),
+                                 manifest(), "/data", "/run/hot/secrets")["services"]["app"]
+        self.assertEqual(opened["environment"]["HOT_APP_SIGNUP"], "open")
+
     def test_logs_ship_to_the_cloud_without_blocking(self):
         aws = renderer.render(example("aws"), manifest(), "/data", "/run/hot/secrets")["services"]
         gcp = renderer.render(example("gcp"), manifest(), "/data", "/run/hot/secrets")["services"]

@@ -1830,12 +1830,18 @@ or an existing operator destination without coupling telemetry to S3.
 - [ ] State the supported trust model for administrators, code authors,
       organizations, and executions. Default account creation to invitation-only
       after explicit first-admin bootstrap; public signup is an operator choice.
+      [Trust and identities](../../infra/README.md#trust-and-identities)
+      states the model. The bundle sets `HOT_APP_SIGNUP=invite`, which
+      operators may override.
 - [ ] Separate bootstrap/provisioning, deployment, migration, runtime, backup,
       and restore permissions. Publish a least-privilege matrix and document
       any single-host identity sharing; migration authority is not a runtime
       capability. Use short-lived identities where supported. Include the
       GitHub Actions plan, apply, and release roles, their OIDC trust
       conditions, and the deploy agent's pointer/status identity.
+      The guide's identity matrix covers plan, apply, release, host, and
+      database logins. It also documents that Hot services on one VM share
+      the host identity, while user code has neither identity nor secrets.
 - [ ] Test both normal Hot execution and box execution against cloud metadata,
       host sockets/files, credentials, protected data services, and other
       organizations. Distinguish intentional application integrations from
@@ -1884,6 +1890,9 @@ or an existing operator destination without coupling telemetry to S3.
 - [ ] Define supported-release lifetimes, security reporting/advisory channels,
       patch priorities, and operator upgrade instructions. Track application,
       OS/base image, TLS libraries, Kata, containerd, and bundled dependencies.
+      [Security updates](../../infra/README.md#security-updates) covers the
+      latest-release support policy, advisories, and what each layer pins
+      and how it is updated.
 - [ ] Require a repeatable security-update process for the initial release:
       rebuild pinned artifacts, verify their integrity, publish immutable
       versions, back up, drain/replace, apply required migrations, and run smoke
@@ -1895,6 +1904,9 @@ or an existing operator destination without coupling telemetry to S3.
       inventories, vulnerability scanning/triage, and signing-key rotation.
       Allow customer mirrors while preserving artifact identity and verification.
       Keep remediation decisions and supported versions tied to release records.
+      The runtime image is signed and carries build provenance and an SBOM.
+      Each release attaches a Trivy vulnerability report, which never blocks
+      it. Customer mirrors are not supported yet.
 
 ### 7. State recovery and infrastructure drift
 
@@ -1938,6 +1950,9 @@ or an existing operator destination without coupling telemetry to S3.
       concurrent execution limits, queue throughput/age, DB connection budgets,
       scratch/durable disk needs, and scaling bounds. Size labels are not HA,
       cost, or throughput guarantees.
+      [Capacity, retention, and cost](../../infra/README.md#capacity-retention-and-cost)
+      publishes the configured limits per size, marked as not yet
+      benchmarked, and the behavior at capacity.
 - [ ] Define behavior at capacity: backpressure, admission rejection, retry,
       or bounded scale-out. Keep recovery/migration/admin headroom and prevent
       autoscaling from overwhelming data services or exceeding declared limits.
@@ -1945,10 +1960,15 @@ or an existing operator destination without coupling telemetry to S3.
       files/blobs, multipart staging, snapshots, and backups. Reconcile metadata
       and object references before deletion; distinguish user data from
       disposable artifacts. Test disk-full and cleanup-failure behavior.
+      The guide tabulates retention for snapshots, logs, dumps, deploy
+      history, and managed backups. Hot's execution-history and build
+      retention, and disk-full tests, remain.
 - [ ] Publish estimates and cost drivers for compute, managed-service minimums,
       replicas, storage, requests, NAT/endpoints, load balancers, logging, backups,
       and KMS. Offer spend alerts and usage reporting with documented limits;
       do not present alerts as guaranteed spend caps.
+      The guide lists the cost drivers and points to cloud budgets; no spend
+      alerts are provisioned yet.
 
 ## Validation matrix and first implementation slices
 
