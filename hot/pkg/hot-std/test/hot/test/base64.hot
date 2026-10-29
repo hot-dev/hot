@@ -23,6 +23,19 @@ meta ["test"] fn () {
     assert(not(::hot::base64/is-valid("not-a-base64-string")))
 }
 
+// Test that encode and encode-url take a Str and encode its UTF-8 bytes
+test-base64-encode-str
+meta ["test"] fn () {
+    assert-eq("aGk=", ::hot::base64/encode("hi"), "encode should encode a Str as UTF-8")
+    assert-eq("aGk", ::hot::base64/encode-url("hi"), "encode-url should encode a Str as UTF-8, without padding")
+    assert-eq("w6k=", ::hot::base64/encode("é"), "encode should encode multi-byte characters as UTF-8")
+    assert-eq(::hot::base64/encode(Bytes("hi")), ::hot::base64/encode("hi"), "a Str should encode like its Bytes")
+    // An untyped value reaches the native without a check-time Str type
+    untyped from-json(`"hi"`)
+    assert-eq("aGk=", ::hot::base64/encode(untyped), "encode should encode an untyped Str at run time")
+    assert-eq("aGk", ::hot::base64/encode-url(untyped), "encode-url should encode an untyped Str at run time")
+}
+
 // Test URL-safe base64 encode
 test-base64-url-encode
 meta ["test"] fn () {
