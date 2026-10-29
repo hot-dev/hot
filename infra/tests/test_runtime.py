@@ -222,6 +222,19 @@ class RuntimeContract(unittest.TestCase):
         upstream = json.loads((ROOT / "release/upstream-images.json").read_text())
         self.assertIn("-pg18@", upstream["postgres"])
 
+    def test_services_know_the_installation_hostnames(self):
+        config = example("aws", "local")
+        bundle = renderer.render(config, manifest(), "/data", "/run/hot/secrets")
+        for role in renderer.SERVICES:
+            env = bundle["services"][role]["environment"]
+            self.assertEqual(env["HOT_APP_URL"], "https://" + config["installation"]["app_hostname"])
+            self.assertEqual(env["HOT_API_URL"], "https://" + config["installation"]["api_hostname"])
+            self.assertEqual(env["HOT_OAUTH_REDIRECT_BASE_URL"], env["HOT_APP_URL"])
+            self.assertEqual(env["HOT_COOKIE_DOMAIN"], config["installation"]["app_hostname"])
+        with self.assertRaisesRegex(ValueError, "set by the runtime bundle"):
+            renderer.render(dict(config["installation"], settings={"HOT_APP_URL": "https://elsewhere.example"}),
+                            manifest(), "/data", "/run/hot/secrets")
+
     def test_nginx_config_has_safe_defaults_and_streaming(self):
         text = renderer.nginx_config(renderer.validate(example()))
         self.assertIn("ssl_reject_handshake on", text)

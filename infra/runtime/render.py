@@ -210,6 +210,11 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "HOT_FILE_MODE": "service", "HOT_BLOB_MODE": "service", "HOT_LOG_FORMAT": "json",
         "HOT_LOG_TARGET": "stdout", "HOT_LOG_LEVEL": "info", "HOT_DAEMON": "true",
         "HOT_APP_HOST": "0.0.0.0", "HOT_API_HOST": "0.0.0.0",
+        # Links in email, OAuth redirects, and the API address the app shows
+        # use the installation's own hostnames, never Hot's cloud defaults.
+        "HOT_APP_URL": f"https://{config['app_hostname']}", "HOT_API_URL": f"https://{config['api_hostname']}",
+        "HOT_OAUTH_REDIRECT_BASE_URL": f"https://{config['app_hostname']}",
+        "HOT_COOKIE_DOMAIN": config["app_hostname"],
         "HOT_TASK_MAX_CONCURRENT": str(size["task"]["max"]),
         "HOT_TASK_CODE_MAX_CONCURRENT": str(size["task"]["code"]),
         "HOT_TASK_CONTAINER_MAX_CONCURRENT": str(size["task"]["container"]),
@@ -338,7 +343,8 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             "image": images["hot"], "platform": "linux/amd64", "profiles": ["admin"],
             "command": ["admin", "bootstrap", "--email", config["admin_email"], "--password-file", "/run/secrets/ADMIN_PASSWORD"],
             "user": "10001:10001", "read_only": True,
-            "environment": {"HOT_ENV": "production", "HOT_PRODUCT_EXPERIENCE": "self-host", "HOT_DB_URI_FILE": "/run/secrets/HOT_DB_URI"},
+            "environment": {"HOT_ENV": "production", "HOT_PRODUCT_EXPERIENCE": "self-host", "HOT_DB_URI_FILE": "/run/secrets/HOT_DB_URI",
+                            "HOT_APP_URL": common_env["HOT_APP_URL"]},
             "secrets": [secret("bootstrap-admin", k) for k in ("HOT_DB_URI", "ADMIN_PASSWORD", *db_ca)],
             "tmpfs": ["/tmp:uid=10001,gid=10001"],
             "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
