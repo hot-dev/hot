@@ -2,6 +2,7 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -85,6 +86,21 @@ class RuntimeContract(unittest.TestCase):
         with self.assertRaises(ValueError):
             renderer.render(example(), unpinned, "/data", "/run/hot/secrets")
 
+    def test_user_code_is_denied_the_installation_itself(self):
+        bundle = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")
+        subnet = bundle["networks"]["default"]["ipam"]["config"][0]["subnet"]
+        for role in ("worker", "task-worker"):
+            deny = bundle["services"][role]["environment"]["HOT_NETWORK_DENY_CIDRS"].split(",")
+            self.assertIn(subnet, deny)
+            self.assertIn("10.68.0.0/16", deny)
+        self.assertNotIn("HOT_NETWORK_DENY_CIDRS", bundle["services"]["app"]["environment"])
+
+    def test_postgres_data_uses_the_postgres_18_layout(self):
+        postgres = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")["services"]["postgres"]
+        self.assertEqual(postgres["volumes"][0]["target"], "/var/lib/postgresql")
+        upstream = json.loads((ROOT / "release/upstream-images.json").read_text())
+        self.assertIn("-pg18@", upstream["postgres"])
+
     def test_nginx_config_has_safe_defaults_and_streaming(self):
         text = renderer.nginx_config(renderer.validate(example()))
         self.assertIn("ssl_reject_handshake on", text)
@@ -104,6 +120,55 @@ class RuntimeContract(unittest.TestCase):
             self.assertEqual(len(parsed["services"]), 10)
             self.assertEqual(parsed["services"]["task-worker"]["pid"], "host")
             self.assertEqual(parsed["services"]["scheduler"]["environment"]["HOT_LOG_FORMAT"], "json")
+
+
+release_spec = importlib.util.spec_from_file_location("release_manifest", ROOT / "release/release_manifest.py")
+releaser = importlib.util.module_from_spec(release_spec)
+release_spec.loader.exec_module(releaser)
+
+
+def fake_cosign(directory, exit_code):
+    """A cosign stand-in that records its arguments."""
+    script = Path(directory) / "cosign"
+    script.write_text(f"#!/bin/sh\necho \"$@\" > {directory}/args\necho 'none of the expected identities matched' >&2\nexit {exit_code}\n")
+    script.chmod(0o755)
+    return str(script)
+
+
+class ReleaseManifest(unittest.TestCase):
+    def test_release_manifests_pin_every_image_and_render(self):
+        upstream = json.loads((ROOT / "release/upstream-images.json").read_text())
+        hot = "ghcr.io/hot-dev/hot-runtime@sha256:" + "b" * 64
+        built = releaser.build("3.0.1", hot, upstream)
+        self.assertEqual(built["images"]["hot"], hot)
+        self.assertEqual(built["module_tag"], "v3.0.1")
+        self.assertGreater(built["migrations"]["latest"], 0)
+        renderer.render(example(), built, "/data", "/run/hot/secrets")
+        with self.assertRaises(ValueError):
+            releaser.build("3.0.1", "ghcr.io/hot-dev/hot-runtime:latest", upstream)
+        with self.assertRaises(ValueError):
+            releaser.build("latest", hot, upstream)
+
+    def test_unknown_manifest_fields_are_rejected(self):
+        extra = manifest()
+        extra["unsigned_override"] = True
+        with self.assertRaises(ValueError):
+            renderer.render(example(), extra, "/data", "/run/hot/secrets")
+
+    def test_signatures_must_name_the_release_workflow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            renderer.verify_manifest_signature("m.json", "m.sigstore.json", cosign=fake_cosign(tmp, 0))
+            args = (Path(tmp) / "args").read_text()
+            self.assertIn("verify-blob --bundle m.sigstore.json", args)
+            self.assertIn(renderer.RELEASE_SIGNER, args)
+            self.assertIn(renderer.RELEASE_ISSUER, args)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "did not verify: none of the expected"):
+                renderer.verify_manifest_signature("m.json", "m.sigstore.json", cosign=fake_cosign(tmp, 1))
+        signer = re.compile(renderer.RELEASE_SIGNER)
+        self.assertTrue(signer.match("https://github.com/hot-dev/hot/.github/workflows/release.yml@refs/tags/v3.0.1"))
+        self.assertFalse(signer.match("https://github.com/hot-dev/hot/.github/workflows/release.yml@refs/heads/main"))
+        self.assertFalse(signer.match("https://github.com/fork/hot/.github/workflows/release.yml@refs/tags/v3.0.1"))
 
 
 if __name__ == "__main__":

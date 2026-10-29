@@ -34,7 +34,9 @@ Environment variables take comma-separated lists. All three are empty by
 default.
 
 Put the installation's own database, cache, ingress, and host addresses in
-`network.deny-cidrs` whenever an allowlist could cover them.
+`network.deny-cidrs` whenever an allowlist could cover them. The runtime bundle
+for Hot's single-machine AWS and Google Cloud stacks sets it to the bundle's
+container network and, when the stack created it, the installation's network.
 
 ## Always blocked
 

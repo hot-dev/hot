@@ -22,11 +22,23 @@ Implemented:
 - File-backed secret consumption and provenance-based configuration redaction
   in Hot; strict backend selection; S3 temporary session-token support; JSON
   runtime logging.
+- The single runtime image recipe
+  ([`images/containers/runtime.Dockerfile`](images/containers/runtime.Dockerfile)),
+  built by [`images/build-runtime.sh`](images/build-runtime.sh) and by the
+  release workflow, which pushes it to `ghcr.io/hot-dev/hot-runtime` and signs
+  it with Sigstore.
+- Signed release manifests: [`release/release_manifest.py`](release/release_manifest.py)
+  pins the runtime image and the upstream images in
+  [`release/upstream-images.json`](release/upstream-images.json). The release
+  workflow signs the manifest keylessly; the renderer verifies it with
+  `cosign verify-blob` against the release workflow's tag identity.
+- In Hot: SMTP email delivery, `hot admin bootstrap`/`reset-password` and the
+  `app.signup` policy for operator-managed accounts, and outbound allowlists
+  (`network.allow-cidrs`, `allow-hosts`, `deny-cidrs`) behind a fixed deny set.
 
 The roots intentionally require `acknowledge_unqualified = true`. The bootstrap
 also refuses to start if the supplied image lacks `hot-agent.service`. The baked
-host image, deploy/secret agent, signed release delivery, onboarding/SMTP,
-scheduler lock-liveness changes, full outbound-policy controls, existing-DB
+host image, deploy/secret agent, the optional egress proxy, existing-DB
 integration, cloud monitoring/alerts, and the real-cloud release gates remain
 to be implemented and qualified. Do not apply these development examples to
 production. No usable host image or published runtime digest is implied by the
@@ -83,14 +95,26 @@ docker compose -f infra/.generated/gcp-example/compose.json \
 ```
 
 The development manifest contains deliberately unusable image references for
-configuration validation only. Rendering requires an explicit unsigned-manifest
-acknowledgment until release-signature verification is implemented.
+configuration validation only, so rendering it requires the explicit
+unsigned-manifest acknowledgment. A published release manifest renders with its
+signature instead:
+
+```sh
+python3 infra/runtime/render.py config.json \
+  --manifest hot-selfhost-manifest.json \
+  --signature-bundle hot-selfhost-manifest.sigstore.json \
+  --output /etc/hot/bundle
+```
+
+Verification needs `cosign` on `PATH` (or `--cosign`) and accepts only
+signatures from the `hot-dev/hot` release workflow on a `v*` tag; a fork that
+publishes its own releases passes `--signer-identity`.
 
 The resulting bundle has these prerequisites for future host-agent integration:
 
 - A qualified amd64 runtime image with S3 and Kata, runtime resources and
-  `hotbox`, plus pinned PostgreSQL/pgvector (currently PostgreSQL 17 layout),
-  Valkey, and unprivileged Nginx images. All Hot commands use one image digest.
+  `hotbox`, plus pinned PostgreSQL/pgvector, Valkey, and unprivileged Nginx
+  images. All Hot commands use one image digest.
 - A mounted encrypted data disk and precreated `postgres`, `valkey`, `build`,
   and `file` directories. Bind mounts disable automatic host-path creation to
   avoid silently initializing storage on the boot filesystem.

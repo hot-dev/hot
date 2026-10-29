@@ -6,11 +6,19 @@ import ipaddress
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 SERVICES = ("app", "api", "worker", "scheduler", "task-worker")
 IMAGES = {"hot", "postgres", "valkey", "ingress"}
 DIGEST = re.compile(r"^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$")
+MANIFEST_KEYS = {"schema_version", "release", "module_tag", "configuration_schema", "migrations", "images"}
+# The release workflow signs manifests keylessly with its GitHub OIDC identity.
+RELEASE_SIGNER = r"^https://github\.com/hot-dev/hot/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+RELEASE_ISSUER = "https://token.actions.githubusercontent.com"
+# The bundle's container network, where PostgreSQL, Valkey, ingress, and the
+# Hot services listen. Fixed so user code can be denied all of it.
+RUNTIME_SUBNET = "172.30.0.0/24"
 CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "size", "host_image", "release_pointer", "secret_references", "app_hostname", "api_hostname", "app_exposure", "api_exposure", "storage", "network"}
 
 
@@ -70,10 +78,26 @@ def validate(document):
     return config
 
 
+def verify_manifest_signature(manifest_path, bundle_path, signer=RELEASE_SIGNER, cosign="cosign"):
+    """Accept a manifest only when its Sigstore bundle names the release workflow."""
+    result = subprocess.run(
+        [cosign, "verify-blob", "--bundle", str(bundle_path),
+         "--certificate-identity-regexp", signer,
+         "--certificate-oidc-issuer", RELEASE_ISSUER, str(manifest_path)],
+        capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        raise ValueError("Manifest signature did not verify" + (": " + detail[-1] if detail else ""))
+
+
 def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_session_tokens=False):
     config = validate(document)
+    if set(manifest) - MANIFEST_KEYS:
+        raise ValueError("Unknown manifest fields: " + ", ".join(sorted(set(manifest) - MANIFEST_KEYS)))
     if manifest.get("schema_version") != 1 or set(manifest.get("images", {})) != IMAGES:
         raise ValueError("Manifest schema 1 requires hot/postgres/valkey/ingress images")
+    if manifest.get("configuration_schema", 1) != 1:
+        raise ValueError("This renderer supports configuration schema 1 only")
     if not all(DIGEST.fullmatch(image) for image in manifest["images"].values()):
         raise ValueError("Every image must be pinned by OCI sha256 digest")
     for path in (data_root, secrets_root):
@@ -109,8 +133,15 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "HOT_BOX_BACKEND": "kata", "HOT_BOX_CONTAINERD_SOCKET": "/run/kata-containerd/containerd.sock",
         "HOT_BOX_VMM": "qemu",
     }
+    # User code may never reach the installation itself, even when an operator
+    # allowlists private ranges that overlap it.
+    deny = [RUNTIME_SUBNET]
+    if config.get("network", {}).get("mode", "new") == "new":
+        deny.append(config.get("network", {}).get("cidr", "10.68.0.0/16"))
     for role in SERVICES:
         env, mounts = dict(common_env), []
+        if role in {"worker", "task-worker"}:
+            env["HOT_NETWORK_DENY_CIDRS"] = ",".join(deny)
         keys = ["HOT_DB_URI", "HOT_REDIS_URI"]
         if role != "scheduler":
             keys.append("HOT_ENCRYPTION_KEY")
@@ -154,7 +185,9 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "image": images["postgres"], "restart": "unless-stopped", "shm_size": "256m", "mem_limit": "1536m",
         "environment": {"POSTGRES_DB": "hot", "POSTGRES_USER": "hot_owner", "POSTGRES_PASSWORD_FILE": "/run/secrets/POSTGRES_PASSWORD"},
         "secrets": [secret("postgres", k) for k in ("POSTGRES_PASSWORD", "POSTGRES_RUNTIME_PASSWORD")],
-        "volumes": [bind(Path(data_root) / "postgres", "/var/lib/postgresql/data"), {"type": "bind", "source": "./init.sql", "target": "/docker-entrypoint-initdb.d/10-hot.sql", "read_only": True}],
+        # PostgreSQL 18 images keep data in /var/lib/postgresql/<major>/docker and
+        # refuse a mount at the older /var/lib/postgresql/data.
+        "volumes": [bind(Path(data_root) / "postgres", "/var/lib/postgresql"), {"type": "bind", "source": "./init.sql", "target": "/docker-entrypoint-initdb.d/10-hot.sql", "read_only": True}],
         "healthcheck": {"test": ["CMD", "pg_isready", "-U", "hot_owner", "-d", "hot"], "interval": "5s", "timeout": "3s", "retries": 12},
         "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
     }
@@ -197,7 +230,8 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
     }
     # No Docker socket is ever mounted. The separate Kata daemon owns guests.
-    compose = {"name": config["name"], "services": services, "secrets": secrets}
+    compose = {"name": config["name"], "services": services, "secrets": secrets,
+               "networks": {"default": {"ipam": {"config": [{"subnet": RUNTIME_SUBNET}]}}}}
     return compose
 
 
@@ -266,6 +300,9 @@ def main():
     parser.add_argument("--secrets-root", default="/run/hot/secrets")
     parser.add_argument("--s3-auth", choices=("identity", "files"), default="identity")
     parser.add_argument("--s3-session-tokens", action="store_true")
+    parser.add_argument("--signature-bundle", type=Path, help="Sigstore bundle published with the manifest")
+    parser.add_argument("--signer-identity", default=RELEASE_SIGNER, help="Certificate identity regex; change only for a fork's releases")
+    parser.add_argument("--cosign", default="cosign")
     parser.add_argument("--allow-unsigned-development-manifest", action="store_true")
     args = parser.parse_args()
     try:
@@ -274,8 +311,10 @@ def main():
         if args.manifest is None:
             print(json.dumps({"valid": True, "cloud": config["cloud"], "name": config["name"], "qualification": "unqualified-development"}))
             return 0
-        if not args.allow_unsigned_development_manifest:
-            raise ValueError("Signature verification is not implemented yet; development rendering requires --allow-unsigned-development-manifest")
+        if args.signature_bundle is not None:
+            verify_manifest_signature(args.manifest, args.signature_bundle, args.signer_identity, args.cosign)
+        elif not args.allow_unsigned_development_manifest:
+            raise ValueError("Pass the manifest's --signature-bundle; only development rendering may use --allow-unsigned-development-manifest")
         if args.output is None:
             raise ValueError("Rendering requires --output pointing to a new directory")
         manifest = json.loads(args.manifest.read_text())
