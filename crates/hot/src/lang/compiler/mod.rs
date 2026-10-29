@@ -842,8 +842,9 @@ impl Compiler {
     /// - Enum variant constructors like `::hot::type/Result.Ok`
     fn extract_known_functions(&mut self, program: &Program) {
         // First, add all built-in (hotlib) functions
-        for func_name in crate::lang::natives::NATIVE_FUNCTIONS {
-            self.known_functions.insert(func_name.to_string());
+        let hotlib_map = crate::lang::hot::get_hotlib_map();
+        for func_name in hotlib_map.keys() {
+            self.known_functions.insert(func_name.clone());
         }
 
         let mut user_fn_count = 0;
@@ -928,7 +929,7 @@ impl Compiler {
         tracing::debug!(
             "Compiler: Extracted {} known function names ({} built-ins, {} user fns, {} type constructors, {} enum variants)",
             self.known_functions.len(),
-            crate::lang::natives::NATIVE_FUNCTIONS.len(),
+            hotlib_map.len(),
             user_fn_count,
             type_constructor_count,
             variant_count
@@ -1052,7 +1053,10 @@ impl Compiler {
         // must expose only the newest ordinary binding. Normalize before any
         // lowering, resolution, or type checking can interpret old and new
         // signatures as overloads.
-        crate::lang::merge::normalize_shadow_bindings(validation_program, extension_program);
+        crate::lang::engine::discover::normalize_shadow_bindings(
+            validation_program,
+            extension_program,
+        );
 
         // Keep the seeded core registry, adding any new core declarations from
         // the merged AST before resolution.
@@ -3217,8 +3221,10 @@ impl Compiler {
         };
 
         // Check if this function exists in the Hot library map.
+        let hotlib_map = crate::lang::hot::get_hotlib_map();
+
         // Try exact match first
-        if crate::lang::natives::is_native(&function_name) {
+        if hotlib_map.contains_key(&function_name) {
             tracing::trace!(
                 "Compiler: call-lib function '{}' found in Hot library map",
                 function_name
@@ -3237,7 +3243,7 @@ impl Compiler {
             function_name.clone()
         };
 
-        if crate::lang::natives::is_native(&namespaced_name) {
+        if hotlib_map.contains_key(&namespaced_name) {
             tracing::trace!(
                 "Compiler: call-lib function '{}' found as '{}' in Hot library map",
                 function_name,

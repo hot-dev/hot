@@ -21,7 +21,7 @@ use crate::lang::bytecode::BytecodeProgram;
 use crate::lang::compiler::Compiler;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
 use std::sync::Arc;
 
@@ -55,7 +55,16 @@ pub enum PipelineMode {
     },
 }
 
-pub(super) use hot_lang::check::ContextValidationPolicy;
+/// Explicit policy for required runtime context validation.
+///
+/// This is intentionally separate from `Option<context_storage>`: an absent
+/// storage map can mean either "collect requirements only" or "runtime has
+/// zero keys", depending on the caller.
+#[derive(Debug, Clone)]
+pub(super) enum ContextValidationPolicy {
+    CollectOnly,
+    RequireSatisfied(AHashSet<String>),
+}
 
 /// Outcome of a test run, distinguishing "tests failed" from "nothing ran".
 ///

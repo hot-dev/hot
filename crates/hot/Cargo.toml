@@ -2,7 +2,7 @@
 name = "hot"
 version.workspace = true
 edition.workspace = true
-description = "Hot runtime, storage, and package support"
+description = "Core Hot language, runtime, storage, and package support"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -18,9 +18,8 @@ local-embeddings = ["dep:fastembed"]
 test-utils = []
 
 [dependencies]
-hot_lang = { workspace = true, features = ["fetch"] }
 ahash = { workspace = true }
-fastnum = { workspace = true, features = ["sqlx", "tokio-postgres"] }
+fastnum = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order", "arbitrary_precision"] }
 postcard = { workspace = true }
 serde = { workspace = true }
@@ -83,6 +82,12 @@ pulldown-cmark = { workspace = true }
 mime_guess = { workspace = true }
 # Canonical single extension per MIME type (mime-db backed)
 mime2ext = { workspace = true }
+# Blocking HTTP client for CDN package downloads (no async runtime)
+ureq = { workspace = true }
+# Gzip decompression for package tarballs
+flate2 = { workspace = true }
+# Tarball extraction for packages
+tar = { workspace = true }
 # XML parsing for ::hot::xml functions
 quick-xml = { workspace = true }
 # DNS resolution for custom domain verification
