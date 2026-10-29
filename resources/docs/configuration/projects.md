@@ -107,6 +107,13 @@ hot.set.project "my-project-name"
 
 This project is used when no `-p/--project` flag is specified.
 
+If `hot.hot` defines no projects, Hot uses a default project with
+`./hot/src` sources and `./hot/test` tests. Once `hot.hot` defines projects,
+name the one to use with `hot.set.project` or `-p`. `hot check`, `hot watch`,
+`hot test`, `hot run`, `hot eval`, `hot repl` and `hot dev` stop with an error
+when neither names one, or when `-p` names a project `hot.hot` doesn't define.
+The error lists the projects `hot.hot` defines.
+
 ## Store Configuration
 
 `::hot::store` persists data in the main Hot database and is always scoped to
