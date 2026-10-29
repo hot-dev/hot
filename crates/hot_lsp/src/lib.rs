@@ -936,13 +936,13 @@ impl Backend {
         }
 
         // 2. Load project dependencies from hot.hot config
-        let project_name = hot::project::get_default_project_name(conf);
+        let project_name = hot_lang::project::get_default_project_name(conf);
         if let Ok(resolved_deps) =
-            hot::project::get_resolved_project_dependencies(conf, &project_name)
+            hot_lang::project::get_resolved_project_dependencies(conf, &project_name)
         {
             for dep in &resolved_deps {
                 if let Ok(files) =
-                    hot::lang::engine::Engine::discover_dependency_source_files(&dep.resolved_path)
+                    hot_lang::lang::discover::discover_dependency_source_files(&dep.resolved_path)
                 {
                     for file_path in files {
                         let normalized_file = normalize_file_path(Path::new(&file_path));
@@ -1217,7 +1217,7 @@ impl Backend {
         let mut all_hot_files = Vec::new();
 
         // Find hot-std directory
-        // Resolution order: HOT_HOME > macOS package > Linux package > development paths
+        // Resolution order: HOT_HOME > macOS package > Linux package > development paths > embedded
         let mut hot_std_paths = Vec::new();
 
         // Check HOT_HOME first
@@ -1237,6 +1237,11 @@ impl Backend {
             "./hot/pkg/hot-std/src".to_string(),
         ]);
 
+        // Then the hot-std embedded in hot_lang, from the compiler's own commit
+        if let Ok(embedded) = hot_lang::lang::hot_std::embedded_dir() {
+            hot_std_paths.push(embedded.join("src").to_string_lossy().to_string());
+        }
+
         for hot_std_path in &hot_std_paths {
             if std::path::Path::new(hot_std_path).exists()
                 && let Ok(files) = self.discover_hot_files_in_dir(hot_std_path)
@@ -1249,12 +1254,12 @@ impl Backend {
         // Load project dependency source files
         {
             let conf = self.conf.lock().await;
-            let project_name = hot::project::get_default_project_name(&conf);
+            let project_name = hot_lang::project::get_default_project_name(&conf);
             if let Ok(resolved_deps) =
-                hot::project::get_resolved_project_dependencies(&conf, &project_name)
+                hot_lang::project::get_resolved_project_dependencies(&conf, &project_name)
             {
                 for dep in &resolved_deps {
-                    if let Ok(files) = hot::lang::engine::Engine::discover_dependency_source_files(
+                    if let Ok(files) = hot_lang::lang::discover::discover_dependency_source_files(
                         &dep.resolved_path,
                     ) {
                         all_hot_files.extend(files);
@@ -1306,12 +1311,12 @@ impl Backend {
 
     /// Discover `.hot` files under a directory.
     ///
-    /// Routes through `hot::discovery::discover` so the LSP honors
+    /// Routes through `hot_lang::discovery::discover` so the LSP honors
     /// `.gitignore` / `.hotignore` / default hard-excludes uniformly with
     /// the rest of the toolchain.
     fn discover_hot_files_in_dir(&self, dir_path: &str) -> Result<Vec<String>, String> {
-        let opts = hot::discovery::DiscoveryOpts::for_extension("hot");
-        Ok(hot::discovery::discover_paths(
+        let opts = hot_lang::discovery::DiscoveryOpts::for_extension("hot");
+        Ok(hot_lang::discovery::discover_paths(
             &[std::path::PathBuf::from(dir_path)],
             &opts,
         ))
@@ -3129,11 +3134,11 @@ impl Backend {
             let src_paths = self.src_paths.lock().await.clone();
 
             // Get project name for dependency resolution (hot-std, etc.)
-            let project_name = hot::project::get_default_project_name(&conf);
+            let project_name = hot_lang::project::get_default_project_name(&conf);
 
             // Get merged src paths including project paths
             let merged_src_paths: Vec<String> = {
-                let mut paths = hot::project::get_project_src_paths(&conf, &project_name);
+                let mut paths = hot_lang::project::get_project_src_paths(&conf, &project_name);
                 paths.extend(
                     src_paths
                         .iter()
@@ -3143,7 +3148,7 @@ impl Backend {
             };
 
             // Get test paths
-            let test_paths = hot::project::get_project_test_paths(&conf, &project_name);
+            let test_paths = hot_lang::project::get_project_test_paths(&conf, &project_name);
 
             let repl_config = ReplConfig {
                 src_paths: merged_src_paths,
@@ -3792,7 +3797,7 @@ pub async fn run_stdio() -> anyhow::Result<()> {
         }
     }
 
-    let project_conf = hot::project::get_resolved_conf(conf.clone());
+    let project_conf = hot_lang::project::get_resolved_conf(conf.clone());
     conf = conf.merge(&project_conf);
 
     // Apply emitter defaults (LSP is always runtime context for eval)
@@ -3806,8 +3811,8 @@ pub async fn run_stdio() -> anyhow::Result<()> {
     let resolved_queue_conf = hot::queue::get_resolved_conf(queue_conf_from_user, in_project);
     conf = conf.set("queue", resolved_queue_conf);
 
-    let project_name = hot::project::get_default_project_name(&conf);
-    let src_paths: Vec<PathBuf> = hot::project::get_project_src_paths(&conf, &project_name)
+    let project_name = hot_lang::project::get_default_project_name(&conf);
+    let src_paths: Vec<PathBuf> = hot_lang::project::get_project_src_paths(&conf, &project_name)
         .into_iter()
         .map(PathBuf::from)
         .collect();

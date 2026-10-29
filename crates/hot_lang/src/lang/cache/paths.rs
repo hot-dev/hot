@@ -219,6 +219,17 @@ pub fn get_package_unit_cache_dir() -> PathBuf {
     get_system_cache_dir().join("cache").join("unit")
 }
 
+/// Get the directory the embedded hot-std is unpacked into
+/// (`<system cache>/cache/std/`). Machine-scoped like
+/// [`get_package_unit_cache_dir`], and for the same reason: the copy depends
+/// only on the hot_lang build. `HOT_HOME` still wins when set.
+pub fn get_embedded_std_dir() -> PathBuf {
+    if let Ok(hot_home) = std::env::var("HOT_HOME") {
+        return PathBuf::from(hot_home).join("cache").join("std");
+    }
+    get_system_cache_dir().join("cache").join("std")
+}
+
 /// Get the git dependency cache directory (.hot/cache/git/).
 /// Used by `DependencyResolver` for cloned git repositories.
 pub fn get_git_cache_dir() -> PathBuf {
