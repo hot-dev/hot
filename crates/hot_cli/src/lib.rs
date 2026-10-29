@@ -893,21 +893,9 @@ async fn async_main(providers: CliProviders) {
         // On Unix platforms, fork the process to run in the background
         #[cfg(unix)]
         {
-            use std::process::Command;
-
             // Get the current executable path
             let exe = std::env::current_exe().expect("Failed to get executable path");
-
-            // Build a command with the same arguments, but without the daemon flag
-            let mut args: Vec<String> = std::env::args().collect();
-            if let Some(pos) = args.iter().position(|arg| arg == "--daemon" || arg == "-d") {
-                args.remove(pos);
-            }
-            args.remove(0); // Remove the program name
-
-            // Create a new process that will run in the background
-            let mut cmd = Command::new(exe);
-            cmd.args(&args);
+            let mut cmd = daemon_child_command(exe, std::env::args().collect());
 
             match cmd.spawn() {
                 Ok(_) => {
@@ -1827,6 +1815,38 @@ fn format_size(bytes: u64) -> String {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+/// The background process `--daemon` starts: the same arguments without the
+/// daemon flag, and `HOT_DAEMON=false` so that neither an inherited
+/// `HOT_DAEMON=true` nor a configuration file makes it start another.
+#[cfg(unix)]
+fn daemon_child_command(exe: std::path::PathBuf, mut args: Vec<String>) -> std::process::Command {
+    if let Some(pos) = args.iter().position(|arg| arg == "--daemon" || arg == "-d") {
+        args.remove(pos);
+    }
+    args.remove(0); // Remove the program name
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(&args).env("HOT_DAEMON", "false");
+    cmd
+}
+
+#[cfg(all(test, unix))]
+mod daemon_tests {
+    use super::*;
+
+    #[test]
+    fn the_daemon_child_never_daemonizes_again() {
+        let cmd = daemon_child_command(
+            "/usr/local/bin/hot".into(),
+            vec!["hot".into(), "--daemon".into(), "api".into()],
+        );
+        assert_eq!(cmd.get_args().collect::<Vec<_>>(), ["api"]);
+        assert!(
+            cmd.get_envs()
+                .any(|(key, value)| key == "HOT_DAEMON" && value == Some("false".as_ref()))
+        );
     }
 }
 

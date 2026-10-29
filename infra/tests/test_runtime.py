@@ -222,6 +222,13 @@ class RuntimeContract(unittest.TestCase):
         upstream = json.loads((ROOT / "release/upstream-images.json").read_text())
         self.assertIn("-pg18@", upstream["postgres"])
 
+    def test_services_run_in_the_foreground(self):
+        # daemon = true makes the CLI start a background copy and exit, which
+        # a container's supervisor sees as the service stopping.
+        bundle = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")
+        for role in renderer.SERVICES:
+            self.assertNotIn("HOT_DAEMON", bundle["services"][role]["environment"], role)
+
     def test_services_know_the_installation_hostnames(self):
         config = example("aws", "local")
         bundle = renderer.render(config, manifest(), "/data", "/run/hot/secrets")

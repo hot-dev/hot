@@ -208,7 +208,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "HOT_ENGINE_ISOLATION": "true", "HOT_NETWORK_ALLOW_PRIVATE": "false",
         "HOT_QUEUE_TYPE": "redis", "HOT_EMITTER_TYPE": "db",
         "HOT_FILE_MODE": "service", "HOT_BLOB_MODE": "service", "HOT_LOG_FORMAT": "json",
-        "HOT_LOG_TARGET": "stdout", "HOT_LOG_LEVEL": "info", "HOT_DAEMON": "true",
+        "HOT_LOG_TARGET": "stdout", "HOT_LOG_LEVEL": "info",
         "HOT_APP_HOST": "0.0.0.0", "HOT_API_HOST": "0.0.0.0",
         # Links in email, OAuth redirects, and the API address the app shows
         # use the installation's own hostnames, never Hot's cloud defaults.
