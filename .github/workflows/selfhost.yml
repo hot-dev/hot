@@ -54,11 +54,11 @@ jobs:
       - name: OpenTofu validation and mock-provider tests
         run: |
           set -euo pipefail
-          for root in infra/opentofu/modules/* infra/opentofu/stacks/*/*; do
+          for root in infra/opentofu/modules/* infra/opentofu/bootstrap/* infra/opentofu/stacks/*/*; do
             [ -d "$root" ] || continue
             echo "::group::$root"
             tofu -chdir="$root" init -backend=false -lockfile=readonly -input=false
-            if [[ "$root" == infra/opentofu/stacks/* ]]; then
+            if [[ "$root" != infra/opentofu/modules/* ]]; then
               tofu -chdir="$root" validate
             fi
             if compgen -G "$root/tests/*.tftest.hcl" > /dev/null; then

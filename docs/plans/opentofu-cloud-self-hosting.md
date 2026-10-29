@@ -1078,10 +1078,14 @@ Changes for self-hosting:
 
 ### AWS track
 
-- [ ] Bootstrap or reuse an S3 state bucket with versioning, encryption, access
+- [x] Bootstrap or reuse an S3 state bucket with versioning, encryption, access
       restrictions, and locking. Enable OpenTofu client-side state and plan
       encryption with an AWS KMS key provider. Pin OpenTofu and AWS provider
       versions.
+      [`bootstrap/aws`](../../infra/opentofu/bootstrap/aws) creates a versioned,
+      TLS-only, never-public state bucket and, optionally, GitHub OIDC roles
+      for plan, apply, and release. Stacks grant the release role only their
+      own pointer, status, and command (`release_principal`).
 - [ ] Provision VPC/subnets or validated existing networking, firewall rules,
       EC2 identity, stable endpoint, retained EBS data volume, and the host image.
       Include private routing, required egress, Session Manager connectivity,
@@ -1102,12 +1106,15 @@ Changes for self-hosting:
 
 ### GCP track
 
-- [ ] Bootstrap or reuse a protected state backend; provide GCS as the native
+- [x] Bootstrap or reuse a protected state backend; provide GCS as the native
       example and support existing S3 state independently of compute cloud.
       Enable versioning, encryption policy, access restrictions, and locking.
       Enable OpenTofu client-side state and plan encryption with a Cloud KMS
       key provider. Pin OpenTofu and Google provider versions. State storage is independent
       of Hot's application-level GCS implementation.
+      [`bootstrap/gcp`](../../infra/opentofu/bootstrap/gcp) creates the GCS
+      state bucket and, optionally, a Workload Identity pool limited to the
+      operator's repository with plan, apply, and release service accounts.
 - [ ] Provision or reuse project networking, required APIs, firewall rules,
       service account, stable endpoint, retained persistent data disk, and host
       image. Avoid disabling shared project APIs on installation removal.

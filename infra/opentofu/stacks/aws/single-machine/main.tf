@@ -239,6 +239,18 @@ resource "aws_instance" "host" {
   }
   depends_on = [aws_route_table_association.private, aws_iam_role_policy.runtime, aws_iam_role_policy_attachment.ssm]
 }
+# The release workflow may write the pointer, read status, and send the Hot
+# command to this installation's host, and nothing else.
+resource "aws_iam_role_policy" "release" {
+  count = var.release_principal == "" ? 0 : 1
+  name  = "hot-${local.config.name}-release"
+  role  = element(split("/", var.release_principal), length(split("/", var.release_principal)) - 1)
+  policy = jsonencode({ Version = "2012-10-17", Statement = [
+    { Effect = "Allow", Action = ["ssm:PutParameter"], Resource = aws_ssm_parameter.release.arn },
+    { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = aws_ssm_parameter.status.arn },
+    { Effect = "Allow", Action = ["ssm:SendCommand"], Resource = [aws_ssm_document.command.arn, aws_instance.host.arn] },
+  ] })
+}
 resource "aws_volume_attachment" "data" {
   device_name = "/dev/sdf"
   volume_id   = aws_ebs_volume.data.id

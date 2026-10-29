@@ -150,3 +150,14 @@ run "agent_channel" {
     error_message = "The host may store only its generated secrets."
   }
 }
+
+run "release_principal_is_scoped" {
+  command = plan
+  variables {
+    release_principal = "arn:aws:iam::123456789012:role/ci/hot-github-release"
+  }
+  assert {
+    condition     = aws_iam_role_policy.release[0].role == "hot-github-release" && !strcontains(aws_iam_role_policy.release[0].policy, "\"Resource\":\"*\"")
+    error_message = "The release role is granted only this installation's pointer, status, and command."
+  }
+}

@@ -142,6 +142,27 @@ resource "google_pubsub_subscription_iam_member" "agent" {
   role         = "roles/pubsub.subscriber"
   member       = "serviceAccount:${google_service_account.host.email}"
 }
+# The release workflow may add pointer versions, publish commands, and read
+# the agent's status logs.
+resource "google_secret_manager_secret_iam_member" "release" {
+  count     = var.release_principal == "" ? 0 : 1
+  project   = local.config.project
+  secret_id = google_secret_manager_secret.release.id
+  role      = "roles/secretmanager.secretVersionAdder"
+  member    = "serviceAccount:${var.release_principal}"
+}
+resource "google_pubsub_topic_iam_member" "release" {
+  count  = var.release_principal == "" ? 0 : 1
+  topic  = google_pubsub_topic.commands.name
+  role   = "roles/pubsub.publisher"
+  member = "serviceAccount:${var.release_principal}"
+}
+resource "google_project_iam_member" "release_logs" {
+  count   = var.release_principal == "" ? 0 : 1
+  project = local.config.project
+  role    = "roles/logging.viewer"
+  member  = "serviceAccount:${var.release_principal}"
+}
 locals {
   host_config = merge(local.config, {
     data_volume_id       = google_compute_disk.data.id

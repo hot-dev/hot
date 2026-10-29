@@ -146,3 +146,14 @@ run "agent_channel" {
     error_message = "The host reads the release pointer, generated secrets, and operator secrets."
   }
 }
+
+run "release_principal_is_scoped" {
+  command = plan
+  variables {
+    release_principal = "hot-github-release@example-project.iam.gserviceaccount.com"
+  }
+  assert {
+    condition     = google_secret_manager_secret_iam_member.release[0].role == "roles/secretmanager.secretVersionAdder" && google_pubsub_topic_iam_member.release[0].role == "roles/pubsub.publisher"
+    error_message = "The release account may add pointer versions and publish commands only."
+  }
+}
