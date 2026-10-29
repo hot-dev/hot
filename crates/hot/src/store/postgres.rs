@@ -55,74 +55,144 @@ impl PgStore {
         )
         .await?;
         let mut written = Vec::with_capacity(entries.len());
-        for (key, value, embedding, text_content) in entries {
-            let key_data = &key;
-            let value_data = &value;
-            let embedding_data = embedding
-                .as_ref()
-                .map(|e| Self::embedding_to_pgvector_literal(e));
-            let now = Utc::now();
+        for write in entries {
             let old:Option<i64>=sqlx::query_scalar("SELECT size FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4")
-                .bind(self.org_id).bind(self.env_id).bind(store_name).bind(key_data).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
+                .bind(self.org_id).bind(self.env_id).bind(store_name).bind(&write.0).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
             if only_missing && old.is_some() {
                 continue;
             }
-            let embedding_bytes = embedding
-                .as_ref()
-                .map_or(Some(0), |e| e.len().checked_mul(4))
-                .ok_or("Store embedding is too large")?;
-            let size = super::quota::entry_size(
-                key.to_string().len(),
-                value.to_string().len(),
-                text_content.as_ref().map_or(0, |s| s.len()),
-                embedding_bytes,
-            )?;
-            budget.replace(old.unwrap_or(0), size)?;
-            let query = if only_missing {
-                "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8,$9,$9)
-             ON CONFLICT (org_id,env_id,store_name,key) DO NOTHING
-             RETURNING seq,created_at,updated_at"
-            } else {
-                "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8,$9,$9)
-             ON CONFLICT (org_id,env_id,store_name,key) DO UPDATE SET value=EXCLUDED.value,embedding=EXCLUDED.embedding,text_content=EXCLUDED.text_content,size=EXCLUDED.size,updated_at=EXCLUDED.updated_at
-             RETURNING seq,created_at,updated_at"
-            };
-            let row = sqlx::query(query)
-                .bind(self.org_id)
-                .bind(self.env_id)
-                .bind(store_name)
-                .bind(key_data)
-                .bind(value_data)
-                .bind(&embedding_data)
-                .bind(&text_content)
-                .bind(size)
-                .bind(now)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| format!("store write failed: {e}"))?;
-            let Some(row) = row else {
-                continue;
-            };
-            let seq: i64 = row.try_get("seq").map_err(|e| e.to_string())?;
-            let created_at: chrono::DateTime<Utc> =
-                row.try_get("created_at").map_err(|e| e.to_string())?;
-            let updated_at: chrono::DateTime<Utc> =
-                row.try_get("updated_at").map_err(|e| e.to_string())?;
-            written.push(StoreEntry {
-                key,
-                value,
-                seq,
-                embedding,
-                created_at,
-                updated_at,
-            });
+            if let Some(entry) = self
+                .write_entry(&mut tx, &mut budget, store_name, write, old, only_missing)
+                .await?
+            {
+                written.push(entry);
+            }
         }
         tx.commit()
             .await
             .map_err(|e| format!("store commit failed: {e}"))?;
         Ok(written)
+    }
+
+    /// Lock the entry at `key` for the rest of `tx` and return its stored
+    /// value and size. A missing key locks nothing: a write that creates it
+    /// must insert with ON CONFLICT DO NOTHING and check that it won.
+    async fn lock_entry(
+        &self,
+        tx: &mut sqlx::PgConnection,
+        store_name: &str,
+        key: &serde_json::Value,
+    ) -> Result<Option<(serde_json::Value, i64)>, String> {
+        sqlx::query_as(
+            "SELECT value, size FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4 FOR UPDATE",
+        )
+        .bind(self.org_id)
+        .bind(self.env_id)
+        .bind(store_name)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    /// Write one entry whose stored size was `old` (`None` when missing),
+    /// after admitting its size to `budget`. With `only_missing` a concurrent
+    /// creator wins: nothing is written, the admission is returned, and this
+    /// gives `None`.
+    async fn write_entry(
+        &self,
+        tx: &mut sqlx::PgConnection,
+        budget: &mut super::quota::Budget,
+        store_name: &str,
+        (key, value, embedding, text_content): super::StoreWrite,
+        old: Option<i64>,
+        only_missing: bool,
+    ) -> Result<Option<StoreEntry>, String> {
+        let embedding_data = embedding
+            .as_ref()
+            .map(|e| Self::embedding_to_pgvector_literal(e));
+        let now = Utc::now();
+        let embedding_bytes = embedding
+            .as_ref()
+            .map_or(Some(0), |e| e.len().checked_mul(4))
+            .ok_or("Store embedding is too large")?;
+        let size = super::quota::entry_size(
+            key.to_string().len(),
+            value.to_string().len(),
+            text_content.as_ref().map_or(0, |s| s.len()),
+            embedding_bytes,
+        )?;
+        budget.replace(old.unwrap_or(0), size)?;
+        let query = if only_missing {
+            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8,$9,$9)
+             ON CONFLICT (org_id,env_id,store_name,key) DO NOTHING
+             RETURNING seq,created_at,updated_at"
+        } else {
+            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8,$9,$9)
+             ON CONFLICT (org_id,env_id,store_name,key) DO UPDATE SET value=EXCLUDED.value,embedding=EXCLUDED.embedding,text_content=EXCLUDED.text_content,size=EXCLUDED.size,updated_at=EXCLUDED.updated_at
+             RETURNING seq,created_at,updated_at"
+        };
+        let row = sqlx::query(query)
+            .bind(self.org_id)
+            .bind(self.env_id)
+            .bind(store_name)
+            .bind(&key)
+            .bind(&value)
+            .bind(&embedding_data)
+            .bind(&text_content)
+            .bind(size)
+            .bind(now)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| format!("store write failed: {e}"))?;
+        let Some(row) = row else {
+            budget.replace(size, old.unwrap_or(0))?;
+            return Ok(None);
+        };
+        let seq: i64 = row.try_get("seq").map_err(|e| e.to_string())?;
+        let created_at: chrono::DateTime<Utc> =
+            row.try_get("created_at").map_err(|e| e.to_string())?;
+        let updated_at: chrono::DateTime<Utc> =
+            row.try_get("updated_at").map_err(|e| e.to_string())?;
+        Ok(Some(StoreEntry {
+            key,
+            value,
+            seq,
+            embedding,
+            created_at,
+            updated_at,
+        }))
+    }
+
+    /// The range `[low, high)` of key text that holds the string keys
+    /// starting with `prefix`, in byte order (`high` is `None` when nothing
+    /// is above them). It is read from `idx_store_map_entry_key_prefix`: the
+    /// jsonb key itself orders strings by the database collation, where the
+    /// keys sharing a prefix need not be one range.
+    fn prefix_range(prefix: Option<&str>) -> Option<(String, Option<String>)> {
+        prefix.map(|prefix| (prefix.to_string(), super::prefix_upper_bound(prefix)))
+    }
+
+    /// A page of `columns` in insertion order, binding org, env, store name,
+    /// limit and offset, then the prefix range's ends when there is one.
+    fn listing_sql(columns: &str, range: &Option<(String, Option<String>)>) -> String {
+        let terms = match range {
+            None => "",
+            Some((_, None)) => {
+                " AND jsonb_typeof(key) = 'string' AND (key #>> '{}') COLLATE \"C\" >= $6"
+            }
+            Some((_, Some(_))) => {
+                " AND jsonb_typeof(key) = 'string' AND (key #>> '{}') COLLATE \"C\" >= $6 AND (key #>> '{}') COLLATE \"C\" < $7"
+            }
+        };
+        format!(
+            "SELECT {columns}
+             FROM store_map_entry
+             WHERE org_id = $1 AND env_id = $2 AND store_name = $3{terms}
+             ORDER BY seq LIMIT $4 OFFSET $5"
+        )
     }
 
     fn row_to_entry(row: &sqlx::postgres::PgRow) -> Result<StoreEntry, String> {
@@ -314,6 +384,76 @@ impl Store for PgStore {
             .is_empty())
     }
 
+    async fn put_if(
+        &self,
+        store_name: &str,
+        key: serde_json::Value,
+        expected: serde_json::Value,
+        value: serde_json::Value,
+        embedding: Option<Vec<f32>>,
+        text_content: Option<String>,
+    ) -> Result<bool, String> {
+        let (mut tx, mut budget) = super::quota::begin_postgres(
+            &self.pool,
+            self.org_id,
+            self.env_id,
+            super::quota::QuotaKind::Store,
+        )
+        .await?;
+        let stored = self.lock_entry(&mut tx, store_name, &key).await?;
+        if !super::stored_value_matches(stored.as_ref().map(|(value, _)| value), &expected) {
+            return Ok(false);
+        }
+        let old = stored.map(|(_, size)| size);
+        let write = (key, value, embedding, text_content);
+        // Creating a missing key races other creators; losing means the
+        // key now holds their value, not the expected one.
+        let wrote = self
+            .write_entry(&mut tx, &mut budget, store_name, write, old, old.is_none())
+            .await?
+            .is_some();
+        tx.commit()
+            .await
+            .map_err(|e| format!("store commit failed: {e}"))?;
+        Ok(wrote)
+    }
+
+    async fn increment(
+        &self,
+        store_name: &str,
+        key: serde_json::Value,
+        by: i64,
+    ) -> Result<i64, String> {
+        let (mut tx, mut budget) = super::quota::begin_postgres(
+            &self.pool,
+            self.org_id,
+            self.env_id,
+            super::quota::QuotaKind::Store,
+        )
+        .await?;
+        // A concurrent increment can create a missing key between the lock
+        // and the insert. It has committed once our insert yields to it, and
+        // each statement here reads the latest commit, so the next lock sees
+        // its row. Only a delete racing every retry can exhaust them.
+        for _ in 0..8 {
+            let stored = self.lock_entry(&mut tx, store_name, &key).await?;
+            let next = super::incremented(stored.as_ref().map(|(value, _)| value), by)?;
+            let old = stored.map(|(_, size)| size);
+            let write = (key.clone(), serde_json::Value::from(next), None, None);
+            if self
+                .write_entry(&mut tx, &mut budget, store_name, write, old, old.is_none())
+                .await?
+                .is_some()
+            {
+                tx.commit()
+                    .await
+                    .map_err(|e| format!("store commit failed: {e}"))?;
+                return Ok(next);
+            }
+        }
+        Err("store increment kept losing its entry to concurrent writers".into())
+    }
+
     async fn get(
         &self,
         store_name: &str,
@@ -496,18 +636,22 @@ impl Store for PgStore {
         let pg = self.pg_pool()?;
         let limit = options.limit.unwrap_or(1000) as i64;
         let offset = options.offset.unwrap_or(0) as i64;
+        let range = Self::prefix_range(options.prefix.as_deref());
 
-        let rows = sqlx::query(
-            "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at
-             FROM store_map_entry
-             WHERE org_id = $1 AND env_id = $2 AND store_name = $3
-             ORDER BY seq LIMIT $4 OFFSET $5",
-        )
+        let rows = sqlx::query(sqlx::AssertSqlSafe(Self::listing_sql(
+            "key, value, seq, embedding::text as embedding_text, created_at, updated_at",
+            &range,
+        )))
         .bind(self.org_id)
         .bind(self.env_id)
         .bind(store_name)
         .bind(limit)
-        .bind(offset)
+        .bind(offset);
+        let rows = match &range {
+            Some((low, Some(high))) => rows.bind(low).bind(high),
+            Some((low, None)) => rows.bind(low),
+            None => rows,
+        }
         .fetch_all(pg)
         .await
         .map_err(|e| format!("store list failed: {e}"))?;
@@ -523,20 +667,24 @@ impl Store for PgStore {
         let pg = self.pg_pool()?;
         let limit = options.limit.unwrap_or(1000) as i64;
         let offset = options.offset.unwrap_or(0) as i64;
+        let range = Self::prefix_range(options.prefix.as_deref());
 
-        let rows = sqlx::query(
-            "SELECT key, seq,
+        let rows = sqlx::query(sqlx::AssertSqlSafe(Self::listing_sql(
+            "key, seq,
                     CASE WHEN embedding IS NULL THEN NULL ELSE vector_dims(embedding)::bigint END AS embedding_dimensions,
-                    created_at, updated_at
-             FROM store_map_entry
-             WHERE org_id = $1 AND env_id = $2 AND store_name = $3
-             ORDER BY seq LIMIT $4 OFFSET $5",
-        )
+                    created_at, updated_at",
+            &range,
+        )))
         .bind(self.org_id)
         .bind(self.env_id)
         .bind(store_name)
         .bind(limit)
-        .bind(offset)
+        .bind(offset);
+        let rows = match &range {
+            Some((low, Some(high))) => rows.bind(low).bind(high),
+            Some((low, None)) => rows.bind(low),
+            None => rows,
+        }
         .fetch_all(pg)
         .await
         .map_err(|e| format!("store list_info failed: {e}"))?;
@@ -1076,6 +1224,160 @@ mod tests {
             !store
                 .put_if_missing(&name, json!("race"), json!("replacement"), None, None)
                 .await?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_put_if_compares_values_as_hot_values() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("put-if-test-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        let key = || json!("case");
+
+        assert!(
+            store
+                .put_if(
+                    &name,
+                    key(),
+                    serde_json::Value::Null,
+                    json!({"zeta": 1, "alpha": [1.5]}),
+                    None,
+                    None
+                )
+                .await?
+        );
+        assert!(
+            !store
+                .put_if(&name, key(), serde_json::Value::Null, json!(2), None, None)
+                .await?
+        );
+        // jsonb hands the object back with its keys in its own order.
+        let stored = store.get(&name, &key()).await?.ok_or("missing")?.value;
+        assert!(
+            store
+                .put_if(&name, key(), stored.clone(), json!("next"), None, None)
+                .await?
+        );
+        assert!(
+            !store
+                .put_if(&name, key(), stored, json!(3), None, None)
+                .await?
+        );
+        assert_eq!(
+            store.get(&name, &key()).await?.ok_or("missing")?.value,
+            json!("next")
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn postgres_concurrent_put_if_keeps_every_entry() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("put-if-race-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        crate::store::contention::put_if_keeps_every_entry(Arc::new(store), &name).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn postgres_concurrent_increments_count_exactly() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("increment-race-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        let store = Arc::new(store);
+        crate::store::contention::increments_count_exactly(store.clone(), &name).await?;
+        store
+            .put(&name, json!("text"), json!("x"), None, None)
+            .await?;
+        assert!(store.increment(&name, json!("text"), 1).await.is_err());
+        assert_eq!(
+            store
+                .get(&name, &json!("text"))
+                .await?
+                .ok_or("missing")?
+                .value,
+            json!("x")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_prefix_listing_reads_the_key_prefix_index() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("prefix-test-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        let mut writes: Vec<super::super::StoreWrite> = (0..2000)
+            .map(|i| (json!(format!("other:{i:04}")), json!(i), None, None))
+            .collect();
+        for key in [
+            json!("case:1:b"),
+            json!("case:10"),
+            json!("case:1:a"),
+            json!("case;"),
+            json!(17),
+            json!("say \"case:1:\""),
+            json!("Case:1:z"),
+        ] {
+            writes.push((key, json!(1), None, None));
+        }
+        store.put_many(&name, writes).await?;
+        let keys = |prefix: &str, limit, offset| {
+            let options = ListOptions {
+                limit,
+                offset,
+                prefix: Some(prefix.to_string()),
+            };
+            let (store, name) = (&store, &name);
+            async move {
+                let entries = store.list(name, options.clone()).await?;
+                let infos = store.list_info(name, options).await?;
+                let keys: Vec<_> = entries.into_iter().map(|e| e.key).collect();
+                assert_eq!(keys, infos.into_iter().map(|i| i.key).collect::<Vec<_>>());
+                Ok::<_, String>(keys)
+            }
+        };
+        assert_eq!(
+            keys("case:1:", None, None).await?,
+            [json!("case:1:b"), json!("case:1:a")]
+        );
+        assert_eq!(keys("case:1", Some(1), Some(1)).await?, [json!("case:10")]);
+        assert_eq!(
+            keys("say \"", None, None).await?,
+            [json!("say \"case:1:\"")]
+        );
+        assert_eq!(keys("", Some(3000), None).await?.len(), 2006);
+
+        let range = PgStore::prefix_range(Some("case:1:"));
+        let (low, high) = range.clone().ok_or("no range")?;
+        let sql = format!("EXPLAIN {}", PgStore::listing_sql("key", &range));
+        let mut tx = store.pg_pool()?.begin().await.map_err(|e| e.to_string())?;
+        sqlx::query("ANALYZE store_map_entry")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        let plan: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .bind(store.org_id)
+            .bind(store.env_id)
+            .bind(&name)
+            .bind(10i64)
+            .bind(0i64)
+            .bind(low)
+            .bind(high)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("idx_store_map_entry_key_prefix")),
+            "the prefix read should use the key prefix index: {plan:?}"
         );
         Ok(())
     }

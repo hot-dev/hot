@@ -247,6 +247,29 @@ impl CompilerSeed {
     }
 }
 
+/// The registers a match tests its arms against.
+#[derive(Clone, Copy)]
+struct MatchSubject {
+    /// The subject: a Result when the arms name `Result`.
+    value: RegisterId,
+    /// The type path of `value`.
+    type_path: RegisterId,
+    /// When the arms name `Result`, what the subject holds, which the arms
+    /// that don't test the Result itself test instead.
+    ok: Option<MatchOkPayload>,
+}
+
+/// What a match subject holds, when the arms name `Result`.
+#[derive(Clone, Copy)]
+struct MatchOkPayload {
+    /// True when the subject is an `Ok`.
+    is_ok: RegisterId,
+    /// The value it holds.
+    value: RegisterId,
+    /// The type path of `value`.
+    type_path: RegisterId,
+}
+
 impl Compiler {
     /// Normalize type annotation strings to match VM's get_val_type_name format
     /// Converts "Builtin(Str)" -> "Str", "Named("PlainDateTime")" -> "PlainDateTime", etc.
@@ -819,9 +842,8 @@ impl Compiler {
     /// - Enum variant constructors like `::hot::type/Result.Ok`
     fn extract_known_functions(&mut self, program: &Program) {
         // First, add all built-in (hotlib) functions
-        let hotlib_map = crate::lang::hot::get_hotlib_map();
-        for func_name in hotlib_map.keys() {
-            self.known_functions.insert(func_name.clone());
+        for func_name in crate::lang::natives::NATIVE_FUNCTIONS {
+            self.known_functions.insert(func_name.to_string());
         }
 
         let mut user_fn_count = 0;
@@ -906,7 +928,7 @@ impl Compiler {
         tracing::debug!(
             "Compiler: Extracted {} known function names ({} built-ins, {} user fns, {} type constructors, {} enum variants)",
             self.known_functions.len(),
-            hotlib_map.len(),
+            crate::lang::natives::NATIVE_FUNCTIONS.len(),
             user_fn_count,
             type_constructor_count,
             variant_count
@@ -1030,10 +1052,7 @@ impl Compiler {
         // must expose only the newest ordinary binding. Normalize before any
         // lowering, resolution, or type checking can interpret old and new
         // signatures as overloads.
-        crate::lang::engine::discover::normalize_shadow_bindings(
-            validation_program,
-            extension_program,
-        );
+        crate::lang::merge::normalize_shadow_bindings(validation_program, extension_program);
 
         // Keep the seeded core registry, adding any new core declarations from
         // the merged AST before resolution.
@@ -3198,10 +3217,8 @@ impl Compiler {
         };
 
         // Check if this function exists in the Hot library map.
-        let hotlib_map = crate::lang::hot::get_hotlib_map();
-
         // Try exact match first
-        if hotlib_map.contains_key(&function_name) {
+        if crate::lang::natives::is_native(&function_name) {
             tracing::trace!(
                 "Compiler: call-lib function '{}' found in Hot library map",
                 function_name
@@ -3220,7 +3237,7 @@ impl Compiler {
             function_name.clone()
         };
 
-        if hotlib_map.contains_key(&namespaced_name) {
+        if crate::lang::natives::is_native(&namespaced_name) {
             tracing::trace!(
                 "Compiler: call-lib function '{}' found as '{}' in Hot library map",
                 function_name,
@@ -5598,16 +5615,38 @@ impl Compiler {
             // First validates data through the associated type's constructor using ConstructTyped,
             // then wraps with {$type: "::namespace/Type.Variant", $val: typed_data}
 
-            // Resolve the associated type reference to fully qualified name
-            let (resolved_type_ref, _) = self.resolve_type_path(type_ref);
+            // A payload written as a type expression (`Vec<Ask>`, `Ask?`,
+            // `Ask | Bid`) checks its data as a record field of that type
+            // would, and takes the data as given, tags included.
+            let payload_expr =
+                crate::lang::parser::parse_type_annotation(type_ref).filter(|expr| {
+                    !matches!(
+                        expr,
+                        TypeExpr::Named(_)
+                            | TypeExpr::Simple(_)
+                            | TypeExpr::Builtin(_)
+                            | TypeExpr::Any
+                    )
+                });
+            let data_reg = if payload_expr.is_some() { 1 } else { 6 };
 
-            // Build type_info for the associated type (for ConstructTyped instruction)
-            let mut associated_type_info = indexmap::IndexMap::new();
-            associated_type_info.insert(Val::from("$type"), Val::from(resolved_type_ref.clone()));
-            // Mark this as a nested type reference (no $all_fields means VM will call the constructor)
+            let associated_type_info = match &payload_expr {
+                Some(expr) => self.build_field_type_info_from_expr(expr, true),
+                None => {
+                    // Resolve the associated type reference to fully qualified name
+                    let (resolved_type_ref, _) = self.resolve_type_path(type_ref);
+
+                    // Build type_info for the associated type (for ConstructTyped instruction)
+                    let mut associated_type_info = indexmap::IndexMap::new();
+                    associated_type_info
+                        .insert(Val::from("$type"), Val::from(resolved_type_ref.clone()));
+                    // Mark this as a nested type reference (no $all_fields means VM will call the constructor)
+                    Val::Map(Box::new(associated_type_info))
+                }
+            };
             let associated_type_info_constant = self
                 .program
-                .add_constant(Constant::Val(Val::Map(Box::new(associated_type_info))));
+                .add_constant(Constant::Val(associated_type_info));
 
             let empty_map_constant = self.program.add_constant(Constant::Val(Val::map_empty()));
             let data_var_constant = self.program.add_constant(Constant::Val(Val::from("data")));
@@ -5636,7 +5675,7 @@ impl Compiler {
                     // Returns {$type: "Circle", $val: {radius: 5.0}} on success, or error on failure
                     Instruction::ConstructTyped {
                         dest: 7,
-                        src: 6,
+                        src: data_reg,
                         type_info: associated_type_info_constant,
                     },
                     // If validation failed (error), return the error immediately
@@ -8723,6 +8762,27 @@ impl Compiler {
         })
     }
 
+    /// In a match whose arms name `Result`, whether the pattern atom tests the
+    /// Result itself: a `Result` pattern, `Any`, or the default. Any other atom
+    /// tests the value an `Ok` holds.
+    fn atom_tests_result(
+        &self,
+        type_name: &Option<String>,
+        variant: &Option<String>,
+        value_literal: &Option<Box<Value>>,
+    ) -> bool {
+        if value_literal.is_some() {
+            return false;
+        }
+        match type_name {
+            Some(type_name) => {
+                let (resolved, _) = self.resolve_type_path(type_name);
+                resolved == "::hot::type/Result" || resolved == "::hot::type/Any"
+            }
+            None => variant.is_none(),
+        }
+    }
+
     /// Whether `arm` is a single `Enum.Variant` atom whose variant carries a
     /// payload other than a record.
     fn arm_binds_plain_payload(&self, arm: &crate::lang::ast::MatchArm) -> bool {
@@ -8763,6 +8823,69 @@ impl Compiler {
                 (None, None) => "_".to_string(),
             }
         }
+    }
+
+    /// Emit the test for one match-arm pattern atom into `dest`. When the arms
+    /// name `Result`, an atom that doesn't test the Result itself tests the
+    /// value an `Ok` holds, and never matches an `Err`.
+    fn emit_match_atom_test(
+        &mut self,
+        dest: RegisterId,
+        subject: MatchSubject,
+        type_name: &Option<String>,
+        variant: &Option<String>,
+        value_literal: &Option<Box<Value>>,
+    ) -> Result<(), String> {
+        let Some(ok) = subject
+            .ok
+            .filter(|_| !self.atom_tests_result(type_name, variant, value_literal))
+        else {
+            return self.emit_match_atom_comparison(
+                dest,
+                subject.value,
+                subject.type_path,
+                type_name,
+                variant,
+                value_literal,
+            );
+        };
+
+        // `and(is-ok, test)` through CallLibBuiltin, as union arms fold with
+        // `or`. MakeVec reads consecutive registers.
+        let args_start_reg = self.allocate_register();
+        let held_test_reg = self.allocate_register();
+        self.emit_instruction(Instruction::Move {
+            dest: args_start_reg,
+            src: ok.is_ok,
+        });
+        self.emit_match_atom_comparison(
+            held_test_reg,
+            ok.value,
+            ok.type_path,
+            type_name,
+            variant,
+            value_literal,
+        )?;
+        let args_reg = self.allocate_register();
+        self.emit_instruction(Instruction::MakeVec {
+            dest: args_reg,
+            elements_start: args_start_reg,
+            count: 2,
+        });
+        let and_fn_reg = self.allocate_register();
+        let and_fn_constant = self
+            .program
+            .add_constant(Constant::Val(Val::from("::hot::bool/and")));
+        self.emit_instruction(Instruction::LoadConst {
+            dest: and_fn_reg,
+            constant: and_fn_constant,
+        });
+        self.emit_instruction(Instruction::CallLibBuiltin {
+            dest,
+            function: and_fn_reg,
+            args: args_reg,
+        });
+        Ok(())
     }
 
     /// Emit the comparison for one match-arm pattern atom into `dest`.
@@ -8950,7 +9073,8 @@ impl Compiler {
         // ensure the subject is wrapped in a Result type. This makes
         // `match fn_call_result { Result.Ok => ... }` work even when the
         // function return value is not explicitly wrapped in Result.Ok.
-        let value_reg = if self.match_has_result_patterns(&match_expr.arms) {
+        let has_result_arms = self.match_has_result_patterns(&match_expr.arms);
+        let value_reg = if has_result_arms {
             let wrapped_reg = self.allocate_register();
             self.emit_instruction(Instruction::EnsureResult {
                 dest: wrapped_reg,
@@ -9009,6 +9133,47 @@ impl Compiler {
             value: value_reg,
         });
 
+        // With arms naming `Result`, the other arms test what the subject
+        // holds: `"a" =>` matches `Ok("a")`, and none of them matches an Err.
+        let ok = if has_result_arms {
+            let ok_type_reg = self.allocate_register();
+            let ok_type_constant = self
+                .program
+                .add_constant(Constant::Val(Val::from("::hot::type/Result.Ok")));
+            self.emit_instruction(Instruction::LoadConst {
+                dest: ok_type_reg,
+                constant: ok_type_constant,
+            });
+            let is_ok_reg = self.allocate_register();
+            self.emit_instruction(Instruction::Eq {
+                dest: is_ok_reg,
+                left: type_field_reg,
+                right: ok_type_reg,
+            });
+            let held_reg = self.allocate_register();
+            self.emit_instruction(Instruction::ExtractInnerVal {
+                dest: held_reg,
+                src: value_reg,
+            });
+            let held_type_reg = self.allocate_register();
+            self.emit_instruction(Instruction::GetTypePath {
+                dest: held_type_reg,
+                value: held_reg,
+            });
+            Some(MatchOkPayload {
+                is_ok: is_ok_reg,
+                value: held_reg,
+                type_path: held_type_reg,
+            })
+        } else {
+            None
+        };
+        let subject = MatchSubject {
+            value: value_reg,
+            type_path: type_field_reg,
+            ok,
+        };
+
         // For each arm, emit comparison and body using CondBranchStart/CondBranchEnd
         for arm in &match_expr.arms {
             let cmp_result_reg = self.allocate_register();
@@ -9030,10 +9195,9 @@ impl Compiler {
 
             // Emit comparison instruction(s)
             if arm.alternatives.is_empty() {
-                self.emit_match_atom_comparison(
+                self.emit_match_atom_test(
                     cmp_result_reg,
-                    value_reg,
-                    type_field_reg,
+                    subject,
                     &arm.type_name,
                     &arm.variant,
                     &arm.value_literal,
@@ -9055,19 +9219,17 @@ impl Compiler {
                     self.allocate_register();
                 }
 
-                self.emit_match_atom_comparison(
+                self.emit_match_atom_test(
                     atoms_start_reg,
-                    value_reg,
-                    type_field_reg,
+                    subject,
                     &arm.type_name,
                     &arm.variant,
                     &arm.value_literal,
                 )?;
                 for (i, alt) in arm.alternatives.iter().enumerate() {
-                    self.emit_match_atom_comparison(
+                    self.emit_match_atom_test(
                         atoms_start_reg + 1 + i as RegisterId,
-                        value_reg,
-                        type_field_reg,
+                        subject,
                         &alt.type_name,
                         &alt.variant,
                         &alt.value_literal,
@@ -9121,6 +9283,24 @@ impl Compiler {
                     .iter()
                     .all(|alt| self.is_result_ok_err_atom(&alt.type_name, &alt.variant));
 
+            // An arm whose atoms all test what a Result subject holds binds
+            // that value, and sees it through the subject as a `Result.Ok`
+            // arm does.
+            let held_reg = subject
+                .ok
+                .filter(|_| {
+                    !self.atom_tests_result(&arm.type_name, &arm.variant, &arm.value_literal)
+                        && arm.alternatives.iter().all(|alt| {
+                            !self.atom_tests_result(
+                                &alt.type_name,
+                                &alt.variant,
+                                &alt.value_literal,
+                            )
+                        })
+                })
+                .map(|ok| ok.value);
+            let arm_value_reg = held_reg.unwrap_or(value_reg);
+
             if is_result_variant {
                 let unwrapped_reg = self.allocate_register();
                 self.emit_instruction(Instruction::ExtractInnerVal {
@@ -9149,7 +9329,7 @@ impl Compiler {
                 let payload_reg = self.allocate_register();
                 self.emit_instruction(Instruction::ExtractInnerVal {
                     dest: payload_reg,
-                    src: value_reg,
+                    src: arm_value_reg,
                 });
                 if let Some(binding) = &arm.binding {
                     self.store_variable(binding, payload_reg);
@@ -9162,7 +9342,13 @@ impl Compiler {
             } else {
                 // Other arms: use the full value for bindings
                 if let Some(binding) = &arm.binding {
-                    self.store_variable(binding, value_reg);
+                    self.store_variable(binding, arm_value_reg);
+                }
+                if let Some(held_reg) = held_reg
+                    && let Some(ref var_name) = match_subject_var_name
+                    && arm.binding.as_deref() != Some(var_name)
+                {
+                    self.store_variable(var_name, held_reg);
                 }
             }
 

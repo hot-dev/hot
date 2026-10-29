@@ -905,6 +905,56 @@ probe()"#;
         );
     }
 
+    /// A variant's payload can be any type expression. Its data is checked as
+    /// a record field of that type would be: `Vec<Ask>` builds each item as
+    /// an `Ask` and fails on an item that isn't one.
+    #[test]
+    fn enum_variants_carry_type_expression_payloads() {
+        let src = r#"::t ns
+Ask type { key: Str }
+Status enum { One(Ask), Many(Vec<Ask>), Counts(Map<Str, Int>), Maybe(Ask?), Either(Ask | Str), Done }
+Steps type
+  | Each(Vec<Ask>)
+  | Stop
+
+describe fn match (s: Status): Str {
+    Status.One => { "one" }
+    Status.Many => { "many" }
+    Status.Counts => { "counts" }
+    Status.Maybe => { "maybe" }
+    Status.Either => { "either" }
+    Status.Done => { "done" }
+}
+
+probe fn (): Vec {
+    many Status.Many([Ask(key: "a"), {key: "b"}])
+    [is-type(many, Status), describe(many), map(untype(many), %.key),
+     is-err(Status.Many([{nope: 1}])),
+     get(untype(Status.Counts({a: 1})), "a"), describe(Status.Counts({a: 1})),
+     is-type(Status.Maybe(null), Status), Status.Maybe({key: "c"}).key,
+     untype(Status.Either("s")), Status.Either(Ask(key: "d")).key,
+     map(untype(Steps.Each([{key: "e"}])), %.key)]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([
+                true,
+                "many",
+                ["a", "b"],
+                true,
+                1,
+                "counts",
+                true,
+                "c",
+                "s",
+                "d",
+                ["e"]
+            ]),
+        );
+    }
+
     /// An arrow may name its enum by a namespace alias or in full. The
     /// checker used to read `::k/Kind.Extra` as a type of its own, so the
     /// arrow failed with "Implementation body returns ::geo/Kind, but should
@@ -1053,6 +1103,34 @@ concat([::rl::p/why(::rl::core/q3), ::rl::p/why(top)], in-body(), [::rl::p/why(H
                 .unwrap_or_else(|e| panic!("run failed: {e}"));
             assert_eq!(out, expected);
         }
+    }
+
+    /// In a match whose arms name `Result`, the other arms test the value an
+    /// `Ok` holds and never match an `Err`; `Any` and `_` see the Result.
+    /// Those arms used to test the Result itself, so `"a" =>` never matched
+    /// `Ok("a")`.
+    #[test]
+    fn match_arms_beside_result_arms_test_the_ok_value() {
+        let src = r#"::t ns
+S type "a" | "b" | "c"
+get-s fn (x: Str): S { if(eq(x, "bad"), err("a"), x) }
+pick fn (x: Str): Str {
+    match get-s(x) {
+        Result.Err => { "err" }
+        "a" => { "A" }
+        S (s) => { `S ${s}` }
+        _ => { "default" }
+    }
+}
+held fn (): Str {
+    match get-s("bad") {
+        "a" => { "held a" }
+        Result.Ok => { "ok" }
+        Any => { "any" }
+    }
+}
+[pick("a"), pick("b"), pick("bad"), held()]"#;
+        assert_same_with_and_without_jit(src, &strs(&["A", "S b", "err", "any"]));
     }
 
     /// A runtime error that a native meets while running Hot code reaches a

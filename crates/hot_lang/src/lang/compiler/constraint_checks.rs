@@ -12,6 +12,9 @@
 //! - `where-changes-representation` (warning): a refined primitive type used
 //!   with `is-type` or as a `match` arm. Its values are untagged, so those
 //!   checks run the predicate instead of comparing a tag.
+//! - `invalid-registry-auth`: a literal `registry-auth` of a box
+//!   configuration that is anything but `{secret: Str}`, so a registry token
+//!   is never written into source.
 
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
@@ -24,7 +27,7 @@ use crate::lang::ast::{
     is_where_predicate,
 };
 use crate::lang::errors::{CompilerError, ErrorLocation};
-use crate::lang::hot::libmap::is_pure_native;
+use crate::lang::natives::is_pure_native;
 use crate::lang::parser::parse_type_annotation;
 use crate::val::Val;
 
@@ -189,6 +192,79 @@ fn map_literal(val: &Val) -> Option<&IndexMap<Val, Val>> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// The `registry-auth` value a literal argument gives `::hot::box/start`,
+/// `BoxConf` or `BoxRegistryAuth`.
+fn registry_auth_arg<'v>(callee_ns: &str, callee: &str, arg: &'v Value) -> Option<&'v Val> {
+    if callee_ns != "::hot::box" {
+        return None;
+    }
+    let Value::Val(val, _) = arg else {
+        return None;
+    };
+    match callee {
+        "BoxRegistryAuth" => Some(val),
+        "BoxConf" | "start" => map_literal(val)?.get(&Val::from("registry-auth")),
+        _ => None,
+    }
+}
+
+/// `registry-auth` names a context secret and holds nothing else, so a
+/// registry token can't be written into source. Messages never repeat the
+/// literal: it may be the token.
+fn check_registry_auth(
+    value: &Val,
+    location: Option<ErrorLocation>,
+    out: &mut ConstraintDiagnostics,
+) {
+    const HELP: &str = "keep the registry, username and token in a context secret \
+         (::hot::ctx/set-secret, or the environment's context variables) and write \
+         `registry-auth: {secret: \"<its name>\"}`";
+    let problem = if let Some(entries) = map_literal(value) {
+        // A spread or computed key makes the map's shape a run-time matter.
+        if entries.keys().any(|key| !matches!(key, Val::Str(_))) {
+            return;
+        }
+        let extra = entries.keys().find_map(|key| match key {
+            Val::Str(key) if &**key != "secret" => Some(key.to_string()),
+            _ => None,
+        });
+        match (extra, entries.get(&Val::from("secret"))) {
+            (Some(key), _) => Some(format!(
+                "`registry-auth` takes only `secret`, the name of a context secret, not `{key}`"
+            )),
+            (None, None) => {
+                Some("`registry-auth` needs `secret`, the name of a context secret".to_string())
+            }
+            (None, Some(secret)) => match scalar_literal(secret) {
+                Some(Val::Str(name)) if name.trim().is_empty() => {
+                    Some("`registry-auth.secret` must name a context secret".to_string())
+                }
+                Some(Val::Str(_)) | None => None,
+                Some(_) => {
+                    Some("`registry-auth.secret` must be a Str naming a context secret".to_string())
+                }
+            },
+        }
+    } else {
+        match scalar_literal(value) {
+            None | Some(Val::Null) => None,
+            Some(_) => Some(
+                "`registry-auth` must be a map like {secret: \"ghcr-pull\"} naming a context secret"
+                    .to_string(),
+            ),
+        }
+    };
+    if let Some(message) = problem {
+        out.errors.push(diagnostic(
+            "invalid-registry-auth",
+            message,
+            Some(HELP),
+            false,
+            location,
+        ));
     }
 }
 
@@ -805,6 +881,12 @@ impl<'a> Index<'a> {
             return;
         };
         let location = call.src.as_ref().map(error_location);
+        if let [arg] = call.args.as_slice()
+            && let Some(registry_auth) = registry_auth_arg(&callee_ns, &callee, &arg.value)
+        {
+            let location = arg.src.as_ref().map(error_location).or(location.clone());
+            check_registry_auth(registry_auth, location, out);
+        }
         match self.vars.get(&(callee_ns.clone(), callee.clone())) {
             Some((_, Value::TypeDef(type_def))) => {
                 let [arg] = call.args.as_slice() else {

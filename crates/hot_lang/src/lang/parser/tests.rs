@@ -2608,6 +2608,50 @@ Path type
     );
 }
 
+/// A variant's payload type can be any type expression, in both enum forms.
+#[test]
+fn enum_variant_payload_types_can_be_type_expressions() {
+    let source = r#"::forms ns
+Status enum { Many(Vec<Ask>), Counts(Map<Str, Int>), Maybe(Ask?), Either(Ask | ::geo/Round), One(Ask), Done }
+Steps type
+  | Each(Vec<::geo/Round>)
+  | Stop
+"#;
+    let program = parse_hot(source).unwrap_or_else(|e| panic!("{e}"));
+    let payloads = |name: &str| -> Vec<Option<String>> {
+        find_type_def(&program, name)
+            .and_then(|def| def.variants.as_ref())
+            .unwrap_or_else(|| panic!("{name} has no variants"))
+            .iter()
+            .map(|variant| variant.type_ref.clone())
+            .collect()
+    };
+    assert_eq!(
+        payloads("Status"),
+        vec![
+            Some("Vec<Ask>".to_string()),
+            Some("Map<Str, Int>".to_string()),
+            Some("Ask?".to_string()),
+            Some("Ask | ::geo/Round".to_string()),
+            Some("Ask".to_string()),
+            None,
+        ]
+    );
+    assert_eq!(
+        payloads("Steps"),
+        vec![Some("Vec<::geo/Round>".to_string()), None]
+    );
+
+    let err = format!(
+        "{:?}",
+        parse_hot("::forms ns\nStatus enum { Many(Vec<Ask> Extra) }\n").expect_err("unclosed")
+    );
+    assert!(
+        err.contains("Expected ')' after variant type reference"),
+        "{err}"
+    );
+}
+
 #[test]
 fn named_arguments_come_last_and_once() {
     for (source, message) in [
