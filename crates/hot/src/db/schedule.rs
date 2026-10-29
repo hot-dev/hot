@@ -10,7 +10,6 @@ use uuid::Uuid;
 
 /// The prefix used for one-time "at" schedules stored in the cron field
 pub const AT_SCHEDULE_PREFIX: &str = "@at:";
-pub const TECHNICAL_MIN_RECURRING_INTERVAL_SECS: i64 = 1;
 pub const DEFAULT_MIN_DELAY_SECS: i64 = 0;
 pub const SELF_HOSTED_MAX_ACTIVE_SCHEDULES_PER_ORG: i64 = -1;
 pub const HOSTED_DEFAULT_MAX_ACTIVE_SCHEDULES_PER_ORG: i64 = 50;
@@ -43,12 +42,7 @@ impl SchedulePolicy {
         };
 
         Self {
-            min_interval_secs: conf
-                .get_int_or_default(
-                    "schedule.min-interval-seconds",
-                    TECHNICAL_MIN_RECURRING_INTERVAL_SECS,
-                )
-                .max(TECHNICAL_MIN_RECURRING_INTERVAL_SECS),
+            min_interval_secs: min_recurring_interval_secs(conf),
             min_delay_secs: conf
                 .get_int_or_default("schedule.min-delay-seconds", DEFAULT_MIN_DELAY_SECS)
                 .max(0),
@@ -78,53 +72,10 @@ fn stricter_limit(a: i64, b: i64) -> i64 {
 }
 
 pub use hot_lang::lang::schedule::{
-    RECURRING_SCHEDULE_FORMS, normalize_recurring_schedule_expression, parse_cron,
+    RECURRING_SCHEDULE_FORMS, ScheduleIntervalValidation, TECHNICAL_MIN_RECURRING_INTERVAL_SECS,
+    min_recurring_interval_secs, normalize_recurring_schedule_expression, parse_cron,
+    validate_recurring_schedule_interval,
 };
-
-#[derive(Debug, Clone)]
-pub enum ScheduleIntervalValidation {
-    /// The schedule is not a cron expression or a supported English schedule.
-    Unparseable { original: String, reason: String },
-    /// The schedule parses but has no upcoming run to measure.
-    NoOccurrence {
-        original: String,
-        normalized_cron: String,
-        reason: String,
-    },
-    TooFrequent {
-        original: String,
-        normalized_cron: String,
-        observed_interval_secs: i64,
-        required_interval_secs: i64,
-    },
-}
-
-impl ScheduleIntervalValidation {
-    pub fn message(&self) -> String {
-        match self {
-            Self::Unparseable { reason, .. } => {
-                format!("{}. {}", reason, RECURRING_SCHEDULE_FORMS)
-            }
-            Self::NoOccurrence {
-                original,
-                normalized_cron,
-                reason,
-            } => format!(
-                "Schedule '{}' has no upcoming run (normalized cron: '{}'): {}",
-                original, normalized_cron, reason
-            ),
-            Self::TooFrequent {
-                original,
-                normalized_cron,
-                observed_interval_secs,
-                required_interval_secs,
-            } => format!(
-                "Schedule '{}' runs every {} second(s), below the minimum of {} second(s) (normalized cron: '{}')",
-                original, observed_interval_secs, required_interval_secs, normalized_cron
-            ),
-        }
-    }
-}
 
 /// Represents the type of schedule - either a cron expression or a one-time "at" datetime
 #[derive(Debug, Clone, PartialEq)]
@@ -222,56 +173,6 @@ pub fn parse_schedule_expression_at(
         • English: \"every day at 9am\", \"every Monday at 2 PM\"",
         expr
     ))
-}
-
-pub fn validate_recurring_schedule_interval(
-    expr: &str,
-    min_interval_secs: i64,
-) -> Result<(), ScheduleIntervalValidation> {
-    let required = min_interval_secs.max(TECHNICAL_MIN_RECURRING_INTERVAL_SECS);
-    let normalized = normalize_recurring_schedule_expression(expr).map_err(|reason| {
-        ScheduleIntervalValidation::Unparseable {
-            original: expr.to_string(),
-            reason,
-        }
-    })?;
-
-    let cron = parse_cron(&normalized).map_err(|e| ScheduleIntervalValidation::Unparseable {
-        original: expr.to_string(),
-        reason: format!("Could not parse '{}' as cron: {}", normalized, e),
-    })?;
-
-    let no_occurrence = |e: croner::errors::CronError| ScheduleIntervalValidation::NoOccurrence {
-        original: expr.to_string(),
-        normalized_cron: normalized.clone(),
-        reason: e.to_string(),
-    };
-    let mut prev = cron
-        .find_next_occurrence(&Utc::now(), false)
-        .map_err(no_occurrence)?;
-
-    let mut min_gap = i64::MAX;
-    for _ in 0..64 {
-        let next = cron
-            .find_next_occurrence(&prev, false)
-            .map_err(no_occurrence)?;
-        let gap = (next - prev).num_seconds();
-        if gap > 0 {
-            min_gap = min_gap.min(gap);
-        }
-        prev = next;
-    }
-
-    if min_gap < required {
-        Err(ScheduleIntervalValidation::TooFrequent {
-            original: expr.to_string(),
-            normalized_cron: normalized,
-            observed_interval_secs: min_gap,
-            required_interval_secs: required,
-        })
-    } else {
-        Ok(())
-    }
 }
 
 pub fn validate_one_time_schedule_delay(

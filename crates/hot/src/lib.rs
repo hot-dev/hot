@@ -9,7 +9,7 @@ pub mod context_encryption;
 pub mod data;
 pub mod db;
 pub mod deploy;
-pub mod discovery;
+pub use hot_lang::discovery;
 pub mod domain;
 pub mod domain_provider;
 pub mod email;
