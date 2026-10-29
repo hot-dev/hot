@@ -207,6 +207,11 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
                 );
                 Some(Arc::new(pubsub))
             }
+            // A Redis queue means services may span processes or hosts.
+            // Refuse to start rather than lose cross-instance updates.
+            Err(e) if matches!(pubsub_type, StreamPubSubType::Redis) => {
+                panic!("Failed to create Redis stream pub/sub: {}", e);
+            }
             Err(e) => {
                 warn!(
                     "hot.dev: APP failed to create stream pub/sub: {}. Real-time updates will be unavailable.",

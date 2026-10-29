@@ -390,8 +390,18 @@ async fn sub_org_lifecycle_and_browser_scope_use_a_restricted_runtime_login()
         .next()
         .unwrap()
         .to_string();
+    let handoff_token = pending
+        .body
+        .split("name=\"handoff_token\" value=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .to_owned();
     let key_form = [
         ("api_key_id", key_id.as_str()),
+        ("handoff_token", handoff_token.as_str()),
         ("description", "lifecycle-ui-key"),
         ("access_level", "full"),
     ];

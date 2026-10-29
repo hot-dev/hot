@@ -4,6 +4,11 @@
 //! shared by sibling organizations and API replicas. Immutable env ownership
 //! and root entitlement caches avoid repeated feature reads. In-flight and SSE
 //! connection counters are additionally enforced per process and credential.
+//! Those limits protect each replica's own sockets and memory, so they stay
+//! process-local: with N API replicas behind a load balancer, an account can
+//! hold up to N times the per-org and per-credential limits. Size them per
+//! replica. A shared counter would need leases to recover from crashed
+//! replicas and would add a Valkey round trip to every admission.
 //! In enforce mode, accounting lookup failures deny admission rather than
 //! bypassing the quota. Observe mode (public ingress default) only estimates
 //! per process: it never consumes the shared counter and never rejects.

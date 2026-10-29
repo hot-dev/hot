@@ -6240,6 +6240,13 @@ pub async fn run_with_components_shared_context_and_db(
                 );
                 Some(Arc::new(pubsub))
             }
+            // A Redis queue means API and app replicas subscribe through
+            // Redis. Publishing nowhere would silently stall their streams.
+            Err(e) if matches!(pubsub_type, StreamPubSubType::Redis) => {
+                return Err(worker_error(format!(
+                    "Failed to create Redis stream publisher: {e}"
+                )));
+            }
             Err(e) => {
                 tracing::warn!(
                     "hot.dev: WORKER failed to create stream publisher: {}. SSE will fall back to polling.",
