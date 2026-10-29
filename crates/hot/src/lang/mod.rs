@@ -10,28 +10,26 @@
 // 5. Native function integration with zero-copy semantics
 // 6. Advanced optimization passes for performance-critical code
 
-pub use hot_lang::lang::ast;
-pub use hot_lang::lang::bytecode;
+pub mod ast;
+pub mod bytecode;
 pub mod cache;
-pub use hot_lang::lang::compiler;
-pub use hot_lang::lang::display;
+pub mod compiler;
+pub mod data;
+pub mod display;
 pub mod emitter;
 pub mod engine;
-pub use hot_lang::lang::errors;
+pub mod errors;
 pub mod event;
-pub use hot_lang::lang::fmt;
+pub mod fmt;
 pub mod hot;
-pub use hot_lang::lang::json_schema;
-pub use hot_lang::lang::lexer;
-pub use hot_lang::lang::parser;
-pub use hot_lang::lang::project;
-pub use hot_lang::lang::refs;
+pub mod json_schema;
+pub mod lexer;
+pub mod parser;
+pub mod project;
+pub mod refs;
 pub mod repl;
 pub mod runtime;
 pub mod user_code;
-
-#[cfg(test)]
-mod compiler_vm_tests;
 
 // Re-export key components
 pub use bytecode::{BytecodeProgram, Constant, Instruction};

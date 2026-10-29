@@ -53,10 +53,10 @@ static GLOBAL_ALLOC: hot::lang::runtime::oom_logger::LoggingAllocator =
 use clap::{CommandFactory, Parser as ClapParser};
 use clap_complete::{generate, generate_to};
 
+use hot::lang::cache::paths as cache_paths;
 use hot::lang::emitter::EngineEventEmitter;
 use hot::queue::QueueType;
 use hot::val::Val;
-use hot_lang::lang::cache::paths as cache_paths;
 
 use std::fs;
 use std::fs::{File, OpenOptions};
