@@ -379,6 +379,98 @@ and dependency signals. Schedules that came due while Hot was down run when
 the scheduler next evaluates them. Work queued in a local Valkey is restored
 with the data disk; work queued after the snapshot is lost.
 
+## State, drift, and teardown
+
+**State.** Each installation's state is in the bucket named in its
+`backend_override.tf`. That bucket is versioned and kept outside the
+installation's stack, and the state is encrypted with the state passphrase.
+GitHub's concurrency group and OpenTofu's lock serialize applies.
+
+- **Stale lock.** If a run died holding the lock, the next plan reports the
+  lock's ID, holder, and time. Confirm in the Actions tab that the run has
+  ended, then run `tofu force-unlock ID`. Never unlock while an apply may
+  still be running.
+- **Lost or damaged state.** Restore an earlier version of the state object
+  from the bucket's version history (`aws s3api list-object-versions`, or
+  `gcloud storage ls --all-versions`). Never plan from empty state: it would
+  try to create resources that already exist. If no version survives, adopt
+  the resources with `import` blocks in `installation/imports.tf`, which the
+  workflow copies into the stack. Start with the durable resources below,
+  and repeat until the plan creates none of them.
+- **Interrupted apply.** State keeps whatever finished; run the plan again
+  and review it.
+
+**Drift.** The example operator repository plans every morning with
+`drift_check`, and any change fails the run with the changes in its summary.
+A change can be:
+- a console edit;
+- a resource changed by AWS or Google;
+- a merge that was never applied.
+
+Apply the configuration, or change the configuration to keep what you want.
+Nothing in the single-machine stacks is changed by a controller, such as an
+autoscaler, that OpenTofu would fight.
+
+**Durable resources.** Deleting these loses data, or the keys to read it:
+
+| | AWS | GCP |
+| --- | --- | --- |
+| Data disk | `aws_ebs_volume.data` | `google_compute_disk.data` |
+| Generated secrets (encryption key, passwords) | `aws_secretsmanager_secret.generated` | `google_secret_manager_secret.generated` |
+| Operator secrets | `aws_secretsmanager_secret.operator` | `google_secret_manager_secret.operator` |
+| Managed PostgreSQL | `aws_db_instance.postgres[0]` | `google_sql_database_instance.postgres[0]` |
+| Managed Valkey | `aws_elasticache_replication_group.valkey[0]` | |
+| Container logs | `aws_cloudwatch_log_group.host` | |
+
+They are protected in several ways:
+- The data disk and generated secret have `prevent_destroy`, so no plan that
+  destroys them can be made.
+- Managed databases have deletion protection (`data.postgres.deletion_protection`,
+  on by default), and RDS keeps a final snapshot.
+- Secrets Manager waits 30 days before it deletes a secret.
+- Snapshots outlive their disk.
+- The plan workflow fails any plan that deletes or replaces a durable
+  resource, unless the caller sets `allow_data_deletion: true` for a
+  reviewed purge.
+- Existing databases, caches, and buckets are never managed by the stacks.
+
+**Hand off a managed database.** To stop managing a database the stack
+created without deleting it, for example to keep it as `existing`, remove it
+from state before changing the mode. Run `tofu` locally with the
+installation's backend, state passphrase, and apply credentials:
+
+```sh
+# AWS (data subnets only exist on a network the stack created)
+tofu state rm 'aws_db_instance.postgres[0]' 'aws_db_parameter_group.postgres[0]' \
+  'aws_db_subnet_group.postgres[0]' 'aws_security_group.postgres[0]' 'aws_subnet.data'
+# GCP (the address and peering only exist on a network the stack created)
+tofu state rm 'google_sql_database_instance.postgres[0]' 'google_secret_manager_secret.postgres_admin[0]' \
+  'google_secret_manager_secret_version.postgres_admin[0]' 'google_secret_manager_secret_iam_member.postgres_admin[0]' \
+  'google_compute_global_address.services[0]' 'google_service_networking_connection.services[0]'
+```
+
+Then set the mode to `existing` and put the connection settings in the
+operator secret. The logins the agent created stay as they are. A database on
+a network the stack created still needs that network, so keep the stack
+until the database moves. Managed Valkey hands off the same way, with the
+`valkey` resources in `valkey.tf`.
+
+**Retire an installation.**
+1. Run `drain-and-stop`.
+2. Remove the durable resources you want to keep from state with
+   `tofu state rm`.
+3. Destroy the rest with `tofu destroy`; on GCP, lift the instance's deletion
+   protection first.
+
+Retained resources keep costing money until you delete them yourself:
+- disks and snapshots, per GB-month;
+- a database instance. RDS restarts a stopped instance after 7 days, so take a
+  final snapshot and delete the instance instead;
+- secrets;
+- stored logs.
+
+Purging is always a manual, separate step.
+
 ## Local validation
 
 Use OpenTofu 1.13.1 (the tested version) and Python 3.10 or newer. Docker Compose

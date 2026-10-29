@@ -9,6 +9,11 @@ name: selfhost-plan
 # and the state lock. With `apply: true`, a second job applies exactly the
 # saved plan after the GitHub Environment's reviewers approve; OpenTofu
 # refuses the plan if state changed since it was made.
+#
+# Every plan fails if it would delete or replace a durable resource (data
+# disk, database, cache, secrets, logs) unless `allow_data_deletion` is set.
+# With `drift_check: true` (for a schedule), any change at all fails the run:
+# the installation no longer matches its configuration.
 on:
   workflow_call:
     inputs:
@@ -30,6 +35,14 @@ on:
         default: installation
       apply:
         description: Apply the plan after environment approval
+        type: boolean
+        default: false
+      drift_check:
+        description: Fail if the plan has any change, and never apply
+        type: boolean
+        default: false
+      allow_data_deletion:
+        description: Allow a plan that deletes or replaces durable resources
         type: boolean
         default: false
       environment:
@@ -136,32 +149,55 @@ jobs:
           SOURCE: operator/${{ inputs.installation_dir }}
         run: |
           cp "$SOURCE/installation.tfvars.json" "$STACK/terraform.tfvars.json"
-          for file in backend_override.tf encryption_override.tf; do
+          for file in backend_override.tf encryption_override.tf imports.tf; do
             if [[ -f "$SOURCE/$file" ]]; then cp "$SOURCE/$file" "$STACK/$file"; fi
           done
           if [[ -f "$SOURCE/.terraform.lock.hcl" ]]; then cp "$SOURCE/.terraform.lock.hcl" "$STACK/"; fi
 
       - name: Check and plan
         id: plan
+        env:
+          DRIFT_CHECK: ${{ inputs.drift_check }}
+          ALLOW_DATA_DELETION: ${{ inputs.allow_data_deletion }}
+          # Resources whose deletion loses data or access to it.
+          DURABLE: '^(aws_ebs_volume|aws_db_instance|aws_elasticache_replication_group|aws_secretsmanager_secret|aws_cloudwatch_log_group|google_compute_disk|google_sql_database_instance|google_secret_manager_secret)\.'
         run: |
           set -euo pipefail
           tofu -chdir="$STACK" init -input=false -lockfile=readonly
           tofu -chdir="$STACK" validate
           tofu -chdir="$STACK" plan -input=false -lock-timeout=5m -out=hot.tfplan
           # Summarize actions only: plans can contain sensitive values.
-          tofu -chdir="$STACK" show -json hot.tfplan |
-            jq -r '[.resource_changes[] | select(.change.actions != ["no-op"])
-                    | "\(.change.actions | join("/")) \(.address)"] | join("\n")' > summary.txt
+          tofu -chdir="$STACK" show -json hot.tfplan > plan.json
+          jq -r '[.resource_changes[] | select(.change.actions != ["no-op"])
+                  | "\(.change.actions | join("/")) \(.address)"] | join("\n")' plan.json > summary.txt
+          jq -r --arg durable "$DURABLE" '[.resource_changes[] | select(.change.actions | index("delete"))
+                  | select(.address | test($durable)) | "\(.change.actions | join("/")) \(.address)"]
+                  | join("\n")' plan.json > durable.txt
+          rm plan.json
           {
             echo "### OpenTofu plan for ${{ inputs.cloud }}/${{ inputs.preset }}"
             echo '```'
             if [[ -s summary.txt ]]; then cat summary.txt; else echo "No changes."; fi
             echo '```'
+            if [[ -s durable.txt ]]; then
+              echo "**This plan deletes or replaces durable resources:**"
+              echo '```'
+              cat durable.txt
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           if [[ -s summary.txt ]]; then echo "changes=true" >> "$GITHUB_OUTPUT"; fi
+          if [[ -s durable.txt && "$ALLOW_DATA_DELETION" != "true" ]]; then
+            echo "::error::The plan deletes or replaces durable resources; see the summary. Set allow_data_deletion only for a reviewed purge."
+            exit 1
+          fi
+          if [[ -s summary.txt && "$DRIFT_CHECK" == "true" ]]; then
+            echo "::error::Drift: the installation no longer matches its configuration; see the summary."
+            exit 1
+          fi
 
       - name: Comment on the pull request
-        if: github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request' && hashFiles('summary.txt') != ''
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
@@ -171,6 +207,12 @@ jobs:
             echo '```'
             if [[ -s summary.txt ]]; then cat summary.txt; else echo "No changes."; fi
             echo '```'
+            if [[ -s durable.txt ]]; then
+              echo "**This plan deletes or replaces durable resources** and fails unless \`allow_data_deletion\` is set:"
+              echo '```'
+              cat durable.txt
+              echo '```'
+            fi
           } > comment.md
           gh pr comment "$PR" --repo "${{ github.repository }}" --body-file comment.md
 
@@ -185,7 +227,7 @@ jobs:
   apply:
     name: Apply
     needs: plan
-    if: inputs.apply && needs.plan.outputs.changes == 'true'
+    if: inputs.apply && !inputs.drift_check && needs.plan.outputs.changes == 'true'
     runs-on: ubuntu-24.04
     environment: ${{ inputs.environment }}
     # One apply per installation at a time, in addition to the state lock.
@@ -236,7 +278,7 @@ jobs:
           SOURCE: operator/${{ inputs.installation_dir }}
         run: |
           cp "$SOURCE/installation.tfvars.json" "$STACK/terraform.tfvars.json"
-          for file in backend_override.tf encryption_override.tf; do
+          for file in backend_override.tf encryption_override.tf imports.tf; do
             if [[ -f "$SOURCE/$file" ]]; then cp "$SOURCE/$file" "$STACK/$file"; fi
           done
           if [[ -f "$SOURCE/.terraform.lock.hcl" ]]; then cp "$SOURCE/.terraform.lock.hcl" "$STACK/"; fi

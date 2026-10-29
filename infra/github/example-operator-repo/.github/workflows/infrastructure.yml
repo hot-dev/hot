@@ -1,13 +1,16 @@
 name: infrastructure
 
 # Plans every pull request; applies on merge after the production
-# environment's reviewers approve the plan.
+# environment's reviewers approve the plan. Every morning it checks for drift:
+# the run fails if the installation no longer matches main.
 on:
   pull_request:
     paths: ['installation/**']
   push:
     branches: [main]
     paths: ['installation/**']
+  schedule:
+    - cron: '17 6 * * *'
 
 permissions:
   contents: read
@@ -21,6 +24,7 @@ jobs:
       hot_version: v3.0.1
       cloud: aws
       apply: ${{ github.event_name == 'push' }}
+      drift_check: ${{ github.event_name == 'schedule' }}
       environment: production
       aws_region: us-east-1
       aws_plan_role: arn:aws:iam::123456789012:role/hot-example-plan

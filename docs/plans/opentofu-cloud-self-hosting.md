@@ -1901,12 +1901,22 @@ or an existing operator destination without coupling telemetry to S3.
 - [ ] Use protected remote state, deployment locks, and a separate state
       bootstrap lifecycle. Document lost-state recovery, interrupted applies,
       lock-owner checks before stale-lock recovery, and retained resource IDs.
+      [State, drift, and teardown](../../infra/README.md#state-drift-and-teardown)
+      covers stale locks, restoring a state version, adoption through
+      `imports.tf`, and interrupted applies.
 - [ ] Define drift detection and review for manual cloud edits, module/provider
       upgrades, and controllers such as autoscalers. Preserve field ownership;
       do not overwrite autoscaled counts or adopt external resources silently.
+      The plan workflow's `drift_check` fails a scheduled run on any change,
+      and the example operator repository runs it daily.
 - [ ] Document import/adoption and managed-to-existing handoffs with reviewed
       plans. Use `removed` blocks with `destroy = false` so a mode change stops
       managing a resource without destroying it. Never rely on toggling `count`.
+      The managed-data resources are count-based, and a `removed` block cannot
+      apply to a resource whose block remains in the configuration. Handoffs
+      therefore use documented `tofu state rm` lists, and a test keeps those
+      addresses real. Deletion protection and the workflow's durable-resource
+      guard stop an unplanned destroy.
 - [ ] Protect durable disks, databases, buckets, secrets, and keys from
       replacement/deletion; normal teardown retains data. `prevent_destroy`
       cannot be set from a variable, so use service-level protection (RDS and
@@ -1915,6 +1925,10 @@ or an existing operator destination without coupling telemetry to S3.
       an explicit purge input. Alternatively, place durable resources in a
       separate data root. Specify the purge procedure and the ongoing costs of
       retained resources.
+      Every plan fails if it deletes or replaces a durable resource unless
+      the caller sets `allow_data_deletion`. Retirement removes kept resources
+      from state before `tofu destroy`; purging is a separate manual step,
+      and the guide lists what retained resources cost.
 - [ ] Exercise safe recovery and ownership handoff cases in infrastructure
       qualification; add automated drift reporting as the operator tooling grows.
 

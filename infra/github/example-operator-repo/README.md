@@ -5,12 +5,13 @@ installation from GitHub Actions. Hot's reusable workflows do the work; this
 repository holds only non-secret configuration and three small callers.
 
 ```text
-.github/workflows/infrastructure.yml   plan on pull requests, apply on merge
+.github/workflows/infrastructure.yml   plan on pull requests, apply on merge, check drift daily
 .github/workflows/release.yml          deploy a Hot release
 .github/workflows/command.yml          status, diagnostics, logs, and other host commands
 installation/installation.tfvars.json  the installation (no secrets)
 installation/backend_override.tf       where OpenTofu keeps state
 installation/.terraform.lock.hcl       optional: your reviewed provider lockfile
+installation/imports.tf                optional: import blocks to adopt resources after lost state
 ```
 
 Pin the `uses:` lines and `hot_version` to the same Hot tag, and change them
@@ -86,3 +87,12 @@ this repository's Actions runs can read those summaries, and logs can contain
 user data. The same commands run locally with
 `python3 infra/operator/selfhost.py installation/installation.tfvars.json ...`
 from a Hot checkout; see [Operating an installation](../../README.md#operating-an-installation).
+
+## Drift and durable resources
+
+The daily scheduled run plans with `drift_check: true` and fails if anything
+differs from `main`, such as a console edit. Every plan, including drift
+checks, fails if it would delete or replace the data disk, a managed
+database or cache, a secret, or the log group. Set `allow_data_deletion: true`
+on the caller only for a reviewed purge, and remove it afterwards. See
+[State, drift, and teardown](../../README.md#state-drift-and-teardown).
