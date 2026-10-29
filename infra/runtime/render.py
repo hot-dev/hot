@@ -440,6 +440,18 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             }
         # Read-only preconditions the database administrator owns; see the
         # self-hosted PostgreSQL guide.
+        # Restores a local database's dump when an installation moves it here
+        # (see the agent's data moves). It refuses a database that already
+        # has Hot's tables, and restores in one transaction.
+        services["restore-postgres"] = {
+            "image": images["postgres"], "profiles": ["admin"], "user": "10001:10001", "read_only": True,
+            "entrypoint": ["sh", "/etc/hot/restore_postgres.sh"],
+            "secrets": [secret("check-postgres", k) for k in ("HOT_DB_MIGRATION_URI", *db_ca)],
+            "tmpfs": ["/tmp:size=16777216,uid=10001,gid=10001"],
+            "volumes": [{"type": "bind", "source": "./restore_postgres.sh", "target": "/etc/hot/restore_postgres.sh", "read_only": True},
+                        bind(Path(data_root) / "moves", "/move", readonly=True)],
+            "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
+        }
         services["check-postgres"] = {
             "image": images["postgres"], "profiles": ["admin"], "user": "10001:10001", "read_only": True,
             "entrypoint": via_uri,
@@ -547,6 +559,23 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA hot;
 '''
 
 
+# Restores /move/postgres.dump (a local database's pg_dump) as the schema
+# owner. Extensions and the schema already exist, created by the database's
+# administrator, so they are left out, as are ownership and grants, which
+# provisioning applies.
+RESTORE_POSTGRES_SH = r'''set -eu
+uri="$(cat /run/secrets/HOT_DB_MIGRATION_URI)"
+tables="$(psql "$uri" --no-psqlrc --tuples-only --no-align \
+  --command="SELECT count(*) FROM pg_tables WHERE schemaname = 'hot'")"
+if [ "$tables" != "0" ]; then
+  echo "The database already has $tables of Hot's tables; refusing to restore over them" >&2
+  exit 3
+fi
+pg_restore --list /move/postgres.dump | grep -v -E ' (SCHEMA|EXTENSION) - | COMMENT - EXTENSION ' > /tmp/restore.list
+exec pg_restore --no-owner --no-privileges --exit-on-error --single-transaction \
+  --use-list=/tmp/restore.list --dbname="$uri" /move/postgres.dump
+'''
+
 CHECK_POSTGRES_SQL = r'''SELECT set_config('hot.runtime_role', :'runtime_role', false);
 DO $$
 DECLARE
@@ -609,7 +638,7 @@ def main():
         compose = render(document, manifest, args.data_root, args.secrets_root, args.s3_auth, args.s3_session_tokens)
         args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
         grant_script = Path(__file__).resolve().parents[2] / "resources/db/postgres/provision_runtime.sql"
-        files = {"compose.json": json.dumps(compose, indent=2) + "\n", "nginx.conf": nginx_config(config), "init.sql": INIT_SQL, "valkey.conf": valkey_conf(config.get("size", "small")), "check_postgres.sql": CHECK_POSTGRES_SQL, "prepare_postgres.sql": PREPARE_POSTGRES_SQL,
+        files = {"compose.json": json.dumps(compose, indent=2) + "\n", "nginx.conf": nginx_config(config), "init.sql": INIT_SQL, "valkey.conf": valkey_conf(config.get("size", "small")), "check_postgres.sql": CHECK_POSTGRES_SQL, "prepare_postgres.sql": PREPARE_POSTGRES_SQL, "restore_postgres.sh": RESTORE_POSTGRES_SH,
                  "provision_runtime.sql": grant_script.read_text()}
         for name, content in files.items():
             path = args.output / name

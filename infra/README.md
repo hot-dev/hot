@@ -392,6 +392,37 @@ Upgrades follow these rules, and the deploy agent enforces them:
 
   `diagnostics` shows the last 5.
 
+## Moving data off the host
+
+To move a single machine's database or queue to a managed service (or an
+existing one), change `data.postgres.mode` or `data.valkey.mode` and apply,
+then deploy a release (the same one is fine) with the release workflow. The
+agent notices the change and moves the data as part of that deploy. Plan a
+maintenance window: Hot is unavailable from the first step until the new
+services are ready.
+
+1. It stops admissions: the scheduler, app, API, and ingress.
+2. If the queue is moving, it lets the workers finish queued work, for up to
+   15 minutes, and checks with `hot queue status`. Dead-lettered items stay
+   in the old Valkey on the data disk, and the deploy record counts them.
+3. It stops the workers.
+4. It dumps the local database to `/var/lib/hot/backups/move-<release>-*`.
+   This dump is also the recovery point.
+5. It prepares the new database. Then it restores the dump in one
+   transaction, which is refused if the database already holds Hot's
+   tables.
+6. It migrates, grants, and starts Hot on the new services.
+
+Until the restore succeeds, any failure restarts the installed release on the
+untouched local data. After the restore, the move is complete: the local copy
+is no longer used, a failure is fixed forward with `deploy-now`, and
+`roll-back` refuses. The old data directories stay on the data disk until you
+remove them.
+
+Moving a database back onto the host, or between managed and existing
+databases, is not automated. The agent refuses that change before stopping
+anything. Copy the database with `pg_dump` and `pg_restore` yourself.
+
 ## Recovery
 
 The host's boot disk holds nothing recovery needs. The installation's

@@ -77,6 +77,8 @@ SECRET_OWNERS = {"postgres": 999, "valkey": 999}
 # Deploy records kept in releases/history.json, and pre-upgrade dumps kept.
 HISTORY = 20
 UPGRADE_DUMPS = 3
+# How long queued work may take to drain before a data move gives up.
+DRAIN_SECONDS = 900
 
 
 # Health metrics the agent publishes every cycle, with their CloudWatch units.
@@ -764,6 +766,7 @@ class Agent:
         (bundle / "valkey.conf").write_text(render.valkey_conf(self.config.get("size", "small")))
         (bundle / "check_postgres.sql").write_text(render.CHECK_POSTGRES_SQL)
         (bundle / "prepare_postgres.sql").write_text(render.PREPARE_POSTGRES_SQL)
+        (bundle / "restore_postgres.sh").write_text(render.RESTORE_POSTGRES_SH)
         shutil.copy(provision_sql(), bundle / "provision_runtime.sql")
         return bundle
 
@@ -840,6 +843,7 @@ class Agent:
             self.save_state({**self.state(), "deploying": record})
 
         step("started")
+        moves = self.data_moves(state)
         manifest = self.fetch_release(release)
         check_upgrade(manifest, previous, state.get("migrations"))
         record.update(images={name: image.rsplit("@", 1)[-1][:19] for name, image in manifest["images"].items()},
@@ -851,6 +855,16 @@ class Agent:
         step("secrets")
         self.compose(bundle, "--profile", "admin", "pull", "--quiet")
         step("pulled")
+        if moves:
+            # Hot stops completely, so nothing is written after the copy.
+            record["moves"] = {service: f"{old} -> {new}" for service, (old, new) in moves.items()}
+            step("draining")
+            record["deadletter"] = self.drain(self.releases / previous / "bundle", queue="valkey" in moves)
+            step("drained")
+            if "postgres" in moves:
+                dump = self.dump_postgres(self.releases / previous / "bundle", f"move-{release}") / "postgres.dump"
+                record["restore_point"] = {"kind": "dump", "path": str(dump), "time": utc_now()}
+                step("dumped")
         self.compose(bundle, "stop", "scheduler")
         step("scheduler-stopped")
         local_data = [s for s in ("postgres", "valkey") if render.data_mode(self.config, s) == "local"]
@@ -860,6 +874,12 @@ class Agent:
             self.compose(bundle, "--profile", "admin", "run", "--rm", "prepare-postgres")
         if render.data_mode(self.config, "postgres") != "local":
             self.compose(bundle, "--profile", "admin", "run", "--rm", "check-postgres")
+        if "postgres" in moves:
+            self.restore_moved_database(bundle, Path(record["restore_point"]["path"]))
+            # From here the data lives in the new database: a later failure
+            # is fixed forward, never by returning to the local copy.
+            self.save_state({**self.state(), "data_modes": self.configured_modes()})
+            step("data-moved")
         step("data-ready")
         if state.get("migrations") is not None and record["migrations"] > state["migrations"]:
             # Hot never migrates down: undoing these migrations means a restore.
@@ -877,9 +897,77 @@ class Agent:
         step("ready")
         record["finished"] = utc_now()
         self.save_state({"release": release, "previous": previous, "migrations": record["migrations"],
-                         "dependencies": data_services(self.config, self.operator_secrets())})
+                         "dependencies": data_services(self.config, self.operator_secrets()),
+                         "data_modes": self.configured_modes()})
         self.remember(record)
         return record["steps"]
+
+    # -- data moves --------------------------------------------------------------
+
+    def configured_modes(self):
+        return {service: render.data_mode(self.config, service) for service in ("postgres", "valkey")}
+
+    def data_moves(self, state):
+        """Data services whose mode changed since the last deploy, as
+        {service: (old, new)}. PostgreSQL moves from the host to a managed
+        or existing database; Valkey may move anywhere, since its work is
+        drained rather than copied. Other moves are refused before anything
+        stops."""
+        if not state.get("release"):
+            return {}
+        recorded = state.get("data_modes") or {
+            # Deployed before modes were recorded: what the data disk holds.
+            service: "local" if any((self.data_root / "data" / service).glob("*")) else render.data_mode(self.config, service)
+            for service in ("postgres", "valkey")}
+        moves = {service: (recorded[service], mode) for service, mode in self.configured_modes().items()
+                 if recorded.get(service, mode) != mode}
+        old_postgres = moves.get("postgres", ("local",))[0]
+        if old_postgres != "local":
+            raise AgentError(f"Moving PostgreSQL from {old_postgres} to {moves['postgres'][1]} is not automated: "
+                             "copy the database with pg_dump and pg_restore, then change data.postgres.mode")
+        return moves
+
+    def drain(self, bundle, queue, timeout=DRAIN_SECONDS):
+        """Stop admissions (scheduler, app, API, ingress), let workers finish
+        queued work when the queue is moving, then stop the workers. Returns
+        the dead-lettered items left behind in the old queue."""
+        self.compose(bundle, "stop", "scheduler")
+        self.compose(bundle, "stop", "app", "api", "ingress")
+        deadletter = 0
+        if queue:
+            waited = 0
+            while True:
+                backlog, deadletter = self.queue_backlog(bundle)
+                if backlog == 0:
+                    break
+                if waited >= timeout:
+                    raise AgentError(f"{backlog} queued items did not finish within {timeout // 60} minutes; "
+                                     "the data move was not started")
+                self.sleep(10)
+                waited += 10
+        self.compose(bundle, "stop", "--timeout", "120", "worker", "task-worker")
+        return deadletter
+
+    def queue_backlog(self, bundle):
+        """(pending + in progress, dead-lettered) items in Hot's queue,
+        from `hot queue status` in the running worker."""
+        output = self.compose(bundle, "exec", "-T", "worker", "/usr/bin/hot", "queue", "status").stdout
+        counts = dict(re.findall(r"Total (pending|processing|deadletter):\s+(-?\d+)", output))
+        if {"pending", "processing"} - set(counts):
+            raise AgentError("Could not read the queue's status from the worker")
+        return int(counts["pending"]) + int(counts["processing"]), int(counts.get("deadletter", 0))
+
+    def restore_moved_database(self, bundle, dump):
+        """Restore the local database's dump into the new one, which must not
+        hold Hot's tables yet."""
+        staged = self.data_root / "data" / "moves"
+        staged.mkdir(parents=True, exist_ok=True)
+        shutil.copy(dump, staged / "postgres.dump")
+        os.chmod(staged / "postgres.dump", 0o644)
+        try:
+            self.compose(bundle, "--profile", "admin", "run", "--rm", "restore-postgres")
+        finally:
+            (staged / "postgres.dump").unlink(missing_ok=True)
 
     def recover(self, release, previous, error):
         """After a failed deploy: keep the previous release scheduling when
@@ -890,14 +978,23 @@ class Agent:
         if record.get("release") != release:
             record = {"release": release, "previous": previous, "steps": []}
         steps = record["steps"]
-        if "migrating" in steps:
+        if "data-moved" in steps:
+            recovery = ("The data now lives in the new database, and the copy on this host is no longer used"
+                        + ("; migrations may be partly applied" if "migrating" in steps else "")
+                        + ". Fix the cause, then run deploy-now.")
+        elif "migrating" in steps:
             point = record.get("restore_point")
             where = f" from {point['path']}" if point and point.get("path") else (
                 f" to {point['time']}" if point else "")
             recovery = "Migrations may be partly applied, and Hot does not migrate down. Deploy a fixed release"
             recovery += f", or restore the database{where} and deploy {previous} again." if previous else "."
         else:
-            if previous and "scheduler-stopped" in steps:
+            if previous and "draining" in steps:
+                # A data move stopped all of Hot; the local data is untouched.
+                with contextlib.suppress(AgentError, subprocess.CalledProcessError):
+                    self.start_services(self.releases / previous / "bundle")
+                    steps.append("previous-release-restarted")
+            elif previous and "scheduler-stopped" in steps:
                 with contextlib.suppress(AgentError, subprocess.CalledProcessError):
                     self.compose(self.releases / previous / "bundle", "up", "-d", "scheduler")
                     steps.append("previous-scheduler-restarted")
@@ -1197,6 +1294,9 @@ class Agent:
         failed = state.get("failed") or {}
         if not failed:
             raise AgentError("Nothing to roll back: the last deploy did not fail")
+        if "data-moved" in failed.get("steps", []):
+            raise AgentError("The data already moved to the new database; rolling back would return to the copy "
+                             "on this host from before the move. Fix the cause and run deploy-now instead")
         steps = []
         if "migrating" in failed.get("steps", []):
             point = failed.get("restore_point") or {}

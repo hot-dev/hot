@@ -84,7 +84,7 @@ pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), St
                     let redis_uri = conf.get_str_or_default("redis.uri", "redis://127.0.0.1/");
                     println!(
                         "  Backend: Redis ({}){}",
-                        redis_uri,
+                        hot::db::redact_password(&redis_uri),
                         if redis_cluster { " [cluster]" } else { "" }
                     );
 

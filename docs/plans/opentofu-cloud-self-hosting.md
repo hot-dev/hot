@@ -1283,6 +1283,16 @@ IAM, generation preconditions, or real composition behavior.
       drain or reconcile in-flight work, back up/copy data, verify objects and
       metadata, switch connections, validate, and resume. Retain a documented
       recovery point and account for writes made after cutover.
+      Changing `data.*.mode` triggers the move during the next deploy (see
+      [Moving data off the host](../../infra/README.md#moving-data-off-the-host)).
+      The agent stops admissions, drains a moving queue, and stops workers.
+      It dumps the local database, which is also the recovery point, and
+      restores it in one transaction into the prepared target, refusing a
+      target that already holds Hot's tables. Then it migrates and resumes.
+      The move commits once the restore succeeds; before that, a failure
+      restarts the installed release on the untouched local data. No writes
+      happen after the dump, because Hot is stopped. Reverse and
+      managed-to-existing moves are refused.
 - [ ] For storage moves, create an old-to-new object manifest with checksums.
       Update build/file/blob backend and path records under controlled cutover,
       preserving IDs, references, and unique conditional-write object names.

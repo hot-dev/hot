@@ -79,6 +79,7 @@ class Recorder:
         self.logs = ""
         self.enddate = "notAfter=Jan 30 12:00:00 2027 GMT\n"
         self.journal = {"agent": [], "host": []}
+        self.queue = []
 
     def __call__(self, command, **kwargs):
         self.commands.append(command)
@@ -88,6 +89,11 @@ class Recorder:
                 after = command[command.index("--after-cursor") + 1]
                 records = records[next(i for i, r in enumerate(records) if r["__CURSOR"] == after) + 1:]
             return subprocess.CompletedProcess(command, 0, stdout="".join(json.dumps(r) + "\n" for r in records))
+        if "queue" in command:
+            pending, processing, deadletter = self.queue.pop(0) if len(self.queue) > 1 else self.queue[0]
+            return subprocess.CompletedProcess(command, 0, stdout=(
+                "Queue Status:\n  Backend: Redis (redis://hot:***@valkey:6379)\n\nSummary:\n"
+                f"  Total pending:    {pending}\n  Total processing: {processing}\n  Total deadletter: {deadletter}\n"))
         stdout = (self.ps if "ps" in command else self.logs if "logs" in command
                   else self.enddate if command[0] == "openssl" else "")
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -363,6 +369,112 @@ class Upgrades(UpgradeHarness):
         text = (Path(self.tmp.name) / "releases/history.json").read_text()
         for value in self.cloud.secrets[GENERATED].values():
             self.assertNotIn(value, text)
+
+
+class DataMoves(UpgradeHarness):
+    ADMIN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-0123-abcdef"
+    HOST = "hot-example.c0123.us-east-1.rds.amazonaws.com"
+    CACHE = "master.hot-example.abc123.use1.cache.amazonaws.com"
+    TOKEN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:hot/hot-example/valkey-AbCdEf"
+
+    def setUp(self):
+        super().setUp()
+        self.cloud.secrets[self.ADMIN] = {"username": "hot_admin", "password": "p@ss/word"}
+        self.cloud.secrets[self.TOKEN] = {"password": "token"}
+        self.agent.resolve = lambda hosts: []
+        self.run.queue = [(0, 0, 0)]
+
+    def fake_http(self, method, url, body=None, headers=None, timeout=30):
+        if url.startswith("https://truststore.pki.rds.amazonaws.com/"):
+            return 200, b"-----BEGIN CERTIFICATE-----\nRDS\n-----END CERTIFICATE-----\n"
+        return super().fake_http(method, url, body, headers, timeout)
+
+    def move(self, postgres=True, valkey=False):
+        data = {}
+        if postgres:
+            data["postgres"] = {"mode": "managed", "runtime_role": "hot_runtime", "endpoint": {
+                "host": self.HOST, "port": 5432, "admin_user": "hot_admin", "admin_secret": self.ADMIN}}
+        if valkey:
+            data["valkey"] = {"mode": "managed", "endpoint": {"host": self.CACHE, "port": 6379, "auth_secret": self.TOKEN}}
+        self.config["data"] = data
+        self.release("3.0.2")
+        self.run.commands.clear()
+        return self.agent.reconcile()
+
+    def calls(self):
+        return [" ".join(c) for c in self.run.commands]
+
+    def test_a_local_database_moves_to_the_managed_one(self):
+        status = self.move()
+        self.assertEqual(status["state"], "deployed", status)
+        calls = self.calls()
+        order = [next(i for i, c in enumerate(calls) if marker in c) for marker in (
+            "releases/3.0.1/bundle/compose.json stop scheduler", "releases/3.0.1/bundle/compose.json stop app api ingress",
+            "stop --timeout 120 worker task-worker", "exec -T postgres pg_dump", "run --rm prepare-postgres",
+            "run --rm check-postgres", "run --rm restore-postgres", "run --rm migrate", "up -d scheduler")]
+        self.assertEqual(order, sorted(order), calls)
+        self.assertFalse(any("queue status" in c for c in calls), "the queue stays put, so it is not drained")
+        record = self.agent.history()[-1]
+        self.assertEqual(record["moves"], {"postgres": "local -> managed"})
+        self.assertTrue(Path(record["restore_point"]["path"]).exists(), "the dump is kept as the recovery point")
+        self.assertEqual(self.agent.state()["data_modes"], {"postgres": "managed", "valkey": "local"})
+        self.assertFalse((Path(self.tmp.name) / "data/moves/postgres.dump").exists(), "the staged copy is removed")
+        self.assertIn("restore_postgres.sh", [p.name for p in (Path(self.tmp.name) / "releases/3.0.2/bundle").iterdir()])
+
+    def test_a_moving_queue_drains_first(self):
+        self.run.queue = [(3, 1, 2), (0, 1, 2), (0, 0, 2)]
+        status = self.move(postgres=False, valkey=True)
+        self.assertEqual(status["state"], "deployed", status)
+        calls = self.calls()
+        checks = [i for i, c in enumerate(calls) if "exec -T worker /usr/bin/hot queue status" in c]
+        self.assertEqual(len(checks), 3)
+        self.assertLess(calls.index(next(c for c in calls if c.endswith("stop app api ingress"))), checks[0])
+        self.assertLess(checks[-1], next(i for i, c in enumerate(calls) if "stop --timeout 120 worker task-worker" in c))
+        self.assertFalse(any("pg_dump" in c for c in calls), "the database stays put")
+        self.assertEqual(self.agent.history()[-1]["deadletter"], 2)
+
+    def test_work_that_will_not_drain_stops_the_move_and_restarts_hot(self):
+        self.run.queue = [(5, 0, 0)]
+        status = self.move(valkey=True)
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("did not finish within 15 minutes", status["error"])
+        self.assertIn("previous-release-restarted", status["steps"])
+        self.assertFalse(any("pg_dump" in c for c in self.calls()))
+        self.assertEqual(self.calls()[-1].split("compose.json ")[1], "up -d scheduler")
+        self.assertEqual(self.agent.state()["data_modes"], {"postgres": "local", "valkey": "local"})
+
+    def test_a_failed_restore_returns_to_the_local_data(self):
+        self.failing = "restore-postgres"
+        status = self.move()
+        self.assertIn("previous-release-restarted", status["steps"])
+        self.assertIn("The database was not changed", status["recovery"])
+        self.assertEqual(self.agent.state()["data_modes"]["postgres"], "local")
+
+    def test_after_the_data_moves_failures_are_fixed_forward(self):
+        self.failing = "migrate"
+        status = self.move()
+        self.assertIn("data now lives in the new database", status["recovery"])
+        self.assertEqual(self.agent.state()["data_modes"]["postgres"], "managed")
+        with self.assertRaisesRegex(agent_module.AgentError, "already moved"):
+            self.agent.command("roll-back")
+
+    def test_moving_a_database_back_to_the_host_is_refused(self):
+        self.agent.save_state({**self.agent.state(), "data_modes": {"postgres": "managed", "valkey": "local"}})
+        self.release("3.0.2")
+        self.run.commands.clear()
+        status = self.agent.reconcile()
+        self.assertIn("is not automated", status["error"])
+        self.assertFalse(any("stop" in c for c in self.calls()), "nothing stops")
+
+    def test_older_installations_are_read_from_the_data_disk(self):
+        state = self.agent.state()
+        state.pop("data_modes")
+        (Path(self.tmp.name) / "data/postgres").mkdir(parents=True, exist_ok=True)
+        (Path(self.tmp.name) / "data/postgres/PG_VERSION").write_text("18")
+        self.agent.save_state(state)
+        self.assertEqual(self.agent.data_moves(self.agent.state()), {})
+        self.config["data"] = {"postgres": {"mode": "existing"}}
+        self.assertEqual(self.agent.data_moves(self.agent.state()), {"postgres": ("local", "existing")})
 
 
 class RollBack(UpgradeHarness):
