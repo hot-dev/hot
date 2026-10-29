@@ -281,8 +281,9 @@ Initial single-machine release (both clouds unless noted):
 Qualified after the initial release, each before it is marked supported:
 customer-managed keys, existing Valkey, mixed app/API exposure, mixed
 build/file backends, provisioned S3 from GCP compute, and GCS after Phase 2.
-Managed-data and scalable presets add their own reference configurations when
-those phases ship.
+Managed-data reference configurations are added when that phase ships; the
+scalable ones are defined in
+[Scalable reference configurations](#scalable-reference-configurations).
 
 The configuration schema can accept settings before they are qualified.
 Validation classifies each resolved configuration as a reference configuration,
@@ -734,7 +735,8 @@ identically.
 
 For scalable presets, the release supplies the manifest version as an OpenTofu
 input. The reviewed apply updates ECS task definitions and Compute Engine
-instance templates, and the same drain and stop-before-start rules apply.
+instance templates, and the same drain and stop-before-start rules apply. See
+[Release and deployment](#release-and-deployment).
 
 ### GitHub Actions workflows
 
@@ -1188,13 +1190,215 @@ reacquire the lock with no interval in which two schedulers send events.
 
 ## Phase 4 Scalable presets
 
+The scalable preset runs each Hot role as its own independently sized and
+released service, on managed data, across at least two availability zones.
+`hot-cloud` already runs this shape on AWS (ECS services behind an ALB, plus an
+EC2 task-worker pool), but its tooling scales each service to 0 or 1
+(`scale-ecs-services.sh`). Running several replicas of one role is therefore not
+yet proven anywhere; see [Cross-instance readiness](#cross-instance-readiness).
+
 | Role | AWS target | GCP target |
 | --- | --- | --- |
-| App/API | Separate ECS/Fargate services behind ingress | Separate Compute Engine managed instance groups behind an HTTPS load balancer |
-| Queue worker | ECS/Fargate service | Dedicated Compute Engine managed instance group |
-| Scheduler | One active ECS task with controlled replacement | One Compute Engine VM with controlled replacement |
-| Task-worker | Dedicated EC2 pool with Kata host setup, as in the current [Box task host](#box-task-host) | Separate Compute Engine managed instance group with Kata host setup |
-| Data | RDS, ElastiCache Valkey; independently selected S3 or GCS | Cloud SQL, Memorystore for Valkey; independently selected S3 or GCS |
+| App | ECS Fargate service, Nginx sidecar, at least 2 tasks across 2 AZs | Regional managed instance group, at least 2 instances across 2 zones |
+| API | Separate ECS Fargate service, same pattern | Separate regional managed instance group |
+| Queue worker | ECS Fargate service, at least 2 tasks | Regional managed instance group, at least 2 instances |
+| Scheduler | One ECS Fargate task, `minimumHealthyPercent=0`, `maximumPercent=100` | One-instance managed instance group with stop-before-start replacement |
+| Task-worker | EC2 Auto Scaling group of `m8i` hosts with the [Box task host](#box-task-host) setup, scale-in protection while tasks run | Regional managed instance group on a qualified nested-virtualization family |
+| Migrations | One-off ECS `RunTask` with the migration role | Ephemeral Compute Engine instance with the migration service account, deleted after reporting |
+| PostgreSQL | RDS PostgreSQL, Multi-AZ | Cloud SQL for PostgreSQL, regional high availability |
+| Valkey | ElastiCache for Valkey replication group, Multi-AZ automatic failover, TLS | Memorystore for Valkey with replicas, TLS |
+| Storage | S3 (or qualified GCS) | GCS (or S3) |
+
+### Scalable reference configurations
+
+| ID | Cloud | Storage | App / API exposure | Keys |
+| --- | --- | --- | --- | --- |
+| `sc-aws-private` | AWS | S3 | private / private | provider-managed |
+| `sc-aws-public` | AWS | S3 | public / public | provider-managed |
+| `sc-gcp-private` | GCP | GCS (requires Phase 2) | private / private | provider-managed |
+| `sc-gcp-s3-private` | GCP | existing S3 | private / private | provider-managed |
+
+All use managed PostgreSQL and Valkey in the same region. Existing PostgreSQL
+or Valkey, customer-managed keys, and mixed exposure follow the same
+qualified-variation rules as the single-machine preset. Multi-region
+deployment and cross-region disaster recovery are out of scope; cross-region
+backup copies are an optional setting.
+
+### Topology and ingress
+
+```text
+clients ── HTTPS ──> load balancer (internal, or internet-facing when selected)
+                       ├─ host = app endpoint ─> app target group  ─> [nginx sidecar ─> hot app]
+                       └─ host = api endpoint ─> api target group  ─> [nginx sidecar ─> hot api]
+worker, scheduler, task-worker: no inbound routes
+all Hot roles ─> RDS / Cloud SQL, Valkey, object storage, secret store (private endpoints)
+user-code egress ─> NAT (stable egress IPs)
+```
+
+- One load balancer with host-based routing to separate app and API backends.
+  Public exposure uses an internet-facing ALB (AWS) or external Application
+  Load Balancer (GCP); private uses the internal variants. Each endpoint's
+  exposure remains independent.
+- Keep the Nginx configuration from the single-machine bundle as the single
+  source for body limits (API `client_max_body_size 300M`), buffering, and
+  streaming routes. On AWS it runs as a sidecar container in the same task;
+  on GCP it runs in the same instance's Compose bundle.
+- Streaming routes use 330 s proxy timeouts today. Set the ALB idle timeout
+  (60 s by default) and the GCP backend-service timeout (30 s by default) above
+  that, for example 360 s, and qualify SSE reconnects through rolling
+  replacement.
+- Health checks target the sidecar's `/health`. Use deregistration delay and
+  connection draining long enough for in-flight uploads; streaming clients are
+  expected to reconnect.
+- Load-balancer-to-target traffic is re-encrypted with an installation-local
+  certificate on the sidecar. Document that ALB and GCP load balancers do not
+  verify backend certificates.
+- AWS WAF or Cloud Armor is an optional setting for public endpoints.
+- The task-worker, worker, and scheduler have no listeners reachable from
+  the load balancer.
+
+### Networking and identities
+
+- **AWS:** private subnets in at least 2 AZs. NAT gateways default to one per
+  AZ, with a single-NAT cost option documented as a resilience trade-off. VPC
+  endpoints for S3 (gateway), ECR, Secrets Manager, CloudWatch Logs, SSM, and
+  STS.
+- **GCP:** a regional subnet with Private Google Access, regional Cloud NAT
+  with reserved addresses, and a proxy-only subnet for internal load balancing.
+- One security group or firewall tag per role. Only the load balancer reaches
+  app and API. Only Hot roles reach PostgreSQL and Valkey. Task-worker hosts
+  have their own group and receive no inbound traffic.
+- One identity per role: an ECS task role plus execution role per service on
+  AWS, and one service account per managed instance group on GCP. Each reads
+  only its own secrets and the storage prefixes its role needs. The migration
+  identity is separate and used only by the migration job.
+- Secrets reach ECS services through per-service `secrets` (environment
+  variables, the documented exception) and reach Compute Engine instances
+  through the agent's tmpfs files.
+
+### Data tier
+
+- **PostgreSQL:** RDS Multi-AZ or Cloud SQL regional HA, private IP only, TLS
+  required, point-in-time recovery enabled, deletion protection on. Verify the
+  extensions in the [RLS setup](../../resources/db/postgres/RLS_SETUP.md),
+  including pgvector, for each engine version.
+- **Connection budget:** the sum over roles of replicas × pool size, plus
+  migration and admin headroom, must stay below the engine's connection limit.
+  Validation rejects replica bounds that exceed it. RDS Proxy is optional for
+  app, API, and worker. The scheduler always connects directly, because its
+  advisory lock needs a dedicated session.
+- **Valkey:** start with cluster mode disabled and one primary plus at least
+  one replica, with automatic failover and TLS. Use Hot's cluster mode only
+  where the managed offering requires it, and qualify it. Adding shards does
+  not spread the write load of a single stream.
+- **Queue durability on failover:** replication is asynchronous, and ElastiCache
+  offers snapshots but not append-only persistence. A failover can lose
+  recently acknowledged queue writes. Qualify Hot's reconciliation from
+  PostgreSQL (`reconcile-queued-after-seconds`) as the recovery path, and
+  publish the resulting recovery-point behavior.
+
+### Release and deployment
+
+The release workflow supplies the manifest version as an OpenTofu input, and
+the reviewed apply rolls each role. Order:
+
+1. Verify the manifest and reject unsupported version jumps.
+2. Run the migration job. Only backward-compatible (expand) migrations run
+   during a rolling release. Incompatible migrations require a maintenance
+   window: drain workers, stop the scheduler, then migrate.
+3. Roll task-worker hosts: drain each host's slots, then replace it through
+   instance refresh (AWS) or a managed instance group rolling update (GCP).
+4. Roll queue workers within their drain deadline.
+5. Roll API, then app, with surge capacity and health-gated progression.
+6. Replace the scheduler last, stop-before-start.
+
+- **AWS:** each release registers new task definitions using the single image
+  digest, with deployment circuit breakers and automatic rollback. OpenTofu
+  ignores `desired_count` on autoscaled services. Fargate caps `stopTimeout` at
+  120 s, so worker drain must finish or durably requeue within that deadline.
+- **GCP:** each release creates a new immutable instance template, and the
+  managed instance group performs a rolling update with `maxSurge` and
+  `maxUnavailable` set per role. Unlike the single VM, replacement here is the
+  intended behavior. Instances drain when the agent receives the shutdown
+  signal. Use Compute Engine graceful shutdown where available, and never
+  depend on shutdown scripts alone.
+- Rollback redeploys the previous manifest when the migration class allows it.
+  Otherwise the release stops and reports the required forward fix or restore.
+
+### Autoscaling
+
+| Role | Signal | Bounds and scale-in |
+| --- | --- | --- |
+| App, API | CPU and request count per target | Minimum 2; scale-in through normal connection draining |
+| Queue worker | Hot-published backlog and oldest-message age | Fixed counts first; autoscale after the drain protocol is qualified |
+| Task-worker | Hot-published queued tasks and free slots | AWS: per-instance scale-in protection while tasks run, as `hot-cloud` does today. GCP managed instance groups lack per-instance scale-in protection, so scale-in goes only through the agent drain path, with autoscaler scale-in disabled or rate-limited |
+| Scheduler | None | Always exactly one |
+
+Hot must publish the queue and slot metrics through the monitoring contract
+(CloudWatch or Cloud Monitoring); a Valkey queue does not supply them by
+itself. Upper bounds derive from the connection budget, so autoscaling cannot
+exhaust PostgreSQL or Valkey.
+
+### Sizes and availability
+
+- Sizes map to per-role CPU and memory, replica bounds, task-host instance
+  types, and data-tier classes. `hot-cloud` staging is the starting point to
+  benchmark from: API 0.25 vCPU / 512 MB, app 0.5 vCPU / 1 GB, worker
+  0.5 vCPU / 1 GB, scheduler 0.25 vCPU / 512 MB, and `m8i.large` task hosts.
+  These are not qualified sizes.
+- Set Fargate ephemeral storage for build-upload staging explicitly, and give
+  Compute Engine instances bounded scratch disks.
+- The target availability claim is: the loss of one instance per role, or of
+  one zone for stateless roles, does not stop service. Data services recover
+  through their managed failover. Scheduled dispatch pauses until the single
+  scheduler is replaced; publish that measured gap. Publish only claims
+  exercised by the acceptance checks.
+- Main cost drivers: NAT per AZ, load balancers, Multi-AZ or HA database
+  classes, Valkey replicas, task hosts, VPC endpoints, and logs. Report them
+  separately from size labels.
+
+### Cross-instance readiness
+
+These code changes are needed before any role runs more than one replica. None
+depends on cloud work, so they can start now; they also benefit `hot-cloud`.
+
+[#144](https://github.com/hot-dev/hot/pull/144) completed the first four items.
+
+- [x] The app's API-key handoff
+      ([`keys.rs`](../../crates/hot_app/src/handlers/keys.rs)) kept the pending
+      key hash in an in-process map, so the create request could land on an
+      instance that never saw it. The new-key page now carries the hash in a
+      five-minute HS256 form token, signed with a key derived from
+      `HOT_APP_SESSION_SECRET` and bound to the key ID, user, org, and env.
+      Any app instance can verify it. The key ID's primary key makes the token
+      single-use. This needs no migration and no sticky sessions; every app
+      replica already shares the session secret.
+- [x] Env, Org, Project, and Build entity caches
+      ([`entity_cache.rs`](../../crates/hot/src/db/entity_cache.rs)) are read
+      only on SQLite, which is single-host. PostgreSQL reads always reach the
+      database and RLS. The env-wide event-handler cache is also SQLite-only and
+      rechecks `runtime_revision` every 500 ms. No change was needed.
+- [x] The API's in-flight and SSE connection limits
+      ([`rate_limit.rs`](../../crates/hot_api/src/rate_limit.rs)) stay per
+      process and are now documented as per-replica limits. Request RPS
+      already uses a shared PostgreSQL counter. Connection caps protect each
+      replica's own sockets and memory. Shared counters would need crash-safe
+      leases and a Valkey round trip on every admission. Size the per-org and
+      per-credential caps per replica: an account can hold up to N times them.
+      The app's auth-surface limits
+      ([`hot_app/src/rate_limit.rs`](../../crates/hot_app/src/rate_limit.rs))
+      are already documented as per-process backstops.
+- [x] Stream pub/sub uses Redis exactly when `queue.type` is `redis`. Memory
+      pub/sub only occurs with the memory or SQLite queue, and neither can span
+      hosts. With a Redis queue, the app, API, and worker now refuse to start
+      if they cannot create Redis pub/sub, instead of warning and serving
+      without it. MCP HTTP+SSE message delivery depends on it. Multi-replica
+      configuration validation in the deployment tooling must still require
+      `queue.type = "redis"`.
+- [ ] Verify legacy MCP HTTP+SSE, environment subscriptions, and stream
+      subscriptions when the paired requests land on different instances.
+- [ ] Verify sessions, uploaded builds, files, internal blobs, and per-instance
+      app caches across instances and through rolling replacement.
 
 ### GCP app/API hosting recommendation
 
@@ -1272,12 +1476,21 @@ release of the three presets.
 
 ### Implementation and acceptance
 
+- [ ] Complete [Cross-instance readiness](#cross-instance-readiness).
 - [ ] Extract independently scalable service modules using the same runtime
       image, configuration, secrets, and migration contract. Deliver secrets
       through per-service ECS `secrets` on AWS and the agent's tmpfs files on
       Compute Engine.
+- [ ] Implement the topology, ingress, networking, identities, and data tier
+      above for each scalable reference configuration, including the
+      streaming timeouts and the connection-budget validation.
 - [ ] Configure ingress behavior, readiness, graceful shutdown, connection
-      budgets, replica bounds, and rolling deployments per service.
+      budgets, replica bounds, and rolling deployments per service, following
+      the release order above.
+- [ ] Publish queue backlog, oldest-message age, and task-slot metrics for
+      autoscaling.
+- [ ] Qualify Valkey failover with queue reconciliation, and PostgreSQL
+      failover with scheduler lock loss.
 - [ ] Scale queue workers using measured queue demand, age/lag, and capacity.
       Scale task hosts using queued/running demand and available slots; drain
       hosts before scale-in and preserve durable task recovery.
@@ -1296,8 +1509,10 @@ release of the three presets.
       VM loss recovers durable work as well as testing the graceful drain path.
 - [ ] Prove cross-instance behavior for sessions, uploaded builds, files,
       internal blobs, cache invalidation, and database/queue coordination.
-- [ ] Document migration from managed-data compute to distributed compute,
-      including endpoint changes and scheduler/worker handoff.
+- [ ] Document migration from managed-data compute to distributed compute.
+      Local storage must first move to S3 or GCS. Then drain the VM, stop its
+      scheduler, start the scalable roles against the same managed data, switch
+      endpoints, verify, and retire the VM.
 
 Completion: multiple app/API/worker instances can serve one installation;
 instance loss and rolling upgrades preserve durable work and tenant boundaries;
@@ -1572,7 +1787,7 @@ or an existing operator destination without coupling telemetry to S3.
 | Storage | Local/S3/GCS contract checks and real-cloud identity/behavior checks |
 | Storage independence | AWS/GCP with Local/S3 and qualified GCS; mixed build/file backends, existing-bucket non-ownership, private-network access, independent state backend, and cross-cloud credentials |
 | Managed data | PostgreSQL/RLS/extensions, queue commands/failover, private networking, migration, and restore |
-| Scalable | Cross-instance correctness, worker interruption and recovery, singleton handoff, autoscaling, and rolling releases |
+| Scalable | Each scalable reference configuration: cross-instance correctness (handoff store, entity-cache invalidation, shared limits, Valkey pub/sub), streaming through load-balancer timeouts, zone and instance loss, worker interruption and recovery, Valkey and PostgreSQL failover, singleton handoff, connection-budget enforcement, autoscaling bounds, and ordered rolling releases with rollback |
 
 Cloud qualification runs use isolated accounts/projects or installation
 namespaces, explicit spending limits, and cleanup that distinguishes disposable
@@ -1590,7 +1805,8 @@ Recommended implementation slices, each within the phase shown:
 | 6 | 2 | GCS storage and real-bucket parity checks; can start after slice 1, in parallel with slices 2–5 |
 | 7 | 1 | Initial single-machine release gates for every reference configuration: preflight, upgrades, release delivery, measured recovery, trust/IAM, basic diagnostics, logging/monitoring, repeatable security updates, and the operator guide. Broader tooling for all eight operational areas continues in later slices |
 | 8 | 3 | Managed-data stacks and data migration qualification |
-| 9 | 4 | Scalable AWS and GCP stacks, using Compute Engine app/API and worker groups on GCP. Any future Cloud Run option requires separate runtime qualification |
+| 9 | 4 | [Cross-instance readiness](#cross-instance-readiness) code changes. Independent of cloud work; can start now, in parallel with any slice |
+| 10 | 4 | Scalable AWS and GCP stacks, using Compute Engine app/API and worker groups on GCP. Any future Cloud Run option requires separate runtime qualification |
 
 Before implementation, resolve exact image distribution, first supported OS and
 machine families (`m8i` on AWS; the GCP family), the ingress proxy, SMTP
