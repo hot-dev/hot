@@ -8,6 +8,41 @@ use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
 use uuid::Uuid;
 
+/// The qualified name a schedule's `fn` names: a string, or a function value.
+pub(crate) fn function_name(value: &Val) -> Result<String, String> {
+    match value {
+        Val::Str(s) => Ok((**s).to_owned()),
+        Val::Map(m) => {
+            // Handle Fn type wrapper
+            if let Some(Val::Str(type_name)) = m.get(&Val::from("$type"))
+                && &**type_name == "::hot::type/Fn"
+            {
+                if let Some(Val::Str(qualified_name)) = m.get(&Val::from("$val")) {
+                    Ok((**qualified_name).to_owned())
+                } else {
+                    Err("Fn value missing string $val for named function".to_string())
+                }
+            } else {
+                Err("Expected function reference or string, got Map".to_string())
+            }
+        }
+        Val::Box(b) => {
+            if let Some(fr) = b
+                .as_any()
+                .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
+            {
+                Ok(fr.name().to_string())
+            } else {
+                Err("Expected function reference or string".to_string())
+            }
+        }
+        other => Err(format!(
+            "Expected function reference or string for fn, got: {:?}",
+            other
+        )),
+    }
+}
+
 /// Create a new schedule dynamically (called by hot:schedule:new event handler)
 ///
 /// Arguments:
@@ -31,44 +66,9 @@ pub fn create_schedule(
     }
 
     // Extract function name
-    let fn_name: String = match &args[0] {
-        Val::Str(s) => (**s).to_owned(),
-        Val::Map(m) => {
-            // Handle Fn type wrapper
-            if let Some(Val::Str(type_name)) = m.get(&Val::from("$type"))
-                && &**type_name == "::hot::type/Fn"
-            {
-                if let Some(Val::Str(qualified_name)) = m.get(&Val::from("$val")) {
-                    (**qualified_name).to_owned()
-                } else {
-                    return HotResult::Err(Val::from(
-                        "Fn value missing string $val for named function".to_string(),
-                    ));
-                }
-            } else {
-                return HotResult::Err(Val::from(
-                    "Expected function reference or string, got Map".to_string(),
-                ));
-            }
-        }
-        Val::Box(b) => {
-            if let Some(fr) = b
-                .as_any()
-                .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
-            {
-                fr.name().to_string()
-            } else {
-                return HotResult::Err(Val::from(
-                    "Expected function reference or string".to_string(),
-                ));
-            }
-        }
-        other => {
-            return HotResult::Err(Val::from(format!(
-                "Expected function reference or string for fn, got: {:?}",
-                other
-            )));
-        }
+    let fn_name = match function_name(&args[0]) {
+        Ok(name) => name,
+        Err(e) => return HotResult::Err(Val::from(e)),
     };
 
     // Parse namespace and var from function name

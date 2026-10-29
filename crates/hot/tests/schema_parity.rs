@@ -23,8 +23,11 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 /// add NOT NULL to an existing column, so a trigger rejects NULL instead.
 const NULLABILITY_ENFORCED_BY_TRIGGER: &[&str] = &["org.active"];
 
-/// Indexes PostgreSQL has and SQLite cannot: trigram search over store text.
-const POSTGRES_ONLY_INDEXES: &[&str] = &["idx_store_map_entry_text"];
+/// Indexes PostgreSQL has and SQLite cannot or need not: trigram search over
+/// store text, and store key text in byte order for prefix reads, which SQLite
+/// reads from its unique key because it stores keys as JSON text.
+const POSTGRES_ONLY_INDEXES: &[&str] =
+    &["idx_store_map_entry_text", "idx_store_map_entry_key_prefix"];
 
 /// Indexes both have whose definitions only differ in engine syntax:
 /// PostgreSQL's UNIQUE NULLS NOT DISTINCT is SQLite's zero-sentinel COALESCE.

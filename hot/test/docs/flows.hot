@@ -457,6 +457,25 @@ meta ["test"] fn () {
   assert-eq(0, rate(null), "null arm")
 }
 
+level-of fn (n: Int): Level {
+  if(lt(n, 3), "low", if(lt(n, 7), "medium", "high"))
+}
+
+test-match-on-call-exhaustive
+meta ["test"] fn () {
+  // A match on a call is checked against the type the callee declares it
+  // returns, so these arms must cover every Level
+  label fn (n: Int): Str {
+    match level-of(n) {
+      "low" => { "L" }
+      "medium" | "high" => { "MH" }
+    }
+  }
+
+  assert-eq("L", label(1), "low has its own arm")
+  assert-eq("MH", label(9), "high in the union arm")
+}
+
 heading fn (n: Int): Direction {
   if(lt(n, 0), err("no heading"), Direction.Up)
 }

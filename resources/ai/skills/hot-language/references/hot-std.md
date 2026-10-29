@@ -721,10 +721,14 @@ Embedding type { model: Str?, field: Str?, text-search: Bool? }
 // CRUD
 put fn (store: Map, key: Str, value: Any): Any           // Set entry, replacing existing value
 put-if-missing fn (store: Map, key: Str, value: Any): Bool // Atomically create; false if key exists
+put-if fn (store: Map, key: Str, expected: Any, value: Any): Bool // Compare-and-set; null expects a missing key
+increment fn (store: Map, key: Str): Int                 // Atomically add 1; a missing key counts from 0
+increment fn (store: Map, key: Str, by: Int): Int        // Atomically add by; returns the new value
 get fn (store: Map, key: Str): Any?                      // Get by key (null if missing)
 get fn (store: Map, key: Str, default: Any): Any         // Get with default
 delete fn (store: Map, key: Str): Bool                   // Remove entry
 keys fn (store: Map): Vec<Str>                           // All keys
+keys fn (store: Map, opts: Map): Vec<Str>                // Keys with {prefix, limit, offset}
 vals fn (store: Map): Vec<Any>                           // All values
 length fn (store: Map): Int                              // Entry count
 is-empty fn (store: Map): Bool                           // True if no entries
@@ -735,7 +739,7 @@ last fn (store: Map): Any?                               // Last entry
 put-many fn (store: Map, entries: Map): Map              // Insert multiple entries
 merge fn (store: Map, entries: Map): Map                 // Alias for put-many
 list fn (store: Map): Vec                                // List entries (default limit 1000)
-list fn (store: Map, opts: Map): Vec                     // List with {limit, offset, order}
+list fn (store: Map, opts: Map): Vec                     // List with {limit, offset, prefix}
 clear fn (store: Map): Bool                              // Remove all entries
 destroy fn (store: Map): Bool                            // Delete the store itself
 
@@ -752,6 +756,29 @@ reduce fn (store: Map, reducer: Fn, initial: Any): Any   // Reduce over entries
 slice fn (store: Map, start: Int): Vec                   // Entries from offset
 slice fn (store: Map, start: Int, end: Int): Vec         // Entries in range
 ```
+
+Handlers can run at the same time, so `get` then `put` on a shared key can
+lose another handler's write. Use `put-if-missing` to create an entry once,
+`increment` for counters, and a `put-if` retry loop to change a value
+(the computation must be pure, since it can run more than once):
+
+```hot
+::store ::hot::store
+
+cases ::store/Map({name: "cases"})
+
+add-answer fn (case-id: Str, answer-id: Str, answer: Any): Map {
+    current ::store/get(cases, case-id)
+    next assoc(if(is-null(current), {}, current), answer-id, answer)
+    cond {
+        ::store/put-if(cases, case-id, current, next) => { next }
+        => { add-answer(case-id, answer-id, answer) }
+    }
+}
+```
+
+`list` and `keys` with `prefix` read only the Str keys that start with it,
+from an index; `filter` reads every entry.
 
 ---
 

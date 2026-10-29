@@ -188,6 +188,27 @@ pub struct FunctionSignature {
     variadic: bool,
 }
 
+/// One arity of a top-level function: how many parameters it takes and
+/// the return type it declares, as written.
+#[derive(Debug, Clone)]
+struct DeclaredArity {
+    params: usize,
+    variadic: bool,
+    return_type: Option<String>,
+}
+
+/// What the qualified-variable pre-pass records about a top-level name a
+/// call can name: a function's arities with the namespace that declares
+/// them, or the function a var import (`local ::ns/fn`) names.
+#[derive(Debug, Clone)]
+enum DeclaredFunction {
+    Arities {
+        namespace: String,
+        arities: Vec<DeclaredArity>,
+    },
+    Import(String),
+}
+
 /// Type implementation for type extensions
 #[derive(Debug, Clone)]
 pub struct Implementation {
@@ -609,6 +630,15 @@ pub struct TypeChecker {
     /// `Any`. Mirrors how the compiler/VM looks up variables in
     /// `NamespaceRegistry`.
     qualified_variables: AHashMap<String, TypeExpr>,
+    /// Fully-qualified name (`::ns/fn`) → that function's arities and
+    /// declared return types, or the function a var import names.
+    /// Populated by the qualified-variable pre-pass so a `match` on a call
+    /// is checked against the callee's declared return type (see
+    /// `declared_call_return_type`).
+    declared_functions: AHashMap<String, DeclaredFunction>,
+    /// Namespace → its alias map (`::ctx` → `::hot::ctx`), for resolving a
+    /// declaration's annotations as its own namespace does.
+    namespace_aliases: AHashMap<String, AHashMap<String, String>>,
     /// Set by `shallow_infer_top_level_type` when an inference consulted a
     /// qualified variable that is not resolved yet. Drives the worklist in
     /// `check_program`: only variables blocked on something unresolved can
@@ -683,6 +713,8 @@ impl TypeChecker {
             impl_locations: AHashMap::new(),
             refinement_displays: AHashMap::new(),
             qualified_variables: AHashMap::new(),
+            declared_functions: AHashMap::new(),
+            namespace_aliases: AHashMap::new(),
             pending_dependency: std::cell::Cell::new(false),
             core_variables: AHashMap::new(),
             in_fn_body: 0,
@@ -984,6 +1016,7 @@ impl TypeChecker {
                 location: None,
             });
         }
+        self.namespace_aliases = alias_maps;
         // Refresh type metadata now that top-level alias variables have been
         // inferred. Struct fields can legally use namespace-local aliases such
         // as `Session ::ai::session/Session` followed by `session: Session`;
@@ -1131,6 +1164,7 @@ impl TypeChecker {
                 if let Some(note) = Self::deprecated_meta_note(var) {
                     self.deprecated_defs.insert(qualified.clone(), note);
                 }
+                self.record_declared_function(&qualified, value, &alias_map, &ns_str);
 
                 self.pending_dependency.set(false);
                 let inferred = self.shallow_infer_top_level_type(var, value, &alias_map, &ns_str);
@@ -1314,11 +1348,72 @@ impl TypeChecker {
         ns_ref: &crate::lang::ast::NsRef,
         alias_map: &AHashMap<String, String>,
     ) -> Option<TypeExpr> {
+        let qualified = Self::qualified_ns_ref_name(ns_ref, alias_map)?;
+        self.qualified_variables.get(&qualified).cloned()
+    }
+
+    /// The qualified name (`::hot::ctx/get`) a `::alias/name` reference
+    /// names, resolving its namespace through `alias_map`.
+    fn qualified_ns_ref_name(
+        ns_ref: &crate::lang::ast::NsRef,
+        alias_map: &AHashMap<String, String>,
+    ) -> Option<String> {
         let func_name = ns_ref.function_name.as_ref()?;
         let raw_ns = ns_ref.ns.to_string();
         let resolved_ns = alias_map.get(&raw_ns).cloned().unwrap_or(raw_ns);
-        let qualified = format!("{}/{}", resolved_ns, func_name);
-        self.qualified_variables.get(&qualified).cloned()
+        Some(format!("{}/{}", resolved_ns, func_name))
+    }
+
+    /// Record a top-level function's arities and declared return types,
+    /// or the function a var import (`local ::ns/fn`) names, for
+    /// `declared_call_return_type`.
+    fn record_declared_function(
+        &mut self,
+        qualified: &str,
+        value: &Value,
+        alias_map: &AHashMap<String, String>,
+        ns_str: &str,
+    ) {
+        let mut fn_defs = Vec::new();
+        collect_fn_defs(value, &mut fn_defs);
+        if fn_defs.is_empty() {
+            if let Some(target) = Self::imported_function(value, alias_map) {
+                self.declared_functions
+                    .insert(qualified.to_string(), DeclaredFunction::Import(target));
+            }
+            return;
+        }
+        let new_arities = fn_defs.iter().map(|fn_def| DeclaredArity {
+            params: fn_def.args.args.len(),
+            variadic: fn_def.args.variadic,
+            return_type: fn_def.return_type.clone(),
+        });
+        // The parser can split one function's arities across several
+        // top-level entries, so add to what an earlier entry recorded.
+        match self.declared_functions.get_mut(qualified) {
+            Some(DeclaredFunction::Arities { arities, .. }) => arities.extend(new_arities),
+            _ => {
+                self.declared_functions.insert(
+                    qualified.to_string(),
+                    DeclaredFunction::Arities {
+                        namespace: ns_str.to_string(),
+                        arities: new_arities.collect(),
+                    },
+                );
+            }
+        }
+    }
+
+    /// The qualified function a var import (`local ::ns/fn`) names.
+    fn imported_function(value: &Value, alias_map: &AHashMap<String, String>) -> Option<String> {
+        match value {
+            Value::Ref(Ref::Ns(ns_ref)) => Self::qualified_ns_ref_name(ns_ref, alias_map),
+            // `local ::ns/fn` parses as `[VarRef(local), Ref::Ns(target)]`.
+            Value::MultipleValues(values) => values
+                .iter()
+                .find_map(|v| Self::imported_function(v, alias_map)),
+            _ => None,
+        }
     }
 
     /// Pure (no `&mut self`) variant of `parse_type_annotation` for use in the
@@ -1430,10 +1525,11 @@ impl TypeChecker {
     ///   `Result.Ok` arm takes every `Ok`, so nothing is left to cover; a
     ///   `Result.Err` arm covers no value, and the other arms still must.
     ///
-    /// When the subject type can't be tied to a declared enum (e.g.
-    /// matches on `Int`/`Str` literals, on `Any`, on the result of a
-    /// function call inside a non-`fn match` standalone match flow),
-    /// no error is emitted - existing behavior is preserved.
+    /// A standalone `match` on a call takes the callee's declared return
+    /// type (`declared_call_return_type`). When the subject type can't be
+    /// tied to a declared enum or literal union (matches on `Int`/`Str`
+    /// literals, on `Any`, on a call whose callee declares no return
+    /// type), no error is emitted.
     fn check_match_exhaustiveness(&mut self, flow: &Flow) {
         let Some(subject_type) = self.match_subject_stack.last().cloned().flatten() else {
             return;
@@ -1585,6 +1681,87 @@ impl TypeChecker {
     /// `Ok` whatever value it holds.
     fn atom_takes_every_ok(&self, type_name: &Option<String>, variant: &Option<String>) -> bool {
         self.atom_names_result(type_name, variant) && variant.as_deref() != Some("Err")
+    }
+
+    /// The return type declared by the function a `match` subject calls
+    /// (`f(x)`, `::alias/f(x)`, `x |> f()`, or a var import of one),
+    /// resolved in the callee's own namespace. `None` when the callee or
+    /// the called arity is unknown, or that arity declares no return type.
+    fn declared_call_return_type(&mut self, subject: &Value) -> Option<TypeExpr> {
+        let (fn_call, piped) = match subject {
+            Value::FnCall(fn_call) => (fn_call, 0),
+            Value::Flow(flow) if flow.flow_type == FlowType::Pipe && flow.expressions.len() > 1 => {
+                match flow.expressions.last() {
+                    Some(Value::FnCall(fn_call)) => (fn_call, 1),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let mut qualified = match &*fn_call.function {
+            Value::Ref(Ref::Var(var_ref)) if var_ref.var.deep_path.is_none() => {
+                let name = var_ref.var.sym.name();
+                if self.context.is_shadowing_local(name) {
+                    return None;
+                }
+                // A name declared in this namespace wins over a core one.
+                let local = format!("{}/{}", self.context.current_namespace, name);
+                if self.qualified_variables.contains_key(&local) {
+                    local
+                } else {
+                    self.core_variables.get(name)?.last()?.clone()
+                }
+            }
+            Value::Ref(Ref::Ns(ns_ref)) => {
+                Self::qualified_ns_ref_name(ns_ref, self.context.current_aliases_ref())?
+            }
+            _ => return None,
+        };
+        // Follow var imports to the function they name; the bound guards
+        // against an import cycle.
+        let mut hops = 0;
+        let (namespace, arities) = loop {
+            match self.declared_functions.get(&qualified)? {
+                DeclaredFunction::Arities { namespace, arities } => break (namespace, arities),
+                DeclaredFunction::Import(target) if hops < 16 => {
+                    qualified = target.clone();
+                    hops += 1;
+                }
+                DeclaredFunction::Import(_) => return None,
+            }
+        };
+        let arg_count = fn_call.args.len() + piped;
+        let arity = arities
+            .iter()
+            .find(|a| !a.variadic && a.params == arg_count)
+            .or_else(|| {
+                arities
+                    .iter()
+                    .find(|a| a.variadic && arg_count + 1 >= a.params)
+            })?;
+        let return_type = arity.return_type.clone()?;
+        let namespace = namespace.clone();
+        Some(self.parse_type_annotation_in(&return_type, &namespace))
+    }
+
+    /// Parse `annotation` the way `namespace` resolves it (its own types and
+    /// aliases). Diagnostics are dropped: the declaration reports its own.
+    fn parse_type_annotation_in(&mut self, annotation: &str, namespace: &str) -> TypeExpr {
+        let aliases = self
+            .namespace_aliases
+            .get(namespace)
+            .cloned()
+            .unwrap_or_default();
+        let saved_namespace =
+            std::mem::replace(&mut self.context.current_namespace, namespace.to_string());
+        let saved_aliases = std::mem::replace(&mut self.context.current_aliases, aliases);
+        let (errors, warnings) = (self.errors.errors.len(), self.errors.warnings.len());
+        let parsed = self.parse_type_annotation(annotation, None);
+        self.errors.errors.truncate(errors);
+        self.errors.warnings.truncate(warnings);
+        self.context.current_namespace = saved_namespace;
+        self.context.current_aliases = saved_aliases;
+        parsed
     }
 
     /// Describe a `match` subject typed as a literal union (`Severity`,
@@ -2891,7 +3068,16 @@ impl TypeChecker {
             Value::CondDefault(body) => self.infer_flow_type(body),
 
             Value::Match(match_expr) => {
-                let subject_type = self.infer_value_type(&match_expr.value);
+                let mut subject_type = self.infer_value_type(&match_expr.value);
+                // User function calls infer as `Any`; take the type the
+                // callee declares it returns. Arms naming `Result` match
+                // the call's Result, which `check_match_exhaustiveness_for`
+                // allows for.
+                if matches!(subject_type, TypeExpr::Any)
+                    && let Some(declared) = self.declared_call_return_type(&match_expr.value)
+                {
+                    subject_type = declared;
+                }
                 let subject_name = match &*match_expr.value {
                     Value::Ref(Ref::Var(var_ref))
                         if var_ref.var.deep_path.is_none() && var_ref.var.deep_set.is_none() =>
@@ -5974,9 +6160,9 @@ mod tests {
     }
 
     /// Arms naming `Result` match the subject as a Result: `Result` or
-    /// `Result.Ok` takes every Ok, so a typed binding or a `fn match`
-    /// parameter has nothing left to cover. These were flagged as missing
-    /// every member.
+    /// `Result.Ok` takes every Ok, so a typed binding, a `fn match`
+    /// parameter or a call has nothing left to cover. The first two were
+    /// flagged as missing every member.
     #[test]
     fn test_match_taking_every_ok_is_not_checked_against_the_value_type() {
         for arms in [
@@ -6004,6 +6190,11 @@ mod tests {
             by-enum fn (x: Str): Int {{
                 d: Dir get-dir(x)
                 match d {{
+                    {arms}
+                }}
+            }}
+            by-call fn (x: Str): Int {{
+                match get-s(x) {{
                     {arms}
                 }}
             }}
@@ -6040,6 +6231,12 @@ mod tests {
                 Dir.Up => { 1 }
             }
         }
+        by-call fn (x: Str): Int {
+            match get-s(x) {
+                Result.Err => { 0 }
+                "b" | "c" => { 1 }
+            }
+        }
         "#,
         );
         assert_eq!(
@@ -6051,6 +6248,7 @@ mod tests {
                     vec![r#""b""#.to_string(), r#""c""#.to_string()]
                 ),
                 ("Dir".to_string(), vec!["Err".to_string()]),
+                ("S".to_string(), vec![r#""a""#.to_string()]),
             ],
         );
     }
@@ -6067,12 +6265,209 @@ mod tests {
             Result.Ok => { 1 }
             Result.Err => { 0 }
         }
+        get-r fn (): Result { Result.Pending }
+        settle-call fn (): Int {
+            match get-r() {
+                Result.Ok => { 1 }
+                Result.Err => { 0 }
+            }
+        }
         "#,
         );
         assert_eq!(
             errors,
-            vec![("Result".to_string(), vec!["Pending".to_string()])],
+            vec![
+                ("Result".to_string(), vec!["Pending".to_string()]),
+                ("Result".to_string(), vec!["Pending".to_string()]),
+            ],
         );
+    }
+
+    #[test]
+    fn test_match_on_call_is_checked_against_declared_return_type() {
+        let errors = literal_union_match_errors(
+            r#"
+        ::exh ns
+        S type "a" | "b" | "c"
+        get-s fn (x: Str): S { "a" }
+
+        by-call fn (x: Str): Str {
+            match get-s(x) {
+                "a" => { "A" }
+                "b" => { "B" }
+            }
+        }
+
+        by-binding fn (x: Str): Str {
+            s: S get-s(x)
+            match s {
+                "a" => { "A" }
+                "b" => { "B" }
+            }
+        }
+
+        by-param fn match (s: S): Str {
+            "a" => { "A" }
+            "b" => { "B" }
+        }
+        "#,
+        );
+        let missing_c = ("S".to_string(), vec![r#""c""#.to_string()]);
+        assert_eq!(errors, vec![missing_c; 3]);
+    }
+
+    #[test]
+    fn test_match_on_call_from_another_namespace_is_checked() {
+        let errors = literal_union_match_errors(
+            r#"
+        ::exh::other ns
+        T type "x" | "y"
+        other-t fn (x: Str): T { "x" }
+
+        ::exh ns
+        ::o ::exh::other
+        imported-t ::exh::other/other-t
+
+        by-alias fn (x: Str): Str {
+            match ::o/other-t(x) {
+                "x" => { "X" }
+            }
+        }
+
+        by-full-path fn (x: Str): Str {
+            match ::exh::other/other-t(x) {
+                "x" => { "X" }
+            }
+        }
+
+        by-var-import fn (x: Str): Str {
+            match imported-t(x) {
+                "x" => { "X" }
+            }
+        }
+
+        by-pipe fn (x: Str): Str {
+            match x |> ::o/other-t() {
+                "x" => { "X" }
+            }
+        }
+        "#,
+        );
+        let missing_y = ("T".to_string(), vec![r#""y""#.to_string()]);
+        assert_eq!(errors, vec![missing_y; 4]);
+    }
+
+    #[test]
+    fn test_match_on_call_returning_closed_enum_is_checked() {
+        let errors = literal_union_match_errors(
+            r#"
+        Dir enum { Up, Down, Left }
+        get-dir fn (x: Str): Dir { Dir.Up }
+
+        describe fn (x: Str): Str {
+            match get-dir(x) {
+                Dir.Up => { "up" }
+            }
+        }
+        "#,
+        );
+        assert_eq!(
+            errors,
+            vec![(
+                "Dir".to_string(),
+                vec!["Down".to_string(), "Left".to_string()]
+            )],
+        );
+    }
+
+    #[test]
+    fn test_match_on_call_uses_the_called_arity() {
+        let errors = literal_union_match_errors(
+            r#"
+        S type "a" | "b"
+        pick fn (x: Str): S { "a" }
+        pick fn (x: Str, y: Str): Str { y }
+
+        one fn (x: Str): Str {
+            match pick(x) {
+                "a" => { "A" }
+            }
+        }
+
+        two fn (x: Str): Str {
+            match pick(x, x) {
+                "z" => { "Z" }
+            }
+        }
+        "#,
+        );
+        assert_eq!(errors, vec![("S".to_string(), vec![r#""b""#.to_string()])]);
+    }
+
+    #[test]
+    fn test_match_on_call_without_closed_return_type_is_not_checked() {
+        let errors = literal_union_match_errors(
+            r#"
+        Open type open "p" | "q"
+        open-s fn (x: Str): Open { "p" }
+        untyped fn (x: Str) { "p" }
+        any-s fn (x: Str): Any { "p" }
+
+        by-open fn (x: Str): Str {
+            match open-s(x) {
+                "p" => { "P" }
+                _ => { "other" }
+            }
+        }
+
+        by-untyped fn (x: Str): Str {
+            match untyped(x) {
+                "p" => { "P" }
+            }
+        }
+
+        by-any fn (x: Str): Str {
+            match any-s(x) {
+                "p" => { "P" }
+            }
+        }
+
+        by-unknown fn (x: Str): Str {
+            match ::nowhere/missing(x) {
+                "p" => { "P" }
+            }
+        }
+
+        by-local-fn fn (get-s: Fn, x: Str): Str {
+            match get-s(x) {
+                "p" => { "P" }
+            }
+        }
+        "#,
+        );
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    #[test]
+    fn test_covered_match_on_call_is_ok() {
+        for arms in [
+            r#""a" => { 1 }  "b" => { 2 }  "c" => { 3 }"#,
+            r#""a" => { 1 }  _ => { 0 }"#,
+            r#""a" => { 1 }  Any => { 0 }"#,
+            r#""a" => { 1 }  "b" | "c" => { 2 }"#,
+            r#"Str => { 1 }"#,
+            // Arms naming `Result` match the call's Result, not its value.
+            r#"Result.Ok => { 1 }  Result.Err => { 0 }"#,
+        ] {
+            let source = format!(
+                "S type \"a\" | \"b\" | \"c\"\n\
+                 get-s fn (x: Str): S {{ \"a\" }}\n\
+                 rate fn (x: Str): Int {{\nmatch get-s(x) {{\n{}\n}}\n}}\n",
+                arms.replace("  ", "\n")
+            );
+            let errors = literal_union_match_errors(&source);
+            assert!(errors.is_empty(), "arms {:?} gave {:?}", arms, errors);
+        }
     }
 
     #[test]
