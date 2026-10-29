@@ -21,7 +21,7 @@ locals {
   tag         = "hot-${local.config.name}"
 }
 resource "google_project_service" "required" {
-  for_each           = toset(["compute.googleapis.com", "secretmanager.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com"])
+  for_each           = toset(["compute.googleapis.com", "secretmanager.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com", "pubsub.googleapis.com"])
   project            = local.config.project
   service            = each.value
   disable_on_destroy = false
@@ -80,12 +80,76 @@ resource "google_project_iam_member" "telemetry" {
   role     = each.value
   member   = "serviceAccount:${google_service_account.host.email}"
 }
-resource "google_secret_manager_secret_iam_member" "runtime" {
-  for_each  = local.config.secret_references
+# The release pointer: the release process adds a version {"release": "X.Y.Z"};
+# OpenTofu only creates the secret. Secret Manager has a "latest" alias, which
+# the agent reads.
+resource "google_secret_manager_secret" "release" {
+  secret_id = "${local.tag}-release"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.required]
+}
+# Values the installation generates for itself, stored once by the agent.
+resource "google_secret_manager_secret" "generated" {
+  secret_id = "${local.tag}-generated"
+  replication {
+    auto {}
+  }
+  lifecycle { prevent_destroy = true }
+  depends_on = [google_project_service.required]
+}
+# The operator's TLS certificate and key, and any SMTP, OAuth, or S3
+# credentials, as one JSON object.
+resource "google_secret_manager_secret" "operator" {
+  secret_id = "${local.tag}-operator"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.required]
+}
+resource "google_secret_manager_secret_iam_member" "read" {
+  for_each  = { release = google_secret_manager_secret.release.id, generated = google_secret_manager_secret.generated.id, operator = google_secret_manager_secret.operator.id }
   project   = local.config.project
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.host.email}"
+}
+resource "google_secret_manager_secret_iam_member" "store_generated" {
+  project   = local.config.project
+  secret_id = google_secret_manager_secret.generated.id
+  role      = "roles/secretmanager.secretVersionAdder"
+  member    = "serviceAccount:${google_service_account.host.email}"
+}
+# The only way to run anything on the host: agent commands published here.
+# The agent pulls them, so the host needs no inbound connectivity.
+resource "google_pubsub_topic" "commands" {
+  name                       = "${local.tag}-commands"
+  message_retention_duration = "3600s"
+  depends_on                 = [google_project_service.required]
+}
+resource "google_pubsub_subscription" "commands" {
+  name                       = "${local.tag}-agent"
+  topic                      = google_pubsub_topic.commands.id
+  ack_deadline_seconds       = 60
+  message_retention_duration = "3600s"
+  expiration_policy {
+    ttl = ""
+  }
+}
+resource "google_pubsub_subscription_iam_member" "agent" {
+  subscription = google_pubsub_subscription.commands.name
+  role         = "roles/pubsub.subscriber"
+  member       = "serviceAccount:${google_service_account.host.email}"
+}
+locals {
+  host_config = merge(local.config, {
+    data_volume_id       = google_compute_disk.data.id
+    release_pointer      = google_secret_manager_secret.release.id
+    status_reference     = "${local.tag}-status"
+    command_subscription = google_pubsub_subscription.commands.id
+    secret_references    = { generated = google_secret_manager_secret.generated.id, operator = google_secret_manager_secret.operator.id }
+  })
 }
 resource "google_compute_firewall" "https" {
   name    = "${local.tag}-https"
@@ -152,7 +216,7 @@ resource "google_compute_instance" "host" {
     enable-oslogin         = "FALSE"
     serial-port-enable     = "FALSE"
     startup-script = templatefile("${path.module}/../../../../runtime/bootstrap.sh.tftpl", {
-      config_base64 = base64encode(jsonencode(merge(local.config, { data_volume_id = google_compute_disk.data.id })))
+      config_base64 = base64encode(jsonencode(local.host_config))
     })
   }
   lifecycle {
@@ -161,10 +225,13 @@ resource "google_compute_instance" "host" {
       error_message = "The GCP root requires installation.cloud = gcp."
     }
   }
-  depends_on = [google_compute_router_nat.egress, google_project_iam_member.telemetry, google_secret_manager_secret_iam_member.runtime]
+  depends_on = [google_compute_router_nat.egress, google_project_iam_member.telemetry, google_secret_manager_secret_iam_member.read, google_pubsub_subscription_iam_member.agent]
 }
 output "private_ip" { value = google_compute_instance.host.network_interface[0].network_ip }
 output "instance_id" { value = google_compute_instance.host.id }
 output "retained_data_volume_id" { value = google_compute_disk.data.id }
 output "egress_ips" { value = google_compute_address.egress[*].address }
-output "configuration" { value = local.config }
+output "configuration" { value = local.host_config }
+output "release_secret" { value = google_secret_manager_secret.release.id }
+output "operator_secret" { value = google_secret_manager_secret.operator.id }
+output "command_topic" { value = google_pubsub_topic.commands.id }

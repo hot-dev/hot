@@ -5,20 +5,28 @@ terraform {
 variable "installation" {
   description = "Non-secret installation contract. Secrets are cloud secret-store references only."
   type = object({
-    schema_version    = optional(number, 1)
-    name              = string
-    cloud             = string
-    region            = string
-    zone              = string
-    project           = optional(string, "")
-    size              = optional(string, "small")
-    host_image        = string
-    release_pointer   = string
-    secret_references = map(string)
-    app_hostname      = string
-    api_hostname      = string
-    app_exposure      = optional(string, "private")
-    api_exposure      = optional(string, "private")
+    schema_version = optional(number, 1)
+    name           = string
+    cloud          = string
+    region         = string
+    zone           = string
+    project        = optional(string, "")
+    size           = optional(string, "small")
+    host_image     = string
+    # The stacks create the release pointer, status, and secret containers and
+    # fill these in; values given here are ignored.
+    release_pointer   = optional(string, "")
+    secret_references = optional(map(string), {})
+    # The first administrator, created by the agent with a generated password.
+    admin_email = optional(string, "")
+    # Where release manifests are published; empty means Hot's GitHub releases.
+    manifest_base_url = optional(string, "")
+    # Non-secret HOT_* settings for every Hot service, such as HOT_EMAIL_PROVIDER.
+    settings     = optional(map(string), {})
+    app_hostname = string
+    api_hostname = string
+    app_exposure = optional(string, "private")
+    api_exposure = optional(string, "private")
     storage = object({
       build = object({
         backend = string
@@ -74,8 +82,22 @@ variable "installation" {
     error_message = "The network needs a usable IPv4 CIDR; client ranges must be valid IPv4 CIDRs narrower than /0."
   }
   validation {
-    condition     = var.installation.host_image != "" && var.installation.release_pointer != "" && length(var.installation.secret_references) > 0
-    error_message = "A baked host image, release pointer, and cloud secret references are required; do not put secret values in this object."
+    condition     = var.installation.host_image != ""
+    error_message = "A baked host image is required."
+  }
+  validation {
+    condition     = var.installation.admin_email == "" || can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.installation.admin_email))
+    error_message = "admin_email must be an email address."
+  }
+  validation {
+    condition     = var.installation.manifest_base_url == "" || startswith(var.installation.manifest_base_url, "https://")
+    error_message = "manifest_base_url must use https."
+  }
+  validation {
+    condition = alltrue([for key in keys(var.installation.settings) :
+      can(regex("^HOT_[A-Z0-9_]+$", key)) && length(regexall("SECRET|PASSWORD|TOKEN|_KEY|_URI", key)) == 0
+    ])
+    error_message = "settings take non-secret HOT_* names; secrets belong in the operator secret bundle."
   }
   validation {
     condition     = var.installation.cloud != "gcp" || var.installation.project != ""

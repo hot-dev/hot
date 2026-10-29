@@ -130,3 +130,19 @@ run "existing_network_ownership" {
     error_message = "Existing networking must not be recreated or re-routed."
   }
 }
+
+run "agent_channel" {
+  command = plan
+  assert {
+    condition     = google_pubsub_subscription_iam_member.agent.role == "roles/pubsub.subscriber" && google_pubsub_topic.commands.name == "hot-hot-example-commands"
+    error_message = "Host commands arrive on the installation's own Pub/Sub subscription."
+  }
+  assert {
+    condition     = google_secret_manager_secret_iam_member.store_generated.role == "roles/secretmanager.secretVersionAdder"
+    error_message = "The host may add versions only to its generated secrets."
+  }
+  assert {
+    condition     = length(google_secret_manager_secret_iam_member.read) == 3
+    error_message = "The host reads the release pointer, generated secrets, and operator secrets."
+  }
+}

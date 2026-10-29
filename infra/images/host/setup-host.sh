@@ -120,6 +120,8 @@ systemctl start docker
 docker pull -q "$RUNTIME_IMAGE"
 container=$(docker create "$RUNTIME_IMAGE")
 docker cp "$container:/usr/share/hot/bin/hotbox-linux-x86_64" "$work/hotbox"
+# The deploy agent and the bundle renderer it uses come from the same image.
+docker cp "$container:/usr/share/hot/selfhost/." "$work/selfhost"
 docker rm "$container" >/dev/null
 docker image rm "$RUNTIME_IMAGE" >/dev/null
 # Kata's shim bind-mounts hotbox from this host path into each guest.
@@ -137,6 +139,17 @@ install -D -m 0755 "$work/hotbox" "$mnt/usr/local/bin/hotbox"
 umount "$mnt"
 losetup -d "$loop"
 sha256sum "$rootfs" | cut -d' ' -f1 > "$rootfs.sha256"
+
+log "Installing the deploy agent"
+install -d -m 0755 "$HOST_DIR/agent" "$HOST_DIR/runtime"
+install -m 0644 "$work/selfhost/agent/hot_agent.py" "$HOST_DIR/agent/hot_agent.py"
+install -m 0644 "$work/selfhost/runtime/render.py" "$work/selfhost/runtime/provision_runtime.sql" "$HOST_DIR/runtime/"
+# SSM Run Command documents and operators invoke `hot-agent command ...`.
+cat > /usr/local/bin/hot-agent <<'AGENT'
+#!/bin/sh
+exec /usr/bin/python3 -I /opt/hot-host/agent/hot_agent.py "$@"
+AGENT
+chmod 0755 /usr/local/bin/hot-agent
 
 log "Writing Kata and containerd configuration"
 install -d -m 0755 /opt/kata/share/defaults/kata-containers
@@ -426,6 +439,25 @@ OOMScoreAdjust=-999
 LimitNOFILE=1048576
 LimitNPROC=infinity
 LimitCORE=infinity
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# Enabled at boot by the installation's bootstrap, which first writes
+# /etc/hot/installation.json.
+cat > /etc/systemd/system/hot-agent.service <<'UNIT'
+[Unit]
+Description=Hot deploy agent
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+ConditionPathExists=/etc/hot/installation.json
+
+[Service]
+ExecStart=/usr/local/bin/hot-agent run
+Restart=always
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target

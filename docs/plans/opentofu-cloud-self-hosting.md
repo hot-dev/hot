@@ -1040,7 +1040,16 @@ Changes for self-hosting:
 - [ ] Implement the host deploy agent and release pointer from
       [Release delivery](#release-delivery-and-github-actions), with status
       reporting and the drain, migrate, and stop-before-start sequence.
-- [ ] Use VM identity to retrieve secrets; keep secret values out of images,
+      [`hot_agent.py`](../../infra/agent/hot_agent.py) (standard-library
+      Python, shipped in the runtime image and installed by the host bake)
+      verifies signed manifests, delivers secrets as tmpfs files, deploys in
+      order (old scheduler stopped first, migrations before services, new
+      scheduler last), checks readiness through the ingress, and reports
+      status. The stacks create the pointer, status, secret containers, and
+      command channel (an SSM command document on AWS; Pub/Sub on GCP). On
+      GCP the pointer is a Secret Manager secret, which has a `latest` alias,
+      and status goes to Cloud Logging. Check this after a real deployment.
+- [x] Use VM identity to retrieve secrets; keep secret values out of images,
       instance metadata/user-data, command logs, process environments, and
       ordinary OpenTofu outputs. Deliver them as tmpfs files through the agent
       as described in [Secrets delivery](#secrets-delivery).

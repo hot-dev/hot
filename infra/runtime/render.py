@@ -19,7 +19,12 @@ RELEASE_ISSUER = "https://token.actions.githubusercontent.com"
 # The bundle's container network, where PostgreSQL, Valkey, ingress, and the
 # Hot services listen. Fixed so user code can be denied all of it.
 RUNTIME_SUBNET = "172.30.0.0/24"
-CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "size", "host_image", "release_pointer", "secret_references", "app_hostname", "api_hostname", "app_exposure", "api_exposure", "storage", "network"}
+CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "size", "host_image", "release_pointer", "secret_references", "app_hostname", "api_hostname", "app_exposure", "api_exposure", "storage", "network",
+               # Read by the host agent, not by the bundle.
+               "data_volume_id", "admin_email", "manifest_base_url", "status_reference", "command_subscription",
+               "settings"}
+# Names that would carry a secret; those belong in the operator secret bundle.
+SECRET_MARKERS = ("SECRET", "PASSWORD", "TOKEN", "_KEY", "_URI")
 
 
 def validate(document):
@@ -40,6 +45,18 @@ def validate(document):
             raise ValueError("Public/mixed ingress is not implemented in this development slice")
         if not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", config.get(endpoint + "_hostname", "")):
             raise ValueError("App/API require DNS hostnames without schemes, ports, or paths")
+    if config.get("admin_email") and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", config["admin_email"]):
+        raise ValueError("admin_email must be an email address")
+    if not (config.get("manifest_base_url") or "https://").startswith("https://"):
+        raise ValueError("manifest_base_url must use https")
+    settings = config.get("settings", {})
+    if not isinstance(settings, dict):
+        raise ValueError("settings must map HOT_* names to values")
+    for key, value in settings.items():
+        if not re.fullmatch(r"HOT_[A-Z0-9_]+", key) or not isinstance(value, str):
+            raise ValueError(f"settings entry {key!r} must be a HOT_* name with a string value")
+        if any(marker in key for marker in SECRET_MARKERS):
+            raise ValueError(f"settings entry {key} looks like a secret; put it in the operator secret bundle")
     if config["app_hostname"] == config["api_hostname"]:
         raise ValueError("App and API must have distinct hostnames")
     if set(config.get("storage", {})) != {"build", "file"}:
@@ -90,7 +107,10 @@ def verify_manifest_signature(manifest_path, bundle_path, signer=RELEASE_SIGNER,
         raise ValueError("Manifest signature did not verify" + (": " + detail[-1] if detail else ""))
 
 
-def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_session_tokens=False):
+def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_session_tokens=False,
+           operator_secrets=None):
+    """`operator_secrets` maps a Hot service role to extra secret names, such
+    as SMTP or OAuth credentials, that it mounts from the operator bundle."""
     config = validate(document)
     if set(manifest) - MANIFEST_KEYS:
         raise ValueError("Unknown manifest fields: " + ", ".join(sorted(set(manifest) - MANIFEST_KEYS)))
@@ -138,8 +158,11 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     deny = [RUNTIME_SUBNET]
     if config.get("network", {}).get("mode", "new") == "new":
         deny.append(config.get("network", {}).get("cidr", "10.68.0.0/16"))
+    for key in config.get("settings", {}):
+        if key in common_env or key.endswith(("_STORAGE_TYPE", "_STORAGE_PATH")) or "_AWS_S3_" in key:
+            raise ValueError(f"settings entry {key} is set by the runtime bundle")
     for role in SERVICES:
-        env, mounts = dict(common_env), []
+        env, mounts = {**common_env, **config.get("settings", {})}, []
         if role in {"worker", "task-worker"}:
             env["HOT_NETWORK_DENY_CIDRS"] = ",".join(deny)
         keys = ["HOT_DB_URI", "HOT_REDIS_URI"]
@@ -161,6 +184,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
                     keys += [prefix + "_AWS_ACCESS_KEY_ID", prefix + "_AWS_SECRET_ACCESS_KEY"]
                     if s3_session_tokens:
                         keys.append(prefix + "_AWS_SESSION_TOKEN")
+        keys += [key for key in (operator_secrets or {}).get(role, []) if key not in keys]
         for key in keys:
             env[key + "_FILE"] = "/run/secrets/" + key
         services[role] = {
@@ -219,6 +243,18 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
         "depends_on": {"postgres": {"condition": "service_healthy"}},
     }
+    if config.get("admin_email"):
+        # The first administrator; rerunning changes nothing (hot admin bootstrap).
+        services["bootstrap-admin"] = {
+            "image": images["hot"], "platform": "linux/amd64", "profiles": ["admin"],
+            "command": ["admin", "bootstrap", "--email", config["admin_email"], "--password-file", "/run/secrets/ADMIN_PASSWORD"],
+            "user": "10001:10001", "read_only": True,
+            "environment": {"HOT_ENV": "production", "HOT_PRODUCT_EXPERIENCE": "self-host", "HOT_DB_URI_FILE": "/run/secrets/HOT_DB_URI"},
+            "secrets": [secret("bootstrap-admin", k) for k in ("HOT_DB_URI", "ADMIN_PASSWORD")],
+            "tmpfs": ["/tmp:uid=10001,gid=10001"],
+            "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
+            "depends_on": {"postgres": {"condition": "service_healthy"}},
+        }
     services["provision"] = {
         "image": images["postgres"], "profiles": ["admin"], "user": "10001:10001", "read_only": True,
         "entrypoint": ["psql"],

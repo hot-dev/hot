@@ -108,6 +108,61 @@ resource "aws_security_group" "host" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
+# The release process owns the pointer's value; OpenTofu only creates it.
+resource "aws_ssm_parameter" "release" {
+  name  = "/hot/${local.config.name}/release"
+  type  = "String"
+  value = "none"
+  lifecycle { ignore_changes = [value] }
+}
+resource "aws_ssm_parameter" "status" {
+  name  = "/hot/${local.config.name}/status"
+  type  = "String"
+  value = "{}"
+  lifecycle { ignore_changes = [value] }
+}
+# The agent stores values the installation generates for itself here, once;
+# they never enter OpenTofu state.
+resource "aws_secretsmanager_secret" "generated" {
+  name                    = "hot/${local.config.name}/generated"
+  recovery_window_in_days = 30
+  lifecycle { prevent_destroy = true }
+}
+# The operator puts the TLS certificate and key, and any SMTP, OAuth, or S3
+# credentials, here as one JSON object.
+resource "aws_secretsmanager_secret" "operator" {
+  name                    = "hot/${local.config.name}/operator"
+  recovery_window_in_days = 30
+}
+# The only way to run anything on the host: a fixed set of agent commands,
+# with every parameter constrained. There is no shell or SSH.
+resource "aws_ssm_document" "command" {
+  name            = "hot-${local.config.name}-command"
+  document_type   = "Command"
+  document_format = "JSON"
+  content = jsonencode({
+    schemaVersion = "2.2"
+    description   = "Run one Hot agent command on the installation host."
+    parameters = {
+      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "backup", "restart-service", "drain-and-stop"] }
+      service   = { type = "String", default = "none", allowedValues = ["none", "app", "api", "worker", "task-worker", "scheduler", "ingress"] }
+      requestId = { type = "String", allowedPattern = "^[A-Za-z0-9-]{1,64}$" }
+    }
+    mainSteps = [{
+      action = "aws:runShellScript"
+      name   = "hotAgent"
+      inputs = { runCommand = ["/usr/local/bin/hot-agent command {{ operation }} --service {{ service }} --request-id {{ requestId }}"] }
+    }]
+  })
+}
+locals {
+  host_config = merge(local.config, {
+    data_volume_id    = aws_ebs_volume.data.id
+    release_pointer   = aws_ssm_parameter.release.arn
+    status_reference  = aws_ssm_parameter.status.arn
+    secret_references = { generated = aws_secretsmanager_secret.generated.arn, operator = aws_secretsmanager_secret.operator.arn }
+  })
+}
 resource "aws_iam_role" "host" {
   name = "hot-${local.config.name}-host"
   assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = [{
@@ -125,8 +180,10 @@ resource "aws_cloudwatch_log_group" "host" {
 resource "aws_iam_role_policy" "runtime" {
   role = aws_iam_role.host.id
   policy = jsonencode({ Version = "2012-10-17", Statement = concat([
-    { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = values(local.config.secret_references) },
-    { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = local.config.release_pointer },
+    { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.generated.arn, aws_secretsmanager_secret.operator.arn] },
+    { Effect = "Allow", Action = ["secretsmanager:PutSecretValue"], Resource = aws_secretsmanager_secret.generated.arn },
+    { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = aws_ssm_parameter.release.arn },
+    { Effect = "Allow", Action = ["ssm:PutParameter"], Resource = aws_ssm_parameter.status.arn },
     { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = "${aws_cloudwatch_log_group.host.arn}:*" },
     { Effect = "Allow", Action = ["cloudwatch:PutMetricData"], Resource = "*", Condition = { StringEquals = { "cloudwatch:namespace" = "Hot/SelfHost" } } }
     ], [for s in local.s3_roles : {
@@ -171,7 +228,7 @@ resource "aws_instance" "host" {
     encrypted   = true
   }
   user_data = templatefile("${path.module}/../../../../runtime/bootstrap.sh.tftpl", {
-    config_base64 = base64encode(jsonencode(merge(local.config, { data_volume_id = aws_ebs_volume.data.id })))
+    config_base64 = base64encode(jsonencode(local.host_config))
   })
   tags = { Name = "hot-${local.config.name}" }
   lifecycle {
@@ -191,4 +248,8 @@ output "private_ip" { value = aws_instance.host.private_ip }
 output "instance_id" { value = aws_instance.host.id }
 output "retained_data_volume_id" { value = aws_ebs_volume.data.id }
 output "egress_ips" { value = aws_eip.egress[*].public_ip }
-output "configuration" { value = local.config }
+output "configuration" { value = local.host_config }
+output "release_parameter" { value = aws_ssm_parameter.release.name }
+output "status_parameter" { value = aws_ssm_parameter.status.name }
+output "operator_secret_arn" { value = aws_secretsmanager_secret.operator.arn }
+output "command_document" { value = aws_ssm_document.command.name }

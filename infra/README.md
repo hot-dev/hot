@@ -40,13 +40,22 @@ Implemented:
   state lives on the data disk and stays off until it is mounted; box storage
   is capped by `HOT_BOX_POOL_GB`; a mangle-table baseline keeps guests off
   metadata, the host, other guests, and private ranges outside the allowlist.
+- The host deploy agent ([`agent/hot_agent.py`](agent/hot_agent.py)): it
+  follows the release pointer, verifies the signed manifest, writes each
+  service's secrets to tmpfs, migrates, and restarts services with the
+  scheduler stopped first and started last. Generated secrets (database and
+  cache passwords, the session secret, the encryption key, the first admin's
+  password) are created once in the cloud secret store; the operator puts the
+  TLS certificate and key, and any SMTP, OAuth, or S3 credentials, in the
+  operator secret the stack creates. Commands are a fixed list run through an
+  SSM command document (AWS) or Pub/Sub (GCP).
 - In Hot: SMTP email delivery, `hot admin bootstrap`/`reset-password` and the
   `app.signup` policy for operator-managed accounts, and outbound allowlists
   (`network.allow-cidrs`, `allow-hosts`, `deny-cidrs`) behind a fixed deny set.
 
 The roots intentionally require `acknowledge_unqualified = true`. The bootstrap
-also refuses to start if the supplied image lacks `hot-agent.service`. The baked
-host image, deploy/secret agent, the optional egress proxy, existing-DB
+also refuses to start if the supplied image lacks `hot-agent.service`. Real
+image builds and deployments on each cloud, the optional egress proxy, existing-DB
 integration, cloud monitoring/alerts, and the real-cloud release gates remain
 to be implemented and qualified. Do not apply these development examples to
 production. No usable host image or published runtime digest is implied by the

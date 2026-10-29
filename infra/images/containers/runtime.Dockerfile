@@ -96,6 +96,10 @@ COPY --from=builder /src/resources/ai /usr/share/hot/ai
 COPY --from=builder /src/resources/init /usr/share/hot/init
 COPY --from=builder /src/hot/pkg/hot-std /usr/share/hot/pkg/hot-std
 COPY --from=builder /src/LICENSE /src/NOTICE /usr/share/hot/
+# The host bake copies the deploy agent and bundle renderer out of this image.
+COPY --from=builder /src/infra/agent/hot_agent.py /usr/share/hot/selfhost/agent/
+COPY --from=builder /src/infra/runtime/render.py /src/resources/db/postgres/provision_runtime.sql \
+     /usr/share/hot/selfhost/runtime/
 
 LABEL org.opencontainers.image.title="Hot runtime" \
       org.opencontainers.image.source="https://github.com/hot-dev/hot" \

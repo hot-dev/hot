@@ -130,3 +130,23 @@ run "existing_network_ownership" {
     error_message = "Existing networking must not be recreated or re-routed."
   }
 }
+
+run "agent_channel" {
+  command = plan
+  assert {
+    condition     = aws_ssm_document.command.document_type == "Command" && length(jsondecode(aws_ssm_document.command.content).parameters.operation.allowedValues) == 6
+    error_message = "Host commands must be a fixed allowlist in a Hot command document."
+  }
+  assert {
+    condition     = jsondecode(aws_ssm_document.command.content).parameters.requestId.allowedPattern == "^[A-Za-z0-9-]{1,64}$"
+    error_message = "Every command parameter must be constrained."
+  }
+  assert {
+    condition     = aws_ssm_parameter.release.value == "none" && aws_ssm_parameter.status.type == "String"
+    error_message = "The stack creates the release pointer and status; the release process owns the pointer's value."
+  }
+  assert {
+    condition     = !strcontains(aws_iam_role_policy.runtime.policy, "\"*\",\"Effect\":\"Allow\",\"Resource\":\"*\"") && strcontains(aws_iam_role_policy.runtime.policy, "secretsmanager:PutSecretValue")
+    error_message = "The host may store only its generated secrets."
+  }
+}
