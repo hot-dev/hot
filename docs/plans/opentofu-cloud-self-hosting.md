@@ -915,6 +915,13 @@ remove the only copy of its own state.
       endpoint, client-network, DNS/TLS, and egress requirements. Implement the
       initial certificate mechanism: operator-supplied certificates, plus
       DNS-validated cloud certificates for public endpoints.
+      Implemented: `app_exposure` and `api_exposure` are each private or
+      public. A public endpoint gets a cloud load balancer (an ALB with the
+      operator's DNS-validated ACM certificate on AWS; a global external ALB
+      with a Google-managed certificate on GCP) that re-encrypts to a separate
+      host port serving only public hostnames; the VM stays private. App and
+      API trust forwarded client addresses from Nginx and the load balancer
+      only. Qualification remains.
 - [ ] Ensure public binaries include required PostgreSQL/Valkey TLS support,
       trusted CA handling, and strict verification; validate the encryption
       policy and immutable creation-time settings before provisioning.

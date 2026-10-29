@@ -58,6 +58,9 @@ variable "installation" {
       client_cidrs = optional(list(string), [])
       network_id   = optional(string, "")
       subnet_id    = optional(string, "")
+      # Existing AWS networks with a public endpoint: two or more public
+      # subnets in different zones for the load balancer.
+      public_subnet_ids = optional(list(string), [])
     }), {})
   })
   validation {
@@ -81,8 +84,12 @@ variable "installation" {
     error_message = "Storage prefixes must be relative and must not contain '..'."
   }
   validation {
-    condition     = var.installation.app_exposure == "private" && var.installation.api_exposure == "private"
-    error_message = "This initial infrastructure slice implements private/private ingress only; public ingress is not implemented yet."
+    condition     = alltrue([for e in [var.installation.app_exposure, var.installation.api_exposure] : contains(["private", "public"], e)])
+    error_message = "app_exposure and api_exposure are each private or public."
+  }
+  validation {
+    condition     = (var.installation.app_exposure == "private" && var.installation.api_exposure == "private") || var.installation.cloud != "aws" || var.installation.network.mode == "new" || length(var.installation.network.public_subnet_ids) >= 2
+    error_message = "A public endpoint on an existing AWS network needs network.public_subnet_ids in at least two zones."
   }
   validation {
     condition     = var.installation.app_hostname != var.installation.api_hostname && alltrue([for h in [var.installation.app_hostname, var.installation.api_hostname] : can(regex("^[a-z0-9][a-z0-9.-]+[a-z0-9]$", h))])

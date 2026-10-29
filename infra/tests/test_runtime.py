@@ -69,7 +69,7 @@ class RuntimeContract(unittest.TestCase):
     def test_invalid_settings_fail_before_rendering(self):
         cases = [
             lambda c: c.update(password="do-not-print"),
-            lambda c: c.update(app_exposure="public"),
+            lambda c: c.update(app_exposure="internet"),
             lambda c: c["storage"]["file"].update(backend="gcs"),
             lambda c: c["storage"]["file"].update(backend="s3"),
             lambda c: c.update(network={"client_cidrs": ["0.0.0.0/0"]}),
@@ -166,6 +166,26 @@ class RuntimeContract(unittest.TestCase):
         self.assertFalse(any("GCS" in key and key.endswith("_FILE") for key in env))
         with self.assertRaisesRegex(ValueError, "needs cloud=gcp"):
             renderer.validate(dict(renderer.validate(example("aws")), storage=config["storage"]))
+
+    def test_public_endpoints_get_a_load_balancer_listener(self):
+        private = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")
+        self.assertEqual(private["services"]["ingress"]["ports"], ["443:8443"])
+        self.assertEqual(private["services"]["api"]["environment"]["HOT_NETWORK_CLIENT_IP_TRUSTED_PROXIES"],
+                         renderer.RUNTIME_SUBNET)
+        config = dict(renderer.validate(example("gcp")), api_exposure="public")
+        bundle = renderer.render(config, manifest(), "/data", "/run/hot/secrets")
+        self.assertIn("9443:9443", bundle["services"]["ingress"]["ports"])
+        self.assertIn("130.211.0.0/22", bundle["services"]["api"]["environment"]["HOT_NETWORK_CLIENT_IP_TRUSTED_PROXIES"])
+        text = renderer.nginx_config(config)
+        lb = text.split("listen 9443 ssl;")
+        self.assertEqual(len(lb), 2, "only the public endpoint is served to the load balancer")
+        self.assertIn(config["api_hostname"], lb[1].split("}")[0])
+        self.assertIn("return 444", text)
+        with self.assertRaises(ValueError):
+            renderer.validate(dict(config, app_exposure="internet"))
+        with self.assertRaisesRegex(ValueError, "set by the runtime bundle"):
+            renderer.render(dict(config, settings={"HOT_NETWORK_CLIENT_IP_TRUSTED_PROXIES": "0.0.0.0/0"}),
+                            manifest(), "/data", "/run/hot/secrets")
 
     def test_postgres_data_uses_the_postgres_18_layout(self):
         postgres = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")["services"]["postgres"]

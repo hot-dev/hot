@@ -83,7 +83,7 @@ run "s3_missing_bucket" {
   expect_failures = [var.installation]
 }
 
-run "public_not_yet_implemented" {
+run "public_on_existing_network_needs_two_public_subnets" {
   command = plan
   variables { installation = {
     "schema_version" : 1,
@@ -108,7 +108,8 @@ run "public_not_yet_implemented" {
         "backend" : "local"
       }
     },
-    "api_exposure" : "public"
+    "api_exposure" : "public",
+    "network" : { "mode" : "existing", "network_id" : "vpc-0123", "subnet_id" : "subnet-0123" }
   } }
   expect_failures = [var.installation]
 }

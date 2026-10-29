@@ -118,6 +118,15 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
     ("HOT_NETWORK_ALLOW_HOSTS", "network.allow-hosts"),
     ("HOT_NETWORK_DENY_CIDRS", "network.deny-cidrs"),
     ("HOT_NETWORK_EGRESS_PROXY", "network.egress-proxy"),
+    (
+        "HOT_NETWORK_CLIENT_IP_TRUSTED_PROXY",
+        "network.client-ip.trusted-proxy",
+    ),
+    (
+        "HOT_NETWORK_CLIENT_IP_TRUSTED_PROXIES",
+        "network.client-ip.trusted-proxies",
+    ),
+    ("HOT_NETWORK_CLIENT_IP_HEADER", "network.client-ip.header"),
     ("HOT_BOX_GUEST_DNS", "box.guest-dns"),
     ("HOT_TASK_MAX_CONCURRENT", "task.max-concurrent"),
     ("HOT_TASK_CODE_MAX_CONCURRENT", "task.code-max-concurrent"),

@@ -35,6 +35,22 @@ SIZES = {
 }
 VM_MEMORY_MB = {"small": 8192, "medium": 16384, "large": 32768}
 
+# Where a cloud load balancer's connections come from: the VPC on AWS (an
+# Application Load Balancer), Google's front-end ranges on GCP.
+GCP_LOAD_BALANCER_RANGES = ("35.191.0.0/16", "130.211.0.0/22")
+LOAD_BALANCER_PORT = 9443
+
+
+def public_endpoints(config):
+    return [role for role in ("app", "api") if config.get(role + "_exposure", "private") == "public"]
+
+
+def load_balancer_sources(config):
+    if config["cloud"] == "gcp":
+        return list(GCP_LOAD_BALANCER_RANGES)
+    return [config.get("network", {}).get("cidr", "10.68.0.0/16")]
+
+
 # The bundle's container network, where PostgreSQL, Valkey, ingress, and the
 # Hot services listen. Fixed so user code can be denied all of it.
 RUNTIME_SUBNET = "172.30.0.0/24"
@@ -60,8 +76,8 @@ def validate(document):
     if config["cloud"] == "gcp" and not config.get("project"):
         raise ValueError("GCP compute requires a project")
     for endpoint in ("app", "api"):
-        if config.get(endpoint + "_exposure", "private") != "private":
-            raise ValueError("Public/mixed ingress is not implemented in this development slice")
+        if config.get(endpoint + "_exposure", "private") not in {"private", "public"}:
+            raise ValueError(f"{endpoint}_exposure must be private or public")
         if not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", config.get(endpoint + "_hostname", "")):
             raise ValueError("App/API require DNS hostnames without schemes, ports, or paths")
     if config.get("admin_email") and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", config["admin_email"]):
@@ -216,12 +232,19 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     data_ready = {name: {"condition": "service_healthy"}
                   for name, local in (("postgres", pg_local), ("valkey", valkey_local)) if local}
     for key in config.get("settings", {}):
-        if key in common_env or key.endswith(("_STORAGE_TYPE", "_STORAGE_PATH")) or "_AWS_S3_" in key or "_GCS_" in key:
+        if (key in common_env or key.endswith(("_STORAGE_TYPE", "_STORAGE_PATH")) or "_AWS_S3_" in key
+                or "_GCS_" in key or key.startswith("HOT_NETWORK_CLIENT_IP_")):
             raise ValueError(f"settings entry {key} is set by the runtime bundle")
     for role in SERVICES:
         env, mounts = {**common_env, **config.get("settings", {})}, []
         if role in {"worker", "task-worker"}:
             env["HOT_NETWORK_DENY_CIDRS"] = ",".join(deny)
+        if role in {"app", "api"}:
+            # Client addresses come from forwarding headers only through Nginx
+            # and, for public endpoints, the cloud load balancer.
+            proxies = [RUNTIME_SUBNET] + (load_balancer_sources(config) if public_endpoints(config) else [])
+            env.update(HOT_NETWORK_CLIENT_IP_TRUSTED_PROXY="true", HOT_NETWORK_CLIENT_IP_HEADER="x-forwarded-for",
+                       HOT_NETWORK_CLIENT_IP_TRUSTED_PROXIES=",".join(proxies))
         keys = ["HOT_DB_URI", "HOT_REDIS_URI", *db_ca]
         if role != "scheduler":
             keys.append("HOT_ENCRYPTION_KEY")
@@ -289,7 +312,9 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         }
     services["ingress"] = {
         "image": images["ingress"], "restart": "unless-stopped", "user": "10001:10001", "read_only": True,
-        "entrypoint": ["nginx", "-g", "daemon off;"], "ports": ["443:8443"], "mem_limit": memory["ingress"],
+        "entrypoint": ["nginx", "-g", "daemon off;"],
+        "ports": ["443:8443"] + ([f"{LOAD_BALANCER_PORT}:{LOAD_BALANCER_PORT}"] if public_endpoints(config) else []),
+        "mem_limit": memory["ingress"],
         "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"], "tmpfs": ["/tmp:size=16777216,uid=10001,gid=10001"],
         "secrets": [secret("ingress", k) for k in ("TLS_CERTIFICATE", "TLS_PRIVATE_KEY")],
         "volumes": [{"type": "bind", "source": "./nginx.conf", "target": "/etc/nginx/nginx.conf", "read_only": True}],
@@ -357,15 +382,33 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
 
 def nginx_config(config):
     servers = []
-    for role, port in (("app", 4680), ("api", 4681)):
+    # Private access on 8443 requires SNI naming an endpoint. A cloud load
+    # balancer re-encrypts without SNI, so public endpoints get their own port,
+    # routed by Host header, where anything else is refused.
+    listeners = [("8443", "$remote_addr", ("app", "api"))]
+    if public_endpoints(config):
+        listeners.append((str(LOAD_BALANCER_PORT), "$proxy_add_x_forwarded_for", public_endpoints(config)))
         servers.append(f'''server {{
-  listen 8443 ssl;
+  listen {LOAD_BALANCER_PORT} ssl default_server;
+  location = /hot-lb-health {{
+    proxy_pass http://api:4681/status;
+  }}
+  location / {{
+    return 444;
+  }}
+}}''')
+    for listen, forwarded, roles in listeners:
+        for role, port in (("app", 4680), ("api", 4681)):
+            if role not in roles:
+                continue
+            servers.append(f'''server {{
+  listen {listen} ssl;
   server_name {config[role + '_hostname']};
   location / {{
     proxy_pass http://{role}:{port};
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-For {forwarded};
     proxy_set_header X-Request-ID $request_id;
     proxy_http_version 1.1;
     proxy_buffering off;

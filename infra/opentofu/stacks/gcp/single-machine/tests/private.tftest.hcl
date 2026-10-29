@@ -182,3 +182,30 @@ run "existing_gcs_is_prefix_scoped" {
     error_message = "GCS access is limited to the installation's prefix."
   }
 }
+
+run "public_app_only" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "project" : "example-project",
+      "host_image" : "projects/example-project/global/images/hot-host",
+      "app_hostname" : "app.hot.example",
+      "api_hostname" : "api.hot.example",
+      "app_exposure" : "public",
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = toset(google_compute_managed_ssl_certificate.public[0].managed[0].domains) == toset(["app.hot.example"])
+    error_message = "Only the public endpoint gets a public certificate."
+  }
+  assert {
+    condition     = one(google_compute_firewall.public[0].allow).ports == tolist(["9443"]) && length(google_compute_instance.host.network_interface[0].access_config) == 0
+    error_message = "The load balancer reaches only the host's public-endpoint port; the VM has no external IP."
+  }
+}

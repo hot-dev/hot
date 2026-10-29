@@ -20,3 +20,12 @@ variable "release_principal" {
     error_message = "release_principal must be an IAM role ARN."
   }
 }
+variable "public_certificate_arn" {
+  description = "ACM certificate covering every public hostname, DNS-validated by the operator. Required when an endpoint is public."
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.public_certificate_arn == "" || can(regex("^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/.+$", var.public_certificate_arn))
+    error_message = "public_certificate_arn must be an ACM certificate ARN."
+  }
+}

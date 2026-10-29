@@ -1,4 +1,17 @@
-mock_provider "aws" {}
+mock_provider "aws" {
+  mock_data "aws_availability_zones" {
+    defaults = { names = ["us-east-1a", "us-east-1b"] }
+  }
+  mock_resource "aws_lb" {
+    defaults = { arn = "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/hot-example/0123" }
+  }
+  mock_resource "aws_lb_target_group" {
+    defaults = { arn = "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/hot-example/0123" }
+  }
+  mock_resource "aws_lb_listener" {
+    defaults = { arn = "arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/app/hot-example/0123/4567" }
+  }
+}
 variables {
   acknowledge_unqualified     = true
   state_encryption_passphrase = "test-only-encryption-passphrase-never-use-in-production"
@@ -160,4 +173,54 @@ run "release_principal_is_scoped" {
     condition     = aws_iam_role_policy.release[0].role == "hot-github-release" && !strcontains(aws_iam_role_policy.release[0].policy, "\"Resource\":\"*\"")
     error_message = "The release role is granted only this installation's pointer, status, and command."
   }
+}
+
+run "public_api_only" {
+  command = plan
+  variables {
+    public_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/0123"
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.example",
+      "api_hostname" : "api.hot.example",
+      "api_exposure" : "public",
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = aws_instance.host.associate_public_ip_address == false && aws_lb.public[0].internal == false
+    error_message = "Public access goes through the load balancer; the VM stays private."
+  }
+  assert {
+    condition     = toset(one(aws_lb_listener_rule.public[0].condition).host_header[0].values) == toset(["api.hot.example"])
+    error_message = "Only the public endpoint's hostname is forwarded."
+  }
+  assert {
+    condition     = aws_lb_target_group.public[0].port == 9443 && aws_lb_target_group.public[0].health_check[0].path == "/hot-lb-health"
+    error_message = "The load balancer reaches the host's public-endpoint port."
+  }
+}
+
+run "public_needs_a_certificate" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.example",
+      "api_hostname" : "api.hot.example",
+      "app_exposure" : "public",
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [aws_lb.public]
 }

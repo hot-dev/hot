@@ -56,6 +56,11 @@ Implemented:
   [Self-Hosted PostgreSQL](../resources/docs/configuration/postgres.md)
   describes; the bundle checks it, migrates, and grants the runtime login,
   and never creates or drops anything the operator owns.
+- Public endpoints: set `app_exposure` or `api_exposure` to `public`. AWS
+  needs `public_certificate_arn` (an ACM certificate you DNS-validate); GCP
+  issues a managed certificate once your DNS points at the `public_endpoint`
+  output. The VM keeps no public address, and private endpoints are never
+  served to the load balancer.
 - In Hot: SMTP email delivery, `hot admin bootstrap`/`reset-password` and the
   `app.signup` policy for operator-managed accounts, and outbound allowlists
   (`network.allow-cidrs`, `allow-hosts`, `deny-cidrs`) behind a fixed deny set.

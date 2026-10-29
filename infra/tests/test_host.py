@@ -11,8 +11,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = (ROOT / "images/host/setup-host.sh").read_text()
 PACKER = (ROOT / "images/packer/hot-host.pkr.hcl").read_text()
-AWS = (ROOT / "opentofu/stacks/aws/single-machine/main.tf").read_text()
-GCP = (ROOT / "opentofu/stacks/gcp/single-machine/main.tf").read_text()
+AWS = "\n".join(p.read_text() for p in sorted((ROOT / "opentofu/stacks/aws/single-machine").glob("*.tf")))
+GCP = "\n".join(p.read_text() for p in sorted((ROOT / "opentofu/stacks/gcp/single-machine").glob("*.tf")))
 
 
 class HostImage(unittest.TestCase):
