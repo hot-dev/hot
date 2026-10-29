@@ -817,11 +817,8 @@ mod tests {
         let conf =
             crate::val!({"build": {"storage": {"type": "local", "path": "/tmp/chosen-builds"}}});
         let store = build_storage_from_config(&conf).await.unwrap();
-        assert!(
-            store
-                .build_path(&Uuid::nil(), &Uuid::nil(), &Uuid::nil())
-                .starts_with("/tmp/chosen-builds/")
-        );
+        let path = store.build_path(&Uuid::nil(), &Uuid::nil(), &Uuid::nil());
+        assert!(std::path::Path::new(&path).starts_with("/tmp/chosen-builds"));
     }
 
     #[test]
