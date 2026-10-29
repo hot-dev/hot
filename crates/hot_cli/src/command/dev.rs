@@ -455,13 +455,21 @@ pub(crate) async fn run_dev(
         .read()
         .ok()
         .and_then(|guard| guard.clone());
-    if let Err(e) = hot::lang::engine::Engine::check_sources_pipeline_with_context(
+    let available_ctx_keys: Option<ahash::AHashSet<String>> = context_storage_snapshot
+        .as_ref()
+        .map(|storage| storage.keys().cloned().collect());
+    let unit_cache = hot::lang::engine::discover::unit_cache();
+    if let Err(e) = hot_lang::check::check_project_text(
         &src_paths,
         &test_paths,
-        Some(&conf),
-        Some(&project_name),
-        context_storage_snapshot.as_ref(),
+        &hot::lang::engine::Engine::check_options(
+            Some(&conf),
+            Some(&project_name),
+            available_ctx_keys.as_ref(),
+            &unit_cache,
+        ),
         diagnostic_output.color,
+        None,
     ) {
         if hot::env::is_local_dev() {
             report_dev_warning(diagnostic_output, "hot.dev: Source validation failed", &e);

@@ -24,7 +24,7 @@ pub mod hot;
 pub use hot_lang::lang::json_schema;
 pub use hot_lang::lang::lexer;
 pub use hot_lang::lang::parser;
-pub mod project;
+pub use hot_lang::lang::project;
 pub use hot_lang::lang::refs;
 pub mod repl;
 pub mod runtime;
