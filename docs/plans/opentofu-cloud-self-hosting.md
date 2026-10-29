@@ -1022,8 +1022,12 @@ Changes for self-hosting:
       The task worker's per-task chains read `network.allow-cidrs`,
       `network.deny-cidrs`, and `box.guest-dns`; the host's baseline runs in
       the mangle table so per-task rules cannot bypass it.
-- [ ] Derive task concurrency, memory, and disk settings from the VM size
+- [x] Derive task concurrency, memory, and disk settings from the VM size
       instead of the standalone task-worker defaults.
+      `SIZES` in [`render.py`](../../infra/runtime/render.py) sets every
+      container's memory and CPU caps, Valkey's `maxmemory`, and the task
+      limits per size, within the VM and leaving room for the OS. Starting
+      values to replace with benchmarks.
 - [ ] Port the isolation validation into public qualification checks, run
       against the built image as well as the scripts, and extend it to GCP.
       Static checks are in [`test_host.py`](../../infra/tests/test_host.py);

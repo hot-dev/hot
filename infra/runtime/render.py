@@ -16,6 +16,25 @@ MANIFEST_KEYS = {"schema_version", "release", "module_tag", "configuration_schem
 # The release workflow signs manifests keylessly with its GitHub OIDC identity.
 RELEASE_SIGNER = r"^https://github\.com/hot-dev/hot/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
 RELEASE_ISSUER = "https://token.actions.githubusercontent.com"
+# Per-size starting allocations within the VM sizes the stacks choose (8, 16,
+# and 32 GB; 2, 4, and 8 vCPUs), leaving 1-2 GB for the OS, Docker, and Kata.
+# Conservative caps, not benchmarked limits. Memory in MB.
+SIZES = {
+    "small": {"memory": {"postgres": 1536, "valkey": 384, "ingress": 128, "app": 768, "api": 768,
+                         "scheduler": 256, "worker": 1536, "task-worker": 1536},
+              "cpus": {"worker": 1.0, "task-worker": 1.0}, "default_cpus": 0.5, "valkey_maxmemory": 256,
+              "task": {"max": 1, "code": 2, "container": 1, "disk_mb": 10240}, "engine_threads": 2},
+    "medium": {"memory": {"postgres": 3072, "valkey": 768, "ingress": 256, "app": 1024, "api": 1024,
+                          "scheduler": 256, "worker": 3072, "task-worker": 5120},
+               "cpus": {"worker": 1.5, "task-worker": 2.0}, "default_cpus": 1.0, "valkey_maxmemory": 512,
+               "task": {"max": 2, "code": 4, "container": 2, "disk_mb": 40960}, "engine_threads": 3},
+    "large": {"memory": {"postgres": 6144, "valkey": 1536, "ingress": 256, "app": 2048, "api": 2048,
+                         "scheduler": 512, "worker": 6144, "task-worker": 12288},
+              "cpus": {"worker": 3.0, "task-worker": 4.0}, "default_cpus": 2.0, "valkey_maxmemory": 1024,
+              "task": {"max": 4, "code": 8, "container": 4, "disk_mb": 81920}, "engine_threads": 6},
+}
+VM_MEMORY_MB = {"small": 8192, "medium": 16384, "large": 32768}
+
 # The bundle's container network, where PostgreSQL, Valkey, ingress, and the
 # Hot services listen. Fixed so user code can be denied all of it.
 RUNTIME_SUBNET = "172.30.0.0/24"
@@ -128,6 +147,8 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     if s3_session_tokens and s3_auth != "files":
         raise ValueError("Session-token files require S3 file authentication")
     images = manifest["images"]
+    size = SIZES[config.get("size", "small")]
+    memory = {role: f"{mb}m" for role, mb in size["memory"].items()}
     secrets, services = {}, {}
 
     def secret(role, key):
@@ -146,10 +167,12 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "HOT_FILE_MODE": "service", "HOT_BLOB_MODE": "service", "HOT_LOG_FORMAT": "json",
         "HOT_LOG_TARGET": "stdout", "HOT_LOG_LEVEL": "info", "HOT_DAEMON": "true",
         "HOT_APP_HOST": "0.0.0.0", "HOT_API_HOST": "0.0.0.0",
-        "HOT_TASK_MAX_CONCURRENT": "1", "HOT_TASK_CODE_MAX_CONCURRENT": "2",
-        "HOT_TASK_CONTAINER_MAX_CONCURRENT": "1", "HOT_TASK_WORKER_MEMORY_MB": "1536",
-        "HOT_TASK_WORKER_DISK_MB": "10240", "HOT_BOX_ENABLED": "true",
-        "HOT_WORKER_THREADS": "1", "HOT_ENGINE_THREADS": "2",
+        "HOT_TASK_MAX_CONCURRENT": str(size["task"]["max"]),
+        "HOT_TASK_CODE_MAX_CONCURRENT": str(size["task"]["code"]),
+        "HOT_TASK_CONTAINER_MAX_CONCURRENT": str(size["task"]["container"]),
+        "HOT_TASK_WORKER_MEMORY_MB": str(size["memory"]["task-worker"]),
+        "HOT_TASK_WORKER_DISK_MB": str(size["task"]["disk_mb"]), "HOT_BOX_ENABLED": "true",
+        "HOT_WORKER_THREADS": "1", "HOT_ENGINE_THREADS": str(size["engine_threads"]),
         "HOT_BOX_BACKEND": "kata", "HOT_BOX_CONTAINERD_SOCKET": "/run/kata-containerd/containerd.sock",
         "HOT_BOX_VMM": "qemu",
     }
@@ -196,8 +219,8 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
             "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
             "depends_on": {"postgres": {"condition": "service_healthy"}, "valkey": {"condition": "service_healthy"}},
-            "mem_limit": {"app": "768m", "api": "768m", "worker": "1536m", "scheduler": "256m", "task-worker": "1536m"}[role],
-            "cpus": 1.0 if role in {"worker", "task-worker"} else 0.5,
+            "mem_limit": memory[role],
+            "cpus": size["cpus"].get(role, size["default_cpus"]),
         }
     task = services["task-worker"]
     task.update(user="0:2000", privileged=True, pid="host", read_only=False)
@@ -206,7 +229,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     for path, readonly in (("/run/kata-containerd", False), ("/run/vc", False), ("/var/run/netns", False), ("/opt/cni/bin", True), ("/var/lib/cni", False), ("/tmp/hot-box-io", False)):
         task["volumes"].append(bind(path, path, readonly))
     services["postgres"] = {
-        "image": images["postgres"], "restart": "unless-stopped", "shm_size": "256m", "mem_limit": "1536m",
+        "image": images["postgres"], "restart": "unless-stopped", "shm_size": "256m", "mem_limit": memory["postgres"],
         "environment": {"POSTGRES_DB": "hot", "POSTGRES_USER": "hot_owner", "POSTGRES_PASSWORD_FILE": "/run/secrets/POSTGRES_PASSWORD"},
         "secrets": [secret("postgres", k) for k in ("POSTGRES_PASSWORD", "POSTGRES_RUNTIME_PASSWORD")],
         # PostgreSQL 18 images keep data in /var/lib/postgresql/<major>/docker and
@@ -216,7 +239,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
     }
     services["valkey"] = {
-        "image": images["valkey"], "restart": "unless-stopped", "mem_limit": "384m",
+        "image": images["valkey"], "restart": "unless-stopped", "mem_limit": memory["valkey"],
         "command": ["valkey-server", "/etc/valkey/valkey.conf"],
         "secrets": [secret("valkey", k) for k in ("VALKEY_ACL", "VALKEY_PASSWORD")],
         "volumes": [bind(Path(data_root) / "valkey", "/data"), {"type": "bind", "source": "./valkey.conf", "target": "/etc/valkey/valkey.conf", "read_only": True}],
@@ -225,7 +248,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     }
     services["ingress"] = {
         "image": images["ingress"], "restart": "unless-stopped", "user": "10001:10001", "read_only": True,
-        "entrypoint": ["nginx", "-g", "daemon off;"], "ports": ["443:8443"], "mem_limit": "128m",
+        "entrypoint": ["nginx", "-g", "daemon off;"], "ports": ["443:8443"], "mem_limit": memory["ingress"],
         "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"], "tmpfs": ["/tmp:size=16777216,uid=10001,gid=10001"],
         "secrets": [secret("ingress", k) for k in ("TLS_CERTIFICATE", "TLS_PRIVATE_KEY")],
         "volumes": [{"type": "bind", "source": "./nginx.conf", "target": "/etc/nginx/nginx.conf", "read_only": True}],
@@ -314,6 +337,10 @@ SELECT format('CREATE ROLE hot_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hot_runtime') \gexec
 ALTER ROLE hot_runtime SET search_path = hot, public;
 '''
+def valkey_conf(size="small"):
+    return VALKEY_CONF.replace("maxmemory 256mb", f"maxmemory {SIZES[size]['valkey_maxmemory']}mb")
+
+
 VALKEY_CONF = '''bind 0.0.0.0
 protected-mode yes
 port 6379
@@ -357,7 +384,7 @@ def main():
         compose = render(document, manifest, args.data_root, args.secrets_root, args.s3_auth, args.s3_session_tokens)
         args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
         grant_script = Path(__file__).resolve().parents[2] / "resources/db/postgres/provision_runtime.sql"
-        files = {"compose.json": json.dumps(compose, indent=2) + "\n", "nginx.conf": nginx_config(config), "init.sql": INIT_SQL, "valkey.conf": VALKEY_CONF,
+        files = {"compose.json": json.dumps(compose, indent=2) + "\n", "nginx.conf": nginx_config(config), "init.sql": INIT_SQL, "valkey.conf": valkey_conf(config.get("size", "small")),
                  "provision_runtime.sql": grant_script.read_text()}
         for name, content in files.items():
             path = args.output / name

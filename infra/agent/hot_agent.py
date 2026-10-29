@@ -405,7 +405,7 @@ class Agent:
         (bundle / "compose.json").write_text(json.dumps(compose, indent=2))
         (bundle / "nginx.conf").write_text(render.nginx_config(render.validate(self.config)))
         (bundle / "init.sql").write_text(render.INIT_SQL)
-        (bundle / "valkey.conf").write_text(render.VALKEY_CONF)
+        (bundle / "valkey.conf").write_text(render.valkey_conf(self.config.get("size", "small")))
         shutil.copy(provision_sql(), bundle / "provision_runtime.sql")
         return bundle
 

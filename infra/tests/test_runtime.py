@@ -109,6 +109,21 @@ class RuntimeContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "set by the runtime bundle"):
             renderer.render(dict(config, settings={"HOT_ENGINE_ISOLATION": "false"}), manifest(), "/data", "/run/hot/secrets")
 
+    def test_allocations_grow_with_size_and_fit_the_vm(self):
+        previous = None
+        for size in ("small", "medium", "large"):
+            config = dict(renderer.validate(example()), size=size)
+            bundle = renderer.render(config, manifest(), "/data", "/run/hot/secrets")
+            total = sum(int(s["mem_limit"].rstrip("m")) for s in bundle["services"].values() if "mem_limit" in s)
+            self.assertLessEqual(total, renderer.VM_MEMORY_MB[size] - 1024, size)
+            task = int(bundle["services"]["task-worker"]["environment"]["HOT_TASK_WORKER_MEMORY_MB"])
+            self.assertEqual(f"{task}m", bundle["services"]["task-worker"]["mem_limit"])
+            if previous:
+                self.assertGreater(total, previous)
+            previous = total
+            maxmemory = int(renderer.valkey_conf(size).split("maxmemory ")[1].split("mb")[0])
+            self.assertLess(maxmemory, int(bundle["services"]["valkey"]["mem_limit"].rstrip("m")))
+
     def test_postgres_data_uses_the_postgres_18_layout(self):
         postgres = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")["services"]["postgres"]
         self.assertEqual(postgres["volumes"][0]["target"], "/var/lib/postgresql")
