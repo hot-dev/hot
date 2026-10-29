@@ -181,7 +181,7 @@ pub(crate) struct GlobalOptions {
     #[arg(
         long = "log.format",
         value_name = "FORMAT",
-        help = "Log output format: full (timestamp+level+target+message), simple (message only)",
+        help = "Log output format: full (timestamp+level+target+message), simple (message only), json (one object per line)",
         global = true
     )]
     pub(crate) log_format: Option<String>,

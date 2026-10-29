@@ -18,8 +18,9 @@ pub struct ContextEncryption {
 impl ContextEncryption {
     /// Load master key from environment variable HOT_ENCRYPTION_KEY
     pub fn from_env() -> Result<Self, EncryptionError> {
-        let key_hex =
-            std::env::var("HOT_ENCRYPTION_KEY").map_err(|_| EncryptionError::KeyNotConfigured)?;
+        let key_hex = crate::environment::read_optional("HOT_ENCRYPTION_KEY")
+            .map_err(EncryptionError::IoError)?
+            .ok_or(EncryptionError::KeyNotConfigured)?;
 
         let master_key = hex::decode(&key_hex).map_err(|_| EncryptionError::InvalidKeyFormat)?;
 

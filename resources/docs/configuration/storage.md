@@ -301,11 +301,14 @@ Fresh installations can select GCS from the start with no migration.
 | `hot.file.aws.s3.region` / `hot.build.aws.s3.region` | Region override |
 
 S3 uses the standard AWS credential chain unless `access-key-id` and
-`secret-access-key` are set under `hot.file.aws` or `hot.build.aws`.
+`secret-access-key` are set under `hot.file.aws` or `hot.build.aws`
+(`HOT_FILE_AWS_ACCESS_KEY_ID` and so on). Set both or neither. Add
+`session-token` (`HOT_FILE_AWS_SESSION_TOKEN` / `HOT_BUILD_AWS_SESSION_TOKEN`)
+for temporary credentials.
 
 ## Local Filesystem
 
 | Setting | Environment variable | Default |
 |---------|----------------------|---------|
 | `hot.file.storage.path` | `HOT_FILE_STORAGE_PATH` | `./.hot/file`, or `$HOT_HOME/file` when `HOT_HOME` is set |
-| none | `HOT_BUILD_STORAGE_PATH` | `.hot/build` |
+| `hot.build.storage.path` | `HOT_BUILD_STORAGE_PATH` | `.hot/build` |
