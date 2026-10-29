@@ -5,7 +5,7 @@ on:
     inputs:
       operation:
         type: choice
-        options: [status, diagnostics, logs, backup, restart-service, drain-and-stop]
+        options: [status, diagnostics, logs, backup, restart-service, drain-and-stop, roll-back]
       service:
         description: For logs and restart-service
         type: choice

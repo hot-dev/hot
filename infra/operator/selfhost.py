@@ -23,7 +23,8 @@ import subprocess
 import sys
 import time
 
-OPERATIONS = ("deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop")
+OPERATIONS = ("deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop",
+              "roll-back")
 # Final states per operation; anything else is progress or another request.
 FAILED = {"failed", "rejected"}
 STATUS_STREAM = "hot-agent-status"

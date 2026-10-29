@@ -295,6 +295,10 @@ Options=defaults,nofail
 [Install]
 WantedBy=local-fs.target
 UNIT
+# Containers bind-mount the data disk and restart with Docker, so Docker must
+# never start them before the disk is mounted (the mount is nofail).
+install -d /etc/systemd/system/docker.service.d
+printf '[Unit]\nRequiresMountsFor=/var/lib/hot\n' > /etc/systemd/system/docker.service.d/hot-data.conf
 systemctl daemon-reload
 systemctl enable --now var-lib-hot.mount
 install -d -m 0755 /var/lib/hot/kata

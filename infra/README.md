@@ -222,6 +222,7 @@ workflow run and a manual run behave the same.
 | `restart-service SERVICE` | Delivers secrets again and recreates one service; the scheduler stops before it starts |
 | `drain-and-stop` | Stops the scheduler, then workers (2-minute grace), then the app, API, and ingress |
 | `deploy-now` | Deploys the release pointer now (the `release` action sets the pointer first) |
+| `roll-back` | After a failed upgrade: restores a local database from the pre-upgrade dump if the migrations started, then restarts the installed release |
 
 Diagnostics and logs are redacted on the host before they are reported:
 - every value in the host's secret files, and passwords inside connection URIs;
@@ -308,6 +309,75 @@ Upgrades follow these rules, and the deploy agent enforces them:
   - steps, restore point, and any error.
 
   `diagnostics` shows the last 5.
+
+## Recovery
+
+The host's boot disk holds nothing recovery needs. The installation's
+configuration is in OpenTofu state and the instance's boot data. Its secrets,
+including the encryption key in the generated secret, are in the cloud secret
+store. Release pointer and status are in SSM or Secret Manager. Its data is on
+the retained data disk and in its daily snapshots, or in the managed database.
+A restore must use the same installation's generated secret: the local
+database's logins and Hot's encrypted values depend on it.
+
+These are design targets for the single machine. They have not been measured
+yet; the restore drills in the plan measure them on each cloud.
+
+| Failure | Data lost (recovery point) | Target time to recover | Procedure |
+| --- | --- | --- | --- |
+| Host VM lost or broken | None: the data disk is retained | 30 minutes | Replace the instance |
+| Data disk lost or corrupted | Up to a day: since the last daily snapshot | 1 hour | Restore the data disk from a snapshot |
+| Failed upgrade, local database | Writes since the upgrade began | 15 minutes | `roll-back` |
+| Failed upgrade or data loss, managed database | Point-in-time recovery, within `backup_retention_days` | Provider restore time plus a deploy | Provider point-in-time recovery |
+| Region loss | Not covered by the single machine | — | — |
+
+**Replace the instance.** The data disk survives instance replacement, and
+the new VM mounts it, delivers secrets, and deploys the release pointer:
+
+```sh
+tofu apply -replace=aws_instance.host
+```
+
+On GCP the instance has deletion protection; lift it, then replace it:
+
+```sh
+gcloud compute instances update hot-NAME --zone ZONE --no-deletion-protection
+tofu apply -replace=google_compute_instance.host
+```
+
+**Restore the data disk from a snapshot.** Snapshots are named or tagged with
+the installation (`HotDataVolume` on AWS, label `hot-installation` on GCP).
+Stop managing the current disk without deleting it, set
+`backup.restore_snapshot` to the snapshot, and apply with a new instance:
+
+```sh
+tofu state rm aws_ebs_volume.data          # GCP: google_compute_disk.data
+tofu apply -replace=aws_instance.host      # with backup.restore_snapshot set
+```
+
+On GCP, lift the instance's deletion protection first, as above. The restored
+GCP disk is named after its snapshot, so it does not collide with the kept
+one. The old disk is left as it was; delete it in the console once the
+restore is verified. `restore_snapshot` is read only when a disk is created,
+so leaving it set changes nothing later.
+
+**Roll back a failed upgrade.** When a deploy fails after its migrations
+started, run `roll-back`, then point the installation back at the installed
+release (the `release` action with that version):
+- A local database is restored from the dump the agent took before the
+  migrations, and the installed release is checked and restarted.
+- For a managed or existing database, `roll-back` refuses and names the
+  restore time. Restore the database to that time with RDS or Cloud SQL
+  point-in-time recovery, or the operator's own backups, then deploy the
+  installed release.
+
+If the deploy failed before migrating, the database is unchanged and
+`roll-back` only makes sure the installed release is running.
+
+**After any restore,** run `diagnostics` and check the `Ready`, scheduler,
+and dependency signals. Schedules that came due while Hot was down run when
+the scheduler next evaluates them. Work queued in a local Valkey is restored
+with the data disk; work queued after the snapshot is lost.
 
 ## Local validation
 

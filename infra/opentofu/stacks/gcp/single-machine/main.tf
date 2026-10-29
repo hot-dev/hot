@@ -198,13 +198,21 @@ resource "google_compute_firewall" "https" {
   }
 }
 resource "google_compute_disk" "data" {
-  name   = "${local.tag}-data"
+  # A disk restored from a snapshot gets its own name: the disk it replaces
+  # is kept until the restore is verified.
+  name   = local.config.backup.restore_snapshot == "" ? "${local.tag}-data" : "${local.tag}-data-${substr(sha1(local.config.backup.restore_snapshot), 0, 8)}"
   zone   = local.config.zone
   type   = "pd-balanced"
   size   = module.contract.capacity.data_gb
   labels = { hot-installation = local.config.name }
+  # Restores create the disk from a snapshot; see "Recovery" in
+  # infra/README.md. It is read only when the disk is created.
+  snapshot = local.config.backup.restore_snapshot == "" ? null : local.config.backup.restore_snapshot
   # Google-managed at-rest encryption is unconditional for Persistent Disk.
-  lifecycle { prevent_destroy = true }
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [snapshot, name]
+  }
   depends_on = [google_project_service.required]
 }
 resource "google_compute_instance" "host" {

@@ -166,7 +166,7 @@ run "existing_network_ownership" {
 run "agent_channel" {
   command = plan
   assert {
-    condition     = aws_ssm_document.command.document_type == "Command" && length(jsondecode(aws_ssm_document.command.content).parameters.operation.allowedValues) == 7
+    condition     = aws_ssm_document.command.document_type == "Command" && length(jsondecode(aws_ssm_document.command.content).parameters.operation.allowedValues) == 8
     error_message = "Host commands must be a fixed allowlist in a Hot command document."
   }
   assert {
@@ -381,5 +381,27 @@ run "backups_and_alerts" {
   assert {
     condition     = aws_cloudwatch_log_group.host.retention_in_days == 90
     error_message = "Container logs are kept for the chosen days."
+  }
+}
+
+run "restore_from_a_snapshot" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "backup" : { "restore_snapshot" : "snap-0123456789abcdef0" },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = aws_ebs_volume.data.snapshot_id == "snap-0123456789abcdef0"
+    error_message = "A restore creates the data disk from the chosen snapshot."
   }
 }

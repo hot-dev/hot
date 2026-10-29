@@ -249,7 +249,7 @@ class ExistingData(AgentHarness):
         self.assertIn("unsupported entry", self.agent.reconcile()["error"])
 
 
-class Upgrades(AgentHarness):
+class UpgradeHarness(AgentHarness):
     def setUp(self):
         super().setUp()
         self.failing = None
@@ -271,6 +271,8 @@ class Upgrades(AgentHarness):
         self.manifests[version] = manifest(version, **fields)
         self.cloud.parameters["pointer"] = version
 
+
+class Upgrades(UpgradeHarness):
     def test_a_failed_release_waits_for_deploy_now(self):
         self.release("3.0.2", latest=23)
         self.failing = "migrate"
@@ -350,6 +352,55 @@ class Upgrades(AgentHarness):
         text = (Path(self.tmp.name) / "releases/history.json").read_text()
         for value in self.cloud.secrets[GENERATED].values():
             self.assertNotIn(value, text)
+
+
+class RollBack(UpgradeHarness):
+    def fail_upgrade(self):
+        self.release("3.0.2", latest=23)
+        self.failing = "migrate"
+        self.agent.reconcile()
+        self.failing = None
+        self.run.commands.clear()
+
+    def test_a_failed_upgrade_is_restored_and_the_installed_release_restarted(self):
+        self.fail_upgrade()
+        dump = self.agent.state()["failed"]["restore_point"]["path"]
+        report = self.agent.command("roll-back", request_id="rb-1")
+        self.assertEqual((report["state"], report["release"], report["rolled_back_from"]),
+                         ("rolled-back", "3.0.1", "3.0.2"))
+        calls = self.run.compose_calls()
+        restore = next(i for i, c in enumerate(calls) if c.startswith("exec -T postgres pg_restore"))
+        self.assertIn("--clean --if-exists --create --exit-on-error /var/lib/postgresql/restore.dump", calls[restore])
+        self.assertEqual(calls[0], "stop scheduler")
+        self.assertLess(calls.index("stop app api ingress"), restore)
+        self.assertLess(restore, calls.index("--profile admin run --rm migrate"))
+        self.assertEqual(calls[-1], "up -d scheduler")
+        self.assertTrue(all("releases/3.0.1/bundle" in " ".join(c) for c in self.run.commands if "compose" in c))
+        self.assertTrue(Path(dump).exists(), "the restore point is kept")
+        self.assertFalse((Path(self.tmp.name) / "data/postgres/restore.dump").exists())
+        self.assertIsNone(self.agent.reconcile(), "the failed release is still not retried")
+        self.assertEqual(self.agent.history()[-1]["rolled_back_from"], "3.0.2")
+
+    def test_a_failure_before_migrating_needs_no_restore(self):
+        self.release("3.0.2")
+        self.failing = "--wait"
+        self.agent.reconcile()
+        self.failing = None
+        self.run.commands.clear()
+        report = self.agent.command("roll-back")
+        self.assertEqual(report["steps"], ["started"])
+        self.assertFalse(any("pg_restore" in c for c in self.run.commands))
+
+    def test_only_a_failed_upgrade_with_a_local_dump_is_restored(self):
+        with self.assertRaisesRegex(agent_module.AgentError, "the last deploy did not fail"):
+            self.agent.command("roll-back")
+        self.fail_upgrade()
+        failed = self.agent.state()["failed"]
+        failed["restore_point"] = {"kind": "point-in-time", "time": "2026-10-29T12:00:00+00:00"}
+        self.agent.save_state({**self.agent.state(), "failed": failed})
+        with self.assertRaisesRegex(agent_module.AgentError, "restore it to 2026-10-29T12:00:00.*then deploy 3.0.1"):
+            self.agent.command("roll-back")
+        self.assertEqual(self.run.commands, [], "nothing is stopped")
 
 
 class Readiness(unittest.TestCase):

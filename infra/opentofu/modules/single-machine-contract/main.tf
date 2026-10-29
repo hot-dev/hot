@@ -50,10 +50,12 @@ variable "installation" {
       }), {})
     }), {})
     # Daily snapshots of the retained data disk, at an hour in UTC, kept for
-    # retention_days. The host cannot delete them.
+    # retention_days. The host cannot delete them. restore_snapshot creates a
+    # new data disk from a snapshot; it is read only when the disk is created.
     backup = optional(object({
-      retention_days = optional(number, 7)
-      time_utc       = optional(string, "03:00")
+      retention_days   = optional(number, 7)
+      time_utc         = optional(string, "03:00")
+      restore_snapshot = optional(string, "")
     }), {})
     # Where infrastructure alerts go, independent of Hot's own email.
     monitoring = optional(object({
@@ -161,6 +163,13 @@ variable "installation" {
   validation {
     condition     = var.installation.backup.retention_days >= 1 && var.installation.backup.retention_days <= 365 && can(regex("^([01][0-9]|2[0-3]):00$", var.installation.backup.time_utc))
     error_message = "backup.retention_days must be 1-365, and backup.time_utc an hour such as 03:00."
+  }
+  validation {
+    condition = var.installation.backup.restore_snapshot == "" || (
+      var.installation.cloud == "aws" ? can(regex("^snap-[0-9a-f]{8,17}$", var.installation.backup.restore_snapshot))
+      : can(regex("^(projects/[a-z][-a-z0-9]{4,28}[a-z0-9]/global/snapshots/)?[a-z]([-a-z0-9]{0,61}[a-z0-9])?$", var.installation.backup.restore_snapshot))
+    )
+    error_message = "backup.restore_snapshot must be an EBS snapshot ID (snap-...) on AWS, or a snapshot name or projects/.../global/snapshots/NAME on GCP."
   }
   validation {
     condition     = contains(["cloud", "local"], var.installation.logging.destination) && contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.installation.logging.retention_days)

@@ -52,7 +52,7 @@ LOCK = Path("/run/hot/agent.lock")
 LIBEXEC = Path("/usr/local/libexec/hot")
 DEFAULT_MANIFESTS = "https://github.com/hot-dev/hot/releases/download/v{release}"
 POLL_SECONDS = 30
-COMMANDS = {"deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop"}
+COMMANDS = {"deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop", "roll-back"}
 HOT_SERVICES = ("app", "api", "worker", "task-worker", "scheduler")
 # Service logs: the newest lines, each shortened, within a size that fits
 # one log entry on either cloud.
@@ -835,9 +835,7 @@ class Agent:
         if self.config.get("admin_email"):
             self.compose(bundle, "--profile", "admin", "run", "--rm", "bootstrap-admin")
             step("admin")
-        self.compose(bundle, "up", "-d", "--remove-orphans", "app", "api", "worker", "task-worker", "ingress")
-        self.wait_ready()
-        self.compose(bundle, "up", "-d", "scheduler")
+        self.start_services(bundle)
         step("ready")
         record["finished"] = utc_now()
         self.save_state({"release": release, "previous": previous, "migrations": record["migrations"],
@@ -1086,10 +1084,10 @@ class Agent:
             self.compose(bundle, "up", "-d", "--force-recreate", service)
             return self.report(state="restarted", service=service, request_id=request_id)
         if operation == "drain-and-stop":
-            self.compose(bundle, "stop", "scheduler")
-            self.compose(bundle, "stop", "--timeout", "120", "worker", "task-worker")
-            self.compose(bundle, "stop", "app", "api", "ingress")
+            self.stop_services(bundle)
             return self.report(state="stopped", request_id=request_id)
+        if operation == "roll-back":
+            return self.report(state="rolled-back", request_id=request_id, **self.roll_back(bundle))
         if operation == "backup":
             # An extra logical dump beside the scheduled data-disk snapshots.
             # A managed database is backed up by its cloud service, an existing
@@ -1099,6 +1097,60 @@ class Agent:
             target = self.dump_postgres(bundle, "manual")
             return self.report(state="backed-up", backup=str(target / "postgres.dump"), request_id=request_id)
         raise AgentError(f"Unhandled command {operation!r}")
+
+    def stop_services(self, bundle):
+        """Stop Hot in order: the scheduler, then workers with time to
+        finish, then the app, API, and ingress."""
+        self.compose(bundle, "stop", "scheduler")
+        self.compose(bundle, "stop", "--timeout", "120", "worker", "task-worker")
+        self.compose(bundle, "stop", "app", "api", "ingress")
+
+    def start_services(self, bundle):
+        self.compose(bundle, "up", "-d", "--remove-orphans", "app", "api", "worker", "task-worker", "ingress")
+        self.wait_ready()
+        self.compose(bundle, "up", "-d", "scheduler")
+
+    def roll_back(self, bundle):
+        """Undo a failed upgrade: restore a local database from the dump
+        taken before the release's migrations, then run the installed
+        release again. The failed release stays failed, so it is not
+        retried; point the installation back at the installed release."""
+        state = self.state()
+        failed = state.get("failed") or {}
+        if not failed:
+            raise AgentError("Nothing to roll back: the last deploy did not fail")
+        steps = []
+        if "migrating" in failed.get("steps", []):
+            point = failed.get("restore_point") or {}
+            if point.get("kind") != "dump":
+                when = f" to {point['time']}" if point.get("time") else ""
+                raise AgentError(f"The database is not on this host: restore it{when} with its provider's "
+                                 f"point-in-time recovery, then deploy {state.get('release')}")
+            dump = Path(point["path"])
+            if not dump.exists():
+                raise AgentError(f"The restore point {dump} is missing")
+            self.stop_services(bundle)
+            steps.append("stopped")
+            staged = self.data_root / "data/postgres/restore.dump"
+            shutil.copy(dump, staged)
+            try:
+                self.compose(bundle, "up", "-d", "--wait", "postgres")
+                self.compose(bundle, "exec", "-T", "postgres", "pg_restore", "-U", "hot_owner", "-d", "postgres",
+                             "--clean", "--if-exists", "--create", "--exit-on-error",
+                             "/var/lib/postgresql/restore.dump")
+            finally:
+                staged.unlink(missing_ok=True)
+            steps.append("restored")
+            self.compose(bundle, "--profile", "admin", "run", "--rm", "migrate")
+            self.compose(bundle, "--profile", "admin", "run", "--rm", "provision")
+            steps.append("checked")
+        self.start_services(bundle)
+        steps.append("started")
+        failed = {**failed, "rolled_back": utc_now()}
+        self.save_state({**state, "failed": failed})
+        self.remember({"release": state.get("release"), "rolled_back_from": failed["release"],
+                       "restore_point": failed.get("restore_point"), "steps": steps, "finished": utc_now()})
+        return {"release": state.get("release"), "rolled_back_from": failed["release"], "steps": steps}
 
     def diagnostics(self, bundle, probe=None):
         """What support needs to understand an installation, redacted:

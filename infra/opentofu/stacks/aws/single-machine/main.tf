@@ -151,7 +151,7 @@ resource "aws_ssm_document" "command" {
     schemaVersion = "2.2"
     description   = "Run one Hot agent command on the installation host."
     parameters = {
-      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop"] }
+      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop", "roll-back"] }
       service   = { type = "String", default = "none", allowedValues = ["none", "app", "api", "worker", "task-worker", "scheduler", "ingress", "postgres", "valkey"] }
       requestId = { type = "String", allowedPattern = "^[A-Za-z0-9-]{1,64}$" }
     }
@@ -215,9 +215,15 @@ resource "aws_ebs_volume" "data" {
   size              = module.contract.capacity.data_gb
   type              = "gp3"
   encrypted         = true
+  # Restores create the volume from a snapshot; see "Recovery" in
+  # infra/README.md. It is read only when the volume is created.
+  snapshot_id = local.config.backup.restore_snapshot == "" ? null : local.config.backup.restore_snapshot
   # The snapshot policy in monitoring.tf selects the volume by this tag.
   tags = { Name = "hot-${local.config.name}-data", HotDataVolume = local.config.name }
-  lifecycle { prevent_destroy = true }
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [snapshot_id]
+  }
 }
 resource "aws_instance" "host" {
   ami                         = local.config.host_image

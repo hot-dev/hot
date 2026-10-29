@@ -2,7 +2,7 @@ name: selfhost-command
 
 # Reusable: run one host agent command on a self-host installation and show
 # its report in the job summary: status, diagnostics, a service's logs, a
-# backup, restarting a service, or draining. Like the release workflow it uses
+# backup, restarting a service, draining, or rolling back a failed upgrade. Like the release workflow it uses
 # only cloud control-plane APIs and the release identity: no SSH, shell, or
 # network access to the host. It runs infra/operator/selfhost.py, which
 # operators can also run by hand.
@@ -16,7 +16,7 @@ on:
   workflow_call:
     inputs:
       operation:
-        description: status, diagnostics, logs, backup, restart-service, or drain-and-stop
+        description: status, diagnostics, logs, backup, restart-service, drain-and-stop, or roll-back
         type: string
         required: true
       service:
@@ -82,7 +82,7 @@ jobs:
         run: |
           [[ "$NAME" =~ ^[a-z][a-z0-9-]{2,23}$ ]] || { echo "::error::invalid installation name"; exit 1; }
           [[ "$CLOUD" =~ ^(aws|gcp)$ ]] || { echo "::error::cloud must be aws or gcp"; exit 1; }
-          [[ "$OPERATION" =~ ^(status|diagnostics|logs|backup|restart-service|drain-and-stop)$ ]] ||
+          [[ "$OPERATION" =~ ^(status|diagnostics|logs|backup|restart-service|drain-and-stop|roll-back)$ ]] ||
             { echo "::error::unsupported operation; releases use the selfhost-release workflow"; exit 1; }
           [[ "$SERVICE" =~ ^[a-z-]{0,16}$ ]] || { echo "::error::invalid service"; exit 1; }
 

@@ -301,3 +301,26 @@ run "backups_and_alerts" {
     error_message = "A missing backup status alerts too, by email."
   }
 }
+
+run "restore_from_a_snapshot" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example-project/global/images/hot-host-amd64",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "backup" : { "restore_snapshot" : "hot-example-data-20261029" },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = google_compute_disk.data.snapshot == "hot-example-data-20261029" && google_compute_disk.data.name != "hot-hot-example-data" && startswith(google_compute_disk.data.name, "hot-hot-example-data-")
+    error_message = "A restore creates the data disk from the chosen snapshot, under a name that does not collide with the kept disk."
+  }
+}

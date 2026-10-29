@@ -51,6 +51,8 @@ class HostImage(unittest.TestCase):
         unit = SETUP.split("kata-containerd.service <<'UNIT'")[1].split("UNIT")[0]
         self.assertIn("ConditionPathIsMountPoint=/var/lib/hot", unit)
         self.assertIn("refusing to initialize it without --allow-format", SETUP)
+        # Restarted containers would otherwise start on the boot disk.
+        self.assertIn("RequiresMountsFor=/var/lib/hot\\n' > /etc/systemd/system/docker.service.d/hot-data.conf", SETUP)
         self.assertIn("HOT_BOX_POOL_GB", SETUP)
 
     def test_metadata_is_hardened_on_aws(self):

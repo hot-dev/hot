@@ -392,3 +392,21 @@ run "log_retention_must_be_a_cloudwatch_value" {
   }
   expect_failures = [var.installation]
 }
+
+run "restore_snapshots_name_the_clouds_snapshot" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "backup" : { "restore_snapshot" : "projects/example/global/snapshots/hot-data" },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [var.installation]
+}

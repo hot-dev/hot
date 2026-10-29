@@ -1804,6 +1804,8 @@ or an existing operator destination without coupling telemetry to S3.
       loss) and recovery time objectives per qualified preset/configuration.
       Define backup schedules, retention, encryption, verification, and alerts;
       record measured results and prerequisites rather than untested promises.
+      [Recovery](../../infra/README.md#recovery) states single-machine
+      recovery points and target times per failure, marked as unmeasured.
 - [ ] Define a recoverable point across PostgreSQL, local/object bytes, internal
       blobs, queued work, configuration, application secrets, and cloud keys.
       Document pause/snapshot ordering, pending-work reconciliation, duplicate
@@ -1812,6 +1814,12 @@ or an existing operator destination without coupling telemetry to S3.
       or its cached credentials/configuration. Include state-backend recovery,
       retained resource inventory, private access, and key/secret retrieval.
       Run application flows and measure elapsed recovery and recovered data age.
+      The boot disk holds nothing recovery needs. `backup.restore_snapshot`
+      creates the data disk from a snapshot, and instance replacement
+      reattaches the retained disk. `roll-back` restores a local database
+      from the pre-upgrade dump. Docker now waits for the data disk, so a
+      reboot can never start the data services on the boot disk. Drills on
+      real accounts remain.
 - [ ] Require the documented targets and restore drill for the initial
       single-machine release on both clouds. Extend drills to managed data and
       distributed compute as those presets ship; track regional disaster
