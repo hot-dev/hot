@@ -126,6 +126,7 @@ data ports are published; remote dependency TLS qualification is separate work.
 
 Hostnames and supplied TLS material define private ingress. Internet access is
 provided through outbound NAT. Source ranges/IAP access are explicit, and no
-cloud stack publishes PostgreSQL/Valkey or port 22. Public/mixed ingress, GCS,
+cloud stack publishes PostgreSQL/Valkey or port 22. Public/mixed ingress, GCS
+(Hot itself supports it; the renderer does not select it yet),
 managed data, customer-managed keys, and cross-provider bucket provisioning are
 rejected or outside this slice; their implementation remains in the plan.

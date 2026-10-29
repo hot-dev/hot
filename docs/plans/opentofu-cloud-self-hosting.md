@@ -3,11 +3,13 @@
 Status: implementation in progress. Direction selected on 2026-10-20.
 
 The first local slice is documented in [infra/README.md](../../infra/README.md):
-file-backed environment settings and redaction, strict Local/S3 selection,
+file-backed environment settings and redaction, strict storage selection,
 temporary S3 credentials, JSON logging, a shared input/runtime-bundle contract,
 and mock-tested private AWS/GCP VM roots. No cloud configuration is qualified
 yet. Host images, the deploy/secret agent, and the remaining Phase 0/1 release
 gates are still required before these stacks are supported installations.
+Hot's native GCS backend (Phase 2's storage work) landed separately in #104;
+the runtime bundle and stacks do not select it yet.
 
 Provide supported Hot installations in customer-owned AWS accounts and Google
 Cloud projects using OpenTofu. Deliver single-machine installations on both
@@ -1084,6 +1086,11 @@ reconciliation, object/blob recovery, and restoration of session/encryption
 material. A disk snapshot alone is not the complete recovery procedure.
 
 ## Phase 2 Native Google Cloud Storage
+
+Status: the `gcs-storage` feature and the GCS build, file, and blob backends
+landed in #104 (multipart uploads use temporary parts and composition).
+Re-check the items below against it before closing them; bundle and stack
+support for selecting GCS is still open.
 
 This phase begins alongside Phase 1. Its completion gates GCS-backed application
 storage on either compute cloud. It does not gate GCP managed-data/scalable
