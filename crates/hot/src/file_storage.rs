@@ -441,9 +441,7 @@ pub async fn collect_retired_objects(
     retired_before: DateTime<Utc>,
     limit: i64,
 ) -> Result<usize, String> {
-    use crate::db::file::{
-        collectable_retired_objects, forget_retired_object, retired_object_collectable,
-    };
+    use crate::db::file::{collect_retired_object, collectable_retired_objects};
 
     let db = db.with_scope(crate::db::DatabaseScope::Maintenance {
         operation: crate::db::MaintenanceOperation::Retention,
@@ -452,17 +450,20 @@ pub async fn collect_retired_objects(
     let backend = storage.storage_type();
     let mut collected = 0;
     for storage_path in collectable_retired_objects(&db, backend, retired_before, limit).await? {
-        // Checked again right before deleting: a retried multipart completion
-        // can commit its (deterministic) object again meanwhile.
-        if !retired_object_collectable(&db, backend, &storage_path, retired_before).await? {
-            continue;
+        // Checked again, and deleted, while holding the object's row: a
+        // retried completion can register or commit its object meanwhile.
+        let delete = || async {
+            match storage.delete_storage_object(&storage_path).await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "Could not delete a retired file object; the next collection retries it");
+                    false
+                }
+            }
+        };
+        if collect_retired_object(&db, backend, &storage_path, retired_before, delete).await? {
+            collected += 1;
         }
-        if let Err(error) = storage.delete_storage_object(&storage_path).await {
-            tracing::warn!(%error, "Could not delete a retired file object; the next collection retries it");
-            continue;
-        }
-        forget_retired_object(&db, backend, &storage_path, retired_before).await?;
-        collected += 1;
     }
     Ok(collected)
 }
@@ -470,6 +471,8 @@ pub async fn collect_retired_objects(
 /// Register a staged object for collection just before committing it; see
 /// [`crate::db::file::register_staged_object`]. Multipart destinations are not
 /// registered: an upload's expiry aborts and removes one that never commits.
+/// The exception is a legacy S3 upload, which completes into the live key an
+/// earlier version may have retired.
 async fn register_staged(
     ctx: &FileStorageContext,
     backend: &str,
@@ -2419,6 +2422,13 @@ pub mod s3 {
                     staged_bytes_state(ctx, &normalized_path, &storage_path).await
             {
                 return Ok(*meta);
+            }
+            // A legacy upload completes into the live key, which an earlier
+            // version may have retired. Registering it first makes collection
+            // skip the key, or finish deleting its old bytes before this
+            // completion writes new ones.
+            if legacy {
+                register_staged(ctx, "s3", &storage_path).await?;
             }
 
             let completed_parts: Vec<CompletedPart> = parts

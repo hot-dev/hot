@@ -2230,6 +2230,11 @@ struct TaskOwnership {
     /// The delivery also holds the task's lease: no other delivery, on any
     /// worker, is processing it.
     leased: Arc<AtomicBool>,
+    /// The lease itself. It lives here rather than in `process_task_inner`
+    /// so a panic unwinding out of processing doesn't release it: recovery
+    /// runs while the delivery still owns the task, and dropping the guard
+    /// afterwards releases the lease.
+    lease: Arc<parking_lot::Mutex<Option<task_lease::TaskLeaseGuard>>>,
 }
 
 /// What [`guard_task_panics`] needs to fail a task whose processing panicked.
@@ -2284,6 +2289,9 @@ where
     if !ownership.leased.load(Ordering::Acquire) {
         return Err(format!("task processing panicked at {location}").into());
     }
+    // Held until recovery returns, so no other delivery can take the task
+    // over while this one reaps its containers and fails its row.
+    let _lease = ownership.lease.lock().take();
 
     if request.task_type == "container"
         && let Some(executor) = &recovery.container_executor
@@ -2560,8 +2568,9 @@ async fn process_task_inner(
     //     message retry budget. Surface a queue infrastructure retry so the
     //     queue can defer and requeue the message as fresh work.
     //
-    // The guard is bound for the rest of `process_task` — its `Drop`
-    // releases the lease when the body returns (success, error, panic).
+    // The guard is held in `ownership` for the rest of `process_task` — its
+    // `Drop` releases the lease once processing returns, or once recovery
+    // from a panic in it has finished.
     let lease_guard = match task_lease
         .try_acquire(task_id, task_lease::DEFAULT_LEASE_TTL)
         .await
@@ -2593,6 +2602,7 @@ async fn process_task_inner(
         }
     };
     let lease_lost_notify = lease_guard.lost_notify();
+    *ownership.lease.lock() = Some(lease_guard);
     ownership.leased.store(true, Ordering::Release);
 
     let terminal_state_db = Arc::clone(&db);
@@ -2774,7 +2784,12 @@ async fn process_task_inner(
                 )) as Box<dyn std::error::Error + Send + Sync>)
             }
             result = execute_task => {
-                if lease_guard.is_lost() {
+                if ownership
+                    .lease
+                    .lock()
+                    .as_ref()
+                    .is_some_and(task_lease::TaskLeaseGuard::is_lost)
+                {
                     coordinator.cancel_task(&task_id);
                     tracing::warn!(
                         task_id = %task_id,
@@ -7807,6 +7822,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         assert!(coordinator.try_register_task(active));
         ownership.registered.store(true, Ordering::Release);
+        *ownership.lease.lock() = Some(task_lease::TaskLeaseGuard::noop());
         ownership.leased.store(true, Ordering::Release);
         processing_panics()
     }
@@ -7828,6 +7844,10 @@ mod tests {
 
         assert!(result.is_ok(), "the delivery should be settled: {result:?}");
         assert!(!coordinator.is_task_active(&task.task_id));
+        assert!(
+            ownership.lease.lock().is_none(),
+            "the panic left the lease for recovery, which then released it"
+        );
         let failed = Task::get(&db, &task.task_id).await.unwrap();
         assert_eq!(failed.task_status_id, TaskStatus::Failed.as_id());
         let result = failed.result.unwrap().to_string();

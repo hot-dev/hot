@@ -349,15 +349,19 @@ fn list_options(function: &str, opts: &Val) -> Result<ListOptions, Val> {
             )));
         }
     };
+    // A negative count would reach SQL, where SQLite reads `LIMIT -1` as no
+    // limit and PostgreSQL refuses it.
+    let count = |name: &str| match opts.get(name) {
+        Some(Val::Int(i)) => usize::try_from(i).map(Some).map_err(|_| {
+            Val::from(format!(
+                "{function} expects a non-negative `{name}`, got {i}"
+            ))
+        }),
+        _ => Ok(None),
+    };
     Ok(ListOptions {
-        limit: opts.get("limit").and_then(|v| match v {
-            Val::Int(i) => Some(i as usize),
-            _ => None,
-        }),
-        offset: opts.get("offset").and_then(|v| match v {
-            Val::Int(i) => Some(i as usize),
-            _ => None,
-        }),
+        limit: count("limit")?,
+        offset: count("offset")?,
         prefix,
     })
 }
@@ -965,5 +969,13 @@ mod tests {
         let batch = Val::Vec(vec![Val::Vec(vec![Val::Int(1), Val::Int(2)])]);
         let err = batch_vectors_from_val(batch, 2, Some(2)).unwrap_err();
         assert!(err.contains("expected 2"));
+    }
+
+    #[test]
+    fn list_options_refuse_negative_counts() {
+        let opts = list_options("keys", &crate::val!({"limit": 2, "offset": 1})).unwrap();
+        assert_eq!((opts.limit, opts.offset), (Some(2), Some(1)));
+        assert!(list_options("keys", &crate::val!({"limit": -1})).is_err());
+        assert!(list_options("keys", &crate::val!({"offset": -1})).is_err());
     }
 }
