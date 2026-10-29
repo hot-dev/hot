@@ -208,3 +208,70 @@ run "traversal_prefix" {
   } }
   expect_failures = [var.installation]
 }
+
+run "existing_postgres" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "size" : "small",
+      "host_image" : "ami-0123456789abcdef0",
+      "project" : "",
+      "release_pointer" : "arn:aws:ssm:us-east-1:123456789012:parameter/hot/hot-example/release",
+      "secret_references" : {
+        "app" : "arn:aws:secretsmanager:us-east-1:123456789012:secret:hot/hot-example/app-example"
+      },
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "storage" : {
+        "build" : {
+          "backend" : "local"
+        },
+        "file" : {
+          "backend" : "local"
+        }
+      },
+      "data" : { "postgres" : { "mode" : "existing", "runtime_role" : "hot_app" } }
+    }
+  }
+  assert {
+    condition     = output.configuration.data.postgres.mode == "existing" && output.configuration.data.valkey.mode == "local"
+    error_message = "Each data service selects its mode independently."
+  }
+}
+
+run "unknown_data_mode" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "size" : "small",
+      "host_image" : "ami-0123456789abcdef0",
+      "project" : "",
+      "release_pointer" : "arn:aws:ssm:us-east-1:123456789012:parameter/hot/hot-example/release",
+      "secret_references" : {
+        "app" : "arn:aws:secretsmanager:us-east-1:123456789012:secret:hot/hot-example/app-example"
+      },
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "storage" : {
+        "build" : {
+          "backend" : "local"
+        },
+        "file" : {
+          "backend" : "local"
+        }
+      },
+      "data" : { "valkey" : { "mode" : "managed" } }
+    }
+  }
+  expect_failures = [var.installation]
+}

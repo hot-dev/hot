@@ -920,6 +920,13 @@ remove the only copy of its own state.
       Omit provisioning and local containers for each existing dependency;
       verify teardown without owning external services. Qualify existing
       PostgreSQL initially, including its pooler mode for the scheduler.
+      Implemented: `data.postgres.mode` and `data.valkey.mode` (`local` or
+      `existing`). Existing PostgreSQL requires `sslmode=verify-full` with the
+      operator's CA, a read-only `check-postgres` job checks the schema,
+      extensions, and runtime login before migrating, and its addresses are
+      denied to user code; existing Valkey requires `rediss://`. The scheduler
+      refuses a session-breaking pooler at startup (#159). Qualification on
+      each cloud remains.
 - [ ] Implement independent storage-role/backend and bucket-ownership inputs.
       Qualify the Local/S3 reference configurations, including a GCP VM using
       existing S3 without GCS setup.

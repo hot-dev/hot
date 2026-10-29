@@ -258,14 +258,21 @@ OPERATOR_ROUTES = {
     "HOT_FILE_AWS_": HOT_SERVICES,
 }
 OPERATOR_INGRESS = ("TLS_CERTIFICATE", "TLS_PRIVATE_KEY")
+# Connection settings for existing data services; the bundle mounts them itself.
+OPERATOR_DATA = {"postgres": ("HOT_DB_URI", "HOT_DB_MIGRATION_URI", "POSTGRES_CA_CERT"),
+                 "valkey": ("HOT_REDIS_URI",)}
+CA_PATH = "/run/secrets/POSTGRES_CA_CERT"
 
 
-def operator_routes(operator):
+def operator_routes(operator, config=None):
     """Which Hot services mount each operator secret. Unknown names are
     refused rather than silently ignored."""
+    config = config or {}
+    data_keys = {key for service, keys in OPERATOR_DATA.items()
+                 if render.data_mode(config, service) == "existing" for key in keys}
     routes = {}
     for key in operator:
-        if key in OPERATOR_INGRESS:
+        if key in OPERATOR_INGRESS or key in data_keys:
             continue
         roles = next((roles for prefix, roles in OPERATOR_ROUTES.items() if key.startswith(prefix)), None)
         if roles is None:
@@ -275,34 +282,80 @@ def operator_routes(operator):
     return routes
 
 
+def verified_postgres_uri(uri, name, config):
+    """Existing PostgreSQL must be reached with full certificate
+    verification against the operator's CA, mounted at CA_PATH."""
+    parts = urllib.parse.urlsplit(uri)
+    if parts.scheme not in ("postgres", "postgresql") or not parts.hostname:
+        raise AgentError(f"{name} must be a postgres:// URI")
+    query = dict(urllib.parse.parse_qsl(parts.query))
+    if query.get("sslmode") != "verify-full":
+        raise AgentError(f"{name} must set sslmode=verify-full for an existing database")
+    if name == "HOT_DB_URI" and urllib.parse.unquote(parts.username or "") != render.runtime_role(config):
+        raise AgentError(f"HOT_DB_URI must log in as data.postgres.runtime_role ({render.runtime_role(config)})")
+    query["sslrootcert"] = CA_PATH
+    return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
+
+
+def data_endpoints(config, operator):
+    """Hosts of existing data services, which user code must never reach."""
+    hosts = []
+    if render.data_mode(config, "postgres") == "existing":
+        hosts.append(urllib.parse.urlsplit(operator["HOT_DB_URI"]).hostname)
+    if render.data_mode(config, "valkey") == "existing":
+        hosts.append(urllib.parse.urlsplit(operator["HOT_REDIS_URI"]).hostname)
+    return [h for h in hosts if h]
+
+
 def role_secrets(config, generated, operator):
     """Every file the rendered bundle mounts, keyed by role, then by name.
     Each role receives only what it needs."""
     g = generated
-    runtime_uri = f"postgres://hot_runtime:{g['POSTGRES_RUNTIME_PASSWORD']}@postgres:5432/hot?sslmode=disable"
-    owner_uri = f"postgres://hot_owner:{g['POSTGRES_PASSWORD']}@postgres:5432/hot?sslmode=disable"
-    redis_uri = f"redis://hot:{g['VALKEY_PASSWORD']}@valkey:6379"
+    pg_local = render.data_mode(config, "postgres") == "local"
+    valkey_local = render.data_mode(config, "valkey") == "local"
+    if pg_local:
+        runtime_uri = f"postgres://hot_runtime:{g['POSTGRES_RUNTIME_PASSWORD']}@postgres:5432/hot?sslmode=disable"
+        owner_uri = f"postgres://hot_owner:{g['POSTGRES_PASSWORD']}@postgres:5432/hot?sslmode=disable"
+    else:
+        for key in OPERATOR_DATA["postgres"]:
+            if key not in operator:
+                raise AgentError(f"An existing database needs {key} in the operator secret bundle")
+        runtime_uri = verified_postgres_uri(operator["HOT_DB_URI"], "HOT_DB_URI", config)
+        owner_uri = verified_postgres_uri(operator["HOT_DB_MIGRATION_URI"], "HOT_DB_MIGRATION_URI", config)
+    if valkey_local:
+        redis_uri = f"redis://hot:{g['VALKEY_PASSWORD']}@valkey:6379"
+    else:
+        redis_uri = operator.get("HOT_REDIS_URI", "")
+        if not redis_uri.startswith("rediss://"):
+            raise AgentError("An existing Valkey needs a rediss:// HOT_REDIS_URI in the operator secret bundle")
+    ca = {} if pg_local else {"POSTGRES_CA_CERT": operator["POSTGRES_CA_CERT"]}
     files = {}
     for role in HOT_SERVICES:
-        files[role] = {"HOT_DB_URI": runtime_uri, "HOT_REDIS_URI": redis_uri}
+        files[role] = {"HOT_DB_URI": runtime_uri, "HOT_REDIS_URI": redis_uri, **ca}
         if role != "scheduler":
             files[role]["HOT_ENCRYPTION_KEY"] = g["HOT_ENCRYPTION_KEY"]
-    for role, keys in operator_routes(operator).items():
+    for role, keys in operator_routes(operator, config).items():
         for key in keys:
             files[role][key] = operator[key]
     files["app"]["HOT_APP_SESSION_SECRET"] = g["HOT_APP_SESSION_SECRET"]
-    files["postgres"] = {"POSTGRES_PASSWORD": g["POSTGRES_PASSWORD"],
-                         "POSTGRES_RUNTIME_PASSWORD": g["POSTGRES_RUNTIME_PASSWORD"]}
-    files["valkey"] = {"VALKEY_PASSWORD": g["VALKEY_PASSWORD"],
-                       "VALKEY_ACL": f"user default off\nuser hot on >{g['VALKEY_PASSWORD']} ~* &* +@all\n"}
+    if pg_local:
+        files["postgres"] = {"POSTGRES_PASSWORD": g["POSTGRES_PASSWORD"],
+                             "POSTGRES_RUNTIME_PASSWORD": g["POSTGRES_RUNTIME_PASSWORD"]}
+    if valkey_local:
+        files["valkey"] = {"VALKEY_PASSWORD": g["VALKEY_PASSWORD"],
+                           "VALKEY_ACL": f"user default off\nuser hot on >{g['VALKEY_PASSWORD']} ~* &* +@all\n"}
     for key in ("TLS_CERTIFICATE", "TLS_PRIVATE_KEY"):
         if key not in operator:
             raise AgentError(f"The operator secret bundle needs {key} for HTTPS ingress")
     files["ingress"] = {"TLS_CERTIFICATE": operator["TLS_CERTIFICATE"], "TLS_PRIVATE_KEY": operator["TLS_PRIVATE_KEY"]}
-    files["migrate"] = {"HOT_DB_MIGRATION_URI": owner_uri}
-    files["provision"] = {"PGPASSFILE": f"postgres:5432:hot:hot_owner:{g['POSTGRES_PASSWORD']}\n"}
+    files["migrate"] = {"HOT_DB_MIGRATION_URI": owner_uri, **ca}
+    if pg_local:
+        files["provision"] = {"PGPASSFILE": f"postgres:5432:hot:hot_owner:{g['POSTGRES_PASSWORD']}\n"}
+    else:
+        files["provision"] = {"HOT_DB_MIGRATION_URI": owner_uri, **ca}
+        files["check-postgres"] = {"HOT_DB_MIGRATION_URI": owner_uri, **ca}
     if config.get("admin_email"):
-        files["bootstrap-admin"] = {"HOT_DB_URI": runtime_uri, "ADMIN_PASSWORD": g["ADMIN_PASSWORD"]}
+        files["bootstrap-admin"] = {"HOT_DB_URI": runtime_uri, "ADMIN_PASSWORD": g["ADMIN_PASSWORD"], **ca}
     return files
 
 
@@ -395,19 +448,34 @@ class Agent:
         if bundle.exists():
             shutil.rmtree(bundle)
         bundle.mkdir(mode=0o700)
-        routes = operator_routes(operator)
+        routes = operator_routes(operator, self.config)
         # S3 keys in the bundle mean file credentials; otherwise VM identity.
         s3_files = any(key.startswith(("HOT_BUILD_AWS_", "HOT_FILE_AWS_")) for key in operator)
         sessions = any(key.endswith("_AWS_SESSION_TOKEN") for key in operator)
         compose = render.render(self.config, manifest, str(HOT_ROOT / "data"), str(self.secrets_root),
                                 s3_auth="files" if s3_files else "identity", s3_session_tokens=sessions,
-                                operator_secrets=routes)
+                                operator_secrets=routes,
+                                extra_deny=self.resolve(data_endpoints(self.config, operator)))
         (bundle / "compose.json").write_text(json.dumps(compose, indent=2))
         (bundle / "nginx.conf").write_text(render.nginx_config(render.validate(self.config)))
         (bundle / "init.sql").write_text(render.INIT_SQL)
         (bundle / "valkey.conf").write_text(render.valkey_conf(self.config.get("size", "small")))
+        (bundle / "check_postgres.sql").write_text(render.CHECK_POSTGRES_SQL)
         shutil.copy(provision_sql(), bundle / "provision_runtime.sql")
         return bundle
+
+    @staticmethod
+    def resolve(hosts):
+        """Addresses of existing data services, as /32 or /128 deny entries."""
+        addresses = set()
+        for host in hosts:
+            try:
+                for info in socket.getaddrinfo(host, None):
+                    address = info[4][0]
+                    addresses.add(address + ("/128" if ":" in address else "/32"))
+            except OSError as error:
+                raise AgentError(f"Cannot resolve the existing data service {host}: {error}") from error
+        return sorted(addresses)
 
     def compose(self, bundle, *args):
         return self.run_command(["docker", "compose", "-f", str(bundle / "compose.json"), *args], cwd=bundle)
@@ -439,7 +507,11 @@ class Agent:
         steps.append("pulled")
         self.compose(bundle, "stop", "scheduler")
         steps.append("scheduler-stopped")
-        self.compose(bundle, "up", "-d", "--wait", "postgres", "valkey")
+        local_data = [s for s in ("postgres", "valkey") if render.data_mode(self.config, s) == "local"]
+        if local_data:
+            self.compose(bundle, "up", "-d", "--wait", *local_data)
+        if render.data_mode(self.config, "postgres") == "existing":
+            self.compose(bundle, "--profile", "admin", "run", "--rm", "check-postgres")
         self.compose(bundle, "--profile", "admin", "run", "--rm", "migrate")
         self.compose(bundle, "--profile", "admin", "run", "--rm", "provision")
         steps.append("migrated")

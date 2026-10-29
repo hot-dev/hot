@@ -192,6 +192,47 @@ class Secrets(AgentHarness):
             self.assertFalse(any(value in text for value in values))
 
 
+class ExistingData(AgentHarness):
+    URI = "postgres://hot_runtime:pw@db.internal.example:5432/hot?sslmode=verify-full"
+    OWNER = "postgres://hot_owner:pw@db.internal.example:5432/hot?sslmode=verify-full"
+
+    def setUp(self):
+        super().setUp()
+        self.config["data"] = {"postgres": {"mode": "existing"}}
+        self.cloud.secrets[OPERATOR].update(HOT_DB_URI=self.URI, HOT_DB_MIGRATION_URI=self.OWNER,
+                                            POSTGRES_CA_CERT="-----BEGIN CERTIFICATE-----")
+        self.agent.resolve = lambda hosts: ["10.20.30.40/32"] if hosts else []
+
+    def test_existing_databases_are_checked_then_migrated(self):
+        status = self.agent.reconcile()
+        self.assertEqual(status["state"], "deployed", status)
+        calls = self.run.compose_calls()
+        self.assertIn("up -d --wait valkey", calls)
+        self.assertLess(calls.index("--profile admin run --rm check-postgres"),
+                        calls.index("--profile admin run --rm migrate"))
+        root = Path(self.tmp.name) / "secrets"
+        uri = (root / "app/HOT_DB_URI").read_text()
+        self.assertIn("sslrootcert=%2Frun%2Fsecrets%2FPOSTGRES_CA_CERT", uri)
+        self.assertTrue((root / "migrate/POSTGRES_CA_CERT").exists())
+        self.assertFalse((root / "postgres").exists())
+        compose = json.loads((Path(self.tmp.name) / "releases/3.0.1/bundle/compose.json").read_text())
+        self.assertIn("10.20.30.40/32", compose["services"]["task-worker"]["environment"]["HOT_NETWORK_DENY_CIDRS"])
+
+    def test_unverified_or_mismatched_connections_are_refused(self):
+        self.cloud.secrets[OPERATOR]["HOT_DB_URI"] = self.URI.replace("verify-full", "require")
+        self.assertIn("sslmode=verify-full", self.agent.reconcile()["error"])
+        self.cloud.secrets[OPERATOR]["HOT_DB_URI"] = self.URI.replace("hot_runtime", "postgres")
+        self.assertIn("runtime_role", self.agent.reconcile()["error"])
+        self.cloud.secrets[OPERATOR]["HOT_DB_URI"] = self.URI
+        self.config["data"]["valkey"] = {"mode": "existing"}
+        self.cloud.secrets[OPERATOR]["HOT_REDIS_URI"] = "redis://cache.internal:6379"
+        self.assertIn("rediss://", self.agent.reconcile()["error"])
+
+    def test_database_settings_are_refused_for_local_data(self):
+        self.config["data"] = {}
+        self.assertIn("unsupported entry", self.agent.reconcile()["error"])
+
+
 class Commands(AgentHarness):
     def test_only_allowlisted_commands_and_services(self):
         with self.assertRaisesRegex(agent_module.AgentError, "Unknown command"):

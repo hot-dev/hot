@@ -124,6 +124,38 @@ class RuntimeContract(unittest.TestCase):
             maxmemory = int(renderer.valkey_conf(size).split("maxmemory ")[1].split("mb")[0])
             self.assertLess(maxmemory, int(bundle["services"]["valkey"]["mem_limit"].rstrip("m")))
 
+    def test_existing_data_services_leave_out_their_containers(self):
+        config = dict(renderer.validate(example()), data={"postgres": {"mode": "existing", "runtime_role": "hot_app"},
+                                                          "valkey": {"mode": "existing"}})
+        bundle = renderer.render(config, manifest(), "/data", "/run/hot/secrets", extra_deny=["10.9.8.7/32"])
+        services = bundle["services"]
+        self.assertNotIn("postgres", services)
+        self.assertNotIn("valkey", services)
+        self.assertEqual(services["app"]["depends_on"], {})
+        self.assertIn("check-postgres", services)
+        # Connection strings stay in files: never an argument or environment value.
+        for name in ("provision", "check-postgres"):
+            self.assertIn("$(cat /run/secrets/HOT_DB_MIGRATION_URI)", services[name]["entrypoint"][2])
+            self.assertNotIn("environment", services[name])
+        self.assertIn("--set=runtime_role=hot_app", services["provision"]["command"])
+        self.assertIn("app-POSTGRES_CA_CERT", [s["source"] for s in services["app"]["secrets"]])
+        self.assertNotIn("POSTGRES_CA_CERT_FILE", services["app"]["environment"])
+        self.assertIn("10.9.8.7/32", services["worker"]["environment"]["HOT_NETWORK_DENY_CIDRS"])
+        with self.assertRaises(ValueError):
+            renderer.validate(dict(config, data={"postgres": {"mode": "managed"}}))
+        with self.assertRaises(ValueError):
+            renderer.validate(dict(config, data={"postgres": {"runtime_role": "x; drop"}}))
+
+    @unittest.skipUnless(shutil.which("docker"), "Docker CLI is not installed")
+    def test_compose_accepts_an_existing_data_bundle(self):
+        config = dict(renderer.validate(example()), data={"postgres": {"mode": "existing"}, "valkey": {"mode": "existing"}})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "compose.json"
+            path.write_text(json.dumps(renderer.render(config, manifest(), "/data", "/run/hot/secrets")))
+            result = subprocess.run(["docker", "compose", "-f", str(path), "--profile", "admin", "config", "--quiet"],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_postgres_data_uses_the_postgres_18_layout(self):
         postgres = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")["services"]["postgres"]
         self.assertEqual(postgres["volumes"][0]["target"], "/var/lib/postgresql")

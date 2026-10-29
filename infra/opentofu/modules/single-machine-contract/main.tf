@@ -22,7 +22,18 @@ variable "installation" {
     # Where release manifests are published; empty means Hot's GitHub releases.
     manifest_base_url = optional(string, "")
     # Non-secret HOT_* settings for every Hot service, such as HOT_EMAIL_PROVIDER.
-    settings     = optional(map(string), {})
+    settings = optional(map(string), {})
+    # local runs PostgreSQL or Valkey on the VM; existing uses the operator's,
+    # with connection settings in the operator secret.
+    data = optional(object({
+      postgres = optional(object({
+        mode         = optional(string, "local")
+        runtime_role = optional(string, "hot_runtime")
+      }), {})
+      valkey = optional(object({
+        mode = optional(string, "local")
+      }), {})
+    }), {})
     app_hostname = string
     api_hostname = string
     app_exposure = optional(string, "private")
@@ -80,6 +91,10 @@ variable "installation" {
   validation {
     condition     = can(cidrsubnet(var.installation.network.cidr, 8, 1)) && alltrue([for c in var.installation.network.client_cidrs : can(cidrnetmask(c)) && try(tonumber(split("/", c)[1]) > 0, false)])
     error_message = "The network needs a usable IPv4 CIDR; client ranges must be valid IPv4 CIDRs narrower than /0."
+  }
+  validation {
+    condition     = contains(["local", "existing"], var.installation.data.postgres.mode) && contains(["local", "existing"], var.installation.data.valkey.mode) && can(regex("^[a-z_][a-z0-9_]{0,62}$", var.installation.data.postgres.runtime_role))
+    error_message = "data.postgres.mode and data.valkey.mode must be local or existing, and runtime_role a PostgreSQL role name."
   }
   validation {
     condition     = var.installation.host_image != ""

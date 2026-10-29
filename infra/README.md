@@ -49,6 +49,13 @@ Implemented:
   TLS certificate and key, and any SMTP, OAuth, or S3 credentials, in the
   operator secret the stack creates. Commands are a fixed list run through an
   SSM command document (AWS) or Pub/Sub (GCP).
+- Existing data services: set `data.postgres.mode` or `data.valkey.mode` to
+  `existing` and put the connection settings in the operator secret
+  (`HOT_DB_URI` for the runtime login, `HOT_DB_MIGRATION_URI` for the schema
+  owner, `POSTGRES_CA_CERT`, and `HOT_REDIS_URI`). Prepare the database as
+  [Self-Hosted PostgreSQL](../resources/docs/configuration/postgres.md)
+  describes; the bundle checks it, migrates, and grants the runtime login,
+  and never creates or drops anything the operator owns.
 - In Hot: SMTP email delivery, `hot admin bootstrap`/`reset-password` and the
   `app.signup` policy for operator-managed accounts, and outbound allowlists
   (`network.allow-cidrs`, `allow-hosts`, `deny-cidrs`) behind a fixed deny set.

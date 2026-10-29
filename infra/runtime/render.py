@@ -41,7 +41,7 @@ RUNTIME_SUBNET = "172.30.0.0/24"
 CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "size", "host_image", "release_pointer", "secret_references", "app_hostname", "api_hostname", "app_exposure", "api_exposure", "storage", "network",
                # Read by the host agent, not by the bundle.
                "data_volume_id", "admin_email", "manifest_base_url", "status_reference", "command_subscription",
-               "settings"}
+               "settings", "data"}
 # Names that would carry a secret; those belong in the operator secret bundle.
 SECRET_MARKERS = ("SECRET", "PASSWORD", "TOKEN", "_KEY", "_URI")
 
@@ -68,6 +68,17 @@ def validate(document):
         raise ValueError("admin_email must be an email address")
     if not (config.get("manifest_base_url") or "https://").startswith("https://"):
         raise ValueError("manifest_base_url must use https")
+    data = config.get("data", {})
+    if not isinstance(data, dict) or set(data) - {"postgres", "valkey"}:
+        raise ValueError("data takes postgres and valkey settings only")
+    for service, options in data.items():
+        allowed = {"mode", "runtime_role"} if service == "postgres" else {"mode"}
+        if not isinstance(options, dict) or set(options) - allowed:
+            raise ValueError(f"Unknown data.{service} settings")
+        if options.get("mode", "local") not in {"local", "existing"}:
+            raise ValueError(f"data.{service}.mode must be local or existing")
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", runtime_role(config)):
+        raise ValueError("data.postgres.runtime_role must be a PostgreSQL role name")
     settings = config.get("settings", {})
     if not isinstance(settings, dict):
         raise ValueError("settings must map HOT_* names to values")
@@ -114,6 +125,15 @@ def validate(document):
     return config
 
 
+def data_mode(config, service):
+    """local runs the service in the bundle; existing uses the operator's."""
+    return config.get("data", {}).get(service, {}).get("mode", "local")
+
+
+def runtime_role(config):
+    return config.get("data", {}).get("postgres", {}).get("runtime_role", "hot_runtime")
+
+
 def verify_manifest_signature(manifest_path, bundle_path, signer=RELEASE_SIGNER, cosign="cosign"):
     """Accept a manifest only when its Sigstore bundle names the release workflow."""
     result = subprocess.run(
@@ -127,9 +147,11 @@ def verify_manifest_signature(manifest_path, bundle_path, signer=RELEASE_SIGNER,
 
 
 def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_session_tokens=False,
-           operator_secrets=None):
+           operator_secrets=None, extra_deny=()):
     """`operator_secrets` maps a Hot service role to extra secret names, such
-    as SMTP or OAuth credentials, that it mounts from the operator bundle."""
+    as SMTP or OAuth credentials, that it mounts from the operator bundle.
+    `extra_deny` adds addresses user code may never reach, such as an
+    existing database's."""
     config = validate(document)
     if set(manifest) - MANIFEST_KEYS:
         raise ValueError("Unknown manifest fields: " + ", ".join(sorted(set(manifest) - MANIFEST_KEYS)))
@@ -181,6 +203,13 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     deny = [RUNTIME_SUBNET]
     if config.get("network", {}).get("mode", "new") == "new":
         deny.append(config.get("network", {}).get("cidr", "10.68.0.0/16"))
+    deny += [cidr for cidr in extra_deny if cidr not in deny]
+    pg_local = data_mode(config, "postgres") == "local"
+    valkey_local = data_mode(config, "valkey") == "local"
+    # An existing PostgreSQL is reached over TLS verified against its CA.
+    db_ca = [] if pg_local else ["POSTGRES_CA_CERT"]
+    data_ready = {name: {"condition": "service_healthy"}
+                  for name, local in (("postgres", pg_local), ("valkey", valkey_local)) if local}
     for key in config.get("settings", {}):
         if key in common_env or key.endswith(("_STORAGE_TYPE", "_STORAGE_PATH")) or "_AWS_S3_" in key:
             raise ValueError(f"settings entry {key} is set by the runtime bundle")
@@ -188,7 +217,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         env, mounts = {**common_env, **config.get("settings", {})}, []
         if role in {"worker", "task-worker"}:
             env["HOT_NETWORK_DENY_CIDRS"] = ",".join(deny)
-        keys = ["HOT_DB_URI", "HOT_REDIS_URI"]
+        keys = ["HOT_DB_URI", "HOT_REDIS_URI", *db_ca]
         if role != "scheduler":
             keys.append("HOT_ENCRYPTION_KEY")
         if role == "app":
@@ -209,7 +238,8 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
                         keys.append(prefix + "_AWS_SESSION_TOKEN")
         keys += [key for key in (operator_secrets or {}).get(role, []) if key not in keys]
         for key in keys:
-            env[key + "_FILE"] = "/run/secrets/" + key
+            if key.startswith("HOT_"):
+                env[key + "_FILE"] = "/run/secrets/" + key
         services[role] = {
             "image": images["hot"], "platform": "linux/amd64", "command": [role],
             "user": "10001:10001", "working_dir": "/var/lib/hot", "init": True,
@@ -218,7 +248,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             "volumes": mounts, "tmpfs": ["/tmp:size=268435456,uid=10001,gid=10001", "/var/lib/hot/.hot:size=268435456,uid=10001,gid=10001"],
             "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
             "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
-            "depends_on": {"postgres": {"condition": "service_healthy"}, "valkey": {"condition": "service_healthy"}},
+            "depends_on": dict(data_ready),
             "mem_limit": memory[role],
             "cpus": size["cpus"].get(role, size["default_cpus"]),
         }
@@ -228,24 +258,26 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     task.pop("security_opt")
     for path, readonly in (("/run/kata-containerd", False), ("/run/vc", False), ("/var/run/netns", False), ("/opt/cni/bin", True), ("/var/lib/cni", False), ("/tmp/hot-box-io", False)):
         task["volumes"].append(bind(path, path, readonly))
-    services["postgres"] = {
-        "image": images["postgres"], "restart": "unless-stopped", "shm_size": "256m", "mem_limit": memory["postgres"],
-        "environment": {"POSTGRES_DB": "hot", "POSTGRES_USER": "hot_owner", "POSTGRES_PASSWORD_FILE": "/run/secrets/POSTGRES_PASSWORD"},
-        "secrets": [secret("postgres", k) for k in ("POSTGRES_PASSWORD", "POSTGRES_RUNTIME_PASSWORD")],
-        # PostgreSQL 18 images keep data in /var/lib/postgresql/<major>/docker and
-        # refuse a mount at the older /var/lib/postgresql/data.
-        "volumes": [bind(Path(data_root) / "postgres", "/var/lib/postgresql"), {"type": "bind", "source": "./init.sql", "target": "/docker-entrypoint-initdb.d/10-hot.sql", "read_only": True}],
-        "healthcheck": {"test": ["CMD", "pg_isready", "-U", "hot_owner", "-d", "hot"], "interval": "5s", "timeout": "3s", "retries": 12},
-        "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
-    }
-    services["valkey"] = {
-        "image": images["valkey"], "restart": "unless-stopped", "mem_limit": memory["valkey"],
-        "command": ["valkey-server", "/etc/valkey/valkey.conf"],
-        "secrets": [secret("valkey", k) for k in ("VALKEY_ACL", "VALKEY_PASSWORD")],
-        "volumes": [bind(Path(data_root) / "valkey", "/data"), {"type": "bind", "source": "./valkey.conf", "target": "/etc/valkey/valkey.conf", "read_only": True}],
-        "healthcheck": {"test": ["CMD-SHELL", "valkey-cli --askpass < /run/secrets/VALKEY_PASSWORD | grep -qx PONG"], "interval": "5s", "timeout": "3s", "retries": 12},
-        "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
-    }
+    if pg_local:
+        services["postgres"] = {
+            "image": images["postgres"], "restart": "unless-stopped", "shm_size": "256m", "mem_limit": memory["postgres"],
+            "environment": {"POSTGRES_DB": "hot", "POSTGRES_USER": "hot_owner", "POSTGRES_PASSWORD_FILE": "/run/secrets/POSTGRES_PASSWORD"},
+            "secrets": [secret("postgres", k) for k in ("POSTGRES_PASSWORD", "POSTGRES_RUNTIME_PASSWORD")],
+            # PostgreSQL 18 images keep data in /var/lib/postgresql/<major>/docker and
+            # refuse a mount at the older /var/lib/postgresql/data.
+            "volumes": [bind(Path(data_root) / "postgres", "/var/lib/postgresql"), {"type": "bind", "source": "./init.sql", "target": "/docker-entrypoint-initdb.d/10-hot.sql", "read_only": True}],
+            "healthcheck": {"test": ["CMD", "pg_isready", "-U", "hot_owner", "-d", "hot"], "interval": "5s", "timeout": "3s", "retries": 12},
+            "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
+        }
+    if valkey_local:
+        services["valkey"] = {
+            "image": images["valkey"], "restart": "unless-stopped", "mem_limit": memory["valkey"],
+            "command": ["valkey-server", "/etc/valkey/valkey.conf"],
+            "secrets": [secret("valkey", k) for k in ("VALKEY_ACL", "VALKEY_PASSWORD")],
+            "volumes": [bind(Path(data_root) / "valkey", "/data"), {"type": "bind", "source": "./valkey.conf", "target": "/etc/valkey/valkey.conf", "read_only": True}],
+            "healthcheck": {"test": ["CMD-SHELL", "valkey-cli --askpass < /run/secrets/VALKEY_PASSWORD | grep -qx PONG"], "interval": "5s", "timeout": "3s", "retries": 12},
+            "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
+        }
     services["ingress"] = {
         "image": images["ingress"], "restart": "unless-stopped", "user": "10001:10001", "read_only": True,
         "entrypoint": ["nginx", "-g", "daemon off;"], "ports": ["443:8443"], "mem_limit": memory["ingress"],
@@ -261,10 +293,10 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "environment": {"HOT_ENV": "production", "HOT_PRODUCT_EXPERIENCE": "self-host",
             "HOT_DB_URI_FILE": "/run/secrets/HOT_DB_MIGRATION_URI",
             "HOT_DB_MIGRATION_URI_FILE": "/run/secrets/HOT_DB_MIGRATION_URI"},
-        "secrets": [secret("migrate", "HOT_DB_MIGRATION_URI")],
+        "secrets": [secret("migrate", k) for k in ("HOT_DB_MIGRATION_URI", *db_ca)],
         "tmpfs": ["/tmp:uid=10001,gid=10001"],
         "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
-        "depends_on": {"postgres": {"condition": "service_healthy"}},
+        "depends_on": {k: v for k, v in data_ready.items() if k == "postgres"},
     }
     if config.get("admin_email"):
         # The first administrator; rerunning changes nothing (hot admin bootstrap).
@@ -273,21 +305,41 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             "command": ["admin", "bootstrap", "--email", config["admin_email"], "--password-file", "/run/secrets/ADMIN_PASSWORD"],
             "user": "10001:10001", "read_only": True,
             "environment": {"HOT_ENV": "production", "HOT_PRODUCT_EXPERIENCE": "self-host", "HOT_DB_URI_FILE": "/run/secrets/HOT_DB_URI"},
-            "secrets": [secret("bootstrap-admin", k) for k in ("HOT_DB_URI", "ADMIN_PASSWORD")],
+            "secrets": [secret("bootstrap-admin", k) for k in ("HOT_DB_URI", "ADMIN_PASSWORD", *db_ca)],
             "tmpfs": ["/tmp:uid=10001,gid=10001"],
             "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
-            "depends_on": {"postgres": {"condition": "service_healthy"}},
+            "depends_on": {k: v for k, v in data_ready.items() if k == "postgres"},
         }
-    services["provision"] = {
+    grant = ["--set=ON_ERROR_STOP=1", f"--set=runtime_role={runtime_role(config)}", "--set=schema=hot",
+             "--file=/etc/hot/provision_runtime.sql"]
+    provision = {
         "image": images["postgres"], "profiles": ["admin"], "user": "10001:10001", "read_only": True,
-        "entrypoint": ["psql"],
-        "command": ["--host=postgres", "--username=hot_owner", "--dbname=hot", "--set=ON_ERROR_STOP=1", "--set=runtime_role=hot_runtime", "--set=schema=hot", "--file=/etc/hot/provision_runtime.sql"],
-        "environment": {"PGPASSFILE": "/run/secrets/PGPASSFILE"},
-        "secrets": [secret("provision", "PGPASSFILE")],
         "volumes": [{"type": "bind", "source": "./provision_runtime.sql", "target": "/etc/hot/provision_runtime.sql", "read_only": True}],
         "depends_on": {"migrate": {"condition": "service_completed_successfully"}},
         "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
     }
+    if pg_local:
+        provision.update(entrypoint=["psql"], command=["--host=postgres", "--username=hot_owner", "--dbname=hot", *grant],
+                         environment={"PGPASSFILE": "/run/secrets/PGPASSFILE"},
+                         secrets=[secret("provision", "PGPASSFILE")])
+    else:
+        # The connection string is a secret, so it is read from its file, never
+        # passed as an argument or environment value.
+        via_uri = ["sh", "-c", 'exec psql "$(cat /run/secrets/HOT_DB_MIGRATION_URI)" "$@"', "psql"]
+        provision.update(entrypoint=via_uri, command=grant,
+                         secrets=[secret("provision", k) for k in ("HOT_DB_MIGRATION_URI", *db_ca)])
+        # Read-only preconditions the database administrator owns; see the
+        # self-hosted PostgreSQL guide.
+        services["check-postgres"] = {
+            "image": images["postgres"], "profiles": ["admin"], "user": "10001:10001", "read_only": True,
+            "entrypoint": via_uri,
+            "command": ["--set=ON_ERROR_STOP=1", f"--set=runtime_role={runtime_role(config)}",
+                        "--file=/etc/hot/check_postgres.sql"],
+            "secrets": [secret("check-postgres", k) for k in ("HOT_DB_MIGRATION_URI", *db_ca)],
+            "volumes": [{"type": "bind", "source": "./check_postgres.sql", "target": "/etc/hot/check_postgres.sql", "read_only": True}],
+            "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
+        }
+    services["provision"] = provision
     # No Docker socket is ever mounted. The separate Kata daemon owns guests.
     compose = {"name": config["name"], "services": services, "secrets": secrets,
                "networks": {"default": {"ipam": {"config": [{"subnet": RUNTIME_SUBNET}]}}}}
@@ -341,6 +393,25 @@ def valkey_conf(size="small"):
     return VALKEY_CONF.replace("maxmemory 256mb", f"maxmemory {SIZES[size]['valkey_maxmemory']}mb")
 
 
+CHECK_POSTGRES_SQL = r'''SELECT set_config('hot.runtime_role', :'runtime_role', false);
+DO $$
+DECLARE
+  runtime text := current_setting('hot.runtime_role');
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'hot') THEN
+    RAISE EXCEPTION 'Schema hot does not exist; create it as the self-hosted PostgreSQL guide describes';
+  END IF;
+  IF (SELECT count(*) FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+      WHERE n.nspname = 'hot' AND e.extname IN ('vector', 'pg_trgm')) < 2 THEN
+    RAISE EXCEPTION 'Install the vector and pg_trgm extensions into schema hot';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = runtime AND rolcanlogin
+                 AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb) THEN
+    RAISE EXCEPTION 'Runtime login % must exist and be NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB', runtime;
+  END IF;
+END $$;
+'''
+
 VALKEY_CONF = '''bind 0.0.0.0
 protected-mode yes
 port 6379
@@ -384,7 +455,7 @@ def main():
         compose = render(document, manifest, args.data_root, args.secrets_root, args.s3_auth, args.s3_session_tokens)
         args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
         grant_script = Path(__file__).resolve().parents[2] / "resources/db/postgres/provision_runtime.sql"
-        files = {"compose.json": json.dumps(compose, indent=2) + "\n", "nginx.conf": nginx_config(config), "init.sql": INIT_SQL, "valkey.conf": valkey_conf(config.get("size", "small")),
+        files = {"compose.json": json.dumps(compose, indent=2) + "\n", "nginx.conf": nginx_config(config), "init.sql": INIT_SQL, "valkey.conf": valkey_conf(config.get("size", "small")), "check_postgres.sql": CHECK_POSTGRES_SQL,
                  "provision_runtime.sql": grant_script.read_text()}
         for name, content in files.items():
             path = args.output / name
