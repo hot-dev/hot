@@ -8,7 +8,9 @@
 # which records the git revision first. The layout matches the Linux
 # package: `/usr/bin/hot` finds its resources in `/usr/share/hot`.
 
-ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
+# Debian 13: the ONNX Runtime library Hot links needs glibc 2.38 and GCC 13's
+# libstdc++, as on the Ubuntu 24.04 runners that build the Linux packages.
+ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
 
 FROM --platform=linux/amd64 ${DEBIAN_IMAGE} AS builder
 
