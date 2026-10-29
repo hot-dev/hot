@@ -18,6 +18,7 @@ use crate::lang::compiler::ctx_checker::{
 };
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
+use std::collections::BTreeMap;
 
 /// A call graph mapping functions to their callees and ctx/box requirements.
 pub struct CallGraph {
@@ -104,12 +105,17 @@ impl CallGraph {
     ///
     /// Performs a BFS from the roots through the call graph edges, collecting
     /// the union of all ctx requirements from reachable functions.
+    ///
+    /// The result doesn't depend on traversal order: a key several reachable
+    /// functions require is attributed to the one whose FQN sorts first, and
+    /// requirements come back sorted by function FQN, then key. Diagnostics
+    /// built from them (`missing-context`) are therefore the same every run.
     pub fn resolve_ctx_requirements(&self, roots: &[String]) -> ProgramCtxRequirements {
         let mut visited = AHashSet::new();
         let mut queue: Vec<String> = roots.to_vec();
-        let mut all_keys: AHashMap<String, CtxKeyConfig> = AHashMap::new();
-        // Track which namespace each key came from (for error reporting)
-        let mut key_sources: AHashMap<String, (String, Option<String>)> = AHashMap::new();
+        // key -> (requiring function, its source file, the key's config)
+        let mut all_keys: BTreeMap<String, (String, Option<String>, CtxKeyConfig)> =
+            BTreeMap::new();
 
         while let Some(fqn) = queue.pop() {
             if !visited.insert(fqn.clone()) {
@@ -120,9 +126,14 @@ impl CallGraph {
             if let Some(keys) = self.fn_ctx_requirements.get(&fqn) {
                 let source_file = self.fn_source_files.get(&fqn).cloned();
                 for key in keys {
-                    if !all_keys.contains_key(&key.key) {
-                        all_keys.insert(key.key.clone(), key.clone());
-                        key_sources.insert(key.key.clone(), (fqn.clone(), source_file.clone()));
+                    let attributed_earlier = all_keys
+                        .get(&key.key)
+                        .is_some_and(|(owner, _, _)| owner <= &fqn);
+                    if !attributed_earlier {
+                        all_keys.insert(
+                            key.key.clone(),
+                            (fqn.clone(), source_file.clone(), key.clone()),
+                        );
                     }
                 }
             }
@@ -138,9 +149,8 @@ impl CallGraph {
         }
 
         // Build ProgramCtxRequirements grouped by source namespace/function
-        let mut ns_map: AHashMap<String, NamespaceCtxRequirements> = AHashMap::new();
-        for (key_name, key_config) in all_keys {
-            let (fqn, source_file) = key_sources.get(&key_name).cloned().unwrap_or_default();
+        let mut ns_map: BTreeMap<String, NamespaceCtxRequirements> = BTreeMap::new();
+        for (fqn, source_file, key_config) in all_keys.into_values() {
             let entry = ns_map
                 .entry(fqn.clone())
                 .or_insert_with(|| NamespaceCtxRequirements {
@@ -231,6 +241,8 @@ impl CallGraph {
             }
         }
 
+        // Visit order follows hash sets; report in a stable order instead.
+        requirements.sort_by(|a, b| a.fqn.cmp(&b.fqn));
         ProgramBoxRequirements { requirements }
     }
 
@@ -736,6 +748,66 @@ mod tests {
         let reqs = graph.resolve_ctx_requirements(&["::app/my-fn".to_string()]);
         let required = reqs.all_required_keys();
         assert!(required.contains("api.key"));
+    }
+
+    /// `missing-context` diagnostics follow this order, so it must not depend
+    /// on hash-map iteration: sorted by requiring function, then key, with a
+    /// key several functions require attributed to the first FQN.
+    #[test]
+    fn test_ctx_requirements_order_is_stable() {
+        let mut app_scope = Scope {
+            vars: IndexMap::new(),
+        };
+        app_scope.vars.insert(
+            make_var_with_ctx(
+                "zeta",
+                vec![("zeta.key", true), ("gamma.key", true), ("alpha.key", true)],
+            ),
+            make_simple_fn(Value::Val(Val::Null, None)),
+        );
+        app_scope.vars.insert(
+            make_var_with_ctx("alpha", vec![("beta.key", true)]),
+            make_simple_fn(Value::Val(Val::Null, None)),
+        );
+        app_scope.vars.insert(
+            make_var_with_ctx("both", vec![("alpha.key", true)]),
+            make_simple_fn(Value::Val(Val::Null, None)),
+        );
+        let mut program = Program {
+            namespaces: IndexMap::new(),
+            current_namespace: make_ns_path("app"),
+        };
+        program.namespaces.insert(
+            make_ns_path("app"),
+            Namespace {
+                path: make_ns_path("app"),
+                scope: app_scope,
+                meta: None,
+                source_file: Some("src/app.hot".into()),
+                aliases: IndexMap::new(),
+            },
+        );
+
+        let expected = vec![
+            ("::app/alpha", "beta.key"),
+            ("::app/both", "alpha.key"),
+            ("::app/zeta", "gamma.key"),
+            ("::app/zeta", "zeta.key"),
+        ];
+        // Each build gets fresh hash maps, so repeat to catch an order that
+        // only holds by chance.
+        for _ in 0..20 {
+            let graph = CallGraph::build(&program);
+            let reqs = graph.resolve_user_ctx_requirements(&program);
+            let result =
+                crate::lang::compiler::ctx_checker::check_ctx_requirements(&reqs, &AHashSet::new());
+            let missing: Vec<(&str, &str)> = result
+                .missing
+                .iter()
+                .map(|m| (m.namespace.as_str(), m.key.as_str()))
+                .collect();
+            assert_eq!(missing, expected);
+        }
     }
 
     #[test]
