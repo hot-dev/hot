@@ -34,6 +34,8 @@ SIZES = {
               "task": {"max": 4, "code": 8, "container": 4, "disk_mb": 81920}, "engine_threads": 6},
 }
 VM_MEMORY_MB = {"small": 8192, "medium": 16384, "large": 32768}
+# Rewritten by the scheduler while it dispatches; on the scheduler's tmpfs.
+SCHEDULER_HEARTBEAT = "/tmp/hot-scheduler-heartbeat"
 
 # Where a cloud load balancer's connections come from: the VPC on AWS (an
 # Application Load Balancer), Google's front-end ranges on GCP.
@@ -329,6 +331,14 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             "mem_limit": memory[role],
             "cpus": size["cpus"].get(role, size["default_cpus"]),
         }
+    # The scheduler rewrites its heartbeat every 30 seconds while it
+    # dispatches schedules, so a stalled scheduler turns unhealthy even though
+    # its process runs. ($$ escapes Compose interpolation.)
+    scheduler = services["scheduler"]
+    scheduler["environment"]["HOT_SCHEDULER_HEARTBEAT_FILE"] = SCHEDULER_HEARTBEAT
+    scheduler["healthcheck"] = {
+        "test": ["CMD-SHELL", f"test $$(( $$(date +%s) - $$(cat {SCHEDULER_HEARTBEAT} 2>/dev/null || echo 0) )) -lt 120"],
+        "interval": "30s", "timeout": "5s", "retries": 3, "start_period": "90s"}
     task = services["task-worker"]
     task.update(user="0:2000", privileged=True, pid="host", read_only=False)
     task.pop("cap_drop")

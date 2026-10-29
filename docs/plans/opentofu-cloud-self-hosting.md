@@ -1694,8 +1694,10 @@ or an existing operator destination without coupling telemetry to S3.
       scheduler from outside its process/host; absence of logs is not proof of
       health. This adds detection/recovery guidance without adding scheduler HA.
       The heartbeat and backup-status alerts fire on missing data. The
-      scheduler alarm runs in the cloud, but its signal (the container is
-      running) comes from the host; a dispatch-level heartbeat remains.
+      scheduler alarm runs in the cloud, and its signal is dispatch-level:
+      the scheduler rewrites `scheduler.heartbeat-file` from a job on its
+      own dispatch loop. Its container's health check fails when the file
+      is 2 minutes old, which the agent reports as not running.
 - [ ] Route infrastructure alerts through cloud monitoring or an existing
       external monitor, independently of Hot's worker/email pipeline. Accept
       operator-selected recipients/channels and test the configured path.

@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -275,6 +276,26 @@ class RuntimeContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "set by the runtime bundle"):
             renderer.render(dict(config["installation"], settings={"HOT_APP_URL": "https://elsewhere.example"}),
                             manifest(), "/data", "/run/hot/secrets")
+
+    def test_a_stalled_scheduler_is_unhealthy(self):
+        services = renderer.render(example("aws", "local"), manifest(), "/data", "/run/hot/secrets")["services"]
+        scheduler = services["scheduler"]
+        self.assertEqual(scheduler["environment"]["HOT_SCHEDULER_HEARTBEAT_FILE"], "/tmp/hot-scheduler-heartbeat")
+        self.assertIn("/tmp:", scheduler["tmpfs"][0])
+        check = scheduler["healthcheck"]["test"][1]
+        self.assertIn("$$(cat /tmp/hot-scheduler-heartbeat", check)
+        self.assertNotRegex(check.replace("$$", ""), r"\$", "every $ is escaped for Compose")
+        self.assertNotIn("healthcheck", services["worker"])
+        # The check itself: fresh passes, stale and missing fail.
+        shell = check.replace("$$", "$")
+        with tempfile.TemporaryDirectory() as tmp:
+            beat = Path(tmp) / "beat"
+            run = lambda: subprocess.run(["sh", "-c", shell.replace("/tmp/hot-scheduler-heartbeat", str(beat))]).returncode
+            self.assertNotEqual(run(), 0)
+            beat.write_text(str(int(time.time()) - 300))
+            self.assertNotEqual(run(), 0)
+            beat.write_text(str(int(time.time())))
+            self.assertEqual(run(), 0)
 
     def test_sign_up_is_by_invitation_until_the_operator_opens_it(self):
         config = example("aws", "local")

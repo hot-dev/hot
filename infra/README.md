@@ -166,7 +166,7 @@ Every 30 seconds the host agent publishes these metrics, to CloudWatch
 | --- | --- |
 | `AgentHeartbeat` | 1 while the agent runs |
 | `UnhealthyServices` | Hot services, ingress, and local data services not running and healthy |
-| `SchedulerRunning` | 1 while the scheduler container runs |
+| `SchedulerRunning` | 1 while the scheduler runs and dispatches: it rewrites a heartbeat file every 30 seconds, and its health check fails after 2 minutes without one |
 | `DependenciesReachable` | 1 when local data services are healthy and managed or existing ones accept connections |
 | `Ready` | 1 when the app and API answer through the ingress |
 | `DataDiskUsedPercent` | The larger of space and inodes used on the data disk |
@@ -181,7 +181,7 @@ Hot's own email, and both firing and resolving are sent.
 | --- | --- | --- |
 | `host-down` | No heartbeat for 5 minutes (also EC2 `instance-impaired` on AWS) | Check the VM in the console; `diagnostics` once it answers. The agent restarts with the VM. |
 | `services-unhealthy` | A service unhealthy for 15 minutes | `diagnostics` names it; `restart-service`, then read its logs. |
-| `scheduler-stopped` | No scheduler for 10 minutes | Schedules are not firing. `restart-service scheduler`; it exits if it loses its database lock, so check database connectivity too. |
+| `scheduler-stopped` | No dispatching scheduler for 10 minutes | Schedules are not firing. `restart-service scheduler`; it exits if it loses its database lock, so check database connectivity too, and read its `logs`. |
 | `dependencies-unreachable` | PostgreSQL or Valkey unreachable for 10 minutes | Check the data service, its security group or firewall, and its status page. |
 | `not-ready` | App or API not answering for 15 minutes | Check `services-unhealthy` and the ingress certificate. |
 | `disk-pressure` | Data disk over 85% for 15 minutes | Grow the disk, or move builds and files to object storage. |
