@@ -1323,31 +1323,27 @@ pub async fn register_staged_object(
 }
 
 /// Objects of `storage_backend` retired before `retired_before` that no active
-/// file version references, oldest first. `only` narrows the check to one
-/// object.
-async fn collectable_objects(
+/// file version references, oldest first.
+pub async fn collectable_retired_objects(
     db: &DatabasePool,
     storage_backend: &str,
     retired_before: DateTime<Utc>,
-    only: Option<&str>,
     limit: i64,
 ) -> Result<Vec<String>, String> {
     match db {
         DatabasePool::Postgres(pool) => sqlx::query_scalar(
-            "SELECT r.storage_path FROM retired_file_object r WHERE r.storage_backend = $1 AND r.retired_at < $2 AND ($3::text IS NULL OR r.storage_path = $3) AND NOT EXISTS (SELECT 1 FROM file f WHERE f.active = true AND f.storage_backend = r.storage_backend AND f.storage_path = r.storage_path) ORDER BY r.retired_at LIMIT $4",
+            "SELECT r.storage_path FROM retired_file_object r WHERE r.storage_backend = $1 AND r.retired_at < $2 AND NOT EXISTS (SELECT 1 FROM file f WHERE f.active = true AND f.storage_backend = r.storage_backend AND f.storage_path = r.storage_path) ORDER BY r.retired_at LIMIT $3",
         )
         .bind(storage_backend)
         .bind(retired_before)
-        .bind(only)
         .bind(limit)
         .fetch_all(pool)
         .await,
         DatabasePool::Sqlite(pool) => sqlx::query_scalar(
-            "SELECT r.storage_path FROM retired_file_object r WHERE r.storage_backend = $1 AND julianday(r.retired_at) < julianday($2) AND ($3 IS NULL OR r.storage_path = $3) AND NOT EXISTS (SELECT 1 FROM file f WHERE f.active = 1 AND f.storage_backend = r.storage_backend AND f.storage_path = r.storage_path) ORDER BY julianday(r.retired_at) LIMIT $4",
+            "SELECT r.storage_path FROM retired_file_object r WHERE r.storage_backend = $1 AND julianday(r.retired_at) < julianday($2) AND NOT EXISTS (SELECT 1 FROM file f WHERE f.active = 1 AND f.storage_backend = r.storage_backend AND f.storage_path = r.storage_path) ORDER BY julianday(r.retired_at) LIMIT $3",
         )
         .bind(storage_backend)
         .bind(retired_before)
-        .bind(only)
         .bind(limit)
         .fetch_all(pool)
         .await,
@@ -1355,29 +1351,84 @@ async fn collectable_objects(
     .map_err(|e| format!("Failed to list collectable file objects: {}", e))
 }
 
-/// Retired objects collection may delete; see [`collectable_objects`].
-pub async fn collectable_retired_objects(
-    db: &DatabasePool,
-    storage_backend: &str,
-    retired_before: DateTime<Utc>,
-    limit: i64,
-) -> Result<Vec<String>, String> {
-    collectable_objects(db, storage_backend, retired_before, None, limit).await
-}
-
-/// Whether one retired object is still collectable: nothing referenced it
-/// again, and it wasn't retired or registered again since `retired_before`.
-pub async fn retired_object_collectable(
+/// Collect one retired object with `delete`, if it is still collectable:
+/// nothing referenced it again, and it wasn't retired or registered again
+/// since `retired_before`. The check, the delete and forgetting the object
+/// hold the object's row (PostgreSQL) or the writer lock (SQLite) throughout,
+/// so a writer that registers or adopts the object waits for collection to
+/// finish instead of committing a reference to bytes collection then
+/// deletes. `delete` reports whether it removed the object; one it couldn't
+/// stays retired for the next collection. Returns whether the object was
+/// collected.
+pub async fn collect_retired_object<F, Fut>(
     db: &DatabasePool,
     storage_backend: &str,
     storage_path: &str,
     retired_before: DateTime<Utc>,
-) -> Result<bool, String> {
-    Ok(
-        !collectable_objects(db, storage_backend, retired_before, Some(storage_path), 1)
-            .await?
-            .is_empty(),
-    )
+    delete: F,
+) -> Result<bool, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let fail = |e: sqlx::Error| format!("Failed to collect a retired file object: {}", e);
+    match db {
+        DatabasePool::Postgres(pool) => {
+            let mut tx = pool.begin().await.map_err(fail)?;
+            let collectable: Option<i32> = sqlx::query_scalar(
+                "SELECT 1 FROM retired_file_object r WHERE r.storage_backend = $1 AND r.storage_path = $2 AND r.retired_at < $3 AND NOT EXISTS (SELECT 1 FROM file f WHERE f.active = true AND f.storage_backend = r.storage_backend AND f.storage_path = r.storage_path) FOR UPDATE OF r",
+            )
+            .bind(storage_backend)
+            .bind(storage_path)
+            .bind(retired_before)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(fail)?;
+            if collectable.is_none() {
+                return Ok(false);
+            }
+            if !delete().await {
+                return Ok(false);
+            }
+            sqlx::query(
+                "DELETE FROM retired_file_object WHERE storage_backend = $1 AND storage_path = $2",
+            )
+            .bind(storage_backend)
+            .bind(storage_path)
+            .execute(&mut *tx)
+            .await
+            .map_err(fail)?;
+            tx.commit().await.map_err(fail)?;
+        }
+        DatabasePool::Sqlite(pool) => {
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(fail)?;
+            let collectable: Option<i32> = sqlx::query_scalar(
+                "SELECT 1 FROM retired_file_object r WHERE r.storage_backend = $1 AND r.storage_path = $2 AND julianday(r.retired_at) < julianday($3) AND NOT EXISTS (SELECT 1 FROM file f WHERE f.active = 1 AND f.storage_backend = r.storage_backend AND f.storage_path = r.storage_path)",
+            )
+            .bind(storage_backend)
+            .bind(storage_path)
+            .bind(retired_before)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(fail)?;
+            if collectable.is_none() {
+                return Ok(false);
+            }
+            if !delete().await {
+                return Ok(false);
+            }
+            sqlx::query(
+                "DELETE FROM retired_file_object WHERE storage_backend = $1 AND storage_path = $2",
+            )
+            .bind(storage_backend)
+            .bind(storage_path)
+            .execute(&mut *tx)
+            .await
+            .map_err(fail)?;
+            tx.commit().await.map_err(fail)?;
+        }
+    }
+    Ok(true)
 }
 
 /// Forget a collected object, unless it was retired or registered again
@@ -2690,6 +2741,57 @@ mod tests {
         }
         assert_eq!(get_storage_usage_by_account(&db, child).await.unwrap(), 125);
         assert_eq!(get_storage_usage_by_org(&db, child).await.unwrap(), 25);
+    }
+
+    /// Collection re-checks an object before deleting it, keeps one it could
+    /// not delete, and forgets one it deleted.
+    #[tokio::test]
+    async fn collecting_an_object_rechecks_it_before_deleting() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        register_staged_object(&db, data.org_id, Some(data.env_id), "local", "old")
+            .await
+            .unwrap();
+        let after = Utc::now() + chrono::Duration::seconds(1);
+
+        // Registered after the cutoff: never deleted.
+        let ran = std::cell::Cell::new(false);
+        let earlier = Utc::now() - chrono::Duration::hours(1);
+        let delete = || async {
+            ran.set(true);
+            true
+        };
+        assert!(
+            !collect_retired_object(&db, "local", "old", earlier, delete)
+                .await
+                .unwrap()
+        );
+        assert!(!ran.get());
+
+        // A failed delete leaves it retired.
+        assert!(
+            !collect_retired_object(&db, "local", "old", after, || async { false })
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            collectable_retired_objects(&db, "local", after, 10)
+                .await
+                .unwrap(),
+            vec!["old".to_string()]
+        );
+
+        assert!(
+            collect_retired_object(&db, "local", "old", after, || async { true })
+                .await
+                .unwrap()
+        );
+        assert!(
+            collectable_retired_objects(&db, "local", after, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// SQLite DB with FK enforcement on and a `run` table, mirroring the

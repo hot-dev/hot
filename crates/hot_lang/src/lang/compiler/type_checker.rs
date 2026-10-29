@@ -1665,16 +1665,22 @@ impl TypeChecker {
     }
 
     /// Whether a pattern atom is the core `Result`, `Result.Ok` or
-    /// `Result.Err`. A namespace that declares its own `Result` means that
-    /// one.
+    /// `Result.Err`, resolved as the compiler resolves it: a bare `Result`
+    /// is the core one unless the namespace declares its own, and a
+    /// qualified one only when its namespace, or the alias it uses, is
+    /// `::hot::type`.
     fn atom_names_result(&self, type_name: &Option<String>, variant: &Option<String>) -> bool {
-        let names_result = type_name
-            .as_deref()
-            .is_some_and(|name| Self::short_type_name(name) == "Result");
-        let local = format!("{}/Result", self.context.current_namespace);
-        names_result
-            && variant.as_deref().is_none_or(|v| v == "Ok" || v == "Err")
-            && !self.qualified_types.contains_key(&local)
+        let names_result = match type_name.as_deref().map(|name| name.rsplit_once('/')) {
+            Some(Some((ns, "Result"))) => {
+                self.context.resolve_alias(ns).map_or(ns, String::as_str) == "::hot::type"
+            }
+            Some(None) => {
+                let local = format!("{}/Result", self.context.current_namespace);
+                type_name.as_deref() == Some("Result") && !self.qualified_types.contains_key(&local)
+            }
+            _ => false,
+        };
+        names_result && variant.as_deref().is_none_or(|v| v == "Ok" || v == "Err")
     }
 
     /// Whether a pattern atom is `Result` or `Result.Ok`, which takes every
@@ -6279,6 +6285,50 @@ mod tests {
             vec![
                 ("Result".to_string(), vec!["Pending".to_string()]),
                 ("Result".to_string(), vec!["Pending".to_string()]),
+            ],
+        );
+    }
+
+    /// Another namespace's own `Result`, named in full or through an alias,
+    /// is checked like any enum; `::hot::type/Result` is still the core one.
+    #[test]
+    fn test_match_on_another_namespace_result_enum_is_checked() {
+        let errors = literal_union_match_errors(
+            r#"
+        ::ep::own ns
+        Result enum { Ok, Err, Pending }
+        get-r fn (): Result { Result.Pending }
+
+        ::ep::use ns
+        ::o ::ep::own
+        S type "a" | "b"
+        get-s fn (x: Str): S { "a" }
+        in-full fn (): Int {
+            match ::ep::own/get-r() {
+                ::ep::own/Result.Ok => { 1 }
+                ::ep::own/Result.Err => { 0 }
+            }
+        }
+        by-alias fn (): Int {
+            match ::o/get-r() {
+                ::o/Result.Ok => { 1 }
+            }
+        }
+        core fn (x: Str): Int {
+            match get-s(x) {
+                ::hot::type/Result.Ok => { 1 }
+            }
+        }
+        "#,
+        );
+        assert_eq!(
+            errors,
+            vec![
+                ("Result".to_string(), vec!["Pending".to_string()]),
+                (
+                    "Result".to_string(),
+                    vec!["Err".to_string(), "Pending".to_string()]
+                ),
             ],
         );
     }
