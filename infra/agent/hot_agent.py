@@ -719,6 +719,8 @@ class Agent:
     # -- host preparation ---------------------------------------------------
 
     def data_device(self):
+        if self.config.get("data_disk") == "scratch" and self.config["cloud"] == "aws":
+            return "auto"  # an Auto Scaling group's volume IDs are not known in advance
         if self.config["cloud"] == "aws":
             return "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_" + self.config["data_volume_id"].replace("-", "")
         return "/dev/disk/by-id/google-hot-data"
@@ -727,7 +729,9 @@ class Agent:
         """Mount the data disk and write host settings. A blank disk is
         formatted only for a brand-new installation."""
         command = [str(LIBEXEC / "hot-data-disk"), self.data_device()]
-        if first_install:
+        # A scalable host's disk is scratch: it holds nothing that outlives
+        # the instance, so a blank one is always formatted.
+        if first_install or self.config.get("data_disk") == "scratch":
             command.append("--allow-format")
         self.run_command(command)
         self.etc.mkdir(parents=True, exist_ok=True)
@@ -1170,8 +1174,7 @@ class Agent:
         return [(self.config[role + "_hostname"], paths[role]) for role in render.web_roles(self.config)]
 
     def probe(self, host, path):
-        port = render.LOAD_BALANCER_PORT if render.scalable(self.config) else 443
-        return https_status(host, path, port=port)
+        return https_status(host, path)
 
     def wait_ready(self, attempts=40, probe=None):
         """Check the app and API through the ingress from the host itself, so

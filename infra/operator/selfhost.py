@@ -56,6 +56,7 @@ class Installation:
         self.cloud = config["cloud"]
         self.region = config.get("region", "")
         self.project = config.get("project", "")
+        self.zone = config.get("zone", "")
         self.scalable = config.get("preset", "single-machine") == "scalable"
         self.cli = cli
         self.clock = clock
@@ -107,8 +108,10 @@ class Installation:
                              "--output", "json", "--auto-scaling-group-names", group)
             return sorted(i["InstanceId"] for g in found.get("AutoScalingGroups", []) for i in g.get("Instances", [])
                           if i.get("LifecycleState") == "InService")
+        # The scheduler's group is zonal; the others are regional.
+        location = ["--zone", self.zone] if role == "scheduler" else ["--region", self.region]
         found = self.cli("gcloud", "compute", "instance-groups", "managed", "list-instances", group,
-                         "--region", self.region, "--project", self.project, "--format", "json") or []
+                         *location, "--project", self.project, "--format", "json") or []
         return sorted(i["instance"].rsplit("/", 1)[-1] for i in found if i.get("instanceStatus") == "RUNNING")
 
     # -- reports -----------------------------------------------------------------

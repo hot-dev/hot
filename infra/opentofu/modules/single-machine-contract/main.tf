@@ -6,13 +6,23 @@ variable "installation" {
   description = "Non-secret installation contract. Secrets are cloud secret-store references only."
   type = object({
     schema_version = optional(number, 1)
-    name           = string
-    cloud          = string
-    region         = string
-    zone           = string
-    project        = optional(string, "")
-    size           = optional(string, "small")
-    host_image     = string
+    # single-machine runs every role on one VM; scalable runs each role on
+    # its own group of VMs, on managed data and shared object storage.
+    preset = optional(string, "single-machine")
+    # Scalable only: instances per role. The scheduler always runs exactly one.
+    scaling = optional(object({
+      app         = optional(object({ min = optional(number, 2), max = optional(number, 4) }), {})
+      api         = optional(object({ min = optional(number, 2), max = optional(number, 4) }), {})
+      worker      = optional(object({ min = optional(number, 2), max = optional(number, 2) }), {})
+      task_worker = optional(object({ min = optional(number, 1), max = optional(number, 1) }), {})
+    }), {})
+    name       = string
+    cloud      = string
+    region     = string
+    zone       = string
+    project    = optional(string, "")
+    size       = optional(string, "small")
+    host_image = string
     # The stacks create the release pointer, status, and secret containers and
     # fill these in; values given here are ignored.
     release_pointer   = optional(string, "")
@@ -115,6 +125,32 @@ variable "installation" {
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{2,23}$", var.installation.name)) && contains(["small", "medium", "large"], var.installation.size)
     error_message = "name must be 3-24 lowercase letters/digits/hyphens, starting with a letter; size must be small, medium, or large."
+  }
+  validation {
+    condition     = contains(["single-machine", "scalable"], var.installation.preset)
+    error_message = "preset must be single-machine or scalable."
+  }
+  validation {
+    condition = var.installation.preset != "scalable" || (
+      var.installation.data.postgres.mode != "local" && var.installation.data.valkey.mode != "local"
+      && var.installation.storage.build.backend != "local" && var.installation.storage.file.backend != "local"
+    )
+    error_message = "A scalable installation needs managed or existing PostgreSQL and Valkey, and S3 or GCS for builds and files."
+  }
+  validation {
+    condition = alltrue([for role in values(var.installation.scaling) :
+    role.min >= 1 && role.max >= role.min && role.max <= 20])
+    error_message = "Each scaling role needs 1 <= min <= max <= 20."
+  }
+  validation {
+    # Every instance's pool (20 connections) at the maximums, plus the
+    # scheduler and room for administration, within the connections the
+    # database tier of the size accepts.
+    condition = var.installation.preset != "scalable" || (
+      (var.installation.scaling.app.max + var.installation.scaling.api.max + var.installation.scaling.worker.max
+      + var.installation.scaling.task_worker.max + 1) * 20 + 40
+    <= lookup({ small = 400, medium = 800, large = 1600 }, var.installation.size, 400))
+    error_message = "The scaling maximums exceed the database's connection budget for this size: lower them or choose a larger size."
   }
   validation {
     condition = alltrue([for s in [var.installation.storage.build, var.installation.storage.file] :
@@ -248,7 +284,19 @@ locals {
   }
   postgres = var.installation.data.postgres
   capacity = local.sizes[var.installation.size]
+  # Scalable roles other than task-workers need no nested virtualization, so
+  # they use general-purpose machines; task-workers use the size's family.
+  role_machines = {
+    small  = { aws = "m7i.large", gcp = "e2-standard-2" }
+    medium = { aws = "m7i.xlarge", gcp = "e2-standard-4" }
+    large  = { aws = "m7i.2xlarge", gcp = "e2-standard-8" }
+  }
+  # Each scalable instance's PostgreSQL pool, and the connections the
+  # database tier of each size accepts, leaving room for administration.
+  db_pool_per_instance = 20
+  scaling              = var.installation.scaling
 }
+
 
 output "configuration" {
   value = var.installation
@@ -256,6 +304,19 @@ output "configuration" {
 output "capacity" {
   description = "Conservative starting allocations; not benchmarked throughput guarantees."
   value       = local.capacity
+}
+output "roles" {
+  description = "Scalable only: each role's machine types and instance bounds, and the PostgreSQL pool each instance may open."
+  value = var.installation.preset != "scalable" ? null : {
+    db_pool = local.db_pool_per_instance
+    groups = {
+      app         = merge(local.role_machines[var.installation.size], local.scaling.app)
+      api         = merge(local.role_machines[var.installation.size], local.scaling.api)
+      worker      = merge(local.role_machines[var.installation.size], local.scaling.worker)
+      scheduler   = merge(local.role_machines[var.installation.size], { min = 1, max = 1 })
+      task-worker = merge({ aws = local.capacity.aws, gcp = local.capacity.gcp }, local.scaling.task_worker)
+    }
+  }
 }
 output "managed_valkey" {
   description = "The managed Valkey node type, with the size default applied; null unless data.valkey.mode is managed."

@@ -444,3 +444,66 @@ run "a_shared_bucket_needs_one_policy" {
   }
   expect_failures = [var.installation]
 }
+
+run "scalable_maximums_fit_the_connection_budget" {
+  command = plan
+  variables {
+    installation = {
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example/global/images/hot",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "data" : { "postgres" : { "mode" : "managed" }, "valkey" : { "mode" : "managed" } },
+      "storage" : { "build" : { "backend" : "gcs", "bucket" : "b", "prefix" : "builds" }, "file" : { "backend" : "gcs", "bucket" : "b", "prefix" : "files" } },
+      "scaling" : { "app" : { "min" : 2, "max" : 20 }, "api" : { "min" : 2, "max" : 20 } }
+    }
+  }
+  expect_failures = [var.installation]
+}
+
+run "scalable_installations_need_shared_data_and_storage" {
+  command = plan
+  variables {
+    installation = {
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example/global/images/hot",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [var.installation]
+}
+
+run "scalable_roles_follow_the_size" {
+  command = plan
+  variables {
+    installation = {
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "size" : "medium",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "data" : { "postgres" : { "mode" : "managed" }, "valkey" : { "mode" : "managed" } },
+      "storage" : { "build" : { "backend" : "s3", "bucket" : "b", "region" : "us-east-1", "prefix" : "builds" }, "file" : { "backend" : "s3", "bucket" : "b", "region" : "us-east-1", "prefix" : "files" } }
+    }
+  }
+  assert {
+    condition     = output.roles.groups["app"].aws == "m7i.xlarge" && output.roles.groups["task-worker"].aws == "m8i.xlarge" && output.roles.groups["scheduler"].max == 1 && output.roles.groups["app"].min == 2
+    error_message = "Roles use general-purpose machines, task-workers the nested family, and the scheduler exactly one instance."
+  }
+}

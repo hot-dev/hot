@@ -1620,6 +1620,20 @@ release of the three presets.
       image, configuration, secrets, and migration contract. Deliver secrets
       through per-service ECS `secrets` on AWS and the agent's tmpfs files on
       Compute Engine.
+      Two decisions, made while implementing and open for review:
+      - **AWS uses Auto Scaling groups, not ECS.** Both clouds run role
+        groups of the same host image and agent, so secrets stay in tmpfs
+        files on AWS too, there is one delivery path, and workers keep their
+        drain time rather than Fargate's 120-second stop limit.
+      - **One passthrough TCP load balancer per endpoint.** TLS ends on the
+        hosts' ingress with the operator's certificate, rather than an L7
+        load balancer per installation, so no key enters OpenTofu state and
+        streams see no proxy timeout. WAF or Cloud Armor would need L7 load
+        balancers.
+
+      The renderer and agent run one role per host. Each role follows its
+      own release pointer, and the scheduler's host migrates from a migration
+      pointer before any role rolls.
 - [ ] Implement the topology, ingress, networking, identities, and data tier
       above for each scalable reference configuration, including the
       streaming timeouts and the connection-budget validation.
@@ -1637,15 +1651,32 @@ release of the three presets.
       (`minimumHealthyPercent=0`, `maximumPercent=100` on ECS), lock-liveness
       enforcement, health monitoring, and tested restart/recovery behavior.
       Scheduler HA and standby failover remain deferred as described above.
+      On GCP the scheduler runs in a one-instance zonal group that recreates
+      its instance (no surge), with the heartbeat, lock-liveness checks, and
+      an alert when its status is missing.
 - [ ] Extend the release workflow to scalable presets: apply manifest versions
       through reviewed OpenTofu plans, roll each service with its drain rules,
       and report per-service status.
+      The release workflow migrates first, then advances each role's pointer
+      in the planned order and waits for every instance in the role's group.
+      The first failure stops the release.
 - [ ] Implement GCP app/API instance groups and HTTPS ingress, including
       independent capacity, health checks, rolling replacement, and verified
       streaming/upload behavior through the complete load-balancer path.
+      `stacks/gcp/scalable` has the following:
+      - regional groups with CPU autoscaling from two;
+      - autohealing through `/hot-lb-health`;
+      - surge rolling updates;
+      - one internal or external passthrough load balancer per endpoint,
+        with 300-second connection draining.
+
+      Qualification remains.
 - [ ] Implement GCP worker instance templates, separate group identities,
       health checks, metrics, and controlled replacement/scale-in. Prove abrupt
       VM loss recovers durable work as well as testing the graceful drain path.
+      Each role has its own service account, scoped to its pointer, the
+      shared secrets, Valkey, and the storage prefixes. Task-workers only
+      scale out. Queue-driven scaling and the VM-loss drills remain.
 - [ ] Prove cross-instance behavior for sessions, uploaded builds, files,
       internal blobs, cache invalidation, and database/queue coordination.
 - [ ] Document migration from managed-data compute to distributed compute.

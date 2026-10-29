@@ -82,7 +82,7 @@ CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "
                "settings", "data", "backup", "monitoring", "logging",
                # Scalable installations: which roles this host runs, whether it
                # migrates, and the pointer that releases migrations.
-               "preset", "roles", "migrations", "migration_pointer", "instance_group"}
+               "preset", "roles", "migrations", "migration_pointer", "instance_group", "scaling", "data_disk", "db_pool"}
 # data.postgres settings: the contract's, plus the endpoint a managed
 # database's stack adds for the host.
 POSTGRES_KEYS = {"mode", "runtime_role", "version", "tier", "storage_gb", "high_availability",
@@ -298,6 +298,10 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "HOT_BOX_BACKEND": "kata", "HOT_BOX_CONTAINERD_SOCKET": "/run/kata-containerd/containerd.sock",
         "HOT_BOX_VMM": "qemu",
     }
+    if scalable(config):
+        # Each instance's PostgreSQL pool, so every role's maximum fits the
+        # database's connection budget.
+        common_env["HOT_WORKER_DB_MAX_CONNECTIONS"] = str(config.get("db_pool", 20))
     # User code may never reach the installation itself, even when an operator
     # allowlists private ranges that overlap it.
     deny = [RUNTIME_SUBNET]
@@ -407,9 +411,11 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     services["ingress"] = {
         "image": images["ingress"], "restart": "unless-stopped", "user": "10001:10001", "read_only": True,
         "entrypoint": ["nginx", "-g", "daemon off;"],
-        # A scalable installation's hosts are reached only through its load balancer.
-        "ports": ([] if scalable(config) else ["443:8443"])
-                 + ([f"{LOAD_BALANCER_PORT}:{LOAD_BALANCER_PORT}"] if public_endpoints(config) or scalable(config) else []),
+        # A scalable installation's hosts are reached only through passthrough
+        # load balancers, which keep the port: 443 goes to the listener that
+        # routes by Host header.
+        "ports": [f"443:{LOAD_BALANCER_PORT}"] if scalable(config) else
+                 ["443:8443"] + ([f"{LOAD_BALANCER_PORT}:{LOAD_BALANCER_PORT}"] if public_endpoints(config) else []),
         "mem_limit": memory["ingress"],
         "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"], "tmpfs": ["/tmp:size=16777216,uid=10001,gid=10001"],
         "secrets": [secret("ingress", k) for k in ("TLS_CERTIFICATE", "TLS_PRIVATE_KEY")],

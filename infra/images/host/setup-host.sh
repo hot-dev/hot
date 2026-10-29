@@ -263,8 +263,14 @@ cat > "$LIBEXEC/hot-data-disk" <<'DISK'
 #!/usr/bin/env bash
 # hot-data-disk DEVICE [--allow-format]
 set -euo pipefail
-device="${1:?usage: hot-data-disk DEVICE [--allow-format]}"
+device="${1:?usage: hot-data-disk DEVICE|auto [--allow-format]}"
 allow_format="${2:-}"
+if [[ "$device" == "auto" ]]; then
+    # The one attached disk that is not the boot disk.
+    root_disk="/dev/$(lsblk -no PKNAME "$(findmnt -n -o SOURCE /)")"
+    device=$(lsblk -dpno NAME,TYPE | awk -v root="$root_disk" '$2 == "disk" && $1 != root {print $1; exit}')
+    [[ -n "$device" ]] || { echo "No data disk is attached" >&2; exit 1; }
+fi
 [[ -b "$device" ]] || { echo "Data disk $device is not attached" >&2; exit 1; }
 real=$(readlink -f "$device")
 root_source=$(findmnt -n -o SOURCE /)

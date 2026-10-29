@@ -40,6 +40,14 @@ on:
       timeout_minutes:
         type: number
         default: 30
+      preset:
+        description: single-machine or scalable
+        type: string
+        default: single-machine
+      gcp_zone:
+        description: The installation's zone; scalable GCP installations run their scheduler there
+        type: string
+        default: ''
       aws_region:
         type: string
         default: ''
@@ -131,9 +139,11 @@ jobs:
           CLOUD: ${{ inputs.cloud }}
           REGION: ${{ inputs.aws_region }}
           PROJECT: ${{ inputs.gcp_project }}
+          ZONE: ${{ inputs.gcp_zone }}
+          PRESET: ${{ inputs.preset }}
           TIMEOUT: ${{ inputs.timeout_minutes }}
         run: |
           set -euo pipefail
-          jq -n '{installation: {name: env.NAME, cloud: env.CLOUD, region: env.REGION, project: env.PROJECT}}' > installation.json
+          jq -n '{installation: {name: env.NAME, cloud: env.CLOUD, region: env.REGION, project: env.PROJECT, zone: env.ZONE, preset: env.PRESET}}' > installation.json
           python3 hot/infra/operator/selfhost.py installation.json --request-id "$REQUEST_ID" \
             --timeout $(( TIMEOUT * 54 )) --summary "$GITHUB_STEP_SUMMARY" release "$RELEASE"

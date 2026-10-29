@@ -325,7 +325,8 @@ class RuntimeContract(unittest.TestCase):
     def test_a_scalable_host_runs_only_its_roles(self):
         config, bundle = self.scalable(["app"])
         self.assertEqual(set(bundle["services"]), {"app", "ingress"})
-        self.assertEqual(bundle["services"]["ingress"]["ports"], [f"{renderer.LOAD_BALANCER_PORT}:{renderer.LOAD_BALANCER_PORT}"])
+        self.assertEqual(bundle["services"]["ingress"]["ports"], [f"443:{renderer.LOAD_BALANCER_PORT}"])
+        self.assertEqual(bundle["services"]["app"]["environment"]["HOT_WORKER_DB_MAX_CONNECTIONS"], "20")
         self.assertEqual(bundle["services"]["ingress"]["depends_on"], ["app"])
         self.assertTrue(all(name.startswith(("app-", "ingress-")) for name in bundle["secrets"]), bundle["secrets"])
         nginx = renderer.nginx_config(config)

@@ -403,6 +403,51 @@ Upgrades follow these rules, and the deploy agent enforces them:
 
   `diagnostics` shows the last 5.
 
+## Scalable installations
+
+Set `preset` to `scalable` to run each Hot role on its own group of VMs.
+Use the `stacks/<cloud>/scalable` root, with the plan workflow's `preset`
+input set to `scalable`. Every host runs the same host image and agent as a
+single machine, with its own role:
+
+| Role | Group | Scaling (`scaling.<role>`) |
+| --- | --- | --- |
+| App, API | Spread across zones, behind their own load balancer | `min` 2, `max` 4 by default; scale on CPU |
+| Worker | Spread across zones | Fixed at `min` (default 2) unless `max` is higher; then scale on CPU |
+| Task-worker | Spread across zones, on the size's nested-virtualization family | Fixed at `min` (default 1) unless `max` is higher; then only scale out |
+| Scheduler | One instance, replaced stop-before-start | Always one |
+
+- **Data and storage.** A scalable installation needs managed or existing
+  PostgreSQL and Valkey, and S3 or GCS for builds and files; the contract
+  refuses local ones.
+- **Database connections.** Each instance's PostgreSQL pool is limited to 20
+  connections. The contract refuses scaling maximums whose total connections,
+  plus administration, would exceed the database's limit for the size (400,
+  800, or 1,600).
+- **Endpoints.**
+  - The app and API each get a passthrough TCP load balancer: internal by
+    default, external when that endpoint's exposure is public.
+  - TLS ends on the hosts' ingress with the operator's certificate, as on a
+    single machine, so no key enters OpenTofu state, and long streams see no
+    proxy timeout.
+  - Point the hostnames at the `endpoints` output.
+  - A private endpoint admits only `network.client_cidrs` and health checks.
+- **Releases.** Each role follows its own release pointer, and the scheduler's
+  host also follows a migration pointer. The release workflow (or
+  `selfhost.py release`) works in order:
+  1. It sets the migration pointer and waits for the migration report.
+  2. It moves each role in turn (task-workers, workers, API, app, then the
+     scheduler) and waits for every instance in that role's group.
+
+  A failure stops the release and says which roles already moved. Host
+  image or machine changes replace instances through each group's rolling
+  update; the scheduler's group recreates its instance, so two schedulers
+  never run.
+- **Hosts** keep only scratch disks; nothing on them outlives the instance.
+  Commands reach one instance of the installation.
+- **Alerts** fire when any host breaches a signal, when the scheduler stops
+  or disappears, and when every host goes silent.
+
 ## Moving data off the host
 
 To move a single machine's database or queue to a managed service (or an
