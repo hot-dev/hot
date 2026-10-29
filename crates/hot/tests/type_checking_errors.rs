@@ -686,6 +686,116 @@ mod type_checking_tests {
         );
     }
 
+    // A field read straight off a call's result is checked against the type
+    // the callee declares it returns, and off a constructor's result against
+    // the constructed type, as a typed binding or parameter is.
+    #[test]
+    fn test_unknown_field_on_call_and_constructor_result_warns() {
+        let source = r#"
+            ::f::main ns
+
+            Activity type {
+                paid: "yes" | "no",
+                role: Str,
+            }
+
+            activity-of fn (m: Map): Activity { Activity(m) }
+
+            by-call fn (m: Map): Bool { eq(activity-of(m).payed, "yes") }
+
+            by-binding fn (m: Map): Bool {
+                a: Activity activity-of(m)
+                eq(a.payed, "yes")
+            }
+
+            by-param fn (a: Activity): Bool { eq(a.payed, "yes") }
+
+            by-ctor fn (m: Map): Bool { eq(Activity(m).payed, "yes") }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert_eq!(
+            unknown_fields(&warnings),
+            vec![("Activity".to_string(), "payed".to_string()); 4],
+            "Each read of `payed` should warn. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_known_fields_on_call_and_constructor_results_do_not_warn() {
+        let source = r#"
+            ::test ns
+
+            Activity type { paid: Bool, role: Str }
+
+            activity-of fn (m: Map): Activity { Activity(m) }
+            maybe-activity fn (m: Map): Activity? { Activity(m) }
+            activities fn (m: Map): Vec<Activity> { [Activity(m)] }
+            as-map fn (m: Map): Map { m }
+            undeclared fn (m: Map) { m }
+
+            reads fn (m: Map): Vec {
+                [
+                    activity-of(m).paid,
+                    maybe-activity(m).role,
+                    activities(m)[0].role,
+                    Activity(m).role,
+                    Activity({paid: true, role: "r", note: "n"}).note,
+                    as-map(m).anything,
+                    undeclared(m).anything,
+                ]
+            }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            unknown_fields(&warnings).is_empty(),
+            "Known fields and untyped results should not warn. Got: {:?}",
+            warnings
+        );
+    }
+
+    // A pipe stage takes the piped value as its first argument, so its arity
+    // counts one more. A call written inside the stage's arguments is not
+    // piped and counts only its own.
+    #[test]
+    fn test_call_in_pipe_stage_argument_counts_its_own_arguments() {
+        let source = r#"
+            ::test ns
+
+            Activity type { paid: Bool, role: Str }
+            Other type { x: Int }
+
+            activity-of fn (m: Map): Activity { Activity(m) }
+            activity-of fn (m: Map, n: Int): Other { Other({x: n}) }
+            keep fn (m: Map): Map { m }
+
+            stage fn (m: Map): Bool { m |> activity-of().paid }
+            stage-misspelled fn (m: Map): Bool { m |> activity-of().payed }
+            stage-overload fn (m: Map): Int { m |> activity-of(1).x }
+            in-local-stage fn (m: Map, f: Fn): Any { m |> f(activity-of(m).role) }
+            in-ctor-stage fn (m: Map): Activity { m |> Activity(keep(m)) }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert_eq!(
+            unknown_fields(&warnings),
+            vec![("Activity".to_string(), "payed".to_string())],
+            "Only the misspelled stage read should warn. Got: {:?}",
+            warnings
+        );
+    }
+
     #[test]
     fn test_runtime_metadata_fields_warn_as_unknown_fields() {
         let source = r#"

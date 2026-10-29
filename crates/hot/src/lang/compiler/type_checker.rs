@@ -1692,7 +1692,8 @@ impl TypeChecker {
     /// The return type declared by the function a `match` subject calls
     /// (`f(x)`, `::alias/f(x)`, `x |> f()`, or a var import of one),
     /// resolved in the callee's own namespace. `None` when the callee or
-    /// the called arity is unknown, or that arity declares no return type.
+    /// the called arity is unknown, or that arity declares no return type,
+    /// and when the subject reads a path off the result (`f(x).field`).
     fn declared_call_return_type(&mut self, subject: &Value) -> Option<TypeExpr> {
         let (fn_call, piped) = match subject {
             Value::FnCall(fn_call) => (fn_call, 0),
@@ -1704,6 +1705,16 @@ impl TypeChecker {
             }
             _ => return None,
         };
+        if fn_call.result_path.is_some() {
+            return None;
+        }
+        self.declared_return_type(fn_call, piped)
+    }
+
+    /// The return type the callee of `fn_call` declares for the called
+    /// arity, resolved in the callee's own namespace. `piped` counts an
+    /// argument a pipe supplies ahead of the written ones.
+    fn declared_return_type(&mut self, fn_call: &FnCall, piped: usize) -> Option<TypeExpr> {
         let mut qualified = match &*fn_call.function {
             Value::Ref(Ref::Var(var_ref)) if var_ref.var.deep_path.is_none() => {
                 let name = var_ref.var.sym.name();
@@ -3016,7 +3027,28 @@ impl TypeChecker {
                 }
             },
 
-            Value::FnCall(fn_call) => self.infer_function_call_type(fn_call),
+            Value::FnCall(fn_call) => {
+                let piped = usize::from(self.in_pipe_flow);
+                let call_type = self.infer_function_call_type(fn_call);
+                let Some(path) = &fn_call.result_path else {
+                    return call_type;
+                };
+                // A path read off the result (`f(x).field`) is checked as
+                // one read through a typed binding is. User function calls
+                // infer as `Any`, so take the type the callee declares it
+                // returns.
+                let base = match call_type {
+                    TypeExpr::Any => self
+                        .declared_return_type(fn_call, piped)
+                        .unwrap_or(TypeExpr::Any),
+                    call_type => call_type,
+                };
+                let location = fn_call
+                    .src
+                    .as_ref()
+                    .map(|s| self.source_to_error_location(s));
+                self.resolve_deep_path_type(&base, path, location.as_ref())
+            }
 
             Value::Flow(flow) => self.infer_flow_type(flow),
 
@@ -3908,7 +3940,7 @@ impl TypeChecker {
                 || self.qualified_types.contains_key(&func_name))
             && let Some(first_arg) = fn_call.args.first()
         {
-            let source_type = self.infer_value_type(&first_arg.value);
+            let source_type = self.infer_argument_type(&first_arg.value);
 
             // Resolve the source type to a short name we can look up in the
             // implementation registry. For shapes like Vec/Map/Function or an
@@ -3971,7 +4003,7 @@ impl TypeChecker {
             && self.context.is_shadowing_local(var_ref.var.sym.name())
         {
             for arg in &fn_call.args {
-                let _ = self.infer_value_type(&arg.value);
+                let _ = self.infer_argument_type(&arg.value);
             }
             return match self.context.get_variable_type(var_ref.var.sym.name()) {
                 Some(TypeExpr::Function(_, return_type)) => (**return_type).clone(),
@@ -4021,7 +4053,7 @@ impl TypeChecker {
                 // type constructors and would hand back `Any`).
                 let mut arg_types = Vec::new();
                 for arg in &fn_call.args {
-                    arg_types.push(self.infer_value_type(&arg.value));
+                    arg_types.push(self.infer_argument_type(&arg.value));
                 }
                 if let Some(first_arg_type) = arg_types.first()
                     && matches!(first_arg_type, TypeExpr::Record { .. })
@@ -4035,7 +4067,7 @@ impl TypeChecker {
             if let Some(t) = self.qualified_types.get(&qualified_lookup).cloned() {
                 let mut arg_types = Vec::new();
                 for arg in &fn_call.args {
-                    arg_types.push(self.infer_value_type(&arg.value));
+                    arg_types.push(self.infer_argument_type(&arg.value));
                 }
                 if let Some(first_arg_type) = arg_types.first()
                     && matches!(first_arg_type, TypeExpr::Record { .. })
@@ -4108,13 +4140,22 @@ impl TypeChecker {
                 // Even when we don't know the signature, walk the args so nested
                 // function calls inside argument expressions still get type-checked.
                 for arg in &fn_call.args {
-                    let _ = self.infer_value_type(&arg.value);
+                    let _ = self.infer_argument_type(&arg.value);
                 }
             }
         }
 
         // Default return type for unknown functions
         TypeExpr::Any
+    }
+
+    /// Infer the type of a call's argument. An argument is never itself a
+    /// pipe stage, so a call written in one counts only its own arguments.
+    fn infer_argument_type(&mut self, arg: &Value) -> TypeExpr {
+        let saved_pipe = std::mem::replace(&mut self.in_pipe_flow, false);
+        let arg_type = self.infer_value_type(arg);
+        self.in_pipe_flow = saved_pipe;
+        arg_type
     }
 
     /// If `func_name` begins with a namespace alias declared in the current namespace
@@ -6452,6 +6493,38 @@ mod tests {
         "#,
         );
         assert_eq!(errors, vec![("S".to_string(), vec![r#""b""#.to_string()])]);
+    }
+
+    // A match on a path read off a call matches the value at that path, so
+    // it is checked against that field's type, never the call's.
+    #[test]
+    fn test_match_on_a_field_of_a_call_uses_the_field_type() {
+        let errors = literal_union_match_errors(
+            r#"
+        Letter type "a" | "b"
+        Holder type { s: Letter }
+        Circle type { radius: Int }
+        Shape enum { Circle(Circle), Point }
+        get-holder fn (x: Str): Holder { Holder({s: "a"}) }
+        get-shape fn (x: Str): Shape { Shape.Point }
+
+        by-field fn (x: Str): Str {
+            match get-holder(x).s {
+                "a" => { "A" }
+            }
+        }
+
+        by-payload-field fn (x: Str): Str {
+            match get-shape(x).radius {
+                1 => { "one" }
+            }
+        }
+        "#,
+        );
+        assert_eq!(
+            errors,
+            vec![("Letter".to_string(), vec![r#""b""#.to_string()])]
+        );
     }
 
     #[test]
