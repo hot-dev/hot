@@ -27,7 +27,7 @@ meta {
 
     # Seed first so /ask has something to find:
     hot ctx set telegram.chat.id "-1001234567890"
-    hot run hot/src/team-agent/seed.hot
+    hot eval '::team-agent::seed/run-seed()'
 
     # Now ask:
     hot ctx set dev.cmd "ask"

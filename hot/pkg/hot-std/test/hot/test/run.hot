@@ -1,0 +1,9 @@
+::hot::test::run ns
+meta ["test"]
+
+test-is-inline-run
+meta ["test"] fn () {
+    // `hot test` runs directly, as `hot run` does, not from an event or a
+    // schedule.
+    assert(is-inline-run(), "is-inline-run() under hot test")
+}

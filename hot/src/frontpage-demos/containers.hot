@@ -33,12 +33,12 @@ fn (event) {
         }.items()}))
         "
         ```
-    result ::box/start({
+    task ::box/start({
         image: "python:3.12-alpine",
         script,
         timeout: 60,
         size: "small",
     })
-    ::hot::task/await(result.id)
+    result ::hot::task/await(task.id)
     from-json(trim(or(result.stdout, "{}")))
 }
