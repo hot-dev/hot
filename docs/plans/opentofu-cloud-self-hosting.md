@@ -1085,9 +1085,11 @@ Changes for self-hosting:
       OpenTofu state. Use ephemeral values or write-only arguments for any
       secret OpenTofu must pass. Document any remaining state-held secret and
       restrict its access.
-- [ ] Configure local Valkey persistence explicitly: AOF enabled, a stated
+- [x] Configure local Valkey persistence explicitly: AOF enabled, a stated
       `appendfsync` policy, and a matching published recovery-point target.
       Include the AOF in backup and restore procedures.
+      `appendonly yes` with `appendfsync everysec`; the AOF lives on the data
+      disk, which is snapshotted daily (infra/README.md, Backups and alerts).
 - [ ] Implement the private-network contract, with no public workload addresses
       and private app/API ingress by default. Test optional public ingress and
       operator access; PostgreSQL, Valkey, and task internals remain private.
@@ -1674,14 +1676,26 @@ or an existing operator destination without coupling telemetry to S3.
       Critical alerts cover host/service loss, missing scheduler heartbeat,
       disk pressure, backup failure/staleness, and inaccessible dependencies.
       Add detailed application dashboards and tracing in subsequent slices.
+      Done apart from shipping logs off the host:
+      - The agent publishes health, scheduler, dependency, readiness, disk,
+        and backup-age metrics.
+      - CloudWatch alarms and Cloud Monitoring alert policies cover every
+        listed critical case and email operator-chosen addresses.
+      - Container logs are bounded locally.
 - [ ] Alert on missing signals as well as bad values. Monitor the singleton
       scheduler from outside its process/host; absence of logs is not proof of
       health. This adds detection/recovery guidance without adding scheduler HA.
+      The heartbeat and backup-status alerts fire on missing data. The
+      scheduler alarm runs in the cloud, but its signal (the container is
+      running) comes from the host; a dispatch-level heartbeat remains.
 - [ ] Route infrastructure alerts through cloud monitoring or an existing
       external monitor, independently of Hot's worker/email pipeline. Accept
       operator-selected recipients/channels and test the configured path.
       Document thresholds, sustained windows, severity, runbooks, maintenance
       suppression, deduplication, and resolution notifications.
+      Routed through SNS or Cloud Monitoring email channels
+      (`monitoring.alert_emails`). Thresholds, windows, and first steps are in
+      infra/README.md. Testing the path and maintenance suppression remain.
 - [ ] Use private synthetic checks from an authorized network for sign-in/API
       and a representative queued execution. Keep liveness, dependency readiness,
       and end-to-end checks separate; do not expose monitoring endpoints publicly.

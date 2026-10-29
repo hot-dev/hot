@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+import urllib.parse
 
 ROOT = Path(__file__).resolve().parents[1]
 os.environ["HOT_AGENT_RUNTIME"] = str(ROOT / "runtime")
@@ -42,6 +43,14 @@ class FakeCloud:
         self.parameters = {"pointer": pointer}
         self.secrets = {OPERATOR: dict(TLS, **(operator or {}))}
         self.statuses = []
+        self.metrics = []
+        self.snapshot = None
+
+    def put_metrics(self, installation, metrics):
+        self.metrics.append((installation, metrics))
+
+    def latest_snapshot(self, volume, installation):
+        return self.snapshot
 
     def get_parameter(self, reference):
         return self.parameters["pointer"]
@@ -62,10 +71,12 @@ class FakeCloud:
 class Recorder:
     def __init__(self):
         self.commands = []
+        self.ps = ""
 
     def __call__(self, command, **kwargs):
         self.commands.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        stdout = self.ps if "ps" in command else ""
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     def compose_calls(self):
         return [" ".join(c[c.index("compose") + 3:]) for c in self.commands if "compose" in c]
@@ -75,6 +86,7 @@ class AgentHarness(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         roots = {name: Path(self.tmp.name) / name for name in ("releases", "secrets", "etc")}
+        roots["data"] = Path(self.tmp.name)
         self.config = installation()
         self.cloud = FakeCloud()
         self.run = Recorder()
@@ -331,6 +343,104 @@ class ManagedData(AgentHarness):
         self.assertIn("10.68.5.1/32", compose["services"]["worker"]["environment"]["HOT_NETWORK_DENY_CIDRS"])
 
 
+class Monitoring(AgentHarness):
+    NOW = datetime.datetime(2026, 10, 29, 12, 0, tzinfo=datetime.timezone.utc)
+
+    def ps(self, **overrides):
+        services = {name: ("running", "") for name in (*agent_module.HOT_SERVICES, "ingress")}
+        services.update(postgres=("running", "healthy"), valkey=("running", "healthy"))
+        services.update(overrides)
+        self.run.ps = "\n".join(json.dumps({"Service": name, "State": state, "Health": health})
+                                 for name, (state, health) in services.items())
+
+    def test_before_the_first_deploy_only_the_host_is_reported(self):
+        metrics = self.agent.observe(now=self.NOW)
+        self.assertEqual(set(metrics), {"AgentHeartbeat", "DataDiskUsedPercent", "BackupAgeHours"})
+        self.assertEqual(metrics["BackupAgeHours"][0], 0)
+        later = self.agent.observe(now=self.NOW + datetime.timedelta(hours=31))
+        self.assertEqual(later["BackupAgeHours"][0], 31, "without a snapshot, age counts from when monitoring began")
+
+    def test_a_healthy_deployment(self):
+        self.agent.reconcile()
+        self.ps()
+        self.cloud.snapshot = self.NOW - datetime.timedelta(hours=5)
+        metrics = self.agent.observe(probe=lambda host, path: 200, now=self.NOW)
+        self.assertEqual({k: v[0] for k, v in metrics.items() if k != "DataDiskUsedPercent"}, {
+            "AgentHeartbeat": 1, "UnhealthyServices": 0, "SchedulerRunning": 1, "DependenciesReachable": 1,
+            "Ready": 1, "BackupAgeHours": 5})
+        self.assertTrue(0 <= metrics["DataDiskUsedPercent"][0] <= 100)
+
+    def test_failures_show_up_in_the_metrics(self):
+        self.agent.reconcile()
+        self.ps(scheduler=("restarting", ""), postgres=("running", "unhealthy"), worker=("exited", ""))
+        metrics = self.agent.observe(probe=lambda host, path: 502, now=self.NOW)
+        self.assertEqual(metrics["UnhealthyServices"][0], 3)
+        self.assertEqual(metrics["SchedulerRunning"][0], 0)
+        self.assertEqual(metrics["DependenciesReachable"][0], 0)
+        self.assertEqual(metrics["Ready"][0], 0)
+
+    def test_an_unknown_backup_status_is_left_out(self):
+        def denied(volume, installation):
+            raise agent_module.AgentError("ec2 DescribeSnapshots failed: UnauthorizedOperation")
+        self.cloud.latest_snapshot = denied
+        metrics = self.agent.observe(now=self.NOW)
+        self.assertNotIn("BackupAgeHours", metrics)
+        self.assertEqual(metrics["AgentHeartbeat"][0], 1)
+
+    def test_publishing_failures_never_stop_the_agent(self):
+        def broken(installation, metrics):
+            raise agent_module.AgentError("PutMetricData failed: Throttling")
+        self.cloud.put_metrics = broken
+        self.agent.monitor()
+        self.cloud.put_metrics = FakeCloud.put_metrics.__get__(self.cloud)
+        self.agent.monitor()
+        self.assertEqual(self.cloud.metrics[-1][0], "hot-example")
+
+    def test_cloudwatch_and_ec2_use_signed_query_requests(self):
+        requests = []
+
+        def fake(method, url, body=None, headers=None, timeout=30):
+            requests.append((url, urllib.parse.parse_qs(body.decode()), headers))
+            if "ec2." in url:
+                return 200, (b'<DescribeSnapshotsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><snapshotSet>'
+                             b"<item><startTime>2026-10-28T03:00:12.000Z</startTime></item>"
+                             b"<item><startTime>2026-10-29T03:00:09.000Z</startTime></item></snapshotSet></DescribeSnapshotsResponse>")
+            return 200, b"<PutMetricDataResponse/>"
+        aws = agent_module.Aws("us-east-1")
+        aws.credentials = lambda: {"AccessKeyId": "AKID", "SecretAccessKey": "secret", "Token": "t"}
+        with mock.patch.object(agent_module, "http", fake):
+            aws.put_metrics("hot-example", {"Ready": (1, "Count"), "DataDiskUsedPercent": (42.5, "Percent")})
+            latest = aws.latest_snapshot("vol-0abc", "hot-example")
+        url, params, headers = requests[0]
+        self.assertEqual(url, "https://monitoring.us-east-1.amazonaws.com/")
+        self.assertEqual(params["Action"], ["PutMetricData"])
+        self.assertEqual(params["Namespace"], ["Hot/SelfHost"])
+        self.assertEqual(params["MetricData.member.2.MetricName"], ["Ready"])
+        self.assertEqual(params["MetricData.member.1.Dimensions.member.1.Value"], ["hot-example"])
+        self.assertNotIn("x-amz-target", headers)
+        self.assertEqual(requests[1][1]["Filter.1.Value.1"], ["vol-0abc"])
+        self.assertEqual(latest, datetime.datetime(2026, 10, 29, 3, 0, 9, tzinfo=datetime.timezone.utc))
+
+    def test_cloud_monitoring_series_carry_the_instance(self):
+        sent = []
+        gcp = agent_module.Gcp("example-project", zone="us-central1-a")
+        gcp.instance_id = "1234567890"
+        gcp.call = lambda method, url, payload=None, allow=(): sent.append((url, payload))
+        gcp.put_metrics("hot-example", {"AgentHeartbeat": (1, "Count")})
+        url, payload = sent[0]
+        self.assertTrue(url.endswith("/projects/example-project/timeSeries"))
+        series = payload["timeSeries"][0]
+        self.assertEqual(series["metric"], {"type": "custom.googleapis.com/hot/hot-example/agent_heartbeat"})
+        self.assertEqual(series["resource"]["labels"], {"project_id": "example-project", "zone": "us-central1-a",
+                                                        "instance_id": "1234567890"})
+
+    def test_a_database_off_the_host_is_not_dumped(self):
+        self.agent.reconcile()
+        self.config["data"] = {"postgres": {"mode": "existing"}}
+        with self.assertRaisesRegex(agent_module.AgentError, "back it up with its provider"):
+            self.agent.command("backup")
+
+
 class Commands(AgentHarness):
     def test_only_allowlisted_commands_and_services(self):
         with self.assertRaisesRegex(agent_module.AgentError, "Unknown command"):
@@ -353,6 +463,18 @@ class Commands(AgentHarness):
 
 
 class AwsSigning(unittest.TestCase):
+    def test_query_signature_matches_botocore(self):
+        body = b"Action=DescribeSnapshots&Version=2016-11-15&Owner.1=self&Filter.1.Name=volume-id&Filter.1.Value.1=vol-0abc"
+        headers = agent_module.sigv4_headers(
+            "POST", "ec2.us-east-2.amazonaws.com", "us-east-2", "ec2", None, body,
+            {"AccessKeyId": "AKIDEXAMPLE", "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+             "Token": "SESSIONTOKEN"},
+            datetime.datetime(2026, 10, 29, 12, 0, 0, tzinfo=datetime.timezone.utc),
+            content_type="application/x-www-form-urlencoded; charset=utf-8")
+        # Reference value computed with botocore 1.40.0 for the same inputs.
+        self.assertTrue(headers["authorization"].endswith(
+            "Signature=23bcc4832d3d58fc357b9af748806e53fe9a62ade885712e16be6c27276228ad"))
+
     def test_signature_matches_botocore(self):
         body = json.dumps({"Name": "/hot/demo/release"}).encode()
         headers = agent_module.sigv4_headers(

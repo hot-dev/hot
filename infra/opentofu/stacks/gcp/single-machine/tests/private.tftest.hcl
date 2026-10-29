@@ -262,3 +262,42 @@ run "managed_postgres" {
     error_message = "The agent learns where the database and its administrator secret are."
   }
 }
+
+run "backups_and_alerts" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example-project/global/images/hot-host-amd64",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "monitoring" : { "alert_emails" : ["ops@example.com"] },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = one(one(google_compute_resource_policy.snapshots.snapshot_schedule_policy).retention_policy).max_retention_days == 7 && one(one(google_compute_resource_policy.snapshots.snapshot_schedule_policy).snapshot_properties).labels["hot-installation"] == "hot-example"
+    error_message = "Snapshots are kept for the default week and labeled for the agent."
+  }
+  assert {
+    condition     = google_compute_disk_resource_policy_attachment.snapshots.disk == google_compute_disk.data.name
+    error_message = "The schedule snapshots the retained data disk."
+  }
+  assert {
+    condition     = google_project_iam_custom_role.snapshots.permissions == toset(["compute.snapshots.list"])
+    error_message = "The host may only list snapshots."
+  }
+  assert {
+    condition     = google_monitoring_metric_descriptor.hot["agent_heartbeat"].type == "custom.googleapis.com/hot/hot-example/agent_heartbeat" && length(google_monitoring_alert_policy.hot) == 6
+    error_message = "Each installation owns its metric types, and every critical signal has an alert."
+  }
+  assert {
+    condition     = length(google_monitoring_alert_policy.hot["backup-stale"].conditions) == 2 && length(google_monitoring_notification_channel.email) == 1
+    error_message = "A missing backup status alerts too, by email."
+  }
+}

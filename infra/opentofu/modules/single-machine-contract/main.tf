@@ -49,6 +49,16 @@ variable "installation" {
         auth_token_version = optional(number, 1)
       }), {})
     }), {})
+    # Daily snapshots of the retained data disk, at an hour in UTC, kept for
+    # retention_days. The host cannot delete them.
+    backup = optional(object({
+      retention_days = optional(number, 7)
+      time_utc       = optional(string, "03:00")
+    }), {})
+    # Where infrastructure alerts go, independent of Hot's own email.
+    monitoring = optional(object({
+      alert_emails = optional(list(string), [])
+    }), {})
     app_hostname = string
     api_hostname = string
     app_exposure = optional(string, "private")
@@ -141,6 +151,14 @@ variable "installation" {
   validation {
     condition     = (var.installation.data.postgres.mode != "managed" && var.installation.data.valkey.mode != "managed") || var.installation.cloud != "aws" || var.installation.network.mode == "new" || length(var.installation.network.data_subnet_ids) >= 2
     error_message = "Managed PostgreSQL or Valkey on an existing AWS network needs network.data_subnet_ids in at least two zones."
+  }
+  validation {
+    condition     = var.installation.backup.retention_days >= 1 && var.installation.backup.retention_days <= 365 && can(regex("^([01][0-9]|2[0-3]):00$", var.installation.backup.time_utc))
+    error_message = "backup.retention_days must be 1-365, and backup.time_utc an hour such as 03:00."
+  }
+  validation {
+    condition     = alltrue([for email in var.installation.monitoring.alert_emails : can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", email))])
+    error_message = "monitoring.alert_emails must be email addresses."
   }
   validation {
     condition     = var.installation.host_image != ""

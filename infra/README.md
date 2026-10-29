@@ -96,17 +96,63 @@ Implemented:
   issues a managed certificate once your DNS points at the `public_endpoint`
   output. The VM keeps no public address, and private endpoints are never
   served to the load balancer.
+- Backups and alerts: see [Backups and alerts](#backups-and-alerts).
 - In Hot: SMTP email delivery, `hot admin bootstrap`/`reset-password` and the
   `app.signup` policy for operator-managed accounts, and outbound allowlists
   (`network.allow-cidrs`, `allow-hosts`, `deny-cidrs`) behind a fixed deny set.
 
 The roots intentionally require `acknowledge_unqualified = true`. The bootstrap
 also refuses to start if the supplied image lacks `hot-agent.service`. Real
-image builds and deployments on each cloud, managed Valkey on GCP, cloud
-monitoring/alerts, and the real-cloud release gates remain to be implemented
-and qualified. Do not apply these development examples to
+image builds and deployments on each cloud, managed Valkey on GCP, log
+shipping to CloudWatch Logs or Cloud Logging, restore tooling, and the
+real-cloud release gates remain to be implemented and qualified. Do not apply these development examples to
 production. No usable host image or published runtime digest is implied by the
 placeholder references in the fixtures.
+
+## Backups and alerts
+
+The retained data disk is snapshotted daily at `backup.time_utc` (default
+`03:00`) and each snapshot is kept for `backup.retention_days` (default 7).
+AWS uses Data Lifecycle Manager and GCP a snapshot schedule. The host cannot
+delete snapshots.
+
+The disk holds local PostgreSQL, Valkey's append-only file, and local builds
+and files. Snapshots are crash-consistent: PostgreSQL recovers from its WAL
+on restore, and Valkey loses at most the last second of queue writes
+(`appendfsync everysec`). The recovery point is the last snapshot, so at most
+a day. Managed databases keep their own point-in-time backups. The `backup`
+command adds an on-demand `pg_dump` of a local database.
+
+Every 30 seconds the host agent publishes these metrics, to CloudWatch
+(namespace `Hot/SelfHost`, dimension `Installation`) or Cloud Monitoring
+(`custom.googleapis.com/hot/<installation>/...`):
+
+| Metric | Meaning |
+| --- | --- |
+| `AgentHeartbeat` | 1 while the agent runs |
+| `UnhealthyServices` | Hot services, ingress, and local data services not running and healthy |
+| `SchedulerRunning` | 1 while the scheduler container runs |
+| `DependenciesReachable` | 1 when local data services are healthy and managed or existing ones accept connections |
+| `Ready` | 1 when the app and API answer through the ingress |
+| `DataDiskUsedPercent` | The larger of space and inodes used on the data disk |
+| `BackupAgeHours` | Hours since the newest completed snapshot |
+
+The stacks alert on them. Set `monitoring.alert_emails`; AWS sends each address
+an SNS confirmation email first. Alerts reach those addresses independently of
+Hot's own email, and both firing and resolving are sent.
+
+| Alert | Fires when | First steps |
+| --- | --- | --- |
+| `host-down` | No heartbeat for 5 minutes (also EC2 `instance-impaired` on AWS) | Check the VM in the console; `diagnostics` once it answers. The agent restarts with the VM. |
+| `services-unhealthy` | A service unhealthy for 15 minutes | `diagnostics` names it; `restart-service`, then read its logs. |
+| `scheduler-stopped` | No scheduler for 10 minutes | Schedules are not firing. `restart-service scheduler`; it exits if it loses its database lock, so check database connectivity too. |
+| `dependencies-unreachable` | PostgreSQL or Valkey unreachable for 10 minutes | Check the data service, its security group or firewall, and its status page. |
+| `not-ready` | App or API not answering for 15 minutes | Check `services-unhealthy` and the ingress certificate. |
+| `disk-pressure` | Data disk over 85% for 15 minutes | Grow the disk, or move builds and files to object storage. |
+| `backup-stale` | No snapshot for 30 hours, or no backup status | Check the snapshot policy or schedule in the console. |
+
+Liveness, dependency reachability, and end-to-end readiness are separate
+signals, and a missing heartbeat or backup status alerts rather than passing.
 
 ## Local validation
 

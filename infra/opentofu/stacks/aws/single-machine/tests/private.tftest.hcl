@@ -11,6 +11,12 @@ mock_provider "aws" {
   mock_resource "aws_lb_listener" {
     defaults = { arn = "arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/app/hot-example/0123/4567" }
   }
+  mock_resource "aws_iam_role" {
+    defaults = { arn = "arn:aws:iam::123456789012:role/hot-example" }
+  }
+  mock_resource "aws_sns_topic" {
+    defaults = { arn = "arn:aws:sns:us-east-1:123456789012:hot-example-alerts" }
+  }
   mock_resource "aws_elasticache_replication_group" {
     defaults = { primary_endpoint_address = "master.hot-example.abc123.use1.cache.amazonaws.com" }
   }
@@ -327,5 +333,44 @@ run "managed_valkey" {
   assert {
     condition     = strcontains(aws_iam_role_policy.runtime.policy, "secret:hot/hot-example/secret-AbCdEf") && length(aws_subnet.data) == 2
     error_message = "The agent may read the token's secret; the cache gets subnets in two zones."
+  }
+}
+
+run "backups_and_alerts" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "backup" : { "retention_days" : 14, "time_utc" : "05:00" },
+      "monitoring" : { "alert_emails" : ["ops@example.com", "oncall@example.com"] },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = aws_dlm_lifecycle_policy.data.policy_details[0].target_tags["HotDataVolume"] == "hot-example" && aws_ebs_volume.data.tags["HotDataVolume"] == "hot-example"
+    error_message = "The snapshot policy selects exactly this installation's data volume."
+  }
+  assert {
+    condition     = one(one(aws_dlm_lifecycle_policy.data.policy_details[0].schedule).retain_rule).interval == 14 && one(one(aws_dlm_lifecycle_policy.data.policy_details[0].schedule).create_rule).times[0] == "05:00"
+    error_message = "Snapshots run daily at the chosen hour and are kept for the chosen days."
+  }
+  assert {
+    condition     = length(aws_sns_topic_subscription.alerts) == 2 && length(aws_cloudwatch_metric_alarm.hot) == 7
+    error_message = "Every alert email is subscribed and every critical signal has an alarm."
+  }
+  assert {
+    condition     = aws_cloudwatch_metric_alarm.hot["host-down"].treat_missing_data == "breaching" && aws_cloudwatch_metric_alarm.hot["backup-stale"].treat_missing_data == "breaching"
+    error_message = "A missing heartbeat or backup status alarms; absence is not health."
+  }
+  assert {
+    condition     = strcontains(aws_iam_role_policy.runtime.policy, "ec2:DescribeSnapshots") && !strcontains(aws_iam_role_policy.runtime.policy, "ec2:DeleteSnapshot")
+    error_message = "The host may read snapshot times but never delete snapshots."
   }
 }

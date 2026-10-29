@@ -57,7 +57,7 @@ RUNTIME_SUBNET = "172.30.0.0/24"
 CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "size", "host_image", "release_pointer", "secret_references", "app_hostname", "api_hostname", "app_exposure", "api_exposure", "storage", "network",
                # Read by the host agent, not by the bundle.
                "data_volume_id", "admin_email", "manifest_base_url", "status_reference", "command_subscription",
-               "settings", "data"}
+               "settings", "data", "backup", "monitoring"}
 # data.postgres settings: the contract's, plus the endpoint a managed
 # database's stack adds for the host.
 POSTGRES_KEYS = {"mode", "runtime_role", "version", "tier", "storage_gb", "high_availability",

@@ -193,7 +193,9 @@ resource "aws_iam_role_policy" "runtime" {
     { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = aws_ssm_parameter.release.arn },
     { Effect = "Allow", Action = ["ssm:PutParameter"], Resource = aws_ssm_parameter.status.arn },
     { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = "${aws_cloudwatch_log_group.host.arn}:*" },
-    { Effect = "Allow", Action = ["cloudwatch:PutMetricData"], Resource = "*", Condition = { StringEquals = { "cloudwatch:namespace" = "Hot/SelfHost" } } }
+    { Effect = "Allow", Action = ["cloudwatch:PutMetricData"], Resource = "*", Condition = { StringEquals = { "cloudwatch:namespace" = "Hot/SelfHost" } } },
+    # Backup age for monitoring; snapshots cannot be scoped by resource.
+    { Effect = "Allow", Action = ["ec2:DescribeSnapshots"], Resource = "*" }
     ], [for s in local.s3_roles : {
       Effect = "Allow", Action = ["s3:GetBucketLocation"], Resource = "arn:aws:s3:::${s.bucket}"
       }], [for s in local.s3_roles : {
@@ -212,7 +214,8 @@ resource "aws_ebs_volume" "data" {
   size              = module.contract.capacity.data_gb
   type              = "gp3"
   encrypted         = true
-  tags              = { Name = "hot-${local.config.name}-data" }
+  # The snapshot policy in monitoring.tf selects the volume by this tag.
+  tags = { Name = "hot-${local.config.name}-data", HotDataVolume = local.config.name }
   lifecycle { prevent_destroy = true }
 }
 resource "aws_instance" "host" {

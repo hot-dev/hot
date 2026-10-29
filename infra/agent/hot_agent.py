@@ -34,6 +34,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ElementTree
 
 RUNTIME = Path(os.environ.get("HOT_AGENT_RUNTIME", "/opt/hot-host/runtime"))
 sys.path.insert(0, str(RUNTIME))
@@ -55,6 +56,16 @@ BOX_POOL_GB = {"small": 40, "medium": 100, "large": 200}
 SECRET_OWNERS = {"postgres": 999, "valkey": 999}
 
 
+# Health metrics the agent publishes every cycle, with their CloudWatch units.
+# The stacks alarm on them; see infra/README.md.
+METRIC_NAMESPACE = "Hot/SelfHost"
+GCP_METRIC_PREFIX = "custom.googleapis.com/hot/"
+GCP_METRIC_NAMES = {"AgentHeartbeat": "agent_heartbeat", "UnhealthyServices": "unhealthy_services",
+                    "SchedulerRunning": "scheduler_running", "DependenciesReachable": "dependencies_reachable",
+                    "Ready": "ready", "DataDiskUsedPercent": "data_disk_used_percent",
+                    "BackupAgeHours": "backup_age_hours"}
+
+
 class AgentError(Exception):
     """A failure that is safe to report: it never contains secret values."""
 
@@ -72,12 +83,15 @@ def http(method, url, body=None, headers=None, timeout=30):
         return error.code, error.read()
 
 
-def sigv4_headers(method, host, region, service, target, body, creds, now):
-    """AWS Signature Version 4 for a JSON 1.1 API call to `/`."""
+def sigv4_headers(method, host, region, service, target, body, creds, now,
+                  content_type="application/x-amz-json-1.1"):
+    """AWS Signature Version 4 for an API call to `/`: JSON 1.1 with a
+    target, or the Query protocol (form-encoded, no target)."""
     amz_date = now.strftime("%Y%m%dT%H%M%SZ")
     day = now.strftime("%Y%m%d")
-    headers = {"content-type": "application/x-amz-json-1.1", "host": host,
-               "x-amz-date": amz_date, "x-amz-target": target}
+    headers = {"content-type": content_type, "host": host, "x-amz-date": amz_date}
+    if target:
+        headers["x-amz-target"] = target
     if creds.get("Token"):
         headers["x-amz-security-token"] = creds["Token"]
     names = sorted(headers)
@@ -128,6 +142,38 @@ class Aws:
             kind = result.get("__type", "").split("#")[-1] or f"HTTP {status}"
             raise AgentError(f"{target} failed: {kind}")
         return result
+
+    def query(self, service, version, params):
+        """A Query-protocol call (EC2, CloudWatch); returns the XML response."""
+        host = f"{service}.{self.region}.amazonaws.com"
+        body = urllib.parse.urlencode({"Action": params.pop("Action"), "Version": version, **params}).encode()
+        headers = sigv4_headers("POST", host, self.region, service, None, body, self.credentials(),
+                                datetime.datetime.now(datetime.timezone.utc),
+                                content_type="application/x-www-form-urlencoded; charset=utf-8")
+        status, data = http("POST", f"https://{host}/", body, headers)
+        root = ElementTree.fromstring(data or b"<Empty/>")
+        if status != 200:
+            code = next((e.text for e in root.iter() if e.tag.endswith("Code")), None) or f"HTTP {status}"
+            raise AgentError(f"{service} {params.get('Action', '')} failed: {code}")
+        return root
+
+    def put_metrics(self, installation, metrics):
+        params = {"Action": "PutMetricData", "Namespace": METRIC_NAMESPACE}
+        for index, (name, (value, unit)) in enumerate(sorted(metrics.items()), start=1):
+            prefix = f"MetricData.member.{index}."
+            params.update({prefix + "MetricName": name, prefix + "Value": repr(float(value)), prefix + "Unit": unit,
+                           prefix + "Dimensions.member.1.Name": "Installation",
+                           prefix + "Dimensions.member.1.Value": installation})
+        self.query("monitoring", "2010-08-01", params)
+
+    def latest_snapshot(self, volume_id, installation):
+        """When the newest completed snapshot of the data volume started."""
+        root = self.query("ec2", "2016-11-15", {
+            "Action": "DescribeSnapshots", "Owner.1": "self",
+            "Filter.1.Name": "volume-id", "Filter.1.Value.1": volume_id,
+            "Filter.2.Name": "status", "Filter.2.Value.1": "completed"})
+        times = [e.text for e in root.iter() if e.tag.endswith("startTime") and e.text]
+        return max((parse_time(t) for t in times), default=None)
 
     @staticmethod
     def parameter_name(reference):
@@ -183,9 +229,11 @@ class Gcp:
 
     METADATA = "http://metadata.google.internal/computeMetadata/v1"
 
-    def __init__(self, project, subscription=""):
+    def __init__(self, project, subscription="", zone=""):
         self.project = project
         self.subscription = subscription
+        self.zone = zone
+        self.instance_id = None
 
     def token(self):
         _, data = http("GET", self.METADATA + "/instance/service-accounts/default/token",
@@ -225,6 +273,30 @@ class Gcp:
         self.call("POST", "https://logging.googleapis.com/v2/entries:write", {
             "logName": f"projects/{self.project}/logs/{reference or 'hot-agent-status'}",
             "resource": {"type": "global"}, "entries": [{"jsonPayload": status, "severity": "INFO"}]})
+
+    def put_metrics(self, installation, metrics):
+        if self.instance_id is None:
+            _, data = http("GET", self.METADATA + "/instance/id", headers={"Metadata-Flavor": "Google"})
+            self.instance_id = data.decode()
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        resource = {"type": "gce_instance", "labels": {"project_id": self.project, "zone": self.zone,
+                                                        "instance_id": self.instance_id}}
+        # Per-installation metric types: descriptors are project-wide, and
+        # each installation's stack owns its own.
+        series = [{"metric": {"type": f"{GCP_METRIC_PREFIX}{installation}/{GCP_METRIC_NAMES[name]}"},
+                   "resource": resource, "points": [{"interval": {"endTime": now}, "value": {"doubleValue": float(value)}}]}
+                  for name, (value, _) in sorted(metrics.items())]
+        self.call("POST", f"https://monitoring.googleapis.com/v3/projects/{self.project}/timeSeries", {"timeSeries": series})
+
+    def latest_snapshot(self, disk_id, installation):
+        """When the newest ready snapshot of the data disk was created. The
+        snapshot schedule labels its snapshots with the installation."""
+        query = urllib.parse.urlencode({"filter": f'labels.hot-installation = "{installation}"'})
+        result = self.call("GET", f"https://compute.googleapis.com/compute/v1/projects/{self.project}/global/snapshots?{query}")
+        disk = disk_id.rsplit("/", 1)[-1]
+        times = [item["creationTimestamp"] for item in (result or {}).get("items", [])
+                 if item.get("status") == "READY" and item.get("sourceDisk", "").endswith("/disks/" + disk)]
+        return max((parse_time(t) for t in times), default=None)
 
     def receive_commands(self):
         if not self.subscription:
@@ -316,18 +388,25 @@ def managed_sslmode(config):
     return "verify-full" if config["cloud"] == "aws" else "verify-ca"
 
 
+def data_services(config, operator):
+    """(host, port) of managed and existing data services."""
+    services = []
+    for service, key, port in (("postgres", "HOT_DB_URI", 5432), ("valkey", "HOT_REDIS_URI", 6379)):
+        mode = render.data_mode(config, service)
+        if mode == "managed":
+            endpoint = config["data"][service]["endpoint"]
+            services.append((endpoint["host"], int(endpoint["port"])))
+        elif mode == "existing":
+            parts = urllib.parse.urlsplit(operator[key])
+            if parts.hostname:
+                services.append((parts.hostname, parts.port or port))
+    return services
+
+
 def data_endpoints(config, operator):
     """Hosts of managed and existing data services, which user code must
     never reach."""
-    hosts = []
-    for service in ("postgres", "valkey"):
-        if render.data_mode(config, service) == "managed":
-            hosts.append(config["data"][service]["endpoint"]["host"])
-    if render.data_mode(config, "postgres") == "existing":
-        hosts.append(urllib.parse.urlsplit(operator["HOT_DB_URI"]).hostname)
-    if render.data_mode(config, "valkey") == "existing":
-        hosts.append(urllib.parse.urlsplit(operator["HOT_REDIS_URI"]).hostname)
-    return [h for h in hosts if h]
+    return [host for host, _ in data_services(config, operator)]
 
 
 def role_secrets(config, generated, operator, managed=None):
@@ -438,6 +517,7 @@ class Agent:
         self.chown = chown
         roots = roots or {}
         self.releases = Path(roots.get("releases", RELEASES))
+        self.data_root = Path(roots.get("data", HOT_ROOT))
         self.secrets_root = Path(roots.get("secrets", SECRETS_ROOT))
         self.etc = Path(roots.get("etc", "/etc/hot"))
         self.references = config["secret_references"]
@@ -599,7 +679,8 @@ class Agent:
         self.wait_ready()
         self.compose(bundle, "up", "-d", "scheduler")
         steps.append("started")
-        self.save_state({"release": release, "previous": previous, "migrations": latest})
+        self.save_state({"release": release, "previous": previous, "migrations": latest,
+                         "dependencies": data_services(self.config, self.operator_secrets())})
         return steps
 
     def wait_ready(self, attempts=40, probe=None):
@@ -642,6 +723,66 @@ class Agent:
                 print(json.dumps({"status_report_failed": str(error)}), file=sys.stderr, flush=True)
         return status
 
+    # -- monitoring ---------------------------------------------------------------
+
+    def service_states(self, bundle):
+        """Each service's container state and health check result."""
+        output = self.compose(bundle, "ps", "--all", "--format", "json").stdout.strip()
+        entries = json.loads(output) if output.startswith("[") else [json.loads(line) for line in output.splitlines()]
+        return {e.get("Service", "?"): (e.get("State", ""), e.get("Health", "")) for e in entries}
+
+    def observe(self, probe=None, now=None):
+        """The health metrics the stacks alarm on. Ones that need a deployed
+        release are left out before the first deploy."""
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        metrics = {"AgentHeartbeat": (1, "Count")}
+        release = self.state().get("release")
+        if release:
+            local_data = [s for s in ("postgres", "valkey") if render.data_mode(self.config, s) == "local"]
+            states = self.service_states(self.releases / release / "bundle")
+            healthy = {name for name, (state, health) in states.items()
+                       if state == "running" and health in ("", "healthy")}
+            expected = [*HOT_SERVICES, "ingress", *local_data]
+            metrics["UnhealthyServices"] = (sum(name not in healthy for name in expected), "Count")
+            metrics["SchedulerRunning"] = (int("scheduler" in healthy), "Count")
+            reachable = (all(name in healthy for name in local_data)
+                         and all(tcp_reachable(host, port) for host, port in self.state().get("dependencies", [])))
+            metrics["DependenciesReachable"] = (int(reachable), "Count")
+            probe = probe or https_status
+            targets = [(self.config["app_hostname"], "/signin"), (self.config["api_hostname"], "/status")]
+            try:
+                ready = all(probe(host, path) < 400 for host, path in targets)
+            except OSError:
+                ready = False
+            metrics["Ready"] = (int(ready), "Count")
+        usage = os.statvfs(self.data_root)
+        used = max(1 - usage.f_bavail / max(usage.f_blocks, 1), 1 - usage.f_favail / max(usage.f_files, 1))
+        metrics["DataDiskUsedPercent"] = (round(100 * used, 1), "Percent")
+        # Until the first snapshot, backup age counts from when monitoring began.
+        baseline = self.releases / "monitoring.json"
+        try:
+            since = parse_time(json.loads(baseline.read_text())["since"])
+        except (OSError, ValueError, KeyError):
+            since = now
+            baseline.parent.mkdir(parents=True, exist_ok=True)
+            baseline.write_text(json.dumps({"since": now.isoformat()}))
+        try:
+            latest = self.cloud.latest_snapshot(self.config["data_volume_id"], self.config["name"]) or since
+        except AgentError as error:
+            # Left out, so the backup alarm reports the status as unknown.
+            print(json.dumps({"backup_status_failed": str(error)}), file=sys.stderr, flush=True)
+        else:
+            metrics["BackupAgeHours"] = (round((now - latest).total_seconds() / 3600, 2), "None")
+        return metrics
+
+    def monitor(self):
+        """Publish health metrics. Failures are logged, never raised: the
+        missing heartbeat is what alarms."""
+        try:
+            self.cloud.put_metrics(self.config["name"], self.observe())
+        except (AgentError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+            print(json.dumps({"monitoring_failed": describe(error)}), file=sys.stderr, flush=True)
+
     # -- reconcile and commands ------------------------------------------------
 
     def reconcile(self):
@@ -683,6 +824,11 @@ class Agent:
             self.compose(bundle, "stop", "app", "api", "ingress")
             return self.report(state="stopped", request_id=request_id)
         if operation == "backup":
+            # An extra logical dump beside the scheduled data-disk snapshots.
+            # A managed database is backed up by its cloud service, an existing
+            # one by its operator.
+            if render.data_mode(self.config, "postgres") != "local":
+                raise AgentError("The database is not on this host; back it up with its provider")
             stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             target = HOT_ROOT / "backups" / stamp
             target.mkdir(parents=True, mode=0o700)
@@ -725,6 +871,18 @@ def https_status(host, path, address="127.0.0.1"):
         connection.close()
 
 
+def parse_time(value):
+    return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def tcp_reachable(host, port, timeout=3):
+    try:
+        socket.create_connection((host, int(port)), timeout=timeout).close()
+        return True
+    except OSError:
+        return False
+
+
 def describe(error):
     if isinstance(error, subprocess.CalledProcessError):
         command = " ".join(str(part) for part in error.cmd[:6])
@@ -743,7 +901,7 @@ def locked():
 def cloud_for(config):
     if config["cloud"] == "aws":
         return Aws(config["region"])
-    return Gcp(config["project"], config.get("command_subscription", ""))
+    return Gcp(config["project"], config.get("command_subscription", ""), config["zone"])
 
 
 def main(argv=None):
@@ -768,6 +926,7 @@ def main(argv=None):
     while True:
         with locked():
             agent.reconcile()
+            agent.monitor()
             for ack_id, request in agent.cloud.receive_commands():
                 agent.cloud.ack(ack_id)
                 try:
