@@ -80,9 +80,17 @@ Implemented:
     database needs. On an existing AWS network, give `network.data_subnet_ids`
     in two zones; an existing GCP network must already have private services
     access.
-  - Managed Valkey is not available yet: ElastiCache can take a write-only
-    AUTH token, but Memorystore for Valkey accepts only IAM tokens, which Hot's
-    Valkey client does not request yet.
+- Managed Valkey (AWS): set `data.valkey.mode` to `managed` for an ElastiCache
+  Valkey 8.1 replication group, sized from the installation size unless you set
+  `node_type`, with `high_availability` adding a replica in a second zone and
+  automatic failover.
+  - The cache requires TLS and an AUTH token, and never evicts queue entries.
+  - Like the GCP database password, the token is generated during apply and
+    written only to write-only attributes, on ElastiCache and on a Secrets
+    Manager secret. Raise `data.valkey.auth_token_version` to set a new one.
+  - Memorystore for Valkey accepts only IAM tokens, which Hot's Valkey client
+    does not request yet, so GCP installations use local or existing Valkey
+    for now.
 - Public endpoints: set `app_exposure` or `api_exposure` to `public`. AWS
   needs `public_certificate_arn` (an ACM certificate you DNS-validate); GCP
   issues a managed certificate once your DNS points at the `public_endpoint`
@@ -94,7 +102,7 @@ Implemented:
 
 The roots intentionally require `acknowledge_unqualified = true`. The bootstrap
 also refuses to start if the supplied image lacks `hot-agent.service`. Real
-image builds and deployments on each cloud, managed Valkey, cloud
+image builds and deployments on each cloud, managed Valkey on GCP, cloud
 monitoring/alerts, and the real-cloud release gates remain to be implemented
 and qualified. Do not apply these development examples to
 production. No usable host image or published runtime digest is implied by the

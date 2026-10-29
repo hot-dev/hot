@@ -296,7 +296,7 @@ class ManagedData(AgentHarness):
         self.cloud.secrets["projects/example-project/secrets/hot-example-postgres-admin"] = {"username": "postgres", "password": "x"}
         generated = {k: "g" for k in ("POSTGRES_PASSWORD", "POSTGRES_RUNTIME_PASSWORD", "VALKEY_PASSWORD",
                                      "HOT_ENCRYPTION_KEY", "HOT_APP_SESSION_SECRET", "ADMIN_PASSWORD")}
-        files = agent_module.role_secrets(self.config, generated, self.cloud.secrets[OPERATOR], self.agent.managed_postgres())
+        files = agent_module.role_secrets(self.config, generated, self.cloud.secrets[OPERATOR], self.agent.managed_data())
         self.assertIn("sslmode=verify-ca", files["worker"]["HOT_DB_URI"])
         self.assertIn("SQL", files["worker"]["POSTGRES_CA_CERT"])
         self.assertEqual(self.ca_requests, [])
@@ -311,6 +311,24 @@ class ManagedData(AgentHarness):
     def test_operator_database_settings_are_refused(self):
         self.cloud.secrets[OPERATOR]["HOT_DB_URI"] = "postgres://x"
         self.assertIn("unsupported entry", self.agent.reconcile()["error"])
+
+    def test_managed_valkey_uses_tls_and_its_token(self):
+        cache = "master.hot-example.abc123.use1.cache.amazonaws.com"
+        token_secret = "arn:aws:secretsmanager:us-east-1:123456789012:secret:hot/hot-example/valkey-AbCdEf"
+        self.config["data"]["valkey"] = {"mode": "managed", "endpoint": {"host": cache, "port": 6379, "auth_secret": token_secret}}
+        self.assertIn("AUTH token", self.agent.reconcile()["error"])
+        self.cloud.secrets[token_secret] = {"password": "tok+en/1"}
+        self.agent.resolve = lambda hosts: [f"10.68.5.{i}/32" for i, _ in enumerate(hosts)]
+        status = self.agent.reconcile()
+        self.assertEqual(status["state"], "deployed", status)
+        root = Path(self.tmp.name) / "secrets"
+        self.assertEqual((root / "worker/HOT_REDIS_URI").read_text(), f"rediss://:tok%2Ben%2F1@{cache}:6379")
+        self.assertFalse((root / "valkey").exists())
+        calls = self.run.compose_calls()
+        self.assertFalse(any(call.startswith("up -d --wait") for call in calls), calls)
+        compose = json.loads((Path(self.tmp.name) / "releases/3.0.1/bundle/compose.json").read_text())
+        self.assertNotIn("valkey", compose["services"])
+        self.assertIn("10.68.5.1/32", compose["services"]["worker"]["environment"]["HOT_NETWORK_DENY_CIDRS"])
 
 
 class Commands(AgentHarness):

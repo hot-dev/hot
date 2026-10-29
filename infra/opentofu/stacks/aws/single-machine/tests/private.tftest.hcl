@@ -11,6 +11,12 @@ mock_provider "aws" {
   mock_resource "aws_lb_listener" {
     defaults = { arn = "arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/app/hot-example/0123/4567" }
   }
+  mock_resource "aws_elasticache_replication_group" {
+    defaults = { primary_endpoint_address = "master.hot-example.abc123.use1.cache.amazonaws.com" }
+  }
+  mock_resource "aws_secretsmanager_secret" {
+    defaults = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:hot/hot-example/secret-AbCdEf" }
+  }
   mock_resource "aws_db_instance" {
     defaults = {
       address            = "hot-example.c0123.us-east-1.rds.amazonaws.com"
@@ -275,5 +281,51 @@ run "managed_postgres" {
   assert {
     condition     = output.configuration.data.postgres.endpoint.admin_secret == "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-0123-abcdef" && strcontains(aws_iam_role_policy.runtime.policy, "rds!db-0123-abcdef")
     error_message = "The agent learns, and may read, only the administrator secret RDS created."
+  }
+}
+
+run "managed_valkey" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "data" : { "valkey" : { "mode" : "managed", "high_availability" : true } },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = aws_elasticache_replication_group.valkey[0].auth_token == null && aws_elasticache_replication_group.valkey[0].auth_token_wo_version == 1 && aws_secretsmanager_secret_version.valkey[0].secret_string == null
+    error_message = "The AUTH token reaches ElastiCache and Secrets Manager only through write-only attributes."
+  }
+  assert {
+    condition     = aws_elasticache_replication_group.valkey[0].transit_encryption_enabled && aws_elasticache_replication_group.valkey[0].transit_encryption_mode == "required" && aws_elasticache_replication_group.valkey[0].at_rest_encryption_enabled
+    error_message = "Valkey requires TLS and encrypts data at rest."
+  }
+  assert {
+    condition     = one(aws_elasticache_parameter_group.valkey[0].parameter).value == "noeviction"
+    error_message = "Queues must never be evicted."
+  }
+  assert {
+    condition     = aws_elasticache_replication_group.valkey[0].num_cache_clusters == 2 && aws_elasticache_replication_group.valkey[0].automatic_failover_enabled && length(toset(aws_elasticache_replication_group.valkey[0].preferred_cache_cluster_azs)) == 2
+    error_message = "High availability adds a replica in a second zone with automatic failover."
+  }
+  assert {
+    condition     = one(aws_security_group.valkey[0].ingress).from_port == 6379 && one(aws_security_group.valkey[0].ingress).cidr_blocks == null
+    error_message = "Only the host's security group reaches Valkey."
+  }
+  assert {
+    condition     = output.configuration.data.valkey.endpoint.host == "master.hot-example.abc123.use1.cache.amazonaws.com" && output.configuration.data.postgres.endpoint == null && length(aws_db_instance.postgres) == 0
+    error_message = "Each data service is managed independently."
+  }
+  assert {
+    condition     = strcontains(aws_iam_role_policy.runtime.policy, "secret:hot/hot-example/secret-AbCdEf") && length(aws_subnet.data) == 2
+    error_message = "The agent may read the token's secret; the cache gets subnets in two zones."
   }
 }

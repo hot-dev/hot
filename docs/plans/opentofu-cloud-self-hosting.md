@@ -1241,9 +1241,10 @@ IAM, generation preconditions, or real composition behavior.
       PostgreSQL is done as `data.postgres.mode = "managed"` in the
       single-machine stacks (`stacks/*/single-machine/postgres.tf`), not a
       separate root, so each service chooses local, managed, or existing
-      independently. Managed Valkey remains: ElastiCache can take a write-only
-      AUTH token, but Memorystore for Valkey accepts only IAM tokens, which
-      Hot's Valkey client does not request yet.
+      independently. Managed Valkey is done on AWS (ElastiCache, TLS-only,
+      with an AUTH token written only to write-only attributes, and
+      `noeviction`). On GCP it remains: Memorystore for Valkey accepts only
+      IAM tokens, which Hot's Valkey client does not request yet.
 - [ ] Configure private connectivity, TLS, managed secrets, database versions,
       required extensions, owner/runtime roles, capacity, backups, and
       independently selectable failover/replica settings.

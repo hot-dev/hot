@@ -200,8 +200,11 @@ class RuntimeContract(unittest.TestCase):
             endpoint, admin_secret="projects/p/secrets/s")}})
         with self.assertRaisesRegex(ValueError, "ca_certificate"):
             renderer.validate(gcp)
-        with self.assertRaisesRegex(ValueError, "valkey.mode must be local or existing"):
+        with self.assertRaisesRegex(ValueError, "Managed Valkey needs the endpoint"):
             renderer.validate(dict(config, data={"valkey": {"mode": "managed"}}))
+        cache = {"mode": "managed", "endpoint": {"host": "cache.example", "port": 6379, "auth_secret": "projects/p/secrets/v"}}
+        with self.assertRaisesRegex(ValueError, "AWS only"):
+            renderer.validate(dict(renderer.validate(example("gcp")), data={"valkey": cache}))
 
     @unittest.skipUnless(shutil.which("docker"), "Docker CLI is not installed")
     def test_compose_accepts_existing_and_managed_data_bundles(self):

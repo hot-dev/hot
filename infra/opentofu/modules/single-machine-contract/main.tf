@@ -24,7 +24,7 @@ variable "installation" {
     # Non-secret HOT_* settings for every Hot service, such as HOT_EMAIL_PROVIDER.
     settings = optional(map(string), {})
     # local runs PostgreSQL or Valkey on the VM; managed provisions the cloud
-    # service (PostgreSQL only so far); existing uses the operator's, with
+    # service (Valkey on AWS only so far); existing uses the operator's, with
     # connection settings in the operator secret.
     data = optional(object({
       postgres = optional(object({
@@ -42,6 +42,11 @@ variable "installation" {
       }), {})
       valkey = optional(object({
         mode = optional(string, "local")
+        # Managed only. An empty node_type follows the size.
+        node_type         = optional(string, "")
+        high_availability = optional(bool, false)
+        # Raise to set a new AUTH token; see infra/README.md.
+        auth_token_version = optional(number, 1)
       }), {})
     }), {})
     app_hostname = string
@@ -71,8 +76,8 @@ variable "installation" {
       # Existing AWS networks with a public endpoint: two or more public
       # subnets in different zones for the load balancer.
       public_subnet_ids = optional(list(string), [])
-      # Existing AWS networks with managed PostgreSQL: private subnets in two
-      # or more zones for the database.
+      # Existing AWS networks with managed PostgreSQL or Valkey: private
+      # subnets in two or more zones for them.
       data_subnet_ids = optional(list(string), [])
     }), {})
   })
@@ -117,8 +122,12 @@ variable "installation" {
     error_message = "The network needs a usable IPv4 CIDR; client ranges must be valid IPv4 CIDRs narrower than /0."
   }
   validation {
-    condition     = contains(["local", "managed", "existing"], var.installation.data.postgres.mode) && contains(["local", "existing"], var.installation.data.valkey.mode) && can(regex("^[a-z_][a-z0-9_]{0,62}$", var.installation.data.postgres.runtime_role)) && !contains(["hot_owner", "hot_admin", "postgres"], var.installation.data.postgres.runtime_role)
-    error_message = "data.postgres.mode must be local, managed, or existing; data.valkey.mode local or existing; runtime_role a PostgreSQL role name other than hot_owner, hot_admin, or postgres."
+    condition     = contains(["local", "managed", "existing"], var.installation.data.postgres.mode) && contains(["local", "managed", "existing"], var.installation.data.valkey.mode) && can(regex("^[a-z_][a-z0-9_]{0,62}$", var.installation.data.postgres.runtime_role)) && !contains(["hot_owner", "hot_admin", "postgres"], var.installation.data.postgres.runtime_role)
+    error_message = "data.postgres.mode and data.valkey.mode must be local, managed, or existing; runtime_role a PostgreSQL role name other than hot_owner, hot_admin, or postgres."
+  }
+  validation {
+    condition     = var.installation.data.valkey.mode != "managed" || (var.installation.cloud == "aws" && var.installation.data.valkey.auth_token_version >= 1)
+    error_message = "Managed Valkey is available on AWS only: Memorystore for Valkey accepts only IAM tokens, which Hot's Valkey client does not request yet. Use local or existing Valkey on GCP."
   }
   validation {
     condition = var.installation.data.postgres.mode != "managed" || (
@@ -130,8 +139,8 @@ variable "installation" {
     error_message = "Managed PostgreSQL supports version 18, 1-35 days of backups, and 20 GB or more of storage."
   }
   validation {
-    condition     = var.installation.data.postgres.mode != "managed" || var.installation.cloud != "aws" || var.installation.network.mode == "new" || length(var.installation.network.data_subnet_ids) >= 2
-    error_message = "Managed PostgreSQL on an existing AWS network needs network.data_subnet_ids in at least two zones."
+    condition     = (var.installation.data.postgres.mode != "managed" && var.installation.data.valkey.mode != "managed") || var.installation.cloud != "aws" || var.installation.network.mode == "new" || length(var.installation.network.data_subnet_ids) >= 2
+    error_message = "Managed PostgreSQL or Valkey on an existing AWS network needs network.data_subnet_ids in at least two zones."
   }
   validation {
     condition     = var.installation.host_image != ""
@@ -171,11 +180,11 @@ locals {
     medium = { aws = "m8i.xlarge", gcp = "n2-standard-4", memory_mb = 16384, cpus = 4, data_gb = 200 }
     large  = { aws = "m8i.2xlarge", gcp = "n2-standard-8", memory_mb = 32768, cpus = 8, data_gb = 500 }
   }
-  # Managed PostgreSQL starting points per size.
+  # Managed PostgreSQL and Valkey starting points per size.
   database = {
-    small  = { aws = "db.m7g.large", gcp = "db-custom-2-8192", storage_gb = 50 }
-    medium = { aws = "db.m7g.xlarge", gcp = "db-custom-4-16384", storage_gb = 100 }
-    large  = { aws = "db.m7g.2xlarge", gcp = "db-custom-8-32768", storage_gb = 200 }
+    small  = { aws = "db.m7g.large", gcp = "db-custom-2-8192", storage_gb = 50, valkey = "cache.m7g.large" }
+    medium = { aws = "db.m7g.xlarge", gcp = "db-custom-4-16384", storage_gb = 100, valkey = "cache.m7g.xlarge" }
+    large  = { aws = "db.m7g.2xlarge", gcp = "db-custom-8-32768", storage_gb = 200, valkey = "cache.m7g.2xlarge" }
   }
   postgres = var.installation.data.postgres
   capacity = local.sizes[var.installation.size]
@@ -187,6 +196,12 @@ output "configuration" {
 output "capacity" {
   description = "Conservative starting allocations; not benchmarked throughput guarantees."
   value       = local.capacity
+}
+output "managed_valkey" {
+  description = "The managed Valkey node type, with the size default applied; null unless data.valkey.mode is managed."
+  value = var.installation.data.valkey.mode != "managed" ? null : {
+    node_type = var.installation.data.valkey.node_type != "" ? var.installation.data.valkey.node_type : local.database[var.installation.size].valkey
+  }
 }
 output "managed_postgres" {
   description = "The managed PostgreSQL tier and storage, with size defaults applied; null unless data.postgres.mode is managed."

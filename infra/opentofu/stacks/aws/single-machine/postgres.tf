@@ -5,25 +5,12 @@
 locals {
   managed_postgres = local.config.data.postgres.mode == "managed"
   postgres         = local.config.data.postgres
-  # A DB subnet group spans two zones even for a single-zone database.
-  data_subnet_ids = local.new_network ? aws_subnet.data[*].id : local.config.network.data_subnet_ids
-  host_data = merge(local.config.data, {
-    postgres = merge(local.postgres, {
-      endpoint = !local.managed_postgres ? null : {
-        host         = aws_db_instance.postgres[0].address
-        port         = aws_db_instance.postgres[0].port
-        admin_user   = aws_db_instance.postgres[0].username
-        admin_secret = aws_db_instance.postgres[0].master_user_secret[0].secret_arn
-      }
-    })
-  })
-}
-resource "aws_subnet" "data" {
-  count                   = local.managed_postgres && local.new_network ? 2 : 0
-  vpc_id                  = local.vpc_id
-  availability_zone       = count.index == 0 ? local.config.zone : local.second_zone
-  cidr_block              = cidrsubnet(local.config.network.cidr, 8, 4 + count.index)
-  map_public_ip_on_launch = false
+  postgres_endpoint = !local.managed_postgres ? null : {
+    host         = aws_db_instance.postgres[0].address
+    port         = aws_db_instance.postgres[0].port
+    admin_user   = aws_db_instance.postgres[0].username
+    admin_secret = aws_db_instance.postgres[0].master_user_secret[0].secret_arn
+  }
 }
 resource "aws_db_subnet_group" "postgres" {
   count      = local.managed_postgres ? 1 : 0

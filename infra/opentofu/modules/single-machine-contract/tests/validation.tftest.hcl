@@ -245,22 +245,20 @@ run "existing_postgres" {
   }
 }
 
-run "unknown_data_mode" {
+run "managed_valkey_is_aws_only" {
   command = plan
   variables {
     installation = {
       "schema_version" : 1,
       "name" : "hot-example",
-      "cloud" : "aws",
-      "region" : "us-east-1",
-      "zone" : "us-east-1a",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
       "size" : "small",
-      "host_image" : "ami-0123456789abcdef0",
-      "project" : "",
-      "release_pointer" : "arn:aws:ssm:us-east-1:123456789012:parameter/hot/hot-example/release",
-      "secret_references" : {
-        "app" : "arn:aws:secretsmanager:us-east-1:123456789012:secret:hot/hot-example/app-example"
-      },
+      "host_image" : "projects/example/global/images/hot",
+      "project" : "example-project",
+      "release_pointer" : "",
+      "secret_references" : {},
       "app_hostname" : "app.hot.internal",
       "api_hostname" : "api.hot.internal",
       "storage" : {
@@ -335,4 +333,44 @@ run "managed_postgres_rejects_unsupported_versions" {
     }
   }
   expect_failures = [var.installation]
+}
+
+run "unknown_data_mode" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "data" : { "postgres" : { "mode" : "clustered" } },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [var.installation]
+}
+
+run "managed_valkey_node_follows_the_size" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "size" : "large",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "data" : { "valkey" : { "mode" : "managed" } },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = output.managed_valkey.node_type == "cache.m7g.2xlarge" && output.managed_postgres == null
+    error_message = "The node type follows the size; PostgreSQL stays local."
+  }
 }

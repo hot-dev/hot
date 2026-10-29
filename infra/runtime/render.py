@@ -62,6 +62,7 @@ CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "
 # database's stack adds for the host.
 POSTGRES_KEYS = {"mode", "runtime_role", "version", "tier", "storage_gb", "high_availability",
                  "backup_retention_days", "deletion_protection", "admin_password_version", "endpoint"}
+VALKEY_KEYS = {"mode", "node_type", "high_availability", "auth_token_version", "endpoint"}
 # Names that would carry a secret; those belong in the operator secret bundle.
 SECRET_MARKERS = ("SECRET", "PASSWORD", "TOKEN", "_KEY", "_URI")
 
@@ -92,12 +93,17 @@ def validate(document):
     if not isinstance(data, dict) or set(data) - {"postgres", "valkey"}:
         raise ValueError("data takes postgres and valkey settings only")
     for service, options in data.items():
-        allowed = POSTGRES_KEYS if service == "postgres" else {"mode"}
+        allowed = POSTGRES_KEYS if service == "postgres" else VALKEY_KEYS
         if not isinstance(options, dict) or set(options) - allowed:
             raise ValueError(f"Unknown data.{service} settings")
-        modes = ("local", "managed", "existing") if service == "postgres" else ("local", "existing")
-        if options.get("mode", "local") not in modes:
-            raise ValueError(f"data.{service}.mode must be " + ", ".join(modes[:-1]) + " or " + modes[-1])
+        if options.get("mode", "local") not in {"local", "managed", "existing"}:
+            raise ValueError(f"data.{service}.mode must be local, managed, or existing")
+    if data_mode(config, "valkey") == "managed":
+        endpoint = data["valkey"].get("endpoint")
+        if config["cloud"] != "aws":
+            raise ValueError("Managed Valkey is available on AWS only")
+        if not isinstance(endpoint, dict) or set(endpoint) - {"host", "port", "auth_secret"} or not all(endpoint.get(k) for k in ("host", "port", "auth_secret")):
+            raise ValueError("Managed Valkey needs the endpoint the stack provisions: auth_secret, host, port")
     if data_mode(config, "postgres") == "managed":
         endpoint = data["postgres"].get("endpoint")
         required = {"host", "port", "admin_user", "admin_secret"} | ({"ca_certificate"} if config["cloud"] == "gcp" else set())

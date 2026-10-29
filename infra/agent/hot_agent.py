@@ -320,8 +320,9 @@ def data_endpoints(config, operator):
     """Hosts of managed and existing data services, which user code must
     never reach."""
     hosts = []
-    if render.data_mode(config, "postgres") == "managed":
-        hosts.append(config["data"]["postgres"]["endpoint"]["host"])
+    for service in ("postgres", "valkey"):
+        if render.data_mode(config, service) == "managed":
+            hosts.append(config["data"][service]["endpoint"]["host"])
     if render.data_mode(config, "postgres") == "existing":
         hosts.append(urllib.parse.urlsplit(operator["HOT_DB_URI"]).hostname)
     if render.data_mode(config, "valkey") == "existing":
@@ -332,8 +333,10 @@ def data_endpoints(config, operator):
 def role_secrets(config, generated, operator, managed=None):
     """Every file the rendered bundle mounts, keyed by role, then by name.
     Each role receives only what it needs. `managed` carries a managed
-    database's administrator login and CA certificate."""
+    database's administrator login and CA certificate, and a managed
+    Valkey's AUTH token."""
     g = generated
+    managed = managed or {}
     pg_mode = render.data_mode(config, "postgres")
     pg_local = pg_mode == "local"
     valkey_local = render.data_mode(config, "valkey") == "local"
@@ -341,12 +344,13 @@ def role_secrets(config, generated, operator, managed=None):
         runtime_uri = f"postgres://hot_runtime:{g['POSTGRES_RUNTIME_PASSWORD']}@postgres:5432/hot?sslmode=disable"
         owner_uri = f"postgres://hot_owner:{g['POSTGRES_PASSWORD']}@postgres:5432/hot?sslmode=disable"
     elif pg_mode == "managed":
-        if not managed:
+        admin = managed.get("postgres")
+        if not admin:
             raise AgentError("Managed PostgreSQL needs its administrator login and CA certificate")
         endpoint, sslmode = config["data"]["postgres"]["endpoint"], managed_sslmode(config)
         runtime_uri = postgres_uri(render.runtime_role(config), g["POSTGRES_RUNTIME_PASSWORD"], endpoint, "hot", sslmode)
         owner_uri = postgres_uri("hot_owner", g["POSTGRES_PASSWORD"], endpoint, "hot", sslmode)
-        admin_uri = {database: postgres_uri(managed["username"], managed["password"], endpoint, database, sslmode)
+        admin_uri = {database: postgres_uri(admin["username"], admin["password"], endpoint, database, sslmode)
                      for database in ("postgres", "hot")}
     else:
         for key in OPERATOR_DATA["postgres"]:
@@ -356,11 +360,17 @@ def role_secrets(config, generated, operator, managed=None):
         owner_uri = verified_postgres_uri(operator["HOT_DB_MIGRATION_URI"], "HOT_DB_MIGRATION_URI", config)
     if valkey_local:
         redis_uri = f"redis://hot:{g['VALKEY_PASSWORD']}@valkey:6379"
+    elif render.data_mode(config, "valkey") == "managed":
+        token = (managed.get("valkey") or {}).get("password")
+        if not token:
+            raise AgentError("The managed Valkey AUTH token secret has no token yet")
+        endpoint = config["data"]["valkey"]["endpoint"]
+        redis_uri = f"rediss://:{urllib.parse.quote(token, safe='')}@{endpoint['host']}:{int(endpoint['port'])}"
     else:
         redis_uri = operator.get("HOT_REDIS_URI", "")
         if not redis_uri.startswith("rediss://"):
             raise AgentError("An existing Valkey needs a rediss:// HOT_REDIS_URI in the operator secret bundle")
-    ca = ({} if pg_local else {"POSTGRES_CA_CERT": managed["ca"]} if pg_mode == "managed"
+    ca = ({} if pg_local else {"POSTGRES_CA_CERT": managed["postgres"]["ca"]} if pg_mode == "managed"
           else {"POSTGRES_CA_CERT": operator["POSTGRES_CA_CERT"]})
     files = {}
     for role in HOT_SERVICES:
@@ -521,6 +531,14 @@ class Agent:
     def operator_secrets(self):
         return self.cloud.get_secret(self.references["operator"]) or {}
 
+    def managed_data(self):
+        """What the agent needs from managed data services: the database's
+        administrator login and CA certificate, and the cache's AUTH token."""
+        managed = {"postgres": self.managed_postgres()}
+        if render.data_mode(self.config, "valkey") == "managed":
+            managed["valkey"] = self.cloud.get_secret(self.config["data"]["valkey"]["endpoint"]["auth_secret"])
+        return managed
+
     def managed_postgres(self):
         """A managed database's administrator login, from the secret the
         stack names, and the CA certificate its server presents."""
@@ -542,7 +560,7 @@ class Agent:
     def deliver_secrets(self):
         generated = self.cloud.put_secret_if_absent(self.references["generated"], generate_secrets())
         write_secret_files(self.secrets_root,
-                           role_secrets(self.config, generated, self.operator_secrets(), self.managed_postgres()),
+                           role_secrets(self.config, generated, self.operator_secrets(), self.managed_data()),
                            chown=self.chown)
 
     def deploy(self, release, previous):

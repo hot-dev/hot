@@ -1,7 +1,8 @@
 terraform {
   required_version = ">= 1.13.1, < 1.14.0"
   required_providers {
-    aws = { source = "hashicorp/aws", version = "6.69.1" }
+    aws    = { source = "hashicorp/aws", version = "6.69.1" }
+    random = { source = "hashicorp/random", version = "3.9.1" }
   }
 }
 provider "aws" {
@@ -24,7 +25,7 @@ locals {
   second_zone = try([for zone in data.aws_availability_zones.available[0].names : zone if zone != local.config.zone][0], null)
 }
 data "aws_availability_zones" "available" {
-  count = local.new_network && (local.public || local.managed_postgres) ? 1 : 0
+  count = local.new_network && (local.public || local.managed_data) ? 1 : 0
   state = "available"
 }
 resource "aws_vpc" "hot" {
@@ -187,7 +188,7 @@ resource "aws_cloudwatch_log_group" "host" {
 resource "aws_iam_role_policy" "runtime" {
   role = aws_iam_role.host.id
   policy = jsonencode({ Version = "2012-10-17", Statement = concat([
-    { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.generated.arn, aws_secretsmanager_secret.operator.arn], aws_db_instance.postgres[*].master_user_secret[0].secret_arn) },
+    { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.generated.arn, aws_secretsmanager_secret.operator.arn], aws_db_instance.postgres[*].master_user_secret[0].secret_arn, aws_secretsmanager_secret.valkey[*].arn) },
     { Effect = "Allow", Action = ["secretsmanager:PutSecretValue"], Resource = aws_secretsmanager_secret.generated.arn },
     { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = aws_ssm_parameter.release.arn },
     { Effect = "Allow", Action = ["ssm:PutParameter"], Resource = aws_ssm_parameter.status.arn },
