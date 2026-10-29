@@ -8,6 +8,7 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 pub const DEFAULT_LOG_LEVEL: LevelFilter = LevelFilter::INFO;
 pub const DEFAULT_LOG_TARGET: LogTarget = LogTarget::Stdout;
@@ -326,10 +327,7 @@ pub fn setup_tracing(
 
             match format {
                 LogFormat::Json => {
-                    tracing::subscriber::set_global_default(json_subscriber(
-                        std::io::stdout,
-                        filter,
-                    ))?;
+                    json_subscriber(std::io::stdout, filter).try_init()?;
                 }
                 LogFormat::Full => {
                     // Full format with timestamp, level, target
@@ -403,10 +401,7 @@ pub fn setup_tracing(
                 // File output preserves JSON when requested; text files use
                 // full timestamps even when the CLI defaults to simple output.
                 if format == LogFormat::Json {
-                    tracing::subscriber::set_global_default(json_subscriber(
-                        file_appender,
-                        filter,
-                    ))?;
+                    json_subscriber(file_appender, filter).try_init()?;
                 } else {
                     fmt::Subscriber::builder()
                         .with_writer(file_appender)
