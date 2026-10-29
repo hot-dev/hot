@@ -871,13 +871,15 @@ remove the only copy of its own state.
       `hot::environment::read_optional`, which applies the same `_FILE` rules;
       `crates/hot/tests/secret_env_reads.rs` fails on any direct read of a
       secret-like variable.
-- [ ] Enforce mandatory isolation for user-code services, replace
+- [x] Enforce mandatory isolation for user-code services, replace
       `network.allow-private` with the allowlist and fixed deny set, and add the
       optional user-code egress proxy, as described in
       [Outbound access for user code](#outbound-access-for-user-code).
-      Done except the proxy: self-hosted production workers refuse isolation
-      off; `network.allow-cidrs`, `allow-hosts`, and `deny-cidrs` sit behind a
-      fixed deny set; the runtime bundle denies its own networks.
+      Self-hosted production workers refuse isolation off;
+      `network.allow-cidrs`, `allow-hosts`, and `deny-cidrs` sit behind a
+      fixed deny set; the runtime bundle denies its own networks; and
+      `network.egress-proxy` sends user-code HTTP(S) through the operator's
+      proxy (raw TCP is refused then).
 - [ ] Create shared Compose and systemd supervision for app, API, worker,
       scheduler, task-worker, PostgreSQL, Valkey, and HTTPS ingress.
       Configure orderly startup and shutdown, local liveness, and separate

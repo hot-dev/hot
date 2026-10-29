@@ -38,6 +38,25 @@ Put the installation's own database, cache, ingress, and host addresses in
 for Hot's single-machine AWS and Google Cloud stacks sets it to the bundle's
 container network and, when the stack created it, the installation's network.
 
+## Egress proxy
+
+To audit outbound traffic or allow it by domain, send it through your own
+HTTP proxy:
+
+```hot
+hot.network.egress-proxy "http://proxy.internal:3128"
+```
+
+`HOT_NETWORK_EGRESS_PROXY` sets it from the environment; supply it as
+`HOT_NETWORK_EGRESS_PROXY_FILE` if the address carries credentials.
+
+With a proxy set, `::hot::http` requests and alert deliveries go through it,
+and the proxy resolves destination names. It therefore has to enforce the
+destinations in [Always blocked](#always-blocked) itself. Hot still refuses
+blocked addresses written directly in a URL. `::hot::tcp` connections are
+refused, since they could not pass through the proxy. Hot's own connections to
+its database, cache, storage, and secret store never use the proxy.
+
 ## Always blocked
 
 No setting makes these reachable from deployed code:

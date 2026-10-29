@@ -138,18 +138,50 @@ impl DestinationPolicy {
         if !matches!(url.scheme(), "http" | "https") {
             return Err("outbound URL scheme must be http or https".to_string());
         }
-        let host = url
-            .host_str()
-            .ok_or_else(|| "outbound URL must include a host".to_string())?;
-        let addrs = self.resolve_url(url).await?;
-
-        client_builder()
+        let builder = client_builder()
             .timeout(timeout)
             .connect_timeout(connect_timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .resolve_to_addrs(host, &addrs)
+            .redirect(reqwest::redirect::Policy::none());
+        self.route(url, builder)
+            .await?
             .build()
             .map_err(|e| format!("failed to build pinned HTTP client: {e}"))
+    }
+
+    /// The egress proxy user-code HTTP(S) must use, if the operator set one.
+    pub fn egress_proxy(&self) -> Option<&Url> {
+        match self {
+            Self::Restricted(rules) => rules.egress_proxy.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Point a client at `url` safely: through the egress proxy when one is
+    /// configured, otherwise pinned to addresses validated just now, which
+    /// closes DNS-rebinding gaps.
+    pub async fn route(
+        &self,
+        url: &Url,
+        builder: reqwest::ClientBuilder,
+    ) -> Result<reqwest::ClientBuilder, String> {
+        let host = url
+            .host()
+            .ok_or_else(|| "outbound URL must include a host".to_string())?;
+        if let Some(proxy) = self.egress_proxy() {
+            // The proxy resolves names; addresses written in the URL are still
+            // checked here.
+            match host {
+                url::Host::Ipv4(ip) => self.check(None, ip.into())?,
+                url::Host::Ipv6(ip) => self.check(None, ip.into())?,
+                url::Host::Domain(_) => {}
+            }
+            let proxy = reqwest::Proxy::all(proxy.as_str())
+                .map_err(|e| format!("invalid egress proxy: {e}"))?;
+            return Ok(builder.proxy(proxy));
+        }
+        let addrs = self.resolve_url(url).await?;
+        let host = url.host_str().expect("checked above");
+        Ok(builder.resolve_to_addrs(host, &addrs))
     }
 }
 
@@ -165,6 +197,9 @@ pub struct OutboundRules {
     allow_hosts: Vec<String>,
     /// The installation's own endpoints: database, cache, ingress, and agent.
     deny_cidrs: Vec<IpNet>,
+    /// `network.egress-proxy`: user-code HTTP(S) goes through this proxy,
+    /// which resolves names and must enforce the deny set itself.
+    egress_proxy: Option<Url>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -201,10 +236,28 @@ impl OutboundRules {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let deny_cidrs = cidrs(conf, "network.deny-cidrs")?;
+        let egress_proxy = match conf.get("network.egress-proxy") {
+            Some(_) if !conf.get_str("network.egress-proxy").trim().is_empty() => {
+                let raw = conf.get_str("network.egress-proxy");
+                let url = Url::parse(raw.trim())
+                    .map_err(|_| "network.egress-proxy is not a URL".to_string())?;
+                if !matches!(url.scheme(), "http" | "https")
+                    || url.host_str().is_none()
+                    || url.path() != "/"
+                {
+                    return Err(
+                        "network.egress-proxy must be an http:// or https:// proxy address".into(),
+                    );
+                }
+                Some(url)
+            }
+            _ => None,
+        };
         let rules = Self {
             allow_cidrs,
             allow_hosts,
             deny_cidrs,
+            egress_proxy,
         };
         Ok((rules != Self::default()).then_some(rules))
     }
@@ -514,6 +567,31 @@ mod tests {
         );
         let invalid = crate::val!({"network": {"allow-hosts": ["*"]}});
         assert!(OutboundRules::from_conf(&invalid).is_err());
+    }
+
+    #[test]
+    fn egress_proxies_must_be_http_proxy_addresses() {
+        let proxy = |value: &str| {
+            OutboundRules::from_conf(&crate::val!({"network": {"egress-proxy": value}}))
+        };
+        let rules = proxy("http://proxy.internal:3128").unwrap().unwrap();
+        let policy = DestinationPolicy::Restricted(Arc::new(rules));
+        assert_eq!(
+            policy.egress_proxy().map(Url::as_str),
+            Some("http://proxy.internal:3128/")
+        );
+        for invalid in [
+            "ftp://proxy:21",
+            "proxy.internal:3128",
+            "http://proxy/prefix",
+        ] {
+            assert!(proxy(invalid).is_err(), "{invalid}");
+        }
+        assert!(
+            proxy("").unwrap().is_none(),
+            "an empty setting means no proxy"
+        );
+        assert!(DestinationPolicy::PublicOnly.egress_proxy().is_none());
     }
 
     #[test]
