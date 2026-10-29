@@ -61,7 +61,7 @@ pub fn encode_url(args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::from(encoded))
 }
 
-/// Decode URL-safe base64 string to bytes
+/// Decode URL-safe base64 string (with or without padding) to bytes
 pub fn decode_url(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::base64/decode-url", args, 1);
 
@@ -72,7 +72,7 @@ pub fn decode_url(args: &[Val]) -> HotResult<Val> {
         }
     };
 
-    match general_purpose::URL_SAFE_NO_PAD.decode(&**base64_str) {
+    match general_purpose::URL_SAFE_NO_PAD_INDIFFERENT.decode(&**base64_str) {
         Ok(bytes) => HotResult::Ok(Val::Bytes(bytes)),
         Err(e) => HotResult::Err(Val::from(format!("Base64 URL decode error: {}", e))),
     }
@@ -193,5 +193,49 @@ mod tests {
 
         let decoded = decode_base64_to_bytes("SGVsbG8=").unwrap();
         assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn test_decode_url_with_or_without_padding() {
+        let result = decode_url(&[Val::from("aGk=")]);
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"hi"));
+
+        let result = decode_url(&[Val::from("aGk")]);
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"hi"));
+
+        let result = decode_url(&[Val::from("aA==")]);
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"h"));
+
+        let result = decode_url(&[Val::from("aA")]);
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"h"));
+
+        // URL-safe alphabet: `_` is 63, standard `/` is rejected
+        let result = decode_url(&[Val::from("aGk_")]);
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"hi?"));
+        assert!(matches!(
+            decode_url(&[Val::from("aGk/")]),
+            HotResult::Err(_)
+        ));
+    }
+
+    #[test]
+    fn test_decode_url_rejects_bad_padding() {
+        assert!(matches!(
+            decode_url(&[Val::from("aGk==")]),
+            HotResult::Err(_)
+        ));
+        assert!(matches!(
+            decode_url(&[Val::from("a===")]),
+            HotResult::Err(_)
+        ));
+    }
+
+    #[test]
+    fn test_encode_url_stays_unpadded() {
+        let result = encode_url(&[Val::Bytes(b"hi".to_vec())]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(ref s)) if &**s == "aGk"));
+
+        let result = encode_url(&[Val::Bytes(b"h".to_vec())]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(ref s)) if &**s == "aA"));
     }
 }
