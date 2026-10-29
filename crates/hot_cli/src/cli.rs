@@ -740,6 +740,17 @@ pub(crate) enum Command {
         action: KeyAction,
     },
 
+    /// Create the first administrator or reset a password (self-hosted installs)
+    #[command(display_order = 47)]
+    Admin {
+        #[command(flatten)]
+        global: GlobalOptions,
+        #[command(flatten)]
+        show_conf: ShowConfOptions,
+        #[command(subcommand)]
+        action: AdminAction,
+    },
+
     // ==================== Database & Infrastructure (50-59) ====================
     /// Manage database
     #[command(display_order = 50, hide = true)]
@@ -882,6 +893,36 @@ pub(crate) enum KeyAction {
         /// Key description shown in the dashboard
         #[arg(long, default_value = "cli")]
         description: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum AdminAction {
+    /// Let an email address sign in with a password, creating the user if needed.
+    ///
+    /// Use it for a self-hosted installation's first administrator, who then
+    /// signs in, creates an organization, and invites everyone else. Running
+    /// it again changes nothing, even with another password. Writes directly
+    /// to the database configured by hot.db.uri; run migrations first.
+    Bootstrap {
+        /// Email address the user signs in with
+        #[arg(long)]
+        email: String,
+        /// Display name for a newly created user
+        #[arg(long)]
+        name: Option<String>,
+        /// File holding the password; one trailing newline is ignored
+        #[arg(long)]
+        password_file: std::path::PathBuf,
+    },
+    /// Replace the password of a user who signs in with a password
+    ResetPassword {
+        /// Email address the user signs in with
+        #[arg(long)]
+        email: String,
+        /// File holding the new password; one trailing newline is ignored
+        #[arg(long)]
+        password_file: std::path::PathBuf,
     },
 }
 

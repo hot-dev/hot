@@ -241,4 +241,5 @@ hot.project.my-app.deps {
 - **[Projects](/docs/configuration/projects)** - Configuring multiple projects in one workspace
 - **[Storage](/docs/configuration/storage)** - Where Hot stores files, blobs, and build artifacts
 - **[Email](/docs/configuration/email)** - Sending verification, invitation, and alert emails through SMTP
+- **[Accounts and Sign-Up](/docs/configuration/accounts)** - The first administrator, sign-up policy, and password resets
 - **[Self-Hosted PostgreSQL](/docs/configuration/postgres)** - Running Hot on PostgreSQL with row-level security

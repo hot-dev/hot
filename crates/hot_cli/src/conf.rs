@@ -609,6 +609,9 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
         ),
         Command::Key {
             global, show_conf, ..
+        }
+        | Command::Admin {
+            global, show_conf, ..
         } => (
             global.clone(),
             None,
@@ -1498,8 +1501,8 @@ pub(crate) fn show_command_config(command: &Option<Command>, conf: &Val) {
             let config_keys = vec!["db.uri", "db.schema"];
             filter_config(conf, &config_keys)
         }
-        Some(Command::Key { .. }) => {
-            // Key command writes the local environment database directly
+        Some(Command::Key { .. }) | Some(Command::Admin { .. }) => {
+            // Key and admin commands write the configured database directly
             let config_keys = vec!["db.uri", "db.schema"];
             filter_config(conf, &config_keys)
         }

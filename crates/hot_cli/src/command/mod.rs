@@ -7,6 +7,7 @@
 //! `crate::profile` for profile resolution, `crate::conf` for the config
 //! pipeline and runtime emitter/event-publisher constructors).
 
+pub(crate) mod admin;
 pub(crate) mod ai;
 pub(crate) mod api;
 pub(crate) mod app;

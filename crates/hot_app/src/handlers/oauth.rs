@@ -644,6 +644,22 @@ async fn handle_oauth_user(
         }
         Err(_) => {
             // User doesn't exist, create new user with OAuth
+            // Invitations are readable only under the membership lookup scope.
+            let invitations = db.with_scope(hot::db::DatabaseScope::Bootstrap(
+                hot::db::BootstrapOperation::Membership,
+            ));
+            if !crate::signup::oauth_signup_open(conf)
+                && !hot::db::invite::Invite::get_invites_by_email(&invitations, email)
+                    .await
+                    .map_err(|e| format!("Failed to check invitations: {}", e))?
+                    .iter()
+                    .any(|invite| invite.is_valid().is_ok())
+            {
+                return Err(
+                    "Signing up requires an invitation sent to this email address. Ask an administrator to invite you."
+                        .to_string(),
+                );
+            }
             if let Err(retry_after) =
                 crate::rate_limit::check_oauth_new_identity(conf, provider, provider_user_id, email)
             {

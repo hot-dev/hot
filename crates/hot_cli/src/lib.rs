@@ -7,9 +7,10 @@ mod remote;
 mod update;
 
 use crate::cli::{
-    CacheAction, Cli, Command, ConfAction, DbAction, KeyAction, find_help_command,
+    AdminAction, CacheAction, Cli, Command, ConfAction, DbAction, KeyAction, find_help_command,
     print_top_level_help,
 };
+use crate::command::admin::{run_admin_bootstrap, run_admin_reset_password};
 use crate::command::ai::run_ai;
 use crate::command::api::run_api;
 use crate::command::app::run_app;
@@ -1177,6 +1178,23 @@ async fn async_main(providers: CliProviders) {
             };
             if let Err(e) = result {
                 error!("Database command failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Admin { action, .. }) => {
+            let result = match action {
+                AdminAction::Bootstrap {
+                    email,
+                    name,
+                    password_file,
+                } => run_admin_bootstrap(&email, name.as_deref(), &password_file, &conf).await,
+                AdminAction::ResetPassword {
+                    email,
+                    password_file,
+                } => run_admin_reset_password(&email, &password_file, &conf).await,
+            };
+            if let Err(e) = result {
+                error!("Admin command failed: {}", e);
                 std::process::exit(1);
             }
         }

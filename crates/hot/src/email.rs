@@ -152,6 +152,14 @@ pub fn email_provider_factory() -> Arc<dyn EmailProviderFactory> {
         .clone()
 }
 
+/// Whether the installation names an email provider for `purpose`. Processes
+/// that only queue email can rely on this without holding the provider's
+/// credentials.
+pub fn email_delivery_configured(conf: &crate::val::Val, purpose: EmailPurpose) -> bool {
+    let provider = configured_email_provider(conf, purpose);
+    !provider.is_empty() && provider != "none"
+}
+
 pub fn configured_email_provider(conf: &crate::val::Val, purpose: EmailPurpose) -> String {
     let default_provider = conf.get_str_or_default("email.provider", "none");
     let provider = match purpose {

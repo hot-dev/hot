@@ -10,6 +10,7 @@ pub mod oauth;
 pub mod rate_limit;
 pub mod routes;
 pub mod server;
+pub mod signup;
 pub mod slug;
 pub mod source_browser;
 pub mod templates;

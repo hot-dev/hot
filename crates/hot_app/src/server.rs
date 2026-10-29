@@ -49,6 +49,8 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     });
     crate::oauth::OAuthConfig::from_env()
         .unwrap_or_else(|error| panic!("hot.dev: APP OAuth configuration failed: {error}"));
+    crate::signup::SignupPolicy::from_conf(&conf)
+        .unwrap_or_else(|error| panic!("hot.dev: APP sign-up configuration failed: {error}"));
 
     // Get resolved config with app defaults merged in
     let resolved_conf = get_resolved_conf(conf.clone());
