@@ -845,17 +845,35 @@ remove the only copy of its own state.
 - [ ] Build the single [runtime image](#runtime-image) from a clean
       public-only checkout using `hot_cli`. Wire required S3/GCS/Kata features
       explicitly and include every component listed there.
+      Recipe: [`runtime.Dockerfile`](../../infra/images/containers/runtime.Dockerfile)
+      (S3 and GCS always on, `--features kata`, statically linked ONNX
+      Runtime, `hotbox`, `ctr`, the Linux package layout). The `selfhost`
+      workflow builds and smoke-tests it when it changes; check this once a
+      build passes there.
 - [ ] Publish the versioned runtime image and host/runtime artifacts. Pin image
       digests, base images, upstream PostgreSQL/Valkey/ingress images, host
       dependencies, and artifact checksums; allow operators to mirror them into
       their own registries. Choose the ingress proxy.
-- [ ] Implement `HOT_<NAME>_FILE` support, provenance-based redaction, and
+      The release workflow's `selfhost-image` job pushes
+      `ghcr.io/hot-dev/hot-runtime:<version>` and signs it. Upstream images are
+      pinned in [`upstream-images.json`](../../infra/release/upstream-images.json);
+      the ingress proxy is unprivileged Nginx. Host artifacts follow with the
+      host image.
+- [x] Implement `HOT_<NAME>_FILE` support, provenance-based redaction, and
       routing of every secret through resolved configuration, as described in
       [Secrets delivery](#secrets-delivery).
+      Secrets outside configuration (`HOT_ENCRYPTION_KEY`,
+      `HOT_APP_SESSION_SECRET`, OAuth client settings) go through
+      `hot::environment::read_optional`, which applies the same `_FILE` rules;
+      `crates/hot/tests/secret_env_reads.rs` fails on any direct read of a
+      secret-like variable.
 - [ ] Enforce mandatory isolation for user-code services, replace
       `network.allow-private` with the allowlist and fixed deny set, and add the
       optional user-code egress proxy, as described in
       [Outbound access for user code](#outbound-access-for-user-code).
+      Done except the proxy: self-hosted production workers refuse isolation
+      off; `network.allow-cidrs`, `allow-hosts`, and `deny-cidrs` sit behind a
+      fixed deny set; the runtime bundle denies its own networks.
 - [ ] Create shared Compose and systemd supervision for app, API, worker,
       scheduler, task-worker, PostgreSQL, Valkey, and HTTPS ingress.
       Configure orderly startup and shutdown, local liveness, and separate
@@ -867,6 +885,10 @@ remove the only copy of its own state.
       flow. Persist generated secrets across retries and upgrades. Test normal
       authentication without development fallbacks, email verification,
       invitations, alert delivery, and optional OAuth callbacks.
+      SMTP delivery, `hot admin bootstrap`/`reset-password`, and `app.signup`
+      are in; without email, the sign-up form admits only invited users and
+      admins share invitation links. Left for the agent: generating and
+      persisting the first admin's password.
 - [ ] Run extension installation, public migrations, grants, and onboarding as
       distinct administrative steps before starting runtime services. Respect
       the supported `hot` schema and RLS requirements in the existing runbook.
@@ -874,9 +896,15 @@ remove the only copy of its own state.
 - [ ] Define signed release manifests, supported configuration schema, size
       maps, service dependencies, reference-configuration classification, and
       stable outputs for endpoints and resource IDs.
-- [ ] Add scheduler lock-liveness enforcement as described in
+      Manifests are defined and signed keylessly by the release workflow
+      ([`release_manifest.py`](../../infra/release/release_manifest.py)); the
+      renderer verifies them with `cosign`. The rest remains.
+- [x] Add scheduler lock-liveness enforcement as described in
       [Scheduler availability](#scheduler-availability-and-deferred-failover),
       with tests for connection kill and lock loss.
+      [#159](https://github.com/hot-dev/hot/pull/159): a bounded check every
+      two seconds, a startup check that rejects transaction-mode poolers, and
+      a PostgreSQL test that kills the lock session.
 - [ ] Implement independent private-default app/API exposure and validate
       endpoint, client-network, DNS/TLS, and egress requirements. Implement the
       initial certificate mechanism: operator-supplied certificates, plus
