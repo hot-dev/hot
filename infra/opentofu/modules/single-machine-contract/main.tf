@@ -59,6 +59,12 @@ variable "installation" {
     monitoring = optional(object({
       alert_emails = optional(list(string), [])
     }), {})
+    # cloud ships container logs to CloudWatch Logs or Cloud Logging; local
+    # keeps them on the host only. retention_days applies to the AWS log group.
+    logging = optional(object({
+      destination    = optional(string, "cloud")
+      retention_days = optional(number, 30)
+    }), {})
     app_hostname = string
     api_hostname = string
     app_exposure = optional(string, "private")
@@ -155,6 +161,10 @@ variable "installation" {
   validation {
     condition     = var.installation.backup.retention_days >= 1 && var.installation.backup.retention_days <= 365 && can(regex("^([01][0-9]|2[0-3]):00$", var.installation.backup.time_utc))
     error_message = "backup.retention_days must be 1-365, and backup.time_utc an hour such as 03:00."
+  }
+  validation {
+    condition     = contains(["cloud", "local"], var.installation.logging.destination) && contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.installation.logging.retention_days)
+    error_message = "logging.destination must be cloud or local, and logging.retention_days a CloudWatch Logs retention such as 7, 30, 90, or 365."
   }
   validation {
     condition     = alltrue([for email in var.installation.monitoring.alert_emails : can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", email))])

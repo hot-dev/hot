@@ -374,3 +374,21 @@ run "managed_valkey_node_follows_the_size" {
     error_message = "The node type follows the size; PostgreSQL stays local."
   }
 }
+
+run "log_retention_must_be_a_cloudwatch_value" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "logging" : { "retention_days" : 45 },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [var.installation]
+}

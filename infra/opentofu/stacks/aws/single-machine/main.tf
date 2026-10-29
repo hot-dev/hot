@@ -181,9 +181,10 @@ resource "aws_iam_role_policy_attachment" "ssm" {
   role       = aws_iam_role.host.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
+# Container logs, shipped by Docker's awslogs driver with the host's role.
 resource "aws_cloudwatch_log_group" "host" {
   name              = "/hot/${local.config.name}"
-  retention_in_days = 30
+  retention_in_days = local.config.logging.retention_days
 }
 resource "aws_iam_role_policy" "runtime" {
   role = aws_iam_role.host.id

@@ -1651,6 +1651,11 @@ or an existing operator destination without coupling telemetry to S3.
       avoid duplicate ingestion and preserve collection positions across
       rotation/restart. GCP Ops Agent uses log receivers for logs; its OTLP
       receiver covers metrics/traces and must not be assumed to ingest logs.
+      Containers are collected by Docker's `awslogs` and `gcplogs` drivers,
+      which read no files, so there are no positions to lose or lines to
+      ingest twice. CloudWatch Logs Insights parses the JSON lines;
+      `gcplogs` stores each line as a message string. The host journal is not
+      shipped yet.
 - [ ] Set production log levels, local size/retention limits, central retention,
       and optional audit-log retention. Record local-log loss on host failure
       when centralized collection is disabled. Existing log stores and
@@ -1676,12 +1681,13 @@ or an existing operator destination without coupling telemetry to S3.
       Critical alerts cover host/service loss, missing scheduler heartbeat,
       disk pressure, backup failure/staleness, and inaccessible dependencies.
       Add detailed application dashboards and tracing in subsequent slices.
-      Done apart from shipping logs off the host:
+      Done:
       - The agent publishes health, scheduler, dependency, readiness, disk,
         and backup-age metrics.
       - CloudWatch alarms and Cloud Monitoring alert policies cover every
         listed critical case and email operator-chosen addresses.
-      - Container logs are bounded locally.
+      - Container logs ship non-blocking to CloudWatch Logs or Cloud Logging
+        through Docker's drivers, with a bounded local copy.
 - [ ] Alert on missing signals as well as bad values. Monitor the singleton
       scheduler from outside its process/host; absence of logs is not proof of
       health. This adds detection/recovery guidance without adding scheduler HA.

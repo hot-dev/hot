@@ -96,20 +96,20 @@ Implemented:
   issues a managed certificate once your DNS points at the `public_endpoint`
   output. The VM keeps no public address, and private endpoints are never
   served to the load balancer.
-- Backups and alerts: see [Backups and alerts](#backups-and-alerts).
+- Backups, logs, and alerts: see [Backups, logs, and alerts](#backups-logs-and-alerts).
 - In Hot: SMTP email delivery, `hot admin bootstrap`/`reset-password` and the
   `app.signup` policy for operator-managed accounts, and outbound allowlists
   (`network.allow-cidrs`, `allow-hosts`, `deny-cidrs`) behind a fixed deny set.
 
 The roots intentionally require `acknowledge_unqualified = true`. The bootstrap
 also refuses to start if the supplied image lacks `hot-agent.service`. Real
-image builds and deployments on each cloud, managed Valkey on GCP, log
-shipping to CloudWatch Logs or Cloud Logging, restore tooling, and the
-real-cloud release gates remain to be implemented and qualified. Do not apply these development examples to
+image builds and deployments on each cloud, managed Valkey on GCP, host
+journal shipping, restore tooling, and the real-cloud release gates remain to
+be implemented and qualified. Do not apply these development examples to
 production. No usable host image or published runtime digest is implied by the
 placeholder references in the fixtures.
 
-## Backups and alerts
+## Backups, logs, and alerts
 
 The retained data disk is snapshotted daily at `backup.time_utc` (default
 `03:00`) and each snapshot is kept for `backup.retention_days` (default 7).
@@ -122,6 +122,15 @@ on restore, and Valkey loses at most the last second of queue writes
 (`appendfsync everysec`). The recovery point is the last snapshot, so at most
 a day. Managed databases keep their own point-in-time backups. The `backup`
 command adds an on-demand `pg_dump` of a local database.
+
+Container logs (every Hot service, the ingress, the data services, and the
+migration and admin jobs) go to CloudWatch Logs in `/hot/<installation>`, kept
+for `logging.retention_days` (default 30), or to Cloud Logging, with the VM's
+identity. Docker ships them without blocking: if the destination is slow or
+down, lines beyond a 4 MB buffer are dropped rather than stalling Hot. A
+bounded local copy (3 files of 10 MB per container) remains for
+`docker logs`. Set `logging.destination` to `local` to keep logs on the host
+only. Logs are lost with the host then.
 
 Every 30 seconds the host agent publishes these metrics, to CloudWatch
 (namespace `Hot/SelfHost`, dimension `Installation`) or Cloud Monitoring

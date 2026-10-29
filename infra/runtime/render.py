@@ -57,7 +57,7 @@ RUNTIME_SUBNET = "172.30.0.0/24"
 CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "size", "host_image", "release_pointer", "secret_references", "app_hostname", "api_hostname", "app_exposure", "api_exposure", "storage", "network",
                # Read by the host agent, not by the bundle.
                "data_volume_id", "admin_email", "manifest_base_url", "status_reference", "command_subscription",
-               "settings", "data", "backup", "monitoring"}
+               "settings", "data", "backup", "monitoring", "logging"}
 # data.postgres settings: the contract's, plus the endpoint a managed
 # database's stack adds for the host.
 POSTGRES_KEYS = {"mode", "runtime_role", "version", "tier", "storage_gb", "high_availability",
@@ -111,6 +111,9 @@ def validate(document):
             raise ValueError("Managed PostgreSQL needs the endpoint the stack provisions: " + ", ".join(sorted(required)))
     if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", runtime_role(config)) or runtime_role(config) in {"hot_owner", "hot_admin", "postgres"}:
         raise ValueError("data.postgres.runtime_role must be a PostgreSQL role name other than hot_owner, hot_admin, or postgres")
+    logging = config.get("logging", {})
+    if set(logging) - {"destination", "retention_days"} or logging.get("destination", "cloud") not in {"cloud", "local"}:
+        raise ValueError("logging.destination must be cloud or local")
     settings = config.get("settings", {})
     if not isinstance(settings, dict):
         raise ValueError("settings must map HOT_* names to values")
@@ -170,6 +173,22 @@ def data_mode(config, service):
 
 def runtime_role(config):
     return config.get("data", {}).get("postgres", {}).get("runtime_role", "hot_runtime")
+
+
+def log_settings(config):
+    """Container logs go to the cloud's log service with the VM's identity,
+    or stay on the host. Shipping never blocks a container: when the
+    destination is slow or down, lines beyond a bounded buffer are dropped.
+    Docker keeps a bounded local copy either way, for `docker logs`."""
+    local = {"max-size": "10m", "max-file": "3"}
+    if config.get("logging", {}).get("destination", "cloud") == "local":
+        return {"driver": "local", "options": local}
+    shipping = {"mode": "non-blocking", "max-buffer-size": "4m",
+                "cache-max-size": local["max-size"], "cache-max-file": local["max-file"]}
+    if config["cloud"] == "aws":
+        return {"driver": "awslogs", "options": {"awslogs-region": config["region"], "awslogs-group": f"/hot/{config['name']}",
+                                                  "tag": "{{.Name}}", **shipping}}
+    return {"driver": "gcplogs", "options": {"gcp-project": config["project"], **shipping}}
 
 
 def verify_manifest_signature(manifest_path, bundle_path, signer=RELEASE_SIGNER, cosign="cosign"):
@@ -301,7 +320,6 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             "environment": env, "secrets": [secret(role, key) for key in keys],
             "volumes": mounts, "tmpfs": ["/tmp:size=268435456,uid=10001,gid=10001", "/var/lib/hot/.hot:size=268435456,uid=10001,gid=10001"],
             "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
-            "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
             "depends_on": dict(data_ready),
             "mem_limit": memory[role],
             "cpus": size["cpus"].get(role, size["default_cpus"]),
@@ -321,7 +339,6 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             # refuse a mount at the older /var/lib/postgresql/data.
             "volumes": [bind(Path(data_root) / "postgres", "/var/lib/postgresql"), {"type": "bind", "source": "./init.sql", "target": "/docker-entrypoint-initdb.d/10-hot.sql", "read_only": True}],
             "healthcheck": {"test": ["CMD", "pg_isready", "-U", "hot_owner", "-d", "hot"], "interval": "5s", "timeout": "3s", "retries": 12},
-            "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
         }
     if valkey_local:
         services["valkey"] = {
@@ -330,7 +347,6 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             "secrets": [secret("valkey", k) for k in ("VALKEY_ACL", "VALKEY_PASSWORD")],
             "volumes": [bind(Path(data_root) / "valkey", "/data"), {"type": "bind", "source": "./valkey.conf", "target": "/etc/valkey/valkey.conf", "read_only": True}],
             "healthcheck": {"test": ["CMD-SHELL", "valkey-cli --askpass < /run/secrets/VALKEY_PASSWORD | grep -qx PONG"], "interval": "5s", "timeout": "3s", "retries": 12},
-            "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
         }
     services["ingress"] = {
         "image": images["ingress"], "restart": "unless-stopped", "user": "10001:10001", "read_only": True,
@@ -340,7 +356,6 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"], "tmpfs": ["/tmp:size=16777216,uid=10001,gid=10001"],
         "secrets": [secret("ingress", k) for k in ("TLS_CERTIFICATE", "TLS_PRIVATE_KEY")],
         "volumes": [{"type": "bind", "source": "./nginx.conf", "target": "/etc/nginx/nginx.conf", "read_only": True}],
-        "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
         "depends_on": ["app", "api"],
     }
     services["migrate"] = {
@@ -412,6 +427,8 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
         }
     services["provision"] = provision
+    for service in services.values():
+        service["logging"] = log_settings(config)
     # No Docker socket is ever mounted. The separate Kata daemon owns guests.
     compose = {"name": config["name"], "services": services, "secrets": secrets,
                "networks": {"default": {"ipam": {"config": [{"subnet": RUNTIME_SUBNET}]}}}}

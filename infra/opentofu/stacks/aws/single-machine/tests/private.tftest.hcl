@@ -350,6 +350,7 @@ run "backups_and_alerts" {
       "api_hostname" : "api.hot.internal",
       "backup" : { "retention_days" : 14, "time_utc" : "05:00" },
       "monitoring" : { "alert_emails" : ["ops@example.com", "oncall@example.com"] },
+      "logging" : { "retention_days" : 90 },
       "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
     }
   }
@@ -372,5 +373,9 @@ run "backups_and_alerts" {
   assert {
     condition     = strcontains(aws_iam_role_policy.runtime.policy, "ec2:DescribeSnapshots") && !strcontains(aws_iam_role_policy.runtime.policy, "ec2:DeleteSnapshot")
     error_message = "The host may read snapshot times but never delete snapshots."
+  }
+  assert {
+    condition     = aws_cloudwatch_log_group.host.retention_in_days == 90
+    error_message = "Container logs are kept for the chosen days."
   }
 }

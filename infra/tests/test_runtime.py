@@ -276,6 +276,23 @@ class RuntimeContract(unittest.TestCase):
             renderer.render(dict(config["installation"], settings={"HOT_APP_URL": "https://elsewhere.example"}),
                             manifest(), "/data", "/run/hot/secrets")
 
+    def test_logs_ship_to_the_cloud_without_blocking(self):
+        aws = renderer.render(example("aws"), manifest(), "/data", "/run/hot/secrets")["services"]
+        gcp = renderer.render(example("gcp"), manifest(), "/data", "/run/hot/secrets")["services"]
+        for services in (aws, gcp):
+            for name, service in services.items():
+                options = service["logging"]["options"]
+                self.assertEqual(options["mode"], "non-blocking", name)
+                self.assertEqual((options["cache-max-size"], options["cache-max-file"]), ("10m", "3"), name)
+        self.assertEqual(aws["worker"]["logging"]["driver"], "awslogs")
+        self.assertEqual(aws["worker"]["logging"]["options"]["awslogs-group"], "/hot/hot-example")
+        self.assertEqual(gcp["migrate"]["logging"]["driver"], "gcplogs")
+        local = dict(renderer.validate(example("aws")), logging={"destination": "local"})
+        services = renderer.render(local, manifest(), "/data", "/run/hot/secrets")["services"]
+        self.assertEqual({s["logging"]["driver"] for s in services.values()}, {"local"})
+        with self.assertRaisesRegex(ValueError, "logging.destination"):
+            renderer.validate(dict(local, logging={"destination": "syslog"}))
+
     def test_nginx_config_has_safe_defaults_and_streaming(self):
         text = renderer.nginx_config(renderer.validate(example()))
         self.assertIn("ssl_reject_handshake on", text)
