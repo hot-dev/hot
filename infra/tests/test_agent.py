@@ -44,10 +44,14 @@ class FakeCloud:
         self.secrets = {OPERATOR: dict(TLS, **(operator or {}))}
         self.statuses = []
         self.metrics = []
+        self.journal = []
         self.snapshot = None
 
     def put_metrics(self, installation, metrics):
         self.metrics.append((installation, metrics))
+
+    def ship_journal(self, installation, entries):
+        self.journal.append((installation, entries))
 
     def latest_snapshot(self, volume, installation):
         return self.snapshot
@@ -74,9 +78,16 @@ class Recorder:
         self.ps = ""
         self.logs = ""
         self.enddate = "notAfter=Jan 30 12:00:00 2027 GMT\n"
+        self.journal = {"agent": [], "host": []}
 
     def __call__(self, command, **kwargs):
         self.commands.append(command)
+        if command[0] == "journalctl":
+            records = self.journal["agent" if "hot-agent.service" in command else "host"]
+            if "--after-cursor" in command:
+                after = command[command.index("--after-cursor") + 1]
+                records = records[next(i for i, r in enumerate(records) if r["__CURSOR"] == after) + 1:]
+            return subprocess.CompletedProcess(command, 0, stdout="".join(json.dumps(r) + "\n" for r in records))
         stdout = (self.ps if "ps" in command else self.logs if "logs" in command
                   else self.enddate if command[0] == "openssl" else "")
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -401,6 +412,87 @@ class RollBack(UpgradeHarness):
         with self.assertRaisesRegex(agent_module.AgentError, "restore it to 2026-10-29T12:00:00.*then deploy 3.0.1"):
             self.agent.command("roll-back")
         self.assertEqual(self.run.commands, [], "nothing is stopped")
+
+
+def journal_record(number, message, unit="hot-agent.service", priority=6):
+    return {"__CURSOR": f"s=1;i={number}", "__REALTIME_TIMESTAMP": str(1_800_000_000_000_000 + number * 1_000_000),
+            "_SYSTEMD_UNIT": unit, "PRIORITY": str(priority), "MESSAGE": message}
+
+
+class HostJournal(AgentHarness):
+    def shipped(self):
+        return [entry["fields"] for _, entries in self.cloud.journal for entry in entries]
+
+    def test_entries_ship_once_from_saved_cursors(self):
+        self.run.journal["agent"] = [journal_record(1, '{"state": "deployed"}')]
+        self.run.journal["host"] = [journal_record(1, "Out of memory: Killed process 4242 (hot)", "", 3)]
+        self.agent.ship_journal()
+        calls = [c for c in self.run.commands if c[0] == "journalctl"]
+        self.assertEqual([c[-2:] for c in calls], [["--lines", "100"]] * 2)
+        self.assertIn(["--priority", "warning"], [c[3:5] for c in calls])
+        self.assertEqual([(f["source"], f["priority"]) for f in self.shipped()], [("agent", 6), ("host", 3)])
+        self.run.journal["agent"].append(journal_record(2, "next"))
+        self.agent.ship_journal()
+        self.assertEqual([f["message"] for f in self.shipped()][-1], "next")
+        self.assertEqual(len(self.shipped()), 3, "nothing ships twice")
+
+    def test_messages_are_redacted(self):
+        self.agent.reconcile()
+        secret = self.cloud.secrets[GENERATED]["VALKEY_PASSWORD"]
+        self.run.journal["agent"] = [journal_record(1, f"password {secret} refused"),
+                                     journal_record(2, list(b"caf\xe9 bytes"))]
+        self.agent.ship_journal()
+        messages = [f["message"] for f in self.shipped()]
+        self.assertEqual(messages[0], "password [secret] refused")
+        self.assertEqual(messages[1], "caf\ufffd bytes")
+
+    def test_a_failed_source_keeps_its_cursor(self):
+        self.run.journal["agent"] = [journal_record(1, "a")]
+        self.run.journal["host"] = [journal_record(1, "b", "docker.service", 4)]
+        shipped = self.cloud.ship_journal
+
+        def flaky(installation, entries):
+            if entries[0]["fields"]["source"] == "agent":
+                raise agent_module.AgentError("PutLogEvents failed: ThrottlingException")
+            shipped(installation, entries)
+        self.cloud.ship_journal = flaky
+        self.agent.ship_journal()
+        cursors = json.loads((Path(self.tmp.name) / "releases/journal.json").read_text())
+        self.assertEqual(cursors, {"host": "s=1;i=1"})
+        self.cloud.ship_journal = shipped
+        self.agent.ship_journal()
+        self.assertEqual([f["message"] for f in self.shipped()], ["b", "a"])
+
+    def test_each_cycle_is_bounded(self):
+        self.run.journal["agent"] = [journal_record(n, str(n)) for n in range(1, 701)]
+        self.agent.ship_journal()
+        self.assertEqual(len(self.shipped()), agent_module.JOURNAL_BATCH)
+        self.agent.ship_journal()
+        self.assertEqual(len(self.shipped()), 700)
+
+    def test_local_logging_keeps_the_journal_on_the_host(self):
+        self.config["logging"] = {"destination": "local"}
+        self.agent.ship_journal()
+        self.assertFalse(any(c[0] == "journalctl" for c in self.run.commands))
+
+    def test_batches_fit_cloudwatch(self):
+        day = 24 * 3600 * 1000
+        events = [(0, "a"), (1000, "b"), (day, "c"), (day + 1, "d" * 600)]
+        self.assertEqual([[m for _, m in b] for b in agent_module.log_batches(events, 10_000, 23 * 3600 * 1000)],
+                         [["a", "b"], ["c", "d" * 600]])
+        self.assertEqual(len(list(agent_module.log_batches(events, 700))), 2)
+
+    def test_cloud_logging_entries_carry_severity_and_the_instance(self):
+        sent = []
+        gcp = agent_module.Gcp("example-project", zone="us-central1-a")
+        gcp.instance_id = "1234567890"
+        gcp.call = lambda method, url, payload=None, allow=(): sent.append(payload)
+        entry = agent_module.journal_entry(journal_record(1, "oom", "", 3), agent_module.Redactor(), "host")
+        gcp.ship_journal("hot-example", [entry])
+        self.assertEqual(sent[0]["logName"], "projects/example-project/logs/hot-hot-example-host")
+        self.assertTrue(sent[0]["partialSuccess"])
+        self.assertEqual(sent[0]["entries"][0]["severity"], "ERROR")
+        self.assertEqual(sent[0]["resource"]["labels"]["instance_id"], "1234567890")
 
 
 class Readiness(unittest.TestCase):

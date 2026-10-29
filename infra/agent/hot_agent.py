@@ -61,6 +61,13 @@ LOG_LINE_CHARS = 1000
 LOG_CHARS = 48000
 # Reports also go to this stream of the installation's CloudWatch log group.
 STATUS_STREAM = "hot-agent-status"
+# The host journal goes to this stream (AWS) or log (GCP): every agent line,
+# and warnings and errors from the rest of the host, such as the kernel's OOM
+# kills, Docker, and failed units. Each cycle ships at most JOURNAL_BATCH
+# entries per source and continues from a saved cursor.
+JOURNAL_STREAM = "host-journal"
+JOURNAL_SOURCES = {"agent": ["-u", "hot-agent.service"], "host": ["--priority", "warning"]}
+JOURNAL_BATCH = 500
 # Report fields too large for the AWS status parameter (4 KB); the log has them.
 DETAIL_KEYS = ("diagnostics", "logs")
 # Box storage per size label; the data disk is sized to hold it.
@@ -219,19 +226,29 @@ class Aws:
                                                         "Value": json.dumps(summary), "Type": "String", "Overwrite": True})
 
     def log_status(self, status):
-        target = {"logGroupName": self.log_group, "logStreamName": STATUS_STREAM}
-        event = {**target, "logEvents": [{"timestamp": int(time.time() * 1000), "message": json.dumps(status)}]}
-        try:
-            self.call("logs", "Logs_20140328.PutLogEvents", event)
-        except AgentError as error:
-            if "ResourceNotFoundException" not in str(error):
-                raise
+        self.put_log_events(STATUS_STREAM, [(int(time.time() * 1000), json.dumps(status))])
+
+    def put_log_events(self, stream, events):
+        """(milliseconds, message) pairs, oldest first, to a stream of the
+        installation's log group, created on first use. Split into batches
+        CloudWatch accepts: under 1 MB, and spanning under a day."""
+        target = {"logGroupName": self.log_group, "logStreamName": stream}
+        for chunk in log_batches(events, max_bytes=900_000, max_span_ms=23 * 3600 * 1000):
+            batch = {**target, "logEvents": [{"timestamp": at, "message": message} for at, message in chunk]}
             try:
-                self.call("logs", "Logs_20140328.CreateLogStream", target)
-            except AgentError as created:
-                if "ResourceAlreadyExistsException" not in str(created):
+                self.call("logs", "Logs_20140328.PutLogEvents", batch)
+            except AgentError as error:
+                if "ResourceNotFoundException" not in str(error):
                     raise
-            self.call("logs", "Logs_20140328.PutLogEvents", event)
+                try:
+                    self.call("logs", "Logs_20140328.CreateLogStream", target)
+                except AgentError as created:
+                    if "ResourceAlreadyExistsException" not in str(created):
+                        raise
+                self.call("logs", "Logs_20140328.PutLogEvents", batch)
+
+    def ship_journal(self, installation, entries):
+        self.put_log_events(JOURNAL_STREAM, [(entry["at_ms"], json.dumps(entry["fields"])) for entry in entries])
 
     def get_secret(self, reference):
         try:
@@ -314,13 +331,28 @@ class Gcp:
             "logName": f"projects/{self.project}/logs/{reference or 'hot-agent-status'}",
             "resource": {"type": "global"}, "entries": [{"jsonPayload": status, "severity": "INFO"}]})
 
-    def put_metrics(self, installation, metrics):
+    def instance(self):
         if self.instance_id is None:
             _, data = http("GET", self.METADATA + "/instance/id", headers={"Metadata-Flavor": "Google"})
             self.instance_id = data.decode()
+        return {"type": "gce_instance", "labels": {"project_id": self.project, "zone": self.zone,
+                                                    "instance_id": self.instance_id}}
+
+    def ship_journal(self, installation, entries):
+        severities = {0: "EMERGENCY", 1: "ALERT", 2: "CRITICAL", 3: "ERROR", 4: "WARNING", 5: "NOTICE", 6: "INFO", 7: "DEBUG"}
+        written = [{"jsonPayload": entry["fields"], "severity": severities.get(entry["priority"], "DEFAULT"),
+                    "timestamp": datetime.datetime.fromtimestamp(entry["at_ms"] / 1000, datetime.timezone.utc).isoformat()}
+                   for entry in entries]
+        sized = [(0, json.dumps(entry)) for entry in written]
+        for chunk in log_batches(sized, max_bytes=5_000_000):
+            # Entries too old for Cloud Logging are dropped, not the batch.
+            self.call("POST", "https://logging.googleapis.com/v2/entries:write", {
+                "logName": f"projects/{self.project}/logs/hot-{installation}-host", "resource": self.instance(),
+                "partialSuccess": True, "entries": [json.loads(text) for _, text in chunk]})
+
+    def put_metrics(self, installation, metrics):
+        resource = self.instance()
         now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        resource = {"type": "gce_instance", "labels": {"project_id": self.project, "zone": self.zone,
-                                                        "instance_id": self.instance_id}}
         # Per-installation metric types: descriptors are project-wide, and
         # each installation's stack owns its own.
         series = [{"metric": {"type": f"{GCP_METRIC_PREFIX}{installation}/{GCP_METRIC_NAMES[name]}"},
@@ -1031,6 +1063,46 @@ class Agent:
         except (AgentError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
             print(json.dumps({"monitoring_failed": describe(error)}), file=sys.stderr, flush=True)
 
+    # -- host journal -----------------------------------------------------------
+
+    def journal_records(self, source, cursor):
+        """Up to JOURNAL_BATCH records for one source after `cursor`, oldest
+        first. Without a cursor, the newest 100."""
+        command = ["journalctl", "--output=json", "--no-pager", *JOURNAL_SOURCES[source]]
+        command += ["--after-cursor", cursor] if cursor else ["--lines", "100"]
+        records = []
+        for line in self.run_command(command).stdout.splitlines():
+            if len(records) == JOURNAL_BATCH:
+                break
+            with contextlib.suppress(ValueError):
+                records.append(json.loads(line))
+        return records
+
+    def ship_journal(self):
+        """Ship new host journal entries to the installation's log. A source
+        whose shipping fails is retried from the same cursor next cycle; a
+        failure is logged and never stops the agent. With logs kept on the
+        host (logging.destination = local), the journal stays there too."""
+        if (self.config.get("logging") or {}).get("destination", "cloud") != "cloud":
+            return
+        path = self.releases / "journal.json"
+        try:
+            cursors = json.loads(path.read_text())
+        except (OSError, ValueError):
+            cursors = {}
+        redact = Redactor.from_files(self.secrets_root)
+        for source in JOURNAL_SOURCES:
+            try:
+                records = self.journal_records(source, cursors.get(source))
+                if records:
+                    self.cloud.ship_journal(self.config["name"], [journal_entry(r, redact, source) for r in records])
+                    cursors[source] = records[-1]["__CURSOR"]
+            except (AgentError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+                print(json.dumps({"journal_shipping_failed": describe(error), "source": source}),
+                      file=sys.stderr, flush=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cursors))
+
     # -- reconcile and commands ------------------------------------------------
 
     def reconcile(self, request_id="", retry=False):
@@ -1212,6 +1284,33 @@ def https_status(host, path, address="127.0.0.1"):
         connection.close()
 
 
+def log_batches(events, max_bytes, max_span_ms=None):
+    """Split (milliseconds, message) pairs, oldest first, into consecutive
+    batches under `max_bytes` that span less than `max_span_ms`."""
+    batch, size = [], 0
+    for at, message in events:
+        length = len(message.encode()) + 26
+        if batch and (size + length > max_bytes or (max_span_ms and at - batch[0][0] >= max_span_ms)):
+            yield batch
+            batch, size = [], 0
+        batch.append((at, message))
+        size += length
+    if batch:
+        yield batch
+
+
+def journal_entry(record, redact, source):
+    """One `journalctl --output=json` record as shipped: its source, unit,
+    priority, and redacted message."""
+    message = record.get("MESSAGE") or ""
+    if isinstance(message, list):  # journald sends non-UTF-8 messages as bytes
+        message = bytes(message).decode("utf-8", "replace")
+    priority = int(record.get("PRIORITY", 6))
+    fields = {"source": source, "unit": record.get("_SYSTEMD_UNIT") or record.get("SYSLOG_IDENTIFIER", ""),
+              "priority": priority, "message": redact(str(message))}
+    return {"at_ms": int(record["__REALTIME_TIMESTAMP"]) // 1000, "priority": priority, "fields": fields}
+
+
 def utc_now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
@@ -1295,6 +1394,7 @@ def main(argv=None):
         with locked():
             agent.reconcile()
             agent.monitor()
+            agent.ship_journal()
             for ack_id, request in agent.cloud.receive_commands():
                 agent.cloud.ack(ack_id)
                 try:

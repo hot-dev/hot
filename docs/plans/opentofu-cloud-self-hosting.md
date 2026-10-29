@@ -1656,8 +1656,10 @@ or an existing operator destination without coupling telemetry to S3.
       Containers are collected by Docker's `awslogs` and `gcplogs` drivers,
       which read no files, so there are no positions to lose or lines to
       ingest twice. CloudWatch Logs Insights parses the JSON lines;
-      `gcplogs` stores each line as a message string. The host journal is not
-      shipped yet.
+      `gcplogs` stores each line as a message string. The agent ships the
+      host journal (its own lines, plus warnings and errors host-wide) from
+      saved journal cursors. A failed shipment retries from the same cursor,
+      so nothing is skipped or sent twice.
 - [ ] Set production log levels, local size/retention limits, central retention,
       and optional audit-log retention. Record local-log loss on host failure
       when centralized collection is disabled. Existing log stores and

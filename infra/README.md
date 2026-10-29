@@ -106,9 +106,8 @@ Implemented:
 
 The roots intentionally require `acknowledge_unqualified = true`. The bootstrap
 also refuses to start if the supplied image lacks `hot-agent.service`. Real
-image builds and deployments on each cloud, managed Valkey on GCP, host
-journal shipping, and the real-cloud release gates remain to be implemented
-and qualified. Do not apply these development examples to
+image builds and deployments on each cloud, managed Valkey on GCP, and the
+real-cloud release gates remain to be implemented and qualified. Do not apply these development examples to
 production. No usable host image or published runtime digest is implied by the
 placeholder references in the fixtures.
 
@@ -224,6 +223,15 @@ down, lines beyond a 4 MB buffer are dropped rather than stalling Hot. A
 bounded local copy (3 files of 10 MB per container) remains for
 `docker logs`. Set `logging.destination` to `local` to keep logs on the host
 only. Logs are lost with the host then.
+
+The agent also ships the host journal. That is every agent line, plus
+warnings and errors from the rest of the host, such as the kernel's OOM
+kills, Docker, and failed units. They go to the `host-journal` stream of the
+same log group, or to the `hot-<installation>-host` log in Cloud Logging. It
+reads from a saved journal cursor, so entries are not lost or sent twice
+across restarts. Each source sends at most 500 entries per cycle, redacted
+like diagnostics. With `logging.destination = local`, the journal stays on
+the host too.
 
 Every 30 seconds the host agent publishes these metrics, to CloudWatch
 (namespace `Hot/SelfHost`, dimension `Installation`) or Cloud Monitoring
