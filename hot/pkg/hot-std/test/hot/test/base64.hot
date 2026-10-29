@@ -46,6 +46,14 @@ meta ["test"] fn () {
     assert-eq(Bytes("Hello"), result, "decode-url should decode URL-safe base64")
 }
 
+// Test that decode-url takes input with or without padding
+test-base64-url-decode-padding
+meta ["test"] fn () {
+    assert-eq(Bytes("hi"), ::hot::base64/decode-url("aGk="), "decode-url should accept padding")
+    assert-eq(Bytes("hi"), ::hot::base64/decode-url("aGk"), "decode-url should accept no padding")
+    assert-eq(Bytes("hi?"), ::hot::base64/decode-url("aGk_"), "decode-url should use the URL-safe alphabet")
+}
+
 // Test URL-safe base64 roundtrip
 test-base64-url-roundtrip
 meta ["test"] fn () {
