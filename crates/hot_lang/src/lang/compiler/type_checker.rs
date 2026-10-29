@@ -1521,6 +1521,9 @@ impl TypeChecker {
     ///   `"a" | "b"`) must cover every member, `null` included for a
     ///   nullable subject, or include a default arm. Open literal unions
     ///   aren't checked.
+    /// - Arms naming `Result` match the subject as a Result. A `Result` or
+    ///   `Result.Ok` arm takes every `Ok`, so nothing is left to cover; a
+    ///   `Result.Err` arm covers no value, and the other arms still must.
     ///
     /// A standalone `match` on a call takes the callee's declared return
     /// type (`declared_call_return_type`). When the subject type can't be
@@ -1557,6 +1560,13 @@ impl TypeChecker {
         arms: &[&MatchArm],
         location: Option<ErrorLocation>,
     ) {
+        if arms.iter().any(|arm| {
+            Self::arm_atoms(arm)
+                .any(|(type_name, variant, _)| self.atom_takes_every_ok(type_name, variant))
+        }) {
+            return;
+        }
+
         if let Some(subject) = self.literal_union_subject(subject_type) {
             self.check_literal_union_exhaustiveness(subject, arms, location);
             return;
@@ -1588,12 +1598,10 @@ impl TypeChecker {
             }
             // Each atom of a union arm (`A | B =>`) contributes coverage
             // independently.
-            let atoms = std::iter::once((&arm.type_name, &arm.variant, &arm.value_literal)).chain(
-                arm.alternatives
-                    .iter()
-                    .map(|alt| (&alt.type_name, &alt.variant, &alt.value_literal)),
-            );
-            for (type_name, variant, value_literal) in atoms {
+            for (type_name, variant, value_literal) in Self::arm_atoms(arm) {
+                if self.atom_names_result(type_name, variant) {
+                    continue;
+                }
                 if variant.is_none()
                     && value_literal.is_none()
                     && let Some(type_name) = type_name
@@ -1642,6 +1650,37 @@ impl TypeChecker {
                 location,
             });
         }
+    }
+
+    /// The pattern atoms of a match arm: the arm's own, then each alternative
+    /// of a union arm (`A | B =>`).
+    fn arm_atoms(
+        arm: &MatchArm,
+    ) -> impl Iterator<Item = (&Option<String>, &Option<String>, &Option<Box<Value>>)> {
+        std::iter::once((&arm.type_name, &arm.variant, &arm.value_literal)).chain(
+            arm.alternatives
+                .iter()
+                .map(|alt| (&alt.type_name, &alt.variant, &alt.value_literal)),
+        )
+    }
+
+    /// Whether a pattern atom is the core `Result`, `Result.Ok` or
+    /// `Result.Err`. A namespace that declares its own `Result` means that
+    /// one.
+    fn atom_names_result(&self, type_name: &Option<String>, variant: &Option<String>) -> bool {
+        let names_result = type_name
+            .as_deref()
+            .is_some_and(|name| Self::short_type_name(name) == "Result");
+        let local = format!("{}/Result", self.context.current_namespace);
+        names_result
+            && variant.as_deref().is_none_or(|v| v == "Ok" || v == "Err")
+            && !self.qualified_types.contains_key(&local)
+    }
+
+    /// Whether a pattern atom is `Result` or `Result.Ok`, which takes every
+    /// `Ok` whatever value it holds.
+    fn atom_takes_every_ok(&self, type_name: &Option<String>, variant: &Option<String>) -> bool {
+        self.atom_names_result(type_name, variant) && variant.as_deref() != Some("Err")
     }
 
     /// The return type declared by the function a `match` subject calls
@@ -1723,17 +1762,6 @@ impl TypeChecker {
         self.context.current_namespace = saved_namespace;
         self.context.current_aliases = saved_aliases;
         parsed
-    }
-
-    /// Whether any `match` arm names `Result` (`Result.Ok`, `Result.Err`,
-    /// `Result`), matching on the subject's Result itself.
-    fn arms_name_result(arms: &[MatchArm]) -> bool {
-        arms.iter().any(|arm| {
-            std::iter::once(&arm.type_name)
-                .chain(arm.alternatives.iter().map(|alt| &alt.type_name))
-                .flatten()
-                .any(|type_name| Self::short_type_name(type_name) == "Result")
-        })
     }
 
     /// Describe a `match` subject typed as a literal union (`Severity`,
@@ -1893,12 +1921,7 @@ impl TypeChecker {
             if is_default {
                 return;
             }
-            let atoms = std::iter::once((&arm.type_name, &arm.variant, &arm.value_literal)).chain(
-                arm.alternatives
-                    .iter()
-                    .map(|alt| (&alt.type_name, &alt.variant, &alt.value_literal)),
-            );
-            for (type_name, variant, value_literal) in atoms {
+            for (type_name, variant, value_literal) in Self::arm_atoms(arm) {
                 if let Some(literal) = value_literal {
                     let Value::Val(val, _) = literal.as_ref() else {
                         continue;
@@ -3047,11 +3070,10 @@ impl TypeChecker {
             Value::Match(match_expr) => {
                 let mut subject_type = self.infer_value_type(&match_expr.value);
                 // User function calls infer as `Any`; take the type the
-                // callee declares it returns. That call's Result reaches
-                // the match intact, so arms naming `Result` match the
-                // Result rather than the declared value.
+                // callee declares it returns. Arms naming `Result` match
+                // the call's Result, which `check_match_exhaustiveness_for`
+                // allows for.
                 if matches!(subject_type, TypeExpr::Any)
-                    && !Self::arms_name_result(&match_expr.arms)
                     && let Some(declared) = self.declared_call_return_type(&match_expr.value)
                 {
                     subject_type = declared;
@@ -6134,6 +6156,130 @@ mod tests {
                 "Severity".to_string(),
                 vec![r#""medium""#.to_string(), r#""high""#.to_string()]
             )],
+        );
+    }
+
+    /// Arms naming `Result` match the subject as a Result: `Result` or
+    /// `Result.Ok` takes every Ok, so a typed binding, a `fn match`
+    /// parameter or a call has nothing left to cover. The first two were
+    /// flagged as missing every member.
+    #[test]
+    fn test_match_taking_every_ok_is_not_checked_against_the_value_type() {
+        for arms in [
+            "Result.Ok => { 1 }\n Result.Err => { 0 }",
+            "Result.Ok => { 1 }",
+            "Result => { 1 }",
+            "Result.Err | Result.Ok => { 1 }",
+            "\"a\" => { 2 }\n Result.Ok => { 1 }",
+        ] {
+            let errors = literal_union_match_errors(&format!(
+                r#"
+            S type "a" | "b" | "c"
+            Dir enum {{ Up, Down }}
+            get-s fn (x: Str): S {{ "a" }}
+            get-dir fn (x: Str): Dir {{ Dir.Up }}
+            by-binding fn (x: Str): Int {{
+                s: S get-s(x)
+                match s {{
+                    {arms}
+                }}
+            }}
+            by-param fn match (s: S): Int {{
+                {arms}
+            }}
+            by-enum fn (x: Str): Int {{
+                d: Dir get-dir(x)
+                match d {{
+                    {arms}
+                }}
+            }}
+            by-call fn (x: Str): Int {{
+                match get-s(x) {{
+                    {arms}
+                }}
+            }}
+            "#
+            ));
+            assert_eq!(errors, Vec::new(), "arms: {arms}");
+        }
+    }
+
+    /// A `Result.Err` arm covers no value of the subject's type, so the other
+    /// arms must still cover it: they match the value an `Ok` holds.
+    #[test]
+    fn test_match_with_err_arm_still_covers_the_value_type() {
+        let errors = literal_union_match_errors(
+            r#"
+        S type "a" | "b" | "c"
+        Dir enum { Up, Err }
+        get-s fn (x: Str): S { "a" }
+        get-dir fn (x: Str): Dir { Dir.Up }
+        by-binding fn (x: Str): Int {
+            s: S get-s(x)
+            match s {
+                Result.Err => { 0 }
+                "a" | "b" => { 1 }
+            }
+        }
+        by-param fn match (s: S): Int {
+            Result.Err | "a" => { 0 }
+        }
+        by-enum fn (x: Str): Int {
+            d: Dir get-dir(x)
+            match d {
+                Result.Err => { 0 }
+                Dir.Up => { 1 }
+            }
+        }
+        by-call fn (x: Str): Int {
+            match get-s(x) {
+                Result.Err => { 0 }
+                "b" | "c" => { 1 }
+            }
+        }
+        "#,
+        );
+        assert_eq!(
+            errors,
+            vec![
+                ("S".to_string(), vec![r#""c""#.to_string()]),
+                (
+                    "S".to_string(),
+                    vec![r#""b""#.to_string(), r#""c""#.to_string()]
+                ),
+                ("Dir".to_string(), vec!["Err".to_string()]),
+                ("S".to_string(), vec![r#""a""#.to_string()]),
+            ],
+        );
+    }
+
+    /// In a namespace that declares its own `Result`, `Result.Ok` names that
+    /// enum's variant, which is checked like any other.
+    #[test]
+    fn test_match_on_a_namespace_own_result_enum_is_checked() {
+        let errors = literal_union_match_errors(
+            r#"
+        ::ep::own ns
+        Result enum { Ok, Err, Pending }
+        settle fn match (r: Result): Int {
+            Result.Ok => { 1 }
+            Result.Err => { 0 }
+        }
+        get-r fn (): Result { Result.Pending }
+        settle-call fn (): Int {
+            match get-r() {
+                Result.Ok => { 1 }
+                Result.Err => { 0 }
+            }
+        }
+        "#,
+        );
+        assert_eq!(
+            errors,
+            vec![
+                ("Result".to_string(), vec!["Pending".to_string()]),
+                ("Result".to_string(), vec!["Pending".to_string()]),
+            ],
         );
     }
 

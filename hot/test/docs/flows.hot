@@ -476,6 +476,33 @@ meta ["test"] fn () {
   assert-eq("MH", label(9), "high in the union arm")
 }
 
+heading fn (n: Int): Direction {
+  if(lt(n, 0), err("no heading"), Direction.Up)
+}
+
+test-match-result-arms-on-typed-binding
+meta ["test"] fn () {
+  // Arms naming Result match the subject as a Result, and Result.Ok takes
+  // every Ok, so these arms need not name each Direction
+  check fn (n: Int): Str {
+    d: Direction heading(n)
+    match d {
+      Result.Ok => { "ok" }
+      Result.Err => { "err" }
+    }
+  }
+
+  check-param fn match (d: Direction): Str {
+    Result.Ok => { "ok" }
+    Result.Err => { "err" }
+  }
+
+  assert-eq("ok", check(1), "an Ok Direction")
+  assert-eq("err", check(-1), "an Err")
+  assert-eq("ok", check-param(heading(1)), "an Ok through fn match")
+  assert-eq("err", check-param(heading(-1)), "an Err through fn match")
+}
+
 test-match-optional-sugar-and-any
 meta ["test"] fn () {
   greet fn (name: Str?): Str {
