@@ -162,8 +162,18 @@ async fn pending_api_keys_cannot_move_between_organizations_environments_or_user
         .next()
         .unwrap()
         .to_owned();
+    let handoff_token = page
+        .body
+        .split("name=\"handoff_token\" value=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .to_owned();
     let form = [
         ("api_key_id", key_id.as_str()),
+        ("handoff_token", handoff_token.as_str()),
         ("description", "Scope-bound credential"),
         ("access_level", "full"),
     ];
@@ -240,6 +250,14 @@ async fn pending_api_keys_cannot_move_between_organizations_environments_or_user
             .await
             .unwrap();
     assert_eq!(key.env_id, td.env_id);
+    // The handoff token is stateless, so the key ID's uniqueness is what makes
+    // it single-use.
+    let replay = client.post_form(&create_path(td.env_id), &form).await;
+    assert!(
+        replay.body.contains("Failed to create API key"),
+        "{}",
+        replay.body
+    );
 }
 
 #[tokio::test]

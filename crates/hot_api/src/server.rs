@@ -229,6 +229,12 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
                 );
                 Some(Arc::new(pubsub))
             }
+            // A Redis queue means services may span processes or hosts, and
+            // MCP HTTP+SSE delivery depends on shared pub/sub. Refuse to start
+            // rather than serve with a broken cross-instance channel.
+            Err(e) if matches!(pubsub_type, StreamPubSubType::Redis) => {
+                panic!("Failed to create Redis stream pub/sub: {}", e);
+            }
             Err(e) => {
                 tracing::warn!(
                     "hot.dev: API failed to create stream pub/sub: {}. SSE will fall back to polling.",

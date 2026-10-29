@@ -5,97 +5,93 @@ use ahash::AHashMap;
 use askama::Template;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::{Html, IntoResponse, Redirect};
+use chrono::Utc;
 use hot::db::DatabasePool;
-use serde::Deserialize;
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
-// Simple in-memory session store for temporary API key data
-#[derive(Clone)]
-struct ApiKeySession {
-    user_id: Uuid,
-    org_id: Uuid,
-    env_id: Uuid,
-    key_hash: String,
-    created_at: Instant,
-}
+/// How long a generated key stays redeemable after the new-key page renders.
+const API_KEY_HANDOFF_TTL_SECS: i64 = 300;
 
-type ApiKeySessionStore = Arc<RwLock<AHashMap<Uuid, ApiKeySession>>>;
-
-// Global session store with 5-minute TTL
-static API_KEY_SESSIONS: std::sync::OnceLock<ApiKeySessionStore> = std::sync::OnceLock::new();
-
-fn get_session_store() -> &'static ApiKeySessionStore {
-    API_KEY_SESSIONS.get_or_init(|| Arc::new(RwLock::new(AHashMap::new())))
-}
-
-// Clean up expired sessions (called periodically)
-async fn cleanup_expired_sessions() {
-    let store = get_session_store();
-    let mut sessions = store.write().await;
-    let now = Instant::now();
-    sessions.retain(|_, session| now.duration_since(session.created_at) < Duration::from_secs(300)); // 5 minutes
-}
-
-// Store API key data in session
-async fn store_api_key_session(
+/// The new-key page shows a secret and the create form commits its hash. The
+/// hash travels in a signed form token rather than process memory, so any app
+/// instance can complete the handoff.
+#[derive(Serialize, Deserialize)]
+struct ApiKeyHandoff {
     api_key_id: Uuid,
     user_id: Uuid,
     org_id: Uuid,
     env_id: Uuid,
     key_hash: String,
-) {
-    cleanup_expired_sessions().await; // Clean up old sessions
-    let store = get_session_store();
-    let mut sessions = store.write().await;
-    sessions.insert(
-        api_key_id,
-        ApiKeySession {
-            user_id,
-            org_id,
-            env_id,
-            key_hash,
-            created_at: Instant::now(),
-        },
-    );
+    exp: usize,
 }
 
-// Retrieve and remove API key data from session
-async fn take_api_key_session(
+/// Separate the handoff key from the session-token key so neither token type
+/// validates as the other.
+fn api_key_handoff_secret() -> Result<Vec<u8>, String> {
+    let secret = crate::auth::get_session_secret()?;
+    Ok(format!("{secret}:api-key-handoff").into_bytes())
+}
+
+fn sign_api_key_handoff(
+    api_key_id: Uuid,
+    user_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+    key_hash: String,
+) -> Result<String, String> {
+    let exp = (Utc::now().timestamp() + API_KEY_HANDOFF_TTL_SECS) as usize;
+    let claims = ApiKeyHandoff {
+        api_key_id,
+        user_id,
+        org_id,
+        env_id,
+        key_hash,
+        exp,
+    };
+    let key = EncodingKey::from_secret(&api_key_handoff_secret()?);
+    encode(&Header::new(Algorithm::HS256), &claims, &key)
+        .map_err(|e| format!("Failed to sign API key handoff: {e}"))
+}
+
+/// Return the key hash when the token is authentic, unexpired, and was issued
+/// for this key, user, and execution scope. Reuse fails at insert because the
+/// key ID is the primary key.
+fn verify_api_key_handoff(
+    token: &str,
     api_key_id: &Uuid,
     user_id: Uuid,
     org_id: Uuid,
     env_id: Uuid,
 ) -> Option<String> {
-    let store = get_session_store();
-    let mut sessions = store.write().await;
-
-    // Check if session exists and is not expired
-    if let Some(session) = sessions.get(api_key_id) {
-        if Instant::now().duration_since(session.created_at) < Duration::from_secs(300) {
-            // A pending credential belongs to the identity and execution scope
-            // that saw its secret. A mismatched request must not consume it.
-            if (session.user_id, session.org_id, session.env_id) != (user_id, org_id, env_id) {
-                return None;
-            }
-            // Session is valid, remove and return the key_hash
-            let key_hash = session.key_hash.clone();
-            sessions.remove(api_key_id);
-            return Some(key_hash);
-        } else {
-            // Session expired, remove it
-            sessions.remove(api_key_id);
-        }
+    let secret = api_key_handoff_secret().ok()?;
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.leeway = 0;
+    let handoff = decode::<ApiKeyHandoff>(token, &DecodingKey::from_secret(&secret), &validation)
+        .ok()?
+        .claims;
+    // A pending credential belongs to the identity and execution scope that
+    // saw its secret. A mismatched request must not redeem it.
+    if (
+        handoff.api_key_id,
+        handoff.user_id,
+        handoff.org_id,
+        handoff.env_id,
+    ) != (*api_key_id, user_id, org_id, env_id)
+    {
+        return None;
     }
-    None
+    Some(handoff.key_hash)
 }
 
 // Form data structure for creating API keys
 #[derive(Deserialize, Debug)]
 pub struct ApiKeyCreateForm {
     pub api_key_id: Uuid,
+    #[serde(default)]
+    pub handoff_token: String,
     pub description: String,
     pub access_level: String,
     #[serde(default)]
@@ -212,15 +208,16 @@ pub async fn keys_new_handler(
         Err(_) => return Html("Failed to generate API key".to_string()).into_response(),
     };
 
-    // Store the key hash in the session
-    store_api_key_session(
+    let handoff_token = match sign_api_key_handoff(
         api_key_id,
         session.current_user_id(),
         current_env.org_id,
         current_env.env_id,
         key_hash,
-    )
-    .await;
+    ) {
+        Ok(token) => token,
+        Err(_) => return Html("Failed to generate API key".to_string()).into_response(),
+    };
 
     let (mcp_tools_json, webhooks_json) =
         super::build_permission_path_options(&db, &current_env.env_id).await;
@@ -242,6 +239,7 @@ pub async fn keys_new_handler(
         ),
         generated_key,
         api_key_id,
+        handoff_token,
         error_message: "",
         description: "",
         access_level: "full",
@@ -347,19 +345,18 @@ pub async fn keys_create_handler(
             "Description is required",
             "",
             &form.api_key_id,
+            &form.handoff_token,
         )
         .await);
     }
 
-    // Retrieve the key hash from the session store
-    let key_hash = match take_api_key_session(
+    let key_hash = match verify_api_key_handoff(
+        &form.handoff_token,
         &form.api_key_id,
         session.current_user_id(),
         current_env.org_id,
         current_env.env_id,
-    )
-    .await
-    {
+    ) {
         Some(hash) => hash,
         None => {
             return Err(render_keys_new_with_error(
@@ -367,6 +364,7 @@ pub async fn keys_create_handler(
                 "Session expired. Please try again.",
                 &form.description,
                 &form.api_key_id,
+                &form.handoff_token,
             )
             .await);
         }
@@ -381,6 +379,7 @@ pub async fn keys_create_handler(
                 "Failed to process API key",
                 &form.description,
                 &form.api_key_id,
+                &form.handoff_token,
             )
             .await);
         }
@@ -399,6 +398,7 @@ pub async fn keys_create_handler(
                         &format!("Invalid permissions JSON: {}", e),
                         &form.description,
                         &form.api_key_id,
+                        &form.handoff_token,
                     )
                     .await);
                 }
@@ -410,6 +410,7 @@ pub async fn keys_create_handler(
                     &format!("Invalid permissions: {}", e),
                     &form.description,
                     &form.api_key_id,
+                    &form.handoff_token,
                 )
                 .await);
             }
@@ -440,6 +441,7 @@ pub async fn keys_create_handler(
             "Failed to create API key",
             &form.description,
             &form.api_key_id,
+            &form.handoff_token,
         )
         .await),
     }
@@ -572,6 +574,7 @@ async fn render_keys_new_with_error(
     error_message: &str,
     description: &str,
     api_key_id: &Uuid,
+    handoff_token: &str,
 ) -> Html<String> {
     // Build breadcrumbs: <org> (<env>) / API Keys / New
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(session);
@@ -586,6 +589,7 @@ async fn render_keys_new_with_error(
         page_context: templates::PrivatePageContext::with_breadcrumbs("keys", session, breadcrumbs),
         generated_key: "".to_string(),
         api_key_id: *api_key_id,
+        handoff_token: handoff_token.to_string(),
         error_message,
         description,
         access_level: "full",
@@ -635,4 +639,79 @@ async fn render_keys_edit_with_error(
     };
 
     Html(template.render().unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids() -> (Uuid, Uuid, Uuid, Uuid) {
+        (
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        )
+    }
+
+    #[test]
+    fn handoff_redeems_without_process_state() {
+        let (key, user, org, env) = ids();
+        let token = sign_api_key_handoff(key, user, org, env, "hash".into()).unwrap();
+        // Verification reads nothing but the token and the shared secret, so
+        // another app instance accepts it.
+        assert_eq!(
+            verify_api_key_handoff(&token, &key, user, org, env).as_deref(),
+            Some("hash")
+        );
+    }
+
+    #[test]
+    fn handoff_rejects_other_key_identity_or_scope() {
+        let (key, user, org, env) = ids();
+        let token = sign_api_key_handoff(key, user, org, env, "hash".into()).unwrap();
+        let other = Uuid::now_v7();
+        assert!(verify_api_key_handoff(&token, &other, user, org, env).is_none());
+        assert!(verify_api_key_handoff(&token, &key, other, org, env).is_none());
+        assert!(verify_api_key_handoff(&token, &key, user, other, env).is_none());
+        assert!(verify_api_key_handoff(&token, &key, user, org, other).is_none());
+    }
+
+    #[test]
+    fn handoff_rejects_expired_tampered_and_session_signed_tokens() {
+        let (key, user, org, env) = ids();
+        let expired = ApiKeyHandoff {
+            api_key_id: key,
+            user_id: user,
+            org_id: org,
+            env_id: env,
+            key_hash: "hash".into(),
+            exp: (Utc::now().timestamp() - 1) as usize,
+        };
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &expired,
+            &EncodingKey::from_secret(&api_key_handoff_secret().unwrap()),
+        )
+        .unwrap();
+        assert!(verify_api_key_handoff(&token, &key, user, org, env).is_none());
+
+        let fresh = ApiKeyHandoff {
+            exp: (Utc::now().timestamp() + 60) as usize,
+            ..expired
+        };
+        let session_key = crate::auth::get_session_secret().unwrap();
+        let session_signed = encode(
+            &Header::new(Algorithm::HS256),
+            &fresh,
+            &EncodingKey::from_secret(session_key.as_bytes()),
+        )
+        .unwrap();
+        assert!(verify_api_key_handoff(&session_signed, &key, user, org, env).is_none());
+
+        let mut tampered = sign_api_key_handoff(key, user, org, env, "hash".into()).unwrap();
+        tampered.pop();
+        assert!(verify_api_key_handoff(&tampered, &key, user, org, env).is_none());
+        assert!(verify_api_key_handoff("", &key, user, org, env).is_none());
+    }
 }
