@@ -204,8 +204,10 @@ environment-backed deployment setting.
 
 ## Secrets from Files
 
-Settings supplied through `HOT_*` environment variables, plus `HOT_ENCRYPTION_KEY`
-and `HOT_APP_SESSION_SECRET`, can instead name a file that holds the value:
+Settings supplied through `HOT_*` environment variables, plus `HOT_ENCRYPTION_KEY`,
+`HOT_APP_SESSION_SECRET`, and the OAuth client settings
+(`HOT_GOOGLE_CLIENT_ID`, `HOT_GOOGLE_CLIENT_SECRET`, `HOT_GITHUB_CLIENT_ID`,
+`HOT_GITHUB_CLIENT_SECRET`), can instead name a file that holds the value:
 set `<NAME>_FILE`, for example `HOT_DB_URI_FILE=/run/secrets/db-uri`. Hot
 reads the file at startup, drops one trailing newline, and does not copy the
 value into the process environment. Setting both `<NAME>` and `<NAME>_FILE`,

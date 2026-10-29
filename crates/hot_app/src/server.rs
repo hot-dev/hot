@@ -47,6 +47,8 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     crate::auth::get_session_secret().unwrap_or_else(|error| {
         panic!("hot.dev: APP session secret configuration failed: {error}")
     });
+    crate::oauth::OAuthConfig::from_env()
+        .unwrap_or_else(|error| panic!("hot.dev: APP OAuth configuration failed: {error}"));
 
     // Get resolved config with app defaults merged in
     let resolved_conf = get_resolved_conf(conf.clone());
