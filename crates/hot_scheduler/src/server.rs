@@ -72,9 +72,29 @@ pub const DEFAULT_REDIS_URL: &str = "redis://localhost:6379";
 pub const DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 30; // Sync with database every 30 seconds
 pub const DEFAULT_RETRY_INTERVAL_SECONDS: u64 = 1;
 pub const DEFAULT_AT_INTERVAL_SECONDS: u64 = 1;
-const SCHEDULER_ADVISORY_LOCK_ID: i64 = 4_849_672_113_597_841;
-/// How often the scheduler confirms it still holds its singleton lock.
-const SINGLETON_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+/// The session advisory lock that elects the one active scheduler. Operators can
+/// find the active scheduler's database session by this key in `pg_locks`.
+pub const SCHEDULER_ADVISORY_LOCK_ID: i64 = 4_849_672_113_597_841;
+/// How often the scheduler confirms it still holds its singleton lock, and how
+/// long one confirmation may take. Together they bound how long a scheduler
+/// that lost its lock keeps dispatching alongside a successor.
+const SINGLETON_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+const SINGLETON_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// One bounded singleton check. A check that times out counts as lost: a
+/// partitioned session can hang until TCP gives up, while the server has
+/// already freed the lock for a successor.
+async fn confirm_singleton_lock<E: std::fmt::Display>(
+    check: impl std::future::Future<Output = Result<bool, E>>,
+    limit: Duration,
+) -> Result<(), String> {
+    match tokio::time::timeout(limit, check).await {
+        Ok(Ok(true)) => Ok(()),
+        Ok(Ok(false)) => Err("its session no longer holds the lock".into()),
+        Ok(Err(e)) => Err(format!("its lock session failed: {e}")),
+        Err(_) => Err(format!("the lock check did not finish within {limit:?}")),
+    }
+}
 
 async fn acquire_scheduler_singleton_guard(
     db: &DatabasePool,
@@ -82,9 +102,22 @@ async fn acquire_scheduler_singleton_guard(
     if matches!(db, DatabasePool::Sqlite(_)) {
         return Ok(None);
     }
-    let guard = hot::db::try_acquire_advisory_lock(db, SCHEDULER_ADVISORY_LOCK_ID)
+    let mut guard = hot::db::try_acquire_advisory_lock(db, SCHEDULER_ADVISORY_LOCK_ID)
         .await?
         .ok_or("another hot_scheduler instance already holds the scheduler singleton lock")?;
+    // A transaction- or statement-mode pooler can run the next statement on a
+    // different backend, where the session lock is invisible. Fail here, before
+    // any work, rather than at the first periodic check.
+    if let Err(reason) = confirm_singleton_lock(guard.ensure_held(), SINGLETON_CHECK_TIMEOUT).await
+    {
+        guard.release().await;
+        return Err(format!(
+            "the scheduler could not confirm its singleton lock ({reason}); its database \
+             connection must keep one session, so do not route it through a transaction- or \
+             statement-mode pooler"
+        )
+        .into());
+    }
     Ok(Some(guard))
 }
 
@@ -571,14 +604,15 @@ pub async fn run_for_environment(
             timer.tick().await;
             loop {
                 tokio::select! {
-                    _ = timer.tick() => match guard.ensure_held().await {
-                        Ok(true) => {}
-                        outcome => {
-                            error!(?outcome, "hot.dev: SCHEDULER lost its singleton lock; stopping");
+                    _ = timer.tick() => {
+                        if let Err(reason) =
+                            confirm_singleton_lock(guard.ensure_held(), SINGLETON_CHECK_TIMEOUT).await
+                        {
+                            error!("hot.dev: SCHEDULER lost its singleton lock ({reason}); stopping");
                             let _ = lock_lost_tx.send(());
                             return None;
                         }
-                    },
+                    }
                     _ = shutdown_rx.recv() => return Some(guard),
                 }
             }
@@ -1701,6 +1735,36 @@ async fn process_due_at_schedules(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn singleton_check_fails_closed() {
+        let limit = Duration::from_millis(20);
+        assert!(
+            confirm_singleton_lock(async { Ok::<_, String>(true) }, limit)
+                .await
+                .is_ok()
+        );
+        assert!(
+            confirm_singleton_lock(async { Ok::<_, String>(false) }, limit)
+                .await
+                .unwrap_err()
+                .contains("no longer holds")
+        );
+        assert!(
+            confirm_singleton_lock(async { Err::<bool, _>("connection reset") }, limit)
+                .await
+                .unwrap_err()
+                .contains("connection reset")
+        );
+        // A partitioned session never answers; the check must not wait for TCP.
+        let hung = std::future::pending::<Result<bool, String>>();
+        assert!(
+            confirm_singleton_lock(hung, limit)
+                .await
+                .unwrap_err()
+                .contains("did not finish")
+        );
+    }
 
     #[test]
     fn test_convert_to_scheduler_cron() {
