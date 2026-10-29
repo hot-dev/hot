@@ -2042,10 +2042,12 @@ impl Run {
         Ok(())
     }
 
-    /// Fail every run still flagged `running` whose `start_time` is older than
-    /// `older_than`. This is the daily zombie-run reaper: runs can remain in
-    /// `running` if the post-execution DB write is blocked or a worker exits
-    /// before marking its tasks. Even with per-call DB timeouts in
+    /// Fail every run still flagged `running`, or held for a redelivery (see
+    /// [`Run::hold_orphaned_runs_for_redelivery`]), whose `start_time` is
+    /// older than `older_than`. This is the daily zombie-run reaper: runs can
+    /// remain in `running` if the post-execution DB write is blocked or a
+    /// worker exits before marking its tasks, and stay held if their
+    /// redelivery never reaches a worker. Even with per-call DB timeouts in
     /// `hot_task_worker`, a periodic sweep is still needed as a final backstop.
     ///
     /// Caps at `limit` rows per call so a multi-thousand-row backlog can't
@@ -2074,7 +2076,8 @@ impl Run {
                 let result = sqlx::query(
                     "WITH stale AS (
                         SELECT run_id FROM run
-                        WHERE status_id = $1 AND start_time < $2
+                        WHERE (status_id = $1 OR (status_id = $7 AND next_retry_at IS NULL))
+                          AND start_time < $2
                         ORDER BY start_time
                         LIMIT $5
                      )
@@ -2088,6 +2091,7 @@ impl Run {
                 .bind(RunStatus::Failed.as_id())
                 .bind(limit)
                 .bind(&result_val)
+                .bind(RunStatus::PendingRetry.as_id())
                 .execute(pg_pool)
                 .await?;
                 result.rows_affected()
@@ -2099,7 +2103,8 @@ impl Run {
                         SET stop_time = ?, status_id = ?, result = ?
                       WHERE run_id IN (
                           SELECT run_id FROM run
-                          WHERE status_id = ? AND start_time < ?
+                          WHERE (status_id = ? OR (status_id = ? AND next_retry_at IS NULL))
+                            AND start_time < ?
                           ORDER BY start_time
                           LIMIT ?
                       )",
@@ -2108,6 +2113,7 @@ impl Run {
                 .bind(RunStatus::Failed.as_id())
                 .bind(&result_json)
                 .bind(RunStatus::Running.as_id())
+                .bind(RunStatus::PendingRetry.as_id())
                 .bind(older_than)
                 .bind(limit)
                 .execute(sqlite_pool)
@@ -2119,7 +2125,7 @@ impl Run {
         if rows_affected > 0 {
             tracing::warn!(
                 cutoff = %older_than,
-                "Reaped {} zombie run(s) (status=running, start_time < cutoff)",
+                "Reaped {} zombie run(s) (running or held, start_time < cutoff)",
                 rows_affected,
             );
         }
@@ -3834,6 +3840,50 @@ mod tests {
         Run::fail_held_runs(&db, &[data.run_id], "dropped")
             .await
             .unwrap();
+        assert_eq!(status().await, RunStatus::Failed.as_id());
+    }
+
+    /// A held run whose redelivery never reaches a worker is reaped like a
+    /// zombie running one; a scheduled retry is not.
+    #[tokio::test]
+    async fn stale_run_sweep_fails_held_runs_but_not_scheduled_retries() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let event_id = handler_run_of_new_event(&db, &data).await;
+        let status = async || Run::get_run(&db, &data.run_id).await.unwrap().status_id;
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let cutoff = Utc::now() + chrono::Duration::seconds(1);
+
+        sqlx::query("UPDATE run SET status_id = 5, next_retry_at = ? WHERE run_id = ?")
+            .bind(Utc::now())
+            .bind(data.run_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            Run::fail_stale_runs(&db, cutoff, "abandoned", 10)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(status().await, RunStatus::PendingRetry.as_id());
+
+        sqlx::query("UPDATE run SET status_id = 1, next_retry_at = NULL WHERE run_id = ?")
+            .bind(data.run_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        Run::hold_orphaned_runs_for_redelivery(&db, &event_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            Run::fail_stale_runs(&db, cutoff, "abandoned", 10)
+                .await
+                .unwrap(),
+            1
+        );
         assert_eq!(status().await, RunStatus::Failed.as_id());
     }
 
