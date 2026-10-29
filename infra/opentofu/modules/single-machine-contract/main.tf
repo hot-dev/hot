@@ -116,6 +116,9 @@ variable "installation" {
       # Existing AWS networks with managed PostgreSQL or Valkey: private
       # subnets in two or more zones for them.
       data_subnet_ids = optional(list(string), [])
+      # Existing AWS networks, scalable preset: private subnets in two or more
+      # zones for the hosts.
+      private_subnet_ids = optional(list(string), [])
     }), {})
   })
   validation {
@@ -129,6 +132,11 @@ variable "installation" {
   validation {
     condition     = contains(["single-machine", "scalable"], var.installation.preset)
     error_message = "preset must be single-machine or scalable."
+  }
+  validation {
+    condition = var.installation.preset != "scalable" || var.installation.cloud != "aws" || var.installation.network.mode == "new" || (
+    length(var.installation.network.private_subnet_ids) >= 2 && length(var.installation.network.data_subnet_ids) >= 2)
+    error_message = "A scalable installation on an existing AWS network needs private_subnet_ids and data_subnet_ids in two or more zones."
   }
   validation {
     condition = var.installation.preset != "scalable" || (

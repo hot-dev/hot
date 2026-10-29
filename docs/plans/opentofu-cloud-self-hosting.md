@@ -1637,6 +1637,20 @@ release of the three presets.
 - [ ] Implement the topology, ingress, networking, identities, and data tier
       above for each scalable reference configuration, including the
       streaming timeouts and the connection-budget validation.
+      `stacks/gcp/scalable` and `stacks/aws/scalable` implement this. The
+      AWS stack has the following:
+      - private hosts in two zones, with a NAT gateway per zone and an S3
+        gateway endpoint;
+      - an identity per role;
+      - Auto Scaling groups, with stop-before-start instance refresh for the
+        scheduler and scale-in protection for task-workers;
+      - a Network Load Balancer per endpoint;
+      - RDS and ElastiCache, as on a single machine.
+
+      Passthrough load balancers have no proxy timeouts for streams. The
+      contract rejects scaling maximums that exceed the connection budget,
+      with a 20-connection pool per instance. Qualification on both clouds
+      remains.
 - [ ] Configure ingress behavior, readiness, graceful shutdown, connection
       budgets, replica bounds, and rolling deployments per service, following
       the release order above.

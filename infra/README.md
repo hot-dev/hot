@@ -444,7 +444,18 @@ single machine, with its own role:
   update; the scheduler's group recreates its instance, so two schedulers
   never run.
 - **Hosts** keep only scratch disks; nothing on them outlives the instance.
-  Commands reach one instance of the installation.
+  On GCP a command reaches one instance of the installation; on AWS it
+  reaches every instance.
+- **Clouds.**
+  - GCP: managed instance groups (zonal for the scheduler) and passthrough
+    load balancers.
+  - AWS: Auto Scaling groups across two zones, a NAT gateway per zone, and
+    Network Load Balancers. App and API groups replace hosts that fail the
+    load balancer's health check, and task-workers are protected from
+    scale-in.
+  - An existing AWS network needs `network.private_subnet_ids` for the hosts
+    and `data_subnet_ids` for the database and cache, each in two or more
+    zones, plus `public_subnet_ids` for a public endpoint.
 - **Alerts** fire when any host breaches a signal, when the scheduler stops
   or disappears, and when every host goes silent.
 

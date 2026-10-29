@@ -179,7 +179,7 @@ def validate(document):
             if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", storage.get("bucket", "")) or not storage.get("region") or not prefix.strip("/"):
                 raise ValueError(f"{role}: S3 requires bucket, region, and a nonempty relative prefix")
     network = config.get("network", {})
-    if set(network) - {"mode", "cidr", "client_cidrs", "network_id", "subnet_id", "public_subnet_ids", "data_subnet_ids"}:
+    if set(network) - {"mode", "cidr", "client_cidrs", "network_id", "subnet_id", "public_subnet_ids", "data_subnet_ids", "private_subnet_ids"}:
         raise ValueError("Unknown network fields")
     if network.get("mode", "new") not in {"new", "existing"}:
         raise ValueError("Select new or existing networking")
