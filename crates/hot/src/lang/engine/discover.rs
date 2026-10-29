@@ -1509,7 +1509,10 @@ mod pkg_hot_tests {
 
         let files = Engine::discover_dependency_source_files(root).unwrap();
         assert_eq!(files.len(), 1, "{files:?}");
-        assert!(files[0].ends_with("hot/src/lib.hot"), "{files:?}");
+        assert!(
+            std::path::Path::new(&files[0]).ends_with("hot/src/lib.hot"),
+            "{files:?}"
+        );
         let dirs = Engine::discover_dependency_source_dirs(root).unwrap();
         assert_eq!(dirs, vec![root.join("hot/src/").display().to_string()]);
     }
