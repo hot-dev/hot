@@ -116,7 +116,36 @@ run "endpoints_and_scaling" {
     error_message = "App and API autoscale from two; task-workers only scale out."
   }
   assert {
-    condition     = google_monitoring_alert_policy.scheduler.display_name == "hot-hot-example-scheduler-stopped" && length(google_monitoring_alert_policy.hot) == 5
+    condition     = google_monitoring_alert_policy.scheduler.display_name == "hot-hot-example-scheduler-stopped" && length(google_monitoring_alert_policy.hot) == 7
     error_message = "The singleton scheduler and every per-host signal alert."
+  }
+}
+
+run "every_role_pulls_from_the_mirror" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "size" : "small",
+      "host_image" : "projects/example-project/global/images/hot-host-amd64",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "image_registry" : "us-docker.pkg.dev/acme-mirror/hot",
+      "data" : { "postgres" : { "mode" : "managed" }, "valkey" : { "mode" : "managed" } },
+      "storage" : {
+        "build" : { "backend" : "gcs", "bucket" : "acme-hot", "prefix" : "builds", "provision" : true },
+        "file" : { "backend" : "gcs", "bucket" : "acme-hot", "prefix" : "files", "provision" : true }
+      }
+    }
+  }
+  assert {
+    condition     = length(google_artifact_registry_repository_iam_member.mirror) == 5 && alltrue([for m in google_artifact_registry_repository_iam_member.mirror : m.repository == "hot" && m.role == "roles/artifactregistry.reader"])
+    error_message = "Every role's account may read the mirror repository."
   }
 }

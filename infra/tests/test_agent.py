@@ -1,4 +1,5 @@
 """The host deploy agent, with fake cloud, process, and download layers."""
+import base64
 import datetime
 import importlib.util
 import json
@@ -92,7 +93,8 @@ class Recorder:
         if "move-storage" in command:
             return subprocess.CompletedProcess(command, 0, stdout='{"kind":"file","status":"moved"}\n')
         if "queue" in command:
-            pending, processing, deadletter = self.queue.pop(0) if len(self.queue) > 1 else self.queue[0]
+            queue = self.queue or [(0, 0, 0)]
+            pending, processing, deadletter = queue.pop(0) if len(queue) > 1 else queue[0]
             return subprocess.CompletedProcess(command, 0, stdout=(
                 "Queue Status:\n  Backend: Redis (redis://hot:***@valkey:6379)\n\nSummary:\n"
                 f"  Total pending:    {pending}\n  Total processing: {processing}\n  Total deadletter: {deadletter}\n"))
@@ -172,6 +174,39 @@ class Deploy(AgentHarness):
         self.assertIn("names release 3.0.4", self.agent.reconcile()["error"])
         self.cloud.parameters["pointer"] = "latest; rm -rf /"
         self.assertIn("is not a release version", self.agent.reconcile()["error"])
+
+    def test_a_private_mirror_is_signed_in_to_with_the_vm_identity(self):
+        self.cloud.registry_password = lambda host: "token-for-" + host
+        logins = []
+        recorder = self.run
+
+        def run(command, **kwargs):
+            if command[:2] == ["docker", "login"]:
+                logins.append((command, kwargs.get("input")))
+            return recorder(command, **kwargs)
+        self.agent.run_command = run
+        for registry, user in (("123456789012.dkr.ecr.us-east-1.amazonaws.com/hot", "AWS"),
+                               ("us-docker.pkg.dev/acme/hot", "oauth2accesstoken"),
+                               ("mirror.example.com/hot", None)):
+            with self.subTest(registry=registry):
+                logins.clear()
+                self.config["image_registry"] = registry
+                self.agent.registry_login()
+                host = registry.split("/")[0]
+                if user is None:
+                    self.assertEqual(logins, [], "other mirrors are pulled anonymously")
+                    continue
+                self.assertEqual(logins, [(["docker", "login", "--username", user, "--password-stdin",
+                                            f"https://{host}"], "token-for-" + host)])
+        # The sign-in comes before the pull, and the pulled images are the mirror's.
+        self.config["image_registry"] = "us-docker.pkg.dev/acme/hot"
+        self.agent.reconcile()
+        commands = [" ".join(c) for c in self.run.commands]
+        login = next(i for i, c in enumerate(commands) if c.startswith("docker login"))
+        pull = next(i for i, c in enumerate(commands) if c.endswith("pull --quiet"))
+        self.assertLess(login, pull)
+        bundle = json.loads((Path(self.tmp.name) / "releases/3.0.1/bundle/compose.json").read_text())
+        self.assertTrue(bundle["services"]["app"]["image"].startswith("us-docker.pkg.dev/acme/hot/"), bundle["services"]["app"])
 
     def test_failures_report_the_command_not_its_output(self):
         def failing(command, **kwargs):
@@ -873,7 +908,8 @@ class Monitoring(AgentHarness):
         metrics = self.agent.observe(probe=lambda host, path: 200, now=self.NOW)
         self.assertEqual({k: v[0] for k, v in metrics.items() if k != "DataDiskUsedPercent"}, {
             "AgentHeartbeat": 1, "UnhealthyServices": 0, "SchedulerRunning": 1, "DependenciesReachable": 1,
-            "Ready": 1, "BackupAgeHours": 5, "CertificateDaysLeft": 93})
+            "Ready": 1, "BackupAgeHours": 5, "CertificateDaysLeft": 93, "QueueBacklog": 0, "QueueDeadLetters": 0,
+            "NewDeadLetters": 0})
         self.assertTrue(0 <= metrics["DataDiskUsedPercent"][0] <= 100)
 
     def test_failures_show_up_in_the_metrics(self):
@@ -884,6 +920,25 @@ class Monitoring(AgentHarness):
         self.assertEqual(metrics["SchedulerRunning"][0], 0)
         self.assertEqual(metrics["DependenciesReachable"][0], 0)
         self.assertEqual(metrics["Ready"][0], 0)
+
+    def test_worker_hosts_measure_the_queue_every_few_minutes(self):
+        self.agent.reconcile()
+        self.ps()
+        self.run.queue = [(40, 2, 1)]
+        metrics = self.agent.observe(probe=lambda host, path: 200, now=self.NOW)
+        self.assertEqual((metrics["QueueBacklog"][0], metrics["QueueDeadLetters"][0]), (42, 1))
+        self.assertEqual(metrics["NewDeadLetters"][0], 0, "the first measurement has nothing to compare with")
+        self.run.queue = [(0, 0, 4)]
+        later = self.agent.observe(probe=lambda host, path: 200, now=self.NOW + datetime.timedelta(minutes=1))
+        self.assertEqual(later["QueueBacklog"][0], 42, "not measured again within five minutes")
+        later = self.agent.observe(probe=lambda host, path: 200, now=self.NOW + datetime.timedelta(minutes=6))
+        self.assertEqual((later["QueueBacklog"][0], later["NewDeadLetters"][0]), (0, 3))
+        self.run.queue = [(0, 0, 0)]
+        later = self.agent.observe(probe=lambda host, path: 200, now=self.NOW + datetime.timedelta(minutes=12))
+        self.assertEqual(later["NewDeadLetters"][0], 0, "clearing dead letters is not new ones")
+        self.ps(worker=("exited", ""))
+        self.agent._queue_measured = None
+        self.assertNotIn("QueueBacklog", self.agent.observe(probe=lambda host, path: 200, now=self.NOW))
 
     def test_an_unknown_backup_status_is_left_out(self):
         def denied(volume, installation):
@@ -1070,6 +1125,17 @@ class Reports(AgentHarness):
         self.assertEqual(calls[2][1]["logGroupName"], "/hot/hot-example")
         summary = json.loads(calls[3][1]["Value"])
         self.assertEqual(summary, {"state": "logs", "request_id": "r1"})
+
+
+class Registries(unittest.TestCase):
+    def test_an_ecr_password_comes_from_the_instance_role(self):
+        token = base64.b64encode(b"AWS:the-password").decode()
+        with mock.patch.object(agent_module.Aws, "call",
+                               return_value={"authorizationData": [{"authorizationToken": token}]}) as call:
+            password = agent_module.Aws("eu-west-1").registry_password("123456789012.dkr.ecr.us-east-1.amazonaws.com")
+        self.assertEqual(password, "the-password")
+        self.assertEqual(call.call_args.args[0], "ecr", "ECR signs as ecr at the api.ecr endpoint")
+        self.assertEqual(call.call_args.kwargs, {"endpoint": "api.ecr"})
 
 
 class Redaction(unittest.TestCase):

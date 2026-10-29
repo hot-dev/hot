@@ -23,6 +23,12 @@ locals {
   s3_roles    = [for s in [local.config.storage.build, local.config.storage.file] : s if s.backend == "s3"]
   # Load balancers and database subnet groups need a second zone.
   second_zone = try([for zone in data.aws_availability_zones.available[0].names : zone if zone != local.config.zone][0], null)
+  # Pulling images from an ECR mirror with the host's own role.
+  mirror_statements = module.contract.mirror.kind != "ecr" ? [] : [
+    { Effect = "Allow", Action = ["ecr:GetAuthorizationToken"], Resource = "*" },
+    { Effect = "Allow", Action = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
+    Resource = "arn:aws:ecr:${module.contract.mirror.region}:${module.contract.mirror.account}:repository/${module.contract.mirror.repositories}" },
+  ]
 }
 data "aws_availability_zones" "available" {
   count = local.new_network && (local.public || local.managed_data) ? 1 : 0
@@ -197,7 +203,7 @@ resource "aws_iam_role_policy" "runtime" {
     { Effect = "Allow", Action = ["cloudwatch:PutMetricData"], Resource = "*", Condition = { StringEquals = { "cloudwatch:namespace" = "Hot/SelfHost" } } },
     # Backup age for monitoring; snapshots cannot be scoped by resource.
     { Effect = "Allow", Action = ["ec2:DescribeSnapshots"], Resource = "*" }
-    ], [for s in local.s3_roles : {
+    ], local.mirror_statements, [for s in local.s3_roles : {
       Effect = "Allow", Action = ["s3:GetBucketLocation"], Resource = "arn:aws:s3:::${s.bucket}"
       }], [for s in local.s3_roles : {
       Effect    = "Allow", Action = ["s3:ListBucket"], Resource = "arn:aws:s3:::${s.bucket}",

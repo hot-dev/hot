@@ -52,7 +52,8 @@ check "scalable_preset" {
   }
 }
 resource "google_project_service" "required" {
-  for_each           = toset(["compute.googleapis.com", "secretmanager.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com", "pubsub.googleapis.com"])
+  for_each = toset(concat(["compute.googleapis.com", "secretmanager.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com", "pubsub.googleapis.com"],
+  local.config.monitoring.monthly_budget > 0 ? ["billingbudgets.googleapis.com"] : []))
   project            = local.config.project
   service            = each.value
   disable_on_destroy = false
@@ -345,3 +346,14 @@ output "release_secrets" { value = { for role, secret in google_secret_manager_s
 output "operator_secret" { value = google_secret_manager_secret.operator.id }
 output "command_topic" { value = google_pubsub_topic.commands.id }
 output "instance_groups" { value = merge({ for role, group in google_compute_region_instance_group_manager.role : role => group.name }, { scheduler = google_compute_instance_group_manager.scheduler.name }) }
+# Pulling images from an Artifact Registry mirror with the host's own
+# account. The mirror may live in another project; the identity that applies
+# this stack needs to manage that repository's IAM policy.
+resource "google_artifact_registry_repository_iam_member" "mirror" {
+  for_each   = module.contract.mirror.kind == "artifact-registry" ? google_service_account.role : {}
+  project    = module.contract.mirror.project
+  location   = module.contract.mirror.location
+  repository = module.contract.mirror.repository
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${each.value.email}"
+}

@@ -377,6 +377,19 @@ class RuntimeContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "logging.destination"):
             renderer.validate(dict(local, logging={"destination": "syslog"}))
 
+    def test_log_lines_name_their_host_role_and_release(self):
+        aws = renderer.render(example("aws"), manifest(), "/data", "/run/hot/secrets", instance="i-0abc")["services"]
+        gcp = renderer.render(example("gcp"), manifest(), "/data", "/run/hot/secrets", instance="hot-example-x1")["services"]
+        self.assertEqual(aws["worker"]["logging"]["options"]["tag"], "i-0abc/{{.Name}}")
+        self.assertEqual(gcp["worker"]["logging"]["options"]["labels"], "hot.installation,hot.role,hot.release")
+        self.assertEqual(aws["worker"]["labels"], {"hot.installation": "hot-example", "hot.role": "worker", "hot.release": manifest()["release"]})
+
+    def test_a_mirror_keeps_each_images_digest(self):
+        config = dict(renderer.validate(example()), image_registry="123456789012.dkr.ecr.us-east-1.amazonaws.com/hot-mirror/")
+        services = renderer.render(config, manifest(), "/data", "/run/hot/secrets")["services"]
+        for role, service in (("hot", "worker"), ("postgres", "postgres"), ("ingress", "ingress")):
+            self.assertEqual(services[service]["image"], f"123456789012.dkr.ecr.us-east-1.amazonaws.com/hot-mirror/{role}@sha256:" + "a" * 64)
+
     def test_nginx_config_has_safe_defaults_and_streaming(self):
         text = renderer.nginx_config(renderer.validate(example()))
         self.assertIn("ssl_reject_handshake on", text)

@@ -68,10 +68,20 @@ variable "installation" {
       time_utc         = optional(string, "03:00")
       restore_snapshot = optional(string, "")
     }), {})
-    # Where infrastructure alerts go, independent of Hot's own email.
+    # Where infrastructure alerts go, independent of Hot's own email; the
+    # queue backlog that alerts; and an optional monthly budget (in the
+    # billing currency) that emails at 80% spent and 100% forecast. GCP
+    # budgets need the project's billing account.
     monitoring = optional(object({
-      alert_emails = optional(list(string), [])
+      alert_emails        = optional(list(string), [])
+      queue_backlog_alert = optional(number, 1000)
+      monthly_budget      = optional(number, 0)
+      billing_account     = optional(string, "")
     }), {})
+    # A registry that mirrors Hot's images (registry host and path, such as
+    # 123456789012.dkr.ecr.us-east-1.amazonaws.com/hot-mirror). Images keep
+    # their digests. Empty pulls from the release's own registries.
+    image_registry = optional(string, "")
     # cloud ships container logs to CloudWatch Logs or Cloud Logging; local
     # keeps them on the host only. retention_days applies to the AWS log group.
     logging = optional(object({
@@ -132,6 +142,17 @@ variable "installation" {
   validation {
     condition     = contains(["single-machine", "scalable"], var.installation.preset)
     error_message = "preset must be single-machine or scalable."
+  }
+  validation {
+    condition = var.installation.monitoring.queue_backlog_alert >= 1 && var.installation.monitoring.monthly_budget >= 0 && (
+      var.installation.monitoring.monthly_budget == 0 || var.installation.cloud == "aws"
+    || can(regex("^[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}$", var.installation.monitoring.billing_account)))
+    error_message = "queue_backlog_alert must be at least 1; a monthly_budget on GCP needs billing_account (XXXXXX-XXXXXX-XXXXXX)."
+  }
+  validation {
+    condition = var.installation.image_registry == "" || can(regex("^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)*$", var.installation.image_registry)) && (
+    !endswith(split("/", var.installation.image_registry)[0], "-docker.pkg.dev") || length(split("/", var.installation.image_registry)) >= 3)
+    error_message = "image_registry must be a registry host and optional path, such as registry.example.com/hot-mirror; an Artifact Registry mirror names its project and repository (us-docker.pkg.dev/PROJECT/REPOSITORY)."
   }
   validation {
     condition = var.installation.preset != "scalable" || var.installation.cloud != "aws" || var.installation.network.mode == "new" || (
@@ -337,5 +358,25 @@ output "managed_postgres" {
   value = local.postgres.mode != "managed" ? null : {
     tier       = local.postgres.tier != "" ? local.postgres.tier : local.database[var.installation.size][var.installation.cloud]
     storage_gb = local.postgres.storage_gb > 0 ? local.postgres.storage_gb : local.database[var.installation.size].storage_gb
+  }
+}
+locals {
+  registry_host = split("/", var.installation.image_registry)[0]
+  registry_path = trimprefix(trimprefix(var.installation.image_registry, local.registry_host), "/")
+  ecr_mirror    = regex("^(?:([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com)?", local.registry_host)
+  gar_mirror    = regex("^(?:([a-z0-9-]+)-docker\\.pkg\\.dev)?", local.registry_host)
+}
+output "mirror" {
+  description = "The image mirror the hosts sign in to with their own identity: kind is ecr or artifact-registry, or empty for other mirrors and none."
+  value = {
+    kind = local.ecr_mirror[0] != null ? "ecr" : local.gar_mirror[0] != null && length(split("/", local.registry_path)) >= 2 ? "artifact-registry" : ""
+    # ECR: repositories under the mirror path, such as hot-mirror/app.
+    account      = coalesce(local.ecr_mirror[0], "-")
+    region       = coalesce(local.ecr_mirror[1], "-")
+    repositories = local.registry_path == "" ? "*" : "${local.registry_path}/*"
+    # Artifact Registry: LOCATION-docker.pkg.dev/PROJECT/REPOSITORY.
+    location   = coalesce(local.gar_mirror[0], "-")
+    project    = try(split("/", local.registry_path)[0], "-")
+    repository = try(split("/", local.registry_path)[1], "-")
   }
 }

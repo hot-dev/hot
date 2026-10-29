@@ -14,6 +14,9 @@ locals {
     ready                  = { unit = "1", name = "App and API ready" }
     data_disk_used_percent = { unit = "%", name = "Scratch disk used" }
     certificate_days_left  = { unit = "d", name = "Certificate days left" }
+    queue_backlog          = { unit = "1", name = "Queue backlog" }
+    queue_dead_letters     = { unit = "1", name = "Dead-lettered jobs" }
+    new_dead_letters       = { unit = "1", name = "New dead-lettered jobs" }
   }
   alerts = {
     services-unhealthy = {
@@ -35,6 +38,14 @@ locals {
     certificate-expiring = {
       metric      = "certificate_days_left", comparison = "COMPARISON_LT", threshold = 14, aligner = "ALIGN_MIN", duration = "3600s",
       description = "The ingress TLS certificate expires within 14 days, or a host cannot read it."
+    }
+    queue-backlog = {
+      metric      = "queue_backlog", comparison = "COMPARISON_GT", threshold = local.config.monitoring.queue_backlog_alert, aligner = "ALIGN_MIN", duration = "900s",
+      description = "More jobs than monitoring.queue_backlog_alert have been waiting or running in Hot's queue for 15 minutes: workers are not keeping up."
+    }
+    new-dead-letters = {
+      metric      = "new_dead_letters", comparison = "COMPARISON_GT", threshold = 0, aligner = "ALIGN_MAX", duration = "0s",
+      description = "Jobs failed every attempt and were dead-lettered; the worker's logs say why."
     }
   }
   channels = [for channel in google_monitoring_notification_channel.email : channel.id]
@@ -140,4 +151,36 @@ resource "google_monitoring_alert_policy" "hot" {
       }
     }
   }
+}
+# An optional monthly cost budget over the installation's project, on the
+# billing account that pays for it. Creating one needs a billing role on that
+# account; see "Cost" in infra/README.md.
+data "google_project" "budget" {
+  count      = local.config.monitoring.monthly_budget > 0 ? 1 : 0
+  project_id = local.config.project
+}
+resource "google_billing_budget" "monthly" {
+  count           = local.config.monitoring.monthly_budget > 0 ? 1 : 0
+  billing_account = local.config.monitoring.billing_account
+  display_name    = "hot-${local.config.name}"
+  budget_filter {
+    projects = ["projects/${data.google_project.budget[0].number}"]
+  }
+  amount {
+    specified_amount {
+      units = tostring(local.config.monitoring.monthly_budget)
+    }
+  }
+  threshold_rules {
+    threshold_percent = 0.8
+  }
+  threshold_rules {
+    threshold_percent = 1.0
+    spend_basis       = "FORECASTED_SPEND"
+  }
+  all_updates_rule {
+    # A budget notifies at most five channels.
+    monitoring_notification_channels = slice(local.channels, 0, min(5, length(local.channels)))
+  }
+  depends_on = [google_project_service.required]
 }

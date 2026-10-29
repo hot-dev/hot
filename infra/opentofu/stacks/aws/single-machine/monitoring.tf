@@ -88,6 +88,16 @@ locals {
       period      = 3600, periods = 1, missing = "notBreaching",
       description = "The ingress TLS certificate expires within 14 days, or the agent cannot read it."
     }
+    queue-backlog = {
+      metric      = "QueueBacklog", statistic = "Minimum", comparison = "GreaterThanThreshold", threshold = local.config.monitoring.queue_backlog_alert,
+      period      = 300, periods = 3, missing = "notBreaching",
+      description = "More jobs than monitoring.queue_backlog_alert have been waiting or running in Hot's queue for 15 minutes: workers are not keeping up."
+    }
+    new-dead-letters = {
+      metric      = "NewDeadLetters", statistic = "Maximum", comparison = "GreaterThanThreshold", threshold = 0,
+      period      = 300, periods = 1, missing = "notBreaching",
+      description = "Jobs failed every attempt and were dead-lettered; the worker's logs say why."
+    }
   }
 }
 resource "aws_cloudwatch_metric_alarm" "hot" {
@@ -122,3 +132,28 @@ resource "aws_cloudwatch_metric_alarm" "instance_impaired" {
   ok_actions          = [aws_sns_topic.alerts.arn]
 }
 output "alert_topic_arn" { value = aws_sns_topic.alerts.arn }
+# An optional monthly cost budget over everything tagged with this
+# installation. AWS counts the tag only once HotInstallation is activated as a
+# cost allocation tag in the billing console.
+resource "aws_budgets_budget" "monthly" {
+  count        = local.config.monitoring.monthly_budget > 0 ? 1 : 0
+  name         = "hot-${local.config.name}"
+  budget_type  = "COST"
+  limit_amount = tostring(local.config.monitoring.monthly_budget)
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+  cost_filter {
+    name   = "TagKeyValue"
+    values = [format("user:HotInstallation$%s", local.config.name)]
+  }
+  dynamic "notification" {
+    for_each = length(local.config.monitoring.alert_emails) > 0 ? { ACTUAL = 80, FORECASTED = 100 } : {}
+    content {
+      notification_type          = notification.key
+      comparison_operator        = "GREATER_THAN"
+      threshold                  = notification.value
+      threshold_type             = "PERCENTAGE"
+      subscriber_email_addresses = local.config.monitoring.alert_emails
+    }
+  }
+}

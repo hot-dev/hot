@@ -302,7 +302,7 @@ run "backups_and_alerts" {
     error_message = "The host may only list snapshots."
   }
   assert {
-    condition     = google_monitoring_metric_descriptor.hot["agent_heartbeat"].type == "custom.googleapis.com/hot/hot-example/agent_heartbeat" && length(google_monitoring_alert_policy.hot) == 7
+    condition     = google_monitoring_metric_descriptor.hot["agent_heartbeat"].type == "custom.googleapis.com/hot/hot-example/agent_heartbeat" && length(google_monitoring_alert_policy.hot) == 9
     error_message = "Each installation owns its metric types, and every critical signal has an alert."
   }
   assert {
@@ -407,5 +407,44 @@ run "provisioned_buckets" {
   assert {
     condition     = google_storage_bucket_iam_member.storage["build"].bucket == "acme-hot-builds" && strcontains(google_storage_bucket_iam_member.storage["build"].condition[0].expression, "/objects/builds/")
     error_message = "The host reaches the role's prefix only."
+  }
+}
+
+run "mirrors_queues_and_budgets" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example-project/global/images/hot-host-amd64",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "image_registry" : "us-docker.pkg.dev/acme-mirror/hot",
+      "monitoring" : { "alert_emails" : ["ops@example.com"], "queue_backlog_alert" : 250, "monthly_budget" : 400, "billing_account" : "0A1B2C-3D4E5F-6A7B8C" },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = google_artifact_registry_repository_iam_member.mirror[0].project == "acme-mirror" && google_artifact_registry_repository_iam_member.mirror[0].location == "us" && google_artifact_registry_repository_iam_member.mirror[0].repository == "hot" && google_artifact_registry_repository_iam_member.mirror[0].role == "roles/artifactregistry.reader"
+    error_message = "The host account may read the mirror repository and nothing more."
+  }
+  assert {
+    condition     = google_monitoring_alert_policy.hot["queue-backlog"].conditions[0].condition_threshold[0].threshold_value == 250 && contains(keys(google_monitoring_metric_descriptor.hot), "new_dead_letters")
+    error_message = "Queue alerts use the chosen backlog threshold and alert on new dead letters."
+  }
+  assert {
+    condition     = google_billing_budget.monthly[0].billing_account == "0A1B2C-3D4E5F-6A7B8C" && google_billing_budget.monthly[0].amount[0].specified_amount[0].units == "400" && contains(keys(google_project_service.required), "billingbudgets.googleapis.com")
+    error_message = "The budget covers the installation's project on its billing account."
+  }
+}
+
+run "no_mirror_or_budget_by_default" {
+  command = plan
+  assert {
+    condition     = length(google_billing_budget.monthly) == 0 && length(google_artifact_registry_repository_iam_member.mirror) == 0 && !contains(keys(google_project_service.required), "billingbudgets.googleapis.com")
+    error_message = "Without a mirror or budget, there is no registry access and no budget."
   }
 }

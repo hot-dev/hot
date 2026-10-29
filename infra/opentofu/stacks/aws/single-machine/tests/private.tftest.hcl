@@ -367,7 +367,7 @@ run "backups_and_alerts" {
     error_message = "Snapshots run daily at the chosen hour and are kept for the chosen days."
   }
   assert {
-    condition     = length(aws_sns_topic_subscription.alerts) == 2 && length(aws_cloudwatch_metric_alarm.hot) == 8
+    condition     = length(aws_sns_topic_subscription.alerts) == 2 && length(aws_cloudwatch_metric_alarm.hot) == 10
     error_message = "Every alert email is subscribed and every critical signal has an alarm."
   }
   assert {
@@ -443,5 +443,44 @@ run "provisioned_buckets" {
   assert {
     condition     = strcontains(aws_iam_role_policy.runtime.policy, "arn:aws:s3:::acme-hot-data/builds/*") && strcontains(aws_iam_role_policy.runtime.policy, "arn:aws:s3:::acme-hot-data/files/*")
     error_message = "The host reaches each role's prefix only."
+  }
+}
+
+run "mirrors_queues_and_budgets" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "image_registry" : "123456789012.dkr.ecr.us-east-1.amazonaws.com/hot-mirror",
+      "monitoring" : { "alert_emails" : ["ops@example.com"], "queue_backlog_alert" : 250, "monthly_budget" : 400 },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition = anytrue([for s in jsondecode(aws_iam_role_policy.runtime.policy).Statement :
+    s.Resource == "arn:aws:ecr:us-east-1:123456789012:repository/hot-mirror/*" && contains(s.Action, "ecr:BatchGetImage")])
+    error_message = "The host role pulls only from the mirror's repositories."
+  }
+  assert {
+    condition     = aws_cloudwatch_metric_alarm.hot["queue-backlog"].threshold == 250 && aws_cloudwatch_metric_alarm.hot["new-dead-letters"].metric_name == "NewDeadLetters"
+    error_message = "Queue alarms use the chosen backlog threshold and alert on new dead letters."
+  }
+  assert {
+    condition     = aws_budgets_budget.monthly[0].limit_amount == "400" && contains(one(aws_budgets_budget.monthly[0].cost_filter).values, "user:HotInstallation$hot-example") && length(aws_budgets_budget.monthly[0].notification) == 2
+    error_message = "The budget covers this installation's tagged resources and emails the alert addresses."
+  }
+}
+
+run "no_mirror_or_budget_by_default" {
+  command = plan
+  assert {
+    condition     = length(aws_budgets_budget.monthly) == 0 && !strcontains(aws_iam_role_policy.runtime.policy, "ecr:")
+    error_message = "Without a mirror or budget, the host has no ECR access and there is no budget."
   }
 }

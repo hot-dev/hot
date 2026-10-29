@@ -507,3 +507,123 @@ run "scalable_roles_follow_the_size" {
     error_message = "Roles use general-purpose machines, task-workers the nested family, and the scheduler exactly one instance."
   }
 }
+
+run "an_ecr_mirror_is_parsed_for_the_host_role" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "image_registry" : "123456789012.dkr.ecr.eu-west-1.amazonaws.com/hot-mirror",
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = output.mirror.kind == "ecr" && output.mirror.account == "123456789012" && output.mirror.region == "eu-west-1" && output.mirror.repositories == "hot-mirror/*"
+    error_message = "An ECR mirror names its account, region and repositories."
+  }
+}
+
+run "an_artifact_registry_mirror_is_parsed_for_the_service_accounts" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example/global/images/hot",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "image_registry" : "us-docker.pkg.dev/acme-mirror/hot",
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = output.mirror.kind == "artifact-registry" && output.mirror.location == "us" && output.mirror.project == "acme-mirror" && output.mirror.repository == "hot"
+    error_message = "An Artifact Registry mirror names its location, project and repository."
+  }
+}
+
+run "other_mirrors_are_pulled_anonymously" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "image_registry" : "mirror.example.com:5000/hot",
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = output.mirror.kind == ""
+    error_message = "Only ECR and Artifact Registry mirrors use the host identity."
+  }
+}
+
+run "an_artifact_registry_mirror_names_its_repository" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example/global/images/hot",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "image_registry" : "us-docker.pkg.dev/acme-mirror",
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [var.installation]
+}
+
+run "a_gcp_budget_needs_a_billing_account" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example/global/images/hot",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "monitoring" : { "monthly_budget" : 500 },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [var.installation]
+}
+
+run "the_queue_alert_needs_a_positive_threshold" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "monitoring" : { "queue_backlog_alert" : 0 },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [var.installation]
+}

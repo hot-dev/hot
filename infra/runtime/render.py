@@ -82,7 +82,8 @@ CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "
                "settings", "data", "backup", "monitoring", "logging",
                # Scalable installations: which roles this host runs, whether it
                # migrates, and the pointer that releases migrations.
-               "preset", "roles", "migrations", "migration_pointer", "instance_group", "scaling", "data_disk", "db_pool"}
+               "preset", "roles", "migrations", "migration_pointer", "instance_group", "scaling", "data_disk", "db_pool",
+               "image_registry"}
 # data.postgres settings: the contract's, plus the endpoint a managed
 # database's stack adds for the host.
 POSTGRES_KEYS = {"mode", "runtime_role", "version", "tier", "storage_gb", "high_availability",
@@ -211,20 +212,35 @@ def runtime_role(config):
     return config.get("data", {}).get("postgres", {}).get("runtime_role", "hot_runtime")
 
 
-def log_settings(config):
+def log_settings(config, instance=""):
     """Container logs go to the cloud's log service with the VM's identity,
     or stay on the host. Shipping never blocks a container: when the
     destination is slow or down, lines beyond a bounded buffer are dropped.
-    Docker keeps a bounded local copy either way, for `docker logs`."""
+    Docker keeps a bounded local copy either way, for `docker logs`.
+
+    Each line can be traced to its installation, role, release, and host:
+    CloudWatch streams are named for the instance and container, and Cloud
+    Logging records the instance and the container's hot.* labels."""
     local = {"max-size": "10m", "max-file": "3"}
     if config.get("logging", {}).get("destination", "cloud") == "local":
         return {"driver": "local", "options": local}
     shipping = {"mode": "non-blocking", "max-buffer-size": "4m",
                 "cache-max-size": local["max-size"], "cache-max-file": local["max-file"]}
     if config["cloud"] == "aws":
+        tag = f"{instance}/{{{{.Name}}}}" if instance else "{{.Name}}"
         return {"driver": "awslogs", "options": {"awslogs-region": config["region"], "awslogs-group": f"/hot/{config['name']}",
-                                                  "tag": "{{.Name}}", **shipping}}
-    return {"driver": "gcplogs", "options": {"gcp-project": config["project"], **shipping}}
+                                                  "tag": tag, **shipping}}
+    return {"driver": "gcplogs", "options": {"gcp-project": config["project"], "labels": "hot.installation,hot.role,hot.release",
+                                             **shipping}}
+
+
+def mirrored(name, image, registry):
+    """An image reference in a mirror registry: the repository is named for
+    the image's role (hot, postgres, valkey, ingress), and the digest is
+    kept, so the content is the release's exactly."""
+    if not registry:
+        return image
+    return f"{registry.rstrip('/')}/{name}@{image.split('@', 1)[1]}"
 
 
 def verify_manifest_signature(manifest_path, bundle_path, signer=RELEASE_SIGNER, cosign="cosign"):
@@ -240,7 +256,7 @@ def verify_manifest_signature(manifest_path, bundle_path, signer=RELEASE_SIGNER,
 
 
 def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_session_tokens=False,
-           operator_secrets=None, extra_deny=()):
+           operator_secrets=None, extra_deny=(), instance=""):
     """`operator_secrets` maps a Hot service role to extra secret names, such
     as SMTP or OAuth credentials, that it mounts from the operator bundle.
     `extra_deny` adds addresses user code may never reach, such as an
@@ -263,7 +279,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         raise ValueError("S3 authentication must be identity or files")
     if s3_session_tokens and s3_auth != "files":
         raise ValueError("Session-token files require S3 file authentication")
-    images = manifest["images"]
+    images = {name: mirrored(name, image, config.get("image_registry", "")) for name, image in manifest["images"].items()}
     size = SIZES[config.get("size", "small")]
     memory = {role: f"{mb}m" for role, mb in size["memory"].items()}
     secrets, services = {}, {}
@@ -510,8 +526,10 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             services.pop(job, None)
     used = {s["source"] for service in services.values() for s in service.get("secrets", [])}
     secrets = {name: spec for name, spec in secrets.items() if name in used}
-    for service in services.values():
-        service["logging"] = log_settings(config)
+    for name, service in services.items():
+        service["logging"] = log_settings(config, instance)
+        service["labels"] = {"hot.installation": config["name"], "hot.role": name,
+                             "hot.release": str(manifest.get("release", ""))}
     # No Docker socket is ever mounted. The separate Kata daemon owns guests.
     compose = {"name": config["name"], "services": services, "secrets": secrets,
                "networks": {"default": {"ipam": {"config": [{"subnet": RUNTIME_SUBNET}]}}}}

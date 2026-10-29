@@ -242,6 +242,11 @@ bounded local copy (3 files of 10 MB per container) remains for
 `docker logs`. Set `logging.destination` to `local` to keep logs on the host
 only. Logs are lost with the host then.
 
+Every line names the host and release that wrote it, which matters once a
+scalable installation runs many hosts. On AWS each container's stream is
+`<instance ID>/<container>`. Cloud Logging records the instance and the
+container's `hot.installation`, `hot.role`, and `hot.release` labels.
+
 The agent also ships the host journal. That is every agent line, plus
 warnings and errors from the rest of the host, such as the kernel's OOM
 kills, Docker, and failed units. They go to the `host-journal` stream of the
@@ -265,6 +270,12 @@ Every 30 seconds the host agent publishes these metrics, to CloudWatch
 | `DataDiskUsedPercent` | The larger of space and inodes used on the data disk |
 | `BackupAgeHours` | Hours since the newest completed snapshot |
 | `CertificateDaysLeft` | Days until the ingress TLS certificate expires (0 if unreadable) |
+| `QueueBacklog` | Jobs waiting or running in Hot's queue |
+| `QueueDeadLetters` | Jobs dead-lettered after failing every attempt |
+| `NewDeadLetters` | Jobs dead-lettered since the previous measurement |
+
+Hosts that run the worker measure the queue every 5 minutes with
+`hot queue status`, inside the worker.
 
 The stacks alert on them. Set `monitoring.alert_emails`; AWS sends each address
 an SNS confirmation email first. Alerts reach those addresses independently of
@@ -280,6 +291,8 @@ Hot's own email, and both firing and resolving are sent.
 | `disk-pressure` | Data disk over 85% for 15 minutes | Grow the disk, or move builds and files to object storage. |
 | `backup-stale` | No snapshot for 30 hours, or no backup status | Check the snapshot policy or schedule in the console. |
 | `certificate-expiring` | The ingress certificate expires within 14 days | Put the renewed chain and key in the operator secret, then `restart-service ingress`. |
+| `queue-backlog` | More than `monitoring.queue_backlog_alert` jobs (default 1000) queued for 15 minutes | Workers are not keeping up. Check `services-unhealthy` and the worker's `logs`; then move to a larger size, or on a scalable installation raise `scaling.worker.max` or `scaling.task_worker.max`. |
+| `new-dead-letters` | Jobs were dead-lettered since the last measurement | Read the worker's `logs` for the failing jobs' errors. |
 
 Liveness, dependency reachability, and end-to-end readiness are separate
 signals, and a missing heartbeat or backup status alerts rather than passing.
@@ -402,6 +415,32 @@ Upgrades follow these rules, and the deploy agent enforces them:
   - steps, restore point, and any error.
 
   `diagnostics` shows the last 5.
+
+**Managed PostgreSQL and Valkey.**
+- *Minor versions* are applied by the cloud. RDS and ElastiCache apply them
+  in the instance's maintenance window (`auto_minor_version_upgrade`), and
+  the stacks set `apply_immediately = false`, so other changes wait for the
+  window too. Cloud SQL and Memorystore apply them during Google's
+  maintenance. Each causes a short restart or, with `high_availability`, a
+  failover. Hot reconnects; `dependencies-unreachable` alerts only after 10
+  minutes. The scheduler exits if it loses its database lock and starts
+  again.
+- *Major versions* are fixed. The contract accepts PostgreSQL 18 only, and
+  RDS is created with `allow_major_version_upgrade = false`. A new major
+  version arrives with a Hot release and its own procedure.
+- *Restores* use the provider's point-in-time recovery; see
+  [Recovery](#recovery).
+
+**Choices that cannot change in place.** Changing these replaces the
+resource, and the plan workflow's durable-resource guard refuses that
+unless `allow_data_deletion` is set:
+
+| Choice | Instead |
+| --- | --- |
+| `name`, `cloud`, `region` | A new installation, then move data with backups |
+| `zone` (single machine) | Restore a snapshot into a new installation in that zone |
+| Bucket name or location | A new bucket and `hot db move-storage` ([Moving builds and files to a bucket](#moving-builds-and-files-to-a-bucket)) |
+| Local to managed data | A data move ([Moving data off the host](#moving-data-off-the-host)) |
 
 ## Scalable installations
 
@@ -750,8 +789,22 @@ Between host image rebuilds, Ubuntu's unattended security updates (on by
 default) patch the host's packages. Kernel updates take effect when the
 instance is replaced. Rollback follows [Versions and upgrades](#versions-and-upgrades).
 
-Mirroring images to your own registry is not supported yet: manifests name
-`ghcr.io` and Docker Hub images by digest.
+**Image mirrors.** Set `image_registry` to pull every image from a
+registry you control instead of `ghcr.io` and Docker Hub. Each image keeps
+the manifest's digest, so the agent's signature check and the pinned content
+are unchanged. Copy each release's images to `<image_registry>/hot`,
+`/postgres`, `/valkey`, and `/ingress` before you deploy it. A tool that keeps
+digests works, such as `crane copy <manifest image> <image_registry>/hot`.
+- An ECR mirror (`<account>.dkr.ecr.<region>.amazonaws.com/<path>`): the
+  host role may read repositories under `<path>/` and nothing else.
+- An Artifact Registry mirror (`<location>-docker.pkg.dev/<project>/<repository>`):
+  each host account gets `roles/artifactregistry.reader` on that
+  repository, which may be in another project. The apply identity needs to
+  set that repository's IAM policy.
+- Any other registry is pulled from anonymously.
+
+The agent signs in with the host's own identity before each pull; there is
+no registry password to store.
 
 ## Capacity, retention, and cost
 
@@ -802,7 +855,19 @@ Execution history, builds, and files are kept by Hot's own settings.
 - log ingestion and storage, metrics, and alarms;
 - Secrets Manager secrets on AWS.
 
-Use your cloud's budgets and cost alerts. Hot does not cap spending.
+**Budgets.** Set `monitoring.monthly_budget` to create a monthly cost
+budget. It emails `monitoring.alert_emails` at 80% of actual spend and when
+forecast spend reaches 100%. Budgets alert; they never cap spending.
+- AWS: the amount is in USD. The budget counts resources tagged
+  `HotInstallation=<name>`, which the stacks tag. Activate `HotInstallation`
+  as a cost allocation tag in the Billing console, once per account;
+  until then the budget counts nothing. The apply role needs Budgets
+  permissions.
+- GCP: the amount is in the billing account's currency, and the budget counts
+  the installation's project, including anything else in it. Set
+  `monitoring.billing_account`. The apply identity needs
+  `roles/billing.costsManager` on that billing account, and the plan identity
+  `roles/billing.viewer`. The stack enables the Billing Budget API.
 
 ## Local validation
 

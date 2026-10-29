@@ -138,7 +138,41 @@ run "endpoints" {
     error_message = "Web groups replace hosts that fail the load balancer's health check."
   }
   assert {
-    condition     = length(aws_cloudwatch_metric_alarm.hot) == 7 && aws_cloudwatch_metric_alarm.hot["scheduler-stopped"].treat_missing_data == "breaching"
+    condition     = length(aws_cloudwatch_metric_alarm.hot) == 9 && aws_cloudwatch_metric_alarm.hot["scheduler-stopped"].treat_missing_data == "breaching"
     error_message = "Every signal alarms, and a missing scheduler status breaches."
+  }
+}
+
+run "every_role_pulls_from_the_mirror" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "size" : "small",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "image_registry" : "123456789012.dkr.ecr.us-east-1.amazonaws.com/hot-mirror",
+      "monitoring" : { "monthly_budget" : 900 },
+      "data" : { "postgres" : { "mode" : "managed" }, "valkey" : { "mode" : "managed" } },
+      "storage" : {
+        "build" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "builds", "provision" : true },
+        "file" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "files", "provision" : true }
+      }
+    }
+  }
+  assert {
+    condition = alltrue([for role, policy in aws_iam_role_policy.runtime : anytrue([for s in jsondecode(policy.policy).Statement :
+    s.Resource == "arn:aws:ecr:us-east-1:123456789012:repository/hot-mirror/*"])])
+    error_message = "Every role's hosts may pull from the mirror."
+  }
+  assert {
+    condition     = aws_budgets_budget.monthly[0].limit_amount == "900" && length(aws_budgets_budget.monthly[0].notification) == 0
+    error_message = "A budget without alert emails still tracks spend, and notifies no one."
   }
 }

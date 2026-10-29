@@ -88,7 +88,12 @@ GCP_METRIC_PREFIX = "custom.googleapis.com/hot/"
 GCP_METRIC_NAMES = {"AgentHeartbeat": "agent_heartbeat", "UnhealthyServices": "unhealthy_services",
                     "SchedulerRunning": "scheduler_running", "DependenciesReachable": "dependencies_reachable",
                     "Ready": "ready", "DataDiskUsedPercent": "data_disk_used_percent",
-                    "BackupAgeHours": "backup_age_hours", "CertificateDaysLeft": "certificate_days_left"}
+                    "BackupAgeHours": "backup_age_hours", "CertificateDaysLeft": "certificate_days_left",
+                    "QueueBacklog": "queue_backlog", "QueueDeadLetters": "queue_dead_letters",
+                    "NewDeadLetters": "new_dead_letters"}
+# How often a worker host measures Hot's queue: hot queue status starts a
+# process, so not every cycle.
+QUEUE_MEASURE_SECONDS = 300
 
 
 class AgentError(Exception):
@@ -148,6 +153,13 @@ class Aws:
         self.region = region
         self.log_group = log_group
 
+    def registry_password(self, host):
+        """An ECR password for Docker, from the instance role."""
+        region = host.split(".")[3]
+        found = Aws(region).call("ecr", "AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken", {},
+                                 endpoint="api.ecr")
+        return base64.b64decode(found["authorizationData"][0]["authorizationToken"]).decode().split(":", 1)[1]
+
     def instance_name(self):
         """The EC2 instance ID, which the Auto Scaling group lists."""
         _, imds_token = http("PUT", self.IMDS + "/latest/api/token",
@@ -165,8 +177,8 @@ class Aws:
                         headers=auth)
         return json.loads(creds)
 
-    def call(self, service, target, payload):
-        host = f"{service}.{self.region}.amazonaws.com"
+    def call(self, service, target, payload, endpoint=""):
+        host = f"{endpoint or service}.{self.region}.amazonaws.com"
         body = json.dumps(payload).encode()
         headers = sigv4_headers("POST", host, self.region, service, target, body,
                                 self.credentials(), datetime.datetime.now(datetime.timezone.utc))
@@ -340,6 +352,10 @@ class Gcp:
         self.call("POST", "https://logging.googleapis.com/v2/entries:write", {
             "logName": f"projects/{self.project}/logs/{reference or 'hot-agent-status'}",
             "resource": {"type": "global"}, "entries": [{"jsonPayload": status, "severity": "INFO"}]})
+
+    def registry_password(self, host):
+        """An access token, which Artifact Registry accepts as a password."""
+        return self.token()
 
     def instance_name(self):
         """The instance name, which the managed instance group lists."""
@@ -776,7 +792,8 @@ class Agent:
         compose = render.render(self.config, manifest, str(HOT_ROOT / "data"), str(self.secrets_root),
                                 s3_auth="files" if s3_files else "identity", s3_session_tokens=sessions,
                                 operator_secrets=routes,
-                                extra_deny=self.resolve(data_endpoints(self.config, operator)))
+                                extra_deny=self.resolve(data_endpoints(self.config, operator)),
+                                instance=self.instance_name())
         (bundle / "compose.json").write_text(json.dumps(compose, indent=2))
         (bundle / "nginx.conf").write_text(render.nginx_config(render.validate(self.config)))
         (bundle / "init.sql").write_text(render.INIT_SQL)
@@ -799,6 +816,22 @@ class Agent:
             except OSError as error:
                 raise AgentError(f"Cannot resolve the existing data service {host}: {error}") from error
         return sorted(addresses)
+
+    def registry_login(self):
+        """Sign Docker in to a private mirror (image_registry) with the VM's
+        identity: ECR on AWS, Artifact Registry on GCP. Other mirrors are
+        pulled anonymously."""
+        registry = self.config.get("image_registry", "")
+        host = registry.split("/", 1)[0]
+        if not host:
+            return
+        if re.fullmatch(r"[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com", host):
+            user, password = "AWS", self.cloud.registry_password(host)
+        elif host.endswith("-docker.pkg.dev"):
+            user, password = "oauth2accesstoken", self.cloud.registry_password(host)
+        else:
+            return
+        self.run_command(["docker", "login", "--username", user, "--password-stdin", f"https://{host}"], input=password)
 
     def compose(self, bundle, *args):
         return self.run_command(["docker", "compose", "-f", str(bundle / "compose.json"), *args], cwd=bundle)
@@ -883,6 +916,7 @@ class Agent:
         bundle = self.render_bundle(release, manifest, self.operator_secrets())
         self.deliver_secrets()
         step("secrets")
+        self.registry_login()
         self.compose(bundle, "--profile", "admin", "pull", "--quiet")
         step("pulled")
         if moves:
@@ -1242,6 +1276,24 @@ class Agent:
         now = now or datetime.datetime.now(datetime.timezone.utc)
         return round((expires.replace(tzinfo=datetime.timezone.utc) - now).total_seconds() / 86400, 1)
 
+    def queue_metrics(self, bundle, now):
+        """Work waiting or in progress in Hot's queue, dead-lettered work, and
+        how much of that is new since the last measurement, measured at most
+        every QUEUE_MEASURE_SECONDS. These are the signals for queue alerts
+        and, later, worker scaling."""
+        last = getattr(self, "_queue_measured", None)
+        if last and (now - last[0]).total_seconds() < QUEUE_MEASURE_SECONDS:
+            return last[1]
+        try:
+            backlog, dead = self.queue_backlog(bundle)
+        except (AgentError, subprocess.CalledProcessError):
+            return {}
+        added = max(0, dead - last[1]["QueueDeadLetters"][0]) if last else 0
+        measured = {"QueueBacklog": (backlog, "Count"), "QueueDeadLetters": (dead, "Count"),
+                    "NewDeadLetters": (added, "Count")}
+        self._queue_measured = (now, measured)
+        return measured
+
     def observe(self, probe=None, now=None):
         """The health metrics the stacks alarm on. Ones that need a deployed
         release are left out before the first deploy."""
@@ -1274,6 +1326,8 @@ class Agent:
                 days = 0  # unreadable: alarm rather than pass
             if days is not None:
                 metrics["CertificateDaysLeft"] = (days, "None")
+            if "worker" in self.roles() and "worker" in healthy:
+                metrics.update(self.queue_metrics(self.releases / release / "bundle", now))
         usage = os.statvfs(self.data_root)
         used = max(1 - usage.f_bavail / max(usage.f_blocks, 1), 1 - usage.f_favail / max(usage.f_files, 1))
         metrics["DataDiskUsedPercent"] = (round(100 * used, 1), "Percent")

@@ -1320,6 +1320,10 @@ IAM, generation preconditions, or real composition behavior.
       waited for the next release.
 - [ ] Document restore and supported database/cache upgrades, including any
       maintenance downtime and immutable service choices.
+      [Versions and upgrades](../../infra/README.md#versions-and-upgrades)
+      covers managed minor and major versions, maintenance restarts and
+      failovers, and the choices that replace a resource. Qualifying
+      failover remains.
 
 Completion: the same application acceptance suite on managed services, including
 a demonstrated move from a populated single-machine installation, managed-data
@@ -1656,6 +1660,10 @@ release of the three presets.
       the release order above.
 - [ ] Publish queue backlog, oldest-message age, and task-slot metrics for
       autoscaling.
+      Worker hosts publish the queue backlog, dead-lettered jobs, and new
+      dead letters every 5 minutes, and the stacks alert on a sustained
+      backlog and on new dead letters. Oldest-message age and task slots
+      need Hot to report them.
 - [ ] Qualify Valkey failover with queue reconciliation, and PostgreSQL
       failover with scheduler lock loss.
 - [ ] Scale queue workers using measured queue demand, age/lag, and capacity.
@@ -1993,7 +2001,9 @@ or an existing operator destination without coupling telemetry to S3.
       Keep remediation decisions and supported versions tied to release records.
       The runtime image is signed and carries build provenance and an SBOM.
       Each release attaches a Trivy vulnerability report, which never blocks
-      it. Customer mirrors are not supported yet.
+      it. `image_registry` points the hosts at a customer mirror. Images keep
+      their manifest digests, and hosts sign in to ECR or Artifact Registry
+      with their own identity.
 
 ### 7. State recovery and infrastructure drift
 
@@ -2054,8 +2064,9 @@ or an existing operator destination without coupling telemetry to S3.
       replicas, storage, requests, NAT/endpoints, load balancers, logging, backups,
       and KMS. Offer spend alerts and usage reporting with documented limits;
       do not present alerts as guaranteed spend caps.
-      The guide lists the cost drivers and points to cloud budgets; no spend
-      alerts are provisioned yet.
+      The guide lists the cost drivers. `monitoring.monthly_budget` creates
+      an AWS or GCP budget that emails the alert addresses; estimates and
+      usage reporting remain.
 
 ## Validation matrix and first implementation slices
 
