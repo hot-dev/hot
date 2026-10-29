@@ -89,6 +89,9 @@ meta {
       (production) or directly from disk (dev mode). The `resource` field is
       a path relative to a configured resource root; the `dest` field is the
       absolute destination path inside the container.
+    - `registry-auth` — `BoxRegistryAuth` naming the context secret that
+      holds the registry credential for a private image. The token never
+      goes in source. See `BoxRegistryAuth`.
 
     Individual resource fields override the values from the size preset.
     If no `size` is specified, defaults to `"small"`.
@@ -126,7 +129,8 @@ type {
     tmp-size: Int?,
     disk-size: Int?,
     memory: Int?,
-    mounts: Vec<BoxMount>?
+    mounts: Vec<BoxMount>?,
+    registry-auth: BoxRegistryAuth?
 }
 
 BoxMount
@@ -157,6 +161,49 @@ meta {
 type {
     resource: Str,
     dest: Str
+}
+
+BoxRegistryAuth
+meta {
+    doc: """
+    Names the context secret that holds a private image's registry credential.
+    Set it as `registry-auth` on a `BoxConf`.
+
+    **Fields**
+    - `secret` — name of a context secret. Its value is a map with
+      `registry` (e.g. `"ghcr.io"`), `username` and `token`.
+
+    The token never appears in Hot code or in the task's args. `start` reads
+    the secret from the run's own context: the environment's and project's
+    context variables, plus `hot/ctx.hot` in development. It checks that
+    `registry` serves the image, then seals the credential for the task
+    worker, which uses it for that one pull. Each start pulls, so the registry
+    decides every time whether the image is available. An image already
+    cached on the worker can't be used without a credential the registry
+    accepts.
+
+    **Example**
+
+    ```hot
+    // hot/ctx.hot (development). In a deployed environment, set the same
+    // value as the environment's context variable "ghcr-pull".
+    ::hot::ctx/set-secret("ghcr-pull", {
+        registry: "ghcr.io",
+        username: "my-bot",
+        token: ::hot::env/get("GHCR_TOKEN"),
+    })
+
+    // In your code: name the secret, never the token.
+    ::hot::box/start(BoxConf({
+        image: "ghcr.io/my-org/my-tool:1",
+        network: "none",
+        registry-auth: BoxRegistryAuth({secret: "ghcr-pull"}),
+    }))
+    ```
+    """
+}
+type {
+    secret: Str
 }
 
 BoxSizeProfile

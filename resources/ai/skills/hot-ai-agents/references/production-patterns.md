@@ -93,6 +93,11 @@ Use `put-if-missing` or an append primitive for reservations. Treat a
 reservation without a result as a recoverable state with an explicit timeout
 or retry policy.
 
+Handlers for different events of one stream can run at the same time. Change
+shared store state with `put-if` (retrying when it returns `false`) or
+`increment`, never with a `get` followed by a `put`, which can drop a
+concurrent handler's write.
+
 ## Gate Effects
 
 Classify every tool call as:

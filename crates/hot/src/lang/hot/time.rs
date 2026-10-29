@@ -28,6 +28,39 @@ fn create_temporal_map(type_name: &str, data: IndexMap<Val, Val>) -> Val {
     Val::Map(Box::new(map))
 }
 
+/// Nanoseconds since the Unix epoch by the system clock.
+pub(crate) fn system_epoch_nanos() -> Result<i128, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as i128)
+        .map_err(|_| "Failed to get current time".to_string())
+}
+
+/// Nanoseconds since the Unix epoch now: the test clock when a test fixed it
+/// (`::hot::test/set-now`), otherwise the system clock. Every "now" in this
+/// namespace reads time here.
+pub(crate) fn now_epoch_nanos() -> Result<i128, String> {
+    match crate::lang::hot::test::fixed_now() {
+        Some(nanos) => Ok(nanos),
+        None => system_epoch_nanos(),
+    }
+}
+
+/// The local date-time now, by the same clock as `now_epoch_nanos`.
+fn local_now() -> chrono::DateTime<chrono::Local> {
+    match crate::lang::hot::test::fixed_now() {
+        Some(nanos) => chrono::Local.timestamp_nanos(nanos as i64),
+        None => chrono::Local::now(),
+    }
+}
+
+/// An Instant at `nanos` since the Unix epoch.
+pub(crate) fn instant_val(nanos: i128) -> Val {
+    let mut data = IndexMap::new();
+    data.insert(Val::from("epochNanoseconds"), Val::Int(nanos as i64));
+    create_temporal_map("Instant", data)
+}
+
 /// Get current time as an Instant object
 pub fn now(args: &[Val]) -> HotResult<Val> {
     tracing::debug!("time::now called with {} args", args.len());
@@ -35,15 +68,10 @@ pub fn now(args: &[Val]) -> HotResult<Val> {
         return HotResult::Err(Val::from("now expects 0 arguments"));
     }
 
-    // Return current system time as an Instant object (Map with epochNanoseconds)
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(duration) => {
-            let nanos = duration.as_nanos() as i64;
-            let mut data = IndexMap::new();
-            data.insert(Val::from("epochNanoseconds"), Val::Int(nanos));
-            HotResult::Ok(create_temporal_map("Instant", data))
-        }
-        Err(_) => HotResult::Err(Val::from("Failed to get current time")),
+    // Return the current time as an Instant object (Map with epochNanoseconds)
+    match now_epoch_nanos() {
+        Ok(nanos) => HotResult::Ok(instant_val(nanos)),
+        Err(e) => HotResult::Err(Val::from(e)),
     }
 }
 
@@ -390,7 +418,7 @@ fn val_to_plain_datetime(val: &Val) -> Result<temporal_rs::PlainDateTime, String
 }
 
 /// Convert a Hot Duration map to a temporal_rs::Duration.
-fn val_to_duration(val: &Val) -> Result<TemporalDuration, String> {
+pub(crate) fn val_to_duration(val: &Val) -> Result<TemporalDuration, String> {
     let m = match val {
         Val::Map(m) => m,
         _ => return Err("expected a Duration value".to_string()),
@@ -730,7 +758,7 @@ pub fn parse_plain_date_time(args: &[Val]) -> HotResult<Val> {
 
 /// Current local date as PlainDate
 pub fn now_plain_date(_args: &[Val]) -> HotResult<Val> {
-    let today = chrono::Local::now().date_naive();
+    let today = local_now().date_naive();
     let mut m = IndexMap::new();
     m.insert(Val::from("$type"), Val::from("::hot::time/PlainDate"));
     m.insert(Val::from("year"), Val::Int(today.year() as i64));
@@ -741,7 +769,7 @@ pub fn now_plain_date(_args: &[Val]) -> HotResult<Val> {
 
 /// Current local time as PlainTime (hour, minute, second)
 pub fn now_plain_time(_args: &[Val]) -> HotResult<Val> {
-    let now = chrono::Local::now().time();
+    let now = local_now().time();
     let mut m = IndexMap::new();
     m.insert(Val::from("$type"), Val::from("::hot::time/PlainTime"));
     m.insert(Val::from("hour"), Val::Int(now.hour() as i64));
@@ -752,7 +780,7 @@ pub fn now_plain_time(_args: &[Val]) -> HotResult<Val> {
 
 /// Current local date-time as PlainDateTime
 pub fn now_plain_date_time(_args: &[Val]) -> HotResult<Val> {
-    let now = chrono::Local::now().naive_local();
+    let now = local_now().naive_local();
     let mut m = IndexMap::new();
     m.insert(Val::from("$type"), Val::from("::hot::time/PlainDateTime"));
     m.insert(Val::from("year"), Val::Int(now.year() as i64));
@@ -1176,7 +1204,10 @@ pub fn instant_from_plain_time(args: &[Val]) -> HotResult<Val> {
     };
 
     // Get today's date in UTC
-    let today = chrono::Utc::now().date_naive();
+    let today = match now_epoch_nanos() {
+        Ok(nanos) => chrono::Utc.timestamp_nanos(nanos as i64).date_naive(),
+        Err(e) => return HotResult::Err(Val::from(e)),
+    };
 
     // Combine nanosecond components
     let total_nanos = nanosecond
@@ -1651,9 +1682,9 @@ pub fn now_zoned(args: &[Val]) -> HotResult<Val> {
         _ => return HotResult::Err(Val::from("now-zoned expects a timezone string")),
     };
 
-    let epoch_nanos = match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(d) => d.as_nanos() as i128,
-        Err(_) => return HotResult::Err(Val::from("Failed to get current time")),
+    let epoch_nanos = match now_epoch_nanos() {
+        Ok(nanos) => nanos,
+        Err(e) => return HotResult::Err(Val::from(e)),
     };
 
     let time_zone = match TemporalTimeZone::try_from_str(tz_str) {

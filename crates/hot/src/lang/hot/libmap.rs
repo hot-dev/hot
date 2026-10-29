@@ -230,53 +230,7 @@ pub fn pure_op(name: &str) -> Option<PureOpDescriptor> {
         .copied()
 }
 
-/// Whether a native may run inside a `where` predicate: deterministic and
-/// free of side effects. Anything not listed is denied, including clocks,
-/// randomness, environment and context, files, stores, HTTP, events, tasks
-/// and sockets. Higher-order collection functions are allowed because the VM
-/// checks the natives their callbacks reach.
-pub fn is_pure_native(name: &str) -> bool {
-    const PURE_NAMESPACES: &[&str] = &[
-        "::hot::base64",
-        "::hot::bit",
-        "::hot::bool",
-        "::hot::bytes",
-        "::hot::cmp",
-        "::hot::coll",
-        "::hot::hash",
-        "::hot::hex",
-        "::hot::hmac",
-        "::hot::iter",
-        "::hot::json",
-        "::hot::map",
-        "::hot::math",
-        "::hot::md",
-        "::hot::meta",
-        "::hot::mime",
-        "::hot::regex",
-        "::hot::str",
-        "::hot::time",
-        "::hot::type",
-        "::hot::uri",
-        "::hot::xml",
-    ];
-    let Some((namespace, function)) = name.rsplit_once('/') else {
-        return false;
-    };
-    // `call` invokes a function value; the VM checks what that reaches.
-    if namespace == "::hot::lang" {
-        return matches!(function, "call" | "call-internal");
-    }
-    if !PURE_NAMESPACES.contains(&namespace) {
-        return false;
-    }
-    !(function.starts_with("rand")
-        || function.starts_with("now")
-        || matches!(
-            (namespace, function),
-            ("::hot::coll", "pmap") | ("::hot::time", "since") | ("::hot::time", "until")
-        ))
-}
+pub use hot_lang::lang::natives::is_pure_native;
 
 pub type HotLibMap = ahash::AHashMap<String, HotLibFn>;
 
@@ -1117,6 +1071,22 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             "::hot::test/is-test".to_string(),
             HotLibFn::vm_callback(meta::is_test),
         );
+        // Test harness: the clock a test fixes, and the events and schedules
+        // it delivers itself. Each errs outside a `hot test` run.
+        for (name, func) in [
+            ("set-now", test::set_now as LibFnType),
+            ("advance", test::advance),
+            ("clear-now", test::clear_now),
+            ("fixed-now", test::fixed_now_fn),
+            ("reset", test::reset),
+            ("take-sent", test::take_sent),
+            ("arm-schedule", test::arm_schedule),
+            ("cancel-schedule", test::cancel_schedule),
+            ("schedules", test::schedules),
+            ("take-due", test::take_due),
+        ] {
+            map.insert(format!("::hot::test/{name}"), HotLibFn::LibFn(func));
+        }
         map.insert(
             "::hot::meta/source".to_string(),
             HotLibFn::vm_callback(meta::source),
@@ -1865,6 +1835,14 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             HotLibFn::VmAwareFn(store::put_if_missing),
         );
         map.insert(
+            "::hot::store/put-if".to_string(),
+            HotLibFn::VmAwareFn(store::put_if),
+        );
+        map.insert(
+            "::hot::store/increment".to_string(),
+            HotLibFn::VmAwareFn(store::increment),
+        );
+        map.insert(
             "::hot::store/get".to_string(),
             HotLibFn::VmAwareFn(store::get),
         );
@@ -1947,4 +1925,27 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
 
         map
     })
+}
+
+#[cfg(test)]
+mod native_names_tests {
+    /// The compiler resolves `call-lib` targets against `hot_lang`'s list of
+    /// native names, so that list must name exactly the functions this table
+    /// implements.
+    #[test]
+    fn hot_lang_native_names_match_the_function_table() {
+        let table: std::collections::BTreeSet<&str> =
+            super::get_hotlib_map().keys().map(String::as_str).collect();
+        let listed: std::collections::BTreeSet<&str> = hot_lang::lang::natives::NATIVE_FUNCTIONS
+            .iter()
+            .copied()
+            .collect();
+        let missing: Vec<_> = table.difference(&listed).collect();
+        let extra: Vec<_> = listed.difference(&table).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "update NATIVE_FUNCTIONS in crates/hot_lang/src/lang/natives.rs: \
+             missing {missing:?}, no longer implemented {extra:?}"
+        );
+    }
 }

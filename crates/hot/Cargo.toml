@@ -2,7 +2,7 @@
 name = "hot"
 version.workspace = true
 edition.workspace = true
-description = "Core Hot language, runtime, storage, and package support"
+description = "Hot runtime, storage, and package support"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -18,8 +18,9 @@ local-embeddings = ["dep:fastembed"]
 test-utils = []
 
 [dependencies]
+hot_lang = { workspace = true }
 ahash = { workspace = true }
-fastnum = { workspace = true }
+fastnum = { workspace = true, features = ["sqlx", "tokio-postgres"] }
 serde_json = { workspace = true, features = ["preserve_order", "arbitrary_precision"] }
 postcard = { workspace = true }
 serde = { workspace = true }

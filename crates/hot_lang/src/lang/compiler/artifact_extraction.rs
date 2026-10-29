@@ -206,10 +206,50 @@ fn merge_alias_meta(target_meta: Option<&Val>, alias_meta: &Val) -> Val {
     }
 }
 
+/// The meta key that sets how long a run of a function may take, in seconds.
+pub const RUN_TIMEOUT_META_KEY: &str = "timeout";
+
+/// Read a function's `timeout` meta: `None` without the key, else the
+/// seconds when the value is a positive whole number, or why it is not.
+pub fn run_timeout_from_meta(meta: &Val) -> Option<Result<u64, String>> {
+    let Val::Map(meta_map) = meta else {
+        return None;
+    };
+    let value = meta_map.get(&Val::from(RUN_TIMEOUT_META_KEY))?;
+    Some(match value {
+        Val::Int(seconds) if *seconds > 0 => Ok(*seconds as u64),
+        other => Err(format!(
+            "`timeout` must be a positive whole number of seconds, got {}",
+            other
+        )),
+    })
+}
+
+/// The meta a run of `ns/var_name` sees: the var's own meta over its alias
+/// target's, alias keys winning, as handler and schedule registration merge
+/// them. An alias without meta of its own runs under its target's.
+pub fn effective_function_meta(program: &Program, ns: &str, var_name: &str) -> Option<Val> {
+    let ns_path = NsPath::from_string(ns);
+    let namespace = program.namespaces.get(&ns_path)?;
+    let (var, value) = namespace
+        .scope
+        .vars
+        .iter()
+        .find(|(v, _)| v.sym.name() == var_name)?;
+    let target_meta = resolve_alias_target(program, &ns_path.to_string(), value)
+        .and_then(|(target_var, _)| target_var.meta.as_ref())
+        .map(|meta| &meta.val);
+    match (&var.meta, target_meta) {
+        (Some(meta), target_meta) => Some(merge_alias_meta(target_meta, &meta.val)),
+        (None, target_meta) => target_meta.cloned(),
+    }
+}
+
 impl Compiler {
     /// Extract event handlers from the compiled program
     /// This should be called after compilation is complete
-    /// Returns an error if any event handlers have invalid signatures
+    /// Returns an error if any event handlers have invalid signatures, or any
+    /// function has an invalid `timeout` meta
     pub fn extract_event_handlers(&mut self, program: &Program) -> CompilerResult<()> {
         self.event_handlers.clear();
         self.validation_errors.clear(); // Clear at the start of extraction
@@ -223,6 +263,7 @@ impl Compiler {
         for (ns_path, namespace) in &program.namespaces {
             tracing::trace!("Scanning namespace: {}", ns_path.to_string());
             self.scan_namespace_for_event_handlers(&ns_path.to_string(), namespace, program);
+            self.validate_run_timeouts(&ns_path.to_string(), namespace, program);
         }
 
         tracing::trace!("Found {} event handler types", self.event_handlers.len());
@@ -327,7 +368,7 @@ impl Compiler {
             "Installing tool-spec registry with {} entries",
             registry.entries.len()
         );
-        crate::lang::hot::internal_mcp::set_registry(registry);
+        crate::lang::registry::mcp::set_registry(registry);
         Ok(())
     }
 
@@ -339,9 +380,9 @@ impl Compiler {
     pub fn build_tool_specs(
         &self,
         program: &Program,
-    ) -> crate::lang::hot::internal_mcp::ToolSpecRegistry {
+    ) -> crate::lang::registry::mcp::ToolSpecRegistry {
         let type_registry = self.build_type_registry(program);
-        let mut registry = crate::lang::hot::internal_mcp::ToolSpecRegistry::default();
+        let mut registry = crate::lang::registry::mcp::ToolSpecRegistry::default();
 
         for (ns_path, namespace) in &program.namespaces {
             let ns_str = ns_path.to_string();
@@ -394,7 +435,7 @@ impl Compiler {
 
                 registry.entries.insert(
                     fq_name.clone(),
-                    crate::lang::hot::internal_mcp::ToolSpecEntry {
+                    crate::lang::registry::mcp::ToolSpecEntry {
                         name: fq_name,
                         input_schema,
                         output_schema,
@@ -430,7 +471,7 @@ impl Compiler {
             "Installing skill-spec registry with {} entries",
             registry.entries.len()
         );
-        crate::lang::hot::internal_skill::set_registry(registry);
+        crate::lang::registry::skill::set_registry(registry);
         Ok(())
     }
 
@@ -441,8 +482,8 @@ impl Compiler {
     pub fn build_skill_specs(
         &self,
         program: &Program,
-    ) -> crate::lang::hot::internal_skill::SkillSpecRegistry {
-        let mut registry = crate::lang::hot::internal_skill::SkillSpecRegistry::default();
+    ) -> crate::lang::registry::skill::SkillSpecRegistry {
+        let mut registry = crate::lang::registry::skill::SkillSpecRegistry::default();
 
         for (ns_path, namespace) in &program.namespaces {
             let ns_str = ns_path.to_string();
@@ -485,7 +526,7 @@ impl Compiler {
                 let fq_name = format!("{}/{}", ns_str, var_name);
                 registry.entries.insert(
                     fq_name.clone(),
-                    crate::lang::hot::internal_skill::SkillSpecEntry {
+                    crate::lang::registry::skill::SkillSpecEntry {
                         name: fq_name,
                         skill_meta: skill_val.clone(),
                     },
@@ -1782,6 +1823,44 @@ impl Compiler {
         }
     }
 
+    /// Check the `timeout` meta of every function in a namespace. Any
+    /// function can start a run (a `hot:call` reaches all of them), so the
+    /// check is not limited to handlers and scheduled functions.
+    fn validate_run_timeouts(&mut self, ns_name: &str, namespace: &Namespace, program: &Program) {
+        for (var, value) in &namespace.scope.vars {
+            let Some(Err(message)) = var
+                .meta
+                .as_ref()
+                .and_then(|meta| run_timeout_from_meta(&meta.val))
+            else {
+                continue;
+            };
+            let is_function = matches!(value, Value::Fn(_) | Value::Lambda(_))
+                || resolve_alias_target(program, ns_name, value).is_some();
+            if !is_function {
+                continue;
+            }
+            let var_name = var.sym.to_string();
+            // Meta values carry no spans, so diagnostics point at the var.
+            let location = var
+                .src
+                .as_ref()
+                .map(|src| crate::lang::errors::ErrorLocation {
+                    line: src.line,
+                    column: src.column,
+                    position: src.position,
+                    length: var_name.len(),
+                    file: src.file.as_ref().map(std::path::PathBuf::from),
+                });
+            self.validation_errors
+                .push(crate::lang::errors::CompilerError::InvalidRunTimeout {
+                    func_name: format!("{}/{}", ns_name, var_name),
+                    message,
+                    location,
+                });
+        }
+    }
+
     /// Scan a single namespace for scheduled functions
     fn scan_namespace_for_scheduled_functions(
         &mut self,
@@ -1829,7 +1908,7 @@ impl Compiler {
                         file: src.file.as_ref().map(std::path::PathBuf::from),
                     });
                 if let Err(message) =
-                    crate::db::normalize_recurring_schedule_expression(&cron_expression)
+                    crate::lang::schedule::normalize_recurring_schedule_expression(&cron_expression)
                 {
                     self.validation_errors.push(
                         crate::lang::errors::CompilerError::InvalidSchedule {
@@ -2054,6 +2133,55 @@ mod alias_meta_tests {
             compiler.get_event_handlers().clone(),
             compiler.get_scheduled_functions().clone(),
         )
+    }
+
+    #[test]
+    fn effective_function_meta_merges_alias_meta_over_its_target() {
+        let src = r#"
+::test::timed ns
+
+base
+meta { doc: "library doc", timeout: 30 }
+fn (event: Map): Map { {ok: true} }
+
+longer
+meta { on-event: "test:longer", timeout: 1800 }
+base
+
+inherits
+base
+
+plain
+fn (event: Map): Map { {ok: true} }
+"#;
+        let mut program = parse_hot(src).expect("parse");
+        Compiler::new()
+            .compile_program_unchecked(&mut program)
+            .expect("compile");
+        let timeout = |var: &str| {
+            super::effective_function_meta(&program, "::test::timed", var)
+                .and_then(|meta| super::run_timeout_from_meta(&meta))
+        };
+        assert_eq!(timeout("base"), Some(Ok(30)));
+        assert_eq!(timeout("longer"), Some(Ok(1800)));
+        assert_eq!(timeout("inherits"), Some(Ok(30)));
+        assert_eq!(timeout("plain"), None);
+        assert_eq!(timeout("missing"), None);
+        // The namespace may be named with or without its leading `::`.
+        assert!(super::effective_function_meta(&program, "test::timed", "base").is_some());
+    }
+
+    #[test]
+    fn run_timeout_meta_must_be_a_positive_whole_number() {
+        let timeout = |value: Val| super::run_timeout_from_meta(&crate::val!({"timeout": value}));
+        assert_eq!(timeout(Val::Int(1)), Some(Ok(1)));
+        assert!(matches!(timeout(Val::Int(0)), Some(Err(_))));
+        assert!(matches!(timeout(Val::Int(-5)), Some(Err(_))));
+        assert!(matches!(timeout(Val::from("30")), Some(Err(_))));
+        assert_eq!(
+            super::run_timeout_from_meta(&crate::val!({"retry": 3})),
+            None
+        );
     }
 
     fn handler_meta_keys(handler: &EventHandler) -> Vec<String> {

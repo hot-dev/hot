@@ -153,6 +153,47 @@ fn () {
 call written with a space before `(`, as in `assert (x)`, which binds a
 variable named `assert` instead of calling it.
 
+#### Fixing the clock
+
+Each test starts on the real clock. A test can fix it:
+
+- `::hot::test/set-now(time)` fixes the clock at an RFC 3339 string, an
+  `Instant` or a `ZonedDateTime`.
+- `::hot::test/advance(duration)` moves it by a `Duration` of weeks, days or
+  smaller units.
+- `::hot::test/clear-now()` returns it to the real time.
+
+{{snippet:testing#testing-clock}}
+
+`::hot::time/now`, `now-zoned`, `epoch-seconds` and the other "now" functions
+read the fixed time, in the test, in its `parallel` branches and `pmap`
+workers, and in the handlers it delivers events to. After each test the runner
+returns the clock to the real time. Outside `hot test` these functions return
+an error, so no other run reads a fixed clock.
+
+#### Events and schedules
+
+In a test, `send` keeps the event instead of publishing it, and no handler
+runs on its own. The test delivers events itself:
+
+- `::hot::test/deliver(event)` runs the `on-event` handlers of `event`, a map
+  with `type` and `data`, inside the test. Then it delivers the events they
+  send, until none is left. `deliver()` delivers what was sent so far. It
+  returns one `{type, fn, result}` for each handler run.
+- A delivered `hot:schedule:new` arms a schedule in the test, with relative
+  times counted from the test's clock; `hot:schedule:cancel` disarms it.
+  `::hot::test/schedules()` lists what is armed.
+- `::hot::test/run-due()` calls each schedule due by the test's clock,
+  soonest first. Each call runs with the clock at its due time, as the
+  scheduler would have run it, and its events are delivered. Afterwards the
+  clock is back where the test left it.
+
+A handler or scheduled call that fails counts as a failed assertion; the
+others still run. Handlers run as plain calls: retries and run records don't
+apply.
+
+{{snippet:testing#testing-scenario}}
+
 ### hot check
 
 Analyze code for errors without executing:
