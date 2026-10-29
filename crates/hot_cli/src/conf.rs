@@ -117,6 +117,7 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
     ("HOT_NETWORK_ALLOW_CIDRS", "network.allow-cidrs"),
     ("HOT_NETWORK_ALLOW_HOSTS", "network.allow-hosts"),
     ("HOT_NETWORK_DENY_CIDRS", "network.deny-cidrs"),
+    ("HOT_BOX_GUEST_DNS", "box.guest-dns"),
     ("HOT_TASK_MAX_CONCURRENT", "task.max-concurrent"),
     ("HOT_TASK_CODE_MAX_CONCURRENT", "task.code-max-concurrent"),
     (

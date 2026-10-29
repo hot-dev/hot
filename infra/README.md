@@ -32,6 +32,14 @@ Implemented:
   [`release/upstream-images.json`](release/upstream-images.json). The release
   workflow signs the manifest keylessly; the renderer verifies it with
   `cosign verify-blob` against the release workflow's tag identity.
+- The host image recipe ([`images/host/setup-host.sh`](images/host/setup-host.sh),
+  [`images/packer`](images/packer), built by
+  [`images/build-host.sh`](images/build-host.sh)): Ubuntu 24.04 with Docker,
+  Kata on QEMU, a dedicated containerd, CNI, `cosign`, and a guest image with
+  the release's `hotbox`. SSH is masked, and Packer builds without SSH. Kata
+  state lives on the data disk and stays off until it is mounted; box storage
+  is capped by `HOT_BOX_POOL_GB`; a mangle-table baseline keeps guests off
+  metadata, the host, other guests, and private ranges outside the allowlist.
 - In Hot: SMTP email delivery, `hot admin bootstrap`/`reset-password` and the
   `app.signup` policy for operator-managed accounts, and outbound allowlists
   (`network.allow-cidrs`, `allow-hosts`, `deny-cidrs`) behind a fixed deny set.

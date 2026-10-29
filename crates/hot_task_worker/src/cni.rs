@@ -1,3 +1,5 @@
+use crate::guest_network::{SUBNET, guest_policy};
+
 /// CNI (Container Network Interface) helpers for Kata container networking.
 ///
 /// Manages network namespace lifecycle and invokes the CNI bridge plugin to
@@ -17,27 +19,7 @@ const IP_BIN: &str = "/usr/sbin/ip";
 const IPTABLES_BIN: &str = "/usr/sbin/iptables";
 const IP6TABLES_BIN: &str = "/usr/sbin/ip6tables";
 const BRIDGE_NAME: &str = "kata-br0";
-const SUBNET: &str = "10.88.0.0/16";
 const TASK_CHAIN_PREFIX: &str = "HKT-";
-
-/// Destinations that are never public internet. This includes cloud metadata,
-/// host/VPC address space, carrier NAT, multicast, and other Kata guests.
-const BLOCKED_DESTINATIONS: &[&str] = &[
-    "0.0.0.0/8",
-    "10.0.0.0/8",
-    "100.64.0.0/10",
-    "127.0.0.0/8",
-    "169.254.0.0/16",
-    "172.16.0.0/12",
-    "192.0.0.0/24",
-    "192.0.2.0/24",
-    "192.168.0.0/16",
-    "198.18.0.0/15",
-    "198.51.100.0/24",
-    "203.0.113.0/24",
-    "224.0.0.0/4",
-    "240.0.0.0/4",
-];
 
 /// Path on the HOST where we write a resolv.conf for Kata VMs to use.
 /// The guest rootfs may contain stale DNS (e.g. Azure DNS from a CI build),
@@ -198,10 +180,14 @@ pub async fn ensure_iptables() -> Result<(), String> {
 
 /// Write a resolv.conf on the HOST for Kata VMs to bind-mount.
 pub async fn write_resolv_conf() -> Result<(), String> {
-    // VPC resolvers are private/link-local destinations and therefore
-    // intentionally blocked. Public resolvers preserve DNS without punching
-    // a hole to the VPC or metadata network.
-    let content = "nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions ndots:0\n";
+    // The task chain opens port 53 to exactly these resolvers.
+    let mut content: String = guest_policy()
+        .resolvers()
+        .iter()
+        .map(|resolver| format!("nameserver {resolver}\n"))
+        .collect();
+    content.push_str("options ndots:0\n");
+    let content = content.as_str();
 
     let status = host_command("mkdir", &["-p", "/var/lib/kata"])
         .status()
@@ -245,14 +231,6 @@ mod tests {
         assert_eq!(first, task_chain("0123456789abcdef01234567"));
         assert_ne!(first, second);
         assert!(first.len() <= 28);
-    }
-
-    #[test]
-    fn blocked_ranges_cover_guest_and_metadata_networks() {
-        assert!(BLOCKED_DESTINATIONS.contains(&"10.0.0.0/8"));
-        assert!(BLOCKED_DESTINATIONS.contains(&"169.254.0.0/16"));
-        assert!(BLOCKED_DESTINATIONS.contains(&"100.64.0.0/10"));
-        assert!(BLOCKED_DESTINATIONS.contains(&"224.0.0.0/4"));
     }
 }
 
@@ -310,10 +288,10 @@ async fn install_task_policy(container_id: &str) -> Result<(), String> {
     // partially-installed allow policy.
     remove_task_policy(container_id).await;
     run_iptables(&["-N", &chain]).await?;
-    for destination in BLOCKED_DESTINATIONS {
-        run_iptables(&["-A", &chain, "-d", destination, "-j", "REJECT"]).await?;
+    for rule in guest_policy().chain_rules(&chain) {
+        let rule: Vec<&str> = rule.iter().map(String::as_str).collect();
+        run_iptables(&rule).await?;
     }
-    run_iptables(&["-A", &chain, "-j", "ACCEPT"]).await?;
     run_iptables(&[
         "-I",
         "FORWARD",

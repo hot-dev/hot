@@ -3395,6 +3395,7 @@ dependencies = [
  "futures",
  "hex",
  "hot",
+ "ipnet",
  "libc",
  "parking_lot",
  "prost-types",

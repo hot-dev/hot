@@ -17,6 +17,9 @@ mod cni;
 mod data_volume;
 mod executor;
 pub mod file_server;
+// Only the Linux Kata backend applies the policy; other builds parse and test it.
+#[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
+pub mod guest_network;
 mod log_accumulator;
 mod orphan_reaper;
 pub mod resource_budget;
@@ -642,6 +645,9 @@ const CONTAINER_SHELL_FLAGS: &str = "-ec";
 /// Run the task worker.
 pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_task_fairness_conf(&config.worker_conf)?;
+    guest_network::configure(guest_network::GuestNetworkPolicy::from_conf(
+        &config.worker_conf,
+    )?);
     let queue_metrics_enabled = config
         .worker_conf
         .get_bool_or_default("queue.metrics-enabled", true);

@@ -998,21 +998,32 @@ Changes for self-hosting:
 - [ ] Port the host setup into the shared Packer recipes. Bake everything into
       the image; boot only activates services and never downloads and runs
       setup scripts. Ship only the QEMU path.
+      Recipe: [`setup-host.sh`](../../infra/images/host/setup-host.sh) and
+      [`hot-host.pkr.hcl`](../../infra/images/packer/hot-host.pkr.hcl), Ubuntu
+      24.04 on both clouds, built without SSH (`communicator = "none"`). Check
+      this once a real build passes on each cloud.
 - [ ] Run the task-worker from the single runtime image with the same
       privileges and mounts. Qualify its Compose networking on one VM.
-- [ ] Put the devmapper pool on its own volume, or give it a hard size limit
+- [x] Put the devmapper pool on its own volume, or give it a hard size limit
       derived from the size label, so box storage cannot fill the PostgreSQL
       disk.
+      Sparse pool files sized by `HOT_BOX_POOL_GB` in `/etc/hot/host.env`;
+      the agent writes it from the size label.
 - [ ] On one VM, containers use the instance identity, so AWS needs IMDS hop
       limit 2. The guest chain and the `PublicOnly` policy remain the
       metadata boundaries for box and normal execution. Qualify both.
-- [ ] Extend the guest chain with the user-code allowlist and fixed deny set
+- [x] Extend the guest chain with the user-code allowlist and fixed deny set
       from [Outbound access for user code](#outbound-access-for-user-code), and
       make the guest DNS resolver configurable.
+      The task worker's per-task chains read `network.allow-cidrs`,
+      `network.deny-cidrs`, and `box.guest-dns`; the host's baseline runs in
+      the mangle table so per-task rules cannot bypass it.
 - [ ] Derive task concurrency, memory, and disk settings from the VM size
       instead of the standalone task-worker defaults.
 - [ ] Port the isolation validation into public qualification checks, run
       against the built image as well as the scripts, and extend it to GCP.
+      Static checks are in [`test_host.py`](../../infra/tests/test_host.py);
+      checks against a built image and a running host remain.
 
 ### Shared VM lifecycle
 

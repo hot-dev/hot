@@ -58,3 +58,15 @@ explicit allowlists.
 
 Alert deliveries (webhooks and Slack) follow `network.allow-cidrs`,
 `network.allow-hosts`, and `network.deny-cidrs` too.
+
+## Box tasks
+
+[Box](/docs/box) guests on the Kata backend follow the same
+`network.allow-cidrs` and `network.deny-cidrs` rules and the same fixed deny
+set. Guests are IPv4-only, so IPv6 entries do not apply to them, and
+`network.allow-hosts` does not apply because guests connect by address.
+
+Guests resolve names through public resolvers (`1.1.1.1` and `8.8.8.8`) by
+default. To use your own, set `box.guest-dns` (`HOT_BOX_GUEST_DNS`) to their
+IPv4 addresses; guests can reach them on port 53 only, even when they are
+private.
