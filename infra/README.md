@@ -97,6 +97,9 @@ Implemented:
   output. The VM keeps no public address, and private endpoints are never
   served to the load balancer.
 - Backups, logs, and alerts: see [Backups, logs, and alerts](#backups-logs-and-alerts).
+- Preflight: [`preflight/preflight.py`](preflight/preflight.py) checks an
+  installation's account or project before provisioning, and the plan
+  workflow runs it first. See [Preflight](#preflight).
 - In Hot: SMTP email delivery, `hot admin bootstrap`/`reset-password` and the
   `app.signup` policy for operator-managed accounts, and outbound allowlists
   (`network.allow-cidrs`, `allow-hosts`, `deny-cidrs`) behind a fixed deny set.
@@ -108,6 +111,29 @@ journal shipping, restore tooling, and the real-cloud release gates remain to
 be implemented and qualified. Do not apply these development examples to
 production. No usable host image or published runtime digest is implied by the
 placeholder references in the fixtures.
+
+## Preflight
+
+```sh
+python3 infra/preflight/preflight.py installation/installation.tfvars.json
+```
+
+Preflight runs read-only `aws` or `gcloud` commands with your identity; the
+plan role or service account is enough. It reads no secret values. It checks:
+
+- the zone, machine type, vCPU quota, and host image;
+- on GCP, the APIs and the nested-virtualization organization policy;
+- that network ranges avoid the host's container network (`172.30.0.0/24`)
+  and box guest network (`10.88.0.0/16`);
+- existing networks and their subnets;
+- the public certificate on AWS;
+- existing buckets;
+- managed PostgreSQL and Valkey offerings in the region.
+
+It warns when hostnames don't resolve from where it runs. It lists the checks
+only the installation's host can make, such as an existing database's TLS and
+logins, which the agent runs before migrating. It exits 1 when a required
+check fails, and the plan workflow stops there.
 
 ## Backups, logs, and alerts
 

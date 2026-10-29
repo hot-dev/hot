@@ -1738,15 +1738,27 @@ or an existing operator destination without coupling telemetry to S3.
       can recheck an existing installation. Validate cloud identity/permissions,
       enabled APIs, quotas, service/region/machine support, organization policy,
       and nested virtualization when box execution is selected.
+      [`preflight.py`](../../infra/preflight/preflight.py) is a read-only
+      script, and the plan workflow runs it first. It checks identity, zone,
+      machine type, vCPU quota, host image, and managed-data offerings, plus
+      GCP APIs and the nested-virtualization policy. Whether nested
+      virtualization actually works is shown by the host's first box task.
 - [ ] Check CIDR overlap, required routes and egress, private client access,
       DNS/TLS, secrets/keys, registry access, and existing database/cache versions,
       extensions, roles, TLS, and required commands from the appropriate network.
+      Preflight checks CIDR overlap with the host's fixed networks, existing
+      subnets and private services access, DNS (warning only), the public
+      certificate, and existing buckets. Existing databases are checked from
+      the host by the agent. Routes, egress, and registry access remain.
 - [ ] Separate static/cloud checks from host-only qualification; clearly report
       checks that require a private runner or provisioned host. Recheck critical
       conditions after provisioning; availability observations are not capacity
       reservations. Fail safely and make interrupted-install retry idempotent.
 - [ ] Produce actionable, redacted results identifying missing prerequisites
       and which resources, if any, were already created. Initial release gate.
+      Results name the missing prerequisite and the next step, mask the
+      account ID, and go to the job summary. Which resources an interrupted
+      apply already created comes from the plan.
 
 ### 2. Supported versions and upgrade contract
 

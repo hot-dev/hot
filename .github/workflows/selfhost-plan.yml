@@ -123,6 +123,14 @@ jobs:
           workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
           service_account: ${{ inputs.gcp_plan_service_account }}
 
+      # Read-only checks of the account or project before planning: zone,
+      # machine type, quota, host image, networks, certificates, buckets, and
+      # managed-data offerings. A failed check stops the plan.
+      - name: Preflight
+        env:
+          SOURCE: operator/${{ inputs.installation_dir }}
+        run: python3 hot/infra/preflight/preflight.py "$SOURCE/installation.tfvars.json" --summary "$GITHUB_STEP_SUMMARY"
+
       - name: Add the installation's configuration
         env:
           SOURCE: operator/${{ inputs.installation_dir }}
