@@ -868,6 +868,13 @@ async fn async_main(providers: CliProviders) {
         }
     }
 
+    // Every Redis connection this process opens uses redis.auth and
+    // redis.ca-cert.
+    if let Err(error) = hot::redis::configure(&conf) {
+        error!("Invalid Redis configuration: {error}");
+        std::process::exit(1);
+    }
+
     // Ensure daemon has a default before reading it
     let conf = if conf.get("daemon").is_none() {
         conf.set_bool("daemon", Some(false), false)

@@ -1,4 +1,13 @@
 mock_provider "google" {
+  mock_resource "google_memorystore_instance" {
+    defaults = {
+      endpoints = [{ connections = [
+        { psc_auto_connection = [{ connection_type = "CONNECTION_TYPE_DISCOVERY", ip_address = "10.68.0.39", port = 6379, forwarding_rule = "", network = "", project_id = "", psc_connection_id = "", service_attachment = "" }] },
+        { psc_auto_connection = [{ connection_type = "CONNECTION_TYPE_PRIMARY", ip_address = "10.68.0.40", port = 6379, forwarding_rule = "", network = "", project_id = "", psc_connection_id = "", service_attachment = "" }] },
+      ] }]
+      managed_server_ca = [{ ca_certs = [{ certificates = ["-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----\n"] }] }]
+    }
+  }
   mock_resource "google_compute_network" {
     defaults = { id = "projects/example-project/global/networks/hot-example" }
   }
@@ -322,5 +331,48 @@ run "restore_from_a_snapshot" {
   assert {
     condition     = google_compute_disk.data.snapshot == "hot-example-data-20261029" && google_compute_disk.data.name != "hot-hot-example-data" && startswith(google_compute_disk.data.name, "hot-hot-example-data-")
     error_message = "A restore creates the data disk from the chosen snapshot, under a name that does not collide with the kept disk."
+  }
+}
+
+run "managed_valkey" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example-project/global/images/hot-host-amd64",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "data" : { "valkey" : { "mode" : "managed" } },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = google_memorystore_instance.valkey[0].mode == "CLUSTER_DISABLED" && google_memorystore_instance.valkey[0].shard_count == 1 && google_memorystore_instance.valkey[0].node_type == "STANDARD_SMALL"
+    error_message = "One standalone shard, sized from the installation, so Hot's standalone client applies."
+  }
+  assert {
+    condition     = google_memorystore_instance.valkey[0].authorization_mode == "IAM_AUTH" && google_memorystore_instance.valkey[0].transit_encryption_mode == "SERVER_AUTHENTICATION"
+    error_message = "Clients authenticate with IAM tokens over TLS; there is no password."
+  }
+  assert {
+    condition     = google_memorystore_instance.valkey[0].engine_configs["maxmemory-policy"] == "noeviction" && one(google_memorystore_instance.valkey[0].persistence_config).mode == "AOF" && google_memorystore_instance.valkey[0].deletion_protection_enabled
+    error_message = "Queued work is never evicted, is persisted, and the instance is protected from deletion."
+  }
+  assert {
+    condition     = google_network_connectivity_service_connection_policy.valkey[0].service_class == "gcp-memorystore"
+    error_message = "The new network gets the Private Service Connect policy Memorystore needs."
+  }
+  assert {
+    condition     = google_project_iam_member.valkey[0].role == "roles/memorystore.dbConnectionUser" && strcontains(google_project_iam_member.valkey[0].condition[0].expression, "/instances/hot-hot-example-valkey")
+    error_message = "The host may connect to this instance only."
+  }
+  assert {
+    condition     = local.host_config.data.valkey.endpoint.host == "10.68.0.40" && local.host_config.data.valkey.endpoint.auth == "gcp-iam" && startswith(local.host_config.data.valkey.endpoint.ca_certificate, "-----BEGIN CERTIFICATE-----")
+    error_message = "The host connects to the primary endpoint with IAM tokens and the instance's CA."
   }
 }

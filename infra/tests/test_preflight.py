@@ -171,9 +171,18 @@ class Gcp(unittest.TestCase):
         report = preflight.run(gcp_installation(), cli)
         self.assertIn("N2_CPUS has 1 of 8 free", details(report)["vCPU quota"])
 
-    def test_managed_valkey_is_refused(self):
-        report = preflight.run(gcp_installation(data={"valkey": {"mode": "managed"}}), FakeCli(GCP))
-        self.assertEqual(statuses(report)["Managed Valkey"], "fail")
+    def test_managed_valkey_on_an_existing_network_needs_a_connection_policy(self):
+        network = {"mode": "existing", "network_id": "projects/example-project/global/networks/shared",
+                   "subnet_id": "projects/example-project/regions/us-central1/subnetworks/hot"}
+        cli = FakeCli(GCP)
+        cli.responses[("network-connectivity", "service-connection-policies")] = []
+        report = preflight.run(gcp_installation(network=network, data={"valkey": {"mode": "managed"}}), cli)
+        self.assertEqual(statuses(report)["Memorystore connection policy"], "fail")
+        self.assertIn("memorystore.googleapis.com", details(report)["APIs"])
+        cli.responses[("network-connectivity", "service-connection-policies")] = [
+            {"serviceClass": "gcp-memorystore", "network": "projects/example-project/global/networks/shared"}]
+        report = preflight.run(gcp_installation(network=network, data={"valkey": {"mode": "managed"}}), cli)
+        self.assertEqual(statuses(report)["Memorystore connection policy"], "pass")
 
 
 class Static(unittest.TestCase):

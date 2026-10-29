@@ -102,10 +102,13 @@ def validate(document):
             raise ValueError(f"data.{service}.mode must be local, managed, or existing")
     if data_mode(config, "valkey") == "managed":
         endpoint = data["valkey"].get("endpoint")
-        if config["cloud"] != "aws":
-            raise ValueError("Managed Valkey is available on AWS only")
-        if not isinstance(endpoint, dict) or set(endpoint) - {"host", "port", "auth_secret"} or not all(endpoint.get(k) for k in ("host", "port", "auth_secret")):
-            raise ValueError("Managed Valkey needs the endpoint the stack provisions: auth_secret, host, port")
+        # ElastiCache takes an AUTH token from a secret; Memorystore takes the
+        # host's IAM tokens and presents its own CA.
+        required = {"host", "port", "auth_secret"} if config["cloud"] == "aws" else {"host", "port", "auth", "ca_certificate"}
+        if not isinstance(endpoint, dict) or set(endpoint) - required or not all(endpoint.get(k) for k in required):
+            raise ValueError("Managed Valkey needs the endpoint the stack provisions: " + ", ".join(sorted(required)))
+        if config["cloud"] == "gcp" and endpoint["auth"] != "gcp-iam":
+            raise ValueError("Managed Valkey on GCP authenticates with gcp-iam")
     if data_mode(config, "postgres") == "managed":
         endpoint = data["postgres"].get("endpoint")
         required = {"host", "port", "admin_user", "admin_secret"} | ({"ca_certificate"} if config["cloud"] == "gcp" else set())
@@ -274,6 +277,9 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     valkey_local = data_mode(config, "valkey") == "local"
     # A managed or existing PostgreSQL is reached over TLS verified against its CA.
     db_ca = [] if pg_local else ["POSTGRES_CA_CERT"]
+    # Memorystore: IAM tokens, and the instance's CA for TLS.
+    valkey_iam = data_mode(config, "valkey") == "managed" and config["cloud"] == "gcp"
+    valkey_ca = ["HOT_REDIS_CA_CERT"] if valkey_iam else []
     data_ready = {name: {"condition": "service_healthy"}
                   for name, local in (("postgres", pg_local), ("valkey", valkey_local)) if local}
     for key in config.get("settings", {}):
@@ -293,7 +299,9 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             proxies = [RUNTIME_SUBNET] + (load_balancer_sources(config) if public_endpoints(config) else [])
             env.update(HOT_NETWORK_CLIENT_IP_TRUSTED_PROXY="true", HOT_NETWORK_CLIENT_IP_HEADER="x-forwarded-for",
                        HOT_NETWORK_CLIENT_IP_TRUSTED_PROXIES=",".join(proxies))
-        keys = ["HOT_DB_URI", "HOT_REDIS_URI", *db_ca]
+        keys = ["HOT_DB_URI", "HOT_REDIS_URI", *db_ca, *valkey_ca]
+        if valkey_iam:
+            env["HOT_REDIS_AUTH"] = "gcp-iam"
         if role != "scheduler":
             keys.append("HOT_ENCRYPTION_KEY")
         if role == "app":

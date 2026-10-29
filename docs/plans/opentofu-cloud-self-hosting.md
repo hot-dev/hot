@@ -1247,8 +1247,12 @@ IAM, generation preconditions, or real composition behavior.
       separate root, so each service chooses local, managed, or existing
       independently. Managed Valkey is done on AWS (ElastiCache, TLS-only,
       with an AUTH token written only to write-only attributes, and
-      `noeviction`). On GCP it remains: Memorystore for Valkey accepts only
-      IAM tokens, which Hot's Valkey client does not request yet.
+      `noeviction`). On GCP it is Memorystore for Valkey, with cluster mode
+      disabled, TLS, and IAM authentication. Hot gained `redis.auth = gcp-iam`
+      (metadata-server tokens through redis-rs's streaming credentials,
+      re-authenticating connections when the token changes) and
+      `redis.ca-cert` for the instance's private CA. Both were checked against
+      a live TLS Valkey; Memorystore itself is unqualified.
 - [ ] Configure private connectivity, TLS, managed secrets, database versions,
       required extensions, owner/runtime roles, capacity, backups, and
       independently selectable failover/replica settings.

@@ -511,6 +511,10 @@ def role_secrets(config, generated, operator, managed=None):
         owner_uri = verified_postgres_uri(operator["HOT_DB_MIGRATION_URI"], "HOT_DB_MIGRATION_URI", config)
     if valkey_local:
         redis_uri = f"redis://hot:{g['VALKEY_PASSWORD']}@valkey:6379"
+    elif render.data_mode(config, "valkey") == "managed" and config["cloud"] == "gcp":
+        # Memorystore: Hot authenticates with the VM's IAM tokens.
+        endpoint = config["data"]["valkey"]["endpoint"]
+        redis_uri = f"rediss://{endpoint['host']}:{int(endpoint['port'])}"
     elif render.data_mode(config, "valkey") == "managed":
         token = (managed.get("valkey") or {}).get("password")
         if not token:
@@ -523,9 +527,11 @@ def role_secrets(config, generated, operator, managed=None):
             raise AgentError("An existing Valkey needs a rediss:// HOT_REDIS_URI in the operator secret bundle")
     ca = ({} if pg_local else {"POSTGRES_CA_CERT": managed["postgres"]["ca"]} if pg_mode == "managed"
           else {"POSTGRES_CA_CERT": operator["POSTGRES_CA_CERT"]})
+    valkey_ca = ({"HOT_REDIS_CA_CERT": config["data"]["valkey"]["endpoint"]["ca_certificate"]}
+                 if render.data_mode(config, "valkey") == "managed" and config["cloud"] == "gcp" else {})
     files = {}
     for role in HOT_SERVICES:
-        files[role] = {"HOT_DB_URI": runtime_uri, "HOT_REDIS_URI": redis_uri, **ca}
+        files[role] = {"HOT_DB_URI": runtime_uri, "HOT_REDIS_URI": redis_uri, **ca, **valkey_ca}
         if role != "scheduler":
             files[role]["HOT_ENCRYPTION_KEY"] = g["HOT_ENCRYPTION_KEY"]
     for role, keys in operator_routes(operator, config).items():
@@ -784,7 +790,7 @@ class Agent:
         """What the agent needs from managed data services: the database's
         administrator login and CA certificate, and the cache's AUTH token."""
         managed = {"postgres": self.managed_postgres()}
-        if render.data_mode(self.config, "valkey") == "managed":
+        if render.data_mode(self.config, "valkey") == "managed" and self.config["cloud"] == "aws":
             managed["valkey"] = self.cloud.get_secret(self.config["data"]["valkey"]["endpoint"]["auth_secret"])
         return managed
 

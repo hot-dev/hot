@@ -18,6 +18,7 @@ locals {
         ca_certificate = nonsensitive(google_sql_database_instance.postgres[0].server_ca_cert[0].cert)
       }
     })
+    valkey = merge(local.valkey, { endpoint = local.valkey_endpoint })
   })
 }
 resource "google_project_service" "postgres" {

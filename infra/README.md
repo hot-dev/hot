@@ -80,17 +80,24 @@ Implemented:
     database needs. On an existing AWS network, give `network.data_subnet_ids`
     in two zones; an existing GCP network must already have private services
     access.
-- Managed Valkey (AWS): set `data.valkey.mode` to `managed` for an ElastiCache
-  Valkey 8.1 replication group, sized from the installation size unless you set
-  `node_type`, with `high_availability` adding a replica in a second zone and
-  automatic failover.
-  - The cache requires TLS and an AUTH token, and never evicts queue entries.
-  - Like the GCP database password, the token is generated during apply and
-    written only to write-only attributes, on ElastiCache and on a Secrets
-    Manager secret. Raise `data.valkey.auth_token_version` to set a new one.
-  - Memorystore for Valkey accepts only IAM tokens, which Hot's Valkey client
-    does not request yet, so GCP installations use local or existing Valkey
-    for now.
+- Managed Valkey: set `data.valkey.mode` to `managed`. It is sized from the
+  installation size unless you set `node_type`, never evicts queue entries,
+  and requires TLS. With `high_availability`, a replica runs in another zone.
+  - AWS: an ElastiCache Valkey 8.1 replication group with automatic failover.
+    It requires an AUTH token, which, like the GCP database password, is
+    generated during apply and written only to write-only attributes, on
+    ElastiCache and on a Secrets Manager secret. Raise
+    `data.valkey.auth_token_version` to set a new one.
+  - GCP: a Memorystore for Valkey 8.0 instance with cluster mode disabled,
+    with append-only persistence, reached through Private Service Connect.
+    It uses IAM authentication, so there is no password at all: Hot services
+    run with `redis.auth = gcp-iam`. They present the VM's short-lived access
+    tokens, refreshed before they expire, and trust the instance's CA
+    (`redis.ca-cert`). The host may connect to this instance only
+    (`roles/memorystore.dbConnectionUser` with a condition). On a new
+    network the stack adds the service connection policy Memorystore needs.
+    An existing network must already have one for `gcp-memorystore` in the
+    region; preflight checks for it.
 - Public endpoints: set `app_exposure` or `api_exposure` to `public`. AWS
   needs `public_certificate_arn` (an ACM certificate you DNS-validate); GCP
   issues a managed certificate once your DNS points at the `public_endpoint`
@@ -106,8 +113,8 @@ Implemented:
 
 The roots intentionally require `acknowledge_unqualified = true`. The bootstrap
 also refuses to start if the supplied image lacks `hot-agent.service`. Real
-image builds and deployments on each cloud, managed Valkey on GCP, and the
-real-cloud release gates remain to be implemented and qualified. Do not apply these development examples to
+image builds and deployments on each cloud and the real-cloud release gates
+remain to be implemented and qualified. Do not apply these development examples to
 production. No usable host image or published runtime digest is implied by the
 placeholder references in the fixtures.
 
@@ -328,7 +335,7 @@ repository; a test keeps this table in step with those pins.
 | Local Valkey | 8.1 | `release/upstream-images.json` |
 | Ingress | nginx 1.30 | `release/upstream-images.json` |
 | Managed PostgreSQL | 18 (RDS, Cloud SQL) | `opentofu/modules/single-machine-contract` |
-| Managed Valkey | 8.1 (ElastiCache) | `opentofu/stacks/aws/single-machine/valkey.tf` |
+| Managed Valkey | 8.1 (ElastiCache), 8.0 (Memorystore) | `opentofu/stacks/*/single-machine/valkey.tf` |
 | Host OS | Ubuntu 24.04 LTS | `images/packer/hot-host.pkr.hcl` |
 | Kata Containers | 3.28.0 | `images/host/setup-host.sh` |
 | containerd (box tasks) | 1.7.30 | `images/host/setup-host.sh` |
@@ -494,7 +501,7 @@ autoscaler, that OpenTofu would fight.
 | Generated secrets (encryption key, passwords) | `aws_secretsmanager_secret.generated` | `google_secret_manager_secret.generated` |
 | Operator secrets | `aws_secretsmanager_secret.operator` | `google_secret_manager_secret.operator` |
 | Managed PostgreSQL | `aws_db_instance.postgres[0]` | `google_sql_database_instance.postgres[0]` |
-| Managed Valkey | `aws_elasticache_replication_group.valkey[0]` | |
+| Managed Valkey | `aws_elasticache_replication_group.valkey[0]` | `google_memorystore_instance.valkey[0]` |
 | Container logs | `aws_cloudwatch_log_group.host` | |
 
 They are protected in several ways:

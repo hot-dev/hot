@@ -245,34 +245,27 @@ run "existing_postgres" {
   }
 }
 
-run "managed_valkey_is_aws_only" {
+run "managed_valkey_on_gcp_follows_the_size" {
   command = plan
   variables {
     installation = {
-      "schema_version" : 1,
       "name" : "hot-example",
       "cloud" : "gcp",
       "region" : "us-central1",
       "zone" : "us-central1-a",
-      "size" : "small",
+      "size" : "medium",
       "host_image" : "projects/example/global/images/hot",
       "project" : "example-project",
-      "release_pointer" : "",
-      "secret_references" : {},
       "app_hostname" : "app.hot.internal",
       "api_hostname" : "api.hot.internal",
-      "storage" : {
-        "build" : {
-          "backend" : "local"
-        },
-        "file" : {
-          "backend" : "local"
-        }
-      },
-      "data" : { "valkey" : { "mode" : "managed" } }
+      "data" : { "valkey" : { "mode" : "managed" } },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
     }
   }
-  expect_failures = [var.installation]
+  assert {
+    condition     = output.managed_valkey.node_type == "HIGHMEM_MEDIUM"
+    error_message = "Memorystore's node type follows the size."
+  }
 }
 
 run "managed_postgres_sizes_follow_the_installation" {

@@ -45,7 +45,8 @@ variable "installation" {
         # Managed only. An empty node_type follows the size.
         node_type         = optional(string, "")
         high_availability = optional(bool, false)
-        # Raise to set a new AUTH token; see infra/README.md.
+        # AWS only: raise to set a new AUTH token; see infra/README.md. GCP
+        # authenticates with the host's IAM identity instead.
         auth_token_version = optional(number, 1)
       }), {})
     }), {})
@@ -144,8 +145,8 @@ variable "installation" {
     error_message = "data.postgres.mode and data.valkey.mode must be local, managed, or existing; runtime_role a PostgreSQL role name other than hot_owner, hot_admin, or postgres."
   }
   validation {
-    condition     = var.installation.data.valkey.mode != "managed" || (var.installation.cloud == "aws" && var.installation.data.valkey.auth_token_version >= 1)
-    error_message = "Managed Valkey is available on AWS only: Memorystore for Valkey accepts only IAM tokens, which Hot's Valkey client does not request yet. Use local or existing Valkey on GCP."
+    condition     = var.installation.data.valkey.mode != "managed" || var.installation.data.valkey.auth_token_version >= 1
+    error_message = "data.valkey.auth_token_version must be at least 1."
   }
   validation {
     condition = var.installation.data.postgres.mode != "managed" || (
@@ -219,9 +220,9 @@ locals {
   }
   # Managed PostgreSQL and Valkey starting points per size.
   database = {
-    small  = { aws = "db.m7g.large", gcp = "db-custom-2-8192", storage_gb = 50, valkey = "cache.m7g.large" }
-    medium = { aws = "db.m7g.xlarge", gcp = "db-custom-4-16384", storage_gb = 100, valkey = "cache.m7g.xlarge" }
-    large  = { aws = "db.m7g.2xlarge", gcp = "db-custom-8-32768", storage_gb = 200, valkey = "cache.m7g.2xlarge" }
+    small  = { aws = "db.m7g.large", gcp = "db-custom-2-8192", storage_gb = 50, valkey = "cache.m7g.large", valkey_gcp = "STANDARD_SMALL" }
+    medium = { aws = "db.m7g.xlarge", gcp = "db-custom-4-16384", storage_gb = 100, valkey = "cache.m7g.xlarge", valkey_gcp = "HIGHMEM_MEDIUM" }
+    large  = { aws = "db.m7g.2xlarge", gcp = "db-custom-8-32768", storage_gb = 200, valkey = "cache.m7g.2xlarge", valkey_gcp = "HIGHMEM_MEDIUM" }
   }
   postgres = var.installation.data.postgres
   capacity = local.sizes[var.installation.size]
@@ -237,7 +238,7 @@ output "capacity" {
 output "managed_valkey" {
   description = "The managed Valkey node type, with the size default applied; null unless data.valkey.mode is managed."
   value = var.installation.data.valkey.mode != "managed" ? null : {
-    node_type = var.installation.data.valkey.node_type != "" ? var.installation.data.valkey.node_type : local.database[var.installation.size].valkey
+    node_type = var.installation.data.valkey.node_type != "" ? var.installation.data.valkey.node_type : local.database[var.installation.size][var.installation.cloud == "aws" ? "valkey" : "valkey_gcp"]
   }
 }
 output "managed_postgres" {

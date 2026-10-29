@@ -160,7 +160,7 @@ jobs:
           DRIFT_CHECK: ${{ inputs.drift_check }}
           ALLOW_DATA_DELETION: ${{ inputs.allow_data_deletion }}
           # Resources whose deletion loses data or access to it.
-          DURABLE: '^(aws_ebs_volume|aws_db_instance|aws_elasticache_replication_group|aws_secretsmanager_secret|aws_cloudwatch_log_group|google_compute_disk|google_sql_database_instance|google_secret_manager_secret)\.'
+          DURABLE: '^(aws_ebs_volume|aws_db_instance|aws_elasticache_replication_group|aws_secretsmanager_secret|aws_cloudwatch_log_group|google_compute_disk|google_sql_database_instance|google_memorystore_instance|google_secret_manager_secret)\.'
         run: |
           set -euo pipefail
           tofu -chdir="$STACK" init -input=false -lockfile=readonly

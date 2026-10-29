@@ -516,7 +516,7 @@ impl StreamPubSub {
                     ))
                 } else {
                     tracing::debug!("Creating Redis Streams standalone pub/sub");
-                    let client = ::redis::Client::open(url.as_str())?;
+                    let client = crate::redis::client(url.as_str())?;
                     Ok(StreamPubSub::Redis(streams::RedisStreamsPubSub::new(
                         client,
                     )))

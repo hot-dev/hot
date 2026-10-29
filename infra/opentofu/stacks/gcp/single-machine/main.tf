@@ -268,7 +268,7 @@ resource "google_compute_instance" "host" {
       error_message = "The GCP root requires installation.cloud = gcp."
     }
   }
-  depends_on = [google_compute_router_nat.egress, google_project_iam_member.telemetry, google_secret_manager_secret_iam_member.read, google_pubsub_subscription_iam_member.agent, google_secret_manager_secret_iam_member.postgres_admin, google_secret_manager_secret_version.postgres_admin]
+  depends_on = [google_compute_router_nat.egress, google_project_iam_member.telemetry, google_secret_manager_secret_iam_member.read, google_pubsub_subscription_iam_member.agent, google_secret_manager_secret_iam_member.postgres_admin, google_secret_manager_secret_version.postgres_admin, google_project_iam_member.valkey]
 }
 output "private_ip" { value = google_compute_instance.host.network_interface[0].network_ip }
 output "instance_id" { value = google_compute_instance.host.id }

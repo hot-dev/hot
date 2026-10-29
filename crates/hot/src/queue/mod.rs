@@ -301,7 +301,7 @@ where
                     "Creating Redis Streams standalone queue for: {}",
                     queue_name
                 );
-                let client = ::redis::Client::open(url.as_str())?;
+                let client = crate::redis::client(url.as_str())?;
                 let queue = streams::RedisStreamQueue::<T>::new(client, queue_name)
                     .with_serialization(serialization);
                 Ok(Arc::new(queue))
@@ -450,7 +450,7 @@ impl<T> ProcessingQueue<T> {
                         "Creating Redis Streams standalone processing queue for: {}",
                         queue_name
                     );
-                    let client = ::redis::Client::open(url.as_str())?;
+                    let client = crate::redis::client(url.as_str())?;
                     let queue = streams::RedisStreamQueue::<T>::new(client, queue_name)
                         .with_serialization(serialization);
                     Ok(ProcessingQueue::Redis(Box::new(queue)))
@@ -965,7 +965,7 @@ impl RedisQueueAdmin {
                 .map_err(|e| format!("Failed to get cluster connection: {}", e))?;
             self.clear_queues_impl(&mut conn, &queue_names)?
         } else {
-            let client = ::redis::Client::open(self.uri.as_str())
+            let client = crate::redis::client(self.uri.as_str())
                 .map_err(|e| format!("Failed to connect to Redis: {}", e))?;
             let mut conn = client
                 .get_connection()
@@ -1159,7 +1159,7 @@ impl RedisQueueAdmin {
                 .map_err(|e| format!("Failed to get cluster connection: {}", e))?;
             self.status_impl(&mut conn, &queue_names)
         } else {
-            let client = ::redis::Client::open(self.uri.as_str())
+            let client = crate::redis::client(self.uri.as_str())
                 .map_err(|e| format!("Failed to connect to Redis: {}", e))?;
             let mut conn = client
                 .get_connection()

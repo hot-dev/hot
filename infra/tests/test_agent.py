@@ -593,6 +593,22 @@ class ManagedData(AgentHarness):
         self.assertIn("10.68.5.1/32", compose["services"]["worker"]["environment"]["HOT_NETWORK_DENY_CIDRS"])
 
 
+class Memorystore(AgentHarness):
+    CA = "-----BEGIN CERTIFICATE-----\nMEMORYSTORE\n-----END CERTIFICATE-----\n"
+
+    def test_hot_connects_with_iam_tokens_and_the_instance_ca(self):
+        config = installation(cloud="gcp", project="example-project", zone="us-central1-a", region="us-central1")
+        config["data"] = {"valkey": {"mode": "managed", "endpoint": {
+            "host": "10.68.0.40", "port": 6379, "auth": "gcp-iam", "ca_certificate": self.CA}}}
+        files = agent_module.role_secrets(config, self.cloud.put_secret_if_absent(GENERATED, agent_module.generate_secrets()),
+                                          dict(TLS), {})
+        for role in agent_module.HOT_SERVICES:
+            self.assertEqual(files[role]["HOT_REDIS_URI"], "rediss://10.68.0.40:6379", "no password in the URI")
+            self.assertEqual(files[role]["HOT_REDIS_CA_CERT"], self.CA)
+        self.assertNotIn("valkey", files)
+        self.assertEqual(agent_module.data_services(config, {}), [("10.68.0.40", 6379)])
+
+
 class Monitoring(AgentHarness):
     NOW = datetime.datetime(2026, 10, 29, 12, 0, tzinfo=datetime.timezone.utc)
 

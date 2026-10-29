@@ -239,7 +239,7 @@ pub async fn run_for_environment(
                 Arc::new(queue)
             } else {
                 debug!("hot.dev: SCHEDULER using Redis Streams standalone mode");
-                let client = redis::Client::open(redis_uri.as_str())?;
+                let client = hot::redis::client(redis_uri.as_str())?;
                 let queue = RedisStreamQueue::<Message>::new(client, "hot:event".to_string())
                     .with_serialization(serialization);
                 Arc::new(queue)

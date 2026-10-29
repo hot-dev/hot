@@ -228,10 +228,13 @@ def gcp_checks(report, document, cli):
 
     data = installation.get("data", {})
     managed_postgres = data.get("postgres", {}).get("mode") == "managed"
+    managed_valkey = data.get("valkey", {}).get("mode") == "managed"
 
     def apis():
         enabled = {s["config"]["name"] for s in gcloud("services", "list", "--enabled")}
         needed = GCP_APIS + (["sqladmin.googleapis.com", "servicenetworking.googleapis.com"] if managed_postgres else [])
+        needed += ["memorystore.googleapis.com", "networkconnectivity.googleapis.com",
+                   "serviceconsumermanagement.googleapis.com"] if managed_valkey else []
         missing = [api for api in needed if api not in enabled]
         if missing:
             return WARN, "the stack will enable " + ", ".join(missing) + "; the apply identity needs serviceusage permission"
@@ -286,6 +289,16 @@ def gcp_checks(report, document, cli):
                     return PASS, "private services access is configured"
                 return FAIL, f"{name} has no private services access, which Cloud SQL needs"
             report.check("Private services access", peering)
+        if managed_valkey:
+            def connection_policy():
+                name = network["network_id"].rsplit("/", 1)[-1]
+                policies = gcloud("network-connectivity", "service-connection-policies", "list", "--region", region)
+                if any(p.get("serviceClass") == "gcp-memorystore" and p.get("network", "").rsplit("/", 1)[-1] == name
+                       for p in policies or []):
+                    return PASS, "a Memorystore service connection policy exists"
+                return FAIL, (f"{name} has no service connection policy for gcp-memorystore in {region}, "
+                              "which Memorystore's Private Service Connect endpoints need")
+            report.check("Memorystore connection policy", connection_policy)
 
     for role, storage in installation.get("storage", {}).items():
         if storage.get("backend") == "gcs":
@@ -293,8 +306,6 @@ def gcp_checks(report, document, cli):
                 gcloud("storage", "buckets", "describe", "gs://" + storage["bucket"])
                 return PASS, f"{storage['bucket']} is reachable"
             report.check(f"Bucket for {role}", bucket)
-    if data.get("valkey", {}).get("mode") == "managed":
-        report.add(FAIL, "Managed Valkey", "not available on GCP yet; use local or existing Valkey")
 
 
 def run(document, cli=None):

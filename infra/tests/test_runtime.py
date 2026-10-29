@@ -203,9 +203,24 @@ class RuntimeContract(unittest.TestCase):
             renderer.validate(gcp)
         with self.assertRaisesRegex(ValueError, "Managed Valkey needs the endpoint"):
             renderer.validate(dict(config, data={"valkey": {"mode": "managed"}}))
+        # Memorystore needs its CA and IAM tokens, not an AUTH secret.
         cache = {"mode": "managed", "endpoint": {"host": "cache.example", "port": 6379, "auth_secret": "projects/p/secrets/v"}}
-        with self.assertRaisesRegex(ValueError, "AWS only"):
+        with self.assertRaisesRegex(ValueError, "auth, ca_certificate, host, port"):
             renderer.validate(dict(renderer.validate(example("gcp")), data={"valkey": cache}))
+
+    def test_memorystore_uses_iam_tokens_and_its_ca(self):
+        endpoint = {"host": "10.68.0.40", "port": 6379, "auth": "gcp-iam",
+                    "ca_certificate": "-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----\n"}
+        config = dict(renderer.validate(example("gcp")), data={"valkey": {"mode": "managed", "endpoint": endpoint}})
+        services = renderer.render(config, manifest(), "/data", "/run/hot/secrets")["services"]
+        self.assertNotIn("valkey", services)
+        for role in ("app", "api", "worker", "task-worker", "scheduler"):
+            env = services[role]["environment"]
+            self.assertEqual(env["HOT_REDIS_AUTH"], "gcp-iam", role)
+            self.assertEqual(env["HOT_REDIS_CA_CERT_FILE"], "/run/secrets/HOT_REDIS_CA_CERT", role)
+            self.assertIn(f"{role}-HOT_REDIS_CA_CERT", [s["source"] for s in services[role]["secrets"]])
+        with self.assertRaisesRegex(ValueError, "gcp-iam"):
+            renderer.validate(dict(config, data={"valkey": {"mode": "managed", "endpoint": dict(endpoint, auth="password")}}))
 
     @unittest.skipUnless(shutil.which("docker"), "Docker CLI is not installed")
     def test_compose_accepts_existing_and_managed_data_bundles(self):
