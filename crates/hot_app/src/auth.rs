@@ -12,7 +12,6 @@ use hot::stream::StreamPubSub;
 use hot::val::Val;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::sync::Arc;
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -736,8 +735,8 @@ pub fn build_removal_cookie(name: &'static str) -> axum_extra::extract::cookie::
 /// Get session secret from environment variable
 /// In development mode, falls back to a default secret for convenience
 pub(crate) fn get_session_secret() -> Result<String, String> {
-    match env::var("HOT_APP_SESSION_SECRET") {
-        Ok(secret) if !secret.is_empty() => Ok(secret),
+    match hot::environment::read_optional("HOT_APP_SESSION_SECRET")? {
+        Some(secret) if !secret.is_empty() => Ok(secret),
         _ => {
             // In local development, use a fallback secret for convenience
             if hot::env::is_local_dev() {
