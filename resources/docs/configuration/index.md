@@ -240,4 +240,5 @@ hot.project.my-app.deps {
 - **[Dependencies](/docs/configuration/dependencies)** - How to declare and manage package dependencies
 - **[Projects](/docs/configuration/projects)** - Configuring multiple projects in one workspace
 - **[Storage](/docs/configuration/storage)** - Where Hot stores files, blobs, and build artifacts
+- **[Email](/docs/configuration/email)** - Sending verification, invitation, and alert emails through SMTP
 - **[Self-Hosted PostgreSQL](/docs/configuration/postgres)** - Running Hot on PostgreSQL with row-level security

@@ -109,6 +109,10 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
         "file.aws.secret-access-key",
     ),
     ("HOT_FILE_AWS_SESSION_TOKEN", "file.aws.session-token"),
+    (
+        "HOT_EMAIL_SMTP_TIMEOUT_SECONDS",
+        "email.smtp.timeout-seconds",
+    ),
     ("HOT_NETWORK_ALLOW_PRIVATE", "network.allow-private"),
     ("HOT_TASK_MAX_CONCURRENT", "task.max-concurrent"),
     ("HOT_TASK_CODE_MAX_CONCURRENT", "task.code-max-concurrent"),
@@ -2005,6 +2009,24 @@ mod tests {
         let reloaded =
             preserve_runtime_overrides_after_init(val!({"set": {"profile": "local-dev"}}), &conf);
         assert_eq!(reloaded.get_str("set.profile"), "child");
+    }
+
+    #[test]
+    fn smtp_settings_map_to_the_keys_the_provider_reads() {
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                ("HOT_EMAIL_PROVIDER".into(), "smtp".into()),
+                ("HOT_EMAIL_SMTP_HOST".into(), "smtp.example.com".into()),
+                ("HOT_EMAIL_SMTP_TIMEOUT_SECONDS".into(), "10".into()),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(conf.get_str("email.provider"), "smtp");
+        let settings = hot::email_smtp::SmtpSettings::from_conf(&conf).unwrap();
+        assert_eq!(settings.host, "smtp.example.com");
+        assert_eq!(settings.timeout, std::time::Duration::from_secs(10));
     }
 
     #[test]

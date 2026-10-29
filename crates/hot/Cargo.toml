@@ -72,6 +72,7 @@ futures = { workspace = true }
 bytes = { workspace = true }
 # HTTP client for ::hot::http functions
 reqwest = { workspace = true }
+lettre = { workspace = true }
 # CRC32 checksum for binary protocols
 crc32fast = { workspace = true }
 # File locking for cross-process cache coordination

@@ -54,6 +54,7 @@ migrations, editor reference).
   - [Dependencies](configuration/dependencies)
   - [Projects](configuration/projects)
   - [Storage](configuration/storage)
+  - [Email](configuration/email)
   - [Self-Hosted PostgreSQL](configuration/postgres)
 - [Hot Packages](packages)
   - [Package Manifest](packages/manifest)

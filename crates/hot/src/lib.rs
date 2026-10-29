@@ -13,6 +13,7 @@ pub mod discovery;
 pub mod domain;
 pub mod domain_provider;
 pub mod email;
+pub mod email_smtp;
 pub mod env;
 pub mod environment;
 pub mod file_storage;
