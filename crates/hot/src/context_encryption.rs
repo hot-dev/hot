@@ -35,6 +35,11 @@ impl ContextEncryption {
         })
     }
 
+    /// Build from a raw 32-byte master key (the decoded `HOT_ENCRYPTION_KEY`).
+    pub fn from_master_key(master_key: [u8; 32]) -> Self {
+        Self { master_key }
+    }
+
     /// Load encryption key from environment or generate for local development
     /// If profile is "local-dev" and HOT_ENCRYPTION_KEY is not set, auto-generate a key
     pub fn from_env_or_generate_for_dev(profile: &str) -> Result<Self, EncryptionError> {

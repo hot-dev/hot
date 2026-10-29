@@ -1,5 +1,11 @@
 ::hot::test ns
-meta {doc: """Testing framework with assertions and test runners."""}
+meta {
+    doc: """
+    Testing framework with assertions and test runners. A test can also fix
+    the clock (`set-now`, `advance`), deliver events to their handlers
+    (`deliver`) and fire due schedules (`run-due`).
+    """
+}
 
 white ::hot::term/white
 red ::hot::term/red
@@ -288,6 +294,257 @@ fn
     passed
 }
 
+// ---- Clock and delivery ------------------------------------------------------
+//
+// A `hot test` run has a harness the runner resets before and after each
+// test: the clock a test may fix, the events `send` keeps instead of
+// publishing, and the schedules `hot:schedule:new` arms. These functions err
+// in any other run.
+
+set-now
+meta {
+    doc: """
+    Fix this test's clock at `time`, an RFC 3339 string, `Instant` or
+    `ZonedDateTime`, and return it as an `Instant`. `::hot::time/now`,
+    `now-zoned` and the other "now" functions return it, in this test and in
+    the handlers it delivers to, until the test sets, advances or clears it.
+    Each test starts on the real clock.
+
+    **Example**
+
+    ```hot
+    ::hot::test/set-now("2026-10-14T09:00:00Z")
+    Str(::hot::time/now())  // "2026-10-14T09:00:00Z"
+    ```
+    """
+}
+fn (time: Str | ::hot::time/Instant | ::hot::time/ZonedDateTime): ::hot::time/Instant {
+    call-lib(::hot::test/set-now, [time])
+}
+
+advance
+meta {
+    doc: """
+    Move this test's clock by `duration` and return the new time. Years and
+    months have no fixed length, so use weeks, days or smaller units. A clock
+    the test has not fixed is fixed at the real time first.
+
+    **Example**
+
+    ```hot
+    ::hot::test/set-now("2026-10-14T09:00:00Z")
+    ::hot::test/advance(::hot::time/hours(5))
+    Str(::hot::time/now())  // "2026-10-14T14:00:00Z"
+    ```
+    """
+}
+fn (duration: ::hot::time/Duration): ::hot::time/Instant {
+    call-lib(::hot::test/advance, [duration])
+}
+
+clear-now
+meta {
+    doc: """
+    Return this test's clock to the real time.
+
+    **Example**
+
+    ```hot
+    ::hot::test/set-now("2026-10-14T09:00:00Z")
+    ::hot::test/clear-now()
+    ::hot::time/now()  // the real time again
+    ```
+    """
+}
+fn (): Null {
+    call-lib(::hot::test/clear-now, [])
+}
+
+// Stops a delivery or schedule loop that never settles.
+max-test-deliveries 10000
+
+// Each `on-event` handler's name by event type, found once per run
+find-event-handlers fn (): Map {
+    namespaces()
+    |> test-runner-mapcat(functions-in-namespace(%))
+    |> map(Str(%))
+    |> reduce((found, name) {
+        // `call-lib` reads the function's meta by name, not a local's meta
+        fn-meta call-lib(::hot::meta/get, [name])
+        event-type if(and(is-ok(fn-meta), is-map(fn-meta)), get(fn-meta, "on-event"), null)
+        if(is-str(event-type), assoc(found, event-type, concat(get(found, event-type, []), [name])), found)
+    }, {})
+}
+
+event-handlers fn (): Map {
+    found ::hot::ctx/get("test-event-handlers")
+    if(found, found, ::hot::ctx/set("test-event-handlers", find-event-handlers()))
+}
+
+// Run `handler` on `event` as a worker would; a failure is a failed assertion
+run-handler fn (handler: Str, event: Map): Map {
+    result ::hot::internal::exec/contain(handler, [event])
+    cond {
+        is-err(result) => {
+            record-failure(`${handler} failed on ${event.type}: ${::hot::type/err-message(err-value(result))}`)
+        }
+        => { null }
+    }
+
+    {type: event.type, fn: handler, result}
+}
+
+// Deliver one sent event. Schedule events arm and disarm the test's
+// schedules, as the scheduler would; any other runs its handlers.
+deliver-one fn (event: Map): Vec<Map> {
+    cond {
+        eq(event.type, "hot:schedule:new") => {
+            armed call-lib(::hot::test/arm-schedule, [event.data])
+            cond {
+                is-err(armed) => { record-failure(`hot:schedule:new: ${err-value(armed)}`) }
+                => { null }
+            }
+
+            []
+        }
+
+        eq(event.type, "hot:schedule:cancel") => {
+            cancelled call-lib(::hot::test/cancel-schedule, [event.data])
+            cond {
+                is-err(cancelled) => { record-failure(`hot:schedule:cancel: ${err-value(cancelled)}`) }
+                => { null }
+            }
+
+            []
+        }
+        => { map(get(event-handlers(), event.type, []), run-handler(%, event)) }
+    }
+}
+
+// Deliver the sent events, oldest first, then what their handlers send,
+// until nothing is left
+deliver-sent fn (runs: Vec<Map>, delivered: Int): Vec<Map> {
+    pending call-lib(::hot::test/take-sent, [])
+    cond {
+        is-empty(pending) => { runs }
+
+        gt(add(delivered, length(pending)), max-test-deliveries) => {
+            record-failure(`deliver stopped after ${max-test-deliveries} events: handlers keep sending events`)
+            runs
+        }
+        => { deliver-sent(concat(runs, test-runner-mapcat(pending, deliver-one)), add(delivered, length(pending))) }
+    }
+}
+
+deliver
+meta {
+    doc: """
+    Deliver `event`, a map with `type` and `data`, to its `on-event`
+    handlers, run inside this test; then deliver the events they send, until
+    none is left. With no argument, deliver the events sent so far.
+
+    In a test, `send` keeps an event instead of publishing it, and nothing
+    runs until the test delivers it. A delivered `hot:schedule:new` arms a
+    schedule for `run-due`, and `hot:schedule:cancel` disarms. A handler that
+    fails counts as a failed assertion; the other handlers still run. Retries
+    do not apply. Returns one `{type, fn, result}` per handler run.
+
+    **Example**
+
+    ```hot
+    runs ::hot::test/deliver({type: "order:placed", data: {id: "o-1"}})
+    assert-eq(["::shop::orders/on-placed"], map(runs, %.fn))
+    ```
+    """
+}
+fn
+(): Vec<Map> {
+    deliver-sent([], 0)
+},
+(event: Map): Vec<Map> {
+    send(event.type, event.data)
+    deliver-sent([], 0)
+}
+
+// Call a due schedule's function as the scheduler would; a failure is a
+// failed assertion
+run-scheduled fn (due: Map): Map {
+    result ::hot::internal::exec/contain(due.fn, due.args)
+    cond {
+        is-err(result) => {
+            record-failure(`scheduled ${due.fn} failed: ${::hot::type/err-message(err-value(result))}`)
+        }
+        => { null }
+    }
+
+    {type: "hot:schedule", fn: due.fn, at: due.at, result}
+}
+
+// Fire schedules due by `until`, soonest first, each at its due time;
+// `fixed` is the clock to return to afterwards (null for the real time)
+fire-due fn (until: ::hot::time/Instant, fixed: ::hot::time/Instant?, runs: Vec<Map>, fired: Int): Vec<Map> {
+    due call-lib(::hot::test/take-due, [until])
+    cond {
+        is-null(due) => { runs }
+
+        gte(fired, max-test-deliveries) => {
+            record-failure(`run-due stopped after ${max-test-deliveries} scheduled calls`)
+            runs
+        }
+        => {
+            set-now(due.at)
+            called run-scheduled(due)
+            handled deliver()
+            if(is-null(fixed), clear-now(), set-now(fixed))
+            fire-due(until, fixed, concat(runs, [called], handled), add(fired, 1))
+        }
+    }
+}
+
+run-due
+meta {
+    doc: """
+    Fire each armed schedule due by this test's clock, soonest first, and
+    deliver the events it sends. Each call runs with the clock at its due
+    time, as the scheduler would have run it; afterwards the clock is back
+    where the test left it. A recurring schedule fires once for each
+    occurrence that is due. A call that fails counts as a failed assertion.
+    Returns one `{type, fn, result}` per call and handler run; a scheduled
+    call has type `"hot:schedule"` and its due time in `at`.
+
+    **Example**
+
+    ```hot
+    ::hot::test/set-now("2026-10-14T09:00:00Z")
+    send("hot:schedule:new", {fn: "::app::steps/check-due", args: ["s-1"], schedule: "in 1 day"})
+    ::hot::test/advance(::hot::time/days(2))
+    ::hot::test/run-due()  // calls check-due("s-1") at 2026-10-15T09:00:00Z
+    ```
+    """
+}
+fn (): Vec<Map> {
+    runs deliver()
+    fire-due(::hot::time/now(), call-lib(::hot::test/fixed-now, []), runs, 0)
+}
+
+schedules
+meta {
+    doc: """
+    The schedules armed in this test and not yet fired, soonest first, each
+    `{id, fn, args, at}`.
+
+    **Example**
+
+    ```hot
+    ::hot::test/deliver()
+    first(::hot::test/schedules()).fn  // "::app::steps/check-due"
+    ```
+    """
+}
+fn (): Vec<Map> {
+    call-lib(::hot::test/schedules, [])
+}
+
 print-test-header
 meta {doc: """Print header for the test run and record start time."""}
 fn (tests) {
@@ -330,6 +587,7 @@ meta {
 }
 fn (f, capture-output) {
     current-test-reset()
+    call-lib(::hot::test/reset, [])
 
     // Ensure f is a string (convert function reference to string if needed)
     f-str Str(f)
@@ -349,6 +607,9 @@ fn (f, capture-output) {
         capture-output => { call-with-capture(f-str) }
         => { ::hot::internal::exec/contain(f-str, []) }
     }
+
+    // The next test, and the summary's duration, start on the real clock
+    call-lib(::hot::test/reset, [])
 
     // Check if test had any execution errors (real engine/compiler errors)
     test-had-execution-error is-err(result)

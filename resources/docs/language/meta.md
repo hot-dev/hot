@@ -286,6 +286,35 @@ fn (event) {
 
 See [Retries](/docs/retries) for retry fields, backoff behavior, and platform limits.
 
+## Run Timeout
+
+A run that takes longer than its timeout is recorded as failed and retried
+under its `retry` policy. The worker's `worker.run-timeout` (5 minutes by
+default) applies to every run. A function that needs more, or less, sets its
+own with the `timeout` field, in seconds:
+
+```hot
+draft-policy
+meta {on-event: "drafting:requested", timeout: 1800}
+fn (event) {
+  // May run for up to 30 minutes
+  run-drafting-loop(event.data)
+}
+```
+
+`timeout` applies to the function a run starts with: the handler of an event,
+the scheduled function of a schedule, or the function a call names (from the
+API, an MCP tool, a webhook, or a re-run). It has no effect on a function
+called from inside a run. An alias without its own `timeout` takes its
+target's.
+
+The value must be a positive whole number; `hot check` reports any other
+value as `invalid-timeout`. The worker caps it at `worker.max-run-timeout`
+(1 hour by default, at most 24 hours) and says so in the failure of a run
+that hits the cap. For longer work, start a [task](/docs/tasks), whose
+timeout can reach 24 hours. See
+[Run Timeouts](/docs/platform/runs-events-streams#run-timeouts).
+
 ## Context Requirements
 
 The `ctx` field declares context variables (secrets and configuration) that a function requires:
@@ -398,4 +427,5 @@ fn (event) {
 | `mcp: {...}` | Expose as MCP tool |
 | `webhook: {...}` | Expose as webhook endpoint |
 | `retry: N` or `retry: {...}` | Automatic retry on failure |
+| `timeout: N` | Seconds a run of this function may take |
 | `ctx: {...}` | Declare required context variables (secrets) |

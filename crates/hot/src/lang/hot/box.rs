@@ -24,6 +24,8 @@ use bollard::query_parameters::{
 };
 use futures::stream::StreamExt;
 
+pub mod registry_auth;
+
 /// `box/start` executes on a blocking VM thread. Bound every async bridge so
 /// a slow database or Redis connection cannot outlive the parent run timeout.
 const BOX_START_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -97,6 +99,28 @@ pub fn start(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
         }
     };
 
+    // Resolve the named registry secret in this run's context and seal it for
+    // the task worker. Only the secret's name, its registry and the sealed
+    // value reach the task args; the token never does.
+    let registry_auth = match &input.registry_auth {
+        Some(secret) => {
+            match registry_auth::resolve_and_seal(
+                &vm.context_storage,
+                secret,
+                &input.image,
+                &env_id,
+                ctx.org_id.as_ref(),
+                registry_auth::encryption_key,
+            ) {
+                Ok(sealed) => Some(sealed),
+                Err(msg) => {
+                    return HotResult::Err(Val::from(format!("::hot::box/start: {}", msg)));
+                }
+            }
+        }
+        None => None,
+    };
+
     let db = match vm.get_database_pool() {
         Some(pool) => pool,
         None => {
@@ -154,7 +178,7 @@ pub fn start(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
         })
         .collect();
 
-    let args_json = serde_json::json!({
+    let mut args_json = serde_json::json!({
         "image": input.image,
         "size": input.size,
         "cmd": input.cmd,
@@ -169,6 +193,9 @@ pub fn start(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
         "writable": input.writable,
         "mounts": mounts_json,
     });
+    if let Some(registry_auth) = registry_auth {
+        args_json["registry_auth"] = registry_auth;
+    }
 
     let request = TaskRequest {
         task_id: task_id.to_string(),
@@ -339,6 +366,9 @@ struct BoxConf {
     /// roots — i.e. the same paths that show up under `resources/` in the
     /// bundle).
     mounts: Vec<BoxMount>,
+    /// Name of the context secret holding the image's registry credential
+    /// (`registry-auth: {secret: ...}`). Resolved and sealed in `start`.
+    registry_auth: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -359,7 +389,13 @@ fn validate_and_parse(args: &[Val]) -> Result<BoxConf, HotResult<Val>> {
         )));
     }
 
-    let input = match &args[0] {
+    // A `BoxConf(...)` value arrives tagged (`{$type, $val}`), as do nested
+    // records like `BoxRegistryAuth(...)`; read the fields underneath.
+    let untyped = match crate::lang::hot::r#type::untype_recursive(&args[0]) {
+        HotResult::Ok(val) => val,
+        HotResult::Err(e) => return Err(HotResult::Err(e)),
+    };
+    let input = match &untyped {
         Val::Map(m) => m,
         _ => {
             return Err(HotResult::Err(Val::from("Argument must be a BoxConf map")));
@@ -492,6 +528,9 @@ fn validate_and_parse(args: &[Val]) -> Result<BoxConf, HotResult<Val>> {
     let mounts = parse_mounts(input.get(&Val::from("mounts")))
         .map_err(|msg| HotResult::Err(Val::from(msg)))?;
 
+    let registry_auth = registry_auth::parse(input.get(&Val::from("registry-auth")))
+        .map_err(|msg| HotResult::Err(Val::from(format!("::hot::box/start: {}", msg))))?;
+
     Ok(BoxConf {
         image: image.to_string(),
         size,
@@ -506,6 +545,7 @@ fn validate_and_parse(args: &[Val]) -> Result<BoxConf, HotResult<Val>> {
         memory_mb,
         writable,
         mounts,
+        registry_auth,
     })
 }
 
@@ -1372,6 +1412,40 @@ mod tests {
                 );
             }
             HotResult::Ok(_) => panic!("Expected Err for denied image"),
+        }
+    }
+
+    /// `BoxConf(...)` and `BoxRegistryAuth(...)` values arrive tagged.
+    #[test]
+    fn test_start_reads_tagged_box_conf() {
+        let input = crate::val!({
+            "$type": "::hot::box/BoxConf",
+            "$val": {
+                "image": "ghcr.io/withleela/reglang:1",
+                "registry-auth": {
+                    "$type": "::hot::box/BoxRegistryAuth",
+                    "$val": {"secret": "ghcr-pull"}
+                }
+            }
+        });
+        let parsed = validate_and_parse(&[input]).unwrap();
+        assert_eq!(parsed.image, "ghcr.io/withleela/reglang:1");
+        assert_eq!(parsed.registry_auth.as_deref(), Some("ghcr-pull"));
+    }
+
+    #[test]
+    fn test_start_refuses_a_token_in_registry_auth() {
+        let input = crate::val!({
+            "image": "ghcr.io/withleela/reglang:1",
+            "registry-auth": {"secret": "ghcr-pull", "token": "ghp_literal"}
+        });
+        match validate_and_parse(&[input]) {
+            Err(HotResult::Err(msg)) => {
+                let msg = msg.to_string();
+                assert!(msg.contains("not `token`"), "{msg}");
+                assert!(!msg.contains("ghp_literal"), "{msg}");
+            }
+            _ => panic!("expected registry-auth with a token to be refused"),
         }
     }
 
