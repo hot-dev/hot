@@ -1,0 +1,56 @@
+// Documentation examples for: resources/docs/cli/index.md (hot test)
+::hot::test::docs::testing ns
+meta ["test"]
+
+// =============================================================================
+// Snippets
+// =============================================================================
+
+// @doc: testing-clock
+test-clock-demo
+meta ["test"]
+fn () {
+  ::hot::test/set-now("2026-10-14T09:00:00Z")
+  assert-eq("2026-10-14T09:00:00Z", Str(::hot::time/now()))
+
+  ::hot::test/advance(::hot::time/hours(5))
+  assert-eq("2026-10-14T14:00:00Z", Str(::hot::time/now()))
+}
+// @end: testing-clock
+
+// @doc: testing-scenario
+::store ::hot::store
+
+steps ::store/Map(name: "docs.testing.steps")
+
+// Opening a step arms its deadline
+on-step-opened
+meta {on-event: "step:opened"}
+fn (event: Map) {
+  ::store/put(steps, event.data.id, {status: "open"})
+  send("hot:schedule:new", {
+    fn: "::hot::test::docs::testing/check-due",
+    args: [event.data.id],
+    schedule: "in 2 days"
+  })
+}
+
+// At the deadline, a step still open is late
+check-due fn (id: Str) {
+  step ::store/get(steps, id)
+  if(eq(step.status, "open"), ::store/put(steps, id, {status: "late", at: Str(::hot::time/now())}), null)
+}
+
+test-a-step-goes-late
+meta ["test"]
+fn () {
+  ::hot::test/set-now("2026-10-14T09:00:00Z")
+  ::hot::test/deliver({type: "step:opened", data: {id: "s-1"}})
+  assert-eq("open", ::store/get(steps, "s-1").status)
+
+  ::hot::test/advance(::hot::time/days(3))
+  ::hot::test/run-due()
+  // check-due ran at the deadline, with the clock at its due time
+  assert-eq({status: "late", at: "2026-10-16T09:00:00Z"}, ::store/get(steps, "s-1"))
+}
+// @end: testing-scenario

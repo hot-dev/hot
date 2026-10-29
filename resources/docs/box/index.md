@@ -28,6 +28,7 @@ Configure a container with `BoxConf`:
 | `tmp-size` | `Int` | `/tmp` tmpfs size in MB (overrides size default) |
 | `disk-size` | `Int` | `/data` writable disk in MB (overrides size default) |
 | `memory` | `Int` | Container memory in MB (overrides size default) |
+| `registry-auth` | `BoxRegistryAuth` | Names the context secret that holds a private image's registry credential (see [Private Images](#private-images)) |
 
 `script` runs with `set -ex` (trace commands, exit on error). Use `script` for multi-line shell commands; use `cmd` for non-shell executables. Only one of `script` or `cmd` may be specified.
 
@@ -93,6 +94,67 @@ policy.policy           // "open"
 policy.denied            // ["docker:dind", ...]
 policy.denied-prefixes   // ["docker:", "rancher/", ...]
 ```
+
+## Private Images
+
+To run an image from a private registry, keep its credential in a context
+secret and name that secret with `registry-auth`. Your code holds only the
+secret's name, never the token.
+
+The secret's value is a map with `registry`, `username` and `token`. In a
+deployed environment, add it as a context variable of the environment, for
+example `ghcr-pull`. Each environment keeps its own credential. In
+development, set it in `hot/ctx.hot`, reading the token from your shell
+rather than writing it into the file:
+
+```hot
+::hot::ctx/set-secret("ghcr-pull", {
+  registry: "ghcr.io",
+  username: "my-bot",
+  token: ::hot::env/get("GHCR_TOKEN"),
+})
+```
+
+Then start the box with the secret's name:
+
+```hot
+task ::box/start(BoxConf({
+  image: "ghcr.io/my-org/my-tool:1",
+  network: "none",
+  registry-auth: BoxRegistryAuth({secret: "ghcr-pull"}),
+}))
+```
+
+How it works:
+
+- `start` reads the secret from the run's own context, checks that its
+  `registry` is the image's registry, and seals the credential for the task
+  worker. The task's args, the run's trace and the logs carry only the
+  secret's name and its registry.
+- `start` refuses a secret that isn't set, isn't a map with `registry`,
+  `username` and `token`, or is for a different registry than the image.
+- Every start pulls with that task's own credential, so the registry decides
+  each time. An image already cached on a worker can't be used by a task
+  that lacks a credential the registry accepts.
+- `registry-auth` takes only `secret`. `hot check` reports any other shape,
+  such as a token written inline, as `invalid-registry-auth`.
+
+The image denylist applies to private images by name, like any other image.
+
+**Self-hosted Kata workers** pull private images through containerd's
+Transfer service, so the token never appears in a process's arguments. That
+needs containerd 1.7 or later, with an `unpack_config` entry for the
+devmapper snapshotter:
+
+```toml
+[plugins."io.containerd.transfer.v1.local"]
+  [[plugins."io.containerd.transfer.v1.local".unpack_config]]
+    platform = "linux/amd64"
+    snapshotter = "devmapper"
+```
+
+The task worker needs the same `HOT_ENCRYPTION_KEY` as the run worker so it
+can open the sealed credential.
 
 ## Example
 

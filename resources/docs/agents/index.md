@@ -403,10 +403,16 @@ counters ::store/Map({name: "support:counters"})
 
 on-ticket meta {agent: SupportAgent, on-event: "support:ticket"}
 fn (event) {
-  total or(::store/get(counters, "total-tickets"), 0)
-  ::store/put(counters, "total-tickets", add(total, 1))
+  ::store/increment(counters, "total-tickets")
 }
 ```
+
+Handlers for different events can run at the same time, so read a shared
+entry and write it back only through the atomic writes: `increment` counts,
+`put-if-missing` creates an entry once, and `put-if` replaces a value only if
+it still holds the one you read. A `get` followed by a `put` can lose a
+concurrent handler's write. See
+[Concurrent Store Writes](/docs/platform/durability#concurrent-store-writes).
 
 ## Lifecycle
 

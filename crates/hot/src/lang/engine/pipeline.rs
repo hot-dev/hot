@@ -757,10 +757,11 @@ impl Engine {
         context_policy: ContextValidationPolicy,
         color: bool,
     ) -> Result<crate::lang::compiler::ctx_checker::ProgramCtxRequirements, String> {
-        // Validate event handlers (event parameter requirement)
+        // Validate event handlers (event parameter requirement) and every
+        // function's `timeout` meta
         if let Err(e) = compiler.extract_event_handlers(combined_program) {
             let formatted = e.format_error(color);
-            return Err(String::from("Event handler validation errors:\n") + &formatted);
+            return Err(String::from("Function validation errors:\n") + &formatted);
         }
 
         // Validate scheduled functions (event parameter requirement)
@@ -1267,6 +1268,12 @@ impl Engine {
             } => {
                 // Execute the Hot test runner functions
                 tracing::debug!(" Unified Pipeline: Running tests...");
+
+                // Only a test run has a harness: the clock tests may fix, and
+                // the events and schedules they deliver themselves.
+                let _test_harness = crate::lang::hot::test::ThreadHarnessGuard::install(Arc::new(
+                    crate::lang::hot::test::TestHarness::default(),
+                ));
 
                 // Create VM for test execution using Arc for efficient sharing
                 let program = compiler.get_program_arc();
@@ -2093,6 +2100,63 @@ fn (): Str { "unused" }
         );
     }
 
+    /// A source dir with one function, `::timed/job`, declared on line 3
+    /// with the given meta entries.
+    fn write_timed_src(root: &std::path::Path, meta: &str) -> Vec<String> {
+        let src_dir = root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("timed.hot"),
+            format!("::timed ns\n\njob meta {{{meta}}}\nfn (event: Map): Map {{ event }}\n"),
+        )
+        .unwrap();
+        vec![src_dir.to_string_lossy().to_string()]
+    }
+
+    #[test]
+    fn check_reports_a_timeout_that_is_not_a_positive_whole_number() {
+        let conf = crate::val::Val::map_empty();
+        for timeout in ["0", "-5", "1.5", "\"30\""] {
+            let temp = tempfile::tempdir().unwrap();
+            let src_paths = write_timed_src(
+                temp.path(),
+                &format!("on-event: \"timed:job\", timeout: {timeout}"),
+            );
+
+            let error = check_text(&src_paths, &conf).unwrap_err();
+            assert!(error.contains("[invalid-timeout]"), "{error}");
+            assert!(error.contains("timed.hot:3:1"), "{error}");
+            assert!(
+                error.contains("`timeout` must be a positive whole number of seconds"),
+                "{error}"
+            );
+
+            let diagnostics = check_json(&src_paths, &conf);
+            assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+            assert_eq!(diagnostics[0].code, "invalid-timeout");
+            assert_eq!(diagnostics[0].severity, 1);
+            assert_eq!(diagnostics[0].range.start.line, 2);
+        }
+    }
+
+    #[test]
+    fn check_validates_timeout_on_any_function_and_accepts_whole_seconds() {
+        let conf = crate::val::Val::map_empty();
+        // A function that is not a handler can still start a run as a call.
+        let temp = tempfile::tempdir().unwrap();
+        let src_paths = write_timed_src(temp.path(), "timeout: 0");
+        let codes: Vec<_> = check_json(&src_paths, &conf)
+            .into_iter()
+            .map(|d| d.code)
+            .collect();
+        assert_eq!(codes, ["invalid-timeout"]);
+
+        let temp = tempfile::tempdir().unwrap();
+        let src_paths = write_timed_src(temp.path(), "on-event: \"timed:job\", timeout: 1800");
+        check_text(&src_paths, &conf).unwrap();
+        assert!(check_json(&src_paths, &conf).is_empty());
+    }
+
     #[test]
     fn structural_compile_allows_required_ctx_but_runtime_execute_rejects_empty_keys() {
         let temp = tempfile::tempdir().unwrap();
@@ -2153,5 +2217,90 @@ value 1
             false,
             None,
         )
+    }
+
+    fn run_tests(test_paths: &[String]) -> Result<crate::val::Val, String> {
+        Engine::run_unified_pipeline(
+            &[],
+            test_paths,
+            None,
+            None,
+            None,
+            None,
+            PipelineMode::Test {
+                pattern: None,
+                capture_output: true,
+            },
+            None,
+            None,
+            None,
+            Some(AHashMap::new()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+    }
+
+    /// `::hot::test/deliver` counts a failing handler as a failed assertion.
+    #[test]
+    fn a_handler_failing_under_deliver_fails_its_test() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("delivery.hot"),
+            r#"::delivery ns
+
+on-ok meta {on-event: "delivery:ok"} fn (event: Map): Int { 1 }
+on-broken meta {on-event: "delivery:broken"} fn (event: Map): Int { div(1, 0) }
+
+delivers meta ["test"] fn () {
+    assert-eq(["::delivery/on-ok"], map(::hot::test/deliver({type: "delivery:ok", data: {}}), %.fn))
+}
+"#,
+        )
+        .unwrap();
+        let paths = vec![temp.path().to_string_lossy().to_string()];
+        assert_eq!(run_tests(&paths).unwrap(), crate::val::Val::Bool(true));
+
+        std::fs::write(
+            temp.path().join("broken.hot"),
+            r#"::delivery::broken ns
+
+delivers-to-a-broken-handler meta ["test"] fn () {
+    ::hot::test/deliver({type: "delivery:broken", data: {}})
+    assert(true, "nothing in the test itself fails")
+}
+"#,
+        )
+        .unwrap();
+        assert_eq!(run_tests(&paths).unwrap(), crate::val::Val::Bool(false));
+    }
+
+    /// Only `hot test` has a harness: elsewhere the clock is real and cannot
+    /// be fixed, and `send` still needs a publisher.
+    #[test]
+    fn execute_has_no_test_clock() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("app.hot"), "::app ns\n\nvalue 1\n").unwrap();
+        let target_file = temp.path().join("clock.hot");
+        std::fs::write(
+            &target_file,
+            r#"::clock ns
+
+fixed ::hot::test/set-now("2001-02-03T04:05:06Z")
+sent send("clock:tick", {})
+[is-err(fixed), is-err(sent), gt(::hot::time/epoch-seconds(), 1700000000)]
+"#,
+        )
+        .unwrap();
+        let src_paths = vec![src_dir.to_string_lossy().to_string()];
+        let result = execute_target(&src_paths, &target_file.to_string_lossy()).unwrap();
+        assert_eq!(result, crate::val!([true, true, true]));
     }
 }

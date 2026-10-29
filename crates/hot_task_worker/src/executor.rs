@@ -231,6 +231,9 @@ pub struct ContainerExtras {
     /// When true, the container needs host network access for the file server transport
     /// (TCP on macOS where VirtioFS doesn't support Unix socket bind mounts).
     pub needs_host_network: bool,
+    /// Credential for pulling a private image, opened from the task's sealed
+    /// `registry-auth`. Used for the pull only; its `Debug` hides the secret.
+    pub registry_auth: Option<Arc<hot::lang::hot::r#box::registry_auth::RegistryCredential>>,
 }
 
 /// VMM selection within the Kata backend.
@@ -530,6 +533,7 @@ mod docker {
     use super::*;
     use crate::log_accumulator::LogAccumulator;
     use bollard::Docker;
+    use bollard::auth::DockerCredentials;
     use bollard::models::{ContainerCreateBody, HostConfig};
     use bollard::query_parameters::{
         CreateImageOptionsBuilder, ListContainersOptionsBuilder, WaitContainerOptionsBuilder,
@@ -650,30 +654,13 @@ mod docker {
             // slot-wait timing fields stay unset by design.
             let pull_start = Instant::now();
             timings.image_pull_started_at = Some(pull_start);
-            let create_image_options = CreateImageOptionsBuilder::default()
-                .from_image(image)
-                .build();
-            let mut pull_stream = self
-                .docker
-                .create_image(Some(create_image_options), None, None);
-            let mut pull_error = None;
-            while let Some(pull_result) = pull_stream.next().await {
-                if let Err(e) = pull_result {
-                    pull_error = Some(ExecutorError::ImagePull(format!(
-                        "Failed to pull image '{}': {}",
-                        image, e
-                    )));
-                    break;
-                }
-            }
+            let pull_result = self.pull_image(image, extras).await;
             // Stamp the phase end on success and mid-pull failure alike:
             // the time already spent pulling is platform-owned either way
             // and must be measurable for the billing deduction.
             timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
             timings.image_pull_ended_at = Some(Instant::now());
-            if let Some(e) = pull_error {
-                return Err(e);
-            }
+            pull_result?;
             let runtime_start = Instant::now();
 
             let memory_bytes =
@@ -781,6 +768,45 @@ mod docker {
             Ok(container_id)
         }
 
+        /// Pull `image`, authenticating with the task's registry credential
+        /// when it has one. Every task pulls, so the registry decides each
+        /// time whether this task may use the image: a private image another
+        /// environment already pulled onto this daemon is not usable without
+        /// a credential the registry accepts.
+        async fn pull_image(
+            &self,
+            image: &str,
+            extras: Option<&ContainerExtras>,
+        ) -> ExecutorResult<()> {
+            let registry_auth = extras.and_then(|e| e.registry_auth.as_deref());
+            let credentials = registry_auth.map(|auth| DockerCredentials {
+                username: Some(auth.username.clone()),
+                password: Some(auth.token.clone()),
+                serveraddress: Some(auth.docker_server_address()),
+                ..Default::default()
+            });
+            let create_image_options = CreateImageOptionsBuilder::default()
+                .from_image(image)
+                .build();
+            let mut pull_stream =
+                self.docker
+                    .create_image(Some(create_image_options), None, credentials);
+            while let Some(pull_result) = pull_stream.next().await {
+                if let Err(e) = pull_result {
+                    let detail = e.to_string();
+                    let detail = match registry_auth {
+                        Some(auth) => auth.redact(&detail),
+                        None => detail,
+                    };
+                    return Err(ExecutorError::ImagePull(format!(
+                        "Failed to pull image '{}': {}",
+                        image, detail
+                    )));
+                }
+            }
+            Ok(())
+        }
+
         /// Check container status. Returns `Some(exit_code)` if stopped, `None` if running.
         pub async fn inspect_status(&self, container_id: &str) -> ExecutorResult<Option<i64>> {
             let info = self
@@ -870,33 +896,13 @@ mod docker {
             let pull_start = Instant::now();
             timings.image_pull_started_at = Some(pull_start);
             tracing::debug!(trace_id = trace_id, image = %image, "box.image.pulling");
-
-            let create_image_options = CreateImageOptionsBuilder::default()
-                .from_image(image)
-                .build();
-
-            let mut pull_stream = self
-                .docker
-                .create_image(Some(create_image_options), None, None);
-
-            let mut pull_error = None;
-            while let Some(pull_result) = pull_stream.next().await {
-                if let Err(e) = pull_result {
-                    pull_error = Some(ExecutorError::ImagePull(format!(
-                        "Failed to pull image '{}': {}",
-                        image, e
-                    )));
-                    break;
-                }
-            }
+            let pull_result = self.pull_image(image, extras).await;
             // Stamp the phase end on success and mid-pull failure alike:
             // the time already spent pulling is platform-owned either way
             // and must be measurable for the billing deduction.
             timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
             timings.image_pull_ended_at = Some(Instant::now());
-            if let Some(e) = pull_error {
-                return Err(e);
-            }
+            pull_result?;
             let runtime_start = Instant::now();
 
             let memory_bytes =
@@ -1264,9 +1270,21 @@ mod kata {
         },
         with_namespace,
     };
+    use hot::lang::hot::r#box::registry_auth::RegistryCredential;
 
     const NAMESPACE: &str = "hot-box";
     const SNAPSHOTTER: &str = "devmapper";
+    const CONTAINERD_TRANSFER_REQUIRED: &str = "this worker's containerd has no Transfer \
+        service, which pulling with registry-auth needs (containerd 1.7 or later)";
+
+    /// containerd's name for this host's CPU architecture.
+    fn containerd_arch() -> &'static str {
+        match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        }
+    }
     const KATA_IO_DIR: &str = "/tmp/hot-box-io";
     const KATA_VC_DIR: &str = "/run/vc/firecracker";
     const DEVMAPPER_MIN_FREE_RESERVE_MB: u64 = 2_048;
@@ -1315,6 +1333,143 @@ mod kata {
                 );
             }
         }
+    }
+
+    /// Pull `image` through containerd's Transfer service, unpacked into
+    /// `snapshotter` like `ctr images pull`. `ctr` can take a
+    /// password only in its arguments, where any process on the host can
+    /// read it; here containerd asks for the credential over a gRPC stream
+    /// instead, and it is answered only for the image's own registry.
+    async fn pull_with_registry_auth(
+        channel: Channel,
+        image: &str,
+        auth: Arc<RegistryCredential>,
+        snapshotter: &str,
+    ) -> ExecutorResult<()> {
+        use containerd_client::services::v1::{
+            StreamInit, TransferRequest, streaming_client::StreamingClient,
+            transfer_client::TransferClient,
+        };
+        use containerd_client::to_any;
+        use containerd_client::types::Platform;
+        use containerd_client::types::transfer::{
+            AuthRequest, AuthResponse, AuthType, ImageStore, OciRegistry, RegistryResolver,
+            UnpackConfiguration,
+        };
+
+        let pull_error = |detail: String| {
+            ExecutorError::ImagePull(format!(
+                "Failed to pull image '{}': {}",
+                image,
+                auth.redact(&detail)
+            ))
+        };
+        let unsupported = |status: &Status| {
+            status.code() == Code::Unimplemented
+                || (status.code() == Code::NotFound && status.message().contains("stream"))
+        };
+
+        // Open the credential stream and wait for containerd to register it.
+        let stream_id = format!("hot-box-creds-{}", uuid::Uuid::new_v4());
+        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<prost_types::Any>(4);
+        outbound_tx
+            .send(to_any(&StreamInit {
+                id: stream_id.clone(),
+            }))
+            .await
+            .map_err(|_| pull_error("credential stream closed".to_string()))?;
+        let outbound = futures::stream::poll_fn(move |cx| outbound_rx.poll_recv(cx));
+        let mut inbound = StreamingClient::new(channel.clone())
+            .stream(with_namespace!(outbound, NAMESPACE))
+            .await
+            .map_err(|status| {
+                if unsupported(&status) {
+                    pull_error(CONTAINERD_TRANSFER_REQUIRED.to_string())
+                } else {
+                    pull_error(format!("credential stream: {}", status.message()))
+                }
+            })?
+            .into_inner();
+        inbound
+            .message()
+            .await
+            .map_err(|status| pull_error(format!("credential stream: {}", status.message())))?
+            .ok_or_else(|| pull_error("credential stream closed".to_string()))?;
+
+        // Answer each credential request for the image's registry; any
+        // other host (a mirror from containerd's hosts config, say) gets
+        // none and pulls anonymously.
+        let responder_auth = Arc::clone(&auth);
+        let responder = tokio::spawn(async move {
+            while let Ok(Some(mut message)) = inbound.message().await {
+                // containerd names Any types without the `/` prefix
+                // that prost's type URL check requires.
+                if !message.type_url.contains('/') {
+                    message.type_url.insert(0, '/');
+                }
+                let response = match message.to_msg::<AuthRequest>() {
+                    Ok(request) if responder_auth.serves_host(&request.host) => AuthResponse {
+                        auth_type: AuthType::Credentials as i32,
+                        username: responder_auth.username.clone(),
+                        secret: responder_auth.token.clone(),
+                        expire_at: None,
+                    },
+                    _ => AuthResponse::default(),
+                };
+                if outbound_tx.send(to_any(&response)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let platform = Platform {
+            os: "linux".to_string(),
+            architecture: containerd_arch().to_string(),
+            ..Default::default()
+        };
+        let source = OciRegistry {
+            reference: image.to_string(),
+            resolver: Some(RegistryResolver {
+                auth_stream: stream_id,
+                ..Default::default()
+            }),
+        };
+        let destination = ImageStore {
+            name: image.to_string(),
+            platforms: vec![platform.clone()],
+            unpacks: vec![UnpackConfiguration {
+                platform: Some(platform),
+                snapshotter: snapshotter.to_string(),
+            }],
+            ..Default::default()
+        };
+        let request = TransferRequest {
+            source: Some(to_any(&source)),
+            destination: Some(to_any(&destination)),
+            options: None,
+        };
+        let result = TransferClient::new(channel)
+            .transfer(with_namespace!(request, NAMESPACE))
+            .await;
+        // Dropping the responder ends the stream, so containerd forgets it.
+        responder.abort();
+        result.map(|_| ()).map_err(|status| {
+            if unsupported(&status) {
+                pull_error(CONTAINERD_TRANSFER_REQUIRED.to_string())
+            } else if status.message().contains("no unpack platforms defined") {
+                // containerd's Transfer service unpacks only into the
+                // platform/snapshotter pairs its config lists.
+                pull_error(format!(
+                    "this worker's containerd can't unpack into the {snapshotter} snapshotter \
+                     through its Transfer service; add an `unpack_config` entry with platform \
+                     \"linux/{}\" and snapshotter \"{snapshotter}\" under \
+                     [plugins.\"io.containerd.transfer.v1.local\"]",
+                    containerd_arch()
+                ))
+            } else {
+                pull_error(status.message().to_string())
+            }
+        })
     }
 
     pub struct KataExecutor {
@@ -1646,7 +1801,14 @@ mod kata {
             )
             .await
             {
-                Ok(()) => self.ensure_image(&mut images, image).await,
+                Ok(()) => {
+                    self.ensure_image(
+                        &mut images,
+                        image,
+                        extras.and_then(|e| e.registry_auth.clone()),
+                    )
+                    .await
+                }
                 Err(e) => Err(e),
             };
             // Stamp the phase end on success and mid-pull failure alike
@@ -2087,7 +2249,16 @@ mod kata {
             &self,
             _client: &mut ImagesClient<Channel>,
             image: &str,
+            registry_auth: Option<Arc<RegistryCredential>>,
         ) -> ExecutorResult<()> {
+            // Every task pulls, so the registry decides each time whether this
+            // task may use the image: a private image another environment
+            // already pulled into this namespace is not usable without a
+            // credential the registry accepts.
+            if let Some(auth) = registry_auth {
+                return pull_with_registry_auth(self.channel.clone(), image, auth, SNAPSHOTTER)
+                    .await;
+            }
             // Always run ctr pull; it is idempotent and skips already-present
             // layers. Checking the image index via gRPC first is unreliable
             // because the index can exist while layer blobs are missing.
@@ -2753,6 +2924,70 @@ mod kata {
             )));
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod registry_auth_tests {
+        use super::*;
+
+        fn env(name: &str) -> String {
+            std::env::var(name).unwrap_or_else(|_| panic!("set {name}"))
+        }
+
+        /// Pulls a private image through containerd's Transfer service: a
+        /// wrong token is refused without echoing it, the right one pulls.
+        /// Needs containerd and a registry that requires a login:
+        /// `HOT_TEST_CONTAINERD_SOCKET`, `HOT_TEST_PRIVATE_IMAGE`,
+        /// `HOT_TEST_REGISTRY_USER`, `HOT_TEST_REGISTRY_TOKEN`, and
+        /// optionally `HOT_TEST_SNAPSHOTTER` (default `overlayfs`).
+        #[tokio::test]
+        #[ignore = "needs containerd and a private registry"]
+        async fn transfer_pull_authenticates_with_the_registry_credential() {
+            let channel = connect(env("HOT_TEST_CONTAINERD_SOCKET")).await.unwrap();
+            let image = normalize_image_ref(&env("HOT_TEST_PRIVATE_IMAGE"));
+            let snapshotter =
+                std::env::var("HOT_TEST_SNAPSHOTTER").unwrap_or_else(|_| "overlayfs".into());
+            let registry = hot::lang::hot::r#box::registry_auth::image_registry(&image);
+            let credential = |token: String| {
+                Arc::new(RegistryCredential {
+                    registry: registry.clone(),
+                    username: env("HOT_TEST_REGISTRY_USER"),
+                    token,
+                })
+            };
+
+            let wrong = "hot-test-wrong-token-value".to_string();
+            let refused = pull_with_registry_auth(
+                channel.clone(),
+                &image,
+                credential(wrong.clone()),
+                &snapshotter,
+            )
+            .await
+            .expect_err("a wrong token must not pull");
+            let refused = refused.to_string();
+            assert!(!refused.contains(&wrong), "{refused}");
+            eprintln!("wrong token: {refused}");
+
+            pull_with_registry_auth(
+                channel.clone(),
+                &image,
+                credential(env("HOT_TEST_REGISTRY_TOKEN")),
+                &snapshotter,
+            )
+            .await
+            .expect("the registry credential pulls the image");
+            let mut images = ImagesClient::new(channel);
+            images
+                .get(with_namespace!(
+                    GetImageRequest {
+                        name: image.clone()
+                    },
+                    NAMESPACE
+                ))
+                .await
+                .expect("the pulled image is in the hot-box namespace");
+        }
     }
 }
 
