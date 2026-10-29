@@ -141,6 +141,7 @@ This is useful for:
 |---------|-------------|---------|
 | `hot.log.level` | Log level: trace, debug, info, warn, error, off | `info` |
 | `hot.log.target` | Output target: stdout, file, none | `stdout` |
+| `hot.log.format` | Output format: full, simple, json (one object per line) | `full` for services, `simple` for CLI commands |
 | `hot.log.dir` | Directory for log files (when target is file) | `.hot/log` |
 | `hot.log.rotation` | File rotation: hourly, daily, none | `daily` |
 | `hot.log.retention` | Number of log files to keep (0 = keep all) | `7` |
@@ -200,6 +201,17 @@ values, are ignored in favor of the direct peer address.
 
 `trusted-proxies` also accepts a comma-delimited string, which is useful for an
 environment-backed deployment setting.
+
+## Secrets from Files
+
+Settings supplied through `HOT_*` environment variables, plus `HOT_ENCRYPTION_KEY`
+and `HOT_APP_SESSION_SECRET`, can instead name a file that holds the value:
+set `<NAME>_FILE`, for example `HOT_DB_URI_FILE=/run/secrets/db-uri`. Hot
+reads the file at startup, drops one trailing newline, and does not copy the
+value into the process environment. Setting both `<NAME>` and `<NAME>_FILE`,
+or naming an empty or unreadable file, stops startup with an error that names
+the variable and path but not the value. `--show-conf` prints such values as
+`***` and lists their source files under `_secret-files`.
 
 ## Configuration Format
 

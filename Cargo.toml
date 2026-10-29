@@ -51,6 +51,7 @@ tracing-subscriber = { version = "0.3.23", features = [
     "time",
     "chrono",
     "env-filter",
+    "json",
 ] }
 tracing-appender = { version = "0.2" }
 ariadne = "0.6"

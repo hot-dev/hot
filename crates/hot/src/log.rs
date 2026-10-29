@@ -8,6 +8,7 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 pub const DEFAULT_LOG_LEVEL: LevelFilter = LevelFilter::INFO;
 pub const DEFAULT_LOG_TARGET: LogTarget = LogTarget::Stdout;
@@ -58,6 +59,8 @@ pub enum LogFormat {
     Full,
     /// Simple format: just the message (for CLI commands)
     Simple,
+    /// One structured JSON object per event, for cloud/collector ingestion.
+    Json,
 }
 
 impl FromStr for LogFormat {
@@ -67,8 +70,9 @@ impl FromStr for LogFormat {
         match s.to_lowercase().as_str() {
             "full" => Ok(LogFormat::Full),
             "simple" => Ok(LogFormat::Simple),
+            "json" => Ok(LogFormat::Json),
             _ => Err(format!(
-                "Unknown log format: '{}'. Valid options: full, simple",
+                "Unknown log format: '{}'. Valid options: full, simple, json",
                 s
             )),
         }
@@ -80,6 +84,7 @@ impl std::fmt::Display for LogFormat {
         match self {
             LogFormat::Full => write!(f, "full"),
             LogFormat::Simple => write!(f, "simple"),
+            LogFormat::Json => write!(f, "json"),
         }
     }
 }
@@ -268,6 +273,21 @@ fn spawn_periodic_cleanup(log_dir: PathBuf, retention: usize) {
     });
 }
 
+fn json_subscriber<W>(writer: W, filter: EnvFilter) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
+    fmt::Subscriber::builder()
+        .json()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_current_span(true)
+        .with_span_list(true)
+        .with_timer(fmt::time::UtcTime::rfc_3339())
+        .with_env_filter(filter)
+        .finish()
+}
+
 /// Set up logging based on configuration
 /// The `format` parameter controls output format:
 /// - `Full`: timestamp, level, target, message (for servers)
@@ -306,6 +326,9 @@ pub fn setup_tracing(
             let use_ansi = console_ansi_enabled();
 
             match format {
+                LogFormat::Json => {
+                    json_subscriber(std::io::stdout, filter).try_init()?;
+                }
                 LogFormat::Full => {
                     // Full format with timestamp, level, target
                     fmt::Subscriber::builder()
@@ -375,20 +398,24 @@ pub fn setup_tracing(
                     "hot", // prefix - files will be named hot.YYYY-MM-DD or hot.YYYY-MM-DD-HH
                 );
 
-                // Initialize the file logging subscriber with the rolling appender
-                // File logs always use full format for debugging purposes
-                fmt::Subscriber::builder()
-                    .with_writer(file_appender)
-                    .with_ansi(false) // No ANSI colors in log files
-                    .with_target(true)
-                    .with_level(true)
-                    .with_thread_ids(false)
-                    .with_thread_names(false)
-                    .with_file(false)
-                    .with_line_number(false)
-                    .with_timer(fmt::time::UtcTime::rfc_3339())
-                    .with_env_filter(filter)
-                    .init();
+                // File output preserves JSON when requested; text files use
+                // full timestamps even when the CLI defaults to simple output.
+                if format == LogFormat::Json {
+                    json_subscriber(file_appender, filter).try_init()?;
+                } else {
+                    fmt::Subscriber::builder()
+                        .with_writer(file_appender)
+                        .with_ansi(false) // No ANSI colors in log files
+                        .with_target(true)
+                        .with_level(true)
+                        .with_thread_ids(false)
+                        .with_thread_names(false)
+                        .with_file(false)
+                        .with_line_number(false)
+                        .with_timer(fmt::time::UtcTime::rfc_3339())
+                        .with_env_filter(filter)
+                        .init();
+                }
 
                 // Log the directory being used for logging
                 info!(
@@ -425,4 +452,44 @@ pub fn setup_tracing(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+    impl Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn json_logs_keep_fields_spans_and_multiline_events_on_one_line() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(bytes.clone());
+        let subscriber = json_subscriber(move || writer.clone(), EnvFilter::new("info"));
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("service", service = "worker");
+            let _guard = span.enter();
+            tracing::info!(count = 3u64, "first\nsecond");
+        });
+        let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        assert!(!text.contains('\u{1b}'));
+        let event: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(event["level"], "INFO");
+        assert_eq!(event["fields"]["count"], 3);
+        assert_eq!(event["fields"]["message"], "first\nsecond");
+        assert_eq!(event["span"]["service"], "worker");
+        assert!(event["timestamp"].as_str().unwrap().ends_with('Z'));
+    }
 }
