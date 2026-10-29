@@ -241,6 +241,78 @@ class Readiness(unittest.TestCase):
                 agent_module.https_status("app.hot.internal", "/signin")
 
 
+class ManagedData(AgentHarness):
+    ADMIN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-0123-abcdef"
+    HOST = "hot-example.c0123.us-east-1.rds.amazonaws.com"
+
+    def setUp(self):
+        super().setUp()
+        self.config["data"] = {"postgres": {"mode": "managed", "runtime_role": "hot_runtime", "endpoint": {
+            "host": self.HOST, "port": 5432, "admin_user": "hot_admin", "admin_secret": self.ADMIN}}}
+        self.cloud.secrets[self.ADMIN] = {"username": "hot_admin", "password": "p@ss/word"}
+        self.agent.resolve = lambda hosts: ["10.68.4.10/32"] if hosts == [self.HOST] else []
+        self.ca_requests, self.ca_status = [], 200
+
+    def fake_http(self, method, url, body=None, headers=None, timeout=30):
+        if url.startswith("https://truststore.pki.rds.amazonaws.com/"):
+            self.ca_requests.append(url)
+            return self.ca_status, b"-----BEGIN CERTIFICATE-----\nRDS\n-----END CERTIFICATE-----\n"
+        return super().fake_http(method, url, body, headers, timeout)
+
+    def test_the_database_is_prepared_checked_then_migrated(self):
+        status = self.agent.reconcile()
+        self.assertEqual(status["state"], "deployed", status)
+        calls = self.run.compose_calls()
+        order = [calls.index(f"--profile admin run --rm {job}") for job in ("prepare-postgres", "check-postgres", "migrate")]
+        self.assertEqual(order, sorted(order))
+        self.assertNotIn("up -d --wait postgres", " ".join(calls))
+        self.assertEqual(self.ca_requests, ["https://truststore.pki.rds.amazonaws.com/us-east-1/us-east-1-bundle.pem"])
+        compose = json.loads((Path(self.tmp.name) / "releases/3.0.1/bundle/compose.json").read_text())
+        self.assertNotIn("postgres", compose["services"])
+        self.assertIn("10.68.4.10/32", compose["services"]["worker"]["environment"]["HOT_NETWORK_DENY_CIDRS"])
+        self.assertTrue((Path(self.tmp.name) / "releases/3.0.1/bundle/prepare_postgres.sql").exists())
+
+    def test_only_the_prepare_job_gets_the_administrator(self):
+        self.agent.reconcile()
+        root = Path(self.tmp.name) / "secrets"
+        admin = (root / "prepare-postgres/POSTGRES_ADMIN_URI").read_text()
+        self.assertTrue(admin.startswith("postgres://hot_admin:p%40ss%2Fword@" + self.HOST + ":5432/postgres?"))
+        self.assertIn("/hot?", (root / "prepare-postgres/POSTGRES_ADMIN_HOT_URI").read_text())
+        runtime = (root / "app/HOT_DB_URI").read_text()
+        self.assertTrue(runtime.startswith("postgres://hot_runtime:"), runtime)
+        self.assertIn("sslmode=verify-full", runtime)
+        self.assertIn("RDS", (root / "app/POSTGRES_CA_CERT").read_text())
+        for path in root.rglob("*"):
+            if path.is_file() and path.parent.name != "prepare-postgres":
+                self.assertNotIn("p@ss/word", path.read_text())
+                self.assertNotIn("p%40ss%2Fword", path.read_text())
+
+    def test_cloud_sql_verifies_its_own_ca(self):
+        self.config.update(cloud="gcp", project="example-project")
+        self.config["data"]["postgres"]["endpoint"] = {
+            "host": "10.100.0.3", "port": 5432, "admin_user": "postgres",
+            "admin_secret": "projects/example-project/secrets/hot-example-postgres-admin",
+            "ca_certificate": "-----BEGIN CERTIFICATE-----\nSQL\n-----END CERTIFICATE-----\n"}
+        self.cloud.secrets["projects/example-project/secrets/hot-example-postgres-admin"] = {"username": "postgres", "password": "x"}
+        generated = {k: "g" for k in ("POSTGRES_PASSWORD", "POSTGRES_RUNTIME_PASSWORD", "VALKEY_PASSWORD",
+                                     "HOT_ENCRYPTION_KEY", "HOT_APP_SESSION_SECRET", "ADMIN_PASSWORD")}
+        files = agent_module.role_secrets(self.config, generated, self.cloud.secrets[OPERATOR], self.agent.managed_postgres())
+        self.assertIn("sslmode=verify-ca", files["worker"]["HOT_DB_URI"])
+        self.assertIn("SQL", files["worker"]["POSTGRES_CA_CERT"])
+        self.assertEqual(self.ca_requests, [])
+
+    def test_a_missing_administrator_or_ca_stops_the_deploy(self):
+        del self.cloud.secrets[self.ADMIN]
+        self.assertIn("administrator secret", self.agent.reconcile()["error"])
+        self.cloud.secrets[self.ADMIN] = {"username": "hot_admin", "password": "x"}
+        self.ca_status = 503
+        self.assertIn("CA certificate", self.agent.reconcile()["error"])
+
+    def test_operator_database_settings_are_refused(self):
+        self.cloud.secrets[OPERATOR]["HOT_DB_URI"] = "postgres://x"
+        self.assertIn("unsupported entry", self.agent.reconcile()["error"])
+
+
 class Commands(AgentHarness):
     def test_only_allowlisted_commands_and_services(self):
         with self.assertRaisesRegex(agent_module.AgentError, "Unknown command"):

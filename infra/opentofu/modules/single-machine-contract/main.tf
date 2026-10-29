@@ -23,12 +23,22 @@ variable "installation" {
     manifest_base_url = optional(string, "")
     # Non-secret HOT_* settings for every Hot service, such as HOT_EMAIL_PROVIDER.
     settings = optional(map(string), {})
-    # local runs PostgreSQL or Valkey on the VM; existing uses the operator's,
-    # with connection settings in the operator secret.
+    # local runs PostgreSQL or Valkey on the VM; managed provisions the cloud
+    # service (PostgreSQL only so far); existing uses the operator's, with
+    # connection settings in the operator secret.
     data = optional(object({
       postgres = optional(object({
         mode         = optional(string, "local")
         runtime_role = optional(string, "hot_runtime")
+        # Managed only. Empty tier and zero storage_gb follow the size.
+        version               = optional(string, "18")
+        tier                  = optional(string, "")
+        storage_gb            = optional(number, 0)
+        high_availability     = optional(bool, false)
+        backup_retention_days = optional(number, 7)
+        deletion_protection   = optional(bool, true)
+        # Raise to set a new administrator password (GCP); see infra/README.md.
+        admin_password_version = optional(number, 1)
       }), {})
       valkey = optional(object({
         mode = optional(string, "local")
@@ -61,6 +71,9 @@ variable "installation" {
       # Existing AWS networks with a public endpoint: two or more public
       # subnets in different zones for the load balancer.
       public_subnet_ids = optional(list(string), [])
+      # Existing AWS networks with managed PostgreSQL: private subnets in two
+      # or more zones for the database.
+      data_subnet_ids = optional(list(string), [])
     }), {})
   })
   validation {
@@ -104,8 +117,21 @@ variable "installation" {
     error_message = "The network needs a usable IPv4 CIDR; client ranges must be valid IPv4 CIDRs narrower than /0."
   }
   validation {
-    condition     = contains(["local", "existing"], var.installation.data.postgres.mode) && contains(["local", "existing"], var.installation.data.valkey.mode) && can(regex("^[a-z_][a-z0-9_]{0,62}$", var.installation.data.postgres.runtime_role))
-    error_message = "data.postgres.mode and data.valkey.mode must be local or existing, and runtime_role a PostgreSQL role name."
+    condition     = contains(["local", "managed", "existing"], var.installation.data.postgres.mode) && contains(["local", "existing"], var.installation.data.valkey.mode) && can(regex("^[a-z_][a-z0-9_]{0,62}$", var.installation.data.postgres.runtime_role)) && !contains(["hot_owner", "hot_admin", "postgres"], var.installation.data.postgres.runtime_role)
+    error_message = "data.postgres.mode must be local, managed, or existing; data.valkey.mode local or existing; runtime_role a PostgreSQL role name other than hot_owner, hot_admin, or postgres."
+  }
+  validation {
+    condition = var.installation.data.postgres.mode != "managed" || (
+      contains(["18"], var.installation.data.postgres.version)
+      && var.installation.data.postgres.backup_retention_days >= 1 && var.installation.data.postgres.backup_retention_days <= 35
+      && (var.installation.data.postgres.storage_gb == 0 || var.installation.data.postgres.storage_gb >= 20)
+      && var.installation.data.postgres.admin_password_version >= 1
+    )
+    error_message = "Managed PostgreSQL supports version 18, 1-35 days of backups, and 20 GB or more of storage."
+  }
+  validation {
+    condition     = var.installation.data.postgres.mode != "managed" || var.installation.cloud != "aws" || var.installation.network.mode == "new" || length(var.installation.network.data_subnet_ids) >= 2
+    error_message = "Managed PostgreSQL on an existing AWS network needs network.data_subnet_ids in at least two zones."
   }
   validation {
     condition     = var.installation.host_image != ""
@@ -145,6 +171,13 @@ locals {
     medium = { aws = "m8i.xlarge", gcp = "n2-standard-4", memory_mb = 16384, cpus = 4, data_gb = 200 }
     large  = { aws = "m8i.2xlarge", gcp = "n2-standard-8", memory_mb = 32768, cpus = 8, data_gb = 500 }
   }
+  # Managed PostgreSQL starting points per size.
+  database = {
+    small  = { aws = "db.m7g.large", gcp = "db-custom-2-8192", storage_gb = 50 }
+    medium = { aws = "db.m7g.xlarge", gcp = "db-custom-4-16384", storage_gb = 100 }
+    large  = { aws = "db.m7g.2xlarge", gcp = "db-custom-8-32768", storage_gb = 200 }
+  }
+  postgres = var.installation.data.postgres
   capacity = local.sizes[var.installation.size]
 }
 
@@ -154,4 +187,11 @@ output "configuration" {
 output "capacity" {
   description = "Conservative starting allocations; not benchmarked throughput guarantees."
   value       = local.capacity
+}
+output "managed_postgres" {
+  description = "The managed PostgreSQL tier and storage, with size defaults applied; null unless data.postgres.mode is managed."
+  value = local.postgres.mode != "managed" ? null : {
+    tier       = local.postgres.tier != "" ? local.postgres.tier : local.database[var.installation.size][var.installation.cloud]
+    storage_gb = local.postgres.storage_gb > 0 ? local.postgres.storage_gb : local.database[var.installation.size].storage_gb
+  }
 }

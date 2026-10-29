@@ -58,6 +58,10 @@ CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "
                # Read by the host agent, not by the bundle.
                "data_volume_id", "admin_email", "manifest_base_url", "status_reference", "command_subscription",
                "settings", "data"}
+# data.postgres settings: the contract's, plus the endpoint a managed
+# database's stack adds for the host.
+POSTGRES_KEYS = {"mode", "runtime_role", "version", "tier", "storage_gb", "high_availability",
+                 "backup_retention_days", "deletion_protection", "admin_password_version", "endpoint"}
 # Names that would carry a secret; those belong in the operator secret bundle.
 SECRET_MARKERS = ("SECRET", "PASSWORD", "TOKEN", "_KEY", "_URI")
 
@@ -88,13 +92,19 @@ def validate(document):
     if not isinstance(data, dict) or set(data) - {"postgres", "valkey"}:
         raise ValueError("data takes postgres and valkey settings only")
     for service, options in data.items():
-        allowed = {"mode", "runtime_role"} if service == "postgres" else {"mode"}
+        allowed = POSTGRES_KEYS if service == "postgres" else {"mode"}
         if not isinstance(options, dict) or set(options) - allowed:
             raise ValueError(f"Unknown data.{service} settings")
-        if options.get("mode", "local") not in {"local", "existing"}:
-            raise ValueError(f"data.{service}.mode must be local or existing")
-    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", runtime_role(config)):
-        raise ValueError("data.postgres.runtime_role must be a PostgreSQL role name")
+        modes = ("local", "managed", "existing") if service == "postgres" else ("local", "existing")
+        if options.get("mode", "local") not in modes:
+            raise ValueError(f"data.{service}.mode must be " + ", ".join(modes[:-1]) + " or " + modes[-1])
+    if data_mode(config, "postgres") == "managed":
+        endpoint = data["postgres"].get("endpoint")
+        required = {"host", "port", "admin_user", "admin_secret"} | ({"ca_certificate"} if config["cloud"] == "gcp" else set())
+        if not isinstance(endpoint, dict) or set(endpoint) - (required | {"ca_certificate"}) or not all(endpoint.get(k) for k in required):
+            raise ValueError("Managed PostgreSQL needs the endpoint the stack provisions: " + ", ".join(sorted(required)))
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", runtime_role(config)) or runtime_role(config) in {"hot_owner", "hot_admin", "postgres"}:
+        raise ValueError("data.postgres.runtime_role must be a PostgreSQL role name other than hot_owner, hot_admin, or postgres")
     settings = config.get("settings", {})
     if not isinstance(settings, dict):
         raise ValueError("settings must map HOT_* names to values")
@@ -124,7 +134,7 @@ def validate(document):
             if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", storage.get("bucket", "")) or not storage.get("region") or not prefix.strip("/"):
                 raise ValueError(f"{role}: S3 requires bucket, region, and a nonempty relative prefix")
     network = config.get("network", {})
-    if set(network) - {"mode", "cidr", "client_cidrs", "network_id", "subnet_id", "public_subnet_ids"}:
+    if set(network) - {"mode", "cidr", "client_cidrs", "network_id", "subnet_id", "public_subnet_ids", "data_subnet_ids"}:
         raise ValueError("Unknown network fields")
     if network.get("mode", "new") not in {"new", "existing"}:
         raise ValueError("Select new or existing networking")
@@ -147,7 +157,8 @@ def validate(document):
 
 
 def data_mode(config, service):
-    """local runs the service in the bundle; existing uses the operator's."""
+    """local runs the service in the bundle; managed uses the cloud service
+    the stack provisions; existing uses the operator's."""
     return config.get("data", {}).get(service, {}).get("mode", "local")
 
 
@@ -232,7 +243,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     deny += [cidr for cidr in extra_deny if cidr not in deny]
     pg_local = data_mode(config, "postgres") == "local"
     valkey_local = data_mode(config, "valkey") == "local"
-    # An existing PostgreSQL is reached over TLS verified against its CA.
+    # A managed or existing PostgreSQL is reached over TLS verified against its CA.
     db_ca = [] if pg_local else ["POSTGRES_CA_CERT"]
     data_ready = {name: {"condition": "service_healthy"}
                   for name, local in (("postgres", pg_local), ("valkey", valkey_local)) if local}
@@ -368,6 +379,21 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         via_uri = ["sh", "-c", 'exec psql "$(cat /run/secrets/HOT_DB_MIGRATION_URI)" "$@"', "psql"]
         provision.update(entrypoint=via_uri, command=grant,
                          secrets=[secret("provision", k) for k in ("HOT_DB_MIGRATION_URI", *db_ca)])
+        if data_mode(config, "postgres") == "managed":
+            # The stack's administrator login creates the owner and runtime
+            # logins, the database, the schema, and its extensions; rerunning
+            # it only resets the two passwords to the generated ones.
+            services["prepare-postgres"] = {
+                "image": images["postgres"], "profiles": ["admin"], "user": "10001:10001", "read_only": True,
+                "entrypoint": ["sh", "-c", 'exec psql "$(cat /run/secrets/POSTGRES_ADMIN_URI)" "$@"', "psql"],
+                "command": ["--set=ON_ERROR_STOP=1", f"--set=runtime_role={runtime_role(config)}",
+                            "--file=/etc/hot/prepare_postgres.sql"],
+                "secrets": [secret("prepare-postgres", k) for k in
+                            ("POSTGRES_ADMIN_URI", "POSTGRES_ADMIN_HOT_URI", "POSTGRES_PASSWORD",
+                             "POSTGRES_RUNTIME_PASSWORD", *db_ca)],
+                "volumes": [{"type": "bind", "source": "./prepare_postgres.sql", "target": "/etc/hot/prepare_postgres.sql", "read_only": True}],
+                "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
+            }
         # Read-only preconditions the database administrator owns; see the
         # self-hosted PostgreSQL guide.
         services["check-postgres"] = {
@@ -451,6 +477,30 @@ def valkey_conf(size="small"):
     return VALKEY_CONF.replace("maxmemory 256mb", f"maxmemory {SIZES[size]['valkey_maxmemory']}mb")
 
 
+PREPARE_POSTGRES_SQL = r'''\set owner_password `cat /run/secrets/POSTGRES_PASSWORD`
+\set runtime_password `cat /run/secrets/POSTGRES_RUNTIME_PASSWORD`
+\set hot_uri `cat /run/secrets/POSTGRES_ADMIN_HOT_URI`
+SELECT format('CREATE ROLE hot_owner LOGIN PASSWORD %L', :'owner_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hot_owner') \gexec
+SELECT format('ALTER ROLE hot_owner WITH LOGIN PASSWORD %L', :'owner_password') \gexec
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'runtime_role', :'runtime_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'runtime_role') \gexec
+SELECT format('ALTER ROLE %I WITH LOGIN PASSWORD %L', :'runtime_role', :'runtime_password') \gexec
+SELECT format('ALTER ROLE %I SET search_path = hot, public', :'runtime_role') \gexec
+-- A managed administrator is not a superuser: it acts as the owner to give
+-- it the database and schema.
+GRANT hot_owner TO CURRENT_USER;
+SELECT 'CREATE DATABASE hot OWNER hot_owner'
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'hot') \gexec
+REVOKE ALL ON DATABASE hot FROM PUBLIC;
+SELECT format('GRANT CONNECT ON DATABASE hot TO %I', :'runtime_role') \gexec
+\connect :hot_uri
+CREATE SCHEMA IF NOT EXISTS hot AUTHORIZATION hot_owner;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA hot;
+CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA hot;
+'''
+
+
 CHECK_POSTGRES_SQL = r'''SELECT set_config('hot.runtime_role', :'runtime_role', false);
 DO $$
 DECLARE
@@ -513,7 +563,7 @@ def main():
         compose = render(document, manifest, args.data_root, args.secrets_root, args.s3_auth, args.s3_session_tokens)
         args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
         grant_script = Path(__file__).resolve().parents[2] / "resources/db/postgres/provision_runtime.sql"
-        files = {"compose.json": json.dumps(compose, indent=2) + "\n", "nginx.conf": nginx_config(config), "init.sql": INIT_SQL, "valkey.conf": valkey_conf(config.get("size", "small")), "check_postgres.sql": CHECK_POSTGRES_SQL,
+        files = {"compose.json": json.dumps(compose, indent=2) + "\n", "nginx.conf": nginx_config(config), "init.sql": INIT_SQL, "valkey.conf": valkey_conf(config.get("size", "small")), "check_postgres.sql": CHECK_POSTGRES_SQL, "prepare_postgres.sql": PREPARE_POSTGRES_SQL,
                  "provision_runtime.sql": grant_script.read_text()}
         for name, content in files.items():
             path = args.output / name

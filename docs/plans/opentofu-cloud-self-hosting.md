@@ -1238,11 +1238,29 @@ IAM, generation preconditions, or real composition behavior.
       Provision RDS PostgreSQL and ElastiCache Valkey on AWS; Cloud SQL
       PostgreSQL and Memorystore for Valkey on GCP. Support validated existing
       endpoints as an alternative.
+      PostgreSQL is done as `data.postgres.mode = "managed"` in the
+      single-machine stacks (`stacks/*/single-machine/postgres.tf`), not a
+      separate root, so each service chooses local, managed, or existing
+      independently. Managed Valkey remains: ElastiCache can take a write-only
+      AUTH token, but Memorystore for Valkey accepts only IAM tokens, which
+      Hot's Valkey client does not request yet.
 - [ ] Configure private connectivity, TLS, managed secrets, database versions,
       required extensions, owner/runtime roles, capacity, backups, and
       independently selectable failover/replica settings.
       Explicitly enable at-rest encryption and TLS-only access under the
       encryption policy, including replicas, snapshots, and restore targets.
+      Done for PostgreSQL, apart from replicas and restore targets:
+      - Connectivity: the host's security group only on AWS; private
+        services access on GCP.
+      - TLS: required by the server, with the RDS hostname or the Cloud SQL
+        instance CA verified by clients.
+      - Secrets: the administrator password stays out of OpenTofu state
+        (an RDS-managed secret; write-only attributes on GCP).
+      - Database: PostgreSQL 18, with logins, database, schema, and
+        extensions created by the agent.
+      - Capacity and backups: size-derived tiers; point-in-time backups;
+        selectable Multi-AZ or regional HA; deletion protection; encrypted
+        storage.
 - [ ] Validate Redis Streams, consumer groups, Lua operations, reclaim,
       cluster-aware connections, and failover against each managed offering.
       Configure queue-appropriate persistence/eviction and monitoring.

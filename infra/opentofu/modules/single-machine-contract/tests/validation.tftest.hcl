@@ -276,3 +276,63 @@ run "unknown_data_mode" {
   }
   expect_failures = [var.installation]
 }
+
+run "managed_postgres_sizes_follow_the_installation" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "project" : "example-project",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "size" : "medium",
+      "host_image" : "projects/example/global/images/hot",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "data" : { "postgres" : { "mode" : "managed", "storage_gb" : 250 } },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = output.managed_postgres.tier == "db-custom-4-16384" && output.managed_postgres.storage_gb == 250
+    error_message = "The tier follows the size unless set; explicit storage wins."
+  }
+}
+
+run "managed_postgres_on_an_existing_aws_network_needs_data_subnets" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "data" : { "postgres" : { "mode" : "managed" } },
+      "network" : { "mode" : "existing", "network_id" : "vpc-0123", "subnet_id" : "subnet-0123" },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [var.installation]
+}
+
+run "managed_postgres_rejects_unsupported_versions" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "data" : { "postgres" : { "mode" : "managed", "version" : "14" } },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [var.installation]
+}

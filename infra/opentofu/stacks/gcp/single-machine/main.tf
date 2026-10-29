@@ -2,6 +2,7 @@ terraform {
   required_version = ">= 1.13.1, < 1.14.0"
   required_providers {
     google = { source = "hashicorp/google", version = "8.7.0" }
+    random = { source = "hashicorp/random", version = "3.9.1" }
   }
 }
 provider "google" {
@@ -182,6 +183,7 @@ locals {
     status_reference     = "${local.tag}-status"
     command_subscription = google_pubsub_subscription.commands.id
     secret_references    = { generated = google_secret_manager_secret.generated.id, operator = google_secret_manager_secret.operator.id }
+    data                 = local.host_data
   })
 }
 resource "google_compute_firewall" "https" {
@@ -258,7 +260,7 @@ resource "google_compute_instance" "host" {
       error_message = "The GCP root requires installation.cloud = gcp."
     }
   }
-  depends_on = [google_compute_router_nat.egress, google_project_iam_member.telemetry, google_secret_manager_secret_iam_member.read, google_pubsub_subscription_iam_member.agent]
+  depends_on = [google_compute_router_nat.egress, google_project_iam_member.telemetry, google_secret_manager_secret_iam_member.read, google_pubsub_subscription_iam_member.agent, google_secret_manager_secret_iam_member.postgres_admin, google_secret_manager_secret_version.postgres_admin]
 }
 output "private_ip" { value = google_compute_instance.host.network_interface[0].network_ip }
 output "instance_id" { value = google_compute_instance.host.id }

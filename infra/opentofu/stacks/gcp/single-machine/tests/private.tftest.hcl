@@ -1,4 +1,14 @@
-mock_provider "google" {}
+mock_provider "google" {
+  mock_resource "google_compute_network" {
+    defaults = { id = "projects/example-project/global/networks/hot-example" }
+  }
+  mock_resource "google_sql_database_instance" {
+    defaults = {
+      private_ip_address = "10.100.0.3"
+      server_ca_cert     = [{ cert = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n", common_name = "C=US,O=Google\\, Inc,CN=Google Cloud SQL Server CA", create_time = "2026-10-29T00:00:00Z", expiration_time = "2036-10-27T00:00:00Z", sha1_fingerprint = "00" }]
+    }
+  }
+}
 variables {
   acknowledge_unqualified     = true
   state_encryption_passphrase = "test-only-encryption-passphrase-never-use-in-production"
@@ -207,5 +217,48 @@ run "public_app_only" {
   assert {
     condition     = one(google_compute_firewall.public[0].allow).ports == tolist(["9443"]) && length(google_compute_instance.host.network_interface[0].access_config) == 0
     error_message = "The load balancer reaches only the host's public-endpoint port; the VM has no external IP."
+  }
+}
+
+run "managed_postgres" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example-project/global/images/hot-host-amd64",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "data" : { "postgres" : { "mode" : "managed", "high_availability" : true } },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = google_sql_database_instance.postgres[0].root_password == null && tostring(google_sql_database_instance.postgres[0].root_password_wo_version) == "1" && google_secret_manager_secret_version.postgres_admin[0].secret_data == null
+    error_message = "The administrator password reaches Cloud SQL and Secret Manager only through write-only attributes."
+  }
+  assert {
+    condition     = one(google_sql_database_instance.postgres[0].settings[0].ip_configuration).ipv4_enabled == false && one(google_sql_database_instance.postgres[0].settings[0].ip_configuration).ssl_mode == "ENCRYPTED_ONLY"
+    error_message = "Cloud SQL has no public address and refuses connections without TLS."
+  }
+  assert {
+    condition     = google_sql_database_instance.postgres[0].settings[0].availability_type == "REGIONAL" && google_sql_database_instance.postgres[0].settings[0].tier == "db-custom-2-8192" && google_sql_database_instance.postgres[0].deletion_protection
+    error_message = "High availability is regional; the tier follows the size; the instance is protected from deletion."
+  }
+  assert {
+    condition     = one(google_sql_database_instance.postgres[0].settings[0].backup_configuration).point_in_time_recovery_enabled && one(one(google_sql_database_instance.postgres[0].settings[0].backup_configuration).backup_retention_settings).retained_backups == 7
+    error_message = "Backups with point-in-time recovery are kept for the configured days."
+  }
+  assert {
+    condition     = length(google_service_networking_connection.services) == 1 && google_compute_global_address.services[0].purpose == "VPC_PEERING"
+    error_message = "A new network gets private services access for Cloud SQL."
+  }
+  assert {
+    condition     = output.configuration.data.postgres.endpoint.admin_user == "postgres" && output.configuration.data.postgres.endpoint.port == 5432
+    error_message = "The agent learns where the database and its administrator secret are."
   }
 }

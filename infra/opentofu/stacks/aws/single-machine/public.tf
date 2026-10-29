@@ -8,14 +8,10 @@ locals {
   # The ALB needs subnets in two zones.
   public_subnet_ids = local.new_network ? concat(aws_subnet.public[*].id, aws_subnet.public_second[*].id) : local.config.network.public_subnet_ids
 }
-data "aws_availability_zones" "available" {
-  count = local.public && local.new_network ? 1 : 0
-  state = "available"
-}
 resource "aws_subnet" "public_second" {
   count                   = local.public && local.new_network ? 1 : 0
   vpc_id                  = local.vpc_id
-  availability_zone       = [for zone in data.aws_availability_zones.available[0].names : zone if zone != local.config.zone][0]
+  availability_zone       = local.second_zone
   cidr_block              = cidrsubnet(local.config.network.cidr, 8, 2)
   map_public_ip_on_launch = false
 }

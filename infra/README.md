@@ -56,6 +56,33 @@ Implemented:
   [Self-Hosted PostgreSQL](../resources/docs/configuration/postgres.md)
   describes; the bundle checks it, migrates, and grants the runtime login,
   and never creates or drops anything the operator owns.
+- Managed PostgreSQL: set `data.postgres.mode` to `managed` and the stack
+  provisions PostgreSQL 18 on RDS or Cloud SQL, reachable only from the host
+  and only over TLS. It is sized from the installation size unless you set
+  `tier` or `storage_gb`; `high_availability` selects Multi-AZ or a regional
+  instance; backups are kept for `backup_retention_days` (default 7) with
+  point-in-time recovery. On each deploy the agent signs in as the database
+  administrator to create the `hot_owner` and runtime logins, the `hot`
+  database and schema, and the `vector` and `pg_trgm` extensions, then checks,
+  migrates, and grants as for an existing database.
+  - The administrator password never enters OpenTofu state. RDS keeps it in
+    its own secret. On GCP it is generated during apply and written only to
+    write-only attributes on Cloud SQL and on a Secret Manager secret. If an
+    apply stops between the two, raise `data.postgres.admin_password_version`
+    and apply again to set a new one in both.
+  - RDS connections verify the endpoint's hostname against the RDS CA bundle,
+    which the agent downloads from AWS. Cloud SQL connections verify the
+    instance's own CA, which signs only that instance's certificates.
+  - `deletion_protection` (default on) keeps OpenTofu and the cloud from
+    deleting the database, including when `data.postgres.mode` changes. Turn
+    it off in a reviewed apply first. RDS also keeps a final snapshot.
+  - New networks get the subnets (AWS) or private services access (GCP) the
+    database needs. On an existing AWS network, give `network.data_subnet_ids`
+    in two zones; an existing GCP network must already have private services
+    access.
+  - Managed Valkey is not available yet: ElastiCache can take a write-only
+    AUTH token, but Memorystore for Valkey accepts only IAM tokens, which Hot's
+    Valkey client does not request yet.
 - Public endpoints: set `app_exposure` or `api_exposure` to `public`. AWS
   needs `public_certificate_arn` (an ACM certificate you DNS-validate); GCP
   issues a managed certificate once your DNS points at the `public_endpoint`
@@ -67,9 +94,9 @@ Implemented:
 
 The roots intentionally require `acknowledge_unqualified = true`. The bootstrap
 also refuses to start if the supplied image lacks `hot-agent.service`. Real
-image builds and deployments on each cloud, the optional egress proxy, existing-DB
-integration, cloud monitoring/alerts, and the real-cloud release gates remain
-to be implemented and qualified. Do not apply these development examples to
+image builds and deployments on each cloud, managed Valkey, cloud
+monitoring/alerts, and the real-cloud release gates remain to be implemented
+and qualified. Do not apply these development examples to
 production. No usable host image or published runtime digest is implied by the
 placeholder references in the fixtures.
 

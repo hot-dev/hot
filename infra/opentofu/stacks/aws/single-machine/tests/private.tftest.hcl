@@ -11,6 +11,13 @@ mock_provider "aws" {
   mock_resource "aws_lb_listener" {
     defaults = { arn = "arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/app/hot-example/0123/4567" }
   }
+  mock_resource "aws_db_instance" {
+    defaults = {
+      address            = "hot-example.c0123.us-east-1.rds.amazonaws.com"
+      port               = 5432
+      master_user_secret = [{ secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-0123-abcdef", kms_key_id = "", secret_status = "active" }]
+    }
+  }
 }
 variables {
   acknowledge_unqualified     = true
@@ -223,4 +230,50 @@ run "public_needs_a_certificate" {
     }
   }
   expect_failures = [aws_lb.public]
+}
+
+run "managed_postgres" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "data" : { "postgres" : { "mode" : "managed" } },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  assert {
+    condition     = aws_db_instance.postgres[0].manage_master_user_password && aws_db_instance.postgres[0].password == null && aws_db_instance.postgres[0].password_wo == null
+    error_message = "RDS keeps the administrator password in its own secret, never in state."
+  }
+  assert {
+    condition     = !aws_db_instance.postgres[0].publicly_accessible && aws_db_instance.postgres[0].storage_encrypted && aws_db_instance.postgres[0].deletion_protection && !aws_db_instance.postgres[0].skip_final_snapshot
+    error_message = "The database is private, encrypted, protected from deletion, and snapshotted if removed."
+  }
+  assert {
+    condition     = aws_db_instance.postgres[0].instance_class == "db.m7g.large" && aws_db_instance.postgres[0].allocated_storage == 50 && !aws_db_instance.postgres[0].multi_az
+    error_message = "A small installation starts with a single-zone db.m7g.large and 50 GB."
+  }
+  assert {
+    condition     = one(aws_security_group.postgres[0].ingress).from_port == 5432 && one(aws_security_group.postgres[0].ingress).cidr_blocks == null && length(one(aws_security_group.postgres[0].ingress).security_groups) == 1
+    error_message = "Only the host's security group reaches PostgreSQL."
+  }
+  assert {
+    condition     = contains([for p in aws_db_parameter_group.postgres[0].parameter : "${p.name}=${p.value}"], "rds.force_ssl=1")
+    error_message = "RDS must refuse connections without TLS."
+  }
+  assert {
+    condition     = length(toset(aws_subnet.data[*].availability_zone)) == 2
+    error_message = "The DB subnet group spans two zones."
+  }
+  assert {
+    condition     = output.configuration.data.postgres.endpoint.admin_secret == "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-0123-abcdef" && strcontains(aws_iam_role_policy.runtime.policy, "rds!db-0123-abcdef")
+    error_message = "The agent learns, and may read, only the administrator secret RDS created."
+  }
 }

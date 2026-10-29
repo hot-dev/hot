@@ -172,18 +172,49 @@ class RuntimeContract(unittest.TestCase):
         self.assertIn("10.9.8.7/32", services["worker"]["environment"]["HOT_NETWORK_DENY_CIDRS"])
         with self.assertRaises(ValueError):
             renderer.validate(dict(config, data={"postgres": {"mode": "managed"}}))
-        with self.assertRaises(ValueError):
-            renderer.validate(dict(config, data={"postgres": {"runtime_role": "x; drop"}}))
+        for role in ("x; drop", "hot_owner"):
+            with self.assertRaises(ValueError):
+                renderer.validate(dict(config, data={"postgres": {"runtime_role": role}}))
+
+    def test_managed_postgres_is_prepared_by_its_administrator(self):
+        endpoint = {"host": "hot-example.c0123.us-east-1.rds.amazonaws.com", "port": 5432, "admin_user": "hot_admin",
+                    "admin_secret": "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-0123"}
+        config = dict(renderer.validate(example()), data={"postgres": {"mode": "managed", "endpoint": endpoint}})
+        services = renderer.render(config, manifest(), "/data", "/run/hot/secrets")["services"]
+        self.assertNotIn("postgres", services)
+        self.assertIn("valkey", services)
+        prepare = services["prepare-postgres"]
+        self.assertIn("$(cat /run/secrets/POSTGRES_ADMIN_URI)", prepare["entrypoint"][2])
+        self.assertNotIn("environment", prepare)
+        self.assertEqual({s["target"] for s in prepare["secrets"]},
+                         {"POSTGRES_ADMIN_URI", "POSTGRES_ADMIN_HOT_URI", "POSTGRES_PASSWORD",
+                          "POSTGRES_RUNTIME_PASSWORD", "POSTGRES_CA_CERT"})
+        # Only the prepare job holds the administrator login.
+        for name, service in services.items():
+            if name != "prepare-postgres":
+                self.assertNotIn("POSTGRES_ADMIN_URI", {s["target"] for s in service.get("secrets", [])})
+        self.assertIn("check-postgres", services)
+        self.assertIn("app-POSTGRES_CA_CERT", [s["source"] for s in services["app"]["secrets"]])
+        # A Cloud SQL endpoint also carries its instance CA.
+        gcp = dict(renderer.validate(example("gcp")), data={"postgres": {"mode": "managed", "endpoint": dict(
+            endpoint, admin_secret="projects/p/secrets/s")}})
+        with self.assertRaisesRegex(ValueError, "ca_certificate"):
+            renderer.validate(gcp)
+        with self.assertRaisesRegex(ValueError, "valkey.mode must be local or existing"):
+            renderer.validate(dict(config, data={"valkey": {"mode": "managed"}}))
 
     @unittest.skipUnless(shutil.which("docker"), "Docker CLI is not installed")
-    def test_compose_accepts_an_existing_data_bundle(self):
-        config = dict(renderer.validate(example()), data={"postgres": {"mode": "existing"}, "valkey": {"mode": "existing"}})
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "compose.json"
-            path.write_text(json.dumps(renderer.render(config, manifest(), "/data", "/run/hot/secrets")))
-            result = subprocess.run(["docker", "compose", "-f", str(path), "--profile", "admin", "config", "--quiet"],
-                                    capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
+    def test_compose_accepts_existing_and_managed_data_bundles(self):
+        managed = {"mode": "managed", "endpoint": {"host": "db.example", "port": 5432, "admin_user": "hot_admin",
+                                                   "admin_secret": "arn:aws:secretsmanager:us-east-1:123456789012:secret:a"}}
+        for data in ({"postgres": {"mode": "existing"}, "valkey": {"mode": "existing"}}, {"postgres": managed}):
+            config = dict(renderer.validate(example()), data=data)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "compose.json"
+                path.write_text(json.dumps(renderer.render(config, manifest(), "/data", "/run/hot/secrets")))
+                result = subprocess.run(["docker", "compose", "-f", str(path), "--profile", "admin", "config", "--quiet"],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_gcs_storage_uses_the_vm_identity_on_gcp(self):
         config = renderer.validate(example("gcp"))

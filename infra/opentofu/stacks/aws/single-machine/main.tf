@@ -20,6 +20,12 @@ locals {
   vpc_id      = local.new_network ? aws_vpc.hot[0].id : local.config.network.network_id
   subnet_id   = local.new_network ? aws_subnet.private[0].id : local.config.network.subnet_id
   s3_roles    = [for s in [local.config.storage.build, local.config.storage.file] : s if s.backend == "s3"]
+  # Load balancers and database subnet groups need a second zone.
+  second_zone = try([for zone in data.aws_availability_zones.available[0].names : zone if zone != local.config.zone][0], null)
+}
+data "aws_availability_zones" "available" {
+  count = local.new_network && (local.public || local.managed_postgres) ? 1 : 0
+  state = "available"
 }
 resource "aws_vpc" "hot" {
   count                = local.new_network ? 1 : 0
@@ -161,6 +167,7 @@ locals {
     release_pointer   = aws_ssm_parameter.release.arn
     status_reference  = aws_ssm_parameter.status.arn
     secret_references = { generated = aws_secretsmanager_secret.generated.arn, operator = aws_secretsmanager_secret.operator.arn }
+    data              = local.host_data
   })
 }
 resource "aws_iam_role" "host" {
@@ -180,7 +187,7 @@ resource "aws_cloudwatch_log_group" "host" {
 resource "aws_iam_role_policy" "runtime" {
   role = aws_iam_role.host.id
   policy = jsonencode({ Version = "2012-10-17", Statement = concat([
-    { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.generated.arn, aws_secretsmanager_secret.operator.arn] },
+    { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.generated.arn, aws_secretsmanager_secret.operator.arn], aws_db_instance.postgres[*].master_user_secret[0].secret_arn) },
     { Effect = "Allow", Action = ["secretsmanager:PutSecretValue"], Resource = aws_secretsmanager_secret.generated.arn },
     { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = aws_ssm_parameter.release.arn },
     { Effect = "Allow", Action = ["ssm:PutParameter"], Resource = aws_ssm_parameter.status.arn },
