@@ -819,15 +819,16 @@ class Agent:
 
     def registry_login(self):
         """Sign Docker in to a private mirror (image_registry) with the VM's
-        identity: ECR on AWS, Artifact Registry on GCP. Other mirrors are
-        pulled anonymously."""
+        identity: ECR on AWS, Artifact Registry on GCP (the contract refuses
+        the other cloud's). Other mirrors are pulled anonymously."""
         registry = self.config.get("image_registry", "")
         host = registry.split("/", 1)[0]
         if not host:
             return
-        if re.fullmatch(r"[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com", host):
+        cloud = self.config["cloud"]
+        if cloud == "aws" and re.fullmatch(r"[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com", host):
             user, password = "AWS", self.cloud.registry_password(host)
-        elif host.endswith("-docker.pkg.dev"):
+        elif cloud == "gcp" and host.endswith("-docker.pkg.dev"):
             user, password = "oauth2accesstoken", self.cloud.registry_password(host)
         else:
             return

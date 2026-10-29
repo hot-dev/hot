@@ -185,11 +185,12 @@ class Deploy(AgentHarness):
                 logins.append((command, kwargs.get("input")))
             return recorder(command, **kwargs)
         self.agent.run_command = run
-        for registry, user in (("123456789012.dkr.ecr.us-east-1.amazonaws.com/hot", "AWS"),
-                               ("us-docker.pkg.dev/acme/hot", "oauth2accesstoken"),
-                               ("mirror.example.com/hot", None)):
+        for cloud, registry, user in (("aws", "123456789012.dkr.ecr.us-east-1.amazonaws.com/hot", "AWS"),
+                                      ("gcp", "us-docker.pkg.dev/acme/hot", "oauth2accesstoken"),
+                                      ("aws", "mirror.example.com/hot", None)):
             with self.subTest(registry=registry):
                 logins.clear()
+                self.config["cloud"] = cloud
                 self.config["image_registry"] = registry
                 self.agent.registry_login()
                 host = registry.split("/")[0]
@@ -199,14 +200,16 @@ class Deploy(AgentHarness):
                 self.assertEqual(logins, [(["docker", "login", "--username", user, "--password-stdin",
                                             f"https://{host}"], "token-for-" + host)])
         # The sign-in comes before the pull, and the pulled images are the mirror's.
-        self.config["image_registry"] = "us-docker.pkg.dev/acme/hot"
+        self.config["cloud"] = "aws"
+        self.config["image_registry"] = "123456789012.dkr.ecr.us-east-1.amazonaws.com/hot"
         self.agent.reconcile()
         commands = [" ".join(c) for c in self.run.commands]
         login = next(i for i, c in enumerate(commands) if c.startswith("docker login"))
         pull = next(i for i, c in enumerate(commands) if c.endswith("pull --quiet"))
         self.assertLess(login, pull)
         bundle = json.loads((Path(self.tmp.name) / "releases/3.0.1/bundle/compose.json").read_text())
-        self.assertTrue(bundle["services"]["app"]["image"].startswith("us-docker.pkg.dev/acme/hot/"), bundle["services"]["app"])
+        self.assertTrue(bundle["services"]["app"]["image"].startswith("123456789012.dkr.ecr.us-east-1.amazonaws.com/hot/hot@"),
+                        bundle["services"]["app"])
 
     def test_failures_report_the_command_not_its_output(self):
         def failing(command, **kwargs):

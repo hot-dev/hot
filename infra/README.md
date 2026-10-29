@@ -795,13 +795,14 @@ the manifest's digest, so the agent's signature check and the pinned content
 are unchanged. Copy each release's images to `<image_registry>/hot`,
 `/postgres`, `/valkey`, and `/ingress` before you deploy it. A tool that keeps
 digests works, such as `crane copy <manifest image> <image_registry>/hot`.
-- An ECR mirror (`<account>.dkr.ecr.<region>.amazonaws.com/<path>`): the
-  host role may read repositories under `<path>/` and nothing else.
-- An Artifact Registry mirror (`<location>-docker.pkg.dev/<project>/<repository>`):
+- On AWS, an ECR mirror (`<account>.dkr.ecr.<region>.amazonaws.com/<path>`):
+  the host role may read repositories under `<path>/` and nothing else.
+- On GCP, an Artifact Registry mirror (`<location>-docker.pkg.dev/<project>/<repository>`):
   each host account gets `roles/artifactregistry.reader` on that
   repository, which may be in another project. The apply identity needs to
   set that repository's IAM policy.
-- Any other registry is pulled from anonymously.
+- Any other registry is pulled from anonymously. The contract refuses the
+  other cloud's registry, since the hosts have no identity there.
 
 The agent signs in with the host's own identity before each pull; there is
 no registry password to store.

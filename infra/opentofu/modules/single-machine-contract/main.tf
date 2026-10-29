@@ -151,8 +151,9 @@ variable "installation" {
   }
   validation {
     condition = var.installation.image_registry == "" || can(regex("^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)*$", var.installation.image_registry)) && (
-    !endswith(split("/", var.installation.image_registry)[0], "-docker.pkg.dev") || length(split("/", var.installation.image_registry)) >= 3)
-    error_message = "image_registry must be a registry host and optional path, such as registry.example.com/hot-mirror; an Artifact Registry mirror names its project and repository (us-docker.pkg.dev/PROJECT/REPOSITORY)."
+      !endswith(split("/", var.installation.image_registry)[0], "-docker.pkg.dev") || var.installation.cloud == "gcp" && length(split("/", var.installation.image_registry)) >= 3
+    ) && (!endswith(split("/", var.installation.image_registry)[0], ".amazonaws.com") || var.installation.cloud == "aws")
+    error_message = "image_registry must be a registry host and optional path, such as registry.example.com/hot-mirror. An ECR mirror needs cloud aws; an Artifact Registry mirror needs cloud gcp and names its project and repository (us-docker.pkg.dev/PROJECT/REPOSITORY)."
   }
   validation {
     condition = var.installation.preset != "scalable" || var.installation.cloud != "aws" || var.installation.network.mode == "new" || (

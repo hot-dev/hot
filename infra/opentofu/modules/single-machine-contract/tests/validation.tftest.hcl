@@ -627,3 +627,22 @@ run "the_queue_alert_needs_a_positive_threshold" {
   }
   expect_failures = [var.installation]
 }
+
+run "a_mirror_belongs_to_the_installation_cloud" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example/global/images/hot",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "image_registry" : "123456789012.dkr.ecr.us-east-1.amazonaws.com/hot-mirror",
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [var.installation]
+}
