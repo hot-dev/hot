@@ -219,12 +219,14 @@ Bytes
 meta {
     core: true,
     doc: """
-    Byte array type for binary data.
+    Byte array type for binary data. Builds bytes from a vector of
+    ints (0-255), or from a `Str` as its UTF-8 bytes.
 
     **Example**
 
     ```hot
     data Bytes([72, 105])  // "Hi" as bytes
+    Bytes("Hi")            // Bytes([72, 105])
     ::hot::base64/encode(data)  // "SGk="
     ```
     """
