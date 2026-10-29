@@ -95,6 +95,20 @@ class RuntimeContract(unittest.TestCase):
             self.assertIn("10.68.0.0/16", deny)
         self.assertNotIn("HOT_NETWORK_DENY_CIDRS", bundle["services"]["app"]["environment"])
 
+    def test_the_example_operator_installation_is_valid(self):
+        tfvars = json.loads((ROOT / "github/example-operator-repo/installation/installation.tfvars.json").read_text())
+        config = dict(tfvars["installation"], data_volume_id="vol-0abc",
+                      release_pointer="arn:aws:ssm:us-east-1:123456789012:parameter/hot/hot-example/release",
+                      secret_references={"generated": "arn:aws:secretsmanager:us-east-1:123456789012:secret:g",
+                                         "operator": "arn:aws:secretsmanager:us-east-1:123456789012:secret:o"})
+        bundle = renderer.render(config, manifest(), "/data", "/run/hot/secrets")
+        self.assertEqual(bundle["services"]["worker"]["environment"]["HOT_EMAIL_PROVIDER"], "smtp")
+        self.assertIn("bootstrap-admin", bundle["services"])
+        with self.assertRaisesRegex(ValueError, "looks like a secret"):
+            renderer.validate(dict(config, settings={"HOT_EMAIL_SMTP_PASSWORD": "x"}))
+        with self.assertRaisesRegex(ValueError, "set by the runtime bundle"):
+            renderer.render(dict(config, settings={"HOT_ENGINE_ISOLATION": "false"}), manifest(), "/data", "/run/hot/secrets")
+
     def test_postgres_data_uses_the_postgres_18_layout(self):
         postgres = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")["services"]["postgres"]
         self.assertEqual(postgres["volumes"][0]["target"], "/var/lib/postgresql")

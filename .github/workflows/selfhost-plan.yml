@@ -1,0 +1,244 @@
+name: selfhost-plan
+
+# Reusable: plan (and optionally apply) a Hot self-host installation from an
+# operator's repository. Call it from that repository, pinned to a Hot tag:
+#
+#   uses: hot-dev/hot/.github/workflows/selfhost-plan.yml@v3.0.1
+#
+# See infra/github/example-operator-repo. The plan job needs only read access
+# and the state lock. With `apply: true`, a second job applies exactly the
+# saved plan after the GitHub Environment's reviewers approve; OpenTofu
+# refuses the plan if state changed since it was made.
+on:
+  workflow_call:
+    inputs:
+      hot_version:
+        description: Hot tag the modules come from; use the same tag as `uses:`
+        type: string
+        required: true
+      cloud:
+        description: aws or gcp
+        type: string
+        required: true
+      preset:
+        description: Stack preset
+        type: string
+        default: single-machine
+      installation_dir:
+        description: Directory with installation.tfvars.json, backend_override.tf, and encryption_override.tf
+        type: string
+        default: installation
+      apply:
+        description: Apply the plan after environment approval
+        type: boolean
+        default: false
+      environment:
+        description: GitHub Environment that gates apply and holds its role
+        type: string
+        default: production
+      aws_region:
+        type: string
+        default: ''
+      aws_plan_role:
+        description: IAM role for planning (read-only plus state)
+        type: string
+        default: ''
+      aws_apply_role:
+        description: IAM role for applying
+        type: string
+        default: ''
+      gcp_workload_identity_provider:
+        type: string
+        default: ''
+      gcp_plan_service_account:
+        type: string
+        default: ''
+      gcp_apply_service_account:
+        type: string
+        default: ''
+    secrets:
+      state_encryption_passphrase:
+        description: OpenTofu state and plan encryption passphrase
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TOFU_VERSION: 1.13.1
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    outputs:
+      changes: ${{ steps.plan.outputs.changes }}
+    env:
+      STACK: hot/infra/opentofu/stacks/${{ inputs.cloud }}/${{ inputs.preset }}
+      TF_VAR_state_encryption_passphrase: ${{ secrets.state_encryption_passphrase }}
+    steps:
+      - name: Check inputs
+        env:
+          CLOUD: ${{ inputs.cloud }}
+          PRESET: ${{ inputs.preset }}
+        run: |
+          [[ "$CLOUD" =~ ^(aws|gcp)$ ]] || { echo "::error::cloud must be aws or gcp"; exit 1; }
+          [[ "$PRESET" =~ ^[a-z-]+$ ]] || { echo "::error::invalid preset"; exit 1; }
+
+      - name: Check out the installation
+        uses: actions/checkout@v5
+        with:
+          path: operator
+
+      - name: Check out Hot ${{ inputs.hot_version }}
+        uses: actions/checkout@v5
+        with:
+          repository: hot-dev/hot
+          ref: ${{ inputs.hot_version }}
+          path: hot
+          sparse-checkout: |
+            infra
+            resources/db/postgres
+
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      - name: Authenticate to AWS
+        if: inputs.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.aws_plan_role }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Authenticate to Google Cloud
+        if: inputs.cloud == 'gcp'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
+          service_account: ${{ inputs.gcp_plan_service_account }}
+
+      - name: Add the installation's configuration
+        env:
+          SOURCE: operator/${{ inputs.installation_dir }}
+        run: |
+          cp "$SOURCE/installation.tfvars.json" "$STACK/terraform.tfvars.json"
+          for file in backend_override.tf encryption_override.tf; do
+            if [[ -f "$SOURCE/$file" ]]; then cp "$SOURCE/$file" "$STACK/$file"; fi
+          done
+          if [[ -f "$SOURCE/.terraform.lock.hcl" ]]; then cp "$SOURCE/.terraform.lock.hcl" "$STACK/"; fi
+
+      - name: Check and plan
+        id: plan
+        run: |
+          set -euo pipefail
+          tofu -chdir="$STACK" init -input=false -lockfile=readonly
+          tofu -chdir="$STACK" validate
+          tofu -chdir="$STACK" plan -input=false -lock-timeout=5m -out=hot.tfplan
+          # Summarize actions only: plans can contain sensitive values.
+          tofu -chdir="$STACK" show -json hot.tfplan |
+            jq -r '[.resource_changes[] | select(.change.actions != ["no-op"])
+                    | "\(.change.actions | join("/")) \(.address)"] | join("\n")' > summary.txt
+          {
+            echo "### OpenTofu plan for ${{ inputs.cloud }}/${{ inputs.preset }}"
+            echo '```'
+            if [[ -s summary.txt ]]; then cat summary.txt; else echo "No changes."; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ -s summary.txt ]]; then echo "changes=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Comment on the pull request
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo "OpenTofu plan for \`${{ inputs.cloud }}/${{ inputs.preset }}\` with Hot ${{ inputs.hot_version }}:"
+            echo '```'
+            if [[ -s summary.txt ]]; then cat summary.txt; else echo "No changes."; fi
+            echo '```'
+          } > comment.md
+          gh pr comment "$PR" --repo "${{ github.repository }}" --body-file comment.md
+
+      - name: Keep the encrypted plan for apply
+        if: inputs.apply && steps.plan.outputs.changes == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: selfhost-plan
+          path: ${{ env.STACK }}/hot.tfplan
+          retention-days: 1
+
+  apply:
+    name: Apply
+    needs: plan
+    if: inputs.apply && needs.plan.outputs.changes == 'true'
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    # One apply per installation at a time, in addition to the state lock.
+    concurrency:
+      group: selfhost-apply-${{ github.repository }}-${{ inputs.installation_dir }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      STACK: hot/infra/opentofu/stacks/${{ inputs.cloud }}/${{ inputs.preset }}
+      TF_VAR_state_encryption_passphrase: ${{ secrets.state_encryption_passphrase }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: operator
+
+      - uses: actions/checkout@v5
+        with:
+          repository: hot-dev/hot
+          ref: ${{ inputs.hot_version }}
+          path: hot
+          sparse-checkout: |
+            infra
+            resources/db/postgres
+
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      - name: Authenticate to AWS
+        if: inputs.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.aws_apply_role }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Authenticate to Google Cloud
+        if: inputs.cloud == 'gcp'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
+          service_account: ${{ inputs.gcp_apply_service_account }}
+
+      - name: Add the installation's configuration
+        env:
+          SOURCE: operator/${{ inputs.installation_dir }}
+        run: |
+          cp "$SOURCE/installation.tfvars.json" "$STACK/terraform.tfvars.json"
+          for file in backend_override.tf encryption_override.tf; do
+            if [[ -f "$SOURCE/$file" ]]; then cp "$SOURCE/$file" "$STACK/$file"; fi
+          done
+          if [[ -f "$SOURCE/.terraform.lock.hcl" ]]; then cp "$SOURCE/.terraform.lock.hcl" "$STACK/"; fi
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: selfhost-plan
+          path: ${{ env.STACK }}
+
+      - name: Apply the reviewed plan
+        run: |
+          tofu -chdir="$STACK" init -input=false -lockfile=readonly
+          tofu -chdir="$STACK" apply -input=false -lock-timeout=5m hot.tfplan

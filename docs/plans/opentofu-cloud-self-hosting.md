@@ -748,7 +748,7 @@ That repository holds non-secret `tfvars`, the provider lockfile, and a pinned
 | Workflow | Trigger | Does | Cloud role |
 | --- | --- | --- | --- |
 | `selfhost-plan` | Pull request | `tofu fmt`/`validate`, configuration and reference-configuration classification, cloud preflight, `tofu plan`. Posts a redacted plan summary. | Plan: read-only, plus state read and lock |
-| `selfhost-apply` | Merge or manual, gated by a GitHub Environment | Applies the reviewed plan; refuses if state changed since the plan | Apply: provisioning |
+| `selfhost-plan` with `apply: true` | Merge or manual, gated by a GitHub Environment | A second job applies exactly the saved plan from the first; OpenTofu refuses it if state changed since the plan | Apply: provisioning |
 | `selfhost-release` | Manual (`workflow_dispatch` with release version) or release promotion | Verifies the manifest, writes the pointer, sends `deploy-now`, waits for status, fails on timeout or failed checks | Release: write pointer, read status, send Hot command documents to tagged instances (AWS) or publish to the installation's command topic (GCP); no SSH or shell access |
 
 Requirements:
@@ -775,7 +775,11 @@ Requirements:
   agent or on an operator self-hosted runner inside the network. CI never opens
   public ingress.
 - Ship an example operator repository and a GitHub Enterprise Server
-  compatibility note. Other CI systems call the same helper commands; the
+  compatibility note. The reusable workflows are
+  [`selfhost-plan.yml`](../../.github/workflows/selfhost-plan.yml) and
+  [`selfhost-release.yml`](../../.github/workflows/selfhost-release.yml); the
+  example operator repository is
+  [`infra/github/example-operator-repo`](../../infra/github/example-operator-repo). Other CI systems call the same helper commands; the
   GitHub workflows are a supported convenience, not the only path.
 
 Hot's own [release workflow](../../.github/workflows/release.yml) extends to

@@ -1,0 +1,29 @@
+name: infrastructure
+
+# Plans every pull request; applies on merge after the production
+# environment's reviewers approve the plan.
+on:
+  pull_request:
+    paths: ['installation/**']
+  push:
+    branches: [main]
+    paths: ['installation/**']
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  hot:
+    uses: hot-dev/hot/.github/workflows/selfhost-plan.yml@v3.0.1
+    with:
+      hot_version: v3.0.1
+      cloud: aws
+      apply: ${{ github.event_name == 'push' }}
+      environment: production
+      aws_region: us-east-1
+      aws_plan_role: arn:aws:iam::123456789012:role/hot-example-plan
+      aws_apply_role: arn:aws:iam::123456789012:role/hot-example-apply
+    secrets:
+      state_encryption_passphrase: ${{ secrets.HOT_STATE_ENCRYPTION_PASSPHRASE }}
