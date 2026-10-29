@@ -224,6 +224,13 @@ pub enum CompilerError {
         message: String,
         location: Option<ErrorLocation>,
     },
+    /// A function's `meta {timeout: ...}` that is not a positive whole
+    /// number of seconds
+    InvalidRunTimeout {
+        func_name: String,
+        message: String,
+        location: Option<ErrorLocation>,
+    },
     /// Invalid event handler (e.g., missing event parameter)
     InvalidEventHandler {
         func_name: String,
@@ -974,6 +981,27 @@ impl fmt::Display for CompilerError {
                     write!(f, "Invalid schedule on '{}': {}", func_name, message)
                 }
             }
+            CompilerError::InvalidRunTimeout {
+                func_name,
+                message,
+                location,
+            } => {
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<source>".to_string()),
+                        loc.line,
+                        loc.column,
+                        message
+                    )
+                } else {
+                    write!(f, "Invalid timeout on '{}': {}", func_name, message)
+                }
+            }
             CompilerError::InvalidEventHandler {
                 func_name,
                 event_type,
@@ -1442,6 +1470,7 @@ impl CompilerErrors {
             CompilerError::IncompatibleFlowBranches { location, .. } => location.as_ref(),
             CompilerError::InvalidScheduledFunction { location, .. } => location.as_ref(),
             CompilerError::InvalidSchedule { location, .. } => location.as_ref(),
+            CompilerError::InvalidRunTimeout { location, .. } => location.as_ref(),
             CompilerError::InvalidEventHandler { location, .. } => location.as_ref(),
             CompilerError::InvalidFunctionSyntax { location, .. } => location.as_ref(),
             CompilerError::OpenEnumMatchMissingDefault { location, .. } => location.as_ref(),
@@ -1795,6 +1824,23 @@ impl CompilerErrors {
                             .with_color(label_color),
                     )
                     .with_help(crate::lang::schedule::RECURRING_SCHEDULE_FORMS);
+            }
+            CompilerError::InvalidRunTimeout {
+                func_name, message, ..
+            } => {
+                report = report
+                    .with_code("invalid-timeout")
+                    .with_message(format!("Invalid timeout on '{}'", func_name))
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(message)
+                            .with_color(label_color),
+                    )
+                    .with_help(
+                        "Set `timeout` to the seconds one run of this function may take, \
+                         like `meta {on-event: \"report:requested\", timeout: 1800}`. \
+                         The worker caps it at `worker.max-run-timeout`.",
+                    );
             }
             CompilerError::InvalidEventHandler {
                 func_name,
@@ -2150,6 +2196,7 @@ impl CompilerError {
             CompilerError::IncompatibleFlowBranches { location, .. } => location.as_ref(),
             CompilerError::InvalidScheduledFunction { location, .. } => location.as_ref(),
             CompilerError::InvalidSchedule { location, .. } => location.as_ref(),
+            CompilerError::InvalidRunTimeout { location, .. } => location.as_ref(),
             CompilerError::InvalidEventHandler { location, .. } => location.as_ref(),
             CompilerError::InvalidFunctionSyntax { location, .. } => location.as_ref(),
             CompilerError::OpenEnumMatchMissingDefault { location, .. } => location.as_ref(),
@@ -2214,6 +2261,7 @@ impl CompilerError {
             CompilerError::IncompatibleFlowBranches { .. } => "incompatible-flow-branches",
             CompilerError::InvalidScheduledFunction { .. } => "invalid-scheduled-function",
             CompilerError::InvalidSchedule { .. } => "invalid-schedule",
+            CompilerError::InvalidRunTimeout { .. } => "invalid-timeout",
             CompilerError::InvalidEventHandler { .. } => "invalid-event-handler",
             CompilerError::InvalidFunctionSyntax { .. } => "invalid-function-syntax",
             CompilerError::OpenEnumMatchMissingDefault { .. } => "open-enum-match-missing-default",

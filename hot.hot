@@ -295,6 +295,7 @@ hot.watch.with-tests false
 
 // Worker Configuration
 hot.worker.run-timeout Int(::env/get("HOT_WORKER_RUN_TIMEOUT", "300"))
+hot.worker.max-run-timeout Int(::env/get("HOT_WORKER_MAX_RUN_TIMEOUT", "3600"))
 hot.worker.shutdown-timeout Int(::env/get("HOT_WORKER_SHUTDOWN_TIMEOUT", "1"))
 hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "4"))
 hot.worker.vm-concurrency ::env/get("HOT_WORKER_VM_CONCURRENCY", "auto")

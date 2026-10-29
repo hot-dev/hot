@@ -69,6 +69,7 @@ hot.scheduler.retry-interval-seconds 1
 hot.scheduler.at-interval-seconds 1
 
 hot.worker.run-timeout Int(::env/get("HOT_WORKER_RUN_TIMEOUT", "300"))
+hot.worker.max-run-timeout Int(::env/get("HOT_WORKER_MAX_RUN_TIMEOUT", "3600"))
 hot.worker.shutdown-timeout Int(::env/get("HOT_WORKER_SHUTDOWN_TIMEOUT", "1"))
 hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "4"))
 hot.worker.cancel-on-timeout true

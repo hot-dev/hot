@@ -1868,6 +1868,7 @@ fn pmap_vec(
     let resource_registry = StdArc::new(crate::lang::hot::resource::get_registry());
     let tool_registry = StdArc::new(crate::lang::hot::internal_mcp::get_registry());
     let skill_registry = StdArc::new(crate::lang::hot::internal_skill::get_registry());
+    let test_harness = crate::lang::hot::test::current_harness();
 
     // Store results with chunk index to preserve order. Each entry is
     // (chunk_idx, values_produced_before_halt, optional halt).
@@ -1896,6 +1897,7 @@ fn pmap_vec(
         let resource_registry_clone = resource_registry.clone();
         let tool_registry_clone = tool_registry.clone();
         let skill_registry_clone = skill_registry.clone();
+        let test_harness_clone = test_harness.clone();
 
         // These workers run the VM, which may execute JIT-compiled code. The
         // JIT stack-overflow guard is calibrated for a large stack (see
@@ -1913,6 +1915,8 @@ fn pmap_vec(
             let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
                 skill_registry_clone,
             );
+            let _test_harness =
+                crate::lang::hot::test::ThreadHarnessGuard::install_some(test_harness_clone);
 
             // Create a new VM for this thread with its own private failure
             // state. Halts in this worker do not affect the parent or

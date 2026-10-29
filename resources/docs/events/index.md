@@ -152,3 +152,9 @@ fn (event) {
 ```
 
 For full retry configuration (attempts, delay, backoff, jitter, and limits), see [Retries](/docs/retries).
+
+## Testing Handlers
+
+`hot test` doesn't publish events: a test delivers them to their handlers with
+`::hot::test/deliver`, at a time it can fix. See
+[Events and schedules](/docs/cli#events-and-schedules) under `hot test`.

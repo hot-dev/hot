@@ -1,0 +1,216 @@
+::hot::test::test ns
+
+::test ::hot::test
+::time ::hot::time
+
+// A time no real clock reads, so a test can tell a fixed clock from the real one
+fixed-at "2001-02-03T04:05:06Z"
+
+// ---- Clock --------------------------------------------------------------------
+
+// The first of two tests that run in this order: this one fixes the clock and
+// leaves it fixed; the next one must see the real time again.
+test-clock-1-set-now-fixes-the-time
+meta ["test"]
+fn () {
+    set ::test/set-now(fixed-at)
+    assert-eq(fixed-at, Str(set), "set-now returns the time it set")
+    assert-eq(fixed-at, Str(::time/now()), "now returns the fixed time")
+    assert-eq(981173106, ::time/epoch-seconds(), "epoch-seconds reads the fixed time")
+    chicago ::time/now-zoned("America/Chicago")
+    assert-eq([2001, 2, 2, 22, 5], [chicago.year, chicago.month, chicago.day, chicago.hour, chicago.minute], "now-zoned reads the fixed time")
+    assert-eq(fixed-at, Str(::time/now()), "the clock does not move on its own")
+}
+
+test-clock-2-next-test-sees-real-time
+meta ["test"]
+fn () {
+    assert(ne(fixed-at, Str(::time/now())), "the previous test's fixed time is gone")
+    assert(gt(::time/now-zoned("UTC").year, 2025), "now is the real time")
+}
+
+test-clock-advance-moves-the-time
+meta ["test"]
+fn () {
+    ::test/set-now("2026-10-14T09:00:00Z")
+    assert-eq("2026-10-14T14:00:00Z", Str(::test/advance(::time/hours(5))), "advance returns the new time")
+    assert-eq("2026-10-14T14:00:00Z", Str(::time/now()), "now moved by five hours")
+    ::test/advance(::time/days(2))
+    assert-eq("2026-10-16T14:00:00Z", Str(::time/now()), "days are 24 hours")
+    ::test/advance(::time/Duration({days: 7, minutes: 30}))
+    assert-eq("2026-10-23T14:30:00Z", Str(::time/now()), "days and minutes add up")
+    assert(is-err(::test/advance(::time/Duration({months: 1}))), "months have no fixed length")
+}
+
+test-clock-accepts-instants-and-clears
+meta ["test"]
+fn () {
+    zoned ::time/ZonedDateTime("2026-10-14T04:00:00-05:00[America/Chicago]")
+    ::test/set-now(zoned)
+    assert-eq("2026-10-14T09:00:00Z", Str(::time/now()), "a ZonedDateTime sets its instant")
+    new-year ::test/set-now("2026-01-01T00:00:00Z")
+    ::test/clear-now()
+    ::test/set-now(new-year)
+    assert-eq("2026-01-01T00:00:00Z", Str(::time/now()), "an Instant sets itself")
+    assert(is-err(::test/set-now("next tuesday")), "set-now refuses a time it cannot read")
+    ::test/clear-now()
+    assert(gt(::time/now-zoned("UTC").year, 2025), "clear-now returns to the real time")
+}
+
+test-clock-holds-in-parallel-branches
+meta ["test"]
+fn () {
+    ::test/set-now(fixed-at)
+    seen parallel {
+        a Str(::time/now())
+        b Str(::time/now())
+    }
+
+    assert-eq({a: fixed-at, b: fixed-at}, seen, "parallel branches read the fixed clock")
+    assert-eq([fixed-at, fixed-at], pmap([1, 2], (i) { Str(::time/now()) }), "pmap workers read the fixed clock")
+}
+
+// ---- Delivery -----------------------------------------------------------------
+
+// Handlers that note what they saw, and when, in the run's context
+note fn (what: Str): Vec<Map> {
+    ::hot::ctx/set("test-notes", concat(or(::hot::ctx/get("test-notes"), []), [{what, at: Str(::time/now())}]))
+}
+
+on-ping
+meta {on-event: "hot-test:ping"}
+fn (event: Map): Map {
+    note(`ping ${event.data.n}`)
+    send("hot-test:pong", {n: event.data.n})
+}
+
+on-pong
+meta {on-event: "hot-test:pong"}
+fn (event: Map): Vec<Map> {
+    note(`pong ${event.data.n}`)
+}
+
+on-arm
+meta {on-event: "hot-test:arm"}
+fn (event: Map): Map {
+    send("hot:schedule:new", {fn: "::hot::test::test/check", args: [event.data.step], schedule: event.data.schedule})
+}
+
+check fn (step: Str): Vec<Map> {
+    note(`check ${step}`)
+    send("hot-test:pong", {n: step})
+}
+
+test-deliver-runs-handlers-and-what-they-send
+meta ["test"]
+fn () {
+    ::hot::ctx/set("test-notes", [])
+    ::test/set-now("2026-10-14T09:00:00Z")
+    runs ::test/deliver({type: "hot-test:ping", data: {n: 1}})
+    assert-eq(["::hot::test::test/on-ping", "::hot::test::test/on-pong"], map(runs, %.fn), "the ping handler, then the pong it sent")
+    assert-eq(
+        [{what: "ping 1", at: "2026-10-14T09:00:00Z"}, {what: "pong 1", at: "2026-10-14T09:00:00Z"}],
+        ::hot::ctx/get("test-notes"),
+        "handlers read the test's clock")
+    assert(is-empty(::test/deliver()), "nothing is left to deliver")
+}
+
+test-send-keeps-events-for-deliver
+meta ["test"]
+fn () {
+    ::hot::ctx/set("test-notes", [])
+    info send("hot-test:pong", {n: 2})
+    assert-eq("hot-test:pong", info.event.type, "send returns the event's info")
+    assert(is-empty(::hot::ctx/get("test-notes")), "no handler runs until the test delivers")
+    ::test/deliver()
+    assert-eq(["pong 2"], map(::hot::ctx/get("test-notes"), %.what), "deliver runs what was sent")
+}
+
+test-deliver-finds-no-handler
+meta ["test"]
+fn () {
+    assert(is-empty(::test/deliver({type: "hot-test:nobody-listens", data: {}})), "an event no handler hears runs nothing")
+}
+
+// ---- Schedules ----------------------------------------------------------------
+
+test-run-due-fires-at-the-due-time
+meta ["test"]
+fn () {
+    ::hot::ctx/set("test-notes", [])
+    ::test/set-now("2026-10-14T09:00:00Z")
+    ::test/deliver({type: "hot-test:arm", data: {step: "step-1", schedule: "in 1 day"}})
+    armed ::test/schedules()
+    assert-eq(1, length(armed), "the handler armed one schedule")
+    assert-eq("2026-10-15T09:00:00Z", Str(first(armed).at), "relative times count from the test's clock")
+    assert-eq(["step-1"], first(armed).args)
+
+    assert(is-empty(::test/run-due()), "nothing is due yet")
+    ::test/advance(::time/days(2))
+    runs ::test/run-due()
+    assert-eq(["::hot::test::test/check", "::hot::test::test/on-pong"], map(runs, %.fn), "the due call, then the handler of what it sent")
+    assert-eq("hot:schedule", first(runs).type)
+    assert-eq(
+        [{what: "check step-1", at: "2026-10-15T09:00:00Z"}, {what: "pong step-1", at: "2026-10-15T09:00:00Z"}],
+        ::hot::ctx/get("test-notes"),
+        "the call and its events run at the due time")
+    assert-eq("2026-10-16T09:00:00Z", Str(::time/now()), "afterwards the clock is where the test left it")
+    assert(is-empty(::test/schedules()), "a one-time schedule fires once")
+    assert(is-empty(::test/run-due()), "and only once")
+}
+
+test-run-due-fires-soonest-first
+meta ["test"]
+fn () {
+    ::hot::ctx/set("test-notes", [])
+    ::test/set-now("2026-10-14T09:00:00Z")
+    ::test/deliver({type: "hot-test:arm", data: {step: "late", schedule: "2026-10-14T12:00:00Z"}})
+    ::test/deliver({type: "hot-test:arm", data: {step: "early", schedule: "2026-10-14T10:00:00Z"}})
+    ::test/set-now("2026-10-14T11:00:00Z")
+    ::test/run-due()
+    assert-eq(["check early", "pong early"], map(::hot::ctx/get("test-notes"), %.what), "only what is due fires")
+    ::test/advance(::time/hours(1))
+    ::test/run-due()
+    assert-eq(["check early", "pong early", "check late", "pong late"], map(::hot::ctx/get("test-notes"), %.what), "a due time equal to now is due")
+}
+
+test-recurring-schedule-fires-each-occurrence
+meta ["test"]
+fn () {
+    ::hot::ctx/set("test-notes", [])
+    ::test/set-now("2026-10-14T09:30:00Z")
+    send("hot:schedule:new", {fn: ::hot::test::test/check, args: ["daily"], schedule: "0 0 9 * * *"})
+    ::test/deliver()
+    assert-eq("2026-10-15T09:00:00Z", Str(first(::test/schedules()).at), "the next occurrence after now")
+    ::test/advance(::time/days(3))
+    ::test/run-due()
+    assert-eq(
+        ["2026-10-15T09:00:00Z", "2026-10-16T09:00:00Z", "2026-10-17T09:00:00Z"],
+        ::hot::ctx/get("test-notes") |> filter(eq(%.what, "check daily")) |> map(%.at),
+        "each due occurrence fires at its own time")
+    assert-eq("2026-10-18T09:00:00Z", Str(first(::test/schedules()).at), "and it stays armed")
+}
+
+test-cancel-disarms
+meta ["test"]
+fn () {
+    ::test/set-now("2026-10-14T09:00:00Z")
+    send("hot:schedule:new", {fn: "::hot::test::test/check", args: ["a"], schedule: "in 1 hour"})
+    send("hot:schedule:new", {fn: "::hot::test::test/note", args: ["b"], schedule: "in 2 hours"})
+    ::test/deliver()
+    first-id first(::test/schedules()).id
+    send("hot:schedule:cancel", {schedule-id: first-id})
+    ::test/deliver()
+    assert-eq(["::hot::test::test/note"], map(::test/schedules(), %.fn), "cancel by id")
+    send("hot:schedule:cancel", {fn: "::hot::test::test/note"})
+    ::test/deliver()
+    assert(is-empty(::test/schedules()), "cancel by function")
+}
+
+test-harness-resets-between-tests
+meta ["test"]
+fn () {
+    // The schedule tests above left armed schedules and fixed clocks behind
+    assert(is-empty(::test/schedules()), "no schedule from another test")
+    assert(is-empty(::test/deliver()), "no event from another test")
+}
