@@ -3186,6 +3186,7 @@ dependencies = [
  "humantime",
  "ignore",
  "indexmap 2.14.2",
+ "ipnet",
  "lettre",
  "libc",
  "libsqlite3-sys",

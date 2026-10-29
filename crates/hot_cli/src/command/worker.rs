@@ -47,12 +47,23 @@ fn resolve_task_worker_backend(
     Ok(backend)
 }
 
+/// Both services run user code: refuse to start without the isolation a
+/// self-hosted production install requires, or with outbound rules that do
+/// not parse.
+fn exit_on_unsafe_user_code_conf(conf: &Val, service: &str) {
+    if let Err(e) = hot::outbound::validate_user_code_conf(conf) {
+        error!("hot.dev: {service} configuration rejected: {e}");
+        std::process::exit(1);
+    }
+}
+
 pub(crate) async fn run_task_worker(conf: Val) {
     info!(
         "hot.dev: TASK_WORKER starting, version: {} ({})",
         build_info::VERSION,
         build_info::git_sha_short()
     );
+    exit_on_unsafe_user_code_conf(&conf, "TASK_WORKER");
 
     let queue_type = QueueType::from_str(&conf.get_str("queue.type")).unwrap_or(QueueType::Memory);
     let redis_uri_str = conf.get_str("redis.uri");
@@ -225,6 +236,7 @@ pub(crate) async fn run_worker_with_stream_pubsub_shared_context(
         build_info::VERSION,
         build_info::git_sha_short()
     );
+    exit_on_unsafe_user_code_conf(&conf, "WORKER");
 
     // Extract configuration values from conf
     let queue_type = QueueType::from_str(&conf.get_str("queue.type")).unwrap_or(QueueType::Memory);

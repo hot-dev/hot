@@ -56,6 +56,7 @@ migrations, editor reference).
   - [Storage](configuration/storage)
   - [Email](configuration/email)
   - [Accounts and Sign-Up](configuration/accounts)
+  - [Outbound Network Access](configuration/network)
   - [Self-Hosted PostgreSQL](configuration/postgres)
 - [Hot Packages](packages)
   - [Package Manifest](packages/manifest)

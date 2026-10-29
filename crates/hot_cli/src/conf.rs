@@ -114,6 +114,9 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
         "email.smtp.timeout-seconds",
     ),
     ("HOT_NETWORK_ALLOW_PRIVATE", "network.allow-private"),
+    ("HOT_NETWORK_ALLOW_CIDRS", "network.allow-cidrs"),
+    ("HOT_NETWORK_ALLOW_HOSTS", "network.allow-hosts"),
+    ("HOT_NETWORK_DENY_CIDRS", "network.deny-cidrs"),
     ("HOT_TASK_MAX_CONCURRENT", "task.max-concurrent"),
     ("HOT_TASK_CODE_MAX_CONCURRENT", "task.code-max-concurrent"),
     (
@@ -2048,6 +2051,29 @@ mod tests {
         assert_eq!(conf.get_int("task.worker-memory-mb"), 1536);
         assert!(!conf.get_bool("network.allow-private"));
         assert!(conf.get("task.code.max.concurrent").is_none());
+    }
+
+    #[test]
+    fn outbound_rules_come_from_comma_separated_variables() {
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                ("HOT_NETWORK_ALLOW_CIDRS".into(), "10.20.0.0/16".into()),
+                ("HOT_NETWORK_ALLOW_HOSTS".into(), "api.corp.example".into()),
+                (
+                    "HOT_NETWORK_DENY_CIDRS".into(),
+                    "10.20.0.5/32, 10.20.0.6".into(),
+                ),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert!(
+            hot::outbound::OutboundRules::from_conf(&conf)
+                .unwrap()
+                .is_some()
+        );
+        assert!(conf.get("network.allow.cidrs").is_none());
     }
 
     #[test]
