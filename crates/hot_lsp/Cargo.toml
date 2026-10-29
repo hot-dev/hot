@@ -10,7 +10,6 @@ homepage.workspace = true
 [dependencies]
 ahash = { workspace = true }
 hot = { workspace = true }
-hot_lang = { workspace = true }
 tower-lsp = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

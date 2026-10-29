@@ -3154,6 +3154,7 @@ dependencies = [
  "fastnum",
  "fd-lock",
  "filetime",
+ "flate2",
  "futures",
  "google-cloud-auth",
  "google-cloud-gax",
@@ -3161,7 +3162,6 @@ dependencies = [
  "hex",
  "hickory-resolver",
  "hkdf",
- "hot_lang",
  "humantime",
  "ignore",
  "indexmap 2.14.2",
@@ -3187,6 +3187,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "sqlx",
+ "tar",
  "tempfile",
  "temporal_rs",
  "thiserror 2.0.21",
@@ -3197,6 +3198,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "ureq",
  "url",
  "uuid",
  "walkdir",
@@ -3290,7 +3292,6 @@ dependencies = [
  "hot",
  "hot_api",
  "hot_app",
- "hot_lang",
  "hot_lsp",
  "hot_scheduler",
  "hot_task_worker",
@@ -3329,42 +3330,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "hot_lang"
-version = "3.0.0"
-dependencies = [
- "ahash",
- "ariadne",
- "base64 0.23.1",
- "blake3",
- "chrono",
- "croner",
- "english-to-cron",
- "fastnum",
- "fd-lock",
- "flate2",
- "ignore",
- "indexmap 2.14.2",
- "libc",
- "parking_lot",
- "postcard",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "tar",
- "tempfile",
- "tracing",
- "ureq",
-]
-
-[[package]]
 name = "hot_lsp"
 version = "3.0.0"
 dependencies = [
  "ahash",
  "anyhow",
  "hot",
- "hot_lang",
  "serde",
  "tokio",
  "tower-lsp",

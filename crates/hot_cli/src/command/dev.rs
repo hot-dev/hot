@@ -455,21 +455,13 @@ pub(crate) async fn run_dev(
         .read()
         .ok()
         .and_then(|guard| guard.clone());
-    let available_ctx_keys: Option<ahash::AHashSet<String>> = context_storage_snapshot
-        .as_ref()
-        .map(|storage| storage.keys().cloned().collect());
-    let unit_cache = hot::lang::engine::discover::unit_cache();
-    if let Err(e) = hot_lang::check::check_project_text(
+    if let Err(e) = hot::lang::engine::Engine::check_sources_pipeline_with_context(
         &src_paths,
         &test_paths,
-        &hot::lang::engine::Engine::check_options(
-            Some(&conf),
-            Some(&project_name),
-            available_ctx_keys.as_ref(),
-            &unit_cache,
-        ),
+        Some(&conf),
+        Some(&project_name),
+        context_storage_snapshot.as_ref(),
         diagnostic_output.color,
-        None,
     ) {
         if hot::env::is_local_dev() {
             report_dev_warning(diagnostic_output, "hot.dev: Source validation failed", &e);
@@ -1210,9 +1202,9 @@ pub(crate) async fn run_dev_file_watcher(
 mod tests {
     use super::*;
     use hot::data::serialization::Serialization;
+    use hot::lang::parser::{ErrorLocation, ParseError};
     use hot::queue::Queue;
     use hot::queue::sqlite::SqliteQueue;
-    use hot_lang::lang::parser::{ErrorLocation, ParseError};
 
     #[test]
     fn project_dev_lock_excludes_a_second_holder() {

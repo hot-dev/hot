@@ -238,7 +238,6 @@ impl DependencyResolver {
     /// 3. Executable-relative: <exe_dir>/resources/pkg/hot-std (Windows/bundled installs)
     /// 4. macOS package install: /usr/local/share/hot/pkg/hot-std
     /// 5. Linux package install: /usr/share/hot/pkg/hot-std
-    /// 6. The hot-std embedded in this crate (`embed-std` feature)
     pub fn new_default() -> Self {
         // Check HOT_HOME first
         if let Ok(home) = std::env::var("HOT_HOME") {
@@ -274,11 +273,6 @@ impl DependencyResolver {
         let linux_path = PathBuf::from("/usr/share/hot/pkg/hot-std");
         if linux_path.exists() {
             return Self::new(linux_path);
-        }
-
-        // Then the copy embedded in this crate, if it has one
-        if let Ok(embedded) = crate::lang::hot_std::embedded_dir() {
-            return Self::new(embedded);
         }
 
         // Final fallback (will fail gracefully if doesn't exist)
@@ -641,7 +635,6 @@ impl DependencyResolver {
     }
 
     /// Acquire a cross-process file lock for a CDN package.
-    #[cfg(feature = "fetch")]
     fn acquire_cdn_file_lock(
         parsed: &ParsedPkgSpec,
     ) -> Result<fd_lock::RwLock<std::fs::File>, std::io::Error> {
@@ -661,6 +654,7 @@ impl DependencyResolver {
     }
 
     /// Resolve a package from the CDN (pkg.hot.dev)
+    /// Uses file locking to prevent cross-process races during download/extraction
     fn resolve_from_cdn(parsed: &ParsedPkgSpec, dep_name: &str) -> Result<PathBuf, String> {
         let pkg_path = Self::get_cdn_package_path(parsed)?;
 
@@ -674,17 +668,6 @@ impl DependencyResolver {
             return Ok(pkg_path);
         }
 
-        Self::fetch_cdn_package(parsed, dep_name, pkg_path)
-    }
-
-    /// Download and unpack a package that isn't in the CDN cache yet.
-    /// Uses file locking to prevent cross-process races during download/extraction
-    #[cfg(feature = "fetch")]
-    fn fetch_cdn_package(
-        parsed: &ParsedPkgSpec,
-        dep_name: &str,
-        pkg_path: PathBuf,
-    ) -> Result<PathBuf, String> {
         // Acquire cross-process file lock (best effort - proceed even if locking fails)
         let mut file_lock = Self::acquire_cdn_file_lock(parsed).ok();
         let _file_lock_guard = file_lock.as_mut().and_then(|lock| lock.try_write().ok());
@@ -726,24 +709,7 @@ impl DependencyResolver {
         Ok(pkg_path)
     }
 
-    /// Without the `fetch` feature only packages already in the CDN cache
-    /// resolve; `hot` (or any build with `fetch`) downloads them.
-    #[cfg(not(feature = "fetch"))]
-    fn fetch_cdn_package(
-        _parsed: &ParsedPkgSpec,
-        dep_name: &str,
-        pkg_path: PathBuf,
-    ) -> Result<PathBuf, String> {
-        Err(format!(
-            "package '{}' is not in the package cache at {}, and this build can't download it \
-             (enable hot_lang's `fetch` feature, or fetch it once with `hot`)",
-            dep_name,
-            pkg_path.display()
-        ))
-    }
-
     /// Download a package tarball from the CDN
-    #[cfg(feature = "fetch")]
     fn download_cdn_package(url: &str) -> Result<Vec<u8>, String> {
         // Use ureq for blocking HTTP request (no async runtime conflicts)
         let agent = ureq::Agent::config_builder()
@@ -774,7 +740,6 @@ impl DependencyResolver {
     }
 
     /// Extract a gzipped tarball to a directory
-    #[cfg(feature = "fetch")]
     fn extract_tarball(tarball_bytes: &[u8], dest_path: &Path) -> Result<(), String> {
         use flate2::read::GzDecoder;
         use std::io::Cursor;
@@ -835,7 +800,6 @@ impl DependencyResolver {
     }
 
     /// Recursively copy a directory
-    #[cfg(feature = "fetch")]
     fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         std::fs::create_dir_all(dst)
             .map_err(|e| format!("Failed to create directory {}: {}", dst.display(), e))?;
@@ -1331,7 +1295,7 @@ impl DependencyResolver {
 
                         // Check minimum Hot version requirement
                         if let Some(ref min_version) = pkg_meta.hot_min_version {
-                            if let Err(e) = crate::version::check_min_version(min_version) {
+                            if let Err(e) = crate::build_info::check_min_version(min_version) {
                                 return Err(format!(
                                     "Package '{}' requires Hot {}: {}",
                                     dep.name, min_version, e
