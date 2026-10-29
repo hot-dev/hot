@@ -237,6 +237,78 @@ logs. Treat a diagnostics bundle like the logs themselves. The command
 workflow writes reports to its job summary, which anyone who can read the
 operator repository's Actions runs can see.
 
+## Versions and upgrades
+
+Each release's signed manifest pins the Hot runtime image and the upstream
+images by digest, and names its configuration schema, latest database
+migration, and oldest supported source release. The rest is pinned in this
+repository; a test keeps this table in step with those pins.
+
+| Component | Version | Pinned in |
+| --- | --- | --- |
+| Hot runtime image | One digest per release | Release manifest |
+| Runtime image base | Debian 13 (trixie) | `images/containers/runtime.Dockerfile` |
+| Local PostgreSQL | 18 with pgvector 0.8.1 | `release/upstream-images.json` |
+| Local Valkey | 8.1 | `release/upstream-images.json` |
+| Ingress | nginx 1.30 | `release/upstream-images.json` |
+| Managed PostgreSQL | 18 (RDS, Cloud SQL) | `opentofu/modules/single-machine-contract` |
+| Managed Valkey | 8.1 (ElastiCache) | `opentofu/stacks/aws/single-machine/valkey.tf` |
+| Host OS | Ubuntu 24.04 LTS | `images/packer/hot-host.pkr.hcl` |
+| Kata Containers | 3.28.0 | `images/host/setup-host.sh` |
+| containerd (box tasks) | 1.7.30 | `images/host/setup-host.sh` |
+| CNI plugins | 1.9.1 | `images/host/setup-host.sh` |
+| OpenTofu | 1.13.1 | `selfhost-plan.yml` |
+| AWS provider | 6.69.1 | Stack lockfiles |
+| Google provider | 8.7.0 | Stack lockfiles |
+| Random provider | 3.9.1 | Stack lockfiles |
+| Configuration schema | 1 | `release/release_manifest.py` |
+
+Upgrades follow these rules, and the deploy agent enforces them:
+
+- **Supported jumps.** A release upgrades from its manifest's
+  `upgrade.minimum_source` (set in
+  [`release/upgrade-policy.json`](release/upgrade-policy.json)) or any later
+  release. The agent refuses a larger jump; deploy a release in between first.
+- **Order and downtime.** The agent stops the scheduler, readies the data
+  services, takes a restore point if the schema changes, migrates and grants,
+  then replaces the app, API, workers, and ingress, checks readiness, and
+  starts the new scheduler. Schedules pause for the whole deploy. The
+  previous release keeps serving requests and work until its containers are
+  replaced, so it runs briefly against the migrated schema. For a full
+  maintenance window, run `drain-and-stop` first. A single machine never runs
+  two releases of the same service at once.
+- **Restore points.** Hot never migrates a database down. Before a release
+  adds migrations, the agent records where to recover from:
+  - a local database gets a `pg_dump` in `/var/lib/hot/backups/pre-<release>-*`,
+    and the last 3 are kept;
+  - a managed database gets the time to restore to with RDS or Cloud SQL
+    point-in-time recovery;
+  - an existing database gets the time, for its operator's backups.
+
+  A retried deploy keeps the first attempt's restore point.
+- **Rollback.** Pointing back to a release with the same migration level is a
+  normal deploy. A release with fewer migrations is refused. Recovery is a
+  forward fix (a newer release) or a restore from the restore point, then the
+  earlier release.
+- **Failures.** A failed deploy reports the steps it finished and what
+  recovery means:
+  - If it failed before migrating, the database is unchanged, and the
+    previous release's scheduler starts again.
+  - If it failed during or after migrating, a forward fix or a restore is
+    needed.
+
+  The agent does not retry a failed release on its own; run `deploy-now`
+  after fixing the cause, or point at another release. If the host stopped
+  mid-deploy, the agent resumes when it starts again.
+- **Records.** `/var/lib/hot/releases/history.json` keeps the last 20 deploys:
+  - release and previous release;
+  - image digests and host image versions;
+  - configuration schema;
+  - migration levels before and after;
+  - steps, restore point, and any error.
+
+  `diagnostics` shows the last 5.
+
 ## Local validation
 
 Use OpenTofu 1.13.1 (the tested version) and Python 3.10 or newer. Docker Compose

@@ -32,9 +32,9 @@ def installation(**overrides):
     return config
 
 
-def manifest(release="3.0.1", latest=22):
+def manifest(release="3.0.1", latest=22, minimum_source="3.0.0"):
     return {"schema_version": 1, "release": release, "module_tag": "v" + release, "configuration_schema": 1,
-            "migrations": {"latest": latest},
+            "migrations": {"latest": latest}, "upgrade": {"minimum_source": minimum_source},
             "images": {name: f"registry.example.com/{name}@sha256:" + "a" * 64 for name in render.IMAGES}}
 
 
@@ -146,7 +146,8 @@ class Deploy(AgentHarness):
         self.manifests["2.9.0"] = manifest("2.9.0", latest=12)
         status = self.agent.reconcile()
         self.assertEqual(status["state"], "failed")
-        self.assertIn("downgrades need a restore", status["error"])
+        self.assertIn("Hot does not migrate down", status["error"])
+        self.assertIn("restore the database", status["error"])
         self.cloud.parameters["pointer"] = "3.0.3"
         self.manifests["3.0.3"] = manifest("3.0.4")
         self.assertIn("names release 3.0.4", self.agent.reconcile()["error"])
@@ -197,7 +198,7 @@ class Secrets(AgentHarness):
         self.assertIn("unsupported entry HOT_DB_URI", self.agent.reconcile()["error"])
         del self.cloud.secrets[OPERATOR]["HOT_DB_URI"]
         del self.cloud.secrets[OPERATOR]["TLS_PRIVATE_KEY"]
-        self.assertIn("TLS_PRIVATE_KEY", self.agent.reconcile()["error"])
+        self.assertIn("TLS_PRIVATE_KEY", self.agent.reconcile(retry=True)["error"])
 
     def test_status_never_carries_secret_values(self):
         self.agent.reconcile()
@@ -237,15 +238,118 @@ class ExistingData(AgentHarness):
         self.cloud.secrets[OPERATOR]["HOT_DB_URI"] = self.URI.replace("verify-full", "require")
         self.assertIn("sslmode=verify-full", self.agent.reconcile()["error"])
         self.cloud.secrets[OPERATOR]["HOT_DB_URI"] = self.URI.replace("hot_runtime", "postgres")
-        self.assertIn("runtime_role", self.agent.reconcile()["error"])
+        self.assertIn("runtime_role", self.agent.reconcile(retry=True)["error"])
         self.cloud.secrets[OPERATOR]["HOT_DB_URI"] = self.URI
         self.config["data"]["valkey"] = {"mode": "existing"}
         self.cloud.secrets[OPERATOR]["HOT_REDIS_URI"] = "redis://cache.internal:6379"
-        self.assertIn("rediss://", self.agent.reconcile()["error"])
+        self.assertIn("rediss://", self.agent.reconcile(retry=True)["error"])
 
     def test_database_settings_are_refused_for_local_data(self):
         self.config["data"] = {}
         self.assertIn("unsupported entry", self.agent.reconcile()["error"])
+
+
+class Upgrades(AgentHarness):
+    def setUp(self):
+        super().setUp()
+        self.failing = None
+        recorder = self.run
+
+        def run(command, **kwargs):
+            if self.failing and self.failing in command:
+                recorder.commands.append(command)
+                raise subprocess.CalledProcessError(1, command)
+            if "pg_dump" in command:
+                dump = Path(self.tmp.name) / "data/postgres/backup.dump"
+                dump.parent.mkdir(parents=True, exist_ok=True)
+                dump.write_text("dump")
+            return recorder(command, **kwargs)
+        self.agent.run_command = run
+        self.agent.reconcile()
+
+    def release(self, version, **fields):
+        self.manifests[version] = manifest(version, **fields)
+        self.cloud.parameters["pointer"] = version
+
+    def test_a_failed_release_waits_for_deploy_now(self):
+        self.release("3.0.2", latest=23)
+        self.failing = "migrate"
+        status = self.agent.reconcile()
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("Migrations may be partly applied", status["recovery"])
+        self.assertIn("restore the database from ", status["recovery"])
+        calls = len(self.run.commands)
+        self.assertIsNone(self.agent.reconcile(), "a failed release is not retried every poll")
+        self.assertEqual(len(self.run.commands), calls)
+        point = self.agent.state()["failed"]["restore_point"]
+        self.failing = None
+        self.run.commands.clear()
+        status = self.agent.command("deploy-now", request_id="retry-1")
+        self.assertEqual((status["state"], status["release"]), ("deployed", "3.0.2"))
+        self.assertNotIn("failed", self.agent.state())
+        self.assertFalse(any("pg_dump" in c for c in self.run.commands), "a retry keeps the first restore point")
+        self.assertEqual(self.agent.history()[-1]["restore_point"], point)
+
+    def test_a_failure_before_migrating_keeps_the_previous_scheduler(self):
+        self.release("3.0.2")
+        self.failing = "--wait"
+        self.run.commands.clear()
+        status = self.agent.reconcile()
+        self.assertIn("The database was not changed and 3.0.1 keeps running", status["recovery"])
+        self.assertIn("previous-scheduler-restarted", status["steps"])
+        restart = self.run.commands[-1]
+        self.assertIn(str(Path(self.tmp.name) / "releases/3.0.1/bundle/compose.json"), restart)
+        self.assertEqual(restart[-3:], ["up", "-d", "scheduler"])
+
+    def test_an_interrupted_deploy_resumes(self):
+        self.release("3.0.2")
+        self.agent.save_state({**self.agent.state(), "deploying": {"release": "3.0.2", "steps": ["started", "pulled"]}})
+        self.assertEqual(self.agent.reconcile()["state"], "deployed")
+        record = self.agent.history()[-1]
+        self.assertEqual(record["resumed_after"], "pulled")
+        self.assertNotIn("deploying", self.agent.state())
+
+    def test_schema_changes_take_a_restore_point_first(self):
+        self.assertNotIn("restore_point", self.agent.history()[-1], "a first install has nothing to restore")
+        for number, version in enumerate(["3.0.2", "3.0.3", "3.0.4", "3.0.5"]):
+            self.release(version, latest=23 + number)
+            self.run.commands.clear()
+            self.assertEqual(self.agent.reconcile()["state"], "deployed")
+            calls = [" ".join(c) for c in self.run.commands]
+            dump = next(i for i, c in enumerate(calls) if "pg_dump" in c)
+            self.assertLess(dump, next(i for i, c in enumerate(calls) if c.endswith("run --rm migrate")))
+        point = self.agent.history()[-1]["restore_point"]
+        self.assertEqual(point["kind"], "dump")
+        self.assertTrue(Path(point["path"]).exists())
+        self.assertEqual(len(list((Path(self.tmp.name) / "backups").glob("pre-*"))), agent_module.UPGRADE_DUMPS)
+        self.release("3.0.6", latest=26)
+        self.agent.reconcile()
+        self.assertNotIn("restore_point", self.agent.history()[-1], "no schema change, no dump")
+
+    def test_unsupported_jumps_are_refused(self):
+        self.release("3.2.0", minimum_source="3.1.0")
+        status = self.agent.reconcile()
+        self.assertIn("upgrades from 3.1.0 or later, and this installation runs 3.0.1", status["error"])
+        self.assertIn("The database was not changed", status["recovery"])
+        self.assertLess(agent_module.version_key("3.1.0-rc.1"), agent_module.version_key("3.1.0"))
+        self.assertLess(agent_module.version_key("3.9.0"), agent_module.version_key("3.10.0"))
+
+    def test_each_deploy_is_recorded_without_secrets(self):
+        (Path(self.tmp.name) / "host").mkdir()
+        (Path(self.tmp.name) / "host/versions.json").write_text(json.dumps({"kata": "3.21.0"}))
+        self.release("3.0.2", latest=23)
+        self.agent.reconcile()
+        record = self.agent.history()[-1]
+        self.assertEqual({k: record[k] for k in ("release", "previous", "migrations_before", "migrations",
+                                                 "configuration_schema")},
+                         {"release": "3.0.2", "previous": "3.0.1", "migrations_before": 22, "migrations": 23,
+                          "configuration_schema": 1})
+        self.assertEqual(record["images"]["hot"], "sha256:aaaaaaaaaaaa")
+        self.assertEqual(record["host"], {"kata": "3.21.0"})
+        self.assertIn("finished", record)
+        text = (Path(self.tmp.name) / "releases/history.json").read_text()
+        for value in self.cloud.secrets[GENERATED].values():
+            self.assertNotIn(value, text)
 
 
 class Readiness(unittest.TestCase):
@@ -321,7 +425,7 @@ class ManagedData(AgentHarness):
         self.assertIn("administrator secret", self.agent.reconcile()["error"])
         self.cloud.secrets[self.ADMIN] = {"username": "hot_admin", "password": "x"}
         self.ca_status = 503
-        self.assertIn("CA certificate", self.agent.reconcile()["error"])
+        self.assertIn("CA certificate", self.agent.reconcile(retry=True)["error"])
 
     def test_operator_database_settings_are_refused(self):
         self.cloud.secrets[OPERATOR]["HOT_DB_URI"] = "postgres://x"
@@ -334,7 +438,7 @@ class ManagedData(AgentHarness):
         self.assertIn("AUTH token", self.agent.reconcile()["error"])
         self.cloud.secrets[token_secret] = {"password": "tok+en/1"}
         self.agent.resolve = lambda hosts: [f"10.68.5.{i}/32" for i, _ in enumerate(hosts)]
-        status = self.agent.reconcile()
+        status = self.agent.reconcile(retry=True)
         self.assertEqual(status["state"], "deployed", status)
         root = Path(self.tmp.name) / "secrets"
         self.assertEqual((root / "worker/HOT_REDIS_URI").read_text(), f"rediss://:tok%2Ben%2F1@{cache}:6379")

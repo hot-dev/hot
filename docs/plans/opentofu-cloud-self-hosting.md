@@ -944,6 +944,8 @@ remove the only copy of its own state.
       and qualification remain.
 - [ ] Make migration and bootstrap retries idempotent; a migration failure
       blocks rollout. Record versions and completed steps without exposing secrets.
+      The agent records each deploy's versions and steps, and a migration
+      failure stops the rollout with recovery guidance.
 
 Completion: using only public source/artifacts, start the entire stack on a
 Linux host and sign in, create a project, deploy a build, serve an HTTP request,
@@ -1765,19 +1767,36 @@ or an existing operator destination without coupling telemetry to S3.
 - [ ] Publish a compatibility matrix for Hot service images, configuration and
       DB schema, PostgreSQL/extensions, Valkey, host OS, Kata/containerd, and
       OpenTofu/providers. Pin dependencies and commit root-stack lockfiles.
+      [Versions and upgrades](../../infra/README.md#versions-and-upgrades)
+      publishes the matrix; a test fails when it disagrees with the pins.
 - [ ] Define supported source/target releases, ordering, maintenance downtime,
       admission pause/drain behavior, migrations, and post-upgrade checks.
       Qualify mixed service versions wherever rolling deployment permits them;
       otherwise require coordinated replacement. Preserve singleton scheduling.
+      Each manifest names its oldest source release, and the agent refuses
+      larger jumps. The single machine replaces services in one ordered deploy
+      with the scheduler stopped throughout; the order and downtime are
+      documented.
 - [ ] Record image digests, host image, configuration version, schema version,
       previous release, and completed migration steps. Classify migrations by
       backward compatibility and identify when application rollback is safe,
       when a forward fix is required, and when recovery needs a data restore.
+      The agent keeps the last 20 deploys (digests, host versions,
+      configuration schema, migration levels, steps, restore point, error).
+      Hot never migrates down, so every migration counts as one-way: rollback
+      is safe only at the same migration level, and otherwise needs a forward
+      fix or a restore. Before a release adds migrations the agent takes a
+      `pg_dump` of a local database or records the point-in-time restore time.
 - [ ] Test representative upgrade fixtures and interrupted-upgrade recovery for
       the initial release; test supported prior releases as they become
       available. Reject unsupported jumps and engine/provider combinations.
       The host deploy agent and release workflow enforce these rules; they
       are not just documentation.
+      Agent tests cover refused jumps and downgrades, resumed interrupted
+      deploys, failed releases that wait for `deploy-now` instead of retrying
+      every poll, a retry that keeps the first restore point, and a failure
+      before migrating that restarts the previous scheduler. Real upgrade
+      fixtures need a second release.
 
 ### 3. Measurable backup and recovery
 

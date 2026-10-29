@@ -67,6 +67,9 @@ DETAIL_KEYS = ("diagnostics", "logs")
 BOX_POOL_GB = {"small": 40, "medium": 100, "large": 200}
 # Container users that read their secret files.
 SECRET_OWNERS = {"postgres": 999, "valkey": 999}
+# Deploy records kept in releases/history.json, and pre-upgrade dumps kept.
+HISTORY = 20
+UPGRADE_DUMPS = 3
 
 
 # Health metrics the agent publishes every cycle, with their CloudWatch units.
@@ -653,6 +656,7 @@ class Agent:
         self.secrets_root = Path(roots.get("secrets", SECRETS_ROOT))
         self.etc = Path(roots.get("etc", "/etc/hot"))
         self.host = Path(roots.get("host", "/opt/hot-host"))
+        self.backups = self.data_root / "backups"
         self.references = config["secret_references"]
 
     @staticmethod
@@ -779,22 +783,38 @@ class Agent:
     def deploy(self, release, previous):
         """Deploy one release. Order matters: the old scheduler stops before
         anything else changes, migrations finish before services start, and
-        the new scheduler starts last."""
-        steps = []
+        the new scheduler starts last. Progress is saved after every step, so
+        an interrupted deploy is resumed and a failed one is explained."""
+        state = self.state()
+        interrupted = state.get("deploying") or {}
+        record = {"release": release, "previous": previous, "started": utc_now(), "steps": [],
+                  "migrations_before": state.get("migrations")}
+        if interrupted.get("release") == release:
+            record["resumed_after"] = (interrupted.get("steps") or ["start"])[-1]
+        # A retry keeps the first attempt's restore point: by now the
+        # database may hold some of this release's migrations.
+        for earlier in (interrupted, state.get("failed") or {}):
+            if earlier.get("release") == release and earlier.get("restore_point"):
+                record["restore_point"] = earlier["restore_point"]
+
+        def step(name):
+            record["steps"].append(name)
+            self.save_state({**self.state(), "deploying": record})
+
+        step("started")
         manifest = self.fetch_release(release)
-        steps.append("verified")
-        current = self.state().get("migrations")
-        latest = manifest.get("migrations", {}).get("latest", 0)
-        if current is not None and latest < current:
-            raise AgentError(f"Release {release} expects migration {latest}, older than the installed {current}; "
-                             "downgrades need a restore")
+        check_upgrade(manifest, previous, state.get("migrations"))
+        record.update(images={name: image.rsplit("@", 1)[-1][:19] for name, image in manifest["images"].items()},
+                      migrations=manifest["migrations"]["latest"],
+                      configuration_schema=manifest.get("configuration_schema", 1), host=self.host_versions())
+        step("verified")
         bundle = self.render_bundle(release, manifest, self.operator_secrets())
         self.deliver_secrets()
-        steps.append("secrets")
+        step("secrets")
         self.compose(bundle, "--profile", "admin", "pull", "--quiet")
-        steps.append("pulled")
+        step("pulled")
         self.compose(bundle, "stop", "scheduler")
-        steps.append("scheduler-stopped")
+        step("scheduler-stopped")
         local_data = [s for s in ("postgres", "valkey") if render.data_mode(self.config, s) == "local"]
         if local_data:
             self.compose(bundle, "up", "-d", "--wait", *local_data)
@@ -802,19 +822,94 @@ class Agent:
             self.compose(bundle, "--profile", "admin", "run", "--rm", "prepare-postgres")
         if render.data_mode(self.config, "postgres") != "local":
             self.compose(bundle, "--profile", "admin", "run", "--rm", "check-postgres")
+        step("data-ready")
+        if state.get("migrations") is not None and record["migrations"] > state["migrations"]:
+            # Hot never migrates down: undoing these migrations means a restore.
+            if not record.get("restore_point"):
+                record["restore_point"] = self.restore_point(bundle, release)
+            step("restore-point")
+        step("migrating")
         self.compose(bundle, "--profile", "admin", "run", "--rm", "migrate")
         self.compose(bundle, "--profile", "admin", "run", "--rm", "provision")
-        steps.append("migrated")
+        step("migrated")
         if self.config.get("admin_email"):
             self.compose(bundle, "--profile", "admin", "run", "--rm", "bootstrap-admin")
-            steps.append("admin")
+            step("admin")
         self.compose(bundle, "up", "-d", "--remove-orphans", "app", "api", "worker", "task-worker", "ingress")
         self.wait_ready()
         self.compose(bundle, "up", "-d", "scheduler")
-        steps.append("started")
-        self.save_state({"release": release, "previous": previous, "migrations": latest,
+        step("ready")
+        record["finished"] = utc_now()
+        self.save_state({"release": release, "previous": previous, "migrations": record["migrations"],
                          "dependencies": data_services(self.config, self.operator_secrets())})
-        return steps
+        self.remember(record)
+        return record["steps"]
+
+    def recover(self, release, previous, error):
+        """After a failed deploy: keep the previous release scheduling when
+        the database was not touched, record the failure, and say what
+        recovery means. The failed release is not retried until asked."""
+        state = self.state()
+        record = state.get("deploying") or {}
+        if record.get("release") != release:
+            record = {"release": release, "previous": previous, "steps": []}
+        steps = record["steps"]
+        if "migrating" in steps:
+            point = record.get("restore_point")
+            where = f" from {point['path']}" if point and point.get("path") else (
+                f" to {point['time']}" if point else "")
+            recovery = "Migrations may be partly applied, and Hot does not migrate down. Deploy a fixed release"
+            recovery += f", or restore the database{where} and deploy {previous} again." if previous else "."
+        else:
+            if previous and "scheduler-stopped" in steps:
+                with contextlib.suppress(AgentError, subprocess.CalledProcessError):
+                    self.compose(self.releases / previous / "bundle", "up", "-d", "scheduler")
+                    steps.append("previous-scheduler-restarted")
+            recovery = (f"The database was not changed and {previous} keeps running. Fix the cause, then run "
+                        "deploy-now, or point the installation at another release." if previous else
+                        "Nothing was installed. Fix the cause, then run deploy-now.")
+        record.update(error=describe(error), recovery=recovery, finished=utc_now())
+        failed = {key: record[key] for key in ("release", "steps", "error", "recovery", "restore_point") if key in record}
+        self.save_state({**{k: v for k, v in state.items() if k != "deploying"}, "failed": failed})
+        self.remember(record)
+        return failed
+
+    def restore_point(self, bundle, release):
+        """Where to recover the database from if this release's migrations
+        must be undone: a dump of a local database, or the time to restore a
+        managed or existing one to."""
+        mode = render.data_mode(self.config, "postgres")
+        if mode != "local":
+            return {"kind": "point-in-time" if mode == "managed" else "operator", "time": utc_now()}
+        target = self.dump_postgres(bundle, f"pre-{release}")
+        dumps = sorted(self.backups.glob("pre-*"), key=lambda path: path.stat().st_mtime)
+        for old in dumps[:-UPGRADE_DUMPS]:
+            shutil.rmtree(old)
+        return {"kind": "dump", "path": str(target / "postgres.dump"), "time": utc_now()}
+
+    def dump_postgres(self, bundle, label):
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        target = self.backups / f"{label}-{stamp}"
+        target.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.compose(bundle, "exec", "-T", "postgres", "pg_dump", "-U", "hot_owner", "-d", "hot",
+                     "--format=custom", "--file=/var/lib/postgresql/backup.dump")
+        shutil.move(str(self.data_root / "data/postgres/backup.dump"), str(target / "postgres.dump"))
+        return target
+
+    def host_versions(self):
+        try:
+            return json.loads((self.host / "versions.json").read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def history(self):
+        try:
+            return json.loads((self.releases / "history.json").read_text())
+        except (OSError, ValueError):
+            return []
+
+    def remember(self, record):
+        (self.releases / "history.json").write_text(json.dumps((self.history() + [record])[-HISTORY:], indent=1))
 
     def wait_ready(self, attempts=40, probe=None):
         """Check the app and API through the ingress from the host itself, so
@@ -842,6 +937,7 @@ class Agent:
             return {}
 
     def save_state(self, state):
+        self.releases.mkdir(parents=True, exist_ok=True)
         self.state_path().write_text(json.dumps(state))
 
     def report(self, **status):
@@ -939,18 +1035,25 @@ class Agent:
 
     # -- reconcile and commands ------------------------------------------------
 
-    def reconcile(self, request_id=""):
+    def reconcile(self, request_id="", retry=False):
+        """Deploy the release pointer if it changed. A release that failed
+        waits for deploy-now (`retry`) or a new pointer; an interrupted one
+        is resumed."""
         desired = self.cloud.get_parameter(self.config["release_pointer"])
         state = self.state()
         if not desired or desired == state.get("release"):
             return None
-        first_install = self.cloud.get_secret(self.references["generated"]) is None and not state
+        if not retry and (state.get("failed") or {}).get("release") == desired:
+            return None
+        first_install = self.cloud.get_secret(self.references["generated"]) is None and not state.get("release")
         try:
             self.prepare_host(first_install)
             steps = self.deploy(desired, state.get("release"))
             return self.report(state="deployed", release=desired, steps=steps, request_id=request_id)
         except (AgentError, ValueError, subprocess.CalledProcessError) as error:
-            return self.report(state="failed", release=desired, error=describe(error), request_id=request_id)
+            failed = self.recover(desired, state.get("release"), error)
+            return self.report(state="failed", release=desired, error=describe(error), request_id=request_id,
+                               steps=failed["steps"], recovery=failed["recovery"])
 
     def command(self, operation, service="", request_id=""):
         if operation not in COMMANDS:
@@ -959,7 +1062,7 @@ class Agent:
         release = self.state().get("release")
         bundle = self.releases / release / "bundle" if release else None
         if operation == "deploy-now":
-            return self.reconcile(request_id) or self.report(state="current", request_id=request_id)
+            return self.reconcile(request_id, retry=True) or self.report(state="current", request_id=request_id)
         if operation == "status":
             return self.report(state="status", request_id=request_id)
         if operation == "diagnostics":
@@ -993,13 +1096,8 @@ class Agent:
             # one by its operator.
             if render.data_mode(self.config, "postgres") != "local":
                 raise AgentError("The database is not on this host; back it up with its provider")
-            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            target = HOT_ROOT / "backups" / stamp
-            target.mkdir(parents=True, mode=0o700)
-            self.compose(bundle, "exec", "-T", "postgres", "pg_dump", "-U", "hot_owner", "-d", "hot",
-                         "--format=custom", "--file=/var/lib/postgresql/backup.dump")
-            shutil.move(str(HOT_ROOT / "data/postgres/backup.dump"), str(target / "postgres.dump"))
-            return self.report(state="backed-up", backup=str(target), request_id=request_id)
+            target = self.dump_postgres(bundle, "manual")
+            return self.report(state="backed-up", backup=str(target / "postgres.dump"), request_id=request_id)
         raise AgentError(f"Unhandled command {operation!r}")
 
     def diagnostics(self, bundle, probe=None):
@@ -1008,13 +1106,10 @@ class Agent:
         metrics, and the certificate. Logs are a separate command."""
         redact = Redactor.from_files(self.secrets_root)
         state = self.state()
-        try:
-            host = json.loads((self.host / "versions.json").read_text())
-        except (OSError, ValueError):
-            host = {}
         result = {
             "versions": {"release": state.get("release"), "previous": state.get("previous"),
-                         "migrations": state.get("migrations"), "host": host},
+                         "migrations": state.get("migrations"), "host": self.host_versions()},
+            "deploys": self.history()[-5:],
             "configuration": effective_configuration(self.config, redact),
             "dependencies": [{"service": service, "mode": render.data_mode(self.config, service)}
                              for service in ("postgres", "valkey")],
@@ -1063,6 +1158,33 @@ def https_status(host, path, address="127.0.0.1"):
         return connection.getresponse().status
     finally:
         connection.close()
+
+
+def utc_now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def version_key(version):
+    """Orders release versions; a prerelease sorts before its release."""
+    core, _, pre = version.partition("-")
+    return tuple(int(part) for part in core.split(".")), pre == "", pre
+
+
+def check_upgrade(manifest, installed, migrations):
+    """The upgrade rules every deploy enforces. Hot never migrates a
+    database down, so a release older than the installed schema needs a
+    restore, and a release names the oldest release it upgrades from."""
+    latest = (manifest.get("migrations") or {}).get("latest")
+    if not isinstance(latest, int):
+        raise AgentError(f"The manifest for {manifest.get('release')} names no migration level")
+    if migrations is not None and latest < migrations:
+        raise AgentError(f"Release {manifest['release']} knows migrations up to {latest}, but the database has "
+                         f"{migrations}; Hot does not migrate down. Deploy a newer release, or restore the "
+                         "database from before the upgrade")
+    minimum = (manifest.get("upgrade") or {}).get("minimum_source")
+    if installed and minimum and version_key(installed) < version_key(minimum):
+        raise AgentError(f"Release {manifest['release']} upgrades from {minimum} or later, and this installation "
+                         f"runs {installed}; deploy a release in between first")
 
 
 def parse_time(value):

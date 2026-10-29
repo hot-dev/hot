@@ -335,7 +335,10 @@ class ReleaseManifest(unittest.TestCase):
         self.assertEqual(built["images"]["hot"], hot)
         self.assertEqual(built["module_tag"], "v3.0.1")
         self.assertGreater(built["migrations"]["latest"], 0)
+        self.assertEqual(built["upgrade"], json.loads((ROOT / "release/upgrade-policy.json").read_text()))
         renderer.render(example(), built, "/data", "/run/hot/secrets")
+        with self.assertRaisesRegex(ValueError, "no newer than 3.0.1"):
+            releaser.build("3.0.1", hot, upstream, policy={"minimum_source": "3.1.0"})
         with self.assertRaises(ValueError):
             releaser.build("3.0.1", "ghcr.io/hot-dev/hot-runtime:latest", upstream)
         with self.assertRaises(ValueError):

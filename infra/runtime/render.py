@@ -12,7 +12,7 @@ import sys
 SERVICES = ("app", "api", "worker", "scheduler", "task-worker")
 IMAGES = {"hot", "postgres", "valkey", "ingress"}
 DIGEST = re.compile(r"^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$")
-MANIFEST_KEYS = {"schema_version", "release", "module_tag", "configuration_schema", "migrations", "images"}
+MANIFEST_KEYS = {"schema_version", "release", "module_tag", "configuration_schema", "migrations", "upgrade", "images"}
 # The release workflow signs manifests keylessly with its GitHub OIDC identity.
 RELEASE_SIGNER = r"^https://github\.com/hot-dev/hot/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
 RELEASE_ISSUER = "https://token.actions.githubusercontent.com"
@@ -216,6 +216,8 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         raise ValueError("Manifest schema 1 requires hot/postgres/valkey/ingress images")
     if manifest.get("configuration_schema", 1) != 1:
         raise ValueError("This renderer supports configuration schema 1 only")
+    if set(manifest.get("upgrade", {})) - {"minimum_source"}:
+        raise ValueError("Unknown manifest upgrade fields")
     if not all(DIGEST.fullmatch(image) for image in manifest["images"].values()):
         raise ValueError("Every image must be pinned by OCI sha256 digest")
     for path in (data_root, secrets_root):
