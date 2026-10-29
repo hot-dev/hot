@@ -107,10 +107,77 @@ Implemented:
 The roots intentionally require `acknowledge_unqualified = true`. The bootstrap
 also refuses to start if the supplied image lacks `hot-agent.service`. Real
 image builds and deployments on each cloud, managed Valkey on GCP, host
-journal shipping, restore tooling, and the real-cloud release gates remain to
-be implemented and qualified. Do not apply these development examples to
+journal shipping, and the real-cloud release gates remain to be implemented
+and qualified. Do not apply these development examples to
 production. No usable host image or published runtime digest is implied by the
 placeholder references in the fixtures.
+
+## Running OpenTofu yourself
+
+The GitHub workflows are optional: you can plan and apply from a terminal
+with a deploy identity you assume, and so can a CI system other than GitHub.
+The stacks and the state bootstrap configure no credentials of their own,
+so OpenTofu, `gcloud`, the `aws` CLI, `preflight.py`, and `selfhost.py` all
+use the identity you give them.
+
+**GCP: impersonate a service account**, such as an `infra-provisioner` you
+already use, or the bootstrap's apply identity:
+
+```sh
+export GOOGLE_IMPERSONATE_SERVICE_ACCOUNT=infra-provisioner@PROJECT.iam.gserviceaccount.com
+export CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=$GOOGLE_IMPERSONATE_SERVICE_ACCOUNT
+```
+
+The first variable covers the Google provider and the `gcs` state backend;
+the second covers `gcloud`. You need `roles/iam.serviceAccountTokenCreator`
+on the service account.
+
+**AWS: assume a role** with a CLI profile:
+
+```ini
+[profile hot-apply]
+role_arn = arn:aws:iam::123456789012:role/infra-provisioner
+source_profile = default
+```
+
+Run `export AWS_PROFILE=hot-apply`. The S3 state backend, the provider, and
+the `aws` CLI all use it.
+
+**Let the bootstrap create the identity,** or let people use the one GitHub
+uses. Name the people who may assume each deploy identity, and optionally
+rename it:
+
+```hcl
+# GCP bootstrap
+operators   = { apply = ["user:ada@example.com", "group:platform@example.com"] }
+names       = { apply = "infra-provisioner" }
+apply_roles = ["roles/compute.admin", "..."]
+
+# AWS bootstrap
+operators         = { apply = ["arn:aws:iam::123456789012:role/platform-admins"] }
+names             = { apply = "infra-provisioner" }
+apply_policy_arns = ["arn:aws:iam::aws:policy/..."]
+```
+
+An identity is created when GitHub uses it, when operators are named for it,
+or both:
+- **GCP:** each operator gets `roles/iam.serviceAccountTokenCreator` on that
+  service account.
+- **AWS:** each operator is added to the role's trust policy for
+  `sts:AssumeRole`.
+
+The plan and apply identities can read and lock state; the release
+identity's permissions come from each installation's `release_principal`.
+
+**Bring your own identity** instead: give it the apply permissions, plus
+read, write, and delete on the state objects (`roles/storage.objectUser` on
+the bucket, or `s3:GetObject`, `PutObject`, `DeleteObject`, and
+`ListBucket`). For release and host commands, set it as the installation's
+`release_principal`.
+
+In every case, provide the state passphrase as
+`TF_VAR_state_encryption_passphrase` and use the installation's
+`backend_override.tf`.
 
 ## Preflight
 

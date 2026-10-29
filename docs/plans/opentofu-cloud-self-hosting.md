@@ -1844,6 +1844,10 @@ or an existing operator destination without coupling telemetry to S3.
       The guide's identity matrix covers plan, apply, release, host, and
       database logins. It also documents that Hot services on one VM share
       the host identity, while user code has neither identity nor secrets.
+      People can assume the same short-lived deploy identities as CI:
+      service account impersonation on GCP, or role assumption on AWS. The
+      bootstrap's `operators` and `names` inputs create and name them, for
+      example as an `infra-provisioner`.
 - [ ] Test both normal Hot execution and box execution against cloud metadata,
       host sockets/files, credentials, protected data services, and other
       organizations. Distinguish intentional application integrations from

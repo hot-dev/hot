@@ -51,5 +51,38 @@ run "apply_needs_chosen_roles" {
   variables {
     github_repository = "example/hot-infra"
   }
-  expect_failures = [google_project_iam_member.plan_read]
+  expect_failures = [google_service_account.github]
+}
+
+run "operators_impersonate_a_named_identity_without_github" {
+  command = plan
+  variables {
+    operators   = { apply = ["user:ada@example.com", "group:ops@example.com"] }
+    names       = { apply = "infra-provisioner" }
+    apply_roles = ["roles/compute.admin"]
+  }
+  assert {
+    condition     = keys(google_service_account.github) == ["apply"] && google_service_account.github["apply"].account_id == "infra-provisioner"
+    error_message = "Only the impersonated identity exists, under the chosen name."
+  }
+  assert {
+    condition     = length(google_service_account_iam_member.github) == 0 && length(google_iam_workload_identity_pool.github) == 0
+    error_message = "No GitHub federation without a repository."
+  }
+  assert {
+    condition     = length(google_service_account_iam_member.operators) == 2 && google_service_account_iam_member.operators["apply user:ada@example.com"].role == "roles/iam.serviceAccountTokenCreator"
+    error_message = "Each operator may mint short-lived tokens for the identity, and nothing more."
+  }
+  assert {
+    condition     = keys(google_storage_bucket_iam_member.state) == ["apply"] && length(google_project_iam_member.apply) == 1
+    error_message = "The identity reads and locks state and has the chosen roles."
+  }
+}
+
+run "operators_must_be_iam_members" {
+  command = plan
+  variables {
+    operators = { apply = ["ada@example.com"] }
+  }
+  expect_failures = [var.operators]
 }

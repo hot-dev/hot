@@ -50,6 +50,12 @@ together when you upgrade.
 4. **Environment.** Create a GitHub Environment named `production` with
    required reviewers. Apply and release jobs wait for their approval.
 
+To also plan and apply from a terminal with an identity you assume, such as
+an `infra-provisioner` service account or role, see
+[Running OpenTofu yourself](../../README.md#running-opentofu-yourself). The
+state bootstrap's `operators` and `names` inputs can create that identity,
+or let you assume the one GitHub uses.
+
 ## Operator secrets
 
 After the first apply, put a JSON object in the operator secret the stack

@@ -54,9 +54,36 @@ variable "name_prefix" {
   type    = string
   default = "hot"
 }
+variable "operators" {
+  description = "People, groups, or service accounts who may impersonate a deploy identity to run OpenTofu or the operator helper themselves, by identity: plan, apply, release. For example { apply = [\"user:ada@example.com\"] }."
+  type = object({
+    plan    = optional(list(string), [])
+    apply   = optional(list(string), [])
+    release = optional(list(string), [])
+  })
+  default = {}
+  validation {
+    condition = alltrue([for member in flatten([var.operators.plan, var.operators.apply, var.operators.release]) :
+    can(regex("^(user|group|serviceAccount|domain|principal|principalSet):.+$", member))])
+    error_message = "operators entries must be IAM members such as user:ada@example.com or group:ops@example.com."
+  }
+}
+variable "names" {
+  description = "Service account IDs for the deploy identities, such as { apply = \"infra-provisioner\" }. The default is NAME_PREFIX-github-IDENTITY."
+  type        = map(string)
+  default     = {}
+  validation {
+    condition = alltrue([for identity, id in var.names :
+    contains(["plan", "apply", "release"], identity) && can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", id))])
+    error_message = "names maps plan, apply, or release to a service account ID of 6-30 lowercase letters, digits, and hyphens."
+  }
+}
 
 locals {
   github = var.github_repository != ""
+  # A deploy identity exists for GitHub, for the operators who impersonate
+  # it, or both.
+  identities = toset([for identity in ["plan", "apply", "release"] : identity if local.github || length(var.operators[identity]) > 0])
 }
 
 resource "google_storage_bucket" "state" {
@@ -110,8 +137,14 @@ resource "google_iam_workload_identity_pool_provider" "github" {
 }
 
 resource "google_service_account" "github" {
-  for_each   = local.github ? toset(["plan", "apply", "release"]) : toset([])
-  account_id = "${var.name_prefix}-github-${each.key}"
+  for_each   = local.identities
+  account_id = lookup(var.names, each.key, "${var.name_prefix}-github-${each.key}")
+  lifecycle {
+    precondition {
+      condition     = each.key != "apply" || length(var.apply_roles) > 0
+      error_message = "Choose apply_roles for the apply service account."
+    }
+  }
 }
 locals {
   pool = local.github ? google_iam_workload_identity_pool.github[0].name : ""
@@ -124,25 +157,29 @@ locals {
   }
 }
 resource "google_service_account_iam_member" "github" {
-  for_each           = google_service_account.github
+  for_each           = local.github ? google_service_account.github : {}
   service_account_id = each.value.name
   role               = "roles/iam.workloadIdentityUser"
   member             = local.principals[each.key]
 }
+# Operators impersonate a deploy identity with short-lived tokens, for
+# example with GOOGLE_IMPERSONATE_SERVICE_ACCOUNT; see infra/README.md.
+resource "google_service_account_iam_member" "operators" {
+  for_each = { for pair in flatten([for identity in local.identities : [
+    for member in var.operators[identity] : { key = "${identity} ${member}", identity = identity, member = member }
+  ]]) : pair.key => pair }
+  service_account_id = google_service_account.github[each.value.identity].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = each.value.member
+}
 resource "google_project_iam_member" "plan_read" {
-  count   = local.github ? 1 : 0
+  count   = contains(local.identities, "plan") ? 1 : 0
   project = var.project
   role    = "roles/viewer"
   member  = "serviceAccount:${google_service_account.github["plan"].email}"
-  lifecycle {
-    precondition {
-      condition     = length(var.apply_roles) > 0
-      error_message = "Choose apply_roles for the apply service account."
-    }
-  }
 }
 resource "google_project_iam_member" "apply" {
-  for_each = local.github ? toset(var.apply_roles) : toset([])
+  for_each = contains(local.identities, "apply") ? toset(var.apply_roles) : toset([])
   project  = var.project
   role     = each.value
   member   = "serviceAccount:${google_service_account.github["apply"].email}"
@@ -150,7 +187,7 @@ resource "google_project_iam_member" "apply" {
 # Plan and apply read and lock state. The release identity gets its
 # permissions from each installation stack, scoped to that installation.
 resource "google_storage_bucket_iam_member" "state" {
-  for_each = local.github ? toset(["plan", "apply"]) : toset([])
+  for_each = setintersection(local.identities, ["plan", "apply"])
   bucket   = google_storage_bucket.state.name
   role     = "roles/storage.objectUser"
   member   = "serviceAccount:${google_service_account.github[each.key].email}"
@@ -159,3 +196,4 @@ resource "google_storage_bucket_iam_member" "state" {
 output "state_bucket" { value = google_storage_bucket.state.name }
 output "workload_identity_provider" { value = local.github ? google_iam_workload_identity_pool_provider.github[0].name : "" }
 output "github_service_accounts" { value = { for k, s in google_service_account.github : k => s.email } }
+output "service_accounts" { value = { for k, s in google_service_account.github : k => s.email } }

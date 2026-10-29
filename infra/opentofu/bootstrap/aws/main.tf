@@ -59,10 +59,36 @@ variable "name_prefix" {
   type    = string
   default = "hot"
 }
+variable "operators" {
+  description = "IAM roles, users, or accounts that may assume a deploy role to run OpenTofu or the operator helper themselves, by role: plan, apply, release. For example { apply = [\"arn:aws:iam::123456789012:role/platform-admins\"] }."
+  type = object({
+    plan    = optional(list(string), [])
+    apply   = optional(list(string), [])
+    release = optional(list(string), [])
+  })
+  default = {}
+  validation {
+    condition = alltrue([for principal in flatten([var.operators.plan, var.operators.apply, var.operators.release]) :
+    can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:(root|role/.+|user/.+)$", principal))])
+    error_message = "operators entries must be IAM role, user, or account root ARNs."
+  }
+}
+variable "names" {
+  description = "Role names for the deploy roles, such as { apply = \"infra-provisioner\" }. The default is NAME_PREFIX-github-ROLE."
+  type        = map(string)
+  default     = {}
+  validation {
+    condition = alltrue([for role, name in var.names :
+    contains(["plan", "apply", "release"], role) && can(regex("^[A-Za-z0-9+=,.@_-]{1,64}$", name))])
+    error_message = "names maps plan, apply, or release to an IAM role name."
+  }
+}
 
 locals {
   github = var.github_repository != ""
   oidc   = "token.actions.githubusercontent.com"
+  # A deploy role exists for GitHub, for the operators who assume it, or both.
+  roles = toset([for role in ["plan", "apply", "release"] : role if local.github || length(var.operators[role]) > 0])
 }
 
 resource "aws_s3_bucket" "state" {
@@ -136,18 +162,24 @@ locals {
     release = ["repo:${var.github_repository}:environment:${var.github_environment}"]
   }
 }
+# Operators assume a role with their own credentials, for example through an
+# AWS CLI profile with role_arn; see infra/README.md.
 resource "aws_iam_role" "github" {
-  for_each = local.github ? local.subjects : {}
-  name     = "${var.name_prefix}-github-${each.key}"
-  assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = [{
+  for_each = local.roles
+  name     = lookup(var.names, each.key, "${var.name_prefix}-github-${each.key}")
+  assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = concat(local.github ? [{
     Effect    = "Allow"
     Principal = { Federated = local.oidc_arn }
     Action    = "sts:AssumeRoleWithWebIdentity"
     Condition = {
       StringEquals = { "${local.oidc}:aud" = "sts.amazonaws.com" }
-      StringLike   = { "${local.oidc}:sub" = each.value }
+      StringLike   = { "${local.oidc}:sub" = local.subjects[each.key] }
     }
-  }] })
+    }] : [], length(var.operators[each.key]) > 0 ? [{
+    Effect    = "Allow"
+    Principal = { AWS = var.operators[each.key] }
+    Action    = ["sts:AssumeRole", "sts:SetSourceIdentity"]
+  }] : []) })
   lifecycle {
     precondition {
       condition     = each.key != "apply" || length(var.apply_policy_arns) > 0
@@ -157,19 +189,19 @@ resource "aws_iam_role" "github" {
   depends_on = [aws_iam_openid_connect_provider.github]
 }
 resource "aws_iam_role_policy_attachment" "plan_read" {
-  count      = local.github ? 1 : 0
+  count      = contains(local.roles, "plan") ? 1 : 0
   role       = aws_iam_role.github["plan"].name
   policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
 resource "aws_iam_role_policy_attachment" "apply" {
-  for_each   = local.github ? toset(var.apply_policy_arns) : toset([])
+  for_each   = contains(local.roles, "apply") ? toset(var.apply_policy_arns) : toset([])
   role       = aws_iam_role.github["apply"].name
   policy_arn = each.value
 }
 # Plan and apply read and lock state. The release role gets its permissions
 # from each installation stack (release_principal), scoped to that installation.
 resource "aws_iam_role_policy" "state" {
-  for_each = local.github ? toset(["plan", "apply"]) : toset([])
+  for_each = setintersection(local.roles, ["plan", "apply"])
   role     = aws_iam_role.github[each.key].id
   policy = jsonencode({ Version = "2012-10-17", Statement = concat([
     { Effect = "Allow", Action = ["s3:ListBucket"], Resource = aws_s3_bucket.state.arn },
@@ -181,3 +213,4 @@ resource "aws_iam_role_policy" "state" {
 
 output "state_bucket" { value = aws_s3_bucket.state.id }
 output "github_roles" { value = { for k, r in aws_iam_role.github : k => r.arn } }
+output "roles" { value = { for k, r in aws_iam_role.github : k => r.arn } }

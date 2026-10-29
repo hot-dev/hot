@@ -55,3 +55,45 @@ run "apply_needs_chosen_policies" {
   }
   expect_failures = [aws_iam_role.github]
 }
+
+run "operators_assume_a_named_role_without_github" {
+  command = plan
+  variables {
+    operators         = { apply = ["arn:aws:iam::123456789012:role/platform-admins"] }
+    names             = { apply = "infra-provisioner" }
+    apply_policy_arns = ["arn:aws:iam::aws:policy/PowerUserAccess"]
+  }
+  assert {
+    condition     = keys(aws_iam_role.github) == ["apply"] && aws_iam_role.github["apply"].name == "infra-provisioner"
+    error_message = "Only the assumed role exists, under the chosen name."
+  }
+  assert {
+    condition     = jsondecode(aws_iam_role.github["apply"].assume_role_policy).Statement[0].Principal.AWS == ["arn:aws:iam::123456789012:role/platform-admins"] && !strcontains(aws_iam_role.github["apply"].assume_role_policy, "Federated")
+    error_message = "Only the named operators may assume the role; no GitHub federation without a repository."
+  }
+  assert {
+    condition     = keys(aws_iam_role_policy.state) == ["apply"] && length(aws_iam_openid_connect_provider.github) == 0
+    error_message = "The role reads and locks state."
+  }
+}
+
+run "github_and_operators_share_a_role" {
+  command = plan
+  variables {
+    github_repository = "example/hot-infra"
+    operators         = { release = ["arn:aws:iam::123456789012:user/ada"] }
+    apply_policy_arns = ["arn:aws:iam::aws:policy/PowerUserAccess"]
+  }
+  assert {
+    condition     = length(jsondecode(aws_iam_role.github["release"].assume_role_policy).Statement) == 2 && length(jsondecode(aws_iam_role.github["apply"].assume_role_policy).Statement) == 1
+    error_message = "Operators are added beside GitHub only where they are named."
+  }
+}
+
+run "operators_must_be_iam_arns" {
+  command = plan
+  variables {
+    operators = { apply = ["ada"] }
+  }
+  expect_failures = [var.operators]
+}
