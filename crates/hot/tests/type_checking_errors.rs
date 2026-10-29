@@ -1774,6 +1774,52 @@ mod integration_tests {
             .collect()
     }
 
+    /// A box configuration's literal `registry-auth` must be `{secret: Str}`:
+    /// it names a context secret, so a registry token never sits in source.
+    /// The messages never repeat the literal, which may be the token.
+    #[test]
+    fn test_registry_auth_takes_only_a_secret_name() {
+        let source = r#"
+            ::test ns
+            ::box ::hot::box
+            good-ctor ::box/BoxConf({image: "ghcr.io/a/b:1", registry-auth: ::box/BoxRegistryAuth({secret: "ghcr-pull"})})
+            good-map ::box/BoxConf({image: "ghcr.io/a/b:1", registry-auth: {secret: "ghcr-pull"}})
+            none ::box/BoxConf({image: "alpine", registry-auth: null})
+            name "ghcr-pull"
+            computed ::box/BoxConf({image: "ghcr.io/a/b:1", registry-auth: {secret: name}})
+            bare ::box/BoxConf({image: "ghcr.io/a/b:1", registry-auth: "ghp_bareTokenLiteral"})
+            token ::box/BoxConf({image: "ghcr.io/a/b:1", registry-auth: {secret: "x", token: "ghp_mapTokenLiteral"}})
+            number ::box/BoxRegistryAuth({secret: 3})
+            empty ::box/BoxRegistryAuth({secret: ""})
+            missing ::box/BoxRegistryAuth({})
+            named ::box/BoxRegistryAuth(secret: 3)
+            started fn () { ::box/start({image: "ghcr.io/a/b:1", registry-auth: {password: "ghp_startTokenLiteral"}}) }
+        "#;
+        let errors: Vec<String> = compile_and_get_type_errors(source)
+            .iter()
+            .filter(|e| constraint_code(e) == Some("invalid-registry-auth"))
+            .map(|e| e.to_string())
+            .collect();
+        assert_eq!(errors.len(), 7, "Got: {:?}", errors);
+        for expected in [
+            "`registry-auth` must be a map like {secret: \"ghcr-pull\"}",
+            "`registry-auth` takes only `secret`, the name of a context secret, not `token`",
+            "`registry-auth` takes only `secret`, the name of a context secret, not `password`",
+            "`registry-auth.secret` must be a Str naming a context secret",
+            "`registry-auth.secret` must name a context secret",
+            "`registry-auth` needs `secret`",
+        ] {
+            assert!(
+                errors.iter().any(|m| m.contains(expected)),
+                "Expected {expected:?} in {errors:?}"
+            );
+        }
+        assert!(
+            errors.iter().all(|m| !m.contains("TokenLiteral")),
+            "A diagnostic repeated a token: {errors:?}"
+        );
+    }
+
     /// A predicate that calls a pure function of the program is evaluated
     /// through it: a single-expression body, local bindings and `cond`.
     #[test]
