@@ -19,7 +19,7 @@ import datetime
 import fcntl
 import hashlib
 import hmac
-import http.client
+from http.client import HTTPSConnection
 import json
 import os
 from pathlib import Path
@@ -638,7 +638,7 @@ def https_status(host, path, address="127.0.0.1"):
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE  # loopback only; certificates name the public hostnames
-    connection = http.client.HTTPSConnection(host, 443, timeout=5, context=context)
+    connection = HTTPSConnection(host, 443, timeout=5, context=context)
     connection.sock = context.wrap_socket(socket.create_connection((address, 443), timeout=5),
                                           server_hostname=host)
     try:

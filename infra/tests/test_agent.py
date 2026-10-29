@@ -233,6 +233,14 @@ class ExistingData(AgentHarness):
         self.assertIn("unsupported entry", self.agent.reconcile()["error"])
 
 
+class Readiness(unittest.TestCase):
+    def test_an_unreachable_ingress_is_a_connection_error(self):
+        # The agent's http() helper must not shadow the http.client module.
+        with mock.patch.object(agent_module.socket, "create_connection", side_effect=ConnectionRefusedError):
+            with self.assertRaises(OSError):
+                agent_module.https_status("app.hot.internal", "/signin")
+
+
 class Commands(AgentHarness):
     def test_only_allowlisted_commands_and_services(self):
         with self.assertRaisesRegex(agent_module.AgentError, "Unknown command"):
