@@ -1305,6 +1305,19 @@ IAM, generation preconditions, or real composition behavior.
       preserving IDs, references, and unique conditional-write object names.
       Retain old bytes and metadata for recovery; copying bytes and changing
       configuration alone does not migrate persisted storage references.
+      `hot db move-storage` moves builds, or files and internal blobs:
+      - each object is copied under the same key below its organization and
+        environment, which keeps version suffixes, so conditional-write names
+        stay unique;
+      - each copy is read back and checked (SHA-256, or the blob's BLAKE3
+        hash), then that record alone is rewritten, with the file's backend
+        and path in one update. The update retires the source object under
+        the source backend, so the target's cleanup never deletes it;
+      - a JSON-lines manifest is written, and reruns are resumable.
+      On a single machine, a storage change triggers the move during a deploy
+      of the same release. The agent also redeploys whenever the
+      configuration changes; before this, `settings` and data-mode changes
+      waited for the next release.
 - [ ] Document restore and supported database/cache upgrades, including any
       maintenance downtime and immutable service choices.
 

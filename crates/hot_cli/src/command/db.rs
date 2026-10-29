@@ -227,3 +227,73 @@ fn print_port_report(report: &hot::db::port::PortReport) {
         }
     }
 }
+
+/// Where `hot db move-storage` moves a role's objects.
+pub(crate) struct MoveStorageTarget {
+    pub to: String,
+    pub path: String,
+    pub bucket: String,
+    pub prefix: String,
+    pub region: String,
+}
+
+/// Move one storage role's objects to another backend, record by record,
+/// checking each copy. Run it while Hot is stopped, then switch the role's
+/// configuration to the target. Exits with an error if any object failed;
+/// running it again retries those and skips the ones already moved.
+pub(crate) async fn run_db_move_storage(
+    conf: &Val,
+    role: &str,
+    target: MoveStorageTarget,
+    dry_run: bool,
+    manifest: Option<String>,
+) -> Result<(), String> {
+    use hot::storage_move::{MoveTarget, StorageRole, move_storage};
+    use std::io::Write;
+
+    let role = if role == "build" {
+        StorageRole::Build
+    } else {
+        StorageRole::File
+    };
+    let kind = hot::file_storage::parse_storage_backend_name(&target.to, "--to")?;
+    let target = MoveTarget {
+        kind,
+        path: target.path,
+        bucket: target.bucket,
+        prefix: target.prefix,
+        region: target.region,
+    };
+    let db = hot::db::create_db_pool(conf)
+        .await
+        .map_err(|e| format!("Cannot connect to the database: {e}"))?;
+    let mut out: Option<Box<dyn Write>> = match manifest.as_deref() {
+        None => None,
+        Some("-") => Some(Box::new(std::io::stdout())),
+        Some(path) => Some(Box::new(
+            std::fs::File::create(path).map_err(|e| format!("Cannot write {path}: {e}"))?,
+        )),
+    };
+    let mut write_error = None;
+    let summary = move_storage(&db, conf, role, &target, dry_run, &mut |object| {
+        if let Some(out) = out.as_mut()
+            && let Err(error) = serde_json::to_writer(&mut *out, object)
+                .and_then(|()| out.write_all(b"\n").map_err(serde_json::Error::io))
+        {
+            write_error.get_or_insert(error.to_string());
+        }
+    })
+    .await?;
+    if let Some(error) = write_error {
+        return Err(format!("Cannot write the manifest: {error}"));
+    }
+    let summary_line = serde_json::json!({ "summary": summary });
+    eprintln!("{summary_line}");
+    if summary.failed > 0 {
+        return Err(format!(
+            "{} object(s) did not move; run the command again to retry them",
+            summary.failed
+        ));
+    }
+    Ok(())
+}

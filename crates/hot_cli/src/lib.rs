@@ -1160,13 +1160,34 @@ async fn async_main(providers: CliProviders) {
                     notify,
                     org,
                 } => command::db::run_db_redeploy(&conf, dry_run, notify, org).await,
+                DbAction::MoveStorage {
+                    role,
+                    to,
+                    path,
+                    bucket,
+                    prefix,
+                    region,
+                    dry_run,
+                    manifest,
+                } => {
+                    let target = command::db::MoveStorageTarget {
+                        to,
+                        path,
+                        bucket,
+                        prefix,
+                        region,
+                    };
+                    command::db::run_db_move_storage(&conf, &role, target, dry_run, manifest).await
+                }
                 action => {
                     let db_cmd = match action {
                         DbAction::Status => "status",
                         DbAction::Migrate => "migrate",
                         DbAction::ProvisionStoreIndexes => "provision-store-indexes",
                         DbAction::PortV1ToV2 => "port-v1-to-v2",
-                        DbAction::Redeploy { .. } => unreachable!("handled above"),
+                        DbAction::Redeploy { .. } | DbAction::MoveStorage { .. } => {
+                            unreachable!("handled above")
+                        }
                     };
                     run_db(db_cmd, &conf, &providers).await
                 }

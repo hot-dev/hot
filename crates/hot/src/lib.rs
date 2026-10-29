@@ -41,6 +41,7 @@ pub mod signal;
 pub mod skill_codegen;
 pub mod slug;
 pub mod storage;
+pub mod storage_move;
 pub mod store;
 pub mod stream;
 pub mod time_range;

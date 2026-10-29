@@ -949,6 +949,33 @@ pub(crate) enum DbAction {
         #[arg(long, value_name = "SLUG")]
         org: Option<String>,
     },
+    /// Move builds, or files and internal blobs, to another storage backend while Hot is stopped
+    MoveStorage {
+        /// What to move: build, or file (files include internal blobs)
+        #[arg(long, value_parser = ["build", "file"])]
+        role: String,
+        /// The backend to move to: local, s3, or gcs
+        #[arg(long, value_parser = ["local", "s3", "gcs"])]
+        to: String,
+        /// Directory, for a local target
+        #[arg(long, default_value = "")]
+        path: String,
+        /// Bucket, for an S3 or GCS target
+        #[arg(long, default_value = "")]
+        bucket: String,
+        /// Key prefix in the bucket
+        #[arg(long, default_value = "")]
+        prefix: String,
+        /// Region, for an S3 target
+        #[arg(long, default_value = "")]
+        region: String,
+        /// List what would move without reading or writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Write one JSON line per object to this file ("-" for standard output)
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

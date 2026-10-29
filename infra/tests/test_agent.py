@@ -89,6 +89,8 @@ class Recorder:
                 after = command[command.index("--after-cursor") + 1]
                 records = records[next(i for i, r in enumerate(records) if r["__CURSOR"] == after) + 1:]
             return subprocess.CompletedProcess(command, 0, stdout="".join(json.dumps(r) + "\n" for r in records))
+        if "move-storage" in command:
+            return subprocess.CompletedProcess(command, 0, stdout='{"kind":"file","status":"moved"}\n')
         if "queue" in command:
             pending, processing, deadletter = self.queue.pop(0) if len(self.queue) > 1 else self.queue[0]
             return subprocess.CompletedProcess(command, 0, stdout=(
@@ -544,6 +546,63 @@ class DataMoves(UpgradeHarness):
         self.assertEqual(self.agent.data_moves(self.agent.state()), {})
         self.config["data"] = {"postgres": {"mode": "existing"}}
         self.assertEqual(self.agent.data_moves(self.agent.state()), {"postgres": ("local", "existing")})
+
+
+class StorageMoves(UpgradeHarness):
+    S3 = {"backend": "s3", "bucket": "acme", "region": "us-east-1", "prefix": "files"}
+
+    def calls(self):
+        return [" ".join(c) for c in self.run.commands]
+
+    def worker_env(self):
+        compose = json.loads((Path(self.tmp.name) / "releases/3.0.1/bundle/compose.json").read_text())
+        return compose["services"]["worker"]["environment"]
+
+    def test_a_configuration_change_redeploys_the_same_release(self):
+        self.assertIsNone(self.agent.reconcile())
+        self.config["settings"] = {"HOT_LOG_LEVEL_FILTER": "warn"}
+        status = self.agent.reconcile()
+        self.assertEqual((status["state"], status["release"]), ("deployed", "3.0.1"))
+        self.assertEqual(self.worker_env()["HOT_LOG_LEVEL_FILTER"], "warn")
+        self.assertIsNone(self.agent.reconcile())
+
+    def test_files_move_to_a_bucket_before_the_new_storage_starts(self):
+        self.config["storage"] = dict(self.config["storage"], file=self.S3)
+        self.run.commands.clear()
+        status = self.agent.reconcile()
+        self.assertEqual(status["state"], "deployed", status)
+        calls = self.calls()
+        move = next(i for i, c in enumerate(calls) if "move-storage" in c)
+        self.assertIn("run --rm --no-deps worker db move-storage --role file --to s3 --bucket acme --prefix files "
+                      "--manifest - --region us-east-1", calls[move])
+        self.assertLess(next(i for i, c in enumerate(calls) if c.endswith("stop --timeout 120 worker task-worker")), move)
+        self.assertEqual(self.worker_env()["HOT_FILE_STORAGE_TYPE"], "s3", "the new bundle uses the bucket")
+        record = self.agent.history()[-1]
+        self.assertEqual(Path(record["storage_manifests"]["file"]).read_text(), '{"kind":"file","status":"moved"}\n')
+
+    def test_storage_moves_with_the_running_release_only(self):
+        self.config["storage"] = dict(self.config["storage"], file=self.S3)
+        self.release("3.0.2")
+        self.run.commands.clear()
+        status = self.agent.reconcile()
+        self.assertIn("release already running", status["error"])
+        self.assertFalse(any(" stop " in f" {c} " for c in self.calls()), "nothing stops")
+
+    def test_moving_back_onto_the_host_is_refused(self):
+        self.config["storage"] = dict(self.config["storage"], file=self.S3)
+        self.agent.reconcile()
+        self.config["storage"] = dict(self.config["storage"], file={"backend": "local"})
+        self.assertIn("back onto the host is not automated", self.agent.reconcile()["error"])
+
+    def test_a_failed_move_keeps_hot_stopped(self):
+        self.config["storage"] = dict(self.config["storage"], file=self.S3)
+        self.failing = "move-storage"
+        self.run.commands.clear()
+        status = self.agent.reconcile()
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("Hot stays stopped", status["recovery"])
+        after = self.calls()[next(i for i, c in enumerate(self.calls()) if "move-storage" in c):]
+        self.assertFalse(any(" up " in f" {c} " for c in after), "nothing restarts")
 
 
 class RollBack(UpgradeHarness):

@@ -867,6 +867,15 @@ class Agent:
                       migrations=manifest["migrations"]["latest"],
                       configuration_schema=manifest.get("configuration_schema", 1), host=self.host_versions())
         step("verified")
+        # Storage moves run through the installed bundle, before it is
+        # rendered again with the new storage.
+        storage_moves = self.storage_moves(previous) if previous and not render.scalable(self.config) else {}
+        if storage_moves:
+            if release != previous:
+                raise AgentError("Change storage in a deploy of the release already running, then upgrade")
+            if moves:
+                raise AgentError("Move storage and data services in separate deploys")
+            self.move_storage(self.releases / previous / "bundle", storage_moves, record, step)
         bundle = self.render_bundle(release, manifest, self.operator_secrets())
         self.deliver_secrets()
         step("secrets")
@@ -922,11 +931,15 @@ class Agent:
         migrated = {k: v for k, v in self.state().items() if k == "migrated_release"}
         self.save_state({"release": release, "previous": previous, "migrations": record["migrations"],
                          "dependencies": data_services(self.config, self.operator_secrets()),
-                         "data_modes": self.configured_modes(), **migrated})
+                         "data_modes": self.configured_modes(), "configuration": self.configuration_digest(),
+                         **migrated})
         self.remember(record)
         return record["steps"]
 
     # -- data moves --------------------------------------------------------------
+
+    def configuration_digest(self):
+        return hashlib.sha256(json.dumps(self.config, sort_keys=True).encode()).hexdigest()[:16]
 
     def configured_modes(self):
         return {service: render.data_mode(self.config, service) for service in ("postgres", "valkey")}
@@ -950,6 +963,72 @@ class Agent:
             raise AgentError(f"Moving PostgreSQL from {old_postgres} to {moves['postgres'][1]} is not automated: "
                              "copy the database with pg_dump and pg_restore, then change data.postgres.mode")
         return moves
+
+    def deployed_storage(self, bundle):
+        """Each storage role as a deployed bundle configured it."""
+        services = json.loads((bundle / "compose.json").read_text())["services"]
+        env = next(services[role]["environment"] for role in render.SERVICES if role in services)
+        storage = {}
+        for role in ("build", "file"):
+            name = "HOT_" + role.upper()
+            backend = env.get(name + "_STORAGE_TYPE", "local")
+            storage[role] = {"backend": backend,
+                             "bucket": env.get(name + "_AWS_S3_BUCKET") or env.get(name + "_GCS_BUCKET") or "",
+                             "prefix": env.get(name + "_AWS_S3_PREFIX") or env.get(name + "_GCS_PREFIX") or "",
+                             "region": env.get(name + "_AWS_S3_REGION", "")}
+        return storage
+
+    def configured_storage(self):
+        storage = {}
+        for role in ("build", "file"):
+            settings = self.config["storage"][role]
+            backend = settings["backend"]
+            storage[role] = {"backend": backend,
+                             "bucket": settings.get("bucket", "") if backend != "local" else "",
+                             "prefix": settings.get("prefix", role + "s") if backend != "local" else "",
+                             "region": settings.get("region", "") if backend == "s3" else ""}
+        return storage
+
+    def storage_moves(self, previous):
+        """Storage roles whose backend changed since the installed bundle, as
+        {role: target}. Moves into S3 or GCS are automated; moving back onto
+        the host, or between buckets of one backend, is refused before
+        anything stops."""
+        bundle = self.releases / previous / "bundle"
+        if not (bundle / "compose.json").exists():
+            return {}
+        deployed, configured = self.deployed_storage(bundle), self.configured_storage()
+        moves = {role: configured[role] for role in configured if configured[role] != deployed[role]}
+        for role, target in moves.items():
+            if target["backend"] == "local":
+                raise AgentError(f"Moving {role} storage back onto the host is not automated; copy the objects "
+                                 "and run hot db move-storage yourself")
+            if target["backend"] == deployed[role]["backend"]:
+                raise AgentError(f"Moving {role} storage to another {target['backend']} bucket or prefix is not "
+                                 "automated: records keep their bucket. Copy the objects with your provider's tools")
+        return moves
+
+    def move_storage(self, bundle, moves, record, step):
+        """Stop Hot, then move each role's objects with hot db move-storage in
+        the installed release's worker, which still has the source settings.
+        Each object's record changes only after its copy checks out, so the
+        move resumes where it stopped; the manifests record what moved."""
+        record["storage_moves"] = {role: target["backend"] for role, target in moves.items()}
+        step("storage-moving")
+        self.drain(bundle, queue=False)
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        self.backups.mkdir(parents=True, exist_ok=True)
+        for role, target in moves.items():
+            command = ["run", "--rm", "--no-deps", "worker", "db", "move-storage", "--role", role,
+                       "--to", target["backend"], "--bucket", target["bucket"], "--prefix", target["prefix"],
+                       "--manifest", "-"]
+            if target["region"]:
+                command += ["--region", target["region"]]
+            moved = self.compose(bundle, *command)
+            manifest = self.backups / f"storage-move-{role}-{stamp}.jsonl"
+            manifest.write_text(moved.stdout)
+            record.setdefault("storage_manifests", {})[role] = str(manifest)
+        step("storage-moved")
 
     def drain(self, bundle, queue, timeout=DRAIN_SECONDS):
         """Stop admissions (scheduler, app, API, ingress), let workers finish
@@ -1002,7 +1081,10 @@ class Agent:
         if record.get("release") != release:
             record = {"release": release, "previous": previous, "steps": []}
         steps = record["steps"]
-        if "data-moved" in steps:
+        if "storage-moving" in steps and "storage-moved" not in steps:
+            recovery = ("Some objects may already be in the new storage, so Hot stays stopped. Fix the cause, then "
+                        "run deploy-now: the move skips objects already moved.")
+        elif "data-moved" in steps:
             recovery = ("The data now lives in the new database, and the copy on this host is no longer used"
                         + ("; migrations may be partly applied" if "migrating" in steps else "")
                         + ". Fix the cause, then run deploy-now.")
@@ -1304,7 +1386,14 @@ class Agent:
         migrated = self.reconcile_migrations(request_id, retry)
         desired = self.cloud.get_parameter(self.config["release_pointer"])
         state = self.state()
-        if not desired or desired == state.get("release"):
+        if state.get("release") and "configuration" not in state:
+            # Deployed before configurations were recorded: assume the one it runs.
+            self.save_state({**state, "configuration": self.configuration_digest()})
+            state = self.state()
+        # A configuration change (settings, data modes, storage) redeploys the
+        # same release, so the change takes effect.
+        changed = state.get("configuration") not in (None, self.configuration_digest())
+        if not desired or (desired == state.get("release") and not changed):
             return migrated
         if not retry and (state.get("failed") or {}).get("release") == desired:
             return None

@@ -434,6 +434,32 @@ Moving a database back onto the host, or between managed and existing
 databases, is not automated. The agent refuses that change before stopping
 anything. Copy the database with `pg_dump` and `pg_restore` yourself.
 
+## Moving builds and files to a bucket
+
+To move a single machine's builds or files from its disk to S3 or GCS,
+set that role's `storage` to the bucket and apply, then deploy the release
+the installation already runs. The agent sees that the deployed storage
+differs from the configured storage:
+
+1. It stops Hot.
+2. It runs `hot db move-storage` in the installed release's worker, which
+   still has the old settings. Each object is copied under the same key, read
+   back and checked, and only then is its record rewritten.
+3. It keeps one JSON line per object in
+   `/var/lib/hot/backups/storage-move-<role>-*.jsonl`.
+4. It starts Hot on the bucket.
+
+The objects stay on the data disk as a recovery copy. If the move fails,
+Hot stays stopped, because some records may already point at the bucket.
+Fix the cause and run `deploy-now`: objects that already moved are skipped.
+
+These cases are refused before anything stops; run `hot db move-storage`
+yourself for them:
+- changing storage and the release in the same deploy;
+- moving data services and storage together;
+- moving back onto the host;
+- moving between buckets of one backend.
+
 ## Recovery
 
 The host's boot disk holds nothing recovery needs. The installation's
