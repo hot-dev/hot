@@ -757,10 +757,11 @@ impl Engine {
         context_policy: ContextValidationPolicy,
         color: bool,
     ) -> Result<crate::lang::compiler::ctx_checker::ProgramCtxRequirements, String> {
-        // Validate event handlers (event parameter requirement)
+        // Validate event handlers (event parameter requirement) and every
+        // function's `timeout` meta
         if let Err(e) = compiler.extract_event_handlers(combined_program) {
             let formatted = e.format_error(color);
-            return Err(String::from("Event handler validation errors:\n") + &formatted);
+            return Err(String::from("Function validation errors:\n") + &formatted);
         }
 
         // Validate scheduled functions (event parameter requirement)
@@ -2097,6 +2098,63 @@ fn (): Str { "unused" }
             error.contains("runs every 1 second(s), below the minimum of 300"),
             "{error}"
         );
+    }
+
+    /// A source dir with one function, `::timed/job`, declared on line 3
+    /// with the given meta entries.
+    fn write_timed_src(root: &std::path::Path, meta: &str) -> Vec<String> {
+        let src_dir = root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("timed.hot"),
+            format!("::timed ns\n\njob meta {{{meta}}}\nfn (event: Map): Map {{ event }}\n"),
+        )
+        .unwrap();
+        vec![src_dir.to_string_lossy().to_string()]
+    }
+
+    #[test]
+    fn check_reports_a_timeout_that_is_not_a_positive_whole_number() {
+        let conf = crate::val::Val::map_empty();
+        for timeout in ["0", "-5", "1.5", "\"30\""] {
+            let temp = tempfile::tempdir().unwrap();
+            let src_paths = write_timed_src(
+                temp.path(),
+                &format!("on-event: \"timed:job\", timeout: {timeout}"),
+            );
+
+            let error = check_text(&src_paths, &conf).unwrap_err();
+            assert!(error.contains("[invalid-timeout]"), "{error}");
+            assert!(error.contains("timed.hot:3:1"), "{error}");
+            assert!(
+                error.contains("`timeout` must be a positive whole number of seconds"),
+                "{error}"
+            );
+
+            let diagnostics = check_json(&src_paths, &conf);
+            assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+            assert_eq!(diagnostics[0].code, "invalid-timeout");
+            assert_eq!(diagnostics[0].severity, 1);
+            assert_eq!(diagnostics[0].range.start.line, 2);
+        }
+    }
+
+    #[test]
+    fn check_validates_timeout_on_any_function_and_accepts_whole_seconds() {
+        let conf = crate::val::Val::map_empty();
+        // A function that is not a handler can still start a run as a call.
+        let temp = tempfile::tempdir().unwrap();
+        let src_paths = write_timed_src(temp.path(), "timeout: 0");
+        let codes: Vec<_> = check_json(&src_paths, &conf)
+            .into_iter()
+            .map(|d| d.code)
+            .collect();
+        assert_eq!(codes, ["invalid-timeout"]);
+
+        let temp = tempfile::tempdir().unwrap();
+        let src_paths = write_timed_src(temp.path(), "on-event: \"timed:job\", timeout: 1800");
+        check_text(&src_paths, &conf).unwrap();
+        assert!(check_json(&src_paths, &conf).is_empty());
     }
 
     #[test]
