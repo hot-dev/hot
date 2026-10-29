@@ -132,7 +132,7 @@ def validate(document):
     if set(config.get("storage", {})) != {"build", "file"}:
         raise ValueError("Choose build and file storage independently")
     for role, storage in config["storage"].items():
-        if set(storage) - {"backend", "bucket", "region", "prefix"}:
+        if set(storage) - {"backend", "bucket", "region", "prefix", "provision", "noncurrent_days"}:
             raise ValueError(f"Unknown {role} storage fields; secret values do not belong here")
         if storage.get("backend") not in {"local", "s3", "gcs"}:
             raise ValueError(f"{role}: select local, existing S3, or existing GCS")

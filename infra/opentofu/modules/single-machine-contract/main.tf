@@ -72,18 +72,26 @@ variable "installation" {
     api_hostname = string
     app_exposure = optional(string, "private")
     api_exposure = optional(string, "private")
+    # Each role uses local disk, or S3 or GCS. With provision, the stack
+    # creates the bucket (in the installation's own cloud and region) and
+    # keeps noncurrent object versions for noncurrent_days; otherwise the
+    # bucket already exists and is never managed.
     storage = object({
       build = object({
-        backend = string
-        bucket  = optional(string, "")
-        region  = optional(string, "")
-        prefix  = optional(string, "builds")
+        backend         = string
+        bucket          = optional(string, "")
+        region          = optional(string, "")
+        prefix          = optional(string, "builds")
+        provision       = optional(bool, false)
+        noncurrent_days = optional(number, 30)
       })
       file = object({
-        backend = string
-        bucket  = optional(string, "")
-        region  = optional(string, "")
-        prefix  = optional(string, "files")
+        backend         = string
+        bucket          = optional(string, "")
+        region          = optional(string, "")
+        prefix          = optional(string, "files")
+        provision       = optional(bool, false)
+        noncurrent_days = optional(number, 30)
       })
     })
     network = optional(object({
@@ -114,11 +122,25 @@ variable "installation" {
       && (s.backend != "s3" || (s.bucket != "" && s.region != "" && trim(s.prefix, "/") != ""))
       && (s.backend != "gcs" || (s.bucket != "" && trim(s.prefix, "/") != "" && var.installation.cloud == "gcp"))
     ])
-    error_message = "Each storage role selects local, existing S3 (bucket and region), or existing GCS (bucket; GCP compute only); cloud storage needs a nonempty relative prefix."
+    error_message = "Each storage role selects local, S3 (bucket and region), or GCS (bucket; GCP compute only); cloud storage needs a nonempty relative prefix."
   }
   validation {
     condition     = alltrue([for s in [var.installation.storage.build, var.installation.storage.file] : !startswith(s.prefix, "/") && !strcontains(s.prefix, "..")])
     error_message = "Storage prefixes must be relative and must not contain '..'."
+  }
+  validation {
+    condition = alltrue([for s in [var.installation.storage.build, var.installation.storage.file] : !s.provision || (
+      (s.backend == "s3" && var.installation.cloud == "aws" && s.region == var.installation.region
+      && can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", s.bucket)))
+      || (s.backend == "gcs" && var.installation.cloud == "gcp" && can(regex("^[a-z0-9][a-z0-9_.-]{1,61}[a-z0-9]$", s.bucket)))
+    ) && s.noncurrent_days >= 1 && s.noncurrent_days <= 3650])
+    error_message = "A provisioned bucket is S3 in the installation's AWS region or GCS on GCP, with a valid bucket name and noncurrent_days between 1 and 3650."
+  }
+  validation {
+    condition = (var.installation.storage.build.bucket != var.installation.storage.file.bucket || var.installation.storage.build.bucket == ""
+      || (var.installation.storage.build.provision == var.installation.storage.file.provision
+    && var.installation.storage.build.noncurrent_days == var.installation.storage.file.noncurrent_days))
+    error_message = "Build and file storage sharing a bucket must agree on provision and noncurrent_days."
   }
   validation {
     condition     = alltrue([for e in [var.installation.app_exposure, var.installation.api_exposure] : contains(["private", "public"], e)])

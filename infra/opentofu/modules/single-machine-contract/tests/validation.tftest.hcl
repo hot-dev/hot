@@ -403,3 +403,44 @@ run "restore_snapshots_name_the_clouds_snapshot" {
   }
   expect_failures = [var.installation]
 }
+
+run "provisioned_buckets_belong_to_the_installation_cloud" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example/global/images/hot",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "storage" : {
+        "build" : { "backend" : "s3", "bucket" : "acme-hot-builds", "region" : "us-east-1", "provision" : true },
+        "file" : { "backend" : "local" }
+      }
+    }
+  }
+  expect_failures = [var.installation]
+}
+
+run "a_shared_bucket_needs_one_policy" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "storage" : {
+        "build" : { "backend" : "s3", "bucket" : "acme-hot-data", "region" : "us-east-1", "provision" : true },
+        "file" : { "backend" : "s3", "bucket" : "acme-hot-data", "region" : "us-east-1", "provision" : false }
+      }
+    }
+  }
+  expect_failures = [var.installation]
+}

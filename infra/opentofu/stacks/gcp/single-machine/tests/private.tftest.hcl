@@ -376,3 +376,36 @@ run "managed_valkey" {
     error_message = "The host connects to the primary endpoint with IAM tokens and the instance's CA."
   }
 }
+
+run "provisioned_buckets" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "host_image" : "projects/example-project/global/images/hot-host-amd64",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "storage" : {
+        "build" : { "backend" : "gcs", "bucket" : "acme-hot-builds", "prefix" : "builds", "provision" : true },
+        "file" : { "backend" : "local" }
+      }
+    }
+  }
+  assert {
+    condition     = google_storage_bucket.storage["acme-hot-builds"].public_access_prevention == "enforced" && google_storage_bucket.storage["acme-hot-builds"].uniform_bucket_level_access && !google_storage_bucket.storage["acme-hot-builds"].force_destroy
+    error_message = "Provisioned buckets are private, IAM-only, and never emptied on destroy."
+  }
+  assert {
+    condition     = google_storage_bucket.storage["acme-hot-builds"].versioning[0].enabled && length(google_storage_bucket.storage["acme-hot-builds"].lifecycle_rule) == 2
+    error_message = "Versions are kept for a while and abandoned uploads are cleaned up."
+  }
+  assert {
+    condition     = google_storage_bucket_iam_member.storage["build"].bucket == "acme-hot-builds" && strcontains(google_storage_bucket_iam_member.storage["build"].condition[0].expression, "/objects/builds/")
+    error_message = "The host reaches the role's prefix only."
+  }
+}

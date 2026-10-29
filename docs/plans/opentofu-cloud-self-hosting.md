@@ -1130,6 +1130,10 @@ Changes for self-hosting:
       retention/deletion behavior; local disk remains the initial default.
       Honor existing-bucket selections and the independent storage contract,
       including GCS after qualification.
+      `storage.<role>.provision` creates the bucket: encrypted, public access
+      blocked, TLS-only, versioned with `noncurrent_days` retention, abandoned
+      uploads removed after 7 days, and never force-destroyed. The plan
+      workflow's durable-resource guard covers it.
 
 ### GCP track
 
@@ -1221,6 +1225,9 @@ using retained local storage.
       For existing buckets, validate requirements without assuming ownership.
       Differentiate permission errors, missing objects, conditional conflicts,
       and retryable failures.
+      The GCP stack provisions buckets on request: uniform access, public access
+      prevention, versioning with noncurrent retention, and abandoned-upload
+      cleanup. Existing buckets are only granted to, never managed.
 - [ ] Honor bucket-default encryption and optional CMEK for files, builds,
       blobs, temporary parts, and compose outputs. Test KMS permissions,
       rotation/old-object reads, and required-key failure without fallback.

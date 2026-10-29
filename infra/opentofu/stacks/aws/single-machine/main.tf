@@ -255,7 +255,7 @@ resource "aws_instance" "host" {
       error_message = "The AWS root requires installation.cloud = aws."
     }
   }
-  depends_on = [aws_route_table_association.private, aws_iam_role_policy.runtime, aws_iam_role_policy_attachment.ssm]
+  depends_on = [aws_route_table_association.private, aws_iam_role_policy.runtime, aws_iam_role_policy_attachment.ssm, aws_s3_bucket_policy.storage]
 }
 # The release and command workflows may write the pointer, read status, send
 # the Hot command to this installation's host, and read the agent's reports

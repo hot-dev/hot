@@ -127,6 +127,17 @@ class Aws(unittest.TestCase):
         self.assertEqual(statuses(report)["Subnets"], "pass")
         self.assertIn("overlaps 10.88.0.0/16", details(report)["Network ranges"])
 
+    def test_provisioned_buckets_must_not_exist_yet(self):
+        storage = {"build": {"backend": "s3", "bucket": "acme-hot-builds", "region": "us-east-1", "provision": True},
+                   "file": {"backend": "local"}}
+        cli = FakeCli(AWS)
+        cli.responses[("s3api", "head-bucket")] = preflight.CliError("An error occurred (404) when calling the HeadBucket operation: Not Found")
+        self.assertEqual(statuses(preflight.run(aws_installation(storage=storage), cli))["Bucket for build"], "pass")
+        report = preflight.run(aws_installation(storage=storage), FakeCli(AWS))
+        self.assertIn("already exists", details(report)["Bucket for build"])
+        cli.responses[("s3api", "head-bucket")] = preflight.CliError("An error occurred (403) when calling the HeadBucket operation: Forbidden")
+        self.assertEqual(statuses(preflight.run(aws_installation(storage=storage), cli))["Bucket for build"], "fail")
+
     def test_managed_data_checks_regional_offerings(self):
         document = aws_installation(data={"postgres": {"mode": "managed"}, "valkey": {"mode": "managed"}})
         cli = FakeCli(AWS)

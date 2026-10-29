@@ -405,3 +405,43 @@ run "restore_from_a_snapshot" {
     error_message = "A restore creates the data disk from the chosen snapshot."
   }
 }
+
+run "provisioned_buckets" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "storage" : {
+        "build" : { "backend" : "s3", "bucket" : "acme-hot-data", "region" : "us-east-1", "prefix" : "builds", "provision" : true, "noncurrent_days" : 14 },
+        "file" : { "backend" : "s3", "bucket" : "acme-hot-data", "region" : "us-east-1", "prefix" : "files", "provision" : true, "noncurrent_days" : 14 }
+      }
+    }
+  }
+  assert {
+    condition     = keys(aws_s3_bucket.storage) == ["acme-hot-data"] && !aws_s3_bucket.storage["acme-hot-data"].force_destroy
+    error_message = "A bucket shared by both roles is created once and is never emptied on destroy."
+  }
+  assert {
+    condition     = aws_s3_bucket_public_access_block.storage["acme-hot-data"].restrict_public_buckets && strcontains(aws_s3_bucket_policy.storage["acme-hot-data"].policy, "aws:SecureTransport")
+    error_message = "Provisioned buckets are private and TLS-only."
+  }
+  assert {
+    condition     = one(aws_s3_bucket_versioning.storage["acme-hot-data"].versioning_configuration).status == "Enabled" && one([for r in aws_s3_bucket_lifecycle_configuration.storage["acme-hot-data"].rule : r if r.id == "old-versions"]).noncurrent_version_expiration[0].noncurrent_days == 14
+    error_message = "Old versions are kept for the chosen days."
+  }
+  assert {
+    condition     = one([for r in aws_s3_bucket_lifecycle_configuration.storage["acme-hot-data"].rule : r if r.id == "abandoned-uploads"]).abort_incomplete_multipart_upload[0].days_after_initiation == 7
+    error_message = "Abandoned multipart uploads are cleaned up."
+  }
+  assert {
+    condition     = strcontains(aws_iam_role_policy.runtime.policy, "arn:aws:s3:::acme-hot-data/builds/*") && strcontains(aws_iam_role_policy.runtime.policy, "arn:aws:s3:::acme-hot-data/files/*")
+    error_message = "The host reaches each role's prefix only."
+  }
+}

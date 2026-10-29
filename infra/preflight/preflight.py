@@ -188,7 +188,17 @@ def aws_checks(report, document, cli):
         report.check("Public certificate", certificate)
 
     for role, storage in installation.get("storage", {}).items():
-        if storage.get("backend") == "s3":
+        if storage.get("backend") == "s3" and storage.get("provision"):
+            def free(storage=storage):
+                try:
+                    aws("s3api", "head-bucket", "--bucket", storage["bucket"])
+                except CliError as error:
+                    if "404" in str(error) or "Not Found" in str(error):
+                        return PASS, f"{storage['bucket']} is free to create"
+                    raise
+                return FAIL, f"{storage['bucket']} already exists; set provision to false to use it as an existing bucket"
+            report.check(f"Bucket for {role}", free)
+        elif storage.get("backend") == "s3":
             def bucket(storage=storage):
                 aws("s3api", "head-bucket", "--bucket", storage["bucket"])
                 return PASS, f"{storage['bucket']} is reachable"
@@ -301,7 +311,17 @@ def gcp_checks(report, document, cli):
             report.check("Memorystore connection policy", connection_policy)
 
     for role, storage in installation.get("storage", {}).items():
-        if storage.get("backend") == "gcs":
+        if storage.get("backend") == "gcs" and storage.get("provision"):
+            def free(storage=storage):
+                try:
+                    gcloud("storage", "buckets", "describe", "gs://" + storage["bucket"])
+                except CliError as error:
+                    if "404" in str(error) or "not found" in str(error).lower():
+                        return PASS, f"{storage['bucket']} is free to create"
+                    raise
+                return FAIL, f"{storage['bucket']} already exists; set provision to false to use it as an existing bucket"
+            report.check(f"Bucket for {role}", free)
+        elif storage.get("backend") == "gcs":
             def bucket(storage=storage):
                 gcloud("storage", "buckets", "describe", "gs://" + storage["bucket"])
                 return PASS, f"{storage['bucket']} is reachable"

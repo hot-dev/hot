@@ -1,0 +1,41 @@
+# Provisioned GCS buckets (storage.<role>.provision): uniform access, public
+# access prevented, versioned so an overwritten or deleted object can be
+# recovered for noncurrent_days, with abandoned multipart uploads removed after
+# a week. Google encrypts objects at rest. Existing buckets are never managed.
+# The host's access is granted in main.tf, limited to each role's prefix.
+locals {
+  # Both roles may share one bucket; the contract makes their settings agree.
+  provisioned_buckets = { for name, roles in {
+    for s in [local.config.storage.build, local.config.storage.file] : s.bucket => s... if s.backend == "gcs" && s.provision
+  } : name => roles[0] }
+}
+resource "google_storage_bucket" "storage" {
+  for_each                    = local.provisioned_buckets
+  name                        = each.key
+  project                     = local.config.project
+  location                    = upper(local.config.region)
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = false
+  labels                      = { hot-installation = local.config.name }
+  versioning {
+    enabled = true
+  }
+  lifecycle_rule {
+    condition {
+      days_since_noncurrent_time = each.value.noncurrent_days
+    }
+    action {
+      type = "Delete"
+    }
+  }
+  lifecycle_rule {
+    condition {
+      age = 7
+    }
+    action {
+      type = "AbortIncompleteMultipartUpload"
+    }
+  }
+  lifecycle { prevent_destroy = true }
+}

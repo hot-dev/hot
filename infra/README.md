@@ -49,6 +49,17 @@ Implemented:
   TLS certificate and key, and any SMTP, OAuth, or S3 credentials, in the
   operator secret the stack creates. Commands are a fixed list run through an
   SSM command document (AWS) or Pub/Sub (GCP).
+- Buckets: each storage role (`storage.build`, `storage.file`) uses local
+  disk, S3, or GCS. A bucket is used as it exists unless `provision` is
+  true. Then the stack creates it in the installation's own cloud and region,
+  with these settings:
+  - private, encrypted, and TLS-only on S3;
+  - versioned, with old versions kept for `noncurrent_days` (default 30);
+  - abandoned multipart uploads deleted after a week;
+  - never emptied or deleted by `tofu destroy`.
+
+  Both roles may share one bucket under different prefixes, and the host
+  may use only its roles' prefixes.
 - Existing data services: set `data.postgres.mode` or `data.valkey.mode` to
   `existing` and put the connection settings in the operator secret
   (`HOT_DB_URI` for the runtime login, `HOT_DB_MIGRATION_URI` for the schema
@@ -200,7 +211,7 @@ plan role or service account is enough. It reads no secret values. It checks:
   and box guest network (`10.88.0.0/16`);
 - existing networks and their subnets;
 - the public certificate on AWS;
-- existing buckets;
+- existing buckets, and that buckets to provision are still free;
 - managed PostgreSQL and Valkey offerings in the region.
 
 It warns when hostnames don't resolve from where it runs. It lists the checks
@@ -534,6 +545,7 @@ autoscaler, that OpenTofu would fight.
 | Managed PostgreSQL | `aws_db_instance.postgres[0]` | `google_sql_database_instance.postgres[0]` |
 | Managed Valkey | `aws_elasticache_replication_group.valkey[0]` | `google_memorystore_instance.valkey[0]` |
 | Container logs | `aws_cloudwatch_log_group.host` | |
+| Provisioned buckets | `aws_s3_bucket.storage` | `google_storage_bucket.storage` |
 
 They are protected in several ways:
 - The data disk and generated secret have `prevent_destroy`, so no plan that
@@ -816,7 +828,6 @@ data ports are published; remote dependency TLS qualification is separate work.
 
 Hostnames and supplied TLS material define private ingress. Internet access is
 provided through outbound NAT. Source ranges/IAP access are explicit, and no
-cloud stack publishes PostgreSQL/Valkey or port 22. Public/mixed ingress, GCS
-(Hot itself supports it; the renderer does not select it yet),
-managed data, customer-managed keys, and cross-provider bucket provisioning are
-rejected or outside this slice; their implementation remains in the plan.
+cloud stack publishes PostgreSQL/Valkey or port 22. Customer-managed keys and
+provisioning a bucket in the other cloud are outside this slice; their
+implementation remains in the plan.

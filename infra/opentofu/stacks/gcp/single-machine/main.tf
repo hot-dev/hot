@@ -143,8 +143,9 @@ resource "google_pubsub_subscription_iam_member" "agent" {
   role         = "roles/pubsub.subscriber"
   member       = "serviceAccount:${google_service_account.host.email}"
 }
-# Existing GCS buckets: the host may use objects under its prefix only. The
-# bucket must use uniform bucket-level access for the condition to apply.
+# GCS buckets, existing or provisioned: the host may use objects under its
+# prefix only. The bucket must use uniform bucket-level access for the
+# condition to apply.
 resource "google_storage_bucket_iam_member" "storage" {
   for_each = { for role, s in local.config.storage : role => s if s.backend == "gcs" }
   bucket   = each.value.bucket
@@ -154,6 +155,7 @@ resource "google_storage_bucket_iam_member" "storage" {
     title      = "hot-${local.config.name}-${each.key}"
     expression = "resource.type == \"storage.googleapis.com/Bucket\" || resource.name.startsWith(\"projects/_/buckets/${each.value.bucket}/objects/${trim(each.value.prefix, "/")}/\")"
   }
+  depends_on = [google_storage_bucket.storage]
 }
 # The release workflow may add pointer versions, publish commands, and read
 # the agent's status logs.
