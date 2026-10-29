@@ -69,8 +69,12 @@ variable "installation" {
     error_message = "name must be 3-24 lowercase letters/digits/hyphens, starting with a letter; size must be small, medium, or large."
   }
   validation {
-    condition     = alltrue([for s in [var.installation.storage.build, var.installation.storage.file] : contains(["local", "s3"], s.backend) && (s.backend != "s3" || (s.bucket != "" && s.region != "" && trim(s.prefix, "/") != ""))])
-    error_message = "Each storage role must select local or existing S3; S3 requires bucket and region. GCS/provisioned buckets are not implemented in this slice."
+    condition = alltrue([for s in [var.installation.storage.build, var.installation.storage.file] :
+      contains(["local", "s3", "gcs"], s.backend)
+      && (s.backend != "s3" || (s.bucket != "" && s.region != "" && trim(s.prefix, "/") != ""))
+      && (s.backend != "gcs" || (s.bucket != "" && trim(s.prefix, "/") != "" && var.installation.cloud == "gcp"))
+    ])
+    error_message = "Each storage role selects local, existing S3 (bucket and region), or existing GCS (bucket; GCP compute only); cloud storage needs a nonempty relative prefix."
   }
   validation {
     condition     = alltrue([for s in [var.installation.storage.build, var.installation.storage.file] : !startswith(s.prefix, "/") && !strcontains(s.prefix, "..")])

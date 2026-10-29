@@ -156,6 +156,17 @@ class RuntimeContract(unittest.TestCase):
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_gcs_storage_uses_the_vm_identity_on_gcp(self):
+        config = renderer.validate(example("gcp"))
+        config["storage"] = {"build": {"backend": "gcs", "bucket": "acme-hot", "prefix": "builds"},
+                             "file": {"backend": "local"}}
+        env = renderer.render(config, manifest(), "/data", "/run/hot/secrets")["services"]["worker"]["environment"]
+        self.assertEqual(env["HOT_BUILD_STORAGE_TYPE"], "gcs")
+        self.assertEqual((env["HOT_BUILD_GCS_BUCKET"], env["HOT_BUILD_GCS_PREFIX"]), ("acme-hot", "builds"))
+        self.assertFalse(any("GCS" in key and key.endswith("_FILE") for key in env))
+        with self.assertRaisesRegex(ValueError, "needs cloud=gcp"):
+            renderer.validate(dict(renderer.validate(example("aws")), storage=config["storage"]))
+
     def test_postgres_data_uses_the_postgres_18_layout(self):
         postgres = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")["services"]["postgres"]
         self.assertEqual(postgres["volumes"][0]["target"], "/var/lib/postgresql")

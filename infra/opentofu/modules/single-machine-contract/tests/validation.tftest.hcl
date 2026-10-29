@@ -47,7 +47,7 @@ run "unknown_backend" {
         "backend" : "local"
       },
       "file" : {
-        "backend" : "gcs"
+        "backend" : "azure"
       }
     }
   } }

@@ -157,3 +157,28 @@ run "release_principal_is_scoped" {
     error_message = "The release account may add pointer versions and publish commands only."
   }
 }
+
+run "existing_gcs_is_prefix_scoped" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "project" : "example-project",
+      "host_image" : "projects/example-project/global/images/hot-host",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "storage" : {
+        "build" : { "backend" : "gcs", "bucket" : "acme-hot", "prefix" : "builds" },
+        "file" : { "backend" : "local" }
+      }
+    }
+  }
+  assert {
+    condition     = length(google_storage_bucket_iam_member.storage) == 1 && strcontains(google_storage_bucket_iam_member.storage["build"].condition[0].expression, "objects/builds/")
+    error_message = "GCS access is limited to the installation's prefix."
+  }
+}

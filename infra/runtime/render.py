@@ -94,11 +94,16 @@ def validate(document):
     for role, storage in config["storage"].items():
         if set(storage) - {"backend", "bucket", "region", "prefix"}:
             raise ValueError(f"Unknown {role} storage fields; secret values do not belong here")
-        if storage.get("backend") not in {"local", "s3"}:
-            raise ValueError(f"{role}: select local or existing S3; GCS is not implemented yet")
+        if storage.get("backend") not in {"local", "s3", "gcs"}:
+            raise ValueError(f"{role}: select local, existing S3, or existing GCS")
+        if storage["backend"] == "gcs" and config["cloud"] != "gcp":
+            raise ValueError(f"{role}: GCS uses the VM's Google identity, so it needs cloud=gcp in this release")
         prefix = storage.get("prefix", role + "s")
         if prefix.startswith("/") or ".." in prefix:
             raise ValueError(f"{role}: unsafe storage prefix")
+        if storage["backend"] == "gcs":
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]", storage.get("bucket", "")) or not prefix.strip("/"):
+                raise ValueError(f"{role}: GCS requires bucket and a nonempty relative prefix")
         if storage["backend"] == "s3":
             if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", storage.get("bucket", "")) or not storage.get("region") or not prefix.strip("/"):
                 raise ValueError(f"{role}: S3 requires bucket, region, and a nonempty relative prefix")
@@ -211,7 +216,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     data_ready = {name: {"condition": "service_healthy"}
                   for name, local in (("postgres", pg_local), ("valkey", valkey_local)) if local}
     for key in config.get("settings", {}):
-        if key in common_env or key.endswith(("_STORAGE_TYPE", "_STORAGE_PATH")) or "_AWS_S3_" in key:
+        if key in common_env or key.endswith(("_STORAGE_TYPE", "_STORAGE_PATH")) or "_AWS_S3_" in key or "_GCS_" in key:
             raise ValueError(f"settings entry {key} is set by the runtime bundle")
     for role in SERVICES:
         env, mounts = {**common_env, **config.get("settings", {})}, []
@@ -229,6 +234,10 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
                 target = "/var/lib/hot/" + storage_role
                 env[prefix + "_STORAGE_PATH"] = target
                 mounts.append(bind(Path(data_root) / storage_role, target))
+            elif storage["backend"] == "gcs":
+                # The VM's service account; no credential files.
+                env[prefix + "_GCS_BUCKET"] = storage["bucket"]
+                env[prefix + "_GCS_PREFIX"] = storage.get("prefix", storage_role + "s")
             else:
                 for field in ("bucket", "region", "prefix"):
                     env[prefix + "_AWS_S3_" + field.upper()] = storage.get(field, storage_role + "s")

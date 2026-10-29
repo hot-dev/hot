@@ -885,15 +885,15 @@ remove the only copy of its own state.
 - [ ] Set `HOT_ENV=production`, `HOT_PRODUCT_EXPERIENCE=self-host`, billing off,
       explicit endpoint URLs, persistent session/encryption keys, and restricted
       runtime database credentials. Disable custom-domain provisioning.
-- [ ] Implement public email delivery and the first-admin bootstrap/recovery
+- [x] Implement public email delivery and the first-admin bootstrap/recovery
       flow. Persist generated secrets across retries and upgrades. Test normal
       authentication without development fallbacks, email verification,
       invitations, alert delivery, and optional OAuth callbacks.
       SMTP delivery, `hot admin bootstrap`/`reset-password`, and `app.signup`
       are in; without email, the sign-up form admits only invited users and
-      admins share invitation links. Left for the agent: generating and
-      persisting the first admin's password.
-- [ ] Run extension installation, public migrations, grants, and onboarding as
+      admins share invitation links. The agent generates the first admin's
+      password once and runs `hot admin bootstrap` on every deploy.
+- [x] Run extension installation, public migrations, grants, and onboarding as
       distinct administrative steps before starting runtime services. Respect
       the supported `hot` schema and RLS requirements in the existing runbook.
       Migration credentials never become normal service credentials.
@@ -930,6 +930,9 @@ remove the only copy of its own state.
 - [ ] Implement independent storage-role/backend and bucket-ownership inputs.
       Qualify the Local/S3 reference configurations, including a GCP VM using
       existing S3 without GCS setup.
+      Builds and files each select local, existing S3, or existing GCS (GCP
+      compute, VM identity, IAM limited to the prefix). Provisioned buckets
+      and qualification remain.
 - [ ] Make migration and bootstrap retries idempotent; a migration failure
       blocks rollout. Record versions and completed steps without exposing secrets.
 
