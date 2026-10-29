@@ -2088,6 +2088,89 @@ fn (): Str { "unused" }
         assert!(!errors.is_empty());
     }
 
+    /// Write `content` to `path`, creating its parent folders.
+    fn write_file(path: std::path::PathBuf, content: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    /// A project in `root/src` that builds `::lib::core/Rec` by name, and the
+    /// local package `example.com/lib` at `root/lib` that defines it in
+    /// `root/lib/hot/src`. Its pkg.hot declares `src_paths`. Returns the
+    /// project's source paths and conf, with the project named `app`.
+    fn write_project_using_a_hot_src_package(
+        root: &std::path::Path,
+        src_paths: &str,
+    ) -> (Vec<String>, crate::val::Val) {
+        let lib = root.join("lib");
+        write_file(
+            lib.join("pkg.hot"),
+            &format!(
+                "::hot::pkg ns\n\nhot.pkg.lib {{\n  name: \"example.com/lib\",\n  version: \"1.0.0\",\n  deps: {{}},\n  src-paths: {src_paths},\n  test-paths: [\"hot/test/\"],\n}}\n"
+            ),
+        );
+        write_file(
+            lib.join("hot/src/lib/core.hot"),
+            "::lib::core ns\n\nRec type { a: Int, b: Str }\n",
+        );
+        let src = root.join("src");
+        write_file(
+            src.join("app.hot"),
+            "::app ns\n\nRec ::lib::core/Rec\n\nx Rec(a: 1, b: \"x\")\n",
+        );
+        let conf = crate::lang::data::eval_data(&format!(
+            "hot.project.app.deps {{\"example.com/lib\": {{local: {:?}}}}}\n",
+            lib.display().to_string()
+        ))
+        .unwrap();
+        (vec![src.display().to_string()], conf)
+    }
+
+    /// A dependency's sources load from the `src-paths` its pkg.hot
+    /// declares, as a project's own `src.paths` do. Its `test-paths` stay
+    /// out of the program that uses it.
+    #[test]
+    fn check_loads_a_dependency_from_its_declared_src_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src_paths, conf) = write_project_using_a_hot_src_package(dir.path(), "[\"hot/src/\"]");
+        // This test file doesn't check, so loading it would fail the check.
+        write_file(
+            dir.path().join("lib/hot/test/lib/core.test.hot"),
+            "::lib::core-test ns\n\nbroken fn (): Int { ::lib::missing/nothing() }\n",
+        );
+
+        let errors =
+            Engine::check_sources_pipeline_diagnostics(&src_paths, &[], Some(&conf), Some("app"));
+        assert!(errors.is_empty(), "{:?}", errors.to_diagnostics());
+    }
+
+    /// A dependency whose `src-paths` hold no `.hot` files is the first
+    /// error, by name, not the unresolved references it leads to.
+    #[test]
+    fn check_reports_a_dependency_with_no_source_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // The sources are in hot/src, but pkg.hot points at src/.
+        let (src_paths, conf) = write_project_using_a_hot_src_package(dir.path(), "[\"src/\"]");
+
+        let diagnostics =
+            Engine::check_sources_pipeline_diagnostics(&src_paths, &[], Some(&conf), Some("app"))
+                .to_diagnostics();
+        let first = diagnostics
+            .first()
+            .expect("an empty dependency is an error");
+        assert!(
+            first
+                .message
+                .contains("Package 'example.com/lib' has no source files")
+                && first.message.contains("[\"src/\"]"),
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|d| d.code == "named-argument"),
+            "{diagnostics:?}"
+        );
+    }
+
     #[test]
     fn check_reports_unparseable_schedule_as_located_diagnostic() {
         let temp = tempfile::tempdir().unwrap();

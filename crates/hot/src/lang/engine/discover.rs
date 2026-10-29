@@ -981,59 +981,28 @@ impl Engine {
     /// This reads the package's pkg.hot file to get src_paths and only discovers
     /// files from those directories. This prevents test files from being included
     /// in production builds.
+    ///
+    /// A package that contributes no `.hot` files is an error naming the
+    /// package and the folders searched. Otherwise its namespaces would just
+    /// be missing, and the first error would be an unresolved reference in
+    /// the code that uses it.
     pub fn discover_dependency_source_files(
         pkg_root: &std::path::Path,
     ) -> Result<Vec<String>, String> {
-        let pkg_hot_path = pkg_root.join("pkg.hot");
-
         // If no pkg.hot exists, fall back to discovering all files (for simple packages)
-        if !pkg_hot_path.exists() {
+        let Some((meta, src_paths)) = Self::read_dependency_src_paths(pkg_root)? else {
             tracing::debug!(
                 "No pkg.hot found in {}, falling back to full discovery",
                 pkg_root.display()
             );
-            return Self::discover_hot_files(&pkg_root.to_string_lossy());
-        }
-
-        // Parse the pkg.hot file to get src_paths
-        let pkg_content = std::fs::read_to_string(&pkg_hot_path)
-            .map_err(|e| format!("Failed to read {}: {}", pkg_hot_path.display(), e))?;
-
-        // pkg.hot holds literal data; read it without running it
-        let pkg_val = crate::lang::data::eval_data(&pkg_content)?;
-
-        // Find the package config (the value of the first key that starts with "hot.pkg.")
-        let src_paths = match &pkg_val {
-            crate::val::Val::Map(map) => {
-                let mut found_src_paths: Vec<String> = Vec::new();
-                for (key, value) in map.iter() {
-                    if let crate::val::Val::Str(key_str) = key
-                        && key_str.starts_with("hot.pkg.")
-                    {
-                        // This is the package config
-                        if let crate::val::Val::Map(config) = value {
-                            // Look for src-paths (preferred) or src_paths (legacy)
-                            let paths_val = config
-                                .get(&crate::val::Val::from("src-paths"))
-                                .or_else(|| config.get(&crate::val::Val::from("src_paths")));
-                            if let Some(crate::val::Val::Vec(paths)) = paths_val {
-                                for path in paths {
-                                    if let crate::val::Val::Str(path_str) = path {
-                                        found_src_paths.push((**path_str).to_owned());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if found_src_paths.is_empty() {
-                    // No src_paths found, default to "src/"
-                    vec!["src/".to_string()]
-                } else {
-                    found_src_paths
-                }
+            let files = Self::discover_hot_files(&pkg_root.to_string_lossy())?;
+            if files.is_empty() {
+                return Err(format!(
+                    "Package at {} has no pkg.hot and no .hot files",
+                    pkg_root.display()
+                ));
             }
-            _ => vec!["src/".to_string()],
+            return Ok(files);
         };
 
         tracing::debug!(
@@ -1044,8 +1013,8 @@ impl Engine {
 
         // Discover files from each src_path
         let mut all_files = Vec::new();
-        for src_path in src_paths {
-            let full_path = pkg_root.join(&src_path);
+        for src_path in &src_paths {
+            let full_path = pkg_root.join(src_path);
             if full_path.exists() {
                 let files = Self::discover_hot_files(&full_path.to_string_lossy())?;
                 all_files.extend(files);
@@ -1058,6 +1027,21 @@ impl Engine {
             }
         }
 
+        if all_files.is_empty() {
+            let name = if meta.name.is_empty() {
+                pkg_root.display().to_string()
+            } else {
+                meta.name
+            };
+            return Err(format!(
+                "Package '{}' has no source files: no .hot files in its src-paths {:?} under {}. \
+                 Set src-paths in its pkg.hot to the folders that hold its .hot files.",
+                name,
+                src_paths,
+                pkg_root.display()
+            ));
+        }
+
         Ok(all_files)
     }
 
@@ -1067,44 +1051,8 @@ impl Engine {
     pub fn discover_dependency_source_dirs(
         pkg_root: &std::path::Path,
     ) -> Result<Vec<String>, String> {
-        let pkg_hot_path = pkg_root.join("pkg.hot");
-
-        if !pkg_hot_path.exists() {
+        let Some((_, src_paths)) = Self::read_dependency_src_paths(pkg_root)? else {
             return Ok(vec![pkg_root.to_string_lossy().to_string()]);
-        }
-
-        let pkg_content = std::fs::read_to_string(&pkg_hot_path)
-            .map_err(|e| format!("Failed to read {}: {}", pkg_hot_path.display(), e))?;
-
-        let pkg_val = crate::lang::data::eval_data(&pkg_content)?;
-
-        let src_paths = match &pkg_val {
-            crate::val::Val::Map(map) => {
-                let mut found: Vec<String> = Vec::new();
-                for (key, value) in map.iter() {
-                    if let crate::val::Val::Str(key_str) = key
-                        && key_str.starts_with("hot.pkg.")
-                        && let crate::val::Val::Map(config) = value
-                    {
-                        let paths_val = config
-                            .get(&crate::val::Val::from("src-paths"))
-                            .or_else(|| config.get(&crate::val::Val::from("src_paths")));
-                        if let Some(crate::val::Val::Vec(paths)) = paths_val {
-                            for path in paths {
-                                if let crate::val::Val::Str(path_str) = path {
-                                    found.push((**path_str).to_owned());
-                                }
-                            }
-                        }
-                    }
-                }
-                if found.is_empty() {
-                    vec!["src/".to_string()]
-                } else {
-                    found
-                }
-            }
-            _ => vec!["src/".to_string()],
         };
 
         Ok(src_paths
@@ -1112,6 +1060,27 @@ impl Engine {
             .map(|p| pkg_root.join(&p).to_string_lossy().to_string())
             .filter(|p| std::path::Path::new(p).exists())
             .collect())
+    }
+
+    /// Read a package's pkg.hot and the `src-paths` it declares, or `src/`
+    /// when it declares none. `None` when the package has no pkg.hot.
+    fn read_dependency_src_paths(
+        pkg_root: &std::path::Path,
+    ) -> Result<Option<(crate::lang::project::PackageMetadata, Vec<String>)>, String> {
+        let pkg_hot_path = pkg_root.join("pkg.hot");
+        if !pkg_hot_path.exists() {
+            return Ok(None);
+        }
+
+        // pkg.hot holds literal data; read it without running it
+        let meta = crate::lang::project::PackageMetadata::parse_from_file(&pkg_hot_path)
+            .map_err(|e| format!("{}: {}", pkg_hot_path.display(), e))?;
+        let src_paths = if meta.src_paths.is_empty() {
+            vec!["src/".to_string()]
+        } else {
+            meta.src_paths.clone()
+        };
+        Ok(Some((meta, src_paths)))
     }
 }
 
@@ -1518,5 +1487,30 @@ mod pkg_hot_tests {
             checked += 1;
         }
         assert!(checked > 10, "only {checked} packages found");
+    }
+
+    /// A package's files and folders come from the `src-paths` its pkg.hot
+    /// declares, for the compiler and the bundler alike, and never from its
+    /// `test-paths`.
+    #[test]
+    fn dependency_sources_come_from_declared_src_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("pkg.hot"),
+            "::hot::pkg ns\n\nhot.pkg.lib {\n  name: \"example.com/lib\",\n  version: \"1.0.0\",\n  deps: {},\n  src-paths: [\"hot/src/\"],\n  test-paths: [\"hot/test/\"],\n}\n",
+        )
+        .unwrap();
+        for file in ["hot/src/lib.hot", "hot/test/lib.test.hot", "src/stray.hot"] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "::lib ns\n").unwrap();
+        }
+
+        let files = Engine::discover_dependency_source_files(root).unwrap();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert!(files[0].ends_with("hot/src/lib.hot"), "{files:?}");
+        let dirs = Engine::discover_dependency_source_dirs(root).unwrap();
+        assert_eq!(dirs, vec![root.join("hot/src/").display().to_string()]);
     }
 }
