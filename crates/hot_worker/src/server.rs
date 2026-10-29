@@ -5707,7 +5707,9 @@ pub fn get_max_run_timeout(worker_conf: &Val) -> std::time::Duration {
     };
     std::time::Duration::from_secs(cap)
         .max(get_run_timeout(worker_conf))
-        .min(std::time::Duration::from_secs(MAX_RUN_TIMEOUT_CEILING_SECONDS))
+        .min(std::time::Duration::from_secs(
+            MAX_RUN_TIMEOUT_CEILING_SECONDS,
+        ))
 }
 
 /// How long one run may take: the `timeout` meta of the function it runs,

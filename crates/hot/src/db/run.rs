@@ -3862,7 +3862,12 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        assert_eq!(Run::fail_stale_runs(&db, cutoff, "abandoned", 10).await.unwrap(), 0);
+        assert_eq!(
+            Run::fail_stale_runs(&db, cutoff, "abandoned", 10)
+                .await
+                .unwrap(),
+            0
+        );
         assert_eq!(status().await, RunStatus::PendingRetry.as_id());
 
         sqlx::query("UPDATE run SET status_id = 1, next_retry_at = NULL WHERE run_id = ?")
@@ -3873,7 +3878,12 @@ mod tests {
         Run::hold_orphaned_runs_for_redelivery(&db, &event_id)
             .await
             .unwrap();
-        assert_eq!(Run::fail_stale_runs(&db, cutoff, "abandoned", 10).await.unwrap(), 1);
+        assert_eq!(
+            Run::fail_stale_runs(&db, cutoff, "abandoned", 10)
+                .await
+                .unwrap(),
+            1
+        );
         assert_eq!(status().await, RunStatus::Failed.as_id());
     }
 
