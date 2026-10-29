@@ -171,6 +171,7 @@ Every 30 seconds the host agent publishes these metrics, to CloudWatch
 | `Ready` | 1 when the app and API answer through the ingress |
 | `DataDiskUsedPercent` | The larger of space and inodes used on the data disk |
 | `BackupAgeHours` | Hours since the newest completed snapshot |
+| `CertificateDaysLeft` | Days until the ingress TLS certificate expires (0 if unreadable) |
 
 The stacks alert on them. Set `monitoring.alert_emails`; AWS sends each address
 an SNS confirmation email first. Alerts reach those addresses independently of
@@ -185,9 +186,56 @@ Hot's own email, and both firing and resolving are sent.
 | `not-ready` | App or API not answering for 15 minutes | Check `services-unhealthy` and the ingress certificate. |
 | `disk-pressure` | Data disk over 85% for 15 minutes | Grow the disk, or move builds and files to object storage. |
 | `backup-stale` | No snapshot for 30 hours, or no backup status | Check the snapshot policy or schedule in the console. |
+| `certificate-expiring` | The ingress certificate expires within 14 days | Put the renewed chain and key in the operator secret, then `restart-service ingress`. |
 
 Liveness, dependency reachability, and end-to-end readiness are separate
 signals, and a missing heartbeat or backup status alerts rather than passing.
+
+## Operating an installation
+
+[`operator/selfhost.py`](operator/selfhost.py) sends one host agent command
+and waits for the agent's report. It uses the `aws` or `gcloud` CLI with your
+identity (or the release role), never SSH or network access to the host:
+
+```sh
+python3 infra/operator/selfhost.py installation.tfvars.json command status
+python3 infra/operator/selfhost.py installation.tfvars.json command diagnostics
+python3 infra/operator/selfhost.py installation.tfvars.json logs worker
+python3 infra/operator/selfhost.py installation.tfvars.json command restart-service --service scheduler
+python3 infra/operator/selfhost.py installation.tfvars.json release 3.0.2
+```
+
+Commands reach the agent through the SSM command document (AWS) or the
+command topic (GCP). Each report carries the command's request ID and goes to
+the installation's log: the `hot-agent-status` stream of `/hot/<installation>`
+in CloudWatch Logs, or the `hot-<installation>-status` log in Cloud Logging.
+AWS also keeps a summary of the latest report in the `/hot/<installation>/status`
+parameter. The release and command workflows run the same script, so a
+workflow run and a manual run behave the same.
+
+| Command | Does |
+| --- | --- |
+| `status` | The deployed release, previous release, and migration level |
+| `diagnostics` | Versions (release, migrations, host image, Kata), effective configuration, each service's state, health, and image digest, the Hot services' environment, data-service modes and reachability, and the current health metrics |
+| `logs SERVICE` | The newest 200 lines (at most 48,000 characters) of a Hot service, the ingress, or a local data service |
+| `backup` | An on-demand `pg_dump` of a local database to the data disk |
+| `restart-service SERVICE` | Delivers secrets again and recreates one service; the scheduler stops before it starts |
+| `drain-and-stop` | Stops the scheduler, then workers (2-minute grace), then the app, API, and ingress |
+| `deploy-now` | Deploys the release pointer now (the `release` action sets the pointer first) |
+
+Diagnostics and logs are redacted on the host before they are reported:
+- every value in the host's secret files, and passwords inside connection URIs;
+- URI credentials, bearer and basic credentials, JWTs, Hot API keys, AWS
+  access key IDs, private keys, and `password=`/`token=`-style settings;
+- the local part of email addresses, and all but the last four digits of AWS
+  account IDs;
+- secret references (ARNs and secret names) and CA certificates in the
+  configuration, which is shown as set or unset.
+
+Logs can still contain other user data, such as event payloads a service
+logs. Treat a diagnostics bundle like the logs themselves. The command
+workflow writes reports to its job summary, which anyone who can read the
+operator repository's Actions runs can see.
 
 ## Local validation
 

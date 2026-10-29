@@ -53,6 +53,7 @@ locals {
     ready                  = { unit = "1", name = "App and API ready" }
     data_disk_used_percent = { unit = "%", name = "Data disk used" }
     backup_age_hours       = { unit = "h", name = "Backup age" }
+    certificate_days_left  = { unit = "d", name = "Certificate days left" }
   }
   # Thresholds and sustained windows match the AWS alarms; see the runbook in
   # infra/README.md. A missing signal alerts where an absent value is unsafe.
@@ -80,6 +81,10 @@ locals {
     backup-stale = {
       metric      = "backup_age_hours", comparison = "COMPARISON_GT", threshold = 30, aligner = "ALIGN_MIN", duration = "3600s", absent = true,
       description = "No data-disk snapshot has completed in 30 hours, or the agent cannot tell."
+    }
+    certificate-expiring = {
+      metric      = "certificate_days_left", comparison = "COMPARISON_LT", threshold = 14, aligner = "ALIGN_MIN", duration = "3600s", absent = false,
+      description = "The ingress TLS certificate expires within 14 days, or the agent cannot read it."
     }
   }
 }

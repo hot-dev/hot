@@ -1828,16 +1828,27 @@ or an existing operator destination without coupling telemetry to S3.
       Keep plain OpenTofu usable and specify helper inputs, outputs, and failures.
       Each release and infrastructure workflow is available both as a helper
       command and through the GitHub Actions workflows, with the same behavior.
+      [`selfhost.py`](../../infra/operator/selfhost.py) sends an agent command
+      and waits for its report by request ID; the release and command
+      workflows run it, so they match manual use. Upgrade, restore, resizing,
+      and rotation procedures remain to be written.
 - [ ] Require basic status, versions, redacted effective configuration, service
       logs, dependency checks, and a redacted diagnostic bundle for the initial
       release. Deliver them through the agent command channel, so they need
       neither SSH nor network access to the VM, and avoid exposing a public
       management endpoint. Test redaction of secrets,
       tokens, user payloads, and sensitive configuration.
+      `diagnostics` reports versions, effective configuration, services,
+      dependencies, and health; `logs` reports a service's newest lines. Both
+      are redacted on the host: known secret values, credential shapes, email
+      local parts, account IDs, and secret references. Free-form user payloads
+      in logs are not detected.
 - [ ] Add broader operational signals, dashboards, and actionable alerts for
       scheduler inactivity, queue age, retries/failures, task capacity, disk/
       memory pressure, connection pressure, certificate expiry, and backup
       failures. Document thresholds, ownership, response steps, and export options.
+      The ingress certificate's remaining days are a metric with an alert at
+      14 days.
       Apply the logging/monitoring contract above: its baseline is required for
       initial installs; detailed dashboards and tracing can follow.
 

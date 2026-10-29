@@ -83,6 +83,11 @@ locals {
       period      = 3600, periods = 1, missing = "breaching",
       description = "No data-disk snapshot has completed in 30 hours, or the agent cannot tell."
     }
+    certificate-expiring = {
+      metric      = "CertificateDaysLeft", statistic = "Minimum", comparison = "LessThanThreshold", threshold = 14,
+      period      = 3600, periods = 1, missing = "notBreaching",
+      description = "The ingress TLS certificate expires within 14 days, or the agent cannot read it."
+    }
   }
 }
 resource "aws_cloudwatch_metric_alarm" "hot" {

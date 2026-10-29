@@ -151,8 +151,8 @@ resource "aws_ssm_document" "command" {
     schemaVersion = "2.2"
     description   = "Run one Hot agent command on the installation host."
     parameters = {
-      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "backup", "restart-service", "drain-and-stop"] }
-      service   = { type = "String", default = "none", allowedValues = ["none", "app", "api", "worker", "task-worker", "scheduler", "ingress"] }
+      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop"] }
+      service   = { type = "String", default = "none", allowedValues = ["none", "app", "api", "worker", "task-worker", "scheduler", "ingress", "postgres", "valkey"] }
       requestId = { type = "String", allowedPattern = "^[A-Za-z0-9-]{1,64}$" }
     }
     mainSteps = [{
@@ -251,8 +251,9 @@ resource "aws_instance" "host" {
   }
   depends_on = [aws_route_table_association.private, aws_iam_role_policy.runtime, aws_iam_role_policy_attachment.ssm]
 }
-# The release workflow may write the pointer, read status, and send the Hot
-# command to this installation's host, and nothing else.
+# The release and command workflows may write the pointer, read status, send
+# the Hot command to this installation's host, and read the agent's reports
+# from the installation's log, and nothing else.
 resource "aws_iam_role_policy" "release" {
   count = var.release_principal == "" ? 0 : 1
   name  = "hot-${local.config.name}-release"
@@ -261,6 +262,7 @@ resource "aws_iam_role_policy" "release" {
     { Effect = "Allow", Action = ["ssm:PutParameter"], Resource = aws_ssm_parameter.release.arn },
     { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = aws_ssm_parameter.status.arn },
     { Effect = "Allow", Action = ["ssm:SendCommand"], Resource = [aws_ssm_document.command.arn, aws_instance.host.arn] },
+    { Effect = "Allow", Action = ["logs:FilterLogEvents"], Resource = [aws_cloudwatch_log_group.host.arn, "${aws_cloudwatch_log_group.host.arn}:*"] },
   ] })
 }
 resource "aws_volume_attachment" "data" {

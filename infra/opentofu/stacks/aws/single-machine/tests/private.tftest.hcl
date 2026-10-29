@@ -166,7 +166,7 @@ run "existing_network_ownership" {
 run "agent_channel" {
   command = plan
   assert {
-    condition     = aws_ssm_document.command.document_type == "Command" && length(jsondecode(aws_ssm_document.command.content).parameters.operation.allowedValues) == 6
+    condition     = aws_ssm_document.command.document_type == "Command" && length(jsondecode(aws_ssm_document.command.content).parameters.operation.allowedValues) == 7
     error_message = "Host commands must be a fixed allowlist in a Hot command document."
   }
   assert {
@@ -191,6 +191,10 @@ run "release_principal_is_scoped" {
   assert {
     condition     = aws_iam_role_policy.release[0].role == "hot-github-release" && !strcontains(aws_iam_role_policy.release[0].policy, "\"Resource\":\"*\"")
     error_message = "The release role is granted only this installation's pointer, status, and command."
+  }
+  assert {
+    condition     = strcontains(aws_iam_role_policy.release[0].policy, "logs:FilterLogEvents") && !strcontains(aws_iam_role_policy.release[0].policy, "logs:GetLogEvents")
+    error_message = "The release role reads the agent's reports from this installation's log group only."
   }
 }
 
@@ -363,7 +367,7 @@ run "backups_and_alerts" {
     error_message = "Snapshots run daily at the chosen hour and are kept for the chosen days."
   }
   assert {
-    condition     = length(aws_sns_topic_subscription.alerts) == 2 && length(aws_cloudwatch_metric_alarm.hot) == 7
+    condition     = length(aws_sns_topic_subscription.alerts) == 2 && length(aws_cloudwatch_metric_alarm.hot) == 8
     error_message = "Every alert email is subscribed and every critical signal has an alarm."
   }
   assert {

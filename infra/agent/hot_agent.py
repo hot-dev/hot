@@ -9,6 +9,10 @@ commands (see COMMANDS); it never runs arbitrary shell.
     hot-agent run                         # reconcile to the release pointer, forever
     hot-agent command OP [--service S] [--request-id ID]
 
+Every report also goes to the installation's log with its request ID, where
+infra/operator/selfhost.py waits for it. Diagnostics and service logs are
+redacted before they leave the host.
+
 The standard library only: cloud APIs are called over HTTPS with the VM's
 identity, so the host image needs no cloud CLIs.
 """
@@ -48,8 +52,17 @@ LOCK = Path("/run/hot/agent.lock")
 LIBEXEC = Path("/usr/local/libexec/hot")
 DEFAULT_MANIFESTS = "https://github.com/hot-dev/hot/releases/download/v{release}"
 POLL_SECONDS = 30
-COMMANDS = {"deploy-now", "status", "diagnostics", "backup", "restart-service", "drain-and-stop"}
+COMMANDS = {"deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop"}
 HOT_SERVICES = ("app", "api", "worker", "task-worker", "scheduler")
+# Service logs: the newest lines, each shortened, within a size that fits
+# one log entry on either cloud.
+LOG_LINES = 200
+LOG_LINE_CHARS = 1000
+LOG_CHARS = 48000
+# Reports also go to this stream of the installation's CloudWatch log group.
+STATUS_STREAM = "hot-agent-status"
+# Report fields too large for the AWS status parameter (4 KB); the log has them.
+DETAIL_KEYS = ("diagnostics", "logs")
 # Box storage per size label; the data disk is sized to hold it.
 BOX_POOL_GB = {"small": 40, "medium": 100, "large": 200}
 # Container users that read their secret files.
@@ -63,7 +76,7 @@ GCP_METRIC_PREFIX = "custom.googleapis.com/hot/"
 GCP_METRIC_NAMES = {"AgentHeartbeat": "agent_heartbeat", "UnhealthyServices": "unhealthy_services",
                     "SchedulerRunning": "scheduler_running", "DependenciesReachable": "dependencies_reachable",
                     "Ready": "ready", "DataDiskUsedPercent": "data_disk_used_percent",
-                    "BackupAgeHours": "backup_age_hours"}
+                    "BackupAgeHours": "backup_age_hours", "CertificateDaysLeft": "certificate_days_left"}
 
 
 class AgentError(Exception):
@@ -119,8 +132,9 @@ class Aws:
 
     IMDS = "http://169.254.169.254"
 
-    def __init__(self, region):
+    def __init__(self, region, log_group=""):
         self.region = region
+        self.log_group = log_group
 
     def credentials(self):
         _, imds_token = http("PUT", self.IMDS + "/latest/api/token",
@@ -146,7 +160,8 @@ class Aws:
     def query(self, service, version, params):
         """A Query-protocol call (EC2, CloudWatch); returns the XML response."""
         host = f"{service}.{self.region}.amazonaws.com"
-        body = urllib.parse.urlencode({"Action": params.pop("Action"), "Version": version, **params}).encode()
+        action = params.pop("Action")
+        body = urllib.parse.urlencode({"Action": action, "Version": version, **params}).encode()
         headers = sigv4_headers("POST", host, self.region, service, None, body, self.credentials(),
                                 datetime.datetime.now(datetime.timezone.utc),
                                 content_type="application/x-www-form-urlencoded; charset=utf-8")
@@ -154,7 +169,7 @@ class Aws:
         root = ElementTree.fromstring(data or b"<Empty/>")
         if status != 200:
             code = next((e.text for e in root.iter() if e.tag.endswith("Code")), None) or f"HTTP {status}"
-            raise AgentError(f"{service} {params.get('Action', '')} failed: {code}")
+            raise AgentError(f"{service} {action} failed: {code}")
         return root
 
     def put_metrics(self, installation, metrics):
@@ -190,8 +205,30 @@ class Aws:
         return result["Parameter"]["Value"]
 
     def put_status(self, reference, status):
-        self.call("ssm", "AmazonSSM.PutParameter", {"Name": self.parameter_name(reference), "Value": json.dumps(status),
-                                                    "Type": "String", "Overwrite": True})
+        """The full report goes to the log, where it is found by request ID;
+        the status parameter keeps a summary of the latest one."""
+        summary = {key: value for key, value in status.items() if key not in DETAIL_KEYS}
+        try:
+            if self.log_group:
+                self.log_status(status)
+        finally:
+            self.call("ssm", "AmazonSSM.PutParameter", {"Name": self.parameter_name(reference),
+                                                        "Value": json.dumps(summary), "Type": "String", "Overwrite": True})
+
+    def log_status(self, status):
+        target = {"logGroupName": self.log_group, "logStreamName": STATUS_STREAM}
+        event = {**target, "logEvents": [{"timestamp": int(time.time() * 1000), "message": json.dumps(status)}]}
+        try:
+            self.call("logs", "Logs_20140328.PutLogEvents", event)
+        except AgentError as error:
+            if "ResourceNotFoundException" not in str(error):
+                raise
+            try:
+                self.call("logs", "Logs_20140328.CreateLogStream", target)
+            except AgentError as created:
+                if "ResourceAlreadyExistsException" not in str(created):
+                    raise
+            self.call("logs", "Logs_20140328.PutLogEvents", event)
 
     def get_secret(self, reference):
         try:
@@ -505,6 +542,101 @@ def write_secret_files(root, files, chown=os.chown):
 
 
 # --------------------------------------------------------------------------
+# Redaction: what diagnostics and logs may carry off the host
+# --------------------------------------------------------------------------
+
+class Redactor:
+    """Removes secrets from text the agent reports: every value in the
+    host's secret files (and passwords inside connection URIs), then common
+    credential shapes. Email addresses keep only their domain, and AWS
+    account IDs only their last four digits."""
+
+    PATTERNS = [
+        (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)", re.S), "[private key]"),
+        (re.compile(r"\b([a-z][a-z0-9+.-]*://)[^/\s:@]*:[^@\s/]*@", re.I), r"\1[credentials]@"),
+        (re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", re.I), r"\1 [redacted]"),
+        (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"), "[token]"),
+        (re.compile(r"\bhot_[0-9a-f]{32}_[0-9a-f]+\b"), "[api key]"),
+        (re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "[access key]"),
+        (re.compile(r"(?i)\b((?:\w+[_-])?(?:password|passwd|secret|token|api[_-]?key|access[_-]?key))"
+                    r"(\\?[\"']?\s*[:=]\s*\\?[\"']?)[^\s\"'\\,;&}]+"), r"\1\2[redacted]"),
+        (re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)"), r"[email]@\1"),
+        (re.compile(r"(arn:aws[a-z-]*:[a-z0-9-]*:[a-z0-9-]*:)\d{8}(\d{4})"), r"\1****\2"),
+    ]
+    # Shorter values are too common to replace safely; the patterns cover
+    # passwords inside URIs and settings.
+    MINIMUM = 8
+
+    def __init__(self, values=()):
+        known = set()
+        for value in values:
+            value = value.strip()
+            known.add(value)
+            for word in value.split():
+                if "://" in word:
+                    password = urllib.parse.urlsplit(word).password or ""
+                    known.update({password, urllib.parse.unquote(password)})
+        self.values = sorted((v for v in known if len(v) >= self.MINIMUM), key=len, reverse=True)
+
+    @classmethod
+    def from_files(cls, root):
+        values = []
+        for path in sorted(Path(root).glob("*/*")):
+            with contextlib.suppress(OSError, UnicodeDecodeError):
+                values.append(path.read_text())
+        return cls(values)
+
+    def __call__(self, text):
+        for value in self.values:
+            text = text.replace(value, "[secret]")
+        for pattern, replacement in self.PATTERNS:
+            text = pattern.sub(replacement, text)
+        return text
+
+    def tree(self, value):
+        if isinstance(value, dict):
+            return {key: self.tree(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self.tree(item) for item in value]
+        return self(value) if isinstance(value, str) else value
+
+
+# Configuration keys that name where secrets and channels live. Diagnostics
+# show that they are set, not what they name.
+REFERENCE_KEYS = {"secret_references", "release_pointer", "status_reference", "command_subscription"}
+
+
+def effective_configuration(config, redact):
+    """The installation as the host sees it, without references, private
+    certificates, or anything the redactor removes."""
+    def clean(key, value):
+        if key in REFERENCE_KEYS or key.endswith("_secret"):
+            return "[reference]" if value else ""
+        if key == "ca_certificate":
+            return "[certificate]" if value else ""
+        if isinstance(value, dict):
+            return {k: clean(k, v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [clean(key, v) for v in value]
+        return redact(value) if isinstance(value, str) else value
+    return {key: clean(key, value) for key, value in config.items()}
+
+
+def bounded_lines(text, redact, lines=LOG_LINES, line_chars=LOG_LINE_CHARS, total=LOG_CHARS):
+    """The newest redacted lines that fit within `total` characters."""
+    kept, size = [], 0
+    for line in reversed(text.splitlines()[-lines:]):
+        line = redact(line)
+        if len(line) > line_chars:
+            line = line[:line_chars] + " [shortened]"
+        if size + len(line) > total:
+            break
+        kept.append(line)
+        size += len(line) + 1
+    return kept[::-1]
+
+
+# --------------------------------------------------------------------------
 # The agent
 # --------------------------------------------------------------------------
 
@@ -520,6 +652,7 @@ class Agent:
         self.data_root = Path(roots.get("data", HOT_ROOT))
         self.secrets_root = Path(roots.get("secrets", SECRETS_ROOT))
         self.etc = Path(roots.get("etc", "/etc/hot"))
+        self.host = Path(roots.get("host", "/opt/hot-host"))
         self.references = config["secret_references"]
 
     @staticmethod
@@ -725,11 +858,26 @@ class Agent:
 
     # -- monitoring ---------------------------------------------------------------
 
+    def containers(self, bundle):
+        """`docker compose ps` entries: a JSON array, or JSON lines from
+        newer Compose releases."""
+        output = self.compose(bundle, "ps", "--all", "--format", "json").stdout.strip()
+        return json.loads(output) if output.startswith("[") else [json.loads(line) for line in output.splitlines()]
+
     def service_states(self, bundle):
         """Each service's container state and health check result."""
-        output = self.compose(bundle, "ps", "--all", "--format", "json").stdout.strip()
-        entries = json.loads(output) if output.startswith("[") else [json.loads(line) for line in output.splitlines()]
-        return {e.get("Service", "?"): (e.get("State", ""), e.get("Health", "")) for e in entries}
+        return {e.get("Service", "?"): (e.get("State", ""), e.get("Health", "")) for e in self.containers(bundle)}
+
+    def certificate_days_left(self, now=None):
+        """Days until the ingress certificate expires, or None before it is
+        delivered."""
+        path = self.secrets_root / "ingress" / "TLS_CERTIFICATE"
+        if not path.exists():
+            return None
+        output = self.run_command(["openssl", "x509", "-noout", "-enddate", "-in", str(path)]).stdout.strip()
+        expires = datetime.datetime.strptime(output.split("=", 1)[1], "%b %d %H:%M:%S %Y %Z")
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        return round((expires.replace(tzinfo=datetime.timezone.utc) - now).total_seconds() / 86400, 1)
 
     def observe(self, probe=None, now=None):
         """The health metrics the stacks alarm on. Ones that need a deployed
@@ -755,6 +903,12 @@ class Agent:
             except OSError:
                 ready = False
             metrics["Ready"] = (int(ready), "Count")
+            try:
+                days = self.certificate_days_left(now)
+            except (ValueError, IndexError, subprocess.CalledProcessError):
+                days = 0  # unreadable: alarm rather than pass
+            if days is not None:
+                metrics["CertificateDaysLeft"] = (days, "None")
         usage = os.statvfs(self.data_root)
         used = max(1 - usage.f_bavail / max(usage.f_blocks, 1), 1 - usage.f_favail / max(usage.f_files, 1))
         metrics["DataDiskUsedPercent"] = (round(100 * used, 1), "Percent")
@@ -785,7 +939,7 @@ class Agent:
 
     # -- reconcile and commands ------------------------------------------------
 
-    def reconcile(self):
+    def reconcile(self, request_id=""):
         desired = self.cloud.get_parameter(self.config["release_pointer"])
         state = self.state()
         if not desired or desired == state.get("release"):
@@ -794,21 +948,31 @@ class Agent:
         try:
             self.prepare_host(first_install)
             steps = self.deploy(desired, state.get("release"))
-            return self.report(state="deployed", release=desired, steps=steps)
+            return self.report(state="deployed", release=desired, steps=steps, request_id=request_id)
         except (AgentError, ValueError, subprocess.CalledProcessError) as error:
-            return self.report(state="failed", release=desired, error=describe(error))
+            return self.report(state="failed", release=desired, error=describe(error), request_id=request_id)
 
     def command(self, operation, service="", request_id=""):
         if operation not in COMMANDS:
             raise AgentError(f"Unknown command {operation!r}")
+        service = "" if service == "none" else service  # the SSM document's default
         release = self.state().get("release")
         bundle = self.releases / release / "bundle" if release else None
         if operation == "deploy-now":
-            return self.reconcile() or self.report(state="current", request_id=request_id)
+            return self.reconcile(request_id) or self.report(state="current", request_id=request_id)
         if operation == "status":
             return self.report(state="status", request_id=request_id)
+        if operation == "diagnostics":
+            return self.report(state="diagnostics", request_id=request_id, diagnostics=self.diagnostics(bundle))
         if bundle is None:
             raise AgentError("Nothing is deployed yet")
+        if operation == "logs":
+            local_data = tuple(s for s in ("postgres", "valkey") if render.data_mode(self.config, s) == "local")
+            if service not in HOT_SERVICES + ("ingress",) + local_data:
+                raise AgentError(f"Unknown service {service!r}")
+            output = self.compose(bundle, "logs", "--no-color", "--timestamps", "--tail", str(LOG_LINES), service).stdout
+            lines = bounded_lines(output, Redactor.from_files(self.secrets_root))
+            return self.report(state="logs", service=service, request_id=request_id, logs=lines)
         if operation == "restart-service":
             if service not in HOT_SERVICES + ("ingress",):
                 raise AgentError(f"Unknown service {service!r}")
@@ -836,14 +1000,44 @@ class Agent:
                          "--format=custom", "--file=/var/lib/postgresql/backup.dump")
             shutil.move(str(HOT_ROOT / "data/postgres/backup.dump"), str(target / "postgres.dump"))
             return self.report(state="backed-up", backup=str(target), request_id=request_id)
-        # diagnostics: service state and versions, never configuration values.
-        services = {}
-        for line in self.compose(bundle, "ps", "--all", "--format", "json").stdout.splitlines():
-            entry = json.loads(line)
-            services[entry.get("Service", "?")] = entry.get("State", "?")
-        host = json.loads(Path("/opt/hot-host/versions.json").read_text())
-        return self.report(state="diagnostics", request_id=request_id, services=services,
-                           kata=host.get("kata"), guest_rootfs=host.get("guest_rootfs_sha256", "")[:12])
+        raise AgentError(f"Unhandled command {operation!r}")
+
+    def diagnostics(self, bundle, probe=None):
+        """What support needs to understand an installation, redacted:
+        versions, effective configuration, services, dependencies, health
+        metrics, and the certificate. Logs are a separate command."""
+        redact = Redactor.from_files(self.secrets_root)
+        state = self.state()
+        try:
+            host = json.loads((self.host / "versions.json").read_text())
+        except (OSError, ValueError):
+            host = {}
+        result = {
+            "versions": {"release": state.get("release"), "previous": state.get("previous"),
+                         "migrations": state.get("migrations"), "host": host},
+            "configuration": effective_configuration(self.config, redact),
+            "dependencies": [{"service": service, "mode": render.data_mode(self.config, service)}
+                             for service in ("postgres", "valkey")],
+        }
+        for entry, (host_name, port) in zip(
+                [d for d in result["dependencies"] if d["mode"] != "local"], state.get("dependencies", [])):
+            entry.update(endpoint=f"{host_name}:{port}", reachable=tcp_reachable(host_name, port))
+        if bundle is not None:
+            result["services"] = {
+                e.get("Service", "?"): {"state": e.get("State", ""), "health": e.get("Health", ""),
+                                        "status": e.get("Status", ""), "exit_code": e.get("ExitCode", 0),
+                                        "image": e.get("Image", "").rsplit("@", 1)[-1][:19]}
+                for e in self.containers(bundle)}
+            compose = json.loads((bundle / "compose.json").read_text())
+            result["environment"] = {name: dict(sorted(compose["services"][name].get("environment", {}).items()))
+                                     for name in HOT_SERVICES if name in compose["services"]}
+        try:
+            metrics = self.observe(probe)
+        except (AgentError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+            result["health_error"] = describe(error)
+        else:
+            result["health"] = {name: value for name, (value, _) in metrics.items()}
+        return redact.tree(result)
 
 
 def provision_sql():
@@ -900,7 +1094,7 @@ def locked():
 
 def cloud_for(config):
     if config["cloud"] == "aws":
-        return Aws(config["region"])
+        return Aws(config["region"], f"/hot/{config['name']}")
     return Gcp(config["project"], config.get("command_subscription", ""), config["zone"])
 
 

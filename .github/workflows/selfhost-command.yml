@@ -1,0 +1,121 @@
+name: selfhost-command
+
+# Reusable: run one host agent command on a self-host installation and show
+# its report in the job summary: status, diagnostics, a service's logs, a
+# backup, restarting a service, or draining. Like the release workflow it uses
+# only cloud control-plane APIs and the release identity: no SSH, shell, or
+# network access to the host. It runs infra/operator/selfhost.py, which
+# operators can also run by hand.
+#
+#   uses: hot-dev/hot/.github/workflows/selfhost-command.yml@v3.0.1
+#
+# Diagnostics and logs are redacted on the host (secrets, credentials, tokens,
+# email addresses), but logs can still contain other user data. Anyone who can
+# read the calling repository's Actions runs can read the summary.
+on:
+  workflow_call:
+    inputs:
+      operation:
+        description: status, diagnostics, logs, backup, restart-service, or drain-and-stop
+        type: string
+        required: true
+      service:
+        description: The service for logs or restart-service
+        type: string
+        default: ''
+      installation:
+        type: string
+        required: true
+      cloud:
+        type: string
+        required: true
+      hot_version:
+        description: Hot tag whose operator helper to use, such as v3.0.1
+        type: string
+        required: true
+      environment:
+        type: string
+        default: production
+      timeout_minutes:
+        type: number
+        default: 15
+      aws_region:
+        type: string
+        default: ''
+      aws_release_role:
+        type: string
+        default: ''
+      gcp_project:
+        type: string
+        default: ''
+      gcp_workload_identity_provider:
+        type: string
+        default: ''
+      gcp_release_service_account:
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  command:
+    name: ${{ inputs.operation }} on ${{ inputs.installation }}
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    concurrency:
+      group: selfhost-command-${{ github.repository }}-${{ inputs.installation }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NAME: ${{ inputs.installation }}
+      OPERATION: ${{ inputs.operation }}
+      SERVICE: ${{ inputs.service }}
+      REQUEST_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check inputs
+        env:
+          CLOUD: ${{ inputs.cloud }}
+        run: |
+          [[ "$NAME" =~ ^[a-z][a-z0-9-]{2,23}$ ]] || { echo "::error::invalid installation name"; exit 1; }
+          [[ "$CLOUD" =~ ^(aws|gcp)$ ]] || { echo "::error::cloud must be aws or gcp"; exit 1; }
+          [[ "$OPERATION" =~ ^(status|diagnostics|logs|backup|restart-service|drain-and-stop)$ ]] ||
+            { echo "::error::unsupported operation; releases use the selfhost-release workflow"; exit 1; }
+          [[ "$SERVICE" =~ ^[a-z-]{0,16}$ ]] || { echo "::error::invalid service"; exit 1; }
+
+      - name: Check out the operator helper
+        uses: actions/checkout@v5
+        with:
+          repository: hot-dev/hot
+          ref: ${{ inputs.hot_version }}
+          path: hot
+          sparse-checkout: infra/operator
+
+      - name: Authenticate to AWS
+        if: inputs.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.aws_release_role }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Authenticate to Google Cloud
+        if: inputs.cloud == 'gcp'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
+          service_account: ${{ inputs.gcp_release_service_account }}
+
+      - name: Run ${{ inputs.operation }}
+        env:
+          CLOUD: ${{ inputs.cloud }}
+          REGION: ${{ inputs.aws_region }}
+          PROJECT: ${{ inputs.gcp_project }}
+          TIMEOUT: ${{ inputs.timeout_minutes }}
+        run: |
+          set -euo pipefail
+          jq -n '{installation: {name: env.NAME, cloud: env.CLOUD, region: env.REGION, project: env.PROJECT}}' > installation.json
+          python3 hot/infra/operator/selfhost.py installation.json --request-id "$REQUEST_ID" \
+            --timeout $(( TIMEOUT * 54 )) --summary "$GITHUB_STEP_SUMMARY" command "$OPERATION" --service "$SERVICE"

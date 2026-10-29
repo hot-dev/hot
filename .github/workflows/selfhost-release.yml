@@ -2,8 +2,10 @@ name: selfhost-release
 
 # Reusable: deploy a Hot release to a self-host installation. It verifies the
 # release manifest's signature, writes the installation's release pointer,
-# asks the host agent to deploy now, and waits for the agent's status. It uses
+# asks the host agent to deploy now, and waits for the agent's report. It uses
 # only cloud control-plane APIs: no SSH, shell, or network access to the host.
+# The pointer, command, and wait are infra/operator/selfhost.py, which
+# operators can also run by hand.
 #
 #   uses: hot-dev/hot/.github/workflows/selfhost-release.yml@v3.0.1
 on:
@@ -23,6 +25,10 @@ on:
       environment:
         type: string
         default: production
+      hot_version:
+        description: Hot tag whose operator helper to use; empty means the release's own tag
+        type: string
+        default: ''
       manifest_base_url:
         description: Where manifests are published; empty means Hot's GitHub releases
         type: string
@@ -98,34 +104,20 @@ jobs:
           [[ "$(jq -r .release manifest.json)" == "$RELEASE" ]] || { echo "::error::manifest names another release"; exit 1; }
           jq . manifest.json >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Check out the operator helper
+        uses: actions/checkout@v5
+        with:
+          repository: hot-dev/hot
+          ref: ${{ inputs.hot_version || format('v{0}', inputs.release) }}
+          path: hot
+          sparse-checkout: infra/operator
+
       - name: Authenticate to AWS
         if: inputs.cloud == 'aws'
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ inputs.aws_release_role }}
           aws-region: ${{ inputs.aws_region }}
-
-      - name: Release on AWS
-        if: inputs.cloud == 'aws'
-        run: |
-          set -euo pipefail
-          started=$(date -u +%Y-%m-%dT%H:%M:%S)
-          aws ssm put-parameter --name "/hot/$NAME/release" --value "$RELEASE" --type String --overwrite >/dev/null
-          aws ssm send-command --document-name "hot-$NAME-command" \
-            --targets "Key=tag:HotInstallation,Values=$NAME" \
-            --parameters "operation=deploy-now,requestId=$REQUEST_ID" \
-            --comment "Hot $RELEASE" >/dev/null
-          while true; do
-            status=$(aws ssm get-parameter --name "/hot/$NAME/status" --query Parameter.Value --output text)
-            state=$(STARTED="$started" jq -r \
-              'if .release == env.RELEASE and .at >= env.STARTED then .state else "" end' \
-              <<<"$status" 2>/dev/null || true)
-            case "$state" in
-              deployed) echo "Deployed $RELEASE"; jq . <<<"$status" >> "$GITHUB_STEP_SUMMARY"; exit 0 ;;
-              failed) echo "::error::$(jq -r .error <<<"$status")"; exit 1 ;;
-            esac
-            sleep 20
-          done
 
       - name: Authenticate to Google Cloud
         if: inputs.cloud == 'gcp'
@@ -134,23 +126,14 @@ jobs:
           workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
           service_account: ${{ inputs.gcp_release_service_account }}
 
-      - name: Release on Google Cloud
-        if: inputs.cloud == 'gcp'
+      - name: Release
         env:
+          CLOUD: ${{ inputs.cloud }}
+          REGION: ${{ inputs.aws_region }}
           PROJECT: ${{ inputs.gcp_project }}
+          TIMEOUT: ${{ inputs.timeout_minutes }}
         run: |
           set -euo pipefail
-          started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          printf '{"release":"%s"}' "$RELEASE" |
-            gcloud secrets versions add "hot-$NAME-release" --project "$PROJECT" --data-file=- >/dev/null
-          gcloud pubsub topics publish "hot-$NAME-commands" --project "$PROJECT" \
-            --message "{\"operation\":\"deploy-now\",\"request_id\":\"$REQUEST_ID\"}" >/dev/null
-          while true; do
-            state=$(gcloud logging read --project "$PROJECT" --limit 1 --format 'value(jsonPayload.state,jsonPayload.error)' \
-              "logName=\"projects/$PROJECT/logs/hot-$NAME-status\" AND jsonPayload.release=\"$RELEASE\" AND timestamp>=\"$started\"" || true)
-            case "$state" in
-              deployed*) echo "Deployed $RELEASE"; exit 0 ;;
-              failed*) echo "::error::${state#failed}"; exit 1 ;;
-            esac
-            sleep 20
-          done
+          jq -n '{installation: {name: env.NAME, cloud: env.CLOUD, region: env.REGION, project: env.PROJECT}}' > installation.json
+          python3 hot/infra/operator/selfhost.py installation.json --request-id "$REQUEST_ID" \
+            --timeout $(( TIMEOUT * 54 )) --summary "$GITHUB_STEP_SUMMARY" release "$RELEASE"

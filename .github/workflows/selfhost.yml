@@ -9,7 +9,7 @@ on:
     paths:
       - 'infra/**'
       - 'resources/db/**'
-      - '.github/workflows/selfhost.yml'
+      - '.github/workflows/selfhost*.yml'
   workflow_dispatch:
 
 permissions:

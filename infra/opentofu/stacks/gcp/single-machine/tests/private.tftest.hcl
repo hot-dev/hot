@@ -293,7 +293,7 @@ run "backups_and_alerts" {
     error_message = "The host may only list snapshots."
   }
   assert {
-    condition     = google_monitoring_metric_descriptor.hot["agent_heartbeat"].type == "custom.googleapis.com/hot/hot-example/agent_heartbeat" && length(google_monitoring_alert_policy.hot) == 6
+    condition     = google_monitoring_metric_descriptor.hot["agent_heartbeat"].type == "custom.googleapis.com/hot/hot-example/agent_heartbeat" && length(google_monitoring_alert_policy.hot) == 7
     error_message = "Each installation owns its metric types, and every critical signal has an alert."
   }
   assert {

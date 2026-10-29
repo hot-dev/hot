@@ -72,10 +72,13 @@ class Recorder:
     def __init__(self):
         self.commands = []
         self.ps = ""
+        self.logs = ""
+        self.enddate = "notAfter=Jan 30 12:00:00 2027 GMT\n"
 
     def __call__(self, command, **kwargs):
         self.commands.append(command)
-        stdout = self.ps if "ps" in command else ""
+        stdout = (self.ps if "ps" in command else self.logs if "logs" in command
+                  else self.enddate if command[0] == "openssl" else "")
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     def compose_calls(self):
@@ -85,7 +88,7 @@ class Recorder:
 class AgentHarness(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        roots = {name: Path(self.tmp.name) / name for name in ("releases", "secrets", "etc")}
+        roots = {name: Path(self.tmp.name) / name for name in ("releases", "secrets", "etc", "host")}
         roots["data"] = Path(self.tmp.name)
         self.config = installation()
         self.cloud = FakeCloud()
@@ -367,7 +370,7 @@ class Monitoring(AgentHarness):
         metrics = self.agent.observe(probe=lambda host, path: 200, now=self.NOW)
         self.assertEqual({k: v[0] for k, v in metrics.items() if k != "DataDiskUsedPercent"}, {
             "AgentHeartbeat": 1, "UnhealthyServices": 0, "SchedulerRunning": 1, "DependenciesReachable": 1,
-            "Ready": 1, "BackupAgeHours": 5})
+            "Ready": 1, "BackupAgeHours": 5, "CertificateDaysLeft": 93})
         self.assertTrue(0 <= metrics["DataDiskUsedPercent"][0] <= 100)
 
     def test_failures_show_up_in_the_metrics(self):
@@ -460,6 +463,130 @@ class Commands(AgentHarness):
         self.run.commands.clear()
         self.agent.command("drain-and-stop")
         self.assertEqual(self.run.compose_calls()[0], "stop scheduler")
+
+
+class Diagnostics(AgentHarness):
+    def setUp(self):
+        super().setUp()
+        self.agent.reconcile()
+        self.run.ps = "\n".join(json.dumps({
+            "Service": name, "State": "running", "Health": "", "Status": "Up 2 hours", "ExitCode": 0,
+            "Image": "registry.example.com/hot@sha256:" + "a" * 64}) for name in (*agent_module.HOT_SERVICES, "ingress"))
+        (Path(self.tmp.name) / "host").mkdir()
+        (Path(self.tmp.name) / "host/versions.json").write_text(json.dumps({"kata": "3.21.0", "image": "hot-host-3.0.1"}))
+        self.generated = self.cloud.secrets[GENERATED]
+
+    def assert_no_secrets(self, report):
+        text = json.dumps(report)
+        for value in [*self.generated.values(), *TLS.values()]:
+            self.assertNotIn(value, text)
+
+    def test_the_bundle_describes_the_installation_without_secrets(self):
+        self.config["public_certificate_arn"] = "arn:aws:acm:us-east-1:123456789012:certificate/0123"
+        report = self.agent.command("diagnostics", request_id="req-1")
+        bundle = report["diagnostics"]
+        self.assertEqual(report["request_id"], "req-1")
+        self.assertEqual(bundle["versions"]["release"], "3.0.1")
+        self.assertEqual(bundle["versions"]["host"]["kata"], "3.21.0")
+        self.assertEqual(bundle["services"]["app"]["image"], "sha256:aaaaaaaaaaaa")
+        self.assertEqual(bundle["configuration"]["secret_references"], "[reference]")
+        self.assertEqual(bundle["configuration"]["admin_email"], "[email]@example.com")
+        self.assertEqual(bundle["configuration"]["status_reference"], "[reference]")
+        self.assertEqual(bundle["configuration"]["public_certificate_arn"], "arn:aws:acm:us-east-1:****9012:certificate/0123")
+        self.assertEqual(bundle["configuration"]["app_hostname"], self.config["app_hostname"])
+        self.assertEqual(bundle["environment"]["app"]["HOT_ENV"], "production")
+        self.assertGreater(bundle["health"]["CertificateDaysLeft"], 0)
+        self.assertEqual([d["mode"] for d in bundle["dependencies"]], ["local", "local"])
+        self.assert_no_secrets(report)
+
+    def test_the_bundle_works_before_the_first_deploy(self):
+        self.agent.save_state({})
+        bundle = self.agent.command("diagnostics")["diagnostics"]
+        self.assertNotIn("services", bundle)
+        self.assertEqual(bundle["health"]["AgentHeartbeat"], 1)
+
+    def test_logs_are_redacted_and_bounded(self):
+        secret = self.generated["HOT_APP_SESSION_SECRET"]
+        noisy = [f"app-1  | 2026-10-29T12:00:00Z line {i} " + "x" * 400 for i in range(400)]
+        self.run.logs = "\n".join(noisy + [
+            f"app-1  | session {secret}",
+            "app-1  | connecting to postgres://hot_runtime:hunter2hunter2@db.internal:5432/hot",
+            "app-1  | Authorization: Bearer abc.def.ghi from ada@example.com",
+            'app-1  | {"api_key":"hot_0123456789abcdef0123456789abcdef_abcdef","password":"pw"}',
+        ])
+        report = self.agent.command("logs", service="app")
+        lines = report["logs"]
+        self.assertEqual(self.run.compose_calls()[-1], "logs --no-color --timestamps --tail 200 app")
+        self.assertLessEqual(len(lines), agent_module.LOG_LINES)
+        self.assertLessEqual(sum(len(line) for line in lines), agent_module.LOG_CHARS)
+        tail = "\n".join(lines[-4:])
+        for leaked in (secret, "hunter2hunter2", "abc.def.ghi", "ada@", "0123456789abcdef", '"pw"'):
+            self.assertNotIn(leaked, tail)
+        self.assertIn("postgres://[credentials]@db.internal", tail)
+
+    def test_logs_only_for_known_services(self):
+        with self.assertRaisesRegex(agent_module.AgentError, "Unknown service"):
+            self.agent.command("logs", service="app; id")
+        self.config["data"] = {"postgres": {"mode": "existing"}}
+        with self.assertRaisesRegex(agent_module.AgentError, "Unknown service"):
+            self.agent.command("logs", service="postgres")
+        self.agent.command("logs", service="valkey")
+
+    def test_an_unreadable_certificate_alarms(self):
+        self.run.enddate = "garbage"
+        self.assertEqual(self.agent.observe(probe=lambda host, path: 200)["CertificateDaysLeft"][0], 0)
+
+
+class Reports(AgentHarness):
+    def test_deploys_answer_their_request(self):
+        report = self.agent.command("deploy-now", request_id="gha-1-1")
+        self.assertEqual((report["state"], report["request_id"]), ("deployed", "gha-1-1"))
+        report = self.agent.command("deploy-now", service="none", request_id="gha-2-1")
+        self.assertEqual((report["state"], report["release"], report["request_id"]), ("current", "3.0.1", "gha-2-1"))
+
+    def test_aws_logs_the_full_report_and_keeps_a_summary(self):
+        calls = []
+        streams = set()
+
+        def call(service, target, payload):
+            calls.append((target, payload))
+            if target.endswith("PutLogEvents") and payload["logStreamName"] not in streams:
+                raise agent_module.AgentError(f"{target} failed: ResourceNotFoundException")
+            if target.endswith("CreateLogStream"):
+                streams.add(payload["logStreamName"])
+            return {}
+        aws = agent_module.Aws("us-east-1", "/hot/hot-example")
+        aws.call = call
+        aws.put_status("arn:aws:ssm:us-east-1:1:parameter/hot/hot-example/status",
+                       {"state": "logs", "request_id": "r1", "logs": ["line"] * 500})
+        targets = [target for target, _ in calls]
+        self.assertEqual(targets, ["Logs_20140328.PutLogEvents", "Logs_20140328.CreateLogStream",
+                                   "Logs_20140328.PutLogEvents", "AmazonSSM.PutParameter"])
+        logged = json.loads(calls[2][1]["logEvents"][0]["message"])
+        self.assertEqual(len(logged["logs"]), 500)
+        self.assertEqual(calls[2][1]["logGroupName"], "/hot/hot-example")
+        summary = json.loads(calls[3][1]["Value"])
+        self.assertEqual(summary, {"state": "logs", "request_id": "r1"})
+
+
+class Redaction(unittest.TestCase):
+    def test_known_values_and_credential_shapes(self):
+        redact = agent_module.Redactor(["s3cr3t-value-0001", "rediss://:t%2Fok3n-value@cache:6379"])
+        cases = {
+            "x s3cr3t-value-0001 y": "x [secret] y",
+            "token t/ok3n-value": "token [secret]",
+            "postgres://u:p@h/db": "postgres://[credentials]@h/db",
+            "AKIAABCDEFGHIJKLMNOP": "[access key]",
+            "SMTP_PASSWORD=abc HOT_DB_URI_FILE=/run/secrets/HOT_DB_URI":
+                "SMTP_PASSWORD=[redacted] HOT_DB_URI_FILE=/run/secrets/HOT_DB_URI",
+            "arn:aws:iam::123456789012:role/x": "arn:aws:iam::****9012:role/x",
+            "-----BEGIN RSA PRIVATE KEY-----\nabc": "[private key]",
+        }
+        for text, expected in cases.items():
+            self.assertEqual(redact(text), expected, text)
+
+    def test_short_values_are_left_to_the_patterns(self):
+        self.assertEqual(agent_module.Redactor(["abc"]).values, [])
 
 
 class AwsSigning(unittest.TestCase):
