@@ -24,6 +24,19 @@ def manifest():
                        for name in renderer.IMAGES}}
 
 
+def contract_output(tfvars):
+    """The installation as the stacks hand it to the host: the contract fills
+    in every optional field, so the renderer sees the full shape."""
+    tofu = shutil.which("tofu")
+    if not tofu:
+        raise unittest.SkipTest("tofu is not installed")
+    result = subprocess.run(
+        [tofu, "-chdir=" + str(ROOT / "opentofu/modules/single-machine-contract"), "console",
+         "-var-file=" + str(tfvars)],
+        input="jsonencode(var.installation)\n", capture_output=True, text=True, check=True)
+    return json.loads(json.loads(result.stdout.strip().splitlines()[-1]))
+
+
 class RuntimeContract(unittest.TestCase):
     def test_both_clouds_accept_local_and_existing_s3(self):
         for cloud in ("aws", "gcp"):
@@ -108,6 +121,22 @@ class RuntimeContract(unittest.TestCase):
             renderer.validate(dict(config, settings={"HOT_EMAIL_SMTP_PASSWORD": "x"}))
         with self.assertRaisesRegex(ValueError, "set by the runtime bundle"):
             renderer.render(dict(config, settings={"HOT_ENGINE_ISOLATION": "false"}), manifest(), "/data", "/run/hot/secrets")
+
+    def test_the_contract_output_renders(self):
+        sources = [*(ROOT / "examples" / f"{name}.json" for name in ("aws-local", "aws-existing-s3", "gcp-local", "gcp-existing-s3")),
+                   ROOT / "github/example-operator-repo/installation/installation.tfvars.json"]
+        for source in sources:
+            with self.subTest(source=source.name):
+                config = contract_output(source)
+                stack = {"aws": {"data_volume_id": "vol-0abc",
+                                 "release_pointer": "arn:aws:ssm:us-east-1:123456789012:parameter/hot/x/release",
+                                 "secret_references": {"generated": "arn:aws:secretsmanager:us-east-1:123456789012:secret:g",
+                                                       "operator": "arn:aws:secretsmanager:us-east-1:123456789012:secret:o"}},
+                         "gcp": {"data_volume_id": "projects/p/zones/z/disks/d", "release_pointer": "projects/p/secrets/r",
+                                 "command_subscription": "projects/p/subscriptions/c",
+                                 "secret_references": {"generated": "projects/p/secrets/g", "operator": "projects/p/secrets/o"}}}
+                config.update(stack[config["cloud"]], status_reference="status")
+                renderer.render(config, manifest(), "/data", "/run/hot/secrets")
 
     def test_allocations_grow_with_size_and_fit_the_vm(self):
         previous = None
