@@ -40,17 +40,13 @@ async fn run_check_compilation(conf: &Val, global_options: &GlobalOptions) -> Re
     scan_cli_inputs(conf, global_options, &src_paths, &test_paths)?;
 
     let color = hot::env::is_local_dev();
-    let mut warnings = hot_lang::lang::errors::CompilerErrors::new();
-    let unit_cache = hot::lang::engine::discover::unit_cache();
-    hot_lang::check::check_project_text(
+    let mut warnings = hot::lang::errors::CompilerErrors::new();
+    hot::lang::engine::Engine::check_sources_pipeline_with_context_warnings(
         &src_paths,
         &test_paths,
-        &hot::lang::engine::Engine::check_options(
-            Some(conf),
-            Some(&project_name),
-            None,
-            &unit_cache,
-        ),
+        Some(conf),
+        Some(&project_name),
+        None,
         color,
         Some(&mut warnings),
     )?;
@@ -109,16 +105,11 @@ pub(crate) async fn run_check_watch(
             .project
             .clone()
             .unwrap_or_else(|| hot::project::get_default_project_name(conf));
-        let unit_cache = hot::lang::engine::discover::unit_cache();
-        let errors = hot_lang::check::check_project(
+        let errors = hot::lang::engine::Engine::check_sources_pipeline_diagnostics(
             &src_paths,
             &test_paths,
-            &hot::lang::engine::Engine::check_options(
-                Some(conf),
-                Some(&project_name),
-                None,
-                &unit_cache,
-            ),
+            Some(conf),
+            Some(&project_name),
         );
         let diagnostics = errors.to_diagnostics();
         let serialized = if json_min {
@@ -298,16 +289,12 @@ pub(crate) async fn run_check_with_raw(
             .as_ref()
             .map(|cs| cs.keys().cloned().collect())
             .unwrap_or_default();
-        let unit_cache = hot::lang::engine::discover::unit_cache();
-        let errors = hot_lang::check::check_project(
+        let errors = hot::lang::engine::Engine::check_sources_pipeline_diagnostics_with_ctx(
             &src_paths,
             &test_paths,
-            &hot::lang::engine::Engine::check_options(
-                Some(conf),
-                Some(&project_name),
-                Some(&available_ctx_keys),
-                &unit_cache,
-            ),
+            Some(conf),
+            Some(&project_name),
+            Some(&available_ctx_keys),
         );
         let diagnostics = errors.to_diagnostics();
         let serialized = if fmt == "json-min" {
@@ -326,20 +313,13 @@ pub(crate) async fn run_check_with_raw(
     // and rendered on success without failing the check unless
     // `--check.deny-warnings` is set.
     let color = hot::env::is_local_dev();
-    let mut warnings = hot_lang::lang::errors::CompilerErrors::new();
-    let available_ctx_keys: Option<ahash::AHashSet<String>> = context_storage
-        .as_ref()
-        .map(|cs| cs.keys().cloned().collect());
-    let unit_cache = hot::lang::engine::discover::unit_cache();
-    match hot_lang::check::check_project_text(
+    let mut warnings = hot::lang::errors::CompilerErrors::new();
+    match hot::lang::engine::Engine::check_sources_pipeline_with_context_warnings(
         &src_paths,
         &test_paths,
-        &hot::lang::engine::Engine::check_options(
-            Some(conf),
-            Some(&project_name),
-            available_ctx_keys.as_ref(),
-            &unit_cache,
-        ),
+        Some(conf),
+        Some(&project_name),
+        context_storage.as_ref(),
         color,
         Some(&mut warnings),
     ) {

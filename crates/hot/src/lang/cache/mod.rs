@@ -5,9 +5,9 @@
 //! * [`unit_cache`]     — per-source-unit cache entries and invalidation.
 //! * [`ast_cache`]      — pre-built `HotAst` caching for fast cached execution.
 
-pub use hot_lang::lang::cache::ast_cache;
+pub mod ast_cache;
 pub mod bytecode_cache;
-pub use hot_lang::lang::cache::paths;
+pub mod paths;
 pub mod unit_cache;
 
 /// How long an untouched cache file survives before opportunistic pruning.

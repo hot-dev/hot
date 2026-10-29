@@ -230,7 +230,53 @@ pub fn pure_op(name: &str) -> Option<PureOpDescriptor> {
         .copied()
 }
 
-pub use hot_lang::lang::natives::is_pure_native;
+/// Whether a native may run inside a `where` predicate: deterministic and
+/// free of side effects. Anything not listed is denied, including clocks,
+/// randomness, environment and context, files, stores, HTTP, events, tasks
+/// and sockets. Higher-order collection functions are allowed because the VM
+/// checks the natives their callbacks reach.
+pub fn is_pure_native(name: &str) -> bool {
+    const PURE_NAMESPACES: &[&str] = &[
+        "::hot::base64",
+        "::hot::bit",
+        "::hot::bool",
+        "::hot::bytes",
+        "::hot::cmp",
+        "::hot::coll",
+        "::hot::hash",
+        "::hot::hex",
+        "::hot::hmac",
+        "::hot::iter",
+        "::hot::json",
+        "::hot::map",
+        "::hot::math",
+        "::hot::md",
+        "::hot::meta",
+        "::hot::mime",
+        "::hot::regex",
+        "::hot::str",
+        "::hot::time",
+        "::hot::type",
+        "::hot::uri",
+        "::hot::xml",
+    ];
+    let Some((namespace, function)) = name.rsplit_once('/') else {
+        return false;
+    };
+    // `call` invokes a function value; the VM checks what that reaches.
+    if namespace == "::hot::lang" {
+        return matches!(function, "call" | "call-internal");
+    }
+    if !PURE_NAMESPACES.contains(&namespace) {
+        return false;
+    }
+    !(function.starts_with("rand")
+        || function.starts_with("now")
+        || matches!(
+            (namespace, function),
+            ("::hot::coll", "pmap") | ("::hot::time", "since") | ("::hot::time", "until")
+        ))
+}
 
 pub type HotLibMap = ahash::AHashMap<String, HotLibFn>;
 
@@ -1925,27 +1971,4 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
 
         map
     })
-}
-
-#[cfg(test)]
-mod native_names_tests {
-    /// The compiler resolves `call-lib` targets against `hot_lang`'s list of
-    /// native names, so that list must name exactly the functions this table
-    /// implements.
-    #[test]
-    fn hot_lang_native_names_match_the_function_table() {
-        let table: std::collections::BTreeSet<&str> =
-            super::get_hotlib_map().keys().map(String::as_str).collect();
-        let listed: std::collections::BTreeSet<&str> = hot_lang::lang::natives::NATIVE_FUNCTIONS
-            .iter()
-            .copied()
-            .collect();
-        let missing: Vec<_> = table.difference(&listed).collect();
-        let extra: Vec<_> = listed.difference(&table).collect();
-        assert!(
-            missing.is_empty() && extra.is_empty(),
-            "update NATIVE_FUNCTIONS in crates/hot_lang/src/lang/natives.rs: \
-             missing {missing:?}, no longer implemented {extra:?}"
-        );
-    }
 }

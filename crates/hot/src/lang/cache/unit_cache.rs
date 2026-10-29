@@ -55,7 +55,53 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub use hot_lang::lang::cache::unit::{CompilationUnit, UnitStore};
+/// A compilation unit (package or source path)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CompilationUnit {
+    /// A package from dependencies (e.g., "hot-std", "openai")
+    Package { name: String, path: PathBuf },
+    /// A source path from the project (e.g., "src/main", "src/test")
+    SourcePath { name: String, path: PathBuf },
+}
+
+impl CompilationUnit {
+    /// Get a unique identifier for this compilation unit
+    pub fn id(&self) -> String {
+        match self {
+            CompilationUnit::Package { name, .. } => format!("pkg-{}", name),
+            CompilationUnit::SourcePath { name, .. } => format!("src-{}", name),
+        }
+    }
+
+    /// Get a filesystem-safe identifier (no special chars)
+    pub fn fs_safe_id(&self) -> String {
+        self.id().replace(['/', '\\', ':'], "-").replace('.', "_")
+    }
+
+    /// Filesystem-safe identity for this unit *at this location*.
+    ///
+    /// The plain `fs_safe_id` is only the unit's name, which is ambiguous in
+    /// the machine-shared package cache: two monorepos can each have a local
+    /// dependency called `mylib`. Appending a hash of the resolved path scopes
+    /// every entry (and its lock) to one specific directory, which is what
+    /// makes the generation sweep in `save` safe.
+    pub fn scoped_fs_id(&self) -> String {
+        let path = self
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| self.path().to_path_buf());
+        let digest = crate::hasher::HotHasher::hash_content(path.to_string_lossy().as_bytes());
+        format!("{}-{}", self.fs_safe_id(), &digest[..8])
+    }
+
+    /// Get the path to source files
+    pub fn path(&self) -> &Path {
+        match self {
+            CompilationUnit::Package { path, .. } => path,
+            CompilationUnit::SourcePath { path, .. } => path,
+        }
+    }
+}
 
 /// Cached parsed namespaces for a compilation unit
 /// Note: This struct uses custom serialization via ast_cache module
@@ -399,20 +445,6 @@ impl std::fmt::Display for CacheStats {
             self.source_entries,
             self.total_bytes as f64 / 1024.0 / 1024.0
         )
-    }
-}
-
-impl UnitStore for UnitCache {
-    fn load(&self, unit: &CompilationUnit) -> Result<Option<IndexMap<NsPath, Namespace>>, String> {
-        UnitCache::load(self, unit).map(|cached| cached.map(|cached| cached.namespaces))
-    }
-
-    fn save(
-        &self,
-        unit: &CompilationUnit,
-        namespaces: &IndexMap<NsPath, Namespace>,
-    ) -> Result<(), String> {
-        UnitCache::save(self, unit, namespaces)
     }
 }
 

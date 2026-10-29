@@ -6,6 +6,7 @@
 
 use crate::lang::bytecode::{NamespaceRegistry, VariableInfo, VariableType};
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
+use crate::lang::hot::libmap::get_hotlib_functions;
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 
@@ -32,7 +33,7 @@ impl Default for UnifiedResolver {
 
 impl UnifiedResolver {
     pub fn new() -> Self {
-        let hotlib_functions = native_function_names();
+        let hotlib_functions = get_hotlib_functions().into_iter().collect();
 
         Self {
             namespace_registry: NamespaceRegistry::new(),
@@ -46,7 +47,7 @@ impl UnifiedResolver {
     /// Create a UnifiedResolver with an existing NamespaceRegistry
     /// This allows access to core variables extracted by the compiler
     pub fn with_namespace_registry(namespace_registry: NamespaceRegistry) -> Self {
-        let hotlib_functions = native_function_names();
+        let hotlib_functions = get_hotlib_functions().into_iter().collect();
 
         Self {
             namespace_registry,
@@ -63,7 +64,7 @@ impl UnifiedResolver {
         namespace_registry: NamespaceRegistry,
         core_variables: CoreVariableRegistry,
     ) -> Self {
-        let hotlib_functions = native_function_names();
+        let hotlib_functions = get_hotlib_functions().into_iter().collect();
 
         Self {
             namespace_registry,
@@ -362,12 +363,4 @@ impl ResolutionInfo {
             format!("resolved via: {}", parts.join(", "))
         }
     }
-}
-
-/// The native function names, as the owned set the resolver keeps.
-fn native_function_names() -> AHashSet<String> {
-    crate::lang::natives::NATIVE_FUNCTIONS
-        .iter()
-        .map(|name| name.to_string())
-        .collect()
 }

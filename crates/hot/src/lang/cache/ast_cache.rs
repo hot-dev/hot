@@ -33,18 +33,6 @@ use crate::val::Val;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-fn encode_bytes_to_base64(bytes: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
-fn decode_base64_to_bytes(base64_str: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD
-        .decode(base64_str)
-        .map_err(|e| format!("Base64 decode error: {}", e))
-}
-
 // =============================================================================
 // Tagged Val - Lossless Val serialization
 // =============================================================================
@@ -99,7 +87,7 @@ impl From<&Val> for TaggedVal {
             Val::Bool(b) => TaggedVal::Bool { v: *b },
             Val::Byte(b) => TaggedVal::Byte { v: *b },
             Val::Bytes(bytes) => TaggedVal::Bytes {
-                v: encode_bytes_to_base64(bytes),
+                v: crate::lang::hot::base64::encode_bytes_to_base64(bytes),
             },
             Val::Vec(vec) => TaggedVal::Vec {
                 v: vec.iter().map(TaggedVal::from).collect(),
@@ -147,7 +135,7 @@ impl TryFrom<TaggedVal> for Val {
             TaggedVal::Bool { v } => Ok(Val::Bool(v)),
             TaggedVal::Byte { v } => Ok(Val::Byte(v)),
             TaggedVal::Bytes { v } => {
-                let bytes = decode_base64_to_bytes(&v)
+                let bytes = crate::lang::hot::base64::decode_base64_to_bytes(&v)
                     .map_err(|e| format!("Failed to decode base64: {}", e))?;
                 Ok(Val::Bytes(bytes))
             }
@@ -1955,7 +1943,7 @@ named Greeting(text: greeting)
         let program = crate::lang::parser::parse_hot_file(source, "canary.hot")
             .expect("canary source must parse");
         let serialized = serialize_namespaces(&program.namespaces).unwrap();
-        let hash = blake3::hash(&serialized).to_hex().to_string();
+        let hash = crate::hasher::HotHasher::hash_content(&serialized);
 
         let expected = "7f68ab49c94c52c1e36e333aee0387720d051e906e569eb1abc1f8de18b4d7c0";
         assert_eq!(
