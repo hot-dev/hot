@@ -901,6 +901,15 @@ impl Compiler {
                             // Default constructor takes 1 argument (the map/value to construct from)
                             let arity_name = format!("{}/1", qualified_type_name);
                             self.known_functions.insert(arity_name);
+                        } else if type_def.variants.is_none() {
+                            // A type with neither fields nor constructors (a
+                            // `where` type, a literal union, a marker) compiles a
+                            // default constructor too, so `::ns/Port` from another
+                            // namespace is its function, as `Port` is in its own.
+                            self.known_functions.insert(qualified_type_name.clone());
+                            type_constructor_count += 1;
+                            let arity_name = format!("{}/1", qualified_type_name);
+                            self.known_functions.insert(arity_name);
                         }
 
                         // Enum variant constructors (defined with `enum { Ok(Any), Err(Any) }`)

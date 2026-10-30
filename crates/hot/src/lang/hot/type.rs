@@ -986,10 +986,16 @@ pub fn is_type(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
             }
         }
 
-        // Map-based type references or type descriptors
+        // Map-based type references or type descriptors. A var import of a
+        // type (`D ::hot::time/PlainDate`) is a FunctionAlias naming it.
         Val::Map(map) => {
             if let Some(Val::Str(type_str)) = map.get(&Val::from("$type")) {
-                (**type_str).to_owned()
+                match map.get(&Val::from("$target")) {
+                    Some(Val::Str(target)) if &**type_str == "::hot::type/FunctionAlias" => {
+                        (**target).to_owned()
+                    }
+                    _ => (**type_str).to_owned(),
+                }
             } else if let Some(Val::Str(fnref)) = map.get(&Val::from("$fnref")) {
                 (**fnref).to_owned()
             } else {

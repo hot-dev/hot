@@ -299,6 +299,10 @@ Ring type { inner: Dec, outer: Dec }
 Form enum { Round(::geo/Circle), Band(Ring) }   // a qualified payload type
 ```
 
+An import of any type (`Port ::net/Port`) stands for it wherever its full path
+would: in an annotation, with `is-type`, and as a function value, as in
+`map-vals(settings, Port)`.
+
 An alias of a variant with a payload is its constructor. An alias of a unit variant is the variant's value.
 
 ### Type-Level and Variant-Level Matching
