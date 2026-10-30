@@ -5778,13 +5778,30 @@ impl VirtualMachine {
 
         // 1. FULLY QUALIFIED NAMES - Direct lookup in function_mapping
         if function_name.starts_with("::") {
-            // Try exact match first
+            // Try exact match first. The bare name of a type's constructors
+            // holds just one of them, so pick the overload the arguments fit,
+            // as a direct call does: `PlainDate` called as a function value
+            // with a string parses it rather than reading the clock.
             if let Some(&function_id) = self.function_mapping.get(function_name) {
                 tracing::trace!(
                     "✅ VM: Found fully qualified function '{}' with ID {}",
                     function_name,
                     function_id
                 );
+                let fits = self
+                    .program
+                    .functions
+                    .get(function_id as usize)
+                    .is_some_and(|info| info.is_variadic || info.arity as usize == args.len());
+                let function_id = if fits {
+                    function_id
+                } else {
+                    self.find_best_function_overload(function_name, args)
+                        .unwrap_or(function_id)
+                };
+                let function_id = self
+                    .overload_for_args(function_id, args)
+                    .unwrap_or(function_id);
                 return self.execute_user_function_cached(cache_key, function_id, args);
             } else {
                 tracing::trace!(
