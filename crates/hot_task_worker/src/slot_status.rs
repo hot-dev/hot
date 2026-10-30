@@ -64,8 +64,14 @@ mod tests {
 
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(written["code"], serde_json::json!({"slots": 500, "busy": 3}));
-        assert_eq!(written["containers"], serde_json::json!({"slots": 8, "busy": 2}));
+        assert_eq!(
+            written["code"],
+            serde_json::json!({"slots": 500, "busy": 3})
+        );
+        assert_eq!(
+            written["containers"],
+            serde_json::json!({"slots": 8, "busy": 2})
+        );
         assert_eq!(written["memory_mb"], 8192);
         assert_eq!(written["memory_used_mb"], 1024);
         assert!(written["time"].as_u64().unwrap() > 1_700_000_000);
