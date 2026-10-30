@@ -409,8 +409,8 @@ run "provisioned_buckets" {
     error_message = "Provisioned buckets are private, IAM-only, and never emptied on destroy."
   }
   assert {
-    condition     = google_storage_bucket.storage["acme-hot-builds"].versioning[0].enabled && length(google_storage_bucket.storage["acme-hot-builds"].lifecycle_rule) == 2
-    error_message = "Versions are kept for a while and abandoned uploads are cleaned up."
+    condition     = google_storage_bucket.storage["acme-hot-builds"].versioning[0].enabled && length(google_storage_bucket.storage["acme-hot-builds"].lifecycle_rule) == 3 && contains(flatten([for rule in google_storage_bucket.storage["acme-hot-builds"].lifecycle_rule : [for c in rule.condition : coalesce(c.matches_prefix, [])]]), "builds/.uploads/")
+    error_message = "Versions are kept for a while, and abandoned uploads, including Hot's staged parts, are cleaned up."
   }
   assert {
     condition     = google_storage_bucket_iam_member.storage["build"].bucket == "acme-hot-builds" && strcontains(google_storage_bucket_iam_member.storage["build"].condition[0].expression, "/objects/builds/")

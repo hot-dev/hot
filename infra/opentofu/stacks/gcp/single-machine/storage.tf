@@ -7,7 +7,7 @@ locals {
   # Both roles may share one bucket; the contract makes their settings agree.
   provisioned_buckets = { for name, roles in {
     for s in [local.config.storage.build, local.config.storage.file] : s.bucket => s... if s.backend == "gcs" && s.provision
-  } : name => roles[0] }
+  } : name => merge(roles[0], { staging = [for s in roles : "${trim(s.prefix, "/")}/.uploads/"] }) }
 }
 resource "google_storage_bucket" "storage" {
   for_each                    = local.provisioned_buckets
@@ -35,6 +35,17 @@ resource "google_storage_bucket" "storage" {
     }
     action {
       type = "AbortIncompleteMultipartUpload"
+    }
+  }
+  # Hot stages multipart uploads as objects under <prefix>/.uploads/, which
+  # holds nothing committed; a week-old part belongs to an abandoned upload.
+  lifecycle_rule {
+    condition {
+      age            = 7
+      matches_prefix = each.value.staging
+    }
+    action {
+      type = "Delete"
     }
   }
   lifecycle { prevent_destroy = true }

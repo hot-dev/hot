@@ -251,6 +251,25 @@ class Deploy(AgentHarness):
         self.assertNotIn("SECRET", json.dumps(status))
 
 
+class DataDirectories(AgentHarness):
+    def test_the_first_deploy_creates_what_the_bundle_mounts(self):
+        owners = []
+        self.agent.chown = lambda path, uid, gid: owners.append((Path(path).name, uid))
+        self.agent.reconcile()
+        data = Path(self.tmp.name) / "data"
+        mounted = {Path(volume["source"]).name for service in self.compose()["services"].values()
+                   for volume in service.get("volumes", [])
+                   if volume.get("type") == "bind" and volume["source"].startswith("/var/lib/hot/data/")
+                   and volume["target"] != "/move"}
+        self.assertEqual(mounted, {"postgres", "valkey", "build", "file"})
+        self.assertTrue(all((data / name).is_dir() for name in mounted))
+        self.assertIn(("build", 10001), owners)
+        self.assertIn(("file", 10001), owners)
+
+    def compose(self):
+        return json.loads(next(Path(self.tmp.name, "releases").glob("*/bundle/compose.json")).read_text())
+
+
 class Secrets(AgentHarness):
     def test_each_role_receives_only_its_own_files(self):
         self.cloud.secrets[OPERATOR].update(HOT_EMAIL_SMTP_PASSWORD="smtp", HOT_GOOGLE_CLIENT_SECRET="oauth")

@@ -79,7 +79,8 @@ DETAIL_KEYS = ("diagnostics", "logs")
 BOX_POOL_GB = {"small": 40, "medium": 100, "large": 200}
 # Container users that read their secret files.
 SECRET_OWNERS = {"postgres": 999, "valkey": 999}
-# The user the bundle's one-off jobs run as (see the renderer).
+# The user Hot's services and the bundle's one-off jobs run as (see the
+# renderer).
 JOB_USER = 10001
 # Deploy records kept in releases/history.json, and pre-upgrade dumps kept.
 HISTORY = 20
@@ -819,6 +820,17 @@ class Agent:
         if first_install or self.config.get("data_disk") == "scratch":
             command.append("--allow-format")
         self.run_command(command)
+        # The bundle bind-mounts these, and Docker does not create them.
+        # PostgreSQL and Valkey own theirs from their own entrypoints; Hot's
+        # services write local builds and files as JOB_USER.
+        data = self.data_root / "data"
+        for service in ("postgres", "valkey"):
+            if render.data_mode(self.config, service) == "local":
+                (data / service).mkdir(parents=True, exist_ok=True)
+        for role, storage in self.config["storage"].items():
+            if storage["backend"] == "local":
+                (data / role).mkdir(parents=True, exist_ok=True)
+                self.chown(data / role, JOB_USER, JOB_USER)
         self.etc.mkdir(parents=True, exist_ok=True)
         (self.etc / "host.env").write_text(f"HOT_BOX_POOL_GB={BOX_POOL_GB[self.config.get('size', 'small')]}\n")
         deny = [render.RUNTIME_SUBNET]
