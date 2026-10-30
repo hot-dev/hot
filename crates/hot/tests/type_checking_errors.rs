@@ -2410,6 +2410,119 @@ mod integration_tests {
         );
     }
 
+    /// A var import of another namespace's type (`Port ::a/Port`) resolves
+    /// as the full path does, through a namespace alias and an import of an
+    /// import too: a refinement accepts its base type and refuses a literal
+    /// its constraint rejects.
+    #[test]
+    fn test_imported_refinement_types_resolve_as_their_full_path() {
+        let declarations = r#"
+            ::a ns
+            Port type Int where gt(%, 0)
+            Name type Str where gt(length(%), 0)
+
+            ::c ns
+            ::x ::a
+            Port ::a/Port
+            Name ::x/Name
+            g fn (p: Port): Int { p }
+            gn fn (n: Name): Str { n }
+            g-full fn (p: ::a/Port): Int { p }
+
+            ::d ns
+            P ::c/Port
+            h fn (p: P): Int { p }
+        "#;
+
+        let passing = format!(
+            r#"{declarations}
+            ::calls ns
+            port ::c/g(5)
+            name ::c/gn("x")
+            chained ::d/h(5)
+            in-body fn (): Int {{ ::c/g(5) }}
+            "#
+        );
+        let errors = compile_and_get_type_errors(&passing);
+        assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+
+        let failing = format!(
+            r#"{declarations}
+            ::calls ns
+            Port ::a/Port
+            port ::c/g(0)
+            full ::c/g-full(0)
+            name ::c/gn("")
+            chained ::d/h(0)
+            binding: Port 0
+            "#
+        );
+        let found = violations(&failing);
+        assert_eq!(
+            found.len(),
+            5,
+            "Each failing literal is a constraint-violation. Got: {:?}",
+            found
+        );
+        assert_eq!(
+            found
+                .iter()
+                .filter(|m| m.contains("0 fails `Port`"))
+                .count(),
+            3
+        );
+        assert!(found.iter().any(|m| m.contains("0 fails `P` (gt(%, 0))")));
+        assert!(found.iter().any(|m| m.contains("\"\" fails `Name`")));
+    }
+
+    /// An imported type keeps its own fields when another namespace declares
+    /// a type with the same short name.
+    #[test]
+    fn test_imported_type_is_not_a_same_named_type() {
+        let source = r#"
+            ::a ns
+            Identity type { id: Str }
+
+            ::b ns
+            Identity type { name: Str }
+
+            ::c ns
+            Identity ::a/Identity
+            id-of fn (x: Identity): Str { x.id }
+        "#;
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| matches!(w, CompilerError::UnknownField { .. })),
+            "`id` is a field of `::a/Identity`. Got: {:?}",
+            warnings
+        );
+    }
+
+    /// An import of core `Result` is no local `Result`: a match naming
+    /// `Result.Ok` still takes every Ok, whatever another namespace's own
+    /// `Result` declares.
+    #[test]
+    fn test_imported_result_still_names_core_result() {
+        let source = r#"
+            ::other ns
+            Result enum { OkVal, ErrVal }
+
+            ::c ns
+            Result ::hot::type/Result
+            pick fn (): Int {
+                r Result.Ok(1)
+                match r {
+                    Result.Ok => { r }
+                    Result.Err => { 0 }
+                }
+            }
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+    }
+
     /// A parameter's predicate can't use another parameter; the error points
     /// to argument-list preconditions.
     #[test]
@@ -2549,5 +2662,85 @@ mod integration_tests {
             "`or` of Bools is a Bool. Got: {:?}",
             warnings
         );
+    }
+
+    fn impossible_comparisons(source: &str) -> Vec<String> {
+        compile_and_get_warnings(source)
+            .iter()
+            .filter(|w| constraint_code(w) == Some("impossible-comparison"))
+            .map(|w| w.to_string())
+            .collect()
+    }
+
+    /// `eq` or `ne` between a value of a closed literal union and a literal
+    /// outside it warns: `eq` is always false, `ne` always true. A member,
+    /// `null`, an open union and a plain `Str` don't.
+    #[test]
+    fn test_comparison_with_a_literal_outside_a_closed_union_warns() {
+        let source = r#"
+            ::test ns
+            CausedBy type "company" | "broker"
+            Channel type open "email" | "phone"
+            Order type { caused-by: CausedBy }
+
+            param fn (c: CausedBy): Bool { eq(c, "compnay") }
+            negated fn (c: CausedBy): Bool { ne(c, "compnay") }
+            reversed fn (c: CausedBy): Bool { eq("compnay", c) }
+            nullable fn (c: CausedBy?): Bool { eq(c, "compnay") }
+            binding fn (): Bool {
+                c: CausedBy "company"
+                eq(c, "brokr")
+            }
+            field fn (o: Order): Bool { eq(o.caused-by, "compnay") }
+            inline fn (c: "a" | "b"): Bool { eq(c, "c") }
+            nested fn (c: CausedBy): Int { if(eq(c, 5), 1, 2) }
+
+            member fn (c: CausedBy): Bool { eq(c, "company") }
+            null-check fn (c: CausedBy?): Bool { eq(c, null) }
+            open fn (c: Channel): Bool { eq(c, "fax") }
+            plain fn (s: Str): Bool { eq(s, "compnay") }
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+
+        let found = impossible_comparisons(source);
+        assert_eq!(
+            found.len(),
+            8,
+            "One warning per comparison. Got: {:?}",
+            found
+        );
+        assert!(found.iter().any(|m| m.contains(
+            r#""compnay" isn't one of the values of `CausedBy` ("company" | "broker"), so this `eq` is always false"#
+        )));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("so this `ne` is always true"))
+        );
+        assert!(found.iter().any(|m| m.contains("of `CausedBy?`")));
+        assert!(found.iter().any(|m| m.contains(
+            r#""c" isn't one of the values of `"a" | "b"`, so this `eq` is always false"#
+        )));
+        assert!(found.iter().any(|m| m.contains("5 isn't one of")));
+    }
+
+    /// The union may come from another namespace. A local `eq` that
+    /// shadows the core one isn't checked.
+    #[test]
+    fn test_comparison_check_across_namespaces_and_shadowing() {
+        let source = r#"
+            ::d ns
+            CausedBy type "company" | "broker"
+
+            ::e ns
+            other fn (c: ::d/CausedBy): Bool { eq(c, "compnay") }
+
+            ::f ns
+            eq fn (a: Any, b: Any): Bool { true }
+            shadowed fn (c: ::d/CausedBy): Bool { eq(c, "compnay") }
+        "#;
+        let found = impossible_comparisons(source);
+        assert_eq!(found.len(), 1, "Only `::e/other` warns. Got: {:?}", found);
     }
 }

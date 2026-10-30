@@ -311,6 +311,10 @@ Ring type { inner: Dec, outer: Dec }
 Form enum { Round(::geo/Circle), Band(Ring) }   // a qualified payload type
 ```
 
+An import of any type (`Port ::net/Port`) stands for it wherever its full path
+would: in an annotation, with `is-type`, and as a function value, as in
+`map-vals(settings, Port)`.
+
 An alias of a variant with a payload is its constructor. An alias of a unit variant is the variant's value.
 
 ### Type-Level and Variant-Level Matching
@@ -368,6 +372,10 @@ inline: every member needs an arm, unless a `_`, `Any`, or type arm (such as
 lists the missing values. A nullable subject (`Severity?`) also needs a `null`
 arm. An `open` literal union isn't checked this way, since other declarations
 can add members.
+
+Comparing a closed union's value with a literal outside it, as in
+`eq(severity, "hgih")`, is always false (`ne`: always true), so `hot check`
+warns with `impossible-comparison`. `null` and `open` unions aren't checked.
 
 ```hot
 Severity type "low" | "medium" | "high"

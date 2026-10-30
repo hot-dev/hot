@@ -591,6 +591,11 @@ pub struct TypeChecker {
     /// types — they're variables holding `Value::TypeDef`, looked up by
     /// fully-qualified name.
     qualified_types: AHashMap<String, TypeExpr>,
+    /// Var imports of a type (`::c/Port` for `Port ::a/Port` in `::c`) →
+    /// what the type they name resolves to. Kept apart from
+    /// `qualified_types`, which holds only the types declared in each
+    /// namespace.
+    type_imports: AHashMap<String, TypeExpr>,
     /// Short name → fully-qualified name for any type declared with `core: true`
     /// metadata. Lets unqualified references like `Account` resolve when the
     /// declaration lives in another namespace, the same way the compiler
@@ -708,6 +713,7 @@ impl TypeChecker {
             in_pipe_flow: false,
             known_types: AHashSet::new(),
             qualified_types: AHashMap::new(),
+            type_imports: AHashMap::new(),
             core_types: AHashMap::new(),
             impl_registry: AHashSet::new(),
             impl_locations: AHashMap::new(),
@@ -1116,12 +1122,56 @@ impl TypeChecker {
                 });
             }
         }
+        self.register_type_imports(program);
         tracing::debug!(
             "TypeChecker: Discovered {} type definitions ({} core), {} implementations",
             self.qualified_types.len(),
             self.core_types.len(),
             self.impl_registry.len(),
         );
+    }
+
+    /// Record each var import of a type (`Port ::a/Port`) in `type_imports`,
+    /// so an annotation naming the import resolves as the full path does.
+    /// An import of an import resolves on a later round.
+    fn register_type_imports(&mut self, program: &Program) {
+        let mut imports = Vec::new();
+        for (ns_path, namespace) in &program.namespaces {
+            let ns_str = ns_path.to_string();
+            let alias_map: AHashMap<String, String> = namespace
+                .aliases
+                .iter()
+                .map(|(alias, target)| (alias.to_string(), target.to_string()))
+                .collect();
+            for (var, value) in &namespace.scope.vars {
+                if var.deep_set.is_some() || var.deep_path.is_some() {
+                    continue;
+                }
+                if let Some(target) = Self::imported_function(value, &alias_map) {
+                    imports.push((format!("{}/{}", ns_str, var.sym.name()), target));
+                }
+            }
+        }
+        loop {
+            let before = imports.len();
+            imports.retain(|(name, target)| {
+                let resolved = self
+                    .qualified_types
+                    .get(target)
+                    .or_else(|| self.type_imports.get(target))
+                    .cloned();
+                match resolved {
+                    Some(resolved) => {
+                        self.type_imports.insert(name.clone(), resolved);
+                        false
+                    }
+                    None => true,
+                }
+            });
+            if imports.len() == before {
+                break;
+            }
+        }
     }
 
     /// Walk every namespace and register the inferred type of each top-level
@@ -1404,7 +1454,7 @@ impl TypeChecker {
         }
     }
 
-    /// The qualified function a var import (`local ::ns/fn`) names.
+    /// The qualified function or type a var import (`local ::ns/fn`) names.
     fn imported_function(value: &Value, alias_map: &AHashMap<String, String>) -> Option<String> {
         match value {
             Value::Ref(Ref::Ns(ns_ref)) => Self::qualified_ns_ref_name(ns_ref, alias_map),
@@ -3938,6 +3988,91 @@ impl TypeChecker {
         }
     }
 
+    /// `impossible-comparison`: `eq` or `ne` between a value of a closed
+    /// literal union and a literal outside it, such as a misspelled
+    /// `eq(caused-by, "compnay")`, is always false (`ne`: always true).
+    /// `null` is left out, as a defensive null check is common.
+    fn check_literal_comparison(&mut self, name: &str, fn_call: &FnCall) {
+        let short = name.strip_prefix("::hot::cmp/").unwrap_or(name);
+        if !matches!(short, "eq" | "ne") || self.in_pipe_flow {
+            return;
+        }
+        if name == short && self.context.current_namespace != "::hot::cmp" {
+            let local = format!("{}/{}", self.context.current_namespace, short);
+            if self.context.get_function_signature(&local).is_some() {
+                return;
+            }
+        }
+        let [a, b] = fn_call.args.as_slice() else {
+            return;
+        };
+        let (literal, literal_arg, other) = match (
+            Self::literal_type_of_value(&a.value),
+            Self::literal_type_of_value(&b.value),
+        ) {
+            (Some(TypeExpr::Literal(lit)), None) => (lit, a, b),
+            (None, Some(TypeExpr::Literal(lit))) => (lit, b, a),
+            _ => return,
+        };
+        if literal == LiteralType::Null {
+            return;
+        }
+        // The argument was inferred already; drop what doing it again reports.
+        let (errors, warnings) = (self.errors.errors.len(), self.errors.warnings.len());
+        let other_type = self.infer_argument_type(&other.value);
+        self.errors.errors.truncate(errors);
+        self.errors.warnings.truncate(warnings);
+        let Some(subject) = self.literal_union_subject(&other_type) else {
+            return;
+        };
+        // An Int and a Dec member can be numerically equal.
+        let numeric_mix = matches!(literal, LiteralType::Int(_))
+            && subject
+                .members
+                .iter()
+                .any(|m| matches!(m, LiteralType::Dec(_)));
+        if subject.is_open || subject.members.contains(&literal) || numeric_mix {
+            return;
+        }
+        let location = literal_arg
+            .src
+            .as_ref()
+            .or(fn_call.src.as_ref())
+            .map(|s| self.source_to_error_location(s));
+        // Argument types are inferred more than once for some calls.
+        if self.errors.warnings.iter().any(|w| {
+            matches!(w, CompilerError::Constraint { code: "impossible-comparison", location: l, .. } if *l == location)
+        }) {
+            return;
+        }
+        // A named union lists its values; an inline one already shows them.
+        let shown = if subject.name.starts_with(char::is_uppercase) {
+            let known = subject
+                .members
+                .iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("`{}` ({known})", subject.name)
+        } else {
+            format!("`{}`", subject.name)
+        };
+        let outcome = if short == "eq" {
+            "always false"
+        } else {
+            "always true"
+        };
+        self.errors.add_warning(CompilerError::Constraint {
+            code: "impossible-comparison",
+            message: format!(
+                "{literal} isn't one of the values of {shown}, so this `{short}` is {outcome}"
+            ),
+            help: Some("check the spelling".to_string()),
+            warning: true,
+            location,
+        });
+    }
+
     /// Infer the return type of a function call
     /// Precise result types for `and`, `or`, `if` and `not`. `and` and `or`
     /// return one of their arguments and `if` one of its branches, so the
@@ -4189,6 +4324,7 @@ impl TypeChecker {
 
                 if let Some(sig) = matching_sig {
                     let declared = sig.return_type.clone();
+                    self.check_literal_comparison(lookup_name, fn_call);
                     if let Some(precise) = self.logic_result_type(lookup_name, fn_call) {
                         return precise;
                     }
@@ -4721,6 +4857,9 @@ impl TypeChecker {
             return None;
         }
         let qualified = format!("{}/{}", self.context.current_namespace, type_name);
+        if let Some(imported) = self.type_imports.get(&qualified) {
+            return Some(imported.clone());
+        }
         self.qualified_types.get(&qualified).cloned().or_else(|| {
             // Fall back to the in-pass types registered by `process_type_definition`
             // (e.g. types defined later in the same file that haven't been
