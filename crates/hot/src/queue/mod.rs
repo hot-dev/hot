@@ -1290,17 +1290,20 @@ impl RedisQueueAdmin {
         queue_name: &str,
         group_name: &str,
     ) -> Result<Option<GroupInfo>, String> {
-        let result: ::redis::Value =
-            match ::redis::cmd("XINFO").arg("GROUPS").arg(queue_name).query(conn) {
-                Ok(result) => result,
-                Err(e) if e.to_string().contains("no such key") => return Ok(None),
-                Err(e) => {
-                    return Err(format!(
-                        "Failed to list consumer groups for {}: {}",
-                        queue_name, e
-                    ));
-                }
-            };
+        let result: ::redis::Value = match ::redis::cmd("XINFO")
+            .arg("GROUPS")
+            .arg(queue_name)
+            .query(conn)
+        {
+            Ok(result) => result,
+            Err(e) if e.to_string().contains("no such key") => return Ok(None),
+            Err(e) => {
+                return Err(format!(
+                    "Failed to list consumer groups for {}: {}",
+                    queue_name, e
+                ));
+            }
+        };
         let records: Vec<Vec<::redis::Value>> = ::redis::from_redis_value_ref(&result)
             .map_err(|e| format!("Failed to parse consumer groups for {}: {}", queue_name, e))?;
         for fields in records {
@@ -1416,7 +1419,10 @@ mod admin_status_tests {
     fn status(conn: &mut ::redis::Connection, queue: &str) -> QueueStatus {
         let admin = RedisQueueAdmin::new("redis://127.0.0.1/".to_string(), false);
         let summary = admin.status_impl(conn, &[queue.to_string()]).unwrap();
-        assert_eq!(summary.oldest_pending_secs, summary.queues[0].oldest_pending_secs);
+        assert_eq!(
+            summary.oldest_pending_secs,
+            summary.queues[0].oldest_pending_secs
+        );
         summary.queues[0].clone()
     }
 

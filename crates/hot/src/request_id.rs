@@ -66,7 +66,10 @@ mod tests {
 
     fn app() -> Router {
         Router::new()
-            .route("/", get(|Extension(id): Extension<RequestId>| async move { id.0 }))
+            .route(
+                "/",
+                get(|Extension(id): Extension<RequestId>| async move { id.0 }),
+            )
             .route(
                 "/named",
                 get(|| async { ([(HEADER, "from-the-handler")], "named") }),
@@ -84,14 +87,19 @@ mod tests {
             .await
             .unwrap();
         let returned = response.headers()[&HEADER].to_str().unwrap().to_string();
-        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
         (String::from_utf8(body.to_vec()).unwrap(), returned)
     }
 
     #[tokio::test]
     async fn a_valid_caller_id_is_kept_and_returned() {
         let (seen, returned) = call("/", Some("lb-7f3a.9_x")).await;
-        assert_eq!((seen.as_str(), returned.as_str()), ("lb-7f3a.9_x", "lb-7f3a.9_x"));
+        assert_eq!(
+            (seen.as_str(), returned.as_str()),
+            ("lb-7f3a.9_x", "lb-7f3a.9_x")
+        );
     }
 
     #[tokio::test]

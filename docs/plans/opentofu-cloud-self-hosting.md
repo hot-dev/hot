@@ -2107,8 +2107,11 @@ or an existing operator destination without coupling telemetry to S3.
       and object references before deletion; distinguish user data from
       disposable artifacts. Test disk-full and cleanup-failure behavior.
       The guide tabulates retention for snapshots, logs, dumps, deploy
-      history, and managed backups. Hot's execution-history and build
-      retention, and disk-full tests, remain.
+      history, managed backups, and execution history. Organizations without
+      a plan (self-hosted) keep calls for `db.retention.call.days`
+      (`HOT_DB_RETENTION_CALL_DAYS`, default forever); the worker's
+      maintenance deletes older calls and deactivates their blob references
+      for blob collection. Disk-full and cleanup-failure tests remain.
 - [ ] Publish estimates and cost drivers for compute, managed-service minimums,
       replicas, storage, requests, NAT/endpoints, load balancers, logging, backups,
       and KMS. Offer spend alerts and usage reporting with documented limits;

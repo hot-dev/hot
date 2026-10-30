@@ -913,8 +913,13 @@ disk kept), or move builds and files to object storage.
 | On-demand `backup` dumps | Until you delete them | You |
 | Deploy history | The last 20 deploys | Fixed |
 | Managed database backups | 7 days, with point-in-time recovery | `data.postgres.backup_retention_days` |
+| Execution history (calls, and their argument and result blobs) | Forever | `settings.HOT_DB_RETENTION_CALL_DAYS` (days, at least 1) |
 
-Execution history, builds, and files are kept by Hot's own settings.
+The worker's daily maintenance deletes calls older than
+`HOT_DB_RETENTION_CALL_DAYS` for every organization, unless the organization
+has its own `call_retention_days` override. The blobs those calls referenced
+are then collected once nothing else references them, after a day's grace.
+Builds and files stay until users delete them.
 
 **Cost drivers.** The VM runs all the time and dominates the cost. Then come:
 - the data disk and its snapshots;
