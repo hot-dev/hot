@@ -1145,6 +1145,67 @@ class Commands(AgentHarness):
         self.assertEqual(self.run.compose_calls()[0], "stop scheduler")
 
 
+class Synthetic(AgentHarness):
+    NOW = datetime.datetime(2026, 10, 29, 12, 0, tzinfo=datetime.timezone.utc)
+
+    def setUp(self):
+        super().setUp()
+        self.config["monitoring"] = {"synthetic_event": "hot-check:ping"}
+        self.cloud.secrets[OPERATOR]["HOT_SYNTHETIC_API_KEY"] = "hot_synthetic_key"
+        self.agent.background = lambda function: function()
+        self.requests = []
+        self.runs = ["running", "succeeded"]
+
+    def request(self, host, method, path, body=None, headers=None):
+        self.requests.append((host, method, path, json.loads(body) if body else None, headers))
+        if method == "POST":
+            return 201, json.dumps({"data": {"event_id": "e1"}}).encode()
+        status = self.runs.pop(0) if len(self.runs) > 1 else self.runs[0]
+        return 200, json.dumps({"data": [{"run_id": "r1", "status": status}]}).encode()
+
+    def clock(self):
+        self.ticks = getattr(self, "ticks", 0) + 2
+        return self.ticks
+
+    def test_an_event_runs_through_the_api_and_a_worker(self):
+        ok, seconds = self.agent.synthetic_check(request=self.request, clock=self.clock)
+        self.assertTrue(ok)
+        host, method, path, body, headers = self.requests[0]
+        self.assertEqual((host, method, path), ("api.hot.internal", "POST", "/v1/events"))
+        self.assertEqual(body["event_type"], "hot-check:ping")
+        self.assertEqual(headers["Authorization"], "Bearer hot_synthetic_key")
+        self.assertEqual([r[2] for r in self.requests[1:]], ["/v1/events/e1/runs"] * 2)
+
+    def test_a_failed_or_slow_run_fails_the_check(self):
+        self.runs = ["failed"]
+        self.assertFalse(self.agent.synthetic_check(request=self.request, clock=self.clock)[0])
+        self.runs = ["running"]
+        ok, seconds = self.agent.synthetic_check(request=self.request, clock=self.clock)
+        self.assertFalse(ok)
+        self.assertGreaterEqual(seconds, agent_module.SYNTHETIC_TIMEOUT)
+
+    def test_the_result_is_published_and_rechecked_every_few_minutes(self):
+        self.agent.synthetic_check = lambda: (True, 3.25)
+        self.assertEqual(self.agent.synthetic_metrics(self.NOW),
+                         {"SyntheticOk": (1, "Count"), "SyntheticSeconds": (3.2, "Seconds")})
+        self.agent.synthetic_check = lambda: (False, 60)
+        soon = self.agent.synthetic_metrics(self.NOW + datetime.timedelta(minutes=1))
+        self.assertEqual(soon["SyntheticOk"][0], 1, "not run again within five minutes")
+        later = self.agent.synthetic_metrics(self.NOW + datetime.timedelta(minutes=6))
+        self.assertEqual(later["SyntheticOk"][0], 0)
+
+    def test_a_missing_key_fails_the_check(self):
+        del self.cloud.secrets[OPERATOR]["HOT_SYNTHETIC_API_KEY"]
+        self.assertEqual(self.agent.synthetic_metrics(self.NOW)["SyntheticOk"][0], 0)
+
+    def test_only_api_hosts_with_an_event_run_it(self):
+        self.config["roles"] = ["worker"]
+        self.assertEqual(self.agent.synthetic_metrics(self.NOW), {})
+        self.config["roles"] = None
+        self.config["monitoring"] = {}
+        self.assertEqual(self.agent.synthetic_metrics(self.NOW), {})
+
+
 class AlertTests(AgentHarness):
     def test_a_test_alert_fires_then_resolves(self):
         report = self.agent.command("test-alert", request_id="t1")

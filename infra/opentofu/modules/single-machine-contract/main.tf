@@ -90,8 +90,12 @@ variable "installation" {
       alert_emails        = optional(list(string), [])
       queue_backlog_alert = optional(number, 1000)
       queue_wait_alert    = optional(number, 900)
-      monthly_budget      = optional(number, 0)
-      billing_account     = optional(string, "")
+      # An event type a deployed Hot handler answers. Hosts serving the API
+      # publish it every 5 minutes with the operator secret's
+      # HOT_SYNTHETIC_API_KEY and alert when its run does not succeed.
+      synthetic_event = optional(string, "")
+      monthly_budget  = optional(number, 0)
+      billing_account = optional(string, "")
     }), {})
     # A registry that mirrors Hot's images (registry host and path, such as
     # 123456789012.dkr.ecr.us-east-1.amazonaws.com/hot-mirror). Images keep
@@ -170,6 +174,12 @@ variable "installation" {
       && (var.installation.scaling.task_worker.retire_idle_minutes == 0
     || (var.installation.scaling.task_worker.retire_idle_minutes >= 5 && var.installation.scaling.task_worker.retire_idle_minutes <= 1440)))
     error_message = "scaling.worker.waiting_per_host must be at least 1, scaling.task_worker.slots_target 10-100, and retire_idle_minutes 0 or 5-1440."
+  }
+  validation {
+    condition = var.installation.monitoring.synthetic_event == "" || (
+      can(regex("^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$", var.installation.monitoring.synthetic_event))
+    && !startswith(var.installation.monitoring.synthetic_event, "hot:"))
+    error_message = "monitoring.synthetic_event must be an event type your project handles (letters, digits, :._-), not a reserved hot: type."
   }
   validation {
     condition = var.installation.image_registry == "" || can(regex("^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)*$", var.installation.image_registry)) && (
@@ -398,6 +408,7 @@ output "dashboard" {
     { title = "Jobs and tasks waiting", stat = "Maximum", metrics = [["JobsWaiting", "jobs_waiting"], ["TasksWaiting", "tasks_waiting"]], single = false },
     { title = "Oldest wait (seconds)", stat = "Maximum", metrics = [["JobWaitSeconds", "job_wait_seconds"], ["TaskWaitSeconds", "task_wait_seconds"]], single = false },
     { title = "Task slots used (%)", stat = "Average", metrics = [["TaskSlotsUsedPercent", "task_slots_used_percent"]], single = false },
+    { title = "Synthetic check (1 = passed)", stat = "Minimum", metrics = [["SyntheticOk", "synthetic_ok"]], single = false },
     { title = "Disk used (%)", stat = "Maximum", metrics = [["DataDiskUsedPercent", "data_disk_used_percent"]], single = false },
     { title = "Certificate days left", stat = "Minimum", metrics = [["CertificateDaysLeft", "certificate_days_left"]], single = false },
     { title = "Backup age (hours)", stat = "Maximum", metrics = [["BackupAgeHours", "backup_age_hours"]], single = true },

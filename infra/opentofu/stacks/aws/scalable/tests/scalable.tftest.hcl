@@ -138,7 +138,7 @@ run "endpoints" {
     error_message = "Web groups replace hosts that fail the load balancer's health check."
   }
   assert {
-    condition     = length(aws_cloudwatch_metric_alarm.hot) == 12 && length(jsondecode(aws_cloudwatch_dashboard.hot.dashboard_body).widgets) == 8 && aws_cloudwatch_metric_alarm.hot["scheduler-stopped"].treat_missing_data == "breaching"
+    condition     = length(aws_cloudwatch_metric_alarm.hot) == 13 && length(jsondecode(aws_cloudwatch_dashboard.hot.dashboard_body).widgets) == 9 && aws_cloudwatch_metric_alarm.hot["scheduler-stopped"].treat_missing_data == "breaching"
     error_message = "Every signal alarms, and a missing scheduler status breaches."
   }
 }

@@ -34,6 +34,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -99,7 +100,7 @@ GCP_METRIC_NAMES = {"AgentHeartbeat": "agent_heartbeat", "UnhealthyServices": "u
                     "NewDeadLetters": "new_dead_letters", "JobsWaiting": "jobs_waiting",
                     "JobWaitSeconds": "job_wait_seconds", "TasksWaiting": "tasks_waiting",
                     "TaskWaitSeconds": "task_wait_seconds", "TaskSlotsUsedPercent": "task_slots_used_percent",
-                    "AlertTest": "alert_test"}
+                    "AlertTest": "alert_test", "SyntheticOk": "synthetic_ok", "SyntheticSeconds": "synthetic_seconds"}
 # Installation-wide measurements of Hot's queue, published by the one host
 # that runs the scheduler. On GCP they are written for the project rather
 # than an instance, so autoscalers can use them as per-group metrics.
@@ -112,6 +113,12 @@ TASK_QUEUE = "{hot:task}"
 # The task worker rewrites its status file every 15 seconds; an older one
 # is a stopped worker's.
 TASK_STATUS_STALE_SECONDS = 120
+# The synthetic check (monitoring.synthetic_event): how often API hosts run
+# it, how long its run may take, and the operator secret key holding its API
+# key.
+SYNTHETIC_SECONDS = 300
+SYNTHETIC_TIMEOUT = 60
+SYNTHETIC_KEY = "HOT_SYNTHETIC_API_KEY"
 
 
 class AgentError(Exception):
@@ -1389,6 +1396,63 @@ class Agent:
             return None
         return round(100 * max(shares, default=0), 1)
 
+    def synthetic_check(self, request=None, clock=time.monotonic):
+        """Publish monitoring.synthetic_event through this host's ingress
+        with the operator's synthetic API key, and wait for a run it starts
+        to finish: (succeeded, seconds). The operator deploys a handler for
+        the event; the check covers the API, the queue, a worker, and the
+        database together."""
+        request = request or https_request
+        key = self.operator_secrets().get(SYNTHETIC_KEY, "")
+        if not key:
+            raise AgentError(f"The operator secret has no {SYNTHETIC_KEY} for the synthetic check")
+        host = self.config["api_hostname"]
+        headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+        started = clock()
+        event = {"event_type": self.config["monitoring"]["synthetic_event"], "event_data": {"synthetic": True}}
+        status, body = request(host, "POST", "/v1/events", json.dumps(event).encode(), headers)
+        if status >= 300:
+            raise AgentError(f"Publishing the synthetic event answered HTTP {status}")
+        event_id = json.loads(body)["data"]["event_id"]
+        while clock() - started < SYNTHETIC_TIMEOUT:
+            status, body = request(host, "GET", f"/v1/events/{event_id}/runs", None, headers)
+            states = {run.get("status") for run in (json.loads(body).get("data", []) if status == 200 else [])}
+            if "succeeded" in states:
+                return True, clock() - started
+            if states & {"failed", "cancelled"}:
+                return False, clock() - started
+            self.sleep(2)
+        return False, clock() - started
+
+    def run_synthetic(self):
+        try:
+            self._synthetic_result = self.synthetic_check()
+        except (AgentError, OSError, ValueError, KeyError, TypeError) as error:
+            print(json.dumps({"synthetic_check_failed": describe(error)}), file=sys.stderr, flush=True)
+            self._synthetic_result = (False, 0)
+
+    def synthetic_metrics(self, now):
+        """The latest synthetic check's result. On hosts that serve the API,
+        a new check starts in the background every SYNTHETIC_SECONDS, so it
+        never holds up the agent's loop."""
+        if not (self.config.get("monitoring", {}).get("synthetic_event") and "api" in self.roles()):
+            return {}
+        started = getattr(self, "_synthetic_started", None)
+        running = getattr(self, "_synthetic_thread", None)
+        if (started is None or (now - started).total_seconds() >= SYNTHETIC_SECONDS) and not (running and running.is_alive()):
+            self._synthetic_started = now
+            self._synthetic_thread = self.background(self.run_synthetic)
+        result = getattr(self, "_synthetic_result", None)
+        if result is None:
+            return {}
+        return {"SyntheticOk": (int(result[0]), "Count"), "SyntheticSeconds": (round(result[1], 1), "Seconds")}
+
+    @staticmethod
+    def background(function):
+        thread = threading.Thread(target=function, daemon=True)
+        thread.start()
+        return thread
+
     def retire_if_idle(self, metrics, now):
         """In a scalable installation, a task host that has run nothing for
         scaling.task_worker.retire_idle_minutes leaves its group, which
@@ -1467,6 +1531,8 @@ class Agent:
                 metrics["CertificateDaysLeft"] = (days, "None")
             if "scheduler" in self.roles() and "scheduler" in healthy:
                 metrics.update(self.queue_metrics(self.releases / release / "bundle", now))
+            if "api" in healthy:
+                metrics.update(self.synthetic_metrics(now))
             if "task-worker" in self.roles() and "task-worker" in healthy:
                 used = self.task_slots_used(self.releases / release / "bundle", now)
                 if used is not None:
@@ -1778,21 +1844,28 @@ def provision_sql():
     return Path(render.__file__).resolve().parents[2] / "resources/db/postgres/provision_runtime.sql"
 
 
-def https_status(host, path, address="127.0.0.1", port=443):
-    """GET through the local ingress, sending the hostname as SNI: the
-    ingress refuses handshakes that name no configured host."""
+def https_request(host, method, path, body=None, headers=None, address="127.0.0.1", port=443, timeout=10):
+    """A request through the local ingress, sending the hostname as SNI: the
+    ingress refuses handshakes that name no configured host. Returns
+    (status, body)."""
     context = ssl.create_default_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE  # loopback only; certificates name the public hostnames
-    connection = HTTPSConnection(host, port, timeout=5, context=context)
-    connection.sock = context.wrap_socket(socket.create_connection((address, port), timeout=5),
+    connection = HTTPSConnection(host, port, timeout=timeout, context=context)
+    connection.sock = context.wrap_socket(socket.create_connection((address, port), timeout=timeout),
                                           server_hostname=host)
     try:
-        connection.request("GET", path, headers={"Host": host})
-        return connection.getresponse().status
+        connection.request(method, path, body=body, headers={"Host": host, **(headers or {})})
+        response = connection.getresponse()
+        return response.status, response.read()
     finally:
         connection.close()
+
+
+def https_status(host, path, address="127.0.0.1", port=443):
+    """GET through the local ingress; the response's status."""
+    return https_request(host, "GET", path, address=address, port=port, timeout=5)[0]
 
 
 def log_batches(events, max_bytes, max_span_ms=None):

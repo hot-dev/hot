@@ -1830,6 +1830,14 @@ or an existing operator destination without coupling telemetry to S3.
 - [ ] Use private synthetic checks from an authorized network for sign-in/API
       and a representative queued execution. Keep liveness, dependency readiness,
       and end-to-end checks separate; do not expose monitoring endpoints publicly.
+      - Readiness (`/signin` and `/status` through each host's ingress) and
+        dependency reachability are separate metrics.
+      - With `monitoring.synthetic_event`, the hosts serving the API publish
+        that event every 5 minutes, through their own ingress, with an API
+        key the operator holds, then wait for its run (`SyntheticOk`,
+        `synthetic-failed`).
+
+      Qualification remains.
 
 ### Privacy, reliability, and qualification
 

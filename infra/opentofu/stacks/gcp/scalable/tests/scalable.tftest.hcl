@@ -116,7 +116,7 @@ run "endpoints_and_scaling" {
     error_message = "App and API autoscale from two; task-workers only scale out."
   }
   assert {
-    condition     = google_monitoring_alert_policy.scheduler.display_name == "hot-hot-example-scheduler-stopped" && length(google_monitoring_alert_policy.hot) == 10 && length(jsondecode(google_monitoring_dashboard.hot.dashboard_json).mosaicLayout.tiles) == 8
+    condition     = google_monitoring_alert_policy.scheduler.display_name == "hot-hot-example-scheduler-stopped" && length(google_monitoring_alert_policy.hot) == 11 && length(jsondecode(google_monitoring_dashboard.hot.dashboard_json).mosaicLayout.tiles) == 9
     error_message = "The singleton scheduler and every per-host signal alert."
   }
   assert {

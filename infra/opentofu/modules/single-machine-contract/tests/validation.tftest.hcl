@@ -533,6 +533,24 @@ run "scaling_targets_are_bounded" {
   expect_failures = [var.installation]
 }
 
+run "a_synthetic_event_is_not_a_reserved_type" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "monitoring" : { "synthetic_event" : "hot:rerun" },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [var.installation]
+}
+
 run "the_queue_wait_alert_is_at_least_a_minute" {
   command = plan
   variables {

@@ -302,7 +302,7 @@ run "backups_and_alerts" {
     error_message = "The host may only list snapshots."
   }
   assert {
-    condition     = google_monitoring_metric_descriptor.hot["agent_heartbeat"].type == "custom.googleapis.com/hot/hot-example/agent_heartbeat" && length(google_monitoring_alert_policy.hot) == 12
+    condition     = google_monitoring_metric_descriptor.hot["agent_heartbeat"].type == "custom.googleapis.com/hot/hot-example/agent_heartbeat" && length(google_monitoring_alert_policy.hot) == 13
     error_message = "Each installation owns its metric types, and every critical signal has an alert."
   }
   assert {
@@ -310,7 +310,7 @@ run "backups_and_alerts" {
     error_message = "Queue alerts read the installation-wide series; host alerts the instance's."
   }
   assert {
-    condition     = length(jsondecode(google_monitoring_dashboard.hot.dashboard_json).mosaicLayout.tiles) == 9 && strcontains(jsondecode(google_monitoring_dashboard.hot.dashboard_json).mosaicLayout.tiles[3].widget.xyChart.dataSets[0].timeSeriesQuery.timeSeriesFilter.filter, "resource.type = \"global\"")
+    condition     = length(jsondecode(google_monitoring_dashboard.hot.dashboard_json).mosaicLayout.tiles) == 10 && strcontains(jsondecode(google_monitoring_dashboard.hot.dashboard_json).mosaicLayout.tiles[3].widget.xyChart.dataSets[0].timeSeriesQuery.timeSeriesFilter.filter, "resource.type = \"global\"")
     error_message = "A dashboard of the installation's metrics, reading queue metrics for the project."
   }
   assert {

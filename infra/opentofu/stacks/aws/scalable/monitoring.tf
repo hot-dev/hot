@@ -59,6 +59,11 @@ locals {
       period      = 300, periods = 1, missing = "notBreaching",
       description = "Jobs failed every attempt and were dead-lettered; the worker's logs say why."
     }
+    synthetic-failed = {
+      metric      = "SyntheticOk", statistic = "Minimum", comparison = "LessThanThreshold", threshold = 1,
+      period      = 300, periods = 2, missing = "notBreaching",
+      description = "The synthetic event's run has not succeeded for 10 minutes: the API, queue, workers, or database are failing end to end."
+    }
     alert-test = {
       metric      = "AlertTest", statistic = "Maximum", comparison = "GreaterThanThreshold", threshold = 0,
       period      = 60, periods = 1, missing = "notBreaching",

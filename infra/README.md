@@ -320,6 +320,7 @@ Hot's own email, and both firing and resolving are sent.
 | `job-wait` | A job has waited more than `monitoring.queue_wait_alert` seconds (default 900) for 10 minutes | As for `queue-backlog`; a scalable installation at `scaling.worker.max` needs a higher maximum. |
 | `task-wait` | A task has waited more than `monitoring.queue_wait_alert` seconds for 10 minutes | Task capacity is short: check the task-worker's `logs` and `TaskSlotsUsedPercent`, then raise `scaling.task_worker.max` or the size. |
 | `new-dead-letters` | Jobs were dead-lettered since the last measurement | Read the worker's `logs` for the failing jobs' errors. |
+| `synthetic-failed` | The synthetic event's run has not succeeded for 10 minutes (only with `monitoring.synthetic_event`) | Something fails end to end. Check `services-unhealthy`, `dependencies-unreachable`, and the queue alerts, then the API's and worker's `logs` for the synthetic event. |
 | `alert-test` | The `test-alert` command was sent | Nothing is wrong: it checks the path to your inbox, and resolves by itself within about 15 minutes. |
 
 Liveness, dependency reachability, and end-to-end readiness are separate
@@ -328,6 +329,19 @@ signals, and a missing heartbeat or backup status alerts rather than passing.
 Each stack also creates a dashboard named `hot-<installation>`, in
 CloudWatch or Cloud Monitoring. It plots these metrics: health, the queue and
 its waits, task slots, disk, certificate, and backup age.
+
+**A synthetic check** runs Hot end to end from inside the installation's
+network: a request through the API, a queued event, a worker run, and the
+database. To turn it on:
+1. Deploy a Hot project with a handler for an event type of your own, such
+   as `ops:ping`, that succeeds quickly.
+2. Put an API key that may publish and read that event in the operator
+   secret as `HOT_SYNTHETIC_API_KEY`.
+3. Set `monitoring.synthetic_event` to the event type.
+
+Every 5 minutes, each host serving the API publishes the event through its
+own ingress and waits up to a minute for the run to succeed. It reports
+`SyntheticOk` and `SyntheticSeconds`; nothing is exposed publicly.
 
 **Test the alert path** after installing and whenever the recipients change:
 run the `test-alert` command (below). The agent publishes a test metric, and

@@ -64,6 +64,8 @@ locals {
     task_wait_seconds       = { unit = "s", name = "Oldest task's wait" }
     task_slots_used_percent = { unit = "%", name = "Task slots used" }
     alert_test              = { unit = "1", name = "Test alert" }
+    synthetic_ok            = { unit = "1", name = "Synthetic check passed" }
+    synthetic_seconds       = { unit = "s", name = "Synthetic check duration" }
   }
   # Installation-wide queue measurements, written for the project rather
   # than the instance (see the agent's QUEUE_METRICS).
@@ -106,6 +108,10 @@ locals {
     new-dead-letters = {
       metric      = "new_dead_letters", comparison = "COMPARISON_GT", threshold = 0, aligner = "ALIGN_MAX", duration = "0s", absent = false,
       description = "Jobs failed every attempt and were dead-lettered; the worker's logs say why."
+    }
+    synthetic-failed = {
+      metric      = "synthetic_ok", comparison = "COMPARISON_LT", threshold = 1, aligner = "ALIGN_MIN", duration = "600s", absent = false,
+      description = "The synthetic event's run has not succeeded for 10 minutes: the API, queue, workers, or database are failing end to end."
     }
     alert-test = {
       metric      = "alert_test", comparison = "COMPARISON_GT", threshold = 0, aligner = "ALIGN_MAX", duration = "0s", absent = false,
