@@ -91,6 +91,15 @@ Run just the job scheduler:
 hot scheduler
 ```
 
+With PostgreSQL, only one scheduler runs at a time. It holds a session
+advisory lock and confirms it every two seconds. If its database session ends
+(a failover, a terminated backend, a network partition) or a check takes longer
+than a second, it stops and exits non-zero, and its supervisor restarts it.
+A second scheduler started while one is running exits immediately, so replace a
+scheduler by stopping the old one first. Connect the scheduler to PostgreSQL
+directly or through a session-mode pooler; it refuses to start through a
+transaction- or statement-mode pooler that loses its lock.
+
 ## Running Code
 
 ### hot run
