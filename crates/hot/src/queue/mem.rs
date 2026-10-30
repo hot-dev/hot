@@ -486,6 +486,15 @@ where
         let Some(retry_item) = self.retry_item.take() else {
             return;
         };
+        // A dropped delivery spends an attempt, as on SQLite and Redis, so a
+        // handler that panics on every delivery reaches the DLQ through the
+        // claim-side gate instead of being redelivered forever.
+        let retry_item = RetryItem::from_parts(
+            retry_item.item,
+            retry_item.retry_count + 1,
+            retry_item.first_attempt,
+            true,
+        );
 
         // Best-effort restore for the in-process local-dev queue: `Drop` is
         // synchronous, so we first try a non-blocking `try_send`. If the channel
