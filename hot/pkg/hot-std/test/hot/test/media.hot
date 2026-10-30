@@ -311,12 +311,14 @@ fn () {
         Media.Image => { "image" }
         Media.Audio => { "audio" }
         Media.Video => { "video" }
+        _ => { "other" }
     }
 
     result-literal match image-media-literal {
         Media.Image => { "image" }
         Media.Audio => { "audio" }
         Media.Video => { "video" }
+        _ => { "other" }
     }
 
     assert-eq("image", result-typed, "Match should work with typed construction")

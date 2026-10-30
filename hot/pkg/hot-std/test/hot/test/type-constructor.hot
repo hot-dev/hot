@@ -570,3 +570,19 @@ meta ["test"] fn () {
     assert-eq(false, Bool(null), "null is false")
     assert(is-err(Bool("hi")), "arbitrary strings are an error")
 }
+
+// A constructor with several arities, passed as a function value, takes the
+// overload its arguments fit, as a direct call does
+apply-to fn (f: Fn, value: Any): Any {
+    f(value)
+}
+
+test-constructor-value-picks-overload-by-arguments
+meta ["test"] fn () {
+    noon apply-to(::hot::time/PlainTime, "12:00:00")
+    assert-eq(12, noon.hour, "a string reaches the parsing overload, not the clock")
+    times map-vals({lunch: "12:30:00"}, ::hot::time/PlainTime)
+    assert-eq(30, times.lunch.minute, "a Hot HOF calls the parsing overload too")
+    built apply-to(::hot::time/PlainTime, {hour: 9, minute: 0, second: 0, millisecond: 0, microsecond: 0, nanosecond: 0})
+    assert-eq(9, built.hour, "a Map reaches the default constructor")
+}
