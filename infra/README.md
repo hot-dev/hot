@@ -571,8 +571,9 @@ installation:
   do not retry on their own. Fix the cause, then run `command deploy-now`
   (AWS) or replace the group's instances (GCP; see
   [Rotating secrets and certificates](#rotating-secrets-and-certificates)).
-  Running `release` again skips roles whose pointer names the release and
-  moves the rest.
+  Running `release` again checks each role that is already pointed: it
+  goes on only when every instance's latest report is `deployed`, and
+  reports the failed role again otherwise. Then it moves the remaining roles.
 - **Going back.** Scalable hosts have no `roll-back`, so recovery is a
   forward fix or a point-in-time restore. Each host remembers the migration
   level it last deployed and refuses a lower one, so replace every host

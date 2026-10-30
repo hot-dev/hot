@@ -231,6 +231,21 @@ class ScalableReleases(unittest.TestCase):
         self.assertEqual(set(report["rolled"]), {"task-worker", "worker"})
 
 
+class ScalableRetries(unittest.TestCase):
+    def test_running_the_release_again_reports_a_failed_role_until_it_deploys(self):
+        cli = ScalableCli(fail_role="api")
+        installation(SCALABLE, cli).release("3.0.2")
+        again = installation(SCALABLE, cli).release("3.0.2")
+        self.assertEqual((again["state"], again["role"]), ("failed", "api"), "not skipped because its pointer is set")
+        self.assertEqual(cli.order(), ["migrate", "task-worker", "worker", "api"], "nothing is pointed twice")
+        # deploy-now retried the API hosts, and they deployed.
+        cli.events += [{"state": "deployed", "release": "3.0.2", "instance": "i-a1", "roles": ["api"]}]
+        cli.fail_role = None
+        third = installation(SCALABLE, cli).release("3.0.2")
+        self.assertEqual(third["state"], "deployed", third)
+        self.assertEqual(cli.order(), ["migrate", "task-worker", "worker", "api", "app", "scheduler"])
+
+
 class Main(unittest.TestCase):
     def run_main(self, argv, reports, document=AWS):
         with tempfile.TemporaryDirectory() as tmp:

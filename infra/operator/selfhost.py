@@ -249,19 +249,27 @@ class Installation:
         rolled = {}
         for role in ROLE_ORDER:
             instances = self.instances(role)
-            if not instances or self.pointer(role) == version:
+            if not instances:
                 rolled[role] = instances
                 continue
-            self.point_at(version, role)
 
             def deployed(reports, role=role, instances=instances):
-                mine = [r for r in reports if role in (r.get("roles") or []) and r.get("instance") in instances]
-                failed = next((r for r in mine if r.get("state") == "failed"), None)
+                # Each instance's latest report: a retry supersedes a failure.
+                latest = {r["instance"]: r for r in reports
+                          if role in (r.get("roles") or []) and r.get("instance") in instances}
+                failed = next((r for r in latest.values() if r.get("state") == "failed"), None)
                 if failed:
                     return failed
-                done = {r["instance"] for r in mine if r.get("state") in ("deployed", "current")}
+                done = {i for i, r in latest.items() if r.get("state") in ("deployed", "current")}
                 return {"state": "deployed"} if set(instances) <= done else None
-            result = self.wait_for(version, since, timeout, deployed)
+            if self.pointer(role) == version:
+                # Pointed by an earlier run: every instance must have deployed
+                # it, so a role that failed then is reported again, not skipped.
+                result = deployed(self.reports(version, 0, field="release")) or self.wait_for(
+                    version, since, timeout, deployed)
+            else:
+                self.point_at(version, role)
+                result = self.wait_for(version, since, timeout, deployed)
             if result["state"] == "failed":
                 return {**result, "role": role, "rolled": rolled}
             rolled[role] = instances
