@@ -10,13 +10,13 @@ meta {
 
   Run (Telegram, default):
     hot ctx set telegram.chat.id <your-chat-id>
-    hot run hot/src/team-agent/seed.hot
+    hot eval '::team-agent::seed/run-seed()'
 
   Run (Slack):
     hot ctx set seed.transport slack
     hot ctx set slack.team.id    <your-team-id>
     hot ctx set slack.channel.id <your-channel-id>
-    hot run hot/src/team-agent/seed.hot
+    hot eval '::team-agent::seed/run-seed()'
 
   The seed only writes to memory — it does NOT post to Telegram or
   Slack. Re-running is safe: each call uses fresh, unique message ids.
@@ -24,7 +24,6 @@ meta {
 }
 
 ::ctx           ::hot::ctx
-::run           ::hot::run
 ::time          ::hot::time
 ::mem           ::ai::memory
 ::msg           ::ai::message
@@ -282,7 +281,3 @@ fn (): Vec<Str> {
   println(`Done. Try /summary, /decisions, or /ask "when did we decide to ship?"`)
   result
 }
-
-// Only execute when invoked as a script (`hot run .../seed.hot`); skip when
-// the namespace is loaded as part of a broader compile or test sweep.
-if(::run/is-inline-run(), run-seed(), null)

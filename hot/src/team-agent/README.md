@@ -405,9 +405,9 @@ seed once to populate ~28 synthetic Telegram messages spanning a
 launch decision, a postmortem, and several action items:
 
 ```bash
-hot run \
+hot eval \
         --ctx /tmp/dev-driver.ctx.hot \
-        hot/src/team-agent/seed.hot
+        '::team-agent::seed/run-seed()'
 ```
 
 Memory persists in your local store across runs, so this is a
@@ -628,7 +628,7 @@ recording:
 
 ```bash
 hot ctx set telegram.chat.id "-1001234567890"
-hot run hot/src/team-agent/seed.hot
+hot eval '::team-agent::seed/run-seed()'
 ```
 
 This posts ~28 synthetic messages from five fictional teammates over

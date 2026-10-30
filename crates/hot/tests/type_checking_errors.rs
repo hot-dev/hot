@@ -762,6 +762,184 @@ mod type_checking_tests {
         );
     }
 
+    // An untyped binding of a call takes the type the callee declares it
+    // returns, as an annotation would give it, wherever the binding is made.
+    #[test]
+    fn test_unknown_field_on_untyped_binding_of_call_warns() {
+        let source = r#"
+            ::test ns
+
+            Activity type { paid: Bool, role: Str }
+
+            activity-of fn (m: Map): Activity { Activity(m) }
+
+            top activity-of({paid: true, role: "r"})
+            by-top fn (): Bool { top.payed }
+
+            by-local fn (m: Map): Bool {
+                a activity-of(m)
+                a.payed
+            }
+
+            by-pipe fn (m: Map): Bool {
+                a m |> activity-of()
+                a.payed
+            }
+
+            by-parallel fn (m: Map): Bool {
+                data parallel {
+                    a activity-of(m)
+                    b a.payed
+                }
+                data.b
+            }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert_eq!(
+            unknown_fields(&warnings),
+            vec![("Activity".to_string(), "payed".to_string()); 4],
+            "Each read of `payed` should warn. Got: {:?}",
+            warnings
+        );
+    }
+
+    // The binding still holds the call's Result: checks that take a Result
+    // and match arms naming its variants accept it, a deep set adds a field,
+    // and a call declaring no return type, or a `Result`, leaves the binding
+    // untyped, since consuming that Result gives a value it does not name.
+    #[test]
+    fn test_untyped_binding_of_call_keeps_result_uses() {
+        let source = r#"
+            ::test ns
+
+            Activity type { paid: Bool, role: Str }
+
+            activity-of fn (m: Map): Activity { Activity(m) }
+            maybe-activity fn (m: Map): Activity? { Activity(m) }
+            safe fn (n: Int): Int { if(eq(n, 0), err("zero"), n) }
+            wrapped fn (n: Int): Result { ok(n) }
+            undeclared fn (m: Map) { m }
+            takes-map fn (m: Map): Map { m }
+            takes-int fn (n: Int): Int { n }
+
+            top ok(10)
+            by-top-result fn (): Int { takes-int(top) }
+
+            by-result fn (): Int {
+                r wrapped(1)
+                takes-int(r)
+            }
+
+            known fn (m: Map): Vec {
+                a activity-of(m)
+                b maybe-activity(m)
+                c undeclared(m)
+                [a.paid, b.role, c.anything]
+            }
+
+            by-match fn (): Str {
+                r safe(0)
+                match r {
+                    Result.Ok => { "ok" }
+                    Result.Err => { "err" }
+                }
+            }
+
+            by-checks fn (): Vec {
+                r safe(0)
+                [is-ok(r), is-err(r), or(r, 5), r |> if-ok((v) { add(v, 1) }) |> if-err(0)]
+            }
+
+            by-deep-set fn (m: Map): Map {
+                a activity-of(m)
+                a.extra 1
+                takes-map(merge(a, {x: 1}))
+            }
+
+            by-local-fn fn (m: Map, f: Fn): Any {
+                a f(m)
+                a.anything
+            }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Result uses of a call binding should not warn. Got: {:?}",
+            warnings
+        );
+    }
+
+    // Inside a type arm, a subject typed as a union holds the member the arm
+    // names, so a field read there is checked against that member alone.
+    #[test]
+    fn test_type_arm_narrows_union_subject() {
+        let source = r#"
+            ::test ns
+
+            Image type { data: Str }
+            Failure type { status: Int }
+
+            generate fn (m: Map): Image | Failure { Image({data: "d"}) }
+
+            read fn (m: Map): Any {
+                response generate(m)
+                match response {
+                    Failure => { response.status }
+                    Image => { response.data }
+                }
+            }
+
+            typed fn (m: Map): Any {
+                response: Image | Failure generate(m)
+                match response {
+                    Failure => { response.status }
+                    Image => { response.data }
+                }
+            }
+
+            misspelled fn (m: Map): Any {
+                response generate(m)
+                match response {
+                    Failure => { response.statsu }
+                    Image => { response.data }
+                }
+            }
+
+            ::consumer ns
+            ::t ::test
+
+            Image ::t/Image
+            Failure ::t/Failure
+
+            imported fn (m: Map): Any {
+                response ::t/generate(m)
+                match response {
+                    Failure => { response.status }
+                    Image => { response.data }
+                }
+            }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert_eq!(
+            unknown_fields(&warnings),
+            vec![("Failure".to_string(), "statsu".to_string())],
+            "Only the misspelled read should warn, against its arm's type. Got: {:?}",
+            warnings
+        );
+    }
+
     // A pipe stage takes the piped value as its first argument, so its arity
     // counts one more. A call written inside the stage's arguments is not
     // piped and counts only its own.

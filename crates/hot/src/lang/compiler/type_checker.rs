@@ -1689,11 +1689,12 @@ impl TypeChecker {
         self.atom_names_result(type_name, variant) && variant.as_deref() != Some("Err")
     }
 
-    /// The return type declared by the function a `match` subject calls
-    /// (`f(x)`, `::alias/f(x)`, `x |> f()`, or a var import of one),
-    /// resolved in the callee's own namespace. `None` when the callee or
-    /// the called arity is unknown, or that arity declares no return type,
-    /// and when the subject reads a path off the result (`f(x).field`).
+    /// The return type declared by the function a `match` subject or a
+    /// bound value calls (`f(x)`, `::alias/f(x)`, `x |> f()`, or a var
+    /// import of one), resolved in the callee's own namespace. `None` when
+    /// the callee or the called arity is unknown, or that arity declares no
+    /// return type, and when the subject reads a path off the result
+    /// (`f(x).field`).
     fn declared_call_return_type(&mut self, subject: &Value) -> Option<TypeExpr> {
         let (fn_call, piped) = match subject {
             Value::FnCall(fn_call) => (fn_call, 0),
@@ -1709,6 +1710,24 @@ impl TypeChecker {
             return None;
         }
         self.declared_return_type(fn_call, piped)
+    }
+
+    /// The type an untyped binding of `value` records. User function calls
+    /// infer as `Any`, so a binding of one takes the type the callee
+    /// declares it returns, as an annotation would give it. A declared
+    /// `Result` stays `Any`: the binding holds the Result, and consuming it
+    /// gives a value the declaration does not name.
+    fn untyped_binding_type(&mut self, value: &Value, inferred: TypeExpr) -> TypeExpr {
+        let TypeExpr::Any = inferred else {
+            return inferred;
+        };
+        match self.declared_call_return_type(value) {
+            Some(TypeExpr::Union(members)) if members.iter().any(Self::names_result) => {
+                TypeExpr::Any
+            }
+            Some(declared) if !Self::names_result(&declared) => declared,
+            _ => TypeExpr::Any,
+        }
     }
 
     /// The return type the callee of `fn_call` declares for the called
@@ -2952,7 +2971,7 @@ impl TypeChecker {
                 );
                 self.apply_annotation_constraint(inferred_type, &constraint)
             } else {
-                inferred_type
+                self.untyped_binding_type(value, inferred_type)
             };
             self.current_def = None;
             self.current_def_src = None;
@@ -3191,7 +3210,7 @@ impl TypeChecker {
                         );
                         self.apply_annotation_constraint(inferred, &constraint)
                     } else {
-                        inferred
+                        self.untyped_binding_type(&values[1], inferred)
                     };
                     let name = var_ref.var.sym.name().to_string();
                     self.context.add_variable(name, assigned.clone());
@@ -3522,6 +3541,9 @@ impl TypeChecker {
             (Some(type_name), Some(variant)) if arm.alternatives.is_empty() => {
                 self.variant_payload_type(type_name, variant)
             }
+            (Some(type_name), None) if arm.alternatives.is_empty() => {
+                self.union_member_named(subject, type_name)
+            }
             _ => None,
         };
         let names: Vec<&str> = subject.into_iter().chain(arm.binding.as_deref()).collect();
@@ -3535,6 +3557,31 @@ impl TypeChecker {
         let body_type = self.infer_value_type(&arm.body);
         self.context.pop_scope();
         body_type
+    }
+
+    /// The member of a union-typed `match` subject that a type arm names
+    /// (`HttpError =>` on `Response | HttpError`), which the subject holds
+    /// inside that arm. Members are matched by short name, as exhaustiveness
+    /// matches them, so an imported or qualified arm name finds its type.
+    /// `None` when the subject is not a variable typed as a union, or not
+    /// exactly one member has that name.
+    fn union_member_named(&self, subject: Option<&str>, type_name: &str) -> Option<TypeExpr> {
+        let TypeExpr::Union(members) = self.context.get_variable_type(subject?)? else {
+            return None;
+        };
+        let short = Self::short_type_name(type_name);
+        let mut named = members.iter().filter(|member| match member {
+            TypeExpr::Named(name)
+            | TypeExpr::Record {
+                type_name: Some(name),
+                ..
+            } => Self::short_type_name(name) == short,
+            _ => false,
+        });
+        match (named.next(), named.next()) {
+            (Some(member), None) => Some(member.clone()),
+            _ => None,
+        }
     }
 
     /// The declared payload type of `enum_name.variant`, resolved in the
@@ -5102,7 +5149,10 @@ impl TypeChecker {
                         && v.var.deep_set.is_none()
                 )
             {
-                let inferred = self.infer_value_type(value);
+                let mut inferred = self.infer_value_type(value);
+                if var_ref.var.type_annotation.is_none() {
+                    inferred = self.untyped_binding_type(value, inferred);
+                }
                 let name = var_ref.var.sym.name().to_string();
                 self.context.add_variable(name, inferred.clone());
                 result_types.push(inferred);
@@ -5134,12 +5184,12 @@ impl TypeChecker {
                     );
                 }
                 // Walk every expression so calls earlier in the body are type-checked,
-                // not just whichever happens to be the return value.
-                let mut last_type = TypeExpr::Null;
-                for expr in &flow.expressions {
-                    last_type = self.infer_value_type(expr);
-                }
-                last_type
+                // not just whichever happens to be the return value. A binding
+                // the parser leaves unfolded (`a m |> f()`) arrives as a bare
+                // `Var` and its value, which the runtime binds as a pair.
+                self.walk_paired_bindings(&flow.expressions)
+                    .pop()
+                    .unwrap_or(TypeExpr::Null)
             }
             FlowType::Parallel => {
                 // Parallel flow bodies pair consecutive expressions as
