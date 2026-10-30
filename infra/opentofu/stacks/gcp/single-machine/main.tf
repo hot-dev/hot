@@ -226,8 +226,10 @@ resource "google_compute_instance" "host" {
   machine_type        = module.contract.capacity.gcp
   min_cpu_platform    = "Intel Cascade Lake"
   deletion_protection = true
-  can_ip_forward      = false
-  labels              = { hot-installation = local.config.name, managed-by = "opentofu" }
+  # A new size stops and starts the VM; the data disk stays attached.
+  allow_stopping_for_update = true
+  can_ip_forward            = false
+  labels                    = { hot-installation = local.config.name, managed-by = "opentofu" }
   boot_disk {
     auto_delete = true
     initialize_params {
@@ -266,6 +268,9 @@ resource "google_compute_instance" "host" {
     startup-script = templatefile("${path.module}/../../../../runtime/bootstrap.sh.tftpl", {
       config_base64 = base64encode(jsonencode(local.host_config))
     })
+    # The same configuration, which the agent rereads every cycle: a change
+    # applied in place takes effect without a reboot.
+    hot-installation = base64encode(jsonencode(local.host_config))
   }
   lifecycle {
     precondition {

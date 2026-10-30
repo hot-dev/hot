@@ -116,6 +116,10 @@ run "endpoints_and_scaling" {
     error_message = "App and API autoscale from two; task-workers only scale out."
   }
   assert {
+    condition     = length(google_compute_region_autoscaler.role) == 4 && !contains(keys(google_compute_region_autoscaler.role), "scheduler")
+    error_message = "Every role group but the scheduler's has an autoscaler, so a new count takes effect even when fixed."
+  }
+  assert {
     condition     = google_monitoring_alert_policy.scheduler.display_name == "hot-hot-example-scheduler-stopped" && length(google_monitoring_alert_policy.hot) == 12 && length(jsondecode(google_monitoring_dashboard.hot.dashboard_json).mosaicLayout.tiles) == 10 && one(google_monitoring_alert_policy.database_connections[0].conditions).condition_threshold[0].threshold_value == 320
     error_message = "The singleton scheduler and every per-host signal alert."
   }

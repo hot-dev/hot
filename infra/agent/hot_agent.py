@@ -398,6 +398,13 @@ class Gcp:
         """An access token, which Artifact Registry accepts as a password."""
         return self.token()
 
+    def installation(self):
+        """The installation configuration in the instance's metadata, which
+        OpenTofu updates in place; None where the stack sets none."""
+        status, data = http("GET", self.METADATA + "/instance/attributes/hot-installation",
+                            headers={"Metadata-Flavor": "Google"})
+        return json.loads(base64.b64decode(data)) if status == 200 else None
+
     def instance_name(self):
         """The instance name, which the managed instance group lists."""
         _, data = http("GET", self.METADATA + "/instance/name", headers={"Metadata-Flavor": "Google"})
@@ -1318,6 +1325,26 @@ class Agent:
         except (OSError, ValueError):
             return {}
 
+    def refresh_configuration(self):
+        """Use a configuration the stack changed in place, where the cloud
+        offers one (GCP instance metadata): the next reconcile sees a new
+        configuration digest and redeploys with it, without a reboot. On AWS
+        a changed configuration replaces the instance."""
+        try:
+            current = getattr(self.cloud, "installation", lambda: None)()
+        except (OSError, ValueError):
+            return False
+        if not current or current == self.config:
+            return False
+        path = self.etc / "installation.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(mode=0o600)
+        path.write_text(json.dumps(current))
+        self.config = current
+        self.references = current["secret_references"]
+        self._dependencies = None
+        return True
+
     def dependencies(self):
         """(host, port) of the managed and existing data services. Kept in
         memory, not in the state file: existing services' addresses come
@@ -2042,6 +2069,7 @@ def main(argv=None):
         return 0
     while True:
         with locked():
+            agent.refresh_configuration()
             agent.resume()
             agent.reconcile()
             agent.monitor()

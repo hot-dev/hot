@@ -307,6 +307,9 @@ install -d /etc/systemd/system/docker.service.d
 printf '[Unit]\nRequiresMountsFor=/var/lib/hot\n' > /etc/systemd/system/docker.service.d/hot-data.conf
 systemctl daemon-reload
 systemctl enable --now var-lib-hot.mount
+# A disk enlarged for a bigger size grows its filesystem, online; an
+# unchanged one is left as it is.
+resize2fs "$real"
 install -d -m 0755 /var/lib/hot/kata
 DISK
 

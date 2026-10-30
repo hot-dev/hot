@@ -326,9 +326,11 @@ resource "google_compute_instance_group_manager" "scheduler" {
 # per host (measured once for the installation by the scheduler's host), and
 # task-workers the share of their slots in use. Task-workers only scale out,
 # since a managed instance group cannot protect an instance that is running
-# tasks; idle task hosts leave the group on their own.
+# tasks; idle task hosts leave the group on their own. A fixed count is an
+# autoscaler with equal bounds too: the groups leave their size to it, so a
+# new count takes effect.
 resource "google_compute_region_autoscaler" "role" {
-  for_each = { for role, group in local.roles : role => group if role != "scheduler" && (contains(local.web_roles, role) || group.max > group.min) }
+  for_each = { for role, group in local.roles : role => group if role != "scheduler" }
   name     = "${local.tag}-${each.key}"
   region   = local.config.region
   target   = google_compute_region_instance_group_manager.role[each.key].id

@@ -58,7 +58,7 @@ run "private_local" {
     error_message = "Nested virtualization and deletion protection must be enabled."
   }
   assert {
-    condition     = google_compute_instance.host.metadata["block-project-ssh-keys"] == "TRUE" && google_compute_instance.host.metadata["serial-port-enable"] == "FALSE"
+    condition     = google_compute_instance.host.metadata["block-project-ssh-keys"] == "TRUE" && google_compute_instance.host.metadata["serial-port-enable"] == "FALSE" && jsondecode(base64decode(google_compute_instance.host.metadata["hot-installation"])).name == "hot-example" && google_compute_instance.host.allow_stopping_for_update
     error_message = "Project SSH keys and the serial console must be disabled."
   }
   assert {

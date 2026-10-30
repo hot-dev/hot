@@ -1226,6 +1226,30 @@ class Synthetic(AgentHarness):
         self.assertEqual(self.agent.synthetic_metrics(self.NOW), {})
 
 
+class ConfigurationRefresh(AgentHarness):
+    def test_a_configuration_changed_in_place_is_used_and_redeploys(self):
+        self.agent.reconcile()
+        changed = json.loads(json.dumps(self.config))
+        changed["settings"] = {"HOT_APP_SIGNUP": "open"}
+        self.cloud.installation = lambda: changed
+        self.assertTrue(self.agent.refresh_configuration())
+        self.assertEqual(json.loads((Path(self.tmp.name) / "etc/installation.json").read_text()), changed)
+        self.assertEqual(self.agent.config["settings"], {"HOT_APP_SIGNUP": "open"})
+        self.assertEqual(self.agent.reconcile()["state"], "deployed", "a new configuration digest redeploys")
+        self.assertFalse(self.agent.refresh_configuration(), "unchanged: nothing to do")
+
+    def test_clouds_without_one_keep_the_boot_configuration(self):
+        self.assertFalse(self.agent.refresh_configuration())
+
+    def test_gcp_reads_it_from_the_instance_metadata(self):
+        encoded = base64.b64encode(json.dumps({"name": "hot-example"}).encode())
+        with mock.patch.object(agent_module, "http", return_value=(200, encoded)) as fetched:
+            self.assertEqual(agent_module.Gcp("acme").installation(), {"name": "hot-example"})
+        self.assertTrue(fetched.call_args.args[1].endswith("/instance/attributes/hot-installation"))
+        with mock.patch.object(agent_module, "http", return_value=(404, b"")):
+            self.assertIsNone(agent_module.Gcp("acme").installation())
+
+
 class Resume(AgentHarness):
     def booted(self):
         """What a reboot leaves: the deployed release, and an empty tmpfs."""
