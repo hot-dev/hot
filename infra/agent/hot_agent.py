@@ -100,7 +100,8 @@ GCP_METRIC_NAMES = {"AgentHeartbeat": "agent_heartbeat", "UnhealthyServices": "u
                     "NewDeadLetters": "new_dead_letters", "JobsWaiting": "jobs_waiting",
                     "JobWaitSeconds": "job_wait_seconds", "TasksWaiting": "tasks_waiting",
                     "TaskWaitSeconds": "task_wait_seconds", "TaskSlotsUsedPercent": "task_slots_used_percent",
-                    "AlertTest": "alert_test", "SyntheticOk": "synthetic_ok", "SyntheticSeconds": "synthetic_seconds"}
+                    "AlertTest": "alert_test", "SyntheticOk": "synthetic_ok", "SyntheticSeconds": "synthetic_seconds",
+                    "MemoryUsedPercent": "memory_used_percent"}
 # Installation-wide measurements of Hot's queue, published by the one host
 # that runs the scheduler. On GCP they are written for the project rather
 # than an instance, so autoscalers can use them as per-group metrics.
@@ -782,6 +783,7 @@ class Agent:
         self.secrets_root = Path(roots.get("secrets", SECRETS_ROOT))
         self.etc = Path(roots.get("etc", "/etc/hot"))
         self.host = Path(roots.get("host", "/opt/hot-host"))
+        self.meminfo = Path(roots.get("meminfo", "/proc/meminfo"))
         self.backups = self.data_root / "backups"
         self.references = config["secret_references"]
 
@@ -1540,6 +1542,9 @@ class Agent:
         usage = os.statvfs(self.data_root)
         used = max(1 - usage.f_bavail / max(usage.f_blocks, 1), 1 - usage.f_favail / max(usage.f_files, 1))
         metrics["DataDiskUsedPercent"] = (round(100 * used, 1), "Percent")
+        memory = memory_used_percent(self.meminfo)
+        if memory is not None:
+            metrics["MemoryUsedPercent"] = (memory, "Percent")
         # Until the first snapshot, backup age counts from when monitoring began.
         baseline = self.releases / "monitoring.json"
         try:
@@ -1842,6 +1847,17 @@ def provision_sql():
     if beside.exists():
         return beside
     return Path(render.__file__).resolve().parents[2] / "resources/db/postgres/provision_runtime.sql"
+
+
+def memory_used_percent(meminfo):
+    """The share of the host's memory in use: all of it except what the
+    kernel reports as available without swapping. None where unreadable."""
+    try:
+        fields = dict(line.split(":", 1) for line in meminfo.read_text().splitlines() if ":" in line)
+        total, available = (int(fields[key].split()[0]) for key in ("MemTotal", "MemAvailable"))
+    except (OSError, KeyError, ValueError):
+        return None
+    return round(100 * (1 - available / max(total, 1)), 1)
 
 
 def https_request(host, method, path, body=None, headers=None, address="127.0.0.1", port=443, timeout=10):

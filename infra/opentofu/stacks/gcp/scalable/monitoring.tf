@@ -25,6 +25,7 @@ locals {
     alert_test              = { unit = "1", name = "Test alert" }
     synthetic_ok            = { unit = "1", name = "Synthetic check passed" }
     synthetic_seconds       = { unit = "s", name = "Synthetic check duration" }
+    memory_used_percent     = { unit = "%", name = "Memory used" }
   }
   # Installation-wide queue measurements, written for the project by the
   # scheduler's host rather than per instance (see the agent's
@@ -62,6 +63,10 @@ locals {
     synthetic-failed = {
       metric      = "synthetic_ok", comparison = "COMPARISON_LT", threshold = 1, aligner = "ALIGN_MIN", duration = "600s",
       description = "The synthetic event's run has not succeeded for 10 minutes: the API, queue, workers, or database are failing end to end."
+    }
+    memory-pressure = {
+      metric      = "memory_used_percent", comparison = "COMPARISON_GT", threshold = 90, aligner = "ALIGN_MAX", duration = "900s",
+      description = "A host has used over 90% of its memory for 15 minutes; the kernel may soon kill containers."
     }
     alert-test = {
       metric      = "alert_test", comparison = "COMPARISON_GT", threshold = 0, aligner = "ALIGN_MAX", duration = "0s",
@@ -237,4 +242,32 @@ resource "google_monitoring_dashboard" "hot" {
       }] } }
     }] }
   })
+}
+
+# Connections to a managed database near the size's connection budget.
+resource "google_monitoring_alert_policy" "database_connections" {
+  count                 = local.managed_postgres ? 1 : 0
+  display_name          = "hot-${local.config.name}-database-connections"
+  combiner              = "OR"
+  severity              = "WARNING"
+  notification_channels = [for channel in google_monitoring_notification_channel.email : channel.id]
+  documentation {
+    content   = "PostgreSQL has had over 80% of the size's planned connections for 15 minutes. Check for connection leaks, then lower the scaling maximums or choose a larger size."
+    mime_type = "text/markdown"
+  }
+  conditions {
+    display_name = "Connections over 80% of the planned budget"
+    condition_threshold {
+      filter          = "resource.type = \"cloudsql_database\" AND resource.labels.database_id = \"${local.config.project}:${google_sql_database_instance.postgres[0].name}\" AND metric.type = \"cloudsql.googleapis.com/database/postgresql/num_backends\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = floor(0.8 * module.contract.database_connections)
+      duration        = "900s"
+      aggregations {
+        alignment_period     = "300s"
+        per_series_aligner   = "ALIGN_MAX"
+        cross_series_reducer = "REDUCE_SUM"
+        group_by_fields      = ["resource.label.database_id"]
+      }
+    }
+  }
 }

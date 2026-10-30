@@ -293,6 +293,8 @@ Every 30 seconds the host agent publishes these metrics, to CloudWatch
 | `NewDeadLetters` | Jobs dead-lettered since the previous measurement |
 | `JobsWaiting`, `JobWaitSeconds` | Jobs no worker has taken yet, and how long the oldest has waited |
 | `TasksWaiting`, `TaskWaitSeconds` | The same for tasks, which task workers take |
+| `MemoryUsedPercent` | Host memory in use: all of it except what the kernel reports as available |
+| `SyntheticOk`, `SyntheticSeconds` | With `monitoring.synthetic_event`: whether the latest synthetic run succeeded, and how long it took |
 | `TaskSlotsUsedPercent` | On task-worker hosts: the busiest of the task worker's code slots, container slots, and container memory, in use |
 
 The host that runs the scheduler measures the queue every minute with
@@ -320,6 +322,8 @@ Hot's own email, and both firing and resolving are sent.
 | `job-wait` | A job has waited more than `monitoring.queue_wait_alert` seconds (default 900) for 10 minutes | As for `queue-backlog`; a scalable installation at `scaling.worker.max` needs a higher maximum. |
 | `task-wait` | A task has waited more than `monitoring.queue_wait_alert` seconds for 10 minutes | Task capacity is short: check the task-worker's `logs` and `TaskSlotsUsedPercent`, then raise `scaling.task_worker.max` or the size. |
 | `new-dead-letters` | Jobs were dead-lettered since the last measurement | Read the worker's `logs` for the failing jobs' errors. |
+| `memory-pressure` | A host over 90% memory for 15 minutes | Read `diagnostics` and the host journal for OOM kills; move to a larger size. |
+| `database-connections` | Managed PostgreSQL over 80% of the size's planned connections (400, 800, or 1,600) for 15 minutes | Look for connection leaks in the services' `logs`; lower the scaling maximums or choose a larger size. |
 | `synthetic-failed` | The synthetic event's run has not succeeded for 10 minutes (only with `monitoring.synthetic_event`) | Something fails end to end. Check `services-unhealthy`, `dependencies-unreachable`, and the queue alerts, then the API's and worker's `logs` for the synthetic event. |
 | `alert-test` | The `test-alert` command was sent | Nothing is wrong: it checks the path to your inbox, and resolves by itself within about 15 minutes. |
 

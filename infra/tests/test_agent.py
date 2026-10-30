@@ -138,6 +138,7 @@ class AgentHarness(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         roots = {name: Path(self.tmp.name) / name for name in ("releases", "secrets", "etc", "host")}
         roots["data"] = Path(self.tmp.name)
+        roots["meminfo"] = Path(self.tmp.name) / "meminfo"  # absent: no memory metric
         self.config = installation()
         self.cloud = FakeCloud()
         self.run = Recorder()
@@ -998,6 +999,13 @@ class Monitoring(AgentHarness):
             "Ready": 1, "BackupAgeHours": 5, "CertificateDaysLeft": 93, "QueueBacklog": 0, "QueueDeadLetters": 0,
             "NewDeadLetters": 0, "JobsWaiting": 0, "JobWaitSeconds": 0, "TasksWaiting": 0, "TaskWaitSeconds": 0})
         self.assertTrue(0 <= metrics["DataDiskUsedPercent"][0] <= 100)
+
+    def test_memory_in_use_counts_what_the_kernel_cannot_give_back(self):
+        (Path(self.tmp.name) / "meminfo").write_text(
+            "MemTotal:        8000000 kB\nMemFree:          500000 kB\nMemAvailable:    2000000 kB\n")
+        self.assertEqual(self.agent.observe(now=self.NOW)["MemoryUsedPercent"], (75.0, "Percent"))
+        (Path(self.tmp.name) / "meminfo").write_text("MemTotal: 8000000 kB\n")
+        self.assertNotIn("MemoryUsedPercent", self.agent.observe(now=self.NOW))
 
     def test_failures_show_up_in_the_metrics(self):
         self.agent.reconcile()

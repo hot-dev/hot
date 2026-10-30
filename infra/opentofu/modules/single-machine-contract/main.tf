@@ -399,6 +399,10 @@ locals {
   ecr_mirror    = regex("^(?:([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com)?", local.registry_host)
   gar_mirror    = regex("^(?:([a-z0-9-]+)-docker\\.pkg\\.dev)?", local.registry_host)
 }
+output "database_connections" {
+  description = "The PostgreSQL connections the size's database tier is planned for, which the scalable maximums must fit."
+  value       = lookup({ small = 400, medium = 800, large = 1600 }, var.installation.size, 400)
+}
 output "dashboard" {
   description = "Each stack's dashboard panels: a title, the statistic that reads the panel's agent metrics, and each metric's CloudWatch name and Cloud Monitoring descriptor key."
   value = [for panel in [
@@ -410,6 +414,7 @@ output "dashboard" {
     { title = "Task slots used (%)", stat = "Average", metrics = [["TaskSlotsUsedPercent", "task_slots_used_percent"]], single = false },
     { title = "Synthetic check (1 = passed)", stat = "Minimum", metrics = [["SyntheticOk", "synthetic_ok"]], single = false },
     { title = "Disk used (%)", stat = "Maximum", metrics = [["DataDiskUsedPercent", "data_disk_used_percent"]], single = false },
+    { title = "Memory used (%)", stat = "Maximum", metrics = [["MemoryUsedPercent", "memory_used_percent"]], single = false },
     { title = "Certificate days left", stat = "Minimum", metrics = [["CertificateDaysLeft", "certificate_days_left"]], single = false },
     { title = "Backup age (hours)", stat = "Maximum", metrics = [["BackupAgeHours", "backup_age_hours"]], single = true },
     ] : { title = panel.title, stat = panel.stat, metrics = [for m in panel.metrics : { aws = m[0], gcp = m[1] }] }

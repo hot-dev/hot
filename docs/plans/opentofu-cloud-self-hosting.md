@@ -2031,9 +2031,9 @@ or an existing operator destination without coupling telemetry to S3.
       memory pressure, connection pressure, certificate expiry, and backup
       failures. Document thresholds, ownership, response steps, and export options.
       The ingress certificate's remaining days are a metric with an alert at
-      14 days. Queue waits and task slots are metrics with alerts, and each
-      stack has a dashboard of the agent's metrics. Connection pressure and
-      memory pressure are not yet measured.
+      14 days. Queue waits, task slots, and host memory are metrics with
+      alerts. Managed PostgreSQL alerts at 80% of the size's planned
+      connections. Each stack has a dashboard of the agent's metrics.
       Apply the logging/monitoring contract above: its baseline is required for
       initial installs; detailed dashboards and tracing can follow.
 

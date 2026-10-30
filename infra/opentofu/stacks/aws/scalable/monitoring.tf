@@ -64,6 +64,11 @@ locals {
       period      = 300, periods = 2, missing = "notBreaching",
       description = "The synthetic event's run has not succeeded for 10 minutes: the API, queue, workers, or database are failing end to end."
     }
+    memory-pressure = {
+      metric      = "MemoryUsedPercent", statistic = "Maximum", comparison = "GreaterThanThreshold", threshold = 90,
+      period      = 300, periods = 3, missing = "notBreaching",
+      description = "A host has used over 90% of its memory for 15 minutes; the kernel may soon kill containers."
+    }
     alert-test = {
       metric      = "AlertTest", statistic = "Maximum", comparison = "GreaterThanThreshold", threshold = 0,
       period      = 60, periods = 1, missing = "notBreaching",
@@ -133,4 +138,22 @@ resource "aws_cloudwatch_dashboard" "hot" {
       metrics = [for metric in panel.metrics : ["Hot/SelfHost", metric.aws, "Installation", local.config.name]]
     }
   }] })
+}
+
+# Connections to a managed database near the size's connection budget.
+resource "aws_cloudwatch_metric_alarm" "database_connections" {
+  count               = local.managed_postgres ? 1 : 0
+  alarm_name          = "hot-${local.config.name}-database-connections"
+  alarm_description   = "PostgreSQL has had over 80% of the size's planned connections for 15 minutes. Check for connection leaks, then lower the scaling maximums or choose a larger size."
+  namespace           = "AWS/RDS"
+  metric_name         = "DatabaseConnections"
+  dimensions          = { DBInstanceIdentifier = aws_db_instance.postgres[0].identifier }
+  statistic           = "Maximum"
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = floor(0.8 * module.contract.database_connections)
+  period              = 300
+  evaluation_periods  = 3
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
 }

@@ -367,11 +367,11 @@ run "backups_and_alerts" {
     error_message = "Snapshots run daily at the chosen hour and are kept for the chosen days."
   }
   assert {
-    condition     = length(aws_sns_topic_subscription.alerts) == 2 && length(aws_cloudwatch_metric_alarm.hot) == 14
+    condition     = length(aws_sns_topic_subscription.alerts) == 2 && length(aws_cloudwatch_metric_alarm.hot) == 15
     error_message = "Every alert email is subscribed and every critical signal has an alarm."
   }
   assert {
-    condition     = aws_cloudwatch_metric_alarm.hot["alert-test"].period == 60 && length(jsondecode(aws_cloudwatch_dashboard.hot.dashboard_body).widgets) == 10 && jsondecode(aws_cloudwatch_dashboard.hot.dashboard_body).widgets[3].properties.metrics[0] == ["Hot/SelfHost", "JobsWaiting", "Installation", "hot-example"]
+    condition     = aws_cloudwatch_metric_alarm.hot["alert-test"].period == 60 && length(jsondecode(aws_cloudwatch_dashboard.hot.dashboard_body).widgets) == 11 && jsondecode(aws_cloudwatch_dashboard.hot.dashboard_body).widgets[3].properties.metrics[0] == ["Hot/SelfHost", "JobsWaiting", "Installation", "hot-example"]
     error_message = "A test alarm for the alert path, and a dashboard of the installation's metrics."
   }
   assert {
