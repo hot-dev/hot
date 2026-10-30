@@ -10,9 +10,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+pub mod admin;
 pub mod mem;
 pub mod sqlite;
 pub mod streams;
+
+pub use admin::QueueAdmin;
 
 static QUEUE_METRICS_ENABLED: AtomicBool = AtomicBool::new(true);
 static QUEUE_WAIT_TARGET_P99_MS: AtomicU64 = AtomicU64::new(1_000);
