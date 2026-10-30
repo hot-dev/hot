@@ -1334,9 +1334,8 @@ using retained local storage.
       corresponding `HOT_BUILD_GCS_*` / `HOT_FILE_GCS_*` environment variables.
       Document and test configuration precedence across every service/template.
       `GcsConfig::resolve` reads `HOT_<ROLE>_GCS_*`, then `<role>.gcs.*`, with
-      a test, and `configuration/storage.md` documents the precedence.
-      Missing: the app, API, worker, and task-worker templates list only S3
-      settings.
+      a test, and `configuration/storage.md` documents the precedence. Every
+      service template lists the GCS settings beside the S3 ones.
 - [x] Use Application Default Credentials, attached service accounts in GCP,
       and federated credentials for CI. Do not require runtime service-account
       key files or invoke `gcloud` from storage operations.
