@@ -1096,6 +1096,50 @@ fn test_explicit_all_still_allowed_on_ambiguous_flows() {
 }
 
 #[test]
+fn test_all_return_annotation_shapes_a_single_flow_body() {
+    let source = r#"
+        trace fn (x: Int): All<Vec> { x |> add(1) |> mul(2) }
+        bound fn (x: Int): All<Vec> {
+            a x
+            x |> add(1)
+        }
+        "#;
+
+    let program = parse_hot(source).expect("annotated bodies should parse");
+    let default_ns = &program.namespaces[&NsPath::new()];
+    let body_of = |name: &str| match default_ns
+        .scope
+        .vars
+        .iter()
+        .find(|(var, _)| var.sym.name() == name)
+    {
+        Some((_, Value::Fn(defs))) => defs[0].body.clone(),
+        other => panic!("expected fn {name}, got {other:?}"),
+    };
+
+    // One flow expression: the pipe collects, the serial body does not.
+    match body_of("trace") {
+        Value::Flow(body) => {
+            assert_eq!(body.result_modifier, None);
+            match body.expressions.as_slice() {
+                [Value::Flow(pipe)] => {
+                    assert_eq!(pipe.flow_type, FlowType::Pipe);
+                    assert_eq!(pipe.result_modifier, Some(ResultModifier::Vec));
+                }
+                other => panic!("expected one pipe, got {other:?}"),
+            }
+        }
+        other => panic!("expected flow body, got {other:?}"),
+    }
+
+    // A body with bindings stays a collecting serial flow.
+    match body_of("bound") {
+        Value::Flow(body) => assert_eq!(body.result_modifier, Some(ResultModifier::Vec)),
+        other => panic!("expected flow body, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_type_definitions_with_constructors() {
     let source = r#"
         // Simple type definitions (like time.hot)

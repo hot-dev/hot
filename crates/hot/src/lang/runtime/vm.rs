@@ -574,6 +574,10 @@ pub struct VirtualMachine {
 
     /// Flow context stack for nested flows
     flow_contexts: Vec<FlowContext>,
+    /// Depth of `flow_contexts` when the running function or lambda body
+    /// began. The contexts below it are its callers' flows, which collect
+    /// only their own bindings (see `own_flow_context_mut`).
+    flow_frame_base: usize,
     /// Call context stack for tracking function invocations and runtime paths
     call_stack: Vec<CallContext>,
     /// Hot AST for namespace and metadata access
@@ -764,6 +768,7 @@ impl VirtualMachine {
             scope_stack,
 
             flow_contexts: Vec::new(),
+            flow_frame_base: 0,
             call_stack: Vec::new(),
             hot_ast,
             current_debug_function: None,
@@ -2981,7 +2986,7 @@ impl VirtualMachine {
                 tracing::trace!("VM StoreVar - storing '{}' = {:?}", name, val);
 
                 // Track variable assignments in flow contexts for result modifiers
-                if let Some(flow_context) = self.flow_contexts.last_mut() {
+                if let Some(flow_context) = self.own_flow_context_mut() {
                     // Only track for serial/parallel flows (all have result modifiers when using BeginFlow/EndFlow)
                     if matches!(
                         flow_context.flow_type,
@@ -3030,7 +3035,7 @@ impl VirtualMachine {
                     self.store_variable(&name, result.clone())?;
 
                     // Track in flow context if present
-                    if let Some(flow_context) = self.flow_contexts.last_mut() {
+                    if let Some(flow_context) = self.own_flow_context_mut() {
                         flow_context
                             .flow_variable_refs
                             .push((name.to_string(), result));
@@ -5128,6 +5133,17 @@ impl VirtualMachine {
     /// Uses the Hot language semantics from val.rs
     fn is_truthy(&self, val: &Val) -> bool {
         val.is_truthy()
+    }
+
+    /// The innermost flow opened by the running function or lambda body. A
+    /// binding is collected only by a flow of its own body: a call made
+    /// inside a caller's `All<Map>`/`All<Vec>` flow adds nothing to it.
+    fn own_flow_context_mut(&mut self) -> Option<&mut FlowContext> {
+        if self.flow_contexts.len() > self.flow_frame_base {
+            self.flow_contexts.last_mut()
+        } else {
+            None
+        }
     }
 
     /// Collect flow result from flow context
@@ -8159,6 +8175,10 @@ impl VirtualMachine {
         // Push the lambda scope onto the scope stack
         let saved_scope_depth = self.scope_stack.len();
         let saved_flow_context_depth = self.flow_contexts.len();
+        // The lambda's bindings are its own, never a binding of a flow
+        // the caller has open.
+        let saved_flow_frame_base =
+            std::mem::replace(&mut self.flow_frame_base, saved_flow_context_depth);
         let saved_skip_flag = self.skip_until_branch_end;
         let saved_skip_cond_flow = self.skip_remaining_cond_flow;
         self.scope_stack.push(lambda_scope);
@@ -8433,6 +8453,7 @@ impl VirtualMachine {
 
         // Restore instruction pointer and register state
         self.instruction_pointer = saved_instruction_pointer;
+        self.flow_frame_base = saved_flow_frame_base;
 
         // Restore saved registers before truncating (for recursive lambdas)
         for (reg_idx, saved_val) in registers_to_save {
@@ -8988,6 +9009,10 @@ impl VirtualMachine {
 
             // Save flow context depth for TCO cleanup - tail calls may leave stale contexts
             let saved_flow_context_depth = self.flow_contexts.len();
+            // The caller's open flows end here: a binding the body makes,
+            // a checked parameter included, belongs to this call alone.
+            let saved_flow_frame_base =
+                std::mem::replace(&mut self.flow_frame_base, saved_flow_context_depth);
 
             let result = if !function_has_instructions {
                 // No instructions compiled yet - this is expected for now
@@ -9149,6 +9174,7 @@ impl VirtualMachine {
             if result.is_err() {
                 self.flow_contexts.truncate(saved_flow_context_depth);
             }
+            self.flow_frame_base = saved_flow_frame_base;
 
             // Restore scope stack to pre-function depth.
             // This pops the function scope AND any scopes leaked by flow constructs
@@ -10329,6 +10355,7 @@ impl VirtualMachine {
 
         // Clear flow contexts
         self.flow_contexts.clear();
+        self.flow_frame_base = 0;
 
         // Dispatch cache is NOT cleared — it's valid across runs for the same program
         // (function mappings are immutable after compilation)

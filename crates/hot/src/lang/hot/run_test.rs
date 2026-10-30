@@ -710,6 +710,117 @@ ser-map fn (n: Int): Map {
         );
     }
 
+    /// A collecting flow holds only its own bindings. A function or lambda
+    /// called inside it binds its checked parameters and locals in its own
+    /// frame: the interpreter added `r`, `k`, `z` and `w` to the caller's map.
+    #[test]
+    fn calls_add_nothing_to_a_callers_collected_flow() {
+        let src = r#"::t ns
+Refined type { n: Int where gt(%, 0) }
+read-refined fn (r: Refined): Int { r.n }
+read-positive fn (k: Int where gt(%, 0)): Int { k }
+read-local fn (q: Int): Int {
+    z add(q, 1)
+    z
+}
+calls-refined fn serial (x: Refined): All<Map> {
+    y read-refined(x)
+    status y
+}
+calls-positive fn serial (x: Int): All<Map> {
+    y read-positive(x)
+    status y
+}
+calls-local fn (x: Int): All<Map> {
+    y read-local(x)
+    status y
+}
+calls-lambda fn (xs: Vec): All<Map> {
+    doubled map(xs, (v) {
+        w mul(v, 2)
+        w
+    })
+    n length(doubled)
+}
+calls-positive-vec fn serial (x: Int): All<Vec> {
+    y read-positive(x)
+    status y
+}
+calls-in-parallel fn parallel (x: Int): All<Map> {
+    a read-positive(x)
+    b read-local(x)
+}
+[
+    keys(calls-refined(Refined(n: 1))),
+    keys(calls-positive(1)),
+    keys(calls-local(1)),
+    calls-lambda([1, 2]),
+    calls-positive-vec(1),
+    calls-in-parallel(1),
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &crate::val!([
+                ["y", "status"],
+                ["y", "status"],
+                ["y", "status"],
+                {"doubled": [2, 4], "n": 2},
+                [1, 1],
+                {"a": 1, "b": 2},
+            ]),
+        );
+    }
+
+    /// A plain `fn` body that is one flow takes an `All` return annotation
+    /// on that flow, as a binding of it does: a pipe collects its stages.
+    /// The annotation used to shape the implicit serial body, which binds
+    /// nothing, so these returned `[]`.
+    #[test]
+    fn single_flow_fn_body_takes_the_all_annotation() {
+        let src = r#"::t ns
+pipe-trace fn (x: Int): All<Vec> { x |> add(1) |> mul(2) |> sub(3) }
+pipe-lines fn (x: Int): All<Vec> {
+    x
+        |> add(1)
+        |> mul(2)
+}
+checks fn (x: Int): All<Vec> {
+    cond-all {
+        gt(x, 0) => a { "positive" }
+        gt(x, 10) => b { "big" }
+        => c { "any" }
+    }
+}
+both fn (x: Int): All<Vec> {
+    parallel {
+        a add(x, 1)
+        b add(x, 2)
+    }
+}
+both-named fn (x: Int): All {
+    parallel {
+        a add(x, 1)
+        b add(x, 2)
+    }
+}
+bindings fn (x: Int): All<Vec> {
+    a x
+    x |> add(1)
+}
+[pipe-trace(5), pipe-lines(1), checks(5), both(1), both-named(1), bindings(1)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &crate::val!([
+                [5, 6, 12, 9],
+                [1, 2, 4],
+                ["positive", "any"],
+                [2, 3],
+                {"a": 2, "b": 3},
+                [1],
+            ]),
+        );
+    }
+
     /// A `fail()` inside a `pmap` callback stays a halt when the caller is
     /// compiled, so containment returns the worker's `Failure`. The JIT
     /// boundary used to clear the re-raised halt and pass on a plain error

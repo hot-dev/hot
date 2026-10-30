@@ -262,6 +262,43 @@ meta ["test"] fn () {
     assert-eq(result, [1, 2, 3], "function return All<Vec> shapes the body flow")
 }
 
+all-pipe-return fn (x: Int): All<Vec> { x |> add(1) |> mul(2) |> sub(3) }
+
+all-cond-all-return fn (x: Int): All<Vec> {
+    cond-all {
+        gt(x, 0) => a { "positive" }
+        gt(x, 10) => b { "big" }
+    }
+}
+
+test-all-return-annotation-on-one-flow
+meta ["test"] fn () {
+    assert-eq(all-pipe-return(5), [5, 6, 12, 9], "a pipe body collects its stages")
+    assert-eq(all-cond-all-return(20), ["positive", "big"], "a cond-all body collects its branches")
+}
+
+ShapeRefined type {
+    n: Int where gt(%, 0)
+}
+
+shape-read-refined fn (r: ShapeRefined): Int { r.n }
+shape-read-positive fn (k: Int where gt(%, 0)): Int { k }
+shape-read-local fn (q: Int): Int {
+    z add(q, 1)
+    z
+}
+
+shape-calls fn serial (x: Int): All<Map> {
+    a shape-read-refined(ShapeRefined(n: x))
+    b shape-read-positive(x)
+    c shape-read-local(x)
+}
+
+test-all-map-holds-only-its-own-bindings
+meta ["test"] fn () {
+    assert-eq(shape-calls(1), {a: 1, b: 1, c: 2}, "a callee's parameters and locals stay out of the caller's map")
+}
+
 test-pipe-with-collections
 meta ["test"] fn () {
     // Test pipe with collection functions - piped value becomes first arg
