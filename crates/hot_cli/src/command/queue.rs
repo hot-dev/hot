@@ -74,7 +74,9 @@ pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), St
                 hot::queue::QueueType::Redis => {
                     let redis_uri = conf.get_str_or_default("redis.uri", "redis://127.0.0.1/");
                     if redis_uri.is_empty() || redis_uri == "null" {
-                        return Err("Redis URI not configured. Set redis.uri in config.".to_string());
+                        return Err(
+                            "Redis URI not configured. Set redis.uri in config.".to_string()
+                        );
                     }
                     hot::queue::RedisQueueAdmin::new(redis_uri, redis_cluster)
                         .with_password(hot::redis::one_off_password().await?)
@@ -121,7 +123,7 @@ pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), St
                     }
 
                     let admin = hot::queue::RedisQueueAdmin::new(redis_uri, redis_cluster)
-                    .with_password(hot::redis::one_off_password().await?);
+                        .with_password(hot::redis::one_off_password().await?);
 
                     match admin.status() {
                         Ok(summary) => {
@@ -146,7 +148,10 @@ fn print_summary(summary: &hot::queue::QueueStatusSummary) {
         "  {:<20} {:>8} {:>10} {:>10} {:>12}",
         "Name", "Pending", "Processing", "DeadLetter", "OldestWait"
     );
-    println!("  {:-<20} {:->8} {:->10} {:->10} {:->12}", "", "", "", "", "");
+    println!(
+        "  {:-<20} {:->8} {:->10} {:->10} {:->12}",
+        "", "", "", "", ""
+    );
     for queue in &summary.queues {
         println!(
             "  {:<20} {:>8} {:>10} {:>10} {:>12}",
