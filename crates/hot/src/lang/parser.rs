@@ -2473,6 +2473,7 @@ impl Parser {
                                             | TokenType::RightBrace
                                             | TokenType::LeftParen
                                             | TokenType::Pipe
+                                            | TokenType::PipeOp
                                             | TokenType::Arrow
                                             | TokenType::Comma
                                     )
@@ -2504,7 +2505,9 @@ impl Parser {
                                 && Some(t.position) == ident_token_end
                         });
                         let is_method_access = self.check(&TokenType::Dot);
-                        let is_pipe = self.check(&TokenType::Pipe);
+                        // `name |> f()` pipes the name's value; it binds nothing.
+                        let is_pipe =
+                            self.check(&TokenType::Pipe) || self.check(&TokenType::PipeOp);
                         let is_newline_or_end = self.check(&TokenType::Newline)
                             || self.check(&TokenType::RightBrace)
                             || self.check(&TokenType::Comma);

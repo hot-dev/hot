@@ -826,6 +826,29 @@ body-match fn (x: Int): All<Vec> {
         );
     }
 
+    /// In a flow function's body, a line that pipes a name (`x |> add(1)`,
+    /// `st.a |> add(1)`) is an expression, not a binding of that name. It
+    /// was a parse error ("Expected value") after the name.
+    #[test]
+    fn flow_body_line_can_pipe_a_name() {
+        let src = r#"::t ns
+inc fn serial (x: Int): Int { x |> add(1) }
+both fn serial (x: Int): All<Vec> {
+    a x
+    a |> add(1)
+}
+field fn serial (x: Int): Int {
+    st {a: x}
+    st.a |> mul(3)
+}
+fan fn parallel (x: Int): All<Vec> {
+    x |> add(1)
+    x |> mul(3)
+}
+[inc(1), both(1), field(2), fan(2)]"#;
+        assert_same_with_and_without_jit(src, &crate::val!([2, [1, 2], 6, [3, 6]]));
+    }
+
     /// `All<Map>` on a pipe keys each stage by position, with keys that show
     /// when the map is printed. They were `$pipe_0`, ..., which read as type
     /// tags and printed as `{}`, and compiled code keyed every stage
