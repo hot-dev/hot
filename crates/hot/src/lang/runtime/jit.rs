@@ -7737,7 +7737,25 @@ fn build_supported_body(
                     };
                     builder.def_var(acc_var, new_acc);
                     flow.merged_result_kind = Some(RawKind::OwnedVal);
-                    ctx.jump_to_next(builder, ip)?;
+                    if matches!(flow.flow_type, FlowType::Cond | FlowType::Match) {
+                        // The first matching arm is the only one collected:
+                        // drop what the arm made, as the single-value path
+                        // below does, and skip the remaining arms.
+                        for (idx, existing_kind) in ctx.register_kinds.iter_mut().enumerate() {
+                            if *existing_kind == Some(RawKind::OwnedVal)
+                                && !ctx.compile_time_owned.contains(&idx)
+                                && !flow.pre_flow_owned.contains(&idx)
+                                && !flow.flow_header_regs.contains(&idx)
+                            {
+                                drop_owned_var(builder, &ctx.helper_refs, ctx.registers[idx]);
+                                *existing_kind = None;
+                            }
+                        }
+                        let target = ctx.blocks[flow.end_ip];
+                        builder.ins().jump(target, &[]);
+                    } else {
+                        ctx.jump_to_next(builder, ip)?;
+                    }
                 } else {
                     let result_reg = flow.result_reg.ok_or_else(|| {
                         "JIT flow result register was not initialized".to_string()

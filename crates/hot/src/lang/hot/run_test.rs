@@ -771,6 +771,61 @@ calls-in-parallel fn parallel (x: Int): All<Map> {
         );
     }
 
+    /// `cond` and `match` collect only the first matching arm under
+    /// `All<Vec>` or `All<Map>`, in compiled code too. Compiled code ran on
+    /// into the later arms, so `match 1 { 1 => ... _ => ... }` gave both.
+    #[test]
+    fn collecting_cond_and_match_stop_at_the_first_match() {
+        let src = r#"::t ns
+first-vec fn (x: Int): Vec {
+    v: All<Vec> match x {
+        1 => { `one ${x}` }
+        2 => { {two: x} }
+        _ => { "other" }
+    }
+    v
+}
+first-map fn (x: Int): Map {
+    v: All<Map> match x {
+        1 => { `one ${x}` }
+        _ => { "other" }
+    }
+    v
+}
+first-cond fn (x: Int): Vec {
+    label `n${x}`
+    v: All<Vec> cond {
+        gt(x, 10) => { concat(label, " big") }
+        gt(x, 0) => { concat(label, " positive") }
+        => { concat(label, " other") }
+    }
+    v
+}
+body-match fn (x: Int): All<Vec> {
+    match x {
+        1 => { "one" }
+        _ => { "other" }
+    }
+}
+[
+    map(range(0, 4), first-vec),
+    first-map(1),
+    first-map(5),
+    map([20, 3, -1], first-cond),
+    [body-match(1), body-match(2)],
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &crate::val!([
+                [["other"], ["one 1"], [{"two": 2}], ["other"]],
+                {"1": "one 1"},
+                {"_": "other"},
+                [["n20 big"], ["n3 positive"], ["n-1 other"]],
+                [["one"], ["other"]],
+            ]),
+        );
+    }
+
     /// A plain `fn` body that is one flow takes an `All` return annotation
     /// on that flow, as a binding of it does: a pipe collects its stages.
     /// The annotation used to shape the implicit serial body, which binds
