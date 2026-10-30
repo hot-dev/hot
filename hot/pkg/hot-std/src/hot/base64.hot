@@ -4,18 +4,17 @@ meta {doc: """Base64 encoding and decoding functions."""}
 encode
 meta {
     doc: """
-    Encode `data` byte array to a base64 string.
+    Encode `data` to a base64 string. A `Str` is encoded as its UTF-8 bytes.
 
     **Example**
 
     ```hot
-    data Bytes([72, 101, 108, 108, 111])  // "Hello" as bytes
-    result encode(data)
-    // result = "SGVsbG8="
+    encode("Hello")                          // "SGVsbG8="
+    encode(Bytes([72, 101, 108, 108, 111]))  // "SGVsbG8=" ("Hello" as bytes)
     ```
     """
 }
-fn (data: Bytes): Str {
+fn (data: Str | Bytes): Str {
     call-lib(::hot::base64/encode, [data])
 }
 
@@ -62,6 +61,7 @@ meta {
     doc: """
     Encode `data` to URL-safe base64 string (no padding).
     Uses `-` and `_` instead of `+` and `/`. Safe for URLs and filenames.
+    A `Str` is encoded as its UTF-8 bytes.
 
     **Example**
 

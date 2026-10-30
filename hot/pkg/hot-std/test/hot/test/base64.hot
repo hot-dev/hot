@@ -23,6 +23,19 @@ meta ["test"] fn () {
     assert(not(::hot::base64/is-valid("not-a-base64-string")))
 }
 
+// Test that encode and encode-url take a Str and encode its UTF-8 bytes
+test-base64-encode-str
+meta ["test"] fn () {
+    assert-eq("aGk=", ::hot::base64/encode("hi"), "encode should encode a Str as UTF-8")
+    assert-eq("aGk", ::hot::base64/encode-url("hi"), "encode-url should encode a Str as UTF-8, without padding")
+    assert-eq("w6k=", ::hot::base64/encode("é"), "encode should encode multi-byte characters as UTF-8")
+    assert-eq(::hot::base64/encode(Bytes("hi")), ::hot::base64/encode("hi"), "a Str should encode like its Bytes")
+    // An untyped value reaches the native without a check-time Str type
+    untyped from-json(`"hi"`)
+    assert-eq("aGk=", ::hot::base64/encode(untyped), "encode should encode an untyped Str at run time")
+    assert-eq("aGk", ::hot::base64/encode-url(untyped), "encode-url should encode an untyped Str at run time")
+}
+
 // Test URL-safe base64 encode
 test-base64-url-encode
 meta ["test"] fn () {
@@ -44,6 +57,14 @@ test-base64-url-decode
 meta ["test"] fn () {
     result ::hot::base64/decode-url("SGVsbG8")
     assert-eq(Bytes("Hello"), result, "decode-url should decode URL-safe base64")
+}
+
+// Test that decode-url takes input with or without padding
+test-base64-url-decode-padding
+meta ["test"] fn () {
+    assert-eq(Bytes("hi"), ::hot::base64/decode-url("aGk="), "decode-url should accept padding")
+    assert-eq(Bytes("hi"), ::hot::base64/decode-url("aGk"), "decode-url should accept no padding")
+    assert-eq(Bytes("hi?"), ::hot::base64/decode-url("aGk_"), "decode-url should use the URL-safe alphabet")
 }
 
 // Test URL-safe base64 roundtrip

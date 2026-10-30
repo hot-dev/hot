@@ -37,3 +37,14 @@ cdn-output/
 .env.*
 !.env.example
 .cursor/
+
+# Local infrastructure state, plans, provider caches, and rendered secrets.
+**/.terraform/
+**/.terraform.tfstate.lock.info
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+infra/**/backend_override.tf
+infra/**/encryption_override.tf
+infra/.generated/
+infra/**/__pycache__/

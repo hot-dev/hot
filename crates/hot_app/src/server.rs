@@ -42,31 +42,11 @@ pub async fn run(conf: Val) {
 pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<StreamPubSub>>) {
     tracing::info!("Hot environment: {}", hot::env::get_env());
 
-    // Validate session secret in production environments
-    if !hot::env::is_local_dev() {
-        match std::env::var("HOT_APP_SESSION_SECRET") {
-            Ok(secret) if !secret.is_empty() => {
-                info!("hot.dev: APP session secret configured");
-            }
-            _ => {
-                error!(
-                    "hot.dev: APP startup failed - HOT_APP_SESSION_SECRET environment variable is required in production"
-                );
-                panic!("HOT_APP_SESSION_SECRET environment variable is required in production");
-            }
-        }
-    } else {
-        match std::env::var("HOT_APP_SESSION_SECRET") {
-            Ok(secret) if !secret.is_empty() => {
-                info!("hot.dev: APP using configured session secret");
-            }
-            _ => {
-                debug!(
-                    "hot.dev: APP using fallback session secret (development mode only - set HOT_APP_SESSION_SECRET for production)"
-                );
-            }
-        }
-    }
+    // Use the same resolver as JWT signing/verification, including _FILE and
+    // its conflict/error checks. Malformed file settings never use a dev fallback.
+    crate::auth::get_session_secret().unwrap_or_else(|error| {
+        panic!("hot.dev: APP session secret configuration failed: {error}")
+    });
 
     // Get resolved config with app defaults merged in
     let resolved_conf = get_resolved_conf(conf.clone());

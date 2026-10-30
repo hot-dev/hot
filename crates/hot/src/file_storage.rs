@@ -441,9 +441,7 @@ pub async fn collect_retired_objects(
     retired_before: DateTime<Utc>,
     limit: i64,
 ) -> Result<usize, String> {
-    use crate::db::file::{
-        collectable_retired_objects, forget_retired_object, retired_object_collectable,
-    };
+    use crate::db::file::{collect_retired_object, collectable_retired_objects};
 
     let db = db.with_scope(crate::db::DatabaseScope::Maintenance {
         operation: crate::db::MaintenanceOperation::Retention,
@@ -452,17 +450,20 @@ pub async fn collect_retired_objects(
     let backend = storage.storage_type();
     let mut collected = 0;
     for storage_path in collectable_retired_objects(&db, backend, retired_before, limit).await? {
-        // Checked again right before deleting: a retried multipart completion
-        // can commit its (deterministic) object again meanwhile.
-        if !retired_object_collectable(&db, backend, &storage_path, retired_before).await? {
-            continue;
+        // Checked again, and deleted, while holding the object's row: a
+        // retried completion can register or commit its object meanwhile.
+        let delete = || async {
+            match storage.delete_storage_object(&storage_path).await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "Could not delete a retired file object; the next collection retries it");
+                    false
+                }
+            }
+        };
+        if collect_retired_object(&db, backend, &storage_path, retired_before, delete).await? {
+            collected += 1;
         }
-        if let Err(error) = storage.delete_storage_object(&storage_path).await {
-            tracing::warn!(%error, "Could not delete a retired file object; the next collection retries it");
-            continue;
-        }
-        forget_retired_object(&db, backend, &storage_path, retired_before).await?;
-        collected += 1;
     }
     Ok(collected)
 }
@@ -470,6 +471,8 @@ pub async fn collect_retired_objects(
 /// Register a staged object for collection just before committing it; see
 /// [`crate::db::file::register_staged_object`]. Multipart destinations are not
 /// registered: an upload's expiry aborts and removes one that never commits.
+/// The exception is a legacy S3 upload, which completes into the live key an
+/// earlier version may have retired.
 async fn register_staged(
     ctx: &FileStorageContext,
     backend: &str,
@@ -1763,12 +1766,12 @@ pub mod s3 {
                 .get("s3")
                 .ok_or_else(|| "file.aws.s3 configuration section not found".to_string())?;
 
-            let bucket = s3_conf.get_str("bucket");
+            let bucket = s3_conf.get_str_or_default("bucket", "");
             if bucket.is_empty() {
                 return Err("file.aws.s3.bucket not configured".to_string());
             }
 
-            let prefix_str = s3_conf.get_str("prefix");
+            let prefix_str = s3_conf.get_str_or_default("prefix", "");
             let prefix = if prefix_str.is_empty() {
                 None
             } else {
@@ -1779,15 +1782,24 @@ pub mod s3 {
             let mut config_loader = aws_config::defaults(BehaviorVersion::latest());
 
             // Override region if specified in S3 config
-            let s3_region = s3_conf.get_str("region");
+            let s3_region = s3_conf.get_str_or_default("region", "");
             if !s3_region.is_empty() {
                 config_loader = config_loader.region(aws_config::Region::new(s3_region));
             }
 
             // Check for custom file-specific AWS credentials from config
             // Prioritize: 1) Config values, 2) HOT_FILE_AWS_* env vars, 3) Standard AWS credential chain
-            let access_key = aws_conf.get_str("access-key-id");
-            let secret_key = aws_conf.get_str("secret-access-key");
+            let access_key = aws_conf.get_str_or_default("access-key-id", "");
+            let secret_key = aws_conf.get_str_or_default("secret-access-key", "");
+            let session_token = aws_conf.get_str_or_default("session-token", "");
+            if access_key.is_empty() != secret_key.is_empty()
+                || (!session_token.is_empty() && access_key.is_empty())
+            {
+                return Err(
+                    "AWS storage credentials require both access-key-id and secret-access-key"
+                        .into(),
+                );
+            }
 
             if !access_key.is_empty() && !secret_key.is_empty() {
                 use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
@@ -1795,8 +1807,8 @@ pub mod s3 {
                 let credentials = Credentials::new(
                     access_key,
                     secret_key,
-                    None, // session token
-                    None, // expiry
+                    (!session_token.is_empty()).then_some(session_token), // temporary credentials
+                    None,                                                 // expiry
                     "hot-file-config",
                 );
                 config_loader = config_loader
@@ -2410,6 +2422,13 @@ pub mod s3 {
                     staged_bytes_state(ctx, &normalized_path, &storage_path).await
             {
                 return Ok(*meta);
+            }
+            // A legacy upload completes into the live key, which an earlier
+            // version may have retired. Registering it first makes collection
+            // skip the key, or finish deleting its old bytes before this
+            // completion writes new ones.
+            if legacy {
+                register_staged(ctx, "s3", &storage_path).await?;
             }
 
             let completed_parts: Vec<CompletedPart> = parts
@@ -3504,6 +3523,9 @@ pub async fn file_storage_from_config(conf: &Val) -> Result<Box<dyn FileStorage>
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| crate::lang::cache::paths::get_file_storage_dir())
             };
+            if path.as_os_str().is_empty() {
+                return Err("file.storage.path must not be empty".into());
+            }
             Ok(Box::new(LocalFileStorage::new(path)))
         }
         #[cfg(feature = "s3-storage")]
@@ -3534,6 +3556,26 @@ pub async fn file_storage_from_config(conf: &Val) -> Result<Box<dyn FileStorage>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "s3-storage")]
+    #[tokio::test]
+    async fn s3_configuration_errors_do_not_panic_or_contact_aws() {
+        let missing_bucket = crate::val!({"file": {"aws": {"s3": {}}}});
+        assert!(
+            s3::S3FileStorage::from_config(&missing_bucket)
+                .await
+                .is_err()
+        );
+        let incomplete_credentials = crate::val!({"file": {"aws": {
+            "access-key-id": "only-one-half",
+            "s3": {"bucket": "customer-bucket", "region": "us-east-1"}
+        }}});
+        assert!(
+            s3::S3FileStorage::from_config(&incomplete_credentials)
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn test_normalize_path() {

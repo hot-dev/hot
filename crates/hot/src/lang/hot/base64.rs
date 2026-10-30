@@ -3,32 +3,13 @@ use crate::val::Val;
 use crate::validate_args;
 use base64::{Engine as _, engine::general_purpose};
 
-/// Encode bytes to base64 string
+/// Encode a string (as UTF-8) or bytes to a base64 string
 pub fn encode(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::base64/encode", args, 1);
 
-    let bytes = match &args[0] {
-        Val::Bytes(bytes) => bytes.clone(),
-        Val::Vec(vec) => {
-            // Convert Vec<Val> to Vec<u8> if all elements are bytes
-            let mut result = Vec::new();
-            for val in vec {
-                match val {
-                    Val::Byte(b) => result.push(*b),
-                    _ => {
-                        return HotResult::Err(Val::from(
-                            "All vector elements must be bytes for base64 encoding".to_string(),
-                        ));
-                    }
-                }
-            }
-            result
-        }
-        _ => {
-            return HotResult::Err(Val::from(
-                "Argument must be bytes or a vector of bytes".to_string(),
-            ));
-        }
+    let bytes = match get_bytes_from_arg(&args[0]) {
+        Ok(bytes) => bytes,
+        Err(e) => return HotResult::Err(Val::from(e)),
     };
 
     let encoded = general_purpose::STANDARD.encode(&bytes);
@@ -67,39 +48,20 @@ pub fn is_valid(args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::Bool(is_valid))
 }
 
-/// Encode bytes to URL-safe base64 string (no padding)
+/// Encode a string (as UTF-8) or bytes to a URL-safe base64 string (no padding)
 pub fn encode_url(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::base64/encode-url", args, 1);
 
-    let bytes = match &args[0] {
-        Val::Bytes(bytes) => bytes.clone(),
-        Val::Str(s) => s.as_bytes().to_vec(),
-        Val::Vec(vec) => {
-            let mut result = Vec::new();
-            for val in vec {
-                match val {
-                    Val::Byte(b) => result.push(*b),
-                    _ => {
-                        return HotResult::Err(Val::from(
-                            "All vector elements must be bytes for base64 encoding".to_string(),
-                        ));
-                    }
-                }
-            }
-            result
-        }
-        _ => {
-            return HotResult::Err(Val::from(
-                "Argument must be string, bytes, or a vector of bytes".to_string(),
-            ));
-        }
+    let bytes = match get_bytes_from_arg(&args[0]) {
+        Ok(bytes) => bytes,
+        Err(e) => return HotResult::Err(Val::from(e)),
     };
 
     let encoded = general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
     HotResult::Ok(Val::from(encoded))
 }
 
-/// Decode URL-safe base64 string to bytes
+/// Decode URL-safe base64 string (with or without padding) to bytes
 pub fn decode_url(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::base64/decode-url", args, 1);
 
@@ -110,9 +72,32 @@ pub fn decode_url(args: &[Val]) -> HotResult<Val> {
         }
     };
 
-    match general_purpose::URL_SAFE_NO_PAD.decode(&**base64_str) {
+    match general_purpose::URL_SAFE_NO_PAD_INDIFFERENT.decode(&**base64_str) {
         Ok(bytes) => HotResult::Ok(Val::Bytes(bytes)),
         Err(e) => HotResult::Err(Val::from(format!("Base64 URL decode error: {}", e))),
+    }
+}
+
+/// Helper to extract bytes from a Val (Str as UTF-8, Bytes, or a vector of bytes)
+fn get_bytes_from_arg(arg: &Val) -> Result<Vec<u8>, String> {
+    match arg {
+        Val::Str(s) => Ok(s.as_bytes().to_vec()),
+        Val::Bytes(bytes) => Ok(bytes.clone()),
+        Val::Vec(vec) => {
+            let mut result = Vec::new();
+            for val in vec {
+                match val {
+                    Val::Byte(b) => result.push(*b),
+                    _ => {
+                        return Err(
+                            "All vector elements must be bytes for base64 encoding".to_string()
+                        );
+                    }
+                }
+            }
+            Ok(result)
+        }
+        _ => Err("Argument must be string, bytes, or a vector of bytes".to_string()),
     }
 }
 
@@ -163,6 +148,24 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_str_as_utf8() {
+        let result = encode(&[Val::from("hi")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(ref s)) if &**s == "aGk="));
+
+        let result = encode(&[Val::from("é")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(ref s)) if &**s == "w6k="));
+
+        let result = encode_url(&[Val::from("hi")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(ref s)) if &**s == "aGk"));
+    }
+
+    #[test]
+    fn test_encode_rejects_other_values() {
+        assert!(matches!(encode(&[Val::Int(1)]), HotResult::Err(_)));
+        assert!(matches!(encode_url(&[Val::Int(1)]), HotResult::Err(_)));
+    }
+
+    #[test]
     fn test_decode_base64() {
         let result = decode(&[Val::from("SGVsbG8=")]);
         match result {
@@ -190,5 +193,49 @@ mod tests {
 
         let decoded = decode_base64_to_bytes("SGVsbG8=").unwrap();
         assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn test_decode_url_with_or_without_padding() {
+        let result = decode_url(&[Val::from("aGk=")]);
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"hi"));
+
+        let result = decode_url(&[Val::from("aGk")]);
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"hi"));
+
+        let result = decode_url(&[Val::from("aA==")]);
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"h"));
+
+        let result = decode_url(&[Val::from("aA")]);
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"h"));
+
+        // URL-safe alphabet: `_` is 63, standard `/` is rejected
+        let result = decode_url(&[Val::from("aGk_")]);
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"hi?"));
+        assert!(matches!(
+            decode_url(&[Val::from("aGk/")]),
+            HotResult::Err(_)
+        ));
+    }
+
+    #[test]
+    fn test_decode_url_rejects_bad_padding() {
+        assert!(matches!(
+            decode_url(&[Val::from("aGk==")]),
+            HotResult::Err(_)
+        ));
+        assert!(matches!(
+            decode_url(&[Val::from("a===")]),
+            HotResult::Err(_)
+        ));
+    }
+
+    #[test]
+    fn test_encode_url_stays_unpadded() {
+        let result = encode_url(&[Val::Bytes(b"hi".to_vec())]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(ref s)) if &**s == "aGk"));
+
+        let result = encode_url(&[Val::Bytes(b"h".to_vec())]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(ref s)) if &**s == "aA"));
     }
 }

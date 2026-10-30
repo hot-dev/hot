@@ -1540,8 +1540,12 @@ enum ClaimLoss {
     /// The delivery is no longer pending for this consumer: another worker
     /// reclaimed it.
     Lost,
-    /// No touch has confirmed the claim for this long.
-    Unconfirmed(std::time::Duration),
+    /// No touch has confirmed the claim for `unconfirmed`. Another worker
+    /// can reclaim the delivery from `reclaimable_at`.
+    Unconfirmed {
+        unconfirmed: std::time::Duration,
+        reclaimable_at: tokio::time::Instant,
+    },
 }
 
 /// The claim fence: from the keepalive's touch results, decide when a worker
@@ -1553,12 +1557,16 @@ enum ClaimLoss {
 struct ClaimFence {
     last_confirmed: tokio::time::Instant,
     fence_after: std::time::Duration,
+    /// How long after its last confirmed touch another worker can reclaim
+    /// the delivery: the effective orphan-reclaim idle.
+    reclaim_after: std::time::Duration,
     loss: tokio::sync::watch::Sender<Option<ClaimLoss>>,
 }
 
 impl ClaimFence {
     fn new(
         fence_after: std::time::Duration,
+        reclaim_after: std::time::Duration,
         now: tokio::time::Instant,
     ) -> (Self, tokio::sync::watch::Receiver<Option<ClaimLoss>>) {
         let (loss, claim) = tokio::sync::watch::channel(None);
@@ -1566,6 +1574,7 @@ impl ClaimFence {
             Self {
                 last_confirmed: now,
                 fence_after,
+                reclaim_after,
                 loss,
             },
             claim,
@@ -1584,7 +1593,10 @@ impl ClaimFence {
             Some(false) => Some(ClaimLoss::Lost),
             None => {
                 let unconfirmed = now.saturating_duration_since(self.last_confirmed);
-                (unconfirmed >= self.fence_after).then_some(ClaimLoss::Unconfirmed(unconfirmed))
+                (unconfirmed >= self.fence_after).then_some(ClaimLoss::Unconfirmed {
+                    unconfirmed,
+                    reclaimable_at: self.last_confirmed + self.reclaim_after,
+                })
             }
         }
         .filter(|_| self.loss.borrow().is_none())?;
@@ -1660,6 +1672,7 @@ fn spawn_event_lease_keepalive(
         std::time::Duration::from_millis(event_keepalive_interval_ms(effective_orphan_idle_ms));
     let (mut fence, claim) = ClaimFence::new(
         event_claim_fence_after(effective_orphan_idle_ms),
+        std::time::Duration::from_millis(effective_orphan_idle_ms),
         tokio::time::Instant::now(),
     );
     let touch_loop = tokio::spawn(async move {
@@ -5679,9 +5692,9 @@ pub fn get_run_timeout(worker_conf: &Val) -> std::time::Duration {
 }
 
 /// Get the cap on a function's own `timeout` meta from worker config (in
-/// seconds). It never falls below `worker.run-timeout`, so a function may
-/// always ask for the default, and never rises above
-/// `MAX_RUN_TIMEOUT_CEILING_SECONDS`.
+/// seconds). It never rises above `MAX_RUN_TIMEOUT_CEILING_SECONDS`, and
+/// below that never falls below `worker.run-timeout`, so a function may
+/// always ask for the default.
 pub fn get_max_run_timeout(worker_conf: &Val) -> std::time::Duration {
     let cap_secs = worker_conf.get_int_or_default(
         "worker.max-run-timeout",
@@ -5692,7 +5705,11 @@ pub fn get_max_run_timeout(worker_conf: &Val) -> std::time::Duration {
     } else {
         DEFAULT_MAX_RUN_TIMEOUT_SECONDS
     };
-    std::time::Duration::from_secs(cap).max(get_run_timeout(worker_conf))
+    std::time::Duration::from_secs(cap)
+        .max(get_run_timeout(worker_conf))
+        .min(std::time::Duration::from_secs(
+            MAX_RUN_TIMEOUT_CEILING_SECONDS,
+        ))
 }
 
 /// How long one run may take: the `timeout` meta of the function it runs,
@@ -5797,7 +5814,10 @@ async fn run_budget_reached(
 }
 
 /// Wait for the claim fence to report a loss; never resolves without a fence
-/// (memory and SQLite queues) or once the keepalive ends without one.
+/// (memory and SQLite queues) or once the keepalive ends without one. An
+/// unconfirmed claim resolves only at the last moment that still leaves a
+/// stopped run time to unwind and record its failure before another worker
+/// could reclaim the event, so a run that ends before then is not stopped.
 async fn claim_lost(
     claim: Option<tokio::sync::watch::Receiver<Option<ClaimLoss>>>,
 ) -> Option<ClaimLoss> {
@@ -5810,6 +5830,13 @@ async fn claim_lost(
         .ok()
         .and_then(|loss| *loss);
     match loss {
+        Some(loss @ ClaimLoss::Unconfirmed { reclaimable_at, .. }) => {
+            let unwind = RUN_TIMEOUT_HARD_GRACE + RUN_RESULT_FLUSH_TIMEOUT;
+            if let Some(stop_at) = reclaimable_at.checked_sub(unwind) {
+                tokio::time::sleep_until(stop_at).await;
+            }
+            Some(loss)
+        }
         Some(loss) => Some(loss),
         None => std::future::pending().await,
     }
@@ -5837,7 +5864,7 @@ impl RunStop {
             RunStop::ClaimLost(ClaimLoss::Lost) => {
                 "Run stopped: another worker took over its event".to_string()
             }
-            RunStop::ClaimLost(ClaimLoss::Unconfirmed(unconfirmed)) => format!(
+            RunStop::ClaimLost(ClaimLoss::Unconfirmed { unconfirmed, .. }) => format!(
                 "Run stopped: its worker could not refresh its claim on the event for {} seconds",
                 unconfirmed.as_secs()
             ),
@@ -8672,7 +8699,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                             match hot::db::Run::fail_stale_runs(
                                                                 db,
                                                                 cutoff,
-                                                                "Run abandoned: still in 'running' state past max timeout (likely worker crash)",
+                                                                "Run abandoned: unfinished past max timeout (likely worker crash)",
                                                                 ZOMBIE_BATCH_LIMIT,
                                                             )
                                                             .await
@@ -9736,6 +9763,10 @@ mod tests {
             get_max_run_timeout(&val!({"worker": {"max-run-timeout": 200_000}})),
             secs(86_400)
         );
+        assert_eq!(
+            get_max_run_timeout(&val!({"worker": {"run-timeout": 100_000}})),
+            secs(86_400)
+        );
     }
 
     #[test]
@@ -9832,8 +9863,9 @@ mod tests {
                 > RUN_TIMEOUT_HARD_GRACE + RUN_RESULT_FLUSH_TIMEOUT
         );
 
+        let reclaim_after = std::time::Duration::from_millis(idle_ms);
         let start = tokio::time::Instant::now();
-        let (mut fence, claim) = ClaimFence::new(fence_after, start);
+        let (mut fence, claim) = ClaimFence::new(fence_after, reclaim_after, start);
         // Failed touches short of the fence leave the run alone, and a
         // confirmed touch restarts the clock.
         assert_eq!(fence.observe(None, start + fence_after - secs(1)), None);
@@ -9841,18 +9873,22 @@ mod tests {
         assert_eq!(fence.observe(None, start + fence_after * 2 - secs(1)), None);
         assert_eq!(*claim.borrow(), None);
         // Failing for the whole fence window trips it.
+        let unconfirmed = ClaimLoss::Unconfirmed {
+            unconfirmed: fence_after,
+            reclaimable_at: start + fence_after + reclaim_after,
+        };
         assert_eq!(
             fence.observe(None, start + fence_after * 2),
-            Some(ClaimLoss::Unconfirmed(fence_after))
+            Some(unconfirmed)
         );
-        assert_eq!(*claim.borrow(), Some(ClaimLoss::Unconfirmed(fence_after)));
+        assert_eq!(*claim.borrow(), Some(unconfirmed));
         // The verdict is one-way.
         assert_eq!(fence.observe(Some(true), start + fence_after * 3), None);
         assert_eq!(fence.observe(Some(false), start + fence_after * 3), None);
-        assert_eq!(*claim.borrow(), Some(ClaimLoss::Unconfirmed(fence_after)));
+        assert_eq!(*claim.borrow(), Some(unconfirmed));
 
         // A touch that finds the delivery gone trips it at once.
-        let (mut fence, claim) = ClaimFence::new(fence_after, start);
+        let (mut fence, claim) = ClaimFence::new(fence_after, reclaim_after, start);
         assert_eq!(fence.observe(Some(false), start), Some(ClaimLoss::Lost));
         assert_eq!(*claim.borrow(), Some(ClaimLoss::Lost));
     }
@@ -9864,7 +9900,7 @@ mod tests {
         let started = tokio::time::Instant::now();
         let (budget_tx, budget_rx) = tokio::sync::oneshot::channel();
         budget_tx.send(budget).unwrap();
-        let (mut fence, claim) = ClaimFence::new(secs(300), started);
+        let (mut fence, claim) = ClaimFence::new(secs(300), secs(450), started);
         let stopped = Arc::new(OnceLock::new());
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop = tokio::spawn(run_must_stop(
@@ -9892,9 +9928,64 @@ mod tests {
             "Run stopped: another worker took over its event"
         );
         assert_eq!(
-            RunStop::ClaimLost(ClaimLoss::Unconfirmed(secs(307))).error(),
+            RunStop::ClaimLost(ClaimLoss::Unconfirmed {
+                unconfirmed: secs(307),
+                reclaimable_at: started,
+            })
+            .error(),
             "Run stopped: its worker could not refresh its claim on the event for 307 seconds"
         );
+    }
+
+    /// An unconfirmed claim stops a run only once it could still be running
+    /// when another worker reclaims the event; a run whose budget ends first
+    /// stops at its budget instead. With an hour's `run-timeout` the fence
+    /// trips at about 42 minutes, well inside a default run's budget.
+    #[tokio::test(start_paused = true)]
+    async fn unconfirmed_claim_stops_only_runs_that_could_outlast_it() {
+        let secs = std::time::Duration::from_secs;
+        let run_timeout = secs(3_600);
+        let idle_ms = min_event_orphan_idle_floor_ms(run_timeout);
+        let reclaim_after = std::time::Duration::from_millis(idle_ms);
+        let fence_after = event_claim_fence_after(idle_ms);
+        assert!(fence_after < run_timeout);
+        let unwind = RUN_TIMEOUT_HARD_GRACE + RUN_RESULT_FLUSH_TIMEOUT;
+        let must_stop = |budget: RunBudget| {
+            let started = tokio::time::Instant::now();
+            let (budget_tx, budget_rx) = tokio::sync::oneshot::channel();
+            budget_tx.send(budget).unwrap();
+            let (mut fence, claim) = ClaimFence::new(fence_after, reclaim_after, started);
+            let trip = tokio::spawn(async move {
+                tokio::time::sleep(fence_after).await;
+                fence.observe(None, tokio::time::Instant::now())
+            });
+            let stop = run_must_stop(
+                started,
+                budget,
+                budget_rx,
+                Some(claim),
+                Arc::new(OnceLock::new()),
+                None,
+            );
+            (started, trip, stop)
+        };
+
+        // A default-budget run ends before anyone could reclaim its event.
+        let default = RunBudget::new(None, run_timeout, secs(86_400));
+        let (started, trip, stop) = must_stop(default);
+        assert_eq!(stop.await, RunStop::TimedOut(default));
+        assert_eq!(started.elapsed(), run_timeout);
+        assert!(trip.await.unwrap().is_some(), "the fence tripped first");
+
+        // A longer run is stopped with just enough time left to unwind.
+        let long = RunBudget::new(Some(7_200), run_timeout, secs(86_400));
+        let (started, trip, stop) = must_stop(long);
+        let RunStop::ClaimLost(ClaimLoss::Unconfirmed { reclaimable_at, .. }) = stop.await else {
+            panic!("expected an unconfirmed claim to stop the run");
+        };
+        assert_eq!(reclaimable_at, started + reclaim_after);
+        assert_eq!(started.elapsed(), reclaim_after - unwind);
+        assert!(trip.await.unwrap().is_some());
     }
 
     #[test]
@@ -10636,6 +10727,7 @@ fn (url: Str, wait: Int): Int {
         // long before its own timeout.
         let (mut fence, claim) = ClaimFence::new(
             std::time::Duration::from_secs(300),
+            std::time::Duration::from_secs(450),
             tokio::time::Instant::now(),
         );
         let lose_claim = tokio::spawn(async move {

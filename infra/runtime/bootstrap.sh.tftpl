@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+# Only non-secret installation metadata is passed at boot. The baked host agent
+# obtains secrets using VM identity. No application release is embedded here.
+install -d -m 0700 /etc/hot
+printf '%s' '${config_base64}' | base64 --decode > /etc/hot/installation.json
+if ! systemctl cat hot-agent.service >/dev/null 2>&1; then
+  echo 'Hot host image is missing hot-agent.service; refusing unconfigured startup' >&2
+  exit 1
+fi
+systemctl enable --now hot-agent.service

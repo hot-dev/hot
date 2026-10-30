@@ -103,6 +103,49 @@ pub fn get_default_project_name(conf: &Val) -> String {
         .unwrap_or_else(|| "my-hot-project".to_string())
 }
 
+/// Names of the projects the configuration defines, in definition order
+pub fn get_project_names(conf: &Val) -> Vec<String> {
+    match conf.get("project") {
+        Some(Val::Map(projects)) => projects
+            .keys()
+            .map(|name| match name {
+                Val::Str(s) => (*s).to_string(),
+                _ => name.to_string().trim_matches('"').to_string(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Fail unless `project_name` is a project the configuration defines.
+///
+/// A project that isn't defined has no source or test paths, so checking,
+/// testing or running it would quietly cover no project files. `conf` should
+/// be resolved with [`get_resolved_conf`]: when `hot.hot` defines no
+/// projects, that adds the default project with `./hot/src`.
+pub fn check_project_defined(conf: &Val, project_name: &str) -> Result<(), String> {
+    if get_project_conf(conf, project_name).is_some() {
+        return Ok(());
+    }
+    // The name used when neither -p nor hot.set.project gives one
+    let why = if project_name == "my-hot-project" {
+        " (the default when hot.set.project is not set)"
+    } else {
+        ""
+    };
+    let names = get_project_names(conf);
+    let Some(example) = names.first() else {
+        return Err(format!(
+            "Project '{project_name}'{why} is not defined, and hot.hot defines no projects."
+        ));
+    };
+    Err(format!(
+        "Project '{project_name}'{why} is not defined. hot.hot defines: {}.\n\
+         Pick one with -p <name>, or set a default in hot.hot: hot.set.project \"{example}\"",
+        names.join(", ")
+    ))
+}
+
 /// Get paths for a specific project and path type (src, test, pkg)
 pub fn get_project_paths(conf: &Val, project_name: &str, path_type: &str) -> Vec<String> {
     get_project_conf(conf, project_name)
@@ -389,4 +432,62 @@ pub fn compile_project_for_cache(
         combined_program,
         hot_ast,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolved(hot_hot: &str) -> Val {
+        get_resolved_conf(crate::lang::data::eval_data(hot_hot).unwrap())
+    }
+
+    #[test]
+    fn an_undefined_default_project_is_refused() {
+        let conf = resolved("hot.project.drafting.src.paths [\"./hot/src\"]\n");
+        let project = get_default_project_name(&conf);
+        assert_eq!(project, "my-hot-project");
+
+        let error = check_project_defined(&conf, &project).unwrap_err();
+        assert_eq!(
+            error,
+            "Project 'my-hot-project' (the default when hot.set.project is not set) is not defined. \
+             hot.hot defines: drafting.\n\
+             Pick one with -p <name>, or set a default in hot.hot: hot.set.project \"drafting\""
+        );
+    }
+
+    #[test]
+    fn a_misspelled_project_is_refused() {
+        let conf = resolved(
+            "hot.project.drafting.src.paths [\"./hot/src\"]\n\
+             hot.project.review.src.paths [\"./review/src\"]\n",
+        );
+        assert!(check_project_defined(&conf, "drafting").is_ok());
+
+        let error = check_project_defined(&conf, "draftin").unwrap_err();
+        assert!(
+            error.starts_with(
+                "Project 'draftin' is not defined. hot.hot defines: drafting, review.\n"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_default_project_stands_in_when_none_are_defined() {
+        let conf = resolved("hot.check.with-tests true\n");
+        let project = get_default_project_name(&conf);
+        assert!(check_project_defined(&conf, &project).is_ok());
+        assert_eq!(get_project_src_paths(&conf, &project), ["./hot/src"]);
+    }
+
+    #[test]
+    fn a_conf_without_projects_says_so() {
+        let error = check_project_defined(&Val::map_empty(), "app").unwrap_err();
+        assert_eq!(
+            error,
+            "Project 'app' is not defined, and hot.hot defines no projects."
+        );
+    }
 }

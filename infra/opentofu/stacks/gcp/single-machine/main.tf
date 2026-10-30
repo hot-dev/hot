@@ -1,0 +1,170 @@
+terraform {
+  required_version = ">= 1.13.1, < 1.14.0"
+  required_providers {
+    google = { source = "hashicorp/google", version = "8.7.0" }
+  }
+}
+provider "google" {
+  project = var.installation.project
+  region  = var.installation.region
+  zone    = var.installation.zone
+}
+module "contract" {
+  source       = "../../../modules/single-machine-contract"
+  installation = var.installation
+}
+locals {
+  config      = module.contract.configuration
+  new_network = local.config.network.mode == "new"
+  network_id  = local.new_network ? google_compute_network.hot[0].id : local.config.network.network_id
+  subnet_id   = local.new_network ? google_compute_subnetwork.hot[0].id : local.config.network.subnet_id
+  tag         = "hot-${local.config.name}"
+}
+resource "google_project_service" "required" {
+  for_each           = toset(["compute.googleapis.com", "secretmanager.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com"])
+  project            = local.config.project
+  service            = each.value
+  disable_on_destroy = false
+}
+resource "google_compute_network" "hot" {
+  count                   = local.new_network ? 1 : 0
+  name                    = local.tag
+  auto_create_subnetworks = false
+  routing_mode            = "REGIONAL"
+  depends_on              = [google_project_service.required]
+}
+resource "google_compute_subnetwork" "hot" {
+  count                    = local.new_network ? 1 : 0
+  name                     = local.tag
+  network                  = local.network_id
+  region                   = local.config.region
+  ip_cidr_range            = local.config.network.cidr
+  private_ip_google_access = true
+}
+resource "google_compute_router" "egress" {
+  count   = local.new_network ? 1 : 0
+  name    = local.tag
+  network = local.network_id
+  region  = local.config.region
+}
+resource "google_compute_address" "egress" {
+  count  = local.new_network ? 1 : 0
+  name   = "${local.tag}-egress"
+  region = local.config.region
+}
+resource "google_compute_router_nat" "egress" {
+  count                              = local.new_network ? 1 : 0
+  name                               = local.tag
+  router                             = google_compute_router.egress[0].name
+  region                             = local.config.region
+  nat_ip_allocate_option             = "MANUAL_ONLY"
+  nat_ips                            = [google_compute_address.egress[0].self_link]
+  source_subnetwork_ip_ranges_to_nat = "LIST_OF_SUBNETWORKS"
+  subnetwork {
+    name                    = google_compute_subnetwork.hot[0].id
+    source_ip_ranges_to_nat = ["ALL_IP_RANGES"]
+  }
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
+  }
+}
+resource "google_service_account" "host" {
+  account_id   = local.tag
+  display_name = "Hot ${local.config.name} host"
+  depends_on   = [google_project_service.required]
+}
+resource "google_project_iam_member" "telemetry" {
+  for_each = toset(["roles/logging.logWriter", "roles/monitoring.metricWriter"])
+  project  = local.config.project
+  role     = each.value
+  member   = "serviceAccount:${google_service_account.host.email}"
+}
+resource "google_secret_manager_secret_iam_member" "runtime" {
+  for_each  = local.config.secret_references
+  project   = local.config.project
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.host.email}"
+}
+resource "google_compute_firewall" "https" {
+  name    = "${local.tag}-https"
+  network = local.network_id
+  # IAP forwards HTTPS, never SSH. IAM on IAP controls who can use the tunnel.
+  source_ranges           = concat(local.config.network.client_cidrs, ["35.235.240.0/20"])
+  target_service_accounts = [google_service_account.host.email]
+  allow {
+    protocol = "tcp"
+    ports    = ["443"]
+  }
+}
+resource "google_compute_disk" "data" {
+  name   = "${local.tag}-data"
+  zone   = local.config.zone
+  type   = "pd-balanced"
+  size   = module.contract.capacity.data_gb
+  labels = { hot-installation = local.config.name }
+  # Google-managed at-rest encryption is unconditional for Persistent Disk.
+  lifecycle { prevent_destroy = true }
+  depends_on = [google_project_service.required]
+}
+resource "google_compute_instance" "host" {
+  name                = local.tag
+  zone                = local.config.zone
+  machine_type        = module.contract.capacity.gcp
+  min_cpu_platform    = "Intel Cascade Lake"
+  deletion_protection = true
+  can_ip_forward      = false
+  labels              = { hot-installation = local.config.name, managed-by = "opentofu" }
+  boot_disk {
+    auto_delete = true
+    initialize_params {
+      image = local.config.host_image
+      size  = 40
+      type  = "pd-balanced"
+    }
+  }
+  attached_disk {
+    source      = google_compute_disk.data.id
+    device_name = "hot-data"
+    mode        = "READ_WRITE"
+  }
+  network_interface {
+    subnetwork = local.subnet_id
+    # Intentionally no access_config or ipv6_access_config: no external IP.
+  }
+  service_account {
+    email  = google_service_account.host.email
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+  }
+  advanced_machine_features { enable_nested_virtualization = true }
+  shielded_instance_config {
+    enable_secure_boot          = true
+    enable_vtpm                 = true
+    enable_integrity_monitoring = true
+  }
+  scheduling {
+    on_host_maintenance = "TERMINATE"
+    automatic_restart   = true
+  }
+  metadata = {
+    block-project-ssh-keys = "TRUE"
+    enable-oslogin         = "FALSE"
+    serial-port-enable     = "FALSE"
+    startup-script = templatefile("${path.module}/../../../../runtime/bootstrap.sh.tftpl", {
+      config_base64 = base64encode(jsonencode(merge(local.config, { data_volume_id = google_compute_disk.data.id })))
+    })
+  }
+  lifecycle {
+    precondition {
+      condition     = local.config.cloud == "gcp"
+      error_message = "The GCP root requires installation.cloud = gcp."
+    }
+  }
+  depends_on = [google_compute_router_nat.egress, google_project_iam_member.telemetry, google_secret_manager_secret_iam_member.runtime]
+}
+output "private_ip" { value = google_compute_instance.host.network_interface[0].network_ip }
+output "instance_id" { value = google_compute_instance.host.id }
+output "retained_data_volume_id" { value = google_compute_disk.data.id }
+output "egress_ips" { value = google_compute_address.egress[*].address }
+output "configuration" { value = local.config }
