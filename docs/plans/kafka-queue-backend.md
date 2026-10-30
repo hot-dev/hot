@@ -90,21 +90,32 @@ To check against the OpenTofu stacks:
 
 Worth doing whatever Phase 0 decides.
 
-- [ ] Write a conformance suite that runs against every backend. Cover:
-      - lease and ack;
-      - redelivery after a dropped lease;
-      - orphan reclaim;
-      - retry, then DLQ;
-      - infra backoff;
-      - the fast-forward window;
-      - purge;
-      - status counts and oldest wait.
+- [x] Write a conformance suite that runs against every backend:
+      [`queue_conformance.rs`](../../crates/hot/tests/queue_conformance.rs).
+      It covers lease and ack, redelivery after a failure or a dropped lease,
+      a panicking handler, retry then DLQ, infra retries and backoff, orphan
+      reclaim, concurrent consumers, lease timing, the startup window, purge,
+      and explicit dead-lettering. Redis cases skip when no Redis answers.
 
-      The SQLite panic-redelivery loop is the kind of defect it would catch.
-- [ ] Remove Redis-specific pieces from the public queue API:
-      `with_consumer_name`, `cleanup_streams`, and the `RedisQueueAdmin` behind
-      `hot queue status` and `hot queue clear`. Replace them with a
-      `QueueAdmin` trait.
+      It found the memory queue redelivering a panicking handler forever, the
+      defect SQLite once had: a dropped memory lease spent no attempt and was
+      not marked redelivered. Fixed. It also documents three differences
+      that are by design:
+      - Redis hands out one more lease for an exhausted message and
+        dead-letters it in `process` without running the handler.
+      - A Redis clone is a new consumer, so a delivery dropped on one handle
+        is redelivered only to that handle, or reclaimed after the idle time.
+      - Redis's purge count includes each purged pending entry twice.
+- [ ] Status counts and oldest wait. Wait for #189, which fixes Redis
+      counting acknowledged entries as pending and adds the oldest wait.
+- [x] Route `hot queue status` and `hot queue clear` through a `QueueAdmin`
+      trait ([`admin.rs`](../../crates/hot/src/queue/admin.rs)). The Redis
+      location is shown with its password redacted.
+- [x] Keep `with_consumer_name`, `fast_forward_if_stale`,
+      `purge_old_pending`, and `cleanup_streams` as they are. Each backend
+      already does nothing where a concept does not apply, so renaming them
+      would only churn the workers. Their doc comments now cover every
+      backend.
 
 ## Phase 2 Share-group spike
 
