@@ -595,7 +595,7 @@ impl RedisTaskLease {
                 .map_err(|e| LeaseError::Build(format!("cluster client: {}", e)))?;
             Ok(Self::cluster(c, worker_id))
         } else {
-            let c = Client::open(uri)
+            let c = hot::redis::client(uri)
                 .map_err(|e| LeaseError::Build(format!("standalone client: {}", e)))?;
             Ok(Self::standalone(c, worker_id))
         }

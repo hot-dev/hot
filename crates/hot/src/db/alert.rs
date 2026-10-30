@@ -2445,7 +2445,7 @@ pub async fn process_pending_deliveries(
         let result = process_delivery(
             &info,
             http_client,
-            destination_policy,
+            destination_policy.clone(),
             email_sender,
             email_config,
             db,

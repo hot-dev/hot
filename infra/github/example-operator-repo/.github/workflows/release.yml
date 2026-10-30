@@ -1,0 +1,23 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Hot release to deploy, such as 3.0.1
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  hot:
+    uses: hot-dev/hot/.github/workflows/selfhost-release.yml@v3.0.1
+    with:
+      release: ${{ inputs.release }}
+      installation: hot-example
+      cloud: aws
+      environment: production
+      aws_region: us-east-1
+      aws_release_role: arn:aws:iam::123456789012:role/hot-example-release

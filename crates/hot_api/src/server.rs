@@ -130,14 +130,69 @@ pub async fn run(conf: Val) {
 pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<StreamPubSub>>) {
     // Get resolved config with API defaults merged in
     let resolved_conf = get_resolved_conf(conf.clone());
-    let client_ip_policy = Arc::new(
-        ClientIpPolicy::from_conf(&conf)
-            .unwrap_or_else(|error| panic!("Invalid client IP configuration: {error}")),
-    );
 
     // Extract values from resolved config
     let host = resolved_conf.get_str_or_default("host", DEFAULT_API_HOST);
     let port = resolved_conf.get_int_or_default("port", DEFAULT_API_PORT as i64) as u16;
+
+    let app = build_app(&conf, shared_stream_pubsub).await;
+
+    // Bind every address the configured host resolves to: "localhost" can
+    // resolve to 127.0.0.1 and ::1, and single-address clients (the JDK,
+    // .NET) fail when only one loopback family is bound.
+    let listeners = hot::net::bind_all(&host, port).await.unwrap();
+    for listener in &listeners {
+        info!(
+            "hot.dev: API listening on http://{}",
+            listener.local_addr().unwrap()
+        );
+    }
+
+    // Graceful shutdown handler shared across listeners
+    let (shutdown_tx, shutdown_watch) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        hot::signal::shutdown_signal().await;
+        info!("hot.dev: API received shutdown signal");
+        let _ = shutdown_tx.send(true);
+    });
+
+    let mut serve_tasks = Vec::new();
+    for listener in listeners {
+        let app = app.clone();
+        let mut shutdown_watch = shutdown_watch.clone();
+        serve_tasks.push(tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_watch.wait_for(|shutdown| *shutdown).await;
+            })
+            .await
+            .unwrap();
+        }));
+    }
+    for task in serve_tasks {
+        task.await.unwrap();
+    }
+
+    info!("hot.dev: API shutdown complete");
+}
+
+/// Connect the database, storage, blob store, and stream pub/sub described by
+/// `conf`, then assemble the production router. Every API replica builds its
+/// own; nothing here is shared between processes except through PostgreSQL,
+/// Redis, and the configured storage.
+pub(crate) async fn build_app(
+    conf: &Val,
+    shared_stream_pubsub: Option<Arc<StreamPubSub>>,
+) -> Router {
+    let conf = conf.clone();
+    let resolved_conf = get_resolved_conf(conf.clone());
+    let client_ip_policy = Arc::new(
+        ClientIpPolicy::from_conf(&conf)
+            .unwrap_or_else(|error| panic!("Invalid client IP configuration: {error}")),
+    );
 
     // Max HTTP body size: 300 MB to support 256 MB multipart upload parts.
     // Handler-level checks enforce the real per-route limits (build size, plan
@@ -268,46 +323,7 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         public_concurrency_limit
     );
 
-    // Bind every address the configured host resolves to: "localhost" can
-    // resolve to 127.0.0.1 and ::1, and single-address clients (the JDK,
-    // .NET) fail when only one loopback family is bound.
-    let listeners = hot::net::bind_all(&host, port).await.unwrap();
-    for listener in &listeners {
-        info!(
-            "hot.dev: API listening on http://{}",
-            listener.local_addr().unwrap()
-        );
-    }
-
-    // Graceful shutdown handler shared across listeners
-    let (shutdown_tx, shutdown_watch) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        hot::signal::shutdown_signal().await;
-        info!("hot.dev: API received shutdown signal");
-        let _ = shutdown_tx.send(true);
-    });
-
-    let mut serve_tasks = Vec::new();
-    for listener in listeners {
-        let app = app.clone();
-        let mut shutdown_watch = shutdown_watch.clone();
-        serve_tasks.push(tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_watch.wait_for(|shutdown| *shutdown).await;
-            })
-            .await
-            .unwrap();
-        }));
-    }
-    for task in serve_tasks {
-        task.await.unwrap();
-    }
-
-    info!("hot.dev: API shutdown complete");
+    app
 }
 
 /// Project, build and context routes of one environment. Environment keys call
@@ -580,11 +596,14 @@ pub(crate) fn build_router(
                         "http_request",
                         method = %request.method(),
                         uri = %redacted,
+                        request_id = %hot::request_id::of(request),
                     )
                 })
                 .on_request(trace::DefaultOnRequest::new().level(tracing::Level::DEBUG))
                 .on_response(trace::DefaultOnResponse::new().level(tracing::Level::DEBUG)),
         )
+        // Outside the trace layer, so each request's span carries its ID.
+        .layer(middleware::from_fn(hot::request_id::middleware))
         .with_state(state)
 }
 

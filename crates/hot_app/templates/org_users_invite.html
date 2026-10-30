@@ -21,6 +21,11 @@
                         {% if success_message != "" %}
                         <div class="mb-4 p-3 bg-green-100 border border-green-400 text-green-700 rounded-md">
                             {{ success_message }}
+                            {% if invite_link != "" %}
+                            <input type="text" readonly value="{{ invite_link }}" aria-label="Invitation link"
+                                class="mt-2 w-full px-3 py-2 font-mono text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border border-green-400 rounded-md"
+                                onclick="this.select()">
+                            {% endif %}
                         </div>
                         {% endif %}
 

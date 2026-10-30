@@ -1,0 +1,30 @@
+name: command
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [status, diagnostics, logs, backup, restart-service, drain-and-stop, roll-back]
+      service:
+        description: For logs and restart-service
+        type: choice
+        default: none
+        options: [none, app, api, worker, task-worker, scheduler, ingress, postgres, valkey]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  hot:
+    uses: hot-dev/hot/.github/workflows/selfhost-command.yml@v3.0.1
+    with:
+      operation: ${{ inputs.operation }}
+      service: ${{ inputs.service }}
+      installation: hot-example
+      cloud: aws
+      hot_version: v3.0.1
+      environment: production
+      aws_region: us-east-1
+      aws_release_role: arn:aws:iam::123456789012:role/hot-example-release

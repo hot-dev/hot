@@ -299,6 +299,12 @@ fn connect_with_policy(
         _ => true,
     };
 
+    if policy.egress_proxy().is_some() {
+        // The proxy would be bypassed: it carries HTTP(S) only.
+        return HotResult::Err(err_val(format!(
+            "{FN}: raw TCP is unavailable when outbound traffic must use the egress proxy"
+        )));
+    }
     let result = tokio::runtime::Handle::current().block_on(async {
         let addrs = policy
             .resolve_host(&host, port as u16)
@@ -589,6 +595,23 @@ mod tests {
             HotResult::Err(e) => e,
             HotResult::Ok(v) => panic!("Expected Err, got Ok: {:?}", v),
         }
+    }
+
+    #[test]
+    fn raw_tcp_never_bypasses_the_egress_proxy() {
+        let rules = crate::outbound::OutboundRules::from_conf(
+            &crate::val!({"network": {"egress-proxy": "http://proxy.internal:3128"}}),
+        )
+        .unwrap()
+        .unwrap();
+        let policy = DestinationPolicy::Restricted(Arc::new(rules));
+        let error = expect_err(connect_with_policy(
+            &[Val::from("example.com"), Val::Int(443)],
+            policy,
+            true,
+            None,
+        ));
+        assert!(format!("{error:?}").contains("egress proxy"), "{error:?}");
     }
 
     /// Start an echo server; returns its port.

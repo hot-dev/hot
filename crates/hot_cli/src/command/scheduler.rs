@@ -103,6 +103,10 @@ pub(crate) async fn run_scheduler(env: Env, conf: Val) {
     };
 
     let schedule_policy = hot::db::SchedulePolicy::from_conf(&conf);
+    // Rewritten while the scheduler dispatches, for a supervisor's health check.
+    let heartbeat_file = Some(conf.get_str_or_default("scheduler.heartbeat-file", ""))
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from);
 
     // A standalone scheduler that stops on an error, such as losing its
     // singleton lock, exits non-zero so its supervisor restarts it.
@@ -121,6 +125,7 @@ pub(crate) async fn run_scheduler(env: Env, conf: Val) {
             schedule_policy,
             singleton,
             selected_env,
+            heartbeat_file,
         )
         .await
         {

@@ -204,8 +204,10 @@ environment-backed deployment setting.
 
 ## Secrets from Files
 
-Settings supplied through `HOT_*` environment variables, plus `HOT_ENCRYPTION_KEY`
-and `HOT_APP_SESSION_SECRET`, can instead name a file that holds the value:
+Settings supplied through `HOT_*` environment variables, plus `HOT_ENCRYPTION_KEY`,
+`HOT_APP_SESSION_SECRET`, and the OAuth client settings
+(`HOT_GOOGLE_CLIENT_ID`, `HOT_GOOGLE_CLIENT_SECRET`, `HOT_GITHUB_CLIENT_ID`,
+`HOT_GITHUB_CLIENT_SECRET`), can instead name a file that holds the value:
 set `<NAME>_FILE`, for example `HOT_DB_URI_FILE=/run/secrets/db-uri`. Hot
 reads the file at startup, drops one trailing newline, and does not copy the
 value into the process environment. Setting both `<NAME>` and `<NAME>_FILE`,
@@ -238,4 +240,7 @@ hot.project.my-app.deps {
 - **[Dependencies](/docs/configuration/dependencies)** - How to declare and manage package dependencies
 - **[Projects](/docs/configuration/projects)** - Configuring multiple projects in one workspace
 - **[Storage](/docs/configuration/storage)** - Where Hot stores files, blobs, and build artifacts
+- **[Email](/docs/configuration/email)** - Sending verification, invitation, and alert emails through SMTP
+- **[Accounts and Sign-Up](/docs/configuration/accounts)** - The first administrator, sign-up policy, and password resets
+- **[Outbound Network Access](/docs/configuration/network)** - Which destinations deployed code can reach
 - **[Self-Hosted PostgreSQL](/docs/configuration/postgres)** - Running Hot on PostgreSQL with row-level security

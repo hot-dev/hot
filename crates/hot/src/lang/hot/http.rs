@@ -241,17 +241,15 @@ async fn send_with_redirect_validation(
     let original_origin = current_url.origin();
 
     for redirect_count in 0..=MAX_REDIRECTS {
-        let addrs = policy
-            .resolve_url(&current_url)
-            .await
-            .map_err(|e| err_val(format!("::hot::http/request: {e}")))?;
-        let host = current_url.host_str().expect("validated URL has host");
-        let client = crate::outbound::client_builder()
+        let builder = crate::outbound::client_builder()
             .user_agent(build_user_agent(headers))
             .connect_timeout(std::time::Duration::from_secs(30))
             .timeout(std::time::Duration::from_secs(timeout_secs))
-            .redirect(reqwest::redirect::Policy::none())
-            .resolve_to_addrs(host, &addrs)
+            .redirect(reqwest::redirect::Policy::none());
+        let client = policy
+            .route(&current_url, builder)
+            .await
+            .map_err(|e| err_val(format!("::hot::http/request: {e}")))?
             .build()
             .map_err(|e| err_val(format!("::hot::http/request: client setup failed: {e}")))?;
         let mut request = client.request(method.clone(), current_url.clone());
@@ -1116,6 +1114,47 @@ mod tests {
             &Val::Null,
             DestinationPolicy::AllowPrivate,
             4,
+        )
+        .await;
+        assert!(matches!(result, HotResult::Err(_)));
+    }
+
+    #[tokio::test]
+    async fn egress_proxy_carries_requests_it_resolves_itself() {
+        // A stand-in proxy: it answers with the absolute URI it was asked for.
+        let proxy = Router::new().fallback(|uri: axum::http::Uri| async move { uri.to_string() });
+        let proxy = start_mock_server(proxy).await;
+        let rules = crate::outbound::OutboundRules::from_conf(
+            &crate::val!({"network": {"egress-proxy": format!("{proxy}/")}}),
+        )
+        .unwrap()
+        .unwrap();
+        let policy = DestinationPolicy::Restricted(std::sync::Arc::new(rules));
+        // The name cannot resolve locally; only the proxy sees it.
+        let result = make_http_request(
+            "GET",
+            "http://hot-egress-test.invalid/path",
+            &IndexMap::new(),
+            &Val::Null,
+            policy.clone(),
+            DEFAULT_MAX_RESPONSE_BYTES,
+        )
+        .await;
+        let HotResult::Ok(response) = result else {
+            panic!("request through the proxy failed: {result:?}");
+        };
+        assert!(
+            format!("{response:?}").contains("http://hot-egress-test.invalid/path"),
+            "{response:?}"
+        );
+        // Addresses written in the URL are still checked locally.
+        let result = make_http_request(
+            "GET",
+            "http://169.254.169.254/latest/meta-data/",
+            &IndexMap::new(),
+            &Val::Null,
+            policy,
+            DEFAULT_MAX_RESPONSE_BYTES,
         )
         .await;
         assert!(matches!(result, HotResult::Err(_)));

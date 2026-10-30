@@ -814,6 +814,7 @@ pub async fn org_users_invite_handler(
         org,
         error_message: "",
         success_message: "",
+        invite_link: "",
         email: "",
         role_id: 1, // Default to member role
         active_page: "users",
@@ -956,6 +957,29 @@ pub async fn org_users_invite_post_handler(
     .await
     {
         Ok(_) => {
+            // Without an email provider the queued email would only fail, so
+            // the inviting admin delivers the link instead. (The Err arm is
+            // this handler's "render a page" path.)
+            if !hot::email::email_delivery_configured(&conf, hot::email::EmailPurpose::App) {
+                let invite_link = format!(
+                    "{}/invite?code={}",
+                    hot::email::EmailConfig::from_conf(&conf).app_base_url,
+                    invite_code
+                );
+                return Err(render_org_users_invite(
+                    &session,
+                    &org,
+                    "",
+                    &format!(
+                        "Invited {}. This installation cannot send email, so share this link with them; it expires in 7 days.",
+                        form.email
+                    ),
+                    &invite_link,
+                    "",
+                    form.role_id,
+                ));
+            }
+
             // Enqueue the invitation email for sending by the worker
             let email_enqueuer = AppEmailEnqueuer::from_conf(db.clone(), &conf);
             if let Err(e) = email_enqueuer
@@ -1246,6 +1270,18 @@ fn render_org_users_invite_with_error(
     email: &str,
     role_id: i16,
 ) -> Html<String> {
+    render_org_users_invite(session, org, error_message, "", "", email, role_id)
+}
+
+fn render_org_users_invite(
+    session: &Session,
+    org: &hot::db::org::Org,
+    error_message: &str,
+    success_message: &str,
+    invite_link: &str,
+    email: &str,
+    role_id: i16,
+) -> Html<String> {
     // Build breadcrumbs: <org> / Users / Invite
     let mut breadcrumbs = templates::build_base_breadcrumbs_without_env(session);
     breadcrumbs.push(templates::BreadcrumbItem::clickable(
@@ -1259,7 +1295,8 @@ fn render_org_users_invite_with_error(
         page_context: templates::PrivatePageContext::for_org_page("users", session, breadcrumbs),
         org: org.clone(),
         error_message,
-        success_message: "",
+        success_message,
+        invite_link,
         email,
         role_id,
         active_page: "users",

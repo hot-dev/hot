@@ -240,6 +240,9 @@ pub async fn signup_handler(
 
     // User is not authenticated (guaranteed by guest_only_middleware)
     let invite_code = params.get("invite_code").cloned().unwrap_or_default();
+    if invite_code.is_empty() && !crate::signup::open_signup_available(&conf) {
+        return Redirect::to("/signin").into_response();
+    }
     let plan = params.get("plan").cloned().unwrap_or_default();
     if hot::product::billing_enabled(&conf) && invite_code.is_empty() && plan.is_empty() {
         return Redirect::to("/signup/plans").into_response();
@@ -483,6 +486,13 @@ pub async fn signup_post_handler(
             form.email
         );
         return Ok((final_cookies, Redirect::to("/")).into_response());
+    }
+
+    // Without open sign-up, the invite fast path above is the only way in.
+    if !crate::signup::open_signup_available(&conf) {
+        return Err(render_error(
+            "Signing up requires an invitation sent to this email address. Ask an administrator to invite you.",
+        ));
     }
 
     // Generate verification token and ID

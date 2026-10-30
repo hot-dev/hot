@@ -55,6 +55,8 @@ In scope:
   worker, scheduler, task worker, `hotbox`, and LSP server.
 - Public Hot packages under `hot/pkg`.
 - Installer scripts and release artifacts published from this repository.
+- Self-host infrastructure under `infra/`: the OpenTofu stacks, host image,
+  deploy agent, runtime image, and release manifests.
 
 Out of scope:
 

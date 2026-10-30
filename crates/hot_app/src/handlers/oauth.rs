@@ -40,12 +40,18 @@ pub struct OAuthCallbackQuery {
     pub state: String,
 }
 
+/// Log a configuration failure; the browser only learns sign-in is unavailable.
+fn oauth_config_error(error: String) -> Html<String> {
+    tracing::error!("hot.dev: APP OAuth configuration failed: {error}");
+    Html("Sign-in with this provider is unavailable. Please contact support.".to_string())
+}
+
 /// Google OAuth initiation handler
 pub async fn google_auth_handler(
     Query(params): Query<OAuthInitQuery>,
     cookies: CookieJar,
 ) -> Result<(CookieJar, Redirect), Html<String>> {
-    let config = OAuthConfig::from_env();
+    let config = OAuthConfig::from_env().map_err(oauth_config_error)?;
 
     let google_config = match config.google {
         Some(cfg) => cfg,
@@ -140,7 +146,7 @@ pub async fn google_callback_handler(
         )));
     }
 
-    let config = OAuthConfig::from_env();
+    let config = OAuthConfig::from_env().map_err(oauth_config_error)?;
     let google_config = config
         .google
         .ok_or_else(|| Html("Google OAuth is not configured".to_string()))?;
@@ -271,7 +277,7 @@ pub async fn github_auth_handler(
     Query(params): Query<OAuthInitQuery>,
     cookies: CookieJar,
 ) -> Result<(CookieJar, Redirect), Html<String>> {
-    let config = OAuthConfig::from_env();
+    let config = OAuthConfig::from_env().map_err(oauth_config_error)?;
 
     let github_config = match config.github {
         Some(cfg) => cfg,
@@ -366,7 +372,7 @@ pub async fn github_callback_handler(
         )));
     }
 
-    let config = OAuthConfig::from_env();
+    let config = OAuthConfig::from_env().map_err(oauth_config_error)?;
     let github_config = config
         .github
         .ok_or_else(|| Html("GitHub OAuth is not configured".to_string()))?;
@@ -638,6 +644,22 @@ async fn handle_oauth_user(
         }
         Err(_) => {
             // User doesn't exist, create new user with OAuth
+            // Invitations are readable only under the membership lookup scope.
+            let invitations = db.with_scope(hot::db::DatabaseScope::Bootstrap(
+                hot::db::BootstrapOperation::Membership,
+            ));
+            if !crate::signup::oauth_signup_open(conf)
+                && !hot::db::invite::Invite::get_invites_by_email(&invitations, email)
+                    .await
+                    .map_err(|e| format!("Failed to check invitations: {}", e))?
+                    .iter()
+                    .any(|invite| invite.is_valid().is_ok())
+            {
+                return Err(
+                    "Signing up requires an invitation sent to this email address. Ask an administrator to invite you."
+                        .to_string(),
+                );
+            }
             if let Err(retry_after) =
                 crate::rate_limit::check_oauth_new_identity(conf, provider, provider_user_id, email)
             {

@@ -2,6 +2,7 @@ terraform {
   required_version = ">= 1.13.1, < 1.14.0"
   required_providers {
     google = { source = "hashicorp/google", version = "8.7.0" }
+    random = { source = "hashicorp/random", version = "3.9.1" }
   }
 }
 provider "google" {
@@ -21,7 +22,8 @@ locals {
   tag         = "hot-${local.config.name}"
 }
 resource "google_project_service" "required" {
-  for_each           = toset(["compute.googleapis.com", "secretmanager.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com"])
+  for_each = toset(concat(["compute.googleapis.com", "secretmanager.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com", "pubsub.googleapis.com"],
+  local.config.monitoring.monthly_budget > 0 ? ["billingbudgets.googleapis.com"] : []))
   project            = local.config.project
   service            = each.value
   disable_on_destroy = false
@@ -80,12 +82,114 @@ resource "google_project_iam_member" "telemetry" {
   role     = each.value
   member   = "serviceAccount:${google_service_account.host.email}"
 }
-resource "google_secret_manager_secret_iam_member" "runtime" {
-  for_each  = local.config.secret_references
+# The release pointer: the release process adds a version {"release": "X.Y.Z"};
+# OpenTofu only creates the secret. Secret Manager has a "latest" alias, which
+# the agent reads.
+resource "google_secret_manager_secret" "release" {
+  secret_id = "${local.tag}-release"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.required]
+}
+# Values the installation generates for itself, stored once by the agent.
+resource "google_secret_manager_secret" "generated" {
+  secret_id = "${local.tag}-generated"
+  replication {
+    auto {}
+  }
+  lifecycle { prevent_destroy = true }
+  depends_on = [google_project_service.required]
+}
+# The operator's TLS certificate and key, and any SMTP, OAuth, or S3
+# credentials, as one JSON object.
+resource "google_secret_manager_secret" "operator" {
+  secret_id = "${local.tag}-operator"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.required]
+}
+resource "google_secret_manager_secret_iam_member" "read" {
+  for_each  = { release = google_secret_manager_secret.release.id, generated = google_secret_manager_secret.generated.id, operator = google_secret_manager_secret.operator.id }
   project   = local.config.project
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.host.email}"
+}
+resource "google_secret_manager_secret_iam_member" "store_generated" {
+  project   = local.config.project
+  secret_id = google_secret_manager_secret.generated.id
+  role      = "roles/secretmanager.secretVersionAdder"
+  member    = "serviceAccount:${google_service_account.host.email}"
+}
+# The only way to run anything on the host: agent commands published here.
+# The agent pulls them, so the host needs no inbound connectivity.
+resource "google_pubsub_topic" "commands" {
+  name                       = "${local.tag}-commands"
+  message_retention_duration = "3600s"
+  depends_on                 = [google_project_service.required]
+}
+resource "google_pubsub_subscription" "commands" {
+  name                       = "${local.tag}-agent"
+  topic                      = google_pubsub_topic.commands.id
+  ack_deadline_seconds       = 60
+  message_retention_duration = "3600s"
+  expiration_policy {
+    ttl = ""
+  }
+}
+resource "google_pubsub_subscription_iam_member" "agent" {
+  subscription = google_pubsub_subscription.commands.name
+  role         = "roles/pubsub.subscriber"
+  member       = "serviceAccount:${google_service_account.host.email}"
+}
+# GCS buckets, existing or provisioned: the host may use objects under its
+# prefix only. The bucket must use uniform bucket-level access for the
+# condition to apply.
+resource "google_storage_bucket_iam_member" "storage" {
+  for_each = { for role, s in local.config.storage : role => s if s.backend == "gcs" }
+  bucket   = each.value.bucket
+  role     = "roles/storage.objectUser"
+  member   = "serviceAccount:${google_service_account.host.email}"
+  condition {
+    title      = "hot-${local.config.name}-${each.key}"
+    expression = "resource.type == \"storage.googleapis.com/Bucket\" || resource.name.startsWith(\"projects/_/buckets/${each.value.bucket}/objects/${trim(each.value.prefix, "/")}/\")"
+  }
+  depends_on = [google_storage_bucket.storage]
+}
+# The release workflow may add pointer versions, publish commands, and read
+# the agent's status logs.
+resource "google_secret_manager_secret_iam_member" "release" {
+  count     = var.release_principal == "" ? 0 : 1
+  project   = local.config.project
+  secret_id = google_secret_manager_secret.release.id
+  role      = "roles/secretmanager.secretVersionAdder"
+  member    = "serviceAccount:${var.release_principal}"
+}
+resource "google_pubsub_topic_iam_member" "release" {
+  count  = var.release_principal == "" ? 0 : 1
+  topic  = google_pubsub_topic.commands.name
+  role   = "roles/pubsub.publisher"
+  member = "serviceAccount:${var.release_principal}"
+}
+# Reading the agent's reports, and (selfhost.py maintenance) listing and
+# snoozing the alert policies.
+resource "google_project_iam_member" "release_logs" {
+  for_each = var.release_principal == "" ? toset([]) : toset(["roles/logging.viewer", "roles/monitoring.alertPolicyViewer", "roles/monitoring.snoozeEditor"])
+  project  = local.config.project
+  role     = each.value
+  member   = "serviceAccount:${var.release_principal}"
+}
+locals {
+  host_config = merge(local.config, {
+    data_volume_id       = google_compute_disk.data.id
+    release_pointer      = google_secret_manager_secret.release.id
+    status_reference     = "${local.tag}-status"
+    command_subscription = google_pubsub_subscription.commands.id
+    secret_references    = { generated = google_secret_manager_secret.generated.id, operator = google_secret_manager_secret.operator.id }
+    data                 = local.host_data
+  })
 }
 resource "google_compute_firewall" "https" {
   name    = "${local.tag}-https"
@@ -99,14 +203,31 @@ resource "google_compute_firewall" "https" {
   }
 }
 resource "google_compute_disk" "data" {
-  name   = "${local.tag}-data"
+  # A disk restored from a snapshot gets its own name: the disk it replaces
+  # is kept until the restore is verified.
+  name   = local.config.backup.restore_snapshot == "" ? "${local.tag}-data" : "${local.tag}-data-${substr(sha1(local.config.backup.restore_snapshot), 0, 8)}"
   zone   = local.config.zone
   type   = "pd-balanced"
   size   = module.contract.capacity.data_gb
   labels = { hot-installation = local.config.name }
+  # Restores create the disk from a snapshot; see "Recovery" in
+  # infra/README.md. It is read only when the disk is created.
+  snapshot = local.config.backup.restore_snapshot == "" ? null : local.config.backup.restore_snapshot
   # Google-managed at-rest encryption is unconditional for Persistent Disk.
-  lifecycle { prevent_destroy = true }
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [snapshot, name]
+  }
   depends_on = [google_project_service.required]
+}
+# The host's address outlives the VM (a new host image replaces it), so a
+# private hostname pointed at it keeps working.
+resource "google_compute_address" "host" {
+  name         = "${local.tag}-host"
+  region       = local.config.region
+  subnetwork   = local.subnet_id
+  address_type = "INTERNAL"
+  depends_on   = [google_project_service.required]
 }
 resource "google_compute_instance" "host" {
   name                = local.tag
@@ -114,8 +235,10 @@ resource "google_compute_instance" "host" {
   machine_type        = module.contract.capacity.gcp
   min_cpu_platform    = "Intel Cascade Lake"
   deletion_protection = true
-  can_ip_forward      = false
-  labels              = { hot-installation = local.config.name, managed-by = "opentofu" }
+  # A new size stops and starts the VM; the data disk stays attached.
+  allow_stopping_for_update = true
+  can_ip_forward            = false
+  labels                    = { hot-installation = local.config.name, managed-by = "opentofu" }
   boot_disk {
     auto_delete = true
     initialize_params {
@@ -131,6 +254,7 @@ resource "google_compute_instance" "host" {
   }
   network_interface {
     subnetwork = local.subnet_id
+    network_ip = google_compute_address.host.address
     # Intentionally no access_config or ipv6_access_config: no external IP.
   }
   service_account {
@@ -152,8 +276,11 @@ resource "google_compute_instance" "host" {
     enable-oslogin         = "FALSE"
     serial-port-enable     = "FALSE"
     startup-script = templatefile("${path.module}/../../../../runtime/bootstrap.sh.tftpl", {
-      config_base64 = base64encode(jsonencode(merge(local.config, { data_volume_id = google_compute_disk.data.id })))
+      config_base64 = base64encode(jsonencode(local.host_config))
     })
+    # The same configuration, which the agent rereads every cycle: a change
+    # applied in place takes effect without a reboot.
+    hot-installation = base64encode(jsonencode(local.host_config))
   }
   lifecycle {
     precondition {
@@ -161,10 +288,24 @@ resource "google_compute_instance" "host" {
       error_message = "The GCP root requires installation.cloud = gcp."
     }
   }
-  depends_on = [google_compute_router_nat.egress, google_project_iam_member.telemetry, google_secret_manager_secret_iam_member.runtime]
+  depends_on = [google_compute_router_nat.egress, google_project_iam_member.telemetry, google_secret_manager_secret_iam_member.read, google_pubsub_subscription_iam_member.agent, google_secret_manager_secret_iam_member.postgres_admin, google_secret_manager_secret_version.postgres_admin, google_project_iam_member.valkey]
 }
-output "private_ip" { value = google_compute_instance.host.network_interface[0].network_ip }
+output "private_ip" { value = google_compute_address.host.address }
 output "instance_id" { value = google_compute_instance.host.id }
 output "retained_data_volume_id" { value = google_compute_disk.data.id }
 output "egress_ips" { value = google_compute_address.egress[*].address }
-output "configuration" { value = local.config }
+output "configuration" { value = local.host_config }
+output "release_secret" { value = google_secret_manager_secret.release.id }
+output "operator_secret" { value = google_secret_manager_secret.operator.id }
+output "command_topic" { value = google_pubsub_topic.commands.id }
+# Pulling images from an Artifact Registry mirror with the host's own
+# account. The mirror may live in another project; the identity that applies
+# this stack needs to manage that repository's IAM policy.
+resource "google_artifact_registry_repository_iam_member" "mirror" {
+  count      = module.contract.mirror.kind == "artifact-registry" ? 1 : 0
+  project    = module.contract.mirror.project
+  location   = module.contract.mirror.location
+  repository = module.contract.mirror.repository
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${google_service_account.host.email}"
+}

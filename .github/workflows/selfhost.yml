@@ -1,0 +1,110 @@
+name: selfhost
+
+# Checks for the cloud self-hosting infrastructure under infra/: OpenTofu
+# formatting, validation, and mock-provider tests; the runtime-bundle and
+# release-manifest tests; and a build of the runtime image when its recipe
+# changes. None of it touches a cloud account.
+on:
+  pull_request:
+    paths:
+      - 'infra/**'
+      - 'resources/db/**'
+      - '.github/workflows/selfhost*.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  infra:
+    name: Infrastructure checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: 1.13.1
+          tofu_wrapper: false
+
+      - name: Runtime bundle and release manifest tests
+        run: python3 -m unittest discover -s infra/tests -v
+
+      - name: Shell scripts
+        run: |
+          shellcheck infra/images/*.sh infra/images/host/setup-host.sh
+
+      - name: Packer template
+        run: |
+          docker run --rm --entrypoint sh -v "$PWD/infra/images:/w" -w /w \
+            hashicorp/packer:1.16.2@sha256:5aa2160b623fad0b99f8ae8d9cc162ba9775ae428367edca88addc01bb86dd52 -c '
+              packer init packer >/dev/null &&
+              packer fmt -check -diff packer &&
+              touch /tmp/user-data.gz /tmp/startup.sh &&
+              packer validate -var hot_release=0.0.0 -var aws_user_data_file=/tmp/user-data.gz \
+                -var gcp_startup_script_file=/tmp/startup.sh -var gcp_project=validate packer'
+
+      - name: OpenTofu formatting
+        run: tofu fmt -check -recursive infra/opentofu
+
+      - name: OpenTofu validation and mock-provider tests
+        run: |
+          set -euo pipefail
+          for root in infra/opentofu/modules/* infra/opentofu/bootstrap/* infra/opentofu/stacks/*/*; do
+            [ -d "$root" ] || continue
+            echo "::group::$root"
+            tofu -chdir="$root" init -backend=false -lockfile=readonly -input=false
+            if [[ "$root" != infra/opentofu/modules/* ]]; then
+              tofu -chdir="$root" validate
+            fi
+            if compgen -G "$root/tests/*.tftest.hcl" > /dev/null; then
+              tofu -chdir="$root" test
+            fi
+            echo "::endgroup::"
+          done
+
+  runtime-image:
+    name: Runtime image build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check whether the image recipe changed
+        id: changed
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [[ "$EVENT" == "workflow_dispatch" ]] ||
+             git diff --name-only "origin/$BASE_REF...HEAD" | grep -q '^infra/images/'; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: ./.github/actions/free-disk-space
+        if: steps.changed.outputs.build == 'true'
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.changed.outputs.build == 'true'
+
+      - name: Build the runtime image
+        if: steps.changed.outputs.build == 'true'
+        run: |
+          scripts/capture-git-revision.sh
+          docker buildx build --platform linux/amd64 --load \
+            -f infra/images/containers/runtime.Dockerfile -t hot-runtime:ci .
+
+      - name: Smoke test the image
+        if: steps.changed.outputs.build == 'true'
+        run: |
+          docker run --rm hot-runtime:ci --version
+          docker run --rm --entrypoint /bin/sh hot-runtime:ci -c \
+            'test -f /usr/share/hot/db/postgres/provision_runtime.sql &&
+             test -d /usr/share/hot/pkg/hot-std &&
+             test -x /usr/share/hot/bin/hotbox-linux-x86_64 &&
+             test -x /usr/local/bin/ctr && id -u | grep -qx 10001'

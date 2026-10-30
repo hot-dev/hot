@@ -1177,6 +1177,98 @@ jobs:
             echo "is_beta=false" >> $GITHUB_OUTPUT
           fi
 
+  # Self-host runtime image and its signed release manifest. Off the
+  # create-release critical path: a failure here never blocks a Hot release,
+  # and selfhost-release-assets attaches the manifest afterwards. Beta builds
+  # are signed from a branch, so installations' tag-only signer check rejects
+  # their manifests.
+  selfhost-image:
+    name: Self-host runtime image
+    needs: validate-release
+    if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # Keyless Sigstore signing
+    env:
+      IMAGE: ghcr.io/hot-dev/hot-runtime
+      VERSION: ${{ needs.validate-release.outputs.version }}
+      IMAGE_TAG: ${{ needs.validate-release.outputs.is_beta == 'true' && format('{0}-beta.{1}', needs.validate-release.outputs.version, github.run_number) || needs.validate-release.outputs.version }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - uses: ./.github/actions/free-disk-space
+
+    - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+    - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Record the git revision
+      run: scripts/capture-git-revision.sh
+
+    - name: Build and push the runtime image
+      id: push
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+        context: .
+        file: infra/images/containers/runtime.Dockerfile
+        platforms: linux/amd64
+        push: true
+        tags: ${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
+        provenance: mode=max
+        sbom: true
+
+    - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with:
+        cosign-release: v3.1.4
+
+    - name: Sign the image and the release manifest
+      env:
+        DIGEST: ${{ steps.push.outputs.digest }}
+      run: |
+        set -euo pipefail
+        cosign sign --yes "${IMAGE}@${DIGEST}"
+        python3 infra/release/release_manifest.py \
+          --release "$VERSION" \
+          --hot-image "${IMAGE}@${DIGEST}" \
+          --output hot-selfhost-manifest.json
+        cosign sign-blob --yes \
+          --bundle hot-selfhost-manifest.sigstore.json \
+          hot-selfhost-manifest.json
+        cat hot-selfhost-manifest.json
+
+    # A vulnerability report for triage, attached to the release beside the
+    # manifest. It never blocks the release.
+    - name: Scan the runtime image for vulnerabilities
+      continue-on-error: true
+      env:
+        DIGEST: ${{ steps.push.outputs.digest }}
+        TRIVY: docker.io/aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+      run: |
+        set -euo pipefail
+        docker run --rm -v "$PWD:/out" -v "$HOME/.docker/config.json:/root/.docker/config.json:ro" "$TRIVY" \
+          image --quiet --scanners vuln --format json --output /out/hot-runtime-vulnerabilities.json "${IMAGE}@${DIGEST}"
+        {
+          echo "### Runtime image vulnerabilities"
+          jq -r '[.Results[]?.Vulnerabilities[]?.Severity] | group_by(.) | map("- \(.[0]): \(length)") | if length == 0 then "- none found" else join("\n") end' \
+            hot-runtime-vulnerabilities.json
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload the release manifest
+      uses: actions/upload-artifact@v6
+      with:
+        name: selfhost-manifest
+        path: |
+          hot-selfhost-manifest.json
+          hot-selfhost-manifest.sigstore.json
+          hot-runtime-vulnerabilities.json
+
   # Create GitHub Release with all packages
   create-release:
     needs: [validate-release, package-linux, package-macos, package-homebrew, package-windows, determine-release-channel]
@@ -1473,3 +1565,26 @@ jobs:
         echo ""
         echo "✅ Homebrew formula updated successfully!"
         echo "Users can now install with: brew install hot-dev/hot/hot"
+
+  # Attach the self-host manifest to the GitHub release created above.
+  selfhost-release-assets:
+    name: Attach self-host manifest
+    needs: [validate-release, create-release, selfhost-image]
+    if: ${{ needs.validate-release.outputs.is_beta != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Download the release manifest
+      uses: actions/download-artifact@v7
+      with:
+        name: selfhost-manifest
+
+    - name: Upload to the GitHub release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG_NAME: ${{ needs.validate-release.outputs.tag_name }}
+      run: |
+        files=(hot-selfhost-manifest.json hot-selfhost-manifest.sigstore.json)
+        if [[ -f hot-runtime-vulnerabilities.json ]]; then files+=(hot-runtime-vulnerabilities.json); fi
+        gh release upload "$TAG_NAME" "${files[@]}" --repo "${{ github.repository }}" --clobber

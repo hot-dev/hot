@@ -45,7 +45,8 @@ pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), St
                     if redis_cluster { " (cluster mode)" } else { "" }
                 );
 
-                let admin = hot::queue::RedisQueueAdmin::new(redis_uri, redis_cluster);
+                let admin = hot::queue::RedisQueueAdmin::new(redis_uri, redis_cluster)
+                    .with_password(hot::redis::one_off_password().await?);
                 let cleared = admin.clear_all()?;
 
                 for key in &cleared {
@@ -58,7 +59,35 @@ pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), St
                 println!("Redis queues cleared.");
             }
         },
-        QueueAction::Status => {
+        QueueAction::Status { json: true } => {
+            let summary = match queue_type {
+                hot::queue::QueueType::Memory => {
+                    return Err(
+                        "Memory queues live inside the running process and cannot be inspected"
+                            .to_string(),
+                    );
+                }
+                hot::queue::QueueType::Sqlite => hot::queue::sqlite::SqliteQueueAdmin::default()
+                    .status()
+                    .await
+                    .map_err(|e| e.to_string())?,
+                hot::queue::QueueType::Redis => {
+                    let redis_uri = conf.get_str_or_default("redis.uri", "redis://127.0.0.1/");
+                    if redis_uri.is_empty() || redis_uri == "null" {
+                        return Err(
+                            "Redis URI not configured. Set redis.uri in config.".to_string()
+                        );
+                    }
+                    hot::queue::RedisQueueAdmin::new(redis_uri, redis_cluster)
+                        .with_password(hot::redis::one_off_password().await?)
+                        .status()?
+                }
+            };
+            let mut status = serde_json::to_value(&summary).map_err(|e| e.to_string())?;
+            status["type"] = queue_type.to_string().into();
+            println!("{}", status);
+        }
+        QueueAction::Status { json: false } => {
             println!("Queue Status:");
             println!("  Type: {}", queue_type);
 
@@ -84,7 +113,7 @@ pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), St
                     let redis_uri = conf.get_str_or_default("redis.uri", "redis://127.0.0.1/");
                     println!(
                         "  Backend: Redis ({}){}",
-                        redis_uri,
+                        hot::db::redact_password(&redis_uri),
                         if redis_cluster { " [cluster]" } else { "" }
                     );
 
@@ -93,7 +122,8 @@ pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), St
                         return Ok(());
                     }
 
-                    let admin = hot::queue::RedisQueueAdmin::new(redis_uri, redis_cluster);
+                    let admin = hot::queue::RedisQueueAdmin::new(redis_uri, redis_cluster)
+                        .with_password(hot::redis::one_off_password().await?);
 
                     match admin.status() {
                         Ok(summary) => {
@@ -112,20 +142,29 @@ pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), St
 }
 
 fn print_summary(summary: &hot::queue::QueueStatusSummary) {
+    let wait = |seconds: Option<i64>| seconds.map_or("-".to_string(), |s| format!("{}s", s));
     println!("\nQueues:");
     println!(
-        "  {:<20} {:>8} {:>10} {:>10}",
-        "Name", "Pending", "Processing", "DeadLetter"
+        "  {:<20} {:>8} {:>10} {:>10} {:>12}",
+        "Name", "Pending", "Processing", "DeadLetter", "OldestWait"
     );
-    println!("  {:-<20} {:->8} {:->10} {:->10}", "", "", "", "");
+    println!(
+        "  {:-<20} {:->8} {:->10} {:->10} {:->12}",
+        "", "", "", "", ""
+    );
     for queue in &summary.queues {
         println!(
-            "  {:<20} {:>8} {:>10} {:>10}",
-            queue.name, queue.pending, queue.processing, queue.deadletter
+            "  {:<20} {:>8} {:>10} {:>10} {:>12}",
+            queue.name,
+            queue.pending,
+            queue.processing,
+            queue.deadletter,
+            wait(queue.oldest_pending_secs)
         );
     }
     println!("\nSummary:");
     println!("  Total pending:    {}", summary.total_pending);
     println!("  Total processing: {}", summary.total_processing);
     println!("  Total deadletter: {}", summary.total_deadletter);
+    println!("  Oldest wait:      {}", wait(summary.oldest_pending_secs));
 }

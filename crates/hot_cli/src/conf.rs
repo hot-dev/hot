@@ -109,7 +109,29 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
         "file.aws.secret-access-key",
     ),
     ("HOT_FILE_AWS_SESSION_TOKEN", "file.aws.session-token"),
+    (
+        "HOT_EMAIL_SMTP_TIMEOUT_SECONDS",
+        "email.smtp.timeout-seconds",
+    ),
     ("HOT_NETWORK_ALLOW_PRIVATE", "network.allow-private"),
+    ("HOT_NETWORK_ALLOW_CIDRS", "network.allow-cidrs"),
+    ("HOT_NETWORK_ALLOW_HOSTS", "network.allow-hosts"),
+    ("HOT_NETWORK_DENY_CIDRS", "network.deny-cidrs"),
+    ("HOT_NETWORK_EGRESS_PROXY", "network.egress-proxy"),
+    (
+        "HOT_NETWORK_CLIENT_IP_TRUSTED_PROXY",
+        "network.client-ip.trusted-proxy",
+    ),
+    (
+        "HOT_NETWORK_CLIENT_IP_TRUSTED_PROXIES",
+        "network.client-ip.trusted-proxies",
+    ),
+    ("HOT_NETWORK_CLIENT_IP_HEADER", "network.client-ip.header"),
+    ("HOT_BOX_GUEST_DNS", "box.guest-dns"),
+    ("HOT_SCHEDULER_HEARTBEAT_FILE", "scheduler.heartbeat-file"),
+    ("HOT_TASK_STATUS_FILE", "task.status-file"),
+    ("HOT_REDIS_CA_CERT", "redis.ca-cert"),
+    ("HOT_WORKER_DB_MAX_CONNECTIONS", "worker.db-max-connections"),
     ("HOT_TASK_MAX_CONCURRENT", "task.max-concurrent"),
     ("HOT_TASK_CODE_MAX_CONCURRENT", "task.code-max-concurrent"),
     (
@@ -604,6 +626,9 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             Some(show_conf.clone()),
         ),
         Command::Key {
+            global, show_conf, ..
+        }
+        | Command::Admin {
             global, show_conf, ..
         } => (
             global.clone(),
@@ -1494,8 +1519,8 @@ pub(crate) fn show_command_config(command: &Option<Command>, conf: &Val) {
             let config_keys = vec!["db.uri", "db.schema"];
             filter_config(conf, &config_keys)
         }
-        Some(Command::Key { .. }) => {
-            // Key command writes the local environment database directly
+        Some(Command::Key { .. }) | Some(Command::Admin { .. }) => {
+            // Key and admin commands write the configured database directly
             let config_keys = vec!["db.uri", "db.schema"];
             filter_config(conf, &config_keys)
         }
@@ -1850,6 +1875,19 @@ mod tests {
             "db.migration-uri"
         );
         assert_eq!(env_var_to_conf_key("HOT_DB_URI"), "db.uri");
+        assert_eq!(
+            env_var_to_conf_key("HOT_SCHEDULER_HEARTBEAT_FILE"),
+            "scheduler.heartbeat-file"
+        );
+        assert_eq!(
+            env_var_to_conf_key("HOT_TASK_STATUS_FILE"),
+            "task.status-file"
+        );
+        assert_eq!(env_var_to_conf_key("HOT_REDIS_CA_CERT"), "redis.ca-cert");
+        assert_eq!(
+            env_var_to_conf_key("HOT_WORKER_DB_MAX_CONNECTIONS"),
+            "worker.db-max-connections"
+        );
     }
 
     #[test]
@@ -2008,6 +2046,24 @@ mod tests {
     }
 
     #[test]
+    fn smtp_settings_map_to_the_keys_the_provider_reads() {
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                ("HOT_EMAIL_PROVIDER".into(), "smtp".into()),
+                ("HOT_EMAIL_SMTP_HOST".into(), "smtp.example.com".into()),
+                ("HOT_EMAIL_SMTP_TIMEOUT_SECONDS".into(), "10".into()),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(conf.get_str("email.provider"), "smtp");
+        let settings = hot::email_smtp::SmtpSettings::from_conf(&conf).unwrap();
+        assert_eq!(settings.host, "smtp.example.com");
+        assert_eq!(settings.timeout, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
     fn runtime_resource_limits_map_to_existing_hyphenated_keys() {
         let conf = apply_env_bindings(
             create_default_conf(),
@@ -2023,6 +2079,29 @@ mod tests {
         assert_eq!(conf.get_int("task.worker-memory-mb"), 1536);
         assert!(!conf.get_bool("network.allow-private"));
         assert!(conf.get("task.code.max.concurrent").is_none());
+    }
+
+    #[test]
+    fn outbound_rules_come_from_comma_separated_variables() {
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                ("HOT_NETWORK_ALLOW_CIDRS".into(), "10.20.0.0/16".into()),
+                ("HOT_NETWORK_ALLOW_HOSTS".into(), "api.corp.example".into()),
+                (
+                    "HOT_NETWORK_DENY_CIDRS".into(),
+                    "10.20.0.5/32, 10.20.0.6".into(),
+                ),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert!(
+            hot::outbound::OutboundRules::from_conf(&conf)
+                .unwrap()
+                .is_some()
+        );
+        assert!(conf.get("network.allow.cidrs").is_none());
     }
 
     #[test]

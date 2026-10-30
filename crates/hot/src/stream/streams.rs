@@ -21,6 +21,7 @@ use redis::aio::MultiplexedConnection;
 use redis::cluster::ClusterClient;
 use redis::cluster_async::ClusterConnection as AsyncClusterConnection;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -313,13 +314,76 @@ impl ConnectionGuard<'_> {
     }
 }
 
-/// Owned connection for subscribers (long-lived, blocking XREAD)
+/// Owned connection for subscribers (long-lived, blocking XREAD).
+/// Both handles are cheap clones of one connection, so an in-flight read can
+/// own a clone while the subscriber keeps its own.
+#[derive(Clone)]
 enum SubscriberConnection {
     Standalone(MultiplexedConnection),
     Cluster(AsyncClusterConnection),
 }
 
+/// One in-flight `XREAD BLOCK`, kept by the subscriber between `next()`
+/// calls. SSE handlers race `next()` against timers in `tokio::select!`, which
+/// drops the losing future. Dropping it does not cancel the command: Redis
+/// still answers it on this connection, and a fresh XREAD would queue behind
+/// it and never see the entry it consumed. Resuming the stored read instead
+/// makes `next()` cancel-safe, as the memory backend's `recv()` is.
+type PendingRead = Pin<Box<dyn Future<Output = Result<redis::Value, StreamPubSubError>> + Send>>;
+
+/// Entry ID of the newest entry in a stream, or `0-0` when it has none (or
+/// does not exist yet). Subscriptions read after it, so they deliver every
+/// entry added once `subscribe` returns. `$` would instead resolve when the
+/// first XREAD reaches Redis, skipping whatever was published in between,
+/// such as a reply published by another instance.
+const EMPTY_STREAM_ID: &str = "0-0";
+
 impl SubscriberConnection {
+    /// The ID to read after for a subscription that starts now.
+    async fn tail_id(&mut self, stream_key: &str) -> Result<String, StreamPubSubError> {
+        let value = self
+            .cmd(
+                redis::cmd("XREVRANGE")
+                    .arg(stream_key)
+                    .arg("+")
+                    .arg("-")
+                    .arg("COUNT")
+                    .arg(1),
+            )
+            .await?;
+        let entries: Vec<redis::Value> = redis::from_redis_value_ref(&value)
+            .map_err(|e| StreamPubSubError::SubscribeError(e.to_string()))?;
+        let Some(newest) = entries.first() else {
+            return Ok(EMPTY_STREAM_ID.to_string());
+        };
+        let entry: Vec<redis::Value> = redis::from_redis_value_ref(newest)
+            .map_err(|e| StreamPubSubError::SubscribeError(e.to_string()))?;
+        let id = entry.first().ok_or_else(|| {
+            StreamPubSubError::SubscribeError("XREVRANGE returned an entry without an ID".into())
+        })?;
+        redis::from_redis_value_ref(id)
+            .map_err(|e| StreamPubSubError::SubscribeError(e.to_string()))
+    }
+
+    /// Start a blocking read of the entries after `last_id`. The returned
+    /// future owns its connection handle and command, so it can outlive the
+    /// `next()` call that started it.
+    fn start_read(&self, stream_key: &str, last_id: &str) -> PendingRead {
+        let mut conn = self.clone();
+        // 30 second block timeout - after which the read returns nil and the
+        // caller can retry.
+        let cmd = redis::cmd("XREAD")
+            .arg("BLOCK")
+            .arg(30000)
+            .arg("COUNT")
+            .arg(1)
+            .arg("STREAMS")
+            .arg(stream_key)
+            .arg(last_id)
+            .clone();
+        Box::pin(async move { conn.cmd(&cmd).await })
+    }
+
     async fn cmd(&mut self, cmd: &redis::Cmd) -> Result<redis::Value, StreamPubSubError> {
         tokio::time::timeout(REDIS_SUBSCRIBER_COMMAND_TIMEOUT, async {
             match self {
@@ -365,6 +429,17 @@ impl RedisStreamsPubSub {
         Self {
             connection_pool: Arc::new(RedisConnectionPool::new_cluster(cluster_client)),
         }
+    }
+
+    /// Dedicated connection for a subscriber (XREAD BLOCK holds it), and the
+    /// stream position the subscription starts after (see `EMPTY_STREAM_ID`).
+    async fn open_subscription(
+        &self,
+        stream_key: &str,
+    ) -> Result<(SubscriberConnection, String), StreamPubSubError> {
+        let mut conn = self.connection_pool.create_subscriber_connection().await?;
+        let last_id = conn.tail_id(stream_key).await?;
+        Ok((conn, last_id))
     }
 }
 
@@ -481,17 +556,15 @@ impl StreamSubscriberFactory for RedisStreamsPubSub {
         stream_id: Uuid,
     ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError> {
         let stream_key = legacy_channel_name(&stream_id);
-
-        // Subscribers need their own dedicated connection since XREAD BLOCK holds it
-        let conn = self.connection_pool.create_subscriber_connection().await?;
+        let (conn, last_id) = self.open_subscription(&stream_key).await?;
 
         tracing::debug!("Subscribed to Redis Streams channel: {}", stream_key);
 
         Ok(Box::new(RedisStreamsSubscriber {
             conn,
             stream_key,
-            // Start from latest - "$" means "only new messages"
-            last_id: "$".to_string(),
+            last_id,
+            pending: None,
         }))
     }
 
@@ -501,17 +574,15 @@ impl StreamSubscriberFactory for RedisStreamsPubSub {
         stream_id: Uuid,
     ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError> {
         let stream_key = channel_name(&env_id, &stream_id);
-
-        // Subscribers need their own dedicated connection since XREAD BLOCK holds it
-        let conn = self.connection_pool.create_subscriber_connection().await?;
+        let (conn, last_id) = self.open_subscription(&stream_key).await?;
 
         tracing::debug!("Subscribed to Redis Streams channel: {}", stream_key);
 
         Ok(Box::new(RedisStreamsSubscriber {
             conn,
             stream_key,
-            // Start from latest - "$" means "only new messages"
-            last_id: "$".to_string(),
+            last_id,
+            pending: None,
         }))
     }
 }
@@ -521,27 +592,18 @@ pub struct RedisStreamsSubscriber {
     conn: SubscriberConnection,
     stream_key: String,
     last_id: String,
+    /// The read a cancelled `next()` left in flight (see `PendingRead`).
+    pending: Option<PendingRead>,
 }
 
 #[async_trait]
 impl StreamSubscriber for RedisStreamsSubscriber {
     async fn next(&mut self) -> StreamNext {
-        // XREAD BLOCK 30000 STREAMS stream last_id
-        // 30 second block timeout - after which we return Idle and the caller can retry
-        let result = self
-            .conn
-            .cmd(
-                &redis::cmd("XREAD")
-                    .arg("BLOCK")
-                    .arg(30000) // 30 second timeout
-                    .arg("COUNT")
-                    .arg(1)
-                    .arg("STREAMS")
-                    .arg(&self.stream_key)
-                    .arg(&self.last_id)
-                    .clone(),
-            )
-            .await;
+        let read = self
+            .pending
+            .get_or_insert_with(|| self.conn.start_read(&self.stream_key, &self.last_id));
+        let result = read.as_mut().await;
+        self.pending = None;
 
         let value = match result {
             Ok(v) => v,
@@ -694,9 +756,7 @@ impl EnvSubscriberFactory for RedisStreamsPubSub {
         env_id: Uuid,
     ) -> Result<Box<dyn EnvSubscriber>, StreamPubSubError> {
         let stream_key = env_channel_name(&env_id);
-
-        // Subscribers need their own dedicated connection since XREAD BLOCK holds it
-        let conn = self.connection_pool.create_subscriber_connection().await?;
+        let (conn, last_id) = self.open_subscription(&stream_key).await?;
 
         tracing::debug!("Subscribed to Redis Streams env channel: {}", stream_key);
 
@@ -704,8 +764,8 @@ impl EnvSubscriberFactory for RedisStreamsPubSub {
             connection_pool: Arc::clone(&self.connection_pool),
             conn: Some(conn),
             stream_key,
-            // Start from latest - "$" means "only new messages"
-            last_id: "$".to_string(),
+            last_id,
+            pending: None,
             last_failure: None,
         }))
     }
@@ -720,7 +780,11 @@ pub struct RedisEnvSubscriber {
     /// as idle and keep polling the same subscriber).
     conn: Option<SubscriberConnection>,
     stream_key: String,
+    /// Kept across reconnects, so a new connection resumes after the last
+    /// delivered entry instead of skipping what arrived while it was down.
     last_id: String,
+    /// The read a cancelled `next()` left in flight (see `PendingRead`).
+    pending: Option<PendingRead>,
     /// When the last connection-level failure happened. Redials within
     /// `ENV_SUBSCRIBER_RECONNECT_BACKOFF` of it sleep out the remainder
     /// first, so a poll-again caller can't spin dial attempts while Redis
@@ -742,45 +806,40 @@ impl RedisEnvSubscriber {
 #[async_trait]
 impl EnvSubscriber for RedisEnvSubscriber {
     async fn next(&mut self) -> Option<EnvEvent> {
-        let conn = match &mut self.conn {
-            Some(conn) => conn,
-            None => {
-                if let Some(delay) = self.reconnect_delay() {
-                    tokio::time::sleep(delay).await;
-                }
-                match self.connection_pool.create_subscriber_connection().await {
-                    Ok(conn) => {
-                        self.last_failure = None;
-                        self.conn.insert(conn)
+        if self.pending.is_none() {
+            let conn: &SubscriberConnection = match &self.conn {
+                Some(conn) => conn,
+                None => {
+                    if let Some(delay) = self.reconnect_delay() {
+                        tokio::time::sleep(delay).await;
                     }
-                    Err(e) => {
-                        self.last_failure = Some(Instant::now());
-                        tracing::warn!(
-                            "Redis Streams env subscriber reconnect failed on {}: {}",
-                            self.stream_key,
-                            e
-                        );
-                        return None;
+                    match self.connection_pool.create_subscriber_connection().await {
+                        Ok(conn) => {
+                            self.last_failure = None;
+                            self.conn.insert(conn)
+                        }
+                        Err(e) => {
+                            self.last_failure = Some(Instant::now());
+                            tracing::warn!(
+                                "Redis Streams env subscriber reconnect failed on {}: {}",
+                                self.stream_key,
+                                e
+                            );
+                            return None;
+                        }
                     }
                 }
-            }
-        };
+            };
+            self.pending = Some(conn.start_read(&self.stream_key, &self.last_id));
+        }
 
-        // XREAD BLOCK 30000 STREAMS stream last_id
-        // 30 second block timeout - after which we return None and the caller can retry
-        let result = conn
-            .cmd(
-                &redis::cmd("XREAD")
-                    .arg("BLOCK")
-                    .arg(30000) // 30 second timeout
-                    .arg("COUNT")
-                    .arg(1)
-                    .arg("STREAMS")
-                    .arg(&self.stream_key)
-                    .arg(&self.last_id)
-                    .clone(),
-            )
-            .await;
+        // A nil reply after the 30 second block returns None, and the caller
+        // can retry.
+        let result = match self.pending.as_mut() {
+            Some(read) => read.as_mut().await,
+            None => return None,
+        };
+        self.pending = None;
 
         let value = match result {
             Ok(v) => v,
@@ -1171,6 +1230,7 @@ mod tests {
             conn: Some(conn),
             stream_key: stream_key.clone(),
             last_id: "0".to_string(),
+            pending: None,
             last_failure: None,
         };
 
@@ -1224,6 +1284,7 @@ mod tests {
             conn: None,
             stream_key: "test:stream:env:backoff".to_string(),
             last_id: "$".to_string(),
+            pending: None,
             last_failure: None,
         }
     }
@@ -1275,5 +1336,149 @@ mod tests {
             sub.last_id, "42-1",
             "last-seen id must survive failed redials"
         );
+    }
+
+    fn stream_data(env_id: Uuid, stream_id: Uuid, n: i64) -> StreamEvent {
+        StreamEvent::StreamData {
+            stream_data_id: Uuid::now_v7(),
+            run_id: Uuid::now_v7(),
+            env_id: Some(env_id),
+            stream_id,
+            data_type: "test".to_string(),
+            payload: serde_json::json!(n),
+        }
+    }
+
+    fn payload_of(next: StreamNext) -> serde_json::Value {
+        match next {
+            StreamNext::Event(StreamEvent::StreamData { payload, .. }) => payload,
+            other => panic!("expected stream data, got {other:?}"),
+        }
+    }
+
+    fn env_event(env_id: Uuid, stream_id: Uuid) -> EnvEvent {
+        EnvEvent::StreamCreated {
+            stream_id,
+            env_id,
+            project_id: None,
+        }
+    }
+
+    async fn delete_keys(client: &redis::Client, keys: &[String]) {
+        if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
+            let _: redis::RedisResult<()> =
+                redis::cmd("DEL").arg(keys).query_async(&mut conn).await;
+        }
+    }
+
+    const DELIVERY: Duration = Duration::from_secs(5);
+
+    /// A subscription delivers what another publisher (another instance)
+    /// adds after `subscribe` returns, even before the first `next()`. With
+    /// `$`, the first XREAD resolved the position when it reached Redis and
+    /// skipped such entries, e.g. an MCP HTTP+SSE reply whose stream had
+    /// just sent its `endpoint` event.
+    #[tokio::test]
+    async fn subscription_delivers_entries_published_before_the_first_read() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let subscriber_side = RedisStreamsPubSub::new(client.clone());
+        let publisher_side = RedisStreamsPubSub::new(client.clone());
+        let (env_id, stream_id) = (Uuid::now_v7(), Uuid::now_v7());
+        // An older entry must not be replayed to the new subscription.
+        publisher_side
+            .publish(stream_data(env_id, stream_id, 0))
+            .await
+            .unwrap();
+
+        let mut stream_sub = subscriber_side
+            .subscribe_in_env(env_id, stream_id)
+            .await
+            .unwrap();
+        let mut env_sub = subscriber_side.subscribe_env(env_id).await.unwrap();
+        publisher_side
+            .publish(stream_data(env_id, stream_id, 1))
+            .await
+            .unwrap();
+        publisher_side
+            .publish_env(env_event(env_id, stream_id))
+            .await
+            .unwrap();
+
+        let next = tokio::time::timeout(DELIVERY, stream_sub.next())
+            .await
+            .expect("an entry published after subscribe must be delivered");
+        assert_eq!(payload_of(next), serde_json::json!(1));
+        let env_next = tokio::time::timeout(DELIVERY, env_sub.next())
+            .await
+            .expect("an env event published after subscribe must be delivered");
+        assert!(
+            matches!(env_next, Some(EnvEvent::StreamCreated { stream_id: s, .. }) if s == stream_id)
+        );
+
+        delete_keys(
+            &client,
+            &[channel_name(&env_id, &stream_id), env_channel_name(&env_id)],
+        )
+        .await;
+    }
+
+    /// SSE handlers race `next()` against a poll timer in `tokio::select!`.
+    /// Dropping `next()` must not lose the entry its XREAD later receives,
+    /// nor queue a second XREAD behind the first.
+    #[tokio::test]
+    async fn dropped_next_does_not_lose_entries() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let subscriber_side = RedisStreamsPubSub::new(client.clone());
+        let publisher_side = RedisStreamsPubSub::new(client.clone());
+        let (env_id, stream_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let mut stream_sub = subscriber_side
+            .subscribe_in_env(env_id, stream_id)
+            .await
+            .unwrap();
+        let mut env_sub = subscriber_side.subscribe_env(env_id).await.unwrap();
+
+        for n in 1..=3 {
+            // Abandon a read twice, as a 1 s poll interval does.
+            for _ in 0..2 {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), stream_sub.next())
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), env_sub.next())
+                        .await
+                        .is_err()
+                );
+            }
+            publisher_side
+                .publish(stream_data(env_id, stream_id, n))
+                .await
+                .unwrap();
+            publisher_side
+                .publish_env(env_event(env_id, stream_id))
+                .await
+                .unwrap();
+            let next = tokio::time::timeout(DELIVERY, stream_sub.next())
+                .await
+                .expect("an entry read by an abandoned next() must still be delivered");
+            assert_eq!(payload_of(next), serde_json::json!(n));
+            let env_next = tokio::time::timeout(DELIVERY, env_sub.next())
+                .await
+                .expect("an env event read by an abandoned next() must still be delivered");
+            assert!(env_next.is_some());
+        }
+
+        delete_keys(
+            &client,
+            &[channel_name(&env_id, &stream_id), env_channel_name(&env_id)],
+        )
+        .await;
     }
 }
