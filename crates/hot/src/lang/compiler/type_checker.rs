@@ -1626,7 +1626,13 @@ impl TypeChecker {
             return;
         };
 
-        let (is_enum, is_open, declared_variants) = match self.context.types.get(&short_name) {
+        // A qualified subject type names its own declaration. The short-name
+        // entry merges every namespace's type of that name, so one module's
+        // open `Shape` would open another's closed one.
+        let declared = Self::type_expr_name(subject_type)
+            .and_then(|name| self.context.types.get(name))
+            .or_else(|| self.context.types.get(&short_name));
+        let (is_enum, is_open, declared_variants) = match declared {
             Some(td) if td.is_enum => (true, td.enum_is_open, td.variants.clone()),
             _ => return,
         };
@@ -2744,6 +2750,20 @@ impl TypeChecker {
     /// Best-effort short name for a `TypeExpr`, used for implementation lookup.
     /// Returns `None` for shapes (Vec, Map, Function, Union, ...) where a
     /// coercion check doesn't apply.
+    /// The name a type expression's declaration is known by, as it was
+    /// resolved (qualified, or short); `None` for unnamed shapes.
+    fn type_expr_name(expr: &TypeExpr) -> Option<&str> {
+        match expr {
+            TypeExpr::Named(name)
+            | TypeExpr::Record {
+                type_name: Some(name),
+                ..
+            } => Some(name),
+            TypeExpr::Optional(inner) => Self::type_expr_name(inner),
+            _ => None,
+        }
+    }
+
     fn type_expr_short_name(expr: &TypeExpr) -> Option<String> {
         let name = match expr {
             TypeExpr::Named(n) => n.as_str(),
