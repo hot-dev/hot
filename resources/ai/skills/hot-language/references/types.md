@@ -122,6 +122,12 @@ Write `{value,}` with a trailing comma for a one-field map. `{value}` is a
 block that returns `value`, so `Email({value})` would call the
 `(value: Str)` constructor again and never return.
 
+A record field or enum payload of such a type builds through the constructor
+that takes the value's type, as `Email(value)` would. A
+`::hot::time/PlainDate` field takes `"2026-01-02"` this way, and a string
+that doesn't parse makes the record an `Err`. A value no constructor takes by
+its type is kept as given.
+
 Empty marker types are useful for tags and capabilities:
 
 ```hot
@@ -202,6 +208,10 @@ rate fn match (s: Severity): Int {
     "high" => { 3 }
 }
 ```
+
+Comparing a closed union's value with a literal outside it, as in
+`eq(s, "hgih")`, is always false (`ne`: always true), so `hot check` warns
+with `impossible-comparison`. `null` and `open` unions aren't checked.
 
 ### Open Literal Unions
 
@@ -334,9 +344,9 @@ limit: Int fetch-limit() where gt(%, 0)   // binding; `where` may start the next
   (`constraint-not-bool`) and impure ones (`impure-constraint`).
 - `hot check` reports a literal that fails (`constraint-violation`) when it is
   a typed binding's value (top level or in a body), a refined type's
-  argument (`Port(0)`), an argument to a constrained parameter, or a field of
+  argument (`Port(0)`), an argument to a constrained parameter, a field of
   a record constructor call, named or Map form (the error names the field
-  path). A record invariant is checked when every field it reads is a
+  path), or an enum variant's payload (`Due.Hours(0)`). A record invariant is checked when every field it reads is a
   literal. It evaluates core comparisons, `between`, `in`, `and`/`or`/`not`,
   `if`, `is-null`, `length`, `starts-with`/`ends-with`/`contains`, top-level
   literal values, and the program's own functions with untyped or
@@ -397,6 +407,17 @@ Status enum { One(Ask), Many(Vec<Ask>), Maybe(Ask?), Done }
 
 many Status.Many([Ask(key: "a"), {key: "b"}])  // each item is built as an Ask
 none Status.Maybe(null)
+```
+
+A payload can be a refinement or literal union, named or inline with `where`.
+It is checked as a record field of that type is, and stays a plain value:
+
+```hot
+Positive type Int where gt(%, 0)
+Due enum { Hours(Positive), Days(Int where gt(%, 0)), Done }
+
+Due.Hours(4)   // Due.Hours(4)
+Due.Days(n)    // Err(ConstraintError.Violation) when n is 0
 ```
 
 ### Pattern Matching on Enums

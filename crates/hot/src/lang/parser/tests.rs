@@ -1096,6 +1096,50 @@ fn test_explicit_all_still_allowed_on_ambiguous_flows() {
 }
 
 #[test]
+fn test_all_return_annotation_shapes_a_single_flow_body() {
+    let source = r#"
+        trace fn (x: Int): All<Vec> { x |> add(1) |> mul(2) }
+        bound fn (x: Int): All<Vec> {
+            a x
+            x |> add(1)
+        }
+        "#;
+
+    let program = parse_hot(source).expect("annotated bodies should parse");
+    let default_ns = &program.namespaces[&NsPath::new()];
+    let body_of = |name: &str| match default_ns
+        .scope
+        .vars
+        .iter()
+        .find(|(var, _)| var.sym.name() == name)
+    {
+        Some((_, Value::Fn(defs))) => defs[0].body.clone(),
+        other => panic!("expected fn {name}, got {other:?}"),
+    };
+
+    // One flow expression: the pipe collects, the serial body does not.
+    match body_of("trace") {
+        Value::Flow(body) => {
+            assert_eq!(body.result_modifier, None);
+            match body.expressions.as_slice() {
+                [Value::Flow(pipe)] => {
+                    assert_eq!(pipe.flow_type, FlowType::Pipe);
+                    assert_eq!(pipe.result_modifier, Some(ResultModifier::Vec));
+                }
+                other => panic!("expected one pipe, got {other:?}"),
+            }
+        }
+        other => panic!("expected flow body, got {other:?}"),
+    }
+
+    // A body with bindings stays a collecting serial flow.
+    match body_of("bound") {
+        Value::Flow(body) => assert_eq!(body.result_modifier, Some(ResultModifier::Vec)),
+        other => panic!("expected flow body, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_type_definitions_with_constructors() {
     let source = r#"
         // Simple type definitions (like time.hot)
@@ -2511,6 +2555,45 @@ fn where_helpers_precede_their_declaration() {
             !crate::lang::ast::is_where_predicate(last)
                 && !crate::lang::ast::is_inline_refinement_type(last),
             "{source:?} ends with {last}: {names:?}"
+        );
+    }
+}
+
+/// An inline `where` in an enum payload declares a hidden refinement type,
+/// as it does for a field, in the brace and the `|` forms.
+#[test]
+fn enum_payloads_take_an_inline_where() {
+    for source in [
+        "::t ns\n\nDue enum { Hours(Int where gt(%, 0)), Done }\n",
+        "::t ns\n\nDue type\n  | Hours(Int where gt(%, 0))\n  | Done\n",
+    ] {
+        let program = parse_hot_file(source, "t.hot").unwrap_or_else(|e| panic!("{source:?}: {e}"));
+        let namespace = program
+            .namespaces
+            .values()
+            .find(|ns| ns.path.to_string() == "::t")
+            .unwrap();
+        let variants = namespace
+            .scope
+            .vars
+            .iter()
+            .find_map(|(var, value)| match value {
+                Value::TypeDef(def) if var.sym.name() == "Due" => def.variants.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{source:?}: no Due variants"));
+        let payload = variants[0].type_ref.as_deref().unwrap_or_default();
+        assert!(
+            crate::lang::ast::is_inline_refinement_type(payload),
+            "{source:?}: Hours carries {payload:?}"
+        );
+        assert!(
+            namespace
+                .scope
+                .vars
+                .keys()
+                .any(|var| var.sym.name() == payload),
+            "{source:?}: {payload} is not declared"
         );
     }
 }

@@ -42,6 +42,14 @@ pub(crate) fn user_facing_branch_name(internal: &str) -> &str {
     }
 }
 
+/// The `All<Map>` key of a pipe's stage: `pipe_0` is the initial value and
+/// `pipe_1` the first call's result, as unnamed `cond-all` branches are
+/// `cond_branch_0`, `cond_branch_1`, ... A `$` key would read as a type tag
+/// and be hidden when the map is shown.
+pub(crate) fn pipe_step_key(index: usize) -> String {
+    format!("pipe_{index}")
+}
+
 fn is_terminal_payload(val: &Val) -> bool {
     terminal_payload_type(val).is_some()
 }
@@ -574,6 +582,10 @@ pub struct VirtualMachine {
 
     /// Flow context stack for nested flows
     flow_contexts: Vec<FlowContext>,
+    /// Depth of `flow_contexts` when the running function or lambda body
+    /// began. The contexts below it are its callers' flows, which collect
+    /// only their own bindings (see `own_flow_context_mut`).
+    flow_frame_base: usize,
     /// Call context stack for tracking function invocations and runtime paths
     call_stack: Vec<CallContext>,
     /// Hot AST for namespace and metadata access
@@ -764,6 +776,7 @@ impl VirtualMachine {
             scope_stack,
 
             flow_contexts: Vec::new(),
+            flow_frame_base: 0,
             call_stack: Vec::new(),
             hot_ast,
             current_debug_function: None,
@@ -2309,7 +2322,7 @@ impl VirtualMachine {
                 if let Some(flow_context) = self.flow_contexts.last_mut()
                     && flow_context.flow_type == FlowType::Pipe
                 {
-                    let step_name = format!("$pipe_{}", flow_context.pipe_step_results.len());
+                    let step_name = pipe_step_key(flow_context.pipe_step_results.len());
                     tracing::trace!("VM: Tracking pipe step '{}' = {:?}", step_name, value);
                     flow_context
                         .pipe_step_results
@@ -2993,7 +3006,7 @@ impl VirtualMachine {
                 tracing::trace!("VM StoreVar - storing '{}' = {:?}", name, val);
 
                 // Track variable assignments in flow contexts for result modifiers
-                if let Some(flow_context) = self.flow_contexts.last_mut() {
+                if let Some(flow_context) = self.own_flow_context_mut() {
                     // Only track for serial/parallel flows (all have result modifiers when using BeginFlow/EndFlow)
                     if matches!(
                         flow_context.flow_type,
@@ -3042,7 +3055,7 @@ impl VirtualMachine {
                     self.store_variable(&name, result.clone())?;
 
                     // Track in flow context if present
-                    if let Some(flow_context) = self.flow_contexts.last_mut() {
+                    if let Some(flow_context) = self.own_flow_context_mut() {
                         flow_context
                             .flow_variable_refs
                             .push((name.to_string(), result));
@@ -4365,9 +4378,19 @@ impl VirtualMachine {
                 }
             }
 
-            // For non-map data (strings, numbers, etc.), just wrap with $type/$val
-            // This handles enum values, primitives, etc. that don't need constructor validation
+            // Non-map data (strings, numbers, etc.) goes through a constructor
+            // declared for its type, as `Type(data)` would: a time type parses
+            // a Str. Otherwise it is just wrapped with $type/$val, since a
+            // one-argument constructor need not convert (`Uuid(7)` makes a
+            // new id).
             if !matches!(data, Val::Map(_)) {
+                let typed_key = format!("{}/1:{}", type_name, self.get_val_type_name(data));
+                if self.function_mapping.contains_key(&typed_key) {
+                    return self.execute_function_call_by_qualified_name(
+                        &type_name,
+                        std::slice::from_ref(data),
+                    );
+                }
                 let mut result_map = indexmap::IndexMap::new();
                 result_map.insert(Val::from("$type"), Val::from(type_name.clone()));
                 result_map.insert(Val::from("$val"), data.clone());
@@ -5142,6 +5165,17 @@ impl VirtualMachine {
         val.is_truthy()
     }
 
+    /// The innermost flow opened by the running function or lambda body. A
+    /// binding is collected only by a flow of its own body: a call made
+    /// inside a caller's `All<Map>`/`All<Vec>` flow adds nothing to it.
+    fn own_flow_context_mut(&mut self) -> Option<&mut FlowContext> {
+        if self.flow_contexts.len() > self.flow_frame_base {
+            self.flow_contexts.last_mut()
+        } else {
+            None
+        }
+    }
+
     /// Collect flow result from flow context
     fn collect_flow_result(&mut self, flow_context: &FlowContext) -> VmResult<Val> {
         use crate::lang::bytecode::FlowType;
@@ -5756,13 +5790,30 @@ impl VirtualMachine {
 
         // 1. FULLY QUALIFIED NAMES - Direct lookup in function_mapping
         if function_name.starts_with("::") {
-            // Try exact match first
+            // Try exact match first. The bare name of a type's constructors
+            // holds just one of them, so pick the overload the arguments fit,
+            // as a direct call does: `PlainDate` called as a function value
+            // with a string parses it rather than reading the clock.
             if let Some(&function_id) = self.function_mapping.get(function_name) {
                 tracing::trace!(
                     "✅ VM: Found fully qualified function '{}' with ID {}",
                     function_name,
                     function_id
                 );
+                let fits = self
+                    .program
+                    .functions
+                    .get(function_id as usize)
+                    .is_some_and(|info| info.is_variadic || info.arity as usize == args.len());
+                let function_id = if fits {
+                    function_id
+                } else {
+                    self.find_best_function_overload(function_name, args)
+                        .unwrap_or(function_id)
+                };
+                let function_id = self
+                    .overload_for_args(function_id, args)
+                    .unwrap_or(function_id);
                 return self.execute_user_function_cached(cache_key, function_id, args);
             } else {
                 tracing::trace!(
@@ -6223,6 +6274,14 @@ impl VirtualMachine {
             && let Some(inner) = m.get(&Val::from("$val"))
         {
             function_val = inner.clone();
+        }
+        // A var import of a function or type (`Record ::other/Record`) passed
+        // as a value is a FunctionAlias: call the function it names.
+        if let Val::Map(m) = &function_val
+            && crate::val::tagged_type_name(m) == Some("::hot::type/FunctionAlias")
+            && let Some(target @ Val::Str(_)) = m.get(&Val::from("$target"))
+        {
+            function_val = target.clone();
         }
 
         // Determine if this is a dispatch function without stringifying lambdas
@@ -8171,6 +8230,10 @@ impl VirtualMachine {
         // Push the lambda scope onto the scope stack
         let saved_scope_depth = self.scope_stack.len();
         let saved_flow_context_depth = self.flow_contexts.len();
+        // The lambda's bindings are its own, never a binding of a flow
+        // the caller has open.
+        let saved_flow_frame_base =
+            std::mem::replace(&mut self.flow_frame_base, saved_flow_context_depth);
         let saved_skip_flag = self.skip_until_branch_end;
         let saved_skip_cond_flow = self.skip_remaining_cond_flow;
         self.scope_stack.push(lambda_scope);
@@ -8445,6 +8508,7 @@ impl VirtualMachine {
 
         // Restore instruction pointer and register state
         self.instruction_pointer = saved_instruction_pointer;
+        self.flow_frame_base = saved_flow_frame_base;
 
         // Restore saved registers before truncating (for recursive lambdas)
         for (reg_idx, saved_val) in registers_to_save {
@@ -8999,6 +9063,10 @@ impl VirtualMachine {
 
             // Save flow context depth for TCO cleanup - tail calls may leave stale contexts
             let saved_flow_context_depth = self.flow_contexts.len();
+            // The caller's open flows end here: a binding the body makes,
+            // a checked parameter included, belongs to this call alone.
+            let saved_flow_frame_base =
+                std::mem::replace(&mut self.flow_frame_base, saved_flow_context_depth);
 
             let result = if !function_has_instructions {
                 // No instructions compiled yet - this is expected for now
@@ -9160,6 +9228,7 @@ impl VirtualMachine {
             if result.is_err() {
                 self.flow_contexts.truncate(saved_flow_context_depth);
             }
+            self.flow_frame_base = saved_flow_frame_base;
 
             // Restore scope stack to pre-function depth.
             // This pops the function scope AND any scopes leaked by flow constructs
@@ -10340,6 +10409,7 @@ impl VirtualMachine {
 
         // Clear flow contexts
         self.flow_contexts.clear();
+        self.flow_frame_base = 0;
 
         // Dispatch cache is NOT cleared — it's valid across runs for the same program
         // (function mappings are immutable after compilation)

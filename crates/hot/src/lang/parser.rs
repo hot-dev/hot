@@ -1659,6 +1659,29 @@ impl Parser {
         Ok(value)
     }
 
+    /// Apply a plain `fn`'s result annotation to its body. A braced body is
+    /// an implicit serial flow, which collects only bindings, so when the
+    /// body is one flow expression an `All` annotation shapes that flow
+    /// instead, as it does on a binding: `fn (x): All<Vec> { x |> add(1) }`
+    /// collects the pipe's stages like `steps: All<Vec> x |> add(1)`.
+    fn apply_all_annotation_to_fn_body(
+        &mut self,
+        mut body: Value,
+        return_type: Option<&TypeExpr>,
+    ) -> ParseResult<Value> {
+        if let (Some(annotation), Value::Flow(flow)) = (return_type, &mut body)
+            && Self::is_all_annotation(annotation)
+            && flow.flow_type == FlowType::Serial
+            && flow.result_modifier.is_none()
+            && let [only @ (Value::Flow(_) | Value::Match(_))] = flow.expressions.as_mut_slice()
+        {
+            let inner = std::mem::replace(only, Value::Val(Val::Null, None));
+            *only = self.apply_all_annotation_to_value(inner, Some(annotation))?;
+            return Ok(body);
+        }
+        self.apply_all_annotation_to_value(body, return_type)
+    }
+
     fn all_annotation_modifier(
         &mut self,
         type_annotation: &TypeExpr,
@@ -2450,6 +2473,7 @@ impl Parser {
                                             | TokenType::RightBrace
                                             | TokenType::LeftParen
                                             | TokenType::Pipe
+                                            | TokenType::PipeOp
                                             | TokenType::Arrow
                                             | TokenType::Comma
                                     )
@@ -2481,7 +2505,9 @@ impl Parser {
                                 && Some(t.position) == ident_token_end
                         });
                         let is_method_access = self.check(&TokenType::Dot);
-                        let is_pipe = self.check(&TokenType::Pipe);
+                        // `name |> f()` pipes the name's value; it binds nothing.
+                        let is_pipe =
+                            self.check(&TokenType::Pipe) || self.check(&TokenType::PipeOp);
                         let is_newline_or_end = self.check(&TokenType::Newline)
                             || self.check(&TokenType::RightBrace)
                             || self.check(&TokenType::Comma);
@@ -2793,7 +2819,7 @@ impl Parser {
             // Simple expression as function body
             self.parse_value()?
         };
-        let body = self.apply_all_annotation_to_value(body, return_type_expr.as_ref())?;
+        let body = self.apply_all_annotation_to_fn_body(body, return_type_expr.as_ref())?;
         let return_type = return_type_expr.map(|type_expr| type_expr.to_string());
 
         Ok(FnDef {
@@ -3478,9 +3504,10 @@ impl Parser {
 
     /// Parse a variant's payload type after its `(`, through the `)`: any
     /// type expression (`Type`, `::ns/Type`, `Vec<Type>`, `Type?`, `A | B`),
-    /// kept as its annotation text.
+    /// kept as its annotation text. An inline `where` (`Int where gt(%, 0)`)
+    /// declares a hidden refinement type, as it does for a field.
     fn parse_variant_payload(&mut self) -> ParseResult<String> {
-        let payload = self.parse_union_type()?;
+        let payload = self.parse_type_ref()?;
         if !self.check(&TokenType::RightParen) {
             return Err(self.error("Expected ')' after variant type reference"));
         }
