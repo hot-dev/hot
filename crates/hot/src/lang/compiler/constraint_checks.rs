@@ -183,6 +183,24 @@ fn local_binding(values: &[Value]) -> Option<(&VarRef, &Value)> {
     }
 }
 
+/// The payload annotation of the enum variant a call names, as `Hours` in
+/// `Due.Hours(0)`.
+fn variant_payload<'t>(function: &Value, type_def: &'t TypeDef) -> Option<&'t str> {
+    let Value::Ref(Ref::Var(var_ref)) = function else {
+        return None;
+    };
+    let Some(DeepPath::Key(variant)) = &var_ref.var.deep_path else {
+        return None;
+    };
+    type_def
+        .variants
+        .as_ref()?
+        .iter()
+        .find(|v| v.name.name() == variant)?
+        .type_ref
+        .as_deref()
+}
+
 /// The entries of a Map literal, when `val` is one.
 fn map_literal(val: &Val) -> Option<&IndexMap<Val, Val>> {
     match val {
@@ -940,8 +958,12 @@ impl<'a> Index<'a> {
                 };
                 let location = arg.src.as_ref().map(error_location).or(location);
                 if let Some(literal) = literal(&arg.value) {
-                    let qualified = format!("{callee_ns}/{callee}");
-                    self.check_literal_against(&callee_ns, &qualified, literal, location, out);
+                    // A variant call (`Due.Hours(0)`) checks its payload type.
+                    let target = match variant_payload(&call.function, type_def) {
+                        Some(payload) => payload.to_string(),
+                        None => format!("{callee_ns}/{callee}"),
+                    };
+                    self.check_literal_against(&callee_ns, &target, literal, location, out);
                 } else if let Value::Val(val, _) = &arg.value
                     && let Some(entries) = map_literal(val)
                     && let Some((record_ns, record, shown)) =
@@ -1058,24 +1080,17 @@ impl<'a> Index<'a> {
         function: &Value,
         type_def: &'t TypeDef,
     ) -> Option<(String, &'t TypeDef, String)> {
-        let variant = match function {
+        let payload = match function {
             Value::Ref(Ref::Var(var_ref)) => match &var_ref.var.deep_path {
                 None => None,
-                Some(DeepPath::Key(variant)) => Some(variant.as_str()),
+                Some(DeepPath::Key(_)) => Some(variant_payload(function, type_def)?),
                 Some(_) => return None,
             },
             _ => None,
         };
-        let Some(variant) = variant else {
+        let Some(payload) = payload else {
             return Some((callee_ns.to_string(), type_def, callee.to_string()));
         };
-        let payload = type_def
-            .variants
-            .as_ref()?
-            .iter()
-            .find(|v| v.name.name() == variant)?
-            .type_ref
-            .as_deref()?;
         let key = self.type_key(callee_ns, payload)?;
         let record = self.types.get(&key).copied()?;
         let record_ns = key.rsplit_once('/')?.0.to_string();

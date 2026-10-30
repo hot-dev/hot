@@ -1205,6 +1205,82 @@ probe()"#;
         );
     }
 
+    /// A refinement or literal union as an enum payload, named or an inline
+    /// `where`, checks the payload as a record field of that type would.
+    #[test]
+    fn enum_payloads_check_their_refinements() {
+        let src = r#"::t ns
+Positive type Int where gt(%, 0)
+Fruit type "apple" | "banana"
+Due enum { Hours(Positive), Days(Int where gt(%, 0)), Pick(Fruit), Many(Vec<Positive>) }
+dynamic fn (x: Any): Any { x }
+probe fn (): Vec {
+    [is-err(Due.Hours(dynamic(0))), untype(Due.Hours(dynamic(2))),
+     is-err(Due.Days(dynamic(-1))), untype(Due.Days(dynamic(3))),
+     is-err(Due.Pick(dynamic("pear"))), untype(Due.Pick(dynamic("apple"))),
+     is-err(Due.Many(dynamic([1, 0]))), untype(Due.Many(dynamic([1, 2])))]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([true, 2, true, 3, true, "apple", true, [1, 2]]),
+        );
+    }
+
+    /// A record field or enum payload whose type declares a constructor for
+    /// the value's type builds through it, as a call would: a time type
+    /// parses a Str, and a bad Str is an Err. A field used to tag the Str
+    /// as it was, so `found-at: "nonsense"` passed and a ZonedDateTime field
+    /// read as 1970. A constructor that doesn't convert (`Uuid(7)` makes a
+    /// new id) is not called on the value.
+    #[test]
+    fn typed_fields_build_through_the_constructor_for_their_value() {
+        let src = r#"::t ns
+::time ::hot::time
+Form type { found-at: ::time/PlainDate, seen: ::time/PlainDate?, days: Vec<::time/PlainDate> }
+Policy type { effective: ::time/ZonedDateTime }
+Found enum { At(::time/PlainDate) }
+Keyed type { id: Uuid }
+dynamic fn (x: Any): Any { x }
+probe fn (): Vec {
+    form Form({found-at: dynamic("2026-01-02"), seen: null, days: ["2026-01-03"]})
+    named Form(found-at: "2026-02-03", seen: "2026-02-04", days: [])
+    policy Policy({effective: dynamic("2027-01-01T05:00:00Z[UTC]")})
+    id Uuid(7)
+    [is-type(form.found-at, ::time/PlainDate), Str(form.found-at), is-null(form.seen),
+     map(form.days, Str(%)), Str(named.seen),
+     ::time/epoch-millis(::time/to-instant(policy.effective)),
+     is-err(Form({found-at: dynamic("nonsense"), seen: null, days: []})),
+     is-err(Form({found-at: "2026-01-02", seen: dynamic("nope"), days: []})),
+     is-err(Form({found-at: "2026-01-02", seen: null, days: dynamic(["nope"])})),
+     is-err(Policy({effective: dynamic("2027-01-01")})),
+     get(untype(Found.At(dynamic("2026-05-06"))), "day"),
+     is-err(Found.At(dynamic("nope"))),
+     eq(Str(Keyed({id: id}).id), Str(id))]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([
+                true,
+                "2026-01-02",
+                true,
+                ["2026-01-03"],
+                "2026-02-04",
+                1_798_779_600_000_i64,
+                true,
+                true,
+                true,
+                true,
+                6,
+                true,
+                true
+            ]),
+        );
+    }
+
     /// An arrow may name its enum by a namespace alias or in full. The
     /// checker used to read `::k/Kind.Extra` as a type of its own, so the
     /// arrow failed with "Implementation body returns ::geo/Kind, but should
