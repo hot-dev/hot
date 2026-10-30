@@ -159,24 +159,27 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_creates_a_password_sign_in_once() {
         let (_dir, conf) = sqlite_conf().await;
-        let first = password_file("first-password\n");
+        // Generated, so no password is written into the source.
+        let first_password = format!("first-{}", uuid::Uuid::new_v4());
+        let second_password = format!("second-{}", uuid::Uuid::new_v4());
+        let first = password_file(&format!("{first_password}\n"));
         run_admin_bootstrap(" admin@example.com ", Some("Admin"), first.path(), &conf)
             .await
             .unwrap();
-        assert!(can_sign_in(&conf, "admin@example.com", "first-password").await);
+        assert!(can_sign_in(&conf, "admin@example.com", &first_password).await);
 
         // Re-running, even with another password, changes nothing.
-        let second = password_file("second-password");
+        let second = password_file(&second_password);
         run_admin_bootstrap("admin@example.com", None, second.path(), &conf)
             .await
             .unwrap();
-        assert!(can_sign_in(&conf, "admin@example.com", "first-password").await);
+        assert!(can_sign_in(&conf, "admin@example.com", &first_password).await);
 
         run_admin_reset_password("admin@example.com", second.path(), &conf)
             .await
             .unwrap();
-        assert!(can_sign_in(&conf, "admin@example.com", "second-password").await);
-        assert!(!can_sign_in(&conf, "admin@example.com", "first-password").await);
+        assert!(can_sign_in(&conf, "admin@example.com", &second_password).await);
+        assert!(!can_sign_in(&conf, "admin@example.com", &first_password).await);
     }
 
     #[tokio::test]

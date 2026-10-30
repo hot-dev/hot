@@ -1027,8 +1027,8 @@ class Agent:
         step("ready")
         record["finished"] = utc_now()
         migrated = {k: v for k, v in self.state().items() if k == "migrated_release"}
+        self._dependencies = data_services(self.config, self.operator_secrets())
         self.save_state({"release": release, "previous": previous, "migrations": record["migrations"],
-                         "dependencies": data_services(self.config, self.operator_secrets()),
                          "data_modes": self.configured_modes(), "configuration": self.configuration_digest(),
                          **migrated})
         self.remember(record)
@@ -1312,6 +1312,22 @@ class Agent:
         except (OSError, ValueError):
             return {}
 
+    def dependencies(self):
+        """(host, port) of the managed and existing data services. Kept in
+        memory, not in the state file: existing services' addresses come
+        from the operator's connection URIs."""
+        if getattr(self, "_dependencies", None) is None:
+            self._dependencies = data_services(self.config, self.operator_secrets())
+        return self._dependencies
+
+    def dependencies_reachable(self):
+        """Whether every managed and existing data service accepts
+        connections; False when the operator secret cannot be read."""
+        try:
+            return all(tcp_reachable(host, port) for host, port in self.dependencies())
+        except AgentError:
+            return False
+
     def save_state(self, state):
         # Deploy history, never secret values; still only root's to read.
         self.releases.mkdir(parents=True, exist_ok=True)
@@ -1515,7 +1531,7 @@ class Agent:
             if "scheduler" in self.roles():
                 metrics["SchedulerRunning"] = (int("scheduler" in healthy), "Count")
             reachable = (all(name in healthy for name in local_data)
-                         and all(tcp_reachable(host, port) for host, port in self.state().get("dependencies", [])))
+                         and self.dependencies_reachable())
             metrics["DependenciesReachable"] = (int(reachable), "Count")
             probe = probe or self.probe
             targets = self.readiness_targets()
@@ -1820,7 +1836,7 @@ class Agent:
                              for service in ("postgres", "valkey")],
         }
         for entry, (host_name, port) in zip(
-                [d for d in result["dependencies"] if d["mode"] != "local"], state.get("dependencies", [])):
+                [d for d in result["dependencies"] if d["mode"] != "local"], self.dependencies()):
             entry.update(endpoint=f"{host_name}:{port}", reachable=tcp_reachable(host_name, port))
         if bundle is not None:
             result["services"] = {

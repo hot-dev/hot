@@ -612,6 +612,7 @@ class DataMoves(UpgradeHarness):
         self.assertEqual(record["moves"], {"postgres": "local -> managed"})
         self.assertTrue(Path(record["restore_point"]["path"]).exists(), "the dump is kept as the recovery point")
         self.assertEqual(self.agent.state()["data_modes"], {"postgres": "managed", "valkey": "local"})
+        self.assertNotIn("dependencies", self.agent.state(), "service addresses stay in memory")
         self.assertFalse((Path(self.tmp.name) / "data/moves/postgres.dump").exists(), "the staged copy is removed")
         self.assertIn("restore_postgres.sh", [p.name for p in (Path(self.tmp.name) / "releases/3.0.2/bundle").iterdir()])
 
