@@ -217,6 +217,7 @@ program:
 | `where-requires-type` | Error | A `where` follows a binding without a declared type |
 | `nested-placeholder` | Error | An implicit `%` lambda inside a predicate |
 | `unknown-literal` | Warning | A literal outside an open union's known values |
+| `impossible-comparison` | Warning | `eq` or `ne` between a closed union's value and a literal outside it, which is always false (`ne`: always true) |
 | `where-changes-representation` | Warning | A refined primitive type used with `is-type` or as a `match` arm |
 
 For `constraint-violation`, `hot check` evaluates a predicate on a literal

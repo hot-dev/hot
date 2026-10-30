@@ -3918,6 +3918,91 @@ impl TypeChecker {
         }
     }
 
+    /// `impossible-comparison`: `eq` or `ne` between a value of a closed
+    /// literal union and a literal outside it, such as a misspelled
+    /// `eq(caused-by, "compnay")`, is always false (`ne`: always true).
+    /// `null` is left out, as a defensive null check is common.
+    fn check_literal_comparison(&mut self, name: &str, fn_call: &FnCall) {
+        let short = name.strip_prefix("::hot::cmp/").unwrap_or(name);
+        if !matches!(short, "eq" | "ne") || self.in_pipe_flow {
+            return;
+        }
+        if name == short && self.context.current_namespace != "::hot::cmp" {
+            let local = format!("{}/{}", self.context.current_namespace, short);
+            if self.context.get_function_signature(&local).is_some() {
+                return;
+            }
+        }
+        let [a, b] = fn_call.args.as_slice() else {
+            return;
+        };
+        let (literal, literal_arg, other) = match (
+            Self::literal_type_of_value(&a.value),
+            Self::literal_type_of_value(&b.value),
+        ) {
+            (Some(TypeExpr::Literal(lit)), None) => (lit, a, b),
+            (None, Some(TypeExpr::Literal(lit))) => (lit, b, a),
+            _ => return,
+        };
+        if literal == LiteralType::Null {
+            return;
+        }
+        // The argument was inferred already; drop what doing it again reports.
+        let (errors, warnings) = (self.errors.errors.len(), self.errors.warnings.len());
+        let other_type = self.infer_argument_type(&other.value);
+        self.errors.errors.truncate(errors);
+        self.errors.warnings.truncate(warnings);
+        let Some(subject) = self.literal_union_subject(&other_type) else {
+            return;
+        };
+        // An Int and a Dec member can be numerically equal.
+        let numeric_mix = matches!(literal, LiteralType::Int(_))
+            && subject
+                .members
+                .iter()
+                .any(|m| matches!(m, LiteralType::Dec(_)));
+        if subject.is_open || subject.members.contains(&literal) || numeric_mix {
+            return;
+        }
+        let location = literal_arg
+            .src
+            .as_ref()
+            .or(fn_call.src.as_ref())
+            .map(|s| self.source_to_error_location(s));
+        // Argument types are inferred more than once for some calls.
+        if self.errors.warnings.iter().any(|w| {
+            matches!(w, CompilerError::Constraint { code: "impossible-comparison", location: l, .. } if *l == location)
+        }) {
+            return;
+        }
+        // A named union lists its values; an inline one already shows them.
+        let shown = if subject.name.starts_with(char::is_uppercase) {
+            let known = subject
+                .members
+                .iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("`{}` ({known})", subject.name)
+        } else {
+            format!("`{}`", subject.name)
+        };
+        let outcome = if short == "eq" {
+            "always false"
+        } else {
+            "always true"
+        };
+        self.errors.add_warning(CompilerError::Constraint {
+            code: "impossible-comparison",
+            message: format!(
+                "{literal} isn't one of the values of {shown}, so this `{short}` is {outcome}"
+            ),
+            help: Some("check the spelling".to_string()),
+            warning: true,
+            location,
+        });
+    }
+
     /// Infer the return type of a function call
     /// Precise result types for `and`, `or`, `if` and `not`. `and` and `or`
     /// return one of their arguments and `if` one of its branches, so the
@@ -4169,6 +4254,7 @@ impl TypeChecker {
 
                 if let Some(sig) = matching_sig {
                     let declared = sig.return_type.clone();
+                    self.check_literal_comparison(lookup_name, fn_call);
                     if let Some(precise) = self.logic_result_type(lookup_name, fn_call) {
                         return precise;
                     }

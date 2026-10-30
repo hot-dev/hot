@@ -357,6 +357,10 @@ lists the missing values. A nullable subject (`Severity?`) also needs a `null`
 arm. An `open` literal union isn't checked this way, since other declarations
 can add members.
 
+Comparing a closed union's value with a literal outside it, as in
+`eq(severity, "hgih")`, is always false (`ne`: always true), so `hot check`
+warns with `impossible-comparison`. `null` and `open` unions aren't checked.
+
 ```hot
 Severity type "low" | "medium" | "high"
 
