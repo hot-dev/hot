@@ -331,9 +331,15 @@ resource "aws_launch_template" "role" {
   user_data = base64encode(templatefile("${path.module}/../../../../runtime/bootstrap.sh.tftpl", {
     config_base64 = base64encode(jsonencode(local.host_config[each.key]))
   }))
-  tag_specifications {
-    resource_type = "instance"
-    tags          = { Name = "hot-${local.config.name}-${each.key}", HotRole = each.key }
+  # The provider's default tags do not reach instances launched from a
+  # template, so the instance and its volumes name the installation here:
+  # commands, the release role, and the budget find them by it.
+  dynamic "tag_specifications" {
+    for_each = ["instance", "volume"]
+    content {
+      resource_type = tag_specifications.value
+      tags          = { Name = "hot-${local.config.name}-${each.key}", HotRole = each.key, HotInstallation = local.config.name }
+    }
   }
   depends_on = [aws_route_table_association.private, aws_iam_role_policy.runtime, aws_iam_role_policy_attachment.ssm]
 }

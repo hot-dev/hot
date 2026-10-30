@@ -577,6 +577,7 @@ def role_secrets(config, generated, operator, managed=None):
     Valkey's AUTH token."""
     g = generated
     managed = managed or {}
+    admin_uri = None
     pg_mode = render.data_mode(config, "postgres")
     pg_local = pg_mode == "local"
     valkey_local = render.data_mode(config, "valkey") == "local"
@@ -586,12 +587,14 @@ def role_secrets(config, generated, operator, managed=None):
     elif pg_mode == "managed":
         admin = managed.get("postgres")
         if not admin:
-            raise AgentError("Managed PostgreSQL needs its administrator login and CA certificate")
+            raise AgentError("Managed PostgreSQL needs its CA certificate")
         endpoint, sslmode = config["data"]["postgres"]["endpoint"], managed_sslmode(config)
         runtime_uri = postgres_uri(render.runtime_role(config), g["POSTGRES_RUNTIME_PASSWORD"], endpoint, "hot", sslmode)
         owner_uri = postgres_uri("hot_owner", g["POSTGRES_PASSWORD"], endpoint, "hot", sslmode)
-        admin_uri = {database: postgres_uri(admin["username"], admin["password"], endpoint, database, sslmode)
-                     for database in ("postgres", "hot")}
+        # Only the host that migrates has the administrator login.
+        if admin.get("username"):
+            admin_uri = {database: postgres_uri(admin["username"], admin["password"], endpoint, database, sslmode)
+                         for database in ("postgres", "hot")}
     else:
         for key in OPERATOR_DATA["postgres"]:
             if key not in operator:
@@ -643,7 +646,7 @@ def role_secrets(config, generated, operator, managed=None):
     else:
         files["provision"] = {"HOT_DB_MIGRATION_URI": owner_uri, **ca}
         files["check-postgres"] = {"HOT_DB_MIGRATION_URI": owner_uri, **ca}
-    if pg_mode == "managed":
+    if admin_uri:
         files["prepare-postgres"] = {"POSTGRES_ADMIN_URI": admin_uri["postgres"], "POSTGRES_ADMIN_HOT_URI": admin_uri["hot"],
                                      "POSTGRES_PASSWORD": g["POSTGRES_PASSWORD"],
                                      "POSTGRES_RUNTIME_PASSWORD": g["POSTGRES_RUNTIME_PASSWORD"], **ca}
@@ -908,14 +911,12 @@ class Agent:
         return managed
 
     def managed_postgres(self):
-        """A managed database's administrator login, from the secret the
-        stack names, and the CA certificate its server presents."""
+        """The CA certificate a managed database's server presents and, on
+        the host that migrates, the administrator login from the secret the
+        stack names. Only that host may read the login."""
         if render.data_mode(self.config, "postgres") != "managed":
             return None
         endpoint = self.config["data"]["postgres"]["endpoint"]
-        login = self.cloud.get_secret(endpoint["admin_secret"])
-        if not isinstance(login, dict) or not login.get("username") or not login.get("password"):
-            raise AgentError("The managed PostgreSQL administrator secret has no login yet")
         if self.config["cloud"] == "aws":
             status, data = http("GET", RDS_CA_BUNDLE.format(region=self.config["region"]), timeout=60)
             ca = data.decode() if status == 200 else ""
@@ -923,6 +924,11 @@ class Agent:
             ca = endpoint.get("ca_certificate", "")
         if "-----BEGIN CERTIFICATE-----" not in ca:
             raise AgentError("The managed PostgreSQL CA certificate is unavailable")
+        if not render.runs_migrations(self.config):
+            return {"ca": ca}
+        login = self.cloud.get_secret(endpoint["admin_secret"])
+        if not isinstance(login, dict) or not login.get("username") or not login.get("password"):
+            raise AgentError("The managed PostgreSQL administrator secret has no login yet")
         return {"username": login["username"], "password": login["password"], "ca": ca}
 
     def deliver_secrets(self):
@@ -1706,6 +1712,11 @@ class Agent:
         release = self.state().get("release")
         bundle = self.releases / release / "bundle" if release else None
         if operation == "deploy-now":
+            if self.state().get("stopped"):
+                # After drain-and-stop: deploy a new pointer, or start the
+                # installed release again.
+                self.save_state({k: v for k, v in self.state().items() if k != "stopped"})
+                return self.reconcile(request_id, retry=True) or self.resume(force=True, request_id=request_id)
             return self.reconcile(request_id, retry=True) or self.report(state="current", request_id=request_id)
         if operation == "status":
             return self.report(state="status", request_id=request_id)
@@ -1740,6 +1751,8 @@ class Agent:
             return self.report(state="restarted", service=service, request_id=request_id)
         if operation == "drain-and-stop":
             self.stop_services(bundle)
+            # Kept stopped across reboots until the next deploy.
+            self.save_state({**self.state(), "stopped": True})
             return self.report(state="stopped", request_id=request_id)
         if operation == "roll-back":
             return self.report(state="rolled-back", request_id=request_id, **self.roll_back(bundle))
@@ -1766,6 +1779,27 @@ class Agent:
         web = list(render.web_roles(self.config))
         if web:
             self.compose(bundle, "stop", *web, "ingress")
+
+    def resume(self, force=False, request_id=""):
+        """After a boot, start the deployed release again. Secrets live on
+        tmpfs, so they are gone, and Docker's own restart of the containers
+        failed without them. An installation stopped with drain-and-stop
+        stays stopped."""
+        state = self.state()
+        release = state.get("release")
+        delivered = self.secrets_root.is_dir() and any(self.secrets_root.iterdir())
+        if not release or (not force and (state.get("stopped") or delivered)):
+            return None
+        bundle = self.releases / release / "bundle"
+        try:
+            self.deliver_secrets()
+            local_data = [s for s in ("postgres", "valkey") if render.data_mode(self.config, s) == "local"]
+            if local_data:
+                self.compose(bundle, "up", "-d", "--wait", *local_data)
+            self.start_services(bundle)
+        except (AgentError, OSError, subprocess.CalledProcessError) as error:
+            return self.report(state="resume-failed", release=release, error=describe(error), request_id=request_id)
+        return self.report(state="resumed", release=release, request_id=request_id)
 
     def start_services(self, bundle):
         roles = self.roles()
@@ -2008,6 +2042,7 @@ def main(argv=None):
         return 0
     while True:
         with locked():
+            agent.resume()
             agent.reconcile()
             agent.monitor()
             agent.ship_journal()

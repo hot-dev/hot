@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -513,6 +514,16 @@ class Scalable(AgentHarness):
         calls = [" ".join(c) for c in self.run.commands]
         stop = max(i for i, c in enumerate(calls) if c.endswith("stop --timeout 120 task-worker"))
         self.assertTrue(any(c.endswith("up -d task-worker") for c in calls[stop:]), calls[stop:])
+
+    def test_only_the_migrating_host_reads_the_database_administrator_login(self):
+        read = []
+        get_secret = self.cloud.get_secret
+        self.cloud.get_secret = lambda reference: read.append(reference) or get_secret(reference)
+        self.host(["app"])
+        self.assertEqual(self.agent.reconcile()["state"], "deployed")
+        self.assertNotIn(self.ADMIN, read, "an app host's role may not read the administrator secret")
+        self.assertFalse((Path(self.tmp.name) / "secrets/prepare-postgres").exists())
+        self.assertTrue((Path(self.tmp.name) / "secrets/app/POSTGRES_CA_CERT").exists())
 
     def test_an_app_host_deploys_only_its_role(self):
         self.host(["app"])
@@ -1213,6 +1224,41 @@ class Synthetic(AgentHarness):
         self.config["roles"] = None
         self.config["monitoring"] = {}
         self.assertEqual(self.agent.synthetic_metrics(self.NOW), {})
+
+
+class Resume(AgentHarness):
+    def booted(self):
+        """What a reboot leaves: the deployed release, and an empty tmpfs."""
+        self.agent.reconcile()
+        shutil.rmtree(Path(self.tmp.name) / "secrets")
+        self.run.commands.clear()
+
+    def test_a_reboot_delivers_secrets_and_starts_the_release_again(self):
+        self.booted()
+        self.assertEqual(self.agent.resume()["state"], "resumed")
+        self.assertTrue(any((Path(self.tmp.name) / "secrets").iterdir()))
+        calls = self.run.compose_calls()
+        self.assertIn("up -d --wait postgres valkey", calls)
+        self.assertEqual(calls[-1], "up -d scheduler", "the scheduler starts last")
+        self.assertIsNone(self.agent.resume(), "nothing to do once secrets are back")
+
+    def test_a_stopped_installation_stays_stopped_until_deploy_now(self):
+        self.agent.reconcile()
+        self.agent.command("drain-and-stop", request_id="s1")
+        shutil.rmtree(Path(self.tmp.name) / "secrets")
+        self.assertIsNone(self.agent.resume())
+        self.run.commands.clear()
+        report = self.agent.command("deploy-now", request_id="d1")
+        self.assertEqual((report["state"], report["request_id"]), ("resumed", "d1"))
+        self.assertIn("up -d scheduler", self.run.compose_calls())
+        self.assertNotIn("stopped", self.agent.state())
+
+    def test_a_failed_resume_is_reported(self):
+        self.booted()
+        def missing(reference):
+            raise agent_module.AgentError("secretsmanager GetSecretValue failed: AccessDeniedException")
+        self.cloud.get_secret = missing
+        self.assertEqual(self.agent.resume()["state"], "resume-failed")
 
 
 class AlertTests(AgentHarness):

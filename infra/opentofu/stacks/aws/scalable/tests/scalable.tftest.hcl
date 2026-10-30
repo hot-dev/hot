@@ -89,6 +89,10 @@ run "each_role_runs_in_its_own_group" {
     condition     = aws_launch_template.role["app"].metadata_options[0].http_tokens == "required" && length(aws_nat_gateway.egress) == 2 && length(aws_subnet.private) == 2
     error_message = "IMDSv2 only, and private hosts in two zones with a NAT gateway each."
   }
+  assert {
+    condition     = alltrue([for spec in aws_launch_template.role["worker"].tag_specifications : spec.tags["HotInstallation"] == "hot-example"]) && length(aws_launch_template.role["worker"].tag_specifications) == 2
+    error_message = "Instances and their volumes carry the installation tag that commands and the budget select by."
+  }
 }
 
 run "hosts_know_their_role_and_pointers" {
