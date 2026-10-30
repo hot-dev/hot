@@ -2,6 +2,7 @@
 
 mod blobs;
 mod builds;
+mod calls;
 mod context;
 mod domains;
 mod env;
@@ -25,6 +26,7 @@ mod webhook;
 // Re-export all handlers
 pub use blobs::*;
 pub use builds::*;
+pub use calls::*;
 pub use context::*;
 pub use domains::*;
 pub use env::*;

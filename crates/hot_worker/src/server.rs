@@ -4489,6 +4489,13 @@ async fn execute_single_event_handler_inner(
     if let Some(queue_timing) = event_message.body.execution_context.queue_timing.clone() {
         _execution_context = _execution_context.with_queue_timing(queue_timing);
     }
+    // An org can turn call tracing off (the `call_tracing` feature); the run
+    // still records its lifecycle.
+    if emitter.is_some() {
+        _execution_context = _execution_context.with_trace_calls(
+            hot::db::features::Features::call_tracing_for_org_cached(db, &org_id).await,
+        );
+    }
 
     // Set once the worker decides to stop this run (see `run_must_stop`), so
     // the failure the VM records as it unwinds names the reason.

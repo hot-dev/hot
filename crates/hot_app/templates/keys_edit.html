@@ -189,6 +189,7 @@
                                                     <option value="stream">stream</option>
                                                     <option value="event">event</option>
                                                     <option value="run">run</option>
+                                                    <option value="call">call</option>
                                                     <option value="project">project</option>
                                                     <option value="build">build</option>
                                                     <option value="context">context</option>
@@ -324,6 +325,7 @@ function permissionBuilder() {
         'stream':  ['read'],
         'event':   ['create', 'read'],
         'run':     ['read'],
+        'call':    ['delete'],
         'project': ['create', 'read', 'update', 'delete'],
         'build':   ['create', 'read', 'execute'],
         'context': ['create', 'read', 'update', 'delete'],

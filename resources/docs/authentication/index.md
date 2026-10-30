@@ -126,7 +126,7 @@ Presets add rules to the builder — they don't replace existing rules.
 
 **Rule Builder** — Each rule has three parts:
 
-1. **Resource Type** — Select a type from the dropdown (`mcp`, `webhook`, `stream`, `event`, `run`, `project`, `build`, `context`, `key`, `session`, `env`), or `All (*)` for a wildcard that covers every type.
+1. **Resource Type** — Select a type from the dropdown (`mcp`, `webhook`, `stream`, `event`, `run`, `call`, `project`, `build`, `context`, `key`, `session`, `env`, `file`, `blob`, `domain`), or `All (*)` for a wildcard that covers every type.
 2. **Path** — The resource path, usually `*` (all resources of that type) or a specific service name (e.g., `weather`). When the resource type is `All (*)`, the path is locked to `*`.
 3. **Actions** — Check one or more actions: `create`, `read`, `update`, `delete`, `execute`, or `*` (all actions). The available actions depend on the resource type.
 

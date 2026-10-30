@@ -1312,6 +1312,7 @@ async fn queue_schedule_execution(
         queue_timing: None,
         // Enqueue-only producer context; the worker stamps deadline_at at admission
         deadline_at: None,
+        trace_calls: true,
     };
 
     // Create the event data
@@ -1564,6 +1565,7 @@ async fn process_pending_retries(
             queue_timing: None,
             // Enqueue-only producer context; the worker stamps deadline_at at admission
             deadline_at: None,
+            trace_calls: true,
         };
 
         // Create the event
