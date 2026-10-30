@@ -60,6 +60,10 @@ runs:
         fi
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_CACHE_SIZE=${{ inputs.sccache-size }}" >> "$GITHUB_ENV"
+        # The server stops after 600s without a new request, even while a
+        # compile is in flight. Windows builds the `hot` crate alone for
+        # about that long, so the default drops its connection mid-compile.
+        echo "SCCACHE_IDLE_TIMEOUT=0" >> "$GITHUB_ENV"
 
     # Set before the cache steps: rust-cache keys on CARGO_* variables.
     - name: Apply CI build settings
