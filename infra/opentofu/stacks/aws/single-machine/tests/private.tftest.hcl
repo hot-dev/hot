@@ -174,7 +174,7 @@ run "agent_channel" {
     error_message = "Every command parameter must be constrained."
   }
   assert {
-    condition     = aws_ssm_parameter.release.value == "none" && aws_ssm_parameter.status.type == "String"
+    condition     = aws_ssm_parameter.release.value == "none" && aws_ssm_parameter.status.type == "String" && jsondecode(aws_ssm_parameter.installation.value).installation_parameter == "/hot/hot-example/installation" && jsondecode(aws_ssm_parameter.installation.value).name == "hot-example"
     error_message = "The stack creates the release pointer and status; the release process owns the pointer's value."
   }
   assert {

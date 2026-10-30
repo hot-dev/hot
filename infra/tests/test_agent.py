@@ -251,6 +251,24 @@ class Deploy(AgentHarness):
         self.assertNotIn("SECRET", json.dumps(status))
 
 
+class DataDisk(AgentHarness):
+    def test_an_initialized_disk_is_mounted_before_state_is_read(self):
+        self.agent.mount_data()
+        self.assertEqual(self.run.commands[-1][-1], "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0abc")
+        self.assertNotIn("--allow-format", self.run.commands[-1], "never formats here")
+
+    def test_a_blank_disk_is_left_for_the_first_install(self):
+        def blank(command, **kwargs):
+            raise subprocess.CalledProcessError(1, command, stderr="Data disk has no filesystem")
+        self.agent.run_command = blank
+        self.agent.mount_data()  # no error
+
+    def test_scratch_disks_wait_for_the_deploy(self):
+        self.config["data_disk"] = "scratch"
+        self.agent.mount_data()
+        self.assertEqual(self.run.commands, [])
+
+
 class DataDirectories(AgentHarness):
     def test_the_first_deploy_creates_what_the_bundle_mounts(self):
         owners = []
@@ -645,6 +663,17 @@ class DataMoves(UpgradeHarness):
         self.assertNotIn("dependencies", self.agent.state(), "service addresses stay in memory")
         self.assertFalse((Path(self.tmp.name) / "data/moves/postgres.dump").exists(), "the staged copy is removed")
         self.assertIn("restore_postgres.sh", [p.name for p in (Path(self.tmp.name) / "releases/3.0.2/bundle").iterdir()])
+
+    def test_a_move_within_the_running_release_dumps_through_the_running_bundle(self):
+        self.config["data"] = {"postgres": {"mode": "managed", "runtime_role": "hot_runtime", "endpoint": {
+            "host": self.HOST, "port": 5432, "admin_user": "hot_admin", "admin_secret": self.ADMIN}}}
+        self.run.commands.clear()
+        status = self.agent.reconcile()
+        self.assertEqual((status["state"], status["release"]), ("deployed", "3.0.1"), status)
+        dump = next(c for c in self.run.commands if "pg_dump" in c)
+        compose = Path(dump[dump.index("-f") + 1])
+        self.assertEqual(compose.parent.name, "bundle-running")
+        self.assertIn("postgres", json.loads(compose.read_text())["services"], "the running bundle, not the new one")
 
     def test_a_moving_queue_drains_first(self):
         self.run.queue = [(3, 1, 2), (0, 1, 2), (0, 0, 2)]
@@ -1223,6 +1252,11 @@ class Synthetic(AgentHarness):
         self.assertFalse(ok)
         self.assertGreaterEqual(seconds, agent_module.SYNTHETIC_TIMEOUT)
 
+    def test_the_api_key_is_for_the_agent_alone(self):
+        self.assertEqual(self.agent.reconcile()["state"], "deployed", "the key is an accepted operator entry")
+        mounted = [path.name for path in (Path(self.tmp.name) / "secrets").rglob("*") if path.is_file()]
+        self.assertNotIn("HOT_SYNTHETIC_API_KEY", mounted, "no service receives it")
+
     def test_the_result_is_published_and_rechecked_every_few_minutes(self):
         self.agent.synthetic_check = lambda: (True, 3.25)
         self.assertEqual(self.agent.synthetic_metrics(self.NOW),
@@ -1250,7 +1284,7 @@ class ConfigurationRefresh(AgentHarness):
         self.agent.reconcile()
         changed = json.loads(json.dumps(self.config))
         changed["settings"] = {"HOT_APP_SIGNUP": "open"}
-        self.cloud.installation = lambda: changed
+        self.cloud.installation = lambda reference: changed
         self.assertTrue(self.agent.refresh_configuration())
         self.assertEqual(json.loads((Path(self.tmp.name) / "etc/installation.json").read_text()), changed)
         self.assertEqual(self.agent.config["settings"], {"HOT_APP_SIGNUP": "open"})
@@ -1259,6 +1293,13 @@ class ConfigurationRefresh(AgentHarness):
 
     def test_clouds_without_one_keep_the_boot_configuration(self):
         self.assertFalse(self.agent.refresh_configuration())
+
+    def test_aws_reads_it_from_the_installation_parameter(self):
+        aws = agent_module.Aws("us-east-1")
+        with mock.patch.object(agent_module.Aws, "get_parameter", return_value='{"name": "hot-example"}') as read:
+            self.assertEqual(aws.installation("/hot/hot-example/installation"), {"name": "hot-example"})
+        self.assertEqual(read.call_args.args[0], "/hot/hot-example/installation")
+        self.assertIsNone(aws.installation(""), "a host from before the parameter keeps its boot configuration")
 
     def test_gcp_reads_it_from_the_instance_metadata(self):
         encoded = base64.b64encode(json.dumps({"name": "hot-example"}).encode())

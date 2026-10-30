@@ -81,6 +81,7 @@ RUNTIME_SUBNET = "172.30.0.0/24"
 CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "size", "host_image", "release_pointer", "secret_references", "app_hostname", "api_hostname", "app_exposure", "api_exposure", "storage", "network",
                # Read by the host agent, not by the bundle.
                "data_volume_id", "admin_email", "manifest_base_url", "status_reference", "command_subscription",
+               "installation_parameter",
                "settings", "data", "backup", "monitoring", "logging",
                # Scalable installations: which roles this host runs, whether it
                # migrates, and the pointer that releases migrations.

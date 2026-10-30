@@ -128,6 +128,15 @@ resource "aws_ssm_parameter" "release" {
   value = "none"
   lifecycle { ignore_changes = [value] }
 }
+# The host's configuration, which the agent rereads every cycle: a change
+# applied in place takes effect without replacing the VM. The user data holds
+# the configuration the VM first booted with.
+resource "aws_ssm_parameter" "installation" {
+  name  = "/hot/${local.config.name}/installation"
+  type  = "String"
+  tier  = "Intelligent-Tiering"
+  value = jsonencode(local.host_config)
+}
 resource "aws_ssm_parameter" "status" {
   name  = "/hot/${local.config.name}/status"
   type  = "String"
@@ -170,11 +179,13 @@ resource "aws_ssm_document" "command" {
 }
 locals {
   host_config = merge(local.config, {
-    data_volume_id    = aws_ebs_volume.data.id
-    release_pointer   = aws_ssm_parameter.release.arn
-    status_reference  = aws_ssm_parameter.status.arn
-    secret_references = { generated = aws_secretsmanager_secret.generated.arn, operator = aws_secretsmanager_secret.operator.arn }
-    data              = local.host_data
+    data_volume_id  = aws_ebs_volume.data.id
+    release_pointer = aws_ssm_parameter.release.arn
+    # Not the resource's ARN: the parameter holds this configuration.
+    installation_parameter = "/hot/${local.config.name}/installation"
+    status_reference       = aws_ssm_parameter.status.arn
+    secret_references      = { generated = aws_secretsmanager_secret.generated.arn, operator = aws_secretsmanager_secret.operator.arn }
+    data                   = local.host_data
   })
 }
 resource "aws_iam_role" "host" {
@@ -197,7 +208,7 @@ resource "aws_iam_role_policy" "runtime" {
   policy = jsonencode({ Version = "2012-10-17", Statement = concat([
     { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.generated.arn, aws_secretsmanager_secret.operator.arn], aws_db_instance.postgres[*].master_user_secret[0].secret_arn, aws_secretsmanager_secret.valkey[*].arn) },
     { Effect = "Allow", Action = ["secretsmanager:PutSecretValue"], Resource = aws_secretsmanager_secret.generated.arn },
-    { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = aws_ssm_parameter.release.arn },
+    { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = [aws_ssm_parameter.release.arn, aws_ssm_parameter.installation.arn] },
     { Effect = "Allow", Action = ["ssm:PutParameter"], Resource = aws_ssm_parameter.status.arn },
     { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = "${aws_cloudwatch_log_group.host.arn}:*" },
     { Effect = "Allow", Action = ["cloudwatch:PutMetricData"], Resource = "*", Condition = { StringEquals = { "cloudwatch:namespace" = "Hot/SelfHost" } } },
@@ -239,7 +250,6 @@ resource "aws_instance" "host" {
   associate_public_ip_address = false
   vpc_security_group_ids      = [aws_security_group.host.id]
   iam_instance_profile        = aws_iam_instance_profile.host.name
-  user_data_replace_on_change = true
   metadata_options {
     http_tokens                 = "required"
     http_put_response_hop_limit = 2
@@ -256,6 +266,9 @@ resource "aws_instance" "host" {
   })
   tags = { Name = "hot-${local.config.name}" }
   lifecycle {
+    # The agent follows configuration changes from the installation
+    # parameter; a new size stops and starts this instance in place.
+    ignore_changes = [user_data]
     precondition {
       condition     = local.config.cloud == "aws"
       error_message = "The AWS root requires installation.cloud = aws."

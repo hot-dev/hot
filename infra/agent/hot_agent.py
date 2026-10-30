@@ -269,6 +269,12 @@ class Aws:
         # arn:aws:ssm:REGION:ACCOUNT:parameter/NAME -> /NAME
         return "/" + reference.split(":parameter/", 1)[1] if ":parameter/" in reference else reference
 
+    def installation(self, reference=""):
+        """The installation configuration in its SSM parameter, which
+        OpenTofu updates in place; None where the stack sets none."""
+        value = self.get_parameter(reference) if reference else None
+        return json.loads(value) if value else None
+
     def get_parameter(self, reference):
         try:
             result = self.call("ssm", "AmazonSSM.GetParameter", {"Name": self.parameter_name(reference)})
@@ -399,7 +405,7 @@ class Gcp:
         """An access token, which Artifact Registry accepts as a password."""
         return self.token()
 
-    def installation(self):
+    def installation(self, reference=""):
         """The installation configuration in the instance's metadata, which
         OpenTofu updates in place; None where the stack sets none."""
         status, data = http("GET", self.METADATA + "/instance/attributes/hot-installation",
@@ -499,6 +505,8 @@ OPERATOR_ROUTES = {
     "HOT_FILE_AWS_": HOT_SERVICES,
 }
 OPERATOR_INGRESS = ("TLS_CERTIFICATE", "TLS_PRIVATE_KEY")
+# Entries only the agent reads; no service mounts them.
+OPERATOR_AGENT = ("HOT_SYNTHETIC_API_KEY",)
 # Connection settings for existing data services; the bundle mounts them itself.
 OPERATOR_DATA = {"postgres": ("HOT_DB_URI", "HOT_DB_MIGRATION_URI", "POSTGRES_CA_CERT"),
                  "valkey": ("HOT_REDIS_URI",)}
@@ -513,7 +521,7 @@ def operator_routes(operator, config=None):
                  if render.data_mode(config, service) == "existing" for key in keys}
     routes = {}
     for key in operator:
-        if key in OPERATOR_INGRESS or key in data_keys:
+        if key in OPERATOR_INGRESS or key in OPERATOR_AGENT or key in data_keys:
             continue
         roles = next((roles for prefix, roles in OPERATOR_ROUTES.items() if key.startswith(prefix)), None)
         if roles is None:
@@ -811,6 +819,18 @@ class Agent:
             return "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_" + self.config["data_volume_id"].replace("-", "")
         return "/dev/disk/by-id/google-hot-data"
 
+    def mount_data(self):
+        """Mount an initialized data disk before anything reads state from
+        it: a replaced VM boots without the mount, and its state, deploy
+        history, and data are on the disk. A blank disk is left for a first
+        install's prepare_host to format."""
+        if self.config.get("data_disk") == "scratch" or os.path.ismount(self.data_root):
+            return
+        try:
+            self.run_command([str(LIBEXEC / "hot-data-disk"), self.data_device()])
+        except (subprocess.CalledProcessError, OSError):
+            pass
+
     def prepare_host(self, first_install):
         """Mount the data disk and write host settings. A blank disk is
         formatted only for a brand-new installation."""
@@ -998,6 +1018,16 @@ class Agent:
             if moves:
                 raise AgentError("Move storage and data services in separate deploys")
             self.move_storage(self.releases / previous / "bundle", storage_moves, record, step)
+        installed = self.releases / previous / "bundle" if previous else None
+        if moves and previous == release:
+            # The release's bundle is about to be rendered again with the new
+            # data services; drain and dump through a copy of the running one.
+            # The Compose project is named after the installation, so the copy
+            # addresses the same containers.
+            running = self.releases / previous / "bundle-running"
+            shutil.rmtree(running, ignore_errors=True)
+            shutil.copytree(installed, running, symlinks=True)
+            installed = running
         bundle = self.render_bundle(release, manifest, self.operator_secrets())
         self.deliver_secrets()
         step("secrets")
@@ -1008,10 +1038,10 @@ class Agent:
             # Hot stops completely, so nothing is written after the copy.
             record["moves"] = {service: f"{old} -> {new}" for service, (old, new) in moves.items()}
             step("draining")
-            record["deadletter"] = self.drain(self.releases / previous / "bundle", queue="valkey" in moves)
+            record["deadletter"] = self.drain(installed, queue="valkey" in moves)
             step("drained")
             if "postgres" in moves:
-                dump = self.dump_postgres(self.releases / previous / "bundle", f"move-{release}") / "postgres.dump"
+                dump = self.dump_postgres(installed, f"move-{release}") / "postgres.dump"
                 record["restore_point"] = {"kind": "dump", "path": str(dump), "time": utc_now()}
                 step("dumped")
         if "scheduler" in self.roles():
@@ -1338,13 +1368,14 @@ class Agent:
             return {}
 
     def refresh_configuration(self):
-        """Use a configuration the stack changed in place, where the cloud
-        offers one (GCP instance metadata): the next reconcile sees a new
-        configuration digest and redeploys with it, without a reboot. On AWS
-        a changed configuration replaces the instance."""
+        """Use a configuration the stack changed in place (an SSM parameter
+        on AWS, instance metadata on GCP): the next reconcile sees a new
+        configuration digest and redeploys with it, without a reboot or a
+        new VM."""
         try:
-            current = getattr(self.cloud, "installation", lambda: None)()
-        except (OSError, ValueError):
+            current = getattr(self.cloud, "installation", lambda reference: None)(
+                self.config.get("installation_parameter", ""))
+        except (AgentError, OSError, ValueError):
             return False
         if not current or current == self.config:
             return False
@@ -2082,6 +2113,7 @@ def main(argv=None):
     while True:
         with locked():
             agent.refresh_configuration()
+            agent.mount_data()
             agent.resume()
             agent.reconcile()
             agent.monitor()
