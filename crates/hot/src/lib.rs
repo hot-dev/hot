@@ -34,6 +34,7 @@ pub mod project;
 pub mod queue;
 pub mod redeploy;
 pub mod redis;
+pub mod request_id;
 pub mod resources;
 pub mod runtime_budget;
 pub mod secret_scan;

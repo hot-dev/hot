@@ -256,6 +256,15 @@ scalable installation runs many hosts. On AWS each container's stream is
 `<instance ID>/<container>`. Cloud Logging records the instance and the
 container's `hot.installation`, `hot.role`, and `hot.release` labels.
 
+Hot's services log one JSON object per line. Every line the app or API logs
+while handling a request carries that request's `request_id` in its span, and
+the response returns it as `x-request-id`. A caller's own `x-request-id` is
+kept when it is a short token (letters, digits, `-`, `_`, `.`), so an ID set
+by a load balancer or client can be followed through the logs. Request spans
+record the method and path, never the query string or headers, and webhook
+paths hide their token. Workers and task workers name the `run_id` or
+`task_id` in the lines about one run or task.
+
 The agent also ships the host journal. That is every agent line, plus
 warnings and errors from the rest of the host, such as the kernel's OOM
 kills, Docker, and failed units. They go to the `host-journal` stream of the

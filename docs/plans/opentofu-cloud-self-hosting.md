@@ -1751,6 +1751,17 @@ or an existing operator destination without coupling telemetry to S3.
       release, and instance identity. Include validated request/run/task IDs
       where relevant for correlation. Keep host, ingress, database/cache,
       migration/backup, and application execution output distinguishable.
+      - Every service uses `HOT_LOG_FORMAT=json`. Its container labels, or its
+        stream name on AWS, carry the installation, role, release, and
+        instance.
+      - App and API request spans carry a validated `request_id`, which is
+        either the caller's `x-request-id` or a new UUID and is returned in
+        the response.
+      - Workers and task workers log `run_id` and `task_id` fields.
+      - Ingress, host journal, and data services log to their own streams.
+
+      Severity and environment fields on every line, and a review of log
+      levels, remain.
 - [ ] Configure collection/parsing explicitly for the container/journal source;
       avoid duplicate ingestion and preserve collection positions across
       rotation/restart. GCP Ops Agent uses log receivers for logs; its OTLP
@@ -1827,6 +1838,13 @@ or an existing operator destination without coupling telemetry to S3.
       and environment secrets from infrastructure telemetry. Explicitly define
       access/retention for user execution output and audit events; operational
       log access must not become an accidental cross-organization data channel.
+      - HTTP request spans record the method and path only, never the query
+        string or headers, and webhook paths hide their capability token.
+      - Secrets reach services as files, not environment values.
+      - The agent redacts diagnostics and logs before reporting them.
+
+      User payloads that Hot code logs are not detected. Neither access nor
+      retention is defined yet for execution output in central logs.
 - [ ] Apply the network/encryption contracts to logs, metrics, alerts, and
       optional traces: least-privilege export identities, protected local
       listeners, verified TLS, retention/deletion policies, and supported KMS

@@ -580,11 +580,14 @@ pub(crate) fn build_router(
                         "http_request",
                         method = %request.method(),
                         uri = %redacted,
+                        request_id = %hot::request_id::of(request),
                     )
                 })
                 .on_request(trace::DefaultOnRequest::new().level(tracing::Level::DEBUG))
                 .on_response(trace::DefaultOnResponse::new().level(tracing::Level::DEBUG)),
         )
+        // Outside the trace layer, so each request's span carries its ID.
+        .layer(middleware::from_fn(hot::request_id::middleware))
         .with_state(state)
 }
 

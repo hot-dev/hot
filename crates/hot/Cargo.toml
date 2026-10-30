@@ -24,6 +24,8 @@ serde_json = { workspace = true, features = ["preserve_order", "arbitrary_precis
 postcard = { workspace = true }
 serde = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4", "v7"] }
+# Request IDs for the app and API (request_id.rs).
+axum = { workspace = true }
 ariadne.workspace = true
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -134,7 +136,7 @@ blake3 = { workspace = true }
 
 [dev-dependencies]
 ahash = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 filetime = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-axum = { workspace = true }
