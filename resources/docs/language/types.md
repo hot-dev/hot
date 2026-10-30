@@ -233,6 +233,8 @@ Temp({c: 30.0}).celsius  // 30.0
 
 Inside the custom constructors, `Temp({...})` still calls the default constructor, and so does `Temp(data)` in the constructor that takes Maps. If several constructors take a Map, one typed `Map` gets them before a union or nullable type.
 
+A record field or enum payload of such a type builds through the constructor that takes the value's type, as `Temp(value)` would. With `temp: Temp`, `Reading({temp: "21.5"})` runs `Temp("21.5")`. That is how a `::hot::time/PlainDate` field takes `"2026-01-02"`, and a string that doesn't parse makes the record an `Err`. A value that no constructor takes by its type is kept as given.
+
 ### Empty Types (Markers)
 
 Types with no fields work as markers or tags:
@@ -260,6 +262,16 @@ Status enum { One(Ask), Many(Vec<Ask>), Maybe(Ask?), Done }
 one Status.One(key: "a")
 many Status.Many([Ask(key: "a"), {key: "b"}])   // each item is built as an Ask
 none Status.Maybe(null)
+```
+
+A payload can also be a refinement or a literal union, named or written inline with `where`. The variant checks it as a record field of that type is checked, and the value stays plain:
+
+```hot
+Positive type Int where gt(%, 0)
+Due enum { Hours(Positive), Days(Int where gt(%, 0)), Done }
+
+Due.Hours(4)   // Due.Hours(4)
+Due.Days(n)    // Err(ConstraintError.Violation) when n is 0
 ```
 
 ### Built-in Variant Types

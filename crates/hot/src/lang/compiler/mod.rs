@@ -5654,9 +5654,99 @@ impl Compiler {
                 .program
                 .add_constant(Constant::Val(associated_type_info));
 
+            // A payload whose values stay plain (a refinement or literal
+            // union, alone or inside a type expression such as `Vec<Port>`)
+            // is checked here, as a record's constructor checks such fields.
+            // A record payload's own constructor checks it.
+            let payload_check = if payload_expr.is_some() || self.names_constrained_alias(type_ref)
+            {
+                self.constraint_spec_for_annotation(type_ref).map(|spec| {
+                    let boundary = constraint_specs::Boundary {
+                        declared_type: Some(&constructor_name),
+                        ..constraint_specs::Boundary::new("constructor")
+                    };
+                    self.constraint_boundary_constant(spec, &boundary)
+                })
+            } else {
+                None
+            };
+
             let empty_map_constant = self.program.add_constant(Constant::Val(Val::map_empty()));
             let data_var_constant = self.program.add_constant(Constant::Val(Val::from("data")));
             let val_key_constant = self.program.add_constant(Constant::Val(Val::from("$val")));
+
+            let mut instructions = vec![
+                // R1 = input data (from parameter)
+                Instruction::LoadVar {
+                    dest: 1,
+                    var_name: data_var_constant,
+                },
+                // R6 = extracted inner value (if input is typed, extract $val; otherwise use as-is)
+                Instruction::ExtractInnerVal { dest: 6, src: 1 },
+            ];
+            // R9 = the payload, checked against its constraints
+            let construct_src = match payload_check {
+                Some(spec) => {
+                    instructions.push(Instruction::CheckConstraint {
+                        dest: 9,
+                        src: data_reg,
+                        spec,
+                        test: false,
+                    });
+                    instructions.push(Instruction::ReturnIfErr { src: 9 });
+                    9
+                }
+                None => data_reg,
+            };
+            instructions.extend([
+                // R7 = validate through associated type's constructor using ConstructTyped
+                // This calls e.g. EnumTestCircle({radius: 5.0}) to validate the data
+                // Returns {$type: "Circle", $val: {radius: 5.0}} on success, or error on failure
+                Instruction::ConstructTyped {
+                    dest: 7,
+                    src: construct_src,
+                    type_info: associated_type_info_constant,
+                },
+                // If validation failed (error), return the error immediately
+                Instruction::ReturnIfErr { src: 7 },
+                // R8 = extract just the raw data from the typed result
+                // We want $val to contain raw data like {radius: 5.0}, not {$type: "Circle", $val: {radius: 5.0}}
+                Instruction::ExtractInnerVal { dest: 8, src: 7 },
+                // R2 = empty map for result
+                Instruction::LoadConst {
+                    dest: 2,
+                    constant: empty_map_constant,
+                },
+                // R3 = $type key
+                Instruction::LoadConst {
+                    dest: 3,
+                    constant: type_key_constant,
+                },
+                // R4 = full type name (variant type like "Shape.Circle")
+                Instruction::LoadConst {
+                    dest: 4,
+                    constant: type_name_constant,
+                },
+                // Set $type field on result map
+                Instruction::SetElement {
+                    collection: 2,
+                    index: 3, // $type key
+                    value: 4, // full type name
+                },
+                // R5 = $val key
+                Instruction::LoadConst {
+                    dest: 5,
+                    constant: val_key_constant,
+                },
+                // Set $val field on result map using just the raw validated data
+                Instruction::SetElement {
+                    collection: 2,
+                    index: 5, // $val key
+                    value: 8, // raw data extracted from typed result
+                },
+                // Return the result map
+                Instruction::Return { value: 2 },
+            ]);
 
             FunctionInfo {
                 name: constructor_name.clone(),
@@ -5668,63 +5758,8 @@ impl Compiler {
                 return_type: 0,
                 lazy_params: vec![false],
                 flow_type: None,
-                instructions: vec![
-                    // R1 = input data (from parameter)
-                    Instruction::LoadVar {
-                        dest: 1,
-                        var_name: data_var_constant,
-                    },
-                    // R6 = extracted inner value (if input is typed, extract $val; otherwise use as-is)
-                    Instruction::ExtractInnerVal { dest: 6, src: 1 },
-                    // R7 = validate through associated type's constructor using ConstructTyped
-                    // This calls e.g. EnumTestCircle({radius: 5.0}) to validate the data
-                    // Returns {$type: "Circle", $val: {radius: 5.0}} on success, or error on failure
-                    Instruction::ConstructTyped {
-                        dest: 7,
-                        src: data_reg,
-                        type_info: associated_type_info_constant,
-                    },
-                    // If validation failed (error), return the error immediately
-                    Instruction::ReturnIfErr { src: 7 },
-                    // R8 = extract just the raw data from the typed result
-                    // We want $val to contain raw data like {radius: 5.0}, not {$type: "Circle", $val: {radius: 5.0}}
-                    Instruction::ExtractInnerVal { dest: 8, src: 7 },
-                    // R2 = empty map for result
-                    Instruction::LoadConst {
-                        dest: 2,
-                        constant: empty_map_constant,
-                    },
-                    // R3 = $type key
-                    Instruction::LoadConst {
-                        dest: 3,
-                        constant: type_key_constant,
-                    },
-                    // R4 = full type name (variant type like "Shape.Circle")
-                    Instruction::LoadConst {
-                        dest: 4,
-                        constant: type_name_constant,
-                    },
-                    // Set $type field on result map
-                    Instruction::SetElement {
-                        collection: 2,
-                        index: 3, // $type key
-                        value: 4, // full type name
-                    },
-                    // R5 = $val key
-                    Instruction::LoadConst {
-                        dest: 5,
-                        constant: val_key_constant,
-                    },
-                    // Set $val field on result map using just the raw validated data
-                    Instruction::SetElement {
-                        collection: 2,
-                        index: 5, // $val key
-                        value: 8, // raw data extracted from typed result
-                    },
-                    // Return the result map
-                    Instruction::Return { value: 2 },
-                ],
-                register_count: 9,
+                instructions,
+                register_count: 10,
                 source: None,
             }
         } else {

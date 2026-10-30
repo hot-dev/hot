@@ -84,6 +84,61 @@ meta ["test"] fn () {
     assert-eq(2024, year(parsed), "parsed year should be 2024")
     assert-eq(12, month(parsed), "parsed month should be 12")
     assert-eq(25, day(parsed), "parsed day should be 25")
+    assert(is-type(parsed, PlainDate), "a date alone parses as a PlainDate")
+    assert(is-type(parse("14:30:00"), PlainTime), "a time alone parses as a PlainTime")
+    assert(is-type(parse("2024-12-25T14:30:00"), PlainDateTime), "a date and a time parse as a PlainDateTime")
+    assert(is-err(parse("nope")), "a string that isn't a date or a time is an Err")
+}
+
+// A value the type checker can't see, so a call takes it at runtime.
+dynamic fn (value: Any): Any { value }
+
+test-time-string-constructors-return-their-type
+meta ["test"] fn () {
+    date PlainDate(dynamic("2024-12-25"))
+    assert(is-type(date, PlainDate), "PlainDate parses a date as a PlainDate, not a PlainDateTime")
+    assert-eq("2024-12-25", Str(PlainDate(dynamic("2024-12-25T14:30:00"))), "PlainDate keeps the date of a date-time")
+    assert-eq("14:30:00", Str(PlainTime(dynamic("2024-12-25T14:30:00"))), "PlainTime keeps the time of a date-time")
+    assert-eq("2024-12-25T00:00:00", Str(PlainDateTime(dynamic("2024-12-25"))), "PlainDateTime reads a date as midnight")
+    assert(is-err(PlainDate(dynamic("14:30:00"))), "a time isn't a PlainDate")
+    assert(is-err(PlainTime(dynamic("2024-12-25"))), "a date isn't a PlainTime")
+    assert(is-err(PlainDate(dynamic("nonsense"))), "nonsense isn't a PlainDate")
+}
+
+test-time-component-constructors-check-their-values
+meta ["test"] fn () {
+    assert(is-err(PlainDate(2026, dynamic(13), 1)), "there is no month 13")
+    assert(is-err(PlainDate(2026, 2, dynamic(29))), "2026 isn't a leap year")
+    assert-eq("2028-02-29", Str(PlainDate(2028, 2, dynamic(29))), "2028 is")
+    assert(is-err(PlainDate(2026, dynamic(257), 1)), "a month too big for a byte isn't month 1")
+    assert(is-err(PlainTime(dynamic(24), 0, 0)), "there is no hour 24")
+    assert-eq("23:59:59", Str(PlainTime(23, 59, dynamic(59))), "the last second of a day")
+    assert(is-err(PlainDateTime(2026, 1, 1, 10, dynamic(61), 0)), "there is no minute 61")
+    assert(is-err(PlainDateTime(2026, dynamic(2), 30, 10, 0, 0)), "there is no February 30")
+}
+
+Form type {
+    found-at: PlainDate,
+    seen: PlainDate?,
+    days: Vec<PlainDate>
+}
+
+Policy type {
+    effective: ::hot::time/ZonedDateTime
+}
+
+test-time-fields-parse-strings
+meta ["test"] fn () {
+    form Form({found-at: dynamic("2026-01-02"), seen: null, days: ["2026-01-03"]})
+    assert(is-type(form.found-at, PlainDate), "a PlainDate field parses a Str")
+    assert-eq("2026-01-02", Str(form.found-at), "the field holds the date")
+    assert-eq(["2026-01-03"], map(form.days, Str(%)), "so does each item of a Vec<PlainDate> field")
+    assert-eq("2026-02-04", Str(Form(found-at: "2026-02-03", seen: "2026-02-04", days: []).seen), "named arguments parse too")
+    assert(is-err(Form({found-at: dynamic("nonsense"), seen: null, days: []})), "a bad Str is an Err")
+    assert(is-err(Form({found-at: "2026-01-02", seen: dynamic("nope"), days: []})), "in a nullable field too")
+    policy Policy({effective: dynamic("2027-01-01T05:00:00Z[UTC]")})
+    assert-eq(1798779600000, epoch-millis(::hot::time/to-instant(policy.effective)), "a ZonedDateTime field keeps its instant")
+    assert(is-err(Policy({effective: dynamic("2027-01-01")})), "a date without a zone isn't a ZonedDateTime")
 }
 
 test-time-string-constructors

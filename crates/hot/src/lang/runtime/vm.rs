@@ -4353,9 +4353,19 @@ impl VirtualMachine {
                 }
             }
 
-            // For non-map data (strings, numbers, etc.), just wrap with $type/$val
-            // This handles enum values, primitives, etc. that don't need constructor validation
+            // Non-map data (strings, numbers, etc.) goes through a constructor
+            // declared for its type, as `Type(data)` would: a time type parses
+            // a Str. Otherwise it is just wrapped with $type/$val, since a
+            // one-argument constructor need not convert (`Uuid(7)` makes a
+            // new id).
             if !matches!(data, Val::Map(_)) {
+                let typed_key = format!("{}/1:{}", type_name, self.get_val_type_name(data));
+                if self.function_mapping.contains_key(&typed_key) {
+                    return self.execute_function_call_by_qualified_name(
+                        &type_name,
+                        std::slice::from_ref(data),
+                    );
+                }
                 let mut result_map = indexmap::IndexMap::new();
                 result_map.insert(Val::from("$type"), Val::from(type_name.clone()));
                 result_map.insert(Val::from("$val"), data.clone());

@@ -12,6 +12,17 @@ BinaryEnvelope type {
     chunks: Vec<Bytes>
 }
 
+Envelope ::hot::test::type/BinaryEnvelope
+PlainDate ::hot::time/PlainDate
+
+test-is-type-through-a-var-import
+meta ["test"] fn () {
+    envelope BinaryEnvelope({payload: Bytes("a"), marker: Byte(1), chunks: []})
+    assert(is-type(envelope, Envelope), "a type imported under another name")
+    assert(is-type(PlainDate(2026, 1, 2), PlainDate), "a type imported from another namespace")
+    assert(not(is-type(envelope, PlainDate)), "a value of another type")
+}
+
 test-type
 meta ["test"] fn () {
     // Test dual-purpose type constructors

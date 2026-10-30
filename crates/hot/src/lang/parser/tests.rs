@@ -2515,6 +2515,45 @@ fn where_helpers_precede_their_declaration() {
     }
 }
 
+/// An inline `where` in an enum payload declares a hidden refinement type,
+/// as it does for a field, in the brace and the `|` forms.
+#[test]
+fn enum_payloads_take_an_inline_where() {
+    for source in [
+        "::t ns\n\nDue enum { Hours(Int where gt(%, 0)), Done }\n",
+        "::t ns\n\nDue type\n  | Hours(Int where gt(%, 0))\n  | Done\n",
+    ] {
+        let program = parse_hot_file(source, "t.hot").unwrap_or_else(|e| panic!("{source:?}: {e}"));
+        let namespace = program
+            .namespaces
+            .values()
+            .find(|ns| ns.path.to_string() == "::t")
+            .unwrap();
+        let variants = namespace
+            .scope
+            .vars
+            .iter()
+            .find_map(|(var, value)| match value {
+                Value::TypeDef(def) if var.sym.name() == "Due" => def.variants.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{source:?}: no Due variants"));
+        let payload = variants[0].type_ref.as_deref().unwrap_or_default();
+        assert!(
+            crate::lang::ast::is_inline_refinement_type(payload),
+            "{source:?}: Hours carries {payload:?}"
+        );
+        assert!(
+            namespace
+                .scope
+                .vars
+                .keys()
+                .any(|var| var.sym.name() == payload),
+            "{source:?}: {payload} is not declared"
+        );
+    }
+}
+
 /// `name: value` in a call is a named argument. The name can be any
 /// identifier or keyword, `lazy` included, and the call prints back the way
 /// it was written.

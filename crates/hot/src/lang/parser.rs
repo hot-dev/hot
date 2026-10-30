@@ -3478,9 +3478,10 @@ impl Parser {
 
     /// Parse a variant's payload type after its `(`, through the `)`: any
     /// type expression (`Type`, `::ns/Type`, `Vec<Type>`, `Type?`, `A | B`),
-    /// kept as its annotation text.
+    /// kept as its annotation text. An inline `where` (`Int where gt(%, 0)`)
+    /// declares a hidden refinement type, as it does for a field.
     fn parse_variant_payload(&mut self) -> ParseResult<String> {
-        let payload = self.parse_union_type()?;
+        let payload = self.parse_type_ref()?;
         if !self.check(&TokenType::RightParen) {
             return Err(self.error("Expected ')' after variant type reference"));
         }
