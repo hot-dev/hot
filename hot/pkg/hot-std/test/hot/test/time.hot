@@ -101,6 +101,13 @@ meta ["test"] fn () {
     datetime-from-string PlainDateTime("2024-12-25T14:30:45")
     assert-eq(2024, year(datetime-from-string), "string datetime year should be 2024")
     assert-eq(14, hour(datetime-from-string), "string datetime hour should be 14")
+
+    // Each constructor parses its own type, whatever else the string reads as
+    assert(is-type(date-from-string, PlainDate), "a date string should build a PlainDate")
+    assert(is-type(time-from-string, PlainTime), "a time string should build a PlainTime")
+    assert(is-type(datetime-from-string, PlainDateTime), "a date-time string should build a PlainDateTime")
+    assert(is-type(PlainDate("2024-12-25T14:30:45"), PlainDate), "a date-time string should build a PlainDate")
+    assert(is-err(PlainDate("not a date")), "an unreadable string should be an error")
 }
 
 test-time-now
