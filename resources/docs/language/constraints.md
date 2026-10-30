@@ -42,6 +42,11 @@ on the same line as the brace or on the next one.
 Checks run innermost first: each element and field, then the record's
 invariant. The error's `path` leads to the part that failed.
 
+An enum variant's payload is checked the same way. It can name a refinement or
+a literal union, or refine its type inline, as in
+`Due enum { Hours(Int where gt(%, 0)) }`. The error names the variant:
+``constructor of `Due.Hours` failed `gt(%, 0)` ``.
+
 ## Bindings
 
 A typed binding takes a `where` after its value. A line that starts with
@@ -230,6 +235,7 @@ For `constraint-violation`, `hot check` evaluates a predicate on a literal
   field: `` 0 fails `Port` (between(%, 1, 65535)) at `port` of `Server` ``. The
   record's invariant is evaluated too, when every field it reads is a
   literal.
+- the payload of an enum variant: `Due.Hours(0)`.
 
 The evaluation follows comparisons, `between`, `in`, `and`, `or`, `not`, `if`,
 `is-null`, `length`, `starts-with`, `ends-with`, `contains`, top-level literal

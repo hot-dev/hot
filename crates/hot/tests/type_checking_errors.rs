@@ -2054,6 +2054,33 @@ mod integration_tests {
         assert!(violations.iter().any(|m| m.contains("0 fails `Port`")));
     }
 
+    /// A literal enum payload is checked against the payload's type, named
+    /// or an inline `where`, as a record's literal fields are.
+    #[test]
+    fn test_where_rejects_failing_variant_payloads() {
+        let source = r#"
+            ::test ns
+            Positive type Int where gt(%, 0)
+            Fruit type "apple" | "banana"
+            Due enum { Hours(Positive), Days(Int where gt(%, 0)), Pick(Fruit) }
+            a Due.Hours(0)
+            b Due.Days(-1)
+            c Due.Pick("pear")
+            d Due.Hours(2)
+            e Due.Days(3)
+            f Due.Pick("apple")
+        "#;
+        let found = violations(source);
+        assert_eq!(found.len(), 3, "Got: {:?}", found);
+        assert!(found.iter().any(|m| m.contains("0 fails `Positive`")));
+        assert!(found.iter().any(|m| m.contains("-1 fails `gt(%, 0)`")));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("\"pear\" isn't one of the values of `Fruit`"))
+        );
+    }
+
     fn violations(source: &str) -> Vec<String> {
         compile_and_get_type_errors(source)
             .iter()
@@ -2422,6 +2449,72 @@ mod integration_tests {
         "#;
         let errors = compile_and_get_type_errors(source);
         assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+    }
+
+    /// A `match` is checked against its subject's own enum, not another
+    /// namespace's enum of the same name: one module's open `Shape` doesn't
+    /// open another's closed `Shape`, or lend it its variants.
+    #[test]
+    fn test_match_checks_the_subjects_own_enum() {
+        let source = r#"
+            ::shapes::a ns
+            Shape enum open { Dot, Line }
+
+            ::shapes::b ns
+            Shape enum { Dot, Line, Arc }
+
+            ::shapes::c ns
+            open-with-default fn (s: ::shapes::a/Shape): Str {
+                match s {
+                    Shape.Dot => { "dot" }
+                    _ => { "other" }
+                }
+            }
+            open-missing-default fn (s: ::shapes::a/Shape): Str {
+                match s {
+                    Shape.Dot => { "dot" }
+                    Shape.Line => { "line" }
+                }
+            }
+            closed-covered fn (s: ::shapes::b/Shape): Str {
+                match s {
+                    Shape.Dot => { "dot" }
+                    Shape.Line => { "line" }
+                    Shape.Arc => { "arc" }
+                }
+            }
+            closed-missing fn (s: ::shapes::b/Shape): Str {
+                match s {
+                    Shape.Dot => { "dot" }
+                    Shape.Line => { "line" }
+                }
+            }
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        let open_errors = errors
+            .iter()
+            .filter(|e| matches!(e, CompilerError::OpenEnumMatchMissingDefault { .. }))
+            .count();
+        assert_eq!(
+            open_errors, 1,
+            "Only the open enum's match needs a default arm. Got: {:?}",
+            errors
+        );
+        let missing: Vec<&Vec<String>> = errors
+            .iter()
+            .filter_map(|e| match e {
+                CompilerError::NonExhaustiveMatch {
+                    missing_variants, ..
+                } => Some(missing_variants),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            missing,
+            vec![&vec!["Arc".to_string()]],
+            "The closed enum's match misses `Arc`. Got: {:?}",
+            errors
+        );
     }
 
     /// `and`, `or`, `if` and `not` infer the union of their result types, so

@@ -585,6 +585,10 @@ discounts: All<Vec> cond-all {
 // Pipe with All<Vec> - collect all intermediate values
 steps: All<Vec> 5 |> add(2) |> mul(3)
 // => [5, 7, 21]
+
+// Pipe with All<Map> - stages are keyed by position, starting with the input
+staged: All<Map> 5 |> add(2) |> mul(3)
+// => {pipe_0: 5, pipe_1: 7, pipe_2: 21}
 ```
 
 Parallel scheduling is defined by named bindings and their dependencies.
@@ -603,6 +607,34 @@ after the flow, or use a serial flow. The check does not look inside nested
 flows: a `serial { }` block nested in a parallel branch can still write to an
 outer binding, but its merge order across branches is undefined — treat that
 pattern as unsupported.
+
+### Function Result Shapes
+
+A function's return annotation shapes its body. In a flow function
+(`fn parallel`, `fn cond-all`, `fn serial`, and so on) the body is that flow.
+A plain `fn` body in braces is a serial flow, so `All<Vec>` or `All<Map>`
+collects its bindings:
+
+```hot
+measure fn (xs: Vec<Int>): All<Map> {
+  count length(xs)
+  total reduce(xs, add(%1, %2), 0)
+}
+// measure([1, 2, 3]) => {count: 3, total: 6}
+```
+
+When a plain `fn` body is a single flow expression, such as a pipe or a
+`cond-all` block, an `All` annotation shapes that flow instead, as it does on
+a binding of the same expression:
+
+```hot
+trace fn (x: Int): All<Vec> { x |> add(2) |> mul(3) }
+// trace(5) => [5, 7, 21], like `steps: All<Vec> 5 |> add(2) |> mul(3)`
+```
+
+A collecting flow holds only the bindings made in its own body. A function or
+lambda called inside it binds its parameters and locals in its own frame, so
+they never appear in the caller's collected result.
 
 ## Summary
 

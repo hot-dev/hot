@@ -477,6 +477,37 @@ fn plain_datetime_to_val(dt: &temporal_rs::PlainDateTime) -> Val {
     create_temporal_map("PlainDateTime", data)
 }
 
+/// Convert a temporal_rs::PlainDate into a Hot PlainDate map.
+fn plain_date_to_val(date: &temporal_rs::PlainDate) -> Val {
+    let mut data = IndexMap::new();
+    data.insert(Val::from("year"), Val::Int(date.year() as i64));
+    data.insert(Val::from("month"), Val::Int(date.month() as i64));
+    data.insert(Val::from("day"), Val::Int(date.day() as i64));
+    data.insert(
+        Val::from("calendar"),
+        Val::from(date.calendar().identifier().to_string()),
+    );
+    create_temporal_map("PlainDate", data)
+}
+
+/// Convert a temporal_rs::PlainTime into a Hot PlainTime map.
+fn plain_time_to_val(time: &temporal_rs::PlainTime) -> Val {
+    let mut data = IndexMap::new();
+    data.insert(Val::from("hour"), Val::Int(time.hour() as i64));
+    data.insert(Val::from("minute"), Val::Int(time.minute() as i64));
+    data.insert(Val::from("second"), Val::Int(time.second() as i64));
+    data.insert(
+        Val::from("millisecond"),
+        Val::Int(time.millisecond() as i64),
+    );
+    data.insert(
+        Val::from("microsecond"),
+        Val::Int(time.microsecond() as i64),
+    );
+    data.insert(Val::from("nanosecond"), Val::Int(time.nanosecond() as i64));
+    create_temporal_map("PlainTime", data)
+}
+
 // ---------------------------------------------------------------------------
 // Arithmetic: add, subtract, until, since
 // ---------------------------------------------------------------------------
@@ -716,7 +747,10 @@ pub fn parse_plain_date(args: &[Val]) -> HotResult<Val> {
         ));
     }
     match &args[0] {
-        Val::Str(_) => parse(args),
+        Val::Str(s) => match temporal_rs::PlainDate::from_str(s) {
+            Ok(value) => HotResult::Ok(plain_date_to_val(&value)),
+            Err(e) => HotResult::Err(Val::from(format!("Failed to parse PlainDate: {}", e))),
+        },
         other => HotResult::Err(Val::from(format!(
             "parse-plain-date expects Str, got {:?}",
             other
@@ -732,7 +766,10 @@ pub fn parse_plain_time(args: &[Val]) -> HotResult<Val> {
         ));
     }
     match &args[0] {
-        Val::Str(_) => parse(args),
+        Val::Str(s) => match temporal_rs::PlainTime::from_str(s) {
+            Ok(value) => HotResult::Ok(plain_time_to_val(&value)),
+            Err(e) => HotResult::Err(Val::from(format!("Failed to parse PlainTime: {}", e))),
+        },
         other => HotResult::Err(Val::from(format!(
             "parse-plain-time expects Str, got {:?}",
             other
@@ -748,7 +785,10 @@ pub fn parse_plain_date_time(args: &[Val]) -> HotResult<Val> {
         ));
     }
     match &args[0] {
-        Val::Str(_) => parse(args),
+        Val::Str(s) => match temporal_rs::PlainDateTime::from_str(s) {
+            Ok(value) => HotResult::Ok(plain_datetime_to_val(&value)),
+            Err(e) => HotResult::Err(Val::from(format!("Failed to parse PlainDateTime: {}", e))),
+        },
         other => HotResult::Err(Val::from(format!(
             "parse-plain-date-time expects Str, got {:?}",
             other
@@ -791,6 +831,40 @@ pub fn now_plain_date_time(_args: &[Val]) -> HotResult<Val> {
     m.insert(Val::from("second"), Val::Int(now.second() as i64));
     HotResult::Ok(Val::Map(Box::new(m)))
 }
+/// A Hot error unless `year`, `month` and `day` name a real ISO date.
+fn check_iso_date(year: i64, month: i64, day: i64) -> Result<(), Val> {
+    let valid = match (i32::try_from(year), u8::try_from(month), u8::try_from(day)) {
+        (Ok(y), Ok(m), Ok(d)) => temporal_rs::PlainDate::try_new_iso(y, m, d).is_ok(),
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(Val::from(format!(
+            "Invalid date: year {year}, month {month}, day {day}"
+        )))
+    }
+}
+
+/// A Hot error unless `hour`, `minute` and `second` name a real time of day.
+fn check_iso_time(hour: i64, minute: i64, second: i64) -> Result<(), Val> {
+    let valid = match (
+        u8::try_from(hour),
+        u8::try_from(minute),
+        u8::try_from(second),
+    ) {
+        (Ok(h), Ok(m), Ok(s)) => temporal_rs::PlainTime::try_new(h, m, s, 0, 0, 0).is_ok(),
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(Val::from(format!(
+            "Invalid time: hour {hour}, minute {minute}, second {second}"
+        )))
+    }
+}
+
 /// Create a PlainDate(year, month, day)
 pub fn plain_date_constructor(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::time/PlainDate", args, 3);
@@ -806,6 +880,9 @@ pub fn plain_date_constructor(args: &[Val]) -> HotResult<Val> {
         Val::Int(i) => *i,
         _ => return HotResult::Err(Val::from("PlainDate day must be Int")),
     };
+    if let Err(e) = check_iso_date(year, month, day) {
+        return HotResult::Err(e);
+    }
     let mut m = IndexMap::new();
     m.insert(Val::from("$type"), Val::from("::hot::time/PlainDate"));
     m.insert(Val::from("year"), Val::Int(year));
@@ -829,6 +906,9 @@ pub fn plain_time_constructor(args: &[Val]) -> HotResult<Val> {
         Val::Int(i) => *i,
         _ => return HotResult::Err(Val::from("PlainTime second must be Int")),
     };
+    if let Err(e) = check_iso_time(hour, minute, second) {
+        return HotResult::Err(e);
+    }
     let mut m = IndexMap::new();
     m.insert(Val::from("$type"), Val::from("::hot::time/PlainTime"));
     m.insert(Val::from("hour"), Val::Int(hour));
@@ -864,6 +944,12 @@ pub fn plain_datetime_constructor(args: &[Val]) -> HotResult<Val> {
         Val::Int(i) => *i,
         _ => return HotResult::Err(Val::from("PlainDateTime second must be Int")),
     };
+    if let Err(e) = check_iso_date(year, month, day) {
+        return HotResult::Err(e);
+    }
+    if let Err(e) = check_iso_time(hour, minute, second) {
+        return HotResult::Err(e);
+    }
     let mut m = IndexMap::new();
     m.insert(Val::from("$type"), Val::from("::hot::time/PlainDateTime"));
     m.insert(Val::from("year"), Val::Int(year));
@@ -990,61 +1076,21 @@ pub fn parse(args: &[Val]) -> HotResult<Val> {
         _ => return HotResult::Err(Val::from("parse requires a string input")),
     };
 
-    // Try to parse as different temporal types.
-    if let Ok(datetime) = temporal_rs::PlainDateTime::from_str(input) {
-        let mut data = indexmap::IndexMap::new();
-        data.insert(Val::from("year"), Val::Int(datetime.year() as i64));
-        data.insert(Val::from("month"), Val::Int(datetime.month() as i64));
-        data.insert(Val::from("day"), Val::Int(datetime.day() as i64));
-        data.insert(Val::from("hour"), Val::Int(datetime.hour() as i64));
-        data.insert(Val::from("minute"), Val::Int(datetime.minute() as i64));
-        data.insert(Val::from("second"), Val::Int(datetime.second() as i64));
-        data.insert(
-            Val::from("millisecond"),
-            Val::Int(datetime.millisecond() as i64),
-        );
-        data.insert(
-            Val::from("microsecond"),
-            Val::Int(datetime.microsecond() as i64),
-        );
-        data.insert(
-            Val::from("nanosecond"),
-            Val::Int(datetime.nanosecond() as i64),
-        );
-        data.insert(
-            Val::from("calendar"),
-            Val::from(datetime.calendar().identifier().to_string()),
-        );
-        return HotResult::Ok(create_temporal_map("PlainDateTime", data));
-    }
-
-    if let Ok(time) = temporal_rs::PlainTime::from_str(input) {
-        let mut data = indexmap::IndexMap::new();
-        data.insert(Val::from("hour"), Val::Int(time.hour() as i64));
-        data.insert(Val::from("minute"), Val::Int(time.minute() as i64));
-        data.insert(Val::from("second"), Val::Int(time.second() as i64));
-        data.insert(
-            Val::from("millisecond"),
-            Val::Int(time.millisecond() as i64),
-        );
-        data.insert(
-            Val::from("microsecond"),
-            Val::Int(time.microsecond() as i64),
-        );
-        data.insert(Val::from("nanosecond"), Val::Int(time.nanosecond() as i64));
-        return HotResult::Ok(create_temporal_map("PlainTime", data));
-    }
-
-    if let Ok(date) = temporal_rs::PlainDate::from_str(input) {
-        let mut data = indexmap::IndexMap::new();
-        data.insert(Val::from("year"), Val::Int(date.year() as i64));
-        data.insert(Val::from("month"), Val::Int(date.month() as i64));
-        data.insert(Val::from("day"), Val::Int(date.day() as i64));
-        data.insert(
-            Val::from("calendar"),
-            Val::from(date.calendar().identifier().to_string()),
-        );
-        return HotResult::Ok(create_temporal_map("PlainDate", data));
+    // The parts the string has decide its type: each of PlainDate and
+    // PlainTime parses a date-time string by dropping the other part, and
+    // PlainDateTime parses a date alone as midnight.
+    match (
+        temporal_rs::PlainDate::from_str(input),
+        temporal_rs::PlainTime::from_str(input),
+    ) {
+        (Ok(_), Ok(_)) => {
+            if let Ok(datetime) = temporal_rs::PlainDateTime::from_str(input) {
+                return HotResult::Ok(plain_datetime_to_val(&datetime));
+            }
+        }
+        (Ok(date), Err(_)) => return HotResult::Ok(plain_date_to_val(&date)),
+        (Err(_), Ok(time)) => return HotResult::Ok(plain_time_to_val(&time)),
+        (Err(_), Err(_)) => {}
     }
 
     HotResult::Err(Val::from(
@@ -1449,6 +1495,9 @@ pub fn plain_date(args: &[Val]) -> HotResult<Val> {
         _ => return HotResult::Err(Val::from("day must be an integer")),
     };
 
+    if let Err(e) = check_iso_date(year, month, day) {
+        return HotResult::Err(e);
+    }
     let mut data = IndexMap::new();
     data.insert(Val::from("$type"), Val::from("::hot::time/PlainDate"));
     data.insert(Val::from("year"), Val::Int(year));
@@ -1481,6 +1530,9 @@ pub fn plain_time(args: &[Val]) -> HotResult<Val> {
         None => 0,
     };
 
+    if let Err(e) = check_iso_time(hour, minute, second) {
+        return HotResult::Err(e);
+    }
     let mut data = IndexMap::new();
     data.insert(Val::from("$type"), Val::from("::hot::time/PlainTime"));
     data.insert(Val::from("hour"), Val::Int(hour));
@@ -1533,6 +1585,12 @@ pub fn plain_date_time(args: &[Val]) -> HotResult<Val> {
         None => 0,
     };
 
+    if let Err(e) = check_iso_date(year, month, day) {
+        return HotResult::Err(e);
+    }
+    if let Err(e) = check_iso_time(hour, minute, second) {
+        return HotResult::Err(e);
+    }
     let mut data = IndexMap::new();
     data.insert(Val::from("$type"), Val::from("::hot::time/PlainDateTime"));
     data.insert(Val::from("year"), Val::Int(year));
