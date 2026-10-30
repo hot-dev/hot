@@ -6246,6 +6246,14 @@ impl VirtualMachine {
         {
             function_val = inner.clone();
         }
+        // A var import of a function or type (`Record ::other/Record`) passed
+        // as a value is a FunctionAlias: call the function it names.
+        if let Val::Map(m) = &function_val
+            && crate::val::tagged_type_name(m) == Some("::hot::type/FunctionAlias")
+            && let Some(target @ Val::Str(_)) = m.get(&Val::from("$target"))
+        {
+            function_val = target.clone();
+        }
 
         // Determine if this is a dispatch function without stringifying lambdas
         let is_dispatch_function = match &function_val {
