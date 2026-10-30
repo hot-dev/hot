@@ -159,6 +159,8 @@ jobs:
         env:
           DRIFT_CHECK: ${{ inputs.drift_check }}
           ALLOW_DATA_DELETION: ${{ inputs.allow_data_deletion }}
+          CLOUD: ${{ inputs.cloud }}
+          PRESET: ${{ inputs.preset }}
           # Resources whose deletion loses data or access to it.
           DURABLE: '^(aws_ebs_volume|aws_db_instance|aws_elasticache_replication_group|aws_secretsmanager_secret|aws_cloudwatch_log_group|aws_s3_bucket|google_compute_disk|google_sql_database_instance|google_memorystore_instance|google_secret_manager_secret|google_storage_bucket)\.'
         run: |
@@ -175,7 +177,7 @@ jobs:
                   | join("\n")' plan.json > durable.txt
           rm plan.json
           {
-            echo "### OpenTofu plan for ${{ inputs.cloud }}/${{ inputs.preset }}"
+            echo "### OpenTofu plan for $CLOUD/$PRESET"
             echo '```'
             if [[ -s summary.txt ]]; then cat summary.txt; else echo "No changes."; fi
             echo '```'
@@ -201,9 +203,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+          CLOUD: ${{ inputs.cloud }}
+          PRESET: ${{ inputs.preset }}
+          HOT_VERSION: ${{ inputs.hot_version }}
         run: |
           {
-            echo "OpenTofu plan for \`${{ inputs.cloud }}/${{ inputs.preset }}\` with Hot ${{ inputs.hot_version }}:"
+            echo "OpenTofu plan for \`$CLOUD/$PRESET\` with Hot $HOT_VERSION:"
             echo '```'
             if [[ -s summary.txt ]]; then cat summary.txt; else echo "No changes."; fi
             echo '```'
@@ -214,7 +220,7 @@ jobs:
               echo '```'
             fi
           } > comment.md
-          gh pr comment "$PR" --repo "${{ github.repository }}" --body-file comment.md
+          gh pr comment "$PR" --repo "$REPOSITORY" --body-file comment.md
 
       - name: Keep the encrypted plan for apply
         if: inputs.apply && steps.plan.outputs.changes == 'true'

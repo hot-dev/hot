@@ -74,6 +74,8 @@ DETAIL_KEYS = ("diagnostics", "logs")
 BOX_POOL_GB = {"small": 40, "medium": 100, "large": 200}
 # Container users that read their secret files.
 SECRET_OWNERS = {"postgres": 999, "valkey": 999}
+# The user the bundle's one-off jobs run as (see the renderer).
+JOB_USER = 10001
 # Deploy records kept in releases/history.json, and pre-upgrade dumps kept.
 HISTORY = 20
 UPGRADE_DUMPS = 3
@@ -1104,8 +1106,12 @@ class Agent:
         hold Hot's tables yet."""
         staged = self.data_root / "data" / "moves"
         staged.mkdir(parents=True, exist_ok=True)
-        shutil.copy(dump, staged / "postgres.dump")
-        os.chmod(staged / "postgres.dump", 0o644)
+        # Readable only by the restore job's user: the dump is the database.
+        copy = staged / "postgres.dump"
+        copy.touch(mode=0o600)
+        os.chmod(copy, 0o600)
+        self.chown(copy, JOB_USER, JOB_USER)
+        shutil.copyfile(dump, copy)
         try:
             self.compose(bundle, "--profile", "admin", "run", "--rm", "restore-postgres")
         finally:
@@ -1237,8 +1243,12 @@ class Agent:
             return {}
 
     def save_state(self, state):
+        # Deploy history, never secret values; still only root's to read.
         self.releases.mkdir(parents=True, exist_ok=True)
-        self.state_path().write_text(json.dumps(state))
+        path = self.state_path()
+        path.touch(mode=0o600)
+        os.chmod(path, 0o600)
+        path.write_text(json.dumps(state))
 
     def report(self, **status):
         status = {"installation": self.config["name"], "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -1626,6 +1636,7 @@ def https_status(host, path, address="127.0.0.1", port=443):
     """GET through the local ingress, sending the hostname as SNI: the
     ingress refuses handshakes that name no configured host."""
     context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE  # loopback only; certificates name the public hostnames
     connection = HTTPSConnection(host, port, timeout=5, context=context)

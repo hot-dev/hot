@@ -514,8 +514,13 @@ class DataMoves(UpgradeHarness):
         return [" ".join(c) for c in self.run.commands]
 
     def test_a_local_database_moves_to_the_managed_one(self):
+        owners = []
+        self.agent.chown = lambda path, uid, gid: owners.append(
+            (Path(path).name, uid, gid, Path(path).stat().st_mode & 0o777))
         status = self.move()
         self.assertEqual(status["state"], "deployed", status)
+        self.assertIn(("postgres.dump", 10001, 10001, 0o600), owners, "only the restore job's user reads the dump")
+        self.assertEqual(self.agent.state_path().stat().st_mode & 0o777, 0o600)
         calls = self.calls()
         order = [next(i for i, c in enumerate(calls) if marker in c) for marker in (
             "releases/3.0.1/bundle/compose.json stop scheduler", "releases/3.0.1/bundle/compose.json stop app api ingress",

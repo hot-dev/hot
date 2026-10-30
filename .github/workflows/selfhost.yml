@@ -77,9 +77,12 @@ jobs:
 
       - name: Check whether the image recipe changed
         id: changed
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] ||
-             git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -q '^infra/images/'; then
+          if [[ "$EVENT" == "workflow_dispatch" ]] ||
+             git diff --name-only "origin/$BASE_REF...HEAD" | grep -q '^infra/images/'; then
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
