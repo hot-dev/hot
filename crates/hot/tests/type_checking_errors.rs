@@ -2054,6 +2054,33 @@ mod integration_tests {
         assert!(violations.iter().any(|m| m.contains("0 fails `Port`")));
     }
 
+    /// A literal enum payload is checked against the payload's type, named
+    /// or an inline `where`, as a record's literal fields are.
+    #[test]
+    fn test_where_rejects_failing_variant_payloads() {
+        let source = r#"
+            ::test ns
+            Positive type Int where gt(%, 0)
+            Fruit type "apple" | "banana"
+            Due enum { Hours(Positive), Days(Int where gt(%, 0)), Pick(Fruit) }
+            a Due.Hours(0)
+            b Due.Days(-1)
+            c Due.Pick("pear")
+            d Due.Hours(2)
+            e Due.Days(3)
+            f Due.Pick("apple")
+        "#;
+        let found = violations(source);
+        assert_eq!(found.len(), 3, "Got: {:?}", found);
+        assert!(found.iter().any(|m| m.contains("0 fails `Positive`")));
+        assert!(found.iter().any(|m| m.contains("-1 fails `gt(%, 0)`")));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("\"pear\" isn't one of the values of `Fruit`"))
+        );
+    }
+
     fn violations(source: &str) -> Vec<String> {
         compile_and_get_type_errors(source)
             .iter()

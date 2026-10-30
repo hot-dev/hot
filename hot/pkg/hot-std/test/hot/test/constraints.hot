@@ -275,6 +275,19 @@ meta ["test"] fn () {
     assert-eq("violation", constraint-kind(Username(dynamic("al"))), "a short name")
 }
 
+Due enum { Hours(Quantity), Days(Int where gt(%, 0)), Billed(Currency), Batches(Vec<Quantity>) }
+
+test-enum-payload-refinements
+meta ["test"] fn () {
+    assert-eq("violation", constraint-kind(Due.Hours(dynamic(0))), "a named refinement as a payload")
+    assert-eq(5, untype(Due.Hours(dynamic(5))), "a payload that passes stays a plain value")
+    assert-eq("violation", constraint-kind(Due.Days(dynamic(0))), "an inline refinement as a payload")
+    assert-eq(2, untype(Due.Days(dynamic(2))), "an inline refinement that passes")
+    assert-eq("violation", constraint-kind(Due.Billed(dynamic("JPY"))), "a closed union as a payload")
+    assert-eq("violation", constraint-kind(Due.Batches(dynamic([1, 100]))), "a refinement inside a payload's type")
+    assert(contains(violation(Due.Hours(dynamic(0))).message, "Due.Hours"), "the message names the variant")
+}
+
 test-pattern-refinements
 meta ["test"] fn () {
     assert-eq("AB-12", Sku("AB-12"), "a matching pattern")
