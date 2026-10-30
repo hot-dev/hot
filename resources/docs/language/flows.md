@@ -585,6 +585,10 @@ discounts: All<Vec> cond-all {
 // Pipe with All<Vec> - collect all intermediate values
 steps: All<Vec> 5 |> add(2) |> mul(3)
 // => [5, 7, 21]
+
+// Pipe with All<Map> - stages are keyed by position, starting with the input
+staged: All<Map> 5 |> add(2) |> mul(3)
+// => {pipe_0: 5, pipe_1: 7, pipe_2: 21}
 ```
 
 Parallel scheduling is defined by named bindings and their dependencies.

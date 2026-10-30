@@ -42,6 +42,14 @@ pub(crate) fn user_facing_branch_name(internal: &str) -> &str {
     }
 }
 
+/// The `All<Map>` key of a pipe's stage: `pipe_0` is the initial value and
+/// `pipe_1` the first call's result, as unnamed `cond-all` branches are
+/// `cond_branch_0`, `cond_branch_1`, ... A `$` key would read as a type tag
+/// and be hidden when the map is shown.
+pub(crate) fn pipe_step_key(index: usize) -> String {
+    format!("pipe_{index}")
+}
+
 fn is_terminal_payload(val: &Val) -> bool {
     terminal_payload_type(val).is_some()
 }
@@ -2303,7 +2311,7 @@ impl VirtualMachine {
                 if let Some(flow_context) = self.flow_contexts.last_mut()
                     && flow_context.flow_type == FlowType::Pipe
                 {
-                    let step_name = format!("$pipe_{}", flow_context.pipe_step_results.len());
+                    let step_name = pipe_step_key(flow_context.pipe_step_results.len());
                     tracing::trace!("VM: Tracking pipe step '{}' = {:?}", step_name, value);
                     flow_context
                         .pipe_step_results

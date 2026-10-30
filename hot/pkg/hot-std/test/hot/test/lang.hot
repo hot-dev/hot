@@ -184,9 +184,10 @@ meta ["test"] fn () {
     pipe-vec: All<Vec> 5 |> add(2) |> mul(3)
     assert-eq([5, 7, 21], pipe-vec, "Pipe All<Vec>: should return [5, 7, 21]")
 
-    // All<Map> on a pipe returns step results as a map
+    // All<Map> on a pipe returns step results as a map keyed by position
     pipe-map: All<Map> 5 |> add(2) |> mul(3)
-    assert-eq({"$pipe_0": 5, "$pipe_1": 7, "$pipe_2": 21}, pipe-map, "Pipe All<Map>: should return step map")
+    assert-eq({pipe_0: 5, pipe_1: 7, pipe_2: 21}, pipe-map, "Pipe All<Map>: should return step map")
+    assert-eq("{pipe_0: 5, pipe_1: 7, pipe_2: 21}", Str(pipe-map), "Pipe All<Map>: shows every step")
 
     // All<Vec> erases to a plain Vec at runtime.
     pipe-all-vec: All<Vec> 5 |> add(2) |> mul(3)

@@ -826,6 +826,32 @@ body-match fn (x: Int): All<Vec> {
         );
     }
 
+    /// `All<Map>` on a pipe keys each stage by position, with keys that show
+    /// when the map is printed. They were `$pipe_0`, ..., which read as type
+    /// tags and printed as `{}`, and compiled code keyed every stage
+    /// `$pipe_0`, keeping only the last.
+    #[test]
+    fn pipe_all_map_keys_every_stage() {
+        let src = r#"::t ns
+stages fn (x: Int): Map {
+    m: All<Map> x |> add(2) |> mul(3)
+    m
+}
+staged fn (x: Int): All<Map> { x |> add(1) }
+[map([5, 6], stages), Str(stages(5)), staged(1)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &crate::val!([
+                [
+                    {"pipe_0": 5, "pipe_1": 7, "pipe_2": 21},
+                    {"pipe_0": 6, "pipe_1": 8, "pipe_2": 24},
+                ],
+                "{pipe_0: 5, pipe_1: 7, pipe_2: 21}",
+                {"pipe_0": 1, "pipe_1": 2},
+            ]),
+        );
+    }
+
     /// A plain `fn` body that is one flow takes an `All` return annotation
     /// on that flow, as a binding of it does: a pipe collects its stages.
     /// The annotation used to shape the implicit serial body, which binds

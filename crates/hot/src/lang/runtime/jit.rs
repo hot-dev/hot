@@ -583,6 +583,9 @@ struct ActiveFlowState {
     flow_header_regs: Vec<usize>,
     /// For Pipe flows: the register holding the last Pipe step result.
     last_pipe_reg: Option<u32>,
+    /// For Pipe flows: how many steps have been collected, which numbers the
+    /// next step's `All<Map>` key.
+    pipe_steps: usize,
     /// When the flow's branches do not all produce the same JIT value kind, the
     /// shared result register cannot be tagged with a single narrow kind (an
     /// earlier branch would store e.g. a raw `Int` while a later branch stores
@@ -7655,6 +7658,7 @@ fn build_supported_body(
                     accumulator_var,
                     flow_header_regs: Vec::new(),
                     last_pipe_reg: None,
+                    pipe_steps: 0,
                     force_owned_result,
                 });
                 ctx.jump_to_next(builder, ip)?;
@@ -8099,7 +8103,7 @@ fn build_supported_body(
                         let new_acc = match flow.result_modifier {
                             FlowResultModifier::Map => {
                                 let step_name =
-                                    format!("$pipe_{}", flow.last_pipe_reg.map(|_| 0).unwrap_or(0));
+                                    crate::lang::runtime::vm::pipe_step_key(flow.pipe_steps);
                                 let key_val = new_owned_val(Val::Str(step_name.into()));
                                 let key_raw = builder.ins().iconst(types::I64, key_val);
                                 let call = builder.ins().call(
@@ -8119,6 +8123,7 @@ fn build_supported_body(
                             }
                         };
                         builder.def_var(acc_var, new_acc);
+                        flow.pipe_steps += 1;
                     }
                 }
                 ctx.jump_to_next(builder, ip)?;
