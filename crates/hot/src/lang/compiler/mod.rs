@@ -3386,7 +3386,8 @@ impl Compiler {
                 // Resolve namespace aliases
                 let resolved_ns_ref = self.resolve_ns_ref_alias(ns_ref);
                 if let Some(func_name) = &resolved_ns_ref.function_name {
-                    vec![format!("{}/{}", resolved_ns_ref.ns, func_name)]
+                    let qualified = format!("{}/{}", resolved_ns_ref.ns, func_name);
+                    vec![format!("{}/{}", qualified, fn_call.args.len()), qualified]
                 } else {
                     vec![]
                 }
@@ -4306,6 +4307,14 @@ impl Compiler {
                 } else if let Some(function_id) = self
                     .typed_overload(fn_call)
                     .map(|(_, function_id)| function_id)
+                    // Functions are registered by `name/arity`. The bare name
+                    // holds a type's first constructor, whatever its arity, and
+                    // runtime dispatch only picks among overloads of the compiled
+                    // one's arity: look the arity up first.
+                    .or_else(|| {
+                        let arity_key = format!("{}/{}", full_function_name, fn_call.args.len());
+                        self.function_mapping.get(&arity_key).copied()
+                    })
                     .or_else(|| self.function_mapping.get(&full_function_name).copied())
                 {
                     self.emit_instruction(Instruction::CallUserFunction {
