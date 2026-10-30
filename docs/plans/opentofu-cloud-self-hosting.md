@@ -1679,12 +1679,84 @@ depends on cloud work, so they can start now; they also benefit `hot-cloud`.
       without it. MCP HTTP+SSE message delivery depends on it. Multi-replica
       configuration validation in the deployment tooling must still require
       `queue.type = "redis"`.
-- [ ] Verify legacy MCP HTTP+SSE, environment subscriptions, and stream
+
+The last two items are verified by
+[`hot_api/src/cross_instance_tests.rs`](../../crates/hot_api/src/cross_instance_tests.rs)
+and
+[`hot_app/tests/cross_instance.rs`](../../crates/hot_app/tests/cross_instance.rs).
+Each test runs two or three replicas of the production router in one process.
+Every replica has its own restricted runtime pool, Redis pub/sub, storage
+clients, and caches. The replicas share one fresh PostgreSQL database, one
+Redis, and one storage directory, which stands in for S3 or GCS. Events come
+from a separate Redis client, as a worker publishes them. State that a
+per-process cache could hold is changed out of band, through the fixture
+administrator. The suites skip without `HOT_TEST_POSTGRES_URI` and a reachable
+Redis.
+
+- [x] Verify legacy MCP HTTP+SSE, environment subscriptions, and stream
       subscriptions when the paired requests land on different instances.
-      Not started: no test pairs these requests across two instances.
-- [ ] Verify sessions, uploaded builds, files, internal blobs, and per-instance
+      - MCP: the stream opens on A, and messages are posted to B and to B's
+        replacement. Every reply arrives on A's stream. B refuses an unknown
+        session ID and another credential, because the transport-session
+        binding lives in Redis.
+      - `/v1/env/subscribe`, `/v1/streams/{id}/subscribe`, and the dashboard's
+        `/env/subscribe` all receive events published by another process.
+      - This found two Redis subscriber bugs, now fixed in
+        [`streams.rs`](../../crates/hot/src/stream/streams.rs). Both are
+        covered by unit tests that failed before the fix.
+        - A subscription started at `$`, which Redis resolves only when the
+          first XREAD arrives. An entry published between `subscribe` and the
+          first read was lost. Examples are an MCP reply that follows the
+          `endpoint` event, or a webhook or `tools/call` result from a fast
+          worker. Subscriptions now start after the stream's newest entry at
+          subscribe time.
+        - `next()` was not cancel-safe. The stream SSE handlers race it against
+          a one-second database poll. The dashboard races it against a
+          revalidation timer that first fires at once, then every 30 seconds.
+          A dropped XREAD still consumed the next entry, and the new XREAD
+          queued behind it on the same connection. With Redis,
+          `/v1/streams/{id}/subscribe` stopped delivering `stream:data` after
+          the first second, and `subscribe-with-event` runs the same loop.
+          Before the fix, the dashboard test lost an update in three of four
+          runs. The subscriber now keeps its in-flight read across calls.
+- [x] Verify sessions, uploaded builds, files, internal blobs, and per-instance
       app caches across instances and through rolling replacement.
-      Not started.
+      - App sessions: the sign-in form is rendered on A and submitted to B. A,
+        B, and a replacement instance all accept the resulting session. The
+        CSRF token and the session are stateless and signed with the shared
+        `HOT_APP_SESSION_SECRET`. User and org state is read from the database
+        on each request, so deactivating the user ends the session on every
+        instance at once.
+      - API sessions and keys are read from the database on each request. A
+        session created on A works on B. Revoking it on B, or deactivating a
+        key out of band, takes effect on both instances at the next request.
+      - Builds: a bundle uploaded through A downloads through B and through
+        A's replacement. A retried upload that lands on B finds A's stored
+        bundle.
+      - Files: a file uploaded through one API instance downloads, is
+        replaced, and is deleted through the other. A multipart upload is
+        initiated on A, receives parts on B and A, and is completed on B. A
+        file written by another process downloads through both app instances.
+      - Blobs: a payload spilled by another process, as a worker spills one,
+        is rehydrated in `/v1/runs/{id}` and downloads through both API
+        instances.
+      - Caches:
+        - The entity and event-handler caches are SQLite-only. After an out-of-band
+          project rename, both instances serve the new name.
+        - The API domain cache re-checks every positive entry. After an
+          out-of-band domain delete, both instances return 404 at once.
+        - Each API replica caches negative domain lookups for 60 seconds. A
+          domain verified through one replica can return 404 on another for
+          up to a minute.
+        - Each API replica caches each org's request-rate limit for 60
+          seconds. A plan change reaches every replica within that time.
+        - The app's build-docs cache is keyed by immutable build ID. Each read
+          first reloads the build row in the caller's scope, so the cache
+          cannot serve stale or revoked docs. Live builds exist only in
+          `hot dev`.
+      - Rolling replacement here means a new replica process with the same
+        configuration. Replacement under load through the real load balancer
+        remains part of qualification.
 
 ### GCP app/API hosting recommendation
 
@@ -1876,11 +1948,18 @@ release of the three presets.
       worker scale-in. The VM-loss drills remain.
 - [ ] Prove cross-instance behavior for sessions, uploaded builds, files,
       internal blobs, cache invalidation, and database/queue coordination.
-      Not started.
+      Sessions, builds, files, blobs, and caches are verified across replicas
+      (see [Cross-instance readiness](#cross-instance-readiness)). For queues,
+      the Redis queue's own tests cover competing consumers and orphan
+      recovery within one process. Coordinating queues across hosts remains
+      for the VM-loss drills.
 - [ ] Document migration from managed-data compute to distributed compute.
       Local storage must first move to S3 or GCS. Then drain the VM, stop its
       scheduler, start the scalable roles against the same managed data, switch
       endpoints, verify, and retire the VM.
+      [Moving a single machine to the scalable preset](../../infra/README.md#moving-a-single-machine-to-the-scalable-preset)
+      documents the steps, the state moves between roots, and what cannot be
+      undone automatically. Exercising it on each cloud remains.
       Not started: infra/README.md does not describe moving a single machine
       to the scalable preset.
 

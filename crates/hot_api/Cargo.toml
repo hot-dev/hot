@@ -39,3 +39,4 @@ sqlx = { workspace = true }
 hot = { workspace = true, features = ["s3-storage", "test-utils"] }
 tower = { workspace = true, features = ["util"] }
 async-trait = { workspace = true }
+redis = { workspace = true }
