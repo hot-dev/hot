@@ -203,6 +203,10 @@ rate fn match (s: Severity): Int {
 }
 ```
 
+Comparing a closed union's value with a literal outside it, as in
+`eq(s, "hgih")`, is always false (`ne`: always true), so `hot check` warns
+with `impossible-comparison`. `null` and `open` unions aren't checked.
+
 ### Open Literal Unions
 
 A literal union may be declared `open` to allow other namespaces (or
