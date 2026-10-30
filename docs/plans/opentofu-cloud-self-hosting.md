@@ -1860,10 +1860,18 @@ or an existing operator destination without coupling telemetry to S3.
 - [ ] Check CIDR overlap, required routes and egress, private client access,
       DNS/TLS, secrets/keys, registry access, and existing database/cache versions,
       extensions, roles, TLS, and required commands from the appropriate network.
-      Preflight checks CIDR overlap with the host's fixed networks, existing
-      subnets and private services access, DNS (warning only), the public
-      certificate, and existing buckets. Existing databases are checked from
-      the host by the agent. Routes, egress, and registry access remain.
+      Preflight checks:
+      - CIDR overlap with the host's fixed networks;
+      - existing subnets and private services access;
+      - DNS (a warning only);
+      - the public certificate;
+      - existing buckets;
+      - default routes through a NAT on existing networks (Cloud NAT and
+        Private Google Access on GCP);
+      - an image mirror's repositories.
+
+      Pulls from public registries, and existing databases, are checked from
+      the host, by the first deploy and by the agent.
 - [ ] Separate static/cloud checks from host-only qualification; clearly report
       checks that require a private runner or provisioned host. Recheck critical
       conditions after provisioning; availability observations are not capacity

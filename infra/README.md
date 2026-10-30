@@ -205,11 +205,20 @@ python3 infra/preflight/preflight.py installation/installation.tfvars.json
 Preflight runs read-only `aws` or `gcloud` commands with your identity; the
 plan role or service account is enough. It reads no secret values. It checks:
 
-- the zone, machine type, vCPU quota, and host image;
+- the zone, machine types, vCPU quota, and host image. For a scalable
+  installation it counts every role at its `scaling` maximum, plus the
+  scheduler;
 - on GCP, the APIs and the nested-virtualization organization policy;
 - that network ranges avoid the host's container network (`172.30.0.0/24`)
   and box guest network (`10.88.0.0/16`);
 - existing networks and their subnets;
+- that the hosts' subnets on an existing network can reach the internet.
+  On AWS that means a default route through a NAT or other gateway, not an
+  internet gateway, since hosts get no public address. On GCP it means Cloud
+  NAT, plus Private Google Access (a warning if it is off). Hosts need this
+  for images, release manifests, and cloud APIs;
+- with `image_registry`, that the mirror has a repository for each image (ECR)
+  or is a Docker repository (Artifact Registry);
 - the public certificate on AWS;
 - existing buckets, and that buckets to provision are still free;
 - managed PostgreSQL and Valkey offerings in the region.

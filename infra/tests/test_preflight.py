@@ -42,6 +42,10 @@ AWS = {
     ("ec2", "describe-subnets"): {"Subnets": [
         {"SubnetId": "subnet-a", "AvailabilityZone": "us-east-1a", "VpcId": "vpc-0123"},
         {"SubnetId": "subnet-b", "AvailabilityZone": "us-east-1b", "VpcId": "vpc-0123"}]},
+    ("ec2", "describe-route-tables"): {"RouteTables": [{"Routes": [
+        {"DestinationCidrBlock": "10.40.0.0/16", "GatewayId": "local", "State": "active"},
+        {"DestinationCidrBlock": "0.0.0.0/0", "NatGatewayId": "nat-0123", "State": "active"}]}]},
+    ("ecr", "describe-repositories"): {"repositories": [{"repositoryName": f"hot-mirror/{image}"} for image in preflight.MIRROR_IMAGES]},
 }
 GCP = {
     ("projects", "describe"): {"lifecycleState": "ACTIVE"},
@@ -51,7 +55,10 @@ GCP = {
     ("compute", "regions"): {"quotas": [{"metric": "CPUS", "limit": 24.0, "usage": 4.0},
                                         {"metric": "N2_CPUS", "limit": 24.0, "usage": 4.0}]},
     ("compute", "images"): {"status": "READY"},
-    ("compute", "networks"): {"ipCidrRange": "10.40.0.0/20"},
+    ("compute", "networks"): {"ipCidrRange": "10.40.0.0/20", "privateIpGoogleAccess": True},
+    ("compute", "routers"): [{"network": "projects/example-project/global/networks/shared",
+                              "nats": [{"sourceSubnetworkIpRangesToNat": "ALL_SUBNETWORKS_ALL_IP_RANGES"}]}],
+    ("artifacts", "repositories"): {"format": "DOCKER"},
     ("services", "vpc-peerings"): [],
     ("storage", "buckets"): {"name": "acme-hot"},
 }
@@ -127,6 +134,45 @@ class Aws(unittest.TestCase):
         self.assertEqual(statuses(report)["Subnets"], "pass")
         self.assertIn("overlaps 10.88.0.0/16", details(report)["Network ranges"])
 
+    def test_hosts_need_an_outbound_route_through_a_nat(self):
+        network = {"mode": "existing", "network_id": "vpc-0123", "subnet_id": "subnet-a"}
+        self.assertEqual(statuses(preflight.run(aws_installation(network=network), FakeCli(AWS)))["Outbound routes"], "pass")
+        cli = FakeCli(AWS)
+        cli.responses[("ec2", "describe-route-tables")] = {"RouteTables": [{"Routes": [
+            {"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-0123", "State": "active"}]}]}
+        self.assertIn("use a NAT gateway", details(preflight.run(aws_installation(network=network), cli))["Outbound routes"])
+        cli.responses[("ec2", "describe-route-tables")] = {"RouteTables": []}
+        report = preflight.run(aws_installation(network=network), cli)
+        self.assertIn("subnet-a has no default route", details(report)["Outbound routes"])
+        main = [c for c in cli.calls if "Name=association.main,Values=true" in c]
+        self.assertTrue(main, "a subnet without its own table uses the VPC's main table")
+
+    def test_scalable_installations_count_every_role_at_its_maximum(self):
+        network = {"mode": "existing", "network_id": "vpc-0123", "subnet_id": "subnet-a",
+                   "private_subnet_ids": ["subnet-a"], "data_subnet_ids": ["subnet-a", "subnet-b"]}
+        document = aws_installation(preset="scalable", network=network, scaling={"worker": {"min": 2, "max": 6}})
+        cli = FakeCli(AWS)
+        cli.responses[("service-quotas", "get-service-quota")] = {"Quota": {"Value": 16.0}}
+        report = preflight.run(document, cli)
+        self.assertIn("32 are needed", details(report)["vCPU quota"], "(4 + 4 + 6 + 1) m7i and 1 m8i, 2 vCPUs each")
+        offered = [c for c in cli.calls if "describe-instance-type-offerings" in c]
+        self.assertEqual({a.split("=")[-1] for c in offered for a in c if a.startswith("Name=instance-type")},
+                         {"m7i.large", "m8i.large"})
+        self.assertIn("private_subnet_ids must span two zones", details(report)["Subnets"])
+        routes = [c for c in cli.calls if "describe-route-tables" in c]
+        self.assertEqual(len(routes), 1, "the hosts' private subnets, not subnet_id alone")
+
+    def test_an_ecr_mirror_needs_a_repository_per_image(self):
+        document = aws_installation(image_registry="123456789012.dkr.ecr.us-west-2.amazonaws.com/hot-mirror")
+        cli = FakeCli(AWS)
+        report = preflight.run(document, cli)
+        self.assertEqual(statuses(report)["Image mirror"], "pass")
+        listed = next(c for c in cli.calls if "describe-repositories" in c)
+        self.assertEqual(listed[listed.index("--region") + 1], "us-west-2", "the mirror's own region")
+        self.assertNotIn("Image pulls", statuses(report))
+        cli.responses[("ecr", "describe-repositories")] = {"repositories": [{"repositoryName": "hot-mirror/hot"}]}
+        self.assertIn("hot-mirror/postgres", details(preflight.run(document, cli))["Image mirror"])
+
     def test_provisioned_buckets_must_not_exist_yet(self):
         storage = {"build": {"backend": "s3", "bucket": "acme-hot-builds", "region": "us-east-1", "provision": True},
                    "file": {"backend": "local"}}
@@ -176,6 +222,36 @@ class Gcp(unittest.TestCase):
         report = preflight.run(gcp_installation(network=network, data={"postgres": {"mode": "managed"}}), cli)
         self.assertEqual(statuses(report)["Private services access"], "pass")
 
+    def test_hosts_need_cloud_nat_and_private_google_access(self):
+        network = {"mode": "existing", "network_id": "projects/example-project/global/networks/shared",
+                   "subnet_id": "projects/example-project/regions/us-central1/subnetworks/hot"}
+        self.assertEqual(statuses(preflight.run(gcp_installation(network=network), FakeCli(GCP)))["Outbound routes"], "pass")
+        cli = FakeCli(GCP)
+        cli.responses[("compute", "networks")] = {"ipCidrRange": "10.40.0.0/20", "privateIpGoogleAccess": False}
+        self.assertEqual(statuses(preflight.run(gcp_installation(network=network), cli))["Outbound routes"], "warn")
+        cli.responses[("compute", "routers")] = [{"network": "projects/example-project/global/networks/other",
+                                                   "nats": [{"sourceSubnetworkIpRangesToNat": "ALL_SUBNETWORKS_ALL_IP_RANGES"}]}]
+        self.assertIn("no Cloud NAT", details(preflight.run(gcp_installation(network=network), cli))["Outbound routes"])
+        cli.responses[("compute", "routers")] = [{"network": "projects/example-project/global/networks/shared", "nats": [
+            {"sourceSubnetworkIpRangesToNat": "LIST_OF_SUBNETWORKS", "subnetworks": [{"name": "projects/example-project/regions/us-central1/subnetworks/hot"}]}]}]
+        self.assertNotEqual(statuses(preflight.run(gcp_installation(network=network), cli))["Outbound routes"], "fail")
+
+    def test_an_artifact_registry_mirror_must_hold_docker_images(self):
+        document = gcp_installation(image_registry="us-docker.pkg.dev/acme-mirror/hot")
+        cli = FakeCli(GCP)
+        self.assertEqual(statuses(preflight.run(document, cli))["Image mirror"], "pass")
+        described = next(c for c in cli.calls if c[1:3] == ("artifacts", "repositories"))
+        self.assertEqual(described[3:], ("describe", "hot", "--location", "us", "--project", "acme-mirror", "--format", "json"))
+        cli.responses[("artifacts", "repositories")] = {"format": "MAVEN"}
+        self.assertEqual(statuses(preflight.run(document, cli))["Image mirror"], "fail")
+
+    def test_scalable_quota_counts_every_role(self):
+        cli = FakeCli(GCP)
+        report = preflight.run(gcp_installation(preset="scalable"), cli)
+        self.assertIn("CPUS has 20 of 24 free; 24 are needed", details(report)["vCPU quota"])
+        described = {c[4] for c in cli.calls if c[1:3] == ("compute", "machine-types")}
+        self.assertEqual(described, {"e2-standard-2", "n2-standard-2"})
+
     def test_regional_quota_counts_current_use(self):
         cli = FakeCli(GCP)
         cli.responses[("compute", "regions")] = {"quotas": [{"metric": "N2_CPUS", "limit": 8.0, "usage": 7.0}]}
@@ -204,6 +280,12 @@ class Static(unittest.TestCase):
         self.assertEqual(statuses(report)["Network ranges"], "fail")
         self.assertEqual(statuses(report)["DNS for app"], "warn")
 
+    def test_image_pulls_without_a_mirror_are_left_to_the_host(self):
+        report = preflight.Report()
+        with mock.patch.object(preflight.socket, "getaddrinfo", lambda host, port: []):
+            preflight.static_checks(report, aws_installation()["installation"])
+        self.assertEqual(statuses(report)["Image pulls"], "host")
+
     def test_existing_data_services_are_left_to_the_host(self):
         report = preflight.Report()
         with mock.patch.object(preflight.socket, "getaddrinfo", lambda host, port: []):
@@ -217,6 +299,10 @@ class Static(unittest.TestCase):
             self.assertEqual(line.groups(), (expected["aws"], expected["gcp"], str(expected["cpus"])), size)
             database = re.search(rf"^\s+{size}\s+=\s+\{{ aws = \"(db\.[^\"]+)\".*valkey = \"([^\"]+)\"", contract, re.M)
             self.assertEqual(database.groups(), (preflight.DATABASES[size]["aws"], preflight.DATABASES[size]["valkey"]), size)
+            role = re.search(rf"^\s+{size}\s+=\s+\{{ aws = \"(m7i[^\"]*)\", gcp = \"([^\"]+)\" \}}", contract, re.M)
+            self.assertEqual(role.groups(), (preflight.ROLE_MACHINES[size]["aws"], preflight.ROLE_MACHINES[size]["gcp"]), size)
+        for role, top in preflight.SCALING_MAX.items():
+            self.assertRegex(contract, rf"\n\s+{role}\s+= optional\(object\(\{{(?:[^}}]|\n)*?max\s+= optional\(number, {top}\)", role)
 
     def test_the_markdown_report_marks_each_result(self):
         report = preflight.Report()
