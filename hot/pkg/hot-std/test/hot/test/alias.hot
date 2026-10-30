@@ -295,6 +295,41 @@ fn () {
     assert(is-type(failure, Result.Err), "Function-body variant alias should construct Err")
 }
 
+// An alias of another namespace's record type acts as its full path: as the
+// type `is-type` checks and as a function value
+Date ::hot::time/PlainDate
+Mount ::hot::box/BoxMount
+
+test-record-type-alias-with-is-type
+meta ["test"]
+fn () {
+    christmas ::hot::time/PlainDate(2024, 12, 25)
+    assert(is-type(christmas, Date), "is-type should accept a value of the aliased type")
+    assert(not(is-type("2024-12-25", Date)), "is-type should refuse a value of another type")
+}
+
+// A literal union has no type tag, so `is-type` checks its values: through
+// the full path from another namespace and through an alias
+Network ::hot::box/BoxNetwork
+
+test-literal-union-type-with-is-type
+meta ["test"]
+fn () {
+    assert(is-type("none", ::hot::box/BoxNetwork), "is-type should accept a member by full path")
+    assert(is-type("internet", Network), "is-type should accept a member through an alias")
+    assert(not(is-type("wifi", Network)), "is-type should refuse a value outside the union")
+}
+
+test-alias-passed-as-function-value
+meta ["test"]
+fn () {
+    mounts map-vals({data: {resource: "r", dest: "/data"}}, Mount)
+    assert(is-type(mounts.data, ::hot::box/BoxMount), "A type alias should construct as a function value")
+    assert-eq("/data", mounts.data.dest)
+    assert-eq({a: "X"}, map-vals({a: "x"}, str-upper), "A function alias should call as a function value")
+    assert-eq(["X"], map(["x"], str-upper), "A function alias should call from a native HOF")
+}
+
 // ----------------------------------------------------------------------------
 // Namespace Alias in Function Body Tests
 // ----------------------------------------------------------------------------

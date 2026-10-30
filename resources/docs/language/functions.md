@@ -141,7 +141,7 @@ Or different parameter types:
 
 {{snippet:functions#overload-by-arity}}
 
-Hot dispatches to the correct version based on arguments.
+Hot dispatches to the correct version based on arguments, whether the call names the function directly or through a namespace (`::time/PlainDate(s)`). A parameter's `Source -> Target` arrow applies the same way to either call.
 
 When overloads of the same arity differ in which parameters are `lazy`, only literal arguments choose between them. A call defers its arguments before their types are known.
 

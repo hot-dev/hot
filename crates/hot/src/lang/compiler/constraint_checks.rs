@@ -183,6 +183,24 @@ fn local_binding(values: &[Value]) -> Option<(&VarRef, &Value)> {
     }
 }
 
+/// The payload annotation of the enum variant a call names, as `Hours` in
+/// `Due.Hours(0)`.
+fn variant_payload<'t>(function: &Value, type_def: &'t TypeDef) -> Option<&'t str> {
+    let Value::Ref(Ref::Var(var_ref)) = function else {
+        return None;
+    };
+    let Some(DeepPath::Key(variant)) = &var_ref.var.deep_path else {
+        return None;
+    };
+    type_def
+        .variants
+        .as_ref()?
+        .iter()
+        .find(|v| v.name.name() == variant)?
+        .type_ref
+        .as_deref()
+}
+
 /// The entries of a Map literal, when `val` is one.
 fn map_literal(val: &Val) -> Option<&IndexMap<Val, Val>> {
     match val {
@@ -659,8 +677,54 @@ impl<'a> Index<'a> {
     }
 
     /// The qualified name of the type `name` names in `ns`, through the
-    /// namespace's aliases (`::alias/Type`) when it uses one.
+    /// namespace's aliases (`::alias/Type`) when it uses one, and through
+    /// var imports of a type (`Port ::a/Port`).
     fn type_key(&self, ns: &str, name: &str) -> Option<String> {
+        let mut seen = AHashSet::new();
+        let (mut ns, mut name) = (ns.to_string(), name.to_string());
+        loop {
+            if let Some(key) = self.declared_type_key(&ns, &name) {
+                return Some(key);
+            }
+            let (target_ns, target) = self.import_target(&ns, &name)?;
+            if !seen.insert((target_ns.clone(), target.clone())) {
+                return None;
+            }
+            (ns, name) = (target_ns, target);
+        }
+    }
+
+    /// The namespace and name a var import (`Port ::a/Port`) names, when
+    /// `name` in `ns` is one.
+    fn import_target(&self, ns: &str, name: &str) -> Option<(String, String)> {
+        // A qualified name (`::c/Port`) names an import declared in `::c`.
+        if name.contains('/') {
+            let (source, short) = name.strip_prefix("::")?.rsplit_once('/')?;
+            let source = crate::lang::ast::NsPath::from(source);
+            let source_ns = self
+                .aliases
+                .get(ns)
+                .and_then(|aliases| aliases.get(&source))
+                .unwrap_or(&source)
+                .to_string();
+            return self.import_target(&source_ns, short);
+        }
+        let (_, value) = self.vars.get(&(ns.to_string(), name.to_string()))?;
+        let target = match value {
+            Value::Ref(Ref::Ns(ns_ref)) => ns_ref,
+            // `local ::ns/name` parses as `[VarRef(local), Ref::Ns(target)]`.
+            Value::MultipleValues(values) => values.iter().find_map(|v| match v {
+                Value::Ref(Ref::Ns(ns_ref)) => Some(ns_ref),
+                _ => None,
+            })?,
+            _ => return None,
+        };
+        self.resolve(ns, &Value::Ref(Ref::Ns(target.clone())))
+    }
+
+    /// `type_key` for a type declared under `name`, without following
+    /// var imports.
+    fn declared_type_key(&self, ns: &str, name: &str) -> Option<String> {
         if self.types.contains_key(name) {
             return Some(name.to_string());
         }
@@ -894,8 +958,12 @@ impl<'a> Index<'a> {
                 };
                 let location = arg.src.as_ref().map(error_location).or(location);
                 if let Some(literal) = literal(&arg.value) {
-                    let qualified = format!("{callee_ns}/{callee}");
-                    self.check_literal_against(&callee_ns, &qualified, literal, location, out);
+                    // A variant call (`Due.Hours(0)`) checks its payload type.
+                    let target = match variant_payload(&call.function, type_def) {
+                        Some(payload) => payload.to_string(),
+                        None => format!("{callee_ns}/{callee}"),
+                    };
+                    self.check_literal_against(&callee_ns, &target, literal, location, out);
                 } else if let Value::Val(val, _) = &arg.value
                     && let Some(entries) = map_literal(val)
                     && let Some((record_ns, record, shown)) =
@@ -1012,24 +1080,17 @@ impl<'a> Index<'a> {
         function: &Value,
         type_def: &'t TypeDef,
     ) -> Option<(String, &'t TypeDef, String)> {
-        let variant = match function {
+        let payload = match function {
             Value::Ref(Ref::Var(var_ref)) => match &var_ref.var.deep_path {
                 None => None,
-                Some(DeepPath::Key(variant)) => Some(variant.as_str()),
+                Some(DeepPath::Key(_)) => Some(variant_payload(function, type_def)?),
                 Some(_) => return None,
             },
             _ => None,
         };
-        let Some(variant) = variant else {
+        let Some(payload) = payload else {
             return Some((callee_ns.to_string(), type_def, callee.to_string()));
         };
-        let payload = type_def
-            .variants
-            .as_ref()?
-            .iter()
-            .find(|v| v.name.name() == variant)?
-            .type_ref
-            .as_deref()?;
         let key = self.type_key(callee_ns, payload)?;
         let record = self.types.get(&key).copied()?;
         let record_ns = key.rsplit_once('/')?.0.to_string();

@@ -591,6 +591,11 @@ pub struct TypeChecker {
     /// types — they're variables holding `Value::TypeDef`, looked up by
     /// fully-qualified name.
     qualified_types: AHashMap<String, TypeExpr>,
+    /// Var imports of a type (`::c/Port` for `Port ::a/Port` in `::c`) →
+    /// what the type they name resolves to. Kept apart from
+    /// `qualified_types`, which holds only the types declared in each
+    /// namespace.
+    type_imports: AHashMap<String, TypeExpr>,
     /// Short name → fully-qualified name for any type declared with `core: true`
     /// metadata. Lets unqualified references like `Account` resolve when the
     /// declaration lives in another namespace, the same way the compiler
@@ -708,6 +713,7 @@ impl TypeChecker {
             in_pipe_flow: false,
             known_types: AHashSet::new(),
             qualified_types: AHashMap::new(),
+            type_imports: AHashMap::new(),
             core_types: AHashMap::new(),
             impl_registry: AHashSet::new(),
             impl_locations: AHashMap::new(),
@@ -1116,12 +1122,56 @@ impl TypeChecker {
                 });
             }
         }
+        self.register_type_imports(program);
         tracing::debug!(
             "TypeChecker: Discovered {} type definitions ({} core), {} implementations",
             self.qualified_types.len(),
             self.core_types.len(),
             self.impl_registry.len(),
         );
+    }
+
+    /// Record each var import of a type (`Port ::a/Port`) in `type_imports`,
+    /// so an annotation naming the import resolves as the full path does.
+    /// An import of an import resolves on a later round.
+    fn register_type_imports(&mut self, program: &Program) {
+        let mut imports = Vec::new();
+        for (ns_path, namespace) in &program.namespaces {
+            let ns_str = ns_path.to_string();
+            let alias_map: AHashMap<String, String> = namespace
+                .aliases
+                .iter()
+                .map(|(alias, target)| (alias.to_string(), target.to_string()))
+                .collect();
+            for (var, value) in &namespace.scope.vars {
+                if var.deep_set.is_some() || var.deep_path.is_some() {
+                    continue;
+                }
+                if let Some(target) = Self::imported_function(value, &alias_map) {
+                    imports.push((format!("{}/{}", ns_str, var.sym.name()), target));
+                }
+            }
+        }
+        loop {
+            let before = imports.len();
+            imports.retain(|(name, target)| {
+                let resolved = self
+                    .qualified_types
+                    .get(target)
+                    .or_else(|| self.type_imports.get(target))
+                    .cloned();
+                match resolved {
+                    Some(resolved) => {
+                        self.type_imports.insert(name.clone(), resolved);
+                        false
+                    }
+                    None => true,
+                }
+            });
+            if imports.len() == before {
+                break;
+            }
+        }
     }
 
     /// Walk every namespace and register the inferred type of each top-level
@@ -1404,7 +1454,7 @@ impl TypeChecker {
         }
     }
 
-    /// The qualified function a var import (`local ::ns/fn`) names.
+    /// The qualified function or type a var import (`local ::ns/fn`) names.
     fn imported_function(value: &Value, alias_map: &AHashMap<String, String>) -> Option<String> {
         match value {
             Value::Ref(Ref::Ns(ns_ref)) => Self::qualified_ns_ref_name(ns_ref, alias_map),
@@ -1576,7 +1626,13 @@ impl TypeChecker {
             return;
         };
 
-        let (is_enum, is_open, declared_variants) = match self.context.types.get(&short_name) {
+        // A qualified subject type names its own declaration. The short-name
+        // entry merges every namespace's type of that name, so one module's
+        // open `Shape` would open another's closed one.
+        let declared = Self::type_expr_name(subject_type)
+            .and_then(|name| self.context.types.get(name))
+            .or_else(|| self.context.types.get(&short_name));
+        let (is_enum, is_open, declared_variants) = match declared {
             Some(td) if td.is_enum => (true, td.enum_is_open, td.variants.clone()),
             _ => return,
         };
@@ -2694,6 +2750,20 @@ impl TypeChecker {
     /// Best-effort short name for a `TypeExpr`, used for implementation lookup.
     /// Returns `None` for shapes (Vec, Map, Function, Union, ...) where a
     /// coercion check doesn't apply.
+    /// The name a type expression's declaration is known by, as it was
+    /// resolved (qualified, or short); `None` for unnamed shapes.
+    fn type_expr_name(expr: &TypeExpr) -> Option<&str> {
+        match expr {
+            TypeExpr::Named(name)
+            | TypeExpr::Record {
+                type_name: Some(name),
+                ..
+            } => Some(name),
+            TypeExpr::Optional(inner) => Self::type_expr_name(inner),
+            _ => None,
+        }
+    }
+
     fn type_expr_short_name(expr: &TypeExpr) -> Option<String> {
         let name = match expr {
             TypeExpr::Named(n) => n.as_str(),
@@ -4701,6 +4771,9 @@ impl TypeChecker {
             return None;
         }
         let qualified = format!("{}/{}", self.context.current_namespace, type_name);
+        if let Some(imported) = self.type_imports.get(&qualified) {
+            return Some(imported.clone());
+        }
         self.qualified_types.get(&qualified).cloned().or_else(|| {
             // Fall back to the in-pass types registered by `process_type_definition`
             // (e.g. types defined later in the same file that haven't been

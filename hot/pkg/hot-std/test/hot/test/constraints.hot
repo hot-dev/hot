@@ -84,6 +84,7 @@ Clocked type Int where and(gt(%, 0), is-some(call(clock, [])))
 Sku type Str where ::hot::regex/is-match(%, "^[A-Z]{2}-[0-9]+$")
 ShortSku type Str where and(::re/is-match(%, "^[A-Z]"), lte(length(%), 6))
 Tagged type Any where ::hot::regex/is-match(%, "^#")
+Unclosed type Str where ::hot::regex/is-match(%, "(")
 
 // A local `is-match`, which a predicate's regex fast form must not replace.
 is-match fn (value: Str, pattern: Str): Bool {
@@ -274,13 +275,27 @@ meta ["test"] fn () {
     assert-eq("violation", constraint-kind(Username(dynamic("al"))), "a short name")
 }
 
+Due enum { Hours(Quantity), Days(Int where gt(%, 0)), Billed(Currency), Batches(Vec<Quantity>) }
+
+test-enum-payload-refinements
+meta ["test"] fn () {
+    assert-eq("violation", constraint-kind(Due.Hours(dynamic(0))), "a named refinement as a payload")
+    assert-eq(5, untype(Due.Hours(dynamic(5))), "a payload that passes stays a plain value")
+    assert-eq("violation", constraint-kind(Due.Days(dynamic(0))), "an inline refinement as a payload")
+    assert-eq(2, untype(Due.Days(dynamic(2))), "an inline refinement that passes")
+    assert-eq("violation", constraint-kind(Due.Billed(dynamic("JPY"))), "a closed union as a payload")
+    assert-eq("violation", constraint-kind(Due.Batches(dynamic([1, 100]))), "a refinement inside a payload's type")
+    assert(contains(violation(Due.Hours(dynamic(0))).message, "Due.Hours"), "the message names the variant")
+}
+
 test-pattern-refinements
 meta ["test"] fn () {
     assert-eq("AB-12", Sku("AB-12"), "a matching pattern")
     assert-eq("violation", constraint-kind(Sku(dynamic("ab-12"))), "a pattern that doesn't match")
     assert-eq("A-1", ShortSku("A-1"), "through a namespace alias, with a length bound")
     assert-eq("violation", constraint-kind(ShortSku(dynamic("ABCDEFG"))), "too long")
-    assert-eq("evaluation-failed", constraint-kind(Tagged(dynamic(5))), "is-match on a value that isn't a Str")
+    assert-eq("violation", constraint-kind(Tagged(dynamic(5))), "is-match checks an Int as its Str")
+    assert-eq("evaluation-failed", constraint-kind(Unclosed(dynamic("a"))), "is-match with a pattern that doesn't compile")
     assert-eq("^a", Exact("^a"), "a local is-match keeps its meaning")
     assert-eq("violation", constraint-kind(Exact(dynamic("abc"))), "not a regex")
 }
@@ -347,4 +362,13 @@ meta ["test"] fn () {
     server Server({host: "a", port: 8080})
     assert-eq("violation", constraint-kind(postwalk((x) { if(eq(x, 8080), 0, x) }, server)), "postwalk")
     assert-eq("violation", constraint-kind(prewalk((x) { if(eq(x, 1), 9, x) }, Window({start: 1, finish: 5}))), "prewalk")
+}
+
+// `PlainDate()` reads the clock; the predicate calls the one-argument overload.
+IsoDay type Str where is-ok(::hot::time/PlainDate(%))
+
+test-a-predicate-calls-the-overload-of-its-arity
+meta ["test"] fn () {
+    assert-eq("2024-12-25", IsoDay(dynamic("2024-12-25")), "a date")
+    assert-eq("violation", constraint-kind(IsoDay(dynamic("nope"))), "not a date")
 }
