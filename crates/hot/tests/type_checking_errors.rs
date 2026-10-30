@@ -2663,4 +2663,84 @@ mod integration_tests {
             warnings
         );
     }
+
+    fn impossible_comparisons(source: &str) -> Vec<String> {
+        compile_and_get_warnings(source)
+            .iter()
+            .filter(|w| constraint_code(w) == Some("impossible-comparison"))
+            .map(|w| w.to_string())
+            .collect()
+    }
+
+    /// `eq` or `ne` between a value of a closed literal union and a literal
+    /// outside it warns: `eq` is always false, `ne` always true. A member,
+    /// `null`, an open union and a plain `Str` don't.
+    #[test]
+    fn test_comparison_with_a_literal_outside_a_closed_union_warns() {
+        let source = r#"
+            ::test ns
+            CausedBy type "company" | "broker"
+            Channel type open "email" | "phone"
+            Order type { caused-by: CausedBy }
+
+            param fn (c: CausedBy): Bool { eq(c, "compnay") }
+            negated fn (c: CausedBy): Bool { ne(c, "compnay") }
+            reversed fn (c: CausedBy): Bool { eq("compnay", c) }
+            nullable fn (c: CausedBy?): Bool { eq(c, "compnay") }
+            binding fn (): Bool {
+                c: CausedBy "company"
+                eq(c, "brokr")
+            }
+            field fn (o: Order): Bool { eq(o.caused-by, "compnay") }
+            inline fn (c: "a" | "b"): Bool { eq(c, "c") }
+            nested fn (c: CausedBy): Int { if(eq(c, 5), 1, 2) }
+
+            member fn (c: CausedBy): Bool { eq(c, "company") }
+            null-check fn (c: CausedBy?): Bool { eq(c, null) }
+            open fn (c: Channel): Bool { eq(c, "fax") }
+            plain fn (s: Str): Bool { eq(s, "compnay") }
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+
+        let found = impossible_comparisons(source);
+        assert_eq!(
+            found.len(),
+            8,
+            "One warning per comparison. Got: {:?}",
+            found
+        );
+        assert!(found.iter().any(|m| m.contains(
+            r#""compnay" isn't one of the values of `CausedBy` ("company" | "broker"), so this `eq` is always false"#
+        )));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("so this `ne` is always true"))
+        );
+        assert!(found.iter().any(|m| m.contains("of `CausedBy?`")));
+        assert!(found.iter().any(|m| m.contains(
+            r#""c" isn't one of the values of `"a" | "b"`, so this `eq` is always false"#
+        )));
+        assert!(found.iter().any(|m| m.contains("5 isn't one of")));
+    }
+
+    /// The union may come from another namespace. A local `eq` that
+    /// shadows the core one isn't checked.
+    #[test]
+    fn test_comparison_check_across_namespaces_and_shadowing() {
+        let source = r#"
+            ::d ns
+            CausedBy type "company" | "broker"
+
+            ::e ns
+            other fn (c: ::d/CausedBy): Bool { eq(c, "compnay") }
+
+            ::f ns
+            eq fn (a: Any, b: Any): Bool { true }
+            shadowed fn (c: ::d/CausedBy): Bool { eq(c, "compnay") }
+        "#;
+        let found = impossible_comparisons(source);
+        assert_eq!(found.len(), 1, "Only `::e/other` warns. Got: {:?}", found);
+    }
 }
