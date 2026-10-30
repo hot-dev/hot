@@ -63,7 +63,7 @@ variables {
 run "private_local" {
   command = plan
   assert {
-    condition     = aws_instance.host.associate_public_ip_address == false && aws_instance.host.metadata_options[0].http_tokens == "required"
+    condition     = length(aws_instance.host.primary_network_interface) == 1 && aws_network_interface.host.subnet_id != null && aws_instance.host.metadata_options[0].http_tokens == "required"
     error_message = "The VM must have no public address and must require IMDSv2."
   }
   assert {
@@ -216,7 +216,7 @@ run "public_api_only" {
     }
   }
   assert {
-    condition     = aws_instance.host.associate_public_ip_address == false && aws_lb.public[0].internal == false
+    condition     = length(aws_instance.host.primary_network_interface) == 1 && aws_lb.public[0].internal == false
     error_message = "Public access goes through the load balancer; the VM stays private."
   }
   assert {

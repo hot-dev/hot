@@ -220,6 +220,15 @@ resource "google_compute_disk" "data" {
   }
   depends_on = [google_project_service.required]
 }
+# The host's address outlives the VM (a new host image replaces it), so a
+# private hostname pointed at it keeps working.
+resource "google_compute_address" "host" {
+  name         = "${local.tag}-host"
+  region       = local.config.region
+  subnetwork   = local.subnet_id
+  address_type = "INTERNAL"
+  depends_on   = [google_project_service.required]
+}
 resource "google_compute_instance" "host" {
   name                = local.tag
   zone                = local.config.zone
@@ -245,6 +254,7 @@ resource "google_compute_instance" "host" {
   }
   network_interface {
     subnetwork = local.subnet_id
+    network_ip = google_compute_address.host.address
     # Intentionally no access_config or ipv6_access_config: no external IP.
   }
   service_account {
@@ -280,7 +290,7 @@ resource "google_compute_instance" "host" {
   }
   depends_on = [google_compute_router_nat.egress, google_project_iam_member.telemetry, google_secret_manager_secret_iam_member.read, google_pubsub_subscription_iam_member.agent, google_secret_manager_secret_iam_member.postgres_admin, google_secret_manager_secret_version.postgres_admin, google_project_iam_member.valkey]
 }
-output "private_ip" { value = google_compute_instance.host.network_interface[0].network_ip }
+output "private_ip" { value = google_compute_address.host.address }
 output "instance_id" { value = google_compute_instance.host.id }
 output "retained_data_volume_id" { value = google_compute_disk.data.id }
 output "egress_ips" { value = google_compute_address.egress[*].address }

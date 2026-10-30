@@ -242,14 +242,22 @@ resource "aws_ebs_volume" "data" {
     ignore_changes  = [snapshot_id]
   }
 }
+# The host's address outlives the VM (a new host image replaces it), so a
+# private hostname pointed at it keeps working. An interface made before the
+# instance gets no public address.
+resource "aws_network_interface" "host" {
+  subnet_id       = local.subnet_id
+  security_groups = [aws_security_group.host.id]
+  tags            = { Name = "hot-${local.config.name}" }
+}
 resource "aws_instance" "host" {
-  ami                         = local.config.host_image
-  instance_type               = module.contract.capacity.aws
-  availability_zone           = local.config.zone
-  subnet_id                   = local.subnet_id
-  associate_public_ip_address = false
-  vpc_security_group_ids      = [aws_security_group.host.id]
-  iam_instance_profile        = aws_iam_instance_profile.host.name
+  ami                  = local.config.host_image
+  instance_type        = module.contract.capacity.aws
+  availability_zone    = local.config.zone
+  iam_instance_profile = aws_iam_instance_profile.host.name
+  primary_network_interface {
+    network_interface_id = aws_network_interface.host.id
+  }
   metadata_options {
     http_tokens                 = "required"
     http_put_response_hop_limit = 2
@@ -297,7 +305,7 @@ resource "aws_volume_attachment" "data" {
   volume_id   = aws_ebs_volume.data.id
   instance_id = aws_instance.host.id
 }
-output "private_ip" { value = aws_instance.host.private_ip }
+output "private_ip" { value = aws_network_interface.host.private_ip }
 output "instance_id" { value = aws_instance.host.id }
 output "retained_data_volume_id" { value = aws_ebs_volume.data.id }
 output "egress_ips" { value = aws_eip.egress[*].public_ip }

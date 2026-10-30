@@ -1191,8 +1191,9 @@ Changes for self-hosting:
       subnet behind NAT and an Elastic IP, an S3 gateway endpoint, the host
       role, a retained encrypted EBS volume, the SSM command document, and an
       ALB only for public endpoints; it creates no key pair or port 22 rule.
-      Missing: a stable private endpoint, since the `private_ip` output
-      changes when the instance is replaced.
+      The host's address is a separate network interface, which a replaced
+      instance attaches again, so `private_ip` stays the same.
+      Qualification remains.
 - [ ] Use `m8i` as the reference instance family, as proven in `hot-cloud`.
       Qualify other nested-virtualization families and regions before listing
       them. `m8i` sets the AWS price floor for the `small` size. Enable nested
@@ -1242,8 +1243,8 @@ Changes for self-hosting:
       `disable_on_destroy = false`, admits 443 only from `client_cidrs` and
       IAP, and adds the service account, retained disk, Pub/Sub commands, and
       a load balancer only for public endpoints; SSH keys, OS Login, and the
-      serial port are off. Missing: a stable private endpoint, since the
-      instance's internal address is not reserved.
+      serial port are off. The host's internal address is reserved, so
+      `private_ip` survives a replaced instance. Qualification remains.
 - [ ] Select a supported nested-virtualization machine family/image and check
       organization policy and regional availability. Run the same real Kata
       qualification as AWS.
