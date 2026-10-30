@@ -10,11 +10,24 @@ variable "installation" {
     # its own group of VMs, on managed data and shared object storage.
     preset = optional(string, "single-machine")
     # Scalable only: instances per role. The scheduler always runs exactly one.
+    # With a maximum above the minimum, workers also scale on the jobs
+    # waiting per host, and task workers scale out on the share of their
+    # slots in use; an idle task host leaves its group after
+    # retire_idle_minutes (0 keeps every task host).
     scaling = optional(object({
-      app         = optional(object({ min = optional(number, 2), max = optional(number, 4) }), {})
-      api         = optional(object({ min = optional(number, 2), max = optional(number, 4) }), {})
-      worker      = optional(object({ min = optional(number, 2), max = optional(number, 2) }), {})
-      task_worker = optional(object({ min = optional(number, 1), max = optional(number, 1) }), {})
+      app = optional(object({ min = optional(number, 2), max = optional(number, 4) }), {})
+      api = optional(object({ min = optional(number, 2), max = optional(number, 4) }), {})
+      worker = optional(object({
+        min              = optional(number, 2)
+        max              = optional(number, 2)
+        waiting_per_host = optional(number, 50)
+      }), {})
+      task_worker = optional(object({
+        min                 = optional(number, 1)
+        max                 = optional(number, 1)
+        slots_target        = optional(number, 70)
+        retire_idle_minutes = optional(number, 30)
+      }), {})
     }), {})
     name       = string
     cloud      = string
@@ -69,12 +82,14 @@ variable "installation" {
       restore_snapshot = optional(string, "")
     }), {})
     # Where infrastructure alerts go, independent of Hot's own email; the
-    # queue backlog that alerts; and an optional monthly budget (in the
-    # billing currency) that emails at 80% spent and 100% forecast. GCP
-    # budgets need the project's billing account.
+    # queue backlog, and the seconds the oldest waiting job or task has
+    # waited, that alert; and an optional monthly budget (in the billing
+    # currency) that emails at 80% spent and 100% forecast. GCP budgets need
+    # the project's billing account.
     monitoring = optional(object({
       alert_emails        = optional(list(string), [])
       queue_backlog_alert = optional(number, 1000)
+      queue_wait_alert    = optional(number, 900)
       monthly_budget      = optional(number, 0)
       billing_account     = optional(string, "")
     }), {})
@@ -144,10 +159,17 @@ variable "installation" {
     error_message = "preset must be single-machine or scalable."
   }
   validation {
-    condition = var.installation.monitoring.queue_backlog_alert >= 1 && var.installation.monitoring.monthly_budget >= 0 && (
+    condition = var.installation.monitoring.queue_backlog_alert >= 1 && var.installation.monitoring.queue_wait_alert >= 60 && var.installation.monitoring.monthly_budget >= 0 && (
       var.installation.monitoring.monthly_budget == 0 || var.installation.cloud == "aws"
     || can(regex("^[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}$", var.installation.monitoring.billing_account)))
-    error_message = "queue_backlog_alert must be at least 1; a monthly_budget on GCP needs billing_account (XXXXXX-XXXXXX-XXXXXX)."
+    error_message = "queue_backlog_alert must be at least 1 and queue_wait_alert at least 60 seconds; a monthly_budget on GCP needs billing_account (XXXXXX-XXXXXX-XXXXXX)."
+  }
+  validation {
+    condition = (var.installation.scaling.worker.waiting_per_host >= 1
+      && var.installation.scaling.task_worker.slots_target >= 10 && var.installation.scaling.task_worker.slots_target <= 100
+      && (var.installation.scaling.task_worker.retire_idle_minutes == 0
+    || (var.installation.scaling.task_worker.retire_idle_minutes >= 5 && var.installation.scaling.task_worker.retire_idle_minutes <= 1440)))
+    error_message = "scaling.worker.waiting_per_host must be at least 1, scaling.task_worker.slots_target 10-100, and retire_idle_minutes 0 or 5-1440."
   }
   validation {
     condition = var.installation.image_registry == "" || can(regex("^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)*$", var.installation.image_registry)) && (

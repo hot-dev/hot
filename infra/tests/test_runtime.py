@@ -292,6 +292,11 @@ class RuntimeContract(unittest.TestCase):
             renderer.render(dict(config["installation"], settings={"HOT_APP_URL": "https://elsewhere.example"}),
                             manifest(), "/data", "/run/hot/secrets")
 
+    def test_the_task_worker_writes_its_slots_where_the_agent_reads_them(self):
+        services = renderer.render(example("aws", "local"), manifest(), "/data", "/run/hot/secrets")["services"]
+        self.assertEqual(services["task-worker"]["environment"]["HOT_TASK_STATUS_FILE"], renderer.TASK_STATUS)
+        self.assertTrue(renderer.TASK_STATUS.startswith("/tmp/"), "the worker's own writable /tmp")
+
     def test_a_stalled_scheduler_is_unhealthy(self):
         services = renderer.render(example("aws", "local"), manifest(), "/data", "/run/hot/secrets")["services"]
         scheduler = services["scheduler"]

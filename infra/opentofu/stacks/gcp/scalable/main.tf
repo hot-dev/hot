@@ -322,8 +322,11 @@ resource "google_compute_instance_group_manager" "scheduler" {
   }
 }
 # App and API follow CPU. Workers and task-workers keep fixed counts unless a
-# maximum above the minimum is set; task-workers then only scale out, since a
-# managed instance group cannot protect an instance that is running tasks.
+# maximum above the minimum is set. Workers then also follow the jobs waiting
+# per host (measured once for the installation by the scheduler's host), and
+# task-workers the share of their slots in use. Task-workers only scale out,
+# since a managed instance group cannot protect an instance that is running
+# tasks; idle task hosts leave the group on their own.
 resource "google_compute_region_autoscaler" "role" {
   for_each = { for role, group in local.roles : role => group if role != "scheduler" && (contains(local.web_roles, role) || group.max > group.min) }
   name     = "${local.tag}-${each.key}"
@@ -337,6 +340,41 @@ resource "google_compute_region_autoscaler" "role" {
     cpu_utilization {
       target = 0.6
     }
+    dynamic "metric" {
+      for_each = each.key == "worker" ? [google_monitoring_metric_descriptor.hot["jobs_waiting"].type] : []
+      content {
+        name                       = metric.value
+        filter                     = "resource.type = \"global\""
+        single_instance_assignment = local.config.scaling.worker.waiting_per_host
+      }
+    }
+    dynamic "metric" {
+      for_each = each.key == "task-worker" ? [google_monitoring_metric_descriptor.hot["task_slots_used_percent"].type] : []
+      content {
+        name   = metric.value
+        target = local.config.scaling.task_worker.slots_target
+        type   = "GAUGE"
+      }
+    }
+  }
+}
+# An idle task host leaves its group (see the agent's retire_if_idle): it
+# reads the group's size and deletes itself from it. Custom role IDs stay
+# reserved for a week after deletion.
+resource "google_project_iam_custom_role" "retire" {
+  count       = local.roles["task-worker"].max > local.roles["task-worker"].min && local.config.scaling.task_worker.retire_idle_minutes > 0 ? 1 : 0
+  role_id     = "hot_${replace(local.config.name, "-", "_")}_retire"
+  title       = "Hot ${local.config.name} task host retirement"
+  permissions = ["compute.instanceGroupManagers.get", "compute.instanceGroupManagers.update"]
+}
+resource "google_project_iam_member" "retire" {
+  count   = length(google_project_iam_custom_role.retire)
+  project = local.config.project
+  role    = google_project_iam_custom_role.retire[0].id
+  member  = "serviceAccount:${google_service_account.role["task-worker"].email}"
+  condition {
+    title      = "${local.tag}-task-worker"
+    expression = "resource.name == \"projects/${local.config.project}/regions/${local.config.region}/instanceGroupManagers/${local.tag}-task-worker\""
   }
 }
 

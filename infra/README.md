@@ -270,12 +270,19 @@ Every 30 seconds the host agent publishes these metrics, to CloudWatch
 | `DataDiskUsedPercent` | The larger of space and inodes used on the data disk |
 | `BackupAgeHours` | Hours since the newest completed snapshot |
 | `CertificateDaysLeft` | Days until the ingress TLS certificate expires (0 if unreadable) |
-| `QueueBacklog` | Jobs waiting or running in Hot's queue |
+| `QueueBacklog` | Jobs and tasks waiting or running in Hot's queue |
 | `QueueDeadLetters` | Jobs dead-lettered after failing every attempt |
 | `NewDeadLetters` | Jobs dead-lettered since the previous measurement |
+| `JobsWaiting`, `JobWaitSeconds` | Jobs no worker has taken yet, and how long the oldest has waited |
+| `TasksWaiting`, `TaskWaitSeconds` | The same for tasks, which task workers take |
+| `TaskSlotsUsedPercent` | On task-worker hosts: the busiest of the task worker's code slots, container slots, and container memory, in use |
 
-Hosts that run the worker measure the queue every 5 minutes with
-`hot queue status`, inside the worker.
+The host that runs the scheduler measures the queue every minute with
+`hot queue status --json`, inside the scheduler: one measurement for the
+installation. On GCP these queue metrics are written for the `global`
+resource (the project), not for an instance, so a group can scale on them.
+The task worker rewrites its slots in use every 15 seconds
+(`task.status-file`), and the agent publishes them with the other metrics.
 
 The stacks alert on them. Set `monitoring.alert_emails`; AWS sends each address
 an SNS confirmation email first. Alerts reach those addresses independently of
@@ -292,6 +299,8 @@ Hot's own email, and both firing and resolving are sent.
 | `backup-stale` | No snapshot for 30 hours, or no backup status | Check the snapshot policy or schedule in the console. |
 | `certificate-expiring` | The ingress certificate expires within 14 days | Put the renewed chain and key in the operator secret, then `restart-service ingress`. |
 | `queue-backlog` | More than `monitoring.queue_backlog_alert` jobs (default 1000) queued for 15 minutes | Workers are not keeping up. Check `services-unhealthy` and the worker's `logs`; then move to a larger size, or on a scalable installation raise `scaling.worker.max` or `scaling.task_worker.max`. |
+| `job-wait` | A job has waited more than `monitoring.queue_wait_alert` seconds (default 900) for 10 minutes | As for `queue-backlog`; a scalable installation at `scaling.worker.max` needs a higher maximum. |
+| `task-wait` | A task has waited more than `monitoring.queue_wait_alert` seconds for 10 minutes | Task capacity is short: check the task-worker's `logs` and `TaskSlotsUsedPercent`, then raise `scaling.task_worker.max` or the size. |
 | `new-dead-letters` | Jobs were dead-lettered since the last measurement | Read the worker's `logs` for the failing jobs' errors. |
 
 Liveness, dependency reachability, and end-to-end readiness are separate
@@ -452,8 +461,8 @@ single machine, with its own role:
 | Role | Group | Scaling (`scaling.<role>`) |
 | --- | --- | --- |
 | App, API | Spread across zones, behind their own load balancer | `min` 2, `max` 4 by default; scale on CPU |
-| Worker | Spread across zones | Fixed at `min` (default 2) unless `max` is higher; then scale on CPU |
-| Task-worker | Spread across zones, on the size's nested-virtualization family | Fixed at `min` (default 1) unless `max` is higher; then only scale out |
+| Worker | Spread across zones | Fixed at `min` (default 2) unless `max` is higher; then scale on CPU and on the jobs waiting per host (`waiting_per_host`, default 50) |
+| Task-worker | Spread across zones, on the size's nested-virtualization family | Fixed at `min` (default 1) unless `max` is higher; then scale out on CPU and on the slots in use (`slots_target`, default 70%), and idle hosts leave (`retire_idle_minutes`, default 30) |
 | Scheduler | One instance, replaced stop-before-start | Always one |
 
 - **Data and storage.** A scalable installation needs managed or existing
@@ -482,6 +491,20 @@ single machine, with its own role:
   image or machine changes replace instances through each group's rolling
   update; the scheduler's group recreates its instance, so two schedulers
   never run.
+- **Queue-driven scaling.** With `max` above `min`:
+  - Workers add hosts when more than `waiting_per_host` jobs wait per worker
+    host, and remove them when the queue empties. The scheduler's host
+    measures the queue every minute.
+  - Task-workers add hosts when their average share of slots in use passes
+    `slots_target`. A group cannot tell which task hosts are running tasks,
+    so it never removes them. Instead, a task host that has run nothing for
+    `retire_idle_minutes` stops its task worker and leaves its group, which
+    shrinks by one. Each host waits up to five minutes longer than the
+    others, so idle hosts leave one at a time, and the group keeps `min`.
+    A task claimed while its host stops goes back to the queue.
+    `retire_idle_minutes = 0` keeps every task host.
+  - On AWS the task-worker role may terminate instances in its own group
+    only. On GCP its service account may read and shrink its own group only.
 - **Hosts** keep only scratch disks; nothing on them outlives the instance.
   On GCP a command reaches one instance of the installation; on AWS it
   reaches every instance.
@@ -490,8 +513,8 @@ single machine, with its own role:
     load balancers.
   - AWS: Auto Scaling groups across two zones, a NAT gateway per zone, and
     Network Load Balancers. App and API groups replace hosts that fail the
-    load balancer's health check, and task-workers are protected from
-    scale-in.
+    load balancer's health check, and task-workers are protected from the
+    group's scale-in (idle ones leave on their own).
   - An existing AWS network needs `network.private_subnet_ids` for the hosts
     and `data_subnet_ids` for the database and cache, each in two or more
     zones, plus `public_subnet_ids` for a public endpoint.

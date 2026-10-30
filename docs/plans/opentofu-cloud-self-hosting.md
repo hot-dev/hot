@@ -1658,17 +1658,32 @@ release of the three presets.
 - [ ] Configure ingress behavior, readiness, graceful shutdown, connection
       budgets, replica bounds, and rolling deployments per service, following
       the release order above.
-- [ ] Publish queue backlog, oldest-message age, and task-slot metrics for
+- [x] Publish queue backlog, oldest-message age, and task-slot metrics for
       autoscaling.
-      Worker hosts publish the queue backlog, dead-lettered jobs, and new
-      dead letters every 5 minutes, and the stacks alert on a sustained
-      backlog and on new dead letters. Oldest-message age and task slots
-      need Hot to report them.
+      `hot queue status --json` reports each queue's waiting and running
+      items and its oldest item's wait. It counts from the consumer group:
+      acknowledged entries stay in a stream until it is trimmed, so the
+      stream's length overcounts. With `task.status-file`, the task worker
+      writes its code and container slots in use, and its container memory.
+      The scheduler's host publishes the queue backlog, dead letters, and
+      jobs and tasks waiting, with the oldest one's wait, every minute.
+      Task-worker hosts publish their slots in use. The stacks alert on a
+      sustained backlog, long waits, and new dead letters.
 - [ ] Qualify Valkey failover with queue reconciliation, and PostgreSQL
       failover with scheduler lock loss.
 - [ ] Scale queue workers using measured queue demand, age/lag, and capacity.
       Scale task hosts using queued/running demand and available slots; drain
       hosts before scale-in and preserve durable task recovery.
+      Implemented:
+      - Workers scale on jobs waiting per host (`scaling.worker.waiting_per_host`)
+        as well as CPU: target tracking on AWS, a per-group metric on GCP.
+      - Task-workers scale out on their average slots in use
+        (`slots_target`) as well as CPU.
+      - Groups never remove task hosts. A task host idle for
+        `retire_idle_minutes` stops its task worker, then leaves its group,
+        which shrinks by one.
+
+      Qualification on each cloud remains.
 - [ ] Keep one scheduler instance with stop-before-start replacement
       (`minimumHealthyPercent=0`, `maximumPercent=100` on ECS), lock-liveness
       enforcement, health monitoring, and tested restart/recovery behavior.

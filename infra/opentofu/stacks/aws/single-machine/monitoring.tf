@@ -98,6 +98,16 @@ locals {
       period      = 300, periods = 1, missing = "notBreaching",
       description = "Jobs failed every attempt and were dead-lettered; the worker's logs say why."
     }
+    job-wait = {
+      metric      = "JobWaitSeconds", statistic = "Minimum", comparison = "GreaterThanThreshold", threshold = local.config.monitoring.queue_wait_alert,
+      period      = 300, periods = 2, missing = "notBreaching",
+      description = "A job has waited longer than monitoring.queue_wait_alert seconds for a worker, for 10 minutes: workers are not keeping up."
+    }
+    task-wait = {
+      metric      = "TaskWaitSeconds", statistic = "Minimum", comparison = "GreaterThanThreshold", threshold = local.config.monitoring.queue_wait_alert,
+      period      = 300, periods = 2, missing = "notBreaching",
+      description = "A task has waited longer than monitoring.queue_wait_alert seconds for a task worker, for 10 minutes: task capacity is short."
+    }
   }
 }
 resource "aws_cloudwatch_metric_alarm" "hot" {

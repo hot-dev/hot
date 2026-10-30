@@ -367,7 +367,7 @@ run "backups_and_alerts" {
     error_message = "Snapshots run daily at the chosen hour and are kept for the chosen days."
   }
   assert {
-    condition     = length(aws_sns_topic_subscription.alerts) == 2 && length(aws_cloudwatch_metric_alarm.hot) == 10
+    condition     = length(aws_sns_topic_subscription.alerts) == 2 && length(aws_cloudwatch_metric_alarm.hot) == 12
     error_message = "Every alert email is subscribed and every critical signal has an alarm."
   }
   assert {

@@ -92,10 +92,21 @@ GCP_METRIC_NAMES = {"AgentHeartbeat": "agent_heartbeat", "UnhealthyServices": "u
                     "Ready": "ready", "DataDiskUsedPercent": "data_disk_used_percent",
                     "BackupAgeHours": "backup_age_hours", "CertificateDaysLeft": "certificate_days_left",
                     "QueueBacklog": "queue_backlog", "QueueDeadLetters": "queue_dead_letters",
-                    "NewDeadLetters": "new_dead_letters"}
-# How often a worker host measures Hot's queue: hot queue status starts a
+                    "NewDeadLetters": "new_dead_letters", "JobsWaiting": "jobs_waiting",
+                    "JobWaitSeconds": "job_wait_seconds", "TasksWaiting": "tasks_waiting",
+                    "TaskWaitSeconds": "task_wait_seconds", "TaskSlotsUsedPercent": "task_slots_used_percent"}
+# Installation-wide measurements of Hot's queue, published by the one host
+# that runs the scheduler. On GCP they are written for the project rather
+# than an instance, so autoscalers can use them as per-group metrics.
+QUEUE_METRICS = {"QueueBacklog", "QueueDeadLetters", "NewDeadLetters", "JobsWaiting", "JobWaitSeconds",
+                 "TasksWaiting", "TaskWaitSeconds"}
+# How often that host measures the queue: hot queue status starts a
 # process, so not every cycle.
-QUEUE_MEASURE_SECONDS = 300
+QUEUE_MEASURE_SECONDS = 60
+TASK_QUEUE = "{hot:task}"
+# The task worker rewrites its status file every 15 seconds; an older one
+# is a stopped worker's.
+TASK_STATUS_STALE_SECONDS = 120
 
 
 class AgentError(Exception):
@@ -214,6 +225,21 @@ class Aws:
                            prefix + "Dimensions.member.1.Name": "Installation",
                            prefix + "Dimensions.member.1.Value": installation})
         self.query("monitoring", "2010-08-01", params)
+
+    def group_size(self, group):
+        """The Auto Scaling group's desired capacity."""
+        root = self.query("autoscaling", "2011-01-01", {
+            "Action": "DescribeAutoScalingGroups", "AutoScalingGroupNames.member.1": group})
+        sizes = [e.text for e in root.iter() if e.tag.endswith("DesiredCapacity") and e.text]
+        if not sizes:
+            raise AgentError(f"Auto Scaling group {group} was not found")
+        return int(sizes[0])
+
+    def leave_group(self, group):
+        """Terminate this instance, shrinking its Auto Scaling group by one."""
+        self.query("autoscaling", "2011-01-01", {
+            "Action": "TerminateInstanceInAutoScalingGroup", "InstanceId": self.instance_name(),
+            "ShouldDecrementDesiredCapacity": "true"})
 
     def latest_snapshot(self, volume_id, installation):
         """When the newest completed snapshot of the data volume started."""
@@ -384,14 +410,31 @@ class Gcp:
                 "partialSuccess": True, "entries": [json.loads(text) for _, text in chunk]})
 
     def put_metrics(self, installation, metrics):
-        resource = self.instance()
+        instance = self.instance()
+        project = {"type": "global", "labels": {"project_id": self.project}}
         now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         # Per-installation metric types: descriptors are project-wide, and
         # each installation's stack owns its own.
         series = [{"metric": {"type": f"{GCP_METRIC_PREFIX}{installation}/{GCP_METRIC_NAMES[name]}"},
-                   "resource": resource, "points": [{"interval": {"endTime": now}, "value": {"doubleValue": float(value)}}]}
+                   "resource": project if name in QUEUE_METRICS else instance,
+                   "points": [{"interval": {"endTime": now}, "value": {"doubleValue": float(value)}}]}
                   for name, (value, _) in sorted(metrics.items())]
         self.call("POST", f"https://monitoring.googleapis.com/v3/projects/{self.project}/timeSeries", {"timeSeries": series})
+
+    def group_url(self, group):
+        """A regional managed instance group in the installation's region."""
+        region = self.zone.rsplit("-", 1)[0]
+        return f"https://compute.googleapis.com/compute/v1/projects/{self.project}/regions/{region}/instanceGroupManagers/{group}"
+
+    def group_size(self, group):
+        """The managed instance group's target size."""
+        return int(self.call("GET", self.group_url(group))["targetSize"])
+
+    def leave_group(self, group):
+        """Delete this instance from its group, which shrinks by one."""
+        _, zone = http("GET", self.METADATA + "/instance/zone", headers={"Metadata-Flavor": "Google"})
+        instance = f"zones/{zone.decode().rsplit('/', 1)[-1]}/instances/{self.instance_name()}"
+        self.call("POST", self.group_url(group) + "/deleteInstances", {"instances": [instance]})
 
     def latest_snapshot(self, disk_id, installation):
         """When the newest ready snapshot of the data disk was created. The
@@ -1092,14 +1135,27 @@ class Agent:
         self.compose(bundle, "stop", "--timeout", "120", "worker", "task-worker")
         return deadletter
 
-    def queue_backlog(self, bundle):
-        """(pending + in progress, dead-lettered) items in Hot's queue,
-        from `hot queue status` in the running worker."""
-        output = self.compose(bundle, "exec", "-T", "worker", "/usr/bin/hot", "queue", "status").stdout
+    def queue_status(self, bundle, service="worker"):
+        """Hot's queue from `hot queue status` in a running service: per
+        queue, what waits (pending), what runs (processing), what was
+        dead-lettered, and how long the oldest waiting item has waited."""
+        command = ("exec", "-T", service, "/usr/bin/hot", "queue", "status")
+        try:
+            return json.loads(self.compose(bundle, *command, "--json").stdout)
+        except (subprocess.CalledProcessError, ValueError):
+            pass
+        # Releases before --json: only the totals, from the text report.
+        output = self.compose(bundle, *command).stdout
         counts = dict(re.findall(r"Total (pending|processing|deadletter):\s+(-?\d+)", output))
         if {"pending", "processing"} - set(counts):
-            raise AgentError("Could not read the queue's status from the worker")
-        return int(counts["pending"]) + int(counts["processing"]), int(counts.get("deadletter", 0))
+            raise AgentError(f"Could not read the queue's status from the {service}")
+        return {"queues": [], "total_pending": int(counts["pending"]),
+                "total_processing": int(counts["processing"]), "total_deadletter": int(counts.get("deadletter", 0))}
+
+    def queue_backlog(self, bundle):
+        """(pending + in progress, dead-lettered) items in Hot's queue."""
+        status = self.queue_status(bundle)
+        return status["total_pending"] + status["total_processing"], status["total_deadletter"]
 
     def restore_moved_database(self, bundle, dump):
         """Restore the local database's dump into the new one, which must not
@@ -1289,21 +1345,82 @@ class Agent:
 
     def queue_metrics(self, bundle, now):
         """Work waiting or in progress in Hot's queue, dead-lettered work, and
-        how much of that is new since the last measurement, measured at most
-        every QUEUE_MEASURE_SECONDS. These are the signals for queue alerts
-        and, later, worker scaling."""
+        how much of that is new since the last measurement; then, apart for
+        workers' jobs and task workers' tasks, how many wait and how long the
+        oldest has waited. Measured at most every QUEUE_MEASURE_SECONDS, for
+        the queue alerts and for scaling workers."""
         last = getattr(self, "_queue_measured", None)
         if last and (now - last[0]).total_seconds() < QUEUE_MEASURE_SECONDS:
             return last[1]
         try:
-            backlog, dead = self.queue_backlog(bundle)
+            status = self.queue_status(bundle, "scheduler")
         except (AgentError, subprocess.CalledProcessError):
             return {}
+        dead = status["total_deadletter"]
         added = max(0, dead - last[1]["QueueDeadLetters"][0]) if last else 0
-        measured = {"QueueBacklog": (backlog, "Count"), "QueueDeadLetters": (dead, "Count"),
-                    "NewDeadLetters": (added, "Count")}
+        measured = {"QueueBacklog": (status["total_pending"] + status["total_processing"], "Count"),
+                    "QueueDeadLetters": (dead, "Count"), "NewDeadLetters": (added, "Count")}
+        if status["queues"]:
+            for kind, queues in (("Job", [q for q in status["queues"] if q["name"] != TASK_QUEUE]),
+                                 ("Task", [q for q in status["queues"] if q["name"] == TASK_QUEUE])):
+                measured[kind + "sWaiting"] = (sum(q["pending"] for q in queues), "Count")
+                measured[kind + "WaitSeconds"] = (max((q["oldest_pending_secs"] or 0 for q in queues), default=0),
+                                                  "Seconds")
         self._queue_measured = (now, measured)
         return measured
+
+    def task_slots_used(self, bundle, now):
+        """How full the task worker is, in percent: the busiest of its code
+        slots, container slots, and container memory, from the status file
+        it rewrites. None when the file is missing or stale."""
+        try:
+            status = json.loads(self.compose(bundle, "exec", "-T", "task-worker", "cat", render.TASK_STATUS).stdout)
+            if now.timestamp() - status["time"] > TASK_STATUS_STALE_SECONDS:
+                return None
+            shares = [pool["busy"] / pool["slots"] for pool in (status["code"], status["containers"]) if pool["slots"]]
+            if status.get("memory_mb"):
+                shares.append(status["memory_used_mb"] / status["memory_mb"])
+        except (subprocess.CalledProcessError, ValueError, KeyError, TypeError):
+            return None
+        return round(100 * max(shares, default=0), 1)
+
+    def retire_if_idle(self, metrics, now):
+        """In a scalable installation, a task host that has run nothing for
+        scaling.task_worker.retire_idle_minutes leaves its group, which
+        shrinks by one. Groups only scale task hosts out, since they cannot
+        tell which hosts are running tasks; this is how they shrink. The
+        task worker stops first, so tasks claimed in the meantime go back
+        to the queue. The group keeps its minimum, and each host waits up to
+        five minutes longer than the others, by its name, so idle hosts do
+        not all leave at once."""
+        scaling = self.config.get("scaling", {}).get("task_worker", {})
+        minutes = scaling.get("retire_idle_minutes", 0)
+        if not (render.scalable(self.config) and "task-worker" in self.roles() and minutes > 0
+                and scaling.get("max", 1) > scaling.get("min", 1)):
+            return
+        used = metrics.get("TaskSlotsUsedPercent", (None,))[0]
+        if used is None or used > 0:
+            self._idle_since = None
+            return
+        self._idle_since = getattr(self, "_idle_since", None) or now
+        stagger = int(hashlib.sha256(self.instance_name().encode()).hexdigest(), 16) % 300
+        if (now - self._idle_since).total_seconds() < minutes * 60 + stagger:
+            return
+        self._idle_since = now
+        group = self.config["instance_group"]
+        bundle = self.releases / self.state()["release"] / "bundle"
+        try:
+            if self.cloud.group_size(group) <= scaling["min"]:
+                return
+            self.compose(bundle, "stop", "--timeout", "120", "task-worker")
+            try:
+                self.report(state="retiring", reason=f"No tasks for {minutes} minutes; leaving {group}")
+                self.cloud.leave_group(group)
+            except (AgentError, OSError):
+                self.compose(bundle, "up", "-d", "task-worker")
+                raise
+        except (AgentError, OSError, subprocess.CalledProcessError) as error:
+            print(json.dumps({"retire_failed": describe(error)}), file=sys.stderr, flush=True)
 
     def observe(self, probe=None, now=None):
         """The health metrics the stacks alarm on. Ones that need a deployed
@@ -1337,8 +1454,12 @@ class Agent:
                 days = 0  # unreadable: alarm rather than pass
             if days is not None:
                 metrics["CertificateDaysLeft"] = (days, "None")
-            if "worker" in self.roles() and "worker" in healthy:
+            if "scheduler" in self.roles() and "scheduler" in healthy:
                 metrics.update(self.queue_metrics(self.releases / release / "bundle", now))
+            if "task-worker" in self.roles() and "task-worker" in healthy:
+                used = self.task_slots_used(self.releases / release / "bundle", now)
+                if used is not None:
+                    metrics["TaskSlotsUsedPercent"] = (used, "Percent")
         usage = os.statvfs(self.data_root)
         used = max(1 - usage.f_bavail / max(usage.f_blocks, 1), 1 - usage.f_favail / max(usage.f_files, 1))
         metrics["DataDiskUsedPercent"] = (round(100 * used, 1), "Percent")
@@ -1359,13 +1480,18 @@ class Agent:
             metrics["BackupAgeHours"] = (round((now - latest).total_seconds() / 3600, 2), "None")
         return metrics
 
-    def monitor(self):
-        """Publish health metrics. Failures are logged, never raised: the
-        missing heartbeat is what alarms."""
+    def monitor(self, now=None):
+        """Publish health metrics, then retire this host if it is an idle
+        task host. Failures are logged, never raised: the missing heartbeat
+        is what alarms."""
+        now = now or datetime.datetime.now(datetime.timezone.utc)
         try:
-            self.cloud.put_metrics(self.config["name"], self.observe())
+            metrics = self.observe(now=now)
+            self.cloud.put_metrics(self.config["name"], metrics)
         except (AgentError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
             print(json.dumps({"monitoring_failed": describe(error)}), file=sys.stderr, flush=True)
+            return
+        self.retire_if_idle(metrics, now)
 
     # -- host journal -----------------------------------------------------------
 

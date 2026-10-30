@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 import urllib.parse
+import xml.etree.ElementTree as ElementTree
 
 ROOT = Path(__file__).resolve().parents[1]
 os.environ["HOT_AGENT_RUNTIME"] = str(ROOT / "runtime")
@@ -73,6 +74,17 @@ class FakeCloud:
         return []
 
 
+def queue_status(queues):
+    """`hot queue status --json` for {name: (pending, processing, deadletter,
+    oldest_pending_secs)}."""
+    rows = [{"name": name, "pending": p, "processing": r, "deadletter": d, "oldest_pending_secs": w}
+            for name, (p, r, d, w) in queues.items()]
+    return {"queues": rows, "total_pending": sum(r["pending"] for r in rows),
+            "total_processing": sum(r["processing"] for r in rows),
+            "total_deadletter": sum(r["deadletter"] for r in rows),
+            "oldest_pending_secs": max((r["oldest_pending_secs"] or 0 for r in rows), default=None), "type": "redis"}
+
+
 class Recorder:
     def __init__(self):
         self.commands = []
@@ -81,6 +93,9 @@ class Recorder:
         self.enddate = "notAfter=Jan 30 12:00:00 2027 GMT\n"
         self.journal = {"agent": [], "host": []}
         self.queue = []
+        # A release whose hot has no `queue status --json`.
+        self.text_queue_status = False
+        self.task_status = None
 
     def __call__(self, command, **kwargs):
         self.commands.append(command)
@@ -93,11 +108,23 @@ class Recorder:
         if "move-storage" in command:
             return subprocess.CompletedProcess(command, 0, stdout='{"kind":"file","status":"moved"}\n')
         if "queue" in command:
+            if "--json" in command and self.text_queue_status:
+                raise subprocess.CalledProcessError(2, command, stderr="unexpected argument '--json'")
             queue = self.queue or [(0, 0, 0)]
-            pending, processing, deadletter = queue.pop(0) if len(queue) > 1 else queue[0]
+            entry = queue.pop(0) if len(queue) > 1 else queue[0]
+            if isinstance(entry, dict):
+                return subprocess.CompletedProcess(command, 0, stdout=json.dumps(entry))
+            pending, processing, deadletter = entry
+            if "--json" in command:
+                return subprocess.CompletedProcess(command, 0, stdout=json.dumps(queue_status(
+                    {"{hot:event}": (pending, processing, deadletter, 30 if pending else None)})))
             return subprocess.CompletedProcess(command, 0, stdout=(
                 "Queue Status:\n  Backend: Redis (redis://hot:***@valkey:6379)\n\nSummary:\n"
                 f"  Total pending:    {pending}\n  Total processing: {processing}\n  Total deadletter: {deadletter}\n"))
+        if command[-1] == render.TASK_STATUS:
+            if self.task_status is None:
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(self.task_status))
         stdout = (self.ps if "ps" in command else self.logs if "logs" in command
                   else self.enddate if command[0] == "openssl" else "")
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -433,6 +460,58 @@ class Scalable(AgentHarness):
         if url.startswith("https://truststore.pki.rds.amazonaws.com/"):
             return 200, b"-----BEGIN CERTIFICATE-----\nRDS\n-----END CERTIFICATE-----\n"
         return super().fake_http(method, url, body, headers, timeout)
+
+    def task_host(self, idle_minutes=30, size=3, minimum=1):
+        self.host(["task-worker"])
+        self.config.update(instance_group="hot-example-task-worker", scaling={
+            "task_worker": {"min": minimum, "max": 5, "retire_idle_minutes": idle_minutes}})
+        self.cloud.group = size
+        self.cloud.left = []
+        self.cloud.group_size = lambda group: self.cloud.group
+        self.cloud.leave_group = self.cloud.left.append
+        self.agent._instance_name = "i-0123456789abcdef0"
+        self.agent.reconcile()
+        self.run.ps = json.dumps({"Service": "task-worker", "State": "running", "Health": ""})
+        self.run.commands.clear()
+
+    def idle_for(self, minutes, busy=0):
+        start = datetime.datetime(2026, 10, 29, 12, 0, tzinfo=datetime.timezone.utc)
+        for minute in range(0, minutes + 1):
+            now = start + datetime.timedelta(minutes=minute)
+            self.run.task_status = {"time": now.timestamp(), "code": {"slots": 500, "busy": busy},
+                                    "containers": {"slots": 8, "busy": 0}, "memory_mb": 8192, "memory_used_mb": 0}
+            self.agent.monitor(now=now)
+
+    def test_an_idle_task_host_leaves_its_group(self):
+        self.task_host()
+        self.idle_for(20)
+        self.assertEqual(self.cloud.left, [], "not idle long enough")
+        self.idle_for(36)
+        self.assertEqual(self.cloud.left, ["hot-example-task-worker"])
+        stop = next(i for i, c in enumerate(self.run.commands) if c[-1] == "task-worker" and "stop" in c)
+        self.assertEqual(self.run.commands[stop][-3:], ["--timeout", "120", "task-worker"])
+        self.assertEqual(self.cloud.statuses[-1]["state"], "retiring")
+
+    def test_a_task_host_stays_while_busy_or_at_the_minimum(self):
+        self.task_host()
+        self.idle_for(60, busy=1)
+        self.assertEqual(self.cloud.left, [])
+        self.task_host(size=1)
+        self.idle_for(60)
+        self.assertEqual(self.cloud.left, [], "the group keeps its minimum")
+        self.task_host(idle_minutes=0)
+        self.idle_for(60)
+        self.assertEqual(self.cloud.left, [], "retire_idle_minutes = 0 turns retirement off")
+
+    def test_a_failed_departure_restarts_the_task_worker(self):
+        self.task_host()
+        def refused(group):
+            raise agent_module.AgentError("TerminateInstanceInAutoScalingGroup failed: AccessDenied")
+        self.cloud.leave_group = refused
+        self.idle_for(36)
+        calls = [" ".join(c) for c in self.run.commands]
+        stop = max(i for i, c in enumerate(calls) if c.endswith("stop --timeout 120 task-worker"))
+        self.assertTrue(any(c.endswith("up -d task-worker") for c in calls[stop:]), calls[stop:])
 
     def test_an_app_host_deploys_only_its_role(self):
         self.host(["app"])
@@ -917,7 +996,7 @@ class Monitoring(AgentHarness):
         self.assertEqual({k: v[0] for k, v in metrics.items() if k != "DataDiskUsedPercent"}, {
             "AgentHeartbeat": 1, "UnhealthyServices": 0, "SchedulerRunning": 1, "DependenciesReachable": 1,
             "Ready": 1, "BackupAgeHours": 5, "CertificateDaysLeft": 93, "QueueBacklog": 0, "QueueDeadLetters": 0,
-            "NewDeadLetters": 0})
+            "NewDeadLetters": 0, "JobsWaiting": 0, "JobWaitSeconds": 0, "TasksWaiting": 0, "TaskWaitSeconds": 0})
         self.assertTrue(0 <= metrics["DataDiskUsedPercent"][0] <= 100)
 
     def test_failures_show_up_in_the_metrics(self):
@@ -929,24 +1008,59 @@ class Monitoring(AgentHarness):
         self.assertEqual(metrics["DependenciesReachable"][0], 0)
         self.assertEqual(metrics["Ready"][0], 0)
 
-    def test_worker_hosts_measure_the_queue_every_few_minutes(self):
+    def test_the_scheduler_host_measures_the_queue_every_minute(self):
         self.agent.reconcile()
         self.ps()
         self.run.queue = [(40, 2, 1)]
         metrics = self.agent.observe(probe=lambda host, path: 200, now=self.NOW)
         self.assertEqual((metrics["QueueBacklog"][0], metrics["QueueDeadLetters"][0]), (42, 1))
+        self.assertIn("exec -T scheduler /usr/bin/hot queue status --json", self.run.compose_calls())
         self.assertEqual(metrics["NewDeadLetters"][0], 0, "the first measurement has nothing to compare with")
         self.run.queue = [(0, 0, 4)]
-        later = self.agent.observe(probe=lambda host, path: 200, now=self.NOW + datetime.timedelta(minutes=1))
-        self.assertEqual(later["QueueBacklog"][0], 42, "not measured again within five minutes")
-        later = self.agent.observe(probe=lambda host, path: 200, now=self.NOW + datetime.timedelta(minutes=6))
+        later = self.agent.observe(probe=lambda host, path: 200, now=self.NOW + datetime.timedelta(seconds=30))
+        self.assertEqual(later["QueueBacklog"][0], 42, "not measured again within a minute")
+        later = self.agent.observe(probe=lambda host, path: 200, now=self.NOW + datetime.timedelta(minutes=2))
         self.assertEqual((later["QueueBacklog"][0], later["NewDeadLetters"][0]), (0, 3))
         self.run.queue = [(0, 0, 0)]
-        later = self.agent.observe(probe=lambda host, path: 200, now=self.NOW + datetime.timedelta(minutes=12))
+        later = self.agent.observe(probe=lambda host, path: 200, now=self.NOW + datetime.timedelta(minutes=4))
         self.assertEqual(later["NewDeadLetters"][0], 0, "clearing dead letters is not new ones")
-        self.ps(worker=("exited", ""))
+        self.ps(scheduler=("exited", ""))
         self.agent._queue_measured = None
         self.assertNotIn("QueueBacklog", self.agent.observe(probe=lambda host, path: 200, now=self.NOW))
+
+    def test_jobs_and_tasks_are_measured_apart(self):
+        self.agent.reconcile()
+        self.ps()
+        self.run.queue = [queue_status({"{hot:event}": (12, 3, 0, 40), "{hot:email}": (2, 0, 1, 95),
+                                        "{hot:task}": (7, 4, 0, 300), "{hot:deploy}": (0, 0, 0, None)})]
+        metrics = self.agent.observe(probe=lambda host, path: 200, now=self.NOW)
+        self.assertEqual({k: metrics[k][0] for k in ("QueueBacklog", "JobsWaiting", "JobWaitSeconds",
+                                                     "TasksWaiting", "TaskWaitSeconds")},
+                         {"QueueBacklog": 28, "JobsWaiting": 14, "JobWaitSeconds": 95,
+                          "TasksWaiting": 7, "TaskWaitSeconds": 300})
+
+    def test_a_release_without_json_queue_status_reports_totals(self):
+        self.agent.reconcile()
+        self.ps()
+        self.run.text_queue_status = True
+        self.run.queue = [(5, 1, 0)]
+        metrics = self.agent.observe(probe=lambda host, path: 200, now=self.NOW)
+        self.assertEqual(metrics["QueueBacklog"][0], 6)
+        self.assertNotIn("JobsWaiting", metrics)
+
+    def test_the_task_worker_reports_its_busiest_resource(self):
+        self.agent.reconcile()
+        self.ps()
+        now = self.NOW.timestamp()
+        self.run.task_status = {"time": now - 10, "code": {"slots": 500, "busy": 50},
+                                "containers": {"slots": 8, "busy": 6}, "memory_mb": 8192, "memory_used_mb": 4096}
+        metrics = self.agent.observe(probe=lambda host, path: 200, now=self.NOW)
+        self.assertEqual(metrics["TaskSlotsUsedPercent"], (75.0, "Percent"))
+        self.run.task_status["time"] = now - 600
+        stale = self.agent.observe(probe=lambda host, path: 200, now=self.NOW)
+        self.assertNotIn("TaskSlotsUsedPercent", stale, "a stopped worker's file is not current")
+        self.run.task_status = None
+        self.assertNotIn("TaskSlotsUsedPercent", self.agent.observe(probe=lambda host, path: 200, now=self.NOW))
 
     def test_an_unknown_backup_status_is_left_out(self):
         def denied(volume, installation):
@@ -1144,6 +1258,46 @@ class Registries(unittest.TestCase):
         self.assertEqual(password, "the-password")
         self.assertEqual(call.call_args.args[0], "ecr", "ECR signs as ecr at the api.ecr endpoint")
         self.assertEqual(call.call_args.kwargs, {"endpoint": "api.ecr"})
+
+
+class Groups(unittest.TestCase):
+    def test_aws_reads_the_desired_capacity_and_terminates_itself(self):
+        xml = ElementTree.fromstring(
+            "<R xmlns='http://autoscaling.amazonaws.com/doc/2011-01-01/'><DesiredCapacity>3</DesiredCapacity></R>")
+        aws = agent_module.Aws("us-east-1")
+        with mock.patch.object(agent_module.Aws, "query", return_value=xml) as query, \
+                mock.patch.object(agent_module.Aws, "instance_name", return_value="i-0123"):
+            self.assertEqual(aws.group_size("hot-example-task-worker"), 3)
+            aws.leave_group("hot-example-task-worker")
+        self.assertEqual(query.call_args_list[0].args[2]["AutoScalingGroupNames.member.1"], "hot-example-task-worker")
+        self.assertEqual(query.call_args_list[1].args[2], {
+            "Action": "TerminateInstanceInAutoScalingGroup", "InstanceId": "i-0123",
+            "ShouldDecrementDesiredCapacity": "true"})
+
+    def test_gcp_deletes_itself_from_its_regional_group(self):
+        gcp = agent_module.Gcp("acme", zone="us-central1-a")
+        calls = []
+        def call(method, url, payload=None, allow=()):
+            calls.append((method, url, payload))
+            return {"targetSize": 4}
+        gcp.call = call
+        gcp.instance_name = lambda: "hot-example-tsk-x1z2"
+        with mock.patch.object(agent_module, "http", return_value=(200, b"projects/123/zones/us-central1-b")):
+            self.assertEqual(gcp.group_size("hot-example-task-worker"), 4)
+            gcp.leave_group("hot-example-task-worker")
+        base = "https://compute.googleapis.com/compute/v1/projects/acme/regions/us-central1/instanceGroupManagers/hot-example-task-worker"
+        self.assertEqual(calls[0][:2], ("GET", base))
+        self.assertEqual(calls[1], ("POST", base + "/deleteInstances",
+                                    {"instances": ["zones/us-central1-b/instances/hot-example-tsk-x1z2"]}))
+
+    def test_gcp_queue_metrics_are_written_for_the_project(self):
+        gcp = agent_module.Gcp("acme", zone="us-central1-a")
+        gcp.instance_id = "42"
+        sent = []
+        gcp.call = lambda method, url, payload=None, allow=(): sent.append(payload)
+        gcp.put_metrics("hot-example", {"JobsWaiting": (3, "Count"), "TaskSlotsUsedPercent": (50, "Percent")})
+        resources = {s["metric"]["type"].rsplit("/", 1)[-1]: s["resource"]["type"] for s in sent[0]["timeSeries"]}
+        self.assertEqual(resources, {"jobs_waiting": "global", "task_slots_used_percent": "gce_instance"})
 
 
 class Redaction(unittest.TestCase):

@@ -506,6 +506,49 @@ run "scalable_roles_follow_the_size" {
     condition     = output.roles.groups["app"].aws == "m7i.xlarge" && output.roles.groups["task-worker"].aws == "m8i.xlarge" && output.roles.groups["scheduler"].max == 1 && output.roles.groups["app"].min == 2
     error_message = "Roles use general-purpose machines, task-workers the nested family, and the scheduler exactly one instance."
   }
+  assert {
+    condition = (output.roles.groups["worker"].waiting_per_host == 50 && output.roles.groups["task-worker"].slots_target == 70
+    && output.roles.groups["task-worker"].retire_idle_minutes == 30 && output.configuration.monitoring.queue_wait_alert == 900)
+    error_message = "Scaling and wait alerts have defaults."
+  }
+}
+
+run "scaling_targets_are_bounded" {
+  command = plan
+  variables {
+    installation = {
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "scaling" : { "task_worker" : { "min" : 1, "max" : 3, "slots_target" : 5, "retire_idle_minutes" : 2 } },
+      "data" : { "postgres" : { "mode" : "managed" }, "valkey" : { "mode" : "managed" } },
+      "storage" : { "build" : { "backend" : "s3", "bucket" : "b", "region" : "us-east-1", "prefix" : "builds" }, "file" : { "backend" : "s3", "bucket" : "b", "region" : "us-east-1", "prefix" : "files" } }
+    }
+  }
+  expect_failures = [var.installation]
+}
+
+run "the_queue_wait_alert_is_at_least_a_minute" {
+  command = plan
+  variables {
+    installation = {
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "monitoring" : { "queue_wait_alert" : 30 },
+      "storage" : { "build" : { "backend" : "local" }, "file" : { "backend" : "local" } }
+    }
+  }
+  expect_failures = [var.installation]
 }
 
 run "an_ecr_mirror_is_parsed_for_the_host_role" {

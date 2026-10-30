@@ -7,17 +7,26 @@ locals {
   # deleting one deletes its data, so installations never share one.
   metric_prefix = "custom.googleapis.com/hot/${local.config.name}/"
   metrics = {
-    agent_heartbeat        = { unit = "1", name = "Agent heartbeat" }
-    unhealthy_services     = { unit = "1", name = "Unhealthy services" }
-    scheduler_running      = { unit = "1", name = "Scheduler running" }
-    dependencies_reachable = { unit = "1", name = "Dependencies reachable" }
-    ready                  = { unit = "1", name = "App and API ready" }
-    data_disk_used_percent = { unit = "%", name = "Scratch disk used" }
-    certificate_days_left  = { unit = "d", name = "Certificate days left" }
-    queue_backlog          = { unit = "1", name = "Queue backlog" }
-    queue_dead_letters     = { unit = "1", name = "Dead-lettered jobs" }
-    new_dead_letters       = { unit = "1", name = "New dead-lettered jobs" }
+    agent_heartbeat         = { unit = "1", name = "Agent heartbeat" }
+    unhealthy_services      = { unit = "1", name = "Unhealthy services" }
+    scheduler_running       = { unit = "1", name = "Scheduler running" }
+    dependencies_reachable  = { unit = "1", name = "Dependencies reachable" }
+    ready                   = { unit = "1", name = "App and API ready" }
+    data_disk_used_percent  = { unit = "%", name = "Scratch disk used" }
+    certificate_days_left   = { unit = "d", name = "Certificate days left" }
+    queue_backlog           = { unit = "1", name = "Queue backlog" }
+    queue_dead_letters      = { unit = "1", name = "Dead-lettered jobs" }
+    new_dead_letters        = { unit = "1", name = "New dead-lettered jobs" }
+    jobs_waiting            = { unit = "1", name = "Jobs waiting" }
+    job_wait_seconds        = { unit = "s", name = "Oldest job's wait" }
+    tasks_waiting           = { unit = "1", name = "Tasks waiting" }
+    task_wait_seconds       = { unit = "s", name = "Oldest task's wait" }
+    task_slots_used_percent = { unit = "%", name = "Task slots used" }
   }
+  # Installation-wide queue measurements, written for the project by the
+  # scheduler's host rather than per instance (see the agent's
+  # QUEUE_METRICS), so the worker group can scale on them.
+  project_metrics = ["queue_backlog", "queue_dead_letters", "new_dead_letters", "jobs_waiting", "job_wait_seconds", "tasks_waiting", "task_wait_seconds"]
   alerts = {
     services-unhealthy = {
       metric      = "unhealthy_services", comparison = "COMPARISON_GT", threshold = 0, aligner = "ALIGN_MIN", duration = "900s",
@@ -46,6 +55,14 @@ locals {
     new-dead-letters = {
       metric      = "new_dead_letters", comparison = "COMPARISON_GT", threshold = 0, aligner = "ALIGN_MAX", duration = "0s",
       description = "Jobs failed every attempt and were dead-lettered; the worker's logs say why."
+    }
+    job-wait = {
+      metric      = "job_wait_seconds", comparison = "COMPARISON_GT", threshold = local.config.monitoring.queue_wait_alert, aligner = "ALIGN_MIN", duration = "600s",
+      description = "A job has waited longer than monitoring.queue_wait_alert seconds for a worker, for 10 minutes: workers are not keeping up."
+    }
+    task-wait = {
+      metric      = "task_wait_seconds", comparison = "COMPARISON_GT", threshold = local.config.monitoring.queue_wait_alert, aligner = "ALIGN_MIN", duration = "600s",
+      description = "A task has waited longer than monitoring.queue_wait_alert seconds for a task worker, for 10 minutes: task capacity is short."
     }
   }
   channels = [for channel in google_monitoring_notification_channel.email : channel.id]
@@ -141,7 +158,7 @@ resource "google_monitoring_alert_policy" "hot" {
   conditions {
     display_name = each.value.description
     condition_threshold {
-      filter          = "resource.type = \"gce_instance\" AND metric.type = \"${google_monitoring_metric_descriptor.hot[each.value.metric].type}\""
+      filter          = "resource.type = \"${contains(local.project_metrics, each.value.metric) ? "global" : "gce_instance"}\" AND metric.type = \"${google_monitoring_metric_descriptor.hot[each.value.metric].type}\""
       comparison      = each.value.comparison
       threshold_value = each.value.threshold
       duration        = each.value.duration

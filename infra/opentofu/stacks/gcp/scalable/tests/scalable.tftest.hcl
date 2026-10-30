@@ -116,8 +116,20 @@ run "endpoints_and_scaling" {
     error_message = "App and API autoscale from two; task-workers only scale out."
   }
   assert {
-    condition     = google_monitoring_alert_policy.scheduler.display_name == "hot-hot-example-scheduler-stopped" && length(google_monitoring_alert_policy.hot) == 7
+    condition     = google_monitoring_alert_policy.scheduler.display_name == "hot-hot-example-scheduler-stopped" && length(google_monitoring_alert_policy.hot) == 9
     error_message = "The singleton scheduler and every per-host signal alert."
+  }
+  assert {
+    condition     = one(google_compute_region_autoscaler.role["worker"].autoscaling_policy[0].metric).single_instance_assignment == 50 && one(google_compute_region_autoscaler.role["worker"].autoscaling_policy[0].metric).filter == "resource.type = \"global\"" && endswith(one(google_compute_region_autoscaler.role["worker"].autoscaling_policy[0].metric).name, "/jobs_waiting")
+    error_message = "Workers also scale on the jobs waiting per host, an installation-wide series."
+  }
+  assert {
+    condition     = one(google_compute_region_autoscaler.role["task-worker"].autoscaling_policy[0].metric).target == 70 && endswith(one(google_compute_region_autoscaler.role["task-worker"].autoscaling_policy[0].metric).name, "/task_slots_used_percent") && length(google_compute_region_autoscaler.role["app"].autoscaling_policy[0].metric) == 0
+    error_message = "Task-workers scale out on the share of their slots in use."
+  }
+  assert {
+    condition     = google_project_iam_custom_role.retire[0].permissions == toset(["compute.instanceGroupManagers.get", "compute.instanceGroupManagers.update"]) && strcontains(google_project_iam_member.retire[0].condition[0].expression, "regions/us-central1/instanceGroupManagers/hot-hot-example-task-worker\"")
+    error_message = "Idle task hosts may shrink their own group only."
   }
 }
 

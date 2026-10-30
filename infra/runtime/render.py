@@ -36,6 +36,8 @@ SIZES = {
 VM_MEMORY_MB = {"small": 8192, "medium": 16384, "large": 32768}
 # Rewritten by the scheduler while it dispatches; on the scheduler's tmpfs.
 SCHEDULER_HEARTBEAT = "/tmp/hot-scheduler-heartbeat"
+# The task worker's slots in use, which the host agent reads.
+TASK_STATUS = "/tmp/hot-task-status.json"
 
 # Where a cloud load balancer's connections come from: the VPC on AWS (an
 # Application Load Balancer), Google's front-end ranges on GCP.
@@ -402,6 +404,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     if "task-worker" in services:
         task = services["task-worker"]
         task.update(user="0:2000", privileged=True, pid="host", read_only=False)
+        task["environment"]["HOT_TASK_STATUS_FILE"] = TASK_STATUS
         task.pop("cap_drop")
         task.pop("security_opt")
         for path, readonly in (("/run/kata-containerd", False), ("/run/vc", False), ("/var/run/netns", False), ("/opt/cni/bin", True), ("/var/lib/cni", False), ("/tmp/hot-box-io", False)):

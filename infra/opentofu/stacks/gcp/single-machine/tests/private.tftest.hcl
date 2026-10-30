@@ -302,8 +302,12 @@ run "backups_and_alerts" {
     error_message = "The host may only list snapshots."
   }
   assert {
-    condition     = google_monitoring_metric_descriptor.hot["agent_heartbeat"].type == "custom.googleapis.com/hot/hot-example/agent_heartbeat" && length(google_monitoring_alert_policy.hot) == 9
+    condition     = google_monitoring_metric_descriptor.hot["agent_heartbeat"].type == "custom.googleapis.com/hot/hot-example/agent_heartbeat" && length(google_monitoring_alert_policy.hot) == 11
     error_message = "Each installation owns its metric types, and every critical signal has an alert."
+  }
+  assert {
+    condition     = startswith(one(google_monitoring_alert_policy.hot["job-wait"].conditions).condition_threshold[0].filter, "resource.type = \"global\"") && startswith(one(google_monitoring_alert_policy.hot["disk-pressure"].conditions).condition_threshold[0].filter, "resource.type = \"gce_instance\"")
+    error_message = "Queue alerts read the installation-wide series; host alerts the instance's."
   }
   assert {
     condition     = length(google_monitoring_alert_policy.hot["backup-stale"].conditions) == 2 && length(google_monitoring_notification_channel.email) == 1

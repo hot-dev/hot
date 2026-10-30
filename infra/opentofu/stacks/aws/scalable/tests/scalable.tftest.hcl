@@ -138,8 +138,60 @@ run "endpoints" {
     error_message = "Web groups replace hosts that fail the load balancer's health check."
   }
   assert {
-    condition     = length(aws_cloudwatch_metric_alarm.hot) == 9 && aws_cloudwatch_metric_alarm.hot["scheduler-stopped"].treat_missing_data == "breaching"
+    condition     = length(aws_cloudwatch_metric_alarm.hot) == 11 && aws_cloudwatch_metric_alarm.hot["scheduler-stopped"].treat_missing_data == "breaching"
     error_message = "Every signal alarms, and a missing scheduler status breaches."
+  }
+}
+
+run "task_workers_scale_on_their_slots_and_retire_when_idle" {
+  command = plan
+  assert {
+    condition     = aws_autoscaling_policy.task_slots[0].target_tracking_configuration[0].target_value == 70 && aws_autoscaling_policy.task_slots[0].target_tracking_configuration[0].disable_scale_in && aws_autoscaling_policy.task_slots[0].target_tracking_configuration[0].customized_metric_specification[0].metric_name == "TaskSlotsUsedPercent"
+    error_message = "Task-workers scale out on the average share of their slots in use."
+  }
+  assert {
+    condition     = length(aws_autoscaling_policy.jobs) == 0 && length(aws_autoscaling_group.role["worker"].enabled_metrics) == 0
+    error_message = "Workers with a fixed count do not follow the queue."
+  }
+  assert {
+    condition     = strcontains(aws_iam_role_policy.runtime["task-worker"].policy, "autoScalingGroupName/hot-hot-example-task-worker") && !strcontains(aws_iam_role_policy.runtime["worker"].policy, "TerminateInstanceInAutoScalingGroup")
+    error_message = "Only task hosts may leave their own group."
+  }
+}
+
+run "workers_follow_the_jobs_waiting" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "size" : "small",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "data" : { "postgres" : { "mode" : "managed" }, "valkey" : { "mode" : "managed" } },
+      "storage" : {
+        "build" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "builds", "provision" : true },
+        "file" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "files", "provision" : true }
+      },
+      "scaling" : { "worker" : { "min" : 2, "max" : 6, "waiting_per_host" : 20 }, "task_worker" : { "min" : 1, "max" : 3, "retire_idle_minutes" : 0 } }
+    }
+  }
+  assert {
+    condition     = aws_autoscaling_policy.jobs[0].target_tracking_configuration[0].target_value == 20 && one([for m in aws_autoscaling_policy.jobs[0].target_tracking_configuration[0].customized_metric_specification[0].metrics : m if m.return_data]).expression == "waiting / hosts"
+    error_message = "Workers target the jobs waiting per host in service."
+  }
+  assert {
+    condition     = aws_autoscaling_group.role["worker"].enabled_metrics == toset(["GroupInServiceInstances"])
+    error_message = "The worker group reports the hosts in service, which the policy divides by."
+  }
+  assert {
+    condition     = !strcontains(aws_iam_role_policy.runtime["task-worker"].policy, "TerminateInstanceInAutoScalingGroup")
+    error_message = "retire_idle_minutes = 0 keeps every task host, and grants nothing."
   }
 }
 

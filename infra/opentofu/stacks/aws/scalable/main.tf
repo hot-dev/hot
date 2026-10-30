@@ -45,6 +45,14 @@ locals {
     secret_references = { generated = aws_secretsmanager_secret.generated.arn, operator = aws_secretsmanager_secret.operator.arn }
     data              = local.host_data
   }) }
+  # An idle task host leaves its group (see the agent's retire_if_idle):
+  # it reads the group's size and terminates itself, shrinking the group.
+  retire_task_hosts = local.roles["task-worker"].max > local.roles["task-worker"].min && local.config.scaling.task_worker.retire_idle_minutes > 0
+  retire_statements = [
+    { Effect = "Allow", Action = ["autoscaling:DescribeAutoScalingGroups"], Resource = "*" },
+    { Effect = "Allow", Action = ["autoscaling:TerminateInstanceInAutoScalingGroup"],
+    Resource = "arn:aws:autoscaling:${local.config.region}:*:autoScalingGroup:*:autoScalingGroupName/hot-${local.config.name}-task-worker" },
+  ]
   # Pulling images from an ECR mirror with the host's own role.
   mirror_statements = module.contract.mirror.kind != "ecr" ? [] : [
     { Effect = "Allow", Action = ["ecr:GetAuthorizationToken"], Resource = "*" },
@@ -241,7 +249,7 @@ resource "aws_iam_role_policy" "runtime" {
     { Effect = "Allow", Action = ["ssm:PutParameter"], Resource = aws_ssm_parameter.status.arn },
     { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = "${aws_cloudwatch_log_group.host.arn}:*" },
     { Effect = "Allow", Action = ["cloudwatch:PutMetricData"], Resource = "*", Condition = { StringEquals = { "cloudwatch:namespace" = "Hot/SelfHost" } } },
-    ], local.mirror_statements, [for s in local.s3_roles : {
+    ], local.mirror_statements, each.key == "task-worker" && local.retire_task_hosts ? local.retire_statements : [], [for s in local.s3_roles : {
       Effect = "Allow", Action = ["s3:GetBucketLocation"], Resource = "arn:aws:s3:::${s.bucket}"
       }], [for s in local.s3_roles : {
       Effect    = "Allow", Action = ["s3:ListBucket"], Resource = "arn:aws:s3:::${s.bucket}",
@@ -360,6 +368,8 @@ resource "aws_autoscaling_group" "role" {
     value               = each.key
     propagate_at_launch = true
   }
+  # Queue-driven scaling divides the jobs waiting by the hosts in service.
+  enabled_metrics = each.key == "worker" && each.value.max > each.value.min ? ["GroupInServiceInstances"] : []
   lifecycle { ignore_changes = [desired_capacity] }
 }
 # App and API follow CPU. Workers and task-workers keep fixed counts unless a
@@ -374,6 +384,77 @@ resource "aws_autoscaling_policy" "cpu" {
     disable_scale_in = each.key == "task-worker"
     predefined_metric_specification {
       predefined_metric_type = "ASGAverageCPUUtilization"
+    }
+  }
+}
+# Workers also follow the jobs waiting in Hot's queue, per worker host, which
+# the scheduler's host measures every minute.
+resource "aws_autoscaling_policy" "jobs" {
+  count                  = local.roles.worker.max > local.roles.worker.min ? 1 : 0
+  name                   = "hot-${local.config.name}-worker-jobs"
+  autoscaling_group_name = aws_autoscaling_group.role["worker"].name
+  policy_type            = "TargetTrackingScaling"
+  target_tracking_configuration {
+    target_value = local.config.scaling.worker.waiting_per_host
+    customized_metric_specification {
+      metrics {
+        id          = "waiting"
+        return_data = false
+        metric_stat {
+          stat = "Maximum"
+          metric {
+            namespace   = "Hot/SelfHost"
+            metric_name = "JobsWaiting"
+            dimensions {
+              name  = "Installation"
+              value = local.config.name
+            }
+          }
+        }
+      }
+      metrics {
+        id          = "hosts"
+        return_data = false
+        metric_stat {
+          stat = "Average"
+          metric {
+            namespace   = "AWS/AutoScaling"
+            metric_name = "GroupInServiceInstances"
+            dimensions {
+              name  = "AutoScalingGroupName"
+              value = aws_autoscaling_group.role["worker"].name
+            }
+          }
+        }
+      }
+      metrics {
+        id          = "per_host"
+        label       = "Jobs waiting per worker host"
+        expression  = "waiting / hosts"
+        return_data = true
+      }
+    }
+  }
+}
+# Task-workers scale out on the share of their slots in use, averaged over
+# the group's hosts. They never scale in through the group, which cannot
+# tell which hosts run tasks; idle hosts leave on their own.
+resource "aws_autoscaling_policy" "task_slots" {
+  count                  = local.roles["task-worker"].max > local.roles["task-worker"].min ? 1 : 0
+  name                   = "hot-${local.config.name}-task-worker-slots"
+  autoscaling_group_name = aws_autoscaling_group.role["task-worker"].name
+  policy_type            = "TargetTrackingScaling"
+  target_tracking_configuration {
+    target_value     = local.config.scaling.task_worker.slots_target
+    disable_scale_in = true
+    customized_metric_specification {
+      namespace   = "Hot/SelfHost"
+      metric_name = "TaskSlotsUsedPercent"
+      statistic   = "Average"
+      metric_dimension {
+        name  = "Installation"
+        value = local.config.name
+      }
     }
   }
 }
