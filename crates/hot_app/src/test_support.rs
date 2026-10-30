@@ -21,8 +21,8 @@
 //! - Email delivery. The verification email is enqueued to the database
 //!   `hot:email` queue rather than sent. Tests read the verification token
 //!   directly from `email_verification`.
-//! - Streaming/SSE endpoints. Real-time subscribers are stubbed out
-//!   (`stream_pubsub = None`).
+//! - Streaming/SSE endpoints, unless the app is built with
+//!   [`TestApp::spawn_with_db_and_pubsub`]. Otherwise `stream_pubsub = None`.
 //!
 //! # Minimal example
 //!
@@ -84,11 +84,27 @@ impl TestApp {
     /// PostgreSQL callers must supply a qualified restricted runtime pool;
     /// fixture setup and teardown remain outside the application connection.
     pub async fn spawn_with_db(db: DatabasePool, conf: Val) -> Self {
+        Self::spawn_with_db_and_pubsub(db, conf, None).await
+    }
+
+    /// Like [`TestApp::spawn_with_db`], with a stream pub/sub for the
+    /// real-time endpoints (e.g. a Redis one shared with other instances).
+    pub async fn spawn_with_db_and_pubsub(
+        db: DatabasePool,
+        conf: Val,
+        stream_pubsub: Option<Arc<hot::stream::StreamPubSub>>,
+    ) -> Self {
         let db = Arc::new(db);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let blob_store = hot::blob::blob_store_from_conf(db.clone(), &conf).await;
-        let router = crate::routes::routes(db.clone(), conf.clone(), None, blob_store, shutdown_rx);
+        let router = crate::routes::routes(
+            db.clone(),
+            conf.clone(),
+            stream_pubsub,
+            blob_store,
+            shutdown_rx,
+        );
 
         Self {
             db,
