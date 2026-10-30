@@ -573,6 +573,41 @@ e Email({value: "a@b.com"})
         );
     }
 
+    /// A namespaced call runs the overload of its arity. It used to run the
+    /// first overload declared, whatever its arity, when the argument types
+    /// weren't known: `::hot::time/PlainDate(s)` returned today's date
+    /// through `PlainDate()`, and a predicate calling it read the clock.
+    #[test]
+    fn namespaced_calls_run_the_overload_of_their_arity() {
+        let src = r#"::lib ns
+Stamp type { label: Str }
+fn (): Stamp { Stamp({label: "none"}) },
+(label: Str): Stamp { Stamp({label: label}) }
+pick fn (flag: Bool, lazy other: Any): Any { if(flag, "skipped", do(other)) }
+
+::t ns
+::time ::hot::time
+::l ::lib
+Day type Str where is-ok(::hot::time/PlainDate(%))
+dynamic fn (x: Any): Any { x }
+date-of fn (s: Str): Any { ::time/PlainDate(s) }
+label-of fn (s): Str { ::lib/Stamp(s).label }
+probe fn (): Vec {
+    date date-of("2024-12-25")
+    [::time/year(date), ::time/month(date), ::time/day(date),
+     is-err(date-of("nope")),
+     label-of("given"), ::l/Stamp().label,
+     Day(dynamic("2024-12-25")), is-err(Day(dynamic("x"))),
+     ::l/pick(true, fail("evaluated"))]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([2024, 12, 25, true, "given", "none", "2024-12-25", true, "skipped"]),
+        );
+    }
+
     /// A parameter or local binding shadows a function of the same name, for
     /// calls and references and whatever the declaration order. The compiler
     /// used to bind the name to a function registered before the body was
