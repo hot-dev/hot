@@ -341,6 +341,32 @@ fn indent_continuation(text: &str, continuation_indent: &str) -> String {
     out
 }
 
+/// The project a command watches, tests or runs, for the commands that use
+/// one. `hot dev` always uses the default project. `hot check` reports an
+/// undefined project itself, as a diagnostic in either output format.
+fn command_project_name(
+    command: &Option<Command>,
+    global_options: &crate::cli::GlobalOptions,
+    conf: &Val,
+) -> Option<String> {
+    match command {
+        Some(Command::Dev { .. }) => Some(hot::project::get_default_project_name(conf)),
+        Some(
+            Command::Watch { .. }
+            | Command::Test { .. }
+            | Command::Run { .. }
+            | Command::Eval { .. }
+            | Command::Repl { .. },
+        ) => Some(
+            global_options
+                .project
+                .clone()
+                .unwrap_or_else(|| hot::project::get_default_project_name(conf)),
+        ),
+        _ => None,
+    }
+}
+
 async fn async_main(providers: CliProviders) {
     let cli = Cli::parse();
 
@@ -888,6 +914,15 @@ async fn async_main(providers: CliProviders) {
     {
         show_command_config(&cli.command, &conf);
         return;
+    }
+
+    // A project that isn't defined has no source or test paths, so these
+    // commands would watch, test or run no project files.
+    if let Some(project_name) = command_project_name(&cli.command, &global_options, &conf)
+        && let Err(e) = hot::project::check_project_defined(&conf, &project_name)
+    {
+        eprintln!("{}", e);
+        std::process::exit(1);
     }
 
     // When services need their configuration, call their get_resolved_conf with the full merged config
@@ -1942,5 +1977,43 @@ mod migration_failure_tests {
     fn indent_continuation_single_line_unchanged() {
         let s = indent_continuation("only", "      ");
         assert_eq!(s, "only");
+    }
+}
+
+#[cfg(test)]
+mod project_selection_tests {
+    use super::*;
+
+    fn project_for(args: &[&str]) -> Option<String> {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(args).unwrap();
+        let conf = hot::val!({"set": {"project": "drafting"}});
+        let global_options = cli
+            .command
+            .as_ref()
+            .map(|command| extract_options_from_command(command).0)
+            .unwrap_or_default();
+        command_project_name(&cli.command, &global_options, &conf)
+    }
+
+    #[test]
+    fn commands_that_use_a_project_name_the_one_they_use() {
+        assert_eq!(project_for(&["hot", "test"]).as_deref(), Some("drafting"));
+        assert_eq!(
+            project_for(&["hot", "run", "-p", "review", "main.hot"]).as_deref(),
+            Some("review")
+        );
+        assert_eq!(
+            project_for(&["hot", "watch", "-p", "review"]).as_deref(),
+            Some("review")
+        );
+        // `hot dev` serves the default project whatever -p says.
+        assert_eq!(
+            project_for(&["hot", "dev", "-p", "review"]).as_deref(),
+            Some("drafting")
+        );
+        // `hot check` reports an undefined project from the engine.
+        assert_eq!(project_for(&["hot", "check", "-p", "review"]), None);
+        assert_eq!(project_for(&["hot", "fmt"]), None);
     }
 }

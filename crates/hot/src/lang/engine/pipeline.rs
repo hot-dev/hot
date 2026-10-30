@@ -450,6 +450,21 @@ impl Engine {
         out
     }
 
+    /// A check names its project to say whose sources and dependencies it
+    /// covers. One the conf doesn't define has neither, so the check would
+    /// pass on no project files.
+    fn check_selected_project(
+        conf: Option<&crate::val::Val>,
+        project_name: Option<&str>,
+    ) -> Result<(), String> {
+        match (conf, project_name) {
+            (Some(conf), Some(project_name)) => {
+                crate::project::check_project_defined(conf, project_name)
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn check_sources_pipeline_diagnostics(
         src_paths: &[String],
         test_paths: &[String],
@@ -488,6 +503,10 @@ impl Engine {
                 location: None,
             });
             errs
+        }
+
+        if let Err(msg) = Self::check_selected_project(conf, project_name) {
+            return synthesize(msg);
         }
 
         // Phase 1: Discover compilation units
@@ -708,6 +727,8 @@ impl Engine {
         color: bool,
         warnings_out: Option<&mut crate::lang::errors::CompilerErrors>,
     ) -> Result<(), String> {
+        Self::check_selected_project(conf, project_name)?;
+
         // Delegate to unified pipeline with Check mode
         Self::run_unified_pipeline(
             src_paths,
@@ -2086,6 +2107,123 @@ fn (): Str { "unused" }
         // Without the dependency, the call doesn't resolve.
         let errors = Engine::check_sources_pipeline_diagnostics(&src_paths, &[], None, None);
         assert!(!errors.is_empty());
+    }
+
+    /// A check of a project the conf doesn't define fails in both formats,
+    /// rather than passing on no project files.
+    #[test]
+    fn check_refuses_a_project_the_conf_does_not_define() {
+        let conf = crate::project::get_resolved_conf(
+            crate::lang::data::eval_data("hot.project.drafting.src.paths [\"./hot/src\"]\n")
+                .unwrap(),
+        );
+
+        let errors =
+            Engine::check_sources_pipeline_diagnostics(&[], &[], Some(&conf), Some("draftin"));
+        let messages: Vec<String> = errors.errors.iter().map(|e| e.to_string()).collect();
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].contains("Project 'draftin' is not defined. hot.hot defines: drafting."),
+            "{messages:?}"
+        );
+
+        let error = Engine::check_sources_pipeline_with_context_warnings(
+            &[],
+            &[],
+            Some(&conf),
+            Some("draftin"),
+            None,
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with("Project 'draftin' is not defined."),
+            "{error}"
+        );
+    }
+
+    /// Write `content` to `path`, creating its parent folders.
+    fn write_file(path: std::path::PathBuf, content: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    /// A project in `root/src` that builds `::lib::core/Rec` by name, and the
+    /// local package `example.com/lib` at `root/lib` that defines it in
+    /// `root/lib/hot/src`. Its pkg.hot declares `src_paths`. Returns the
+    /// project's source paths and conf, with the project named `app`.
+    fn write_project_using_a_hot_src_package(
+        root: &std::path::Path,
+        src_paths: &str,
+    ) -> (Vec<String>, crate::val::Val) {
+        let lib = root.join("lib");
+        write_file(
+            lib.join("pkg.hot"),
+            &format!(
+                "::hot::pkg ns\n\nhot.pkg.lib {{\n  name: \"example.com/lib\",\n  version: \"1.0.0\",\n  deps: {{}},\n  src-paths: {src_paths},\n  test-paths: [\"hot/test/\"],\n}}\n"
+            ),
+        );
+        write_file(
+            lib.join("hot/src/lib/core.hot"),
+            "::lib::core ns\n\nRec type { a: Int, b: Str }\n",
+        );
+        let src = root.join("src");
+        write_file(
+            src.join("app.hot"),
+            "::app ns\n\nRec ::lib::core/Rec\n\nx Rec(a: 1, b: \"x\")\n",
+        );
+        let conf = crate::lang::data::eval_data(&format!(
+            "hot.project.app.deps {{\"example.com/lib\": {{local: {:?}}}}}\n",
+            lib.display().to_string()
+        ))
+        .unwrap();
+        (vec![src.display().to_string()], conf)
+    }
+
+    /// A dependency's sources load from the `src-paths` its pkg.hot
+    /// declares, as a project's own `src.paths` do. Its `test-paths` stay
+    /// out of the program that uses it.
+    #[test]
+    fn check_loads_a_dependency_from_its_declared_src_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src_paths, conf) = write_project_using_a_hot_src_package(dir.path(), "[\"hot/src/\"]");
+        // This test file doesn't check, so loading it would fail the check.
+        write_file(
+            dir.path().join("lib/hot/test/lib/core.test.hot"),
+            "::lib::core-test ns\n\nbroken fn (): Int { ::lib::missing/nothing() }\n",
+        );
+
+        let errors =
+            Engine::check_sources_pipeline_diagnostics(&src_paths, &[], Some(&conf), Some("app"));
+        assert!(errors.is_empty(), "{:?}", errors.to_diagnostics());
+    }
+
+    /// A dependency whose `src-paths` hold no `.hot` files is the first
+    /// error, by name, not the unresolved references it leads to.
+    #[test]
+    fn check_reports_a_dependency_with_no_source_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // The sources are in hot/src, but pkg.hot points at src/.
+        let (src_paths, conf) = write_project_using_a_hot_src_package(dir.path(), "[\"src/\"]");
+
+        let diagnostics =
+            Engine::check_sources_pipeline_diagnostics(&src_paths, &[], Some(&conf), Some("app"))
+                .to_diagnostics();
+        let first = diagnostics
+            .first()
+            .expect("an empty dependency is an error");
+        assert!(
+            first
+                .message
+                .contains("Package 'example.com/lib' has no source files")
+                && first.message.contains("[\"src/\"]"),
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|d| d.code == "named-argument"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]

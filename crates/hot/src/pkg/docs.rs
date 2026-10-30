@@ -593,13 +593,11 @@ pub fn load_pkg_docs(pkg_path: &Path) -> Result<PkgDocs, String> {
         .find(|p| p.exists())
         .and_then(|p| fs::read_to_string(p).ok());
 
-    // Find and parse all source files
-    let src_path = pkg_path.join("src");
-    let mut modules = if src_path.exists() {
-        discover_namespaces(&src_path)?
-    } else {
-        Vec::new()
-    };
+    // Find and parse all source files in the package's declared src-paths
+    let mut modules = Vec::new();
+    for src_dir in crate::lang::engine::Engine::discover_dependency_source_dirs(pkg_path)? {
+        modules.extend(discover_namespaces(Path::new(&src_dir))?);
+    }
 
     normalize_doc_aliases(&mut modules);
 
