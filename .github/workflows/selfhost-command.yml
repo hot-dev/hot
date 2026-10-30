@@ -16,7 +16,7 @@ on:
   workflow_call:
     inputs:
       operation:
-        description: status, diagnostics, logs, backup, restart-service, drain-and-stop, or roll-back
+        description: status, diagnostics, logs, backup, restart-service, drain-and-stop, roll-back, or test-alert
         type: string
         required: true
       service:
@@ -90,7 +90,7 @@ jobs:
         run: |
           [[ "$NAME" =~ ^[a-z][a-z0-9-]{2,23}$ ]] || { echo "::error::invalid installation name"; exit 1; }
           [[ "$CLOUD" =~ ^(aws|gcp)$ ]] || { echo "::error::cloud must be aws or gcp"; exit 1; }
-          [[ "$OPERATION" =~ ^(status|diagnostics|logs|backup|restart-service|drain-and-stop|roll-back)$ ]] ||
+          [[ "$OPERATION" =~ ^(status|diagnostics|logs|backup|restart-service|drain-and-stop|roll-back|test-alert)$ ]] ||
             { echo "::error::unsupported operation; releases use the selfhost-release workflow"; exit 1; }
           [[ "$SERVICE" =~ ^[a-z-]{0,16}$ ]] || { echo "::error::invalid service"; exit 1; }
 

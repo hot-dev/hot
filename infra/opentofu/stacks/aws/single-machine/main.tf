@@ -157,7 +157,7 @@ resource "aws_ssm_document" "command" {
     schemaVersion = "2.2"
     description   = "Run one Hot agent command on the installation host."
     parameters = {
-      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop", "roll-back"] }
+      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop", "test-alert", "roll-back"] }
       service   = { type = "String", default = "none", allowedValues = ["none", "app", "api", "worker", "task-worker", "scheduler", "ingress", "postgres", "valkey"] }
       requestId = { type = "String", allowedPattern = "^[A-Za-z0-9-]{1,64}$" }
     }
@@ -275,6 +275,8 @@ resource "aws_iam_role_policy" "release" {
     { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = aws_ssm_parameter.status.arn },
     { Effect = "Allow", Action = ["ssm:SendCommand"], Resource = [aws_ssm_document.command.arn, aws_instance.host.arn] },
     { Effect = "Allow", Action = ["logs:FilterLogEvents"], Resource = [aws_cloudwatch_log_group.host.arn, "${aws_cloudwatch_log_group.host.arn}:*"] },
+    # selfhost.py maintenance: silence and restore this installation's alarms.
+    { Effect = "Allow", Action = ["cloudwatch:DescribeAlarms", "cloudwatch:DisableAlarmActions", "cloudwatch:EnableAlarmActions"], Resource = "arn:aws:cloudwatch:${local.config.region}:*:alarm:hot-${local.config.name}-*" },
   ] })
 }
 resource "aws_volume_attachment" "data" {

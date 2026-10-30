@@ -207,7 +207,7 @@ resource "google_pubsub_topic_iam_member" "release" {
   member = "serviceAccount:${var.release_principal}"
 }
 resource "google_project_iam_member" "release" {
-  for_each = var.release_principal == "" ? toset([]) : toset(["roles/logging.viewer", "roles/compute.viewer"])
+  for_each = var.release_principal == "" ? toset([]) : toset(["roles/logging.viewer", "roles/compute.viewer", "roles/monitoring.alertPolicyViewer", "roles/monitoring.snoozeEditor"])
   project  = local.config.project
   role     = each.value
   member   = "serviceAccount:${var.release_principal}"

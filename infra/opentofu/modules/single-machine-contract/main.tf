@@ -389,6 +389,21 @@ locals {
   ecr_mirror    = regex("^(?:([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com)?", local.registry_host)
   gar_mirror    = regex("^(?:([a-z0-9-]+)-docker\\.pkg\\.dev)?", local.registry_host)
 }
+output "dashboard" {
+  description = "Each stack's dashboard panels: a title, the statistic that reads the panel's agent metrics, and each metric's CloudWatch name and Cloud Monitoring descriptor key."
+  value = [for panel in [
+    { title = "Unhealthy services", stat = "Maximum", metrics = [["UnhealthyServices", "unhealthy_services"]], single = false },
+    { title = "Ready, dependencies, scheduler (1 = yes)", stat = "Minimum", metrics = [["Ready", "ready"], ["DependenciesReachable", "dependencies_reachable"], ["SchedulerRunning", "scheduler_running"]], single = false },
+    { title = "Queue backlog and dead letters", stat = "Maximum", metrics = [["QueueBacklog", "queue_backlog"], ["QueueDeadLetters", "queue_dead_letters"]], single = false },
+    { title = "Jobs and tasks waiting", stat = "Maximum", metrics = [["JobsWaiting", "jobs_waiting"], ["TasksWaiting", "tasks_waiting"]], single = false },
+    { title = "Oldest wait (seconds)", stat = "Maximum", metrics = [["JobWaitSeconds", "job_wait_seconds"], ["TaskWaitSeconds", "task_wait_seconds"]], single = false },
+    { title = "Task slots used (%)", stat = "Average", metrics = [["TaskSlotsUsedPercent", "task_slots_used_percent"]], single = false },
+    { title = "Disk used (%)", stat = "Maximum", metrics = [["DataDiskUsedPercent", "data_disk_used_percent"]], single = false },
+    { title = "Certificate days left", stat = "Minimum", metrics = [["CertificateDaysLeft", "certificate_days_left"]], single = false },
+    { title = "Backup age (hours)", stat = "Maximum", metrics = [["BackupAgeHours", "backup_age_hours"]], single = true },
+    ] : { title = panel.title, stat = panel.stat, metrics = [for m in panel.metrics : { aws = m[0], gcp = m[1] }] }
+  if !panel.single || var.installation.preset != "scalable"]
+}
 output "mirror" {
   description = "The image mirror the hosts sign in to with their own identity: kind is ecr or artifact-registry, or empty for other mirrors and none."
   value = {

@@ -4,6 +4,8 @@
     selfhost.py installation.tfvars.json command OPERATION [--service S]
     selfhost.py installation.tfvars.json logs SERVICE
     selfhost.py installation.tfvars.json release VERSION
+    selfhost.py installation.tfvars.json maintenance start --minutes N
+    selfhost.py installation.tfvars.json maintenance end
 
 Uses the `aws` or `gcloud` CLI with the caller's identity, such as the
 release role. A command goes to the agent through the SSM command document
@@ -14,6 +16,11 @@ workflow run this same script.
 
 Prints the agent's report as JSON (or as Markdown with --summary FILE) and
 exits 1 when the agent rejects the command or the deploy fails.
+
+`maintenance` silences the installation's infrastructure alerts during
+planned work: on AWS it disables the alarms' actions until `maintenance end`;
+on GCP it snoozes the alert policies, which ends by itself after N minutes or
+at `maintenance end`. Alerts still change state; nobody is notified.
 """
 import argparse
 import base64
@@ -25,13 +32,17 @@ import sys
 import time
 
 OPERATIONS = ("deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop",
-              "roll-back")
+              "roll-back", "test-alert")
 # Final states per operation; anything else is progress or another request.
 FAILED = {"failed", "rejected", "migration-failed"}
 # A scalable release rolls roles in this order, after migrating; the
 # scheduler is replaced last, stop-before-start.
 ROLE_ORDER = ("task-worker", "worker", "api", "app", "scheduler")
 STATUS_STREAM = "hot-agent-status"
+# CloudWatch takes up to 100 alarm names per call; a snooze names up to 16
+# alert policies.
+ALARMS_PER_CALL = 100
+POLICIES_PER_SNOOZE = 16
 
 
 class CliError(Exception):
@@ -113,6 +124,50 @@ class Installation:
         found = self.cli("gcloud", "compute", "instance-groups", "managed", "list-instances", group,
                          *location, "--project", self.project, "--format", "json") or []
         return sorted(i["instance"].rsplit("/", 1)[-1] for i in found if i.get("instanceStatus") == "RUNNING")
+
+    # -- maintenance ---------------------------------------------------------------
+
+    def alerts(self):
+        """The installation's alarms (AWS) or alert policy names (GCP)."""
+        prefix = f"hot-{self.name}-"
+        if self.cloud == "aws":
+            found = self.cli("aws", "cloudwatch", "describe-alarms", "--region", self.region, "--output", "json",
+                             "--alarm-name-prefix", prefix)
+            return sorted(a["AlarmName"] for a in (found or {}).get("MetricAlarms", []))
+        found = self.cli("gcloud", "monitoring", "policies", "list", "--project", self.project, "--format", "json") or []
+        return sorted(p["name"] for p in found if p.get("displayName", "").startswith(prefix))
+
+    def maintenance(self, action, minutes=60):
+        """Silence the installation's alerts, or stop silencing them."""
+        alerts = self.alerts()
+        if not alerts:
+            raise CliError(f"No alerts found for hot-{self.name}; has the stack been applied?")
+        snooze = f"hot-{self.name} maintenance"
+        if self.cloud == "aws":
+            verb = "disable-alarm-actions" if action == "start" else "enable-alarm-actions"
+            for start in range(0, len(alerts), ALARMS_PER_CALL):
+                self.cli("aws", "cloudwatch", verb, "--region", self.region, "--output", "json",
+                         "--alarm-names", *alerts[start:start + ALARMS_PER_CALL])
+            until = "until maintenance end" if action == "start" else ""
+        elif action == "start":
+            now = datetime.datetime.fromtimestamp(self.clock(), datetime.timezone.utc)
+            until = (now + datetime.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            for start in range(0, len(alerts), POLICIES_PER_SNOOZE):
+                self.cli("gcloud", "monitoring", "snoozes", "create", "--project", self.project, "--format", "json",
+                         "--display-name", snooze, "--criteria-policies", ",".join(alerts[start:start + POLICIES_PER_SNOOZE]),
+                         "--start-time", now.strftime("%Y-%m-%dT%H:%M:%SZ"), "--end-time", until)
+        else:
+            now = self.clock()
+            for found in self.cli("gcloud", "monitoring", "snoozes", "list", "--project", self.project,
+                                  "--format", "json") or []:
+                ends = found.get("interval", {}).get("endTime", "")
+                if found.get("displayName") == snooze and ends and parse_time(ends) > now:
+                    self.cli("gcloud", "monitoring", "snoozes", "cancel", found["name"], "--project", self.project,
+                             "--format", "json")
+            until = ""
+        state = "maintenance" if action == "start" else "monitoring"
+        return {"installation": self.name, "state": state, "alerts": len(alerts),
+                **({"until": until} if until else {})}
 
     # -- reports -----------------------------------------------------------------
 
@@ -213,6 +268,11 @@ class Installation:
         return {"installation": self.name, "state": "deployed", "release": version, "rolled": rolled}
 
 
+def parse_time(value):
+    """Seconds since the epoch, from an RFC 3339 time."""
+    return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+
 def markdown(report):
     """A job summary for a report. Logs go in a code block; everything else
     is shown as JSON."""
@@ -242,12 +302,17 @@ def main(argv=None, cli=None):
     logs.add_argument("service")
     release = sub.add_parser("release")
     release.add_argument("version")
+    maintenance = sub.add_parser("maintenance")
+    maintenance.add_argument("when", choices=("start", "end"))
+    maintenance.add_argument("--minutes", type=int, default=60, help="GCP: how long the snooze lasts")
     args = parser.parse_args(argv)
     with open(args.tfvars) as handle:
         installation = Installation(json.load(handle), cli or Cli())
     try:
         if args.action == "release":
             report = installation.release(args.version, args.request_id, args.timeout or 1800)
+        elif args.action == "maintenance":
+            report = installation.maintenance(args.when, args.minutes)
         elif args.action == "logs":
             report = installation.run("logs", args.service, args.request_id, args.timeout or 300)
         else:

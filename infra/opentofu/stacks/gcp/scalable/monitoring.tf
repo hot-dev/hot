@@ -22,6 +22,7 @@ locals {
     tasks_waiting           = { unit = "1", name = "Tasks waiting" }
     task_wait_seconds       = { unit = "s", name = "Oldest task's wait" }
     task_slots_used_percent = { unit = "%", name = "Task slots used" }
+    alert_test              = { unit = "1", name = "Test alert" }
   }
   # Installation-wide queue measurements, written for the project by the
   # scheduler's host rather than per instance (see the agent's
@@ -55,6 +56,10 @@ locals {
     new-dead-letters = {
       metric      = "new_dead_letters", comparison = "COMPARISON_GT", threshold = 0, aligner = "ALIGN_MAX", duration = "0s",
       description = "Jobs failed every attempt and were dead-lettered; the worker's logs say why."
+    }
+    alert-test = {
+      metric      = "alert_test", comparison = "COMPARISON_GT", threshold = 0, aligner = "ALIGN_MAX", duration = "0s",
+      description = "A test alert sent with the test-alert command; it resolves by itself. Nothing is wrong."
     }
     job-wait = {
       metric      = "job_wait_seconds", comparison = "COMPARISON_GT", threshold = local.config.monitoring.queue_wait_alert, aligner = "ALIGN_MIN", duration = "600s",
@@ -200,4 +205,30 @@ resource "google_billing_budget" "monthly" {
     monitoring_notification_channels = slice(local.channels, 0, min(5, length(local.channels)))
   }
   depends_on = [google_project_service.required]
+}
+
+# The installation's metrics on one page.
+locals {
+  dashboard_aligners = { Maximum = "ALIGN_MAX", Minimum = "ALIGN_MIN", Average = "ALIGN_MEAN" }
+  dashboard_reducers = { Maximum = "REDUCE_MAX", Minimum = "REDUCE_MIN", Average = "REDUCE_MEAN" }
+}
+resource "google_monitoring_dashboard" "hot" {
+  dashboard_json = jsonencode({
+    displayName = "hot-${local.config.name}"
+    mosaicLayout = { columns = 12, tiles = [for index, panel in module.contract.dashboard : {
+      xPos = (index % 2) * 6, yPos = floor(index / 2) * 4, width = 6, height = 4
+      widget = { title = panel.title, xyChart = { dataSets = [for metric in panel.metrics : {
+        plotType       = "LINE"
+        legendTemplate = metric.gcp
+        timeSeriesQuery = { timeSeriesFilter = {
+          filter = "metric.type = \"${google_monitoring_metric_descriptor.hot[metric.gcp].type}\" resource.type = \"${contains(local.project_metrics, metric.gcp) ? "global" : "gce_instance"}\""
+          aggregation = {
+            alignmentPeriod    = "300s"
+            perSeriesAligner   = local.dashboard_aligners[panel.stat]
+            crossSeriesReducer = local.dashboard_reducers[panel.stat]
+          }
+        } }
+      }] } }
+    }] }
+  })
 }

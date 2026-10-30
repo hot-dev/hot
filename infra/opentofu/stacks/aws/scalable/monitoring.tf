@@ -59,6 +59,11 @@ locals {
       period      = 300, periods = 1, missing = "notBreaching",
       description = "Jobs failed every attempt and were dead-lettered; the worker's logs say why."
     }
+    alert-test = {
+      metric      = "AlertTest", statistic = "Maximum", comparison = "GreaterThanThreshold", threshold = 0,
+      period      = 60, periods = 1, missing = "notBreaching",
+      description = "A test alert sent with the test-alert command; it resolves by itself. Nothing is wrong."
+    }
     job-wait = {
       metric      = "JobWaitSeconds", statistic = "Minimum", comparison = "GreaterThanThreshold", threshold = local.config.monitoring.queue_wait_alert,
       period      = 300, periods = 2, missing = "notBreaching",
@@ -111,4 +116,16 @@ resource "aws_budgets_budget" "monthly" {
       subscriber_email_addresses = local.config.monitoring.alert_emails
     }
   }
+}
+
+# The installation's metrics on one page.
+resource "aws_cloudwatch_dashboard" "hot" {
+  dashboard_name = "hot-${local.config.name}"
+  dashboard_body = jsonencode({ widgets = [for index, panel in module.contract.dashboard : {
+    type = "metric", x = (index % 2) * 12, y = floor(index / 2) * 6, width = 12, height = 6
+    properties = {
+      title   = panel.title, region = local.config.region, stat = panel.stat, period = 300, view = "timeSeries"
+      metrics = [for metric in panel.metrics : ["Hot/SelfHost", metric.aws, "Installation", local.config.name]]
+    }
+  }] })
 }

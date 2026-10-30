@@ -1807,9 +1807,15 @@ or an existing operator destination without coupling telemetry to S3.
       operator-selected recipients/channels and test the configured path.
       Document thresholds, sustained windows, severity, runbooks, maintenance
       suppression, deduplication, and resolution notifications.
-      Routed through SNS or Cloud Monitoring email channels
-      (`monitoring.alert_emails`). Thresholds, windows, and first steps are in
-      infra/README.md. Testing the path and maintenance suppression remain.
+      - Routing: SNS or Cloud Monitoring email channels
+        (`monitoring.alert_emails`). Thresholds, windows, and first steps are
+        in infra/README.md.
+      - Testing the path: the `test-alert` agent command publishes a test
+        metric. An `alert-test` alert fires on it and then resolves.
+      - Silencing: `selfhost.py maintenance start/end` disables the alarm
+        actions on AWS and snoozes the alert policies on GCP.
+
+      Delivery on each cloud still needs qualification.
 - [ ] Use private synthetic checks from an authorized network for sign-in/API
       and a representative queued execution. Keep liveness, dependency readiness,
       and end-to-end checks separate; do not expose monitoring endpoints publicly.
@@ -1991,7 +1997,9 @@ or an existing operator destination without coupling telemetry to S3.
       memory pressure, connection pressure, certificate expiry, and backup
       failures. Document thresholds, ownership, response steps, and export options.
       The ingress certificate's remaining days are a metric with an alert at
-      14 days.
+      14 days. Queue waits and task slots are metrics with alerts, and each
+      stack has a dashboard of the agent's metrics. Connection pressure and
+      memory pressure are not yet measured.
       Apply the logging/monitoring contract above: its baseline is required for
       initial installs; detailed dashboards and tracing can follow.
 

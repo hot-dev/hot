@@ -114,7 +114,7 @@ run "hosts_know_their_role_and_pointers" {
     error_message = "Only the scheduler's host reads the database administrator's secret."
   }
   assert {
-    condition     = strcontains(aws_iam_role_policy.release[0].policy, "autoscaling:DescribeAutoScalingGroups") && strcontains(aws_iam_role_policy.release[0].policy, "ssm:resourceTag/HotInstallation")
+    condition     = strcontains(aws_iam_role_policy.release[0].policy, "autoscaling:DescribeAutoScalingGroups") && strcontains(aws_iam_role_policy.release[0].policy, "ssm:resourceTag/HotInstallation") && strcontains(aws_iam_role_policy.release[0].policy, "alarm:hot-hot-example-*")
     error_message = "The release role lists instances and commands only this installation's hosts."
   }
 }
@@ -138,7 +138,7 @@ run "endpoints" {
     error_message = "Web groups replace hosts that fail the load balancer's health check."
   }
   assert {
-    condition     = length(aws_cloudwatch_metric_alarm.hot) == 11 && aws_cloudwatch_metric_alarm.hot["scheduler-stopped"].treat_missing_data == "breaching"
+    condition     = length(aws_cloudwatch_metric_alarm.hot) == 12 && length(jsondecode(aws_cloudwatch_dashboard.hot.dashboard_body).widgets) == 8 && aws_cloudwatch_metric_alarm.hot["scheduler-stopped"].treat_missing_data == "breaching"
     error_message = "Every signal alarms, and a missing scheduler status breaches."
   }
 }

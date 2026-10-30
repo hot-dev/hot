@@ -173,11 +173,13 @@ resource "google_pubsub_topic_iam_member" "release" {
   role   = "roles/pubsub.publisher"
   member = "serviceAccount:${var.release_principal}"
 }
+# Reading the agent's reports, and (selfhost.py maintenance) listing and
+# snoozing the alert policies.
 resource "google_project_iam_member" "release_logs" {
-  count   = var.release_principal == "" ? 0 : 1
-  project = local.config.project
-  role    = "roles/logging.viewer"
-  member  = "serviceAccount:${var.release_principal}"
+  for_each = var.release_principal == "" ? toset([]) : toset(["roles/logging.viewer", "roles/monitoring.alertPolicyViewer", "roles/monitoring.snoozeEditor"])
+  project  = local.config.project
+  role     = each.value
+  member   = "serviceAccount:${var.release_principal}"
 }
 locals {
   host_config = merge(local.config, {

@@ -302,9 +302,35 @@ Hot's own email, and both firing and resolving are sent.
 | `job-wait` | A job has waited more than `monitoring.queue_wait_alert` seconds (default 900) for 10 minutes | As for `queue-backlog`; a scalable installation at `scaling.worker.max` needs a higher maximum. |
 | `task-wait` | A task has waited more than `monitoring.queue_wait_alert` seconds for 10 minutes | Task capacity is short: check the task-worker's `logs` and `TaskSlotsUsedPercent`, then raise `scaling.task_worker.max` or the size. |
 | `new-dead-letters` | Jobs were dead-lettered since the last measurement | Read the worker's `logs` for the failing jobs' errors. |
+| `alert-test` | The `test-alert` command was sent | Nothing is wrong: it checks the path to your inbox, and resolves by itself within about 15 minutes. |
 
 Liveness, dependency reachability, and end-to-end readiness are separate
 signals, and a missing heartbeat or backup status alerts rather than passing.
+
+Each stack also creates a dashboard named `hot-<installation>`, in
+CloudWatch or Cloud Monitoring. It plots these metrics: health, the queue and
+its waits, task slots, disk, certificate, and backup age.
+
+**Test the alert path** after installing and whenever the recipients change:
+run the `test-alert` command (below). The agent publishes a test metric, and
+the `alert-test` alert fires within a few minutes and then resolves. Both
+messages reach `monitoring.alert_emails` the same way a real alert would.
+
+**Silence alerts during planned work**, such as a resize or a restore:
+
+```sh
+python3 infra/operator/selfhost.py installation.tfvars.json maintenance start --minutes 90
+python3 infra/operator/selfhost.py installation.tfvars.json maintenance end
+```
+
+- On AWS this disables the installation's alarm actions until
+  `maintenance end`. The alarms still change state, and the plan workflow's
+  drift check reports the disabled actions until then.
+- On GCP it snoozes the installation's alert policies. The snooze ends after
+  `--minutes`, or at `maintenance end`.
+- Nobody is notified while alerts are silenced, so end maintenance when the
+  work is done.
+- The release role is allowed to do both.
 
 ## Operating an installation
 
@@ -338,6 +364,7 @@ workflow run and a manual run behave the same.
 | `drain-and-stop` | Stops the scheduler, then workers (2-minute grace), then the app, API, and ingress |
 | `deploy-now` | Deploys the release pointer now (the `release` action sets the pointer first) |
 | `roll-back` | After a failed upgrade: restores a local database from the pre-upgrade dump if the migrations started, then restarts the installed release |
+| `test-alert` | Fires the `alert-test` alert, which resolves by itself: checks that alerts reach `monitoring.alert_emails` |
 
 Diagnostics and logs are redacted on the host before they are reported:
 - every value in the host's secret files, and passwords inside connection URIs;

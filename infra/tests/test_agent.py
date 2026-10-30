@@ -1145,6 +1145,19 @@ class Commands(AgentHarness):
         self.assertEqual(self.run.compose_calls()[0], "stop scheduler")
 
 
+class AlertTests(AgentHarness):
+    def test_a_test_alert_fires_then_resolves(self):
+        report = self.agent.command("test-alert", request_id="t1")
+        self.assertEqual(report["state"], "alert-sent")
+        self.assertEqual(self.cloud.metrics[-1], ("hot-example", {"AlertTest": (1, "Count")}))
+        sent = agent_module.parse_time((Path(self.tmp.name) / "releases/alert-test").read_text())
+        soon = self.agent.observe(now=sent + datetime.timedelta(seconds=30))
+        self.assertNotIn("AlertTest", soon, "the alarm sees the test first")
+        later = self.agent.observe(now=sent + datetime.timedelta(minutes=5))
+        self.assertEqual(later["AlertTest"], (0, "Count"), "then a zero resolves it")
+        self.assertNotIn("AlertTest", self.agent.observe(now=sent + datetime.timedelta(hours=1)))
+
+
 class Diagnostics(AgentHarness):
     def setUp(self):
         super().setUp()

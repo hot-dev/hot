@@ -92,6 +92,53 @@ class Commands(unittest.TestCase):
         self.assertRegex(message["request_id"], r"^cli-[0-9a-f]{12}$")
 
 
+class AlertCli(FakeCli):
+    """Lists two alarms or alert policies, one snooze, and records the rest."""
+
+    def __call__(self, *args, stdin=None):
+        self.calls.append((args, stdin))
+        if "describe-alarms" in args:
+            return {"MetricAlarms": [{"AlarmName": "hot-hot-example-host-down"}, {"AlarmName": "hot-hot-example-job-wait"}]}
+        if args[:4] == ("gcloud", "monitoring", "policies", "list"):
+            return [{"name": "projects/example-project/alertPolicies/1", "displayName": "hot-hot-example-host-down"},
+                    {"name": "projects/example-project/alertPolicies/2", "displayName": "hot-hot-example-job-wait"},
+                    {"name": "projects/example-project/alertPolicies/3", "displayName": "hot-other-host-down"}]
+        if args[:4] == ("gcloud", "monitoring", "snoozes", "list"):
+            return [{"name": "projects/example-project/snoozes/7", "displayName": "hot-hot-example maintenance",
+                     "interval": {"endTime": "2027-01-15T09:00:00Z"}},
+                    {"name": "projects/example-project/snoozes/6", "displayName": "hot-hot-example maintenance",
+                     "interval": {"endTime": "2020-01-01T00:00:00Z"}}]
+        return {}
+
+
+class Maintenance(unittest.TestCase):
+    def test_aws_disables_the_alarm_actions_until_the_end(self):
+        cli = AlertCli("aws", [])
+        report = installation(AWS, cli).maintenance("start")
+        self.assertEqual(report, {"installation": "hot-example", "state": "maintenance", "alerts": 2,
+                                  "until": "until maintenance end"})
+        disabled = cli.find("disable-alarm-actions")[0]
+        self.assertEqual(disabled[disabled.index("--alarm-names") + 1:], ("hot-hot-example-host-down", "hot-hot-example-job-wait"))
+        installation(AWS, cli).maintenance("end")
+        self.assertTrue(cli.find("enable-alarm-actions"))
+
+    def test_gcp_snoozes_the_installation_policies_for_a_while(self):
+        cli = AlertCli("gcp", [])
+        report = installation(GCP, cli).maintenance("start", minutes=90)
+        created = cli.find("create")[0]
+        self.assertEqual(created[created.index("--criteria-policies") + 1],
+                         "projects/example-project/alertPolicies/1,projects/example-project/alertPolicies/2")
+        self.assertEqual(created[created.index("--end-time") + 1], report["until"])
+        self.assertEqual(report["until"], "2027-01-15T09:30:00Z")
+        installation(GCP, cli).maintenance("end")
+        cancelled = [args[4] for args in cli.find("cancel")]
+        self.assertEqual(cancelled, ["projects/example-project/snoozes/7"], "only the snooze still running")
+
+    def test_nothing_to_silence_is_an_error(self):
+        with self.assertRaisesRegex(selfhost.CliError, "No alerts found"):
+            installation(AWS, FakeCli("aws", [])).maintenance("start")
+
+
 class Releases(unittest.TestCase):
     def test_the_pointer_is_written_before_deploying(self):
         cli = FakeCli("gcp", [{"state": "deployed", "release": "3.0.2"}])

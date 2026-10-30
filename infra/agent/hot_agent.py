@@ -52,7 +52,11 @@ LOCK = Path("/run/hot/agent.lock")
 LIBEXEC = Path("/usr/local/libexec/hot")
 DEFAULT_MANIFESTS = "https://github.com/hot-dev/hot/releases/download/v{release}"
 POLL_SECONDS = 30
-COMMANDS = {"deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop", "roll-back"}
+COMMANDS = {"deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop", "roll-back",
+            "test-alert"}
+# After a test alert, how long the agent reports AlertTest = 0, which
+# resolves the alert on clouds that keep an incident open without data.
+ALERT_TEST_RESOLVE_SECONDS = (120, 900)
 HOT_SERVICES = ("app", "api", "worker", "task-worker", "scheduler")
 # Service logs: the newest lines, each shortened, within a size that fits
 # one log entry on either cloud.
@@ -94,7 +98,8 @@ GCP_METRIC_NAMES = {"AgentHeartbeat": "agent_heartbeat", "UnhealthyServices": "u
                     "QueueBacklog": "queue_backlog", "QueueDeadLetters": "queue_dead_letters",
                     "NewDeadLetters": "new_dead_letters", "JobsWaiting": "jobs_waiting",
                     "JobWaitSeconds": "job_wait_seconds", "TasksWaiting": "tasks_waiting",
-                    "TaskWaitSeconds": "task_wait_seconds", "TaskSlotsUsedPercent": "task_slots_used_percent"}
+                    "TaskWaitSeconds": "task_wait_seconds", "TaskSlotsUsedPercent": "task_slots_used_percent",
+                    "AlertTest": "alert_test"}
 # Installation-wide measurements of Hot's queue, published by the one host
 # that runs the scheduler. On GCP they are written for the project rather
 # than an instance, so autoscalers can use them as per-group metrics.
@@ -1427,6 +1432,12 @@ class Agent:
         release are left out before the first deploy."""
         now = now or datetime.datetime.now(datetime.timezone.utc)
         metrics = {"AgentHeartbeat": (1, "Count")}
+        try:
+            tested = parse_time((self.releases / "alert-test").read_text())
+        except (OSError, ValueError):
+            tested = None
+        if tested and ALERT_TEST_RESOLVE_SECONDS[0] <= (now - tested).total_seconds() <= ALERT_TEST_RESOLVE_SECONDS[1]:
+            metrics["AlertTest"] = (0, "Count")
         release = self.state().get("release")
         if release:
             local_data = [s for s in ("postgres", "valkey") if render.data_mode(self.config, s) == "local"]
@@ -1613,6 +1624,15 @@ class Agent:
             return self.report(state="status", request_id=request_id)
         if operation == "diagnostics":
             return self.report(state="diagnostics", request_id=request_id, diagnostics=self.diagnostics(bundle))
+        if operation == "test-alert":
+            # The alert-test alarm fires on this, then resolves: the whole
+            # path from the agent to the operator's inbox, without touching
+            # Hot.
+            self.cloud.put_metrics(self.config["name"], {"AlertTest": (1, "Count")})
+            # On AWS a command runs in its own process; the loop reads this.
+            self.releases.mkdir(parents=True, exist_ok=True)
+            (self.releases / "alert-test").write_text(utc_now())
+            return self.report(state="alert-sent", request_id=request_id)
         if bundle is None:
             raise AgentError("Nothing is deployed yet")
         if operation == "logs":

@@ -205,7 +205,7 @@ resource "aws_ssm_document" "command" {
     schemaVersion = "2.2"
     description   = "Run one Hot agent command on an installation host."
     parameters = {
-      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "logs", "restart-service", "drain-and-stop"] }
+      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "logs", "restart-service", "drain-and-stop", "test-alert"] }
       service   = { type = "String", default = "none", allowedValues = ["none", "app", "api", "worker", "task-worker", "scheduler", "ingress"] }
       requestId = { type = "String", allowedPattern = "^[A-Za-z0-9-]{1,64}$" }
     }
@@ -277,6 +277,8 @@ resource "aws_iam_role_policy" "release" {
     { Effect = "Allow", Action = ["ssm:SendCommand"], Resource = "arn:aws:ec2:${local.config.region}:*:instance/*",
     Condition = { StringEquals = { "ssm:resourceTag/HotInstallation" = local.config.name } } },
     { Effect = "Allow", Action = ["logs:FilterLogEvents"], Resource = [aws_cloudwatch_log_group.host.arn, "${aws_cloudwatch_log_group.host.arn}:*"] },
+    # selfhost.py maintenance: silence and restore this installation's alarms.
+    { Effect = "Allow", Action = ["cloudwatch:DescribeAlarms", "cloudwatch:DisableAlarmActions", "cloudwatch:EnableAlarmActions"], Resource = "arn:aws:cloudwatch:${local.config.region}:*:alarm:hot-${local.config.name}-*" },
     # Instance listings cannot be scoped by resource.
     { Effect = "Allow", Action = ["autoscaling:DescribeAutoScalingGroups"], Resource = "*" },
   ] })
