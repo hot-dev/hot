@@ -24,6 +24,7 @@ mod log_accumulator;
 mod orphan_reaper;
 pub mod resource_budget;
 pub mod shutdown;
+pub mod slot_status;
 pub mod task_lease;
 
 pub use executor::Backend;
@@ -1271,6 +1272,41 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
             }
         }
     });
+
+    // `task.status-file`: this worker's slots in use, for the self-host
+    // agent, which scales task hosts on them and retires idle ones.
+    let status_file = config
+        .worker_conf
+        .get_str_or_default("task.status-file", "");
+    if !status_file.is_empty() {
+        let path = std::path::PathBuf::from(status_file);
+        let code = Arc::clone(&code_semaphore);
+        let containers = Arc::clone(&container_semaphore);
+        let memory = Arc::clone(&container_budget);
+        let status_coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+            loop {
+                interval.tick().await;
+                if status_coordinator.is_shutting_down() {
+                    break;
+                }
+                let status = slot_status::SlotStatus {
+                    code_slots: code_max,
+                    code_busy: code_max.saturating_sub(code.available_permits()),
+                    container_slots: container_max,
+                    container_busy: container_max.saturating_sub(containers.available_permits()),
+                    memory_mb: memory.total_memory_mb(),
+                    memory_used_mb: memory
+                        .total_memory_mb()
+                        .saturating_sub(memory.available_memory_mb()),
+                };
+                if let Err(error) = slot_status::write(&path, &status) {
+                    tracing::warn!(%error, path = %path.display(), "Could not write the task status file");
+                }
+            }
+        });
+    }
 
     // Periodic janitor for {hot:task}: every tick, run XAUTOCLAIM to reclaim
     // orphaned PEL entries from dead consumers; every CLEANUP_EVERY_N_TICKS,

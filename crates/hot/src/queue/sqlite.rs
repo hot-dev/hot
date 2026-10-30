@@ -1476,14 +1476,21 @@ impl SqliteQueueAdmin {
                     sqlx::query_scalar("SELECT COUNT(*) FROM queue_message WHERE state = 2")
                         .fetch_one(&pool)
                         .await?;
-                summary.total_pending += pending;
-                summary.total_processing += processing;
-                summary.total_deadletter += deadletter;
-                summary.queues.push(QueueStatus {
+                // A retried message waits from when it became available again.
+                let now = now_ms();
+                let oldest_available_ms: Option<i64> = sqlx::query_scalar(
+                    "SELECT MIN(available_at_ms) FROM queue_message WHERE state = 0 AND available_at_ms <= ?",
+                )
+                .bind(now)
+                .fetch_one(&pool)
+                .await?;
+                summary.push(QueueStatus {
                     name,
                     pending,
                     processing,
                     deadletter,
+                    oldest_pending_secs: oldest_available_ms
+                        .map(|available_ms| (now - available_ms).max(0) / 1000),
                 });
             }
             pool.close().await;
@@ -1585,6 +1592,13 @@ mod tests {
         assert_eq!(before.total_pending, 1);
         assert_eq!(before.total_processing, 1);
         assert_eq!(before.total_deadletter, 1);
+        let waits: Vec<_> = before
+            .queues
+            .iter()
+            .map(|queue| (queue.name.as_str(), queue.oldest_pending_secs))
+            .collect();
+        assert_eq!(waits, [("hot:event", Some(0)), ("hot:task", None)]);
+        assert_eq!(before.oldest_pending_secs, Some(0));
 
         let snapshots = admin.message_snapshots().await.unwrap();
         assert_eq!(snapshots.len(), 3);
@@ -1611,6 +1625,7 @@ mod tests {
         assert_eq!(after.total_pending, 0);
         assert_eq!(after.total_processing, 0);
         assert_eq!(after.total_deadletter, 0);
+        assert_eq!(after.oldest_pending_secs, None);
 
         drop(leased);
     }

@@ -114,6 +114,19 @@ impl GcpIamCredentials {
     }
 }
 
+/// The password for a one-off synchronous connection, such as an admin
+/// command's: the current access token under `redis.auth = "gcp-iam"`,
+/// otherwise none (the URI carries any password).
+pub async fn one_off_password() -> Result<Option<String>, String> {
+    match AUTH.get().and_then(|auth| auth.credentials.as_ref()) {
+        Some(credentials) => fetch_token(&reqwest::Client::new(), &credentials.endpoint)
+            .await
+            .map(|(token, _)| Some(token))
+            .map_err(|error| format!("Could not fetch a Google access token for Valkey: {error}")),
+        None => Ok(None),
+    }
+}
+
 /// When to fetch the next token: five minutes before this one expires, so a
 /// new connection never starts with a token about to lapse, and at least 30
 /// seconds apart.

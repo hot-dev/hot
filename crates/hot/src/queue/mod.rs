@@ -911,27 +911,60 @@ pub fn get_queue_names(is_cluster: bool) -> Vec<String> {
 }
 
 /// Queue status information
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct QueueStatus {
     pub name: String,
+    /// Messages no worker has taken yet.
     pub pending: i64,
+    /// Messages a worker has taken and not yet finished.
     pub processing: i64,
     pub deadletter: i64,
+    /// How long the oldest pending message has waited, in seconds; `None`
+    /// when nothing is pending.
+    pub oldest_pending_secs: Option<i64>,
 }
 
 /// Summary of all queue statuses
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct QueueStatusSummary {
     pub queues: Vec<QueueStatus>,
     pub total_pending: i64,
     pub total_processing: i64,
     pub total_deadletter: i64,
+    /// The longest wait among every queue's oldest pending message.
+    pub oldest_pending_secs: Option<i64>,
+}
+
+impl QueueStatusSummary {
+    /// Add one queue's status to the totals.
+    pub fn push(&mut self, queue: QueueStatus) {
+        self.total_pending += queue.pending;
+        self.total_processing += queue.processing;
+        self.total_deadletter += queue.deadletter;
+        self.oldest_pending_secs = self.oldest_pending_secs.max(queue.oldest_pending_secs);
+        self.queues.push(queue);
+    }
+}
+
+/// Upper bound on the entries counted one by one when a consumer group
+/// cannot report its lag. Beyond it the count is reported as this bound.
+const PENDING_COUNT_LIMIT: i64 = 10_000;
+
+/// What `XINFO GROUPS` reports about one consumer group.
+struct GroupInfo {
+    last_delivered_id: String,
+    /// Entries delivered and not yet acknowledged.
+    pending: i64,
+    /// Entries not yet delivered, when Redis can tell (it cannot after the
+    /// group was moved with `XGROUP SETID` or entries were deleted).
+    lag: Option<i64>,
 }
 
 /// Admin operations for Redis queues
 pub struct RedisQueueAdmin {
     is_cluster: bool,
     uri: String,
+    password: Option<String>,
 }
 
 impl RedisQueueAdmin {
@@ -941,7 +974,34 @@ impl RedisQueueAdmin {
         if uri.starts_with("rediss://") {
             crate::redis::init_crypto_provider();
         }
-        Self { is_cluster, uri }
+        Self {
+            is_cluster,
+            uri,
+            password: None,
+        }
+    }
+
+    /// Authenticate standalone connections with this password, as the
+    /// default user; see [`crate::redis::one_off_password`].
+    pub fn with_password(mut self, password: Option<String>) -> Self {
+        self.password = password;
+        self
+    }
+
+    fn standalone_connection(&self) -> Result<::redis::Connection, String> {
+        let client = crate::redis::client(self.uri.as_str())
+            .map_err(|e| format!("Failed to connect to Redis: {}", e))?;
+        let mut conn = client
+            .get_connection()
+            .map_err(|e| format!("Failed to get Redis connection: {}", e))?;
+        if let Some(password) = &self.password {
+            let _: () = ::redis::cmd("AUTH")
+                .arg("default")
+                .arg(password)
+                .query(&mut conn)
+                .map_err(|e| format!("Failed to authenticate to Redis: {}", e))?;
+        }
+        Ok(conn)
     }
 
     /// Get queue names with hash tags matching the actual Redis Stream keys.
@@ -965,11 +1025,7 @@ impl RedisQueueAdmin {
                 .map_err(|e| format!("Failed to get cluster connection: {}", e))?;
             self.clear_queues_impl(&mut conn, &queue_names)?
         } else {
-            let client = crate::redis::client(self.uri.as_str())
-                .map_err(|e| format!("Failed to connect to Redis: {}", e))?;
-            let mut conn = client
-                .get_connection()
-                .map_err(|e| format!("Failed to get Redis connection: {}", e))?;
+            let mut conn = self.standalone_connection()?;
             self.clear_queues_impl(&mut conn, &queue_names)?
         };
 
@@ -1159,11 +1215,7 @@ impl RedisQueueAdmin {
                 .map_err(|e| format!("Failed to get cluster connection: {}", e))?;
             self.status_impl(&mut conn, &queue_names)
         } else {
-            let client = crate::redis::client(self.uri.as_str())
-                .map_err(|e| format!("Failed to connect to Redis: {}", e))?;
-            let mut conn = client
-                .get_connection()
-                .map_err(|e| format!("Failed to get Redis connection: {}", e))?;
+            let mut conn = self.standalone_connection()?;
             self.status_impl(&mut conn, &queue_names)
         }
     }
@@ -1174,52 +1226,158 @@ impl RedisQueueAdmin {
         queue_names: &[String],
     ) -> Result<QueueStatusSummary, String> {
         let mut summary = QueueStatusSummary::default();
+        let now_ms = Self::server_time_ms(conn)?;
 
         for queue_name in queue_names {
-            // For Redis Streams, use XLEN for total stream length
-            // and XPENDING for pending (unacked) messages
-            let stream_len: i64 = ::redis::cmd("XLEN")
-                .arg(queue_name.as_str())
-                .query(conn)
-                .unwrap_or(0);
-
-            // XPENDING returns [count, min-id, max-id, [[consumer, count], ...]]
-            let pending_result: redis::Value = ::redis::cmd("XPENDING")
-                .arg(queue_name.as_str())
-                .arg("hot-workers")
-                .query(conn)
-                .unwrap_or(redis::Value::Nil);
-
-            let processing: i64 = match pending_result {
-                redis::Value::Array(ref parts) if !parts.is_empty() => {
-                    redis::from_redis_value_ref(&parts[0]).unwrap_or(0)
-                }
-                _ => 0,
+            // Acknowledged entries stay in the stream until it is trimmed,
+            // so its length is not the backlog. The group's position is:
+            // entries after its last-delivered ID are waiting, and its
+            // pending entries list holds those taken and not yet finished.
+            let (pending, processing, after) =
+                match Self::group_info(conn, queue_name, streams::DEFAULT_CONSUMER_GROUP)? {
+                    Some(group) => {
+                        let after = format!("({}", group.last_delivered_id);
+                        let pending = match group.lag {
+                            Some(lag) => lag,
+                            None => Self::count_entries(conn, queue_name, &after)?,
+                        };
+                        (pending, group.pending, after)
+                    }
+                    // No worker has read this queue yet: everything waits.
+                    None => {
+                        let length: i64 = ::redis::cmd("XLEN")
+                            .arg(queue_name.as_str())
+                            .query(conn)
+                            .unwrap_or(0);
+                        (length, 0, "-".to_string())
+                    }
+                };
+            let oldest_pending_secs = if pending > 0 {
+                Self::first_entry_ms(conn, queue_name, &after)?
+                    .map(|enqueued_ms| (now_ms - enqueued_ms).max(0) / 1000)
+            } else {
+                None
             };
 
-            // pending = total in stream - currently processing (already delivered but not acked)
-            let pending = stream_len - processing;
-
-            // Dead letter queue is also a stream now
             let deadletter_key = format!("{}:deadletter", queue_name);
             let deadletter: i64 = ::redis::cmd("XLEN")
                 .arg(&deadletter_key)
                 .query(conn)
                 .unwrap_or(0);
 
-            summary.total_pending += pending;
-            summary.total_processing += processing;
-            summary.total_deadletter += deadletter;
-
-            summary.queues.push(QueueStatus {
+            summary.push(QueueStatus {
                 name: queue_name.clone(),
                 pending,
                 processing,
                 deadletter,
+                oldest_pending_secs,
             });
         }
 
         Ok(summary)
+    }
+
+    /// The Redis server's clock, which stamped the stream entry IDs.
+    fn server_time_ms(conn: &mut dyn ::redis::ConnectionLike) -> Result<i64, String> {
+        let (seconds, micros): (i64, i64) = ::redis::cmd("TIME")
+            .query(conn)
+            .map_err(|e| format!("Failed to read the Redis server time: {}", e))?;
+        Ok(seconds * 1000 + micros / 1000)
+    }
+
+    fn group_info(
+        conn: &mut dyn ::redis::ConnectionLike,
+        queue_name: &str,
+        group_name: &str,
+    ) -> Result<Option<GroupInfo>, String> {
+        let result: ::redis::Value =
+            match ::redis::cmd("XINFO").arg("GROUPS").arg(queue_name).query(conn) {
+                Ok(result) => result,
+                Err(e) if e.to_string().contains("no such key") => return Ok(None),
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to list consumer groups for {}: {}",
+                        queue_name, e
+                    ));
+                }
+            };
+        let records: Vec<Vec<::redis::Value>> = ::redis::from_redis_value_ref(&result)
+            .map_err(|e| format!("Failed to parse consumer groups for {}: {}", queue_name, e))?;
+        for fields in records {
+            let field = |name: &str| {
+                fields.chunks(2).find_map(|pair| match pair {
+                    [key, value]
+                        if ::redis::from_redis_value_ref::<String>(key).ok().as_deref()
+                            == Some(name) =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                })
+            };
+            let name: Option<String> =
+                field("name").and_then(|v| ::redis::from_redis_value_ref(v).ok());
+            if name.as_deref() != Some(group_name) {
+                continue;
+            }
+            return Ok(Some(GroupInfo {
+                last_delivered_id: field("last-delivered-id")
+                    .and_then(|v| ::redis::from_redis_value_ref(v).ok())
+                    .unwrap_or_else(|| "0-0".to_string()),
+                pending: field("pending")
+                    .and_then(|v| ::redis::from_redis_value_ref(v).ok())
+                    .unwrap_or(0),
+                lag: field("lag").and_then(|v| ::redis::from_redis_value_ref(v).ok()),
+            }));
+        }
+        Ok(None)
+    }
+
+    /// Entries from `start` (an `XRANGE` start, such as `(<id>`) to the end
+    /// of the stream, counted up to `PENDING_COUNT_LIMIT`.
+    fn count_entries(
+        conn: &mut dyn ::redis::ConnectionLike,
+        queue_name: &str,
+        start: &str,
+    ) -> Result<i64, String> {
+        let mut start = start.to_string();
+        let mut counted = 0;
+        while counted < PENDING_COUNT_LIMIT {
+            let entries: Vec<(String, ::redis::Value)> = ::redis::cmd("XRANGE")
+                .arg(queue_name)
+                .arg(&start)
+                .arg("+")
+                .arg("COUNT")
+                .arg(1000)
+                .query(conn)
+                .map_err(|e| format!("Failed to count entries in {}: {}", queue_name, e))?;
+            counted += entries.len() as i64;
+            match entries.last() {
+                Some((id, _)) if entries.len() == 1000 => start = format!("({}", id),
+                _ => break,
+            }
+        }
+        Ok(counted.min(PENDING_COUNT_LIMIT))
+    }
+
+    /// When the first entry from `start` on was added, in milliseconds
+    /// since the epoch, from its ID.
+    fn first_entry_ms(
+        conn: &mut dyn ::redis::ConnectionLike,
+        queue_name: &str,
+        start: &str,
+    ) -> Result<Option<i64>, String> {
+        let entries: Vec<(String, ::redis::Value)> = ::redis::cmd("XRANGE")
+            .arg(queue_name)
+            .arg(start)
+            .arg("+")
+            .arg("COUNT")
+            .arg(1)
+            .query(conn)
+            .map_err(|e| format!("Failed to read the oldest entry in {}: {}", queue_name, e))?;
+        Ok(entries
+            .first()
+            .and_then(|(id, _)| id.split('-').next()?.parse().ok()))
     }
 
     /// Check if running in cluster mode
@@ -1230,6 +1388,111 @@ impl RedisQueueAdmin {
     /// Get the Redis URI
     pub fn uri(&self) -> &str {
         &self.uri
+    }
+}
+
+#[cfg(test)]
+mod admin_status_tests {
+    use super::*;
+
+    /// A local Redis, or None to skip where none runs.
+    fn connection() -> Option<::redis::Connection> {
+        ::redis::Client::open("redis://127.0.0.1/")
+            .ok()?
+            .get_connection()
+            .ok()
+    }
+
+    fn add(conn: &mut ::redis::Connection, queue: &str, at_ms: i64, seq: usize) -> String {
+        ::redis::cmd("XADD")
+            .arg(queue)
+            .arg(format!("{}-{}", at_ms, seq))
+            .arg("payload")
+            .arg("x")
+            .query(conn)
+            .unwrap()
+    }
+
+    fn status(conn: &mut ::redis::Connection, queue: &str) -> QueueStatus {
+        let admin = RedisQueueAdmin::new("redis://127.0.0.1/".to_string(), false);
+        let summary = admin.status_impl(conn, &[queue.to_string()]).unwrap();
+        assert_eq!(summary.oldest_pending_secs, summary.queues[0].oldest_pending_secs);
+        summary.queues[0].clone()
+    }
+
+    #[test]
+    fn status_counts_only_undelivered_entries_and_how_long_the_oldest_waited() {
+        let Some(mut conn) = connection() else {
+            return;
+        };
+        let queue = format!("{{test-status-{}}}", uuid::Uuid::now_v7());
+        let now_ms = RedisQueueAdmin::server_time_ms(&mut conn).unwrap();
+        let ids: Vec<String> = [90_000, 60_000, 30_000]
+            .iter()
+            .enumerate()
+            .map(|(seq, age)| add(&mut conn, &queue, now_ms - age, seq))
+            .collect();
+
+        // Before any worker reads the queue, everything waits.
+        let before = status(&mut conn, &queue);
+        assert_eq!((before.pending, before.processing), (3, 0));
+        assert!((90..=92).contains(&before.oldest_pending_secs.unwrap()));
+
+        // A worker takes two and finishes one. The finished entry stays in
+        // the stream, but is no longer waiting.
+        let _: () = ::redis::cmd("XGROUP")
+            .arg("CREATE")
+            .arg(&queue)
+            .arg(streams::DEFAULT_CONSUMER_GROUP)
+            .arg("0")
+            .query(&mut conn)
+            .unwrap();
+        let _: ::redis::Value = ::redis::cmd("XREADGROUP")
+            .arg("GROUP")
+            .arg(streams::DEFAULT_CONSUMER_GROUP)
+            .arg("test")
+            .arg("COUNT")
+            .arg(2)
+            .arg("STREAMS")
+            .arg(&queue)
+            .arg(">")
+            .query(&mut conn)
+            .unwrap();
+        let _: i64 = ::redis::cmd("XACK")
+            .arg(&queue)
+            .arg(streams::DEFAULT_CONSUMER_GROUP)
+            .arg(&ids[0])
+            .query(&mut conn)
+            .unwrap();
+        let taken = status(&mut conn, &queue);
+        assert_eq!((taken.pending, taken.processing), (1, 1));
+        assert!((30..=32).contains(&taken.oldest_pending_secs.unwrap()));
+
+        // Moving the group (as the startup window does) leaves Redis unable to
+        // report its lag; the waiting entries are counted instead.
+        let _: () = ::redis::cmd("XGROUP")
+            .arg("SETID")
+            .arg(&queue)
+            .arg(streams::DEFAULT_CONSUMER_GROUP)
+            .arg(&ids[0])
+            .query(&mut conn)
+            .unwrap();
+        let moved = status(&mut conn, &queue);
+        assert_eq!((moved.pending, moved.processing), (2, 1));
+        assert!((60..=62).contains(&moved.oldest_pending_secs.unwrap()));
+
+        // Nothing waiting: no wait to report.
+        let _: () = ::redis::cmd("XGROUP")
+            .arg("SETID")
+            .arg(&queue)
+            .arg(streams::DEFAULT_CONSUMER_GROUP)
+            .arg("$")
+            .query(&mut conn)
+            .unwrap();
+        let idle = status(&mut conn, &queue);
+        assert_eq!((idle.pending, idle.oldest_pending_secs), (0, None));
+
+        let _: i64 = ::redis::cmd("DEL").arg(&queue).query(&mut conn).unwrap();
     }
 }
 

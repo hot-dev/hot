@@ -876,7 +876,11 @@ pub(crate) enum QueueAction {
     /// Clear all event queues
     Clear,
     /// Show queue status and lengths
-    Status,
+    Status {
+        /// Print the status as one JSON object, for monitoring
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // CacheAction enum removed - will be reimplemented with  bytecode caching

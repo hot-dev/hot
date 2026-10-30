@@ -129,6 +129,7 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
     ("HOT_NETWORK_CLIENT_IP_HEADER", "network.client-ip.header"),
     ("HOT_BOX_GUEST_DNS", "box.guest-dns"),
     ("HOT_SCHEDULER_HEARTBEAT_FILE", "scheduler.heartbeat-file"),
+    ("HOT_TASK_STATUS_FILE", "task.status-file"),
     ("HOT_REDIS_CA_CERT", "redis.ca-cert"),
     ("HOT_WORKER_DB_MAX_CONNECTIONS", "worker.db-max-connections"),
     ("HOT_TASK_MAX_CONCURRENT", "task.max-concurrent"),
@@ -1877,6 +1878,10 @@ mod tests {
         assert_eq!(
             env_var_to_conf_key("HOT_SCHEDULER_HEARTBEAT_FILE"),
             "scheduler.heartbeat-file"
+        );
+        assert_eq!(
+            env_var_to_conf_key("HOT_TASK_STATUS_FILE"),
+            "task.status-file"
         );
         assert_eq!(env_var_to_conf_key("HOT_REDIS_CA_CERT"), "redis.ca-cert");
         assert_eq!(
