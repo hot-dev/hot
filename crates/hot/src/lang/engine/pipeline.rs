@@ -709,14 +709,10 @@ impl Engine {
                 }
             };
             take(compiler.extract_event_handlers(&combined_program));
-            let scheduled = compiler.extract_scheduled_functions(&combined_program);
-            let schedules_extracted = scheduled.is_ok();
-            take(scheduled);
-            if schedules_extracted {
-                found.errors.extend(
-                    Self::schedule_policy_errors(&compiler, &combined_program, conf).errors,
-                );
-            }
+            take(compiler.extract_scheduled_functions(&combined_program));
+            found
+                .errors
+                .extend(Self::schedule_policy_errors(&compiler, &combined_program, conf).errors);
             let call_graph = crate::lang::compiler::call_graph::CallGraph::build(&combined_program);
             let box_requirements = call_graph.resolve_user_box_requirements(&combined_program);
             found
@@ -1110,8 +1106,9 @@ impl Engine {
     /// Recurring schedules the conf's schedule policy rejects: below the
     /// minimum interval, with no upcoming run, or not a valid cron once
     /// normalized. Each points at the scheduled function. Expects
-    /// `extract_scheduled_functions` to have run. The text check and the
-    /// diagnostics check both report these.
+    /// `extract_scheduled_functions` to have run; schedules it already
+    /// rejects are skipped. The text check and the diagnostics check both
+    /// report these.
     fn schedule_policy_errors(
         compiler: &crate::lang::Compiler,
         program: &crate::lang::ast::Program,
@@ -1126,6 +1123,11 @@ impl Engine {
         };
         let policy = crate::db::SchedulePolicy::from_conf(conf);
         for (cron_expression, functions) in compiler.get_scheduled_functions() {
+            // Extraction already reports a schedule that doesn't normalize
+            // (`invalid-schedule`).
+            if crate::db::normalize_recurring_schedule_expression(cron_expression).is_err() {
+                continue;
+            }
             let Err(problem) = crate::db::validate_recurring_schedule_interval(
                 cron_expression,
                 policy.min_interval_secs,
@@ -2755,6 +2757,34 @@ fn (): Str { "unused" }
         assert_eq!(diagnostics[0].range.start.line, 2);
         assert!(diagnostics[0].message.contains("::jobs/big-job"));
         assert!(diagnostics[0].message.contains("Valid sizes: nano"));
+    }
+
+    /// The diagnostics check reports every validation problem at once: an
+    /// unparseable schedule doesn't hide another schedule's policy problem
+    /// or a box size.
+    #[test]
+    fn json_check_reports_every_validation_problem() {
+        let conf = crate::val::val!({"schedule": {"min-interval-seconds": 3600}});
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        write_file(
+            src_dir.join("ticker.hot"),
+            "::ticker ns\n\ntick meta {schedule: \"* * * * *\"} fn (event: Map): Int { 1 }\n\nbad meta {schedule: \"not a cron\"} fn (event: Map): Int { 2 }\n\nbig meta {box: {min-size: \"gigantic\"}} fn (x: Int): Int { x }\n",
+        );
+        let src_paths = vec![src_dir.to_string_lossy().to_string()];
+        let mut found: Vec<(String, u32)> = check_json(&src_paths, &conf)
+            .into_iter()
+            .map(|d| (d.code, d.range.start.line))
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                ("invalid-box-size".to_string(), 6),
+                ("invalid-schedule".to_string(), 4),
+                ("schedule-policy".to_string(), 2),
+            ]
+        );
     }
 
     /// An overlay check reads an open file from its buffer, checks an open
