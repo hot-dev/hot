@@ -66,7 +66,7 @@ hot_worker = { path = "crates/hot_worker" }
 hot_task_worker = { path = "crates/hot_task_worker" }
 hot_scheduler = { path = "crates/hot_scheduler" }
 hot_api = { path = "crates/hot_api" }
-rustyline = "18.0"
+rustyline = "19.0"
 serde_json = "1.0.154"
 serde = { version = "1.0", features = ["derive", "rc"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc", "use-std"] }
