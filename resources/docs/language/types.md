@@ -325,12 +325,11 @@ Use `match` to check variant types (preferred):
 
 ### Matching a Variant's Payload
 
-Inside an `Enum.Variant` arm, the matched name and the arm's binding hold that
-variant's payload: a `Vec`, a `Str`, an `Int`, and so on. A record payload is
-the exception: the arm keeps the variant, whose fields read through to the
-payload, so it can still be passed on as the enum. A unit variant has no
-payload, so its arm keeps the variant too. Outside the arm the matched name is
-still the variant:
+Inside an `Enum.Variant` arm, a binding the arm names (`Reply.Declined (why)`)
+holds that variant's payload: a `Vec`, a `Str`, an `Int`, and so on. The
+matched name, including a `fn match` parameter, keeps the variant, so an arm
+can pass it on as the enum. A record payload's binding keeps the variant too:
+its fields read through to the payload. A unit variant has no payload:
 
 {{snippet:types#match-payload}}
 

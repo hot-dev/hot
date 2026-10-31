@@ -1,9 +1,9 @@
-// Inside an `Enum.Variant` match arm, the arm's binding and the matched
-// variable hold the variant's payload when it is not a record: a Vec, a Str,
-// an Int. Previously they held the variant, which only field access reads
-// through, so a Vec payload had a length of 2 (its `$type` and `$val`). A
-// record variant keeps the variant: its fields read through, and it can
-// still be passed on as the enum.
+// Inside an `Enum.Variant` match arm, the arm's binding holds the variant's
+// payload when it is not a record: a Vec, a Str, an Int. Previously it held
+// the variant, which only field access reads through, so a Vec payload had a
+// length of 2 (its `$type` and `$val`). The matched variable, and a `fn
+// match` parameter, keep the variant, so an arm can pass it on as the enum.
+// A record variant's binding keeps the variant too: its fields read through.
 ::hot::test::match-variant-payloads ns
 meta ["test"]
 
@@ -46,16 +46,21 @@ meta ["test"] fn () {
     assert-eq("b", steps[1].step, "the steps index like a Vec")
 }
 
-test-vec-payload-subject
+test-matched-variable-keeps-the-variant
 meta ["test"] fn () {
     s open-steps()
-    steps match s {
-        Status.Open => { map(s, %.step) }
+    kept match s {
+        Status.Open => { s }
         _ => { null }
     }
 
-    assert-eq(["a", "b", "c"], steps, "the matched variable is the Vec payload")
-    assert(is-type(s, Status.Open), "outside the arm it is still the variant")
+    assert(is-type(kept, Status.Open), "the matched variable is the variant")
+    assert(is-type(kept, Status), "it can be passed on as the enum")
+    steps match s {
+        Status.Open (owed) => { map(owed, %.step) }
+        _ => { null }
+    }
+    assert-eq(["a", "b", "c"], steps, "a binding the arm names is the Vec payload")
 }
 
 test-scalar-payloads
@@ -82,10 +87,10 @@ meta ["test"] fn () {
     assert-eq(2.0, ring.radius, "its payload fields read through")
 }
 
-test-fn-match-parameter-is-payload
+test-fn-match-parameter-keeps-the-variant
 meta ["test"] fn () {
-    assert-eq("why", owed(Status.NotOwed("why")), "a fn match parameter is the payload")
-    assert-eq(3, length(owed(open-steps())), "a Vec payload through fn match")
+    assert(is-type(owed(Status.NotOwed("why")), Status.NotOwed), "a fn match parameter is the variant")
+    assert(is-type(owed(open-steps()), Status), "a Vec variant passes through fn match as the enum")
     assert(is-type(owed(Status.Done), Status.Done), "a unit variant stays the variant")
 }
 

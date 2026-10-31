@@ -946,8 +946,12 @@ impl Engine {
         // usually also discovered as part of its source unit (run pushes the
         // file's directory onto src paths), and the same-file bindings are
         // deduplicated by merge_namespace.
+        // The run's own namespaces (the target file's, then the eval
+        // input's) run last, so the run's result is their last value.
+        let mut run_namespaces: Vec<String> = Vec::new();
         for parsed in &extra_parsed_files {
             for (ns_path, namespace) in &parsed.namespaces {
+                run_namespaces.push(ns_path.to_string());
                 tracing::debug!(
                     "  Found namespace '{}' with {} variables (from target file)",
                     ns_path,
@@ -995,6 +999,7 @@ impl Engine {
                 format!("::hot::$run::run-{}", short_id)
             };
 
+            run_namespaces.push(eval_ns.clone());
             let eval_code_with_namespace = format!("{} ns\n{}", eval_ns, code);
             // Store eval code for pretty error reporting later
             eval_source_content = Some(eval_code_with_namespace.clone());
@@ -1079,6 +1084,8 @@ impl Engine {
                 compiler.set_current_file(std::path::PathBuf::from(target_file), content);
             }
         }
+
+        compiler.set_run_namespaces(run_namespaces);
 
         // Try comprehensive compilation with validation first
         match compiler.compile_program(&mut combined_program) {
@@ -2199,10 +2206,38 @@ fn (): Str { "unused" }
         assert!(errors.is_empty(), "{:?}", errors.to_diagnostics());
     }
 
-    /// A dependency whose `src-paths` hold no `.hot` files is the first
+    /// A dependency that contributes no `.hot` files (a resources-only or
+    /// deps-only package) loads, as it did in 3.0.0.
+    #[test]
+    fn check_accepts_a_dependency_with_no_source_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("prompts");
+        write_file(
+            lib.join("pkg.hot"),
+            "::hot::pkg ns\n\nhot.pkg.prompts {\n  name: \"example.com/prompts\",\n  version: \"1.0.0\",\n  deps: {},\n  resource-paths: [\"resources/\"],\n}\n",
+        );
+        write_file(lib.join("resources/greeting.txt"), "hello\n");
+        let src = dir.path().join("src");
+        write_file(src.join("app.hot"), "::app ns\n\nx 1\n");
+        let conf = crate::lang::data::eval_data(&format!(
+            "hot.project.app.deps {{\"example.com/prompts\": {{local: {:?}}}}}\n",
+            lib.display().to_string()
+        ))
+        .unwrap();
+
+        let errors = Engine::check_sources_pipeline_diagnostics(
+            &[src.display().to_string()],
+            &[],
+            Some(&conf),
+            Some("app"),
+        );
+        assert!(errors.is_empty(), "{:?}", errors.to_diagnostics());
+    }
+
+    /// A dependency whose declared `src-paths` don't exist is the first
     /// error, by name, not the unresolved references it leads to.
     #[test]
-    fn check_reports_a_dependency_with_no_source_files() {
+    fn check_reports_a_dependency_with_missing_src_paths() {
         let dir = tempfile::tempdir().unwrap();
         // The sources are in hot/src, but pkg.hot points at src/.
         let (src_paths, conf) = write_project_using_a_hot_src_package(dir.path(), "[\"src/\"]");
@@ -2212,11 +2247,11 @@ fn (): Str { "unused" }
                 .to_diagnostics();
         let first = diagnostics
             .first()
-            .expect("an empty dependency is an error");
+            .expect("a missing src-paths folder is an error");
         assert!(
             first
                 .message
-                .contains("Package 'example.com/lib' has no source files")
+                .contains("Package 'example.com/lib' declares src-paths")
                 && first.message.contains("[\"src/\"]"),
             "{diagnostics:?}"
         );

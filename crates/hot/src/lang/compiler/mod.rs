@@ -104,6 +104,14 @@ pub struct Compiler {
     current_namespace: String,
     /// Current function parameter names (for parameter resolution during function body compilation)
     current_function_params: Vec<String>,
+    /// Set by `compile_match_flow` for the `compile_match_expression` call it
+    /// makes: per arm, whether its binding is the implicit `fn match`
+    /// parameter rather than one the arm names.
+    implicit_arm_bindings: Option<Vec<bool>>,
+    /// The run's own namespaces (`hot run`'s target file, eval input), in
+    /// the order they run after every other namespace. The run's result is
+    /// the last value they compute.
+    run_namespaces: Vec<String>,
     /// Functions defined in the bodies being compiled, innermost last. A
     /// reference to one by name loads its closure, which keeps its
     /// definer's locals; the function registered under its name doesn't.
@@ -325,6 +333,8 @@ impl Compiler {
             core_variables: CoreVariableRegistry::new(),
             current_namespace: "hot::main".to_string(),
             current_function_params: Vec::new(),
+            implicit_arm_bindings: None,
+            run_namespaces: Vec::new(),
             local_function_names: Vec::new(),
             enclosing_bindings: Vec::new(),
             local_names: Vec::new(),
@@ -579,6 +589,11 @@ impl Compiler {
     }
 
     /// Add a source file for error reporting (without setting it as current)
+    /// Set the run's own namespaces: they run last, in this order.
+    pub fn set_run_namespaces(&mut self, namespaces: Vec<String>) {
+        self.run_namespaces = namespaces;
+    }
+
     pub fn add_source_file(&mut self, file_path: std::path::PathBuf, content: String) {
         self.file_contents
             .insert(file_path.clone(), content.clone());
@@ -1315,6 +1330,16 @@ impl Compiler {
             let main_entry = namespace_order.remove(main_pos);
             namespace_order.push(main_entry);
             tracing::trace!("Compiler: Moved ::hot::main namespace to end of compilation order");
+        }
+        // Then the run's own namespaces, whose last value is the run's result.
+        for run_ns in &self.run_namespaces {
+            if let Some(pos) = namespace_order
+                .iter()
+                .position(|(ns_path, _)| ns_path.to_string() == *run_ns)
+            {
+                let entry = namespace_order.remove(pos);
+                namespace_order.push(entry);
+            }
         }
 
         for (ns_path, namespace) in namespace_order {
@@ -9111,6 +9136,7 @@ impl Compiler {
         // See `next_cond_id` doc on `Compiler` for the original bug.
         let cond_id = self.next_cond_id;
         self.next_cond_id += 1;
+        let implicit_bindings = self.implicit_arm_bindings.take();
 
         // Compile the value being matched
         let value_reg = self.compile_value(&match_expr.value)?;
@@ -9234,7 +9260,10 @@ impl Compiler {
         };
 
         // For each arm, emit comparison and body using CondBranchStart/CondBranchEnd
-        for arm in &match_expr.arms {
+        for (arm_index, arm) in match_expr.arms.iter().enumerate() {
+            let implicit_binding = implicit_bindings
+                .as_ref()
+                .is_some_and(|flags| flags.get(arm_index) == Some(&true));
             let cmp_result_reg = self.allocate_register();
 
             // Construct the branch name for result collection (match-all keys).
@@ -9382,21 +9411,29 @@ impl Compiler {
             } else if self.arm_binds_plain_payload(arm) {
                 // An `Enum.Variant` arm whose payload is not a record (a Vec,
                 // a Str): field access can't reach it through the variant,
-                // so the binding and the subject are the payload, as for
-                // Result. A record variant keeps the variant, whose fields
+                // so the arm's binding is the payload. The matched variable
+                // keeps the variant, so an arm can pass it on as the enum.
+                // A record variant's binding keeps the variant, whose fields
                 // read through to the payload.
-                let payload_reg = self.allocate_register();
-                self.emit_instruction(Instruction::ExtractInnerVal {
-                    dest: payload_reg,
-                    src: arm_value_reg,
-                });
+                // A `fn match` parameter is the arm's implicit binding, so it
+                // keeps the variant too.
                 if let Some(binding) = &arm.binding {
-                    self.store_variable(binding, payload_reg);
+                    if implicit_binding {
+                        self.store_variable(binding, arm_value_reg);
+                    } else {
+                        let payload_reg = self.allocate_register();
+                        self.emit_instruction(Instruction::ExtractInnerVal {
+                            dest: payload_reg,
+                            src: arm_value_reg,
+                        });
+                        self.store_variable(binding, payload_reg);
+                    }
                 }
-                if let Some(ref var_name) = match_subject_var_name
+                if let Some(held_reg) = held_reg
+                    && let Some(ref var_name) = match_subject_var_name
                     && arm.binding.as_deref() != Some(var_name)
                 {
-                    self.store_variable(var_name, payload_reg);
+                    self.store_variable(var_name, held_reg);
                 }
             } else {
                 // Other arms: use the full value for bindings
@@ -9682,6 +9719,8 @@ impl Compiler {
             return Ok(reg);
         }
 
+        let implicit_bindings: Vec<bool> = arms.iter().map(|arm| arm.binding.is_none()).collect();
+
         // Create a synthetic MatchExpr using the first parameter as the value to match
         let match_expr = crate::lang::ast::MatchExpr {
             value: Box::new(Value::Ref(Ref::Var(crate::lang::ast::VarRef {
@@ -9718,6 +9757,7 @@ impl Compiler {
             src: flow.src.clone(),
         };
 
+        self.implicit_arm_bindings = Some(implicit_bindings);
         self.compile_match_expression(&match_expr)
     }
 }

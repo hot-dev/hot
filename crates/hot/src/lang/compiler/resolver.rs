@@ -914,6 +914,9 @@ enum MetaDecl {
 /// registry for auto-imported names.
 struct MetaScope {
     decls: AHashMap<String, MetaDecl>,
+    /// The variants of each closed enum by qualified name. Open enums can
+    /// gain variants elsewhere, so they are not listed.
+    closed_enum_variants: AHashMap<String, Vec<String>>,
     core: crate::lang::compiler::core_registry::CoreVariableRegistry,
 }
 
@@ -923,10 +926,20 @@ impl MetaScope {
         core: crate::lang::compiler::core_registry::CoreVariableRegistry,
     ) -> Self {
         let mut decls = AHashMap::new();
+        let mut closed_enum_variants: AHashMap<String, Vec<String>> = AHashMap::new();
         for (ns_path, namespace) in &program.namespaces {
             for (var, value) in &namespace.scope.vars {
                 if var.deep_set.is_some() || var.deep_path.is_some() {
                     continue;
+                }
+                if let Value::TypeDef(type_def) = value
+                    && !type_def.is_open
+                    && let Some(variants) = &type_def.variants
+                {
+                    closed_enum_variants
+                        .entry(format!("{}/{}", ns_path, var.sym.name()))
+                        .or_default()
+                        .extend(variants.iter().map(|v| v.name.name().to_string()));
                 }
                 let decl = if let Some(target) = Self::import_target(value, &namespace.aliases) {
                     MetaDecl::Import(target)
@@ -947,7 +960,11 @@ impl MetaScope {
                 }
             }
         }
-        Self { decls, core }
+        Self {
+            decls,
+            closed_enum_variants,
+            core,
+        }
     }
 
     /// The qualified target of a var-import: `local ::ns/name` parses either
@@ -1120,8 +1137,32 @@ impl Resolver {
                     self.report_unresolved_meta_name(name, src, type_ref);
                     return None;
                 };
+                // `Enum.Variant` names the variant's constructor, as compiled
+                // code names it (`::ns/Enum.Variant`); a unit variant reads
+                // as its value.
+                if let Some(crate::lang::ast::DeepPath::Key(variant)) = &var_ref.var.deep_path
+                    && matches!(scope.decls.get(&qualified), Some(MetaDecl::Type))
+                    && let Some((target_ns, type_name)) = qualified.rsplit_once('/')
+                {
+                    if let Some(variants) = scope.closed_enum_variants.get(&qualified)
+                        && !variants.contains(variant)
+                    {
+                        self.errors.add(CompilerError::UnresolvedVariable {
+                            var_name: format!("{}.{}", name, variant),
+                            namespace: ns.to_string(),
+                            message: format!("'{}' has no variant '{}'", name, variant),
+                            location: src.map(Self::src_location),
+                        });
+                        return None;
+                    }
+                    return Some(Value::Ref(Ref::Ns(crate::lang::ast::NsRef {
+                        ns: crate::lang::ast::NsPath::from_string(target_ns),
+                        src: src.cloned(),
+                        function_name: Some(format!("{}.{}", type_name, variant)),
+                    })));
+                }
                 if var_ref.var.deep_path.is_some() {
-                    // `Enum.Variant`, `config.port`: keep the path, qualify the root.
+                    // `config.port`: keep the path, qualify the root.
                     let mut var_ref = var_ref.clone();
                     var_ref.var.sym = crate::lang::ast::Sym::String(qualified);
                     return Some(Value::Ref(Ref::Var(var_ref)));

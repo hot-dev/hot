@@ -982,10 +982,11 @@ impl Engine {
     /// files from those directories. This prevents test files from being included
     /// in production builds.
     ///
-    /// A package that contributes no `.hot` files is an error naming the
-    /// package and the folders searched. Otherwise its namespaces would just
-    /// be missing, and the first error would be an unresolved reference in
-    /// the code that uses it.
+    /// A package may contribute no `.hot` files (one that only bundles
+    /// dependencies or resources). A `src-paths` folder it declares that
+    /// doesn't exist is an error naming the package and the folder:
+    /// otherwise its namespaces would just be missing, and the first error
+    /// would be an unresolved reference in the code that uses it.
     pub fn discover_dependency_source_files(
         pkg_root: &std::path::Path,
     ) -> Result<Vec<String>, String> {
@@ -1011,13 +1012,18 @@ impl Engine {
             src_paths
         );
 
-        // Discover files from each src_path
+        // Discover files from each src_path. The default `src/` may be
+        // absent; a folder the package names must exist.
+        let declared = !meta.src_paths.is_empty();
         let mut all_files = Vec::new();
+        let mut missing = Vec::new();
         for src_path in &src_paths {
             let full_path = pkg_root.join(src_path);
             if full_path.exists() {
                 let files = Self::discover_hot_files(&full_path.to_string_lossy())?;
                 all_files.extend(files);
+            } else if declared {
+                missing.push(src_path.clone());
             } else {
                 tracing::debug!(
                     "src_path {} does not exist in {}",
@@ -1027,17 +1033,17 @@ impl Engine {
             }
         }
 
-        if all_files.is_empty() {
+        if !missing.is_empty() {
             let name = if meta.name.is_empty() {
                 pkg_root.display().to_string()
             } else {
                 meta.name
             };
             return Err(format!(
-                "Package '{}' has no source files: no .hot files in its src-paths {:?} under {}. \
+                "Package '{}' declares src-paths {:?} that don't exist under {}. \
                  Set src-paths in its pkg.hot to the folders that hold its .hot files.",
                 name,
-                src_paths,
+                missing,
                 pkg_root.display()
             ));
         }

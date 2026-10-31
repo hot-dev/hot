@@ -590,6 +590,10 @@ pub struct VirtualMachine {
     call_stack: Vec<CallContext>,
     /// Hot AST for namespace and metadata access
     hot_ast: Option<Arc<crate::lang::ast::HotAst>>,
+    /// Qualified names whose AST initializers `lookup_qualified_variable`
+    /// is evaluating, innermost last, so a value cycle across namespaces
+    /// is an error instead of unbounded recursion.
+    ast_initializers_in_progress: Vec<String>,
     /// Debug: Current function name for correlation
     current_debug_function: Option<String>,
     /// Function name to ID mapping from compiler (ordered for consistent resolution)
@@ -779,6 +783,7 @@ impl VirtualMachine {
             flow_frame_base: 0,
             call_stack: Vec::new(),
             hot_ast,
+            ast_initializers_in_progress: Vec::new(),
             current_debug_function: None,
             function_mapping,
             core_functions,
@@ -5115,12 +5120,27 @@ impl VirtualMachine {
                 if let Some(namespace) = hot_ast.namespaces.namespaces.get(&ns_path) {
                     for (var, value) in namespace.scope.vars.iter() {
                         if var.sym.name() == var_name {
+                            let qualified = format!("{}/{}", full_namespace, var_name);
+                            if let Some(start) = self
+                                .ast_initializers_in_progress
+                                .iter()
+                                .position(|name| *name == qualified)
+                            {
+                                let mut cycle = self.ast_initializers_in_progress[start..].to_vec();
+                                cycle.push(qualified);
+                                return Err(VmError::runtime(format!(
+                                    "Value cycle across namespaces: {}",
+                                    cycle.join(" -> ")
+                                )));
+                            }
                             // The initializer names things in its own
                             // namespace, not the reader's.
                             let value_clone = value.clone();
                             let reader_namespace =
                                 std::mem::replace(&mut self.current_namespace, full_namespace);
+                            self.ast_initializers_in_progress.push(qualified);
                             let result = self.convert_ast_value_to_runtime_val(&value_clone);
+                            self.ast_initializers_in_progress.pop();
                             self.current_namespace = reader_namespace;
                             return result;
                         }
@@ -9515,10 +9535,16 @@ impl VirtualMachine {
     /// which namespace reads the meta.
     pub fn resolve_meta_refs(&mut self, val: &Val) -> VmResult<Val> {
         match val {
+            // A name that fails to load leaves its own key as written, so
+            // one bad entry doesn't fail every read of the meta (test
+            // discovery reads `test` off every function's meta).
             Val::Map(map) => {
                 let mut resolved = indexmap::IndexMap::with_capacity(map.len());
                 for (key, value) in map.iter() {
-                    resolved.insert(key.clone(), self.resolve_meta_refs(value)?);
+                    let value = self
+                        .resolve_meta_refs(value)
+                        .unwrap_or_else(|_| value.clone());
+                    resolved.insert(key.clone(), value);
                 }
                 Ok(Val::Map(Box::new(resolved)))
             }
@@ -9537,7 +9563,19 @@ impl VirtualMachine {
                         ns_ref.ns,
                         ns_ref.function_name.as_deref().unwrap_or_default()
                     );
-                    if self.function_mapping.contains_key(&qualified)
+                    // A unit enum variant (`::ns/Enum.Variant` with no
+                    // payload) reads as its value, as it does in code.
+                    let variant = ns_ref
+                        .function_name
+                        .as_deref()
+                        .is_some_and(|name| name.contains('.'));
+                    if variant
+                        && self
+                            .function_mapping
+                            .contains_key(&format!("{}/0", qualified))
+                    {
+                        self.call_function_bypassing_unified_lookup(&qualified, &[])
+                    } else if self.function_mapping.contains_key(&qualified)
                         || self.core_functions.contains_key(&qualified)
                     {
                         Ok(crate::lang::runtime::function_ref::function_ref(qualified))

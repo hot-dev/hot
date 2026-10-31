@@ -1592,10 +1592,14 @@ impl TypeChecker {
                 _ => None,
             })
             .collect();
+        // A `fn match` body has no source of its own: point at the
+        // function, or failing that its first arm.
         let location = flow
             .src
-            .as_ref()
-            .map(|src| self.source_to_error_location(src));
+            .clone()
+            .or_else(|| self.current_def_src.clone())
+            .or_else(|| arms.first().and_then(|arm| arm.src.clone()))
+            .map(|src| self.source_to_error_location(&src));
         self.check_match_exhaustiveness_for(&subject_type, &arms, location);
     }
 
@@ -1772,17 +1776,45 @@ impl TypeChecker {
     /// infer as `Any`, so a binding of one takes the type the callee
     /// declares it returns, as an annotation would give it. A declared
     /// `Result` stays `Any`: the binding holds the Result, and consuming it
-    /// gives a value the declaration does not name.
+    /// gives a value the declaration does not name. So does a union with a
+    /// built-in member (`Str | Vec | Map`, `Int | Dec`): core functions
+    /// declare those for every input they take, so the binding would fail
+    /// checks the value it holds passes.
     fn untyped_binding_type(&mut self, value: &Value, inferred: TypeExpr) -> TypeExpr {
         let TypeExpr::Any = inferred else {
             return inferred;
         };
         match self.declared_call_return_type(value) {
-            Some(TypeExpr::Union(members)) if members.iter().any(Self::names_result) => {
+            Some(TypeExpr::Union(members))
+                if members
+                    .iter()
+                    .any(|m| Self::names_result(m) || Self::is_builtin_type(m)) =>
+            {
                 TypeExpr::Any
             }
             Some(declared) if !Self::names_result(&declared) => declared,
             _ => TypeExpr::Any,
+        }
+    }
+
+    /// Whether `ty` is a built-in value type rather than a declared one
+    /// (a named type, a record shape or a literal).
+    fn is_builtin_type(ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Int
+            | TypeExpr::Dec
+            | TypeExpr::Str
+            | TypeExpr::Bool
+            | TypeExpr::Vec(_)
+            | TypeExpr::Map(_, _)
+            | TypeExpr::Bytes
+            | TypeExpr::Byte
+            | TypeExpr::Any
+            | TypeExpr::Function(_, _) => true,
+            TypeExpr::Optional(inner) | TypeExpr::Constrained(inner, _) => {
+                Self::is_builtin_type(inner)
+            }
+            _ => false,
         }
     }
 
@@ -1823,14 +1855,22 @@ impl TypeChecker {
             }
         };
         let arg_count = fn_call.args.len() + piped;
-        let arity = arities
+        // Overloads of one arity dispatch on argument types at run time, so
+        // their declared return types only count when they agree.
+        let mut same_arity = arities
             .iter()
-            .find(|a| !a.variadic && a.params == arg_count)
-            .or_else(|| {
-                arities
-                    .iter()
-                    .find(|a| a.variadic && arg_count + 1 >= a.params)
-            })?;
+            .filter(|a| !a.variadic && a.params == arg_count);
+        let arity = match same_arity.next() {
+            Some(first) => {
+                if same_arity.any(|a| a.return_type != first.return_type) {
+                    return None;
+                }
+                first
+            }
+            None => arities
+                .iter()
+                .find(|a| a.variadic && arg_count + 1 >= a.params)?,
+        };
         let return_type = arity.return_type.clone()?;
         let namespace = namespace.clone();
         Some(self.parse_type_annotation_in(&return_type, &namespace))
@@ -2032,7 +2072,20 @@ impl TypeChecker {
                 if short == "Any" {
                     return;
                 }
+                // A type arm naming another literal union (a sub-union, a
+                // union of them, or a homonym with the same members) covers
+                // the members it shares with the subject.
+                let namespace = self.context.current_namespace.clone();
+                let arm_type = self.parse_type_annotation_in(type_name, &namespace);
+                let mut arm_members = Vec::new();
+                let mut arm_open = false;
+                if !self.collect_literal_members(&arm_type, &mut arm_members, &mut arm_open) {
+                    arm_members.clear();
+                }
                 for (i, member) in subject.members.iter().enumerate() {
+                    if arm_members.contains(member) {
+                        covered[i] = true;
+                    }
                     let kind = match member {
                         LiteralType::Str(_) => "Str",
                         LiteralType::Int(_) => "Int",
@@ -3580,10 +3633,29 @@ impl TypeChecker {
                 {
                     return TypeExpr::Any;
                 }
+                // A field read off a union warns only when no member can
+                // have the field: packages declare `Response | HttpError`
+                // for calls whose error comes back as an Err, so the read
+                // only ever sees the member that declares it.
+                let warnings_before = self.errors.warnings.len();
+                let mut some_member_has_field = false;
                 let resolved: Vec<_> = variants
                     .iter()
-                    .map(|v| self.value_type(v, key, location))
+                    .map(|v| {
+                        let before = self.errors.warnings.len();
+                        let field_type = self.value_type(v, key, location);
+                        some_member_has_field |= self.errors.warnings.len() == before;
+                        field_type
+                    })
                     .collect();
+                if some_member_has_field {
+                    self.errors.warnings.truncate(warnings_before);
+                } else {
+                    // One read, one warning.
+                    self.errors
+                        .warnings
+                        .truncate(warnings_before.saturating_add(1));
+                }
                 TypeExpr::Union(resolved)
             }
             _ => TypeExpr::Any,
@@ -3603,18 +3675,21 @@ impl TypeChecker {
         });
     }
 
-    /// Walk a match arm's body. Inside an `Enum.Variant` arm the matched name
-    /// and the arm's binding hold that variant's payload, so both are bound
-    /// to the payload type for the arm.
+    /// Walk a match arm's body. Inside an `Enum.Variant` arm the arm's
+    /// binding holds that variant's payload. The matched name keeps the
+    /// variant, whose fields read through to a record payload, so it is
+    /// bound to the payload type only for a record payload.
     fn infer_match_arm_body(&mut self, arm: &MatchArm, subject: Option<&str>) -> TypeExpr {
-        let payload = match (&arm.type_name, &arm.variant) {
+        let (payload, subject) = match (&arm.type_name, &arm.variant) {
             (Some(type_name), Some(variant)) if arm.alternatives.is_empty() => {
-                self.variant_payload_type(type_name, variant)
+                let payload = self.variant_payload_type(type_name, variant);
+                let reads_through = payload.as_ref().is_some_and(|p| self.is_record_type(p));
+                (payload, subject.filter(|_| reads_through))
             }
             (Some(type_name), None) if arm.alternatives.is_empty() => {
-                self.union_member_named(subject, type_name)
+                (self.union_member_named(subject, type_name), subject)
             }
-            _ => None,
+            _ => (None, subject),
         };
         let names: Vec<&str> = subject.into_iter().chain(arm.binding.as_deref()).collect();
         let Some(payload) = payload.filter(|_| !names.is_empty()) else {
@@ -3627,6 +3702,20 @@ impl TypeChecker {
         let body_type = self.infer_value_type(&arm.body);
         self.context.pop_scope();
         body_type
+    }
+
+    /// Whether `ty` is a record: a record shape or a named struct.
+    fn is_record_type(&self, ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Record { .. } => true,
+            TypeExpr::Named(name) => self
+                .context
+                .types
+                .get(name)
+                .or_else(|| self.context.types.get(&Self::short_type_name(name)))
+                .is_some_and(|td| td.is_struct),
+            _ => false,
+        }
     }
 
     /// The member of a union-typed `match` subject that a type arm names
