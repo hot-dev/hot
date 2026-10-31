@@ -251,6 +251,15 @@ pub fn main_with_providers(providers: CliProviders) {
         .build()
         .expect("Failed to build Tokio runtime");
 
+    // Rayon's global pool parses source files and loads the AST cache, both
+    // of which recurse once or more per nesting level. Its default ~2 MB
+    // stacks overflow on ~150 nested lambdas, below the deepest nesting the
+    // parser accepts (256 levels); 16 MB covers that with room to spare.
+    // Building fails only if the pool already exists, which keeps it.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .stack_size(16 * 1024 * 1024)
+        .build_global();
+
     runtime.block_on(async_main(providers));
 }
 
