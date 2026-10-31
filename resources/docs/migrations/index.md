@@ -69,6 +69,32 @@ Afterwards, mint replacements with `POST /v1/orgs/{org}/envs/{env}/api-keys`.
 You can also reactivate a key in the App, and it then works as an ordinary
 environment key.
 
+**`hot init` no longer sets a known password.**
+- Before 3.0.1, `hot init` gave the local identity, `local@hot.dev`, the
+  password `hotdev` on any database. A PostgreSQL installation set up as the
+  [PostgreSQL guide](/docs/configuration/postgres) describes therefore had an
+  admin sign-in for the `local` organization that anyone could use.
+- 3.0.1 sets that password only on a local-development SQLite database, and
+  the App refuses it outside local development.
+- Remove the old password as well. On PostgreSQL, run this as a superuser or
+  `BYPASSRLS` role:
+
+```sql
+DELETE FROM hot.user_auth
+WHERE auth_type = 'email_password' AND auth_identifier = 'local@hot.dev';
+```
+
+**Set `HOT_ENV` on every deployment.**
+- An unset `HOT_ENV` means local development. 3.0.0 then signed every visitor
+  in to the App as the first user and signed sessions with a built-in secret,
+  wherever the App listened.
+- 3.0.1 keeps that only when the App listens on a loopback address or
+  `HOT_ENV=development` is set. With `HOT_ENV` unset on a network address,
+  the App signs nobody in by itself and refuses to start without
+  `HOT_APP_SESSION_SECRET`.
+- Set `HOT_ENV=production` and `HOT_APP_SESSION_SECRET`. The self-host bundle
+  already does.
+
 **PostgreSQL: a rolling upgrade.**
 1. Run `hot db migrate` with the 3.0.1 CLI while 3.0.0 is still serving.
 2. Re-run the 3.0.1 `provision_runtime.sql`.

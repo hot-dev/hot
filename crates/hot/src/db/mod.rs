@@ -1285,6 +1285,10 @@ pub async fn check_default_data_exists(db: &DatabasePool) -> Result<(i64, i64), 
     Ok((org_count, user_count))
 }
 
+/// The local identity's sign-in password. Only a local-development SQLite
+/// database gets it, and the App refuses it outside local development.
+pub const LOCAL_DEV_PASSWORD: &str = "hotdev";
+
 /// Insert default organization and user if none exist
 pub async fn insert_default_data(
     db: &DatabasePool,
@@ -1312,31 +1316,36 @@ pub async fn insert_default_data(
     )
     .await?;
 
-    // Insert user authentication for email/password
-    let password_hash = crate::auth::hash_password_with_random_salt("hotdev").map_err(|e| {
-        DatabaseError::User(UserError::Database(sqlx::Error::Protocol(format!(
-            "Password hashing failed: {}",
-            e
-        ))))
-    })?;
+    // A password only for a local-development SQLite database. `hot init`
+    // also bootstraps PostgreSQL, where a published password would be a
+    // way in for anyone who can reach the App.
+    if crate::env::is_local_dev() && matches!(db, DatabasePool::Sqlite(_)) {
+        let password_hash = crate::auth::hash_password_with_random_salt(LOCAL_DEV_PASSWORD)
+            .map_err(|e| {
+                DatabaseError::User(UserError::Database(sqlx::Error::Protocol(format!(
+                    "Password hashing failed: {}",
+                    e
+                ))))
+            })?;
 
-    let auth_data: serde_json::Value = serde_json::from_str(&password_hash).map_err(|e| {
-        DatabaseError::User(UserError::Database(sqlx::Error::Protocol(format!(
-            "JSON parsing failed: {}",
-            e
-        ))))
-    })?;
+        let auth_data: serde_json::Value = serde_json::from_str(&password_hash).map_err(|e| {
+            DatabaseError::User(UserError::Database(sqlx::Error::Protocol(format!(
+                "JSON parsing failed: {}",
+                e
+            ))))
+        })?;
 
-    UserAuth::insert_user_auth(
-        db,
-        &user_auth_id,
-        &user_id,
-        "email_password",
-        "local@hot.dev",
-        Some(&auth_data),
-        &user_id,
-    )
-    .await?;
+        UserAuth::insert_user_auth(
+            db,
+            &user_auth_id,
+            &user_id,
+            "email_password",
+            "local@hot.dev",
+            Some(&auth_data),
+            &user_id,
+        )
+        .await?;
+    }
 
     // Insert org (individual type for local dev)
     Org::insert_org(db, &org_id, "Local", "local", "individual", &user_id).await?;
@@ -1577,6 +1586,36 @@ mod tests {
         assert!(check_migration_target(runtime, "postgres://hot_owner@db:5432/hot").is_ok());
         assert!(check_migration_target(runtime, "postgres://hot_owner@db:5432/staging").is_err());
         assert!(check_migration_target(runtime, "sqlite:.hot/db/hot.sqlite.db").is_err());
+    }
+
+    #[tokio::test]
+    async fn local_sqlite_gets_the_local_dev_password() {
+        let db = test_db().await;
+        insert_default_data(&db).await.unwrap();
+        let auth = UserAuth::get_user_auth(&db, "email_password", "local@hot.dev")
+            .await
+            .unwrap();
+        let stored = serde_json::to_string(&auth.auth_data.unwrap()).unwrap();
+        assert!(crate::auth::verify_password(LOCAL_DEV_PASSWORD, &stored).unwrap());
+    }
+
+    #[tokio::test]
+    async fn postgres_local_identity_has_no_password() {
+        let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
+            return;
+        };
+        let conf = crate::val!({"uri": uri, "schema": "hot", "rls": {"enforce": false}});
+        run_migrations(&conf).await.unwrap();
+        let pool = create_db_pool(&conf).await.unwrap();
+        let db = pool.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Onboarding));
+        if User::get_user_by_email(&db, "local@hot.dev").await.is_err() {
+            insert_default_data(&db).await.unwrap();
+        }
+        assert!(matches!(
+            UserAuth::get_user_auth(&db, "email_password", "local@hot.dev").await,
+            Err(UserError::Database(sqlx::Error::RowNotFound))
+        ));
     }
 
     // ========================================================================

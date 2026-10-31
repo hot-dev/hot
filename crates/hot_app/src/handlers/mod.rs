@@ -536,6 +536,13 @@ pub async fn authenticate_user(
 ) -> Result<User, String> {
     tracing::debug!("Starting authentication for email: {}", email);
 
+    // Before 3.0.1, `hot init` gave the local identity this published password
+    // on PostgreSQL too. Sign-up needs 8 characters, so only that seed has it.
+    if !crate::auth::local_dev_conveniences() && password == hot::db::LOCAL_DEV_PASSWORD {
+        tracing::warn!("Refused the local development password outside local development");
+        return Err("Invalid email or password".to_string());
+    }
+
     // Get user authentication record
     let user_auth = match UserAuth::get_user_auth(db, "email_password", email).await {
         Ok(auth) => {
@@ -880,18 +887,11 @@ pub async fn switch_env_handler(
     }
 
     // Set the environment cookie
-    let new_cookies = cookies.add(
-        axum_extra::extract::cookie::Cookie::build((
-            crate::auth::current_env_cookie_name(),
-            env_id.to_string(),
-        ))
-        .path("/")
-        .max_age(time::Duration::days(30))
-        .same_site(axum_extra::extract::cookie::SameSite::Lax)
-        .http_only(true)
-        .secure(!hot::env::is_local_dev())
-        .build(),
-    );
+    let new_cookies = cookies.add(crate::auth::build_cookie(
+        crate::auth::current_env_cookie_name(),
+        env_id.to_string(),
+        time::Duration::days(30),
+    ));
 
     let org_id = session
         .current_org_id()
