@@ -12,6 +12,7 @@
 use ahash::{AHashMap, AHashSet};
 
 use super::Compiler;
+use super::constraint_specs::is_constructor_only;
 use crate::lang::ast::{NamespaceAliases, NsPath, Program, Ref, TypeDef, Value};
 
 /// Built-in type names a payload type expression can start with.
@@ -43,7 +44,14 @@ impl Compiler {
             let ns = prefixed(&ns_path.to_string());
             for (var, value) in &namespace.scope.vars {
                 if let Value::TypeDef(def) = value {
-                    records.insert(format!("{ns}/{}", var.sym.name()), def.fields.is_some());
+                    let record = records
+                        .entry(format!("{ns}/{}", var.sym.name()))
+                        .or_insert(false);
+                    // A separate `A type fn (…)` adds constructors to the
+                    // declaration with the fields.
+                    if !is_constructor_only(def) {
+                        *record = def.fields.is_some();
+                    }
                 }
             }
         }

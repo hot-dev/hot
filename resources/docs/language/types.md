@@ -115,8 +115,10 @@ literal outside a closed union, as in `pick-fruit("grape")`, is a compile-time
 runtime too: a computed value from outside the set, such as one parsed from
 JSON, fails where it enters the type with `Err(ConstraintError.Violation)`. An
 `open` union also accepts unknown values of the same type. Literal union values
-stay plain values, with no type tag. See
-[Constraints](/docs/language/constraints).
+stay plain values, with no type tag. A union can name other literal unions, as
+in `Day type Weekday | Weekend` or `Workday type Weekday | "holiday"`: its
+values stay plain too, and a `match` arm or `is-type` on it accepts a member of
+any of them. See [Constraints](/docs/language/constraints).
 
 They also work inline, without a named type:
 

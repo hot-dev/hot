@@ -1,0 +1,115 @@
+// `where` constraints and closed literal unions across declarations: a
+// record whose constructor is a separate `type fn` declaration, and literal
+// unions composed of other unions.
+::hot::test::constraint-declarations ns
+meta ["test"]
+
+// Values reach their boundary at run time, where a literal would be
+// rejected by `hot check` already.
+dynamic fn (value: Any): Any {
+    value
+}
+
+// The kind of constraint error a result holds, or "ok".
+constraint-kind fn (lazy result: Any): Str {
+    forced do result
+    cond {
+        is-ok(forced) => { "ok" }
+        => {
+            match err-value(forced) {
+                ConstraintError.Violation => { "violation" }
+                _ => { "other" }
+            }
+        }
+    }
+}
+
+Currency type "USD" | "EUR" | "GBP"
+Cents type Int where gte(%, 0)
+
+// The constructor declared after the fields.
+Span type {
+    start: Int,
+    finish: Int where lte(%, 1000)
+} where lte(%.start, %.finish)
+
+Span type fn (start: Int, days: Int): Span {
+    Span({start: start, finish: add(start, days)})
+}
+
+// The constructor declared before the fields.
+Wallet type fn (currency: Str, cents: Int): Wallet {
+    Wallet({currency: currency, cents: cents})
+}
+
+Wallet type {
+    currency: Currency,
+    cents: Cents
+}
+
+span-finish fn (span: Span): Int {
+    span.finish
+}
+
+Holder enum { Held(Span), Empty }
+
+test-separate-type-fn-keeps-constraints
+meta ["test"] fn () {
+    assert-eq(8, Span(5, 3).finish, "the custom constructor")
+    assert-eq("violation", constraint-kind(Span(dynamic(5), -1)), "the invariant, through the custom constructor")
+    assert-eq("violation", constraint-kind(Span({start: dynamic(5), finish: 1})), "the invariant, through the map constructor")
+    assert-eq("violation", constraint-kind(Span(start: dynamic(5), finish: 1)), "the invariant, through named arguments")
+    assert-eq("violation", constraint-kind(Span(dynamic(1), 2000)), "a field's where clause")
+    assert-eq("violation", constraint-kind(assoc(Span(1, 2), "start", dynamic(9))), "an update")
+    assert-eq("violation", constraint-kind(span-finish(dynamic({start: 9, finish: 3}))), "a typed parameter")
+    assert-eq("EUR", Wallet("EUR", 5).currency, "a constructor declared before the fields")
+    assert-eq("violation", constraint-kind(Wallet(dynamic("JPY"), 5)), "a closed union field")
+    assert-eq("violation", constraint-kind(Wallet({currency: "EUR", cents: dynamic(-1)})), "a refined field")
+    held match Holder.Held(Span(1, 2)) {
+        Holder.Held (h) => { h }
+        _ => { null }
+    }
+
+    assert(is-type(held, Holder.Held), "a record payload's arm binding keeps the variant")
+    assert-eq(3, held.finish, "and reads its fields")
+}
+
+// Literal unions composed of other unions keep their values plain, and a
+// `match` arm or `is-type` on them checks every member.
+Weekday type "mon" | "tue"
+Weekend type "sat" | "sun"
+Day type Weekday | Weekend
+Workday type Weekday | "holiday"
+Today type Weekday
+Shift enum { On(Workday), Off }
+
+day-kind fn (d: Any): Str {
+    match d {
+        Workday => { "workday" }
+        Day => { "day" }
+        _ => { "other" }
+    }
+}
+
+today-kind fn (d: Any): Str {
+    match d {
+        Today => { "today" }
+        _ => { "other" }
+    }
+}
+
+test-composed-literal-union-arms
+meta ["test"] fn () {
+    assert-eq("workday", day-kind(dynamic("mon")), "a member of a union inside the alias")
+    assert-eq("workday", day-kind(dynamic("holiday")), "a literal of the alias")
+    assert-eq("day", day-kind(dynamic("sat")), "a union of two unions")
+    assert-eq("other", day-kind(dynamic("fri")), "a value outside them")
+    assert-eq("other", day-kind(dynamic(1)), "a value of another type")
+    assert-eq("today", today-kind(dynamic("tue")), "an alias of a union")
+    assert-eq("other", today-kind(dynamic("sat")), "outside the aliased union")
+    assert(is-type("holiday", Workday), "is-type agrees")
+    assert-eq("sun", Day(dynamic("sun")), "a composed union's value stays plain")
+    assert-eq("violation", constraint-kind(Day(dynamic("fri"))), "its constructor checks the members")
+    assert-eq("holiday", untype(Shift.On(dynamic("holiday"))), "a composed union as a payload")
+    assert-eq("violation", constraint-kind(Shift.On(dynamic("fri"))), "a payload outside it")
+}

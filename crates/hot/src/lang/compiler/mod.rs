@@ -201,6 +201,10 @@ pub struct Compiler {
     constraint_type_defs: AHashMap<String, crate::lang::ast::TypeDef>,
     /// Whether each named type carries a constraint (memo).
     constrained_types: AHashMap<String, bool>,
+    /// Aliases built only of literals, base types and constrained aliases,
+    /// with a constraint among them (`Ext type Weekday | "holiday"`). Their
+    /// values stay plain, as a literal union's do.
+    composed_aliases: AHashSet<String>,
     /// Constant ids of registered constraint specs, by qualified type name.
     constraint_spec_ids: AHashMap<String, ConstantId>,
     /// `where` predicate functions by qualified name: parameter and body.
@@ -366,6 +370,7 @@ impl Compiler {
             diagnostics: crate::lang::errors::CompilerErrors::new(),
             constraint_type_defs: AHashMap::new(),
             constrained_types: AHashMap::new(),
+            composed_aliases: AHashSet::new(),
             constraint_spec_ids: AHashMap::new(),
             constraint_predicates: AHashMap::new(),
             shadowing_namespaces: AHashSet::new(),
@@ -5896,7 +5901,7 @@ impl Compiler {
         // constructing it.
         let check = self.constructor_check_constant(&type_tag_name);
         if let Some(check) = check
-            && Self::is_constrained_alias(type_def)
+            && self.is_plain_alias(&type_tag_name)
         {
             let data = self.program.add_constant(Constant::Val(Val::from("data")));
             let function_info = FunctionInfo {
@@ -9056,14 +9061,10 @@ impl Compiler {
                     return Ok(());
                 }
 
-                // A refinement or closed literal union: its values are plain
+                // A refinement or closed literal union, or an alias composed
+                // of them (`Day type Weekday | Weekend`): its values are plain
                 // base values, so the arm is a guard that checks them.
-                if self
-                    .constraint_type_defs
-                    .get(&full_type_path)
-                    .is_some_and(Self::is_constrained_alias)
-                    && let Some(spec) = self.untagged_alias_spec(&full_type_path)
-                {
+                if let Some(spec) = self.untagged_alias_spec(&full_type_path) {
                     let checked = self.emit_constraint_check(
                         value_reg,
                         spec,

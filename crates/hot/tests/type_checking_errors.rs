@@ -2081,6 +2081,63 @@ mod integration_tests {
         );
     }
 
+    /// A record's `where` clauses and closed literal-union fields still
+    /// apply when its constructor is declared separately, as `A type fn
+    /// (…)`, before or after the fields.
+    #[test]
+    fn test_where_kept_with_separate_type_fn() {
+        let source = r#"
+            ::test ns
+            Fruit type "apple" | "banana"
+            A type { x: Int, y: Int } where lte(%.x, 100)
+            A type fn (x: Int, y: Int): A { A({x, y}) }
+            B type fn (x: Int, y: Int): B { B({x, y}) }
+            B type { x: Int where lte(%, 100), y: Int }
+            Basket type { fruit: Fruit, n: Int }
+            Basket type fn (f: Str, n: Int): Basket { Basket({fruit: f, n}) }
+            a A({x: 200, y: 1})
+            b B({x: 300, y: 1})
+            c Basket({fruit: "kiwi", n: 1})
+            ok-a A({x: 1, y: 1})
+            ok-b B({x: 2, y: 1})
+            ok-c Basket({fruit: "apple", n: 1})
+        "#;
+        let found = violations(source);
+        assert_eq!(found.len(), 3, "Got: {:?}", found);
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("fails `A` (lte(%.x, 100))"))
+        );
+        assert!(found.iter().any(|m| m.contains("300 fails `lte(%, 100)`")));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("\"kiwi\" isn't one of the values of `Fruit`"))
+        );
+    }
+
+    /// An exact Dec meets an `Int` refinement as the Int it converts to at
+    /// run time, so `200.0` passes `in(%, [200, 204])`.
+    #[test]
+    fn test_where_converts_exact_numbers_before_the_predicate() {
+        let source = r#"
+            ::test ns
+            Code type Int where in(%, [200, 204])
+            Server type { code: Code }
+            Rate type Dec where eq(%, 2.0)
+            a Server({code: 200.0})
+            b: Code 204.0
+            c: Rate 2
+            d Server({code: 404.0})
+            e: Code 201.0
+        "#;
+        let found = violations(source);
+        assert_eq!(found.len(), 2, "Got: {:?}", found);
+        assert!(found.iter().any(|m| m.contains("404.0 fails `Code`")));
+        assert!(found.iter().any(|m| m.contains("201.0 fails `Code`")));
+    }
+
     fn violations(source: &str) -> Vec<String> {
         compile_and_get_type_errors(source)
             .iter()
@@ -2129,6 +2186,32 @@ mod integration_tests {
                 "Expected {expected:?} in {errors:?}"
             );
         }
+        assert!(
+            errors.iter().all(|m| !m.contains("TokenLiteral")),
+            "A diagnostic repeated a token: {errors:?}"
+        );
+    }
+
+    /// `registry-auth` is checked through var imports of `BoxConf`,
+    /// `BoxRegistryAuth` and `start` too.
+    #[test]
+    fn test_registry_auth_checked_through_var_imports() {
+        let source = r#"
+            ::test ns
+            BoxConf ::hot::box/BoxConf
+            BoxRegistryAuth ::hot::box/BoxRegistryAuth
+            start ::hot::box/start
+            conf BoxConf({image: "ghcr.io/a/b:1", registry-auth: {secret: "x", token: "ghp_confTokenLiteral"}})
+            auth BoxRegistryAuth({token: "ghp_authTokenLiteral"})
+            started fn () { start({image: "ghcr.io/a/b:1", registry-auth: {password: "ghp_startTokenLiteral"}}) }
+            good BoxConf({image: "ghcr.io/a/b:1", registry-auth: BoxRegistryAuth({secret: "ghcr-pull"})})
+        "#;
+        let errors: Vec<String> = compile_and_get_type_errors(source)
+            .iter()
+            .filter(|e| constraint_code(e) == Some("invalid-registry-auth"))
+            .map(|e| e.to_string())
+            .collect();
+        assert_eq!(errors.len(), 3, "Got: {:?}", errors);
         assert!(
             errors.iter().all(|m| !m.contains("TokenLiteral")),
             "A diagnostic repeated a token: {errors:?}"
