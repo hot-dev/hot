@@ -106,6 +106,24 @@ jobs:
       - name: Build the release binary
         run: cargo build --release --locked --bin hot -j 4
 
+      # As in hot.yml, but for the release test binaries: cargo runs crate
+      # tests outside the workspace root, so they find hot-std and the other
+      # resources through these links.
+      - name: Prepare checkout runtime for Rust tests
+        run: |
+          runtime_assets="$RUNNER_TEMP/hot-rust-test-resources"
+          mkdir -p "$runtime_assets" target/release/deps
+          for entry in "$GITHUB_WORKSPACE/resources/"*; do
+            ln -s "$entry" "$runtime_assets/${entry##*/}"
+          done
+          ln -s "$GITHUB_WORKSPACE/hot/pkg" "$runtime_assets/pkg"
+          for destination in target/release/resources target/release/deps/resources; do
+            if [[ -L "$destination" ]]; then
+              rm "$destination"
+            fi
+            ln -s "$runtime_assets" "$destination"
+          done
+
       - name: Library tests (release profile)
         run: cargo test --release --locked --workspace --lib -j 4
 
