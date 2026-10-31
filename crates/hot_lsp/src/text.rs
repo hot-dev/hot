@@ -12,7 +12,7 @@
 //! client goes through it before it touches the text, and every position that
 //! goes out is built by it, so a column never indexes a string directly.
 
-use tower_lsp::lsp_types::{Position, Range};
+use tower_lsp_server::ls_types::{Position, Range};
 
 /// Line starts of one text, for position conversion.
 ///

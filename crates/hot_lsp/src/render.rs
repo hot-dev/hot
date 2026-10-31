@@ -4,7 +4,7 @@ use crate::index::{Def, Index, Scope};
 use crate::syntax::{Local, LocalKind};
 use hot::lang::ast::{FlowType, FnDef, TypeDef, Value};
 use hot::val::Val;
-use tower_lsp::lsp_types::{
+use tower_lsp_server::ls_types::{
     CompletionItemKind, Documentation, ParameterInformation, ParameterLabel, SignatureInformation,
 };
 
@@ -100,8 +100,8 @@ pub fn doc(def: &Def<'_>) -> Option<String> {
 
 pub fn documentation(def: &Def<'_>) -> Option<Documentation> {
     doc(def).map(|value| {
-        Documentation::MarkupContent(tower_lsp::lsp_types::MarkupContent {
-            kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+        Documentation::MarkupContent(tower_lsp_server::ls_types::MarkupContent {
+            kind: tower_lsp_server::ls_types::MarkupKind::Markdown,
             value,
         })
     })

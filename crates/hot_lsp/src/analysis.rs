@@ -16,7 +16,7 @@ use hot::lang::engine::pipeline::SourceOverlays;
 use hot::lang::errors::{CompilerError, CompilerErrors};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
+use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 
 /// What one analysis runs on.
 pub struct Input {
