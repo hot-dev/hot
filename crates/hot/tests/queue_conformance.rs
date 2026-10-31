@@ -524,9 +524,7 @@ mod cases {
         tokio::time::sleep(ORPHAN_IDLE).await;
         survivor.recover_orphaned_items().await.unwrap();
         if harness.backend == Backend::Redis {
-            // Not exact: the count includes each purged entry twice, once
-            // acknowledged and once deleted from the stream.
-            assert!(purged >= 1);
+            assert_eq!(purged, 1);
             expect_nothing(&survivor).await;
         } else {
             assert_eq!(purged, 0);

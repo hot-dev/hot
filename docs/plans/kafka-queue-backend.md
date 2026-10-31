@@ -99,13 +99,14 @@ Worth doing whatever Phase 0 decides.
 
       It found the memory queue redelivering a panicking handler forever, the
       defect SQLite once had: a dropped memory lease spent no attempt and was
-      not marked redelivered. Fixed. It also documents three differences
-      that are by design:
+      not marked redelivered. Fixed. It also found Redis's purge count
+      including each purged pending entry twice, and counting the old
+      entries of processed messages. Fixed: the count is now the messages
+      discarded. It documents two differences that are by design:
       - Redis hands out one more lease for an exhausted message and
         dead-letters it in `process` without running the handler.
       - A Redis clone is a new consumer, so a delivery dropped on one handle
         is redelivered only to that handle, or reclaimed after the idle time.
-      - Redis's purge count includes each purged pending entry twice.
 - [ ] Status counts and oldest wait. Wait for #189, which fixes Redis
       counting acknowledged entries as pending and adds the oldest wait.
 - [x] Route `hot queue status` and `hot queue clear` through a `QueueAdmin`
