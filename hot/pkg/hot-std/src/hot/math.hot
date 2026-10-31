@@ -16,7 +16,9 @@ meta {
     ```
     """
 }
-fn (x: Int | Dec): Bool { eq(0, x) }
+fn (x: Int | Dec): Bool {
+    call-lib(::hot::math/is-zero, [x])
+}
 
 
 is-pos
@@ -142,15 +144,21 @@ mod
 meta {
     core: true,
     doc: """
-    Remainder of `x` divided by `y`. A zero `y` is `Err("Modulo by zero")`.
+    Remainder of `x` divided by `y`, with the sign of `x` (the remainder of
+    truncated division, as `%` in C, Rust and JavaScript), for Ints and Decs
+    alike. The result is an Int when both are Ints, else a Dec. A zero `y`
+    is `Err("Modulo by zero")`.
 
     **Example**
 
     ```hot
-    mod(10, 3)    // 1
-    mod(7, 2)     // 1
-    mod(8, 4)     // 0
-    mod(2.5, 1)   // 0.5
+    mod(10, 3)     // 1
+    mod(7, 2)      // 1
+    mod(8, 4)      // 0
+    mod(2.5, 1)    // 0.5
+    mod(-7, 2)     // -1
+    mod(-7.0, 2)   // -1.0
+    mod(7, -2)     // 1
     ```
     """
 }
@@ -333,7 +341,8 @@ rand-int
 meta {
     core: true,
     doc: """
-    Random integer: 0 to max int, or 0 to n-1 when `n` provided.
+    Random integer from 0 to the largest Int, or from 0 to `n - 1` when `n`
+    is given. `n` must be positive.
 
     **Example**
 
@@ -345,5 +354,5 @@ meta {
     """
 }
 fn
-(): Int { call-lib(::hot::math/floor, [call-lib(::hot::math/rand, [])]) },
-(n: Int): Int { call-lib(::hot::math/floor, [call-lib(::hot::math/rand, [n])]) }
+(): Int { call-lib(::hot::math/rand-int, []) },
+(n: Int): Int { call-lib(::hot::math/rand-int, [n]) }

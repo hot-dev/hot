@@ -1,0 +1,94 @@
+::hot::test::jit-parity-natives ns
+meta ["test"]
+
+// Regressions for natives whose results changed once the JIT compiled their
+// caller: after 100 calls by default, or from the first with
+// `--jit.threshold 1`. Each test calls the code under test 150 times, so
+// both CI runs compare the compiled code with the interpreter's results.
+
+// ----------------------------------------------------------------------------
+// is-zero of a Dec zero is true. Compiled callers, qualified calls and
+// is-zero as a function value ran hot-std's `eq(0, x)`, false for a Dec.
+// ----------------------------------------------------------------------------
+
+settled fn (balance: Dec): Str { if(is-zero(balance), "settled", "owing") }
+
+zero-of fn (x: Any): Any { is-zero(x) }
+
+test-is-zero-of-a-dec-zero
+meta ["test"] fn () {
+    statuses map(range(0, 150), (i) { settled(0.00) })
+    assert-eq(150, length(filter(statuses, (s) { eq(s, "settled") })), "a compiled caller")
+    zeros map(range(0, 150), (i) { 0.0 })
+    assert-eq(150, length(filter(map(zeros, is-zero), (b) { b })), "is-zero as a value")
+    assert-eq(150, length(filter(map(zeros, (x) { is-zero(x) }), (b) { b })), "in a lambda")
+    assert-eq(
+        [true, true, true, false],
+        [::hot::math/is-zero(0.00), ::hot::math/is-zero(-0.0), ::hot::math/is-zero(0), ::hot::math/is-zero(1.5)],
+        "qualified calls",
+    )
+}
+
+// is-zero takes an Int or a Dec. The interpreter gave true for null and for
+// any map; compiled code gave false.
+test-is-zero-of-a-non-number-is-an-err
+meta ["test"] fn () {
+    nulls map(range(0, 150), (i) { is-err(zero-of(null)) })
+    assert-eq(150, length(filter(nulls, (b) { b })), "is-zero(null)")
+    maps map(range(0, 150), (i) { is-err(zero-of({balance: 500})) })
+    assert-eq(150, length(filter(maps, (b) { b })), "is-zero of a map")
+}
+
+// ----------------------------------------------------------------------------
+// length of a value that isn't a collection is an Err. Compiled code gave 0.
+// ----------------------------------------------------------------------------
+
+count-items fn (req: Map): Any { length(req.items) }
+
+item-count fn (req: Map): Map { {n: length(req.items)} }
+
+test-length-of-a-non-collection-is-an-err
+meta ["test"] fn () {
+    missing map(range(0, 150), (i) { is-err(count-items({id: i})) })
+    assert-eq(150, length(filter(missing, (b) { b })), "a missing field")
+    ints map(range(0, 150), (i) { is-err(count-items({items: i})) })
+    assert-eq(150, length(filter(ints, (b) { b })), "an Int")
+    kept map(range(0, 150), (i) { is-err(item-count({id: i}).n) })
+    assert-eq(150, length(filter(kept, (b) { b })), "a result kept in a map")
+    sizes map(range(0, 150), (i) { count-items({items: [i, i]}) })
+    assert-eq(150, length(filter(sizes, (n) { eq(n, 2) })), "a Vec")
+}
+
+// ----------------------------------------------------------------------------
+// A lambda reading a local bound after it finds it when it runs, as mutually
+// recursive and self-recursive local lambdas do. Compiled code failed with
+// "not found".
+// ----------------------------------------------------------------------------
+
+parity fn (x: Int): Str {
+    is-ev (n) { if(eq(n, 0), true, is-od(sub(n, 1))) }
+    is-od (n) { if(eq(n, 0), false, is-ev(sub(n, 1))) }
+    if(is-ev(x), "even", "odd")
+}
+
+fact-of fn (x: Int): Int {
+    fact (n) { if(eq(n, 0), 1, mul(n, fact(sub(n, 1)))) }
+    fact(x)
+}
+
+scaled fn (xs: Vec, x: Int): Vec {
+    scale (y) { mul(y, factor) }
+    factor if(gt(x, 0), 2, 3)
+    map(xs, scale)
+}
+
+test-lambdas-reading-later-locals
+meta ["test"] fn () {
+    parities map(range(0, 150), parity)
+    assert-eq(["even", "odd", "even"], slice(parities, 0, 3), "mutual recursion")
+    assert-eq(75, length(filter(parities, (p) { eq(p, "even") })), "mutual recursion, all calls")
+    facts map(range(0, 150), (i) { fact-of(5) })
+    assert-eq(150, length(filter(facts, (f) { eq(f, 120) })), "self recursion")
+    scales map(range(0, 150), (i) { scaled([1, 2], sub(i, 75)) })
+    assert-eq([[3, 6], [2, 4]], [first(scales), last(scales)], "a later binding")
+}

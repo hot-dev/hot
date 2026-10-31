@@ -3870,8 +3870,15 @@ impl Compiler {
         // exposes them directly.
         let saved_tail_position_for_args = self.in_tail_position;
         self.in_tail_position = false;
-        let args_start = if fn_call.args.is_empty() {
-            0 // No arguments
+        // `call-lib` compiles its own arguments (below); compiling them here
+        // as well ran every side effect in them twice.
+        let is_call_lib = matches!(
+            fn_call.function.as_ref(),
+            Value::Ref(Ref::Var(var_ref))
+                if var_ref.var.deep_path.is_none() && var_ref.var.sym.name() == "call-lib"
+        );
+        let args_start = if fn_call.args.is_empty() || is_call_lib {
+            0 // No arguments, or call-lib's
         } else {
             let first_arg_reg = self.allocate_register();
 
@@ -6403,12 +6410,10 @@ impl Compiler {
                 && tr.name == existing_name
                 && !tr.variants.contains_key(variant_name)
             {
-                let mut variants = tr.variants.clone();
-                variants.insert(variant_name.to_string(), Some(resolved_source.clone()));
-                *c = Constant::VariantTypeRef(crate::lang::refs::TypeRef::new(
-                    existing_name.clone(),
-                    variants,
-                ));
+                // In place: copying the table for each arrow took time
+                // quadratic in the enum's variants.
+                std::sync::Arc::make_mut(&mut tr.variants)
+                    .insert(variant_name.to_string(), Some(resolved_source.clone()));
             }
         }
 
@@ -9225,6 +9230,17 @@ impl Compiler {
             source: self.source_to_location(&match_expr.src).map(Box::new),
             origin_name: None,
         });
+
+        // A match no arm takes is null. EndFlow keeps the register when no
+        // arm ran, so without this it returned whatever an earlier call of
+        // the same body had left there.
+        if !match_expr.match_all {
+            let null_constant = self.program.add_constant(Constant::Val(Val::Null));
+            self.emit_instruction(Instruction::LoadConst {
+                dest: result_reg,
+                constant: null_constant,
+            });
+        }
 
         // Get the type path of the matched value (works for primitives and custom types)
         let type_field_reg = self.allocate_register();

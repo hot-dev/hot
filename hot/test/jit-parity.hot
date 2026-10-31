@@ -1,0 +1,265 @@
+::hot::test::jit-parity::geo ns
+
+// What the aliases in ::hot::test::jit-parity name. Each short name is also
+// defined in ::hot::test::jit-parity::other, where a search for it by suffix
+// alone ends up.
+
+Circle type {
+    radius: Dec
+}
+
+Shape enum { Circle(Circle), Dot }
+
+compute fn (x: Int): Str { `geo-compute ${x}` }
+
+::hot::test::jit-parity::other ns
+
+Disc type {
+    radius: Dec
+}
+
+helper fn (x: Int): Str { `other-helper ${x}` }
+
+jit-parity-label fn (x: Int): Str { `other-label ${x}` }
+
+shout fn (s: Str): Str { `shout ${s}` }
+
+::hot::test::jit-parity ns
+meta ["test"]
+
+// Regressions for code whose results changed once the JIT compiled it:
+// after 100 calls by default, or from the first with `--jit.threshold 1`.
+// Each test calls the code under test 150 times, so both CI runs compare the
+// compiled code with the interpreter's results.
+
+::geo ::hot::test::jit-parity::geo
+::other ::hot::test::jit-parity::other
+
+// ----------------------------------------------------------------------------
+// Collecting flows whose arms all miss return an empty collection of their
+// own: the compiled code handed out, and its caller freed, the one empty
+// collection it was built with.
+// ----------------------------------------------------------------------------
+
+pick-all fn (n: Int): Map {
+    cond-all {
+        eq(n, 1) => one { "a" }
+        eq(n, 2) => two { "b" }
+    }
+}
+
+pick-vec fn (n: Int): Vec {
+    picked: All<Vec> cond-all {
+        eq(n, 1) => { "a" }
+        eq(n, 2) => { "b" }
+    }
+
+    picked
+}
+
+pick-first fn (n: Int): Map {
+    picked: All<Map> cond {
+        eq(n, 1) => one { "a" }
+        eq(n, 2) => two { "b" }
+    }
+
+    picked
+}
+
+kind-arms fn (x: Any): Map {
+    match-all x {
+        Int => { "int" }
+        Str => { "str" }
+    }
+}
+
+test-collecting-flow-with-no-matching-arm
+meta ["test"] fn () {
+    maps map(range(0, 150), (i) { pick-all(mod(i, 3)) })
+    assert-eq(50, length(filter(maps, (m) { is-empty(m) })), "cond-all: no arm matches")
+    assert-eq([{}, {one: "a"}, {two: "b"}], slice(maps, 147, 150), "cond-all: the last calls")
+    vecs map(range(0, 150), (i) { pick-vec(mod(i, 3)) })
+    assert-eq([[], ["a"], ["b"]], slice(vecs, 147, 150), "All<Vec> cond-all")
+    firsts map(range(0, 150), (i) { pick-first(mod(i, 3)) })
+    assert-eq([{}, {one: "a"}, {two: "b"}], slice(firsts, 147, 150), "All<Map> cond")
+    misses map(range(0, 150), (i) { kind-arms(true) })
+    assert-eq(150, length(filter(misses, (m) { is-empty(m) })), "match-all: no arm matches")
+}
+
+// ----------------------------------------------------------------------------
+// A binding in a branch, an arm or a block belongs to that scope: the outer
+// binding of the name is back once it ends.
+// ----------------------------------------------------------------------------
+
+cond-shadow fn (x: Int): Map {
+    y cond {
+        gt(x, 0) => { x 5  add(x, 1) }
+        => { 0 }
+    }
+    {y: y, x-after: x}
+}
+
+block-shadow fn (x: Int): Map {
+    y if(gt(x, 0), { x 7  x }, 0)
+    {y: y, x-after: x}
+}
+
+lookup-status fn (s: Str): Str {
+    if(eq(s, "bad"), err("nope"), s)
+}
+
+result-shadow fn (s: Str): Map {
+    r lookup-status(s)
+    m match r {
+        Result.Ok => { `ok: ${r}` }
+        Result.Err => { `err: ${r}` }
+    }
+    {m: m, after-is-err: is-err(r)}
+}
+
+Reply enum { Steps(Vec), Declined(Str), Pending }
+
+payload-shadow fn (r: Reply): Map {
+    n match r {
+        Reply.Steps (steps) => { length(steps) }
+        _ => { 0 }
+    }
+    {n: n, still-steps: is-type(r, Reply.Steps)}
+}
+
+test-inner-binding-leaves-the-outer-one
+meta ["test"] fn () {
+    assert-eq(
+        {y: 6, x-after: 1},
+        last(map(range(0, 150), (i) { cond-shadow(1) })),
+        "a cond branch's x",
+    )
+    assert-eq(
+        {y: 7, x-after: 1},
+        last(map(range(0, 150), (i) { block-shadow(1) })),
+        "an if block's x",
+    )
+    assert-eq(
+        {m: "err: nope", after-is-err: true},
+        last(map(range(0, 150), (i) { result-shadow("bad") })),
+        "a Result.Err arm's r",
+    )
+    assert-eq(
+        {m: "ok: fine", after-is-err: false},
+        last(map(range(0, 150), (i) { result-shadow("fine") })),
+        "a Result.Ok arm's r",
+    )
+    assert-eq(
+        {n: 2, still-steps: true},
+        last(map(range(0, 150), (i) { payload-shadow(Reply.Steps(["a", "b"])) })),
+        "a variant arm's binding",
+    )
+}
+
+// ----------------------------------------------------------------------------
+// An unqualified call resolves as the interpreter resolves it: a binding of
+// the name in the namespace (an alias, an import, a top-level lambda) comes
+// before a core function, and nothing else is searched for by its suffix.
+// ----------------------------------------------------------------------------
+
+Circle ::geo/Shape.Circle
+Disc ::geo/Circle
+helper ::geo/compute
+trim ::other/shout
+jit-parity-label (x) { `local-label ${x}` }
+
+make-circle fn (r: Dec): Any { Circle({radius: r}) }
+
+make-disc fn (r: Dec): Any { Disc({radius: r}) }
+
+call-helper fn (x: Int): Str { helper(x) }
+
+call-label fn (x: Int): Str { jit-parity-label(x) }
+
+call-trim fn (s: Str): Str { trim(s) }
+
+shape-name fn (s: Any): Str {
+    match s {
+        ::geo/Shape.Circle => { "circle" }
+        ::geo/Shape.Dot => { "dot" }
+        _ => { "other" }
+    }
+}
+
+test-unqualified-call-resolves-as-the-interpreter-does
+meta ["test"] fn () {
+    circle last(map(range(0, 150), (i) { make-circle(4.0) }))
+    assert(is-type(circle, ::geo/Shape), "a variant alias builds the variant")
+    assert-eq("circle", shape-name(circle), "the variant matches its arm")
+    disc last(map(range(0, 150), (i) { make-disc(2.0) }))
+    assert(is-type(disc, ::geo/Circle), "a type alias builds the aliased type")
+    assert(not(is-type(disc, ::other/Disc)), "not another namespace's type of that name")
+    assert-eq("geo-compute 3", last(map(range(0, 150), (i) { call-helper(3) })), "a function alias")
+    assert-eq("local-label 3", last(map(range(0, 150), (i) { call-label(3) })), "a top-level lambda")
+    assert-eq("shout x", last(map(range(0, 150), (i) { call-trim("x") })), "an alias of a core name")
+}
+
+// ----------------------------------------------------------------------------
+// A match arm's value test compares the subject as it is: an Err subject
+// differs from a literal and goes on to `_` or `Any`, and a Dec differs from
+// an Int literal.
+// ----------------------------------------------------------------------------
+
+find-status fn (id: Int): Any {
+    if(eq(id, 1), "active", err("missing"))
+}
+
+status-or-default fn (id: Int): Str {
+    match find-status(id) {
+        "active" => { "on" }
+        _ => { "default" }
+    }
+}
+
+status-or-any fn (id: Int): Str {
+    match find-status(id) {
+        "active" => { "on" }
+        Any => { "any" }
+    }
+}
+
+number-kind fn (x: Any): Str {
+    match x {
+        5 => { "int five" }
+        5.0 => { "dec five" }
+        _ => { "other" }
+    }
+}
+
+pending-or-other fn (x: Any): Str {
+    match x {
+        Reply.Pending => { "pending" }
+        _ => { "other" }
+    }
+}
+
+test-match-value-arm-keeps-the-subject
+meta ["test"] fn () {
+    assert-eq("default", last(map(range(0, 150), (i) { status-or-default(4) })), "an Err goes to _")
+    assert-eq("any", last(map(range(0, 150), (i) { status-or-any(4) })), "an Err goes to Any")
+    assert-eq("on", last(map(range(0, 150), (i) { status-or-default(1) })), "the literal arm")
+    assert-eq("int five", last(map(range(0, 150), (i) { number-kind(5) })), "the Int literal")
+    assert-eq("dec five", last(map(range(0, 150), (i) { number-kind(5.0) })), "the Dec literal")
+    assert-eq("other", last(map(range(0, 150), (i) { pending-or-other(3) })), "a variant arm, an Int")
+}
+
+// ----------------------------------------------------------------------------
+// A parallel flow's binding reads a sibling it depends on.
+// ----------------------------------------------------------------------------
+
+enrich fn (i: Int): Map {
+    parallel {
+        user mul(i, 2)
+        orders add(user, 1)
+    }
+}
+
+test-parallel-binding-reads-its-sibling
+meta ["test"] fn () {
+    assert-eq({user: 298, orders: 299}, last(map(range(0, 150), (i) { enrich(i) })), "dependent binding")
+}

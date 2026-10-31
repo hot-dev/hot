@@ -471,8 +471,6 @@ pub async fn collect_retired_objects(
 /// Register a staged object for collection just before committing it; see
 /// [`crate::db::file::register_staged_object`]. Multipart destinations are not
 /// registered: an upload's expiry aborts and removes one that never commits.
-/// The exception is a legacy S3 upload, which completes into the live key an
-/// earlier version may have retired.
 async fn register_staged(
     ctx: &FileStorageContext,
     backend: &str,
@@ -639,9 +637,10 @@ impl CommitBase {
     }
 }
 
-/// Prefix of the error a multipart completion returns when the file changed
-/// after the completion was claimed. Nothing was written; the upload can
-/// only be aborted.
+/// Prefix of the error a multipart completion returns when the upload can
+/// never be applied: the file changed after the completion was claimed, or
+/// the upload was started by Hot 2.6.10 or earlier. Nothing was written; the
+/// upload can only be aborted.
 pub const COMPLETION_CONFLICT: &str = "Upload completion conflict";
 
 /// Outcome of [`commit_file_record`].
@@ -2409,27 +2408,24 @@ pub mod s3 {
 
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
+            // An upload started before the encoded id format (Hot 2.6.10 and
+            // earlier) would complete into the live key itself, replacing the
+            // bytes under a record that keeps the old size and etag. It is
+            // refused, so the caller aborts it and the client starts again.
+            if !backend_upload_id.starts_with(MULTIPART_ID_PREFIX) {
+                return Err(format!(
+                    "{COMPLETION_CONFLICT}: the upload of {normalized_path} was started by an earlier Hot version and can't be completed; start it again"
+                ));
+            }
             ensure_path_writable("s3", &normalized_path, ctx).await?;
             let (key, upload_id) = self.multipart_target(backend_upload_id, &normalized_path, ctx);
             let storage_path = format!("s3://{}/{}", self.bucket, key);
-            // Uploads started before the encoded id format complete into the
-            // live key itself, so they keep last-writer-wins semantics.
-            let legacy = !backend_upload_id.starts_with(MULTIPART_ID_PREFIX);
-            let base = if legacy { &CommitBase::Any } else { base };
 
             // A retried completion whose earlier attempt already committed.
-            if !legacy
-                && let StagedBytes::Committed(meta) =
-                    staged_bytes_state(ctx, &normalized_path, &storage_path).await
+            if let StagedBytes::Committed(meta) =
+                staged_bytes_state(ctx, &normalized_path, &storage_path).await
             {
                 return Ok(*meta);
-            }
-            // A legacy upload completes into the live key, which an earlier
-            // version may have retired. Registering it first makes collection
-            // skip the key, or finish deleting its old bytes before this
-            // completion writes new ones.
-            if legacy {
-                register_staged(ctx, "s3", &storage_path).await?;
             }
 
             let completed_parts: Vec<CompletedPart> = parts
@@ -2460,11 +2456,7 @@ pub mod s3 {
                 // An earlier attempt completed the upload but never committed
                 // it (lost response, crash, or failed commit): its object is
                 // still at this upload's key.
-                Err(e)
-                    if !legacy
-                        && e.as_service_error().and_then(|se| se.code())
-                            == Some("NoSuchUpload") =>
-                {
+                Err(e) if e.as_service_error().and_then(|se| se.code()) == Some("NoSuchUpload") => {
                     match self
                         .client
                         .head_object()
@@ -4730,10 +4722,30 @@ mod tests {
         assert_eq!(key, format!("files/{org}/default/a/b.bin.mp-abc123"));
         assert_eq!(upload, "S3-UPLOAD.id");
 
-        // Uploads started before the encoded format keep the old key.
+        // Uploads started before the encoded format keep the old key, so an
+        // abort still reaches them.
         let (key, upload) = storage.multipart_target("LEGACY-ID", "a/b.bin", &ctx);
         assert_eq!(key, format!("files/{org}/default/a/b.bin"));
         assert_eq!(upload, "LEGACY-ID");
+
+        // But they can't complete: completing into the live key would replace
+        // its bytes under a record that keeps the old size and etag. The
+        // refusal comes before any database or S3 request, and reads as a
+        // conflict, so the API aborts the upload.
+        let refused = storage
+            .complete_multipart_upload(
+                "LEGACY-ID",
+                "a/b.bin",
+                &[(1, "etag".to_string())],
+                6,
+                None,
+                &CommitBase::Any,
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.starts_with(COMPLETION_CONFLICT), "{refused}");
+        assert!(refused.contains("start it again"), "{refused}");
     }
 
     /// Storage contract shared by every backend. Local always runs; GCS runs

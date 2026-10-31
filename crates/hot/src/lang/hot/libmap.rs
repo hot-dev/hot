@@ -454,6 +454,34 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             HotLibFn::LibFn(coll::flatten),
         );
         map.insert(
+            "::hot::coll/group-by".to_string(),
+            HotLibFn::vm_callback(coll::group_by),
+        );
+        map.insert(
+            "::hot::coll/index-by".to_string(),
+            HotLibFn::vm_callback(coll::index_by),
+        );
+        map.insert(
+            "::hot::coll/frequencies".to_string(),
+            HotLibFn::LibFn(coll::frequencies),
+        );
+        map.insert(
+            "::hot::coll/map-keys".to_string(),
+            HotLibFn::vm_callback(coll::map_keys),
+        );
+        map.insert(
+            "::hot::coll/map-vals".to_string(),
+            HotLibFn::vm_callback(coll::map_vals),
+        );
+        map.insert(
+            "::hot::coll/filter-keys".to_string(),
+            HotLibFn::vm_callback(coll::filter_keys),
+        );
+        map.insert(
+            "::hot::coll/filter-vals".to_string(),
+            HotLibFn::vm_callback(coll::filter_vals),
+        );
+        map.insert(
             "::hot::coll/zipmap".to_string(),
             HotLibFn::LibFn(coll::zipmap),
         );
@@ -744,6 +772,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             HotLibFn::LibFn(math::round),
         );
         map.insert("::hot::math/rand".to_string(), HotLibFn::LibFn(math::rand));
+        map.insert(
+            "::hot::math/rand-int".to_string(),
+            HotLibFn::LibFn(math::rand_int),
+        );
         map.insert(
             "::hot::math/is-zero".to_string(),
             HotLibFn::LibFn(math::is_zero),
@@ -1130,9 +1162,16 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             ("cancel-schedule", test::cancel_schedule),
             ("schedules", test::schedules),
             ("take-due", test::take_due),
+            ("in-test-run", test::in_test_run),
+            ("record-runs", test::record_runs),
+            ("take-runs", test::take_runs),
         ] {
             map.insert(format!("::hot::test/{name}"), HotLibFn::LibFn(func));
         }
+        map.insert(
+            "::hot::test/event-handlers".to_string(),
+            HotLibFn::vm_callback(test::event_handlers),
+        );
         map.insert(
             "::hot::meta/source".to_string(),
             HotLibFn::vm_callback(meta::source),

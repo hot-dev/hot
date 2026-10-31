@@ -1622,7 +1622,8 @@ mod pkg_hot_tests {
 
     /// src-paths that leave the package are refused by name: loading them
     /// would leave the unit cache, `hot dev`'s watcher and the bundle keyed
-    /// to the package folder, which doesn't hold them.
+    /// to the package folder, which doesn't hold them. Reading pkg.hot
+    /// refuses them first.
     #[test]
     fn dependency_src_paths_must_stay_inside_the_package() {
         let dir = tempfile::tempdir().unwrap();
@@ -1636,7 +1637,7 @@ mod pkg_hot_tests {
             Engine::discover_dependency_source_dirs(&root).unwrap_err(),
         ] {
             assert!(
-                error.contains("Package 'example.com/lib' declares src-paths [\"../shared/\"] outside its folder"),
+                error.contains("src-paths entry '../shared/' leaves the package directory"),
                 "{error}"
             );
         }

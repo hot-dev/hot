@@ -1,0 +1,97 @@
+::hot::test::jit-runtime ns
+meta ["test"]
+
+// Regressions for compiled self tail calls and Dec constants: code whose
+// results changed once the JIT compiled it, after 100 calls by default or
+// from the first with `--jit.threshold 1`. Each loop runs past the depth cap
+// (4,096 calls) so a tail call made as a nested call fails it.
+
+// ----------------------------------------------------------------------------
+// A self tail call whose argument is an owned Dec, Bool or Null for a
+// parameter the compiled loop holds raw nested a call per iteration.
+// ----------------------------------------------------------------------------
+
+order fn (n: Int): Vec { map(range(0, n), (i) { {sku: `s${i}`, price: 2.50} }) }
+
+total-due fn (items: Vec, i: Int, acc: Dec): Dec {
+    cond {
+        eq(i, length(items)) => { acc }
+        => { total-due(items, add(i, 1), add(acc, items[i].price)) }
+    }
+}
+
+untyped-total fn (items: Vec, i: Int, acc) {
+    cond {
+        eq(i, length(items)) => { acc }
+        => { untyped-total(items, add(i, 1), add(acc, items[i].price)) }
+    }
+}
+
+same fn (x) { x }
+
+flip-flags fn (n: Int, flag: Bool): Bool {
+    cond {
+        eq(n, 0) => { flag }
+        => { flip-flags(sub(n, 1), same(eq(mod(n, 3), 0))) }
+    }
+}
+
+count-nulls fn (n: Int, v: Null): Int {
+    cond {
+        eq(n, 0) => { n }
+        => { count-nulls(sub(n, 1), same(v)) }
+    }
+}
+
+test-tail-calls-with-owned-arguments-loop
+meta ["test"] fn () {
+    // 150 short loops compile each function; then one runs 5,000 times.
+    small order(3)
+    warm map(range(0, 150), (i) { total-due(small, 0, 0.00) })
+    assert-eq(7.50, last(warm), "a short Dec accumulator")
+    assert-eq(12500.00, total-due(order(5000), 0, 0.00), "a Dec accumulator of field reads")
+    untyped map(range(0, 150), (i) { untyped-total(small, 0, 0.00) })
+    assert-eq(7.50, last(untyped), "a short untyped accumulator")
+    assert-eq(12500.00, untyped-total(order(5000), 0, 0.00), "an untyped accumulator seeded with a Dec")
+    flags map(range(0, 150), (i) { flip-flags(3, false) })
+    assert-eq(false, last(flags), "a short Bool loop")
+    assert-eq(false, flip-flags(5000, false), "a Bool from a call")
+    nulls map(range(0, 150), (i) { count-nulls(3, null) })
+    assert-eq(0, last(nulls), "a short Null loop")
+    assert-eq(0, count-nulls(5000, null), "a Null from a call")
+}
+
+// ----------------------------------------------------------------------------
+// Two Dec parameters a tail call swaps: each read the other's new value.
+// ----------------------------------------------------------------------------
+
+swap-decs fn (n: Int, a: Dec, b: Dec): Vec {
+    cond {
+        eq(n, 0) => { [a, b] }
+        => { swap-decs(sub(n, 1), b, a) }
+    }
+}
+
+test-tail-call-swaps-dec-parameters
+meta ["test"] fn () {
+    odd map(range(0, 150), (i) { swap-decs(5, 1.5, 2.5) })
+    assert-eq([2.5, 1.5], last(odd), "an odd number of swaps")
+    even map(range(0, 150), (i) { swap-decs(4, 1.5, 2.5) })
+    assert-eq([1.5, 2.5], last(even), "an even number of swaps")
+}
+
+// ----------------------------------------------------------------------------
+// A compiled lambda read its Dec constants from a program dropped once it
+// compiled: amounts came back as garbage once that memory was reused.
+// ----------------------------------------------------------------------------
+
+test-compiled-lambda-dec-constants
+meta ["test"] fn () {
+    prices map(range(0, 150), (i) { add(1.25, 0.05) })
+    labels map(range(0, 5000), (i) { `label-${i}` })
+    later map(range(0, 150), (i) { add(1.25, 0.05) })
+    assert-eq(5000, length(labels), "memory churn")
+    assert-eq(1.30, last(prices), "before the churn")
+    assert-eq(1.30, last(later), "after the churn")
+    assert-eq(150, length(filter(later, (p) { eq(p, 1.30) })), "every call")
+}

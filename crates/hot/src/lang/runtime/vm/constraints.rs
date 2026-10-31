@@ -8,7 +8,7 @@
 
 use super::{VirtualMachine, VmError, VmResult};
 use crate::val::Val;
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use fastnum::D256;
 
 /// Instructions one predicate evaluation may run.
@@ -79,6 +79,74 @@ pub(crate) struct ConstraintSpecCache {
     /// and length.
     key: (usize, usize),
     specs: AHashMap<String, Val>,
+    /// The types defined in terms of themselves (`A type B | "x"`, `B type
+    /// A`), each with its cycle. Checking one would never reach a value.
+    cycles: AHashMap<String, Vec<String>>,
+}
+
+impl ConstraintSpecCache {
+    fn new(key: (usize, usize), specs: AHashMap<String, Val>) -> Self {
+        let mut cycles = AHashMap::new();
+        for name in specs.keys() {
+            let mut path = vec![name.clone()];
+            let mut seen = AHashSet::new();
+            if let Some(spec) = specs.get(name)
+                && reaches_type(&specs, spec, name, &mut path, &mut seen)
+            {
+                cycles.insert(name.clone(), path);
+            }
+        }
+        Self { key, specs, cycles }
+    }
+}
+
+/// Whether checking a value against `node` checks that same value against
+/// the named type `target` again, before reaching into any part of it. On
+/// `true`, `path` holds the types in between, ending with `target`. Vec
+/// elements, map values and struct fields are parts, so a recursive record
+/// such as `Node type { next: Node? }` is not a cycle.
+fn reaches_type(
+    specs: &AHashMap<String, Val>,
+    node: &Val,
+    target: &str,
+    path: &mut Vec<String>,
+    seen: &mut AHashSet<String>,
+) -> bool {
+    let child = |key: &str| get(node, key).filter(|v| !matches!(v, Val::Null));
+    match get_str(node, "kind").unwrap_or("any") {
+        "named" => {
+            let name = get_str(node, "type").unwrap_or_default();
+            if name == target {
+                path.push(name.to_string());
+                return true;
+            }
+            let Some(spec) = specs.get(name) else {
+                return false;
+            };
+            if !seen.insert(name.to_string()) {
+                return false;
+            }
+            path.push(name.to_string());
+            if reaches_type(specs, spec, target, path, seen) {
+                return true;
+            }
+            path.pop();
+            false
+        }
+        "union" => match get(node, "members") {
+            Some(Val::Vec(members)) => members
+                .iter()
+                .any(|member| reaches_type(specs, member, target, path, seen)),
+            _ => false,
+        },
+        "optional" => {
+            child("inner").is_some_and(|inner| reaches_type(specs, inner, target, path, seen))
+        }
+        "refine" => child("base").is_some_and(|base| reaches_type(specs, base, target, path, seen)),
+        "struct" | "enum" => child("invariant")
+            .is_some_and(|invariant| reaches_type(specs, invariant, target, path, seen)),
+        _ => false,
+    }
 }
 
 fn get<'a>(map: &'a Val, key: &str) -> Option<&'a Val> {
@@ -273,8 +341,8 @@ impl VirtualMachine {
         })
     }
 
-    /// The spec of a constrained named type.
-    fn named_constraint_spec(&mut self, name: &str) -> Option<Val> {
+    /// The spec cache, rebuilt when the program's table has changed.
+    fn constraint_specs(&mut self) -> &ConstraintSpecCache {
         let table = &self.program.constraint_types;
         let key = (table.as_ptr() as usize, table.len());
         if self.constraint_spec_cache.key != key {
@@ -286,9 +354,14 @@ impl VirtualMachine {
                     specs.insert(type_name.clone(), spec.clone());
                 }
             }
-            self.constraint_spec_cache = ConstraintSpecCache { key, specs };
+            self.constraint_spec_cache = ConstraintSpecCache::new(key, specs);
         }
-        self.constraint_spec_cache.specs.get(name).cloned()
+        &self.constraint_spec_cache
+    }
+
+    /// The spec of a constrained named type.
+    fn named_constraint_spec(&mut self, name: &str) -> Option<Val> {
+        self.constraint_specs().specs.get(name).cloned()
     }
 
     /// Check the result of a native that updates a typed value (`assoc`,
@@ -570,6 +643,16 @@ impl VirtualMachine {
             },
             "named" => {
                 let name = get_str(node, "type").unwrap_or_default().to_string();
+                // `hot check` rejects these; a check that ran one would
+                // recurse until the stack overflowed.
+                if let Some(cycle) = self.constraint_specs().cycles.get(&name) {
+                    let cycle: Vec<&str> = cycle.iter().map(|name| short_name(name)).collect();
+                    return Err(VmError::runtime(format!(
+                        "Type `{}` is defined in terms of itself ({}), so no value can be checked against it",
+                        short_name(&name),
+                        cycle.join(" -> ")
+                    )));
+                }
                 match self.named_constraint_spec(&name) {
                     Some(spec) => self.check_value(value, &spec, path),
                     None => Ok(Ok(value)),
@@ -1006,5 +1089,141 @@ mod tests {
         // What `is-match` itself rejects goes to the predicate.
         assert_eq!(fast_check(&Val::Int(5), &fast("^[A-Z]")), None);
         assert_eq!(fast_check(&Val::from("A"), &fast("(")), None);
+    }
+
+    fn spec(kind: &str, entries: Vec<(&str, Val)>) -> Val {
+        Val::map_from_iter(
+            std::iter::once((Val::from("kind"), Val::from(kind)))
+                .chain(entries.into_iter().map(|(k, v)| (Val::from(k), v))),
+        )
+    }
+
+    fn named(name: &str) -> Val {
+        spec("named", vec![("type", Val::from(name))])
+    }
+
+    fn literal(value: &str) -> Val {
+        spec(
+            "literal",
+            vec![("values", Val::Vec(vec![Val::from(value)]))],
+        )
+    }
+
+    /// A VM whose program declares the given named specs.
+    fn vm_with_specs(specs: Vec<(&str, Val)>) -> VirtualMachine {
+        let mut program = crate::lang::bytecode::BytecodeProgram::new();
+        for (name, spec) in specs {
+            let id = program.add_constant(crate::lang::bytecode::Constant::Val(spec));
+            program.constraint_types.push((name.to_string(), id));
+        }
+        VirtualMachine::new(
+            std::sync::Arc::new(program),
+            None,
+            std::sync::Arc::new(indexmap::IndexMap::new()),
+            std::sync::Arc::new(indexmap::IndexMap::new()),
+            std::sync::Arc::new(indexmap::IndexMap::new()),
+            std::sync::Arc::new(crate::lang::compiler::core_registry::CoreVariableRegistry::new()),
+            None,
+        )
+    }
+
+    fn boundary(name: &str) -> Val {
+        Val::map_from_iter([
+            (Val::from("type"), named(name)),
+            (Val::from("boundary"), Val::from("parameter")),
+        ])
+    }
+
+    // `A type B | "x"` with `B type A`, and `T type T where …`: a check
+    // used to recurse until the process overflowed its stack. It is now a
+    // runtime error, whatever the value.
+    #[test]
+    fn a_type_defined_in_terms_of_itself_is_an_error_not_a_stack_overflow() {
+        let refine_self = spec(
+            "refine",
+            vec![
+                ("base", named("::t/T")),
+                ("pred", Val::from("::t/$where-t")),
+            ],
+        );
+        let mut vm = vm_with_specs(vec![
+            (
+                "::t/A",
+                spec(
+                    "union",
+                    vec![("members", Val::Vec(vec![named("::t/B"), literal("x")]))],
+                ),
+            ),
+            ("::t/B", named("::t/A")),
+            ("::t/T", refine_self),
+            (
+                "::t/Self",
+                spec(
+                    "union",
+                    vec![("members", Val::Vec(vec![literal("x"), named("::t/Self")]))],
+                ),
+            ),
+        ]);
+        for (name, cycle) in [
+            ("::t/A", "A -> B -> A"),
+            ("::t/B", "B -> A -> B"),
+            ("::t/T", "T -> T"),
+            ("::t/Self", "Self -> Self"),
+        ] {
+            for test in [false, true] {
+                let error = vm
+                    .execute_check_constraint(Val::from("y"), &boundary(name), test)
+                    .expect_err("checking a cyclic type is an error");
+                assert!(
+                    error.to_string().contains(&format!("({cycle})")),
+                    "{name}: {error}"
+                );
+            }
+        }
+    }
+
+    // Recursion through a part of the value (a field, an element) ends with
+    // the value, so it is no cycle.
+    #[test]
+    fn recursion_through_a_field_or_element_is_not_a_cycle() {
+        let node = spec(
+            "struct",
+            vec![
+                ("type", Val::from("::t/Node")),
+                (
+                    "fields",
+                    Val::map_from_iter([(
+                        Val::from("next"),
+                        spec("optional", vec![("inner", named("::t/Node"))]),
+                    )]),
+                ),
+                ("invariant", Val::Null),
+            ],
+        );
+        let json = spec(
+            "union",
+            vec![(
+                "members",
+                Val::Vec(vec![
+                    literal("leaf"),
+                    spec("vec", vec![("elem", named("::t/Json"))]),
+                ]),
+            )],
+        );
+        let mut vm = vm_with_specs(vec![("::t/Node", node), ("::t/Json", json)]);
+        assert!(vm.constraint_specs().cycles.is_empty());
+
+        let leaf = Val::map_from_iter([(Val::from("next"), Val::Null)]);
+        let list = Val::map_from_iter([(Val::from("next"), leaf)]);
+        let checked = vm
+            .execute_check_constraint(list.clone(), &boundary("::t/Node"), false)
+            .expect("a recursive record checks");
+        assert_eq!(checked, list);
+
+        let nested = Val::Vec(vec![Val::from("leaf"), Val::Vec(vec![Val::from("leaf")])]);
+        let checked = vm
+            .execute_check_constraint(nested.clone(), &boundary("::t/Json"), true)
+            .expect("a recursive collection checks");
+        assert_eq!(checked, Val::Bool(true));
     }
 }

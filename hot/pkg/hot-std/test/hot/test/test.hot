@@ -42,6 +42,19 @@ fn () {
     assert(is-err(::test/advance(::time/Duration({months: 1}))), "months have no fixed length")
 }
 
+test-clock-advances-by-weeks-and-sub-second-units
+meta ["test"]
+fn () {
+    ::test/set-now("2026-10-14T09:00:00Z")
+    assert-eq("2026-10-21T09:00:00Z", Str(::test/advance(::time/weeks(1))), "a week is seven days")
+    before ::time/epoch-millis(::time/now())
+    ::test/advance(::time/Duration({milliseconds: 1500}))
+    assert-eq(1500, sub(::time/epoch-millis(::time/now()), before), "milliseconds move the clock")
+    assert(is-err(::test/advance(::time/Duration({}))), "a zero duration is refused")
+    assert(is-err(::test/advance(::time/seconds(0))), "so is zero of a unit")
+    assert-eq(7.0, ::time/weeks(7.0).weeks, "weeks keeps its amount")
+}
+
 test-clock-accepts-instants-and-clears
 meta ["test"]
 fn () {
@@ -205,6 +218,86 @@ fn () {
     send("hot:schedule:cancel", {fn: "::hot::test::test/note"})
     ::test/deliver()
     assert(is-empty(::test/schedules()), "cancel by function")
+}
+
+// run-due's own doc example: the schedule counts from when it was sent, not
+// from when run-due delivered it
+test-run-due-counts-relative-times-from-the-send
+meta ["test"]
+fn () {
+    ::hot::ctx/set("test-notes", [])
+    ::test/set-now("2026-10-14T09:00:00Z")
+    send("hot:schedule:new", {fn: "::hot::test::test/check", args: ["s-1"], schedule: "in 1 day"})
+    ::test/advance(::time/days(2))
+    runs ::test/run-due()
+    assert-eq(["::hot::test::test/check", "::hot::test::test/on-pong"], map(runs, %.fn), "the schedule sent before the clock moved fired")
+    assert-eq("2026-10-15T09:00:00Z", Str(first(runs).at), "at a day after the send")
+}
+
+// A handler that sends one more event until `left` runs out
+on-chain
+meta {on-event: "hot-test:chain"}
+fn (event: Map): Any {
+    if(gt(event.data.left, 0), send("hot-test:chain", {left: sub(event.data.left, 1)}), null)
+}
+
+// Delivery keeps its runs in the harness: concatenating them each round made a
+// chain of 2,000 events take a minute and a half
+test-deliver-is-linear-in-the-events-delivered
+meta ["test"]
+fn () {
+    started ::time/epoch-millis(::time/now())
+    runs ::test/deliver({type: "hot-test:chain", data: {left: 3000}})
+    elapsed sub(::time/epoch-millis(::time/now()), started)
+    assert-eq(3001, length(runs), "each event in the chain ran its handler")
+    assert(lt(elapsed, 60000), `a chain of 3,000 events took ${elapsed} ms`)
+}
+
+// The worker runs a handler alias under the alias's name; so does deliver
+on-pong-alias
+meta {on-event: "hot-test:alias"}
+on-pong
+
+on-pong-alias-b on-pong
+meta {on-event: "hot-test:alias-b"}
+
+on-length-alias
+meta {on-event: "hot-test:alias-remote"}
+::hot::coll/length
+
+test-deliver-runs-alias-handlers
+meta ["test"]
+fn () {
+    ::hot::ctx/set("test-notes", [])
+    assert-eq(["::hot::test::test/on-pong-alias"], map(::test/deliver({type: "hot-test:alias", data: {n: "a"}}), %.fn), "a same-namespace alias")
+    assert-eq(["::hot::test::test/on-pong-alias-b"], map(::test/deliver({type: "hot-test:alias-b", data: {n: "b"}}), %.fn), "a second alias of the same target")
+    assert-eq(["pong a", "pong b"], map(::hot::ctx/get("test-notes"), %.what), "each alias ran its target")
+    remote ::test/deliver({type: "hot-test:alias-remote", data: {}})
+    assert-eq(["::hot::test::test/on-length-alias"], map(remote, %.fn), "an alias of another namespace's function")
+    assert-eq(2, first(remote).result, "it ran the target on the event")
+}
+
+on-cancels
+meta {on-event: "hot-test:cancels"}
+fn (event: Map): Any {
+    cancel("not for us")
+}
+
+on-exits
+meta {on-event: "hot-test:exits"}
+fn (event: Map): Any {
+    exit(0)
+}
+
+// A handler that cancels is cancelled, not failed, as in a worker; exit(0)
+// returns, rather than ending the test run with status 0
+test-deliver-treats-cancel-and-exit-as-a-worker-does
+meta ["test"]
+fn () {
+    cancelled ::test/deliver({type: "hot-test:cancels", data: {}})
+    assert(is-err(first(cancelled).result), "the cancelled run's result is its Cancellation")
+    exited ::test/deliver({type: "hot-test:exits", data: {}})
+    assert(is-ok(first(exited).result), "exit(0) completes the handler, and the test run goes on")
 }
 
 test-harness-resets-between-tests

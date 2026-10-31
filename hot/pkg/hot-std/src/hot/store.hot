@@ -153,13 +153,17 @@ meta {
 
     The database compares and writes in one transaction that holds the
     entry's lock, so two writers that read the same value cannot both
-    replace it. Values compare as Hot values, as `get` returns them, so pass
-    back the value you read. An `expected` of `null` also matches a missing
-    key, as `get` returns `null` for one, and then `put-if` creates the entry.
+    replace it. Values compare as Hot values, so pass `expected` exactly as
+    the 2-arity `get` returned it. An `expected` of `null` also matches a
+    missing key, as `get` returns `null` for one, and then `put-if` creates
+    the entry.
 
     To change a value safely while other handlers change it too, read it,
-    compute the new value, and retry until `put-if` returns `true`. The
-    computation must be pure, since it can run more than once.
+    compute the new value, and retry while `put-if` returns `false`. The
+    computation must be pure, since it can run more than once. Each retry
+    means another writer changed the value first; give the loop a budget so
+    a bug, such as an `expected` that is not what `get` returned, fails
+    instead of spinning.
 
     **Example**
 
@@ -167,14 +171,18 @@ meta {
     cases ::store/Map({name: "cases"})
 
     // Add one answer to a case's records; a concurrent answer is never lost
-    add-answer fn (case-id: Str, answer-id: Str, answer: Any): Map {
+    add-answer fn (case-id: Str, answer-id: Str, answer: Any, attempts: Int): Map {
         current ::store/get(cases, case-id)  // null while the case has none
         next assoc(if(is-null(current), {}, current), answer-id, answer)
+        wrote ::store/put-if(cases, case-id, current, next)
         cond {
-            ::store/put-if(cases, case-id, current, next) => { next }
-            => { add-answer(case-id, answer-id, answer) }  // changed: retry
+            wrote => { next }
+            lte(attempts, 1) => { err(`case ${case-id} kept changing`) }
+            => { add-answer(case-id, answer-id, answer, sub(attempts, 1)) }  // changed: retry
         }
     }
+
+    add-answer("case-1", "answer-1", {score: 4}, 20)
     ```
     """
 }

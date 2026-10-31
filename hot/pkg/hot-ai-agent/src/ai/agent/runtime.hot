@@ -69,25 +69,47 @@ fn (): Int {
 }
 
 bump-counter
-meta { doc: "Increment a numeric counter in a store and return the new value." }
+meta {
+    doc: """
+    Increment a numeric counter in a store and return the new value. The
+    store adds atomically, so concurrent bumps are never lost.
+    """
+}
 fn (store: ::hot::store/Map, key: Str, delta: Int): Int {
-    current or(::store/get(store, key), 0)
-    next add(current, delta)
-    ::store/put(store, key, next)
-    next
+    ::store/increment(store, key, delta)
 }
 
+// Each failed attempt means another registration changed the index first,
+// so the budget only stops a write that can never match.
+REGISTER_SESSION_ATTEMPTS 100
+
 register-session
-meta { doc: "Add a session to the runtime's registered-session index. Idempotent." }
+meta {
+    doc: """
+    Add a session to the runtime's registered-session index. Idempotent.
+    Concurrent registrations are all kept: the index is replaced only while
+    it still holds what was read, and the read is retried otherwise.
+    """
+}
 fn (rt: AgentRuntime, session: Session): Vec {
-    current or(::store/get(rt.state-store, REGISTERED_SESSIONS_KEY), [])
-    serialized {id: session.id, meta: session.meta}
+    add-registered-session(rt, {id: session.id, meta: session.meta}, REGISTER_SESSION_ATTEMPTS)
+}
+
+add-registered-session
+meta { no-doc: true }
+fn (rt: AgentRuntime, serialized: Map, attempts: Int): Vec {
+    stored ::store/get(rt.state-store, REGISTERED_SESSIONS_KEY)
+    current or(stored, [])
     cond {
-        some(current, (s) { eq(s.id, session.id) }) => { current }
+        some(current, (s) { eq(s.id, serialized.id) }) => { current }
         => {
             next concat(current, [serialized])
-            ::store/put(rt.state-store, REGISTERED_SESSIONS_KEY, next)
-            next
+            wrote ::store/put-if(rt.state-store, REGISTERED_SESSIONS_KEY, stored, next)
+            cond {
+                wrote => { next }
+                lte(attempts, 1) => { err(`register-session: the session index kept changing; ${serialized.id} was not registered`) }
+                => { add-registered-session(rt, serialized, sub(attempts, 1)) }
+            }
         }
     }
 }

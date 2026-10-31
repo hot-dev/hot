@@ -2695,7 +2695,7 @@ fn (): Str { "unused" }
         assert!(
             diagnostics.iter().any(|d| d
                 .message
-                .contains("declares src-paths [\"../shared/\"] outside its folder")),
+                .contains("src-paths entry '../shared/' leaves the package directory")),
             "{diagnostics:?}"
         );
     }

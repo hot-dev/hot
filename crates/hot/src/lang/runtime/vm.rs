@@ -6,7 +6,10 @@ use crate::lang::bytecode::{
 };
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
 use crate::lang::runtime::error::RuntimeError;
-use crate::lang::runtime::jit::{CodeMemoryStatus, JitConfig, JitFunctionProfile, JitRuntimeState};
+use crate::lang::runtime::jit::{
+    CallNames, CodeMemoryStatus, JitConfig, JitFunctionProfile, JitRuntimeState,
+};
+use crate::lang::runtime::native_core::NativeCoreShadows;
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
@@ -50,6 +53,74 @@ pub(crate) fn pipe_step_key(index: usize) -> String {
     format!("pipe_{index}")
 }
 
+/// The core function an unqualified call to `name` reaches, as
+/// `core_functions` registers it. A qualified name wins over a bare one, and
+/// when several namespaces declare the same core name, the last one
+/// registered wins, as the core variable registry does, so `resolve("trim")`,
+/// parallel-flow captures and compiled code pick the same function as a
+/// direct call.
+pub(crate) fn core_function_name<'a>(
+    core_functions: &'a IndexMap<String, crate::lang::bytecode::FunctionId>,
+    name: &str,
+) -> Option<&'a str> {
+    let suffix = format!("/{name}");
+    let mut unqualified_match = None;
+    for registered_name in core_functions.keys().rev() {
+        if registered_name.contains('/') && registered_name.ends_with(&suffix) {
+            return Some(registered_name);
+        }
+        if registered_name == name && unqualified_match.is_none() {
+            unqualified_match = Some(registered_name.as_str());
+        }
+    }
+    unqualified_match
+}
+
+/// `dest` with the entries of the map spread `{...source}` merged in, as
+/// `MergeMaps` makes it: a constructed value contributes its fields. Compiled
+/// code merges with it too.
+pub(crate) fn merge_map_spread(dest: Val, source: &Val) -> VmResult<Val> {
+    match (dest, crate::val::map_spread_entries(source)) {
+        (Val::Map(mut dest_map), Some(entries)) => {
+            for (k, v) in entries.iter() {
+                dest_map.insert(k.clone(), v.clone());
+            }
+            Ok(Val::Map(dest_map))
+        }
+        (dest, entries) => {
+            let message = match source {
+                Val::Map(m) if entries.is_none() && crate::val::is_tagged_wrapper(m) => {
+                    format!(
+                        "Cannot spread a {} value into a map: it has no fields",
+                        crate::val::tagged_type_name(m).unwrap_or("typed")
+                    )
+                }
+                _ => format!(
+                    "MergeMaps requires two maps, got: {:?} and {:?}",
+                    dest, source
+                ),
+            };
+            Err(VmError::runtime(message))
+        }
+    }
+}
+
+/// `target` with `value` appended, as `items[] value` makes it: a Null
+/// target starts a vector. Compiled code appends with it too.
+pub(crate) fn append_to_vec(target: Val, value: Val) -> VmResult<Val> {
+    match target {
+        Val::Vec(mut elements) => {
+            elements.push(value);
+            Ok(Val::Vec(elements))
+        }
+        Val::Null => Ok(Val::Vec(vec![value])),
+        other => Err(VmError::runtime(format!(
+            "Cannot append to {:?}, expected a vector",
+            other
+        ))),
+    }
+}
+
 fn is_terminal_payload(val: &Val) -> bool {
     terminal_payload_type(val).is_some()
 }
@@ -90,6 +161,18 @@ pub fn max_recursion_depth() -> usize {
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_MAX_RECURSION_DEPTH)
     })
+}
+
+/// The error for a call refused at `depth` because it would pass `max`
+/// (see [`max_recursion_depth`]).
+pub(crate) fn recursion_limit_message(depth: usize, max: usize) -> String {
+    format!(
+        "Function call recursion limit reached (depth {}, max {}). \
+         This usually indicates unbounded recursion. \
+         Use tail recursion (TCO-eligible position), an iterative form, \
+         or raise HOT_MAX_RECURSION_DEPTH if your workload genuinely needs deeper calls.",
+        depth, max,
+    )
 }
 
 /// Failure state that can be shared across threads for parallel execution
@@ -154,6 +237,7 @@ pub(crate) struct VmHostContext {
     secret_value_hashes: AHashSet<u64>,
     run_start_time: chrono::DateTime<chrono::Utc>,
     run_start_instant: std::time::Instant,
+    native_core_shadows: Arc<NativeCoreShadows>,
 }
 
 /// Thread-safe cancellation state holder
@@ -295,6 +379,11 @@ pub struct FlowContext {
 
     /// Pipe step results (for pipe flows with result modifiers)
     pipe_step_results: Vec<(String, Val)>,
+
+    /// A parallel flow's deferred bindings, run when it ends. Kept with the
+    /// flow, so a flow or parallel flow nested in it (a side-effect `cond`,
+    /// a lambda's own `parallel`) leaves them alone.
+    parallel: Option<Box<ParallelFlowContext>>,
 }
 
 /// Call execution context for tracking function invocations
@@ -675,8 +764,6 @@ pub struct VirtualMachine {
     conf: Val,
     /// Thread count for parallel execution (cached from conf)
     thread_count: usize,
-    /// Parallel flow execution context (active when executing parallel flows)
-    parallel_flow_context: Option<ParallelFlowContext>,
     /// Function dispatch cache: maps (function_name_hash, arity) → FunctionId.
     /// Avoids repeated string formatting and multi-map probing in unified_function_lookup.
     /// Populated lazily on first resolution; valid for the lifetime of the program.
@@ -708,6 +795,9 @@ pub struct VirtualMachine {
     /// replaced after construction, so entries stay valid for the VM lifetime.
     hof_plan_cache:
         AHashMap<FunctionId, std::rc::Rc<[crate::lang::runtime::jit_hof::PipelinePlan]>>,
+    /// Where bare calls to the core functions every tier runs natively reach
+    /// another function. Computed on first use, and shared with worker VMs.
+    native_core_shadows: std::cell::OnceCell<Arc<NativeCoreShadows>>,
     /// Number of currently-active `execute_user_function` frames per
     /// FunctionId. Register indices are unique per function but shared across
     /// invocations of the *same* function, so a re-entrant (recursive) call
@@ -819,7 +909,6 @@ impl VirtualMachine {
             secret_value_hashes: AHashSet::new(),
             conf,
             thread_count,
-            parallel_flow_context: None,
             dispatch_cache: AHashMap::new(),
             coercion_param_cache: AHashMap::new(),
             overload_set_cache: AHashMap::new(),
@@ -827,6 +916,7 @@ impl VirtualMachine {
             sorted_key_indices: None,
             jit,
             hof_plan_cache: AHashMap::new(),
+            native_core_shadows: std::cell::OnceCell::new(),
             function_active_depth: vec![0; function_count],
             function_used_registers_cache: AHashMap::new(),
             failure_state: Arc::new(VmFailureState {
@@ -913,6 +1003,12 @@ impl VirtualMachine {
         self.jit.has_compiled_function(function_id)
     }
 
+    /// The VM's JIT state, for tests that drive compiled code directly.
+    #[cfg(test)]
+    pub(crate) fn jit_state_mut(&mut self) -> &mut crate::lang::runtime::jit::JitRuntimeState {
+        &mut self.jit
+    }
+
     /// Set the database pool for file storage and other operations
     pub fn set_database_pool(&mut self, pool: Arc<crate::db::DatabasePool>) {
         self.database_pool = Some(pool);
@@ -994,6 +1090,7 @@ impl VirtualMachine {
             secret_value_hashes: self.secret_value_hashes.clone(),
             run_start_time: self.run_start_time,
             run_start_instant: self.run_start_instant,
+            native_core_shadows: self.native_core_shadows(),
         }
     }
 
@@ -1015,6 +1112,21 @@ impl VirtualMachine {
         self.secret_value_hashes = context.secret_value_hashes.clone();
         self.run_start_time = context.run_start_time;
         self.run_start_instant = context.run_start_instant;
+        // A worker runs the same program, so it shares what was computed.
+        let _ = self
+            .native_core_shadows
+            .set(Arc::clone(&context.native_core_shadows));
+    }
+
+    /// Where bare calls to the core functions every tier runs natively reach
+    /// another function (see [`NativeCoreShadows`]).
+    pub(crate) fn native_core_shadows(&self) -> Arc<NativeCoreShadows> {
+        Arc::clone(self.native_core_shadows_ref())
+    }
+
+    fn native_core_shadows_ref(&self) -> &Arc<NativeCoreShadows> {
+        self.native_core_shadows
+            .get_or_init(|| Arc::new(NativeCoreShadows::new(&self.program, &self.core_functions)))
     }
 
     /// Capture realized namespace state for a worker VM.
@@ -1473,9 +1585,6 @@ impl VirtualMachine {
         }
     }
 
-    /// Admit a host execution before any customer bytecode or run:start side
-    /// effect. VM hosts execute on blocking threads, like async storage syscalls.
-    /// The durable ledger makes independent VM instances/retries idempotent.
     /// Refuse to create durable work (tasks, events, schedules) in an
     /// environment that has stopped admitting it, such as one suspended while
     /// this run executes: held work would only retry until reactivation. A
@@ -1516,6 +1625,9 @@ impl VirtualMachine {
         }
     }
 
+    /// Admit a host execution before any customer bytecode or run:start side
+    /// effect. VM hosts execute on blocking threads, like async storage syscalls.
+    /// The durable ledger makes independent VM instances/retries idempotent.
     pub(crate) fn admit_execution(&mut self) -> VmResult<()> {
         let Some(pool) = self.database_pool.as_ref() else {
             return Ok(());
@@ -1954,9 +2066,12 @@ impl VirtualMachine {
                 let constant = *constant;
                 let value = self.load_constant(constant)?;
 
-                // If we're in a parallel flow and haven't captured metadata yet,
-                // this LoadConst should contain the dependency metadata
-                if let Some(ref mut parallel_ctx) = self.parallel_flow_context
+                // The constant after a parallel flow's BeginFlow holds its
+                // dependency levels.
+                if let Some(parallel_ctx) = self
+                    .flow_contexts
+                    .last_mut()
+                    .and_then(|flow| flow.parallel.as_deref_mut())
                     && !parallel_ctx.metadata_captured
                 {
                     // Extract dependency levels from the constant value
@@ -1992,7 +2107,7 @@ impl VirtualMachine {
                 // rather than waiting until execution time.
                 // EXCEPTION: If we're inside a parallel flow context, skip variable capture
                 // so that thunks can capture variables from previous dependency levels at execution time.
-                let in_parallel_flow = self.parallel_flow_context.is_some();
+                let in_parallel_flow = self.in_parallel_flow();
 
                 let value = if let Val::Box(ref boxed) = value {
                     if let Some(lambda_info) = boxed
@@ -2373,97 +2488,27 @@ impl VirtualMachine {
                     Uuid::now_v7()
                 };
 
-                // For parallel flows: Initialize parallel execution context
-                if flow_type == FlowType::Parallel {
-                    tracing::trace!("VM: Initializing TRUE parallel flow execution context");
-
-                    // Initialize parallel flow context
-                    // The next instruction should be LoadConst with dependency metadata
-                    self.parallel_flow_context = Some(ParallelFlowContext {
+                // A parallel flow collects its deferred bindings; the next
+                // instruction is the LoadConst of its dependency levels.
+                let parallel = (flow_type == FlowType::Parallel).then(|| {
+                    Box::new(ParallelFlowContext {
                         deferred_thunks: Vec::new(),
                         dependency_levels: Vec::new(),
                         metadata_captured: false,
-                    });
-                }
+                    })
+                });
 
                 // For non-serial inline flows, emit a call:start event to track as a call record
                 // Serial flows are the default and don't need tracking
                 let (call_id, start_time) = if flow_type != FlowType::Serial && self.traces_calls()
                 {
-                    if let (Some(emitter), Some(execution_context)) =
-                        (&self.emitter, &self.execution_context)
-                    {
-                        let call_id = Uuid::now_v7();
-                        let start_time = chrono::Utc::now();
-                        let parent_call_id = self.call_stack.last().map(|ctx| ctx.call_id);
-                        let call_depth = self.call_stack.len();
-                        let runtime_path = self.build_runtime_path();
-
-                        // Traced call name for the inline flow. Flows the
-                        // compiler inlined from a named callable (e.g. `if()`)
-                        // carry that name so call-trace search still finds
-                        // them; ordinary flows get a synthetic name. The outer
-                        // `if flow_type != FlowType::Serial` makes Serial logically
-                        // impossible here, but we use a string fallback rather than
-                        // `unreachable!()` so a future refactor that changes the
-                        // outer guard can't take the worker down.
-                        let function_name =
-                            match origin_name.and_then(|id| self.get_string_constant(id).ok()) {
-                                Some(name) => (*name).to_owned(),
-                                None => match flow_type {
-                                    FlowType::Serial => "<serial>".to_string(),
-                                    FlowType::Parallel => "<parallel>".to_string(),
-                                    FlowType::Cond => "<cond>".to_string(),
-                                    FlowType::CondAll => "<cond-all>".to_string(),
-                                    FlowType::Pipe => "<pipe>".to_string(),
-                                    FlowType::Match => "<match>".to_string(),
-                                    FlowType::MatchAll => "<match-all>".to_string(),
-                                },
-                            };
-
-                        // Build flow info with inline marker
-                        let flow_type_str = match flow_type {
-                            FlowType::Serial => "serial",
-                            FlowType::Parallel => "parallel",
-                            FlowType::Cond => "cond",
-                            FlowType::CondAll => "cond-all",
-                            FlowType::Pipe => "pipe",
-                            FlowType::Match => "match",
-                            FlowType::MatchAll => "match-all",
-                        };
-                        let mut flow_map = IndexMap::new();
-                        flow_map.insert(Val::from("type"), Val::from(flow_type_str.to_string()));
-                        if origin_name.is_some() {
-                            // Compiler-inlined named callable (e.g. `if()`):
-                            // mirror the flow shape these calls emitted before
-                            // inlining, when they executed as `fn cond`
-                            // functions ({type: "cond", fn: true}).
-                            flow_map.insert(Val::from("fn"), Val::Bool(true));
-                        } else {
-                            flow_map.insert(Val::from("flow_id"), Val::from(flow_id.to_string()));
-                            flow_map.insert(Val::from("inline"), Val::Bool(true));
-                        }
-
-                        let start_event = crate::lang::emitter::EngineEvent::call_start(
-                            execution_context,
-                            call_id,
-                            parent_call_id,
-                            function_name.clone(),
-                            function_name, // static_scope same as function_name for inline flows
-                            runtime_path
-                                .unwrap_or_else(|| format!("run_{}", execution_context.run_id)),
-                            call_depth,
-                            vec![], // No args for inline flows
-                            source.as_deref(),
-                            start_time,
-                            Some(Val::Map(Box::new(flow_map))),
-                        );
-                        emitter.emit(start_event);
-
-                        (Some(call_id), Some(start_time))
-                    } else {
-                        (None, None)
-                    }
+                    let origin = origin_name.and_then(|id| self.get_string_constant(id).ok());
+                    self.trace_inline_flow_start(
+                        flow_type,
+                        flow_id,
+                        origin.as_deref(),
+                        source.as_deref(),
+                    )
                 } else {
                     (None, None)
                 };
@@ -2481,6 +2526,7 @@ impl VirtualMachine {
                     cond_branch_executed: false,
                     current_branch: None,
                     pipe_step_results: Vec::new(),
+                    parallel,
                 };
 
                 self.flow_contexts.push(flow_context);
@@ -2489,8 +2535,12 @@ impl VirtualMachine {
 
             Instruction::EndFlow { dest } => {
                 let dest = *dest;
-                // Check if we're ending a parallel flow with deferred thunks
-                if let Some(parallel_ctx) = self.parallel_flow_context.take() {
+                // Ending a parallel flow runs its deferred bindings.
+                if let Some(parallel_ctx) = self
+                    .flow_contexts
+                    .last_mut()
+                    .and_then(|flow| flow.parallel.take())
+                {
                     tracing::trace!(
                         "VM: EndFlow for parallel flow - executing {} deferred thunks in {} levels",
                         parallel_ctx.deferred_thunks.len(),
@@ -2498,7 +2548,7 @@ impl VirtualMachine {
                     );
 
                     // Execute deferred thunks in TRUE parallel by dependency level
-                    self.execute_parallel_flow(parallel_ctx)?;
+                    self.execute_parallel_flow(*parallel_ctx)?;
                 }
 
                 // End flow execution and collect results
@@ -2523,26 +2573,7 @@ impl VirtualMachine {
                     };
 
                     // Emit call:stop event for inline flows (those with a call_id)
-                    if let Some(call_id) = flow_context.call_id
-                        && let (Some(emitter), Some(execution_context)) =
-                            (&self.emitter, &self.execution_context)
-                    {
-                        let end_time = chrono::Utc::now();
-                        let duration_us = flow_context
-                            .start_time
-                            .map(|start| (end_time - start).num_microseconds().unwrap_or(0))
-                            .unwrap_or(0);
-
-                        let stop_event = crate::lang::emitter::EngineEvent::call_stop(
-                            execution_context,
-                            call_id,
-                            Some(result.clone()),
-                            None, // No error
-                            end_time,
-                            duration_us,
-                        );
-                        emitter.emit(stop_event);
-                    }
+                    self.trace_inline_flow_stop(&flow_context, &result);
 
                     self.set_register(dest, result)?;
                 } else {
@@ -3046,7 +3077,11 @@ impl VirtualMachine {
                 );
 
                 // Buffer the thunk for parallel execution at EndFlow
-                if let Some(ref mut parallel_ctx) = self.parallel_flow_context {
+                if let Some(parallel_ctx) = self
+                    .flow_contexts
+                    .last_mut()
+                    .and_then(|flow| flow.parallel.as_deref_mut())
+                {
                     parallel_ctx.deferred_thunks.push(DeferredVarThunk {
                         var_name: name.to_string(),
                         thunk: thunk_val,
@@ -3324,26 +3359,9 @@ impl VirtualMachine {
                 let vec = *vec;
                 let value = *value;
                 // Append value to vector (items[] = value syntax)
-                let mut vec_val = self.get_register(vec)?.clone();
+                let vec_val = self.get_register(vec)?.clone();
                 let new_value = self.get_register(value)?.clone();
-
-                match &mut vec_val {
-                    Val::Vec(v) => {
-                        v.push(new_value);
-                    }
-                    Val::Null => {
-                        // If the vector doesn't exist yet, create it with the value
-                        vec_val = Val::Vec(vec![new_value]);
-                    }
-                    _ => {
-                        return Err(VmError::runtime(format!(
-                            "Cannot append to {:?}, expected a vector",
-                            vec_val
-                        )));
-                    }
-                }
-
-                // Store the modified vector back to the register
+                let vec_val = append_to_vec(vec_val, new_value)?;
                 self.set_register(vec, vec_val)?;
                 self.instruction_pointer += 1;
             }
@@ -3721,35 +3739,10 @@ impl VirtualMachine {
                 let dest = *dest;
                 let source = *source;
                 let dest_val = self.get_register(dest)?.clone();
-                let source_val = self.get_register(source)?.clone();
-
                 // A spread contributes a constructed value's fields, not its
                 // internal `$type`/`$val` wrapper keys.
-                match (dest_val, crate::val::map_spread_entries(&source_val)) {
-                    (Val::Map(mut dest_map), Some(entries)) => {
-                        for (k, v) in entries.iter() {
-                            dest_map.insert(k.clone(), v.clone());
-                        }
-                        self.set_register(dest, Val::Map(dest_map))?;
-                    }
-                    (dest, entries) => {
-                        let message = match &source_val {
-                            Val::Map(m)
-                                if entries.is_none() && crate::val::is_tagged_wrapper(m) =>
-                            {
-                                format!(
-                                    "Cannot spread a {} value into a map: it has no fields",
-                                    crate::val::tagged_type_name(m).unwrap_or("typed")
-                                )
-                            }
-                            _ => format!(
-                                "MergeMaps requires two maps, got: {:?} and {:?}",
-                                dest, source_val
-                            ),
-                        };
-                        return Err(VmError::runtime(message));
-                    }
-                }
+                let merged = merge_map_spread(dest_val, self.get_register(source)?)?;
+                self.set_register(dest, merged)?;
 
                 self.instruction_pointer += 1;
             }
@@ -5185,6 +5178,15 @@ impl VirtualMachine {
         val.is_truthy()
     }
 
+    /// Whether the innermost open flow is a parallel flow still collecting
+    /// its bindings. Lambdas created in one (its bindings' thunks) capture
+    /// at run time, so a binding sees those of earlier dependency levels.
+    fn in_parallel_flow(&self) -> bool {
+        self.flow_contexts
+            .last()
+            .is_some_and(|flow| flow.parallel.is_some())
+    }
+
     /// The innermost flow opened by the running function or lambda body. A
     /// binding is collected only by a flow of its own body: a call made
     /// inside a caller's `All<Map>`/`All<Vec>` flow adds nothing to it.
@@ -6333,12 +6335,9 @@ impl VirtualMachine {
                     self.function_call_depth,
                     max_depth,
                 );
-                return Err(VmError::runtime(format!(
-                    "Function call recursion limit reached (depth {}, max {}). \
-                     This usually indicates unbounded recursion. \
-                     Use tail recursion (TCO-eligible position), an iterative form, \
-                     or raise HOT_MAX_RECURSION_DEPTH if your workload genuinely needs deeper calls.",
-                    self.function_call_depth, max_depth,
+                return Err(VmError::runtime(recursion_limit_message(
+                    self.function_call_depth,
+                    max_depth,
                 )));
             }
             self.function_call_depth += 1;
@@ -6404,6 +6403,12 @@ impl VirtualMachine {
         // Tier 1: #[inline(always)] type-specialized helpers (zero call overhead)
         // Tier 2: Full library functions for remaining type combos (single source of truth)
         // Each library file owns both its fast-path specializations and general impls.
+        // Only where the name reaches hot-std's function: a binding in this
+        // namespace or a project core function of the same name is called
+        // through the lookup, as compiled code calls it.
+        if !self
+            .native_core_shadows_ref()
+            .shadows(&self.current_namespace, function_name)
         {
             use crate::lang::hot::r#type::HotResult as HR;
             use crate::lang::hot::{bool, cmp, coll, math};
@@ -6609,10 +6614,14 @@ impl VirtualMachine {
             function_name
         );
 
-        // Fast paths for common Int operations
+        // Fast paths for common Int operations, where the name reaches
+        // hot-std's function (see `execute_function_call`).
         // NOTE: div is excluded because Hot returns Dec when result isn't exact (e.g., div(3,2) = 1.5)
         if args.len() == 2
             && let (Val::Int(a), Val::Int(b)) = (&args[0], &args[1])
+            && !self
+                .native_core_shadows_ref()
+                .shadows(&self.current_namespace, function_name)
         {
             let result = match function_name {
                 "add" => Some(crate::lang::hot::math::fast_add_int(*a, *b)),
@@ -6889,12 +6898,13 @@ impl VirtualMachine {
                 type_signature
             );
             return Some(function_id);
-        } else {
+        } else if tracing::enabled!(tracing::Level::TRACE) {
+            // A scan of every mapping: only when it will be logged, as this
+            // runs on each call by name to a function with union parameters.
             tracing::trace!(
                 "VM: No exact type match found for signature '{}'. Available function mappings with similar names:",
                 type_signature
             );
-            // Debug: show available function mappings that start with the function name
             for (key, _) in self.function_mapping.iter() {
                 if key.starts_with(function_name) {
                     tracing::trace!("  Available: '{}'", key);
@@ -7933,39 +7943,9 @@ impl VirtualMachine {
             self.core_functions.len()
         );
 
-        // Check the core functions registry - this contains all functions with "core" metadata
-        // PRIORITIZE qualified names over unqualified names. When several
-        // namespaces declare the same core name, take the last one registered,
-        // as the core variable registry does, so `resolve("trim")` and
-        // parallel-flow captures pick the same function as a direct call.
-        let mut unqualified_match = None;
-
-        for (registered_name, &function_id) in self.core_functions.iter().rev() {
-            // Check if this is a qualified name that ends with our unqualified name (PREFERRED)
-            if registered_name.contains('/') && registered_name.ends_with(&format!("/{}", name)) {
-                tracing::trace!(
-                    "VM: Found qualified core function '{}' -> '{}' (ID: {})",
-                    name,
-                    registered_name,
-                    function_id
-                );
-                return Some(registered_name.clone());
-            }
-
-            // Check if this is an exact match for unqualified name (FALLBACK)
-            if registered_name == name && unqualified_match.is_none() {
-                tracing::trace!(
-                    "VM: Found unqualified core function match '{}' (ID: {})",
-                    name,
-                    function_id
-                );
-                unqualified_match = Some(registered_name.clone());
-            }
-        }
-
-        // Return unqualified match if no qualified match was found
-        if let Some(unqualified) = unqualified_match {
-            return Some(unqualified);
+        if let Some(core_name) = core_function_name(&self.core_functions, name) {
+            tracing::trace!("VM: Found core function '{}' -> '{}'", name, core_name);
+            return Some(core_name.to_string());
         }
 
         tracing::trace!(
@@ -8052,9 +8032,7 @@ impl VirtualMachine {
         // backstop must be checked here as well.
         if crate::lang::runtime::limits::vm_stack_exhausted() {
             return Err(VmError::runtime(
-                "Native stack budget exhausted by deep recursion. \
-                 Use tail recursion (TCO-eligible position) or an iterative form."
-                    .to_string(),
+                crate::lang::runtime::limits::stack_budget_exhausted_message(),
             ));
         }
         super::jit::increment_lambda_interpreter_call_count();
@@ -8375,7 +8353,9 @@ impl VirtualMachine {
 
                 // Execute instruction directly without interfering with main VM instruction pointer
                 match instruction {
-                    Instruction::LoadConst { dest, constant } => {
+                    // In a parallel flow, the main loop's LoadConst takes the
+                    // flow's dependency levels and defers its thunks' captures.
+                    Instruction::LoadConst { dest, constant } if !self.in_parallel_flow() => {
                         let constant_val = self.load_constant(*constant)?;
 
                         // If this is a lambda value, capture closure variables NOW (at creation time)
@@ -8565,16 +8545,49 @@ impl VirtualMachine {
         Ok(last_result)
     }
 
-    /// Execute a user function
+    /// Run the compiled code for calling `function_id` with `args`: `None`
+    /// when there is none, or the thread is too deep in its stack to start
+    /// it, for the interpreter to run the call. A traced call is traced as an
+    /// interpreted one is.
     fn try_jit_call(&mut self, function_id: u32, args: &[Val]) -> Result<Option<Val>, String> {
         let Some(compiled) = self.jit.compiled_function(function_id, args) else {
             return Ok(None);
         };
+        if !crate::lang::runtime::jit::can_start_compiled_code() {
+            return Ok(None);
+        }
+        let call_id = if self.traces_calls() {
+            let program = Arc::clone(&self.program);
+            program
+                .functions
+                .get(function_id as usize)
+                .and_then(|function_info| self.begin_traced_call(function_info, args))
+        } else {
+            None
+        };
+        let result = self.run_compiled_call(function_id, &compiled, args);
+        if let Ok(value) = &result
+            && call_id.is_some()
+            && !self.has_failed()
+            && !self.has_cancelled()
+        {
+            self.end_traced_call(call_id, value);
+        }
+        result.map(Some)
+    }
+
+    /// Run `compiled`, the code for calling `function_id` with `args`.
+    fn run_compiled_call(
+        &mut self,
+        function_id: u32,
+        compiled: &crate::lang::runtime::jit::JitCompiledFunction,
+        args: &[Val],
+    ) -> Result<Val, String> {
         // Code that never looks up a name or runs other Hot code needs
         // neither the call's frame nor its namespace.
         if !compiled.needs_vm_scope() {
             let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-            let result = compiled.try_call(args);
+            let result = compiled.call(args);
             crate::lang::runtime::jit::set_jit_vm_ptr(prev);
             return result;
         }
@@ -8603,7 +8616,7 @@ impl VirtualMachine {
         }
 
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-        let result = compiled.try_call(args);
+        let result = compiled.call(args);
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
         self.scope_stack.truncate(saved_scope_depth);
         self.current_namespace = saved_namespace;
@@ -8645,9 +8658,16 @@ impl VirtualMachine {
         }
 
         let program = Arc::clone(&self.program);
+        let shadows = self.native_core_shadows();
         let Some((compiled, effective_args)) = self
             .jit
-            .compiled_lambda(&program, lambda_info, &normalized_args, &captures)
+            .compiled_lambda(
+                &program,
+                lambda_info,
+                &normalized_args,
+                &captures,
+                CallNames::new(&self.namespace_variables, &self.core_functions, &shadows),
+            )
             .map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?
         else {
             return Ok(None);
@@ -8709,19 +8729,14 @@ impl VirtualMachine {
             .filter(|(id, _)| *id == function_id);
         let max_depth = max_recursion_depth();
         if self.user_function_depth >= max_depth {
-            return Err(VmError::runtime(format!(
-                "Function call recursion limit reached (depth {}, max {}). \
-                 This usually indicates unbounded recursion. \
-                 Use tail recursion (TCO-eligible position), an iterative form, \
-                 or raise HOT_MAX_RECURSION_DEPTH if your workload genuinely needs deeper calls.",
-                self.user_function_depth, max_depth,
+            return Err(VmError::runtime(recursion_limit_message(
+                self.user_function_depth,
+                max_depth,
             )));
         }
         if crate::lang::runtime::limits::vm_stack_exhausted() {
             return Err(VmError::runtime(
-                "Native stack budget exhausted by deep recursion. \
-                 Use tail recursion (TCO-eligible position) or an iterative form."
-                    .to_string(),
+                crate::lang::runtime::limits::stack_budget_exhausted_message(),
             ));
         }
         // A `where` predicate has its own, smaller call-depth budget.
@@ -8774,99 +8789,177 @@ impl VirtualMachine {
         result
     }
 
-    /// Written-register set for a function body (lazily computed and cached).
-    fn function_used_registers(&mut self, function_id: FunctionId) -> std::rc::Rc<[u32]> {
-        if let Some(cached) = self.function_used_registers_cache.get(&function_id) {
-            return std::rc::Rc::clone(cached);
+    /// Start tracing an inline flow of `flow_type`, as a call named for the
+    /// callable it was inlined from (`origin`) or for its flow type: emit its
+    /// `call:start` event. Returns the call's id and start time, for
+    /// [`Self::trace_inline_flow_stop`].
+    fn trace_inline_flow_start(
+        &self,
+        flow_type: FlowType,
+        flow_id: Uuid,
+        origin: Option<&str>,
+        source: Option<&crate::lang::bytecode::SourceLocation>,
+    ) -> (Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>) {
+        let (Some(emitter), Some(execution_context)) = (&self.emitter, &self.execution_context)
+        else {
+            return (None, None);
+        };
+        let call_id = Uuid::now_v7();
+        let start_time = chrono::Utc::now();
+        let parent_call_id = self.call_stack.last().map(|ctx| ctx.call_id);
+        let call_depth = self.call_stack.len();
+        let runtime_path = self.build_runtime_path();
+
+        // Traced call name for the inline flow. Flows the compiler inlined
+        // from a named callable (e.g. `if()`) carry that name so call-trace
+        // search still finds them; ordinary flows get a synthetic name.
+        let function_name = match origin {
+            Some(name) => name.to_owned(),
+            None => match flow_type {
+                FlowType::Serial => "<serial>".to_string(),
+                FlowType::Parallel => "<parallel>".to_string(),
+                FlowType::Cond => "<cond>".to_string(),
+                FlowType::CondAll => "<cond-all>".to_string(),
+                FlowType::Pipe => "<pipe>".to_string(),
+                FlowType::Match => "<match>".to_string(),
+                FlowType::MatchAll => "<match-all>".to_string(),
+            },
+        };
+
+        // Build flow info with inline marker
+        let flow_type_str = match flow_type {
+            FlowType::Serial => "serial",
+            FlowType::Parallel => "parallel",
+            FlowType::Cond => "cond",
+            FlowType::CondAll => "cond-all",
+            FlowType::Pipe => "pipe",
+            FlowType::Match => "match",
+            FlowType::MatchAll => "match-all",
+        };
+        let mut flow_map = IndexMap::new();
+        flow_map.insert(Val::from("type"), Val::from(flow_type_str.to_string()));
+        if origin.is_some() {
+            // Compiler-inlined named callable (e.g. `if()`): mirror the flow
+            // shape these calls emitted before inlining, when they executed
+            // as `fn cond` functions ({type: "cond", fn: true}).
+            flow_map.insert(Val::from("fn"), Val::Bool(true));
+        } else {
+            flow_map.insert(Val::from("flow_id"), Val::from(flow_id.to_string()));
+            flow_map.insert(Val::from("inline"), Val::Bool(true));
         }
-        let used: std::rc::Rc<[u32]> = self
-            .program
-            .functions
-            .get(function_id as usize)
-            .map(|info| {
-                crate::lang::bytecode::LambdaInfo::compute_used_registers(&info.instructions)
-            })
-            .unwrap_or_default()
-            .into();
-        self.function_used_registers_cache
-            .insert(function_id, std::rc::Rc::clone(&used));
-        used
+
+        let start_event = crate::lang::emitter::EngineEvent::call_start(
+            execution_context,
+            call_id,
+            parent_call_id,
+            function_name.clone(),
+            function_name, // static_scope same as function_name for inline flows
+            runtime_path.unwrap_or_else(|| format!("run_{}", execution_context.run_id)),
+            call_depth,
+            vec![], // No args for inline flows
+            source,
+            start_time,
+            Some(Val::Map(Box::new(flow_map))),
+        );
+        emitter.emit(start_event);
+
+        (Some(call_id), Some(start_time))
     }
 
-    fn execute_user_function_impl(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
-        if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
-            self.jit.record_call(function_id, args);
+    /// Finish tracing the inline flow `flow_context`, which produced
+    /// `result`: emit its `call:stop` event.
+    fn trace_inline_flow_stop(&self, flow_context: &FlowContext, result: &Val) {
+        if let Some(call_id) = flow_context.call_id
+            && let (Some(emitter), Some(execution_context)) =
+                (&self.emitter, &self.execution_context)
+        {
+            let end_time = chrono::Utc::now();
+            let duration_us = flow_context
+                .start_time
+                .map(|start| (end_time - start).num_microseconds().unwrap_or(0))
+                .unwrap_or(0);
 
-            let was_halted = self.has_failed() || self.has_cancelled();
-            if let Some(result) = self.try_jit_call(function_id, args).map_err(|msg| {
-                VmError::RuntimeError(
-                    RuntimeError::new(msg).with_instruction_pointer(self.instruction_pointer),
-                )
-            })? {
-                self.propagate_jit_halt(was_halted)?;
-                return Ok(result);
-            }
-
-            let program = Arc::clone(&self.program);
-            let function_info = program.functions.get(function_id as usize).ok_or_else(|| {
-                VmError::runtime(format!("Function with ID {} not found", function_id))
-            })?;
-            let function_name = &function_info.name;
-
-            if self.jit.should_compile_now(function_id, args)
-                && !self.jit_blocked_by_overload_dispatch(function_id)
-            {
-                let compile_result =
-                    self.jit
-                        .compile_function(&program, function_id, function_info, args);
-
-                match compile_result {
-                    Ok(()) => {
-                        tracing::debug!("[JIT] compiled '{}' (id={})", function_name, function_id);
-                        if let Some(result) =
-                            self.try_jit_call(function_id, args).map_err(|msg| {
-                                VmError::RuntimeError(
-                                    RuntimeError::new(msg)
-                                        .with_function(function_name.to_owned())
-                                        .with_instruction_pointer(self.instruction_pointer),
-                                )
-                            })?
-                        {
-                            self.propagate_jit_halt(was_halted)?;
-                            return Ok(result);
-                        }
-                    }
-                    Err(err) => {
-                        let reason = super::jit::jit_bailout_reason(&err);
-                        tracing::debug!(
-                            "[JIT] compilation skipped for '{}' (id={}, reason={}): {}",
-                            function_name,
-                            function_id,
-                            reason,
-                            err
-                        );
-                        super::jit::increment_jit_bailout_count();
-                        if !super::jit::is_retryable_jit_bailout(&err) {
-                            self.jit.mark_do_not_jit(function_id);
-                        }
-                    }
-                }
-            }
+            let stop_event = crate::lang::emitter::EngineEvent::call_stop(
+                execution_context,
+                call_id,
+                Some(result.clone()),
+                None, // No error
+                end_time,
+                duration_us,
+            );
+            emitter.emit(stop_event);
         }
+    }
 
-        let program = Arc::clone(&self.program);
-        let function_info = program.functions.get(function_id as usize).ok_or_else(|| {
-            VmError::runtime(format!("Function with ID {} not found", function_id))
-        })?;
+    /// Compiled code of a traced call entered an inline flow: trace it, and
+    /// open its flow context, which the calls it makes report as theirs.
+    pub(crate) fn begin_compiled_flow(
+        &mut self,
+        flow_type: FlowType,
+        origin: Option<&str>,
+        source: Option<&crate::lang::bytecode::SourceLocation>,
+    ) {
+        let flow_id = Uuid::now_v7();
+        let (call_id, start_time) = if self.traces_calls() {
+            self.trace_inline_flow_start(flow_type, flow_id, origin, source)
+        } else {
+            (None, None)
+        };
+        self.flow_contexts.push(FlowContext {
+            flow_id,
+            call_id,
+            start_time,
+            flow_type,
+            _result_modifier: FlowResultModifier::One,
+            _flow_variables: Vec::new(),
+            flow_variable_refs: Vec::new(),
+            cond_branch_results: Vec::new(),
+            cond_branch_executed: false,
+            current_branch: None,
+            pipe_step_results: Vec::new(),
+            parallel: None,
+        });
+    }
+
+    /// Compiled code ended the inline flow [`Self::begin_compiled_flow`]
+    /// opened, with `result`: close its flow context and trace its end.
+    pub(crate) fn end_compiled_flow(&mut self, result: &Val) {
+        if let Some(flow_context) = self.flow_contexts.pop() {
+            self.trace_inline_flow_stop(&flow_context, result);
+        }
+    }
+
+    /// Compiled code entered branch `branch` of the inline flow it opened,
+    /// or left it (`None`).
+    pub(crate) fn set_compiled_flow_branch(&mut self, branch: Option<Arc<str>>) {
+        if let Some(flow_context) = self.flow_contexts.last_mut() {
+            flow_context.current_branch = branch;
+        }
+    }
+
+    /// How many flow contexts are open, for [`Self::close_flows_from`].
+    pub(crate) fn flow_context_depth(&self) -> usize {
+        self.flow_contexts.len()
+    }
+
+    /// Close the flow contexts opened since there were `depth`, untraced, as
+    /// the interpreter leaves those a self tail call or an early return
+    /// jumps out of.
+    pub(crate) fn close_flows_from(&mut self, depth: usize) {
+        self.flow_contexts.truncate(depth);
+    }
+
+    /// When calls are traced, start tracing a call of `function_info` with
+    /// `args`: push its call context and emit its `call:start` event. Returns
+    /// the call's id, for [`Self::end_traced_call`].
+    fn begin_traced_call(
+        &mut self,
+        function_info: &crate::lang::bytecode::FunctionInfo,
+        args: &[Val],
+    ) -> Option<uuid::Uuid> {
         let function_name = &function_info.name;
-        let function_arity = function_info.arity;
-        let function_param_names = &function_info.param_names;
-        let function_is_variadic = function_info.is_variadic;
-        let function_has_instructions = !function_info.instructions.is_empty();
-        let function_instructions_len = function_info.instructions.len();
         let function_source = &function_info.source;
         let function_flow_type = function_info.flow_type;
-
         // Fast path: Skip CallContext creation when calls aren't traced
         // This avoids UUID generation, timestamp calls, and call stack management
         let call_id = if self.traces_calls() {
@@ -8957,6 +9050,140 @@ impl VirtualMachine {
             );
             emitter.emit(start_event);
         }
+        call_id
+    }
+
+    /// Finish tracing call `call_id` (from [`Self::begin_traced_call`]),
+    /// which returned `result`: pop its call context and emit its
+    /// `call:stop` event.
+    fn end_traced_call(&mut self, call_id: Option<uuid::Uuid>, result: &Val) {
+        // Only do duration calculation and event emission when emitter is attached
+        if let (Some(emitter), Some(execution_context), Some(cid)) =
+            (&self.emitter, &self.execution_context, call_id)
+        {
+            // Calculate duration before popping call context
+            let (end_time, duration_us) = if let Some(call_ctx) = self.call_stack.last() {
+                let end = chrono::Utc::now();
+                let duration = (end - call_ctx.start_time).num_microseconds().unwrap_or(0);
+                (end, duration)
+            } else {
+                (chrono::Utc::now(), 0)
+            };
+
+            // Pop call context from stack
+            self.call_stack.pop();
+
+            // Emit call:stop event
+            let stop_event = crate::lang::emitter::EngineEvent::call_stop(
+                execution_context,
+                cid,
+                Some(result.clone()),
+                None, // No error since we're returning success
+                end_time,
+                duration_us,
+            );
+            emitter.emit(stop_event);
+        }
+    }
+
+    /// Written-register set for a function body (lazily computed and cached).
+    fn function_used_registers(&mut self, function_id: FunctionId) -> std::rc::Rc<[u32]> {
+        if let Some(cached) = self.function_used_registers_cache.get(&function_id) {
+            return std::rc::Rc::clone(cached);
+        }
+        let used: std::rc::Rc<[u32]> = self
+            .program
+            .functions
+            .get(function_id as usize)
+            .map(|info| {
+                crate::lang::bytecode::LambdaInfo::compute_used_registers(&info.instructions)
+            })
+            .unwrap_or_default()
+            .into();
+        self.function_used_registers_cache
+            .insert(function_id, std::rc::Rc::clone(&used));
+        used
+    }
+
+    fn execute_user_function_impl(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
+        if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
+            self.jit.record_call(function_id, args);
+
+            let was_halted = self.has_failed() || self.has_cancelled();
+            if let Some(result) = self.try_jit_call(function_id, args).map_err(|msg| {
+                VmError::RuntimeError(
+                    RuntimeError::new(msg).with_instruction_pointer(self.instruction_pointer),
+                )
+            })? {
+                self.propagate_jit_halt(was_halted)?;
+                return Ok(result);
+            }
+
+            let program = Arc::clone(&self.program);
+            let function_info = program.functions.get(function_id as usize).ok_or_else(|| {
+                VmError::runtime(format!("Function with ID {} not found", function_id))
+            })?;
+            let function_name = &function_info.name;
+
+            if self.jit.should_compile_now(function_id, args)
+                && !self.jit_blocked_by_overload_dispatch(function_id)
+            {
+                let shadows = self.native_core_shadows();
+                let compile_result = self.jit.compile_function(
+                    &program,
+                    function_id,
+                    function_info,
+                    args,
+                    CallNames::new(&self.namespace_variables, &self.core_functions, &shadows)
+                        .traced(self.traces_calls()),
+                );
+
+                match compile_result {
+                    Ok(()) => {
+                        tracing::debug!("[JIT] compiled '{}' (id={})", function_name, function_id);
+                        if let Some(result) =
+                            self.try_jit_call(function_id, args).map_err(|msg| {
+                                VmError::RuntimeError(
+                                    RuntimeError::new(msg)
+                                        .with_function(function_name.to_owned())
+                                        .with_instruction_pointer(self.instruction_pointer),
+                                )
+                            })?
+                        {
+                            self.propagate_jit_halt(was_halted)?;
+                            return Ok(result);
+                        }
+                    }
+                    Err(err) => {
+                        let reason = super::jit::jit_bailout_reason(&err);
+                        tracing::debug!(
+                            "[JIT] compilation skipped for '{}' (id={}, reason={}): {}",
+                            function_name,
+                            function_id,
+                            reason,
+                            err
+                        );
+                        super::jit::increment_jit_bailout_count();
+                        if !super::jit::is_retryable_jit_bailout(&err) {
+                            self.jit.mark_do_not_jit(function_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        let program = Arc::clone(&self.program);
+        let function_info = program.functions.get(function_id as usize).ok_or_else(|| {
+            VmError::runtime(format!("Function with ID {} not found", function_id))
+        })?;
+        let function_name = &function_info.name;
+        let function_arity = function_info.arity;
+        let function_param_names = &function_info.param_names;
+        let function_is_variadic = function_info.is_variadic;
+        let function_has_instructions = !function_info.instructions.is_empty();
+        let function_instructions_len = function_info.instructions.len();
+
+        let call_id = self.begin_traced_call(function_info, args);
 
         {
             // Check arity (basic validation)
@@ -9190,11 +9417,18 @@ impl VirtualMachine {
                                     if self.jit.should_compile_now(function_id, &new_args)
                                         && !self.jit_blocked_by_overload_dispatch(function_id)
                                     {
+                                        let shadows = self.native_core_shadows();
                                         match self.jit.compile_function(
                                             &program,
                                             function_id,
                                             function_info,
                                             &new_args,
+                                            CallNames::new(
+                                                &self.namespace_variables,
+                                                &self.core_functions,
+                                                &shadows,
+                                            )
+                                            .traced(self.traces_calls()),
                                         ) {
                                             Ok(()) => {}
                                             Err(err) => {
@@ -9277,33 +9511,7 @@ impl VirtualMachine {
             let result = result?;
             restored?;
 
-            // Only do duration calculation and event emission when emitter is attached
-            if let (Some(emitter), Some(execution_context), Some(cid)) =
-                (&self.emitter, &self.execution_context, call_id)
-            {
-                // Calculate duration before popping call context
-                let (end_time, duration_us) = if let Some(call_ctx) = self.call_stack.last() {
-                    let end = chrono::Utc::now();
-                    let duration = (end - call_ctx.start_time).num_microseconds().unwrap_or(0);
-                    (end, duration)
-                } else {
-                    (chrono::Utc::now(), 0)
-                };
-
-                // Pop call context from stack
-                self.call_stack.pop();
-
-                // Emit call:stop event
-                let stop_event = crate::lang::emitter::EngineEvent::call_stop(
-                    execution_context,
-                    cid,
-                    Some(result.clone()),
-                    None, // No error since we're returning success
-                    end_time,
-                    duration_us,
-                );
-                emitter.emit(stop_event);
-            }
+            self.end_traced_call(call_id, &result);
 
             Ok(result)
         }
@@ -9682,8 +9890,22 @@ impl VirtualMachine {
         let ParallelFlowContext {
             deferred_thunks,
             dependency_levels,
-            metadata_captured: _,
+            metadata_captured,
         } = parallel_ctx;
+        // Without its levels the flow would run no binding at all.
+        if !metadata_captured && !deferred_thunks.is_empty() {
+            return Err(VmError::runtime(
+                "Parallel flow is missing its dependency levels".to_string(),
+            ));
+        }
+        // The bindings in source order: the order the flow collects them
+        // in, whichever level each one ran at.
+        let mut seen_names = AHashSet::with_capacity(deferred_thunks.len());
+        let source_order: Vec<String> = deferred_thunks
+            .iter()
+            .filter(|t| seen_names.insert(t.var_name.as_str()))
+            .map(|t| t.var_name.clone())
+            .collect();
 
         tracing::trace!(
             "VM: execute_parallel_flow starting with {} thunks across {} levels",
@@ -9800,14 +10022,7 @@ impl VirtualMachine {
                 self.store_variable(var_name, result.clone())?;
 
                 // Track computed var for subsequent levels
-                computed_vars.insert(var_name.clone(), result.clone());
-
-                // Track in flow context
-                if let Some(flow_context) = self.flow_contexts.last_mut() {
-                    flow_context
-                        .flow_variable_refs
-                        .push((var_name.clone(), result));
-                }
+                computed_vars.insert(var_name.clone(), result);
                 continue;
             }
 
@@ -10096,13 +10311,6 @@ impl VirtualMachine {
 
                     // Track computed var for subsequent levels
                     computed_vars.insert(var_name.clone(), result.clone());
-
-                    // Track in flow context
-                    if let Some(flow_context) = self.flow_contexts.last_mut() {
-                        flow_context
-                            .flow_variable_refs
-                            .push((var_name.clone(), result.clone()));
-                    }
                 }
             }
 
@@ -10111,6 +10319,16 @@ impl VirtualMachine {
                 level_idx,
                 level_vars.len()
             );
+        }
+
+        if let Some(flow_context) = self.flow_contexts.last_mut() {
+            for var_name in &source_order {
+                if let Some(result) = computed_vars.get(var_name) {
+                    flow_context
+                        .flow_variable_refs
+                        .push((var_name.clone(), result.clone()));
+                }
+            }
         }
 
         tracing::trace!("VM: execute_parallel_flow completed with TRUE parallel execution");
@@ -10290,6 +10508,12 @@ impl VirtualMachine {
     /// Check if the VM has failed
     pub fn has_failed(&self) -> bool {
         self.failure_state.failed.load(Ordering::SeqCst)
+    }
+
+    /// How many user-function calls are running, the current one included
+    /// (see `execute_user_function`).
+    pub(crate) fn user_function_depth(&self) -> usize {
+        self.user_function_depth
     }
 
     /// After a JIT-compiled frame returns, surface a halt it raised. JIT
@@ -11035,8 +11259,16 @@ impl VirtualMachine {
         // the `jit.hof.fusion` kill switch; empty when disabled or none found.
         // Plans are memoized per FunctionId so repeated calls (including TCO
         // loop iterations) don't rescan the body.
+        // Fusion runs its stages and their operations natively, so a body
+        // whose namespace reaches another function by one of their names
+        // runs as written.
         let fused_plans: std::rc::Rc<[crate::lang::runtime::jit_hof::PipelinePlan]> =
-            if self.jit.config.hof_fusion_enabled() && !self.in_constraint_predicate() {
+            if self.jit.config.hof_fusion_enabled()
+                && !self.in_constraint_predicate()
+                && !self
+                    .native_core_shadows_ref()
+                    .shadows_fusion(&self.current_namespace)
+            {
                 match function_id.and_then(|fid| self.hof_plan_cache.get(&fid)) {
                     Some(plans) => std::rc::Rc::clone(plans),
                     None => {
@@ -12143,5 +12375,261 @@ fib fn (n: Int): Int {{
             let result = run_recursion_source(&source, "::test/fib", &[Val::Int(20)], jit);
             assert_eq!(result, Val::Int(6765), "fib(20) wrong with jit={jit}");
         }
+    }
+
+    /// Compile `source` and call `entry` under the given JIT mode with a
+    /// publisher attached, returning the result and the event types sent.
+    fn run_with_events(source: &str, entry: &str, args: &[Val], jit: &str) -> (Val, Vec<String>) {
+        let mut vm = compile_test_vm(source, jit);
+        let recording_publisher = Arc::new(RecordingEventPublisher {
+            event_types: Mutex::new(Vec::new()),
+        });
+        vm.set_execution_context(ExecutionContext::new(
+            uuid::Uuid::now_v7(),
+            uuid::Uuid::now_v7(),
+            4,
+            Some(uuid::Uuid::now_v7()),
+            Some(uuid::Uuid::now_v7()),
+            Some(uuid::Uuid::now_v7()),
+            Some(uuid::Uuid::now_v7()),
+        ));
+        vm.set_event_publisher(recording_publisher.clone());
+        let result = vm
+            .call_function_bypassing_unified_lookup(entry, args)
+            .expect("entry function should run");
+        let mut event_types = recording_publisher.event_types.lock().clone();
+        event_types.sort();
+        (result, event_types)
+    }
+
+    // A match that no arm takes is null. The interpreter returned whatever
+    // an earlier call of the same function had left in the result register,
+    // so one caller's data reached another; compiled code returned null.
+    #[test]
+    fn match_with_no_matching_arm_returns_null() {
+        let source = r#"
+::test ns
+
+grant fn (role: Str): Any {
+    match role {
+        "admin" => { "all" }
+        "viewer" => { "read" }
+    }
+}
+
+roles fn (): Vec {
+    [grant("admin"), grant("guest"), grant("viewer"), grant("intruder")]
+}
+"#;
+        for jit in ["off", "on"] {
+            let result = run_recursion_source(source, "::test/roles", &[], jit);
+            assert_eq!(
+                result,
+                Val::Vec(vec![
+                    Val::from("all"),
+                    Val::Null,
+                    Val::from("read"),
+                    Val::Null
+                ]),
+                "jit={jit}"
+            );
+        }
+    }
+
+    // The interpreter took a parallel flow's dependency levels only in its
+    // main loop, so a parallel flow in a lambda (a parallel branch is one)
+    // ran none of its bindings and returned {}. A flow nested in one (a
+    // side-effect `cond`, a lambda's own `parallel`) also ended the outer
+    // flow's context, dropping its bindings.
+    #[test]
+    fn parallel_flows_run_their_bindings_wherever_they_are() {
+        let source = r#"
+::test ns
+
+work fn (tag: Str, v: Int): Int {
+    call-lib(::hot::event/send, [tag, {}])
+    v
+}
+
+in-lambda fn (i: Int): Map {
+    f (x) {
+        parallel {
+            a work("lambda:a", add(x, 1))
+            b work("lambda:b", add(x, 2))
+        }
+    }
+    f(i)
+}
+
+dependent fn (i: Int): Map {
+    a 100
+    f (x) {
+        parallel {
+            a add(x, 1)
+            b add(a, 1)
+        }
+    }
+    f(i)
+}
+
+nested fn (i: Int): Map {
+    parallel {
+        a parallel { x add(i, 1)  y add(i, 2) }
+        b add(i, 3)
+    }
+}
+
+with-cond fn (i: Int): Map {
+    parallel {
+        a add(i, 1)
+        cond { lte(0, i) => { "side" } }
+        b add(i, 2)
+    }
+}
+
+helper fn (i: Int): Map {
+    parallel { x add(i, 10) }
+}
+
+with-call fn (i: Int): Map {
+    parallel {
+        a add(i, 1)
+        helper(i)
+        b add(i, 2)
+    }
+}
+"#;
+        let map = |entries: &[(&str, Val)]| {
+            Val::map_from_iter(entries.iter().map(|(k, v)| (Val::from(*k), v.clone())))
+        };
+        for jit in ["off", "on"] {
+            let (result, events) = run_with_events(source, "::test/in-lambda", &[Val::Int(5)], jit);
+            assert_eq!(
+                result,
+                map(&[("a", Val::Int(6)), ("b", Val::Int(7))]),
+                "jit={jit}"
+            );
+            assert_eq!(events, vec!["lambda:a", "lambda:b"], "jit={jit}");
+        }
+        // Compiled code runs the bindings in source order, so it can't read
+        // a later one; only the interpreter is checked on the rest.
+        let run = |entry: &str| run_recursion_source(source, entry, &[Val::Int(5)], "off");
+        assert_eq!(
+            run("::test/dependent"),
+            map(&[("a", Val::Int(6)), ("b", Val::Int(7))])
+        );
+        assert_eq!(
+            run("::test/nested"),
+            map(&[
+                ("a", map(&[("x", Val::Int(6)), ("y", Val::Int(7))])),
+                ("b", Val::Int(8)),
+            ])
+        );
+        assert_eq!(
+            run("::test/with-cond"),
+            map(&[("a", Val::Int(6)), ("b", Val::Int(7))])
+        );
+        assert_eq!(
+            run("::test/with-call"),
+            map(&[("a", Val::Int(6)), ("b", Val::Int(7))])
+        );
+    }
+
+    // A parallel flow collects its bindings in source order, whichever
+    // dependency level each one ran at, as compiled code does.
+    #[test]
+    fn parallel_flow_collects_in_source_order() {
+        let source = r#"
+::test ns
+
+k 3
+
+keyed fn parallel (x: Int): All<Map> {
+    a add(x, k)
+    b x
+}
+
+listed fn parallel (i: Int): All<Vec> {
+    late add(early, 1)
+    early add(i, i)
+    other sub(i, 3)
+}
+
+last fn parallel (i: Int): Int {
+    later add(first, 1)
+    first add(i, 1)
+}
+"#;
+        for _ in 0..10 {
+            let keyed = run_recursion_source(source, "::test/keyed", &[Val::Int(1)], "off");
+            let Val::Map(keyed) = keyed else {
+                panic!("expected a Map, got {keyed}");
+            };
+            let keys: Vec<&Val> = keyed.keys().collect();
+            assert_eq!(keys, vec![&Val::from("a"), &Val::from("b")]);
+        }
+        assert_eq!(
+            run_recursion_source(source, "::test/listed", &[Val::Int(1)], "off"),
+            Val::Vec(vec![Val::Int(3), Val::Int(2), Val::Int(-2)])
+        );
+        assert_eq!(
+            run_recursion_source(source, "::test/last", &[Val::Int(1)], "off"),
+            Val::Int(2)
+        );
+    }
+
+    // `call-lib`'s arguments were compiled twice, once by the generic
+    // argument pass and again by `call-lib`'s own, so each side effect in
+    // them ran twice (hot-std's `println(message)` converted it twice).
+    #[test]
+    fn call_lib_evaluates_each_argument_once() {
+        let source = r#"
+::test ns
+
+bump fn (): Str {
+    call-lib(::hot::event/send, ["bumped", {}])
+    "sent"
+}
+
+run fn (): Any {
+    call-lib(::hot::event/send, [bump(), {}])
+}
+"#;
+        for jit in ["off", "on"] {
+            let (_, events) = run_with_events(source, "::test/run", &[], jit);
+            assert_eq!(events, vec!["bumped", "sent"], "jit={jit}");
+        }
+    }
+
+    // The overload lookup's trace scan, and the core-name lookup, match a
+    // whole name segment: `abs` is not `fabs`.
+    #[test]
+    fn core_function_lookup_matches_a_whole_name() {
+        let source = r#"
+            ::first ns
+
+            fabs meta {core: true} fn (n: Int): Int { n }
+        "#;
+        let mut program = parse_hot(source).expect("test source should parse");
+        let core_variables =
+            crate::lang::compiler::core_registry::extract_core_variables_from_ast(&program);
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_program_unchecked(&mut program)
+            .expect("test source should compile");
+        let vm = VirtualMachine::new(
+            compiler.get_program_arc(),
+            None,
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            Arc::new(core_variables),
+            None,
+        );
+        assert_eq!(
+            vm.lookup_core_function_name("fabs").as_deref(),
+            Some("::first/fabs")
+        );
+        assert_eq!(vm.lookup_core_function_name("abs"), None);
     }
 }

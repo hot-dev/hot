@@ -17,10 +17,7 @@
 //! halt for another reason. Halting on another numeric op's Err with the
 //! same message, as in `add(add(a, b), 1)` after the op, is the same halt.
 
-use super::{
-    KnownCoreCall, find_function_by_suffix, find_function_exact, known_core_call,
-    resolve_const_function_name,
-};
+use super::{KnownCoreCall, known_core_call, resolve_const_function_name};
 use crate::lang::bytecode::{
     BytecodeProgram, Constant, FlowResultModifier, FlowType, FunctionId, Instruction, LambdaInfo,
 };
@@ -88,6 +85,9 @@ pub(super) struct ErrUseScope<'a> {
     /// For a parameter or local, whether its value can't be an Err; `None`
     /// for a name that isn't one.
     pub plain_local: &'a dyn Fn(&str) -> Option<bool>,
+    /// The function a call by name with that many arguments reaches, when
+    /// it is known before the call runs (see `CallScope::resolve`).
+    pub resolve_call: &'a dyn Fn(&str, u8) -> Option<usize>,
 }
 
 const MAX_PATHS: usize = 32;
@@ -422,12 +422,7 @@ impl ErrPath {
                 if let Some(core) = known_core_call(&name) {
                     return self.core_call(scope, core, *dest, *args_start, *args_count);
                 }
-                let callee = if name.starts_with("::") {
-                    find_function_exact(scope.program, &name, Some(*args_count))
-                } else {
-                    find_function_by_suffix(scope.program, &name, Some(*args_count))
-                };
-                match callee {
+                match (scope.resolve_call)(&name, *args_count) {
                     Some(callee) => {
                         self.call(scope, callee as FunctionId, *args_start, *args_count)
                     }
@@ -612,6 +607,11 @@ mod tests {
     use super::*;
     use crate::lang::bytecode::FunctionInfo;
 
+    /// The function a qualified call name names.
+    fn exact(program: &BytecodeProgram, name: &str, arity: u8) -> Option<usize> {
+        super::super::find_function_exact(program, name, Some(arity))
+    }
+
     /// A program with the names the cases use, and `::t/f(x)` taking `x`
     /// lazily when `lazy`.
     fn program(lazy: bool) -> BytecodeProgram {
@@ -664,6 +664,7 @@ mod tests {
                 returned: NumericErrUse::Returned,
                 plain_register: &plain_register,
                 plain_local: &plain_local,
+                resolve_call: &|name, arity| exact(program, name, arity),
             },
             0,
             0,
@@ -684,6 +685,7 @@ mod tests {
                 returned: NumericErrUse::Returned,
                 plain_register: &plain_register,
                 plain_local: &plain_local,
+                resolve_call: &|name, arity| exact(program, name, arity),
             },
             1,
             0,
@@ -934,6 +936,7 @@ mod tests {
             returned: NumericErrUse::Returned,
             plain_register: &plain_register,
             plain_local: &plain_local,
+            resolve_call: &|name, arity| exact(&program, name, arity),
         };
         assert_eq!(numeric_err_use(&scope, op, 0), NumericErrUse::Returned);
         // In an inlined lazy argument, returning it is the call's use.
