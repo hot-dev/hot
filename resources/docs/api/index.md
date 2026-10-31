@@ -7,7 +7,7 @@ description: "REST API reference for Hot projects, builds, runs, tasks, events, 
 The Hot API provides programmatic access to manage projects, builds, runs, tasks, events, and more.
 
 > **Official SDKs** are available for JavaScript/TypeScript, Python, Go, Rust,
-> and Java — see [SDKs](api/sdks). The examples on this page show the raw
+> and Java — see [SDKs](/docs/api/sdks). The examples on this page show the raw
 > HTTP API; the SDKs wrap every endpoint below.
 
 ## Base URL
@@ -33,7 +33,13 @@ curl https://api.hot.dev/v1/projects \
 
 Runtime endpoints support **API keys**, **service keys**, and **sessions**. These credentials are scoped to one environment, and resources are filtered to that environment's context. An **org API key** is scoped to an organization instead: it calls only `/v1/orgs` and `/v1/api-keys`, to create child organizations, environments, and API keys, and to manage projects, context, and builds in them. See [Sub-organizations](/docs/api/management).
 
+Org API keys replaced Hot 3.0.0's `/v1/management` API and its `hm_` management credentials in Hot 3.0.1. Every `/v1/management` route answers `410 Gone`, and an `hm_` token gets `401` with the code `management_credential_retired`.
+
 See the [Authentication](/docs/authentication) documentation for full details on credential types, the permissions model, and the permissions builder.
+
+### Browser Clients and CORS
+
+The API sends no CORS headers, so a browser page on another origin cannot call it, and API keys, service keys, and sessions must not be shipped to browsers. Call the API from your own backend and give the browser only what that backend returns; the JavaScript SDK's `@hot-dev/sdk/proxy` helper relays SDK calls through a backend route. A session is a good credential for such a backend route to use on a visitor's behalf: it is short-lived and limited to the permissions you choose.
 
 ### Permissions Model {#permissions-model}
 
@@ -154,6 +160,8 @@ All responses use a consistent envelope format.
 }
 ```
 
+Every `/v1` error uses this envelope, including authentication failures, unknown routes, and malformed request bodies. Rate-limited responses also carry `retry_after` (seconds). See [Error Codes](#error-codes).
+
 ## Pagination
 
 List endpoints support pagination via query parameters:
@@ -247,7 +255,7 @@ POST /v1/projects
 GET /v1/projects/{project_id_or_slug}
 ```
 
-Supports both UUID and project name (slug) in the URL.
+Supports both UUID and project name (slug) in the URL. Inactive projects are returned with `"active": false`.
 
 #### Update Project
 
@@ -263,6 +271,36 @@ PATCH /v1/projects/{project_id_or_slug}
 }
 ```
 
+#### Activate / Deactivate Project
+
+```http
+POST /v1/projects/{project_id_or_slug}/activate
+POST /v1/projects/{project_id_or_slug}/deactivate
+```
+
+Deactivating undeploys the project's builds and stops its schedules, event handlers, webhooks, MCP tools, and agents; its builds and history are kept. Activating redeploys the latest build.
+
+**Response:**
+
+```json
+{
+  "data": {
+    "project": {
+      "project_id": "550e8400-e29b-41d4-a716-446655440000",
+      "env_id": "660e8400-e29b-41d4-a716-446655440000",
+      "name": "my-project",
+      "active": false,
+      "created_at": "2024-01-15T10:30:00Z",
+      "updated_at": "2024-01-16T09:00:00Z"
+    },
+    "redeployed_build_id": null
+  },
+  "meta": {...}
+}
+```
+
+`redeployed_build_id` is the build activation redeployed, or `null`.
+
 #### Delete Project
 
 ```http
@@ -270,6 +308,8 @@ DELETE /v1/projects/{project_id_or_slug}
 ```
 
 **Response:** `204 No Content`
+
+Only a project that has never had a build can be deleted. A project with builds returns `409 Conflict` with code `project_has_builds`: deactivate it instead.
 
 ---
 
@@ -281,7 +321,7 @@ DELETE /v1/projects/{project_id_or_slug}
 GET /v1/builds
 ```
 
-Lists all builds across all projects in the environment.
+Lists all builds across all projects in the environment, including inactive projects.
 
 **Response includes** `project_name` for each build.
 
@@ -424,7 +464,7 @@ If the `build_id` already exists, returns `200 OK` with header `X-Build-Exists: 
 GET /v1/projects/{project_id_or_slug}/builds/{build_id}/download
 ```
 
-Returns the build as a zip file with `Content-Type: application/zip`.
+Returns the build as a zip file with `Content-Type: application/zip`. A live (development) build has no bundle and returns `404`.
 
 #### Deploy Build
 
@@ -577,6 +617,14 @@ DELETE /v1/files/{file_id}
 ```
 
 Returns `204 No Content` on success.
+
+#### Download Blob
+
+```http
+GET /v1/blobs/{blob_ref_id}/download
+```
+
+Returns the raw bytes of a blob reference: a large payload that Hot stored in blob storage instead of inline. String payloads are served as UTF-8 text. Needs an API key with `blob:{blob_ref_id}` → `read`; the blob must belong to the key's environment.
 
 #### Multipart Upload
 
@@ -1265,8 +1313,8 @@ curl -N 'https://api.hot.dev/v1/env/subscribe' \
 #### **JavaScript**
 
 ```javascript
-// Note: the browser-native EventSource API can't send an Authorization
-// header, so use fetch with a stream reader instead.
+// Server-side (Node.js 18+); see Browser Clients and CORS. EventSource
+// can't send an Authorization header, so use fetch with a stream reader.
 const response = await fetch('https://api.hot.dev/v1/env/subscribe', {
   headers: {
     'Authorization': `Bearer ${HOT_API_KEY}`,
@@ -1327,7 +1375,7 @@ for line in response.iter_lines():
 GET /v1/org/usage
 ```
 
-Returns current usage statistics, plan limits, and usage percentages for the organization.
+Returns the usage of the credential's **environment** in the current monthly window, with the limits and plan of the account that owns it. Consumption never includes sibling environments or child organizations, so `usage_percent` compares this environment's usage against limits the whole account shares: it is not account-wide consumption or remaining quota. Account-wide usage needs an org key; see [Runtime usage visibility](/docs/api/management#runtime-usage-visibility).
 
 **Response:**
 
@@ -1335,31 +1383,44 @@ Returns current usage statistics, plan limits, and usage percentages for the org
 {
   "data": {
     "org_id": "660e8400-e29b-41d4-a716-446655440000",
+    "env_id": "770e8400-e29b-41d4-a716-446655440000",
+    "usage_scope": "environment",
+    "limits_scope": "billing_account",
     "usage": {
       "runs_this_period": 1250,
       "file_storage_bytes": 52428800,
-      "team_members": 5,
+      "team_members": 0,
       "call_storage_bytes": 104857600,
-      "call_count": 15000
+      "call_count": 15000,
+      "store_storage_bytes": 2097152,
+      "active_schedules": 3
     },
     "limits": {
       "runs_per_month": 10000,
       "storage_bytes": 1073741824,
       "team_members": 10,
       "call_retention_days": 30,
-      "call_storage_bytes": 5368709120
+      "call_storage_bytes": 5368709120,
+      "store_storage_bytes": 1073741824,
+      "compute_units_per_month": 100000,
+      "compute_units_used": 1200,
+      "compute_units_budget": -1,
+      "task_minutes_per_month": -1,
+      "active_schedules_per_org": 50
     },
     "usage_percent": {
       "runs": 12.5,
       "file_storage": 4.9,
-      "team_members": 50.0,
+      "team_members": 0.0,
       "call_storage": 1.95,
+      "store_storage": 0.2,
+      "active_schedules": 6.0,
       "has_warning": false
     },
     "plan": {
       "name": "Pro",
-      "period_start": "2024-01-01T00:00:00Z",
-      "period_end": "2024-02-01T00:00:00Z"
+      "period_start": "2024-01-15T10:30:00Z",
+      "period_end": "2024-02-15T10:30:00Z"
     }
   },
   "meta": {...}
@@ -1370,12 +1431,18 @@ Returns current usage statistics, plan limits, and usage percentages for the org
 
 | Field | Description |
 |-------|-------------|
-| `usage` | Current usage in the billing period |
-| `limits` | Plan limits (-1 = unlimited) |
-| `usage_percent` | Usage as percentage of limits (can exceed 100 if over limit) |
-| `usage_percent.has_warning` | True if any usage exceeds 90% |
-| `plan.period_start` | Start of current billing period |
-| `plan.period_end` | End of current billing period |
+| `env_id` | The credential's environment, the only one `usage` covers |
+| `usage_scope` | Always `environment` |
+| `limits_scope` | Always `billing_account`: limits come from the account root's plan and overrides |
+| `usage` | This environment's usage. Runs and compute units count from `plan.period_start`; storage is current |
+| `usage.team_members` | Always `0`: team seats belong to the account, not an environment |
+| `limits` | Account plan limits (-1 = unlimited). `limits.compute_units_used` is this environment's compute units this window |
+| `usage_percent` | This environment's usage as a percentage of the account limits (can exceed 100) |
+| `usage_percent.has_warning` | True if any percentage exceeds 90 |
+| `plan.period_start` | Start of the current monthly usage window |
+| `plan.period_end` | End of the same window |
+
+The monthly window follows the subscription: a monthly plan's billing period, or monthly anniversaries of an annual or free plan's start. Accounts without a subscription use the calendar month.
 
 For self-hosted/local deployments without a subscription, all limits are unlimited (-1).
 
@@ -1429,6 +1496,18 @@ data: {"type":"run:stop","run":{"run_id":"...","status":"succeeded","result":"He
 
 event: task:update
 data: {"type":"task:update","task":{"task_id":"...","status":"running",...}}
+```
+
+Each run's `run:start` comes before any of its `stream:data` and before its
+`run:stop`, `run:fail`, or `run:cancel`, and each of these arrives once per
+connection. A run that fails and is retried sends `run:fail` with
+`"status":"pending_retry"`, which is not final: its retry follows as a new run
+whose `origin_run_id` names it. A replay after the retry has started also names
+it in `retry_run_id`:
+
+```
+event: run:fail
+data: {"type":"run:fail","run":{"run_id":"A","status":"pending_retry","retry_attempt":1,...},"retry_run_id":"B"}
 ```
 
 On connection, Hot sends the latest persisted snapshot for tasks already on
@@ -1751,6 +1830,22 @@ GET /v1/service-keys/{service_key_id}
 
 Returns details for a specific service key. The key must belong to the authenticated API key.
 
+#### Update Service Key
+
+```http
+PATCH /v1/service-keys/{service_key_id}
+```
+
+**Request Body:**
+
+```json
+{
+  "metadata": {"customer_id": "acme-123", "plan": "pro"}
+}
+```
+
+Replaces the key's metadata entirely. The key must belong to the authenticated API key.
+
 #### Revoke Service Key
 
 ```http
@@ -1899,22 +1994,37 @@ Removes a custom domain. The domain must belong to the authenticated environment
 | Code | HTTP Status | Description |
 |------|-------------|-------------|
 | `unauthorized` | 401 | Invalid, missing, expired, or revoked credential |
-| `forbidden` | 403 | Credential lacks required permissions |
+| `management_credential_retired` | 401 | An `hm_` credential from Hot 3.0.0; use an [org API key](/docs/api/management) |
+| `forbidden` | 403 | Credential lacks required permissions, or its environment or organization is not active |
+| `key_scope_mismatch` | 403 | The route needs the other kind of key: org API keys call `/v1/orgs` and `/v1/api-keys`, environment credentials call everything else |
+| `account_suspended` | 403 | The org key's account is suspended or archived; the key works again when it is reactivated |
+| `org_suspended` | 403 | The child organization is suspended or archived |
+| `org_limit_reached` | 403 | The account's child organization or environment limit is reached |
 | `permission_escalation` | 403 | Requested permissions exceed parent credential permissions |
 | `plan_required` | 403 | Feature requires a higher subscription plan |
 | `not_found` | 404 | Resource not found |
 | `bad_request` | 400 | Invalid request body or parameters |
+| `method_not_allowed` | 405 | The route does not accept this HTTP method |
 | `domain_exists` | 409 | Custom domain is already registered |
+| `slug_taken` | 409 | Organization slug is already taken; slugs are unique across all accounts |
+| `external_id_taken` | 409 | Another child organization of the account has this `external_id` |
+| `gone` | 410 | The route was removed, such as Hot 3.0.0's `/v1/management` |
+| `payload_too_large` | 413 | Request body or file exceeds a size limit |
+| `unsupported_media_type` | 415 | The request body needs a different `Content-Type`, usually `application/json` |
+| `unprocessable_entity` | 422 | The JSON body is well formed but has missing or mistyped fields |
 | `domain_limit_reached` | 403 | Domain count limit reached for current plan |
 | `session_limit_exceeded` | 429 | Maximum active sessions reached for this API key |
 | `rate_limit_exceeded` | 429 | Too many requests (see `Retry-After` header) |
+| `upload_reservation_exceeded` | 413 | Too many pending multipart uploads, or too many bytes reserved by them |
+| `storage_quota_exceeded` | 413 | The account's file storage limit is reached |
 | `internal_server_error` | 500 | Server error |
+| `service_unavailable` | 503 | A dependency, such as the database, cannot be reached; retry the request |
 
 ---
 
 ## Code Examples
 
-The [official SDKs](api/sdks) cover every endpoint on this page. Listing
+The [official SDKs](/docs/api/sdks) cover every endpoint on this page. Listing
 projects and publishing an event in each:
 
 <!-- tabs:start -->

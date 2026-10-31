@@ -188,9 +188,29 @@ impl ExecutedEngine {
         &self.program
     }
 
-    /// Extract context storage (populated by ::hot::ctx/set calls)
+    /// Extract context storage (populated by ::hot::ctx/set calls). The keys
+    /// set with `set-secret` are listed under
+    /// [`crate::lang::hot::ctx::LOADED_SECRET_KEYS`].
     pub fn extract_context_storage(&self) -> AHashMap<String, Val> {
-        self.vm.context_storage.clone()
+        let mut storage = self.vm.context_storage.clone();
+        let mut secret_keys: Vec<&String> = self
+            .vm
+            .secret_keys
+            .iter()
+            .filter(|key| storage.contains_key(*key))
+            .collect();
+        if !secret_keys.is_empty() {
+            secret_keys.sort();
+            let secret_keys: Vec<Val> = secret_keys
+                .into_iter()
+                .map(|key| Val::from(key.as_str()))
+                .collect();
+            storage.insert(
+                crate::lang::hot::ctx::LOADED_SECRET_KEYS.to_string(),
+                Val::from(secret_keys),
+            );
+        }
+        storage
     }
 }
 

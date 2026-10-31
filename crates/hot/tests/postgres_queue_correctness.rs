@@ -779,3 +779,72 @@ async fn redis_success_path_rejects_an_ack_lost_before_commit() {
     assert!(err.to_string().contains("affected 0 entries"));
     cleanup_redis_queue(&client, &queue_name).await;
 }
+
+/// The rows the worker writes for handler runs whose setup failed, or that it
+/// writes before a recovered event runs, and the settlement of earlier
+/// deliveries' runs.
+#[tokio::test]
+async fn postgres_unstarted_and_earlier_delivery_runs_settle() {
+    use hot::db::run::{EarlierDelivery, Run, RunStatus, UnstartedRun};
+
+    let _schema_guard = POSTGRES_SCHEMA_TEST_LOCK.lock().await;
+    let Some((db, schema)) = postgres_db().await else {
+        return;
+    };
+    let data = db::insert_test_data(&db)
+        .await
+        .expect("test data should insert");
+    let event_id = Uuid::now_v7();
+    hot::db::Event::insert_event(
+        &db,
+        &event_id,
+        &data.env_id,
+        &data.stream_id,
+        "demo:event",
+        &serde_json::json!({}),
+        chrono::Utc::now(),
+        &data.user_id,
+        None,
+    )
+    .await
+    .unwrap();
+    let row = |run_id| UnstartedRun {
+        run_id,
+        env_id: data.env_id,
+        stream_id: data.stream_id,
+        build_id: data.build_id,
+        run_type_id: hot::db::run::RunType::Event.as_id(),
+        origin_run_id: None,
+        event_id,
+        by_user_id: data.user_id,
+        retry_attempt: 0,
+    };
+    let status = async |run_id| Run::get_run(&db, &run_id).await.unwrap().status_id;
+
+    let setup_failed = Uuid::now_v7();
+    Run::record_unstarted_run(&db, &row(setup_failed), "Parse errors", true)
+        .await
+        .unwrap();
+    let earlier = Run::earlier_deliveries(&db, &event_id).await.unwrap();
+    assert_eq!(earlier.get(&setup_failed), Some(&EarlierDelivery::Held));
+    Run::reopen_held_runs(&db, &[setup_failed]).await.unwrap();
+    Run::record_unstarted_run(&db, &row(setup_failed), "Still broken", false)
+        .await
+        .unwrap();
+    assert_eq!(status(setup_failed).await, RunStatus::Failed.as_id());
+    Run::record_unstarted_run(&db, &row(setup_failed), "Late", true)
+        .await
+        .unwrap();
+    assert_eq!(status(setup_failed).await, RunStatus::Failed.as_id());
+
+    let opened = Uuid::now_v7();
+    Run::open_event_run(&db, &row(opened)).await.unwrap();
+    Run::open_event_run(&db, &row(opened)).await.unwrap();
+    assert_eq!(status(opened).await, RunStatus::Running.as_id());
+    Run::fail_unrun_earlier_deliveries(&db, &[opened, setup_failed], "dropped")
+        .await
+        .unwrap();
+    assert_eq!(status(opened).await, RunStatus::Failed.as_id());
+
+    drop_schema(&db, &schema).await;
+}

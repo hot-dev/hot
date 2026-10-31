@@ -13,8 +13,10 @@ CREATE TABLE hot.retired_file_object (
     PRIMARY KEY (storage_backend, storage_path)
 );
 CREATE INDEX retired_file_object_due_idx ON hot.retired_file_object(storage_backend, retired_at);
--- Collection deletes only objects no active version references.
-CREATE INDEX file_active_storage_path_idx ON hot.file(storage_backend, storage_path) WHERE active = true;
+-- Collection deletes only objects no active version references. Building it
+-- blocks file writes while it runs; with millions of files, create it
+-- CONCURRENTLY with this statement before upgrading, and this migration keeps it.
+CREATE INDEX IF NOT EXISTS file_active_storage_path_idx ON hot.file(storage_backend, storage_path) WHERE active = true;
 ALTER TABLE hot.retired_file_object ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hot.retired_file_object FORCE ROW LEVEL SECURITY;
 CREATE POLICY retired_object_access ON hot.retired_file_object USING (

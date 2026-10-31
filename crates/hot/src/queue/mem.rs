@@ -379,9 +379,6 @@ where
                             "queue item deferred for infrastructure retry"
                         );
                     }
-                    if !backoff.is_zero() {
-                        tokio::time::sleep(backoff).await;
-                    }
                     // Mirror of the Redis backend's opt-in escalation (see
                     // `streams::PRESERVE_DELIVERY_COUNT_TOKEN`): a requeue
                     // whose reason carries the token consumes retry budget,
@@ -404,12 +401,29 @@ where
                         first_attempt,
                         true,
                     );
-                    if let Err(send_err) = self.queue.channels.tx.send(requeued).await {
-                        tracing::warn!(
-                            queue = self.queue.queue_name,
-                            "Failed to re-enqueue infrastructure retry: {}",
-                            send_err
-                        );
+                    // The backoff runs outside the executor, as the Redis and
+                    // SQLite queues' not-before times do: sleeping it out here
+                    // held the executor, so a few held events stopped a worker.
+                    // Like the rest of this queue, a pending retry does not
+                    // survive the process.
+                    let tx = self.queue.channels.tx.clone();
+                    let queue_name = self.queue.queue_name.clone();
+                    let requeue = async move {
+                        if !backoff.is_zero() {
+                            tokio::time::sleep(backoff).await;
+                        }
+                        if let Err(send_err) = tx.send(requeued).await {
+                            tracing::warn!(
+                                queue = queue_name,
+                                "Failed to re-enqueue infrastructure retry: {}",
+                                send_err
+                            );
+                        }
+                    };
+                    if backoff.is_zero() {
+                        requeue.await;
+                    } else {
+                        tokio::spawn(requeue);
                     }
                     Err(Box::new(QueueProcessingError::QueueError(e))
                         as Box<dyn Error + Send + Sync>)
@@ -752,6 +766,42 @@ mod tests {
         assert!(result.is_err());
         // Item is re-queued at the back with retry_count incremented.
         assert_eq!(queue.len().await.unwrap(), 1);
+    }
+
+    /// An infrastructure retry's backoff runs outside the executor: the
+    /// held item comes back after it, and the items behind it run at once.
+    #[tokio::test(start_paused = true)]
+    async fn held_item_does_not_block_the_items_behind_it() {
+        let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
+        for item in [-1, 1, 2] {
+            queue.enqueue(item).await.unwrap();
+        }
+        let started = tokio::time::Instant::now();
+        let mut done = Vec::new();
+        while let Some(lease) = queue.claim_now().await.unwrap() {
+            let result = lease
+                .process(|item| async move {
+                    if item < 0 {
+                        return Err::<i32, Box<dyn Error + Send + Sync>>(Box::new(
+                            QueueInfrastructureError::new(
+                                "waits for a redeploy",
+                                Duration::from_secs(300),
+                            ),
+                        ));
+                    }
+                    Ok(item)
+                })
+                .await;
+            if let Ok(Some(item)) = result {
+                done.push(item);
+            }
+        }
+        assert_eq!(done, vec![1, 2]);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+
+        let lease = queue.claim_blocking().await.unwrap();
+        assert_eq!(started.elapsed(), Duration::from_secs(300));
+        assert!(lease.timing().redelivered);
     }
 
     #[tokio::test]

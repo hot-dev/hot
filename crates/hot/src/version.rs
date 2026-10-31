@@ -170,9 +170,35 @@ pub fn check_runtime_version_compatibility(
     }
 }
 
+/// Whether a build this runtime can't run needs only a newer runtime of the
+/// same major version, such as a worker a rolling deploy is starting.
+pub fn needs_newer_runtime(
+    build_engine_version: Option<&str>,
+    build_hot_std_version: Option<&str>,
+    runtime_version: &str,
+) -> bool {
+    let relations = [
+        relation_to_runtime(build_engine_version, runtime_version),
+        relation_to_runtime(build_hot_std_version, runtime_version),
+    ];
+    relations.contains(&VersionRelation::Newer)
+        && !relations.contains(&VersionRelation::MajorMismatch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_same_major_newer_builds_need_a_newer_runtime() {
+        assert!(needs_newer_runtime(Some("3.0.1"), Some("3.0.1"), "3.0.0"));
+        assert!(needs_newer_runtime(Some("3.0.0"), Some("3.1.0"), "3.0.0"));
+        assert!(!needs_newer_runtime(Some("3.0.0"), Some("3.0.0"), "3.0.0"));
+        assert!(!needs_newer_runtime(Some("2.9.0"), Some("2.9.0"), "3.0.0"));
+        assert!(!needs_newer_runtime(Some("4.0.0"), Some("4.0.0"), "3.0.0"));
+        assert!(!needs_newer_runtime(Some("3.0.1"), Some("4.0.0"), "3.0.0"));
+        assert!(!needs_newer_runtime(None, None, "3.0.0"));
+    }
 
     #[test]
     fn exact_and_older_patch_are_clean() {

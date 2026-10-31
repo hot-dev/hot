@@ -17,8 +17,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use super::{
-    ListQueryParams, get_and_ensure_active_project, get_and_verify_project,
-    get_and_verify_project_including_inactive,
+    ListQueryParams, get_and_ensure_active_project, get_and_verify_project_including_inactive,
 };
 use crate::ApiStateData;
 use crate::auth::AuthContext;
@@ -128,7 +127,8 @@ pub async fn list_builds(
 ) -> Result<Json<ApiListResponse<BuildResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can list builds.")?;
 
-    let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
+    let project =
+        get_and_verify_project_including_inactive(&db, &api_key, &project_id_or_slug).await?;
 
     let mut builds = Build::get_builds_by_project(
         &db,
@@ -213,20 +213,27 @@ pub async fn list_builds_by_env(
             )
         })?;
 
-    // Fetch project info for each build
+    // Builds of deactivated projects are still listed, so resolve names
+    // without the active-only lookup, once per project.
+    let mut project_names = ahash::AHashMap::new();
     let mut build_responses = Vec::new();
     for build in builds {
-        // Get project for this build
-        let project = Project::get_project(&db, &build.project_id)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiErrorResponse::internal_error(&e.to_string())),
-                )
-            })?;
-
-        build_responses.push(build_with_project_response(build, project.name));
+        let name = match project_names.get(&build.project_id) {
+            Some(name) => String::clone(name),
+            None => {
+                let project = Project::get_project_including_inactive(&db, &build.project_id)
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ApiErrorResponse::internal_error(&e.to_string())),
+                        )
+                    })?;
+                project_names.insert(build.project_id, project.name.clone());
+                project.name
+            }
+        };
+        build_responses.push(build_with_project_response(build, name));
     }
 
     Ok(Json(ApiListResponse::new(
@@ -245,7 +252,8 @@ pub async fn get_build(
 ) -> Result<Json<ApiResponse<BuildResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can read builds.")?;
 
-    let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
+    let project =
+        get_and_verify_project_including_inactive(&db, &api_key, &project_id_or_slug).await?;
 
     let mut build = Build::get_build(&db, &build_id)
         .await
@@ -290,7 +298,8 @@ pub async fn get_deployed_build(
 ) -> Result<Json<ApiResponse<BuildResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can read builds.")?;
 
-    let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
+    let project =
+        get_and_verify_project_including_inactive(&db, &api_key, &project_id_or_slug).await?;
 
     let build = Build::get_deployed_build_by_project(&db, &project.project_id)
         .await
@@ -328,7 +337,8 @@ pub async fn get_live_build(
 ) -> Result<Json<ApiResponse<BuildResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can read builds.")?;
 
-    let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
+    let project =
+        get_and_verify_project_including_inactive(&db, &api_key, &project_id_or_slug).await?;
 
     let build = Build::get_live_build_by_project(&db, &project.project_id)
         .await
@@ -1018,7 +1028,8 @@ pub async fn download_build(
 ) -> Result<Response, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can download builds.")?;
 
-    let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
+    let project =
+        get_and_verify_project_including_inactive(&db, &api_key, &project_id_or_slug).await?;
 
     // Get the build and verify it belongs to this project
     let build = Build::get_build(&db, &build_id)
@@ -1042,6 +1053,17 @@ pub async fn download_build(
         ));
     }
 
+    // A live build runs from the project directory and has no bundle.
+    if build.is_live() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorResponse::new(
+                "not_found",
+                "Live builds have no bundle to download",
+            )),
+        ));
+    }
+
     // Get environment to retrieve org_id for storage path
     let env = hot::db::Env::get_env(&db, &api_key.env_id)
         .await
@@ -1056,18 +1078,36 @@ pub async fn download_build(
         })?;
 
     // Retrieve the build file from storage with org/env context
-    let build_data = storage
+    let build_data = match storage
         .retrieve_build(&build_id, &env.org_id, &api_key.env_id)
         .await
-        .map_err(|e| {
-            (
+    {
+        Ok(data) => data,
+        // Storage errors are strings: a bundle the backend says is missing is
+        // a 404, and only a failing backend is a 500.
+        Err(_)
+            if matches!(
+                storage
+                    .exists(&build_id, &env.org_id, &api_key.env_id)
+                    .await,
+                Ok(false)
+            ) =>
+        {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiErrorResponse::not_found("Build bundle")),
+            ));
+        }
+        Err(e) => {
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiErrorResponse::internal_error(&format!(
                     "Failed to retrieve build: {}",
                     e
                 ))),
-            )
-        })?;
+            ));
+        }
+    };
 
     // Construct filename
     let filename = build_zip_filename(&build_id);
@@ -1192,6 +1232,115 @@ mod tests {
                 .unwrap()
                 .active
         );
+    }
+
+    #[tokio::test]
+    async fn build_reads_cover_inactive_projects_and_bundleless_builds() {
+        use axum::{Router, body::Body, middleware, routing::get};
+        use tower::ServiceExt;
+
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let other_id = Uuid::now_v7();
+        Project::insert_project(&db, &other_id, &data.env_id, "other", &data.user_id)
+            .await
+            .unwrap();
+        let bundle_id = Uuid::now_v7();
+        Build::insert_build(
+            &db,
+            &bundle_id,
+            &other_id,
+            "hash",
+            1,
+            Build::BUILD_TYPE_BUNDLE,
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        Project::toggle_active(&db, &other_id, false, &data.user_id)
+            .await
+            .unwrap();
+        let key_id = Uuid::now_v7();
+        let (token, hash) = ApiKey::generate_api_key(&key_id).unwrap();
+        ApiKey::insert_api_key(
+            &db,
+            &key_id,
+            &data.env_id,
+            "builds",
+            &serde_json::from_str(&hash).unwrap(),
+            &data.user_id,
+            &serde_json::json!({"*:*": ["*"]}),
+        )
+        .await
+        .unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let state: ApiStateData = (
+            db.clone(),
+            Arc::new(Box::new(hot::storage::LocalBuildStorage::new(
+                storage_dir.path().to_path_buf(),
+            ))),
+            Arc::new(hot::val!({})),
+            None,
+        );
+        let app = Router::new()
+            .route("/v1/builds", get(list_builds_by_env))
+            .route("/v1/projects/{project_id_or_slug}/builds", get(list_builds))
+            .route(
+                "/v1/projects/{project_id_or_slug}/builds/{build_id}/download",
+                get(download_build),
+            )
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::auth::api_key_auth_middleware,
+            ))
+            .with_state(state);
+        let call = |uri: String| {
+            let app = app.clone();
+            let token = token.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(uri)
+                            .header("authorization", format!("Bearer {token}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value =
+                    serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+                (status, body)
+            }
+        };
+
+        // A deactivated project's builds stay listed, by environment and by
+        // project ID.
+        let (status, body) = call("/v1/builds".into()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let names: Vec<_> = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|build| build["project_name"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(names.contains(&"other".to_owned()), "{names:?}");
+        let (status, body) = call(format!("/v1/projects/{other_id}/builds")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+
+        // Live builds have no bundle, and a bundle missing from storage is
+        // not found rather than a server error.
+        for (project, build) in [(data.project_id, data.build_id), (other_id, bundle_id)] {
+            let (status, body) =
+                call(format!("/v1/projects/{project}/builds/{build}/download")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(body["error"]["code"], "not_found");
+        }
     }
 
     #[test]

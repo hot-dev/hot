@@ -3,6 +3,7 @@ pub(crate) use route_permissions::authorize as authorize_route;
 
 use crate::ApiStateData;
 use crate::domain_resolver::ResolvedDomain;
+use crate::models::ApiErrorResponse;
 use axum::{
     Json,
     extract::{FromRequestParts, MatchedPath, RawPathParams, Request, State},
@@ -71,9 +72,13 @@ fn service_key_status(error: hot::db::service_key::ServiceKeyError) -> StatusCod
     }
 }
 
+/// A suspended account is refused with 403, like an app-created key in it:
+/// its keys work again on reactivation, so clients must not discard them.
 fn org_api_key_status(error: hot::db::org_api_key::OrgApiKeyError) -> StatusCode {
+    use hot::db::org_api_key::OrgApiKeyError;
     match error {
-        hot::db::org_api_key::OrgApiKeyError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+        OrgApiKeyError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+        OrgApiKeyError::AccountSuspended | OrgApiKeyError::OrgSuspended => StatusCode::FORBIDDEN,
         _ => StatusCode::UNAUTHORIZED,
     }
 }
@@ -562,11 +567,14 @@ async fn authenticate_token_inner(
         // ================================================================
         match ApiKey::verify_api_key(db, token).await {
             Ok(Some(mut key)) => {
+                // verify_api_key already read the key's credential state.
                 key.permissions =
-                    hot::db::org_api_key::OrgApiKey::effective_env_permissions(db, &key)
-                        .await
-                        .map_err(org_api_key_status)?
-                        .to_json();
+                    hot::db::org_api_key::OrgApiKey::effective_env_permissions_of_verified(
+                        db, &key,
+                    )
+                    .await
+                    .map_err(org_api_key_status)?
+                    .to_json();
                 debug!("API key validated successfully for env: {}", key.env_id);
 
                 let auth_ctx = AuthContext::ApiKey(key.clone());
@@ -667,38 +675,15 @@ async fn auth_middleware_inner(
     next: Next,
     authorize: bool,
 ) -> Result<Response, StatusCode> {
-    // Get the Authorization header
-    let auth_header = request
-        .headers()
-        .get("Authorization")
-        .and_then(|header| header.to_str().ok());
-
-    let auth_header = match auth_header {
-        Some(header) => header,
-        None => {
-            debug!("No Authorization header found");
-            return Err(StatusCode::UNAUTHORIZED);
-        }
+    let Some(token) = bearer_token(request.headers()) else {
+        debug!("No bearer token in the Authorization header");
+        return Ok(missing_credential().into_response());
     };
 
-    // Check if it starts with "Bearer "
-    if !auth_header.starts_with("Bearer ") {
-        debug!("Authorization header doesn't start with 'Bearer '");
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    // Extract the token
-    let token = &auth_header[7..]; // Remove "Bearer " prefix
-
     // Authenticate via the shared path
-    let authenticated = match authenticate_token(&db, token).await {
+    let authenticated = match authenticate_or_reject(&db, token).await {
         Ok(authenticated) => authenticated,
-        Err(StatusCode::UNAUTHORIZED) if is_org_key_token(&db, token).await => {
-            return Ok(key_scope_mismatch(
-                "This route needs an environment API key; org API keys call /v1/orgs and /v1/api-keys",
-            ));
-        }
-        Err(status) => return Err(status),
+        Err(rejection) => return Ok(rejection.into_response()),
     };
 
     let scope = authenticated.scope;
@@ -726,17 +711,21 @@ pub async fn route_authorization_middleware(request: Request, next: Next) -> Res
     }
 }
 
+fn rejected(status: StatusCode, code: &str, message: &str) -> Box<Response> {
+    Box::new((status, Json(ApiErrorResponse::new(code, message))).into_response())
+}
+
 async fn authorize_request(mut request: Request) -> Result<Request, Box<Response>> {
     let auth_ctx = request
         .extensions()
         .get::<AuthContext>()
         .cloned()
-        .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+        .ok_or_else(|| Box::new(missing_credential().into_response()))?;
     let scope = request
         .extensions()
         .get::<DatabaseScope>()
         .cloned()
-        .ok_or_else(|| StatusCode::FORBIDDEN.into_response())?;
+        .ok_or_else(|| rejected(StatusCode::FORBIDDEN, "forbidden", NOT_AUTHORIZED))?;
     // If a custom domain was resolved, verify the credential belongs to the same environment.
     // This prevents using credentials from env A to access a custom domain pointing to env B.
     if let Some(resolved) = request.extensions().get::<ResolvedDomain>()
@@ -748,7 +737,11 @@ async fn authorize_request(mut request: Request) -> Result<Request, Box<Response
             resolved.domain,
             resolved.env_id
         );
-        return Err(Box::new(StatusCode::FORBIDDEN.into_response()));
+        return Err(rejected(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Credential does not belong to this domain's environment",
+        ));
     }
 
     if let DatabaseScope::Environment { org_id, env_id } = &scope {
@@ -758,14 +751,29 @@ async fn authorize_request(mut request: Request) -> Result<Request, Box<Response
             let expected = match name.as_ref() {
                 "org_id" => Some(*org_id),
                 "env_id" => Some(*env_id),
-                "tenant_id" => return Err(Box::new(StatusCode::BAD_REQUEST.into_response())),
+                "tenant_id" => {
+                    return Err(rejected(
+                        StatusCode::BAD_REQUEST,
+                        "bad_request",
+                        "tenant_id is not a supported parameter",
+                    ));
+                }
                 _ => None,
             };
             if let Some(expected) = expected {
-                let supplied =
-                    Uuid::parse_str(&value).map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+                let supplied = Uuid::parse_str(&value).map_err(|_| {
+                    rejected(
+                        StatusCode::BAD_REQUEST,
+                        "bad_request",
+                        &format!("{name} must be a UUID"),
+                    )
+                })?;
                 if supplied != expected {
-                    return Err(Box::new(StatusCode::FORBIDDEN.into_response()));
+                    return Err(rejected(
+                        StatusCode::FORBIDDEN,
+                        "forbidden",
+                        &format!("{name} does not match the credential's environment"),
+                    ));
                 }
             }
         }
@@ -774,24 +782,27 @@ async fn authorize_request(mut request: Request) -> Result<Request, Box<Response
     let route = parts
         .extensions
         .get::<MatchedPath>()
-        .ok_or_else(|| StatusCode::FORBIDDEN.into_response())?
+        .ok_or_else(|| rejected(StatusCode::FORBIDDEN, "forbidden", NOT_AUTHORIZED))?
         .as_str()
         .to_owned();
     let params = RawPathParams::from_request_parts(&mut parts, &())
         .await
-        .map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+        .map_err(|_| {
+            rejected(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "Invalid route parameters",
+            )
+        })?;
     let params = params
         .iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect();
     if let Err(status) = route_permissions::authorize(&auth_ctx, &parts.method, &route, &params) {
         let error = if status == StatusCode::BAD_REQUEST {
-            crate::models::ApiErrorResponse::bad_request("Invalid route parameters")
+            ApiErrorResponse::bad_request("Invalid route parameters")
         } else {
-            crate::models::ApiErrorResponse::new(
-                "forbidden",
-                "Credential does not authorize this API action",
-            )
+            ApiErrorResponse::new("forbidden", NOT_AUTHORIZED)
         };
         return Err(Box::new((status, Json(error)).into_response()));
     }
@@ -808,15 +819,96 @@ pub(crate) async fn is_org_key_token(db: &DatabasePool, token: &str) -> bool {
             .is_ok()
 }
 
-pub(crate) fn key_scope_mismatch(message: &str) -> Response {
+pub(crate) type AuthRejection = (StatusCode, Json<ApiErrorResponse>);
+
+const NOT_AUTHORIZED: &str = "Credential does not authorize this API action";
+
+/// Hot 3.0.0 issued `hm_` management credentials for `/v1/management`. Org
+/// API keys replaced both in 3.0.1; the token no longer authenticates anywhere.
+const RETIRED_MANAGEMENT_PREFIX: &str = "hm_";
+
+/// The bearer token of a request, if it sent one.
+pub(crate) fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|header| header.to_str().ok())
+        .and_then(|header| header.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty())
+}
+
+pub(crate) fn missing_credential() -> AuthRejection {
     (
-        StatusCode::FORBIDDEN,
-        Json(crate::models::ApiErrorResponse::new(
-            "key_scope_mismatch",
-            message,
+        StatusCode::UNAUTHORIZED,
+        Json(ApiErrorResponse::unauthorized(
+            "Provide a credential in the Authorization header: Bearer <token>",
         )),
     )
-        .into_response()
+}
+
+/// The JSON error for a token that failed authentication with `status`.
+pub(crate) fn auth_rejection(status: StatusCode) -> AuthRejection {
+    let error = match status {
+        StatusCode::UNAUTHORIZED => {
+            ApiErrorResponse::unauthorized("Invalid, expired or revoked credential")
+        }
+        StatusCode::FORBIDDEN => ApiErrorResponse::new(
+            "forbidden",
+            "The credential's environment or organization is not active",
+        ),
+        StatusCode::SERVICE_UNAVAILABLE => ApiErrorResponse::new(
+            "service_unavailable",
+            "Credentials cannot be checked right now; retry the request",
+        ),
+        other => ApiErrorResponse::for_status(other),
+    };
+    (status, Json(error))
+}
+
+pub(crate) fn retired_management_credential() -> AuthRejection {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ApiErrorResponse::new(
+            "management_credential_retired",
+            "hm_ management credentials were replaced by org API keys in Hot 3.0.1. A root administrator creates an org API key on the organization's Children tab; it calls /v1/orgs and /v1/api-keys. See /docs/api/management.",
+        )),
+    )
+}
+
+pub(crate) fn key_scope_mismatch_error(message: &str) -> AuthRejection {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ApiErrorResponse::new("key_scope_mismatch", message)),
+    )
+}
+
+pub(crate) fn key_scope_mismatch(message: &str) -> Response {
+    key_scope_mismatch_error(message).into_response()
+}
+
+/// [`authenticate_token`] for routes that take environment credentials, with
+/// failures as JSON errors. A retired management credential and an org key
+/// are told what to use instead.
+pub(crate) async fn authenticate_or_reject(
+    db: &Arc<DatabasePool>,
+    token: &str,
+) -> Result<AuthenticatedToken, AuthRejection> {
+    if is_retired_management_token(token) {
+        return Err(retired_management_credential());
+    }
+    match authenticate_token(db, token).await {
+        Ok(authenticated) => Ok(authenticated),
+        Err(StatusCode::UNAUTHORIZED) if is_org_key_token(db, token).await => {
+            Err(key_scope_mismatch_error(
+                "This route needs an environment credential; org API keys call /v1/orgs and /v1/api-keys",
+            ))
+        }
+        Err(status) => Err(auth_rejection(status)),
+    }
+}
+
+/// Whether a token is a retired `hm_` management credential.
+pub(crate) fn is_retired_management_token(token: &str) -> bool {
+    token.starts_with(RETIRED_MANAGEMENT_PREFIX)
 }
 
 #[cfg(test)]
@@ -1079,9 +1171,25 @@ mod scope_tests {
         )
         .await
         .unwrap();
-        // An org key is never a runtime principal.
+        // An org key is never a runtime principal, and webhooks, MCP and the
+        // API say which credential they need instead of a bare 401.
         assert!(authenticate_token(&db, &issuer_token).await.is_err());
         assert!(is_org_key_token(&db, &issuer_token).await);
+        let (status, Json(error)) = authenticate_or_reject(&db, &issuer_token)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(error.error.code, "key_scope_mismatch");
+        let (status, Json(error)) = authenticate_or_reject(
+            &db,
+            "hm_01a18e9c227475d48b0dbc3f0a4e9bf2_d563cc5447f473760beb7354b4d9bb3c",
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.error.code, "management_credential_retired");
         let effective = issuer.effective(&db).await.unwrap();
         let (key_id, token, _) = issuer
             .mint_env_key(

@@ -221,7 +221,7 @@ impl Org {
         match &db {
             DatabasePool::Postgres(pool) => Ok(sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM env e JOIN org o ON o.org_id = e.org_id
-                 JOIN org r ON r.org_id = COALESCE(o.parent_org_id, o.org_id)
+                 JOIN org r ON r.org_id = CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END
                  WHERE e.env_id = $1 AND e.active = true AND o.active = true AND r.active = true
                  AND o.lifecycle_state = 'active' AND r.lifecycle_state = 'active')",
             )
@@ -230,7 +230,7 @@ impl Org {
             .await?),
             DatabasePool::Sqlite(pool) => Ok(sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM env e JOIN org o ON o.org_id = e.org_id
-                 JOIN org r ON r.org_id = COALESCE(o.parent_org_id, o.org_id)
+                 JOIN org r ON r.org_id = CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END
                  WHERE e.env_id = ? AND e.active = 1 AND o.active = 1 AND r.active = 1
                  AND o.lifecycle_state = 'active' AND r.lifecycle_state = 'active')",
             )
@@ -329,8 +329,8 @@ impl Org {
         Self::create_child_authorized(db, root_id, actor_id, request).await
     }
 
-    /// Host-only management operation. The caller MUST have validated a current
-    /// root management capability. actor_id is attribution, not machine authority.
+    /// The caller MUST have authorized child creation on this root: a root
+    /// administrator, or an org key's grants. actor_id is attribution only.
     pub async fn create_child_authorized(
         db: &DatabasePool,
         root_id: &Uuid,
@@ -384,7 +384,7 @@ impl Org {
                         return Err(OrgError::LimitReached);
                     }
                     sqlx::query("INSERT INTO org (org_id, parent_org_id, name, slug, external_id, org_type, created_by_user_id) VALUES ($1,$2,$3,$4,$5,'organization',$6)")
-                        .bind(org_id).bind(root_id).bind(&request.name).bind(&request.slug).bind(&request.external_id).bind(actor_id).execute(&mut *tx).await?;
+                        .bind(org_id).bind(root_id).bind(&request.name).bind(&request.slug).bind(&request.external_id).bind(actor_id).execute(&mut *tx).await.map_err(child_insert_error)?;
                     sqlx::query("INSERT INTO env (env_id, org_id, name, created_by_user_id) VALUES ($1,$2,'development',$3)")
                         .bind(env_id).bind(org_id).bind(actor_id).execute(&mut *tx).await?;
                     sqlx::query("INSERT INTO org_child_provisioning (root_org_id,idempotency_key,child_org_id,env_id,request_fingerprint) VALUES ($1,$2,$3,$4,$5)")
@@ -439,7 +439,7 @@ impl Org {
                         return Err(OrgError::LimitReached);
                     }
                     sqlx::query("INSERT INTO org (org_id, parent_org_id, name, slug, external_id, org_type, created_by_user_id) VALUES (?,?,?,?,?,'organization',?)")
-                        .bind(org_id).bind(root_id).bind(&request.name).bind(&request.slug).bind(&request.external_id).bind(actor_id).execute(&mut *tx).await?;
+                        .bind(org_id).bind(root_id).bind(&request.name).bind(&request.slug).bind(&request.external_id).bind(actor_id).execute(&mut *tx).await.map_err(child_insert_error)?;
                     sqlx::query("INSERT INTO env (env_id, org_id, name, created_by_user_id) VALUES (?,?,'development',?)")
                         .bind(env_id).bind(org_id).bind(actor_id).execute(&mut *tx).await?;
                     sqlx::query("INSERT INTO org_child_provisioning (root_org_id,idempotency_key,child_org_id,env_id,request_fingerprint) VALUES (?,?,?,?,?)")
@@ -458,16 +458,30 @@ impl Org {
         })
     }
 
-    /// Idempotent management operation for one concrete organization's environment.
-    /// The caller must authorize environment creation; account limits are checked
-    /// under the same root lock used by child provisioning.
+    /// Idempotent by exact name within one organization. The caller must
+    /// authorize environment creation; account limits are checked under the
+    /// same root lock used by child provisioning.
     pub async fn provision_environment_authorized(
         db: &DatabasePool,
         org_id: &Uuid,
         actor_id: &Uuid,
         name: &str,
-        _hosted: bool,
+        hosted: bool,
     ) -> Result<crate::db::Env, OrgError> {
+        Self::provision_environment_reporting(db, org_id, actor_id, name, hosted)
+            .await
+            .map(|(env, _)| env)
+    }
+
+    /// [`Self::provision_environment_authorized`], also reporting whether the
+    /// environment was created (false when the name already existed).
+    pub async fn provision_environment_reporting(
+        db: &DatabasePool,
+        org_id: &Uuid,
+        actor_id: &Uuid,
+        name: &str,
+        _hosted: bool,
+    ) -> Result<(crate::db::Env, bool), OrgError> {
         if name.is_empty()
             || name.len() > 63
             || name.starts_with('-')
@@ -484,7 +498,7 @@ impl Org {
             org_id: Some(root_id),
         });
         let env_id = Uuid::now_v7();
-        let result_id = match &db {
+        let (result_id, created) = match &db {
             DatabasePool::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let root: (String, Option<Value>) = sqlx::query_as(
@@ -510,7 +524,7 @@ impl Org {
                             "environment exists but is inactive".into(),
                         ));
                     }
-                    id
+                    (id, false)
                 } else {
                     let plan: Option<Value> = sqlx::query_scalar("SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1")
                         .bind(root_id).fetch_optional(&mut *tx).await?.flatten();
@@ -524,7 +538,7 @@ impl Org {
                         .bind(env_id).bind(org_id).bind(name).bind(actor_id).execute(&mut *tx).await?;
                     sqlx::query("INSERT INTO org_note (note_id,org_id,category,note_type,message,metadata,created_by) VALUES ($1,$2,'security','env_created','Environment created',$3,$4)")
                         .bind(Uuid::now_v7()).bind(root_id).bind(serde_json::json!({"org_id":org_id,"env_id":env_id,"name":name})).bind(actor_id).execute(&mut *tx).await?;
-                    env_id
+                    (env_id, true)
                 };
                 tx.commit().await?;
                 id
@@ -561,7 +575,7 @@ impl Org {
                             "environment exists but is inactive".into(),
                         ));
                     }
-                    id
+                    (id, false)
                 } else {
                     let plan: Option<String> = sqlx::query_scalar("SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?")
                         .bind(root_id).fetch_optional(&mut *tx).await?.flatten();
@@ -584,15 +598,16 @@ impl Org {
                     .await?;
                     sqlx::query("INSERT INTO org_note (note_id,org_id,category,note_type,message,metadata,created_by) VALUES (?,?,'security','env_created','Environment created',?,?)")
                         .bind(Uuid::now_v7()).bind(root_id).bind(serde_json::json!({"org_id":org_id,"env_id":env_id,"name":name}).to_string()).bind(actor_id).execute(&mut *tx).await?;
-                    env_id
+                    (env_id, true)
                 };
                 tx.commit().await?;
                 id
             }
         };
-        crate::db::Env::get_env(&db, &result_id)
+        let env = crate::db::Env::get_env(&db, &result_id)
             .await
-            .map_err(|error| OrgError::Invalid(error.to_string()))
+            .map_err(|error| OrgError::Invalid(error.to_string()))?;
+        Ok((env, created))
     }
 
     pub async fn set_lifecycle(
@@ -605,7 +620,7 @@ impl Org {
         Self::set_lifecycle_authorized(db, org_id, actor_id, state).await
     }
 
-    /// Caller must hold a validated management capability for this exact target.
+    /// The caller MUST have authorized a lifecycle change on this exact target.
     pub async fn set_lifecycle_authorized(
         db: &DatabasePool,
         org_id: &Uuid,
@@ -774,6 +789,23 @@ async fn require_root_admin(
         .await?
         .filter(|access| access.can_manage_account)
         .ok_or(OrgError::Forbidden)
+}
+/// A unique violation on a new child's slug or external ID is the caller's
+/// conflict, not a fault: slugs are global, so another account may hold one.
+fn child_insert_error(error: sqlx::Error) -> OrgError {
+    if let sqlx::Error::Database(db_error) = &error
+        && db_error.is_unique_violation()
+    {
+        // PostgreSQL names the constraint; SQLite names the columns.
+        let target = db_error.constraint().unwrap_or_else(|| db_error.message());
+        if target.contains("slug") {
+            return OrgError::SlugTaken;
+        }
+        if target.contains("external") {
+            return OrgError::ExternalIdTaken;
+        }
+    }
+    OrgError::Database(error)
 }
 fn validate_parent(parent: &Option<Uuid>, kind: &str, state: &str) -> Result<(), OrgError> {
     if parent.is_some() || kind != "organization" || state != "active" {
@@ -1058,6 +1090,28 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn taken_slugs_and_external_ids_are_distinct_errors() {
+        let (db, root, admin, _) = fixture().await;
+        Org::create_child(&db, &root, &admin, &request("child"))
+            .await
+            .unwrap();
+        let mut slug = request("child");
+        slug.idempotency_key = "second".into();
+        slug.external_id = Some("second".into());
+        assert!(matches!(
+            Org::create_child(&db, &root, &admin, &slug).await,
+            Err(OrgError::SlugTaken)
+        ));
+        let mut external = request("child-two");
+        external.external_id = Some("child".into());
+        assert!(matches!(
+            Org::create_child(&db, &root, &admin, &external).await,
+            Err(OrgError::ExternalIdTaken)
+        ));
+        assert_eq!(Org::list_children(&db, &root).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

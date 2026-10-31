@@ -1,7 +1,6 @@
 //! Organization handlers
 
 use axum::{Extension, Json, extract::State, http::StatusCode};
-use chrono::{Datelike, TimeZone};
 use hot::db::api_key::ApiKey;
 use hot::db::env::Env;
 use hot::db::subscription::{OrgPlan, OrgUsageStats, PlanError};
@@ -100,9 +99,9 @@ pub struct UsagePercent {
 pub struct PlanInfo {
     /// Plan name (e.g., "Free", "Pro", "Team")
     pub name: String,
-    /// Billing period start
+    /// Start of the monthly usage window that `usage` counts from
     pub period_start: chrono::DateTime<chrono::Utc>,
-    /// Billing period end
+    /// End of the same monthly usage window
     pub period_end: chrono::DateTime<chrono::Utc>,
 }
 
@@ -110,7 +109,7 @@ pub struct PlanInfo {
 ///
 /// Returns this credential's environment consumption and its root account's
 /// limits. Percentages do not represent total account usage or remaining quota;
-/// management credentials provide the separate account aggregate.
+/// an org key reads the account aggregate from `/v1/orgs/{org_id}/usage`.
 pub async fn get_org_usage(
     State((db, _storage, conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
@@ -279,24 +278,13 @@ pub(super) async fn account_plan_details(
     } else {
         Features::resolve(plan_features.as_ref(), overrides.as_ref())
     };
-    let now = chrono::Utc::now();
-    let (year, month) = if now.month() == 12 {
-        (now.year() + 1, 1)
-    } else {
-        (now.year(), now.month() + 1)
-    };
-    let default_end = chrono::Utc
-        .with_ymd_and_hms(year, month, 1, 0, 0, 0)
-        .single()
-        .unwrap_or(now);
-    let period_start = hot::db::subscription::monthly_usage_start(
-        now,
+    // Usage counts from the start of the current monthly window, so report
+    // that window's end with it rather than the stored billing period's end.
+    let (period_start, period_end) = hot::db::subscription::monthly_usage_window(
+        chrono::Utc::now(),
         subscription.as_ref().and_then(|s| s.current_period_start),
+        subscription.as_ref().and_then(|s| s.current_period_end),
     );
-    let period_end = subscription
-        .as_ref()
-        .and_then(|s| s.current_period_end)
-        .unwrap_or(default_end);
     let name = plan
         .map(|p| p.plan_name)
         .unwrap_or_else(|| if hosted { "No Plan" } else { "Self-Hosted" }.into());
@@ -362,7 +350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_plan_details_use_subscription_period_for_management_and_runtime() {
+    async fn account_plan_details_use_subscription_period_for_org_and_runtime_usage() {
         let db = hot::db::test_db().await;
         let DatabasePool::Sqlite(pool) = &db else {
             unreachable!()
@@ -381,5 +369,23 @@ mod tests {
             account_plan_details(&db, &root, true).await.unwrap();
         assert_eq!(period_start, start);
         assert_eq!(period_end, end);
+        // A free plan's period never renews: report the current window, whose
+        // end follows its start, not the stored end a month back.
+        let start = chrono::Utc::now() - chrono::Duration::days(45);
+        sqlx::query(
+            "UPDATE org_plan SET current_period_start=?,current_period_end=? WHERE org_id=?",
+        )
+        .bind(start)
+        .bind(start + chrono::Duration::days(30))
+        .bind(root)
+        .execute(pool)
+        .await
+        .unwrap();
+        let (_, _, period_start, period_end) =
+            account_plan_details(&db, &root, true).await.unwrap();
+        let now = chrono::Utc::now();
+        assert!(period_start > start && period_start <= now);
+        assert!(period_end > now);
+        assert!((28..=31).contains(&(period_end - period_start).num_days()));
     }
 }

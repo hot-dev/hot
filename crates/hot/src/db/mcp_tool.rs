@@ -46,6 +46,65 @@ fn with_normalized_auth_mode(
     Some(JsonValue::Object(meta_obj))
 }
 
+/// Key under a stored tool's `meta.mcp` listing its parameter names in
+/// declaration order.
+pub const MCP_PARAM_ORDER_KEY: &str = "param-order";
+
+/// The parameter names of a compiled input schema, in `properties` order: a
+/// `Val` map keeps insertion order, which is the function's parameter order
+/// (or the order an explicit `input-schema` lists them).
+fn input_schema_param_order(input_schema: Option<&crate::val::Val>) -> Vec<String> {
+    use crate::val::Val;
+    let Some(Val::Map(schema)) = input_schema else {
+        return Vec::new();
+    };
+    let Some(Val::Map(properties)) = schema.get(&Val::from("properties")) else {
+        return Vec::new();
+    };
+    properties
+        .keys()
+        .filter_map(|key| match key {
+            Val::Str(name) => Some((**name).to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Record `params` under `meta.mcp`. PostgreSQL stores the input schema as
+/// `jsonb`, which reorders object keys (shorter first, then bytewise), so
+/// `properties` cannot tell an MCP call which position each named argument
+/// takes; a `jsonb` array keeps its order.
+fn with_param_order(meta: Option<JsonValue>, params: Vec<String>) -> Option<JsonValue> {
+    if params.is_empty() {
+        return meta;
+    }
+    let mut meta_obj = match meta {
+        Some(JsonValue::Object(obj)) => obj,
+        Some(other) => return Some(other),
+        None => serde_json::Map::new(),
+    };
+    let mcp = meta_obj
+        .entry("mcp")
+        .or_insert_with(|| JsonValue::Object(serde_json::Map::new()));
+    if let JsonValue::Object(mcp) = mcp {
+        mcp.insert(
+            MCP_PARAM_ORDER_KEY.to_string(),
+            JsonValue::Array(params.into_iter().map(JsonValue::String).collect()),
+        );
+    }
+    Some(JsonValue::Object(meta_obj))
+}
+
+/// The parameter order recorded in a stored tool's meta (see
+/// `with_param_order`); `None` for tools stored before it was recorded.
+pub fn param_order_from_meta(meta: Option<&JsonValue>) -> Option<Vec<String>> {
+    let names = meta?.get("mcp")?.get(MCP_PARAM_ORDER_KEY)?.as_array()?;
+    names
+        .iter()
+        .map(|name| name.as_str().map(str::to_owned))
+        .collect()
+}
+
 #[derive(Error, Debug)]
 pub enum McpToolError {
     #[error("Database error: {0}")]
@@ -89,6 +148,11 @@ impl McpTool {
     /// Returns true if this tool allows unauthenticated access.
     pub fn is_public(&self) -> bool {
         self.auth_mode() == "none"
+    }
+
+    /// The tool's parameter names in declaration order, when recorded.
+    pub fn param_order(&self) -> Option<Vec<String>> {
+        param_order_from_meta(self.meta.as_ref())
     }
 
     /// Extract user-declared secret header names from top-level `meta.secret-headers`.
@@ -1003,6 +1067,10 @@ impl McpTool {
                 .and_then(|a| a.as_str())
         }));
         let meta = with_normalized_auth_mode(raw_meta, normalized_auth_mode);
+        let meta = with_param_order(
+            meta,
+            input_schema_param_order(tool_map.get(&Val::from("input_schema"))),
+        );
 
         let file = tool_map.get(&Val::from("file")).and_then(|v| match v {
             Val::Str(s) => Some((**s).to_owned()),
@@ -1091,6 +1159,36 @@ mod tests {
             column: None,
             position: None,
         }
+    }
+
+    #[test]
+    fn param_order_is_recorded_from_the_compiled_schema() {
+        let schema = crate::val!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "mood": {"type": "string"}},
+        });
+        let params = input_schema_param_order(Some(&schema));
+        assert_eq!(params, ["name", "mood"]);
+
+        let meta = with_param_order(
+            Some(serde_json::json!({"mcp": {"service": "s", "auth": "required"}})),
+            params.clone(),
+        );
+        let tool = tool_with_meta(meta.clone());
+        assert_eq!(tool.param_order(), Some(params.clone()));
+        assert_eq!(meta.unwrap()["mcp"]["service"], "s");
+        assert_eq!(
+            param_order_from_meta(with_param_order(None, params.clone()).as_ref()),
+            Some(params)
+        );
+
+        // Nothing to record, or nowhere to record it.
+        assert_eq!(with_param_order(None, Vec::new()), None);
+        assert_eq!(
+            with_param_order(Some(serde_json::json!("x")), vec!["a".to_string()]),
+            Some(serde_json::json!("x"))
+        );
+        assert_eq!(tool_with_meta(None).param_order(), None);
     }
 
     #[test]

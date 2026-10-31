@@ -17,6 +17,10 @@ pub enum ProjectError {
     NotFound,
     #[error("Project already exists")]
     AlreadyExists,
+    /// Builds keep their runs and history, so a project that has any can
+    /// only be deactivated.
+    #[error("Project has builds and cannot be deleted; deactivate it instead")]
+    HasBuilds,
     #[error("{0}")]
     Other(String),
 }
@@ -845,23 +849,45 @@ impl Project {
         }
     }
 
-    /// Delete project
+    /// Delete a project that has never had a build. A project with builds
+    /// returns [`ProjectError::HasBuilds`]: `build.project_id` restricts the
+    /// delete.
     pub async fn delete_project(
         db: &crate::db::DatabasePool,
         project_id: &Uuid,
     ) -> Result<(), ProjectError> {
-        match db {
+        let result = match db {
             crate::db::DatabasePool::Sqlite(pool) => {
                 sqlx::query("DELETE FROM project WHERE project_id = ?")
                     .bind(project_id)
                     .execute(pool)
-                    .await?;
+                    .await
+                    .map(|_| ())
             }
             crate::db::DatabasePool::Postgres(pool) => {
                 sqlx::query("DELETE FROM project WHERE project_id = $1")
                     .bind(project_id)
                     .execute(pool)
-                    .await?;
+                    .await
+                    .map(|_| ())
+            }
+        };
+        match result {
+            Err(error)
+                if error.as_database_error().is_some_and(|error| {
+                    // ON DELETE RESTRICT is not reported as a plain foreign-key
+                    // violation: PostgreSQL raises restrict_violation (23001),
+                    // and SQLite enforces it with a trigger whose message alone
+                    // names the foreign key.
+                    error.is_foreign_key_violation()
+                        || error.code().as_deref() == Some("23001")
+                        || error.message() == "FOREIGN KEY constraint failed"
+                }) =>
+            {
+                return Err(ProjectError::HasBuilds);
+            }
+            result => {
+                result?;
             }
         }
         Self::invalidate_project_cache(project_id);
@@ -907,6 +933,101 @@ mod tests {
             Project::get_project_including_inactive(&db, &missing).await,
             Err(ProjectError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn deleting_a_project_with_builds_reports_has_builds() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            Project::delete_project(&db, &data.project_id).await,
+            Err(ProjectError::HasBuilds)
+        ));
+        assert!(
+            Project::get_project_including_inactive(&db, &data.project_id)
+                .await
+                .is_ok()
+        );
+        let empty = Uuid::now_v7();
+        Project::insert_project(&db, &empty, &data.env_id, "empty", &data.user_id)
+            .await
+            .unwrap();
+        Project::delete_project(&db, &empty).await.unwrap();
+        assert!(matches!(
+            Project::get_project_including_inactive(&db, &empty).await,
+            Err(ProjectError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn postgres_delete_of_a_project_with_builds_reports_has_builds() {
+        let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
+            return;
+        };
+        let conf = val!({"uri": uri, "schema": "hot", "rls": {"enforce": false}});
+        crate::db::run_migrations(&conf).await.unwrap();
+        let pool = create_db_pool(&conf).await.unwrap();
+        let onboarding = pool.with_scope(crate::db::DatabaseScope::Bootstrap(
+            crate::db::BootstrapOperation::Onboarding,
+        ));
+        let (user, org, env) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        crate::db::User::insert_user(
+            &onboarding,
+            &user,
+            &format!("project-{user}@example.test"),
+            None,
+            Some(&user),
+        )
+        .await
+        .unwrap();
+        crate::db::Org::insert_org(
+            &onboarding,
+            &org,
+            "Project fixture",
+            &format!("project-{org}"),
+            "individual",
+            &user,
+        )
+        .await
+        .unwrap();
+        crate::db::Env::insert_env(&onboarding, &env, &org, "development", &user)
+            .await
+            .unwrap();
+        let db = pool.with_scope(crate::db::DatabaseScope::Environment {
+            org_id: org,
+            env_id: env,
+        });
+        let (project, empty) = (Uuid::now_v7(), Uuid::now_v7());
+        Project::insert_project(&db, &project, &env, "built", &user)
+            .await
+            .unwrap();
+        Project::insert_project(&db, &empty, &env, "empty", &user)
+            .await
+            .unwrap();
+        crate::db::Build::insert_build(
+            &db,
+            &Uuid::now_v7(),
+            &project,
+            "hash",
+            1,
+            crate::db::Build::BUILD_TYPE_BUNDLE,
+            &user,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            Project::delete_project(&db, &project).await,
+            Err(ProjectError::HasBuilds)
+        ));
+        Project::delete_project(&db, &empty).await.unwrap();
     }
 
     #[tokio::test]

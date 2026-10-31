@@ -204,7 +204,7 @@ map(groups, filter(%, %(gt(%, 0))))
 map(groups, filter(%, (n) { gt(n, 0) }))
 ```
 
-#### Explicit Lambda Boundary: `%(expr)`
+#### Explicit Lambda Boundary: `%(expr)` {#explicit-lambda-boundary}
 
 `%(expr)` creates a lambda exactly where you write it, and every `%` inside it is that lambda's parameter. Use it for a lambda value where no argument takes a function, or for an inner function as above:
 
@@ -302,21 +302,21 @@ fn (event) {
 
 These functions are available everywhere without imports. See [hot-std](/pkg/hot-std) for full documentation.
 
-**[Math](/pkg/hot-std/hot/math)**: `add`, `sub`, `mul`, `div`, `mod`, `pow`, `round`, `floor`, `ceil`, `rand`
+**[Math](/pkg/hot.dev/hot-std/hot/math)**: `add`, `sub`, `mul`, `div`, `mod`, `pow`, `round`, `floor`, `ceil`, `rand`
 
-**[Comparison](/pkg/hot-std/hot/cmp)**: `eq`, `ne`, `lt`, `gt`, `lte`, `gte`
+**[Comparison](/pkg/hot.dev/hot-std/hot/cmp)**: `eq`, `ne`, `lt`, `gt`, `lte`, `gte`
 
-**[Logic](/pkg/hot-std/hot/bool)**: `if`, `and`, `or`, `not`, `is-truthy`
+**[Logic](/pkg/hot.dev/hot-std/hot/bool)**: `if`, `and`, `or`, `not`, `is-truthy`
 
-**[Collections](/pkg/hot-std/hot/coll)** (eager): `map`, `filter`, `reduce`, `first`, `rest`, `last`, `length`, `concat`, `flatten`, `merge`, `keys`, `vals`, `some`, `all`, `range`, `sort`, `reverse`, `distinct`, `slice`
+**[Collections](/pkg/hot.dev/hot-std/hot/coll)** (eager): `map`, `filter`, `reduce`, `first`, `rest`, `last`, `length`, `concat`, `flatten`, `merge`, `keys`, `vals`, `some`, `all`, `range`, `sort`, `reverse`, `distinct`, `slice`
 
-**[Iterators](/pkg/hot-std/hot/iter)** (lazy): `Iter`, `next`, `collect`, `for-each`, `take`, `range`
+**[Iterators](/pkg/hot.dev/hot-std/hot/iter)** (lazy): `Iter`, `next`, `collect`, `for-each`, `take`, `range`
 
-**[Strings](/pkg/hot-std/hot/str)**: `uppercase`, `lowercase`, `trim`, `split`, `join`, `starts-with`, `ends-with`, `contains`, `replace`
+**[Strings](/pkg/hot.dev/hot-std/hot/str)**: `uppercase`, `lowercase`, `trim`, `split`, `join`, `starts-with`, `ends-with`, `contains`, `replace`
 
-**[Results](/pkg/hot-std/hot/type)**: `ok`, `err`, `is-ok`, `is-err`, `Result`
+**[Results](/pkg/hot.dev/hot-std/hot/type)**: `ok`, `err`, `is-ok`, `is-err`, `Result`
 
-**[Types](/pkg/hot-std/hot/type)**: `Str`, `Int`, `Dec`, `Bool`, `Vec`, `Map`, `Any`, `Null`, `is-null`, `is-some`
+**[Types](/pkg/hot.dev/hot-std/hot/type)**: `Str`, `Int`, `Dec`, `Bool`, `Vec`, `Map`, `Any`, `Null`, `is-null`, `is-some`
 
 ## Tail Call Optimization (TCO)
 

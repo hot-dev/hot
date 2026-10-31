@@ -148,11 +148,11 @@ macro_rules! admission {
             let overrides: Option<String> = sqlx::query_scalar(
                 "SELECT CAST(features AS TEXT) FROM org WHERE org_id=$1"
             ).bind(root_id).fetch_one(&mut *conn).await?;
-            let plan: Option<(Option<String>, Option<DateTime<Utc>>)> = sqlx::query_as(
-                "SELECT CAST(COALESCE(p.features,'{}') AS TEXT),op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
+            let plan: Option<(Option<String>, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = sqlx::query_as(
+                "SELECT CAST(COALESCE(p.features,'{}') AS TEXT),op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
             ).bind(root_id).fetch_optional(&mut *conn).await?;
             let now = Utc::now();
-            let period = crate::db::subscription::monthly_usage_start(now, plan.as_ref().and_then(|p| p.1));
+            let period = crate::db::subscription::monthly_usage_start(now, plan.as_ref().and_then(|p| p.1), plan.as_ref().and_then(|p| p.2));
             let overrides = parse_features(overrides)?;
             let plan_features = parse_features(plan.and_then(|p| p.0))?;
             let limit = run_limit(plan_features.as_ref(), overrides.as_ref())?;
@@ -160,7 +160,7 @@ macro_rules! admission {
                 sqlx::query($lock).bind(root_id).execute(&mut *conn).await?;
             }
             let admitted: bool = sqlx::query_scalar(
-                "SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' AND r.parent_org_id IS NULL FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE e.env_id=$1 AND e.org_id=$2"
+                "SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' AND r.parent_org_id IS NULL FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END WHERE e.env_id=$1 AND e.org_id=$2"
             ).bind(env_id).bind(org_id).fetch_one(&mut *conn).await?;
             if !admitted {
                 return Err(RunError::Suspended("Run environment or account is suspended".into()));

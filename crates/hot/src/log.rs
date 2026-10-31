@@ -315,9 +315,13 @@ pub fn setup_tracing(
 
     // Create enhanced filter that respects the configured log level for all components
     // Suppress sqlx::postgres::notice INFO messages (e.g., "schema already exists, skipping")
+    // bollard debug-logs Docker request bodies, container env (secrets) included: cap it at info.
     let filter = EnvFilter::new(format!(
-        "{},sqlx={},sqlx::postgres::notice=warn,tower_http={},rustyline=off,cranelift_jit=warn,cranelift_codegen=warn",
-        log_level, log_level, log_level
+        "{},sqlx={},sqlx::postgres::notice=warn,tower_http={},rustyline=off,cranelift_jit=warn,cranelift_codegen=warn,bollard={}",
+        log_level,
+        log_level,
+        log_level,
+        log_level.min(LevelFilter::INFO)
     ));
 
     match log_target {
@@ -327,7 +331,12 @@ pub fn setup_tracing(
 
             match format {
                 LogFormat::Json => {
+                    // User print output becomes records too, so every stdout
+                    // line stays one object. It shows at any log level, as
+                    // raw output did.
+                    let filter = filter.add_directive("hot::user_output=info".parse()?);
                     json_subscriber(std::io::stdout, filter).try_init()?;
+                    crate::lang::hot::io::route_user_output_to_log(true);
                 }
                 LogFormat::Full => {
                     // Full format with timestamp, level, target
@@ -491,5 +500,35 @@ mod json_tests {
         assert_eq!(event["fields"]["message"], "first\nsecond");
         assert_eq!(event["span"]["service"], "worker");
         assert!(event["timestamp"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn user_output_keeps_every_json_line_parseable() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(bytes.clone());
+        let subscriber = json_subscriber(
+            move || writer.clone(),
+            EnvFilter::new("warn,hot::user_output=info"),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            // print() without a newline, then a log record, then println()
+            // of several lines and eprintln().
+            crate::lang::hot::io::log_user_output("stdout", "USER-PRINT-NO-NEWLINE");
+            tracing::warn!("next record");
+            crate::lang::hot::io::log_user_output("stdout", "first\nsecond\n");
+            crate::lang::hot::io::log_user_output("stderr", "oops\n");
+        });
+        let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let records: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
+            .collect();
+        assert_eq!(records.len(), 4, "{text}");
+        assert_eq!(records[0]["target"], "hot::user_output");
+        assert_eq!(records[0]["fields"]["stream"], "stdout");
+        assert_eq!(records[0]["fields"]["message"], "USER-PRINT-NO-NEWLINE");
+        assert_eq!(records[1]["fields"]["message"], "next record");
+        assert_eq!(records[2]["fields"]["message"], "first\nsecond");
+        assert_eq!(records[3]["fields"]["stream"], "stderr");
     }
 }

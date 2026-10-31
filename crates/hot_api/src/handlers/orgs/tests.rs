@@ -170,13 +170,7 @@ async fn org_keys_provision_children_and_mint_environment_keys() {
     assert_eq!(child["data"]["created"], true);
     assert_eq!(child["data"]["org"]["external_id"], "leela-org-1");
     let repeated = app
-        .expect(
-            "POST",
-            "/v1/orgs",
-            &token,
-            Some(request),
-            StatusCode::CREATED,
-        )
+        .expect("POST", "/v1/orgs", &token, Some(request), StatusCode::OK)
         .await;
     assert_eq!(repeated["data"]["created"], false);
     assert_eq!(
@@ -214,7 +208,7 @@ async fn org_keys_provision_children_and_mint_environment_keys() {
             &format!("/v1/orgs/{org}/envs"),
             &token,
             Some(json!({"name": "program"})),
-            StatusCode::CREATED,
+            StatusCode::OK,
         )
         .await;
     assert_eq!(again["data"]["env_id"], env_id);
@@ -254,6 +248,7 @@ async fn org_keys_provision_children_and_mint_environment_keys() {
         )
         .await;
     assert_eq!(minted["data"]["scope"], "env");
+    assert_eq!(minted["data"]["status"], "active");
     let env_token = minted["data"]["token"].as_str().unwrap().to_owned();
     let env_key_id = minted["data"]["api_key_id"].as_str().unwrap().to_owned();
     let listed = app
@@ -310,6 +305,373 @@ async fn org_keys_provision_children_and_mint_environment_keys() {
         )
         .await;
     assert_eq!(mismatch["error"]["code"], "key_scope_mismatch");
+}
+
+#[tokio::test]
+async fn taken_slugs_and_external_ids_are_conflicts() {
+    let app = App::new().await;
+    let (_, token) = app.org_key(json!({"org:*": ["create", "read"]})).await;
+    app.expect(
+        "POST",
+        "/v1/orgs",
+        &token,
+        Some(json!({"name": "Globex", "slug": "globex", "external_id": "crm-1", "idempotency_key": "one"})),
+        StatusCode::CREATED,
+    )
+    .await;
+    // Slugs are global: another account's handle is taken too.
+    Org::insert_org(
+        &app.db,
+        &Uuid::now_v7(),
+        "Elsewhere",
+        "elsewhere",
+        "organization",
+        &app.data.user_id,
+    )
+    .await
+    .unwrap();
+    for slug in ["globex", "elsewhere"] {
+        let body = app
+            .expect(
+                "POST",
+                "/v1/orgs",
+                &token,
+                Some(json!({"name": "Again", "slug": slug, "idempotency_key": format!("again-{slug}")})),
+                StatusCode::CONFLICT,
+            )
+            .await;
+        assert_eq!(body["error"]["code"], "slug_taken");
+    }
+    let body = app
+        .expect(
+            "POST",
+            "/v1/orgs",
+            &token,
+            Some(json!({"name": "Other", "slug": "globex-two", "external_id": "crm-1", "idempotency_key": "two"})),
+            StatusCode::CONFLICT,
+        )
+        .await;
+    assert_eq!(body["error"]["code"], "external_id_taken");
+    let listed = app
+        .expect("GET", "/v1/orgs", &token, None, StatusCode::OK)
+        .await;
+    assert_eq!(listed["pagination"]["total"], 1);
+}
+
+#[tokio::test]
+async fn removed_management_api_and_credentials_point_at_org_keys() {
+    let app = App::new().await;
+    for (method, path) in [
+        ("GET", "/v1/management/children"),
+        ("POST", "/v1/management/children"),
+        ("PATCH", "/v1/management/children/x/state"),
+        ("GET", "/v1/management/usage"),
+        ("GET", "/v1/management"),
+    ] {
+        let body = app.expect(method, path, "", None, StatusCode::GONE).await;
+        assert_eq!(body["error"]["code"], "gone", "{method} {path}");
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("/v1/orgs") && message.contains("/docs/api/management"));
+    }
+    let hm = "hm_01a18e9c227475d48b0dbc3f0a4e9bf2_d563cc5447f473760beb7354b4d9bb3c";
+    for path in ["/v1/orgs", "/v1/projects", "/v1/env"] {
+        let body = app
+            .expect("GET", path, hm, None, StatusCode::UNAUTHORIZED)
+            .await;
+        assert_eq!(body["error"]["code"], "management_credential_retired");
+    }
+}
+
+#[tokio::test]
+async fn common_errors_use_the_json_envelope() {
+    let app = App::new().await;
+    let (_, token) = app.org_key(json!({"org:*": ["create", "read"]})).await;
+    for (method, path, bearer, status, code) in [
+        (
+            "GET",
+            "/v1/projects",
+            "",
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ),
+        (
+            "GET",
+            "/v1/orgs",
+            "",
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ),
+        (
+            "GET",
+            "/v1/projects",
+            "hot_00000000000000000000000000000000_00",
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ),
+        (
+            "GET",
+            "/v1/no-such-route",
+            "",
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            "GET",
+            "/v1/orgs/not-a-uuid",
+            token.as_str(),
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+        ),
+        (
+            "PUT",
+            "/v1/orgs",
+            token.as_str(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+        ),
+    ] {
+        let (actual, body) = app.call(method, path, bearer, None).await;
+        assert_eq!(actual, status, "{method} {path}: {body}");
+        assert_eq!(body["error"]["code"], code, "{method} {path}: {body}");
+        assert!(body["error"]["request_id"].is_string(), "{body}");
+    }
+    // Extractor rejections: malformed JSON and a missing content type.
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/orgs")
+                .header("host", "localhost")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from("{not json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/json",
+        "malformed JSON"
+    );
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(body["error"]["code"], "bad_request");
+    assert!(body["error"]["message"].as_str().unwrap().contains("JSON"));
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/orgs")
+                .header("host", "localhost")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(body["error"]["code"], "unsupported_media_type");
+}
+
+#[tokio::test]
+async fn org_lists_page_with_limit_and_offset() {
+    let app = App::new().await;
+    let root = app.data.org_id;
+    let env = app.data.env_id;
+    let mut grants = provisioner();
+    grants[format!("org:{root}/env:*")] = json!(["create", "read"]);
+    grants[format!("org:{root}/env:*/api-key:*")] = json!(["create", "read"]);
+    grants[format!("org:{root}/env:*/event:*")] = json!(["create"]);
+    grants[format!("org:{root}/api-key:*")] = json!(["create", "read"]);
+    let (_, token) = app.org_key(grants).await;
+
+    // More than ten environment keys: every one is listed and counted.
+    let keys_path = format!("/v1/orgs/{root}/envs/{env}/api-keys");
+    for n in 0..12 {
+        app.expect(
+            "POST",
+            &keys_path,
+            &token,
+            Some(
+                json!({"description": format!("key {n}"), "permissions": {"event:*": ["create"]}}),
+            ),
+            StatusCode::CREATED,
+        )
+        .await;
+    }
+    let all = app
+        .expect(
+            "GET",
+            &format!("{keys_path}?limit=50"),
+            &token,
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    let total = all["pagination"]["total"].as_i64().unwrap();
+    assert!(total >= 12, "{total}");
+    assert_eq!(all["data"].as_array().unwrap().len() as i64, total);
+    let last = app
+        .expect(
+            "GET",
+            &format!("{keys_path}?limit=5&offset={}", total - 2),
+            &token,
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(last["data"].as_array().unwrap().len(), 2);
+    assert_eq!(last["pagination"]["has_more"], false);
+    assert_eq!(
+        last["data"][1]["api_key_id"],
+        all["data"][total as usize - 1]["api_key_id"]
+    );
+
+    for name in ["one", "two"] {
+        app.expect(
+            "POST",
+            &format!("/v1/orgs/{root}/envs"),
+            &token,
+            Some(json!({"name": name})),
+            StatusCode::CREATED,
+        )
+        .await;
+    }
+    let envs = app
+        .expect(
+            "GET",
+            &format!("/v1/orgs/{root}/envs?limit=1&offset=1"),
+            &token,
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(envs["data"].as_array().unwrap().len(), 1);
+    assert_eq!(envs["pagination"]["limit"], 1);
+    assert_eq!(envs["pagination"]["offset"], 1);
+    assert_eq!(envs["pagination"]["total"], 3);
+    assert_eq!(envs["pagination"]["has_more"], true);
+
+    app.expect(
+        "POST",
+        &format!("/v1/orgs/{root}/api-keys"),
+        &token,
+        Some(json!({"description": "second", "permissions": {format!("org:{root}/env:*"): ["read"]}})),
+        StatusCode::CREATED,
+    )
+    .await;
+    let keys = app
+        .expect(
+            "GET",
+            &format!("/v1/orgs/{root}/api-keys?limit=1&offset=1"),
+            &token,
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(keys["data"].as_array().unwrap().len(), 1);
+    assert_eq!(keys["pagination"]["total"], 2);
+    assert_eq!(keys["pagination"]["offset"], 1);
+    assert_eq!(keys["pagination"]["has_more"], false);
+}
+
+#[tokio::test]
+async fn key_status_follows_the_issuer_chain_and_suspension_is_403() {
+    let app = App::new().await;
+    let root = app.data.org_id;
+    let env = app.data.env_id;
+    let grants = json!({
+        format!("org:{root}/env:*/api-key:*"): ["create", "read"],
+        format!("org:{root}/env:*/env:*"): ["read"],
+        "org:*": ["read"],
+    });
+    let (_, reader) = app.org_key(grants.clone()).await;
+    let (issuer, issuer_token) = app.org_key(grants).await;
+    let minted = app
+        .expect(
+            "POST",
+            &format!("/v1/orgs/{root}/envs/{env}/api-keys"),
+            &issuer_token,
+            Some(json!({"description": "minted", "permissions": {"env:*": ["read"]}})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let minted_id = minted["data"]["api_key_id"].as_str().unwrap().to_owned();
+    let minted_token = minted["data"]["token"].as_str().unwrap().to_owned();
+
+    // While the account is suspended, org keys and minted keys get 403, like
+    // app-created keys: they work again on reactivation.
+    let DatabasePool::Sqlite(pool) = app.db.as_ref() else {
+        unreachable!("SQLite fixture");
+    };
+    sqlx::query("UPDATE org SET lifecycle_state = 'suspended', active = 0 WHERE org_id = ?")
+        .bind(root)
+        .execute(pool)
+        .await
+        .unwrap();
+    let body = app
+        .expect("GET", "/v1/orgs", &reader, None, StatusCode::FORBIDDEN)
+        .await;
+    assert_eq!(body["error"]["code"], "account_suspended");
+    let body = app
+        .expect("GET", "/v1/env", &minted_token, None, StatusCode::FORBIDDEN)
+        .await;
+    assert_eq!(body["error"]["code"], "forbidden");
+    sqlx::query("UPDATE org SET lifecycle_state = 'active', active = 1 WHERE org_id = ?")
+        .bind(root)
+        .execute(pool)
+        .await
+        .unwrap();
+    app.expect("GET", "/v1/env", &minted_token, None, StatusCode::OK)
+        .await;
+
+    // Revoking the issuer ends the minted key, and responses say so.
+    OrgApiKey::revoke_for_user(&app.db, root, app.data.user_id, issuer.org_api_key_id)
+        .await
+        .unwrap();
+    app.expect(
+        "GET",
+        "/v1/env",
+        &minted_token,
+        None,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    let key = app
+        .expect(
+            "GET",
+            &format!("/v1/api-keys/{minted_id}"),
+            &reader,
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(key["data"]["active"], false);
+    assert_eq!(key["data"]["status"], "issuer_inactive");
+    let listed = app
+        .expect(
+            "GET",
+            &format!("/v1/orgs/{root}/envs/{env}/api-keys?limit=100"),
+            &reader,
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    let entry = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|key| key["api_key_id"] == minted_id.as_str())
+        .unwrap();
+    assert_eq!(entry["status"], "issuer_inactive");
 }
 
 #[tokio::test]
@@ -779,12 +1141,33 @@ async fn org_keys_mint_narrower_org_keys_and_suspension_blocks_children() {
         StatusCode::OK,
     )
     .await;
+    let blocked = app
+        .expect(
+            "POST",
+            &format!("/v1/orgs/{org}/envs"),
+            &token,
+            Some(json!({"name": "blocked"})),
+            StatusCode::FORBIDDEN,
+        )
+        .await;
+    assert_eq!(blocked["error"]["code"], "org_suspended");
+    // Reads stay available, so a suspended child's keys can be found and revoked.
+    let envs = app
+        .expect(
+            "GET",
+            &format!("/v1/orgs/{org}/envs"),
+            &token,
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    let env = envs["data"][0]["env_id"].as_str().unwrap().to_owned();
     app.expect(
-        "POST",
-        &format!("/v1/orgs/{org}/envs"),
+        "GET",
+        &format!("/v1/orgs/{org}/envs/{env}/api-keys"),
         &token,
-        Some(json!({"name": "blocked"})),
-        StatusCode::FORBIDDEN,
+        None,
+        StatusCode::OK,
     )
     .await;
     let resumed = app

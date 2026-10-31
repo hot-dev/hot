@@ -52,10 +52,12 @@ fn resolve_one(name: &str, bindings: &BTreeMap<String, String>) -> Result<Option
         (None, Some(path)) => {
             let contents = std::fs::read_to_string(path)
                 .map_err(|e| format!("Cannot read {file_name} at {path:?}: {e}"))?;
+            // Some editors save a UTF-8 byte order mark, which no value means.
+            let contents = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
             let value = contents
                 .strip_suffix("\r\n")
                 .or_else(|| contents.strip_suffix('\n'))
-                .unwrap_or(&contents);
+                .unwrap_or(contents);
             if value.is_empty() {
                 return Err(format!("{file_name} at {path:?} is empty"));
             }

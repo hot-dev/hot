@@ -292,7 +292,7 @@ pub(crate) async fn run_worker_with_stream_pubsub_shared_context(
     full_worker_conf = full_worker_conf.set_str("runtime.profile", Some(profile.clone()), &profile);
 
     let server = tokio::spawn(async move {
-        match hot_worker::server::run_with_components_shared_context_and_db(
+        hot_worker::server::run_with_components_shared_context_and_db(
             queue_type,
             redis_uri,
             redis_cluster,
@@ -306,15 +306,29 @@ pub(crate) async fn run_worker_with_stream_pubsub_shared_context(
             db_pool,
         )
         .await
-        {
-            Ok(_) => info!("hot.dev: WORKER shut down"),
-            Err(e) => error!("hot.dev: WORKER error: {}", e),
-        }
     });
 
     // Wait for the server task to complete
-    // The server has its own Ctrl-C handler that triggers graceful shutdown
-    let _ = server.await;
+    // The server has its own Ctrl-C handler that triggers graceful shutdown.
+    // A standalone worker that stops on an error or a panic exits non-zero so
+    // its supervisor sees the failure.
+    let failed = match server.await {
+        Ok(Ok(())) => {
+            info!("hot.dev: WORKER shut down");
+            false
+        }
+        Ok(Err(e)) => {
+            error!("hot.dev: WORKER error: {}", e);
+            true
+        }
+        Err(e) => {
+            error!("hot.dev: WORKER stopped unexpectedly: {e}");
+            true
+        }
+    };
+    if failed && env == Env::Production {
+        std::process::exit(1);
+    }
 }
 
 // Function to evaluate a Hot code string directly

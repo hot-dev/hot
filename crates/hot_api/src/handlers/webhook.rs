@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
 use crate::ApiStateData;
-use crate::auth::{AuthContext, authenticate_token};
+use crate::auth::{AuthContext, authenticate_or_reject};
 use crate::client_ip::ClientIp;
 use crate::domain_resolver::ResolvedDomain;
 use crate::models::ApiErrorResponse;
@@ -492,12 +492,7 @@ async fn webhook_handler_inner(
         }
 
         // Authenticate via the shared path (handles API keys, sessions, service keys)
-        let authenticated = authenticate_token(db, token).await.map_err(|status| {
-            (
-                status,
-                Json(ApiErrorResponse::new("unauthorized", "Invalid credentials")),
-            )
-        })?;
+        let authenticated = authenticate_or_reject(db, token).await?;
 
         let auth_ctx = authenticated.auth_ctx;
 

@@ -2,8 +2,13 @@
 -- /v1/management. An org key belongs to one root organization and calls only
 -- control-plane routes. Environment API keys keep their exact binding.
 SET row_security = on;
+-- A rolling upgrade keeps 3.0.0 processes serving after this migration, and
+-- they read api_key and api_key_management_issuer on every authentication.
+-- Take every lock those reads contend for first, in one order, so that a
+-- request mid-transaction cannot deadlock the migration.
+LOCK TABLE hot.api_key, hot.management_key, hot.api_key_management_issuer IN ACCESS EXCLUSIVE MODE;
 
--- Runtime keys that a management credential issued depended on it. Dropping
+-- Runtime keys that a management credential issued depended on it. Retiring
 -- the issuer must not turn them into independent keys, so they are
 -- deactivated first.
 DO $$
@@ -18,8 +23,25 @@ BEGIN
     PERFORM set_config('hot.scope_mode', '', true);
     PERFORM set_config('hot.scope_operation', '', true);
 END $$;
-DROP TABLE hot.api_key_management_issuer;
-DROP TABLE hot.management_key;
+
+-- The management tables stay, empty of authority, until a later release
+-- drops them: a 3.0.0 API that cannot read them rejects every credential. No
+-- policy lets anyone delete their rows or revoke their keys, so the owner
+-- does both with row security briefly unforced. The issuer rows go, because
+-- they would block deleting the keys they name; every management key is
+-- revoked, so a 3.0.0 process refuses hm_ credentials; and with their write
+-- policies dropped, nothing can create new ones.
+ALTER TABLE hot.api_key_management_issuer NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE hot.management_key NO FORCE ROW LEVEL SECURITY;
+DELETE FROM hot.api_key_management_issuer;
+UPDATE hot.management_key SET revoked_at = CURRENT_TIMESTAMP WHERE revoked_at IS NULL;
+ALTER TABLE hot.api_key_management_issuer FORCE ROW LEVEL SECURITY;
+ALTER TABLE hot.management_key FORCE ROW LEVEL SECURITY;
+DROP POLICY api_key_management_issuer_insert ON hot.api_key_management_issuer;
+DROP POLICY management_key_insert ON hot.management_key;
+DROP POLICY management_key_update ON hot.management_key;
+COMMENT ON TABLE hot.management_key IS 'Retired by Hot 3.0.1: read only, for Hot 3.0.0 processes during an upgrade.';
+COMMENT ON TABLE hot.api_key_management_issuer IS 'Retired by Hot 3.0.1: always empty, for Hot 3.0.0 processes during an upgrade.';
 
 -- An org key is owned by its organization; its creator is attribution only.
 -- A minted org key names its issuing org key, in the same organization.

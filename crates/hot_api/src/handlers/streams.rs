@@ -14,6 +14,7 @@ use axum::{
 };
 use futures::stream::Stream;
 use hot::db::{
+    DatabasePool,
     api_key::ApiKey,
     run::Run,
     stream::{Stream as DbStream, StreamError, StreamSummary},
@@ -26,6 +27,8 @@ use hot::stream::{
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::{Instant, MissedTickBehavior};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -109,8 +112,15 @@ pub enum StreamEvent {
     RunStart { run: RunResponse },
     #[serde(rename = "run:stop")]
     RunStop { run: RunResponse },
+    /// A run failed. When the failure is retried, `run.status` is
+    /// `pending_retry` (also after the retry scheduler stores the attempt as
+    /// `failed`), and `retry_run_id` names the retry once it has started.
     #[serde(rename = "run:fail")]
-    RunFail { run: RunResponse },
+    RunFail {
+        run: RunResponse,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retry_run_id: Option<Uuid>,
+    },
     #[serde(rename = "run:cancel")]
     RunCancel { run: RunResponse },
     /// Durable task snapshot for a task associated with this stream.
@@ -176,10 +186,15 @@ async fn task_update_sse(
 ///
 /// Events emitted:
 /// - `run:start` - A new run has started
+/// - `stream:data` - Real-time streaming data from a run
 /// - `run:stop` - A run completed successfully
 /// - `run:fail` - A run failed
+/// - `run:cancel` - A run was cancelled
 /// - `task:update` - A durable task snapshot changed
 /// - `stream:complete` - The stream has completed (no more updates expected)
+///
+/// Each run's `run:start` comes before its `stream:data` and its end (see
+/// `StreamSubscription`).
 pub async fn subscribe_to_stream(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
@@ -212,8 +227,6 @@ pub async fn subscribe_to_stream(
     } else {
         None
     };
-    let db_clone = db.clone();
-    let blob_store_clone = blob_store.clone();
     let connection_guard =
         rate_limit::acquire_sse_connection(&db, &conf, &auth, "stream-subscribe")
             .await
@@ -263,261 +276,8 @@ pub async fn subscribe_to_stream(
     let stream_auth = auth.clone();
     let guard_permissions = vec![(format!("stream:{}", stream_id), "read".into())];
     let stream_db = db.clone();
-    let stream = async_stream::stream! {
-        let _connection_guard = connection_guard;
-        let mut seen_run_ids: ahash::AHashSet<Uuid> = ahash::AHashSet::new();
-        let mut completed_run_ids: ahash::AHashSet<Uuid> = ahash::AHashSet::new();
-        let mut task_versions: ahash::AHashMap<Uuid, TaskSnapshotVersion> = ahash::AHashMap::new();
-
-        // Poll interval for run status updates (stream:data comes via Redis Streams push)
-        let poll_interval = if subscriber.is_some() {
-            tokio::time::Duration::from_secs(1) // Safety net poll every 1s when using pub/sub
-        } else {
-            tokio::time::Duration::from_millis(100) // Poll every 100ms without pub/sub
-        };
-
-        let stream_timeout = tokio::time::Duration::from_secs(300); // 5 minute timeout
-        let start_time = tokio::time::Instant::now();
-
-        // Wrap subscriber in Option for ownership in the loop
-        let mut subscriber = subscriber;
-
-        loop {
-            // Check for timeout
-            if start_time.elapsed() > stream_timeout {
-                let complete_event = StreamEvent::StreamComplete { stream_id };
-                if let Ok(json) = serde_json::to_string(&complete_event) {
-                    yield Ok(SseEvent::default().event("stream:complete").data(json));
-                }
-                break;
-            }
-
-            // Use tokio::select! to wait for either pub/sub event or poll interval
-            tokio::select! {
-                // Branch 1: Receive push event from pub/sub (if available)
-                pubsub_event = async {
-                    if let Some(ref mut sub) = subscriber {
-                        sub.next().await
-                    } else {
-                        // No subscriber - this branch never completes
-                        std::future::pending::<StreamNext>().await
-                    }
-                } => {
-                    match pubsub_event {
-                        StreamNext::Event(event) => {
-                        // Convert pub/sub event to SSE event
-                        match event {
-                            PubSubEvent::RunStart { run_id, stream_id: event_stream_id, .. } => {
-                                if event_stream_id != stream_id {
-                                    continue;
-                                }
-
-                                // For run:start, we need to fetch full run details from DB
-                                if !seen_run_ids.contains(&run_id)
-                                    && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
-                                        if run.env_id != env_id || run.stream_id != stream_id {
-                                            continue;
-                                        }
-
-                                        seen_run_ids.insert(run_id);
-
-                                        // Apply project filter
-                                        if let Some(filter_project_id) = project_filter
-                                            && run.project_id != Some(filter_project_id) {
-                                                continue;
-                                            }
-
-                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
-                                        let sse_event = StreamEvent::RunStart { run: run_response };
-                                        if let Ok(json) = serde_json::to_string(&sse_event) {
-                                            tracing::debug!("SSE push: run:start for {}", run_id);
-                                            yield Ok(SseEvent::default().event("run:start").data(json));
-                                        }
-                                    }
-                            }
-                            PubSubEvent::RunStop { run_id, stream_id: event_stream_id, .. } => {
-                                if event_stream_id != stream_id {
-                                    continue;
-                                }
-
-                                if !completed_run_ids.contains(&run_id)
-                                    && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
-                                        if run.env_id != env_id || run.stream_id != stream_id {
-                                            continue;
-                                        }
-
-                                        completed_run_ids.insert(run_id);
-
-                                        // Apply project filter
-                                        if let Some(filter_project_id) = project_filter
-                                            && run.project_id != Some(filter_project_id) {
-                                                continue;
-                                            }
-
-                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
-                                        let sse_event = StreamEvent::RunStop { run: run_response };
-                                        if let Ok(json) = serde_json::to_string(&sse_event) {
-                                            tracing::debug!("SSE push: run:stop for {}", run_id);
-                                            yield Ok(SseEvent::default().event("run:stop").data(json));
-                                        }
-                                    }
-                            }
-                            PubSubEvent::RunFail { run_id, stream_id: event_stream_id, .. } => {
-                                if event_stream_id != stream_id {
-                                    continue;
-                                }
-
-                                if !completed_run_ids.contains(&run_id)
-                                    && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
-                                        if run.env_id != env_id || run.stream_id != stream_id {
-                                            continue;
-                                        }
-
-                                        completed_run_ids.insert(run_id);
-
-                                        // Apply project filter
-                                        if let Some(filter_project_id) = project_filter
-                                            && run.project_id != Some(filter_project_id) {
-                                                continue;
-                                            }
-
-                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
-                                        let sse_event = StreamEvent::RunFail { run: run_response };
-                                        if let Ok(json) = serde_json::to_string(&sse_event) {
-                                            tracing::debug!("SSE push: run:fail for {}", run_id);
-                                            yield Ok(SseEvent::default().event("run:fail").data(json));
-                                        }
-                                    }
-                            }
-                            PubSubEvent::RunCancel { run_id, stream_id: event_stream_id, .. } => {
-                                if event_stream_id != stream_id {
-                                    continue;
-                                }
-
-                                if !completed_run_ids.contains(&run_id)
-                                    && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
-                                        if run.env_id != env_id || run.stream_id != stream_id {
-                                            continue;
-                                        }
-
-                                        completed_run_ids.insert(run_id);
-
-                                        // Apply project filter
-                                        if let Some(filter_project_id) = project_filter
-                                            && run.project_id != Some(filter_project_id) {
-                                                continue;
-                                            }
-
-                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
-                                        let sse_event = StreamEvent::RunCancel { run: run_response };
-                                        if let Ok(json) = serde_json::to_string(&sse_event) {
-                                            tracing::debug!("SSE push: run:cancel for {}", run_id);
-                                            yield Ok(SseEvent::default().event("run:cancel").data(json));
-                                        }
-                                    }
-                            }
-                            // Handle stream:data events - these come with full payload, no DB lookup needed
-                            PubSubEvent::StreamData { stream_data_id, run_id, env_id: event_env_id, stream_id: event_stream_id, data_type, payload } => {
-                                if event_stream_id != stream_id || event_env_id != Some(env_id) {
-                                    continue;
-                                }
-
-                                // Stream data is emitted immediately - no deduplication needed
-                                // The payload is already in the pub/sub message
-                                let sse_event = StreamEvent::StreamData {
-                                    stream_data_id,
-                                    run_id,
-                                    data_type,
-                                    payload,
-                                };
-                                if let Ok(json) = serde_json::to_string(&sse_event) {
-                                    tracing::debug!("SSE push: stream:data {} for run {}", stream_data_id, run_id);
-                                    yield Ok(SseEvent::default().event("stream:data").data(json));
-                                }
-                            }
-                            PubSubEvent::TaskMessage { .. } => {}
-                        }
-                        }
-                        StreamNext::Idle => {}
-                        StreamNext::Closed => {
-                            // Subscriber closed - disable pub/sub and continue with polling
-                            tracing::debug!("SSE pub/sub subscription closed, falling back to polling");
-                            subscriber = None;
-                        }
-                    }
-                }
-
-                // Branch 2: Poll database on interval (fallback/safety net)
-                _ = tokio::time::sleep(poll_interval) => {
-                    // Poll for runs on this stream
-                    match Run::get_runs_by_stream(&db_clone, &stream_id, &env_id, Some(100), Some(0)).await {
-                        Ok(runs) => {
-                            for run in runs {
-                                // Apply project filter if specified
-                                if let Some(filter_project_id) = project_filter
-                                    && run.project_id != Some(filter_project_id) {
-                                        continue;
-                                    }
-
-                                // Check if this is a new run we haven't seen
-                                if !seen_run_ids.contains(&run.run_id) {
-                                    seen_run_ids.insert(run.run_id);
-
-                                    let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
-                                    let event = StreamEvent::RunStart { run: run_response };
-                                    if let Ok(json) = serde_json::to_string(&event) {
-                                        tracing::debug!("SSE poll: run:start for {}", run.run_id);
-                                        yield Ok(SseEvent::default().event("run:start").data(json));
-                                    }
-                                }
-
-                                // Check if run has completed since we last saw it
-                                if run.stop_time.is_some() && !completed_run_ids.contains(&run.run_id) {
-                                    completed_run_ids.insert(run.run_id);
-
-                                    let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
-
-                                    let (event_type, event) = match run.status.as_str() {
-                                        "failed" => ("run:fail", StreamEvent::RunFail { run: run_response }),
-                                        "cancelled" => ("run:cancel", StreamEvent::RunCancel { run: run_response }),
-                                        _ => ("run:stop", StreamEvent::RunStop { run: run_response }),
-                                    };
-
-                                    if let Ok(json) = serde_json::to_string(&event) {
-                                        tracing::debug!("SSE poll: {} for {}", event_type, run.run_id);
-                                        yield Ok(SseEvent::default().event(event_type).data(json));
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Error polling runs for stream {}: {}", stream_id, e);
-                        }
-                    }
-                    match Task::get_by_stream(&db_clone, &stream_id, &env_id, Some(100)).await {
-                        Ok(tasks) => {
-                            for task in tasks {
-                                let version = TaskSnapshotVersion::from(&task);
-                                if task_versions.get(&task.task_id) == Some(&version) {
-                                    continue;
-                                }
-                                task_versions.insert(task.task_id, version);
-                                if let Some(event) = task_update_sse(&db_clone, blob_store_clone.as_ref(), &task).await {
-                                    tracing::debug!(task_id = %task.task_id, "SSE poll: task:update");
-                                    yield Ok(event);
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            tracing::error!(%stream_id, %error, "Error polling tasks for stream");
-                        }
-                    }
-                    // Note: stream:data events are delivered via Redis Streams push (not database polling)
-                    // They are ephemeral and not persisted to the database
-                }
-            }
-        }
-    };
+    let subscription = StreamSubscription::new(db, blob_store, env_id, stream_id, project_filter);
+    let stream = subscription_events(subscription, subscriber, connection_guard, None);
 
     // KeepAlive sends a comment every 15 seconds by default, preventing ALB idle timeout
     Ok(Sse::new(crate::auth::guard_stream(
@@ -558,6 +318,418 @@ pub async fn subscribe_to_stream_post(
         Query(params),
     )
     .await
+}
+
+// ============================================================================
+// Shared subscription loop
+// ============================================================================
+
+/// DB poll interval while pub/sub pushes `stream:data` and run events: the
+/// poll is only a safety net then.
+const PUSHED_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// DB poll interval without pub/sub.
+const POLL_ONLY_INTERVAL: Duration = Duration::from_millis(100);
+/// A subscription ends with `stream:complete` after this long.
+const SUBSCRIPTION_TIMEOUT: Duration = Duration::from_secs(300);
+/// Attempts to read a run whose pushed event arrived before its row is
+/// visible (the worker flushes the row first, so this is rare).
+const RUN_LOOKUP_ATTEMPTS: u32 = 5;
+const RUN_LOOKUP_DELAY: Duration = Duration::from_millis(50);
+/// While pub/sub delivers, the poll holds back the end of a run it sees for
+/// this long. The worker publishes a run's end after its `stream:data`, so
+/// the pushed end delivers it after them; the poll covers a lost push.
+const POLLED_RUN_END_GRACE: Duration = Duration::from_secs(2);
+
+/// How a run ended, as its SSE event names it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RunEnd {
+    Stop,
+    Fail,
+    Cancel,
+}
+
+impl RunEnd {
+    /// The end a stored run status reports. A run waiting to be retried
+    /// failed; its retry is a run of its own.
+    fn from_status(status: &str) -> Self {
+        match status {
+            "failed" | "pending_retry" => RunEnd::Fail,
+            "cancelled" => RunEnd::Cancel,
+            _ => RunEnd::Stop,
+        }
+    }
+
+    fn event_type(self) -> &'static str {
+        match self {
+            RunEnd::Stop => "run:stop",
+            RunEnd::Fail => "run:fail",
+            RunEnd::Cancel => "run:cancel",
+        }
+    }
+}
+
+/// What one SSE stream subscription has told its client.
+///
+/// Every run the subscription reports gets `run:start` before any of its
+/// `stream:data` and before its end, and each of those at most once, however
+/// pub/sub and the DB poll interleave: a pushed `stream:data` or end for a
+/// run not yet announced announces it first, from the run's row.
+struct StreamSubscription {
+    db: Arc<DatabasePool>,
+    blob_store: Option<Arc<BlobStore>>,
+    env_id: Uuid,
+    stream_id: Uuid,
+    project_filter: Option<Uuid>,
+    /// Runs announced with `run:start` (or skipped by the project filter).
+    started: ahash::AHashSet<Uuid>,
+    /// Runs whose end was sent (or skipped by the project filter).
+    ended: ahash::AHashSet<Uuid>,
+    /// Runs of pushed `stream:data` that had no row to announce them.
+    unknown: ahash::AHashSet<Uuid>,
+    /// When the poll first saw each run's end, while pub/sub is delivering.
+    polled_ends: ahash::AHashMap<Uuid, Instant>,
+    task_versions: ahash::AHashMap<Uuid, TaskSnapshotVersion>,
+}
+
+impl StreamSubscription {
+    fn new(
+        db: Arc<DatabasePool>,
+        blob_store: Option<Arc<BlobStore>>,
+        env_id: Uuid,
+        stream_id: Uuid,
+        project_filter: Option<Uuid>,
+    ) -> Self {
+        Self {
+            db,
+            blob_store,
+            env_id,
+            stream_id,
+            project_filter,
+            started: Default::default(),
+            ended: Default::default(),
+            unknown: Default::default(),
+            polled_ends: Default::default(),
+            task_versions: Default::default(),
+        }
+    }
+
+    /// This stream's run `run_id`, trying `attempts` times.
+    async fn load_run(&self, run_id: Uuid, attempts: u32) -> Option<Run> {
+        for attempt in 1..=attempts {
+            if let Ok(run) = Run::get_run(&self.db, &run_id).await {
+                return (run.env_id == self.env_id && run.stream_id == self.stream_id)
+                    .then_some(run);
+            }
+            if attempt < attempts {
+                tokio::time::sleep(RUN_LOOKUP_DELAY).await;
+            }
+        }
+        None
+    }
+
+    fn passes_filter(&self, run: &Run) -> bool {
+        self.project_filter
+            .is_none_or(|project_id| run.project_id == Some(project_id))
+    }
+
+    /// `retry` is the run's scheduled retry (see `scheduled_retry`).
+    async fn run_event(
+        &self,
+        event_type: &'static str,
+        run: &Run,
+        retry: Option<Option<Uuid>>,
+    ) -> Option<SseEvent> {
+        let mut run = run_to_response(&self.db, self.blob_store.as_ref(), run).await;
+        if retry.is_some() {
+            run.status = "pending_retry".to_string();
+        }
+        let event = match event_type {
+            "run:start" => StreamEvent::RunStart { run },
+            "run:fail" => StreamEvent::RunFail {
+                run,
+                retry_run_id: retry.flatten(),
+            },
+            "run:cancel" => StreamEvent::RunCancel { run },
+            _ => StreamEvent::RunStop { run },
+        };
+        serde_json::to_string(&event)
+            .ok()
+            .map(|json| SseEvent::default().event(event_type).data(json))
+    }
+
+    async fn announce(&mut self, run: &Run, out: &mut Vec<SseEvent>) {
+        if self.started.contains(&run.run_id) {
+            return;
+        }
+        let retry = self.scheduled_retry(run).await;
+        self.announce_with(run, retry, out).await;
+    }
+
+    async fn announce_with(
+        &mut self,
+        run: &Run,
+        retry: Option<Option<Uuid>>,
+        out: &mut Vec<SseEvent>,
+    ) {
+        if !self.started.insert(run.run_id) || !self.passes_filter(run) {
+            return;
+        }
+        if let Some(event) = self.run_event("run:start", run, retry).await {
+            tracing::debug!("SSE: run:start for {}", run.run_id);
+            out.push(event);
+        }
+    }
+
+    async fn end(&mut self, run: &Run, end: RunEnd, out: &mut Vec<SseEvent>) {
+        // A retried attempt is never a success, whatever reported its end.
+        let retry = self.scheduled_retry(run).await;
+        let end = if retry.is_some() { RunEnd::Fail } else { end };
+        self.announce_with(run, retry, out).await;
+        self.polled_ends.remove(&run.run_id);
+        if !self.ended.insert(run.run_id) || !self.passes_filter(run) {
+            return;
+        }
+        if let Some(event) = self.run_event(end.event_type(), run, retry).await {
+            tracing::debug!("SSE: {} for {}", end.event_type(), run.run_id);
+            out.push(event);
+        }
+    }
+
+    /// Whether `run` is a failed attempt whose retry was scheduled (`Some`),
+    /// with the retry's run once it has started.
+    ///
+    /// The worker stores a retryable failure as `pending_retry` and raises
+    /// `retry_attempt` by one. When the retry scheduler queues the retry it
+    /// stores the attempt as `failed`, before the retry's run exists, so the
+    /// raised `retry_attempt` is what tells it apart from a final failure,
+    /// which keeps the attempt number it ran with: 0, or its origin's when it
+    /// is itself a retry (retries share their origin's run type; runs of
+    /// events another run sent need not).
+    async fn scheduled_retry(&self, run: &Run) -> Option<Option<Uuid>> {
+        if run.status == "pending_retry" {
+            return Some(None);
+        }
+        if run.status != "failed" || run.retry_attempt == 0 {
+            return None;
+        }
+        let recorded = run
+            .info
+            .as_ref()
+            .and_then(|info| info.get("retry_run_id"))
+            .and_then(|id| id.as_str())
+            .and_then(|id| Uuid::parse_str(id).ok());
+        if recorded.is_some() {
+            return Some(recorded);
+        }
+        if let Ok(runs) =
+            Run::get_runs_by_stream(&self.db, &self.stream_id, &self.env_id, Some(100), Some(0))
+                .await
+            && let Some(retry) = runs.iter().find(|retry| {
+                retry.origin_run_id == Some(run.run_id)
+                    && retry.run_type_id == run.run_type_id
+                    && retry.retry_attempt >= run.retry_attempt
+            })
+        {
+            return Some(Some(retry.run_id));
+        }
+        let ran_as = match run.origin_run_id {
+            None => 0,
+            Some(origin_id) => match Run::get_run(&self.db, &origin_id).await {
+                Ok(origin) if origin.run_type_id == run.run_type_id => origin.retry_attempt,
+                Ok(_) => 0,
+                Err(_) => return None,
+            },
+        };
+        (run.retry_attempt > ran_as).then_some(None)
+    }
+
+    /// Turn one pushed event into the SSE events it calls for.
+    async fn pushed(&mut self, event: PubSubEvent, out: &mut Vec<SseEvent>) {
+        let (run_id, end) = match event {
+            PubSubEvent::RunStart {
+                run_id, stream_id, ..
+            } => {
+                if stream_id == self.stream_id
+                    && !self.started.contains(&run_id)
+                    && let Some(run) = self.load_run(run_id, RUN_LOOKUP_ATTEMPTS).await
+                {
+                    self.announce(&run, out).await;
+                }
+                return;
+            }
+            PubSubEvent::RunStop {
+                run_id, stream_id, ..
+            } if stream_id == self.stream_id => (run_id, RunEnd::Stop),
+            PubSubEvent::RunFail {
+                run_id, stream_id, ..
+            } if stream_id == self.stream_id => (run_id, RunEnd::Fail),
+            PubSubEvent::RunCancel {
+                run_id, stream_id, ..
+            } if stream_id == self.stream_id => (run_id, RunEnd::Cancel),
+            PubSubEvent::StreamData {
+                stream_data_id,
+                run_id,
+                env_id,
+                stream_id,
+                data_type,
+                payload,
+            } => {
+                if stream_id != self.stream_id || env_id != Some(self.env_id) {
+                    return;
+                }
+                // Announce the run first; a run with no row is looked up once.
+                if !self.started.contains(&run_id)
+                    && self.unknown.insert(run_id)
+                    && let Some(run) = self.load_run(run_id, 1).await
+                {
+                    self.unknown.remove(&run_id);
+                    self.announce(&run, out).await;
+                }
+                let event = StreamEvent::StreamData {
+                    stream_data_id,
+                    run_id,
+                    data_type,
+                    payload,
+                };
+                if let Ok(json) = serde_json::to_string(&event) {
+                    tracing::debug!(
+                        "SSE push: stream:data {} for run {}",
+                        stream_data_id,
+                        run_id
+                    );
+                    out.push(SseEvent::default().event("stream:data").data(json));
+                }
+                return;
+            }
+            _ => return,
+        };
+        if self.ended.contains(&run_id) {
+            return;
+        }
+        if let Some(run) = self.load_run(run_id, RUN_LOOKUP_ATTEMPTS).await {
+            self.end(&run, end, out).await;
+        }
+    }
+
+    /// The DB poll: announce and end the stream's runs, and send changed
+    /// task snapshots. `pushing` says pub/sub is delivering.
+    async fn poll(&mut self, pushing: bool, out: &mut Vec<SseEvent>) {
+        match Run::get_runs_by_stream(&self.db, &self.stream_id, &self.env_id, Some(100), Some(0))
+            .await
+        {
+            Ok(runs) => {
+                // Newest first from the query; report them in start order.
+                for run in runs.iter().rev() {
+                    self.announce(run, out).await;
+                    if run.stop_time.is_none() || self.ended.contains(&run.run_id) {
+                        continue;
+                    }
+                    if pushing {
+                        let seen = *self
+                            .polled_ends
+                            .entry(run.run_id)
+                            .or_insert_with(Instant::now);
+                        if seen.elapsed() < POLLED_RUN_END_GRACE {
+                            continue;
+                        }
+                    }
+                    self.end(run, RunEnd::from_status(&run.status), out).await;
+                }
+            }
+            Err(e) => {
+                tracing::error!("Error polling runs for stream {}: {}", self.stream_id, e);
+            }
+        }
+        match Task::get_by_stream(&self.db, &self.stream_id, &self.env_id, Some(100)).await {
+            Ok(tasks) => {
+                for task in tasks {
+                    let version = TaskSnapshotVersion::from(&task);
+                    if self.task_versions.get(&task.task_id) == Some(&version) {
+                        continue;
+                    }
+                    self.task_versions.insert(task.task_id, version);
+                    if let Some(event) =
+                        task_update_sse(&self.db, self.blob_store.as_ref(), &task).await
+                    {
+                        tracing::debug!(task_id = %task.task_id, "SSE poll: task:update");
+                        out.push(event);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(stream_id = %self.stream_id, %error, "Error polling tasks for stream");
+            }
+        }
+        // stream:data is not stored; it only arrives through pub/sub.
+    }
+}
+
+fn poll_timer(pushing: bool) -> tokio::time::Interval {
+    let mut timer = tokio::time::interval(if pushing {
+        PUSHED_POLL_INTERVAL
+    } else {
+        POLL_ONLY_INTERVAL
+    });
+    timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    timer
+}
+
+async fn next_pushed(subscriber: &mut Option<Box<dyn StreamSubscriber>>) -> StreamNext {
+    match subscriber {
+        Some(subscriber) => subscriber.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The SSE events of one stream subscription: `first` (if any), then pushed
+/// events and the DB poll until the subscription times out.
+///
+/// The poll runs on its own interval. It used to be a fresh sleep raced
+/// against each pushed event, so steady `stream:data` kept resetting it and
+/// a run's `run:start` came from the poll only after the run had ended.
+fn subscription_events(
+    mut subscription: StreamSubscription,
+    subscriber: Option<Box<dyn StreamSubscriber>>,
+    connection_guard: rate_limit::SseConnectionGuard,
+    first: Option<SseEvent>,
+) -> impl Stream<Item = Result<SseEvent, Infallible>> {
+    async_stream::stream! {
+        let _connection_guard = connection_guard;
+        if let Some(first) = first {
+            yield Ok(first);
+        }
+        let mut subscriber = subscriber;
+        let mut poll = poll_timer(subscriber.is_some());
+        let deadline = Instant::now() + SUBSCRIPTION_TIMEOUT;
+
+        loop {
+            let mut out = Vec::new();
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    let complete = StreamEvent::StreamComplete { stream_id: subscription.stream_id };
+                    if let Ok(json) = serde_json::to_string(&complete) {
+                        yield Ok(SseEvent::default().event("stream:complete").data(json));
+                    }
+                    break;
+                }
+                next = next_pushed(&mut subscriber) => match next {
+                    StreamNext::Event(event) => subscription.pushed(event, &mut out).await,
+                    StreamNext::Idle => {}
+                    StreamNext::Closed => {
+                        // The Redis subscriber resubscribes on its own; this
+                        // is a backend that cannot continue at all.
+                        tracing::debug!("SSE pub/sub subscription closed, falling back to polling");
+                        subscriber = None;
+                        poll = poll_timer(false);
+                    }
+                },
+                _ = poll.tick() => subscription.poll(subscriber.is_some(), &mut out).await,
+            }
+            for event in out {
+                yield Ok(event);
+            }
+        }
+    }
 }
 
 /// Helper to convert a Run database record to RunResponse, rehydrating any
@@ -643,6 +815,9 @@ pub struct EventPublishedEvent {
 /// - `run:cancel` - A run was cancelled
 /// - `task:update` - A durable task snapshot changed
 /// - `stream:complete` - The stream subscription timed out
+///
+/// Each run's `run:start` comes before its `stream:data` and its end (see
+/// `StreamSubscription`).
 pub async fn subscribe_with_event(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
@@ -788,286 +963,20 @@ pub async fn subscribe_with_event(
     } else {
         None
     };
-    let db_clone = db.clone();
-    let blob_store_clone = blob_store.clone();
-    let event_id = published.event_id;
-    let event_type = published.event_type.clone();
-
-    // Step 6: Create the SSE stream
+    // Step 6: Create the SSE stream, opening with the publish confirmation
+    let published_event = serde_json::to_string(&serde_json::json!({
+        "type": "event:published",
+        "event_id": published.event_id,
+        "stream_id": stream_id,
+        "event_type": published.event_type,
+    }))
+    .ok()
+    .map(|json| SseEvent::default().event("event:published").data(json));
     let stream_auth = auth.clone();
     let guard_permissions = vec![(format!("stream:{}", stream_id), "read".into())];
     let stream_db = db.clone();
-    let stream = async_stream::stream! {
-        let _connection_guard = connection_guard;
-        // First event: confirm the event was published
-        let published_event = EventPublishedEvent {
-            event_id,
-            stream_id,
-            event_type,
-        };
-        if let Ok(json) = serde_json::to_string(&serde_json::json!({
-            "type": "event:published",
-            "event_id": event_id,
-            "stream_id": stream_id,
-            "event_type": published_event.event_type,
-        })) {
-            yield Ok(SseEvent::default().event("event:published").data(json));
-        }
-
-        // Now run the same subscription loop as subscribe_to_stream
-        let mut seen_run_ids: ahash::AHashSet<Uuid> = ahash::AHashSet::new();
-        let mut completed_run_ids: ahash::AHashSet<Uuid> = ahash::AHashSet::new();
-        let mut task_versions: ahash::AHashMap<Uuid, TaskSnapshotVersion> = ahash::AHashMap::new();
-
-        // Poll interval for run status updates (stream:data comes via pub/sub push)
-        let poll_interval = if subscriber.is_some() {
-            tokio::time::Duration::from_secs(1) // Safety net poll every 1s when using pub/sub
-        } else {
-            tokio::time::Duration::from_millis(100) // Poll every 100ms without pub/sub
-        };
-
-        let stream_timeout = tokio::time::Duration::from_secs(300); // 5 minute timeout
-        let start_time = tokio::time::Instant::now();
-
-        // Wrap subscriber in Option for ownership in the loop
-        let mut subscriber = subscriber;
-
-        loop {
-            // Check for timeout
-            if start_time.elapsed() > stream_timeout {
-                let complete_event = StreamEvent::StreamComplete { stream_id };
-                if let Ok(json) = serde_json::to_string(&complete_event) {
-                    yield Ok(SseEvent::default().event("stream:complete").data(json));
-                }
-                break;
-            }
-
-            // Use tokio::select! to wait for either pub/sub event or poll interval
-            tokio::select! {
-                // Branch 1: Receive push event from pub/sub (if available)
-                pubsub_event = async {
-                    if let Some(ref mut sub) = subscriber {
-                        sub.next().await
-                    } else {
-                        // No subscriber - this branch never completes
-                        std::future::pending::<StreamNext>().await
-                    }
-                } => {
-                    match pubsub_event {
-                        StreamNext::Event(event) => {
-                        // Convert pub/sub event to SSE event
-                        match event {
-                            PubSubEvent::RunStart { run_id, stream_id: event_stream_id, .. } => {
-                                if event_stream_id != stream_id {
-                                    continue;
-                                }
-
-                                // For run:start, we need to fetch full run details from DB
-                                if !seen_run_ids.contains(&run_id)
-                                    && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
-                                        if run.env_id != env_id || run.stream_id != stream_id {
-                                            continue;
-                                        }
-
-                                        seen_run_ids.insert(run_id);
-
-                                        // Apply project filter
-                                        if let Some(filter_project_id) = project_filter
-                                            && run.project_id != Some(filter_project_id) {
-                                                continue;
-                                            }
-
-                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
-                                        let sse_event = StreamEvent::RunStart { run: run_response };
-                                        if let Ok(json) = serde_json::to_string(&sse_event) {
-                                            tracing::debug!("SSE push: run:start for {}", run_id);
-                                            yield Ok(SseEvent::default().event("run:start").data(json));
-                                        }
-                                    }
-                            }
-                            PubSubEvent::RunStop { run_id, stream_id: event_stream_id, .. } => {
-                                if event_stream_id != stream_id {
-                                    continue;
-                                }
-
-                                if !completed_run_ids.contains(&run_id)
-                                    && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
-                                        if run.env_id != env_id || run.stream_id != stream_id {
-                                            continue;
-                                        }
-
-                                        completed_run_ids.insert(run_id);
-
-                                        // Apply project filter
-                                        if let Some(filter_project_id) = project_filter
-                                            && run.project_id != Some(filter_project_id) {
-                                                continue;
-                                            }
-
-                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
-                                        let sse_event = StreamEvent::RunStop { run: run_response };
-                                        if let Ok(json) = serde_json::to_string(&sse_event) {
-                                            tracing::debug!("SSE push: run:stop for {}", run_id);
-                                            yield Ok(SseEvent::default().event("run:stop").data(json));
-                                        }
-                                    }
-                            }
-                            PubSubEvent::RunFail { run_id, stream_id: event_stream_id, .. } => {
-                                if event_stream_id != stream_id {
-                                    continue;
-                                }
-
-                                if !completed_run_ids.contains(&run_id)
-                                    && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
-                                        if run.env_id != env_id || run.stream_id != stream_id {
-                                            continue;
-                                        }
-
-                                        completed_run_ids.insert(run_id);
-
-                                        // Apply project filter
-                                        if let Some(filter_project_id) = project_filter
-                                            && run.project_id != Some(filter_project_id) {
-                                                continue;
-                                            }
-
-                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
-                                        let sse_event = StreamEvent::RunFail { run: run_response };
-                                        if let Ok(json) = serde_json::to_string(&sse_event) {
-                                            tracing::debug!("SSE push: run:fail for {}", run_id);
-                                            yield Ok(SseEvent::default().event("run:fail").data(json));
-                                        }
-                                    }
-                            }
-                            PubSubEvent::RunCancel { run_id, stream_id: event_stream_id, .. } => {
-                                if event_stream_id != stream_id {
-                                    continue;
-                                }
-
-                                if !completed_run_ids.contains(&run_id)
-                                    && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
-                                        if run.env_id != env_id || run.stream_id != stream_id {
-                                            continue;
-                                        }
-
-                                        completed_run_ids.insert(run_id);
-
-                                        // Apply project filter
-                                        if let Some(filter_project_id) = project_filter
-                                            && run.project_id != Some(filter_project_id) {
-                                                continue;
-                                            }
-
-                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
-                                        let sse_event = StreamEvent::RunCancel { run: run_response };
-                                        if let Ok(json) = serde_json::to_string(&sse_event) {
-                                            tracing::debug!("SSE push: run:cancel for {}", run_id);
-                                            yield Ok(SseEvent::default().event("run:cancel").data(json));
-                                        }
-                                    }
-                            }
-                            // Handle stream:data events - these come with full payload, no DB lookup needed
-                            PubSubEvent::StreamData { stream_data_id, run_id, env_id: event_env_id, stream_id: event_stream_id, data_type, payload } => {
-                                if event_stream_id != stream_id || event_env_id != Some(env_id) {
-                                    continue;
-                                }
-
-                                // Stream data is emitted immediately - no deduplication needed
-                                // The payload is already in the pub/sub message
-                                let sse_event = StreamEvent::StreamData {
-                                    stream_data_id,
-                                    run_id,
-                                    data_type,
-                                    payload,
-                                };
-                                if let Ok(json) = serde_json::to_string(&sse_event) {
-                                    tracing::debug!("SSE push: stream:data {} for run {}", stream_data_id, run_id);
-                                    yield Ok(SseEvent::default().event("stream:data").data(json));
-                                }
-                            }
-                            PubSubEvent::TaskMessage { .. } => {}
-                        }
-                        }
-                        StreamNext::Idle => {}
-                        StreamNext::Closed => {
-                            // Subscriber closed - disable pub/sub and continue with polling
-                            tracing::debug!("SSE pub/sub subscription closed, falling back to polling");
-                            subscriber = None;
-                        }
-                    }
-                }
-
-                // Branch 2: Poll database on interval (fallback/safety net)
-                _ = tokio::time::sleep(poll_interval) => {
-                    // Poll for runs on this stream
-                    match Run::get_runs_by_stream(&db_clone, &stream_id, &env_id, Some(100), Some(0)).await {
-                        Ok(runs) => {
-                            for run in runs {
-                                // Apply project filter if specified
-                                if let Some(filter_project_id) = project_filter
-                                    && run.project_id != Some(filter_project_id) {
-                                        continue;
-                                    }
-
-                                // Check if this is a new run we haven't seen
-                                if !seen_run_ids.contains(&run.run_id) {
-                                    seen_run_ids.insert(run.run_id);
-
-                                    let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
-                                    let event = StreamEvent::RunStart { run: run_response };
-                                    if let Ok(json) = serde_json::to_string(&event) {
-                                        tracing::debug!("SSE poll: run:start for {}", run.run_id);
-                                        yield Ok(SseEvent::default().event("run:start").data(json));
-                                    }
-                                }
-
-                                // Check if run has completed since we last saw it
-                                if run.stop_time.is_some() && !completed_run_ids.contains(&run.run_id) {
-                                    completed_run_ids.insert(run.run_id);
-
-                                    let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
-
-                                    let (event_type, event) = match run.status.as_str() {
-                                        "failed" => ("run:fail", StreamEvent::RunFail { run: run_response }),
-                                        "cancelled" => ("run:cancel", StreamEvent::RunCancel { run: run_response }),
-                                        _ => ("run:stop", StreamEvent::RunStop { run: run_response }),
-                                    };
-
-                                    if let Ok(json) = serde_json::to_string(&event) {
-                                        tracing::debug!("SSE poll: {} for {}", event_type, run.run_id);
-                                        yield Ok(SseEvent::default().event(event_type).data(json));
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Error polling runs for stream {}: {}", stream_id, e);
-                        }
-                    }
-                    match Task::get_by_stream(&db_clone, &stream_id, &env_id, Some(100)).await {
-                        Ok(tasks) => {
-                            for task in tasks {
-                                let version = TaskSnapshotVersion::from(&task);
-                                if task_versions.get(&task.task_id) == Some(&version) {
-                                    continue;
-                                }
-                                task_versions.insert(task.task_id, version);
-                                if let Some(event) = task_update_sse(&db_clone, blob_store_clone.as_ref(), &task).await {
-                                    tracing::debug!(task_id = %task.task_id, "SSE poll: task:update");
-                                    yield Ok(event);
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            tracing::error!(%stream_id, %error, "Error polling tasks for stream");
-                        }
-                    }
-                    // Note: stream:data events are delivered via pub/sub push (not database polling)
-                    // They are ephemeral and not persisted to the database
-                }
-            }
-        }
-    };
+    let subscription = StreamSubscription::new(db, blob_store, env_id, stream_id, project_filter);
+    let stream = subscription_events(subscription, subscriber, connection_guard, published_event);
 
     // KeepAlive sends a comment every 15 seconds by default, preventing ALB idle timeout
     Ok(Sse::new(crate::auth::guard_stream(

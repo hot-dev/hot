@@ -122,6 +122,10 @@ pub enum QueueProcessingError {
     QueueError(Box<dyn Error + Send + Sync>),
     WorkerError(Box<dyn Error + Send + Sync>),
     RetryLimitExceeded,
+    /// The item exhausted its retries and was moved to the dead-letter
+    /// queue. Carries the payload for callers that must settle what earlier
+    /// deliveries left behind, such as runs a crashed worker left running.
+    DeadLettered(RecoveredQueueMessage),
 }
 
 impl std::fmt::Display for QueueProcessingError {
@@ -130,6 +134,9 @@ impl std::fmt::Display for QueueProcessingError {
             Self::QueueError(e) => write!(f, "Queue error: {}", e),
             Self::WorkerError(e) => write!(f, "Worker error: {}", e),
             Self::RetryLimitExceeded => write!(f, "Retry limit exceeded"),
+            Self::DeadLettered(_) => {
+                write!(f, "Retry limit exceeded; moved to the dead-letter queue")
+            }
         }
     }
 }
@@ -199,6 +206,85 @@ pub trait Queue<T>: Send + Sync {
         item: T,
         reason: String,
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
+}
+
+/// Delays between enqueue attempts of a handler's `send()` (see
+/// `enqueue_with_retries`). They fit the 5 s a one-shot CLI command waits
+/// for its pending enqueues on shutdown.
+pub const PUBLISH_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+];
+
+/// Enqueue `item`, trying again after each of `delays` while it fails. For
+/// producers whose enqueue is the only copy of the work, such as a handler's
+/// `send()` (the event row is already written) or a scheduled run: a Redis
+/// restart or failover otherwise loses it. The Redis queue already resends
+/// once on a fresh connection when its cached one was dropped; these retries
+/// cover a server that takes a moment to come back.
+pub async fn enqueue_with_retries<T, Q>(
+    queue: &Q,
+    item: T,
+    delays: &[Duration],
+) -> Result<(), Box<dyn Error + Send + Sync>>
+where
+    T: Clone,
+    Q: Queue<T> + ?Sized,
+{
+    let mut delays = delays.iter();
+    loop {
+        match queue.enqueue(item.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let Some(delay) = delays.next() else {
+                    return Err(error);
+                };
+                tracing::warn!(
+                    "Enqueue failed, retrying in {} ms: {}",
+                    delay.as_millis(),
+                    error
+                );
+                tokio::time::sleep(*delay).await;
+            }
+        }
+    }
+}
+
+/// A queue whose `enqueue` retries after each of its delays (see
+/// `enqueue_with_retries`); everything else goes straight to the inner queue.
+pub struct RetryingEnqueue<T> {
+    inner: Arc<dyn Queue<T>>,
+    delays: Vec<Duration>,
+}
+
+impl<T> RetryingEnqueue<T> {
+    pub fn new(inner: Arc<dyn Queue<T>>, delays: Vec<Duration>) -> Self {
+        Self { inner, delays }
+    }
+}
+
+#[async_trait]
+impl<T: Clone + Send + Sync + 'static> Queue<T> for RetryingEnqueue<T> {
+    async fn enqueue(&self, item: T) -> Result<(), Box<dyn Error + Send + Sync>> {
+        enqueue_with_retries(&*self.inner, item, &self.delays).await
+    }
+
+    async fn dequeue(&self) -> Result<Option<T>, Box<dyn Error + Send + Sync>> {
+        self.inner.dequeue().await
+    }
+
+    async fn len(&self) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        self.inner.len().await
+    }
+
+    async fn move_to_dead_letter_queue(
+        &self,
+        item: T,
+        reason: String,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.inner.move_to_dead_letter_queue(item, reason).await
+    }
 }
 
 /// A trait for safely processing queue items with automatic retry handling.
@@ -363,6 +449,38 @@ where
         }
     }
 
+    /// Whether this delivery takes over from one that never settled: the
+    /// worker that held the message stopped (crashed, or lost its lease)
+    /// while processing it, maybe because of it.
+    pub fn recovered(&self) -> bool {
+        match self {
+            ProcessingQueueLease::Memory(_) => false,
+            ProcessingQueueLease::Sqlite(lease) => lease.recovered(),
+            ProcessingQueueLease::Redis(lease) => lease.reclaimed(),
+        }
+    }
+
+    /// Whether a counted failure of this delivery exhausts the message's
+    /// retries. False when the backend can't tell.
+    pub fn last_attempt(&self) -> bool {
+        match self {
+            ProcessingQueueLease::Sqlite(lease) => lease.last_attempt(),
+            ProcessingQueueLease::Memory(_) | ProcessingQueueLease::Redis(_) => false,
+        }
+    }
+
+    /// A handle that records, in the queue's own storage, that this
+    /// delivery's message is processing alone in its worker. Then, if the
+    /// worker stops, the stop is the message's fault and counts toward its
+    /// retry limit (see `SqliteQueue::with_crash_quarantine`). None for
+    /// backends that count every stop.
+    pub fn sole_delivery_marker(&self) -> Option<SoleDeliveryMarker> {
+        match self {
+            ProcessingQueueLease::Sqlite(lease) => lease.sole_delivery_marker(),
+            ProcessingQueueLease::Memory(_) | ProcessingQueueLease::Redis(_) => None,
+        }
+    }
+
     pub async fn process<F, Fut, R>(
         self,
         worker: F,
@@ -377,6 +495,18 @@ where
             ProcessingQueueLease::Sqlite(lease) => lease.process(worker).await,
             ProcessingQueueLease::Redis(lease) => lease.process(worker).await,
         }
+    }
+}
+
+/// See [`ProcessingQueueLease::sole_delivery_marker`].
+pub struct SoleDeliveryMarker(sqlite::SoleDeliveryMarker);
+
+impl SoleDeliveryMarker {
+    pub async fn mark(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.0
+            .mark()
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
     }
 }
 
@@ -516,6 +646,15 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
+    /// For a consumer that processes the deliveries of stopped workers alone:
+    /// see `SqliteQueue::with_crash_quarantine`. No-op for the other queues.
+    pub fn with_crash_quarantine(self) -> Self {
+        match self {
+            ProcessingQueue::Sqlite(q) => ProcessingQueue::Sqlite(q.with_crash_quarantine()),
+            other => other,
+        }
+    }
+
     /// Fast-forward a Redis consumer group's last-delivered-id past backlog
     /// older than the configured startup window. SQLite deliberately no-ops:
     /// its rows are the authoritative copy and remain durable until processed.
@@ -650,6 +789,30 @@ impl<T> ProcessingQueue<T> {
             ProcessingQueue::Memory(q) => q.process_blocking(worker).await,
             ProcessingQueue::Sqlite(q) => q.process_blocking(worker).await,
             ProcessingQueue::Redis(q) => q.process_blocking(worker).await,
+        }
+    }
+
+    /// Like `recover_orphaned_items_with_data`, but `settle` sees the
+    /// recovery before a requeued item can be claimed again (SQLite; the other
+    /// backends recover first and then settle).
+    pub async fn recover_orphaned_items_then<F, Fut>(
+        &self,
+        settle: F,
+    ) -> Result<OrphanRecovery, Box<dyn Error + Send + Sync>>
+    where
+        F: FnOnce(&OrphanRecovery) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        match self {
+            ProcessingQueue::Sqlite(q) => q
+                .recover_orphaned_items_then(settle)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
+            _ => {
+                let recovery = self.recover_orphaned_items_with_data().await?;
+                settle(&recovery).await;
+                Ok(recovery)
+            }
         }
     }
 
@@ -1016,14 +1179,20 @@ impl RedisQueueAdmin {
                 cleared.push(queue_name.clone());
             }
 
-            // Dead-letter streams have no consumer groups; deleting them is safe.
-            let deadletter_key = format!("{}:deadletter", queue_name);
-            let deleted: i64 = ::redis::cmd("DEL")
-                .arg(&deadletter_key)
-                .query(conn)
-                .map_err(|e| format!("Failed to delete {}: {}", deadletter_key, e))?;
-            if deleted > 0 {
-                cleared.push(deadletter_key);
+            // Dead-letter streams have no consumer groups; deleting them is
+            // safe. So are delayed retries, which have left the stream.
+            for key in [
+                format!("{}:deadletter", queue_name),
+                format!("{}:delayed", queue_name),
+                format!("{}:delayed:entries", queue_name),
+            ] {
+                let deleted: i64 = ::redis::cmd("DEL")
+                    .arg(&key)
+                    .query(conn)
+                    .map_err(|e| format!("Failed to delete {}: {}", key, e))?;
+                if deleted > 0 {
+                    cleared.push(key);
+                }
             }
         }
 
@@ -1197,8 +1366,14 @@ impl RedisQueueAdmin {
                 _ => 0,
             };
 
+            // Infrastructure retries waiting out their backoff outside the stream.
+            let delayed: i64 = ::redis::cmd("ZCARD")
+                .arg(format!("{}:delayed", queue_name))
+                .query(conn)
+                .unwrap_or(0);
+
             // pending = total in stream - currently processing (already delivered but not acked)
-            let pending = stream_len - processing;
+            let pending = stream_len - processing + delayed;
 
             // Dead letter queue is also a stream now
             let deadletter_key = format!("{}:deadletter", queue_name);
