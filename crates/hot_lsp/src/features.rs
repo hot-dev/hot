@@ -38,7 +38,7 @@ impl<'a> Files<'a> {
             return Some((uri.clone(), doc.text.clone()));
         }
         let text = std::fs::read_to_string(path).ok()?;
-        Some((Uri::from_file_path(path)?, text))
+        Some((crate::file_uri(path)?, text))
     }
 
     /// The location of a definition's source.
@@ -46,7 +46,7 @@ impl<'a> Files<'a> {
         let file = crate::analysis::normalize(self.root, Path::new(src.file.as_ref()?));
         let uri = match self.open.get(&file) {
             Some((uri, _)) => uri.clone(),
-            None => Uri::from_file_path(&file)?,
+            None => crate::file_uri(&file)?,
         };
         let range = if let Some((_, doc)) = self.open.get(&file) {
             doc.lines
@@ -126,7 +126,7 @@ pub fn definition(
         let file = crate::analysis::normalize(files.root, &file);
         let target = match files.open.get(&file) {
             Some((uri, _)) => uri.clone(),
-            None => Uri::from_file_path(&file)?,
+            None => crate::file_uri(&file)?,
         };
         return Some(Location::new(
             target,
