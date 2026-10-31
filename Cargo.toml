@@ -176,7 +176,7 @@ cranelift-module = "0.137.1"
 cranelift-native = "0.137.1"
 # Non-poisoning Mutex/RwLock for shared state held across user-code execution.
 # Avoids std::sync poisoning if user code panics while a lock is held.
-parking_lot = "0.12"
+parking_lot = "0.13"
 # Tokenizer for OpenAI BPE encodings (cl100k_base, o200k_base, etc.).
 # Used by `::hot::internal::tokenizer` and wrapped by `::ai::tokenizer`.
 tiktoken-rs = "0.12"
