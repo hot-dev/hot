@@ -135,9 +135,9 @@ aws-sdk-s3 = { version = "1.152", default-features = false, features = ["behavio
 # Official Google Cloud Storage SDK (gcs-storage feature). Pinned to a minor
 # line: generation preconditions, compose, and the retry/backoff policy types
 # are relied on directly.
-google-cloud-storage = { version = "~1.20", default-features = false, features = ["default-rustls-provider"] }
+google-cloud-storage = { version = "~1.21", default-features = false, features = ["default-rustls-provider"] }
 google-cloud-gax = { version = "~1.15", default-features = false }
-google-cloud-auth = { version = "~1.17", default-features = false }
+google-cloud-auth = { version = "~1.18", default-features = false }
 oauth2 = { version = "5.0", default-features = false }
 md5 = "0.8"
 pulldown-cmark = "0.13"
