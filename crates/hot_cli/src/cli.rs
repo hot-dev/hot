@@ -685,6 +685,10 @@ pub(crate) enum Command {
         /// Directory to initialize (default: current directory)
         #[arg(value_name = "PATH", value_hint = ValueHint::DirPath)]
         path: Option<String>,
+        /// Project name (lowercase letters, digits and '-'; default: derived
+        /// from the directory name)
+        #[arg(long = "name", value_name = "NAME")]
+        name: Option<String>,
         #[command(flatten)]
         global: GlobalOptions,
         #[command(flatten)]
@@ -989,7 +993,7 @@ pub(crate) enum DepsAction {
     List,
     /// Show detailed information about dependencies
     Show,
-    /// Add a new dependency to the project
+    /// Not implemented yet: add dependencies to hot.project.<name>.deps in hot.hot
     Add {
         /// Package name (e.g., "hot.dev/anthropic")
         package: String,
@@ -1012,12 +1016,12 @@ pub(crate) enum DepsAction {
         #[arg(long = "path")]
         path: Option<String>,
     },
-    /// Remove a dependency from the project
+    /// Not implemented yet: remove dependencies from hot.project.<name>.deps in hot.hot
     Remove {
         /// Package name to remove
         package: String,
     },
-    /// Update dependencies (resolve and cache)
+    /// Resolve dependencies (fetching branch dependencies again)
     Update,
     /// Migrate from pkg.paths to deps format
     Migrate,

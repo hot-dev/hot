@@ -1,6 +1,7 @@
 //! `hot check` and `hot watch`: the secret-shape scan honours the build
 //! allowlist and is reported next to the real diagnostics, output formats
 //! and exit codes, and a watch that re-runs on change.
+#![cfg(unix)]
 
 use std::io::Read;
 use std::path::Path;
@@ -11,8 +12,17 @@ fn hot_binary() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_hot"))
 }
 
-fn hot_home() -> String {
-    format!("{}/../../hot", env!("CARGO_MANIFEST_DIR"))
+/// A `HOT_HOME` for one test directory, holding only the checkout's
+/// packages: the checkout's hot-std wins over an installed release, and the
+/// default database (`$HOT_HOME/db`) belongs to that directory's commands.
+fn hot_home(dir: &Path) -> String {
+    let home = dir.join(".test-hot-home");
+    if !home.join("pkg").exists() {
+        std::fs::create_dir_all(&home).unwrap();
+        let pkg = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hot/pkg");
+        std::os::unix::fs::symlink(pkg.canonicalize().unwrap(), home.join("pkg")).unwrap();
+    }
+    home.display().to_string()
 }
 
 const AWS_KEY_SOURCE: &str = "::sec::a ns\n\nkey \"AKIAIOSFODNN7EXAMPLE\"\n";
@@ -45,7 +55,7 @@ fn command(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new(hot_binary());
     cmd.args(args)
         .current_dir(dir)
-        .env("HOT_HOME", hot_home())
+        .env("HOT_HOME", hot_home(dir))
         .env("NO_COLOR", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

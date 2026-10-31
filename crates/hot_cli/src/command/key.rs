@@ -22,7 +22,9 @@ pub(crate) async fn run_key_create(
 
     // Idempotent: brings a fresh project's database up to schema and seeds the
     // default org/env/user, so `hot key create` works before the first
-    // `hot dev`.
+    // `hot dev`. A project's local SQLite database is prepared first, as
+    // `hot build` does, so it has the local identity the profile resolves to.
+    crate::command::init::prepare_local_database(conf, providers).await?;
     crate::run_migrations_with_bootstrap(conf, providers)
         .await
         .map_err(|e| format!("Failed to prepare database: {}", e))?;

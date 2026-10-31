@@ -113,7 +113,10 @@ fn (event) {
 The clock starts when the worker hands the run to a VM thread, so loading the
 program counts against it, and until the program has loaded the run has the
 default timeout. Waits inside the run, such as `::hot::task/await`, are capped
-to the time it has left.
+to the time it has left minus 5 seconds, which the run keeps to record its
+result. A run with a `timeout` of 5 seconds or less therefore can't await a
+task, and an await in a longer run waits at most its timeout minus 5 seconds
+minus the time already spent.
 
 When a run reaches its timeout, the worker asks it to stop and frees the
 executor slot once it has unwound, or after 5 more seconds if it hasn't. Either

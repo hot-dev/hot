@@ -102,6 +102,9 @@ pub(crate) async fn run_build(
     allow_secret_shape: bool,
     providers: &crate::CliProviders,
 ) -> Result<(), String> {
+    // A fresh checkout's local SQLite database is created on first use,
+    // before the profile is resolved against it.
+    crate::command::init::prepare_local_database(conf, providers).await?;
     let db_uri = conf.get_str("db.uri");
 
     // Extract and resolve profile IDs for execution context
@@ -167,8 +170,6 @@ pub(crate) async fn run_build(
 
     let secret_scan_opts = build_secret_scan_opts(conf, allow_secret_shape);
 
-    // A fresh checkout's local SQLite database is created on first use.
-    crate::command::init::prepare_local_database(conf, providers).await?;
     if let Err(e) = setup_live_build_for_dev_with_secret_scan_opts(
         conf,
         &global_options,

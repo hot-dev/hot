@@ -204,14 +204,25 @@ environment-backed deployment setting.
 
 ## Secrets from Files
 
-Settings supplied through `HOT_*` environment variables, plus `HOT_ENCRYPTION_KEY`
-and `HOT_APP_SESSION_SECRET`, can instead name a file that holds the value:
-set `<NAME>_FILE`, for example `HOT_DB_URI_FILE=/run/secrets/db-uri`. Hot
-reads the file at startup, drops one trailing newline, and does not copy the
-value into the process environment. Setting both `<NAME>` and `<NAME>_FILE`,
-or naming an empty or unreadable file, stops startup with an error that names
-the variable and path but not the value. `--show-conf` prints such values as
-`***` and lists their source files under `_secret-files`.
+Settings supplied through `HOT_*` environment variables can instead name a
+file that holds the value: set `<NAME>_FILE`, for example
+`HOT_DB_URI_FILE=/run/secrets/db-uri`. This covers the configuration overlay,
+values `hot.hot` reads with `::hot::env/get("HOT_...")` (such as the API key
+and Stripe settings in the generated templates), `HOT_ENCRYPTION_KEY`,
+`HOT_APP_SESSION_SECRET`, and the GitHub and Google OAuth client settings. Hot
+drops one trailing newline and does not copy the value into the process
+environment. `HOT_ENCRYPTION_KEY` and `HOT_APP_SESSION_SECRET` are read once,
+when first used, and kept: rotating either takes a restart.
+
+Setting both `<NAME>` and `<NAME>_FILE`, or naming an empty or unreadable
+file, stops the command with an error that names the variable and path but
+not the value. For a `HOT_*_FILE` name that is not a Hot setting, Hot prints a
+warning and ignores it. `hot conf` and `--show-conf` print such values as
+`***` and list their source files under `_secret-files`.
+
+Hyphenated settings map from their environment names too:
+`HOT_WORKER_RUN_TIMEOUT` sets `worker.run-timeout`, and a variable whose
+dotted spelling isn't a setting sets the hyphenated key `hot.hot` already has.
 
 ## Configuration Format
 

@@ -28,12 +28,17 @@ pub struct GitHubConfig {
 type ConfiguredOAuthClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
+/// An OAuth setting from the environment, or from `<NAME>_FILE`.
+fn setting(name: &str) -> Result<String, String> {
+    hot::environment::read_optional(name)?.ok_or_else(|| format!("{name} is not set"))
+}
+
 impl OAuthConfig {
     /// Load OAuth configuration from environment variables
     pub fn from_env() -> Self {
         let google = if let (Ok(client_id), Ok(client_secret)) = (
-            env::var("HOT_GOOGLE_CLIENT_ID"),
-            env::var("HOT_GOOGLE_CLIENT_SECRET"),
+            setting("HOT_GOOGLE_CLIENT_ID"),
+            setting("HOT_GOOGLE_CLIENT_SECRET"),
         ) {
             Some(GoogleConfig {
                 client_id,
@@ -44,8 +49,8 @@ impl OAuthConfig {
         };
 
         let github = if let (Ok(client_id), Ok(client_secret)) = (
-            env::var("HOT_GITHUB_CLIENT_ID"),
-            env::var("HOT_GITHUB_CLIENT_SECRET"),
+            setting("HOT_GITHUB_CLIENT_ID"),
+            setting("HOT_GITHUB_CLIENT_SECRET"),
         ) {
             Some(GitHubConfig {
                 client_id,

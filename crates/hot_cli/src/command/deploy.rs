@@ -1152,6 +1152,23 @@ async fn deploy_via_database(build_uuid: Uuid, conf: &Val, strict: bool) -> Resu
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn remote_deploys_target_the_selected_project() {
+        let conf = hot::val!({"set": {"project": "alpha"}, "project": {
+            "alpha": {"src": {"paths": ["./alpha"]}},
+            "beta": {"src": {"paths": ["./beta"]}}
+        }});
+        let beta = GlobalOptions {
+            project: Some("beta".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(remote_project_slug(&conf, &beta, None).await, "beta");
+        assert_eq!(
+            remote_project_slug(&conf, &GlobalOptions::default(), None).await,
+            "alpha"
+        );
+    }
+
     #[test]
     fn explicit_profile_never_uses_ad_hoc_database_fallback() {
         assert!(!is_ad_hoc_default_db(
