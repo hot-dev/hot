@@ -562,18 +562,15 @@ pub(crate) enum Command {
         #[arg(long = "watch.debounce", value_name = "MILLISECONDS")]
         watch_debounce_ms: Option<u64>,
     },
-    /// Format Hot source files (safe mode: only writes files that pass CHAR-AUDIT)
+    /// Format Hot source files (whitespace only; refuses any change that would alter the program)
     #[command(display_order = 23)]
     Fmt {
         #[command(flatten)]
         global: GlobalOptions,
-        /// Optional path to a specific .hot file to format (if not provided, formats all files in src/pkg paths)
-        #[arg(value_hint = ValueHint::FilePath)]
-        file: Option<String>,
-        /// Force writing files even if they fail CHAR-AUDIT (default: safe mode, only write files that pass audit)
-        #[arg(long = "force", action = clap::ArgAction::SetTrue)]
-        force: bool,
-        /// Check if files are formatted without writing changes (preview mode)
+        /// Files or directories to format (default: the current directory and the project's source paths)
+        #[arg(value_name = "PATH", value_hint = ValueHint::AnyPath)]
+        paths: Vec<String>,
+        /// Check that files are formatted without writing changes; exit 1 if a file is unformatted or cannot be formatted
         #[arg(long = "check", action = clap::ArgAction::SetTrue)]
         check: bool,
     },

@@ -486,6 +486,22 @@ async fn async_main(providers: CliProviders) {
         return;
     }
 
+    // `hot fmt` only reads and writes source files, so it runs before
+    // hot.hot is evaluated: a project whose configuration fails to load can
+    // still be formatted.
+    if let Some(Command::Fmt {
+        global,
+        paths,
+        check,
+    }) = &cli.command
+    {
+        let exit_code = run_fmt(global, paths, *check);
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+        return;
+    }
+
     // Handle update command early (before conf processing)
     if let Some(Command::Update { force, version }) = &cli.command {
         let force = *force;
@@ -1667,22 +1683,8 @@ async fn async_main(providers: CliProviders) {
                 std::process::exit(1);
             }
         }
-        Some(Command::Fmt {
-            global,
-            file,
-            force,
-            check,
-        }) => {
-            let exit_code = match run_fmt(&global, file.as_deref(), force, check).await {
-                Ok(code) => code,
-                Err(e) => {
-                    error!("Fmt failed: {}", e);
-                    1
-                }
-            };
-            if exit_code != 0 {
-                std::process::exit(exit_code);
-            }
+        Some(Command::Fmt { .. }) => {
+            // Handled early, before config processing
         }
         Some(Command::Lsp {
             transport, stdio, ..
