@@ -47,7 +47,7 @@ fn resolve_task_worker_backend(
     Ok(backend)
 }
 
-pub(crate) async fn run_task_worker(conf: Val) {
+pub(crate) async fn run_task_worker(env: Env, conf: Val) {
     info!(
         "hot.dev: TASK_WORKER starting, version: {} ({})",
         build_info::VERSION,
@@ -185,9 +185,24 @@ pub(crate) async fn run_task_worker(conf: Val) {
         queue_name,
     };
 
-    match hot_task_worker::run(config).await {
-        Ok(_) => info!("hot.dev: TASK_WORKER shut down"),
-        Err(e) => error!("hot.dev: Task worker error: {}", e),
+    // A standalone task worker that stops on an error or a panic exits
+    // non-zero so its supervisor sees the failure.
+    let failed = match tokio::spawn(hot_task_worker::run(config)).await {
+        Ok(Ok(())) => {
+            info!("hot.dev: TASK_WORKER shut down");
+            false
+        }
+        Ok(Err(e)) => {
+            error!("hot.dev: TASK_WORKER error: {}", e);
+            true
+        }
+        Err(e) => {
+            error!("hot.dev: TASK_WORKER stopped unexpectedly: {e}");
+            true
+        }
+    };
+    if failed && env == Env::Production {
+        std::process::exit(1);
     }
 }
 

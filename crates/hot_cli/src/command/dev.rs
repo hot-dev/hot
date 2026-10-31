@@ -713,7 +713,7 @@ pub(crate) async fn run_dev(
 
     // Start task worker for processing ::hot::task/start and ::hot::box/start tasks
     info!("hot.dev: Starting task worker...");
-    let task_worker_handle = tokio::spawn(run_task_worker(conf.clone()));
+    let task_worker_handle = tokio::spawn(run_task_worker(Env::Development, conf.clone()));
 
     // Worker is started last to ensure everything else is ready
     // Add a small delay to let scheduler perform initial sync
