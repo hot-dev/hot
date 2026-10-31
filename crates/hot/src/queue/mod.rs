@@ -10,9 +10,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+pub mod admin;
 pub mod mem;
 pub mod sqlite;
 pub mod streams;
+
+pub use admin::QueueAdmin;
 
 static QUEUE_METRICS_ENABLED: AtomicBool = AtomicBool::new(true);
 static QUEUE_WAIT_TARGET_P99_MS: AtomicU64 = AtomicU64::new(1_000);
@@ -510,6 +513,10 @@ impl SoleDeliveryMarker {
     }
 }
 
+/// A Redis clone is a new consumer with its own name, connection, and
+/// prefetch buffer; deliveries pending on the original stay with it. Memory
+/// and SQLite clones keep the same consumer. Share one handle (an `Arc`) when
+/// the same consumer must see its own dropped deliveries again.
 impl<T: Clone> Clone for ProcessingQueue<T> {
     fn clone(&self) -> Self {
         match self {
@@ -589,9 +596,10 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
-    /// Override the consumer name on the underlying Redis Streams queue.
-    /// No-op for Memory queues. Returns self by value to support a builder
-    /// pattern after `clone()` in worker spawn loops:
+    /// Name this handle's consumer: the Redis consumer in its group, or the
+    /// SQLite lease owner. Memory queues have no consumers and ignore it.
+    /// Returns self by value to support a builder pattern after `clone()` in
+    /// worker spawn loops:
     ///
     /// ```ignore
     /// let q = base_queue.clone().with_consumer_name(format!("worker-{i}"));
@@ -606,9 +614,10 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
-    /// Configure the startup retention window on the underlying Redis Streams
-    /// queue. No-op for Memory queues (which never persist anything anyway).
-    /// See `RedisStreamQueue::with_startup_window` for full semantics.
+    /// Configure the startup retention window used by `fast_forward_if_stale`.
+    /// Only Redis skips backlog older than it; SQLite keeps its durable rows,
+    /// and Memory queues never persist anything. See
+    /// `RedisStreamQueue::with_startup_window` for full semantics.
     pub fn with_startup_window(self, window: std::time::Duration) -> Self {
         match self {
             ProcessingQueue::Memory(q) => ProcessingQueue::Memory(q),
@@ -633,7 +642,9 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
-    /// Configure Redis orphan reclaim idle time. No-op for Memory queues.
+    /// How long a delivery may go unacknowledged before another consumer can
+    /// reclaim it: the Redis `XAUTOCLAIM` idle time, or the SQLite lease
+    /// duration (at least one second). Memory queues ignore it.
     pub fn with_orphan_idle_ms(self, orphan_idle_ms: u64) -> Self {
         match self {
             ProcessingQueue::Memory(q) => ProcessingQueue::Memory(q),
@@ -740,8 +751,10 @@ impl<T> ProcessingQueue<T> {
     /// Claim one item, parking until work is available.
     ///
     /// The returned lease must be processed to completion. Dropping it is only
-    /// a best-effort recovery path: memory queues try to re-enqueue, while
-    /// Redis queues leave the stream entry pending for redelivery.
+    /// a recovery path, and it spends one of the item's attempts: memory
+    /// queues try to re-enqueue, SQLite releases the row after a short delay,
+    /// and Redis queues leave the stream entry pending for redelivery to the
+    /// same consumer.
     pub async fn claim_blocking(
         &self,
     ) -> Result<Option<ProcessingQueueLease<T>>, Box<dyn Error + Send + Sync>>
@@ -769,6 +782,8 @@ impl<T> ProcessingQueue<T> {
     ///
     /// - Memory: parks the future on the underlying channel until a message
     ///   is enqueued (or the channel closes).
+    /// - SQLite: wakes on same-process enqueue notifications and polls for
+    ///   other processes' messages.
     /// - Redis: delegates to `dequeue_and_work`; the internal `XREADGROUP BLOCK`
     ///   provides the natural park time.
     ///

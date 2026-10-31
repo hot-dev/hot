@@ -551,6 +551,12 @@ fn stream_message_timestamp(msg_id: &str) -> Option<chrono::DateTime<chrono::Utc
     chrono::DateTime::from_timestamp_millis(millis.parse().ok()?)
 }
 
+/// Parse a `<ms>-<seq>` stream ID into a pair that orders like Redis does.
+fn parse_stream_id(msg_id: &str) -> Option<(u64, u64)> {
+    let (millis, sequence) = msg_id.split_once('-')?;
+    Some((millis.parse().ok()?, sequence.parse().ok()?))
+}
+
 struct RedisQueueDrainStats {
     last_log_at: StdMutex<Instant>,
     refill_calls: AtomicU64,
@@ -1494,6 +1500,12 @@ impl<T> RedisStreamQueue<T> {
     ///
     /// Redis stream message IDs encode the creation timestamp as the prefix
     /// before the `-` separator (e.g. `1712345678901-0`).
+    ///
+    /// Returns how many messages were discarded: pending entries ACKed plus
+    /// undelivered entries deleted. Phase 2 also deletes the old entries of
+    /// messages that were already processed, and the stream entries behind
+    /// the pending entries phase 1 ACKed. Those are housekeeping, so they
+    /// appear in the log line but not in the count.
     pub async fn purge_old_pending(&self, max_age_ms: u64) -> Result<usize, StreamsQueueError> {
         self.ensure_consumer_group().await?;
 
@@ -1550,11 +1562,11 @@ impl<T> RedisStreamQueue<T> {
                 for id in &ids_to_ack {
                     cmd.arg(id);
                 }
-                let _: i64 = redis::from_redis_value_ref(
+                let acked: i64 = redis::from_redis_value_ref(
                     &conn.cmd(&cmd.clone()).await.unwrap_or(redis::Value::Int(0)),
                 )
                 .unwrap_or(0);
-                total_purged += ids_to_ack.len();
+                total_purged += acked.max(0) as usize;
             }
 
             if entries.len() < 200 {
@@ -1577,7 +1589,29 @@ impl<T> RedisStreamQueue<T> {
         // (e.g. enqueued by the scheduler but never read by the worker).
         let cutoff_id = format!("{}-0", cutoff_ms);
         let mut stream_deleted: usize = 0;
+        let mut undelivered_deleted: usize = 0;
         let mut range_start = "-".to_string();
+
+        // Entries after the group's last-delivered-id were never delivered,
+        // so deleting them discards work. Everything at or before it was
+        // either processed already or ACKed by phase 1. If the group can't
+        // be read, nothing is counted as undelivered.
+        let last_delivered = match conn
+            .cmd(
+                &redis::cmd("XINFO")
+                    .arg("GROUPS")
+                    .arg(&self.stream_name)
+                    .clone(),
+            )
+            .await
+        {
+            Ok(info_val) => redis::from_redis_value_ref::<Vec<redis::Value>>(&info_val)
+                .unwrap_or_default()
+                .iter()
+                .find_map(|g| extract_group_field(g, &self.consumer_group, "last-delivered-id"))
+                .and_then(|id| parse_stream_id(&id)),
+            Err(_) => None,
+        };
 
         loop {
             let result = conn
@@ -1599,6 +1633,7 @@ impl<T> RedisStreamQueue<T> {
             }
 
             let mut ids_to_del: Vec<String> = Vec::new();
+            let mut undelivered_in_page: usize = 0;
             let mut last_range_id = String::new();
 
             for msg in &messages {
@@ -1608,6 +1643,11 @@ impl<T> RedisStreamQueue<T> {
                     continue;
                 }
                 let id: String = redis::from_redis_value_ref(&fields[0]).unwrap_or_default();
+                if let (Some(last), Some(parsed)) = (last_delivered, parse_stream_id(&id))
+                    && parsed > last
+                {
+                    undelivered_in_page += 1;
+                }
                 last_range_id = id.clone();
                 ids_to_del.push(id);
             }
@@ -1622,7 +1662,9 @@ impl<T> RedisStreamQueue<T> {
                     &conn.cmd(&cmd.clone()).await.unwrap_or(redis::Value::Int(0)),
                 )
                 .unwrap_or(0);
-                stream_deleted += deleted as usize;
+                let deleted = deleted.max(0) as usize;
+                stream_deleted += deleted;
+                undelivered_deleted += undelivered_in_page.min(deleted);
             }
 
             if messages.len() < 200 {
@@ -1641,14 +1683,15 @@ impl<T> RedisStreamQueue<T> {
             }
         }
 
-        let total = total_purged + stream_deleted;
-        if total > 0 {
+        let total = total_purged + undelivered_deleted;
+        if total > 0 || stream_deleted > 0 {
             tracing::info!(
-                "Purged {} old messages (>{:.0}s) from {} ({} pending ACKed, {} stream entries deleted)",
+                "Purged {} old messages (>{:.0}s) from {} ({} pending ACKed, {} undelivered deleted, {} stream entries deleted in all)",
                 total,
                 max_age_ms as f64 / 1000.0,
                 self.stream_name,
                 total_purged,
+                undelivered_deleted,
                 stream_deleted,
             );
         }
@@ -5309,17 +5352,15 @@ mod tests {
         );
 
         // Purge anything older than 1 hour. Only the 2h-old entry qualifies.
-        // Returned count is `acked + xdeleted` (the function does both phases):
-        //   - Phase 1 ACKs the 2h-old entry from PEL  → 1
-        //   - Phase 2 XDELs the same 2h-old entry from the stream itself → 1
-        // Total = 2.
+        // Phase 1 ACKs it and phase 2 XDELs its stream entry, but it is one
+        // message, so it counts once.
         let purged = queue
             .purge_old_pending(60 * 60 * 1000)
             .await
             .expect("purge_old_pending must succeed");
         assert_eq!(
-            purged, 2,
-            "expected 1 PEL ACK + 1 stream XDEL = 2 (got {})",
+            purged, 1,
+            "expected the one 2h-old PEL entry (got {})",
             purged
         );
 
@@ -5374,8 +5415,8 @@ mod tests {
         );
 
         // Purge cutoff = 1h: the 3h and 90m entries qualify; the 5m does not.
-        // Returned count is `acked + xdeleted`. PEL is empty so phase 1
-        // contributes 0; phase 2 XDELs both stale undelivered entries → 2.
+        // PEL is empty so phase 1 contributes 0; phase 2 XDELs both stale
+        // undelivered entries → 2.
         let purged = queue
             .purge_old_pending(60 * 60 * 1000)
             .await
@@ -5391,6 +5432,79 @@ mod tests {
             remaining, 1,
             "only the 5m-old undelivered entry should remain in stream, got {}",
             remaining
+        );
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// Old entries of messages already processed are deleted from the
+    /// stream but are not counted, since no work was discarded. Only the
+    /// stuck PEL entry and the undelivered entry count.
+    #[tokio::test]
+    async fn test_purge_old_pending_counts_only_discarded_messages() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_purge_count_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let consumer = "test-consumer".to_string();
+
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone())
+            .with_consumer_name(consumer.clone());
+        queue.ensure_consumer_group().await.unwrap();
+
+        // 3h and 2h ago, both delivered; the 3h one is then processed.
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let processed_id = xadd_at_ms(
+            &client,
+            &stream_key,
+            now_ms.saturating_sub(3 * 60 * 60 * 1000),
+            b"processed",
+        )
+        .await;
+        xadd_at_ms(
+            &client,
+            &stream_key,
+            now_ms.saturating_sub(2 * 60 * 60 * 1000),
+            b"stuck",
+        )
+        .await;
+        let delivered =
+            xreadgroup_drain(&client, &stream_key, DEFAULT_CONSUMER_GROUP, &consumer).await;
+        assert_eq!(delivered, 2);
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let acked: i64 = redis::cmd("XACK")
+            .arg(&stream_key)
+            .arg(DEFAULT_CONSUMER_GROUP)
+            .arg(&processed_id)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(acked, 1);
+
+        // 90m ago, never delivered.
+        xadd_at_ms(
+            &client,
+            &stream_key,
+            now_ms.saturating_sub(90 * 60 * 1000),
+            b"undelivered",
+        )
+        .await;
+
+        let purged = queue
+            .purge_old_pending(60 * 60 * 1000)
+            .await
+            .expect("purge_old_pending must succeed");
+        assert_eq!(
+            purged, 2,
+            "expected the stuck and undelivered entries (got {})",
+            purged
+        );
+        assert_eq!(xlen(&client, &stream_key).await, 0, "all 3 entries deleted");
+        assert_eq!(
+            xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+            0
         );
 
         cleanup(&client, &queue_name).await;
