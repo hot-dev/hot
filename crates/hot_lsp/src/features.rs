@@ -230,7 +230,7 @@ fn fields_of_value(
         },
         Resolved::Def(def) => {
             // A binding in this document is fresher than the index.
-            let shape = (base.ns.is_none())
+            let shape = (base.ns.is_none() && def.ns == scope.ns)
                 .then(|| ctx.syntax.top_level_value(base.name.as_deref()?))
                 .flatten()
                 .map(|value| ctx.syntax.value_shape(value));
