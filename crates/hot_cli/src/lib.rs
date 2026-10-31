@@ -749,6 +749,12 @@ async fn async_main(providers: CliProviders) {
                     tracing::debug!("Project hot.min-version {} satisfied", min_version.as_ref());
                 }
             }
+            // The language server loads the project itself and reports a
+            // configuration error as a diagnostic on hot.hot, so it must
+            // start even when the configuration doesn't load.
+            Err(e) if matches!(cli.command, Some(Command::Lsp { .. })) => {
+                tracing::warn!("Configuration error (starting the LSP anyway): {}", e);
+            }
             Err(e) => {
                 // Display the full error message
                 eprintln!("Configuration error: {}", e);
