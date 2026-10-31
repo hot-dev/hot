@@ -2,7 +2,8 @@ name: dependency-audit
 
 # Checks Cargo.lock against the RustSec advisory database (vulnerable,
 # unsound, unmaintained and yanked crates) and allows only crates.io sources,
-# with the ignores documented in deny.toml. It runs on every pull request and
+# with the ignores documented in deny.toml, and checks that every external
+# GitHub action is pinned to a commit SHA. It runs on every pull request and
 # push to main, and weekly, so an advisory published against an unchanged
 # lock still turns up. It builds nothing, so it finishes in well under a
 # minute.
@@ -57,3 +58,15 @@ jobs:
 
       - name: cargo deny check advisories sources
         run: cargo-deny --locked check advisories sources
+
+  actions-pinned:
+    name: Actions pinned to commit SHAs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Check action pins
+        run: bash scripts/check-actions-pinned.sh
