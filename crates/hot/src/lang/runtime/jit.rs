@@ -2,7 +2,10 @@ use crate::lang::bytecode::{
     BytecodeProgram, Constant, FlowResultModifier, FlowType, FunctionId, FunctionInfo, Instruction,
     LambdaInfo,
 };
-use crate::lang::runtime::vm::{VirtualMachine, VmError};
+use crate::lang::runtime::limits;
+use crate::lang::runtime::vm::{
+    VirtualMachine, VmError, max_recursion_depth, recursion_limit_message,
+};
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use cranelift_codegen::ir::{
@@ -26,6 +29,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 mod native_parity_tests;
 mod numeric_err;
 use numeric_err::{ErrUseScope, NumericErrUse, numeric_err_use};
+#[cfg(test)]
+mod runtime_tests;
 
 static GLOBAL_JIT_COMPILE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_JIT_BAILOUT_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -36,38 +41,101 @@ static GLOBAL_LAMBDA_JIT_FALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
     static JIT_VM_PTR: Cell<*mut VirtualMachine> = const { Cell::new(std::ptr::null_mut()) };
     static JIT_STACK_LIMIT: Cell<u64> = const { Cell::new(0) };
+    /// The Dec constants of the code being compiled on this thread, which
+    /// the code reads in place (see `owned_dec_constant`).
+    static COMPILE_DEC_CONSTANTS: std::cell::RefCell<Vec<std::pin::Pin<Box<D256>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Where the code being compiled reads the Dec constant `value`: memory the
+/// compiled function owns. The program it is compiled from can be a
+/// temporary (a lambda's synthetic program is dropped once it compiles), so
+/// a pointer into its constants would dangle.
+fn owned_dec_constant(value: D256) -> *const D256 {
+    // Pinned: the code holds its address.
+    let constant = Box::pin(value);
+    let ptr: *const D256 = &*constant;
+    COMPILE_DEC_CONSTANTS.with(|constants| constants.borrow_mut().push(constant));
+    ptr
+}
+
+/// Stack compiled code leaves free below its deepest frame, for the helpers
+/// and native code it calls: 7 MiB of a [`VM_THREAD_STACK_SIZE`] thread, at
+/// most an eighth of a smaller thread's stack (see
+/// [`limits::stack_guard_limit`]). Less than the interpreter's reserve, so
+/// compiled recursion goes a little deeper than interpreted recursion, and a
+/// compiled frame's call back into the interpreter is refused there first.
+const JIT_STACK_RESERVE: u64 = 7 * 1024 * 1024;
+const JIT_STACK_RESERVE_DIVISOR: u64 = 8;
+
+/// Where the platform doesn't report a thread's stack bounds, the JIT's limit
+/// is this far below the stack pointer of the thread's first compiled call.
 const JIT_STACK_GUARD_BUDGET: u64 = 60_000_000;
+
+/// A compiled frame's return when its stack guard refused it, which every
+/// compiled frame above it returns in turn.
 const JIT_STACK_EXHAUSTED: i64 = 1;
+
+/// A compiled frame's return when it would pass [`max_recursion_depth`],
+/// which every compiled frame above it returns in turn. (Not 2: helpers
+/// return `HALT_SENTINEL`.)
+const JIT_RECURSION_LIMIT: i64 = 3;
 
 /// Minimum stack size (bytes) any thread that executes the VM (and therefore may
 /// run JIT-compiled code) must be given.
 ///
-/// The JIT stack-overflow guard ([`ensure_jit_stack_limit`]) computes its limit
-/// as `first_seen_sp - JIT_STACK_GUARD_BUDGET`. That budget only protects the
-/// thread if the thread actually has at least that much stack below its entry
-/// point; on a smaller stack the computed limit sits *below* the real stack
-/// bottom and the guard never trips, so deep/recursive JIT code overruns the
-/// real stack and segfaults. The CLI's tokio blocking pool uses 64 MiB stacks;
-/// every manually-spawned VM worker thread must match so the guard is effective
-/// there too. Kept strictly greater than `JIT_STACK_GUARD_BUDGET`.
+/// The interpreter's and the JIT's stack guards leave a few MiB free at the
+/// end of a thread's stack (see [`limits::stack_guard_limit`]); the rest is
+/// what deep recursion can use before a call is refused with a structured
+/// error. The CLI's tokio blocking pool uses 64 MiB stacks; every
+/// manually-spawned VM worker thread must match so recursion goes as deep
+/// there. Kept strictly greater than `JIT_STACK_GUARD_BUDGET`, which applies
+/// where the platform doesn't report a thread's stack bounds.
 pub const VM_THREAD_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 const _: () = assert!(VM_THREAD_STACK_SIZE as u64 > JIT_STACK_GUARD_BUDGET);
 
-fn ensure_jit_stack_limit() {
+fn jit_stack_limit() -> u64 {
     JIT_STACK_LIMIT.with(|cell| {
-        if cell.get() == 0 {
-            let anchor: u64 = 0;
-            let sp = std::ptr::addr_of!(anchor) as u64;
-            cell.set(sp.saturating_sub(JIT_STACK_GUARD_BUDGET));
+        let mut limit = cell.get();
+        if limit == 0 {
+            limit = limits::stack_guard_limit(
+                JIT_STACK_RESERVE,
+                JIT_STACK_RESERVE_DIVISOR,
+                JIT_STACK_GUARD_BUDGET,
+            );
+            cell.set(limit);
         }
-    });
+        limit
+    })
+}
+
+/// Whether the current thread is already too deep in its stack to start
+/// compiled code.
+fn jit_stack_exhausted() -> bool {
+    let anchor: u64 = 0;
+    let sp = std::ptr::addr_of!(anchor) as u64;
+    sp <= jit_stack_limit()
+}
+
+/// Whether the current thread has the stack to start compiled code.
+pub fn can_start_compiled_code() -> bool {
+    !jit_stack_exhausted()
+}
+
+/// The depth of the compiled call about to start: the interpreter counts a
+/// call as it enters it, so the VM's depth already includes this one.
+fn jit_entry_call_depth() -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return 1;
+    }
+    let depth = unsafe { &*vm_ptr }.user_function_depth().max(1);
+    i64::try_from(depth).unwrap_or(i64::MAX)
 }
 
 unsafe extern "C" fn hot_jit_get_stack_limit() -> i64 {
-    JIT_STACK_LIMIT.with(|cell| cell.get() as i64)
+    jit_stack_limit() as i64
 }
 
 /// Set the thread-local VM pointer before calling JIT code. Returns the previous
@@ -200,6 +268,15 @@ impl CodeMemoryStatus {
             };
         }
 
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        if !membarrier_available() {
+            return Self::unavailable(
+                "membarrier is unavailable (denied by seccomp?), so compiled code \
+                 can't be finalized"
+                    .to_string(),
+            );
+        }
+
         #[cfg(any(
             all(target_os = "linux", target_arch = "x86_64"),
             all(target_os = "linux", target_arch = "aarch64"),
@@ -215,14 +292,37 @@ impl CodeMemoryStatus {
         }
 
         #[allow(unreachable_code)]
+        Self::unavailable(
+            "No JIT code-memory backend has been validated for this target".to_string(),
+        )
+    }
+
+    /// No compiled code, for `reason`.
+    pub fn unavailable(reason: String) -> Self {
         Self {
             availability: JitAvailability::Unsupported,
             backend: CodeMemoryBackend::None,
-            reason: Some(
-                "No JIT code-memory backend has been validated for this target".to_string(),
-            ),
+            reason: Some(reason),
         }
     }
+}
+
+/// Whether the kernel lets this process use the membarrier syscall, which
+/// cranelift-jit needs to finalize code on Linux AArch64 (it panics without
+/// it). A seccomp profile can deny it.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn membarrier_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        const MEMBARRIER_CMD_QUERY: libc::c_int = 0;
+        // The commands cranelift-jit's flush falls back between.
+        const MEMBARRIER_CMD_GLOBAL: libc::c_long = 1;
+        const MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE: libc::c_long = 32;
+        // SAFETY: QUERY only reports which commands the kernel supports.
+        let supported = unsafe { libc::syscall(libc::SYS_membarrier, MEMBARRIER_CMD_QUERY, 0) };
+        supported > 0
+            && supported & (MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE) != 0
+    })
 }
 
 /// Placeholder abstraction for code-memory ownership/finalization.
@@ -331,6 +431,10 @@ pub struct JitFunctionProfile {
     pub deopts: u32,
     pub cumulative_compile_time_ms: u64,
     pub do_not_jit: bool,
+    /// Signatures whose compilation failed with a retryable
+    /// (`unsupported.*`) reason. Compiling one again would fail again, so
+    /// each is tried once rather than on every call.
+    pub failed_signatures: AHashSet<TypeSig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -460,7 +564,7 @@ struct JitHelperRefs {
     is_err: FuncRef,
     failure_err: FuncRef,
     consume_err: FuncRef,
-    owned_int_arg: FuncRef,
+    owned_raw_arg: FuncRef,
     call_vm_by_name: FuncRef,
     promote_to_owned: FuncRef,
     make_vec: FuncRef,
@@ -535,7 +639,7 @@ impl JitHelperRefs {
             self.is_err,
             self.failure_err,
             self.consume_err,
-            self.owned_int_arg,
+            self.owned_raw_arg,
             self.promote_to_owned,
             self.make_vec,
             self.merge_maps,
@@ -604,12 +708,57 @@ struct ActiveFlowState {
     force_owned_result: bool,
 }
 
+/// A compiled function's module, which frees the function's code memory when
+/// it is dropped. (A `JITModule` leaks its code on drop, so that pointers into
+/// it stay valid; here only the `JitCompiledFunction` that owns the module
+/// calls its code, and callers hold that while they do.)
+struct CodeModule(mem::ManuallyDrop<JITModule>);
+
+impl CodeModule {
+    fn new(module: JITModule) -> Self {
+        Self(mem::ManuallyDrop::new(module))
+    }
+}
+
+impl std::ops::Deref for CodeModule {
+    type Target = JITModule;
+
+    fn deref(&self) -> &JITModule {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for CodeModule {
+    fn deref_mut(&mut self) -> &mut JITModule {
+        &mut self.0
+    }
+}
+
+impl Drop for CodeModule {
+    fn drop(&mut self) {
+        // SAFETY: the module is taken only here, once, and nothing calls its
+        // code once its owner is gone.
+        unsafe { mem::ManuallyDrop::take(&mut self.0).free_memory() };
+        #[cfg(test)]
+        CODE_MODULES_FREED.with(|freed| freed.set(freed.get() + 1));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many compiled functions' code this thread has freed.
+    static CODE_MODULES_FREED: Cell<usize> = const { Cell::new(0) };
+}
+
 pub struct JitCompiledFunction {
     signature: TypeSig,
     result_kind: JitValueKind,
     /// See `needs_vm_scope`.
     needs_vm_scope: bool,
-    module: JITModule,
+    module: CodeModule,
+    /// The Dec constants the code reads, held for it (see
+    /// `owned_dec_constant`).
+    _dec_constants: Vec<std::pin::Pin<Box<D256>>>,
     func_id: FuncId,
     /// Argument ABI layout, computed once at compile time. Rebuilding it per
     /// call allocated two Vecs on every VM->JIT boundary crossing.
@@ -638,36 +787,45 @@ impl JitCompiledFunction {
         self.needs_vm_scope
     }
 
-    /// Run the code: `None` when it ran out of stack before starting, for the
-    /// interpreter to run the call instead.
+    /// Run the code: `None` when the thread is already too deep in its stack
+    /// to start it, for the interpreter to run the call instead (its own
+    /// guard leaves more room, so it refuses any call the body makes).
     pub fn try_call(&self, args: &[Val]) -> Result<Option<Val>, String> {
-        match self.call(args) {
-            Ok(val) => Ok(Some(val)),
-            Err(e) if e == "JIT_STACK_EXHAUSTED" => Ok(None),
-            Err(e) => Err(e),
+        if jit_stack_exhausted() {
+            return Ok(None);
         }
+        self.call(args).map(Some)
     }
 
+    /// Run the code. Once it has started, running out of stack or of call
+    /// depth fails the call, as it does in the interpreter: running the call
+    /// again there would repeat what it already did.
     pub fn call(&self, args: &[Val]) -> Result<Val, String> {
-        ensure_jit_stack_limit();
+        let depth = jit_entry_call_depth();
         let raw_args = self.signature.encode_args(args, &self.arg_layout)?;
         let mut raw_result = vec![0u64; self.result_word_len];
         let fn_ptr = self.module.get_finalized_function(self.func_id);
-        let jit_fn: unsafe extern "C" fn(*const u8, *mut u8) -> i64 =
+        let jit_fn: unsafe extern "C" fn(*const u8, *mut u8, i64) -> i64 =
             unsafe { mem::transmute(fn_ptr) };
         let ret = unsafe {
             jit_fn(
                 raw_args.as_ptr().cast::<u8>(),
                 raw_result.as_mut_ptr().cast::<u8>(),
+                depth,
             )
         };
-        if ret == JIT_STACK_EXHAUSTED {
-            return Err("JIT_STACK_EXHAUSTED".to_string());
-        }
-        if ret != 0 {
-            return unsafe { Ok(take_owned_val(ret)) };
-        }
-        self.result_kind.decode_result(&raw_result)
+        let result = match ret {
+            0 => self.result_kind.decode_result(&raw_result),
+            JIT_STACK_EXHAUSTED => Err(limits::stack_budget_exhausted_message()),
+            JIT_RECURSION_LIMIT => {
+                let max = max_recursion_depth();
+                Err(recursion_limit_message(max, max))
+            }
+            _ => unsafe { Ok(take_owned_val(ret)) },
+        };
+        // A helper's panic goes on from here, where it can unwind.
+        resume_helper_panic();
+        result
     }
 }
 
@@ -741,6 +899,7 @@ impl Default for JitFunctionProfile {
             deopts: 0,
             cumulative_compile_time_ms: 0,
             do_not_jit: false,
+            failed_signatures: AHashSet::new(),
         }
     }
 }
@@ -907,9 +1066,12 @@ impl JitRuntimeState {
             return false;
         }
 
+        if profile.call_count < self.config.threshold {
+            return false;
+        }
         let current_sig = TypeSig::from_args(args);
-        profile.call_count >= self.config.threshold
-            && profile.stable_signature.as_ref() == Some(&current_sig)
+        profile.stable_signature.as_ref() == Some(&current_sig)
+            && !profile.failed_signatures.contains(&current_sig)
     }
 
     pub fn compile_function(
@@ -935,8 +1097,24 @@ impl JitRuntimeState {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        let compiled =
-            compile_supported_function(program, function_id, function_info, &signature, names)?;
+        let compiled = match compile_supported_function(
+            program,
+            function_id,
+            function_info,
+            &signature,
+            names,
+        ) {
+            Ok(compiled) => compiled,
+            Err(err) => {
+                self.note_compile_failure(&err);
+                if is_retryable_jit_bailout(&err)
+                    && let Some(profile) = self.function_profiles.get_mut(function_id as usize)
+                {
+                    profile.failed_signatures.insert(signature);
+                }
+                return Err(err);
+            }
+        };
 
         if let Some(entries) = self.compiled_functions.get_mut(function_id as usize) {
             entries.push(Rc::new(compiled));
@@ -1051,6 +1229,7 @@ impl JitRuntimeState {
                 Ok(Some((compiled, effective_args)))
             }
             Err(err) => {
+                self.note_compile_failure(&err);
                 tracing::debug!(
                     "[JIT] lambda compilation skipped (reason={}): {}",
                     jit_bailout_reason(&err),
@@ -1065,6 +1244,15 @@ impl JitRuntimeState {
                 GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
                 Ok(None)
             }
+        }
+    }
+
+    /// After a compile failed with `err`: code that couldn't be finalized
+    /// means none can be, so this VM compiles nothing more.
+    fn note_compile_failure(&mut self, err: &str) {
+        if jit_bailout_reason(err) == FINALIZE_BAILOUT {
+            tracing::warn!("[JIT] disabled: {}", err);
+            self.code_memory_status = CodeMemoryStatus::unavailable(err.to_string());
         }
     }
 
@@ -1106,6 +1294,26 @@ pub fn increment_jit_bailout_count() {
 
 pub fn increment_lambda_interpreter_call_count() {
     GLOBAL_LAMBDA_INTERPRETER_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The most bytecode instructions a function the JIT compiles may have.
+/// Cranelift's register allocation takes memory that grows with the square
+/// of a function's size: a 5,000-arm match (40,000 instructions) took 2 GB to
+/// compile. The interpreter runs larger functions.
+const MAX_JIT_FUNCTION_INSTRUCTIONS: usize = 4096;
+
+/// The bailout reason of a function over [`MAX_JIT_FUNCTION_INSTRUCTIONS`].
+const FUNCTION_SIZE_BAILOUT: &str = "function_size";
+
+/// The bailout reason of a compile whose code could not be finalized: the
+/// platform won't run code this process makes, so every compile would fail.
+const FINALIZE_BAILOUT: &str = "finalize";
+
+#[cfg(test)]
+thread_local! {
+    /// Makes finalizing compiled code panic on this thread, as it does on a
+    /// Linux AArch64 host that denies membarrier.
+    static FAIL_FINALIZE_FOR_TEST: Cell<bool> = const { Cell::new(false) };
 }
 
 pub fn jit_bailout_reason(error: &str) -> &str {
@@ -1531,6 +1739,13 @@ fn compile_supported_function(
     names: CallNames<'_>,
 ) -> Result<JitCompiledFunction, String> {
     let scope = names.scope_of(program, function_id, function_info);
+    if function_info.instructions.len() > MAX_JIT_FUNCTION_INSTRUCTIONS {
+        return Err(format!(
+            "{FUNCTION_SIZE_BAILOUT}: the JIT compiles functions of up to \
+             {MAX_JIT_FUNCTION_INSTRUCTIONS} instructions; this one has {}",
+            function_info.instructions.len()
+        ));
+    }
     if signature.arity != function_info.arity {
         return Err("JIT arity mismatch".to_string());
     }
@@ -1612,6 +1827,8 @@ fn compile_supported_function(
             scope,
         ) {
             Ok(compiled) => return Ok(compiled),
+            // No other prediction would finalize either.
+            Err(error) if jit_bailout_reason(&error) == FINALIZE_BAILOUT => return Err(error),
             Err(error) => failure = error,
         }
     }
@@ -1678,7 +1895,7 @@ fn compile_with_return_kind(
     builder.symbol("hot_jit_is_err", hot_jit_is_err as *const u8);
     builder.symbol("hot_jit_failure_err", hot_jit_failure_err as *const u8);
     builder.symbol("hot_jit_consume_err", hot_jit_consume_err as *const u8);
-    builder.symbol("hot_jit_owned_int_arg", hot_jit_owned_int_arg as *const u8);
+    builder.symbol("hot_jit_owned_raw_arg", hot_jit_owned_raw_arg as *const u8);
     builder.symbol(
         "hot_jit_call_vm_by_name",
         hot_jit_call_vm_by_name as *const u8,
@@ -1772,12 +1989,16 @@ fn compile_with_return_kind(
         "hot_jit_check_consumable",
         hot_jit_check_consumable as *const u8,
     );
-    let mut module = JITModule::new(builder);
+    // Freed on every path out, a failed compile's included.
+    let mut module = CodeModule::new(JITModule::new(builder));
+    COMPILE_DEC_CONSTANTS.with(|constants| constants.borrow_mut().clear());
 
     let ptr_ty = module.target_config().pointer_type();
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(ptr_ty));
     sig.params.push(AbiParam::new(ptr_ty));
+    // The call's depth, counted as the interpreter counts its calls.
+    sig.params.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(ptr_ty));
 
     let name = format!(
@@ -1821,15 +2042,31 @@ fn compile_with_return_kind(
         .define_function(func_id, &mut ctx)
         .map_err(|e| e.to_string())?;
     module.clear_context(&mut ctx);
-    module.finalize_definitions().map_err(|e| e.to_string())?;
+    // Finalizing can panic inside cranelift-jit, whose instruction-cache
+    // flush on Linux AArch64 expects the membarrier syscall, which a seccomp
+    // profile can deny. Decline to compile instead; the interpreter runs the
+    // call, and this VM compiles nothing more.
+    match crate::lang::user_code::run_user_code("jit:finalize", || {
+        #[cfg(test)]
+        if FAIL_FINALIZE_FOR_TEST.with(Cell::get) {
+            panic!("injected JIT finalize failure");
+        }
+        module.finalize_definitions().map_err(|e| e.to_string())
+    }) {
+        Ok(finalized) => finalized.map_err(|e| format!("{FINALIZE_BAILOUT}: {e}"))?,
+        Err(panic) => return Err(format!("{FINALIZE_BAILOUT}: {panic}")),
+    }
 
     let arg_layout = AbiLayout::for_args(&signature.args)?;
     let result_word_len = AbiLayout::for_result(result_kind).word_len();
+    let dec_constants =
+        COMPILE_DEC_CONSTANTS.with(|constants| mem::take(&mut *constants.borrow_mut()));
     Ok(JitCompiledFunction {
         signature: signature.clone(),
         result_kind,
         needs_vm_scope,
         module,
+        _dec_constants: dec_constants,
         func_id,
         arg_layout,
         result_word_len,
@@ -2041,6 +2278,138 @@ fn hotlib_jit_policy_bails_out(name: &str) -> bool {
     )
 }
 
+thread_local! {
+    /// Whether a contained helper's panic is waiting for the compiled code
+    /// it interrupted to return (see [`contain_helper_panic`]).
+    static HELPER_PANIC_PENDING: Cell<bool> = const { Cell::new(false) };
+    static HELPER_PANIC: std::cell::RefCell<Option<Box<dyn std::any::Any + Send>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run a helper's body, holding a panic it raises. A panic can't unwind
+/// through compiled frames, so it would abort the process. The helper
+/// returns `fallback` instead, a value its compiled caller handles safely (a
+/// halt or an Err), and [`JitCompiledFunction::call`] resumes the panic once
+/// that code has returned, so the panic fails the run as it does in the
+/// interpreter. Until then every contained helper returns its fallback at
+/// once, so no more of the program runs.
+fn contain_helper_panic(fallback: impl FnOnce() -> i64, body: impl FnOnce() -> i64) -> i64 {
+    if HELPER_PANIC_PENDING.with(Cell::get) {
+        return fallback();
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(result) => result,
+        Err(payload) => {
+            HELPER_PANIC.with(|held| *held.borrow_mut() = Some(payload));
+            HELPER_PANIC_PENDING.with(|pending| pending.set(true));
+            fallback()
+        }
+    }
+}
+
+/// Resume the panic a contained helper raised while compiled code ran.
+fn resume_helper_panic() {
+    if HELPER_PANIC_PENDING.with(|pending| pending.replace(false))
+        && let Some(payload) = HELPER_PANIC.with(|held| held.borrow_mut().take())
+    {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+/// The fallback of a contained helper whose result is an Err or a value.
+fn helper_panic_err() -> i64 {
+    new_owned_val(Val::err(Val::Str("panic in a JIT helper".into())))
+}
+
+/// Defines each helper that runs hotlib or VM code, where a latent panic
+/// would come from, as its `_body` with a panic held (see
+/// [`contain_helper_panic`]) and `fallback` returned for it: `HALT_SENTINEL`
+/// where the compiled caller checks for a halt, an Err where it takes an Err
+/// or a value, false for a bare Bool.
+macro_rules! contained_helpers {
+    ($($helper:ident = $body:ident($($arg:ident: $ty:ty),*) -> $fallback:expr;)*) => {
+        $(
+            unsafe extern "C" fn $helper($($arg: $ty),*) -> i64 {
+                contain_helper_panic(|| $fallback, || unsafe { $body($($arg),*) })
+            }
+        )*
+    };
+}
+
+contained_helpers! {
+    // Arithmetic and comparison in hotlib.
+    hot_jit_add_numeric = hot_jit_add_numeric_body(
+        out: *mut D256, left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> helper_panic_err();
+    hot_jit_sub_numeric = hot_jit_sub_numeric_body(
+        out: *mut D256, left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> helper_panic_err();
+    hot_jit_mul_numeric = hot_jit_mul_numeric_body(
+        out: *mut D256, left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> helper_panic_err();
+    hot_jit_div_numeric = hot_jit_div_numeric_body(
+        out: *mut D256, left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> helper_panic_err();
+    hot_jit_mod_numeric = hot_jit_mod_numeric_body(
+        out: *mut D256, left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> helper_panic_err();
+    hot_jit_ne_numeric = hot_jit_ne_numeric_body(
+        left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_eq_numeric = hot_jit_eq_numeric_body(
+        left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_gt_numeric = hot_jit_gt_numeric_body(
+        left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_gte_numeric = hot_jit_gte_numeric_body(
+        left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_lt_numeric = hot_jit_lt_numeric_body(
+        left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_lte_numeric = hot_jit_lte_numeric_body(
+        left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_binop_general = hot_jit_binop_general_body(
+        op: i64, left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_cmp_general = hot_jit_cmp_general_body(
+        op: i64, left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> HALT_SENTINEL;
+
+    // Calls into the VM and hotlib.
+    hot_jit_call_vm = hot_jit_call_vm_body(
+        function_id: i64, args_ptr: *const i64, args_count: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_call_vm_by_name = hot_jit_call_vm_by_name_body(
+        name_ptr: i64, args_ptr: *const i64, args_count: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_call_lib = hot_jit_call_lib_body(
+        fn_name_ptr: i64, args_ptr: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_call_native = hot_jit_call_native_body(
+        function_id: i64, args_ptr: *const i64, args_count: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_call_with_spread = hot_jit_call_with_spread_body(
+        name_ptr: i64, args_ptr: *const i64, args_count: i64, spread_mask: i64
+    ) -> HALT_SENTINEL;
+
+    // Formatting, types and constraints the VM checks.
+    hot_jit_template_interpolate = hot_jit_template_interpolate_body(
+        parts_ptr: *const i64, parts_count: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_construct_typed = hot_jit_construct_typed_body(
+        src_ptr: i64, type_info_ptr: i64
+    ) -> helper_panic_err();
+    hot_jit_is_type_check = hot_jit_is_type_check_body(
+        val_ptr: i64, type_path_ptr: i64
+    ) -> 0;
+    hot_jit_check_constraint = hot_jit_check_constraint_body(
+        src_ptr: i64, spec_ptr: i64, test: i64
+    ) -> HALT_SENTINEL;
+}
+
 /// Intrinsic helpers return this sentinel when a Result.Err operand
 /// triggered the strict-argument halt (failure state already set); emitted
 /// code branches to an error return instead of using it as a result. Safe
@@ -2067,7 +2436,7 @@ unsafe extern "C" fn hot_jit_copy_dec(src: *const D256, dst: *mut D256) {
     unsafe { *dst = *src };
 }
 
-unsafe extern "C" fn hot_jit_add_numeric(
+unsafe fn hot_jit_add_numeric_body(
     out: *mut D256,
     left_kind: i64,
     left_raw: i64,
@@ -2082,7 +2451,7 @@ unsafe extern "C" fn hot_jit_add_numeric(
     write_numeric_result(out, result)
 }
 
-unsafe extern "C" fn hot_jit_sub_numeric(
+unsafe fn hot_jit_sub_numeric_body(
     out: *mut D256,
     left_kind: i64,
     left_raw: i64,
@@ -2097,7 +2466,7 @@ unsafe extern "C" fn hot_jit_sub_numeric(
     write_numeric_result(out, result)
 }
 
-unsafe extern "C" fn hot_jit_mul_numeric(
+unsafe fn hot_jit_mul_numeric_body(
     out: *mut D256,
     left_kind: i64,
     left_raw: i64,
@@ -2112,7 +2481,7 @@ unsafe extern "C" fn hot_jit_mul_numeric(
     write_numeric_result(out, result)
 }
 
-unsafe extern "C" fn hot_jit_div_numeric(
+unsafe fn hot_jit_div_numeric_body(
     out: *mut D256,
     left_kind: i64,
     left_raw: i64,
@@ -2127,7 +2496,7 @@ unsafe extern "C" fn hot_jit_div_numeric(
     write_numeric_result(out, result)
 }
 
-unsafe extern "C" fn hot_jit_mod_numeric(
+unsafe fn hot_jit_mod_numeric_body(
     out: *mut D256,
     left_kind: i64,
     left_raw: i64,
@@ -2142,7 +2511,7 @@ unsafe extern "C" fn hot_jit_mod_numeric(
     write_numeric_result(out, result)
 }
 
-unsafe extern "C" fn hot_jit_ne_numeric(
+unsafe fn hot_jit_ne_numeric_body(
     left_kind: i64,
     left_raw: i64,
     right_kind: i64,
@@ -2157,7 +2526,7 @@ unsafe extern "C" fn hot_jit_ne_numeric(
     )
 }
 
-unsafe extern "C" fn hot_jit_eq_numeric(
+unsafe fn hot_jit_eq_numeric_body(
     left_kind: i64,
     left_raw: i64,
     right_kind: i64,
@@ -2172,7 +2541,7 @@ unsafe extern "C" fn hot_jit_eq_numeric(
     )
 }
 
-unsafe extern "C" fn hot_jit_gt_numeric(
+unsafe fn hot_jit_gt_numeric_body(
     left_kind: i64,
     left_raw: i64,
     right_kind: i64,
@@ -2187,7 +2556,7 @@ unsafe extern "C" fn hot_jit_gt_numeric(
     )
 }
 
-unsafe extern "C" fn hot_jit_gte_numeric(
+unsafe fn hot_jit_gte_numeric_body(
     left_kind: i64,
     left_raw: i64,
     right_kind: i64,
@@ -2202,7 +2571,7 @@ unsafe extern "C" fn hot_jit_gte_numeric(
     )
 }
 
-unsafe extern "C" fn hot_jit_lt_numeric(
+unsafe fn hot_jit_lt_numeric_body(
     left_kind: i64,
     left_raw: i64,
     right_kind: i64,
@@ -2217,7 +2586,7 @@ unsafe extern "C" fn hot_jit_lt_numeric(
     )
 }
 
-unsafe extern "C" fn hot_jit_lte_numeric(
+unsafe fn hot_jit_lte_numeric_body(
     left_kind: i64,
     left_raw: i64,
     right_kind: i64,
@@ -2333,7 +2702,12 @@ unsafe extern "C" fn hot_jit_is_err(raw: i64) -> i64 {
 /// to return. Takes ownership of `raw`.
 unsafe extern "C" fn hot_jit_consume_err(raw: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
-    if vm_ptr.is_null() || raw == 0 || raw == HALT_SENTINEL || raw == JIT_STACK_EXHAUSTED {
+    if vm_ptr.is_null()
+        || raw == 0
+        || raw == HALT_SENTINEL
+        || raw == JIT_STACK_EXHAUSTED
+        || raw == JIT_RECURSION_LIMIT
+    {
         return raw;
     }
     let vm = unsafe { &mut *vm_ptr };
@@ -2347,25 +2721,39 @@ unsafe extern "C" fn hot_jit_consume_err(raw: i64) -> i64 {
     unsafe { hot_jit_failure_err() }
 }
 
-/// A self tail call passes an owned value to an Int parameter: prepare it as
-/// the interpreter's call would. Writes the Int to `out` and returns 0, halts
-/// on an Err (`HALT_SENTINEL`), or returns 1 for any other value, which the
-/// call passes through the VM. Borrows `raw`.
-unsafe extern "C" fn hot_jit_owned_int_arg(raw: i64, out: *mut i64) -> i64 {
+/// A self tail call passes an owned value to a parameter the compiled loop
+/// holds raw (an Int, Bool, Dec or Null, as `kind` names it with a
+/// `HELPER_VAL_KIND_*`): prepare it as the interpreter's call would. Writes
+/// the raw value to `out` (an i64, or a D256 for a Dec) and returns 0, halts
+/// on an Err (`HALT_SENTINEL`), or returns 1 for a value of another type,
+/// which the call passes through the VM. Borrows `raw`.
+unsafe extern "C" fn hot_jit_owned_raw_arg(raw: i64, kind: i64, out: *mut u8) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
-    if vm_ptr.is_null() || raw == 0 || out.is_null() {
+    if vm_ptr.is_null() || out.is_null() {
         return 1;
+    }
+    if raw == 0 {
+        return if kind == HELPER_VAL_KIND_NULL { 0 } else { 1 };
     }
     let vm = unsafe { &mut *vm_ptr };
     let value = unsafe { &*(raw as *const Val) };
-    match vm.unwrap_result_if_ok(value) {
-        Ok(Val::Int(n)) => {
-            unsafe { *out = n };
+    match (kind, vm.unwrap_result_if_ok(value)) {
+        // The run now holds the failure.
+        (_, Err(_)) => HALT_SENTINEL,
+        (HELPER_VAL_KIND_INT, Ok(Val::Int(n))) => {
+            unsafe { out.cast::<i64>().write(n) };
             0
         }
-        Ok(_) => 1,
-        // The run now holds the failure.
-        Err(_) => HALT_SENTINEL,
+        (HELPER_VAL_KIND_BOOL, Ok(Val::Bool(b))) => {
+            unsafe { out.cast::<i64>().write(i64::from(b)) };
+            0
+        }
+        (HELPER_VAL_KIND_DEC, Ok(Val::Dec(d))) => {
+            unsafe { out.cast::<D256>().write(d) };
+            0
+        }
+        (HELPER_VAL_KIND_NULL, Ok(Val::Null)) => 0,
+        _ => 1,
     }
 }
 
@@ -2388,7 +2776,7 @@ const BINOP_MOD: i64 = 4;
 
 /// JIT helper: type-preserving binary arithmetic for operands that include OwnedVal.
 /// Returns an OwnedVal handle wrapping the exact result type (Int stays Int, etc.).
-unsafe extern "C" fn hot_jit_binop_general(
+unsafe fn hot_jit_binop_general_body(
     op: i64,
     left_kind: i64,
     left_raw: i64,
@@ -2428,7 +2816,7 @@ unsafe extern "C" fn hot_jit_binop_general(
 
 /// JIT helper: type-preserving comparison for operands that include OwnedVal.
 /// Returns 1 (true) or 0 (false).
-unsafe extern "C" fn hot_jit_cmp_general(
+unsafe fn hot_jit_cmp_general_body(
     op: i64,
     left_kind: i64,
     left_raw: i64,
@@ -2482,11 +2870,7 @@ unsafe extern "C" fn hot_jit_cmp_general(
 /// `args_ptr` - pointer to array of (kind: i64, raw: i64) pairs
 /// `args_count` - number of arguments
 /// Returns an OwnedVal handle to the result.
-unsafe extern "C" fn hot_jit_call_vm(
-    function_id: i64,
-    args_ptr: *const i64,
-    args_count: i64,
-) -> i64 {
+unsafe fn hot_jit_call_vm_body(function_id: i64, args_ptr: *const i64, args_count: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
         return new_owned_val(Val::err(Val::Str("JIT call_vm: no VM available".into())));
@@ -2548,7 +2932,7 @@ unsafe extern "C" fn hot_jit_make_vec(args_ptr: *const i64, args_count: i64) -> 
 /// `fn_name_ptr` - OwnedVal pointer to a Val::Str (the function name)
 /// `args_ptr` - OwnedVal pointer to a Val::Vec (the arguments)
 /// Returns an OwnedVal handle to the result.
-unsafe extern "C" fn hot_jit_call_lib(fn_name_ptr: i64, args_ptr: i64) -> i64 {
+unsafe fn hot_jit_call_lib_body(fn_name_ptr: i64, args_ptr: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
         return new_owned_val(Val::err(Val::Str("JIT call_lib: no VM available".into())));
@@ -2696,7 +3080,7 @@ unsafe extern "C" fn hot_jit_merge_maps(target_ptr: i64, source_ptr: i64) -> i64
 /// Returns an OwnedVal handle to the concatenated Val::Str, or
 /// `HALT_SENTINEL` when a part is an Err: it shares the interpreter's
 /// interpolation, which consumes each part's Result.
-unsafe extern "C" fn hot_jit_template_interpolate(parts_ptr: *const i64, parts_count: i64) -> i64 {
+unsafe fn hot_jit_template_interpolate_body(parts_ptr: *const i64, parts_count: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     let count = parts_count as usize;
     let parts: Vec<Val> = (0..count)
@@ -2816,7 +3200,7 @@ unsafe extern "C" fn hot_jit_set_element(
 /// `src_ptr` - OwnedVal pointer to the source data
 /// `type_info_ptr` - OwnedVal pointer to the type info constant (a Map with $type, $fields, etc.)
 /// Returns an OwnedVal handle to the typed value.
-unsafe extern "C" fn hot_jit_construct_typed(src_ptr: i64, type_info_ptr: i64) -> i64 {
+unsafe fn hot_jit_construct_typed_body(src_ptr: i64, type_info_ptr: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
         return new_owned_val(Val::err(Val::Str(
@@ -2835,7 +3219,7 @@ unsafe extern "C" fn hot_jit_construct_typed(src_ptr: i64, type_info_ptr: i64) -
 /// JIT helper: a `CheckConstraint`, through the VM's checked path. Returns
 /// an OwnedVal handle to the checked value, the `ConstraintError` Err, or a
 /// `test` check's Bool; HALT_SENTINEL when the check halted.
-unsafe extern "C" fn hot_jit_check_constraint(src_ptr: i64, spec_ptr: i64, test: i64) -> i64 {
+unsafe fn hot_jit_check_constraint_body(src_ptr: i64, spec_ptr: i64, test: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
         return new_owned_val(Val::err(Val::Str(
@@ -2912,7 +3296,7 @@ unsafe extern "C" fn hot_jit_str_ends_with(str_ptr: i64, suffix_ptr: i64) -> i64
 /// `val_ptr` - OwnedVal pointer to the value to check
 /// `type_path_ptr` - OwnedVal or string const pointer to the expected type path
 /// Returns 1 (true) or 0 (false) as i64.
-unsafe extern "C" fn hot_jit_is_type_check(val_ptr: i64, type_path_ptr: i64) -> i64 {
+unsafe fn hot_jit_is_type_check_body(val_ptr: i64, type_path_ptr: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
         return 0;
@@ -3050,7 +3434,8 @@ unsafe extern "C" fn hot_jit_populate_closure(
         }
         return new_owned_val(Val::Box(Box::new(captured)));
     }
-    lambda_ptr
+    // The caller owns what this returns.
+    unsafe { hot_jit_clone_owned_val(lambda_ptr) }
 }
 
 /// JIT helper: string starts-with check (mirrors hot_jit_str_ends_with).
@@ -3200,11 +3585,7 @@ unsafe extern "C" fn hot_jit_set_namespace(ns_ptr: i64) {
 /// JIT helper: call a native/hotlib function by function_id.
 /// Resolves the function name from the program and calls it through the VM.
 /// Returns OwnedVal handle to the result.
-unsafe extern "C" fn hot_jit_call_native(
-    function_id: i64,
-    args_ptr: *const i64,
-    args_count: i64,
-) -> i64 {
+unsafe fn hot_jit_call_native_body(function_id: i64, args_ptr: *const i64, args_count: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
         return new_owned_val(Val::err(Val::Str("no VM available".into())));
@@ -3337,7 +3718,7 @@ unsafe extern "C" fn hot_jit_check_consumable(val_ptr: i64) -> i64 {
 /// Call a function by name through the VM. Used when the function isn't in
 /// program.functions (e.g., built-in type constructors like Vec, Str, etc.).
 /// `name_ptr` is an OwnedVal pointer to a Val::Str containing the function name.
-unsafe extern "C" fn hot_jit_call_vm_by_name(
+unsafe fn hot_jit_call_vm_by_name_body(
     name_ptr: i64,
     args_ptr: *const i64,
     args_count: i64,
@@ -3413,7 +3794,7 @@ fn call_value(vm: &mut VirtualMachine, function: &Val, args: &[Val], error_captu
 
 /// Trampoline for `CallWithSpread`: like `hot_jit_call_vm_by_name` but applies
 /// a spread_mask to expand Vec arguments before calling.
-unsafe extern "C" fn hot_jit_call_with_spread(
+unsafe fn hot_jit_call_with_spread_body(
     name_ptr: i64,
     args_ptr: *const i64,
     args_count: i64,
@@ -3679,12 +4060,12 @@ fn declare_jit_helpers(
             &[types::I64],
             &[types::I64],
         )?,
-        owned_int_arg: declare_helper_func(
+        owned_raw_arg: declare_helper_func(
             module,
             func,
             ptr_ty,
-            "hot_jit_owned_int_arg",
-            &[types::I64, ptr_ty],
+            "hot_jit_owned_raw_arg",
+            &[types::I64, types::I64, ptr_ty],
             &[types::I64],
         )?,
         call_vm_by_name: declare_helper_func(
@@ -5362,6 +5743,9 @@ struct EmitCtx<'a> {
     returned_use: NumericErrUse,
     /// Where the body makes its calls, for resolving call names.
     call_scope: CallScope<'a>,
+    /// The depth of the compiled call (its entry block's last parameter);
+    /// a self-call passes one more.
+    call_depth: cranelift_codegen::ir::Value,
 }
 
 enum EmitResult {
@@ -5714,6 +6098,7 @@ impl<'a> EmitCtx<'a> {
                 &self.thunk_registry,
                 self.numeric_err_use(instructions, ip, dest),
                 self.call_scope,
+                self.call_depth,
             )?
         {
             // An inlined branch that calls this function back reads that
@@ -5732,6 +6117,7 @@ impl<'a> EmitCtx<'a> {
         // 3. Try self-recursive by name (only with deterministically resolved ID)
         if let Some(called_fid) = resolved_fid
             && called_fid as u32 == self.function_id
+            && self.call_scope.native_self_calls()
             && let Some(ret_kind) = self.expected_return_kind
         {
             self.relies_on_expected_return = true;
@@ -5748,6 +6134,7 @@ impl<'a> EmitCtx<'a> {
                 &self.register_kinds,
                 args_start,
                 args_count,
+                self.call_depth,
             )?;
             let returned = self.numeric_err_use(instructions, ip, dest) == NumericErrUse::Returned;
             self.define_register(builder, dest, result_kind, raw)?;
@@ -5798,7 +6185,7 @@ impl<'a> EmitCtx<'a> {
         args_count: u8,
         instructions: &[Instruction],
     ) -> Result<bool, String> {
-        if called_function_id == self.function_id {
+        if called_function_id == self.function_id && self.call_scope.native_self_calls() {
             return Ok(false);
         }
         // Try lazy branch inlining
@@ -5822,6 +6209,7 @@ impl<'a> EmitCtx<'a> {
             &self.thunk_registry,
             self.numeric_err_use(instructions, ip, dest),
             self.call_scope,
+            self.call_depth,
         )? {
             // An inlined branch that calls this function back reads that
             // call's result as the predicted return kind.
@@ -5916,6 +6304,7 @@ impl<'a> EmitCtx<'a> {
             &self.register_kinds,
             args_start,
             args_count,
+            self.call_depth,
         )?;
         let returned = self.numeric_err_use(instructions, ip, dest) == NumericErrUse::Returned;
         self.define_register(builder, dest, result_kind, raw)?;
@@ -6229,6 +6618,10 @@ impl<'a> EmitCtx<'a> {
     ) -> Result<EmitResult, String> {
         match instruction {
             Instruction::LoadConst { dest, constant } => {
+                // A closure made here is a new value each time, which the
+                // register owns; every other constant is made once, at
+                // compile time, and lives as long as the code.
+                let mut made_at_run_time = false;
                 let (kind, value) = match self.program.constants.get(*constant as usize) {
                     Some(Constant::Val(Val::Int(n))) => {
                         (RawKind::Int, builder.ins().iconst(types::I64, *n))
@@ -6262,7 +6655,9 @@ impl<'a> EmitCtx<'a> {
                             3,
                         ));
                         let slot_ptr = builder.ins().stack_addr(self.ptr_ty, slot, 0);
-                        let const_ptr = builder.ins().iconst(types::I64, d as *const D256 as i64);
+                        let const_ptr = builder
+                            .ins()
+                            .iconst(types::I64, owned_dec_constant(*d) as i64);
                         builder
                             .ins()
                             .call(self.helper_refs.copy_dec, &[const_ptr, slot_ptr]);
@@ -6386,6 +6781,7 @@ impl<'a> EmitCtx<'a> {
                             );
                             let captured = builder.inst_results(call)[0];
                             self.drop_owned_temps(builder, &capture_temps);
+                            made_at_run_time = true;
                             (RawKind::OwnedVal, captured)
                         }
                     }
@@ -6402,6 +6798,7 @@ impl<'a> EmitCtx<'a> {
                 };
                 self.define_register(builder, *dest, kind, value)?;
                 if kind == RawKind::OwnedVal
+                    && !made_at_run_time
                     && let Ok(idx) = self.remap_reg(*dest)
                 {
                     self.compile_time_owned.insert(idx);
@@ -7671,6 +8068,7 @@ fn build_supported_body(
 
     let arg_ptr = builder.block_params(entry_block)[0];
     let ret_ptr = builder.block_params(entry_block)[1];
+    let call_depth = builder.block_params(entry_block)[2];
     let arg_layout = AbiLayout::for_args(&signature.args)?;
     let mut locals: AHashMap<String, (Variable, RawKind)> = AHashMap::new();
     let mut param_locals: Vec<(Variable, RawKind)> =
@@ -7742,10 +8140,37 @@ fn build_supported_body(
         function_body: true,
         returned_use: NumericErrUse::Returned,
         call_scope,
+        call_depth,
     };
 
-    // Stack guard: compare a stack slot address (proxy for current SP) against
-    // the thread-local stack limit retrieved via helper call.
+    // Guards, as the interpreter's call entry has: the call's depth against
+    // `max_recursion_depth`, then a stack slot's address (a proxy for the
+    // stack pointer) against the thread's stack limit. A refused call
+    // releases the owned arguments it was given.
+    let max_depth = i64::try_from(max_recursion_depth()).unwrap_or(i64::MAX);
+    let depth_ok = builder.ins().icmp_imm_s(
+        cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
+        call_depth,
+        max_depth,
+    );
+    let stack_block = builder.create_block();
+    let depth_block = builder.create_block();
+    builder
+        .ins()
+        .brif(depth_ok, stack_block, &[], depth_block, &[]);
+
+    builder.switch_to_block(depth_block);
+    builder.seal_block(depth_block);
+    for &(var, kind) in &param_locals {
+        if kind == RawKind::OwnedVal {
+            drop_owned_var(builder, &helper_refs, var);
+        }
+    }
+    let sentinel = builder.ins().iconst(types::I64, JIT_RECURSION_LIMIT);
+    builder.ins().return_(&[sentinel]);
+
+    builder.switch_to_block(stack_block);
+    builder.seal_block(stack_block);
     let guard_slot =
         builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 0));
     let sp_proxy = builder.ins().stack_addr(ptr_ty, guard_slot, 0);
@@ -7764,6 +8189,11 @@ fn build_supported_body(
 
     builder.switch_to_block(overflow_block);
     builder.seal_block(overflow_block);
+    for &(var, kind) in &param_locals {
+        if kind == RawKind::OwnedVal {
+            drop_owned_var(builder, &helper_refs, var);
+        }
+    }
     let sentinel = builder.ins().iconst(types::I64, JIT_STACK_EXHAUSTED);
     builder.ins().return_(&[sentinel]);
 
@@ -8140,12 +8570,13 @@ fn build_supported_body(
                     return Err("JIT tail-call arity mismatch".to_string());
                 }
 
-                // An owned argument for an Int parameter, such as a numeric
-                // op's result kept as a value, is prepared here as the
-                // interpreter's call would, so the loop goes on. Any other
-                // kind mismatch calls through the VM.
+                // An owned argument for a parameter the loop holds raw (an
+                // Int, Bool, Dec or Null), such as a numeric op's result or a
+                // field kept as a value, is prepared here as the interpreter's
+                // call would, so the loop goes on instead of nesting a call
+                // per iteration. Any other kind mismatch calls through the VM.
                 let mut kind_mismatch = false;
-                let mut owned_ints = Vec::new();
+                let mut owned_raws = Vec::new();
                 for (idx, &(_, param_kind)) in param_locals
                     .iter()
                     .enumerate()
@@ -8157,10 +8588,13 @@ fn build_supported_body(
                         continue;
                     }
                     if actual_kind == RawKind::OwnedVal
-                        && param_kind == RawKind::Int
+                        && matches!(
+                            param_kind,
+                            RawKind::Int | RawKind::Bool | RawKind::Dec | RawKind::Null
+                        )
                         && !ctx.error_capture_active
                     {
-                        owned_ints.push(idx);
+                        owned_raws.push(idx);
                         continue;
                     }
                     kind_mismatch = true;
@@ -8178,29 +8612,54 @@ fn build_supported_body(
                     )?;
                     continue;
                 }
+                // A Dec argument is staged in a slot of this call's own, then
+                // copied into the slot its parameter reads from once every
+                // argument is staged: an argument can read a parameter whose
+                // slot another argument would otherwise overwrite first, as
+                // in `f(b, a)`.
+                let dec_slot = |builder: &mut FunctionBuilder<'_>| {
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        mem::size_of::<D256>() as u32,
+                        3,
+                    ));
+                    builder.ins().stack_addr(ptr_ty, slot, 0)
+                };
                 let mut through_vm = None;
                 let mut halts = Vec::new();
                 let mut unboxed = AHashMap::new();
-                for &idx in &owned_ints {
+                for &idx in &owned_raws {
+                    let param_kind = param_locals[idx].1;
                     let reg = *args_start + idx as u32;
                     let raw = ctx.reg_value(builder, reg)?;
-                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        StackSlotKind::ExplicitSlot,
-                        mem::size_of::<i64>() as u32,
-                        3,
-                    ));
-                    let out = builder.ins().stack_addr(ptr_ty, slot, 0);
+                    let out = if param_kind == RawKind::Dec {
+                        dec_slot(builder)
+                    } else {
+                        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            mem::size_of::<i64>() as u32,
+                            3,
+                        ));
+                        builder.ins().stack_addr(ptr_ty, slot, 0)
+                    };
+                    let kind = builder
+                        .ins()
+                        .iconst(types::I64, helper_value_kind(param_kind));
                     let call = builder
                         .ins()
-                        .call(ctx.helper_refs.owned_int_arg, &[raw, out]);
+                        .call(ctx.helper_refs.owned_raw_arg, &[raw, kind, out]);
                     let status = builder.inst_results(call)[0];
                     halts.push(emit_halt_check(builder, status));
                     let other_block = *through_vm.get_or_insert_with(|| builder.create_block());
-                    let int_block = builder.create_block();
-                    builder.ins().brif(status, other_block, &[], int_block, &[]);
-                    builder.switch_to_block(int_block);
-                    builder.seal_block(int_block);
-                    let value = builder.ins().load(types::I64, MemFlagsData::new(), out, 0);
+                    let raw_block = builder.create_block();
+                    builder.ins().brif(status, other_block, &[], raw_block, &[]);
+                    builder.switch_to_block(raw_block);
+                    builder.seal_block(raw_block);
+                    let value = match param_kind {
+                        RawKind::Dec => out,
+                        RawKind::Null => builder.ins().iconst(types::I64, 0),
+                        _ => builder.ins().load(types::I64, MemFlagsData::new(), out, 0),
+                    };
                     unboxed.insert(idx, value);
                 }
                 let mut new_values = Vec::with_capacity(param_locals.len());
@@ -8218,16 +8677,9 @@ fn build_supported_body(
                     let new_val = match param_kind {
                         RawKind::OwnedVal => clone_owned_raw(builder, &ctx.helper_refs, raw),
                         RawKind::Dec => {
-                            let tmp_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                                StackSlotKind::ExplicitSlot,
-                                mem::size_of::<D256>() as u32,
-                                3,
-                            ));
-                            let tmp_ptr = builder.ins().stack_addr(ptr_ty, tmp_slot, 0);
-                            builder
-                                .ins()
-                                .call(ctx.helper_refs.copy_dec, &[raw, tmp_ptr]);
-                            tmp_ptr
+                            let staged = dec_slot(builder);
+                            builder.ins().call(ctx.helper_refs.copy_dec, &[raw, staged]);
+                            staged
                         }
                         RawKind::Int | RawKind::Bool | RawKind::Null => raw,
                         RawKind::TypeTag | RawKind::StringConst => {
@@ -8248,7 +8700,16 @@ fn build_supported_body(
                     }
                 }
 
-                for (param_var, _, new_val) in new_values {
+                for (param_var, param_kind, new_val) in new_values {
+                    let new_val = if param_kind == RawKind::Dec {
+                        let param_slot = dec_slot(builder);
+                        builder
+                            .ins()
+                            .call(ctx.helper_refs.copy_dec, &[new_val, param_slot]);
+                        param_slot
+                    } else {
+                        new_val
+                    };
                     builder.def_var(param_var, new_val);
                 }
                 builder.ins().jump(ctx.blocks[0], &[]);
@@ -10104,6 +10565,7 @@ fn compile_thunk_inline(
     merge_block: cranelift_codegen::ir::Block,
     returned_use: NumericErrUse,
     call_scope: CallScope<'_>,
+    call_depth: cranelift_codegen::ir::Value,
 ) -> Result<RawKind, String> {
     let instructions = &lambda.instructions;
     if instructions.is_empty() {
@@ -10166,6 +10628,7 @@ fn compile_thunk_inline(
         function_body: false,
         returned_use,
         call_scope,
+        call_depth,
     };
 
     let mut return_kind: Option<RawKind> = None;
@@ -10281,6 +10744,7 @@ fn emit_self_recursive_call(
     register_kinds: &[Option<RawKind>],
     args_start: u32,
     args_count: u8,
+    call_depth: cranelift_codegen::ir::Value,
 ) -> SelfRecursiveCallResult {
     if usize::from(args_count) != signature.args.len() {
         return Err("JIT self-recursive call arity mismatch".to_string());
@@ -10345,7 +10809,10 @@ fn emit_self_recursive_call(
         3,
     ));
     let result_ptr = builder.ins().stack_addr(ptr_ty, result_slot, 0);
-    let call_inst = builder.ins().call(self_func_ref, &[arg_ptr, result_ptr]);
+    let next_depth = builder.ins().iadd_imm_s(call_depth, 1);
+    let call_inst = builder
+        .ins()
+        .call(self_func_ref, &[arg_ptr, result_ptr, next_depth]);
     let ret_flag = builder.inst_results(call_inst)[0];
 
     let zero = builder.ins().iconst(types::I64, 0);
@@ -10396,6 +10863,8 @@ pub struct CallNames<'a> {
     namespace_variables: Option<&'a indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>>,
     core_functions: Option<&'a indexmap::IndexMap<String, FunctionId>>,
     native_shadows: Option<&'a crate::lang::runtime::native_core::NativeCoreShadows>,
+    /// The VM traces its calls (see [`CallNames::traced`]).
+    traced: bool,
 }
 
 impl<'a> CallNames<'a> {
@@ -10408,7 +10877,15 @@ impl<'a> CallNames<'a> {
             namespace_variables: Some(namespace_variables),
             core_functions: Some(core_functions),
             native_shadows: Some(native_shadows),
+            traced: false,
         }
+    }
+
+    /// Whether the VM traces its calls: then a compiled function's call of
+    /// itself goes through the VM, which traces it, as it traces every
+    /// interpreted call, rather than straight into the compiled code.
+    pub fn traced(self, traced: bool) -> Self {
+        Self { traced, ..self }
     }
 
     /// Where the code of `function` (the function with id `function_id`)
@@ -10439,6 +10916,12 @@ struct CallScope<'a> {
 }
 
 impl CallScope<'_> {
+    /// Whether the body calls itself natively, rather than through the VM
+    /// (see [`CallNames::traced`]).
+    fn native_self_calls(&self) -> bool {
+        !self.names.traced
+    }
+
     /// The function a call by `name` with `arity` arguments reaches, when it
     /// is known before the call runs; `None` when the call has to go through
     /// the VM by name.
@@ -10548,6 +11031,7 @@ fn try_inline_lazy_branch_call(
     // amounts to.
     result_use: NumericErrUse,
     call_scope: CallScope<'_>,
+    call_depth: cranelift_codegen::ir::Value,
 ) -> Result<Option<(RawKind, cranelift_codegen::ir::Value)>, String> {
     let callee = match program.functions.get(called_function_id as usize) {
         Some(f) => f,
@@ -10645,6 +11129,7 @@ fn try_inline_lazy_branch_call(
             then_merge,
             result_use,
             call_scope,
+            call_depth,
         )?;
 
         // Compile else-branch (writes to result_var, jumps to else_merge)
@@ -10667,6 +11152,7 @@ fn try_inline_lazy_branch_call(
                 else_merge,
                 result_use,
                 call_scope,
+                call_depth,
             )?
         } else {
             builder.def_var(result_var, zero);
@@ -13751,7 +14237,9 @@ mod tests {
             source: None,
         });
 
-        let n = 20_000i64;
+        // As deep as the depth cap lets compiled recursion go, as it lets
+        // the interpreter's.
+        let n = crate::lang::runtime::vm::max_recursion_depth() as i64 - 1;
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
 
         // Production always runs the VM on VM_THREAD_STACK_SIZE threads (see

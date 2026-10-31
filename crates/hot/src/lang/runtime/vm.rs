@@ -163,6 +163,18 @@ pub fn max_recursion_depth() -> usize {
     })
 }
 
+/// The error for a call refused at `depth` because it would pass `max`
+/// (see [`max_recursion_depth`]).
+pub(crate) fn recursion_limit_message(depth: usize, max: usize) -> String {
+    format!(
+        "Function call recursion limit reached (depth {}, max {}). \
+         This usually indicates unbounded recursion. \
+         Use tail recursion (TCO-eligible position), an iterative form, \
+         or raise HOT_MAX_RECURSION_DEPTH if your workload genuinely needs deeper calls.",
+        depth, max,
+    )
+}
+
 /// Failure state that can be shared across threads for parallel execution
 #[derive(Debug, Clone)]
 pub struct FailureState {
@@ -989,6 +1001,12 @@ impl VirtualMachine {
 
     pub fn jit_has_compiled_function(&self, function_id: FunctionId) -> bool {
         self.jit.has_compiled_function(function_id)
+    }
+
+    /// The VM's JIT state, for tests that drive compiled code directly.
+    #[cfg(test)]
+    pub(crate) fn jit_state_mut(&mut self) -> &mut crate::lang::runtime::jit::JitRuntimeState {
+        &mut self.jit
     }
 
     /// Set the database pool for file storage and other operations
@@ -6403,12 +6421,9 @@ impl VirtualMachine {
                     self.function_call_depth,
                     max_depth,
                 );
-                return Err(VmError::runtime(format!(
-                    "Function call recursion limit reached (depth {}, max {}). \
-                     This usually indicates unbounded recursion. \
-                     Use tail recursion (TCO-eligible position), an iterative form, \
-                     or raise HOT_MAX_RECURSION_DEPTH if your workload genuinely needs deeper calls.",
-                    self.function_call_depth, max_depth,
+                return Err(VmError::runtime(recursion_limit_message(
+                    self.function_call_depth,
+                    max_depth,
                 )));
             }
             self.function_call_depth += 1;
@@ -8103,9 +8118,7 @@ impl VirtualMachine {
         // backstop must be checked here as well.
         if crate::lang::runtime::limits::vm_stack_exhausted() {
             return Err(VmError::runtime(
-                "Native stack budget exhausted by deep recursion. \
-                 Use tail recursion (TCO-eligible position) or an iterative form."
-                    .to_string(),
+                crate::lang::runtime::limits::stack_budget_exhausted_message(),
             ));
         }
         super::jit::increment_lambda_interpreter_call_count();
@@ -8618,16 +8631,49 @@ impl VirtualMachine {
         Ok(last_result)
     }
 
-    /// Execute a user function
+    /// Run the compiled code for calling `function_id` with `args`: `None`
+    /// when there is none, or the thread is too deep in its stack to start
+    /// it, for the interpreter to run the call. A traced call is traced as an
+    /// interpreted one is.
     fn try_jit_call(&mut self, function_id: u32, args: &[Val]) -> Result<Option<Val>, String> {
         let Some(compiled) = self.jit.compiled_function(function_id, args) else {
             return Ok(None);
         };
+        if !crate::lang::runtime::jit::can_start_compiled_code() {
+            return Ok(None);
+        }
+        let call_id = if self.traces_calls() {
+            let program = Arc::clone(&self.program);
+            program
+                .functions
+                .get(function_id as usize)
+                .and_then(|function_info| self.begin_traced_call(function_info, args))
+        } else {
+            None
+        };
+        let result = self.run_compiled_call(function_id, &compiled, args);
+        if let Ok(value) = &result
+            && call_id.is_some()
+            && !self.has_failed()
+            && !self.has_cancelled()
+        {
+            self.end_traced_call(call_id, value);
+        }
+        result.map(Some)
+    }
+
+    /// Run `compiled`, the code for calling `function_id` with `args`.
+    fn run_compiled_call(
+        &mut self,
+        function_id: u32,
+        compiled: &crate::lang::runtime::jit::JitCompiledFunction,
+        args: &[Val],
+    ) -> Result<Val, String> {
         // Code that never looks up a name or runs other Hot code needs
         // neither the call's frame nor its namespace.
         if !compiled.needs_vm_scope() {
             let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-            let result = compiled.try_call(args);
+            let result = compiled.call(args);
             crate::lang::runtime::jit::set_jit_vm_ptr(prev);
             return result;
         }
@@ -8656,7 +8702,7 @@ impl VirtualMachine {
         }
 
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-        let result = compiled.try_call(args);
+        let result = compiled.call(args);
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
         self.scope_stack.truncate(saved_scope_depth);
         self.current_namespace = saved_namespace;
@@ -8769,19 +8815,14 @@ impl VirtualMachine {
             .filter(|(id, _)| *id == function_id);
         let max_depth = max_recursion_depth();
         if self.user_function_depth >= max_depth {
-            return Err(VmError::runtime(format!(
-                "Function call recursion limit reached (depth {}, max {}). \
-                 This usually indicates unbounded recursion. \
-                 Use tail recursion (TCO-eligible position), an iterative form, \
-                 or raise HOT_MAX_RECURSION_DEPTH if your workload genuinely needs deeper calls.",
-                self.user_function_depth, max_depth,
+            return Err(VmError::runtime(recursion_limit_message(
+                self.user_function_depth,
+                max_depth,
             )));
         }
         if crate::lang::runtime::limits::vm_stack_exhausted() {
             return Err(VmError::runtime(
-                "Native stack budget exhausted by deep recursion. \
-                 Use tail recursion (TCO-eligible position) or an iterative form."
-                    .to_string(),
+                crate::lang::runtime::limits::stack_budget_exhausted_message(),
             ));
         }
         // A `where` predicate has its own, smaller call-depth budget.
@@ -8834,104 +8875,17 @@ impl VirtualMachine {
         result
     }
 
-    /// Written-register set for a function body (lazily computed and cached).
-    fn function_used_registers(&mut self, function_id: FunctionId) -> std::rc::Rc<[u32]> {
-        if let Some(cached) = self.function_used_registers_cache.get(&function_id) {
-            return std::rc::Rc::clone(cached);
-        }
-        let used: std::rc::Rc<[u32]> = self
-            .program
-            .functions
-            .get(function_id as usize)
-            .map(|info| {
-                crate::lang::bytecode::LambdaInfo::compute_used_registers(&info.instructions)
-            })
-            .unwrap_or_default()
-            .into();
-        self.function_used_registers_cache
-            .insert(function_id, std::rc::Rc::clone(&used));
-        used
-    }
-
-    fn execute_user_function_impl(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
-        if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
-            self.jit.record_call(function_id, args);
-
-            let was_halted = self.has_failed() || self.has_cancelled();
-            if let Some(result) = self.try_jit_call(function_id, args).map_err(|msg| {
-                VmError::RuntimeError(
-                    RuntimeError::new(msg).with_instruction_pointer(self.instruction_pointer),
-                )
-            })? {
-                self.propagate_jit_halt(was_halted)?;
-                return Ok(result);
-            }
-
-            let program = Arc::clone(&self.program);
-            let function_info = program.functions.get(function_id as usize).ok_or_else(|| {
-                VmError::runtime(format!("Function with ID {} not found", function_id))
-            })?;
-            let function_name = &function_info.name;
-
-            if self.jit.should_compile_now(function_id, args)
-                && !self.jit_blocked_by_overload_dispatch(function_id)
-            {
-                let shadows = self.native_core_shadows();
-                let compile_result = self.jit.compile_function(
-                    &program,
-                    function_id,
-                    function_info,
-                    args,
-                    CallNames::new(&self.namespace_variables, &self.core_functions, &shadows),
-                );
-
-                match compile_result {
-                    Ok(()) => {
-                        tracing::debug!("[JIT] compiled '{}' (id={})", function_name, function_id);
-                        if let Some(result) =
-                            self.try_jit_call(function_id, args).map_err(|msg| {
-                                VmError::RuntimeError(
-                                    RuntimeError::new(msg)
-                                        .with_function(function_name.to_owned())
-                                        .with_instruction_pointer(self.instruction_pointer),
-                                )
-                            })?
-                        {
-                            self.propagate_jit_halt(was_halted)?;
-                            return Ok(result);
-                        }
-                    }
-                    Err(err) => {
-                        let reason = super::jit::jit_bailout_reason(&err);
-                        tracing::debug!(
-                            "[JIT] compilation skipped for '{}' (id={}, reason={}): {}",
-                            function_name,
-                            function_id,
-                            reason,
-                            err
-                        );
-                        super::jit::increment_jit_bailout_count();
-                        if !super::jit::is_retryable_jit_bailout(&err) {
-                            self.jit.mark_do_not_jit(function_id);
-                        }
-                    }
-                }
-            }
-        }
-
-        let program = Arc::clone(&self.program);
-        let function_info = program.functions.get(function_id as usize).ok_or_else(|| {
-            VmError::runtime(format!("Function with ID {} not found", function_id))
-        })?;
+    /// When calls are traced, start tracing a call of `function_info` with
+    /// `args`: push its call context and emit its `call:start` event. Returns
+    /// the call's id, for [`Self::end_traced_call`].
+    fn begin_traced_call(
+        &mut self,
+        function_info: &crate::lang::bytecode::FunctionInfo,
+        args: &[Val],
+    ) -> Option<uuid::Uuid> {
         let function_name = &function_info.name;
-        let function_arity = function_info.arity;
-        let function_param_names = &function_info.param_names;
-        let function_is_variadic = function_info.is_variadic;
-        let function_has_instructions = !function_info.instructions.is_empty();
-        let function_instructions_len = function_info.instructions.len();
         let function_source = &function_info.source;
         let function_flow_type = function_info.flow_type;
-
         // Fast path: Skip CallContext creation when calls aren't traced
         // This avoids UUID generation, timestamp calls, and call stack management
         let call_id = if self.traces_calls() {
@@ -9022,6 +8976,140 @@ impl VirtualMachine {
             );
             emitter.emit(start_event);
         }
+        call_id
+    }
+
+    /// Finish tracing call `call_id` (from [`Self::begin_traced_call`]),
+    /// which returned `result`: pop its call context and emit its
+    /// `call:stop` event.
+    fn end_traced_call(&mut self, call_id: Option<uuid::Uuid>, result: &Val) {
+        // Only do duration calculation and event emission when emitter is attached
+        if let (Some(emitter), Some(execution_context), Some(cid)) =
+            (&self.emitter, &self.execution_context, call_id)
+        {
+            // Calculate duration before popping call context
+            let (end_time, duration_us) = if let Some(call_ctx) = self.call_stack.last() {
+                let end = chrono::Utc::now();
+                let duration = (end - call_ctx.start_time).num_microseconds().unwrap_or(0);
+                (end, duration)
+            } else {
+                (chrono::Utc::now(), 0)
+            };
+
+            // Pop call context from stack
+            self.call_stack.pop();
+
+            // Emit call:stop event
+            let stop_event = crate::lang::emitter::EngineEvent::call_stop(
+                execution_context,
+                cid,
+                Some(result.clone()),
+                None, // No error since we're returning success
+                end_time,
+                duration_us,
+            );
+            emitter.emit(stop_event);
+        }
+    }
+
+    /// Written-register set for a function body (lazily computed and cached).
+    fn function_used_registers(&mut self, function_id: FunctionId) -> std::rc::Rc<[u32]> {
+        if let Some(cached) = self.function_used_registers_cache.get(&function_id) {
+            return std::rc::Rc::clone(cached);
+        }
+        let used: std::rc::Rc<[u32]> = self
+            .program
+            .functions
+            .get(function_id as usize)
+            .map(|info| {
+                crate::lang::bytecode::LambdaInfo::compute_used_registers(&info.instructions)
+            })
+            .unwrap_or_default()
+            .into();
+        self.function_used_registers_cache
+            .insert(function_id, std::rc::Rc::clone(&used));
+        used
+    }
+
+    fn execute_user_function_impl(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
+        if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
+            self.jit.record_call(function_id, args);
+
+            let was_halted = self.has_failed() || self.has_cancelled();
+            if let Some(result) = self.try_jit_call(function_id, args).map_err(|msg| {
+                VmError::RuntimeError(
+                    RuntimeError::new(msg).with_instruction_pointer(self.instruction_pointer),
+                )
+            })? {
+                self.propagate_jit_halt(was_halted)?;
+                return Ok(result);
+            }
+
+            let program = Arc::clone(&self.program);
+            let function_info = program.functions.get(function_id as usize).ok_or_else(|| {
+                VmError::runtime(format!("Function with ID {} not found", function_id))
+            })?;
+            let function_name = &function_info.name;
+
+            if self.jit.should_compile_now(function_id, args)
+                && !self.jit_blocked_by_overload_dispatch(function_id)
+            {
+                let shadows = self.native_core_shadows();
+                let compile_result = self.jit.compile_function(
+                    &program,
+                    function_id,
+                    function_info,
+                    args,
+                    CallNames::new(&self.namespace_variables, &self.core_functions, &shadows)
+                        .traced(self.traces_calls()),
+                );
+
+                match compile_result {
+                    Ok(()) => {
+                        tracing::debug!("[JIT] compiled '{}' (id={})", function_name, function_id);
+                        if let Some(result) =
+                            self.try_jit_call(function_id, args).map_err(|msg| {
+                                VmError::RuntimeError(
+                                    RuntimeError::new(msg)
+                                        .with_function(function_name.to_owned())
+                                        .with_instruction_pointer(self.instruction_pointer),
+                                )
+                            })?
+                        {
+                            self.propagate_jit_halt(was_halted)?;
+                            return Ok(result);
+                        }
+                    }
+                    Err(err) => {
+                        let reason = super::jit::jit_bailout_reason(&err);
+                        tracing::debug!(
+                            "[JIT] compilation skipped for '{}' (id={}, reason={}): {}",
+                            function_name,
+                            function_id,
+                            reason,
+                            err
+                        );
+                        super::jit::increment_jit_bailout_count();
+                        if !super::jit::is_retryable_jit_bailout(&err) {
+                            self.jit.mark_do_not_jit(function_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        let program = Arc::clone(&self.program);
+        let function_info = program.functions.get(function_id as usize).ok_or_else(|| {
+            VmError::runtime(format!("Function with ID {} not found", function_id))
+        })?;
+        let function_name = &function_info.name;
+        let function_arity = function_info.arity;
+        let function_param_names = &function_info.param_names;
+        let function_is_variadic = function_info.is_variadic;
+        let function_has_instructions = !function_info.instructions.is_empty();
+        let function_instructions_len = function_info.instructions.len();
+
+        let call_id = self.begin_traced_call(function_info, args);
 
         {
             // Check arity (basic validation)
@@ -9265,7 +9353,8 @@ impl VirtualMachine {
                                                 &self.namespace_variables,
                                                 &self.core_functions,
                                                 &shadows,
-                                            ),
+                                            )
+                                            .traced(self.traces_calls()),
                                         ) {
                                             Ok(()) => {}
                                             Err(err) => {
@@ -9348,33 +9437,7 @@ impl VirtualMachine {
             let result = result?;
             restored?;
 
-            // Only do duration calculation and event emission when emitter is attached
-            if let (Some(emitter), Some(execution_context), Some(cid)) =
-                (&self.emitter, &self.execution_context, call_id)
-            {
-                // Calculate duration before popping call context
-                let (end_time, duration_us) = if let Some(call_ctx) = self.call_stack.last() {
-                    let end = chrono::Utc::now();
-                    let duration = (end - call_ctx.start_time).num_microseconds().unwrap_or(0);
-                    (end, duration)
-                } else {
-                    (chrono::Utc::now(), 0)
-                };
-
-                // Pop call context from stack
-                self.call_stack.pop();
-
-                // Emit call:stop event
-                let stop_event = crate::lang::emitter::EngineEvent::call_stop(
-                    execution_context,
-                    cid,
-                    Some(result.clone()),
-                    None, // No error since we're returning success
-                    end_time,
-                    duration_us,
-                );
-                emitter.emit(stop_event);
-            }
+            self.end_traced_call(call_id, &result);
 
             Ok(result)
         }
@@ -10371,6 +10434,12 @@ impl VirtualMachine {
     /// Check if the VM has failed
     pub fn has_failed(&self) -> bool {
         self.failure_state.failed.load(Ordering::SeqCst)
+    }
+
+    /// How many user-function calls are running, the current one included
+    /// (see `execute_user_function`).
+    pub(crate) fn user_function_depth(&self) -> usize {
+        self.user_function_depth
     }
 
     /// After a JIT-compiled frame returns, surface a halt it raised. JIT
