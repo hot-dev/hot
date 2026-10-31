@@ -337,8 +337,25 @@ fn current_thread_stack() -> Option<(u64, u64)> {
 }
 
 /// The current thread's stack as its lowest address and its size, when the
+/// platform reports them. On Windows that is the thread's whole reservation,
+/// guard pages included, which the guards' reserves are well clear of.
+#[cfg(windows)]
+fn current_thread_stack() -> Option<(u64, u64)> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThreadStackLimits(low_limit: *mut usize, high_limit: *mut usize);
+    }
+    let mut low = 0usize;
+    let mut high = 0usize;
+    // SAFETY: the call only writes the calling thread's own stack bounds into
+    // the two locals.
+    unsafe { GetCurrentThreadStackLimits(&mut low, &mut high) };
+    (high > low).then(|| (low as u64, (high - low) as u64))
+}
+
+/// The current thread's stack as its lowest address and its size, when the
 /// platform reports them.
-#[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))]
 fn current_thread_stack() -> Option<(u64, u64)> {
     None
 }
