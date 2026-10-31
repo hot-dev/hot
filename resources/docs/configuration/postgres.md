@@ -198,7 +198,7 @@ it lists applied, pending and mismatched migrations. See
 
 ## Upgrading from Hot 3.0.0 {#upgrading-from-hot-300}
 
-Hot 3.0.1 adds migrations 017 to 022. You can apply them while 3.0.0 keeps
+Hot 3.0.1 adds migrations 017 to 023. You can apply them while 3.0.0 keeps
 serving, then roll the services:
 
 1. **Take a backup.** See [Backups](#backups).
@@ -228,6 +228,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS file_active_storage_path_idx
 A `CREATE INDEX CONCURRENTLY` that fails leaves an invalid index. Check
 `SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid`, and drop and
 recreate any index it lists before you migrate.
+
+Migration 022 adds a nullable `key_text` column to store entries and commits
+at once, with no table rewrite. Migration 023 fills it in one environment at
+a time, then builds the store prefix index. Store reads continue throughout
+023; store writes wait while the index builds, so expect it to take longer on
+large stores.
 
 Rolling back to 3.0.0 after the migration works, except for `hm_` management
 credentials, which stay revoked.

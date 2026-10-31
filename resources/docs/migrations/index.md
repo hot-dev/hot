@@ -1,5 +1,5 @@
 ---
-description: "Upgrade Hot between releases, including the Hot 3.0 database, language, and API changes, and move local SQLite databases from 1.x to 2."
+description: "Upgrade Hot between releases, including the Hot 3.0.0 to 3.0.1 upgrade, the Hot 3.0 database, language, and API changes, and move local SQLite databases from 1.x to 2."
 ---
 
 # Migrations and Upgrades
@@ -36,6 +36,318 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.0 to 3.0.1 {#upgrading-from-3-0-0-to-3-0-1}
+
+Hot 3.0.1 fixes the issues found in a full review of everything merged after
+3.0.0. Most fixes change nothing you need to act on. A few retire 3.0.0
+features or reject code that 3.0.0 accepted, and those are listed first. Read
+**Before you upgrade** and **Code that 3.0.1 rejects** before you roll it out.
+
+### Before you upgrade {#3-0-1-before-you-upgrade}
+
+**Management credentials are retired.**
+- Migration 020 revokes every `hm_` management credential and deactivates the
+  environment keys one issued. Other keys are untouched.
+- `/v1/management/*` returns `410 Gone`, and an `hm_` token gets `401
+  management_credential_retired`.
+- Use org API keys and the [`/v1/orgs` routes](/docs/api/management) instead.
+  Version 1.3.0 of every SDK uses them.
+- Before upgrading, list the keys the migration will deactivate. On
+  PostgreSQL, run this as a superuser or `BYPASSRLS` role; on SQLite, drop the
+  `hot.` prefixes:
+
+```sql
+SELECT k.api_key_id, k.description, e.name AS env, m.name AS issued_by
+FROM hot.api_key_management_issuer i
+JOIN hot.api_key k ON k.api_key_id = i.api_key_id
+JOIN hot.env e ON e.env_id = k.env_id
+JOIN hot.management_key m ON m.management_key_id = i.management_key_id
+WHERE k.active;
+```
+
+Afterwards, mint replacements with `POST /v1/orgs/{org}/envs/{env}/api-keys`.
+You can also reactivate a key in the App, and it then works as an ordinary
+environment key.
+
+**PostgreSQL: a rolling upgrade.**
+1. Run `hot db migrate` with the 3.0.1 CLI while 3.0.0 is still serving.
+2. Re-run the 3.0.1 `provision_runtime.sql`.
+3. Roll the services, workers first.
+
+3.0.1 services refuse to start when the runtime login lacks grants on Hot's
+tables, or when the schema is behind the release. You can roll back to 3.0.0
+after the migration, but `hm_` credentials stay revoked.
+
+**Migrations 017–023 run on upgrade.**
+- **Lock waits:** migrations wait at most 5 s for a lock
+  (`db.migration-lock-timeout-ms`) and retry up to 5 times.
+- **019 checks your data:** it refuses to run over duplicate project names in
+  an environment, or stores whose organization or environment is gone, and it
+  names the rows. Repair queries are under [Migration 019 refuses to
+  run](#migration-019-refuses-to-run).
+- **Write blocking:** 019 and 021 block writes to the tables they index while
+  they run. With millions of files, pre-create 021's index `CONCURRENTLY`
+  first; the statement is in the [PostgreSQL
+  guide](/docs/configuration/postgres).
+- **022 and 023 (stores):** 022 adds a nullable `key_text` column to store
+  entries and commits immediately, with no table rewrite. 023 fills it in one
+  environment at a time, then builds the store prefix index. Store reads
+  continue throughout 023. Store writes wait while the index builds. Expect
+  023 to take longer on large stores.
+- **Status:** `hot db status` lists applied, pending and mismatched
+  migrations. On PostgreSQL, pass `--db.migration-uri`.
+- **SQLite:** a local database is copied to `<db>.pre-migrate.bak` before
+  migrations change it.
+
+**Packages, SDKs and the self-host bundle.**
+- **hot-std:** hot-std 3.0.1 requires Hot 3.0.1.
+- **hot-ai-agent:** 1.5.0 requires Hot 3.0.1; stay on 1.4.1 with Hot 3.0.0.
+- **Image helpers:** gemini 1.1.4, openai 1.2.9 and xai 1.1.4 fix their image
+  helpers.
+- **SDKs:** version 1.3.0 of the Go, Java, JavaScript, Python and Rust SDKs
+  replaces `HotManagementClient` with the org API, and needs Hot 3.0.1.
+- **JavaScript proxy:** the JavaScript SDK's `/proxy` helper now requires
+  `allowEventTypes`, and rejects `hot:` event types unless they are listed
+  exactly. This is a breaking change for proxy users.
+- **Self-host bundle:** re-render it. The Valkey healthcheck now passes, nginx
+  runs with a read-only filesystem, `HOT_DAEMON` no longer respawns commands,
+  and `HOT_APP_URL`/`HOT_API_URL` name your hosts.
+
+### Code that 3.0.1 rejects {#3-0-1-code-that-is-rejected}
+
+These are compile errors in `hot check`, `hot build`, `hot deploy`, `hot run`
+and when a worker compiles a deployed bundle. A deployed 3.0.0 bundle that
+contains one fails until you fix it and redeploy. Run `hot check` on your
+projects with the 3.0.1 CLI before rolling out workers.
+
+| 3.0.1 rejects | Fix |
+|---|---|
+| A `match` on a closed literal union that misses members | Add the missing arms or a `_ =>` arm |
+| A bare name in meta that names nothing (`tags: [billing]`) | Quote it (`"billing"`) or define it |
+| An unknown variant of a closed enum in meta (`Priority.Nope`) | Use a declared variant |
+| A `timeout` meta that isn't a positive integer (`"30s"`) | Write whole seconds (`30`) |
+| A record literal that violates a `where` clause, including in new positions | Fix the value, or compute it at run time |
+| A non-exhaustive `match` on a binding of a call whose return type is an enum | Add the missing arms or `_ =>` |
+| A meta `schedule` that names one run (`"2026-11-01"`, `"in 10 minutes"`, `"2h"`, `"tomorrow at 9am"`) | Use `every …`, or send a `hot:schedule:new` event to run once |
+| A type alias defined in terms of itself (`A type A \| "x"`, `A type B` with `B type A`) | Recurse through a record field or a `Vec`/`Map` element |
+| An arrow that adds a variant to a closed enum | Declare the variant, or declare the enum `enum open` |
+| A `pkg.hot` that isn't literal data (bindings, templates, calls, spreads) | Write each value out |
+| A package `src-paths`, `test-paths` or `resource-paths` outside the package (`../shared`, absolute paths) | Move the files into the package |
+| A bare dependency name next to a coordinate with the same package name (`utils` next to `acme.com/utils`) | Use full coordinates |
+| A non-hot.dev dependency with an empty spec (`"acme.com/x": {}`) | Give it a `local`, `git` or `pkg` source |
+| Expressions nested more than 256 levels deep | Split them into functions |
+| `::ns/var[i]` and `::ns/var.a.b` | Bind the reference first: `v ::ns/var`, then `v[i]` |
+| A wrong-arity call or other call error inside `${...}` or in the first arm of a `cond` | Fix the call (these failed at run time anyway) |
+
+`hot check` also reports new **warnings**:
+- unresolved names inside literals, templates, arms and spreads;
+- `unresolved-type` for an undeclared type in a record field, variant payload
+  or return annotation;
+- `unknown-variant` for a misspelled `Enum.Variant`.
+
+Warnings fail a check only with `--check.deny-warnings`.
+
+### Language and runtime changes {#3-0-1-language-and-runtime}
+
+**Matching and binding**
+- **Payload binding:** in a match arm on a variant whose payload isn't a
+  record, a binding the arm names (`Status.Open (steps) =>`) holds the
+  payload. The matched variable, including a `fn match` parameter, keeps the
+  variant, as in 3.0.0, so an arm can pass it on as the enum. Mixed and
+  optional payloads (`Vec<Int | Dec>`, `Ask?`, `Ask | Str`) bind the payload.
+- **No matching arm:** a `match` with no matching arm and no default returns
+  `null` in the interpreter too. It used to return the previous call's result.
+
+**Statements and results**
+- **Dotted calls:** a namespace-level `obj.field(args)` calls the field, as it
+  does inside a function body. A bare `obj.field` line is a read. Before, both
+  replaced the field.
+- **Run results:** `hot run` and `hot eval` print the run's own result, even
+  when namespaces read each other's values.
+- **Value cycles:** a value cycle across namespaces is a run-time error that
+  names the cycle, instead of a crash.
+- **Meta names:** a meta name whose namespace hasn't run yet reads as written,
+  instead of running its initializer a second time.
+
+**Parallel flows and calls**
+- Parallel flows inside lambdas and callbacks run their bindings.
+- Parallel results come back in source order.
+- Functions containing a `parallel` flow run in the interpreter.
+- `call-lib` evaluates its arguments once.
+
+**Printing**
+- `Str()`, `println` and templates print nested containers in Hot form (`{k:
+  [1]}`).
+
+**Compiled code (the JIT)**
+
+Compiled code, used after 100 calls or sooner with `--jit.threshold`, now
+gives the interpreter's results and errors:
+- collecting flows with no matching arm;
+- bindings inside branches, which no longer change the outer variable;
+- calls through aliases, imports and top-level lambdas;
+- literal arms on an Err subject;
+- `length` of a non-collection, which is an Err;
+- spreads of a non-map and appends to a non-vector, which halt;
+- late-capturing lambdas;
+- wrong-arity calls.
+
+Compiled self-recursion counts toward `HOT_MAX_RECURSION_DEPTH`. Running out
+of native stack fails the call instead of re-running it. A panic reached from
+compiled code fails the run instead of aborting the worker. Functions over
+4,096 bytecode instructions aren't compiled.
+
+**Core names**
+- A bare call to a core name (`first`, `length`, `get`, …) reaches a project's
+  own core function, or a var import of that name.
+
+**ctx keys**
+- A ctx key that any reachable function requires is required, even when
+  another declares it optional.
+
+### Standard library and store {#3-0-1-std-and-store}
+
+- **`is-zero`:** `is-zero(0.0)` is `true` everywhere. `is-zero(null)` and
+  `is-zero` of a map are Errs.
+- **`mod`:** it takes the dividend's sign for Decs too: `mod(-7.0, 2)` is
+  `-1.0`.
+- **`rand-int()`:** returns a random non-negative Int; it always returned 0.
+- **`flatten`:** keeps strings whole, and flattens nested vectors at every
+  depth.
+- **Map builders:** `group-by`, `index-by`, `frequencies`, `map-keys`,
+  `map-vals`, `filter-keys` and `filter-vals` are linear. A `filter-keys` or
+  `filter-vals` predicate that returns an Err now halts.
+- **`Duration`:** keeps weeks and sub-second units, so `::hot::time/weeks(n)`
+  moves dates.
+- **`::hot::store` values:** stores Dec values exactly, so `get`, `list`,
+  `vals` and `search` return Decs (19.90 stays 19.90). Values written before
+  3.0.1 read back as they were stored.
+- **`put-if`:** matches a Dec read back with `get`.
+- **`list` and `keys`:** reject a `limit` or `offset` that isn't an Int.
+- **S3 uploads:** an S3 multipart upload started on Hot 2.6.10 or earlier is
+  aborted with an upload conflict; start it again.
+
+### `hot test` {#3-0-1-hot-test}
+
+- A relative schedule counts from when its `hot:schedule:new` was sent.
+- `deliver` runs alias event handlers, as the worker does, and is linear in
+  the events delivered.
+- `exit(0)` in a test or handler returns, and `exit(N)` fails it. A handler
+  that calls `cancel()` is not a failure.
+- `deliver(event)` outside `hot test` errors without publishing.
+- `advance` refuses a zero duration.
+
+### CLI, formatter and language server {#3-0-1-cli}
+
+- **`hot check`:**
+  - **Exit codes:** 0 when it passes, 1 for errors, 2 when it couldn't run. An
+    unknown `--check.format`, a missing path, or src paths with no `.hot`
+    files now exit 2.
+  - **JSON output:** `--check.format json` reports the same schedule, box-size
+    and policy errors as the text check.
+- **Secret scan:** the `hot check` and `hot watch` secret scan honours
+  `hot.build.allow-secret-shape`, and reports `secret-shape` diagnostics.
+- **`hot fmt`:**
+  - **Refusals:** it refuses, untouched, a file it can't format safely: one
+    that doesn't parse, or whose formatting would change the program or a
+    string literal. `--check` exits 1 for files it can't read.
+  - **Options:** `--force` is removed.
+  - **What it keeps:** block strings, meta comments and trailing commas are
+    kept.
+- **Daemon mode:** only `hot dev`, `hot api`, `hot app`, `hot worker`, `hot
+  task-worker` and `hot scheduler` daemonize, and only with `-d`.
+  `hot.daemon`/`HOT_DAEMON` no longer make other commands respawn.
+- **Projects:**
+  - `hot deploy -p X` deploys to remote project X.
+  - `hot build`, `hot compile` and `hot deploy` stop for a project `hot.hot`
+    doesn't define.
+  - `hot init` turns the directory name into a valid project name, and ignores
+    `hot/dev.key`.
+- **Dependencies:** `hot deps add`/`remove` exit 1 with the `hot.hot` snippet
+  to write. They were placeholders.
+- **Environment:**
+  - `HOT_WORKER_RUN_TIMEOUT`, `HOT_WORKER_MAX_RUN_TIMEOUT` and
+    `HOT_WORKER_CANCEL_ON_TIMEOUT` take effect.
+  - `<NAME>_FILE` works for values `hot.hot` reads with `::hot::env/get`.
+  - `HOT_APP_SESSION_SECRET` and `HOT_ENCRYPTION_KEY` are kept for the process
+    once found, so rotating them takes a restart.
+- **Language server:** positions are UTF-16, and the workspace root comes from
+  the editor. Diagnostics match `hot check` and update when other files
+  change. Formatting and workspace symbols are new.
+- **Skills:** an installed `.skills/` directory is no longer compiled as
+  project source.
+
+### API, streams and workers {#3-0-1-api}
+
+- **`/v1/orgs` responses:**
+  - `POST /v1/orgs` returns `409 slug_taken`/`external_id_taken` instead of
+    500, and an idempotent replay returns 200.
+  - Env-key and org-key lists return every key with real pagination.
+  - Org key objects have a chain-aware `status`.
+- **Errors:** every `/v1` error uses the JSON envelope. Webhooks and MCP
+  answer an org key with `403 key_scope_mismatch`.
+- **Projects and builds:**
+  - Deactivating a project returns 200.
+  - Deleting a project with builds returns `409 project_has_builds`.
+  - `GET /v1/builds` includes deactivated projects.
+- **Usage:** monthly allowances no longer reset early for month-end renewals.
+- **Streams:**
+  - Each run's `run:start` arrives before its data and its end, and each event
+    arrives once.
+  - With Redis, subscriptions survive quiet periods and Redis errors.
+  - A retried attempt's `run:fail` carries `status: "pending_retry"`.
+- **MCP and calls:**
+  - MCP `tools/call` binds named arguments in declared order on PostgreSQL.
+    Redeploy tools that have optional parameters between required ones.
+  - A `hot:call` to a missing function fails at once.
+- **Queues and workers:**
+  - A run killed by a trimmed Redis stream entry, a recovered Redis outage, or
+    a worker crash is re-run instead of lost.
+  - Setup failures are retried.
+  - An event that crashes its worker three times alone is dead-lettered with a
+    failed run.
+  - A run records at most 10,000 calls by default
+    (`hot.emitter.max-calls-per-run`).
+- **Schedules:**
+  - Dynamic schedules receive their `args`.
+  - Schedules a 3.0.0 bundle stored from one-time strings keep running until
+    the project is redeployed.
+  - `hot dev` restarts its scheduler after a slow database instead of
+    stopping.
+- **Hot Box:**
+  - `::hot::task/start(..., {type: "container"})` fails; use
+    `::hot::box/start`.
+  - Cancelling a box task stops its container.
+  - Untagged images pull `:latest`.
+  - Box task runs finish.
+
+### App {#3-0-1-app}
+
+- **XSS fixes:** stored and reflected XSS in the streams list, the API-key
+  pages, the event and run data links, and the webhook pages is fixed.
+- **Key form:** the new-API-key form keeps a Restricted key restricted after a
+  validation error.
+- **Error pages:** unknown ids return a 404 page, and a suspended or archived
+  workspace explains why.
+- **Front-end libraries:** htmx 2.0.11 and Alpine 3.17.5.
+- **Look and feel:** higher-contrast text, unified status badges, a visible
+  focus ring, and scrolling tab bars on phones.
+
+### Dependencies and security {#3-0-1-dependencies}
+
+- **RustSec advisories cleared:**
+  - zip: RUSTSEC-2026-0367, -0368 and -0369;
+  - ctutils, in the AES-GCM used for stored context secrets:
+    RUSTSEC-2026-0385;
+  - crypto-bigint: RUSTSEC-2026-0387;
+  - pulldown-cmark: RUSTSEC-2026-0414.
+- **Dependency updates:** cranelift 0.137, rustyline 19, jsonschema 0.60 (MCP
+  schema-validation fixes), parking_lot 0.13, google-cloud-storage 1.21, and
+  tower-lsp-server for the language server.
+- **Packaging:** the Linux `.deb` no longer depends on `libssl3t64`, and
+  release builds use `--locked`.
+- **Reporting vulnerabilities:** send reports to `security@hot.dev`.
+
 ## Upgrading to Hot 3.0 {#upgrading-to-hot-30}
 
 Hot 3.0 changes the database schema, the language, and API permissions. Read
@@ -47,7 +359,7 @@ this section before you upgrade.
   other Hot process, then copy the `.hot/db/` directory. For PostgreSQL, take
   a snapshot. See [Backups](/docs/configuration/postgres#backups).
 - **Hot 3.0.0 applies migrations 012 to 016 on PostgreSQL, and 3.0.1 applies
-  017 to 022.** Hot 2.6.11 added 010 and 011. Downgrading a migrated database
+  017 to 023.** Hot 2.6.11 added 010 and 011. Downgrading a migrated database
   is not supported. To go back, restore your backup.
 - **Ignore the "Hot 1.x database" hint.** A 2.x release that opens a migrated
   database says it is a Hot 1.x database and suggests `hot db port-v1-to-v2`
