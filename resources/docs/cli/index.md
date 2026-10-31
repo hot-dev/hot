@@ -274,10 +274,33 @@ can't start prints the reason on stderr and watching continues.
 Format Hot source files:
 
 ```bash
-hot fmt                     # Format all files
-hot fmt path/to/file.hot    # Format specific file
-hot fmt --check             # Check without writing (CI mode)
+hot fmt                       # Format the project's .hot files
+hot fmt path/to/file.hot src  # Format specific files and directories
+hot fmt --check               # Check without writing (CI mode)
 ```
+
+With no paths, `hot fmt` formats the `.hot` files under the current directory
+and the project's source paths. It honors `.gitignore` and `.hotignore`, and
+skips the skill snapshots in `.skills/` (pass a path inside `.skills/` to
+format them anyway). It does not load `hot.hot`, so it also works when the
+project configuration has an error.
+
+`hot fmt` only changes whitespace: it puts a declaration's name, `meta` and
+value on separate lines, expands long or multi-key `meta` blocks and one-line
+`type { … }` records to one entry per line, normalizes blank lines between
+declarations, trims trailing whitespace, and ends the file with one newline.
+It never edits inside string literals or comments, and it keeps the file's
+line endings (LF or CRLF).
+
+Before writing, it checks that the result parses to the same program as the
+original and that every string literal is unchanged. A file that does not
+parse, or whose formatting would change the program, is reported with a line
+and column and left untouched.
+
+`hot fmt --check` writes nothing: it lists the files that need formatting and
+exits with status 1 if there are any. In both modes, a file that cannot be
+read, parsed, formatted safely or written is an error and the exit status is
+1, so `hot fmt --check` is a reliable CI gate.
 
 ## Build & Deploy
 
