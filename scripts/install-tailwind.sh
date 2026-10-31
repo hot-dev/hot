@@ -19,11 +19,11 @@ install_dir="${2:?usage: $0 VERSION INSTALL_DIR}"
 # SHA-256 of each release asset, by "<version>/<asset>".
 pinned_sha256() {
     case "$1" in
-        v4.3.0/tailwindcss-linux-x64) echo 73f0e5459054e5cfaa8ab6f3b940f3fbe0f13cc7fd83bc24e7c655033c203400 ;;
-        v4.3.0/tailwindcss-linux-arm64) echo 8f48dcb72be3b351c10563c5329b4638ba8516820dc3b3a1609625a166e87cbd ;;
-        v4.3.0/tailwindcss-macos-x64) echo 2ba252f770817091e6d0d12a84e0dd531bcc29aad1bfd9d976a3aff1a071b67a ;;
-        v4.3.0/tailwindcss-macos-arm64) echo 56b4bbc62dbdc4614a78930d9c6986423a2ec63e4e640144a59a5d95c914322e ;;
-        v4.3.0/tailwindcss-windows-x64.exe) echo e4303d06a337899d426583508f55c143ce89a585f90ed080f482d02fd83093c1 ;;
+        v4.3.3/tailwindcss-linux-x64) echo dc61b3ac6b8c9ca874c0cc4c57b2409791a64c5540404ca5f5367360babc313a ;;
+        v4.3.3/tailwindcss-linux-arm64) echo 55fd0b241214eff3de1e8ee4f22796662f2d2e7a49bcfca7477cfd0bac398195 ;;
+        v4.3.3/tailwindcss-macos-x64) echo 7922e0953f2110c05976e3bf58f14e643d90427575e766b7d433f5f80cbee7e1 ;;
+        v4.3.3/tailwindcss-macos-arm64) echo cdf646702987a743464dff4d9c60fd4480d1c1e73dd819a9a67f1078815dce9d ;;
+        v4.3.3/tailwindcss-windows-x64.exe) echo e0e260ce048014e9268f6237ff18f8ccf02cef521cbd0ae04e82c2cdf7aa3955 ;;
         *) return 1 ;;
     esac
 }
