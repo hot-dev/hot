@@ -493,11 +493,12 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
         ),
         Command::TaskWorker {
             global,
+            server,
             queue,
             show_conf,
         } => (
             global.clone(),
-            None,
+            Some(server.clone()),
             None,
             Some(queue.clone()),
             None,

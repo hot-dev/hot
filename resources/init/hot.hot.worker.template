@@ -87,5 +87,3 @@ hot.file.aws.s3.region ::env/get("HOT_FILE_AWS_S3_REGION", "us-east-1")
 hot.file.aws.access-key-id ::env/get("HOT_FILE_AWS_ACCESS_KEY_ID", "")
 hot.file.aws.secret-access-key ::env/get("HOT_FILE_AWS_SECRET_ACCESS_KEY", "")
 
-// Daemon Mode
-hot.daemon true

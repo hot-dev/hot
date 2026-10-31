@@ -11,7 +11,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::cli::GlobalOptions;
-use crate::command::build::{build_secret_scan_opts, resource_bundle_options};
+use crate::command::build::{
+    build_secret_scan_opts, resource_bundle_options, secret_scan_opts_from_conf,
+};
 use crate::conf::get_merged_src_paths;
 use crate::profile::{extract_profile_identifiers, resolve_profile_to_uuids};
 use crate::remote::ApiClient;
@@ -40,12 +42,17 @@ fn resolve_local_build_storage_path(
     Ok(Path::new(build_dir).join(storage_path))
 }
 
+/// Run the build-time secret-shape scan over what `hot check` and `hot watch`
+/// would bundle (src, dependency and resource files), with the same
+/// `hot.build.allow-secret-shape` allowlist and `--allow-secret-shape`
+/// override as `hot build`. Returns the matches and, for each bundle path,
+/// the file it came from.
 pub(crate) fn scan_cli_inputs(
     conf: &Val,
     options: &GlobalOptions,
     src: &[String],
-    tests: &[String],
-) -> Result<(), String> {
+    allow_secret_shape: bool,
+) -> Result<(Vec<hot::secret_scan::SecretMatch>, Vec<(String, PathBuf)>), String> {
     let project = options
         .project
         .clone()
@@ -56,17 +63,28 @@ pub(crate) fn scan_cli_inputs(
         &options.resource_paths,
         options.no_gitignore,
     );
-    let context = hot::build::BuildContext::new(
-        None,
-        None,
-        None,
-        None,
-        project,
-        src.to_vec(),
-        tests.to_vec(),
-    )
-    .with_resources(paths, respect, excludes);
-    hot::build::scan_build_inputs(&context, Some(conf))
+    let opts = secret_scan_opts_from_conf(conf, allow_secret_shape);
+    if opts.allow_all {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    // Tests are never bundled, so they are not scanned.
+    let context =
+        hot::build::BuildContext::new(None, None, None, None, project, src.to_vec(), Vec::new())
+            .with_resources(paths, respect, excludes);
+    let (files, resources) = hot::build::collect_build_inputs(&context, Some(conf))?;
+    let hits = hot::secret_scan::scan_bundle(&files, &resources, &opts)
+        .map_err(|e| format!("secret-shape scan failed: {}", e))?;
+    let sources = files
+        .into_iter()
+        .map(|f| (f.relative_path, f.path))
+        .chain(resources.into_iter().map(|r| {
+            (
+                format!("{}/{}", hot::bundle::RESOURCE_BUNDLE_PREFIX, r.rel_path),
+                r.abs_path,
+            )
+        }))
+        .collect();
+    Ok((hits, sources))
 }
 
 pub(crate) fn is_ad_hoc_default_db(conf: &Val) -> bool {
@@ -414,8 +432,10 @@ pub(crate) async fn run_deploy(
         // Without this, the worker won't be able to find the build file even though
         // the database record exists (when sharing the same database in local dev).
         if !local {
-            let remote_build_id = upload_via_api(build_result.build.build_id, conf).await?;
-            return deploy_via_api_only(remote_build_id, conf).await;
+            let project_slug = remote_project_slug(conf, global_options, None).await;
+            let remote_build_id =
+                upload_via_api(build_result.build.build_id, conf, project_slug.clone()).await?;
+            return deploy_via_api_only(remote_build_id, conf, project_slug).await;
         }
 
         build_result.build.build_id
@@ -424,18 +444,13 @@ pub(crate) async fn run_deploy(
     if local {
         deploy_via_database(build_uuid, conf, strict).await
     } else {
-        deploy_via_api(build_uuid, conf).await
+        let project_slug = remote_project_slug(conf, global_options, Some(build_uuid)).await;
+        deploy_via_api(build_uuid, conf, project_slug).await
     }
 }
 
-async fn deploy_via_api(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
+async fn deploy_via_api(build_uuid: Uuid, conf: &Val, project_slug: String) -> Result<(), String> {
     let api = ApiClient::from_config(conf)?;
-
-    let project_slug = conf
-        .get("project")
-        .and_then(|p| p.get("slug"))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| hot::project::get_default_project_name(conf));
 
     let path = format!("/v1/projects/{}/builds/{}/deploy", project_slug, build_uuid);
 
@@ -545,7 +560,8 @@ async fn deploy_via_api(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
                     build_uuid
                 );
 
-                let remote_build_id = upload_via_api(build_uuid, conf).await?;
+                let remote_build_id =
+                    upload_via_api(build_uuid, conf, project_slug.clone()).await?;
 
                 // Deploy the uploaded build
                 info!("Deploying build...");
@@ -594,7 +610,8 @@ async fn deploy_via_api(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
                     build_uuid
                 );
 
-                let remote_build_id = upload_via_api(build_uuid, conf).await?;
+                let remote_build_id =
+                    upload_via_api(build_uuid, conf, project_slug.clone()).await?;
 
                 // Retry the deployment with the REMOTE build ID
                 info!("Retrying deployment...");
@@ -624,14 +641,12 @@ async fn deploy_via_api(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
 
 /// Deploy a build via API without auto-upload fallback.
 /// Used when we've already uploaded the build and just need to mark it deployed.
-async fn deploy_via_api_only(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
+async fn deploy_via_api_only(
+    build_uuid: Uuid,
+    conf: &Val,
+    project_slug: String,
+) -> Result<(), String> {
     let api = ApiClient::from_config(conf)?;
-
-    let project_slug = conf
-        .get("project")
-        .and_then(|p| p.get("slug"))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| hot::project::get_default_project_name(conf));
 
     let path = format!("/v1/projects/{}/builds/{}/deploy", project_slug, build_uuid);
 
@@ -676,21 +691,50 @@ async fn deploy_via_api_only(build_uuid: Uuid, conf: &Val) -> Result<(), String>
     Ok(())
 }
 
-pub(crate) async fn run_upload(build_id: &str, conf: &hot::val::Val) -> Result<(), String> {
+pub(crate) async fn run_upload(
+    build_id: &str,
+    conf: &hot::val::Val,
+    global_options: &GlobalOptions,
+) -> Result<(), String> {
     let build_uuid =
         Uuid::from_str(build_id).map_err(|_| format!("Invalid build ID format: {}", build_id))?;
 
-    upload_via_api(build_uuid, conf).await.map(|_| ())
+    let project_slug = remote_project_slug(conf, global_options, Some(build_uuid)).await;
+    upload_via_api(build_uuid, conf, project_slug)
+        .await
+        .map(|_| ())
 }
 
-async fn upload_via_api(build_uuid: Uuid, conf: &Val) -> Result<Uuid, String> {
-    let api = ApiClient::from_config(conf)?;
+/// The remote project a deploy or upload targets: `-p`, then the
+/// `hot.project.slug` setting, then the local build's own project, then the
+/// default project.
+async fn remote_project_slug(
+    conf: &Val,
+    global_options: &GlobalOptions,
+    build_uuid: Option<Uuid>,
+) -> String {
+    if let Some(project) = &global_options.project {
+        return project.clone();
+    }
+    if let Some(slug) = conf.get("project").and_then(|p| p.get("slug")) {
+        return slug.to_string();
+    }
+    if let Some(build_uuid) = build_uuid
+        && let Ok(db) = crate::profile::create_cli_db_pool(conf).await
+        && let Ok(build) = hot::db::Build::get_build(&db, &build_uuid).await
+        && let Ok(project) = hot::db::Project::get_project(&db, &build.project_id).await
+    {
+        return project.name;
+    }
+    hot::project::get_default_project_name(conf)
+}
 
-    let project_slug = conf
-        .get("project")
-        .and_then(|p| p.get("slug"))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| hot::project::get_default_project_name(conf));
+async fn upload_via_api(
+    build_uuid: Uuid,
+    conf: &Val,
+    project_slug: String,
+) -> Result<Uuid, String> {
+    let api = ApiClient::from_config(conf)?;
 
     info!("Uploading build {} to remote environment...", build_uuid);
 

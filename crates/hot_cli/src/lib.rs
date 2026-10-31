@@ -15,7 +15,7 @@ use crate::command::api::run_api;
 use crate::command::app::run_app;
 use crate::command::build::run_build;
 use crate::command::builds::run_builds;
-use crate::command::check::{run_check_watch, run_check_with_raw};
+use crate::command::check::{CheckFormat, CheckOptions, run_check_once, run_check_watch};
 use crate::command::compile::run_compile;
 use crate::command::conf::run_conf_generate;
 use crate::command::context::run_context;
@@ -338,6 +338,33 @@ fn indent_continuation(text: &str, continuation_indent: &str) -> String {
         out.push_str(line);
     }
     out
+}
+
+/// Set on the process `-d` spawns, so it runs in the foreground of its own
+/// session instead of spawning another copy.
+const DAEMON_CHILD_ENV: &str = "HOT_DAEMON_CHILD";
+
+/// `hot check`/`hot watch` settings from their flags and the `check.*` conf.
+fn check_options<'a>(
+    conf: &'a Val,
+    global: &'a crate::cli::GlobalOptions,
+    format: Option<String>,
+    raw: bool,
+    deny_warnings: bool,
+    allow_secret_shape: bool,
+) -> Result<CheckOptions<'a>, String> {
+    let format = format.or_else(|| {
+        let f = conf.get_str("check.format");
+        if f.is_empty() { None } else { Some(f) }
+    });
+    Ok(CheckOptions {
+        format: CheckFormat::parse(format.as_deref())?,
+        raw: raw || conf.get_bool("check.raw"),
+        deny_warnings: deny_warnings || conf.get_bool_or_default("check.deny-warnings", false),
+        allow_secret_shape,
+        conf,
+        global_options: global,
+    })
 }
 
 /// The project a command watches, tests or runs, for the commands that use
@@ -920,7 +947,22 @@ async fn async_main(providers: CliProviders) {
     // When services need their configuration, call their get_resolved_conf with the full merged config
     // This allows each service to apply its defaults and use dotted paths to access values
 
-    let daemon = conf.get_bool("daemon");
+    // Only the long-running services daemonize, and only with their `-d`
+    // flag (which sets `daemon`). The spawned child is marked so it never
+    // daemonizes again: it re-reads the same arguments and configuration.
+    let is_service = matches!(
+        cli.command,
+        Some(
+            Command::Dev { .. }
+                | Command::Api { .. }
+                | Command::App { .. }
+                | Command::Worker { .. }
+                | Command::TaskWorker { .. }
+                | Command::Scheduler { .. }
+        )
+    );
+    let daemon =
+        is_service && conf.get_bool("daemon") && std::env::var_os(DAEMON_CHILD_ENV).is_none();
 
     // If daemon mode is enabled, fork to the background
     if daemon {
@@ -941,7 +983,7 @@ async fn async_main(providers: CliProviders) {
 
             // Create a new process that will run in the background
             let mut cmd = Command::new(exe);
-            cmd.args(&args);
+            cmd.args(&args).env(DAEMON_CHILD_ENV, "1");
 
             match cmd.spawn() {
                 Ok(_) => {
@@ -1461,34 +1503,28 @@ async fn async_main(providers: CliProviders) {
             format,
             raw,
             deny_warnings,
+            allow_secret_shape,
             path,
             ..
         }) => {
-            let effective_format = format.or_else(|| {
-                let f = conf.get_str("check.format");
-                if f.is_empty() { None } else { Some(f) }
-            });
-            let effective_raw = if raw {
-                true
-            } else {
-                conf.get_bool("check.raw")
-            };
-            let effective_deny_warnings =
-                deny_warnings || conf.get_bool_or_default("check.deny-warnings", false);
-            match run_check_with_raw(
-                effective_format.as_deref(),
-                effective_raw,
-                effective_deny_warnings,
+            let options = match check_options(
                 &conf,
                 &global,
-                context_storage.clone(),
-                path.as_deref(),
-            )
-            .await
-            {
+                format,
+                raw,
+                deny_warnings,
+                allow_secret_shape,
+            ) {
+                Ok(options) => options,
+                Err(e) => {
+                    eprintln!("Check failed: {}", e);
+                    std::process::exit(2);
+                }
+            };
+            match run_check_once(&options, context_storage.as_ref(), path.as_deref()) {
                 Ok(exit_code) => std::process::exit(exit_code),
                 Err(e) => {
-                    error!("Check failed: {}", e);
+                    eprintln!("Check failed: {}", e);
                     std::process::exit(2);
                 }
             }
@@ -1498,35 +1534,27 @@ async fn async_main(providers: CliProviders) {
             format,
             raw,
             deny_warnings,
+            allow_secret_shape,
             watch_debounce_ms,
             ..
         }) => {
-            let effective_format = format.or_else(|| {
-                let f = conf.get_str("check.format");
-                if f.is_empty() { None } else { Some(f) }
-            });
-            let effective_raw = if raw {
-                true
-            } else {
-                conf.get_bool("check.raw")
-            };
-            let effective_deny_warnings =
-                deny_warnings || conf.get_bool_or_default("check.deny-warnings", false);
             let effective_debounce =
                 watch_debounce_ms.unwrap_or_else(|| conf.get_int("watch.debounce") as u64);
-            match run_check_watch(
-                effective_format.as_deref(),
-                effective_raw,
-                effective_deny_warnings,
-                effective_debounce,
+            let result = match check_options(
                 &conf,
                 &global,
-            )
-            .await
-            {
+                format,
+                raw,
+                deny_warnings,
+                allow_secret_shape,
+            ) {
+                Ok(options) => run_check_watch(&options, effective_debounce).await,
+                Err(e) => Err(e),
+            };
+            match result {
                 Ok(exit_code) => std::process::exit(exit_code),
                 Err(e) => {
-                    error!("Watch failed: {}", e);
+                    eprintln!("Watch failed: {}", e);
                     std::process::exit(2);
                 }
             }
@@ -1562,8 +1590,10 @@ async fn async_main(providers: CliProviders) {
                 std::process::exit(1);
             }
         }
-        Some(Command::Upload { build_id, .. }) => {
-            if let Err(e) = run_upload(&build_id, &conf).await {
+        Some(Command::Upload {
+            build_id, global, ..
+        }) => {
+            if let Err(e) = run_upload(&build_id, &conf, &global).await {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }

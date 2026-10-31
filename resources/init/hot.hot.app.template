@@ -73,5 +73,3 @@ hot.queue.infra-retry-backoff-ms Int(::env/get("HOT_QUEUE_INFRA_RETRY_BACKOFF_MS
 hot.queue.wait-target-p99-ms Int(::env/get("HOT_QUEUE_WAIT_TARGET_P99_MS", "1000"))
 hot.queue.metrics-enabled Bool(::env/get("HOT_QUEUE_METRICS_ENABLED", "true"))
 
-// Daemon Mode
-hot.daemon true
