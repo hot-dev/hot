@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, statSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -76,6 +77,20 @@ test('nested meta maps and lists stay one meta annotation', () => {
     for (const meta of ['meta {on-event: "x", opts: {retry: {max: 3}}}', 'meta ["test", ["a", {b: "]"}]]']) {
         const annotation = hotTokens(meta + ' fn () { 1 }').find(([type]) => type === 'meta-annotation');
         assert.equal(annotation?.[1], meta);
+    }
+});
+
+test('vendored browser libraries match their recorded upstream releases', () => {
+    const dir = join(root, 'resources/app/assets/js');
+    const manifest = JSON.parse(readFileSync(join(dir, 'vendor.json'), 'utf8'));
+    for (const { file, sha256 } of manifest.files) {
+        const actual = createHash('sha256').update(readFileSync(join(dir, file))).digest('hex');
+        assert.equal(actual, sha256, `${file} differs from the release vendor.json records`);
+    }
+    // Minified and bundled files are third-party; each needs a manifest entry.
+    const listed = new Set(manifest.files.map(({ file }) => file));
+    for (const file of readdirSync(dir).filter((name) => name.endsWith('.min.js') || name === 'prism.js')) {
+        assert.ok(listed.has(file), `${file} is vendored but not recorded in vendor.json`);
     }
 });
 
