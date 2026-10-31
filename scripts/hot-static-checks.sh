@@ -244,14 +244,33 @@ cmd_check() {
     echo ""
     echo -e "${YELLOW}Step 5b: Bundled skill source loads and its tests pass${NC}"
     local skill_test_errors=0
-    while IFS= read -r skill_dir; do
+    # Build here: cargo run from the throwaway project would miss
+    # .cargo/config.toml and rebuild with other flags.
+    local hot_bin
+    hot_bin="$(cd "$PROJECT_ROOT" && cargo build --quiet --locked --bin hot --message-format json | python3 -c '
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("target", {}).get("name") == "hot" and message.get("executable"):
+        print(message["executable"])
+')"
+    if [[ -z "$hot_bin" ]]; then
+        echo -e "${RED}✗ cargo build did not report the hot executable${NC}"
+        errors=$((errors + 1))
+    fi
+    # Test against this checkout's hot-std, not an installed one.
+    local skill_hot_home
+    skill_hot_home="$(mktemp -d)"
+    mkdir -p "$skill_hot_home/pkg"
+    ln -s "$PROJECT_ROOT/hot/pkg/hot-std" "$skill_hot_home/pkg/hot-std"
+    while [[ -n "$hot_bin" ]] && IFS= read -r skill_dir; do
         local skill_project
         if ! skill_project="$(skill_test_project "$skill_dir")"; then
             continue
         fi
         local threshold
         for threshold in 100 1; do
-            if (cd "$skill_project" && cargo run --quiet --manifest-path "$PROJECT_ROOT/Cargo.toml" -- test --jit.threshold "$threshold" --ctx "$PROJECT_ROOT/hot/ci.ctx.hot" > "$skill_project/test.log" 2>&1); then
+            if (cd "$skill_project" && HOT_HOME="$skill_hot_home" "$hot_bin" test --jit.threshold "$threshold" --ctx "$PROJECT_ROOT/hot/ci.ctx.hot" > "$skill_project/test.log" 2>&1); then
                 echo -e "${GREEN}✓ ${skill_dir#"$PROJECT_ROOT/"} (JIT threshold $threshold)${NC}"
             else
                 echo -e "${RED}✗ ${skill_dir#"$PROJECT_ROOT/"} (JIT threshold $threshold)${NC}"
@@ -261,6 +280,7 @@ cmd_check() {
         done
         rm -rf "$skill_project"
     done < <(find "$skills_root" -mindepth 1 -maxdepth 1 -type d -print | sort)
+    rm -rf "$skill_hot_home"
     if [[ $skill_test_errors -ne 0 ]]; then
         errors=$((errors + skill_test_errors))
     fi
