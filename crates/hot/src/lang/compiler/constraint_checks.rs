@@ -15,6 +15,8 @@
 //! - `invalid-registry-auth`: a literal `registry-auth` of a box
 //!   configuration that is anything but `{secret: Str}`, so a registry token
 //!   is never written into source.
+//! - `circular-type-reference`: a type defined in terms of itself, such as
+//!   `A type B | "x"` with `B type A`. No value could be checked against it.
 
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
@@ -46,6 +48,7 @@ pub(crate) fn check_constraints(
 ) -> ConstraintDiagnostics {
     let index = Index::new(program, core);
     let mut out = ConstraintDiagnostics::default();
+    index.check_alias_cycles(&mut out);
     index.check_predicates(&mut out);
     index.check_signatures(&mut out);
     index.check_literals(program, &mut out);
@@ -778,6 +781,81 @@ impl<'a> Index<'a> {
         self.types.contains_key(&core).then_some(core)
     }
 
+    /// `circular-type-reference`: an alias that names itself again with no
+    /// record field or collection element in between (`T type T where …`,
+    /// `A type B | "x"` with `B type A`). Checking a value against one
+    /// would recurse forever; a field or element (`Node type { next:
+    /// Node? }`, `Json type Str | Vec<Json>`) is a part of the value, so a
+    /// recursive type through one is fine. One error per cycle.
+    fn check_alias_cycles(&self, out: &mut ConstraintDiagnostics) {
+        let mut names: Vec<&String> = self.types.keys().collect();
+        names.sort();
+        let mut reported: AHashSet<String> = AHashSet::new();
+        for name in names {
+            if reported.contains(name) {
+                continue;
+            }
+            let mut path = vec![name.clone()];
+            if !self.alias_reaches(name, name, &mut path, &mut AHashSet::new()) {
+                continue;
+            }
+            reported.extend(path.iter().cloned());
+            let (ns, short) = name.rsplit_once('/').unwrap_or(("", name.as_str()));
+            let location = self
+                .vars
+                .get(&(ns.to_string(), short.to_string()))
+                .and_then(|(var, _)| var.src.as_ref())
+                .map(error_location);
+            out.errors.push(CompilerError::CircularTypeReference {
+                type_name: short.to_string(),
+                cycle_path: path
+                    .iter()
+                    .map(|step| match step.rsplit_once('/') {
+                        Some((step_ns, step_short)) if step_ns == ns => step_short.to_string(),
+                        _ => step.clone(),
+                    })
+                    .collect(),
+                location,
+            });
+        }
+    }
+
+    /// Whether the alias of the type `current` names `target`, directly or
+    /// through other aliases, outside any field or element. On `true`,
+    /// `path` ends with the types from `current` to `target`.
+    fn alias_reaches(
+        &self,
+        current: &str,
+        target: &str,
+        path: &mut Vec<String>,
+        seen: &mut AHashSet<String>,
+    ) -> bool {
+        let Some(alias) = self.types.get(current).and_then(|t| t.type_alias.as_ref()) else {
+            return false;
+        };
+        let ns = current.rsplit_once('/').map_or("", |(ns, _)| ns);
+        let mut names = Vec::new();
+        whole_value_names(alias, &mut names);
+        for name in names {
+            let Some(next) = self.type_key(ns, &name) else {
+                continue;
+            };
+            if next == target {
+                path.push(next);
+                return true;
+            }
+            if !seen.insert(next.clone()) {
+                continue;
+            }
+            path.push(next.clone());
+            if self.alias_reaches(&next, target, path, seen) {
+                return true;
+            }
+            path.pop();
+        }
+        false
+    }
+
     /// Whether an annotation names a type with a `where` clause.
     fn annotation_is_refined(&self, ns: &str, annotation: &str) -> bool {
         if annotation.contains(WHERE_TYPE_PREFIX) {
@@ -1395,6 +1473,22 @@ impl<'a> Index<'a> {
             let location = arm.src.as_ref().map(error_location);
             self.warn_representation(ns, type_name, warned, out, location);
         }
+    }
+}
+
+/// The type names a value of `type_expr` is checked against as a whole:
+/// those of its union members and optional inner type, but not those of
+/// collection elements.
+fn whole_value_names(type_expr: &TypeExpr, names: &mut Vec<String>) {
+    match type_expr {
+        TypeExpr::Simple(name) | TypeExpr::Named(name) => names.push(name.clone()),
+        TypeExpr::Optional(inner) => whole_value_names(inner, names),
+        TypeExpr::Union(members) => {
+            for member in members {
+                whole_value_names(member, names);
+            }
+        }
+        _ => {}
     }
 }
 

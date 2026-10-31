@@ -2249,3 +2249,129 @@ fn meta_type_refs_must_name_types() {
         errors
     );
 }
+
+/// The cycles `compile_program` reports, as `(type, path)`.
+fn circular_type_references(source: &str) -> Vec<(String, String)> {
+    let mut program = parse_hot(source).expect("parses");
+    let mut compiler = Compiler::new();
+    let Err(errors) = compiler.compile_program(&mut program) else {
+        return Vec::new();
+    };
+    errors
+        .errors
+        .iter()
+        .filter_map(|e| match e {
+            crate::lang::errors::CompilerError::CircularTypeReference {
+                type_name,
+                cycle_path,
+                location,
+            } => {
+                assert!(location.is_some(), "{type_name} has a location");
+                Some((type_name.clone(), cycle_path.join(" -> ")))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+// A type defined in terms of itself passed `hot check`, then overflowed the
+// stack on the first value checked against it.
+#[test]
+fn alias_cycles_are_compile_errors() {
+    let cases = [
+        ("Self type Self | \"x\"", vec![("Self", "Self -> Self")]),
+        ("Self type \"x\" | Self", vec![("Self", "Self -> Self")]),
+        (
+            "A type B | \"x\"\nB type A | \"y\"",
+            vec![("A", "A -> B -> A")],
+        ),
+        ("T type T where gt(%, 0)", vec![("T", "T -> T")]),
+        (
+            "Positive type Small where gt(%, 0)\nSmall type Positive where lt(%, 10)",
+            vec![("Positive", "Positive -> Small -> Positive")],
+        ),
+        ("A type B\nB type A", vec![("A", "A -> B -> A")]),
+        ("Maybe type Maybe?", vec![("Maybe", "Maybe -> Maybe")]),
+        // Reaching a cycle without being part of it reports the cycle only.
+        (
+            "Outer type Inner | Int\nInner type Inner | \"z\"",
+            vec![("Inner", "Inner -> Inner")],
+        ),
+    ];
+    for (types, expected) in cases {
+        let found = circular_type_references(&format!("::cyc ns\n{types}\nx 1\n"));
+        let expected: Vec<(String, String)> = expected
+            .into_iter()
+            .map(|(name, path)| (name.to_string(), path.to_string()))
+            .collect();
+        assert_eq!(found, expected, "for {types:?}");
+    }
+}
+
+// Recursion through a record field or a collection element ends with the
+// value: those types are fine.
+#[test]
+fn recursion_through_fields_and_elements_is_not_a_cycle() {
+    for types in [
+        "Node type { v: Int, next: Node? } where gt(%.v, 0)",
+        "Json type Str | Int | Vec<Json> | Map<Str, Json>",
+        "Tree type Leaf | Branch\nLeaf type { v: Int }\nBranch type { kids: Vec<Tree> }",
+    ] {
+        let found = circular_type_references(&format!("::rec ns\n{types}\nx 1\n"));
+        assert!(found.is_empty(), "{types:?}: {found:?}");
+    }
+}
+
+/// The dependency levels of the first parallel flow in `source`.
+fn parallel_levels(source: &str) -> Vec<Vec<String>> {
+    let program = parse_hot(source).expect("parses");
+    let flow = program
+        .namespaces
+        .values()
+        .flat_map(|namespace| namespace.scope.vars.values())
+        .find_map(|value| match value {
+            Value::Fn(defs) => match defs.first().map(|def| &def.body) {
+                Some(Value::Flow(flow)) => Some(flow.clone()),
+                _ => None,
+            },
+            Value::Flow(flow) => Some(flow.clone()),
+            _ => None,
+        })
+        .expect("a parallel flow");
+    let compiler = Compiler::new();
+    let (graph, _) = compiler.build_dependency_graph(&flow).unwrap();
+    let order = compiler.topological_sort(&graph).unwrap();
+    compiler.group_by_dependency_levels(&graph, &order)
+}
+
+// Dependencies were kept in hash sets, so a level's order (and with it the
+// collected Map's key order) changed from one compile to the next. Each
+// level now lists its bindings in source order, and names from outside the
+// flow are ready from the start.
+#[test]
+fn parallel_dependency_levels_are_in_source_order() {
+    let cases = [
+        (
+            "::t ns\nk 3\nh fn parallel (x: Int): All<Map> {\n  a add(x, k)\n  b x\n}\n",
+            vec![vec!["a", "b"]],
+        ),
+        (
+            "::t ns\nv fn parallel (i: Int): All<Vec> {\n  late add(early, 1)\n  early mul(i, 2)\n  other sub(i, 3)\n}\n",
+            vec![vec!["early", "other"], vec!["late"]],
+        ),
+        (
+            "::t ns\nw fn parallel (i: Int): All<Map> {\n  d add(b, c)\n  c add(a, 1)\n  b add(a, i)\n  a 1\n  z 2\n}\n",
+            vec![vec!["a", "z"], vec!["c", "b"], vec!["d"]],
+        ),
+    ];
+    for (source, expected) in cases {
+        let expected: Vec<Vec<String>> = expected
+            .into_iter()
+            .map(|level| level.into_iter().map(str::to_string).collect())
+            .collect();
+        // Fresh hash seeds on every compile used to reorder these.
+        for _ in 0..20 {
+            assert_eq!(parallel_levels(source), expected, "for {source}");
+        }
+    }
+}

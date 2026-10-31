@@ -320,6 +320,11 @@ pub struct FlowContext {
 
     /// Pipe step results (for pipe flows with result modifiers)
     pipe_step_results: Vec<(String, Val)>,
+
+    /// A parallel flow's deferred bindings, run when it ends. Kept with the
+    /// flow, so a flow or parallel flow nested in it (a side-effect `cond`,
+    /// a lambda's own `parallel`) leaves them alone.
+    parallel: Option<Box<ParallelFlowContext>>,
 }
 
 /// Call execution context for tracking function invocations
@@ -700,8 +705,6 @@ pub struct VirtualMachine {
     conf: Val,
     /// Thread count for parallel execution (cached from conf)
     thread_count: usize,
-    /// Parallel flow execution context (active when executing parallel flows)
-    parallel_flow_context: Option<ParallelFlowContext>,
     /// Function dispatch cache: maps (function_name_hash, arity) → FunctionId.
     /// Avoids repeated string formatting and multi-map probing in unified_function_lookup.
     /// Populated lazily on first resolution; valid for the lifetime of the program.
@@ -844,7 +847,6 @@ impl VirtualMachine {
             secret_value_hashes: AHashSet::new(),
             conf,
             thread_count,
-            parallel_flow_context: None,
             dispatch_cache: AHashMap::new(),
             coercion_param_cache: AHashMap::new(),
             overload_set_cache: AHashMap::new(),
@@ -1498,9 +1500,6 @@ impl VirtualMachine {
         }
     }
 
-    /// Admit a host execution before any customer bytecode or run:start side
-    /// effect. VM hosts execute on blocking threads, like async storage syscalls.
-    /// The durable ledger makes independent VM instances/retries idempotent.
     /// Refuse to create durable work (tasks, events, schedules) in an
     /// environment that has stopped admitting it, such as one suspended while
     /// this run executes: held work would only retry until reactivation. A
@@ -1541,6 +1540,9 @@ impl VirtualMachine {
         }
     }
 
+    /// Admit a host execution before any customer bytecode or run:start side
+    /// effect. VM hosts execute on blocking threads, like async storage syscalls.
+    /// The durable ledger makes independent VM instances/retries idempotent.
     pub(crate) fn admit_execution(&mut self) -> VmResult<()> {
         let Some(pool) = self.database_pool.as_ref() else {
             return Ok(());
@@ -1979,9 +1981,12 @@ impl VirtualMachine {
                 let constant = *constant;
                 let value = self.load_constant(constant)?;
 
-                // If we're in a parallel flow and haven't captured metadata yet,
-                // this LoadConst should contain the dependency metadata
-                if let Some(ref mut parallel_ctx) = self.parallel_flow_context
+                // The constant after a parallel flow's BeginFlow holds its
+                // dependency levels.
+                if let Some(parallel_ctx) = self
+                    .flow_contexts
+                    .last_mut()
+                    .and_then(|flow| flow.parallel.as_deref_mut())
                     && !parallel_ctx.metadata_captured
                 {
                     // Extract dependency levels from the constant value
@@ -2017,7 +2022,7 @@ impl VirtualMachine {
                 // rather than waiting until execution time.
                 // EXCEPTION: If we're inside a parallel flow context, skip variable capture
                 // so that thunks can capture variables from previous dependency levels at execution time.
-                let in_parallel_flow = self.parallel_flow_context.is_some();
+                let in_parallel_flow = self.in_parallel_flow();
 
                 let value = if let Val::Box(ref boxed) = value {
                     if let Some(lambda_info) = boxed
@@ -2398,18 +2403,15 @@ impl VirtualMachine {
                     Uuid::now_v7()
                 };
 
-                // For parallel flows: Initialize parallel execution context
-                if flow_type == FlowType::Parallel {
-                    tracing::trace!("VM: Initializing TRUE parallel flow execution context");
-
-                    // Initialize parallel flow context
-                    // The next instruction should be LoadConst with dependency metadata
-                    self.parallel_flow_context = Some(ParallelFlowContext {
+                // A parallel flow collects its deferred bindings; the next
+                // instruction is the LoadConst of its dependency levels.
+                let parallel = (flow_type == FlowType::Parallel).then(|| {
+                    Box::new(ParallelFlowContext {
                         deferred_thunks: Vec::new(),
                         dependency_levels: Vec::new(),
                         metadata_captured: false,
-                    });
-                }
+                    })
+                });
 
                 // For non-serial inline flows, emit a call:start event to track as a call record
                 // Serial flows are the default and don't need tracking
@@ -2506,6 +2508,7 @@ impl VirtualMachine {
                     cond_branch_executed: false,
                     current_branch: None,
                     pipe_step_results: Vec::new(),
+                    parallel,
                 };
 
                 self.flow_contexts.push(flow_context);
@@ -2514,8 +2517,12 @@ impl VirtualMachine {
 
             Instruction::EndFlow { dest } => {
                 let dest = *dest;
-                // Check if we're ending a parallel flow with deferred thunks
-                if let Some(parallel_ctx) = self.parallel_flow_context.take() {
+                // Ending a parallel flow runs its deferred bindings.
+                if let Some(parallel_ctx) = self
+                    .flow_contexts
+                    .last_mut()
+                    .and_then(|flow| flow.parallel.take())
+                {
                     tracing::trace!(
                         "VM: EndFlow for parallel flow - executing {} deferred thunks in {} levels",
                         parallel_ctx.deferred_thunks.len(),
@@ -2523,7 +2530,7 @@ impl VirtualMachine {
                     );
 
                     // Execute deferred thunks in TRUE parallel by dependency level
-                    self.execute_parallel_flow(parallel_ctx)?;
+                    self.execute_parallel_flow(*parallel_ctx)?;
                 }
 
                 // End flow execution and collect results
@@ -3071,7 +3078,11 @@ impl VirtualMachine {
                 );
 
                 // Buffer the thunk for parallel execution at EndFlow
-                if let Some(ref mut parallel_ctx) = self.parallel_flow_context {
+                if let Some(parallel_ctx) = self
+                    .flow_contexts
+                    .last_mut()
+                    .and_then(|flow| flow.parallel.as_deref_mut())
+                {
                     parallel_ctx.deferred_thunks.push(DeferredVarThunk {
                         var_name: name.to_string(),
                         thunk: thunk_val,
@@ -5210,6 +5221,15 @@ impl VirtualMachine {
         val.is_truthy()
     }
 
+    /// Whether the innermost open flow is a parallel flow still collecting
+    /// its bindings. Lambdas created in one (its bindings' thunks) capture
+    /// at run time, so a binding sees those of earlier dependency levels.
+    fn in_parallel_flow(&self) -> bool {
+        self.flow_contexts
+            .last()
+            .is_some_and(|flow| flow.parallel.is_some())
+    }
+
     /// The innermost flow opened by the running function or lambda body. A
     /// binding is collected only by a flow of its own body: a call made
     /// inside a caller's `All<Map>`/`All<Vec>` flow adds nothing to it.
@@ -6914,12 +6934,13 @@ impl VirtualMachine {
                 type_signature
             );
             return Some(function_id);
-        } else {
+        } else if tracing::enabled!(tracing::Level::TRACE) {
+            // A scan of every mapping: only when it will be logged, as this
+            // runs on each call by name to a function with union parameters.
             tracing::trace!(
                 "VM: No exact type match found for signature '{}'. Available function mappings with similar names:",
                 type_signature
             );
-            // Debug: show available function mappings that start with the function name
             for (key, _) in self.function_mapping.iter() {
                 if key.starts_with(function_name) {
                     tracing::trace!("  Available: '{}'", key);
@@ -8370,7 +8391,9 @@ impl VirtualMachine {
 
                 // Execute instruction directly without interfering with main VM instruction pointer
                 match instruction {
-                    Instruction::LoadConst { dest, constant } => {
+                    // In a parallel flow, the main loop's LoadConst takes the
+                    // flow's dependency levels and defers its thunks' captures.
+                    Instruction::LoadConst { dest, constant } if !self.in_parallel_flow() => {
                         let constant_val = self.load_constant(*constant)?;
 
                         // If this is a lambda value, capture closure variables NOW (at creation time)
@@ -9691,8 +9714,22 @@ impl VirtualMachine {
         let ParallelFlowContext {
             deferred_thunks,
             dependency_levels,
-            metadata_captured: _,
+            metadata_captured,
         } = parallel_ctx;
+        // Without its levels the flow would run no binding at all.
+        if !metadata_captured && !deferred_thunks.is_empty() {
+            return Err(VmError::runtime(
+                "Parallel flow is missing its dependency levels".to_string(),
+            ));
+        }
+        // The bindings in source order: the order the flow collects them
+        // in, whichever level each one ran at.
+        let mut seen_names = AHashSet::with_capacity(deferred_thunks.len());
+        let source_order: Vec<String> = deferred_thunks
+            .iter()
+            .filter(|t| seen_names.insert(t.var_name.as_str()))
+            .map(|t| t.var_name.clone())
+            .collect();
 
         tracing::trace!(
             "VM: execute_parallel_flow starting with {} thunks across {} levels",
@@ -9809,14 +9846,7 @@ impl VirtualMachine {
                 self.store_variable(var_name, result.clone())?;
 
                 // Track computed var for subsequent levels
-                computed_vars.insert(var_name.clone(), result.clone());
-
-                // Track in flow context
-                if let Some(flow_context) = self.flow_contexts.last_mut() {
-                    flow_context
-                        .flow_variable_refs
-                        .push((var_name.clone(), result));
-                }
+                computed_vars.insert(var_name.clone(), result);
                 continue;
             }
 
@@ -10105,13 +10135,6 @@ impl VirtualMachine {
 
                     // Track computed var for subsequent levels
                     computed_vars.insert(var_name.clone(), result.clone());
-
-                    // Track in flow context
-                    if let Some(flow_context) = self.flow_contexts.last_mut() {
-                        flow_context
-                            .flow_variable_refs
-                            .push((var_name.clone(), result.clone()));
-                    }
                 }
             }
 
@@ -10120,6 +10143,16 @@ impl VirtualMachine {
                 level_idx,
                 level_vars.len()
             );
+        }
+
+        if let Some(flow_context) = self.flow_contexts.last_mut() {
+            for var_name in &source_order {
+                if let Some(result) = computed_vars.get(var_name) {
+                    flow_context
+                        .flow_variable_refs
+                        .push((var_name.clone(), result.clone()));
+                }
+            }
         }
 
         tracing::trace!("VM: execute_parallel_flow completed with TRUE parallel execution");
@@ -12152,5 +12185,261 @@ fib fn (n: Int): Int {{
             let result = run_recursion_source(&source, "::test/fib", &[Val::Int(20)], jit);
             assert_eq!(result, Val::Int(6765), "fib(20) wrong with jit={jit}");
         }
+    }
+
+    /// Compile `source` and call `entry` under the given JIT mode with a
+    /// publisher attached, returning the result and the event types sent.
+    fn run_with_events(source: &str, entry: &str, args: &[Val], jit: &str) -> (Val, Vec<String>) {
+        let mut vm = compile_test_vm(source, jit);
+        let recording_publisher = Arc::new(RecordingEventPublisher {
+            event_types: Mutex::new(Vec::new()),
+        });
+        vm.set_execution_context(ExecutionContext::new(
+            uuid::Uuid::now_v7(),
+            uuid::Uuid::now_v7(),
+            4,
+            Some(uuid::Uuid::now_v7()),
+            Some(uuid::Uuid::now_v7()),
+            Some(uuid::Uuid::now_v7()),
+            Some(uuid::Uuid::now_v7()),
+        ));
+        vm.set_event_publisher(recording_publisher.clone());
+        let result = vm
+            .call_function_bypassing_unified_lookup(entry, args)
+            .expect("entry function should run");
+        let mut event_types = recording_publisher.event_types.lock().clone();
+        event_types.sort();
+        (result, event_types)
+    }
+
+    // A match that no arm takes is null. The interpreter returned whatever
+    // an earlier call of the same function had left in the result register,
+    // so one caller's data reached another; compiled code returned null.
+    #[test]
+    fn match_with_no_matching_arm_returns_null() {
+        let source = r#"
+::test ns
+
+grant fn (role: Str): Any {
+    match role {
+        "admin" => { "all" }
+        "viewer" => { "read" }
+    }
+}
+
+roles fn (): Vec {
+    [grant("admin"), grant("guest"), grant("viewer"), grant("intruder")]
+}
+"#;
+        for jit in ["off", "on"] {
+            let result = run_recursion_source(source, "::test/roles", &[], jit);
+            assert_eq!(
+                result,
+                Val::Vec(vec![
+                    Val::from("all"),
+                    Val::Null,
+                    Val::from("read"),
+                    Val::Null
+                ]),
+                "jit={jit}"
+            );
+        }
+    }
+
+    // The interpreter took a parallel flow's dependency levels only in its
+    // main loop, so a parallel flow in a lambda (a parallel branch is one)
+    // ran none of its bindings and returned {}. A flow nested in one (a
+    // side-effect `cond`, a lambda's own `parallel`) also ended the outer
+    // flow's context, dropping its bindings.
+    #[test]
+    fn parallel_flows_run_their_bindings_wherever_they_are() {
+        let source = r#"
+::test ns
+
+work fn (tag: Str, v: Int): Int {
+    call-lib(::hot::event/send, [tag, {}])
+    v
+}
+
+in-lambda fn (i: Int): Map {
+    f (x) {
+        parallel {
+            a work("lambda:a", add(x, 1))
+            b work("lambda:b", add(x, 2))
+        }
+    }
+    f(i)
+}
+
+dependent fn (i: Int): Map {
+    a 100
+    f (x) {
+        parallel {
+            a add(x, 1)
+            b add(a, 1)
+        }
+    }
+    f(i)
+}
+
+nested fn (i: Int): Map {
+    parallel {
+        a parallel { x add(i, 1)  y add(i, 2) }
+        b add(i, 3)
+    }
+}
+
+with-cond fn (i: Int): Map {
+    parallel {
+        a add(i, 1)
+        cond { lte(0, i) => { "side" } }
+        b add(i, 2)
+    }
+}
+
+helper fn (i: Int): Map {
+    parallel { x add(i, 10) }
+}
+
+with-call fn (i: Int): Map {
+    parallel {
+        a add(i, 1)
+        helper(i)
+        b add(i, 2)
+    }
+}
+"#;
+        let map = |entries: &[(&str, Val)]| {
+            Val::map_from_iter(entries.iter().map(|(k, v)| (Val::from(*k), v.clone())))
+        };
+        for jit in ["off", "on"] {
+            let (result, events) = run_with_events(source, "::test/in-lambda", &[Val::Int(5)], jit);
+            assert_eq!(
+                result,
+                map(&[("a", Val::Int(6)), ("b", Val::Int(7))]),
+                "jit={jit}"
+            );
+            assert_eq!(events, vec!["lambda:a", "lambda:b"], "jit={jit}");
+        }
+        // Compiled code runs the bindings in source order, so it can't read
+        // a later one; only the interpreter is checked on the rest.
+        let run = |entry: &str| run_recursion_source(source, entry, &[Val::Int(5)], "off");
+        assert_eq!(
+            run("::test/dependent"),
+            map(&[("a", Val::Int(6)), ("b", Val::Int(7))])
+        );
+        assert_eq!(
+            run("::test/nested"),
+            map(&[
+                ("a", map(&[("x", Val::Int(6)), ("y", Val::Int(7))])),
+                ("b", Val::Int(8)),
+            ])
+        );
+        assert_eq!(
+            run("::test/with-cond"),
+            map(&[("a", Val::Int(6)), ("b", Val::Int(7))])
+        );
+        assert_eq!(
+            run("::test/with-call"),
+            map(&[("a", Val::Int(6)), ("b", Val::Int(7))])
+        );
+    }
+
+    // A parallel flow collects its bindings in source order, whichever
+    // dependency level each one ran at, as compiled code does.
+    #[test]
+    fn parallel_flow_collects_in_source_order() {
+        let source = r#"
+::test ns
+
+k 3
+
+keyed fn parallel (x: Int): All<Map> {
+    a add(x, k)
+    b x
+}
+
+listed fn parallel (i: Int): All<Vec> {
+    late add(early, 1)
+    early add(i, i)
+    other sub(i, 3)
+}
+
+last fn parallel (i: Int): Int {
+    later add(first, 1)
+    first add(i, 1)
+}
+"#;
+        for _ in 0..10 {
+            let keyed = run_recursion_source(source, "::test/keyed", &[Val::Int(1)], "off");
+            let Val::Map(keyed) = keyed else {
+                panic!("expected a Map, got {keyed}");
+            };
+            let keys: Vec<&Val> = keyed.keys().collect();
+            assert_eq!(keys, vec![&Val::from("a"), &Val::from("b")]);
+        }
+        assert_eq!(
+            run_recursion_source(source, "::test/listed", &[Val::Int(1)], "off"),
+            Val::Vec(vec![Val::Int(3), Val::Int(2), Val::Int(-2)])
+        );
+        assert_eq!(
+            run_recursion_source(source, "::test/last", &[Val::Int(1)], "off"),
+            Val::Int(2)
+        );
+    }
+
+    // `call-lib`'s arguments were compiled twice, once by the generic
+    // argument pass and again by `call-lib`'s own, so each side effect in
+    // them ran twice (hot-std's `println(message)` converted it twice).
+    #[test]
+    fn call_lib_evaluates_each_argument_once() {
+        let source = r#"
+::test ns
+
+bump fn (): Str {
+    call-lib(::hot::event/send, ["bumped", {}])
+    "sent"
+}
+
+run fn (): Any {
+    call-lib(::hot::event/send, [bump(), {}])
+}
+"#;
+        for jit in ["off", "on"] {
+            let (_, events) = run_with_events(source, "::test/run", &[], jit);
+            assert_eq!(events, vec!["bumped", "sent"], "jit={jit}");
+        }
+    }
+
+    // The overload lookup's trace scan, and the core-name lookup, match a
+    // whole name segment: `abs` is not `fabs`.
+    #[test]
+    fn core_function_lookup_matches_a_whole_name() {
+        let source = r#"
+            ::first ns
+
+            fabs meta {core: true} fn (n: Int): Int { n }
+        "#;
+        let mut program = parse_hot(source).expect("test source should parse");
+        let core_variables =
+            crate::lang::compiler::core_registry::extract_core_variables_from_ast(&program);
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_program_unchecked(&mut program)
+            .expect("test source should compile");
+        let vm = VirtualMachine::new(
+            compiler.get_program_arc(),
+            None,
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            Arc::new(core_variables),
+            None,
+        );
+        assert_eq!(
+            vm.lookup_core_function_name("fabs").as_deref(),
+            Some("::first/fabs")
+        );
+        assert_eq!(vm.lookup_core_function_name("abs"), None);
     }
 }
