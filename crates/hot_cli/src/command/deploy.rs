@@ -42,6 +42,9 @@ fn resolve_local_build_storage_path(
     Ok(Path::new(build_dir).join(storage_path))
 }
 
+/// Secret-shape matches, and the file each bundle path came from.
+pub(crate) type SecretScan = (Vec<hot::secret_scan::SecretMatch>, Vec<(String, PathBuf)>);
+
 /// Run the build-time secret-shape scan over what `hot check` and `hot watch`
 /// would bundle (src, dependency and resource files), with the same
 /// `hot.build.allow-secret-shape` allowlist and `--allow-secret-shape`
@@ -52,7 +55,7 @@ pub(crate) fn scan_cli_inputs(
     options: &GlobalOptions,
     src: &[String],
     allow_secret_shape: bool,
-) -> Result<(Vec<hot::secret_scan::SecretMatch>, Vec<(String, PathBuf)>), String> {
+) -> Result<SecretScan, String> {
     let project = options
         .project
         .clone()
