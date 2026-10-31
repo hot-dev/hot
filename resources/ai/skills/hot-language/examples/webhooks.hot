@@ -9,19 +9,6 @@ HttpResponse ::hot::http/HttpResponse
 
 signing-secret ::env/get("WEBHOOK_SECRET", "")
 
-// Function aliases can carry platform metadata while pointing at shared code.
-signup-webhook
-meta {
-    webhook: {
-        service: "leads",
-        path: "/signup",
-        method: "POST",
-    },
-    secret-headers: ["x-signature"],
-}
-
-handle-signup
-
 handle-signup fn (request: HttpRequest): HttpResponse {
     if(verify-signature(request.headers, request.body-raw),
         accept-signup(request),
@@ -42,6 +29,21 @@ accept-signup fn (request: HttpRequest): HttpResponse {
         body: {ok: true},
     })
 }
+
+// Function aliases can carry platform metadata while pointing at shared code.
+// An alias is a namespace value, so it must come after the function it names:
+// a top-level value can't refer to a definition later in the file.
+signup-webhook
+meta {
+    webhook: {
+        service: "leads",
+        path: "/signup",
+        method: "POST",
+    },
+    secret-headers: ["x-signature"],
+}
+
+handle-signup
 
 // Expose a tool to an MCP server.
 search-leads

@@ -673,7 +673,11 @@ fn (endpoint: Str): Map {
   req ::hot::ctx/get("hot.request")
   token get(req.headers, "authorization")
   if(is-null(token), fail("Authorization header required"))
-  ::http/get(endpoint, {headers: {"Authorization": token}}).body
+  ::http/request(::http/HttpRequest({
+    method: "GET",
+    url: endpoint,
+    headers: {Authorization: token},
+  })).body
 }
 ```
 

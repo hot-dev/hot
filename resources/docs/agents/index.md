@@ -102,7 +102,11 @@ fn (event) {
 
 on-escalation meta {agent: SupportAgent, on-event: "support:escalate"}
 fn (event) {
-  ::hot::slack/post-message(support-agent.escalation-channel, `Needs help: ${event.data.reason}`)
+  // From the hot.dev/slack package (add it to your project's deps).
+  ::slack::messaging/chat-post-message(::slack::messaging/ChatPostMessageRequest({
+    channel: support-agent.escalation-channel,
+    text: `Needs help: ${event.data.reason}`,
+  }))
 }
 ```
 

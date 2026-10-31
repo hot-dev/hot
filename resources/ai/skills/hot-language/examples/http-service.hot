@@ -57,8 +57,9 @@ api-get fn (path: Str): Any {
         headers: auth-headers(),
     }))
 
+    // Returns are wrapped in Ok for you, so the body needs no ok(...).
     if(eq(response.status, 200),
-        ok(response.body),
+        response.body,
         err(`API error: ${response.status}`))
 }
 
@@ -72,8 +73,8 @@ api-post fn (path: Str, body: Map): Any {
     }))
 
     cond {
-        eq(response.status, 200) => { ok(response.body) }
-        eq(response.status, 201) => { ok(response.body) }
+        eq(response.status, 200) => { response.body }
+        eq(response.status, 201) => { response.body }
         => { err(`API error: ${response.status} - ${response.body}`) }
     }
 }

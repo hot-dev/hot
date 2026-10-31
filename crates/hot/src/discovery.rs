@@ -32,9 +32,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// case (no ignore file → don't melt the disk on `node_modules`) is handled.
 ///
 /// `.hot/` is the local Hot build cache. `.git/` is excluded by `ignore`'s
-/// own filtering already, but we list it for clarity.
+/// own filtering already, but we list it for clarity. `.skills/` holds the
+/// agent skills `hot ai add` installs: their example and test `.hot` files
+/// document Hot, and compiling them into a project whose source path is the
+/// project root would load their namespaces with the project's.
 pub const DEFAULT_HARD_EXCLUDES: &[&str] = &[
     ".hot/",
+    ".skills/",
     "target/",
     "node_modules/",
     ".git/",
@@ -59,8 +63,8 @@ pub struct DiscoveryOpts {
 
     /// Skip files whose names start with `.` *unless* they are explicitly
     /// listed by an ignore rule. This is the "hidden files" heuristic in
-    /// `ignore`; we default to `false` so that things like `.skills/` and
-    /// dotfiles inside a tracked tree are still discoverable.
+    /// `ignore`; we default to `false` so that dotfiles inside a tracked
+    /// tree are still discoverable.
     pub skip_hidden: bool,
 
     /// Extra patterns to *exclude* from discovery (gitignore syntax). For
@@ -315,6 +319,23 @@ mod tests {
         let opts = DiscoveryOpts::for_extension("hot");
         let found = discover(&[tmp.path()], &opts);
         assert_eq!(rel_paths(&found), vec!["a.hot", "sub/c.hot"]);
+    }
+
+    #[test]
+    fn installed_skills_are_not_project_sources() {
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), "src/main.hot");
+        touch(tmp.path(), ".skills/hot-language/examples/webhooks.hot");
+        touch(tmp.path(), ".skills/hot-language/test/flows.hot");
+
+        let opts = DiscoveryOpts::for_extension("hot");
+        let found = rel_paths(&discover(&[tmp.path()], &opts));
+        assert_eq!(found, vec!["src/main.hot"]);
+
+        // A root inside .skills is still walked when named explicitly.
+        let skill = tmp.path().join(".skills/hot-language/examples");
+        let found = rel_paths(&discover(&[&skill], &opts));
+        assert_eq!(found, vec!["webhooks.hot"]);
     }
 
     #[test]

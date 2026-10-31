@@ -94,9 +94,27 @@ reservation without a result as a recoverable state with an explicit timeout
 or retry policy.
 
 Handlers for different events of one stream can run at the same time. Change
-shared store state with `put-if` (retrying when it returns `false`) or
-`increment`, never with a `get` followed by a `put`, which can drop a
-concurrent handler's write.
+shared store state with `put-if` or `increment`, never with a `get` followed
+by a `put`, which can drop a concurrent handler's write. Retry a `put-if` that
+returns `false` with a fresh `get`, and give the retries a budget so a stuck
+loop fails instead of spinning:
+
+```hot
+::store ::hot::store
+
+cases ::store/Map({name: "cases"})
+
+add-answer fn (case-id: Str, answer-id: Str, answer: Any, attempts: Int): Map {
+    current ::store/get(cases, case-id)
+    next assoc(if(is-null(current), {}, current), answer-id, answer)
+    wrote ::store/put-if(cases, case-id, current, next)
+    cond {
+        wrote => { next }
+        lte(attempts, 1) => { err(`case ${case-id} kept changing`) }
+        => { add-answer(case-id, answer-id, answer, sub(attempts, 1)) }
+    }
+}
+```
 
 ## Gate Effects
 

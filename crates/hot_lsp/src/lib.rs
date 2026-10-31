@@ -36,9 +36,9 @@ use std::task::Poll;
 use std::time::Duration;
 use text::Document;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tower_lsp::jsonrpc::{Error as JsonRpcError, Result as JsonRpcResult};
-use tower_lsp::lsp_types::*;
-use tower_lsp::{Client, LanguageServer, LspService, Server};
+use tower_lsp_server::jsonrpc::{Error as JsonRpcError, Result as JsonRpcResult};
+use tower_lsp_server::ls_types::*;
+use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 use workspace::Workspace;
 
 /// Parameters for the hot/eval custom request
@@ -107,13 +107,13 @@ fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 }
 
 /// The canonical path of a document URI.
-fn uri_path(uri: &Url) -> Option<PathBuf> {
-    let path = uri.to_file_path().ok()?;
+fn uri_path(uri: &Uri) -> Option<PathBuf> {
+    let path = uri.to_file_path()?.into_owned();
     Some(std::fs::canonicalize(&path).unwrap_or(path))
 }
 
-fn is_hot(uri: &Url) -> bool {
-    uri.path().ends_with(".hot")
+fn is_hot(uri: &Uri) -> bool {
+    uri.path().as_str().ends_with(".hot")
 }
 
 /// What the last successful check parsed.
@@ -141,9 +141,9 @@ impl Snapshot {
 #[derive(Default)]
 struct Published {
     /// Diagnostics last published, by URI.
-    diagnostics: AHashMap<Url, Vec<Diagnostic>>,
+    diagnostics: AHashMap<Uri, Vec<Diagnostic>>,
     /// URIs whose diagnostics came from a check that stopped at parse errors.
-    from_parse_failure: AHashSet<Url>,
+    from_parse_failure: AHashSet<Uri>,
     /// Window messages last shown, so a repeated one isn't shown again.
     messages: Vec<String>,
 }
@@ -151,7 +151,7 @@ struct Published {
 struct State {
     client: Client,
     /// Open documents.
-    docs: RwLock<AHashMap<Url, Arc<Document>>>,
+    docs: RwLock<AHashMap<Uri, Arc<Document>>>,
     workspace: RwLock<Arc<Workspace>>,
     snapshot: RwLock<Arc<Snapshot>>,
     published: tokio::sync::Mutex<Published>,
@@ -207,7 +207,7 @@ impl Backend {
                     .log_message(MessageType::ERROR, &message)
                     .await;
                 Err(JsonRpcError {
-                    code: tower_lsp::jsonrpc::ErrorCode::InternalError,
+                    code: tower_lsp_server::jsonrpc::ErrorCode::InternalError,
                     message: message.into(),
                     data: None,
                 })
@@ -227,7 +227,7 @@ impl Backend {
         }
     }
 
-    fn doc(&self, uri: &Url) -> Option<Arc<Document>> {
+    fn doc(&self, uri: &Uri) -> Option<Arc<Document>> {
         read(&self.state.docs).get(uri).cloned()
     }
 
@@ -240,7 +240,7 @@ impl Backend {
     }
 
     /// Open documents by canonical path.
-    fn open_by_path(&self) -> AHashMap<PathBuf, (Url, Arc<Document>)> {
+    fn open_by_path(&self) -> AHashMap<PathBuf, (Uri, Arc<Document>)> {
         read(&self.state.docs)
             .iter()
             .filter_map(|(uri, doc)| Some((uri_path(uri)?, (uri.clone(), doc.clone()))))
@@ -248,7 +248,7 @@ impl Backend {
     }
 
     /// The document, its token context and the cursor's char offset.
-    fn at(&self, uri: &Url, position: Position) -> Option<(Arc<Document>, DocContext, usize)> {
+    fn at(&self, uri: &Uri, position: Position) -> Option<(Arc<Document>, DocContext, usize)> {
         if !is_hot(uri) {
             return None;
         }
@@ -318,16 +318,16 @@ impl State {
             AHashMap::new()
         };
         let mut from_parse_failure = AHashSet::new();
-        let open: AHashMap<PathBuf, Url> = read(&self.docs)
+        let open: AHashMap<PathBuf, Uri> = read(&self.docs)
             .keys()
             .filter_map(|uri| Some((uri_path(uri)?, uri.clone())))
             .collect();
         for (path, diagnostics) in output.by_file {
             let uri = match open.get(&path) {
                 Some(uri) => uri.clone(),
-                None => match Url::from_file_path(&path) {
-                    Ok(uri) => uri,
-                    Err(_) => continue,
+                None => match Uri::from_file_path(&path) {
+                    Some(uri) => uri,
+                    None => continue,
                 },
             };
             if output.parse_failed {
@@ -409,12 +409,13 @@ impl State {
 fn client_root(params: &InitializeParams) -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::new();
     for folder in params.workspace_folders.iter().flatten() {
-        if let Ok(path) = folder.uri.to_file_path() {
-            candidates.push(path);
+        if let Some(path) = folder.uri.to_file_path() {
+            candidates.push(path.into_owned());
         }
     }
-    if let Some(path) = params.root_uri.as_ref().and_then(|u| u.to_file_path().ok()) {
-        candidates.push(path);
+    #[allow(deprecated)]
+    if let Some(path) = params.root_uri.as_ref().and_then(|u| u.to_file_path()) {
+        candidates.push(path.into_owned());
     }
     #[allow(deprecated)]
     if let Some(path) = params.root_path.as_ref() {
@@ -428,7 +429,6 @@ fn client_root(params: &InitializeParams) -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
-#[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> JsonRpcResult<InitializeResult> {
         self.guard("initialize", async {
@@ -484,6 +484,7 @@ impl LanguageServer for Backend {
                     name: "hot-lsp".to_string(),
                     version: Some(env!("HOT_VERSION").to_string()),
                 }),
+                offset_encoding: None,
             })
         })
         .await
@@ -617,7 +618,7 @@ impl LanguageServer for Backend {
                     continue;
                 }
                 changed = true;
-                if let Ok(path) = change.uri.to_file_path()
+                if let Some(path) = change.uri.to_file_path()
                     && workspace.is_config_file(&path)
                 {
                     reload = true;
@@ -783,7 +784,10 @@ impl LanguageServer for Backend {
                         .client
                         .log_message(
                             MessageType::WARNING,
-                            format!("hot-lsp: not formatting {uri}: the result would not parse"),
+                            format!(
+                                "hot-lsp: not formatting {}: the result would not parse",
+                                uri.as_str()
+                            ),
                         )
                         .await;
                     Ok(None)
@@ -794,7 +798,7 @@ impl LanguageServer for Backend {
                         .client
                         .log_message(
                             MessageType::WARNING,
-                            format!("hot-lsp: not formatting {uri}: {e}"),
+                            format!("hot-lsp: not formatting {}: {e}", uri.as_str()),
                         )
                         .await;
                     Ok(None)
@@ -807,17 +811,19 @@ impl LanguageServer for Backend {
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
-    ) -> JsonRpcResult<Option<Vec<SymbolInformation>>> {
+    ) -> JsonRpcResult<Option<WorkspaceSymbolResponse>> {
         self.guard("workspace/symbol", async {
             let snapshot = self.snapshot();
             let workspace = self.workspace();
             let open = self.open_by_path();
             let mut files = features::Files::new(&workspace.root, &open);
-            Ok(Some(features::workspace_symbols(
-                &snapshot.index,
-                &params.query,
-                &snapshot.project_files_raw,
-                &mut files,
+            Ok(Some(WorkspaceSymbolResponse::Flat(
+                features::workspace_symbols(
+                    &snapshot.index,
+                    &params.query,
+                    &snapshot.project_files_raw,
+                    &mut files,
+                ),
             )))
         })
         .await

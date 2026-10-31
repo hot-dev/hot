@@ -1,5 +1,5 @@
 [workspace.package]
-version = "3.0.0"
+version = "3.0.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/hot-dev/hot"
@@ -66,7 +66,7 @@ hot_worker = { path = "crates/hot_worker" }
 hot_task_worker = { path = "crates/hot_task_worker" }
 hot_scheduler = { path = "crates/hot_scheduler" }
 hot_api = { path = "crates/hot_api" }
-rustyline = "18.0"
+rustyline = "19.0"
 serde_json = "1.0.154"
 serde = { version = "1.0", features = ["derive", "rc"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc", "use-std"] }
@@ -92,7 +92,7 @@ tower = "0.5"
 tower-http = "0.7.1"
 utoipa = { version = "6.0.0", features = ["chrono", "uuid"] }
 utoipa-swagger-ui = { version = "10.0.1", features = ["axum"] }
-tower-lsp = "0.20"
+tower-lsp-server = "0.23.0"
 regex = "1.13.1"
 num-traits = "0.2"
 walkdir = "2.5.0"
@@ -110,7 +110,7 @@ zip = "9.0"
 aws-lc-rs = "1.18.2"
 axum-extra = "0.12.6"
 jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs"] }
-jsonschema = { version = "0.59.0", default-features = false }
+jsonschema = { version = "0.60.2", default-features = false }
 time = "0.3.55"
 croner = "4.0"
 english-to-cron = "0.1.7"
@@ -135,9 +135,9 @@ aws-sdk-s3 = { version = "1.152", default-features = false, features = ["behavio
 # Official Google Cloud Storage SDK (gcs-storage feature). Pinned to a minor
 # line: generation preconditions, compose, and the retry/backoff policy types
 # are relied on directly.
-google-cloud-storage = { version = "~1.20", default-features = false, features = ["default-rustls-provider"] }
+google-cloud-storage = { version = "~1.21", default-features = false, features = ["default-rustls-provider"] }
 google-cloud-gax = { version = "~1.15", default-features = false }
-google-cloud-auth = { version = "~1.17", default-features = false }
+google-cloud-auth = { version = "~1.18", default-features = false }
 oauth2 = { version = "5.0", default-features = false }
 md5 = "0.8"
 pulldown-cmark = "0.13"
@@ -169,14 +169,14 @@ tokio-vsock = "0.7"
 # WebSocket client for ::hot::ws functions
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 fastembed = { version = "7", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
-cranelift-codegen = "0.136.3"
-cranelift-frontend = "0.136.3"
-cranelift-jit = "0.136.3"
-cranelift-module = "0.136.3"
-cranelift-native = "0.136.3"
+cranelift-codegen = "0.137.1"
+cranelift-frontend = "0.137.1"
+cranelift-jit = "0.137.1"
+cranelift-module = "0.137.1"
+cranelift-native = "0.137.1"
 # Non-poisoning Mutex/RwLock for shared state held across user-code execution.
 # Avoids std::sync poisoning if user code panics while a lock is held.
-parking_lot = "0.12"
+parking_lot = "0.13"
 # Tokenizer for OpenAI BPE encodings (cl100k_base, o200k_base, etc.).
 # Used by `::hot::internal::tokenizer` and wrapped by `::ai::tokenizer`.
 tiktoken-rs = "0.12"

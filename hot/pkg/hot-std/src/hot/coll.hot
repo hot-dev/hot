@@ -859,7 +859,7 @@ meta {
     ```
     """
 }
-fn (coll: Str | Vec | Map): Str | Vec | Map {
+fn (coll: Vec): Vec {
     call-lib(::hot::coll/flatten, [coll])
 }
 

@@ -8,22 +8,22 @@ use ahash::{AHashMap, AHashSet};
 use hot::lang::ast::{Source, Value};
 use hot::val::Val;
 use std::path::{Path, PathBuf};
-use tower_lsp::lsp_types::{
+use tower_lsp_server::ls_types::{
     CompletionItem, CompletionItemKind, Hover, HoverContents, InsertTextFormat, Location,
-    MarkupContent, MarkupKind, Position, Range, SignatureHelp, SymbolInformation, SymbolKind, Url,
+    MarkupContent, MarkupKind, Position, Range, SignatureHelp, SymbolInformation, SymbolKind, Uri,
 };
 
 /// Text of files that locations point into: open documents first, then disk.
 pub struct Files<'a> {
     pub root: &'a Path,
-    pub open: &'a AHashMap<PathBuf, (Url, std::sync::Arc<Document>)>,
+    pub open: &'a AHashMap<PathBuf, (Uri, std::sync::Arc<Document>)>,
     cache: AHashMap<PathBuf, Option<(String, LineIndex)>>,
 }
 
 impl<'a> Files<'a> {
     pub fn new(
         root: &'a Path,
-        open: &'a AHashMap<PathBuf, (Url, std::sync::Arc<Document>)>,
+        open: &'a AHashMap<PathBuf, (Uri, std::sync::Arc<Document>)>,
     ) -> Self {
         Self {
             root,
@@ -33,12 +33,12 @@ impl<'a> Files<'a> {
     }
 
     /// The text of a file, and its URI.
-    pub fn text(&mut self, path: &Path) -> Option<(Url, String)> {
+    pub fn text(&mut self, path: &Path) -> Option<(Uri, String)> {
         if let Some((uri, doc)) = self.open.get(path) {
             return Some((uri.clone(), doc.text.clone()));
         }
         let text = std::fs::read_to_string(path).ok()?;
-        Some((Url::from_file_path(path).ok()?, text))
+        Some((Uri::from_file_path(path)?, text))
     }
 
     /// The location of a definition's source.
@@ -46,7 +46,7 @@ impl<'a> Files<'a> {
         let file = crate::analysis::normalize(self.root, Path::new(src.file.as_ref()?));
         let uri = match self.open.get(&file) {
             Some((uri, _)) => uri.clone(),
-            None => Url::from_file_path(&file).ok()?,
+            None => Uri::from_file_path(&file)?,
         };
         let range = if let Some((_, doc)) = self.open.get(&file) {
             doc.lines
@@ -111,7 +111,7 @@ pub fn hover(index: &Index, doc: &Document, ctx: &DocContext, offset: usize) -> 
 
 pub fn definition(
     index: &Index,
-    uri: &Url,
+    uri: &Uri,
     doc: &Document,
     ctx: &DocContext,
     offset: usize,
@@ -126,7 +126,7 @@ pub fn definition(
         let file = crate::analysis::normalize(files.root, &file);
         let target = match files.open.get(&file) {
             Some((uri, _)) => uri.clone(),
-            None => Url::from_file_path(&file).ok()?,
+            None => Uri::from_file_path(&file)?,
         };
         return Some(Location::new(
             target,
@@ -157,11 +157,11 @@ pub fn signature_help(index: &Index, ctx: &DocContext, offset: usize) -> Option<
             .iter()
             .find(|v| v.name.name() == variant)?;
         let payload = v.type_ref.clone()?;
-        vec![tower_lsp::lsp_types::SignatureInformation {
+        vec![tower_lsp_server::ls_types::SignatureInformation {
             label: format!("{}.{}({})", def.name, variant, payload),
             documentation: None,
-            parameters: Some(vec![tower_lsp::lsp_types::ParameterInformation {
-                label: tower_lsp::lsp_types::ParameterLabel::Simple(payload),
+            parameters: Some(vec![tower_lsp_server::ls_types::ParameterInformation {
+                label: tower_lsp_server::ls_types::ParameterLabel::Simple(payload),
                 documentation: None,
             }]),
             active_parameter: None,
@@ -480,14 +480,14 @@ pub fn completion(index: &Index, ctx: &DocContext, offset: usize) -> Option<Vec<
 
 /// What find-references looks for.
 pub enum Target {
-    Local { uri: Url, start: usize },
+    Local { uri: Uri, start: usize },
     Def { qualified: String, name: String },
 }
 
 /// The target of find-references at `offset`, and its declaration.
 pub fn reference_target(
     index: &Index,
-    uri: &Url,
+    uri: &Uri,
     doc: &Document,
     ctx: &DocContext,
     offset: usize,
@@ -522,7 +522,7 @@ pub fn reference_target(
 /// References to `target` in one document.
 pub fn references_in(
     index: &Index,
-    uri: &Url,
+    uri: &Uri,
     text: &str,
     target: &Target,
     out: &mut Vec<Location>,

@@ -75,9 +75,9 @@ build_target() {
     # Build
     echo "  → Building..."
     if [ -n "$build_env" ]; then
-        env $build_env cargo build --release --target "$target"
+        env $build_env cargo build --release --locked --target "$target"
     else
-        cargo build --release --target "$target"
+        cargo build --release --locked --target "$target"
     fi
 
     # Prepare output directory

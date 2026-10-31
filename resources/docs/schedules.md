@@ -110,6 +110,13 @@ Supported English patterns:
 
 Natural language schedules are converted to cron expressions internally. Both formats are fully supported and can be mixed within the same project.
 
+A metadata `schedule` must repeat. A schedule that names a single run, such as
+`"2026-11-01"`, `"in 10 minutes"`, `"2h"` or `"tomorrow at 9am"`, is an
+`invalid-schedule` error in `hot check`, builds and deploys. Hot 3.0.0
+accepted some of these and ran them repeatedly. Write `every …` for an
+interval (`"every 2 hours"`), or send a `hot:schedule:new` event to run a
+function once (see [Dynamic Schedules](#dynamic-schedules)).
+
 ## Dynamic Schedules
 
 In addition to metadata-driven schedules (defined at build time), you can create schedules dynamically at runtime using events. This is useful for:

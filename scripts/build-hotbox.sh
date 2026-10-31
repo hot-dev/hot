@@ -38,7 +38,7 @@ DOCKER_BUILDKIT=1 docker build --progress=plain \
     --output "type=local,dest=target/hotbox-build" \
     . <<'DOCKERFILE'
 # syntax=docker/dockerfile:1.4
-FROM rust:1.99.1-slim AS builder
+FROM rust:1.99.1-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
 
@@ -67,7 +67,7 @@ RUN --mount=type=cache,id=hotbox-registry-${CARGO_LOCK_HASH},target=/usr/local/c
     --mount=type=cache,id=hotbox-git-${CARGO_LOCK_HASH},target=/usr/local/cargo/git \
     --mount=type=cache,id=hotbox-target-${CARGO_LOCK_HASH},target=/workspace/target \
     MUSL_TARGET=$(cat /tmp/musl-target) && \
-    cargo build --release --target $MUSL_TARGET -p hotbox && \
+    cargo build --release --locked --target $MUSL_TARGET -p hotbox && \
     cp /workspace/target/$MUSL_TARGET/release/hotbox /hotbox
 
 FROM scratch

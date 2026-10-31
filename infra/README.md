@@ -22,12 +22,14 @@ Implemented:
 - File-backed secret consumption and provenance-based configuration redaction
   in Hot; strict backend selection; S3 temporary session-token support; JSON
   runtime logging.
+- Scheduler lock liveness: the scheduler confirms its PostgreSQL singleton lock
+  every two seconds and exits non-zero when it loses the lock, so its
+  supervisor restarts it.
 
 The roots intentionally require `acknowledge_unqualified = true`. The bootstrap
 also refuses to start if the supplied image lacks `hot-agent.service`. The baked
 host image, deploy/secret agent, signed release delivery, onboarding/SMTP,
-scheduler lock-liveness changes, full outbound-policy controls, existing-DB
-integration, cloud monitoring/alerts, and the real-cloud release gates remain
+full outbound-policy controls, existing-DB integration, cloud monitoring/alerts, and the real-cloud release gates remain
 to be implemented and qualified. Do not apply these development examples to
 production. No usable host image or published runtime digest is implied by the
 placeholder references in the fixtures.
