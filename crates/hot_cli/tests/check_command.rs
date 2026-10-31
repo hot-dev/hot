@@ -180,6 +180,7 @@ fn unallowed_secret_shape_is_a_diagnostic_in_every_format() {
     let out = stdout(&output);
     assert_eq!(output.status.code(), Some(1), "{out}");
     assert!(out.contains("found 1 potential secret(s)"), "{out}");
+    assert!(!out.contains("AKIA"), "{out}");
 
     let output = run_hot(dir.path(), &["check", "--allow-secret-shape"]);
     assert_eq!(output.status.code(), Some(0), "{}", text(&output));

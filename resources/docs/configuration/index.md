@@ -211,8 +211,8 @@ values `hot.hot` reads with `::hot::env/get("HOT_...")` (such as the API key
 and Stripe settings in the generated templates), `HOT_ENCRYPTION_KEY`,
 `HOT_APP_SESSION_SECRET`, and the GitHub and Google OAuth client settings. Hot
 drops one trailing newline and does not copy the value into the process
-environment. `HOT_ENCRYPTION_KEY` and `HOT_APP_SESSION_SECRET` are read once,
-when first used, and kept: rotating either takes a restart.
+environment. `HOT_ENCRYPTION_KEY` and `HOT_APP_SESSION_SECRET` are kept once
+found: rotating either takes a restart.
 
 Setting both `<NAME>` and `<NAME>_FILE`, or naming an empty or unreadable
 file, stops the command with an error that names the variable and path but

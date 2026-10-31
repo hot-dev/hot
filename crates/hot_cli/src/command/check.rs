@@ -203,7 +203,7 @@ fn simple_line(error: &CompilerError) -> String {
 }
 
 /// The on-disk file a secret-scan match points at, when it is known.
-fn secret_file(hit: &SecretMatch, files: &[(String, PathBuf)]) -> Option<String> {
+fn shape_match_file(hit: &SecretMatch, files: &[(String, PathBuf)]) -> Option<String> {
     files
         .iter()
         .find(|(rel, _)| rel == &hit.path)
@@ -215,19 +215,46 @@ fn secret_file(hit: &SecretMatch, files: &[(String, PathBuf)]) -> Option<String>
         })
 }
 
-fn secret_message(hit: &SecretMatch) -> String {
+/// A secret-shape match without the matched text: check output goes to
+/// terminals, CI logs and editors, so it names the kind and place only.
+fn shape_match_message(hit: &SecretMatch) -> String {
     format!(
-        "potential secret ({}) in {}: {}. Allowlist intentional values with \
+        "potential secret ({}) in {} at line {}. Allowlist intentional values with \
          hot.build.allow-secret-shape in hot.hot, or rotate the credential and \
          read it from ::hot::ctx.",
-        hit.kind, hit.path, hit.snippet
+        hit.kind, hit.path, hit.line
     )
 }
 
-fn secret_diagnostic(hit: &SecretMatch, files: &[(String, PathBuf)]) -> Diagnostic {
+/// The pretty report of secret-shape matches, without their text.
+fn shape_scan_report(hits: &[SecretMatch]) -> String {
+    let mut out = format!(
+        "found {} potential secret(s) in bundled content:\n",
+        hits.len()
+    );
+    for (i, hit) in hits.iter().enumerate() {
+        out.push_str(&format!(
+            "  {:>2}. {} (line {}) — {}\n",
+            i + 1,
+            hit.path,
+            hit.line,
+            hit.kind
+        ));
+    }
+    out.push_str(
+        "\nIf these are intentional (test fixtures, example configs, public keys, …), \
+         allowlist them in hot.hot:\n  hot.build.allow-secret-shape [\"path/to/file\"]\n\
+         …or pass `--allow-secret-shape` to skip the scan for this check.\n\
+         Otherwise: rotate the credential and remove it from the bundle. Production \
+         secrets belong in `::hot::ctx`, not in source.",
+    );
+    out
+}
+
+fn shape_match_diagnostic(hit: &SecretMatch, files: &[(String, PathBuf)]) -> Diagnostic {
     let line = hit.line.saturating_sub(1) as u32;
     Diagnostic {
-        file: secret_file(hit, files),
+        file: shape_match_file(hit, files),
         range: DiagnosticRange {
             start: DiagnosticPosition { line, character: 0 },
             end: DiagnosticPosition { line, character: 0 },
@@ -235,7 +262,7 @@ fn secret_diagnostic(hit: &SecretMatch, files: &[(String, PathBuf)]) -> Diagnost
         severity: 1,
         code: "secret-shape".to_string(),
         source: "hot".to_string(),
-        message: secret_message(hit),
+        message: shape_match_message(hit),
     }
 }
 
@@ -288,7 +315,7 @@ pub(crate) fn run_check_once(
             }
         };
         if !hits.is_empty() {
-            println!("{}", hot::secret_scan::format_findings(&hits));
+            println!("{}", shape_scan_report(&hits));
         }
         let failed = failed || !hits.is_empty();
         if !failed && !had_warnings && !options.raw {
@@ -323,12 +350,12 @@ pub(crate) fn run_check_once(
             println!("{}", simple_line(error));
         }
         for hit in &hits {
-            let file = secret_file(hit, &files).unwrap_or_else(|| hit.path.clone());
+            let file = shape_match_file(hit, &files).unwrap_or_else(|| hit.path.clone());
             println!(
                 "{}:{}:1: error [secret-shape] {}",
                 file,
                 hit.line,
-                secret_message(hit)
+                shape_match_message(hit)
             );
         }
         if !fail && !errors.has_warnings() && !options.raw {
@@ -338,7 +365,7 @@ pub(crate) fn run_check_once(
     }
 
     let mut diagnostics = errors.to_diagnostics();
-    diagnostics.extend(hits.iter().map(|hit| secret_diagnostic(hit, &files)));
+    diagnostics.extend(hits.iter().map(|hit| shape_match_diagnostic(hit, &files)));
     let serialized = if options.format == CheckFormat::JsonMin {
         serde_json::to_string(&diagnostics)
     } else {
@@ -458,6 +485,23 @@ mod tests {
             CheckFormat::JsonMin
         );
         assert!(CheckFormat::parse(Some("jsonl")).is_err());
+    }
+
+    #[test]
+    fn shape_scan_output_never_contains_the_matched_text() {
+        let hit = SecretMatch {
+            path: "hot/src/a.hot".to_string(),
+            kind: "aws-access-key",
+            line: 3,
+            snippet: "key \"AKIA***MPLE\"".to_string(),
+        };
+        let message = shape_match_message(&hit);
+        let report = shape_scan_report(std::slice::from_ref(&hit));
+        for text in [&message, &report] {
+            assert!(!text.contains("AKIA"), "{text}");
+            assert!(text.contains("aws-access-key"), "{text}");
+        }
+        assert!(message.contains("hot/src/a.hot at line 3"), "{message}");
     }
 
     #[test]

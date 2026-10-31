@@ -25,28 +25,43 @@ pub const DIRECT_SETTINGS: &[&str] = &[
     "HOT_OAUTH_REDIRECT_BASE_URL",
 ];
 
-/// Secrets resolved once per process: rotating one takes a restart, and a
-/// secret file removed while the process runs doesn't break it.
+/// Secrets kept once found: rotating one takes a restart, and a secret
+/// file removed while the process runs doesn't break it.
 const RESOLVE_ONCE: &[&str] = &["HOT_APP_SESSION_SECRET", "HOT_ENCRYPTION_KEY"];
 
 /// Read an environment setting, optionally supplied through `<NAME>_FILE`.
 /// Errors deliberately contain variable names and paths, never file contents.
-/// `HOT_APP_SESSION_SECRET` and `HOT_ENCRYPTION_KEY` are read on first use
-/// and then kept for the life of the process.
+/// `HOT_APP_SESSION_SECRET` and `HOT_ENCRYPTION_KEY` are kept for the life of
+/// the process once a value is found.
 pub fn read_optional(name: &str) -> Result<Option<String>, String> {
-    type Cache = Mutex<HashMap<String, Result<Option<String>, String>>>;
-    static CACHE: OnceLock<Cache> = OnceLock::new();
+    static FOUND: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
     if !RESOLVE_ONCE.contains(&name) {
         return read_from_env(name);
     }
-    let mut cache = CACHE
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    cache
-        .entry(name.to_string())
-        .or_insert_with(|| read_from_env(name))
-        .clone()
+    read_kept(FOUND.get_or_init(Default::default), name, || {
+        read_from_env(name)
+    })
+}
+
+/// The value `found` keeps for `name`, else `read()`'s, kept if it has one.
+/// Nothing is kept while the setting is unset or broken, so a value supplied
+/// later is still picked up.
+fn read_kept(
+    found: &Mutex<HashMap<String, String>>,
+    name: &str,
+    read: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    if let Some(value) = found.lock().unwrap_or_else(|e| e.into_inner()).get(name) {
+        return Ok(Some(value.clone()));
+    }
+    let value = read()?;
+    if let Some(value) = &value {
+        found
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string(), value.clone());
+    }
+    Ok(value)
 }
 
 fn read_from_env(name: &str) -> Result<Option<String>, String> {
@@ -135,6 +150,26 @@ mod tests {
         assert_eq!(setting.name, "HOT_CUSTOM_VALUE");
         assert_eq!(setting.source_file.as_ref(), Some(&path));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn kept_secrets_are_kept_once_found_and_not_while_missing() {
+        let found = Mutex::new(HashMap::new());
+        let some = |v: &str| Ok(Some(v.to_string()));
+        assert_eq!(read_kept(&found, "K", || Ok(None)).unwrap(), None);
+        assert!(read_kept(&found, "K", || Err("broken".to_string())).is_err());
+        assert_eq!(
+            read_kept(&found, "K", || some("first")).unwrap(),
+            Some("first".to_string())
+        );
+        assert_eq!(
+            read_kept(&found, "K", || some("rotated")).unwrap(),
+            Some("first".to_string())
+        );
+        assert_eq!(
+            read_kept(&found, "K", || Err("deleted".to_string())).unwrap(),
+            Some("first".to_string())
+        );
     }
 
     #[test]
