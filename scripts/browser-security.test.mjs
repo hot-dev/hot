@@ -47,6 +47,38 @@ for (const [index, open, close] of [[0, '[', ']'], [1, '{', '}']]) {
     }
 }
 
+function hotTokens(code) {
+    const context = vm.createContext({});
+    vm.runInContext(readFileSync(join(root, 'resources/app/assets/js/prism.js'), 'utf8'), context);
+    vm.runInContext(grammar, context);
+    const flatten = (tokens) => tokens.flatMap((token) => typeof token === 'string' ? []
+        : Array.isArray(token.content) ? [[token.type, token.content.map((t) => typeof t === 'string' ? t : t.content).join('')], ...flatten(token.content)]
+            : [[token.type, token.content]]);
+    return flatten(context.Prism.tokenize(code, context.Prism.languages.hot));
+}
+
+test('qualified type and enum names highlight as types, not functions', () => {
+    const tokens = hotTokens('x ::geo/Shape.Dot\ny ::hot::str/join(xs)');
+    assert.ok(tokens.some(([type, text]) => type === 'class-name' && text === 'Shape'));
+    assert.ok(tokens.some(([type, text]) => type === 'class-name' && text === 'Dot'));
+    assert.ok(tokens.some(([type, text]) => type === 'function' && text === 'join'));
+    assert.ok(!tokens.some(([type, text]) => type === 'function' && text === 'Shape'));
+});
+
+test('flow arrows, implements and enum open are tokens of their own', () => {
+    const tokens = hotTokens('f fn (a: Int) -> Out { cond { eq(a, 1) => { 1 } } }\nAnimal enum open { Dog }');
+    assert.ok(tokens.some(([type, text]) => type === 'operator' && text === '->'));
+    assert.ok(tokens.some(([type, text]) => type === 'operator' && text === '=>'));
+    assert.ok(tokens.some(([type, text]) => type === 'keyword' && text === 'open'));
+});
+
+test('nested meta maps and lists stay one meta annotation', () => {
+    for (const meta of ['meta {on-event: "x", opts: {retry: {max: 3}}}', 'meta ["test", ["a", {b: "]"}]]']) {
+        const annotation = hotTokens(meta + ' fn () { 1 }').find(([type]) => type === 'meta-annotation');
+        assert.equal(annotation?.[1], meta);
+    }
+});
+
 // Script-safety lint for the App templates.
 // Every value a template puts into JavaScript must go through the `js` filter
 // (crates/hot_app/src/templates/mod.rs), and `|safe` appears only where reviewed.

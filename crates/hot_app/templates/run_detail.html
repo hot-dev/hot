@@ -676,37 +676,8 @@ document.addEventListener('DOMContentLoaded', function() {
         showRawCheckbox.addEventListener('change', function() {
             // Trigger HTMX request to refresh table with new raw state
             refreshTableWithRawState(showRawCheckbox.checked);
-
-            // Re-display the current value with updated processing if inspector is open
-            const currentVarId = showRawCheckbox.getAttribute('data-current-var-id');
-            const currentType = showRawCheckbox.getAttribute('data-current-type');
-            if (currentVarId && currentType) {
-                fetchAndShowFullValue(currentVarId, currentType);
-            }
         });
     }
-
-    // Use event delegation to handle clicks on rows
-    document.addEventListener('click', function(e) {
-        // Check if any part of a clickable row was clicked
-            const row = e.target.closest('.clickable-row');
-        if (row) {
-            const varId = row.getAttribute('data-var-id');
-
-            // Check if we're in a tab (Table tab of observability tabs)
-            const isInTab = e.target.closest('#table-view-container');
-
-            if (isInTab && window.observabilityTabs) {
-                // Use tabs' Value Inspector - show both meta and value
-                window.observabilityTabs.showVarInInspector(varId);
-            } else {
-                // Use original Value Inspector - show value by default
-            showValueInspector();
-            highlightRow(row);
-                fetchAndShowFullValue(varId, 'value');
-            }
-        }
-    });
 });
 
 function showValueInspector() {
@@ -972,47 +943,6 @@ function extractArgName(arg) {
 
     // Fallback
     return 'arg';
-}
-
-async function fetchAndShowFullValue(varId, type) {
-    const content = document.getElementById('value-panel-content');
-    const typeIndicator = document.getElementById('value-panel-type');
-    const showRawCheckbox = document.getElementById('show-raw-values');
-
-    // Store current variable info for checkbox updates
-    if (showRawCheckbox) {
-        showRawCheckbox.setAttribute('data-current-var-id', varId);
-        showRawCheckbox.setAttribute('data-current-type', type);
-    }
-
-    // Show loading state
-    content.innerHTML = '<div class="text-gray-500 dark:text-gray-400 italic text-center py-4">Loading...</div>';
-    typeIndicator.textContent = 'Loading...';
-    typeIndicator.title = 'Loading...';
-
-    try {
-        const response = await fetch(`/vars/${varId}`);
-        if (!response.ok) {
-            throw new Error('Failed to fetch variable details');
-        }
-
-        const data = await response.json();
-        if (!data.success) {
-            throw new Error(data.error || 'Unknown error');
-        }
-
-        const value = type === 'meta' ? data.meta : data.value;
-        // Pass the formatted_value to the display function
-        showInValuePanel(value, type, data, data.formatted_value);
-    } catch (error) {
-        content.replaceChildren();
-        const errorMessage = document.createElement('div');
-        errorMessage.className = 'text-red-500 dark:text-red-500';
-        errorMessage.textContent = `Error loading data: ${error.message}`;
-        content.appendChild(errorMessage);
-        typeIndicator.textContent = 'Error';
-        typeIndicator.title = `Error: ${error.message}`;
-    }
 }
 
 // Helper functions for unwrapping values

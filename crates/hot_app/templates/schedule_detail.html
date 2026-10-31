@@ -33,11 +33,11 @@
             </div>
             <div>
                 <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Source</dt>
-                <dd class="mt-1 text-sm text-gray-900 dark:text-white font-mono">
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white font-mono min-w-0 break-all">
                     {% match schedule.file %}
                     {% when Some with (file) %}
                         <button type="button"
-                                class="text-hot-red-700 dark:text-hot-red-400 hover:underline font-mono text-left"
+                                class="link hover:underline font-mono text-left break-all"
                                 title="{{ file }}{% if schedule.line.is_some() %}:{{ schedule.line.unwrap() }}{% endif %}"
                                 data-source-build-id="{{ schedule.build_id }}"
                                 data-source-file="{{ file }}"

@@ -133,10 +133,8 @@ pub async fn envs_edit_handler(
                 "Environments".to_string(),
                 "/envs".to_string(),
             ));
-            breadcrumbs.push(templates::BreadcrumbItem::clickable(
-                env.name.clone(),
-                format!("/envs/{}", env_id),
-            ));
+            // There is no environment detail page.
+            breadcrumbs.push(templates::BreadcrumbItem::current(env.name.clone()));
             breadcrumbs.push(templates::BreadcrumbItem::current("Edit".to_string()));
 
             let template = templates::EnvsEdit {

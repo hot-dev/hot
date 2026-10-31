@@ -7,6 +7,23 @@ use hot::time_range::parse_time_range_cutoff;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Every time bucket in the selected range, so empty periods plot as zero and the run charts
+/// line up with the event and stream charts. Runs are bucketed in UTC by the query. With no
+/// range ("all"), only the buckets that have runs.
+fn chart_dates<'a>(
+    cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    time_unit: &str,
+    keys: impl Iterator<Item = &'a String>,
+) -> Vec<String> {
+    let mut dates: std::collections::BTreeSet<String> = keys.cloned().collect();
+    if let Some(cutoff) = cutoff {
+        let hours = (chrono::Utc::now() - cutoff).num_hours().max(1);
+        let days = (hours + 23) / 24;
+        dates.extend(crate::timezone::generate_time_buckets(time_unit, days, "UTC"));
+    }
+    dates.into_iter().collect()
+}
+
 /// GET /data/run-type-data - Get run type chart data with cross-filters
 pub async fn run_type_data_handler(
     State(db): State<Arc<DatabasePool>>,
@@ -51,10 +68,7 @@ pub async fn run_type_data_handler(
     .await
     {
         Ok(daily_counts) => {
-            // Extract all unique dates from the data
-            let all_dates: std::collections::BTreeSet<String> =
-                daily_counts.keys().cloned().collect();
-            let dates: Vec<String> = all_dates.into_iter().collect();
+            let dates = chart_dates(time_range_cutoff, time_unit, daily_counts.keys());
 
             let mut chart_data = serde_json::json!({ "dates": dates, "series": [] });
             let dates_array = chart_data["dates"].as_array().unwrap().clone();
@@ -130,10 +144,7 @@ pub async fn status_chart_data_handler(
     .await
     {
         Ok(daily_counts) => {
-            // Extract all unique dates from the data
-            let all_dates: std::collections::BTreeSet<String> =
-                daily_counts.keys().cloned().collect();
-            let dates: Vec<String> = all_dates.into_iter().collect();
+            let dates = chart_dates(time_range_cutoff, time_unit, daily_counts.keys());
 
             let mut chart_data = serde_json::json!({ "dates": dates, "series": [] });
             let dates_array = chart_data["dates"].as_array().unwrap().clone();

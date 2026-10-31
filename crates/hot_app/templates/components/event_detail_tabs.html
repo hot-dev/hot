@@ -6,6 +6,13 @@
     border-bottom: 1px solid rgba(229, 231, 235, 1);
     background: white;
     padding: 0 0 0 16px;
+    overflow-x: auto;
+    scrollbar-width: thin;
+}
+
+.event-tabs > * {
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .dark .event-tabs {
@@ -183,6 +190,26 @@
     color: rgba(156, 163, 175, 1) !important;
 }
 
+.filter-help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-gray-600);
+    background: var(--color-gray-200);
+    border-radius: 50%;
+    cursor: help;
+    position: relative;
+}
+
+.dark .filter-help {
+    color: var(--color-gray-300);
+    background: var(--color-gray-700);
+}
+
 .dark .event-graph-search-controls .filter-help-tooltip {
     background: var(--color-gray-800) !important;
     border-color: rgba(64, 64, 64, 1) !important;
@@ -248,7 +275,7 @@
                         <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12"></path></svg>
                     </button>
                 </div>
-                <span class="filter-help" tabindex="0" style="display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; font-size: 10px; font-weight: 600; color: rgba(107, 114, 128, 0.8); background: rgba(229, 231, 235, 0.8); border-radius: 50%; cursor: help; position: relative;">?
+                <span class="filter-help" tabindex="0">?
                     <span class="filter-help-tooltip" style="display: none; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: 8px; padding: 10px 12px; min-width: 200px; font-size: 11px; font-weight: 400; line-height: 1.5; color: rgba(55, 65, 81, 1); background: white; border: 1px solid rgba(229, 231, 235, 1); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); z-index: 100; white-space: normal;">
                         <strong>Search</strong><br>
                         Searches type, kind, function, status, and result.<br><br>

@@ -12,11 +12,12 @@
 		'meta-annotation': [
 		{
 			// Meta annotation with brackets: meta [...]
-			pattern: /\bmeta\s*\[(?:[^\]"]|"""(?:(?!""")[\s\S])*"""|"(?!"")(?:[^"\\]|\\.)*")*\]/,
+			// Values may nest lists and maps two levels deep: meta [["a"], {b: [1]}]
+			pattern: /\bmeta\s*\[(?:[^\[\]"]|"""(?:(?!""")[\s\S])*"""|"(?!"")(?:[^"\\]|\\.)*"|\[(?:[^\[\]"]|"""(?:(?!""")[\s\S])*"""|"(?!"")(?:[^"\\]|\\.)*"|\[(?:[^\[\]"]|"""(?:(?!""")[\s\S])*"""|"(?!"")(?:[^"\\]|\\.)*")*\])*\])*\]/,
 			greedy: true,
 			inside: {
 				'keyword': /^meta/,
-				'punctuation': /\[|\]$/,
+				'punctuation': /[[\]{},:]/,
 				'string-triple': {
 					pattern: /"""[\s\S]*?"""/,
 					greedy: true,
@@ -28,17 +29,16 @@
 				},
 					'number': /-?\d+(?:\.\d+)?/,
 					'boolean': /(?<![a-zA-Z0-9_-])(?:true|false)(?![a-zA-Z0-9_-])/,
-					'null': /(?<![a-zA-Z0-9_-])null(?![a-zA-Z0-9_-])/,
-					'punctuation': /[,:]/
+					'null': /(?<![a-zA-Z0-9_-])null(?![a-zA-Z0-9_-])/
 				}
 			},
 		{
 			// Meta annotation with braces: meta {...}
-			pattern: /\bmeta\s*\{(?:[^}"]|"""(?:(?!""")[\s\S])*"""|"(?!"")(?:[^"\\]|\\.)*")*\}/,
+			pattern: /\bmeta\s*\{(?:[^\{\}"]|"""(?:(?!""")[\s\S])*"""|"(?!"")(?:[^"\\]|\\.)*"|\{(?:[^\{\}"]|"""(?:(?!""")[\s\S])*"""|"(?!"")(?:[^"\\]|\\.)*"|\{(?:[^\{\}"]|"""(?:(?!""")[\s\S])*"""|"(?!"")(?:[^"\\]|\\.)*")*\})*\})*\}/,
 			greedy: true,
 			inside: {
 				'keyword': /^meta/,
-				'punctuation': /\{|\}$/,
+				'punctuation': /[[\]{},:]/,
 				'string-triple': {
 					pattern: /"""[\s\S]*?"""/,
 					greedy: true,
@@ -54,8 +54,7 @@
 				},
 					'number': /-?\d+(?:\.\d+)?/,
 					'boolean': /(?<![a-zA-Z0-9_-])(?:true|false)(?![a-zA-Z0-9_-])/,
-					'null': /(?<![a-zA-Z0-9_-])null(?![a-zA-Z0-9_-])/,
-					'punctuation': /[,:]/
+					'null': /(?<![a-zA-Z0-9_-])null(?![a-zA-Z0-9_-])/
 				}
 			},
 		{
@@ -128,6 +127,8 @@
 				pattern: /::[a-zA-Z_][a-zA-Z0-9_\-?!]*(?:::[a-zA-Z_][a-zA-Z0-9_\-?!]*)*/
 			},
 			'punctuation': /\//,
+			// ::geo/Shape.Dot names a type or enum, not a function
+			'class-name': /[A-Z][a-zA-Z0-9_\-?!]*$/,
 			'function': /[a-zA-Z_][a-zA-Z0-9_\-?!]*$/
 		}
 	},
@@ -138,12 +139,13 @@
 	},
 	// Keywords: fn, type, ns, meta are declarations; lazy, do are control; serial, parallel, cond, cond-all, match, match-all are flow;
 	// where introduces a constraint predicate
-	// Note: '->' (implements) is handled separately
 	// Use explicit lookbehind/lookahead to prevent matching keywords within hyphenated identifiers like 'is-null' or 'some-type'
 	'keyword': [
-		/(?<![a-zA-Z0-9_-])(?:meta|type|enum|fn|ns|lazy|do|serial|parallel|cond-all|cond|match-all|match|where)(?![a-zA-Z0-9_-])/,
+		/(?<![a-zA-Z0-9_-])(?:meta|type|enum|fn|ns|lazy|do|serial|parallel|cond-all|cond|match-all|match|where|open)(?![a-zA-Z0-9_-])/,
 		/\|>/  // Pipe operator
 	],
+	// Flow arms (=>) and implements (->); before punctuation, which would take the '>'
+	'operator': /=>|->/,
 		'boolean': /(?<![a-zA-Z0-9_-])(?:true|false)(?![a-zA-Z0-9_-])/,
 		'null': /(?<![a-zA-Z0-9_-])null(?![a-zA-Z0-9_-])/,
 		'special-identifier': {

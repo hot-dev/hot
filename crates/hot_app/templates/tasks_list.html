@@ -116,7 +116,7 @@
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
                                 <path fill-rule="evenodd" d="M3 6a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3V6ZM3 15.75a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-2.25Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3v-2.25Z" clip-rule="evenodd"/>
                             </svg>
-                            <span x-text="selectedTaskTypes.length === 2 ? 'All Task Types' : selectedTaskTypes.length + ' selected'"></span>
+                            <span x-text="selectedTaskTypes.length === 2 || selectedTaskTypes.length === 0 ? 'All Task Types' : selectedTaskTypes.length + ' selected'"></span>
                         </div>
                         <svg class="w-2.5 h-2.5 ml-2" :class="{'rotate-180': open}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
                             <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
@@ -325,7 +325,8 @@ document.addEventListener('alpine:init', () => {
         return {
             searchQuery: this.$el.dataset.searchQuery || '',
             selectedStatuses: (this.$el.dataset.selectedStatuses || '').split(',').filter(s => s),
-            selectedTaskTypes: (this.$el.dataset.selectedTaskTypes || '').split(',').filter(s => s),
+            // No task_types filter means every type is shown, so every type starts checked.
+            selectedTaskTypes: (this.$el.dataset.selectedTaskTypes || 'code,container').split(',').filter(s => s),
             timeRange: this.$el.dataset.selectedTimeRange || 'all',
             currentPage: parseInt(this.$el.dataset.currentPage) || 1,
             _debounceTimer: null,

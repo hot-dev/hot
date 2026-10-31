@@ -1692,7 +1692,9 @@ const DOCS_PATH_MAPPINGS: &[(&str, &str)] = &[
     ("files", "/docs/app#files"),
     ("schedules", "/docs/app#scheduled-runs"),
     ("event_handlers", "/docs/app#event-handlers"),
-    ("agents", "/docs/agents"),
+    ("workflows", "/docs/agents"),
+    ("tasks", "/docs/app#tasks"),
+    ("stores", "/docs/app#stores"),
     ("mcp_services", "/docs/mcp"),
     ("webhook_services", "/docs/webhooks"),
     ("projects", "/docs/app#projects"),
@@ -2126,13 +2128,6 @@ pub struct DashboardRecentStreamsTable {
 #[template(path = "components/dashboard_recent_tasks_rows.html")]
 pub struct DashboardRecentTasksTable {
     pub recent_tasks: Vec<TaskDisplay>,
-}
-
-#[derive(Template)]
-#[template(path = "checkout_success.html")]
-pub struct CheckoutSuccess<'a> {
-    pub title: &'a str,
-    pub page_context: PrivatePageContext,
 }
 
 #[derive(Template)]
@@ -4356,6 +4351,33 @@ mod tests {
         assert_eq!(truncate_string("hello", 3), "hel...");
         assert_eq!(truncate_string("🔥🔥🔥", 2), "🔥🔥...");
         assert_eq!(truncate_string("éclair", 1), "é...");
+    }
+
+    /// Every docs mapping must name a page key that some handler renders, or its link never
+    /// shows (the old "agents" key did nothing: the page is "workflows").
+    #[test]
+    fn docs_path_mappings_name_rendered_pages() {
+        let handlers = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/handlers");
+        let mut sources = String::new();
+        for entry in std::fs::read_dir(handlers).unwrap() {
+            sources.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap_or_default());
+        }
+        // The page key is the first argument of a PrivatePageContext constructor.
+        let mut keys = std::collections::HashSet::new();
+        for (index, _) in sources.match_indices("PrivatePageContext::") {
+            let rest = &sources[index..];
+            let Some(open) = rest.find('(') else { continue };
+            let argument = rest[open + 1..].trim_start();
+            if let Some(literal) = argument.strip_prefix('"') {
+                keys.insert(literal[..literal.find('"').unwrap()].to_string());
+            }
+        }
+        let unused: Vec<&str> = DOCS_PATH_MAPPINGS
+            .iter()
+            .map(|(page, _)| *page)
+            .filter(|page| !keys.contains(*page))
+            .collect();
+        assert!(unused.is_empty(), "docs mappings for pages no handler renders: {unused:?}");
     }
 
     /// Validate that every docs_path in DOCS_PATH_MAPPINGS points to a real

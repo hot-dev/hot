@@ -365,7 +365,7 @@
         <!-- Main Content Area -->
         <div class="flex-1 flex flex-col overflow-hidden">
             <!-- Main Content -->
-            <main id="main-content" tabindex="-1" class="flex-1 overflow-y-auto px-4 pb-4 dark:text-gray-200 custom-scrollbar outline-none">
+            <main id="main-content" tabindex="-1" class="flex-1 min-w-0 overflow-y-auto px-4 pb-4 dark:text-gray-200 custom-scrollbar outline-none">
         <!-- Global Notices -->
         {% for notice in page_context.global_notices %}
         <div class="mb-4 {{ notice.notice_type.bg_class() }} border rounded-lg px-4 py-3 flex items-center justify-between">

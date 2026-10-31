@@ -78,7 +78,6 @@ pub async fn checkout_form_handler(
 pub async fn org_checkout_form_handler(
     Path(org_slug): Path<String>,
     State(db): State<Arc<DatabasePool>>,
-    axum::extract::Extension(conf): axum::extract::Extension<Val>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     Query(params): Query<AHashMap<String, String>>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
@@ -146,49 +145,8 @@ pub async fn org_checkout_form_handler(
         .await
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid plan".to_string()))?;
 
-    // Free plan: don't make the user click through a "Complete Subscription"
-    // form for a $0 plan — go straight to the provider checkout (which
-    // handles the card-verification-only session) just like submitting the
-    // form would. The admin check above already gates this.
-    if plan_id == "hot-free" {
-        if let Err(retry_after) =
-            crate::rate_limit::check_checkout(&conf, &session.user.user_id, &org.org_id, plan_id)
-        {
-            tracing::warn!(
-                key_type = "checkout",
-                key_hash = crate::rate_limit::key_fingerprint(&format!(
-                    "{}:{}:{}",
-                    session.user.user_id, org.org_id, plan_id
-                )),
-                "Checkout rate limit hit"
-            );
-            return Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                format!(
-                    "Too many checkout attempts. Please try again in {} minutes.",
-                    retry_after.div_ceil(60).max(1)
-                ),
-            ));
-        }
-
-        if let Ok(checkout_url) = billing_provider()
-            .create_checkout(BillingCheckoutRequest {
-                db: &db,
-                conf: &conf,
-                org_id: org.org_id,
-                org_slug: &org.slug,
-                org_name: &org.name,
-                user_id: session.user.user_id,
-                user_email: &session.user.email,
-                plan_id,
-                billing_period: &billing_period,
-            })
-            .await
-        {
-            return Ok(Redirect::to(&checkout_url).into_response());
-        }
-    }
-
+    // The free plan renders the same form (worded as card verification). A GET never
+    // creates a provider checkout session; the form's POST does.
     let template = templates::OrgCheckoutForm {
         title: "Complete Subscription",
         page_context: templates::PublicPageContext::new("checkout"),

@@ -597,7 +597,10 @@ function updateActivityTimelineChart(data) {
                         return formatPartialTooltip(params, data.dates.length);
                     }
                 },
+                // A scrolling legend stays on one row on phones; the grid starts below it in
+                // pixels, and the left margin leaves room for the first rotated date label.
                 legend: {
+                    type: 'scroll',
                     data: data.series.map(s => s.name),
                     top: 0,
                     textStyle: {
@@ -605,10 +608,10 @@ function updateActivityTimelineChart(data) {
                     }
                 },
                 grid: {
-                    left: '3%',
+                    left: 24,
                     right: '4%',
                     bottom: '15%',
-                    top: '10%',
+                    top: 40,
                     containLabel: true
                 },
                 xAxis: {
@@ -751,17 +754,18 @@ function updateRunTypeTimelineChart(data) {
                     }
                 },
                 legend: {
+                    type: 'scroll',
                     data: data.series.map(s => s.name),
                     textStyle: {
                         color: getTextColor()
                     },
-                    top: 10
+                    top: 0
                 },
                 grid: {
-                    left: '3%',
+                    left: 24,
                     right: '4%',
                     bottom: '15%',
-                    top: '15%',
+                    top: 40,
                     containLabel: true
                 },
                 xAxis: {

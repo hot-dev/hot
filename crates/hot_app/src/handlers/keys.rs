@@ -4,7 +4,7 @@ use crate::templates;
 use ahash::AHashMap;
 use askama::Template;
 use axum::extract::{Form, Path, Query, State};
-use axum::response::{Html, IntoResponse, Redirect};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use chrono::Utc;
 use hot::db::DatabasePool;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -217,17 +217,17 @@ async fn render_keys_new(
     description: &str,
     access_level: &str,
     permissions: &serde_json::Value,
-) -> Html<String> {
+) -> Response {
     let current_env = match &session.current_env {
         Some(env) => env,
-        None => return Html("No environment selected".to_string()),
+        None => return Html("No environment selected".to_string()).into_response(),
     };
 
     // Generate a new API key ID and the actual key
     let api_key_id = uuid::Uuid::now_v7();
     let (generated_key, key_hash) = match hot::db::api_key::ApiKey::generate_api_key(&api_key_id) {
         Ok(key_data) => key_data,
-        Err(_) => return Html("Failed to generate API key".to_string()),
+        Err(_) => return Html("Failed to generate API key".to_string()).into_response(),
     };
 
     let handoff_token = match sign_api_key_handoff(
@@ -238,7 +238,7 @@ async fn render_keys_new(
         key_hash,
     ) {
         Ok(token) => token,
-        Err(_) => return Html("Failed to generate API key".to_string()),
+        Err(_) => return Html("Failed to generate API key".to_string()).into_response(),
     };
 
     let (mcp_tool_options, webhook_options) =
@@ -266,7 +266,15 @@ async fn render_keys_new(
         webhook_options,
     };
 
-    Html(template.render().unwrap())
+    // The page shows a key secret: keep it out of caches and Referer headers.
+    (
+        [
+            ("Cache-Control", "no-store"),
+            ("Referrer-Policy", "no-referrer"),
+        ],
+        Html(template.render().unwrap()),
+    )
+        .into_response()
 }
 
 /// The access level a key form selected. Anything other than an explicit choice is rejected,
@@ -364,7 +372,7 @@ async fn render_keys_edit(
     description: &str,
     access_level: &str,
     permissions: serde_json::Value,
-) -> Html<String> {
+) -> Response {
     let (mcp_tool_options, webhook_options) =
         super::build_permission_path_options(db, &api_key.env_id).await;
 
@@ -392,24 +400,24 @@ async fn render_keys_edit(
         webhook_options,
     };
 
-    Html(template.render().unwrap())
+    Html(template.render().unwrap()).into_response()
 }
 
 pub async fn keys_create_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     Form(form): Form<ApiKeyCreateForm>,
-) -> Result<Redirect, Html<String>> {
+) -> Result<Redirect, Response> {
     let current_env = match &session.current_env {
         Some(env) => env,
         None => {
-            return Err(Html("No environment selected".to_string()));
+            return Err(Html("No environment selected".to_string()).into_response());
         }
     };
 
     // Check if user is admin
     if !session.is_current_org_admin {
-        return Err(Html("You must be an admin to create API keys".to_string()));
+        return Err(Html("You must be an admin to create API keys".to_string()).into_response());
     }
 
     // Re-render with the submitted choices. A Restricted submission never comes back as Full.
@@ -488,17 +496,17 @@ pub async fn keys_update_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     Form(form): Form<ApiKeyEditForm>,
-) -> Result<Redirect, Html<String>> {
+) -> Result<Redirect, Response> {
     let current_env = match &session.current_env {
         Some(env) => env,
         None => {
-            return Err(Html("No environment selected".to_string()));
+            return Err(Html("No environment selected".to_string()).into_response());
         }
     };
 
     // Check if user is admin
     if !session.is_current_org_admin {
-        return Err(Html("You must be an admin to edit API keys".to_string()));
+        return Err(Html("You must be an admin to edit API keys".to_string()).into_response());
     }
 
     // Get the API key
