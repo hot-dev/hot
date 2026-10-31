@@ -29,7 +29,7 @@ use index::{DocContext, Index};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::Poll;
@@ -106,9 +106,24 @@ fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The path a `file:` URI names.
+///
+/// Paths and URIs convert through `url`, as they did before `Uri`. `Uri`'s
+/// own conversions keep the `\\?\` prefix that `canonicalize` adds on
+/// Windows, which gives a URI no client matches, and take a URI of any
+/// scheme for a path.
+pub(crate) fn file_path(uri: &Uri) -> Option<PathBuf> {
+    url::Url::parse(uri.as_str()).ok()?.to_file_path().ok()
+}
+
+/// The `file:` URI of an absolute path.
+pub(crate) fn file_uri(path: &Path) -> Option<Uri> {
+    url::Url::from_file_path(path).ok()?.as_str().parse().ok()
+}
+
 /// The canonical path of a document URI.
 fn uri_path(uri: &Uri) -> Option<PathBuf> {
-    let path = uri.to_file_path()?.into_owned();
+    let path = file_path(uri)?;
     Some(std::fs::canonicalize(&path).unwrap_or(path))
 }
 
@@ -325,7 +340,7 @@ impl State {
         for (path, diagnostics) in output.by_file {
             let uri = match open.get(&path) {
                 Some(uri) => uri.clone(),
-                None => match Uri::from_file_path(&path) {
+                None => match file_uri(&path) {
                     Some(uri) => uri,
                     None => continue,
                 },
@@ -409,13 +424,13 @@ impl State {
 fn client_root(params: &InitializeParams) -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::new();
     for folder in params.workspace_folders.iter().flatten() {
-        if let Some(path) = folder.uri.to_file_path() {
-            candidates.push(path.into_owned());
+        if let Some(path) = file_path(&folder.uri) {
+            candidates.push(path);
         }
     }
     #[allow(deprecated)]
-    if let Some(path) = params.root_uri.as_ref().and_then(|u| u.to_file_path()) {
-        candidates.push(path.into_owned());
+    if let Some(path) = params.root_uri.as_ref().and_then(file_path) {
+        candidates.push(path);
     }
     #[allow(deprecated)]
     if let Some(path) = params.root_path.as_ref() {
@@ -618,7 +633,7 @@ impl LanguageServer for Backend {
                     continue;
                 }
                 changed = true;
-                if let Some(path) = change.uri.to_file_path()
+                if let Some(path) = file_path(&change.uri)
                     && workspace.is_config_file(&path)
                 {
                     reload = true;
@@ -971,5 +986,28 @@ mod tests {
         .await;
         assert!(result.unwrap_err().contains("index out of bounds"));
         assert_eq!(catch_panic(async { 7 }).await, Ok(7));
+    }
+
+    #[test]
+    fn file_uris_round_trip() {
+        let path = std::env::temp_dir().join("a dir").join("ü.hot");
+        let uri = file_uri(&path).unwrap();
+        assert!(uri.as_str().starts_with("file:///"), "{}", uri.as_str());
+        assert_eq!(file_path(&uri), Some(path));
+    }
+
+    #[test]
+    fn only_file_uris_name_paths() {
+        let uri: Uri = "untitled:Untitled-1.hot".parse().unwrap();
+        assert_eq!(file_path(&uri), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_windows_paths_get_plain_uris() {
+        let uri = file_uri(Path::new(r"\\?\C:\Users\me\hot.hot")).unwrap();
+        assert_eq!(uri.as_str(), "file:///C:/Users/me/hot.hot");
+        let uri = file_uri(Path::new(r"\\?\UNC\server\share\hot.hot")).unwrap();
+        assert_eq!(uri.as_str(), "file://server/share/hot.hot");
     }
 }

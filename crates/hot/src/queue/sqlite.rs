@@ -1500,6 +1500,11 @@ impl SqliteQueueAdmin {
         Self { directory }
     }
 
+    /// The directory holding the queue files.
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
     fn queue_files(&self) -> Result<Vec<PathBuf>, SqliteQueueError> {
         if !self.directory.exists() {
             return Ok(Vec::new());
