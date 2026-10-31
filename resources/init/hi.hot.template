@@ -13,15 +13,15 @@ HttpResponse ::hot::http/HttpResponse
 // The last expression is the return value -- there is no `return` statement.
 hello
 meta {
-  doc: """
-  Say hello from Hot.
+    doc: """
+    Say hello from Hot.
 
-  **Example**
+    **Example**
 
-  ```hot
-  ::{{PROJECT_NAME}}::hi/hello() // => "Things are heating up!"
-  ```
-  """
+    ```hot
+    ::{{PROJECT_NAME}}::hi/hello() // => "Things are heating up!"
+    ```
+    """
 }
 fn (): Str {
   "Things are heating up!"
@@ -30,15 +30,15 @@ fn (): Str {
 // Backticks create template strings with `${}` interpolation.
 warm-welcome
 meta {
-  doc: """
-  Give someone a warm welcome by name.
+    doc: """
+    Give someone a warm welcome by name.
 
-  **Example**
+    **Example**
 
-  ```hot
-  ::{{PROJECT_NAME}}::hi/warm-welcome("Alice") // => "Welcome to the heat, Alice!"
-  ```
-  """
+    ```hot
+    ::{{PROJECT_NAME}}::hi/warm-welcome("Alice") // => "Welcome to the heat, Alice!"
+    ```
+    """
 }
 fn (name: Str): Str {
   `Welcome to the heat, ${name}!`
@@ -48,16 +48,16 @@ fn (name: Str): Str {
 // There are no infix operators in Hot, only functions like `gte`.
 is-it-hot
 meta {
-  doc: """
-  Check if a temperature is hot (>= 100).
+    doc: """
+    Check if a temperature is hot (>= 100).
 
-  **Example**
+    **Example**
 
-  ```hot
-  ::{{PROJECT_NAME}}::hi/is-it-hot(100) // => "It's hot!"
-  ::{{PROJECT_NAME}}::hi/is-it-hot(72)  // => "Not hot yet"
-  ```
-  """
+    ```hot
+    ::{{PROJECT_NAME}}::hi/is-it-hot(100) // => "It's hot!"
+    ::{{PROJECT_NAME}}::hi/is-it-hot(72)  // => "Not hot yet"
+    ```
+    """
 }
 fn (temp: Int): Str {
   if(gte(temp, 100), "It's hot!", "Not hot yet")
@@ -68,17 +68,17 @@ fn (temp: Int): Str {
 // This function fails ~14% of the time (divisible by 7) to demo failures.
 check-heat
 meta {
-  doc: """
-  Classify a number as even or odd. Fails if divisible by 7.
+    doc: """
+    Classify a number as even or odd. Fails if divisible by 7.
 
-  **Example**
+    **Example**
 
-  ```hot
-  ::{{PROJECT_NAME}}::hi/check-heat(42) // => "42 is even"
-  ::{{PROJECT_NAME}}::hi/check-heat(13) // => "13 is odd"
-  ::{{PROJECT_NAME}}::hi/check-heat(7)  // fails: "Too hot to handle!"
-  ```
-  """
+    ```hot
+    ::{{PROJECT_NAME}}::hi/check-heat(42) // => "42 is even"
+    ::{{PROJECT_NAME}}::hi/check-heat(13) // => "13 is odd"
+    ::{{PROJECT_NAME}}::hi/check-heat(7)  // fails: "Too hot to handle!"
+    ```
+    """
 }
 fn cond (num: Int): Str {
   is-zero(mod(num, 7)) => fail("Too hot to handle!")
@@ -89,16 +89,16 @@ fn cond (num: Int): Str {
 // `parallel` runs all branches concurrently and returns a Map keyed by branch name.
 both-checks
 meta {
-  doc: """
-  Run even/odd check and doubling in parallel.
+    doc: """
+    Run even/odd check and doubling in parallel.
 
-  **Example**
+    **Example**
 
-  ```hot
-  ::{{PROJECT_NAME}}::hi/both-checks(6)
-  // => {even-odd: "6 is even", doubled: 12}
-  ```
-  """
+    ```hot
+    ::{{PROJECT_NAME}}::hi/both-checks(6)
+    // => {even-odd: "6 is even", doubled: 12}
+    ```
+    """
 }
 fn parallel (num: Int): Map {
   even-odd check-heat(num)
@@ -109,16 +109,16 @@ fn parallel (num: Int): Map {
 // Lambdas are written as `(param) { body }`.
 double-positives
 meta {
-  doc: """
-  Filter to positive numbers, then double each one.
+    doc: """
+    Filter to positive numbers, then double each one.
 
-  **Example**
+    **Example**
 
-  ```hot
-  ::{{PROJECT_NAME}}::hi/double-positives([-3, 1, -2, 4, 5])
-  // => [2, 8, 10]
-  ```
-  """
+    ```hot
+    ::{{PROJECT_NAME}}::hi/double-positives([-3, 1, -2, 4, 5])
+    // => [2, 8, 10]
+    ```
+    """
 }
 fn (nums: Vec<Int>): Vec<Int> {
   nums
@@ -131,16 +131,16 @@ fn (nums: Vec<Int>): Vec<Int> {
 // Functions return `Result` implicitly. Use `match` on Result.Ok / Result.Err.
 check-positive
 meta {
-  doc: """
-  Check that a number is positive, returning a Result.
+    doc: """
+    Check that a number is positive, returning a Result.
 
-  **Example**
+    **Example**
 
-  ```hot
-  ::{{PROJECT_NAME}}::hi/check-positive(5)  // => "Got positive number: 5"
-  ::{{PROJECT_NAME}}::hi/check-positive(-1) // => "Error: Must be positive"
-  ```
-  """
+    ```hot
+    ::{{PROJECT_NAME}}::hi/check-positive(5)  // => "Got positive number: 5"
+    ::{{PROJECT_NAME}}::hi/check-positive(-1) // => "Error: Must be positive"
+    ```
+    """
 }
 fn (num: Int): Str {
   result if(gt(num, 0), ok(num), err("Must be positive"))
@@ -155,12 +155,12 @@ fn (num: Int): Str {
 // Schedules use English ("every 5 minutes") or cron syntax ("*/5 * * * *"). UTC.
 spark
 meta {
-  schedule: "every 1 minute",
-  doc: """
-  Fires every minute and sends a `"hot-take"` event with a random number.
+    schedule: "every 1 minute",
+    doc: """
+    Fires every minute and sends a `"hot-take"` event with a random number.
 
-  The `on-hot-take` handler below picks up the event.
-  """
+    The `on-hot-take` handler below picks up the event.
+    """
 }
 fn (event) {
   num rand-int(100)
@@ -171,17 +171,17 @@ fn (event) {
 
 on-hot-take
 meta {
-  on-event: "hot-take",
-  doc: """
-  Handle `"hot-take"` events from the `spark` schedule.
+    on-event: "hot-take",
+    doc: """
+    Handle `"hot-take"` events from the `spark` schedule.
 
-  Each event creates a new run with a shared stream ID for tracing.
-  Trigger manually with:
+    Each event creates a new run with a shared stream ID for tracing.
+    Trigger manually with:
 
-  ```
-  hot eval 'send("hot-take", {num: 42})'
-  ```
-  """
+    ```
+    hot eval 'send("hot-take", {num: 42})'
+    ```
+    """
 }
 fn (event) {
   check-heat(event.data.num)
@@ -191,20 +191,20 @@ fn (event) {
 
 greet
 meta {
-  mcp: {service: "salutations"},
-  doc: """
-  Greet someone with a hot welcome.
+    mcp: {service: "salutations"},
+    doc: """
+    Greet someone with a hot welcome.
 
-  Exposed as an MCP tool in the `salutations` service, callable by
-  AI models and agents.
+    Exposed as an MCP tool in the `salutations` service, callable by
+    AI models and agents.
 
-  **Example**
+    **Example**
 
-  ```hot
-  ::{{PROJECT_NAME}}::hi/greet("World")
-  // => "Hey World, things are heating up! Welcome to the hot seat."
-  ```
-  """
+    ```hot
+    ::{{PROJECT_NAME}}::hi/greet("World")
+    // => "Hey World, things are heating up! Welcome to the hot seat."
+    ```
+    """
 }
 fn (name: Str): Str {
   `Hey ${name}, things are heating up! Welcome to the hot seat.`
@@ -212,26 +212,26 @@ fn (name: Str): Str {
 
 farewell
 meta {
-  mcp: {
-    service: "salutations",
-    description: "Send someone off with a fiery farewell"
-  },
-  doc: """
-  Say goodbye with style. The mood controls the tone.
+    mcp: {
+        service: "salutations",
+        description: "Send someone off with a fiery farewell"
+    },
+    doc: """
+    Say goodbye with style. The mood controls the tone.
 
-  **Example**
+    **Example**
 
-  ```hot
-  ::{{PROJECT_NAME}}::hi/farewell("Alice", "formal")
-  // => "Alice, it's been a blazing honor. Until we ignite again."
+    ```hot
+    ::{{PROJECT_NAME}}::hi/farewell("Alice", "formal")
+    // => "Alice, it's been a blazing honor. Until we ignite again."
 
-  ::{{PROJECT_NAME}}::hi/farewell("Bob", "casual")
-  // => "Later, Bob! Don't let the flame die out."
+    ::{{PROJECT_NAME}}::hi/farewell("Bob", "casual")
+    // => "Later, Bob! Don't let the flame die out."
 
-  ::{{PROJECT_NAME}}::hi/farewell("Eve", "other")
-  // => "Stay hot out there, Eve!"
-  ```
-  """
+    ::{{PROJECT_NAME}}::hi/farewell("Eve", "other")
+    // => "Stay hot out there, Eve!"
+    ```
+    """
 }
 fn (name: Str, mood: Str): Str {
   cond {
@@ -248,22 +248,22 @@ fn (name: Str, mood: Str): Str {
 
 on-hook
 meta {
-  webhook: {service: "demo", path: "/hook"},
-  doc: """
-  A webhook endpoint that echoes back the request method.
+    webhook: {service: "demo", path: "/hook"},
+    doc: """
+    A webhook endpoint that echoes back the request method.
 
-  With `hot dev`, the URL is shown on the dashboard:
+    With `hot dev`, the URL is shown on the dashboard:
 
-  ```
-  curl -X POST http://localhost:4681/webhook/local/development/demo/hook/{token} -d '{"hello": "hot"}'
-  ```
+    ```
+    curl -X POST http://localhost:4681/webhook/local/development/demo/hook/{token} -d '{"hello": "hot"}'
+    ```
 
-  When deployed:
+    When deployed:
 
-  ```
-  https://api.hot.dev/webhook/{org}/{env}/demo/hook/{token}
-  ```
-  """
+    ```
+    https://api.hot.dev/webhook/{org}/{env}/demo/hook/{token}
+    ```
+    """
 }
 fn (request: HttpRequest): HttpResponse {
   HttpResponse({status: 200, body: {message: "Received!", method: request.method}})

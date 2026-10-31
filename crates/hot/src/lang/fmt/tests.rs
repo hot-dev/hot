@@ -798,3 +798,14 @@ fn guard_accepts_layout_changes_that_move_where_clauses() {
     )
     .unwrap();
 }
+
+// fresh-project-fails-fmt-check
+
+#[test]
+fn starter_template_is_formatted() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../resources/init/hi.hot.template");
+    let template = std::fs::read_to_string(&path).unwrap();
+    let starter = super::corpus_tests::render_template(&template);
+    assert_eq!(format_str(&starter, 4).unwrap(), starter);
+}
