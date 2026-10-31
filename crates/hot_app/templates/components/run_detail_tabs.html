@@ -435,18 +435,6 @@
     .timing-breakdown-popover.timing-breakdown-popover-wide {
         width: min(420px, calc(100vw - 40px));
     }
-
-    /* Pinned between the screen gutters below its metric, so a popover for a metric in the
-       right column neither runs off the screen nor widens the page while hidden. */
-    .timing-breakdown-popover,
-    .timing-breakdown-popover.timing-breakdown-popover-wide {
-        position: fixed;
-        top: auto;
-        left: 16px;
-        right: 16px;
-        width: auto;
-        margin-top: 8px;
-    }
 }
 
 /* Accessible timing breakdowns: hover, keyboard focus, and mobile tap/focus. */
@@ -511,6 +499,24 @@
 .timing-breakdown-popover-align-right {
     right: 0;
     left: auto;
+}
+
+@media (max-width: 640px) {
+    /* Pinned between the screen gutters below its metric, so a popover for a metric in the
+       right column neither runs off the screen nor widens the page while hidden. After the
+       base and placement rules, which it overrides. */
+    .timing-breakdown-popover,
+    .timing-breakdown-popover.timing-breakdown-popover-wide,
+    .timing-breakdown-popover.timing-breakdown-popover-above,
+    .timing-breakdown-popover.timing-breakdown-popover-align-right {
+        position: fixed;
+        top: auto;
+        bottom: auto;
+        left: 16px;
+        right: 16px;
+        width: auto;
+        margin-top: 8px;
+    }
 }
 
 .timing-breakdown-trigger:hover > .timing-breakdown-popover,
