@@ -1766,6 +1766,8 @@ pub struct PrivatePageContext {
     pub web_url: String,
     // Optional docs path for a "Docs" link in the breadcrumb bar (e.g. "/docs/app#runs")
     pub docs_path: Option<String>,
+    // The selected workspace is suspended or archived (itself or its account); pages skip data loads
+    pub workspace_held: bool,
 }
 
 impl PrivatePageContext {
@@ -1824,6 +1826,7 @@ impl PrivatePageContext {
             value_format: session.value_format.clone(),
             web_url: session.product_web_url.clone(),
             docs_path: default_docs_path(current_page).map(|s| s.to_string()),
+            workspace_held: session.current_org_hold.is_some(),
         }
     }
 
@@ -1887,6 +1890,7 @@ impl PrivatePageContext {
             value_format: session.value_format.clone(),
             web_url: session.product_web_url.clone(),
             docs_path: default_docs_path(current_page).map(|s| s.to_string()),
+            workspace_held: session.current_org_hold.is_some(),
         }
     }
 
@@ -1950,6 +1954,7 @@ impl PrivatePageContext {
             value_format: session.value_format.clone(),
             web_url: session.product_web_url.clone(),
             docs_path: default_docs_path(current_page).map(|s| s.to_string()),
+            workspace_held: session.current_org_hold.is_some(),
         }
     }
 
@@ -4377,7 +4382,10 @@ mod tests {
             .map(|(page, _)| *page)
             .filter(|page| !keys.contains(*page))
             .collect();
-        assert!(unused.is_empty(), "docs mappings for pages no handler renders: {unused:?}");
+        assert!(
+            unused.is_empty(),
+            "docs mappings for pages no handler renders: {unused:?}"
+        );
     }
 
     /// Validate that every docs_path in DOCS_PATH_MAPPINGS points to a real

@@ -2176,6 +2176,8 @@ function hideChartSkeleton(chartId) {
 // skeleton overlay once the task completes so each chart fades from
 // pulsing-placeholder → real chart in order, giving a clear progress cue.
 async function refreshDashboardData() {
+    // A held workspace serves no data; the page's notice explains why.
+    if (document.getElementById('main-content')?.dataset.workspaceHeld === 'true') return;
     const context = createDashboardRefreshContext();
     const tasks = [
         // Top-of-page KPIs + issues banner data (highest priority).

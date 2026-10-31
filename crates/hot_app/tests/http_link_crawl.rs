@@ -72,7 +72,11 @@ fn page_links(body: &str) -> Vec<String> {
         if !href.starts_with('/') || href.starts_with("//") || href.contains("${") {
             continue;
         }
-        let path = href.split(['?', '#']).next().unwrap_or_default().to_string();
+        let path = href
+            .split(['?', '#'])
+            .next()
+            .unwrap_or_default()
+            .to_string();
         if !path.is_empty() && !SKIP_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
             links.push(path);
         }
@@ -120,7 +124,9 @@ fn main_problems(body: &str) -> Option<String> {
 async fn app_pages_render_one_main_and_their_links_resolve() {
     let mut client = TestClient::new().await;
     let td = insert_test_data(client.db()).await.unwrap();
-    let org = hot::db::Org::get_org(client.db(), &td.org_id).await.unwrap();
+    let org = hot::db::Org::get_org(client.db(), &td.org_id)
+        .await
+        .unwrap();
     client.login_as(&td.user_id);
 
     let mut queue: VecDeque<(String, String)> = start_pages(&td, &org.slug)

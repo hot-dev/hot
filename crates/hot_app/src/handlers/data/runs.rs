@@ -19,7 +19,9 @@ fn chart_dates<'a>(
     if let Some(cutoff) = cutoff {
         let hours = (chrono::Utc::now() - cutoff).num_hours().max(1);
         let days = (hours + 23) / 24;
-        dates.extend(crate::timezone::generate_time_buckets(time_unit, days, "UTC"));
+        dates.extend(crate::timezone::generate_time_buckets(
+            time_unit, days, "UTC",
+        ));
     }
     dates.into_iter().collect()
 }

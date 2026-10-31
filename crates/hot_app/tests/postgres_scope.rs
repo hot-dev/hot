@@ -505,7 +505,7 @@ async fn sub_org_lifecycle_and_browser_scope_use_a_restricted_runtime_login()
     assert!(
         returned
             .body
-            .contains(&format!("const orgId = '{}'", a.org))
+            .contains(&format!("const orgId = \"{}\"", a.org))
     );
     assert!(
         !sqlx::query_scalar::<_, bool>(
