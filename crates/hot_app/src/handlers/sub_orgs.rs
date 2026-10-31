@@ -1,3 +1,6 @@
+// Handlers answer errors with a rendered page: an axum Response, which is large by design.
+#![allow(clippy::result_large_err)]
+
 use crate::auth::Session;
 use crate::templates::{self, PrivatePageContext, filters};
 use askama::Template;
