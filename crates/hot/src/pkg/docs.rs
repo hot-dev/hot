@@ -3265,6 +3265,38 @@ mod tests {
         );
     }
 
+    /// A namespace that defines a name twice keeps the later definition, and
+    /// its docs page shows both under one anchor (`::hot::bytes` once had
+    /// two `to-float` and `from-float`).
+    #[test]
+    fn hot_std_defines_each_name_once_per_namespace() {
+        let hot_std = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hot/pkg/hot-std");
+        let docs = load_pkg_docs(&hot_std).expect("hot-std docs load");
+        let mut duplicates = Vec::new();
+        for ns in &docs.namespaces {
+            let kinds: [Vec<&str>; 3] = [
+                ns.functions.iter().map(|f| f.name.as_str()).collect(),
+                ns.types.iter().map(|t| t.name.as_str()).collect(),
+                ns.values.iter().map(|v| v.name.as_str()).collect(),
+            ];
+            for names in kinds {
+                let mut seen = AHashSet::new();
+                for name in names {
+                    if !seen.insert(name) {
+                        duplicates.push(format!("{}/{}", ns.namespace, name));
+                    }
+                }
+            }
+        }
+        assert!(duplicates.is_empty(), "defined twice: {duplicates:?}");
+        assert!(
+            docs.namespaces
+                .iter()
+                .any(|ns| ns.namespace == "::hot::bytes"),
+            "hot-std's namespaces were read"
+        );
+    }
+
     #[test]
     fn test_find_hot_std() {
         // This test will only pass in development environment

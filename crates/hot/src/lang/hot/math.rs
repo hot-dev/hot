@@ -256,7 +256,18 @@ pub fn div(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Modulo operation
+/// The remainder of `a / b` with the sign of `a` (truncated division), as an
+/// Int `mod` returns it.
+fn dec_remainder(a: fastnum::D256, b: fastnum::D256) -> HotResult<Val> {
+    if b.is_zero() {
+        return HotResult::Ok(Val::err(Val::from("Modulo by zero")));
+    }
+    HotResult::Ok(Val::Dec(a % b))
+}
+
+/// Modulo operation: the remainder of truncated division, which has the sign
+/// of the dividend for every Int and Dec combination (`mod(-7, 2)` is `-1`,
+/// `mod(-7.0, 2)` is `-1.0`).
 pub fn modulo(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::math/modulo", args, 2);
 
@@ -268,32 +279,11 @@ pub fn modulo(args: &[Val]) -> HotResult<Val> {
             // Only `i64::MIN % -1` wraps, and its remainder is 0.
             HotResult::Ok(Val::Int(a.wrapping_rem(*b)))
         }
-        (Val::Dec(a), Val::Dec(b)) => {
-            if b.is_zero() {
-                return HotResult::Ok(Val::err(Val::from("Modulo by zero")));
-            }
-            // Stable decimal remainder: a - floor(a / b) * b
-            let q = (*a / *b).floor();
-            HotResult::Ok(Val::Dec(*a - q * *b))
-        }
-        (Val::Int(a), Val::Dec(b)) => {
-            if b.is_zero() {
-                return HotResult::Ok(Val::err(Val::from("Modulo by zero")));
-            }
-            use fastnum::decimal::Decimal;
-            let a_dec = Decimal::from(*a);
-            let q = (a_dec / *b).floor();
-            HotResult::Ok(Val::Dec(a_dec - q * *b))
-        }
-        (Val::Dec(a), Val::Int(b)) => {
-            if *b == 0 {
-                return HotResult::Ok(Val::err(Val::from("Modulo by zero")));
-            }
-            use fastnum::decimal::Decimal;
-            let b_dec = Decimal::from(*b);
-            let q = (*a / b_dec).floor();
-            HotResult::Ok(Val::Dec(*a - q * b_dec))
-        }
+        // A Dec remainder truncates like an Int one: it takes the sign of
+        // `a`, and `%` computes it exactly (no rounded quotient).
+        (Val::Dec(a), Val::Dec(b)) => dec_remainder(*a, *b),
+        (Val::Int(a), Val::Dec(b)) => dec_remainder(fastnum::D256::from(*a), *b),
+        (Val::Dec(a), Val::Int(b)) => dec_remainder(*a, fastnum::D256::from(*b)),
         _ => HotResult::Err(Val::from("mod requires numbers")),
     }
 }
@@ -412,6 +402,24 @@ pub fn round(args: &[Val]) -> HotResult<Val> {
         Val::Int(i) => HotResult::Ok(Val::Int(*i)), // Integer round is itself
         Val::Dec(d) => HotResult::Ok(int_or_overflow(d.round(0).to_i64().ok())),
         _ => HotResult::Err(Val::from("round requires a number")),
+    }
+}
+
+/// A random Int: from 0 to the largest Int, or from 0 to `max - 1`.
+pub fn rand_int(args: &[Val]) -> HotResult<Val> {
+    use rand::RngExt;
+
+    match args {
+        [] => HotResult::Ok(Val::Int(rand::rng().random_range(0..=i64::MAX))),
+        [Val::Int(max)] if *max > 0 => HotResult::Ok(Val::Int(rand::rng().random_range(0..*max))),
+        [Val::Int(_)] => HotResult::Err(Val::from("rand-int max must be positive")),
+        [other] => HotResult::Err(Val::from(format!(
+            "rand-int expects an Int max, got {other}"
+        ))),
+        _ => HotResult::Err(Val::from(format!(
+            "::hot::math/rand-int expects 0 or 1 arguments, got {}",
+            args.len()
+        ))),
     }
 }
 

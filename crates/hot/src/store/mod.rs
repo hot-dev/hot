@@ -201,8 +201,11 @@ pub(crate) fn prefix_upper_bound(prefix: &str) -> Option<String> {
 /// Whether a stored value (`None` for a missing key) is the one a `put-if`
 /// caller expects. Both sides are compared as Hot values after the same JSON
 /// round trip, so a value read with `get` always matches itself, and a
-/// backend that reorders object keys (PostgreSQL jsonb) still matches. A
-/// `null` expectation matches a missing key, as `get` returns null for one.
+/// backend that reorders object keys (PostgreSQL jsonb) or rewrites a
+/// number's notation (`1E-7` as `0.0000001`) still matches. Values are
+/// written with exact Decs (`Val::to_exact_json`), so a Dec read back is the
+/// Dec that was written. A `null` expectation matches a missing key, as
+/// `get` returns null for one.
 pub(crate) fn stored_value_matches(stored: Option<&JsonValue>, expected: &JsonValue) -> bool {
     let as_val = |json: &JsonValue| serde_json::from_value::<Val>(json.clone()).ok();
     match stored {
@@ -844,6 +847,43 @@ pub(crate) mod contention {
         assert_eq!(seen, (1..=WRITERS).collect::<Vec<_>>());
         let stored = store.get(name, &json!("seq")).await?.ok_or("missing")?;
         assert_eq!(stored.value, json!(WRITERS));
+        Ok(())
+    }
+
+    /// Decs written as `::hot::store` writes them read back as the same Decs,
+    /// never as Str or Int, and `put_if` with the value read back matches.
+    pub(crate) async fn decs_round_trip(store: Arc<dyn Store>, name: &str) -> Result<(), String> {
+        use crate::val::Val;
+        let dec = |text: &str| Val::Dec(text.parse().unwrap());
+        let values = [
+            dec("100"),
+            dec("0"),
+            dec("2.0"),
+            dec("19.90"),
+            dec("1E-7"),
+            dec("1E+20"),
+            dec("12345678901234567890.123456789"),
+            crate::val!({"total": dec("0"), "lines": [dec("7"), dec("2.50")]}),
+        ];
+        for (i, value) in values.iter().enumerate() {
+            let key = json!(format!("dec-{i}"));
+            store
+                .put(name, key.clone(), value.to_exact_json(), None, None)
+                .await?;
+            let read = store.get(name, &key).await?.ok_or("missing")?.value;
+            let read = serde_json::from_value::<Val>(read).map_err(|e| e.to_string())?;
+            assert_eq!(&read, value, "{value} read back as {read}");
+            assert!(
+                !matches!(read, Val::Str(_) | Val::Int(_)),
+                "{value} read back as {read}"
+            );
+            assert!(
+                store
+                    .put_if(name, key, read.to_exact_json(), json!("next"), None, None)
+                    .await?,
+                "put_if with what get returned for {value} should write"
+            );
+        }
         Ok(())
     }
 }

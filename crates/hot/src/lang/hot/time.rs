@@ -1394,7 +1394,22 @@ pub fn parse_duration(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Create a simple duration object (without full temporal_rs complexity for now)
+/// The fields of a Duration, largest unit first.
+const DURATION_FIELDS: [&str; 10] = [
+    "years",
+    "months",
+    "weeks",
+    "days",
+    "hours",
+    "minutes",
+    "seconds",
+    "milliseconds",
+    "microseconds",
+    "nanoseconds",
+];
+
+/// Create a Duration from a map of its fields (`Duration({weeks: 2})`). Each
+/// field is an Int or Dec, kept exactly; a missing or null field is zero.
 pub fn duration(args: &[Val]) -> HotResult<Val> {
     if args.len() != 1 {
         return HotResult::Err(Val::from(
@@ -1402,78 +1417,27 @@ pub fn duration(args: &[Val]) -> HotResult<Val> {
         ));
     }
 
-    if let Val::Map(map) = &args[0] {
-        let mut data = IndexMap::new();
-        data.insert(Val::from("$type"), Val::from("::hot::time/Duration"));
-
-        // Extract values with defaults of 0
-        let years = map
-            .get(&Val::from("years"))
-            .and_then(|v| match v {
-                Val::Int(i) => Some(*i as f64),
-                Val::Dec(d) => Some(d.to_f64()),
-                _ => None,
-            })
-            .unwrap_or(0.0);
-
-        let months = map
-            .get(&Val::from("months"))
-            .and_then(|v| match v {
-                Val::Int(i) => Some(*i as f64),
-                Val::Dec(d) => Some(d.to_f64()),
-                _ => None,
-            })
-            .unwrap_or(0.0);
-
-        let days = map
-            .get(&Val::from("days"))
-            .and_then(|v| match v {
-                Val::Int(i) => Some(*i as f64),
-                Val::Dec(d) => Some(d.to_f64()),
-                _ => None,
-            })
-            .unwrap_or(0.0);
-
-        let hours = map
-            .get(&Val::from("hours"))
-            .and_then(|v| match v {
-                Val::Int(i) => Some(*i as f64),
-                Val::Dec(d) => Some(d.to_f64()),
-                _ => None,
-            })
-            .unwrap_or(0.0);
-
-        let minutes = map
-            .get(&Val::from("minutes"))
-            .and_then(|v| match v {
-                Val::Int(i) => Some(*i as f64),
-                Val::Dec(d) => Some(d.to_f64()),
-                _ => None,
-            })
-            .unwrap_or(0.0);
-
-        let seconds = map
-            .get(&Val::from("seconds"))
-            .and_then(|v| match v {
-                Val::Int(i) => Some(*i as f64),
-                Val::Dec(d) => Some(d.to_f64()),
-                _ => None,
-            })
-            .unwrap_or(0.0);
-
-        data.insert(Val::from("years"), Val::Dec(years.into()));
-        data.insert(Val::from("months"), Val::Dec(months.into()));
-        data.insert(Val::from("days"), Val::Dec(days.into()));
-        data.insert(Val::from("hours"), Val::Dec(hours.into()));
-        data.insert(Val::from("minutes"), Val::Dec(minutes.into()));
-        data.insert(Val::from("seconds"), Val::Dec(seconds.into()));
-
-        HotResult::Ok(Val::Map(Box::new(data)))
-    } else {
-        HotResult::Err(Val::from(
+    let Val::Map(map) = &args[0] else {
+        return HotResult::Err(Val::from(
             "duration requires a map of duration fields".to_string(),
-        ))
+        ));
+    };
+    let mut data = IndexMap::new();
+    data.insert(Val::from("$type"), Val::from("::hot::time/Duration"));
+    for field in DURATION_FIELDS {
+        let amount = match map.get(&Val::from(field)) {
+            None | Some(Val::Null) => fastnum::D256::ZERO,
+            Some(Val::Int(i)) => fastnum::D256::from(*i),
+            Some(Val::Dec(d)) => *d,
+            Some(other) => {
+                return HotResult::Err(Val::from(format!(
+                    "Duration `{field}` must be an Int or Dec, got {other}"
+                )));
+            }
+        };
+        data.insert(Val::from(field), Val::Dec(amount));
     }
+    HotResult::Ok(Val::Map(Box::new(data)))
 }
 
 /// Create a PlainDate from year, month, day

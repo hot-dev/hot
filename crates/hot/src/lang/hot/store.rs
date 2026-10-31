@@ -70,8 +70,19 @@ fn call_fn_with_vm(
     }
 }
 
-fn val_to_json(val: &Val) -> JsonValue {
-    JsonValue::from(val)
+/// A key as JSON. Keys keep the encoding they have always had, so an entry
+/// written by an earlier Hot is found by the same key: a Dec key whose text
+/// an f64 does not print the same way (`2.0`, `19.90`) is a JSON string.
+fn key_to_json(key: &Val) -> JsonValue {
+    JsonValue::from(key)
+}
+
+/// A value as JSON that reads back as the same value: Decs stay Decs with
+/// their digits (see [`Val::to_exact_json`]), so `get` returns what `put`
+/// wrote and `put-if` matches what `get` returned. Values written before
+/// 3.0.1 read back as they were stored.
+fn value_to_json(value: &Val) -> JsonValue {
+    value.to_exact_json()
 }
 
 fn json_to_val(jv: JsonValue) -> Val {
@@ -350,14 +361,18 @@ fn list_options(function: &str, opts: &Val) -> Result<ListOptions, Val> {
         }
     };
     // A negative count would reach SQL, where SQLite reads `LIMIT -1` as no
-    // limit and PostgreSQL refuses it.
+    // limit and PostgreSQL refuses it. A count of another type is refused
+    // too, not read as no count: a Dec limit would return every key.
     let count = |name: &str| match opts.get(name) {
+        None | Some(Val::Null) => Ok(None),
         Some(Val::Int(i)) => usize::try_from(i).map(Some).map_err(|_| {
             Val::from(format!(
                 "{function} expects a non-negative `{name}`, got {i}"
             ))
         }),
-        _ => Ok(None),
+        Some(other) => Err(Val::from(format!(
+            "{function} expects an Int `{name}`, got {other}"
+        ))),
     };
     Ok(ListOptions {
         limit: count("limit")?,
@@ -395,8 +410,8 @@ pub fn put(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         Err(e) => return HotResult::Err(e),
     };
 
-    let key_json = val_to_json(&args[1]);
-    let value_json = val_to_json(&args[2]);
+    let key_json = key_to_json(&args[1]);
+    let value_json = value_to_json(&args[2]);
     let embedding = match embed_value(vm, &config, &args[2]) {
         Ok(v) => v,
         Err(e) => return HotResult::Err(e),
@@ -416,8 +431,8 @@ pub fn put_if_missing(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         Err(e) => return HotResult::Err(e),
     };
 
-    let key_json = val_to_json(&args[1]);
-    let value_json = val_to_json(&args[2]);
+    let key_json = key_to_json(&args[1]);
+    let value_json = value_to_json(&args[2]);
 
     // Avoid a known-unnecessary embedding call. This is only a fast path:
     // concurrent callers can both observe a missing key, compute embeddings,
@@ -455,9 +470,9 @@ pub fn put_if(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         Err(e) => return HotResult::Err(e),
     };
 
-    let key_json = val_to_json(&args[1]);
-    let expected_json = val_to_json(&args[2]);
-    let value_json = val_to_json(&args[3]);
+    let key_json = key_to_json(&args[1]);
+    let expected_json = value_to_json(&args[2]);
+    let value_json = value_to_json(&args[3]);
 
     // Avoid a known-unnecessary embedding call. The database still decides:
     // the value can change between this read and the conditional write.
@@ -509,7 +524,7 @@ pub fn increment(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     };
 
-    match block_on(store.increment(&config.name, val_to_json(&args[1]), by)) {
+    match block_on(store.increment(&config.name, key_to_json(&args[1]), by)) {
         Ok(next) => HotResult::Ok(Val::Int(next)),
         Err(e) => HotResult::Err(Val::from(e)),
     }
@@ -522,7 +537,7 @@ pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         Err(e) => return HotResult::Err(e),
     };
 
-    let key_json = val_to_json(&args[1]);
+    let key_json = key_to_json(&args[1]);
 
     match block_on(store.get(&config.name, &key_json)) {
         Ok(Some(entry)) => HotResult::Ok(json_to_val(entry.value)),
@@ -544,7 +559,7 @@ pub fn delete(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         Err(e) => return HotResult::Err(e),
     };
 
-    let key_json = val_to_json(&args[1]);
+    let key_json = key_to_json(&args[1]);
 
     match block_on(store.delete(&config.name, &key_json)) {
         Ok(deleted) => HotResult::Ok(Val::Bool(deleted)),
@@ -674,8 +689,8 @@ pub fn merge(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
     let mut count = 0i64;
     for ((k, v), embedding) in entries_map.iter().zip(embeddings) {
-        let key_json = val_to_json(k);
-        let value_json = val_to_json(v);
+        let key_json = key_to_json(k);
+        let value_json = value_to_json(v);
         let text_content = extract_text_content(v, &config);
         match block_on(store.put(&config.name, key_json, value_json, embedding, text_content)) {
             Ok(_) => count += 1,
@@ -977,5 +992,55 @@ mod tests {
         assert_eq!((opts.limit, opts.offset), (Some(2), Some(1)));
         assert!(list_options("keys", &crate::val!({"limit": -1})).is_err());
         assert!(list_options("keys", &crate::val!({"offset": -1})).is_err());
+    }
+
+    #[test]
+    fn list_options_refuse_counts_that_are_not_ints() {
+        let none = list_options("keys", &crate::val!({"limit": null})).unwrap();
+        assert_eq!((none.limit, none.offset), (None, None));
+        for opts in [
+            crate::val!({"limit": 1.0}),
+            crate::val!({"limit": "1"}),
+            crate::val!({"offset": 2.5}),
+            crate::val!({"offset": true}),
+        ] {
+            let err = list_options("::hot::store/keys", &opts).unwrap_err();
+            assert!(err.to_string().contains("expects an Int"), "{err}");
+        }
+    }
+
+    #[test]
+    fn values_keep_their_decs_through_the_store_encoding() {
+        let decs = |text: &str| Val::Dec(text.parse().unwrap());
+        for value in [
+            decs("100"),
+            decs("100.0"),
+            decs("0"),
+            decs("19.90"),
+            decs("2.0"),
+            decs("-7"),
+            decs("1E-7"),
+            decs("1E+20"),
+            decs("123456789012345678901234567890.123456789"),
+            crate::val!({"total": decs("100"), "items": [decs("7"), decs("2.50")]}),
+        ] {
+            let json = value_to_json(&value);
+            // The text a backend stores, parsed back as a backend reads it
+            let stored: JsonValue = serde_json::from_str(&json.to_string()).unwrap();
+            let read = json_to_val(stored.clone());
+            assert_eq!(read, value, "{value} read back as {read} from {stored}");
+            assert!(!matches!(read, Val::Str(_)), "{value} read back as a Str");
+            assert!(
+                store::stored_value_matches(Some(&stored), &value_to_json(&read)),
+                "put-if with what get returned for {value} should match"
+            );
+        }
+        // An integral Dec stays a Dec, not an Int.
+        assert!(matches!(
+            json_to_val(value_to_json(&decs("100"))),
+            Val::Dec(_)
+        ));
+        // Keys keep their encoding, so entries written before still match.
+        assert_eq!(key_to_json(&decs("2.0")), JsonValue::String("2.0".into()));
     }
 }

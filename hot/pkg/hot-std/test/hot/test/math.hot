@@ -72,6 +72,20 @@ meta ["test"] fn () {
     assert-eq(0.0, mod(2.0, 1), "mod(2.0, 1) should return 0.0")
 }
 
+// mod takes the sign of the dividend for every Int and Dec combination
+test-mod-sign-matches-for-ints-and-decs
+meta ["test"] fn () {
+    assert-eq(-1, mod(-7, 2), "mod(-7, 2)")
+    assert-eq(-1.0, mod(-7.0, 2), "mod(-7.0, 2)")
+    assert-eq(-1.0, mod(-7, 2.0), "mod(-7, 2.0)")
+    assert-eq(-1.0, mod(-7.0, 2.0), "mod(-7.0, 2.0)")
+    assert-eq(1, mod(7, -2), "mod(7, -2)")
+    assert-eq(1.0, mod(7.0, -2), "mod(7.0, -2)")
+    assert-eq(-1.5, mod(-7.5, 2), "mod(-7.5, 2)")
+    assert-eq(-0.5, mod(-0.5, 3), "mod(-0.5, 3)")
+    assert(is-err(mod(1.5, 0)), "mod by zero is an Err")
+}
+
 test-pow
 meta ["test"] fn () {
     assert-eq(1, pow(1, 0), "pow(1, 0) should return 1")
@@ -125,4 +139,16 @@ meta ["test"] fn () {
     assert(is-int(rand-int()), "rand-int() should return an integer")
     // Test rand-int(n) with positive integer
     assert(is-int(rand-int(10)), "rand-int(10) should return an integer")
+}
+
+test-rand-int-ranges
+meta ["test"] fn () {
+    draws map(range(0, 100), (i) { rand-int() })
+    assert(gt(length(distinct(draws)), 1), "rand-int() draws more than one value")
+    assert(all(draws, gte(%, 0)), "rand-int() is never negative")
+    small map(range(0, 200), (i) { rand-int(3) })
+    assert(all(small, (x) { and(gte(x, 0), lt(x, 3)) }), "rand-int(3) is 0, 1 or 2")
+    assert-eq(3, length(distinct(small)), "rand-int(3) draws each of 0, 1 and 2")
+    assert-eq([0], distinct(map(range(0, 20), (i) { rand-int(1) })), "rand-int(1) is always 0")
+    assert(is-err(rand-int(0)), "rand-int(0) is an Err")
 }

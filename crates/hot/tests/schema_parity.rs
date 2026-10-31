@@ -29,6 +29,11 @@ const NULLABILITY_ENFORCED_BY_TRIGGER: &[&str] = &["org.active"];
 const POSTGRES_ONLY_INDEXES: &[&str] =
     &["idx_store_map_entry_text", "idx_store_map_entry_key_prefix"];
 
+/// Columns PostgreSQL has and SQLite need not: the generated text of string
+/// store keys that the prefix index orders (SQLite compares the JSON key text
+/// itself).
+const POSTGRES_ONLY_COLUMNS: &[&str] = &["store_map_entry.key_text"];
+
 /// Indexes both have whose definitions only differ in engine syntax:
 /// PostgreSQL's UNIQUE NULLS NOT DISTINCT is SQLite's zero-sentinel COALESCE.
 const DIALECT_INDEXES: &[&str] = &["usage_file_org_id_env_id_slot_key"];
@@ -207,6 +212,9 @@ async fn postgres_schema(pool: &PgPool) -> TestResult<Schema> {
         }
         let required: bool = row.get(2);
         let qualified = format!("{table}.{column}");
+        if POSTGRES_ONLY_COLUMNS.contains(&qualified.as_str()) {
+            continue;
+        }
         let required = required && !NULLABILITY_ENFORCED_BY_TRIGGER.contains(&qualified.as_str());
         schema.columns.insert(format!("{qualified} not_null={required}"));
         // Generated identifiers come from the application on SQLite.

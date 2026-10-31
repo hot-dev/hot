@@ -1240,89 +1240,132 @@ impl Serialize for Val {
     }
 }
 
-// Helper to convert Val to JsonValue
+// Helper to convert Val to JsonValue. A Dec becomes a JSON number only when
+// an f64 prints it with the same text, and a JSON string otherwise; see
+// [`Val::to_exact_json`] for an encoding that keeps every Dec a number.
 impl From<&Val> for JsonValue {
     fn from(val: &Val) -> JsonValue {
-        match val {
-            Val::Int(i) => JsonValue::Number((*i).into()),
-            Val::Dec(d) => {
-                // Serialize D256 as a standard JSON number when possible
-                let s = format!("{}", d);
-                if let Ok(f) = s.parse::<f64>() {
-                    if f.is_finite() && format!("{}", f) == s {
-                        // Can represent exactly as f64
-                        JsonValue::Number(serde_json::Number::from_f64(f).unwrap())
-                    } else {
-                        // Use string to preserve exact precision
-                        JsonValue::String(s)
-                    }
-                } else {
-                    // For very large numbers that can't fit in f64, use string
-                    JsonValue::String(s)
-                }
-            }
-            Val::Str(s) => JsonValue::String((**s).to_owned()),
-            Val::Bool(b) => JsonValue::Bool(*b),
-            Val::Byte(b) => {
-                // Convert single byte to typed JSON with its numeric value.
-                let mut map = serde_json::Map::new();
-                map.insert(
-                    "$type".to_string(),
-                    JsonValue::String(HOT_BYTE_TYPE.to_string()),
-                );
-                map.insert("$val".to_string(), JsonValue::Number((*b).into()));
-                JsonValue::Object(map)
-            }
-            Val::Bytes(bytes) => {
-                // Convert bytes to a typed JSON array of byte values.
-                let mut map = serde_json::Map::new();
-                map.insert(
-                    "$type".to_string(),
-                    JsonValue::String(HOT_BYTES_TYPE.to_string()),
-                );
-                map.insert(
-                    "$val".to_string(),
-                    JsonValue::Array(
-                        bytes
-                            .iter()
-                            .map(|byte| JsonValue::Number((*byte).into()))
-                            .collect(),
-                    ),
-                );
-                JsonValue::Object(map)
-            }
-            Val::Vec(v) => JsonValue::Array(v.iter().map(|x| x.into()).collect()),
-            Val::Map(m) => {
-                let mut map = serde_json::Map::new();
-                for (k, v) in m.iter() {
-                    let key = match k {
-                        Val::Str(s) => (**s).to_owned(),
-                        _ => format!("{}", k),
-                    };
-                    map.insert(key, v.into());
-                }
-                JsonValue::Object(map)
-            }
+        json_value_with(val, f64_json_dec)
+    }
+}
 
-            Val::Box(b) => {
-                // Use the same typed format as serialization
-                let mut map = serde_json::Map::new();
+impl Val {
+    /// This value as JSON that reads back as the same value: a Dec is a JSON
+    /// number with exactly its digits, and an integral Dec carries a `.0`
+    /// so it reads back as a Dec rather than an Int. Unlike
+    /// `JsonValue::from`, `2.0`, `19.90` and Decs beyond f64's precision stay
+    /// numbers. Non-finite Decs, which JSON has no number for, are strings.
+    pub fn to_exact_json(&self) -> JsonValue {
+        json_value_with(self, exact_json_dec)
+    }
+}
 
-                match b.serialize_json() {
-                    Ok(json) => {
-                        map.insert("$box".to_string(), json);
-                    }
-                    Err(_) => {
-                        map.insert(
-                            "$box".to_string(),
-                            JsonValue::String(format!("<Box: {}>", b.to_string())),
-                        );
-                    }
-                }
-                JsonValue::Object(map)
-            }
-            Val::Null => JsonValue::Null,
+/// A Dec as a JSON number when an f64 prints it with the same text, else as
+/// a string.
+fn f64_json_dec(d: &D256) -> JsonValue {
+    let s = format!("{}", d);
+    if let Ok(f) = s.parse::<f64>() {
+        if f.is_finite() && format!("{}", f) == s {
+            // Can represent exactly as f64
+            JsonValue::Number(serde_json::Number::from_f64(f).unwrap())
+        } else {
+            // Use string to preserve exact precision
+            JsonValue::String(s)
         }
+    } else {
+        // For very large numbers that can't fit in f64, use string
+        JsonValue::String(s)
+    }
+}
+
+/// A Dec as a JSON number with exactly its digits. An integral Dec is written
+/// with one fractional digit in plain notation (`100.0`, not `100` or
+/// `1e+20`): a JSON integer reads back as an Int, and PostgreSQL's jsonb
+/// prints a positive exponent as an integer.
+fn exact_json_dec(d: &D256) -> JsonValue {
+    // Rescaling is exact while the digits fit; D256 holds 76 digits safely.
+    const MAX_EXACT_DIGITS: i32 = 76;
+    let integral_digits = d.digits_count() as i32 - i32::from(d.fractional_digits_count());
+    let text = if d.is_finite()
+        && d.fractional_digits_count() <= 0
+        && integral_digits < MAX_EXACT_DIGITS
+    {
+        format!("{}", d.rescale(1))
+    } else {
+        format!("{}", d)
+    };
+    match serde_json::from_str::<JsonValue>(&text) {
+        Ok(number @ JsonValue::Number(_)) => number,
+        _ => JsonValue::String(text),
+    }
+}
+
+/// `val` as JSON, with `dec` encoding each Dec.
+fn json_value_with(val: &Val, dec: fn(&D256) -> JsonValue) -> JsonValue {
+    match val {
+        Val::Int(i) => JsonValue::Number((*i).into()),
+        Val::Dec(d) => dec(d),
+        Val::Str(s) => JsonValue::String((**s).to_owned()),
+        Val::Bool(b) => JsonValue::Bool(*b),
+        Val::Byte(b) => {
+            // Convert single byte to typed JSON with its numeric value.
+            let mut map = serde_json::Map::new();
+            map.insert(
+                "$type".to_string(),
+                JsonValue::String(HOT_BYTE_TYPE.to_string()),
+            );
+            map.insert("$val".to_string(), JsonValue::Number((*b).into()));
+            JsonValue::Object(map)
+        }
+        Val::Bytes(bytes) => {
+            // Convert bytes to a typed JSON array of byte values.
+            let mut map = serde_json::Map::new();
+            map.insert(
+                "$type".to_string(),
+                JsonValue::String(HOT_BYTES_TYPE.to_string()),
+            );
+            map.insert(
+                "$val".to_string(),
+                JsonValue::Array(
+                    bytes
+                        .iter()
+                        .map(|byte| JsonValue::Number((*byte).into()))
+                        .collect(),
+                ),
+            );
+            JsonValue::Object(map)
+        }
+        Val::Vec(v) => JsonValue::Array(v.iter().map(|x| json_value_with(x, dec)).collect()),
+        Val::Map(m) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in m.iter() {
+                let key = match k {
+                    Val::Str(s) => (**s).to_owned(),
+                    _ => format!("{}", k),
+                };
+                map.insert(key, json_value_with(v, dec));
+            }
+            JsonValue::Object(map)
+        }
+
+        Val::Box(b) => {
+            // Use the same typed format as serialization
+            let mut map = serde_json::Map::new();
+
+            match b.serialize_json() {
+                Ok(json) => {
+                    map.insert("$box".to_string(), json);
+                }
+                Err(_) => {
+                    map.insert(
+                        "$box".to_string(),
+                        JsonValue::String(format!("<Box: {}>", b.to_string())),
+                    );
+                }
+            }
+            JsonValue::Object(map)
+        }
+        Val::Null => JsonValue::Null,
     }
 }
 

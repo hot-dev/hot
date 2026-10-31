@@ -185,7 +185,9 @@ pub fn cancel(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
 
 /// Exit the process/run with a given exit code.
 /// - CLI: exits the process
-/// - Worker (isolation): exit(0) completes successfully, exit(N) delegates to fail
+/// - Worker (isolation) and `hot test`: exit(0) completes successfully,
+///   exit(N) delegates to fail. Under `hot test` the process is the test
+///   runner, so ending it would drop the earlier results and report exit 0.
 pub fn exit(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
     let exit_code = if args.is_empty() {
         0
@@ -197,7 +199,7 @@ pub fn exit(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
         }
     };
 
-    if vm.is_isolation_enabled() {
+    if vm.is_isolation_enabled() || crate::lang::hot::test::current_harness().is_some() {
         tracing::debug!("Isolation mode: exit({}) - harmonizing behavior", exit_code);
 
         if exit_code == 0 {

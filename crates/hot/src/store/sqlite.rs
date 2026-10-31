@@ -1495,6 +1495,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_decs_round_trip() {
+        let (store, _pool, _org, _env) = temp_store().await;
+        store.ensure_store(&plain_config("t")).await.unwrap();
+        crate::store::contention::decs_round_trip(Arc::new(store), "t")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn test_increment_counts_ints_from_zero() {
         let (store, _pool, _org, _env) = temp_store().await;
         store.ensure_store(&plain_config("t")).await.unwrap();
