@@ -31,15 +31,18 @@ application or harness.
 ## Project Dependencies
 
 Use published, versioned packages from the `hot.dev` registry. A compatible
-current set for Hot 3.0 is:
+current set for Hot 3.0.1 is:
 
 ```hot
 hot.project.my-agent.deps {
     "hot.dev/hot-ai":       "1.8.1",
-    "hot.dev/hot-ai-agent": "1.4.0",
+    "hot.dev/hot-ai-agent": "1.5.0",
     "hot.dev/anthropic":    "1.2.5",
 }
 ```
+
+`hot-ai-agent` 1.5.0 needs Hot 3.0.1, because its runtime stores use the
+atomic `::hot::store` writes. On Hot 3.0.0, pin `hot-ai-agent` 1.4.1.
 
 On Hot 3.0, use at least `hot.dev/anthropic` 1.2.5, `hot.dev/openai` 1.2.8,
 `hot.dev/gemini` 1.1.3, `hot.dev/xai` 1.1.3, and `hot.dev/aws-bedrock` 1.2.2.
