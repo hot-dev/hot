@@ -29,7 +29,7 @@ use index::{DocContext, Index};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::Poll;
@@ -110,6 +110,14 @@ fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 fn uri_path(uri: &Uri) -> Option<PathBuf> {
     let path = uri.to_file_path()?.into_owned();
     Some(std::fs::canonicalize(&path).unwrap_or(path))
+}
+
+/// The URI of a file, as `file:///C:/...` on Windows. `Uri::from_file_path`
+/// keeps the `\\?\` prefix that `canonicalize` gives, which makes a URI no
+/// client can match, and encodes the drive's colon. `url` gives the form the
+/// server sent before tower-lsp-server.
+fn file_uri(path: &Path) -> Option<Uri> {
+    url::Url::from_file_path(path).ok()?.as_str().parse().ok()
 }
 
 fn is_hot(uri: &Uri) -> bool {
@@ -325,7 +333,7 @@ impl State {
         for (path, diagnostics) in output.by_file {
             let uri = match open.get(&path) {
                 Some(uri) => uri.clone(),
-                None => match Uri::from_file_path(&path) {
+                None => match file_uri(&path) {
                     Some(uri) => uri,
                     None => continue,
                 },
@@ -971,5 +979,12 @@ mod tests {
         .await;
         assert!(result.unwrap_err().contains("index out of bounds"));
         assert_eq!(catch_panic(async { 7 }).await, Ok(7));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_canonical_windows_path_gets_a_plain_file_uri() {
+        let uri = file_uri(Path::new(r"\\?\C:\Users\me\app.hot")).unwrap();
+        assert_eq!(uri.as_str(), "file:///C:/Users/me/app.hot");
     }
 }
