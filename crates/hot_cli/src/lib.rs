@@ -1696,12 +1696,15 @@ async fn async_main(providers: CliProviders) {
                 transport.unwrap_or_else(|| conf.get_str("lsp.transport"))
             };
             match t.as_str() {
-                "stdio" | "" => {
-                    if let Err(e) = hot_lsp::run_stdio().await {
+                "stdio" | "" => match hot_lsp::run_stdio().await {
+                    // Exit at once: a blocking stdin read must not keep
+                    // the process alive after the client said `exit`.
+                    Ok(code) => std::process::exit(code),
+                    Err(e) => {
                         eprintln!("LSP failed: {}", e);
                         std::process::exit(2);
                     }
-                }
+                },
                 other => {
                     eprintln!("Unsupported lsp.transport: {}", other);
                     std::process::exit(2);
