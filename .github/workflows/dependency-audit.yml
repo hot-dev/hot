@@ -1,0 +1,59 @@
+name: dependency-audit
+
+# Checks Cargo.lock against the RustSec advisory database (vulnerable,
+# unsound, unmaintained and yanked crates) and allows only crates.io sources,
+# with the ignores documented in deny.toml. It runs on every pull request and
+# push to main, and weekly, so an advisory published against an unchanged
+# lock still turns up. It builds nothing, so it finishes in well under a
+# minute.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  merge_group:
+  schedule:
+    - cron: '41 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_DENY_VERSION: 0.20.2
+  # SHA-256 of cargo-deny-<version>-x86_64-unknown-linux-musl.tar.gz (the
+  # GitHub release's asset digest). Update both together.
+  CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+  # cargo-deny only runs `cargo metadata`, so the runner's preinstalled stable
+  # toolchain does; this skips installing rust-toolchain.toml's pinned one.
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (advisories, sources)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-deny
+        run: |
+          set -euo pipefail
+          archive="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$archive.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/$archive.tar.gz"
+          echo "${CARGO_DENY_SHA256}  $RUNNER_TEMP/$archive.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive.tar.gz" -C "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 0755 "$RUNNER_TEMP/$archive/cargo-deny" "$RUNNER_TEMP/bin/cargo-deny"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: cargo deny check advisories sources
+        run: cargo-deny --locked check advisories sources
