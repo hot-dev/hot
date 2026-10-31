@@ -96,10 +96,10 @@
                         </div>
                         {% else %}
                         <div class="w-8 h-8 rounded-full border-2 border-gray-300 dark:border-gray-600 flex items-center justify-center">
-                            <span class="text-xs font-medium text-gray-400 dark:text-gray-500">1</span>
+                            <span class="text-xs font-medium text-gray-500 dark:text-gray-400">1</span>
                         </div>
                         {% endif %}
-                        <span class="mt-1.5 text-xs text-center leading-tight {% if step1_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step1_done %}text-green-600 dark:text-green-400 font-medium{% else %}text-gray-400 dark:text-gray-500{% endif %}">Request Certificate</span>
+                        <span class="mt-1.5 text-xs text-center leading-tight {% if step1_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step1_done %}text-green-700 dark:text-green-400 font-medium{% else %}text-gray-500 dark:text-gray-400{% endif %}">Request Certificate</span>
                     </div>
 
                     <!-- Connector 1-2 -->
@@ -119,10 +119,10 @@
                         </div>
                         {% else %}
                         <div class="w-8 h-8 rounded-full border-2 border-gray-300 dark:border-gray-600 flex items-center justify-center">
-                            <span class="text-xs font-medium text-gray-400 dark:text-gray-500">2</span>
+                            <span class="text-xs font-medium text-gray-500 dark:text-gray-400">2</span>
                         </div>
                         {% endif %}
-                        <span class="mt-1.5 text-xs text-center leading-tight {% if step2_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step2_done %}text-green-600 dark:text-green-400 font-medium{% else %}text-gray-400 dark:text-gray-500{% endif %}">Validate &amp; Issue</span>
+                        <span class="mt-1.5 text-xs text-center leading-tight {% if step2_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step2_done %}text-green-700 dark:text-green-400 font-medium{% else %}text-gray-500 dark:text-gray-400{% endif %}">Validate &amp; Issue</span>
                     </div>
 
                     <!-- Connector 2-3 -->
@@ -142,10 +142,10 @@
                         </div>
                         {% else %}
                         <div class="w-8 h-8 rounded-full border-2 border-gray-300 dark:border-gray-600 flex items-center justify-center">
-                            <span class="text-xs font-medium text-gray-400 dark:text-gray-500">3</span>
+                            <span class="text-xs font-medium text-gray-500 dark:text-gray-400">3</span>
                         </div>
                         {% endif %}
-                        <span class="mt-1.5 text-xs text-center leading-tight {% if step3_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step3_done %}text-green-600 dark:text-green-400 font-medium{% else %}text-gray-400 dark:text-gray-500{% endif %}">Domain CNAME</span>
+                        <span class="mt-1.5 text-xs text-center leading-tight {% if step3_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step3_done %}text-green-700 dark:text-green-400 font-medium{% else %}text-gray-500 dark:text-gray-400{% endif %}">Domain CNAME</span>
                     </div>
                 </div>
 
@@ -173,9 +173,9 @@
                         <div class="flex items-center justify-between mb-3">
                             <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Step 2: Certificate Validation CNAME</span>
                             {% if domain.is_verified() %}
-                            <span class="text-xs text-green-600 dark:text-green-400 font-medium">Done</span>
+                            <span class="text-xs text-green-700 dark:text-green-400 font-medium">Done</span>
                             {% else %}
-                            <span class="text-xs text-yellow-600 dark:text-yellow-400 font-medium">Required</span>
+                            <span class="text-xs text-yellow-700 dark:text-yellow-400 font-medium">Required</span>
                             {% endif %}
                         </div>
                         <div class="space-y-3">
@@ -208,7 +208,7 @@
                         <div class="flex items-center justify-between mb-3">
                             <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Step 3: Domain CNAME</span>
                             {% if domain.is_tls_provisioned() %}
-                            <span class="text-xs text-green-600 dark:text-green-400 font-medium">Ready</span>
+                            <span class="text-xs text-green-700 dark:text-green-400 font-medium">Ready</span>
                             {% else %}
                             <span class="text-xs text-blue-600 dark:text-blue-400 font-medium">Add now</span>
                             {% endif %}
@@ -272,7 +272,7 @@
                     <div class="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md p-4 opacity-60">
                         <div class="flex items-center justify-between mb-1">
                             <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Step 3: Domain CNAME</span>
-                            <span class="text-xs text-gray-400 dark:text-gray-500 font-medium">Available after validation</span>
+                            <span class="text-xs text-gray-500 dark:text-gray-400 font-medium">Available after validation</span>
                         </div>
                         <p class="text-sm text-gray-500 dark:text-gray-400">
                             The domain CNAME will appear here once your certificate is validated and the distribution is created.
@@ -300,13 +300,13 @@
                 {% if let Some(verified) = domain.verified_at %}
                 <div class="py-3 flex justify-between">
                     <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Certificate Validated</dt>
-                    <dd class="text-sm text-green-600 dark:text-green-400">{{ verified|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%b %d, %Y at %H:%M") }}</dd>
+                    <dd class="text-sm text-green-700 dark:text-green-400">{{ verified|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%b %d, %Y at %H:%M") }}</dd>
                 </div>
                 {% endif %}
                 {% if let Some(tls) = domain.tls_provisioned_at %}
                 <div class="py-3 flex justify-between">
                     <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">TLS Provisioned</dt>
-                    <dd class="text-sm text-green-600 dark:text-green-400">{{ tls|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%b %d, %Y at %H:%M") }}</dd>
+                    <dd class="text-sm text-green-700 dark:text-green-400">{{ tls|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%b %d, %Y at %H:%M") }}</dd>
                 </div>
                 {% endif %}
             </dl>

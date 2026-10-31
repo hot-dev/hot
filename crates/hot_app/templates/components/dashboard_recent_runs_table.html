@@ -3,7 +3,7 @@
 <!-- Desktop Table View -->
 <div class="hidden md:block overflow-x-auto">
     <table id="recent-runs-table" class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-        <thead class="bg-gray-50 dark:bg-gray-800">
+        <thead class="table-head">
             <tr>
                 <th scope="col" class="px-3 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Run ID</th>
                 <th scope="col" class="px-3 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">FN</th>
@@ -37,7 +37,7 @@
                     {% when Some with (event_fn) %}
                         <code class="language-hot">{{ event_fn }}</code>
                     {% when None %}
-                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                        <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                     {% endmatch %}
                 </td>
                 <td class="px-3 py-2 text-xs text-gray-600 dark:text-gray-400">
@@ -45,7 +45,7 @@
                     {% when Some with (result) %}
                         <span class="font-mono truncate block max-w-xs" title="{{ result }}">{{ result|truncate(length=30) }}</span>
                     {% when None %}
-                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                        <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                     {% endmatch %}
                 </td>
                 <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-600 dark:text-gray-400">
@@ -110,7 +110,7 @@
                             </button>
                         </div>
                     {% when None %}
-                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                        <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                     {% endmatch %}
                 </td>
                 <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-600 dark:text-gray-400">
@@ -125,7 +125,7 @@
                             </button>
                         </div>
                     {% when None %}
-                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                        <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                     {% endmatch %}
                 </td>
                 <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-600 dark:text-gray-400">
@@ -168,7 +168,7 @@
                     {% when Some with (event_fn) %}
                         <code class="language-hot text-xs">{{ event_fn }}</code>
                     {% when None %}
-                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                        <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                     {% endmatch %}
                 </span>
             </div>
@@ -179,7 +179,7 @@
                     {% when Some with (result) %}
                         {{ result|truncate(length=30) }}
                     {% when None %}
-                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                        <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                     {% endmatch %}
                 </span>
             </div>
@@ -248,7 +248,7 @@
                     </button>
                 </div>
                 {% when None %}
-                <span class="text-gray-400 dark:text-gray-500 italic text-xs">-</span>
+                <span class="text-gray-500 dark:text-gray-400 italic text-xs">-</span>
                 {% endmatch %}
             </div>
             <div class="flex justify-between items-center">
@@ -264,7 +264,7 @@
                     </button>
                 </div>
                 {% when None %}
-                <span class="text-gray-400 dark:text-gray-500 italic text-xs">-</span>
+                <span class="text-gray-500 dark:text-gray-400 italic text-xs">-</span>
                 {% endmatch %}
             </div>
             <div class="flex justify-between">

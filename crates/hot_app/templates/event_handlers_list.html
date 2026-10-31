@@ -34,7 +34,7 @@
         <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-800 text-gray-800 dark:text-white hidden md:block">
             <div class="responsive-table">
                 <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
-                    <thead class="bg-gray-100 dark:bg-gray-800">
+                    <thead class="table-head">
                         <tr>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Project</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Event Type</th>
@@ -52,7 +52,7 @@
                                 </a>
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap text-xs font-medium text-gray-900 dark:text-white">
-                                <code class="bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-1 rounded text-xs">{{ handler.event_type }}</code>
+                                <code class="badge badge-neutral">{{ handler.event_type }}</code>
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap text-xs font-medium text-gray-900 dark:text-white">
                                 <code class="language-hot text-red-600 dark:text-red-400">{{ handler.ns }}/{{ handler.var }}</code>
@@ -60,16 +60,16 @@
                             <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
                                 {% match handler.retry_attempts %}
                                 {% when Some with (attempts) %}
-                                    <code class="bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded text-xs">{% match handler.retry_delay %}{% when Some with (delay) %}{"attempts": {{ attempts }}, "delay": {{ delay }}}{% when None %}{{ attempts }}{% endmatch %}</code>
+                                    <code class="badge badge-neutral">{% match handler.retry_delay %}{% when Some with (delay) %}{"attempts": {{ attempts }}, "delay": {{ delay }}}{% when None %}{{ attempts }}{% endmatch %}</code>
                                 {% when None %}
-                                    <span class="text-gray-400 dark:text-gray-500">-</span>
+                                    <span class="text-gray-500 dark:text-gray-400">-</span>
                                 {% endmatch %}
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
                                 {% match handler.file %}
                                 {% when Some with (file) %}
                                     <button type="button"
-                                            class="font-mono text-hot-red-600 dark:text-hot-red-400 hover:underline truncate max-w-[220px] text-left"
+                                            class="font-mono text-hot-red-700 dark:text-hot-red-400 hover:underline truncate max-w-[220px] text-left"
                                             title="{{ file }}{% if handler.line.is_some() %}:{{ handler.line.unwrap() }}{% endif %}"
                                             data-source-build-id="{{ handler.build_id }}"
                                             data-source-file="{{ file }}"
@@ -79,7 +79,7 @@
                                         {{ file }}{% if handler.line.is_some() %}:{{ handler.line.unwrap() }}{% endif %}
                                     </button>
                                 {% when None %}
-                                    <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                                    <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                                 {% endmatch %}
                             </td>
                         </tr>
@@ -114,14 +114,14 @@
                     </div>
                     <div class="flex justify-between">
                         <span class="text-gray-600 dark:text-gray-400">Event Type:</span>
-                        <code class="bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-0.5 rounded text-xs">{{ handler.event_type }}</code>
+                        <code class="badge badge-neutral">{{ handler.event_type }}</code>
                     </div>
                     {% match handler.file %}
                     {% when Some with (file) %}
                     <div class="flex justify-between gap-3">
                         <span class="text-gray-600 dark:text-gray-400">Source:</span>
                         <button type="button"
-                                class="text-hot-red-600 dark:text-hot-red-400 hover:underline font-mono text-xs truncate max-w-[180px] text-left"
+                                class="text-hot-red-700 dark:text-hot-red-400 hover:underline font-mono text-xs truncate max-w-[180px] text-left"
                                 title="{{ file }}{% if handler.line.is_some() %}:{{ handler.line.unwrap() }}{% endif %}"
                                 data-source-build-id="{{ handler.build_id }}"
                                 data-source-file="{{ file }}"

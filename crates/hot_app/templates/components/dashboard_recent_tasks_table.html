@@ -3,7 +3,7 @@
 <!-- Desktop Table View -->
 <div class="hidden md:block overflow-x-auto">
     <table id="recent-tasks-table" class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-        <thead class="bg-gray-50 dark:bg-gray-800">
+        <thead class="table-head">
             <tr>
                 <th scope="col" class="px-3 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Task ID</th>
                 <th scope="col" class="px-3 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Function</th>
@@ -62,7 +62,7 @@
                     {% when Some with (cus) %}
                         <span class="font-medium">{{ cus }}</span>
                     {% when None %}
-                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                        <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                     {% endmatch %}
                 </td>
                 <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">

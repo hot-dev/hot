@@ -151,14 +151,14 @@ pub async fn stream_detail_handler(
     let stream_raw = match StreamSummary::get_stream(&db, &stream_id).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!("Failed to fetch stream {}: {}", stream_id, e);
-            return Html("<div>Stream not found</div>".to_string()).into_response();
+            tracing::debug!("Failed to fetch stream {}: {}", stream_id, e);
+            return super::not_found_page(&session, "Stream", "/streams", "Back to streams");
         }
     };
 
     // SECURITY: Verify the stream belongs to the current environment
     if stream_raw.env_id != env_id {
-        return Html("<div>Stream not found</div>".to_string()).into_response();
+        return super::not_found_page(&session, "Stream", "/streams", "Back to streams");
     }
 
     // Convert stream to display format with timezone-aware formatting
@@ -290,12 +290,11 @@ pub async fn stream_detail_handler(
         "Streams".to_string(),
         "/streams".to_string(),
     ));
-    breadcrumbs.push(templates::BreadcrumbItem::current(
-        stream_id.to_string()[..8].to_string(),
-    ));
+    let stream_id_short = templates::get_uuid_short(&stream_id);
+    breadcrumbs.push(templates::BreadcrumbItem::current(stream_id_short.clone()));
 
     let template = templates::StreamDetail {
-        title: "Stream Detail",
+        title: &format!("Stream {stream_id_short}"),
         page_context: templates::PrivatePageContext::with_breadcrumbs(
             "streams",
             &session,

@@ -5,7 +5,7 @@
     <!-- Pro Plan Gate -->
     {% if !page_context.has_service_keys() %}
     <div class="text-center py-12 sm:py-16 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
-        <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-10 w-10 sm:h-12 sm:w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-10 w-10 sm:h-12 sm:w-12 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
         </svg>
         <h1 class="mt-4 text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Service Keys</h1>
@@ -63,7 +63,7 @@
     <div class="hidden md:block bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                <thead class="bg-gray-50 dark:bg-gray-900">
+                <thead class="table-head">
                     <tr>
                         <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Name
@@ -102,15 +102,15 @@
                         </td>
                         <td class="px-4 lg:px-6 py-4 whitespace-nowrap">
                             {% if key.revoked_at.is_some() %}
-                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
+                            <span class="badge badge-failure">
                                 Revoked
                             </span>
                             {% else if key.expires_at.is_some() && key.expires_at.unwrap() < chrono::Utc::now() %}
-                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400">
+                            <span class="badge badge-pending">
                                 Expired
                             </span>
                             {% else %}
-                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                            <span class="badge badge-success">
                                 Active
                             </span>
                             {% endif %}
@@ -147,15 +147,15 @@
                     {{ key.name.as_deref().unwrap_or("Unnamed") }}
                 </span>
                 {% if key.revoked_at.is_some() %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 flex-shrink-0">
+                <span class="badge badge-failure flex-shrink-0">
                     Revoked
                 </span>
                 {% else if key.expires_at.is_some() && key.expires_at.unwrap() < chrono::Utc::now() %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400 flex-shrink-0">
+                <span class="badge badge-pending flex-shrink-0">
                     Expired
                 </span>
                 {% else %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400 flex-shrink-0">
+                <span class="badge badge-success flex-shrink-0">
                     Active
                 </span>
                 {% endif %}
@@ -171,7 +171,7 @@
     {% else %}
     <!-- Empty State -->
     <div class="empty-state bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
-        <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-10 w-10 sm:h-12 sm:w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-10 w-10 sm:h-12 sm:w-12 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
         </svg>
         <h3 class="empty-state-title">No service keys</h3>

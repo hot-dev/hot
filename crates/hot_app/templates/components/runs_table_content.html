@@ -2,7 +2,7 @@
 <!-- Desktop Table Body -->
 <div id="runs-table-body">
     <table class="w-full table-fixed md:table-auto divide-y divide-gray-200 dark:divide-gray-700">
-        <thead class="bg-gray-100 dark:bg-gray-700">
+        <thead class="table-head">
             <tr>
                 <th class="w-24 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Run ID</th>
                 <th class="w-32 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">FN</th>
@@ -52,7 +52,7 @@
                         {% when Some with (event_fn) %}
                             <code class="language-hot">{{ event_fn }}</code>
                         {% when None %}
-                            <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                            <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                         {% endmatch %}
                     </td>
                     <td class="px-3 md:px-6 py-4 text-xs text-gray-700 dark:text-gray-300">
@@ -67,12 +67,12 @@
                                 </button>
                             </div>
                         {% when None %}
-                            <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                            <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                         {% endmatch %}
                     </td>
                     <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
                         <div class="flex items-center gap-1">
-                            <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.run_type }}</span>
+                            <span class="badge badge-neutral">{{ run.run_type }}</span>
                             {% if run.is_retry %}
                                 <span class="badge badge-pending">↻{{ run.retry_attempt }}</span>
                             {% endif %}
@@ -126,7 +126,7 @@
                                 </button>
                             </div>
                         {% when None %}
-                            <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                            <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                         {% endmatch %}
                     </td>
                     <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
@@ -141,7 +141,7 @@
                                 </button>
                             </div>
                         {% when None %}
-                            <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                            <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                         {% endmatch %}
                     </td>
                     <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">

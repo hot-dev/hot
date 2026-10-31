@@ -441,7 +441,7 @@
 
                 <!-- Environment Selector (only on env-scoped pages) -->
                 {% if page_context.show_env_selector %}
-                <span class="text-lg text-gray-400 dark:text-gray-500 mx-1">/</span>
+                <span class="text-lg text-gray-500 dark:text-gray-400 mx-1">/</span>
                 <div class="relative inline-flex items-center" x-data="{ open: false }">
                     <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1 focus-ring rounded">
                         <span class="truncate max-w-[200px]">{% match page_context.current_env %}{% when Some with (env) %}{{ env.name }}{% when None %}Select Env{% endmatch %}</span>
@@ -479,7 +479,7 @@
 
                 <!-- Page Breadcrumb Items -->
                 {% if page_context.breadcrumbs.len() > 0 %}
-                <svg class="w-5 h-5 text-gray-400 dark:text-gray-500 flex-shrink-0 mx-0.5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                <svg class="w-5 h-5 text-gray-500 dark:text-gray-400 flex-shrink-0 mx-0.5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
                     <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"></path>
                 </svg>
                 {% for item in page_context.breadcrumbs %}
@@ -494,7 +494,7 @@
                             </span>
                     {% endmatch %}
                     {% if !loop.last %}
-                        <svg class="w-5 h-5 text-gray-400 dark:text-gray-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                        <svg class="w-5 h-5 text-gray-500 dark:text-gray-400 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
                             <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"></path>
                         </svg>
                     {% endif %}
@@ -892,7 +892,7 @@
         const svg = btn.querySelector('svg');
         const sizeClass = svg ? svg.getAttribute('class') : 'w-3.5 h-3.5';
         const original = btn.innerHTML;
-        btn.innerHTML = '<svg class="' + sizeClass + ' text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>';
+        btn.innerHTML = '<svg class="' + sizeClass + ' text-green-700 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>';
         const announcer = document.getElementById('sr-announcer');
         if (announcer) announcer.textContent = 'Copied to clipboard';
         setTimeout(() => {

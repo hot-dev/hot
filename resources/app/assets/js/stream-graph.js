@@ -433,13 +433,13 @@ function renderNodeRow(node, lineInfo, inspectorCallbackName) {
     // FN display
     const fnDisplay = fnValue !== '-'
         ? `<code class="language-hot">${escapeHtml(fnValue)}</code>`
-        : '<span class="text-gray-400 dark:text-gray-500 italic">-</span>';
+        : '<span class="text-gray-500 dark:text-gray-400 italic">-</span>';
 
     // Queue wait line (only for runs with queue wait time) - always on second line
     let queueWaitLine = '';
     if (nodeType === 'run' && node.queue_wait_us && node.queue_wait_us > 0) {
         const formattedWait = formatQueueWait(node.queue_wait_us);
-        queueWaitLine = `<div class="text-[9px] text-yellow-600 dark:text-yellow-400 whitespace-nowrap" title="Queue wait time">⏱ ${formattedWait}</div>`;
+        queueWaitLine = `<div class="text-[9px] text-yellow-700 dark:text-yellow-400 whitespace-nowrap" title="Queue wait time">⏱ ${formattedWait}</div>`;
     }
 
     // Status pill

@@ -31,11 +31,11 @@
                         <dt class="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Current Status</dt>
                         <dd class="mt-1">
                             {% if api_key.active %}
-                            <span class="inline-flex items-center rounded-full bg-green-100 dark:bg-green-900/20 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:text-green-300">
+                            <span class="badge badge-success">
                                 Active
                             </span>
                             {% else %}
-                            <span class="inline-flex items-center rounded-full bg-red-100 dark:bg-red-900/20 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:text-red-300">
+                            <span class="badge badge-failure">
                                 Inactive
                             </span>
                             {% endif %}
@@ -87,7 +87,7 @@
                                         type="radio"
                                         value="true"
                                         {% if api_key.active %}checked{% endif %}
-                                        class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900"
+                                        class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-700 border-gray-300 dark:border-gray-600 dark:bg-gray-900"
                                     >
                                     <label for="active-true" class="ml-3 block text-sm font-medium text-gray-700 dark:text-gray-300">
                                         Active
@@ -101,7 +101,7 @@
                                         type="radio"
                                         value="false"
                                         {% if !api_key.active %}checked{% endif %}
-                                        class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900"
+                                        class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-700 border-gray-300 dark:border-gray-600 dark:bg-gray-900"
                                     >
                                     <label for="active-false" class="ml-3 block text-sm font-medium text-gray-700 dark:text-gray-300">
                                         Inactive
@@ -120,7 +120,7 @@
                                 <div class="flex items-center">
                                     <input id="access-full" name="access_level" type="radio" value="full"
                                         x-model="accessLevel"
-                                        class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900">
+                                        class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-700 border-gray-300 dark:border-gray-600 dark:bg-gray-900">
                                     <label for="access-full" class="ml-3 block text-sm font-medium text-gray-700 dark:text-gray-300">
                                         Full Access
                                         <span class="block text-xs text-gray-500 dark:text-gray-400">Unrestricted access to all API endpoints</span>
@@ -129,7 +129,7 @@
                                 <div class="flex items-center">
                                     <input id="access-restricted" name="access_level" type="radio" value="restricted"
                                         x-model="accessLevel"
-                                        class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900">
+                                        class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-700 border-gray-300 dark:border-gray-600 dark:bg-gray-900">
                                     <label for="access-restricted" class="ml-3 block text-sm font-medium text-gray-700 dark:text-gray-300">
                                         Restricted
                                         <span class="block text-xs text-gray-500 dark:text-gray-400">Limit access to specific resources and actions</span>
@@ -146,7 +146,7 @@
                             <div class="mb-3">
                                 <div class="flex items-center justify-between mb-1.5">
                                     <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Quick Presets</label>
-                                    <button type="button" @click="rules = []" x-show="rules.length > 0" class="text-xs font-medium text-gray-400 dark:text-gray-500 hover:text-red-500 dark:hover:text-red-400 transition-colors">Clear</button>
+                                    <button type="button" @click="rules = []" x-show="rules.length > 0" class="text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors">Clear</button>
                                 </div>
                                 <div class="flex flex-wrap gap-1.5">
                                     <button type="button" @click="applyPreset('read-only')" class="chip">Read Only</button>
@@ -162,7 +162,7 @@
                             <!-- Rule Builder -->
                             <div class="flex items-center justify-between mb-1">
                                 <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Permission Rules</label>
-                                <button type="button" @click="addRule()" class="inline-flex items-center gap-1 text-xs font-medium text-hot-red-600 dark:text-hot-red-400 hover:text-hot-red-700 dark:hover:text-hot-red-300 transition-colors">
+                                <button type="button" @click="addRule()" class="inline-flex items-center gap-1 text-xs font-medium text-hot-red-700 dark:text-hot-red-400 hover:text-hot-red-800 dark:hover:text-hot-red-300 transition-colors">
                                     <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
                                     </svg>
@@ -225,12 +225,12 @@
                                                 <label x-show="idx === 0" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Actions</label>
                                                 <div class="flex flex-wrap items-center gap-x-3 gap-y-1 pt-0.5">
                                                     <label class="inline-flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
-                                                        <input type="checkbox" :checked="rule.actions.includes('*')" @change="toggleAllActions(rule, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-600 focus:ring-hot-red-500 h-3.5 w-3.5">
+                                                        <input type="checkbox" :checked="rule.actions.includes('*')" @change="toggleAllActions(rule, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-700 focus:ring-hot-red-500 h-3.5 w-3.5">
                                                         <span class="text-xs font-medium">All</span>
                                                     </label>
                                                     <template x-for="action in validActions(rule.type)" :key="action">
                                                         <label class="inline-flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
-                                                            <input type="checkbox" :checked="rule.actions.includes(action) || rule.actions.includes('*')" :disabled="rule.actions.includes('*')" @change="toggleAction(rule, action, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-600 focus:ring-hot-red-500 h-3.5 w-3.5">
+                                                            <input type="checkbox" :checked="rule.actions.includes(action) || rule.actions.includes('*')" :disabled="rule.actions.includes('*')" @change="toggleAction(rule, action, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-700 focus:ring-hot-red-500 h-3.5 w-3.5">
                                                             <span class="text-xs" x-text="action"></span>
                                                         </label>
                                                     </template>
@@ -264,7 +264,7 @@
                     <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-3 sm:p-4">
                         <div class="flex">
                             <div class="flex-shrink-0">
-                                <svg class="h-5 w-5 text-amber-600 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
+                                <svg class="h-5 w-5 text-amber-700 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
                                     <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
                                 </svg>
                             </div>

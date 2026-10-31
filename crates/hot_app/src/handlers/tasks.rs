@@ -131,20 +131,15 @@ pub async fn task_detail_handler(
     State(db): State<Arc<DatabasePool>>,
     State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
-) -> Result<Html<String>, (StatusCode, String)> {
-    let task_uuid: Uuid = task_id
-        .parse()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid task ID".to_string()))?;
-    let env_id = session
-        .current_env_id()
-        .ok_or((StatusCode::NOT_FOUND, "Task not found".to_string()))?;
+) -> Result<Html<String>, axum::response::Response> {
+    let not_found = || super::not_found_page(&session, "Task", "/tasks", "Back to tasks");
+    let task_uuid: Uuid = task_id.parse().map_err(|_| not_found())?;
+    let env_id = session.current_env_id().ok_or_else(not_found)?;
 
-    let mut task = Task::get(&db, &task_uuid)
-        .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "Task not found".to_string()))?;
+    let mut task = Task::get(&db, &task_uuid).await.map_err(|_| not_found())?;
 
     if task.env_id != env_id {
-        return Err((StatusCode::NOT_FOUND, "Task not found".to_string()));
+        return Err(not_found());
     }
 
     crate::handlers::rehydrate_opt_json_for_session(blob_store.as_ref(), &session, &mut task.args)
@@ -190,6 +185,6 @@ pub async fn task_detail_handler(
     };
 
     Ok(Html(template.render().map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
     })?))
 }

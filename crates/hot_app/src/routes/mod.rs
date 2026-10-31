@@ -520,6 +520,8 @@ pub fn routes(
             "/settings/alerts/history/{alert_id}",
             get(history_detail_handler),
         )
+        // Inside the session layer, so error pages render with the user's session.
+        .layer(middleware::from_fn(crate::handlers::render_error_pages))
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             session_middleware,

@@ -746,10 +746,7 @@ pub async fn agents_detail_handler(
     let agent = match Agent::get_agent_by_qualified_name(&db, &env_id, &qualified_name).await {
         Ok(a) => a,
         Err(_) => {
-            return super::plain_text_error(
-                axum::http::StatusCode::NOT_FOUND,
-                format!("Agent not found: {qualified_name}"),
-            );
+            return super::not_found_page(&session, "Agent", "/workflows", "Back to workflows");
         }
     };
 
@@ -949,16 +946,14 @@ pub async fn workflow_detail_handler(
         None => return Html("Environment not selected".to_string()).into_response(),
     };
 
-    let workflow =
-        match Workflow::get_workflow_by_qualified_name(&db, &env_id, &qualified_name).await {
-            Ok(w) => w,
-            Err(_) => {
-                return super::plain_text_error(
-                    axum::http::StatusCode::NOT_FOUND,
-                    format!("Workflow not found: {qualified_name}"),
-                );
-            }
-        };
+    let workflow = match Workflow::get_workflow_by_qualified_name(&db, &env_id, &qualified_name)
+        .await
+    {
+        Ok(w) => w,
+        Err(_) => {
+            return super::not_found_page(&session, "Workflow", "/workflows", "Back to workflows");
+        }
+    };
 
     let display_name = workflow_display_name(&workflow);
     breadcrumbs.push(templates::BreadcrumbItem::current(display_name.clone()));
@@ -1070,10 +1065,7 @@ pub async fn unnamed_workflow_detail_handler(
     );
 
     if handler_displays.is_empty() {
-        return super::plain_text_error(
-            axum::http::StatusCode::NOT_FOUND,
-            format!("Unnamed workflow group not found: {build_id}"),
-        );
+        return super::not_found_page(&session, "Workflow", "/workflows", "Back to workflows");
     }
 
     let project_name = handlers

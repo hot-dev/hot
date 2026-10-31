@@ -270,8 +270,7 @@ pub async fn schedule_detail_handler(
             Html(template.render().unwrap()).into_response()
         }
         Err(_) => {
-            // Schedule not found, redirect to schedules list
-            Redirect::to("/schedules").into_response()
+            super::not_found_page(&session, "Schedule", "/schedules", "Back to scheduled runs")
         }
     }
 }

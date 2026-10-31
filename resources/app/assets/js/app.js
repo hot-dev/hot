@@ -639,7 +639,7 @@
         };
 
         var caret = document.createElement('span');
-        caret.className = 'inline-flex w-4 h-4 mr-0.5 flex-shrink-0 items-center justify-center text-gray-400 dark:text-gray-500';
+        caret.className = 'inline-flex w-4 h-4 mr-0.5 flex-shrink-0 items-center justify-center text-gray-500 dark:text-gray-400';
         caret.appendChild(sourceBrowserChevronIcon(isExpanded));
 
         var label = document.createElement('span');
@@ -922,7 +922,7 @@
                 line.className = 'flex gap-2 min-w-0 font-mono';
 
                 var number = document.createElement('span');
-                number.className = 'text-gray-400 dark:text-gray-500 flex-shrink-0';
+                number.className = 'text-gray-500 dark:text-gray-400 flex-shrink-0';
                 number.textContent = String(match.line);
 
                 var text = document.createElement('span');
@@ -1014,7 +1014,7 @@
             row.className = lineNumber === targetLine ? 'bg-hot-red-50 dark:bg-hot-red-900/20' : '';
 
             var gutter = document.createElement('td');
-            gutter.className = 'select-none text-right text-gray-400 dark:text-gray-500 pr-4 pl-3 py-0 align-top border-r border-gray-200 dark:border-gray-800 w-1';
+            gutter.className = 'select-none text-right text-gray-500 dark:text-gray-400 pr-4 pl-3 py-0 align-top border-r border-gray-200 dark:border-gray-800 w-1';
             gutter.textContent = String(lineNumber);
 
             var codeCell = document.createElement('td');

@@ -328,10 +328,7 @@ pub async fn run_detail_handler(
 
             Html(template.render().unwrap()).into_response()
         }
-        Err(_) => {
-            // Run not found, redirect to runs list
-            Redirect::to("/runs").into_response()
-        }
+        Err(_) => super::not_found_page(&session, "Run", "/runs", "Back to runs"),
     }
 }
 

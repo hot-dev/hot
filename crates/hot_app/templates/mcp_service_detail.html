@@ -52,7 +52,7 @@
                         </svg>
                     </template>
                     <template x-if="copied">
-                        <svg class="w-4 h-4 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <svg class="w-4 h-4 text-green-700 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
                         </svg>
                     </template>
@@ -103,7 +103,7 @@
             <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-800 text-gray-800 dark:text-white">
                 <div class="responsive-table">
                     <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
-                        <thead class="bg-gray-100 dark:bg-gray-800">
+                        <thead class="table-head">
                             <tr>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Project</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Tool Name</th>
@@ -131,7 +131,7 @@
                                     {% if tool.auth_mode == "none" %}
                                     <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">Public</span>
                                     {% else %}
-                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200">Required</span>
+                                    <span class="badge badge-pending">Required</span>
                                     {% endif %}
                                 </td>
                                 <td class="px-6 py-4 text-sm text-gray-700 dark:text-gray-300 max-w-xs truncate" title="{% match tool.description %}{% when Some with (d) %}{{ d }}{% when None %}{% endmatch %}">
@@ -139,14 +139,14 @@
                                     {% when Some with (desc) %}
                                         {{ desc }}
                                     {% when None %}
-                                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                                        <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                                     {% endmatch %}
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
                                     {% match tool.file %}
                                     {% when Some with (file) %}
                                         <button type="button"
-                                                class="font-mono text-hot-red-600 dark:text-hot-red-400 hover:underline truncate max-w-[220px] text-left"
+                                                class="font-mono text-hot-red-700 dark:text-hot-red-400 hover:underline truncate max-w-[220px] text-left"
                                                 title="{{ file }}{% if tool.line.is_some() %}:{{ tool.line.unwrap() }}{% endif %}"
                                                 data-source-build-id="{{ tool.build_id }}"
                                                 data-source-file="{{ file }}"
@@ -156,7 +156,7 @@
                                             {{ file }}{% if tool.line.is_some() %}:{{ tool.line.unwrap() }}{% endif %}
                                         </button>
                                     {% when None %}
-                                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                                        <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                                     {% endmatch %}
                                 </td>
                             </tr>
@@ -211,7 +211,7 @@
                     <div class="flex justify-between gap-3">
                         <span class="text-gray-600 dark:text-gray-400">Source:</span>
                         <button type="button"
-                                class="text-hot-red-600 dark:text-hot-red-400 hover:underline font-mono text-xs truncate max-w-[180px] text-left"
+                                class="text-hot-red-700 dark:text-hot-red-400 hover:underline font-mono text-xs truncate max-w-[180px] text-left"
                                 title="{{ file }}{% if tool.line.is_some() %}:{{ tool.line.unwrap() }}{% endif %}"
                                 data-source-build-id="{{ tool.build_id }}"
                                 data-source-file="{{ file }}"

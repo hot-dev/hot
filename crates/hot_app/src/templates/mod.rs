@@ -24,7 +24,7 @@ pub(crate) fn script_safe_json<T: serde::Serialize>(value: &T, fallback: &str) -
 }
 
 /// Human-readable size for blob summaries (e.g. "5.2 MB").
-fn format_blob_size(size: i64) -> String {
+pub(crate) fn format_blob_size(size: i64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut size = size.max(0) as f64;
     let mut unit = 0;
@@ -1637,6 +1637,20 @@ impl GlobalNotice {
 fn build_global_notices(session: &crate::auth::Session) -> Vec<GlobalNotice> {
     let mut notices = Vec::new();
 
+    // A held workspace only serves recovery pages; say why on each of them.
+    if let Some(hold) = &session.current_org_hold {
+        let notice = GlobalNotice::warning(format!(
+            "{hold} Runs, deploys and data are unavailable until it is restored."
+        ));
+        notices.push(match session.billing_org() {
+            Some(root) => notice.with_action(
+                "Manage account status →",
+                format!("/@{}/children", root.slug),
+            ),
+            None => notice,
+        });
+    }
+
     // Check hosted billing status only when billing is enabled for this product experience.
     if session.billing_enabled
         && let Some(ref org) = session.current_org
@@ -2601,6 +2615,20 @@ pub struct ApiKeysNew<'a> {
     pub permissions: serde_json::Value,
     pub mcp_tool_options: serde_json::Value,
     pub webhook_options: serde_json::Value,
+}
+
+/// The shared error page: unknown ids, held workspaces and rejected requests render inside the
+/// app layout with their real status code.
+#[derive(Template)]
+#[template(path = "error.html")]
+pub struct ErrorPage {
+    pub title: String,
+    pub page_context: PrivatePageContext,
+    pub status: u16,
+    pub heading: String,
+    pub message: String,
+    pub back_href: String,
+    pub back_label: String,
 }
 
 #[derive(Template)]

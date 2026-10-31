@@ -13,7 +13,7 @@
                         <path d="m12 5.432 8.159 8.159c.03.03.06.058.091.086v6.198c0 1.035-.84 1.875-1.875 1.875H15a.75.75 0 0 1-.75-.75v-4.5a.75.75 0 0 0-.75-.75h-3a.75.75 0 0 0-.75.75V21a.75.75 0 0 1-.75.75H5.625a1.875 1.875 0 0 1-1.875-1.875v-6.198a2.29 2.29 0 0 0 .091-.086L12 5.432Z" />
                     </svg>
                     Environment
-                    <span class="ml-1 text-xs text-gray-400 dark:text-gray-500">({{ env_contexts.len() }})</span>
+                    <span class="ml-1 text-xs text-gray-500 dark:text-gray-400">({{ env_contexts.len() }})</span>
                 </a>
             </li>
             <li class="mr-2">
@@ -24,7 +24,7 @@
                     </svg>
                     Project
                     {% if selected_project.is_some() %}
-                    <span class="ml-1 text-xs text-gray-400 dark:text-gray-500">({{ project_contexts.len() }})</span>
+                    <span class="ml-1 text-xs text-gray-500 dark:text-gray-400">({{ project_contexts.len() }})</span>
                     {% endif %}
                 </a>
             </li>
@@ -35,7 +35,7 @@
     <div class="mb-6 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-4">
         <div class="flex">
             <div class="flex-shrink-0">
-                <svg class="h-5 w-5 text-amber-600 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
+                <svg class="h-5 w-5 text-amber-700 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
                     <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
                 </svg>
             </div>
@@ -71,7 +71,7 @@
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                <thead class="bg-gray-50 dark:bg-gray-900">
+                <thead class="table-head">
                     <tr>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Key</th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Description</th>
@@ -91,14 +91,14 @@
                         <td class="px-6 py-4">
                             <div class="text-sm text-gray-500 dark:text-gray-400">
                                 {% match context.description %}
-                                {% when Some with (desc) %}{{ desc }}{% when None %}<span class="italic text-gray-400 dark:text-gray-500">No description</span>{% endmatch %}
+                                {% when Some with (desc) %}{{ desc }}{% when None %}<span class="italic text-gray-500 dark:text-gray-400">No description</span>{% endmatch %}
                             </div>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap">
                             {% if context.active %}
-                            <span class="inline-flex items-center rounded-full bg-green-100 dark:bg-green-900/30 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:text-green-300">Active</span>
+                            <span class="badge badge-success">Active</span>
                             {% else %}
-                            <span class="inline-flex items-center rounded-full bg-red-100 dark:bg-red-900/30 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:text-red-300">Inactive</span>
+                            <span class="badge badge-failure">Inactive</span>
                             {% endif %}
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
@@ -253,7 +253,7 @@
         <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
             <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                    <thead class="bg-gray-50 dark:bg-gray-900">
+                    <thead class="table-head">
                         <tr>
                             <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Key</th>
                             <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Description</th>
@@ -273,14 +273,14 @@
                             <td class="px-6 py-4">
                                 <div class="text-sm text-gray-500 dark:text-gray-400">
                                     {% match context.description %}
-                                    {% when Some with (desc) %}{{ desc }}{% when None %}<span class="italic text-gray-400 dark:text-gray-500">No description</span>{% endmatch %}
+                                    {% when Some with (desc) %}{{ desc }}{% when None %}<span class="italic text-gray-500 dark:text-gray-400">No description</span>{% endmatch %}
                                 </div>
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap">
                                 {% if context.active %}
-                                <span class="inline-flex items-center rounded-full bg-green-100 dark:bg-green-900/30 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:text-green-300">Active</span>
+                                <span class="badge badge-success">Active</span>
                                 {% else %}
-                                <span class="inline-flex items-center rounded-full bg-red-100 dark:bg-red-900/30 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:text-red-300">Inactive</span>
+                                <span class="badge badge-failure">Inactive</span>
                                 {% endif %}
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
@@ -331,7 +331,7 @@
     <div class="mt-6 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
         <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">About Context Variables</h3>
         <div class="prose prose-sm text-gray-600 dark:text-gray-300 space-y-3">
-            <p>Context variables provide secure, encrypted storage for configuration values that your Hot code can access at runtime using <code class="bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded text-xs">::hot::ctx/get</code>.</p>
+            <p>Context variables provide secure, encrypted storage for configuration values that your Hot code can access at runtime using <code class="badge badge-neutral">::hot::ctx/get</code>.</p>
             <p><strong>Scope inheritance:</strong></p>
             <ul class="list-disc list-inside pl-4 space-y-1">
                 <li><strong>Environment variables</strong> are available to all projects in this environment</li>
