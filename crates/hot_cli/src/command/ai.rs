@@ -50,7 +50,10 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
             // Validate skill ownership and the destination root before writing
             // AGENTS.md so a rejected skill install cannot leave a partial add.
             preflight_agent_skills(*global)?;
-            setup_agents_md()?;
+            // AGENTS.md belongs to a project; a global install only adds skills.
+            if !*global {
+                setup_agents_md()?;
+            }
             setup_agent_skills(*global)?;
 
             Ok(())

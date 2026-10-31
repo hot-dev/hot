@@ -67,7 +67,7 @@ impl FromStr for LogFormat {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        match s.trim().to_lowercase().as_str() {
             "full" => Ok(LogFormat::Full),
             "simple" => Ok(LogFormat::Simple),
             "json" => Ok(LogFormat::Json),
@@ -215,7 +215,16 @@ pub fn get_log_retention_from_conf(conf: &crate::val::Val) -> usize {
 /// Get log format from configuration
 pub fn get_log_format_from_conf(conf: &crate::val::Val) -> LogFormat {
     let format_str = conf.get_str_or_default("log.format", &DEFAULT_LOG_FORMAT.to_string());
-    LogFormat::from_str(&format_str).unwrap_or(DEFAULT_LOG_FORMAT)
+    parse_log_format_or_warn(&format_str, DEFAULT_LOG_FORMAT)
+}
+
+/// A configured log format, or `fallback` with a warning on stderr (logging
+/// isn't set up yet) when the value is not one Hot knows.
+fn parse_log_format_or_warn(value: &str, fallback: LogFormat) -> LogFormat {
+    LogFormat::from_str(value).unwrap_or_else(|e| {
+        eprintln!("warning: {}; using {}", e, fallback);
+        fallback
+    })
 }
 
 /// Clean up old log files, keeping only the most recent `retention` files
@@ -306,10 +315,10 @@ pub fn setup_tracing(
     // Check if format is overridden in config
     let format = {
         let format_str = conf.get_str_or_default("log.format", "");
-        if format_str.is_empty() {
+        if format_str.trim().is_empty() {
             format // Use the provided default
         } else {
-            LogFormat::from_str(&format_str).unwrap_or(format)
+            parse_log_format_or_warn(&format_str, format)
         }
     };
 
@@ -459,6 +468,17 @@ mod json_tests {
     use super::*;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn log_format_ignores_surrounding_whitespace_and_rejects_unknown_values() {
+        assert_eq!(LogFormat::from_str("json ").unwrap(), LogFormat::Json);
+        assert_eq!(LogFormat::from_str(" Simple").unwrap(), LogFormat::Simple);
+        assert!(LogFormat::from_str("jsonl").is_err());
+        assert_eq!(
+            parse_log_format_or_warn("xml", LogFormat::Simple),
+            LogFormat::Simple
+        );
+    }
 
     #[derive(Clone)]
     struct Buffer(Arc<Mutex<Vec<u8>>>);

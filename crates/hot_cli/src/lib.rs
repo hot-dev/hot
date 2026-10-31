@@ -15,7 +15,7 @@ use crate::command::api::run_api;
 use crate::command::app::run_app;
 use crate::command::build::run_build;
 use crate::command::builds::run_builds;
-use crate::command::check::{run_check_watch, run_check_with_raw};
+use crate::command::check::{CheckFormat, CheckOptions, run_check_once, run_check_watch};
 use crate::command::compile::run_compile;
 use crate::command::conf::run_conf_generate;
 use crate::command::context::run_context;
@@ -349,30 +349,104 @@ fn indent_continuation(text: &str, continuation_indent: &str) -> String {
     out
 }
 
-/// The project a command watches, tests or runs, for the commands that use
-/// one. `hot dev` always uses the default project. `hot check` reports an
-/// undefined project itself, as a diagnostic in either output format.
+/// Set on the process `-d` spawns, so it runs in the foreground of its own
+/// session instead of spawning another copy.
+const DAEMON_CHILD_ENV: &str = "HOT_DAEMON_CHILD";
+
+/// `hot check`/`hot watch` settings from their flags and the `check.*` conf.
+fn check_options<'a>(
+    conf: &'a Val,
+    global: &'a crate::cli::GlobalOptions,
+    format: Option<String>,
+    raw: bool,
+    deny_warnings: bool,
+    allow_secret_shape: bool,
+) -> Result<CheckOptions<'a>, String> {
+    let format = format.or_else(|| {
+        let f = conf.get_str("check.format");
+        if f.is_empty() { None } else { Some(f) }
+    });
+    Ok(CheckOptions {
+        format: CheckFormat::parse(format.as_deref())?,
+        raw: raw || conf.get_bool("check.raw"),
+        deny_warnings: deny_warnings || conf.get_bool_or_default("check.deny-warnings", false),
+        allow_secret_shape,
+        conf,
+        global_options: global,
+    })
+}
+
+/// The project a command watches, tests, runs, compiles, builds or deploys
+/// from source, for the commands that use one. `hot compile <name>` names it
+/// positionally. `hot dev` always uses the default project. `hot check`
+/// reports an undefined project itself, as a diagnostic in either output
+/// format.
 fn command_project_name(
     command: &Option<Command>,
     global_options: &crate::cli::GlobalOptions,
     conf: &Val,
 ) -> Option<String> {
+    let selected = || {
+        global_options
+            .project
+            .clone()
+            .unwrap_or_else(|| hot::project::get_default_project_name(conf))
+    };
     match command {
         Some(Command::Dev { .. }) => Some(hot::project::get_default_project_name(conf)),
+        Some(Command::Compile {
+            project_name: Some(name),
+            ..
+        }) => Some(name.clone()),
+        // Deploying an existing build names a remote project, which hot.hot
+        // need not define.
+        Some(Command::Deploy {
+            build_id: Some(_), ..
+        }) => None,
         Some(
             Command::Watch { .. }
             | Command::Test { .. }
             | Command::Run { .. }
             | Command::Eval { .. }
-            | Command::Repl { .. },
-        ) => Some(
-            global_options
-                .project
-                .clone()
-                .unwrap_or_else(|| hot::project::get_default_project_name(conf)),
-        ),
+            | Command::Repl { .. }
+            | Command::Build { .. }
+            | Command::Compile { .. }
+            | Command::Deploy { .. },
+        ) => Some(selected()),
+        // Code piped on stdin runs in the selected project.
+        None if !std::io::IsTerminal::is_terminal(&std::io::stdin()) => Some(selected()),
         _ => None,
     }
+}
+
+/// `hot dev` serves the default project and has no `-p`: an error for a
+/// `-p` that names another project, and the error for an undefined default.
+fn dev_project_error(global_options: &crate::cli::GlobalOptions, conf: &Val) -> Option<String> {
+    let default = hot::project::get_default_project_name(conf);
+    if let Some(project) = &global_options.project
+        && project != &default
+    {
+        return Some(format!(
+            "hot dev serves the default project ('{default}') and does not take -p. \
+             Set the default in hot.hot: hot.set.project \"{project}\""
+        ));
+    }
+    hot::project::check_project_defined(conf, &default)
+        .err()
+        .map(|_| {
+            let names = hot::project::get_project_names(conf);
+            match names.first() {
+                Some(example) => format!(
+                    "hot dev serves the default project, '{default}', which hot.hot doesn't \
+                     define. hot.hot defines: {}.\nSet the default in hot.hot: \
+                     hot.set.project \"{example}\"",
+                    names.join(", ")
+                ),
+                None => format!(
+                    "hot dev serves the default project, '{default}', which hot.hot doesn't define."
+                ),
+            }
+        })
 }
 
 async fn async_main(providers: CliProviders) {
@@ -417,6 +491,22 @@ async fn async_main(providers: CliProviders) {
                 print_top_level_help(&mut cmd);
                 std::process::exit(1);
             }
+        }
+        return;
+    }
+
+    // `hot fmt` only reads and writes source files, so it runs before
+    // hot.hot is evaluated: a project whose configuration fails to load can
+    // still be formatted.
+    if let Some(Command::Fmt {
+        global,
+        paths,
+        check,
+    }) = &cli.command
+    {
+        let exit_code = run_fmt(global, paths, *check);
+        if exit_code != 0 {
+            std::process::exit(exit_code);
         }
         return;
     }
@@ -542,9 +632,7 @@ async fn async_main(providers: CliProviders) {
                     os, arch
                 );
                 eprintln!();
-                eprintln!(
-                    "Visit https://hot.dev/docs/getting-started/installation for manual installation options."
-                );
+                eprintln!("Visit https://hot.dev/download for manual installation options.");
                 std::process::exit(1);
             }
             update::UpdateCheckResult::Disabled => {
@@ -669,6 +757,12 @@ async fn async_main(providers: CliProviders) {
                     }
                     tracing::debug!("Project hot.min-version {} satisfied", min_version.as_ref());
                 }
+            }
+            // The language server loads the project itself and reports a
+            // configuration error as a diagnostic on hot.hot, so it must
+            // start even when the configuration doesn't load.
+            Err(e) if matches!(cli.command, Some(Command::Lsp { .. })) => {
+                tracing::warn!("Configuration error (starting the LSP anyway): {}", e);
             }
             Err(e) => {
                 // Display the full error message
@@ -919,7 +1013,12 @@ async fn async_main(providers: CliProviders) {
 
     // A project that isn't defined has no source or test paths, so these
     // commands would watch, test or run no project files.
-    if let Some(project_name) = command_project_name(&cli.command, &global_options, &conf)
+    if matches!(cli.command, Some(Command::Dev { .. })) {
+        if let Some(e) = dev_project_error(&global_options, &conf) {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    } else if let Some(project_name) = command_project_name(&cli.command, &global_options, &conf)
         && let Err(e) = hot::project::check_project_defined(&conf, &project_name)
     {
         eprintln!("{}", e);
@@ -929,7 +1028,22 @@ async fn async_main(providers: CliProviders) {
     // When services need their configuration, call their get_resolved_conf with the full merged config
     // This allows each service to apply its defaults and use dotted paths to access values
 
-    let daemon = conf.get_bool("daemon");
+    // Only the long-running services daemonize, and only with their `-d`
+    // flag (which sets `daemon`). The spawned child is marked so it never
+    // daemonizes again: it re-reads the same arguments and configuration.
+    let is_service = matches!(
+        cli.command,
+        Some(
+            Command::Dev { .. }
+                | Command::Api { .. }
+                | Command::App { .. }
+                | Command::Worker { .. }
+                | Command::TaskWorker { .. }
+                | Command::Scheduler { .. }
+        )
+    );
+    let daemon =
+        is_service && conf.get_bool("daemon") && std::env::var_os(DAEMON_CHILD_ENV).is_none();
 
     // If daemon mode is enabled, fork to the background
     if daemon {
@@ -950,7 +1064,7 @@ async fn async_main(providers: CliProviders) {
 
             // Create a new process that will run in the background
             let mut cmd = Command::new(exe);
-            cmd.args(&args);
+            cmd.args(&args).env(DAEMON_CHILD_ENV, "1");
 
             match cmd.spawn() {
                 Ok(_) => {
@@ -1055,7 +1169,7 @@ async fn async_main(providers: CliProviders) {
             )
             .await
             {
-                error!("REPL failed: {}", e);
+                eprintln!("REPL failed: {}", e);
                 std::process::exit(1);
             }
         }
@@ -1099,7 +1213,7 @@ async fn async_main(providers: CliProviders) {
                 .unwrap_or_else(|| hot::project::get_default_project_name(&conf));
 
             if let Err(e) = run_deps(&action, &conf, &project_name).await {
-                error!("Deps command failed: {}", e);
+                eprintln!("Deps command failed: {}", e);
                 std::process::exit(1);
             }
         }
@@ -1107,7 +1221,7 @@ async fn async_main(providers: CliProviders) {
             match action {
                 Some(ConfAction::Generate { template, output }) => {
                     if let Err(e) = run_conf_generate(&template, &output, &conf) {
-                        error!("Config generate failed: {}", e);
+                        eprintln!("Config generate failed: {}", e);
                         std::process::exit(1);
                     }
                 }
@@ -1191,8 +1305,12 @@ async fn async_main(providers: CliProviders) {
                     }
 
                     // Redact secrets (remote keys, session secrets, URI
-                    // passwords) just like --show-conf does.
-                    let display_conf = redact_sensitive_config(&display_conf);
+                    // passwords, values from <NAME>_FILE) just like
+                    // --show-conf does.
+                    let display_conf = redact_sensitive_config(&display_conf.set(
+                        "_secret-files",
+                        conf.get("_secret-files").unwrap_or_else(Val::map_empty),
+                    ));
 
                     println!(
                         "::hot::conf ns\n\n// Hot Configuration\n{}\n",
@@ -1220,14 +1338,15 @@ async fn async_main(providers: CliProviders) {
                 }
             };
             if let Err(e) = result {
-                error!("Database command failed: {}", e);
+                eprintln!("Database command failed: {}", e);
                 std::process::exit(1);
             }
         }
         Some(Command::Key { action, .. }) => match action {
             KeyAction::Create { description } => {
                 if let Err(e) = run_key_create(&description, &conf, &providers).await {
-                    error!("Key command failed: {}", e);
+                    // stderr, so `KEY=$(hot key create)` never captures an error.
+                    eprintln!("Key command failed: {}", e);
                     std::process::exit(1);
                 }
             }
@@ -1327,7 +1446,7 @@ async fn async_main(providers: CliProviders) {
         }
         Some(Command::Queue { action, .. }) => {
             if let Err(e) = run_queue(&action, &conf).await {
-                error!("Queue command failed: {}", e);
+                eprintln!("Queue command failed: {}", e);
                 std::process::exit(1);
             }
         }
@@ -1342,15 +1461,15 @@ async fn async_main(providers: CliProviders) {
                 std::process::exit(1);
             }
         }
-        Some(Command::Init { path, .. }) => {
-            if let Err(e) = run_init(&conf, path.as_deref(), &providers).await {
-                error!("Init command failed: {}", e);
+        Some(Command::Init { path, name, .. }) => {
+            if let Err(e) = run_init(&conf, path.as_deref(), name.as_deref(), &providers).await {
+                eprintln!("Init command failed: {}", e);
                 std::process::exit(1);
             }
         }
         Some(Command::Ai { action }) => {
             if let Err(e) = run_ai(&action) {
-                error!("AI command failed: {}", e);
+                eprintln!("AI command failed: {}", e);
                 std::process::exit(1);
             }
         }
@@ -1383,7 +1502,7 @@ async fn async_main(providers: CliProviders) {
             )
             .await
             {
-                error!("Build command failed: {}", e);
+                eprintln!("Build command failed: {}", e);
                 std::process::exit(1);
             }
         }
@@ -1424,7 +1543,7 @@ async fn async_main(providers: CliProviders) {
             ..
         }) => {
             if let Err(e) = run_extract(&build_path, extract_dir.as_deref(), build_dir.as_deref()) {
-                error!("Extract command failed: {}", e);
+                eprintln!("Extract command failed: {}", e);
                 std::process::exit(1);
             }
         }
@@ -1433,10 +1552,24 @@ async fn async_main(providers: CliProviders) {
             project_name,
             ..
         }) => {
-            // Use the project name from CLI or default from config
-            let project_name = project_name
-                .as_deref()
-                .map(|s| s.to_string())
+            // One project for messages, paths and the live build: the
+            // positional name, else -p, else the default project.
+            if let (Some(positional), Some(flag)) = (&project_name, &global.project)
+                && positional != flag
+            {
+                eprintln!(
+                    "hot compile was given two projects: '{}' and -p '{}'",
+                    positional, flag
+                );
+                std::process::exit(1);
+            }
+            let mut global = global;
+            if let Some(name) = project_name {
+                global.project = Some(name);
+            }
+            let project_name = global
+                .project
+                .clone()
                 .unwrap_or_else(|| hot::project::get_default_project_name(&conf));
 
             // Get paths using the merged path functions
@@ -1456,12 +1589,12 @@ async fn async_main(providers: CliProviders) {
                 &cmd_src_paths,
                 &cmd_test_paths,
                 &conf,
-                &global_options,
+                &global,
                 &providers,
             )
             .await
             {
-                error!("Compile command failed: {}", e);
+                eprintln!("Compile command failed: {}", e);
                 std::process::exit(1);
             }
         }
@@ -1470,34 +1603,28 @@ async fn async_main(providers: CliProviders) {
             format,
             raw,
             deny_warnings,
+            allow_secret_shape,
             path,
             ..
         }) => {
-            let effective_format = format.or_else(|| {
-                let f = conf.get_str("check.format");
-                if f.is_empty() { None } else { Some(f) }
-            });
-            let effective_raw = if raw {
-                true
-            } else {
-                conf.get_bool("check.raw")
-            };
-            let effective_deny_warnings =
-                deny_warnings || conf.get_bool_or_default("check.deny-warnings", false);
-            match run_check_with_raw(
-                effective_format.as_deref(),
-                effective_raw,
-                effective_deny_warnings,
+            let options = match check_options(
                 &conf,
                 &global,
-                context_storage.clone(),
-                path.as_deref(),
-            )
-            .await
-            {
+                format,
+                raw,
+                deny_warnings,
+                allow_secret_shape,
+            ) {
+                Ok(options) => options,
+                Err(e) => {
+                    eprintln!("Check failed: {}", e);
+                    std::process::exit(2);
+                }
+            };
+            match run_check_once(&options, context_storage.as_ref(), path.as_deref()) {
                 Ok(exit_code) => std::process::exit(exit_code),
                 Err(e) => {
-                    error!("Check failed: {}", e);
+                    eprintln!("Check failed: {}", e);
                     std::process::exit(2);
                 }
             }
@@ -1507,35 +1634,27 @@ async fn async_main(providers: CliProviders) {
             format,
             raw,
             deny_warnings,
+            allow_secret_shape,
             watch_debounce_ms,
             ..
         }) => {
-            let effective_format = format.or_else(|| {
-                let f = conf.get_str("check.format");
-                if f.is_empty() { None } else { Some(f) }
-            });
-            let effective_raw = if raw {
-                true
-            } else {
-                conf.get_bool("check.raw")
-            };
-            let effective_deny_warnings =
-                deny_warnings || conf.get_bool_or_default("check.deny-warnings", false);
             let effective_debounce =
                 watch_debounce_ms.unwrap_or_else(|| conf.get_int("watch.debounce") as u64);
-            match run_check_watch(
-                effective_format.as_deref(),
-                effective_raw,
-                effective_deny_warnings,
-                effective_debounce,
+            let result = match check_options(
                 &conf,
                 &global,
-            )
-            .await
-            {
+                format,
+                raw,
+                deny_warnings,
+                allow_secret_shape,
+            ) {
+                Ok(options) => run_check_watch(&options, effective_debounce).await,
+                Err(e) => Err(e),
+            };
+            match result {
                 Ok(exit_code) => std::process::exit(exit_code),
                 Err(e) => {
-                    error!("Watch failed: {}", e);
+                    eprintln!("Watch failed: {}", e);
                     std::process::exit(2);
                 }
             }
@@ -1571,28 +1690,16 @@ async fn async_main(providers: CliProviders) {
                 std::process::exit(1);
             }
         }
-        Some(Command::Upload { build_id, .. }) => {
-            if let Err(e) = run_upload(&build_id, &conf).await {
+        Some(Command::Upload {
+            build_id, global, ..
+        }) => {
+            if let Err(e) = run_upload(&build_id, &conf, &global).await {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
         }
-        Some(Command::Fmt {
-            global,
-            file,
-            force,
-            check,
-        }) => {
-            let exit_code = match run_fmt(&global, file.as_deref(), force, check).await {
-                Ok(code) => code,
-                Err(e) => {
-                    error!("Fmt failed: {}", e);
-                    1
-                }
-            };
-            if exit_code != 0 {
-                std::process::exit(exit_code);
-            }
+        Some(Command::Fmt { .. }) => {
+            // Handled early, before config processing
         }
         Some(Command::Lsp {
             transport, stdio, ..
@@ -1604,14 +1711,17 @@ async fn async_main(providers: CliProviders) {
                 transport.unwrap_or_else(|| conf.get_str("lsp.transport"))
             };
             match t.as_str() {
-                "stdio" | "" => {
-                    if let Err(e) = hot_lsp::run_stdio().await {
-                        error!("LSP failed: {}", e);
+                "stdio" | "" => match hot_lsp::run_stdio().await {
+                    // Exit at once: a blocking stdin read must not keep
+                    // the process alive after the client said `exit`.
+                    Ok(code) => std::process::exit(code),
+                    Err(e) => {
+                        eprintln!("LSP failed: {}", e);
                         std::process::exit(2);
                     }
-                }
+                },
                 other => {
-                    error!("Unsupported lsp.transport: {}", other);
+                    eprintln!("Unsupported lsp.transport: {}", other);
                     std::process::exit(2);
                 }
             }
@@ -1653,7 +1763,7 @@ async fn async_main(providers: CliProviders) {
 
             // Create output directory if it doesn't exist
             if let Err(e) = fs::create_dir_all(&out_path) {
-                error!("Failed to create output directory: {}", e);
+                eprintln!("Failed to create output directory: {}", e);
                 std::process::exit(1);
             }
 
@@ -1716,13 +1826,13 @@ async fn async_main(providers: CliProviders) {
             // Not a terminal (piped input) - read from stdin
             let mut stdin_input = String::new();
             if let Err(e) = io::stdin().read_to_string(&mut stdin_input) {
-                error!("Failed to read from stdin: {}", e);
+                eprintln!("Failed to read from stdin: {}", e);
                 std::process::exit(1);
             }
 
             // Check if stdin is empty
             if stdin_input.trim().is_empty() {
-                error!("No input provided from stdin. Use 'hot help' for usage information.");
+                eprintln!("No input provided from stdin. Use 'hot help' for usage information.");
                 std::process::exit(1);
             }
 
@@ -1736,7 +1846,7 @@ async fn async_main(providers: CliProviders) {
             )
             .await
             {
-                error!("Eval failed: {}", e);
+                eprintln!("Eval failed: {}", e);
                 std::process::exit(1);
             }
         }

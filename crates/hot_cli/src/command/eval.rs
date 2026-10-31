@@ -147,6 +147,30 @@ pub(crate) async fn run_eval(
     crate::command::run::begin_managed_cli_run(db_pool.as_deref(), execution_context.as_ref())
         .await?;
 
+    // The same file storage, store and embedding provider as `hot run`.
+    let file_storage: Option<std::sync::Arc<dyn hot::file_storage::FileStorage>> =
+        match hot::file_storage::file_storage_from_config(conf).await {
+            Ok(fs) => Some(std::sync::Arc::from(fs)),
+            Err(e) => {
+                tracing::debug!("File storage not available for eval: {}", e);
+                None
+            }
+        };
+    let (org_id, env_id) = execution_context
+        .as_ref()
+        .map(|ctx| (ctx.org_id, ctx.env_id))
+        .unwrap_or((None, None));
+    let store: Option<std::sync::Arc<dyn hot::store::Store>> =
+        match hot::store::store_from_config_with_db(conf, db_pool.clone(), org_id, env_id).await {
+            Ok(s) => Some(std::sync::Arc::from(s)),
+            Err(e) => {
+                tracing::debug!("Store not available: {e}");
+                None
+            }
+        };
+    let embedding_provider: Option<std::sync::Arc<dyn hot::store::embedding::EmbeddingProvider>> =
+        hot::store::embedding::embedding_provider_from_config(conf).map(std::sync::Arc::from);
+
     // Use the pipeline with emitter, event publisher, and context storage support
     // IMPORTANT: VM execution runs in spawn_blocking to avoid blocking the tokio runtime.
     // This allows hot-std blocking I/O (HTTP, file ops) to work correctly.
@@ -182,9 +206,9 @@ pub(crate) async fn run_eval(
                 event_publisher_clone,
                 context_storage,
                 db_pool_clone,
-                None,
-                None,
-                None,
+                file_storage,
+                store,
+                embedding_provider,
                 None,
                 None,
                 false,

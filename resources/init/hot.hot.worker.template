@@ -53,6 +53,7 @@ hot.worker.vm-memory-mb Int(::env/get("HOT_WORKER_VM_MEMORY_MB", "256"))
 hot.worker.reserved-memory-mb Int(::env/get("HOT_WORKER_RESERVED_MEMORY_MB", "512"))
 hot.worker.db-reserved-connections Int(::env/get("HOT_WORKER_DB_RESERVED_CONNECTIONS", "4"))
 hot.worker.db-max-connections ::env/get("HOT_WORKER_DB_MAX_CONNECTIONS", "auto")
+hot.worker.run-timeout Int(::env/get("HOT_WORKER_RUN_TIMEOUT", "300"))
 hot.worker.cancel-on-timeout Bool(::env/get("HOT_WORKER_CANCEL_ON_TIMEOUT", "true"))
 hot.worker.max-run-timeout Int(::env/get("HOT_WORKER_MAX_RUN_TIMEOUT", "3600"))
 hot.worker.max-blocking-executions Int(::env/get("HOT_WORKER_MAX_BLOCKING_EXECUTIONS", "-1"))
@@ -87,5 +88,3 @@ hot.file.aws.s3.region ::env/get("HOT_FILE_AWS_S3_REGION", "us-east-1")
 hot.file.aws.access-key-id ::env/get("HOT_FILE_AWS_ACCESS_KEY_ID", "")
 hot.file.aws.secret-access-key ::env/get("HOT_FILE_AWS_SECRET_ACCESS_KEY", "")
 
-// Daemon Mode
-hot.daemon true

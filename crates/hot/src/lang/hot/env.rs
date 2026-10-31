@@ -26,8 +26,16 @@ pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     }
 
-    // Normal mode: read from environment
+    // Normal mode: read from environment. A `HOT_*` setting may come from
+    // `<NAME>_FILE`, as it does for the configuration overlay.
     match (name, default_value) {
+        (Val::Str(n), Val::Str(default)) if n.starts_with("HOT_") => {
+            match crate::environment::read_optional(n) {
+                Ok(Some(value)) => HotResult::Ok(Val::from(value)),
+                Ok(None) => HotResult::Ok(Val::from(default.clone())),
+                Err(e) => HotResult::Err(Val::from(e)),
+            }
+        }
         (Val::Str(n), Val::Str(default)) => match std::env::var(&**n) {
             Ok(value) => HotResult::Ok(Val::from(value)),
             Err(_) => HotResult::Ok(Val::from(default.clone())),

@@ -38,7 +38,10 @@ pub(crate) async fn run_deps(
                     }
                 }
             } else {
-                println!("  No dependencies configured. Use 'hot deps add' to add dependencies.");
+                println!(
+                    "  No dependencies configured. Add them to hot.project.{}.deps in hot.hot.",
+                    project_name
+                );
             }
         }
 
@@ -71,84 +74,30 @@ pub(crate) async fn run_deps(
             local,
             version,
             git,
-            branch,
-            tag,
-            path,
+            ..
         } => {
-            if !hot::project::project_uses_deps_format(conf, project_name) {
-                return Err(
-                    "Project uses legacy pkg.paths format. Use 'hot deps migrate' first."
-                        .to_string(),
-                );
-            }
-
-            let source_count = [local.is_some(), version.is_some(), git.is_some()]
-                .iter()
-                .filter(|&&x| x)
-                .count();
-            if source_count != 1 {
-                return Err(
-                    "Exactly one of --local, --version, or --git must be specified".to_string(),
-                );
-            }
-
-            if git.is_none() {
-                if branch.is_some() {
-                    return Err("--branch can only be used with --git".to_string());
-                }
-                if tag.is_some() {
-                    return Err("--tag can only be used with --git".to_string());
-                }
-                if path.is_some() {
-                    return Err(
-                        "--path can only be used with --git (for monorepo subdirectories)"
-                            .to_string(),
-                    );
-                }
-            }
-
-            if branch.is_some() && tag.is_some() {
-                return Err("Cannot specify both --branch and --tag".to_string());
-            }
-
-            println!(
-                "Adding dependency '{}' to project '{}'",
-                package, project_name
-            );
-
-            if let Some(git_url) = git {
-                print!("  Source: Git repository {}", git_url);
-                if let Some(b) = branch {
-                    print!(" (branch: {})", b);
-                } else if let Some(t) = tag {
-                    print!(" (tag/commit: {})", t);
-                }
-                if let Some(p) = path {
-                    print!(" at path: {}", p);
-                }
-                println!();
-            } else if let Some(l) = local {
-                println!("  Source: Local file system path {}", l);
+            let spec = if let Some(l) = local {
+                format!("{{\"local\": \"{}\"}}", l)
+            } else if let Some(g) = git {
+                format!("{{\"git\": \"{}\"}}", g)
             } else if let Some(v) = version {
-                println!("  Source: Registry version {}", v);
-            }
-
-            println!("Note: Dependency addition not yet implemented - this is a placeholder");
+                format!("\"{}\"", v)
+            } else {
+                "{\"local\": \"./path/to/package\"}".to_string()
+            };
+            return Err(format!(
+                "hot deps add is not implemented yet. Add the dependency to hot.hot:\n  \
+                 hot.project.{}.deps {{\"{}\": {}}}",
+                project_name, package, spec
+            ));
         }
 
         DepsAction::Remove { package } => {
-            if !hot::project::project_uses_deps_format(conf, project_name) {
-                return Err(
-                    "Project uses legacy pkg.paths format. Use 'hot deps migrate' first."
-                        .to_string(),
-                );
-            }
-
-            println!(
-                "Removing dependency '{}' from project '{}'",
+            return Err(format!(
+                "hot deps remove is not implemented yet. Remove \"{}\" from \
+                 hot.project.{}.deps in hot.hot.",
                 package, project_name
-            );
-            println!("Note: Dependency removal not yet implemented - this is a placeholder");
+            ));
         }
 
         DepsAction::Update => {
@@ -167,8 +116,6 @@ pub(crate) async fn run_deps(
                         resolved_dep.resolved_path.display()
                     );
                 }
-
-                println!("Note: Dependency caching not yet implemented");
             } else {
                 println!("Project uses legacy pkg.paths format. Use 'hot deps migrate' first.");
             }
@@ -186,10 +133,10 @@ pub(crate) async fn run_deps(
             println!("Migration from pkg.paths to deps format is no longer needed.");
             println!("The legacy pkg.paths system has been removed.");
             println!("All projects now use the deps format by default.");
-            println!("\nTo add dependencies to your project, use:");
-            println!("  hot deps add <package-name> --path <local-path>");
-            println!("  hot deps add <package-name> --git <git-url>");
-            println!("  hot deps add <package-name> --version <version>");
+            println!(
+                "\nTo add dependencies, list them in hot.project.{}.deps in hot.hot.",
+                project_name
+            );
         }
     }
 

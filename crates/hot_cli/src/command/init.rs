@@ -23,7 +23,8 @@ pub(crate) fn setup_gitignore(use_logging: bool) -> Result<(), String> {
     }
 
     let gitignore_path = std::path::Path::new(".gitignore");
-    let hot_entries = [".hot/", "hot/ctx.hot", ".env"];
+    // `hot/dev.key` decrypts local context values.
+    let hot_entries = [".hot/", "hot/ctx.hot", "hot/dev.key", ".env"];
 
     if gitignore_path.exists() {
         let file = match fs::File::open(gitignore_path) {
@@ -33,42 +34,25 @@ pub(crate) fn setup_gitignore(use_logging: bool) -> Result<(), String> {
 
         let reader = BufReader::new(file);
         let mut existing_lines: Vec<String> = Vec::new();
-        let mut has_hot_dir = false;
-        let mut has_ctx_hot = false;
-        let mut has_env = false;
-
         for line in reader.lines() {
-            let line = match line {
-                Ok(line) => line,
+            match line {
+                Ok(line) => existing_lines.push(line),
                 Err(e) => return Err(format!("Failed to read .gitignore line: {}", e)),
-            };
-            existing_lines.push(line.clone());
-
-            let trimmed = line.trim();
-            if trimmed == ".hot/" || trimmed == ".hot" {
-                has_hot_dir = true;
-            }
-            if trimmed == "hot/ctx.hot" {
-                has_ctx_hot = true;
-            }
-            if trimmed == ".env" {
-                has_env = true;
             }
         }
 
-        let mut entries_added = Vec::new();
-        if !has_hot_dir {
-            existing_lines.push(".hot/".to_string());
-            entries_added.push(".hot/");
-        }
-        if !has_ctx_hot {
-            existing_lines.push("hot/ctx.hot".to_string());
-            entries_added.push("hot/ctx.hot");
-        }
-        if !has_env {
-            existing_lines.push(".env".to_string());
-            entries_added.push(".env");
-        }
+        let has_entry = |entry: &str| {
+            let bare = entry.trim_end_matches('/');
+            existing_lines
+                .iter()
+                .any(|line| line.trim() == entry || line.trim() == bare)
+        };
+        let entries_added: Vec<&str> = hot_entries
+            .iter()
+            .copied()
+            .filter(|entry| !has_entry(entry))
+            .collect();
+        existing_lines.extend(entries_added.iter().map(|e| e.to_string()));
 
         if !entries_added.is_empty() {
             let content = existing_lines.join("\n") + "\n";
@@ -94,6 +78,32 @@ pub(crate) fn setup_gitignore(use_logging: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// A Hot identifier for a project named after its directory: lowercase
+/// letters, digits and `-`, starting with a letter. `2024-app` becomes
+/// `app-2024-app`, `my app` and `my.app` become `my-app`.
+pub(crate) fn project_identifier(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches('-').to_string();
+    match out.chars().next() {
+        None => "my-project".to_string(),
+        Some(c) if !c.is_ascii_alphabetic() => format!("app-{}", out),
+        Some(_) => out,
+    }
+}
+
+/// Whether `name` is usable as a project name in hot.hot paths and as a
+/// namespace segment.
+fn is_project_identifier(name: &str) -> bool {
+    !name.is_empty() && project_identifier(name) == name
+}
+
 /// Check if initialization is needed and run it automatically in development mode.
 /// Returns `Ok(true)` if init was run, `Ok(false)` if no init was needed.
 pub(crate) async fn check_and_run_init_if_needed(
@@ -111,7 +121,7 @@ pub(crate) async fn check_and_run_init_if_needed(
         // runtime role check) is the error to report.
         Err(hot::db::DatabaseError::NotInitialized(_)) => {
             info!("Database not initialized, running initialization...");
-            run_init_impl(conf, true, None, providers).await?;
+            run_init_impl(conf, true, None, None, providers).await?;
             return Ok(true);
         }
         Err(e) => return Err(format!("Cannot connect to the database: {e}")),
@@ -122,7 +132,7 @@ pub(crate) async fn check_and_run_init_if_needed(
             if org_count == 0 || user_count == 0 {
                 info!("No users or organizations found, running initialization...");
                 drop(db);
-                run_init_impl(conf, true, None, providers).await?;
+                run_init_impl(conf, true, None, None, providers).await?;
                 return Ok(true);
             }
             Ok(false)
@@ -131,7 +141,7 @@ pub(crate) async fn check_and_run_init_if_needed(
             info!("Error checking database state, running initialization...");
             drop(db);
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            run_init_impl(conf, true, None, providers).await?;
+            run_init_impl(conf, true, None, None, providers).await?;
             Ok(true)
         }
     }
@@ -140,9 +150,20 @@ pub(crate) async fn check_and_run_init_if_needed(
 pub(crate) async fn run_init(
     conf: &Val,
     path: Option<&str>,
+    name: Option<&str>,
     providers: &crate::CliProviders,
 ) -> Result<(), String> {
-    run_init_impl(conf, false, path, providers).await
+    if let Some(name) = name
+        && !is_project_identifier(name)
+    {
+        return Err(format!(
+            "'{}' is not a valid project name: use lowercase letters, digits and '-', \
+             starting with a letter (for example '{}')",
+            name,
+            project_identifier(name)
+        ));
+    }
+    run_init_impl(conf, false, path, name, providers).await
 }
 
 /// Run initialization.
@@ -154,6 +175,7 @@ async fn run_init_impl(
     conf: &Val,
     use_logging: bool,
     path: Option<&str>,
+    name: Option<&str>,
     providers: &crate::CliProviders,
 ) -> Result<(), String> {
     use std::fs;
@@ -199,13 +221,35 @@ async fn run_init_impl(
         return Err(format!("Failed to create .hot/db directory: {}", e));
     }
 
-    let (profile_email, profile_slug, profile_env_name) =
-        initialize_database(conf, use_logging, providers).await?;
+    let (profile_email, profile_slug, profile_env_name) = initialize_database(
+        conf,
+        if use_logging {
+            InitOutput::Log
+        } else {
+            InitOutput::Print
+        },
+        providers,
+    )
+    .await?;
 
-    let project_name = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-        .unwrap_or_else(|| "my-project".to_string());
+    let project_name = match name {
+        Some(name) => name.to_string(),
+        None => {
+            let dir_name = std::env::current_dir()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .unwrap_or_else(|| "my-project".to_string());
+            let project_name = project_identifier(&dir_name);
+            if project_name != dir_name && !std::path::Path::new("hot.hot").exists() {
+                init_msg!(
+                    "Project name: {} (from directory '{}'; pass --name to choose another)",
+                    project_name,
+                    dir_name
+                );
+            }
+            project_name
+        }
+    };
 
     let conf_file = std::path::Path::new("hot.hot");
     let is_existing_project = conf_file.exists();
@@ -283,21 +327,33 @@ async fn run_init_impl(
     Ok(())
 }
 
+/// Where `initialize_database` reports its progress.
+#[derive(Clone, Copy)]
+enum InitOutput {
+    /// `hot init`: printed.
+    Print,
+    /// `hot dev`'s automatic init: logged.
+    Log,
+    /// A command preparing its database on first use: debug logs only, so
+    /// stdout stays the command's own (`KEY=$(hot key create)`).
+    Quiet,
+}
+
 /// The database part of `hot init`: run the migrations, then make sure the
 /// selected profile's organization, user and environment exist.
 async fn initialize_database(
     conf: &Val,
-    use_logging: bool,
+    output: InitOutput,
     providers: &crate::CliProviders,
 ) -> Result<hot::profile::ProfileIdentifiers, String> {
     use hot::db::{create_db_pool, get_db_uri_from_conf, redact_password};
 
     macro_rules! init_msg {
         ($($arg:tt)*) => {
-            if use_logging {
-                info!($($arg)*);
-            } else {
-                println!($($arg)*);
+            match output {
+                InitOutput::Print => println!($($arg)*),
+                InitOutput::Log => info!($($arg)*),
+                InitOutput::Quiet => tracing::debug!($($arg)*),
             }
         };
     }
@@ -367,7 +423,7 @@ async fn prepare_local_database_in(
                 .map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
         }
         eprintln!("Creating the project database at {}", path.display());
-        initialize_database(conf, true, providers).await?;
+        initialize_database(conf, InitOutput::Quiet, providers).await?;
         return Ok(());
     }
     let pending = hot::db::pending_sqlite_migrations(&hot::db::get_db_uri_from_conf(conf))
@@ -385,7 +441,7 @@ async fn prepare_local_database_in(
             pending.len(),
             if pending.len() == 1 { "" } else { "s" }
         );
-        initialize_database(conf, true, providers).await?;
+        initialize_database(conf, InitOutput::Quiet, providers).await?;
         return Ok(());
     }
     seed_empty_database(conf).await
@@ -463,6 +519,19 @@ mod tests {
     use super::*;
     use hot::db::{Org, User, check_default_data_exists};
     use uuid::Uuid;
+
+    #[test]
+    fn project_identifier_makes_a_hot_identifier() {
+        assert_eq!(project_identifier("my-app"), "my-app");
+        assert_eq!(project_identifier("2024-app"), "app-2024-app");
+        assert_eq!(project_identifier("my app"), "my-app");
+        assert_eq!(project_identifier("my.app"), "my-app");
+        assert_eq!(project_identifier("My_App!"), "my-app");
+        assert_eq!(project_identifier("..."), "my-project");
+        assert!(is_project_identifier("app-2"));
+        assert!(!is_project_identifier("2app"));
+        assert!(!is_project_identifier("my app"));
+    }
 
     fn profile(email: &str, org: &str, env: &str) -> Val {
         hot::val!({"set":{"profile":"selected"},"profile":{"selected":{
