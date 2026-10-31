@@ -61,7 +61,8 @@
         {% for row in org_api_keys %}
         <div class="mt-4 border-t border-gray-200 dark:border-gray-700 pt-3"><p>{{ row.key.description }} · {{ row.key.org_api_key_id }}{% match row.expires_at %}{% when Some with (at) %} · expires {{ at }}{% when None %}{% endmatch %}{% match row.key.issuer_org_api_key_id %}{% when Some with (issuer) %} · created by key {{ issuer }}{% when None %}{% endmatch %}</p>
             <pre class="text-xs text-gray-500 dark:text-gray-400 whitespace-pre-wrap">{{ row.key.permissions }}</pre>
-            {% if row.key.is_usable() %}<form method="post" action="/@{{ root.slug }}/org-api-keys/{{ row.key.org_api_key_id }}/revoke"><button class="btn btn-secondary" type="submit">Revoke</button></form>{% else %}<span class="badge badge-neutral">Inactive</span>{% endif %}
+            {% match row.status_label %}{% when Some with (label) %}<span class="badge badge-neutral">{{ label }}</span>{% when None %}{% endmatch %}
+            {% if row.revocable %}<form method="post" action="/@{{ root.slug }}/org-api-keys/{{ row.key.org_api_key_id }}/revoke"><button class="btn btn-secondary" type="submit">Revoke</button></form>{% endif %}
         </div>
         {% endfor %}
     </details>
