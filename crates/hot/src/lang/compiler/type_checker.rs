@@ -5453,7 +5453,7 @@ impl TypeChecker {
 
         if matching_arity_sigs.is_empty() {
             // No signature with matching arity found
-            let available_arities: Vec<String> = signatures
+            let mut available_arities: Vec<String> = signatures
                 .iter()
                 .map(|sig| {
                     if sig.variadic {
@@ -5469,8 +5469,11 @@ impl TypeChecker {
                     }
                 })
                 .collect();
+            // A core function in two namespaces has two signatures of one arity.
+            let mut seen = std::collections::HashSet::new();
+            available_arities.retain(|arity| seen.insert(arity.clone()));
 
-            let message = if signatures.len() == 1 {
+            let message = if available_arities.len() == 1 {
                 let sig = &signatures[0];
                 let expected = if sig.variadic && !sig.parameter_types.is_empty() {
                     sig.parameter_types.len() - 1
