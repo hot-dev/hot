@@ -9,6 +9,7 @@ use crate::lang::runtime::error::RuntimeError;
 use crate::lang::runtime::jit::{
     CallNames, CodeMemoryStatus, JitConfig, JitFunctionProfile, JitRuntimeState,
 };
+use crate::lang::runtime::native_core::NativeCoreShadows;
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
@@ -73,6 +74,51 @@ pub(crate) fn core_function_name<'a>(
         }
     }
     unqualified_match
+}
+
+/// `dest` with the entries of the map spread `{...source}` merged in, as
+/// `MergeMaps` makes it: a constructed value contributes its fields. Compiled
+/// code merges with it too.
+pub(crate) fn merge_map_spread(dest: Val, source: &Val) -> VmResult<Val> {
+    match (dest, crate::val::map_spread_entries(source)) {
+        (Val::Map(mut dest_map), Some(entries)) => {
+            for (k, v) in entries.iter() {
+                dest_map.insert(k.clone(), v.clone());
+            }
+            Ok(Val::Map(dest_map))
+        }
+        (dest, entries) => {
+            let message = match source {
+                Val::Map(m) if entries.is_none() && crate::val::is_tagged_wrapper(m) => {
+                    format!(
+                        "Cannot spread a {} value into a map: it has no fields",
+                        crate::val::tagged_type_name(m).unwrap_or("typed")
+                    )
+                }
+                _ => format!(
+                    "MergeMaps requires two maps, got: {:?} and {:?}",
+                    dest, source
+                ),
+            };
+            Err(VmError::runtime(message))
+        }
+    }
+}
+
+/// `target` with `value` appended, as `items[] value` makes it: a Null
+/// target starts a vector. Compiled code appends with it too.
+pub(crate) fn append_to_vec(target: Val, value: Val) -> VmResult<Val> {
+    match target {
+        Val::Vec(mut elements) => {
+            elements.push(value);
+            Ok(Val::Vec(elements))
+        }
+        Val::Null => Ok(Val::Vec(vec![value])),
+        other => Err(VmError::runtime(format!(
+            "Cannot append to {:?}, expected a vector",
+            other
+        ))),
+    }
 }
 
 fn is_terminal_payload(val: &Val) -> bool {
@@ -179,6 +225,7 @@ pub(crate) struct VmHostContext {
     secret_value_hashes: AHashSet<u64>,
     run_start_time: chrono::DateTime<chrono::Utc>,
     run_start_instant: std::time::Instant,
+    native_core_shadows: Arc<NativeCoreShadows>,
 }
 
 /// Thread-safe cancellation state holder
@@ -736,6 +783,9 @@ pub struct VirtualMachine {
     /// replaced after construction, so entries stay valid for the VM lifetime.
     hof_plan_cache:
         AHashMap<FunctionId, std::rc::Rc<[crate::lang::runtime::jit_hof::PipelinePlan]>>,
+    /// Where bare calls to the core functions every tier runs natively reach
+    /// another function. Computed on first use, and shared with worker VMs.
+    native_core_shadows: std::cell::OnceCell<Arc<NativeCoreShadows>>,
     /// Number of currently-active `execute_user_function` frames per
     /// FunctionId. Register indices are unique per function but shared across
     /// invocations of the *same* function, so a re-entrant (recursive) call
@@ -854,6 +904,7 @@ impl VirtualMachine {
             sorted_key_indices: None,
             jit,
             hof_plan_cache: AHashMap::new(),
+            native_core_shadows: std::cell::OnceCell::new(),
             function_active_depth: vec![0; function_count],
             function_used_registers_cache: AHashMap::new(),
             failure_state: Arc::new(VmFailureState {
@@ -1021,6 +1072,7 @@ impl VirtualMachine {
             secret_value_hashes: self.secret_value_hashes.clone(),
             run_start_time: self.run_start_time,
             run_start_instant: self.run_start_instant,
+            native_core_shadows: self.native_core_shadows(),
         }
     }
 
@@ -1042,6 +1094,21 @@ impl VirtualMachine {
         self.secret_value_hashes = context.secret_value_hashes.clone();
         self.run_start_time = context.run_start_time;
         self.run_start_instant = context.run_start_instant;
+        // A worker runs the same program, so it shares what was computed.
+        let _ = self
+            .native_core_shadows
+            .set(Arc::clone(&context.native_core_shadows));
+    }
+
+    /// Where bare calls to the core functions every tier runs natively reach
+    /// another function (see [`NativeCoreShadows`]).
+    pub(crate) fn native_core_shadows(&self) -> Arc<NativeCoreShadows> {
+        Arc::clone(self.native_core_shadows_ref())
+    }
+
+    fn native_core_shadows_ref(&self) -> &Arc<NativeCoreShadows> {
+        self.native_core_shadows
+            .get_or_init(|| Arc::new(NativeCoreShadows::new(&self.program, &self.core_functions)))
     }
 
     /// Capture realized namespace state for a worker VM.
@@ -3360,26 +3427,9 @@ impl VirtualMachine {
                 let vec = *vec;
                 let value = *value;
                 // Append value to vector (items[] = value syntax)
-                let mut vec_val = self.get_register(vec)?.clone();
+                let vec_val = self.get_register(vec)?.clone();
                 let new_value = self.get_register(value)?.clone();
-
-                match &mut vec_val {
-                    Val::Vec(v) => {
-                        v.push(new_value);
-                    }
-                    Val::Null => {
-                        // If the vector doesn't exist yet, create it with the value
-                        vec_val = Val::Vec(vec![new_value]);
-                    }
-                    _ => {
-                        return Err(VmError::runtime(format!(
-                            "Cannot append to {:?}, expected a vector",
-                            vec_val
-                        )));
-                    }
-                }
-
-                // Store the modified vector back to the register
+                let vec_val = append_to_vec(vec_val, new_value)?;
                 self.set_register(vec, vec_val)?;
                 self.instruction_pointer += 1;
             }
@@ -3757,35 +3807,10 @@ impl VirtualMachine {
                 let dest = *dest;
                 let source = *source;
                 let dest_val = self.get_register(dest)?.clone();
-                let source_val = self.get_register(source)?.clone();
-
                 // A spread contributes a constructed value's fields, not its
                 // internal `$type`/`$val` wrapper keys.
-                match (dest_val, crate::val::map_spread_entries(&source_val)) {
-                    (Val::Map(mut dest_map), Some(entries)) => {
-                        for (k, v) in entries.iter() {
-                            dest_map.insert(k.clone(), v.clone());
-                        }
-                        self.set_register(dest, Val::Map(dest_map))?;
-                    }
-                    (dest, entries) => {
-                        let message = match &source_val {
-                            Val::Map(m)
-                                if entries.is_none() && crate::val::is_tagged_wrapper(m) =>
-                            {
-                                format!(
-                                    "Cannot spread a {} value into a map: it has no fields",
-                                    crate::val::tagged_type_name(m).unwrap_or("typed")
-                                )
-                            }
-                            _ => format!(
-                                "MergeMaps requires two maps, got: {:?} and {:?}",
-                                dest, source_val
-                            ),
-                        };
-                        return Err(VmError::runtime(message));
-                    }
-                }
+                let merged = merge_map_spread(dest_val, self.get_register(source)?)?;
+                self.set_register(dest, merged)?;
 
                 self.instruction_pointer += 1;
             }
@@ -6449,6 +6474,12 @@ impl VirtualMachine {
         // Tier 1: #[inline(always)] type-specialized helpers (zero call overhead)
         // Tier 2: Full library functions for remaining type combos (single source of truth)
         // Each library file owns both its fast-path specializations and general impls.
+        // Only where the name reaches hot-std's function: a binding in this
+        // namespace or a project core function of the same name is called
+        // through the lookup, as compiled code calls it.
+        if !self
+            .native_core_shadows_ref()
+            .shadows(&self.current_namespace, function_name)
         {
             use crate::lang::hot::r#type::HotResult as HR;
             use crate::lang::hot::{bool, cmp, coll, math};
@@ -6654,10 +6685,14 @@ impl VirtualMachine {
             function_name
         );
 
-        // Fast paths for common Int operations
+        // Fast paths for common Int operations, where the name reaches
+        // hot-std's function (see `execute_function_call`).
         // NOTE: div is excluded because Hot returns Dec when result isn't exact (e.g., div(3,2) = 1.5)
         if args.len() == 2
             && let (Val::Int(a), Val::Int(b)) = (&args[0], &args[1])
+            && !self
+                .native_core_shadows_ref()
+                .shadows(&self.current_namespace, function_name)
         {
             let result = match function_name {
                 "add" => Some(crate::lang::hot::math::fast_add_int(*a, *b)),
@@ -8663,6 +8698,7 @@ impl VirtualMachine {
         }
 
         let program = Arc::clone(&self.program);
+        let shadows = self.native_core_shadows();
         let Some((compiled, effective_args)) = self
             .jit
             .compiled_lambda(
@@ -8670,7 +8706,7 @@ impl VirtualMachine {
                 lambda_info,
                 &normalized_args,
                 &captures,
-                CallNames::new(&self.namespace_variables, &self.core_functions),
+                CallNames::new(&self.namespace_variables, &self.core_functions, &shadows),
             )
             .map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?
         else {
@@ -8840,12 +8876,13 @@ impl VirtualMachine {
             if self.jit.should_compile_now(function_id, args)
                 && !self.jit_blocked_by_overload_dispatch(function_id)
             {
+                let shadows = self.native_core_shadows();
                 let compile_result = self.jit.compile_function(
                     &program,
                     function_id,
                     function_info,
                     args,
-                    CallNames::new(&self.namespace_variables, &self.core_functions),
+                    CallNames::new(&self.namespace_variables, &self.core_functions, &shadows),
                 );
 
                 match compile_result {
@@ -9218,6 +9255,7 @@ impl VirtualMachine {
                                     if self.jit.should_compile_now(function_id, &new_args)
                                         && !self.jit_blocked_by_overload_dispatch(function_id)
                                     {
+                                        let shadows = self.native_core_shadows();
                                         match self.jit.compile_function(
                                             &program,
                                             function_id,
@@ -9226,6 +9264,7 @@ impl VirtualMachine {
                                             CallNames::new(
                                                 &self.namespace_variables,
                                                 &self.core_functions,
+                                                &shadows,
                                             ),
                                         ) {
                                             Ok(()) => {}
@@ -11077,8 +11116,16 @@ impl VirtualMachine {
         // the `jit.hof.fusion` kill switch; empty when disabled or none found.
         // Plans are memoized per FunctionId so repeated calls (including TCO
         // loop iterations) don't rescan the body.
+        // Fusion runs its stages and their operations natively, so a body
+        // whose namespace reaches another function by one of their names
+        // runs as written.
         let fused_plans: std::rc::Rc<[crate::lang::runtime::jit_hof::PipelinePlan]> =
-            if self.jit.config.hof_fusion_enabled() && !self.in_constraint_predicate() {
+            if self.jit.config.hof_fusion_enabled()
+                && !self.in_constraint_predicate()
+                && !self
+                    .native_core_shadows_ref()
+                    .shadows_fusion(&self.current_namespace)
+            {
                 match function_id.and_then(|fid| self.hof_plan_cache.get(&fid)) {
                     Some(plans) => std::rc::Rc::clone(plans),
                     None => {

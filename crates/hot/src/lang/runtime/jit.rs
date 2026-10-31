@@ -22,6 +22,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(test)]
+mod native_parity_tests;
 mod numeric_err;
 use numeric_err::{ErrUseScope, NumericErrUse, numeric_err_use};
 
@@ -494,6 +496,8 @@ struct JitHelperRefs {
     load_scoped: FuncRef,
     capture_var: FuncRef,
     length: FuncRef,
+    length_value: FuncRef,
+    vec_append: FuncRef,
     is_null: FuncRef,
     check_consumable: FuncRef,
 }
@@ -502,7 +506,7 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 41] {
+    fn scope_free(&self) -> [FuncRef; 43] {
         [
             self.call_vm,
             self.template_interpolate,
@@ -543,6 +547,8 @@ impl JitHelperRefs {
             self.make_vec_with_spread,
             self.set_pending_proven,
             self.length,
+            self.length_value,
+            self.vec_append,
             self.is_null,
             self.check_consumable,
         ]
@@ -1242,6 +1248,52 @@ fn calls_read_caller_locals(
     false
 }
 
+/// Whether `instructions` bind the variable `name`.
+fn body_binds(program: &BytecodeProgram, instructions: &[Instruction], name: &str) -> bool {
+    instructions.iter().any(|inst| {
+        matches!(inst, Instruction::StoreVar { var_name, .. }
+            if constant_string(program, *var_name).is_ok_and(|bound| bound == name))
+    })
+}
+
+/// The name of a bare call in this body, or in a lambda it creates, to a core
+/// function the emitter compiles inline, where the name reaches another
+/// function: a binding in the namespace or a project core function.
+fn shadowed_native_call(
+    program: &BytecodeProgram,
+    function_info: &FunctionInfo,
+    scope: CallScope<'_>,
+) -> Option<String> {
+    let mut bodies: Vec<&[Instruction]> = vec![&function_info.instructions];
+    let mut seen_lambdas: AHashSet<u32> = AHashSet::new();
+    while let Some(body) = bodies.pop() {
+        for (ip, inst) in body.iter().enumerate() {
+            match inst {
+                Instruction::Call { function, .. } => {
+                    if let Some(name) = resolve_const_function_name(body, program, ip, *function)
+                        && known_core_call(&name).is_some()
+                        && scope.shadows_native(&name)
+                    {
+                        return Some(name);
+                    }
+                }
+                Instruction::LoadConst { constant, .. } if seen_lambdas.insert(*constant) => {
+                    if let Some(Constant::Val(Val::Box(boxed))) =
+                        program.constants.get(*constant as usize)
+                        && let Some(lambda) = boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                    {
+                        bodies.push(&lambda.instructions);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 fn unsupported_jit_bailout(reason: &'static str, message: impl Into<String>) -> String {
     format!("unsupported.{}: {}", reason, message.into())
 }
@@ -1521,6 +1573,14 @@ fn compile_supported_function(
             "a function this calls reads its locals by name",
         ));
     }
+    if let Some(name) = shadowed_native_call(program, function_info, scope) {
+        // The emitter, its kind predictions and the Err-use analysis all
+        // treat a bare call to an intrinsic's name as the native op, so a
+        // body where the name reaches another function runs interpreted.
+        return Err(format!(
+            "JIT shadowed core call: '{name}' reaches another function than the native one here"
+        ));
+    }
     for tag in &signature.args {
         if tag.raw_kind().is_none() {
             return Err(unsupported_jit_bailout(
@@ -1705,6 +1765,8 @@ fn compile_with_return_kind(
     builder.symbol("hot_jit_load_scoped", hot_jit_load_scoped as *const u8);
     builder.symbol("hot_jit_capture_var", hot_jit_capture_var as *const u8);
     builder.symbol("hot_jit_length", hot_jit_length as *const u8);
+    builder.symbol("hot_jit_length_value", hot_jit_length_value as *const u8);
+    builder.symbol("hot_jit_vec_append", hot_jit_vec_append as *const u8);
     builder.symbol("hot_jit_is_null", hot_jit_is_null as *const u8);
     builder.symbol(
         "hot_jit_check_consumable",
@@ -2615,24 +2677,17 @@ unsafe extern "C" fn hot_jit_dot_access_or_default(
     }
 }
 
-/// JIT helper: merge source map into target map.
-/// Both args are OwnedVal pointers to Val::Map values. A constructed source
-/// contributes its fields, matching the VM's `MergeMaps`.
-/// Returns an OwnedVal handle to the merged map.
+/// JIT helper: merge source map into target map, as the VM's `MergeMaps`
+/// does: a constructed source contributes its fields.
+/// Returns an OwnedVal handle to the merged map, or `HALT_SENTINEL` with the
+/// interpreter's halt when either isn't a map.
 unsafe extern "C" fn hot_jit_merge_maps(target_ptr: i64, source_ptr: i64) -> i64 {
     let target = unsafe { &*(target_ptr as *const Val) };
     let source = unsafe { &*(source_ptr as *const Val) };
-    let result = match (target, crate::val::map_spread_entries(source)) {
-        (Val::Map(t), Some(s)) => {
-            let mut merged = (**t).clone();
-            for (k, v) in s.iter() {
-                merged.insert(k.clone(), v.clone());
-            }
-            Val::Map(Box::new(merged))
-        }
-        _ => target.clone(),
-    };
-    new_owned_val(result)
+    match crate::lang::runtime::vm::merge_map_spread(target.clone(), source) {
+        Ok(merged) => new_owned_val(merged),
+        Err(err) => vm_error_to_halt(err),
+    }
 }
 
 /// JIT helper: template string interpolation.
@@ -2825,6 +2880,19 @@ unsafe extern "C" fn hot_jit_vec_push(vec_ptr: i64, elem_ptr: i64) -> i64 {
             let new_vec = vec![elem_val.clone()];
             new_owned_val(Val::Vec(new_vec))
         }
+    }
+}
+
+/// JIT helper: `items[] value`, as the VM's `VecAppend` does it: a Null
+/// target starts a vector.
+/// Returns an OwnedVal handle to the new Vec, or `HALT_SENTINEL` with the
+/// interpreter's halt when the target is something else.
+unsafe extern "C" fn hot_jit_vec_append(vec_ptr: i64, elem_ptr: i64) -> i64 {
+    let vec_val = unsafe { &*(vec_ptr as *const Val) };
+    let elem_val = unsafe { &*(elem_ptr as *const Val) };
+    match crate::lang::runtime::vm::append_to_vec(vec_val.clone(), elem_val.clone()) {
+        Ok(appended) => new_owned_val(appended),
+        Err(err) => vm_error_to_halt(err),
     }
 }
 
@@ -3207,16 +3275,22 @@ unsafe extern "C" fn hot_jit_capture_var(name_ptr: i64, scope_depth: i64) -> i64
 }
 
 /// JIT helper: compute length of a Vec, Str, Map, or Bytes value.
-/// Takes an OwnedVal pointer and returns the length as an i64 Int.
+/// Takes an OwnedVal pointer and returns the length as an i64 Int, or -1
+/// when the value isn't a collection (see `hot_jit_length_value`).
 unsafe extern "C" fn hot_jit_length(val_ptr: i64) -> i64 {
     let val = ok_payload(unsafe { &*(val_ptr as *const Val) });
-    match crate::val::as_fields(val) {
-        Val::Vec(v) => v.len() as i64,
-        Val::Str(s) => s.len() as i64,
-        Val::Map(m) => m.len() as i64,
-        Val::Bytes(b) => b.len() as i64,
-        _ => 0,
-    }
+    crate::lang::hot::coll::collection_length(val).map_or(-1, |len| len as i64)
+}
+
+/// JIT helper: `length` of an OwnedVal as the interpreter gives it: an
+/// OwnedVal Int, or the Err `length` gives a value that isn't a collection.
+unsafe extern "C" fn hot_jit_length_value(val_ptr: i64) -> i64 {
+    let val = ok_payload(unsafe { &*(val_ptr as *const Val) });
+    let result = match crate::lang::hot::coll::length(std::slice::from_ref(val)) {
+        crate::lang::hot::r#type::HotResult::Ok(len) => len,
+        crate::lang::hot::r#type::HotResult::Err(err) => Val::err(err),
+    };
+    new_owned_val(result)
 }
 
 /// JIT helper: check if an OwnedVal is Val::Null. Returns 1 if null, 0 otherwise.
@@ -3893,6 +3967,22 @@ fn declare_jit_helpers(
             &[types::I64],
             &[types::I64],
         )?,
+        length_value: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_length_value",
+            &[types::I64],
+            &[types::I64],
+        )?,
+        vec_append: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_vec_append",
+            &[types::I64, types::I64],
+            &[types::I64],
+        )?,
         is_null: declare_helper_func(
             module,
             func,
@@ -4082,6 +4172,15 @@ fn vm_error_to_owned_val(err: VmError, error_capture_active: bool) -> i64 {
         m.insert(Val::from("error"), Val::from(err.to_string()));
         return new_owned_val(Val::Map(Box::new(m)));
     }
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return new_owned_val(Val::err(Val::Str(err.to_string().into())));
+    }
+    vm_runtime_error_to_halt(unsafe { &*vm_ptr }, err)
+}
+
+/// `vm_runtime_error_to_halt` for a helper that has no VM at hand.
+fn vm_error_to_halt(err: VmError) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
         return new_owned_val(Val::err(Val::Str(err.to_string().into())));
@@ -5865,6 +5964,31 @@ impl<'a> EmitCtx<'a> {
         self.emit_halt_return_excluding(builder, halt_block, &[]);
     }
 
+    /// Return the failure when a helper's `result` is the halt sentinel, and
+    /// go on in a new block otherwise. The exit releases the registers as
+    /// they are now, so an instruction that writes the result over one of
+    /// its operands (`MergeMaps`, `VecAppend`) emits it before doing so: on
+    /// that path the operand keeps its old value and kind.
+    fn emit_halt_exit_before_redefining(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        result: cranelift_codegen::ir::Value,
+    ) {
+        let halt_block = builder.create_block();
+        let cont_block = builder.create_block();
+        let is_halt = builder.ins().icmp_imm_s(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            result,
+            HALT_SENTINEL,
+        );
+        builder
+            .ins()
+            .brif(is_halt, halt_block, &[], cont_block, &[]);
+        self.emit_halt_return(builder, halt_block);
+        builder.switch_to_block(cont_block);
+        builder.seal_block(cont_block);
+    }
+
     fn emit_halt_return_excluding(
         &self,
         builder: &mut FunctionBuilder<'_>,
@@ -5925,8 +6049,8 @@ impl<'a> EmitCtx<'a> {
         )
     }
 
-    /// `numeric_err_use` for a call to an arithmetic intrinsic; any other
-    /// call makes no Err of its own.
+    /// `numeric_err_use` for a call to an arithmetic intrinsic or `length`;
+    /// any other call makes no Err of its own.
     fn intrinsic_err_use(
         &self,
         callee: &str,
@@ -5940,7 +6064,8 @@ impl<'a> EmitCtx<'a> {
                 | KnownCoreCall::Sub
                 | KnownCoreCall::Mul
                 | KnownCoreCall::Mod
-                | KnownCoreCall::Div,
+                | KnownCoreCall::Div
+                | KnownCoreCall::Length,
             ) => self.numeric_err_use(instructions, ip, dest),
             _ => NumericErrUse::Kept,
         }
@@ -6199,6 +6324,15 @@ impl<'a> EmitCtx<'a> {
                                     promoted
                                 }
                             } else {
+                                // A name this body binds, but not yet: the
+                                // interpreter finds it in this call's frame
+                                // when the lambda runs, and compiled code
+                                // keeps its locals out of the VM's frames.
+                                if body_binds(self.program, instructions, var_name) {
+                                    return Err(format!(
+                                        "JIT late capture: a lambda reads '{var_name}', which this body binds after creating it"
+                                    ));
+                                }
                                 let name_val = new_owned_val(Val::Str(var_name.to_string().into()));
                                 let name_ptr = builder.ins().iconst(types::I64, name_val);
                                 let call =
@@ -6804,6 +6938,7 @@ impl<'a> EmitCtx<'a> {
                     .call(self.helper_refs.merge_maps, &[dest_val, src_val]);
                 let result = builder.inst_results(call)[0];
                 self.drop_owned_temps(builder, &[dest_temp, src_temp]);
+                self.emit_halt_exit_before_redefining(builder, result);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -7016,9 +7151,10 @@ impl<'a> EmitCtx<'a> {
                 let (val_ptr, val_temp) = self.owned_operand(builder, *value)?;
                 let call = builder
                     .ins()
-                    .call(self.helper_refs.vec_push, &[vec_ptr, val_ptr]);
+                    .call(self.helper_refs.vec_append, &[vec_ptr, val_ptr]);
                 let result = builder.inst_results(call)[0];
                 self.drop_owned_temps(builder, &[vec_temp, val_temp]);
+                self.emit_halt_exit_before_redefining(builder, result);
                 self.define_register(builder, *vec, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -9176,9 +9312,36 @@ fn try_lower_known_core_call(
             }
             let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
             exits.halt = Some(emit_consume_check(builder, &helper_refs, raw));
-            let call = builder.ins().call(helper_refs.length, &[raw]);
-            let result = builder.inst_results(call)[0];
-            (RawKind::Int, result)
+            if err_use == NumericErrUse::Kept {
+                // The result is used as a value, so the Err `length` gives a
+                // value that isn't a collection has to be one.
+                let call = builder.ins().call(helper_refs.length_value, &[raw]);
+                (RawKind::OwnedVal, builder.inst_results(call)[0])
+            } else {
+                let call = builder.ins().call(helper_refs.length, &[raw]);
+                let len = builder.inst_results(call)[0];
+                if err_use != NumericErrUse::Unread {
+                    // Not a collection: route its Err as a numeric op's.
+                    let not_collection = builder.ins().icmp_imm_s(
+                        cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
+                        len,
+                        0,
+                    );
+                    let err_block = builder.create_block();
+                    let cont_block = builder.create_block();
+                    builder
+                        .ins()
+                        .brif(not_collection, err_block, &[], cont_block, &[]);
+                    builder.switch_to_block(err_block);
+                    builder.seal_block(err_block);
+                    let call = builder.ins().call(helper_refs.length_value, &[raw]);
+                    let err = builder.inst_results(call)[0];
+                    route_numeric_err(builder, &helper_refs, err, err_use, &mut exits);
+                    builder.switch_to_block(cont_block);
+                    builder.seal_block(cont_block);
+                }
+                (RawKind::Int, len)
+            }
         }
     };
 
@@ -10232,16 +10395,19 @@ fn emit_self_recursive_call(
 pub struct CallNames<'a> {
     namespace_variables: Option<&'a indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>>,
     core_functions: Option<&'a indexmap::IndexMap<String, FunctionId>>,
+    native_shadows: Option<&'a crate::lang::runtime::native_core::NativeCoreShadows>,
 }
 
 impl<'a> CallNames<'a> {
     pub fn new(
         namespace_variables: &'a indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>,
         core_functions: &'a indexmap::IndexMap<String, FunctionId>,
+        native_shadows: &'a crate::lang::runtime::native_core::NativeCoreShadows,
     ) -> Self {
         Self {
             namespace_variables: Some(namespace_variables),
             core_functions: Some(core_functions),
+            native_shadows: Some(native_shadows),
         }
     }
 
@@ -10286,7 +10452,13 @@ impl CallScope<'_> {
     /// also reach its definer's locals, which compiled code can't see.
     fn resolve(&self, program: &BytecodeProgram, name: &str, arity: u8) -> Option<usize> {
         if name.starts_with("::") {
-            return find_function_exact(program, name, Some(arity));
+            // A call no overload of the name takes goes through the VM by
+            // name, which reports it as the interpreter does, rather than to
+            // a function given the wrong number of arguments.
+            return find_function_exact(program, name, Some(arity)).filter(|&index| {
+                let function = &program.functions[index];
+                function.arity == arity || function.is_variadic
+            });
         }
         if self.local_function || self.namespace_binds(program, name) {
             return None;
@@ -10297,6 +10469,17 @@ impl CallScope<'_> {
             .functions
             .iter()
             .position(|f| f.name == core_name && (f.arity == arity || f.is_variadic))
+    }
+
+    /// Whether a bare call to the core function `name`, which the emitter
+    /// would compile inline, reaches another function here (see
+    /// [`NativeCoreShadows`](crate::lang::runtime::native_core::NativeCoreShadows)).
+    fn shadows_native(&self, name: &str) -> bool {
+        !name.starts_with("::")
+            && self
+                .names
+                .native_shadows
+                .is_some_and(|shadows| shadows.shadows(self.namespace, name))
     }
 
     /// Whether the caller's namespace binds `name`: as the VM holds its

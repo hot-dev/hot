@@ -904,18 +904,24 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
 pub fn length(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::coll/length", args, 1);
 
-    let len = match crate::val::as_fields(&args[0]) {
-        Val::Vec(v) => v.len(),
-        Val::Map(m) => m.len(),
-        Val::Str(s) => s.len(),
-        Val::Bytes(b) => b.len(),
-        _ => {
-            return HotResult::Err(Val::from(
-                "length expects collection (Vec, Map, Str, or Bytes)".to_string(),
-            ));
-        }
-    };
-    HotResult::Ok(Val::Int(len as i64))
+    match collection_length(&args[0]) {
+        Some(len) => HotResult::Ok(Val::Int(len as i64)),
+        None => HotResult::Err(Val::from(
+            "length expects collection (Vec, Map, Str, or Bytes)".to_string(),
+        )),
+    }
+}
+
+/// What `length` gives `val`: its element count, or `None` when it isn't a
+/// collection. Compiled code counts with it too.
+pub fn collection_length(val: &Val) -> Option<usize> {
+    match crate::val::as_fields(val) {
+        Val::Vec(v) => Some(v.len()),
+        Val::Map(m) => Some(m.len()),
+        Val::Str(s) => Some(s.len()),
+        Val::Bytes(b) => Some(b.len()),
+        _ => None,
+    }
 }
 
 /// Get a value from a collection by key/index

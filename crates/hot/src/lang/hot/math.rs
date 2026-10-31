@@ -39,18 +39,13 @@ pub fn is_zero(args: &[Val]) -> HotResult<Val> {
     match &args[0] {
         Val::Int(i) => HotResult::Ok(Val::Bool(*i == 0)),
         Val::Dec(d) => HotResult::Ok(Val::Bool(d.is_zero())),
-        Val::Null => HotResult::Ok(Val::Bool(true)), // Null is considered zero
-        Val::Map(_) => {
-            // For the test runner, if we get a map (test counters), assume 0 failed tests
-            // In a full implementation, this would extract the failed count from the map
-            HotResult::Ok(Val::Bool(true)) // Assume all tests passed
-        }
-        _ => {
-            // For debugging: show what type we got
-            let type_name = match &args[0] {
+        other => {
+            let type_name = match other {
+                Val::Null => "null",
                 Val::Str(_) => "string",
                 Val::Bool(_) => "boolean",
                 Val::Vec(_) => "vector",
+                Val::Map(_) => "map",
                 Val::Box(_) => "boxed value",
                 _ => "unknown",
             };
@@ -456,5 +451,29 @@ pub fn rand(args: &[Val]) -> HotResult<Val> {
             }
             _ => HotResult::Err(Val::from("rand expects a numeric max value")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `is-zero` takes an Int or a Dec. A Null or a Map gave true, for an old
+    // test runner, while compiled code gave false.
+    #[test]
+    fn is_zero_takes_numbers_only() {
+        let dec = |s: &str| Val::Dec(s.parse().expect("a Dec"));
+        assert_eq!(is_zero(&[Val::Int(0)]), HotResult::Ok(Val::Bool(true)));
+        assert_eq!(is_zero(&[dec("0.00")]), HotResult::Ok(Val::Bool(true)));
+        assert_eq!(is_zero(&[dec("-0.0")]), HotResult::Ok(Val::Bool(true)));
+        assert_eq!(is_zero(&[dec("1.5")]), HotResult::Ok(Val::Bool(false)));
+        assert_eq!(
+            is_zero(&[Val::Null]),
+            HotResult::Err(Val::from("is-zero requires a number, got null"))
+        );
+        assert_eq!(
+            is_zero(&[Val::map_empty()]),
+            HotResult::Err(Val::from("is-zero requires a number, got map"))
+        );
     }
 }

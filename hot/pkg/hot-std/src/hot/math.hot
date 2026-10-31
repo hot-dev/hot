@@ -16,7 +16,9 @@ meta {
     ```
     """
 }
-fn (x: Int | Dec): Bool { eq(0, x) }
+fn (x: Int | Dec): Bool {
+    call-lib(::hot::math/is-zero, [x])
+}
 
 
 is-pos
