@@ -700,8 +700,9 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
             assert_latest_ledger(&fixture.owner).await?;
             fixture.upgrade().await?;
             assert_eq!(ledger(&fixture.owner).await?, final_ledger);
-            // 022 fills in the text of existing string keys, for prefix reads,
-            // though the non-bypass owner updates one environment at a time.
+            // 022 adds the key text prefix reads compare, and 023 fills it in
+            // for existing string keys, though the non-bypass owner updates
+            // one environment at a time.
             let key_texts: Vec<(Uuid, String, Option<String>)> = sqlx::query_as("SELECT env_id, key::text, key_text FROM store_map_entry WHERE store_name='prefix-backfill' ORDER BY seq")
                 .fetch_all(&fixture.admin).await?;
             assert_eq!(key_texts, [
