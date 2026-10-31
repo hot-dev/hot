@@ -9,7 +9,7 @@ description: >
   languages - always check these references before writing Hot code.
 metadata:
   author: hotdev
-  version: "1.2.0"
+  version: "1.3.0"
   license: Apache-2.0
 ---
 

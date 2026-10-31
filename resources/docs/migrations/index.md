@@ -284,6 +284,9 @@ compiled code fails the run instead of aborting the worker. Functions over
 - **Daemon mode:** only `hot dev`, `hot api`, `hot app`, `hot worker`, `hot
   task-worker` and `hot scheduler` daemonize, and only with `-d`.
   `hot.daemon`/`HOT_DAEMON` no longer make other commands respawn.
+- **Exit status:** `hot app`, `hot api`, `hot worker`, `hot task-worker` and
+  `hot scheduler` exit 1 when they stop on an error or a panic, so a
+  supervisor's restart-on-failure policy restarts them. 3.0.0 exited 0.
 - **Projects:**
   - `hot deploy -p X` deploys to remote project X.
   - `hot build`, `hot compile` and `hot deploy` stop for a project `hot.hot`

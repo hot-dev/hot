@@ -1125,7 +1125,12 @@ async fn async_main(providers: CliProviders) {
             .await
         }
         Some(Command::TaskWorker { .. }) => {
-            run_standalone_service("task-worker", &conf, run_task_worker(conf.clone())).await
+            run_standalone_service(
+                "task-worker",
+                &conf,
+                run_task_worker(Env::Production, conf.clone()),
+            )
+            .await
         }
         Some(Command::Scheduler { .. }) => {
             run_standalone_service(
