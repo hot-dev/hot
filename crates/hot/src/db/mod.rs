@@ -1298,7 +1298,6 @@ pub async fn insert_default_data(
     let org_id = Uuid::now_v7();
     let user_id = Uuid::now_v7();
     let org_user_id = Uuid::now_v7();
-    let user_auth_id = Uuid::now_v7();
     let env_id = Uuid::now_v7();
 
     // Begin transaction by using the entity functions
@@ -1312,31 +1311,8 @@ pub async fn insert_default_data(
     )
     .await?;
 
-    // Insert user authentication for email/password
-    let password_hash = crate::auth::hash_password_with_random_salt("hotdev").map_err(|e| {
-        DatabaseError::User(UserError::Database(sqlx::Error::Protocol(format!(
-            "Password hashing failed: {}",
-            e
-        ))))
-    })?;
-
-    let auth_data: serde_json::Value = serde_json::from_str(&password_hash).map_err(|e| {
-        DatabaseError::User(UserError::Database(sqlx::Error::Protocol(format!(
-            "JSON parsing failed: {}",
-            e
-        ))))
-    })?;
-
-    UserAuth::insert_user_auth(
-        db,
-        &user_auth_id,
-        &user_id,
-        "email_password",
-        "local@hot.dev",
-        Some(&auth_data),
-        &user_id,
-    )
-    .await?;
+    // The local identity has no password. The App signs it in automatically
+    // in local development; every other account signs up.
 
     // Insert org (individual type for local dev)
     Org::insert_org(db, &org_id, "Local", "local", "individual", &user_id).await?;
@@ -1577,6 +1553,35 @@ mod tests {
         assert!(check_migration_target(runtime, "postgres://hot_owner@db:5432/hot").is_ok());
         assert!(check_migration_target(runtime, "postgres://hot_owner@db:5432/staging").is_err());
         assert!(check_migration_target(runtime, "sqlite:.hot/db/hot.sqlite.db").is_err());
+    }
+
+    #[tokio::test]
+    async fn sqlite_local_identity_has_no_password() {
+        let db = test_db().await;
+        insert_default_data(&db).await.unwrap();
+        assert!(matches!(
+            UserAuth::get_user_auth(&db, "email_password", "local@hot.dev").await,
+            Err(UserError::Database(sqlx::Error::RowNotFound))
+        ));
+    }
+
+    #[tokio::test]
+    async fn postgres_local_identity_has_no_password() {
+        let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
+            return;
+        };
+        let conf = crate::val!({"uri": uri, "schema": "hot", "rls": {"enforce": false}});
+        run_migrations(&conf).await.unwrap();
+        let pool = create_db_pool(&conf).await.unwrap();
+        let db = pool.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Onboarding));
+        if User::get_user_by_email(&db, "local@hot.dev").await.is_err() {
+            insert_default_data(&db).await.unwrap();
+        }
+        assert!(matches!(
+            UserAuth::get_user_auth(&db, "email_password", "local@hot.dev").await,
+            Err(UserError::Database(sqlx::Error::RowNotFound))
+        ));
     }
 
     // ========================================================================

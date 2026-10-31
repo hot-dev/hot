@@ -112,11 +112,14 @@ from a production outage.
    ```
 
    Without it, CLI commands fail with "User with email 'local@hot.dev' not
-   found". A hosted setup that signs users in through the app can skip this
-   step.
+   found". The identity has no password, so nobody can sign in to the App as
+   it. A hosted setup that signs users in through the app can skip this step.
 
 5. Start the services with `HOT_DB_URI` only. Don't give them
-   `HOT_DB_MIGRATION_URI`.
+   `HOT_DB_MIGRATION_URI`. Set `HOT_ENV=production`, and give the app a
+   `HOT_APP_SESSION_SECRET`. Without `HOT_ENV`, Hot runs in local development
+   mode: the app signs every visitor in on a loopback address, and on a network
+   address it refuses to start without a session secret.
 
 Run `provision_runtime.sql` again after any later migration that adds tables,
 or the runtime login can't use them. Since rerunning it is safe, the simplest

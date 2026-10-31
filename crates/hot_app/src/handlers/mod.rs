@@ -528,6 +528,9 @@ fn extract_arg_name(arg: &JsonValue) -> String {
     "arg".to_string()
 }
 
+/// The password `hot init` gave the local identity before 3.0.1.
+const PRE_3_0_1_LOCAL_PASSWORD: &str = "hotdev";
+
 // Helper function to authenticate user with email and password
 pub async fn authenticate_user(
     db: &DatabasePool,
@@ -535,6 +538,14 @@ pub async fn authenticate_user(
     password: &str,
 ) -> Result<User, String> {
     tracing::debug!("Starting authentication for email: {}", email);
+
+    // Before 3.0.1, `hot init` gave the local identity this published
+    // password, and a database it set up may still have it. Sign-up needs 8
+    // characters, so nothing else has it.
+    if password == PRE_3_0_1_LOCAL_PASSWORD {
+        tracing::warn!("Refused the local identity's pre-3.0.1 password");
+        return Err("Invalid email or password".to_string());
+    }
 
     // Get user authentication record
     let user_auth = match UserAuth::get_user_auth(db, "email_password", email).await {
@@ -880,18 +891,11 @@ pub async fn switch_env_handler(
     }
 
     // Set the environment cookie
-    let new_cookies = cookies.add(
-        axum_extra::extract::cookie::Cookie::build((
-            crate::auth::current_env_cookie_name(),
-            env_id.to_string(),
-        ))
-        .path("/")
-        .max_age(time::Duration::days(30))
-        .same_site(axum_extra::extract::cookie::SameSite::Lax)
-        .http_only(true)
-        .secure(!hot::env::is_local_dev())
-        .build(),
-    );
+    let new_cookies = cookies.add(crate::auth::build_cookie(
+        crate::auth::current_env_cookie_name(),
+        env_id.to_string(),
+        time::Duration::days(30),
+    ));
 
     let org_id = session
         .current_org_id()

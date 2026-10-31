@@ -31,6 +31,10 @@ hot conf generate worker     # Worker config
 hot conf generate scheduler  # Scheduler config
 ```
 
+A deployment sets `HOT_ENV=production`, and the app also needs
+`HOT_APP_SESSION_SECRET`. With `HOT_ENV` unset, Hot runs in local development
+mode, which signs every visitor in to the app.
+
 ## Overview
 
 The `hot.hot` file is the central configuration for your Hot project. It defines:

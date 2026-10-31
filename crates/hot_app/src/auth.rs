@@ -738,6 +738,35 @@ pub fn build_removal_cookie(name: &'static str) -> axum_extra::extract::cookie::
     build_cookie(name, String::new(), time::Duration::seconds(0))
 }
 
+/// Whether the App listens only on a loopback address. Set once at startup.
+static LISTENS_ON_LOOPBACK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether `host` names only this machine: `localhost` or a loopback address.
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Record the host the App listens on, before it signs or checks a session.
+pub(crate) fn set_listen_host(host: &str) {
+    let _ = LISTENS_ON_LOOPBACK.set(is_loopback_host(host));
+}
+
+/// Whether local development's conveniences apply: signing visitors in, the
+/// built-in session secret and the seeded local password. An unset `HOT_ENV`
+/// means local development, so on a network address they also need
+/// `HOT_ENV=development` set: a deployment that forgot `HOT_ENV` must not
+/// sign in everyone who can reach it.
+pub fn local_dev_conveniences() -> bool {
+    hot::env::is_local_dev()
+        && (std::env::var_os("HOT_ENV").is_some()
+            || LISTENS_ON_LOOPBACK.get().copied().unwrap_or(true))
+}
+
 /// Get session secret from environment variable
 /// In development mode, falls back to a default secret for convenience
 pub(crate) fn get_session_secret() -> Result<String, String> {
@@ -745,8 +774,16 @@ pub(crate) fn get_session_secret() -> Result<String, String> {
         Some(secret) if !secret.is_empty() => Ok(secret),
         _ => {
             // In local development, use a fallback secret for convenience
-            if hot::env::is_local_dev() {
+            if local_dev_conveniences() {
                 Ok("hotdev-session-secret-key-change-in-production".to_string())
+            } else if hot::env::is_local_dev() {
+                Err(
+                    "HOT_APP_SESSION_SECRET is required: HOT_ENV is unset and the App \
+                     listens on a network address. Set HOT_ENV=production and \
+                     HOT_APP_SESSION_SECRET for a deployment, or HOT_ENV=development to \
+                     keep local development's built-in secret"
+                        .to_string(),
+                )
             } else {
                 Err(
                     "HOT_APP_SESSION_SECRET environment variable is required in production"
@@ -1233,7 +1270,7 @@ pub async fn session_middleware(
 
     // If not authenticated and in ordinary local development mode, auto-login
     // with the first user. Hot Cloud test configs should keep production auth behavior.
-    if hot::env::is_local_dev() && !hot::product::billing_enabled(&conf) {
+    if local_dev_conveniences() && !hot::product::billing_enabled(&conf) {
         // Try to get the first user from database
         match User::get_first_user(&db).await {
             Ok(user) => {
@@ -1390,6 +1427,24 @@ pub async fn guest_only_middleware(
 
 #[cfg(test)]
 mod scope_contract_tests {
+    #[test]
+    fn only_loopback_hosts_keep_local_dev_conveniences_without_hot_env() {
+        use super::is_loopback_host;
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "127.1.2.3",
+            "::1",
+            "[::1]",
+        ] {
+            assert!(is_loopback_host(host), "{host}");
+        }
+        for host in ["0.0.0.0", "::", "[::]", "10.0.0.5", "app.example.com", ""] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
+    }
+
     #[test]
     fn session_cookies_take_the_host_prefix_outside_local_dev() {
         use super::{build_cookie, cookie_name, jwt_cookie_name};

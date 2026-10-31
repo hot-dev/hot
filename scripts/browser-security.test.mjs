@@ -278,7 +278,9 @@ async function runInChrome(t, html) {
         }
         server.closeAllConnections();
         await new Promise((done) => server.close(done));
-        rmSync(temporary, { recursive: true, force: true });
+        // Chrome's helper processes can still write to the profile for a
+        // moment after the browser exits.
+        rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     });
     let timer;
     const timeout = new Promise((_, fail) => {

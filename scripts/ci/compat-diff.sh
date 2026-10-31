@@ -41,7 +41,13 @@ import pathlib
 import subprocess
 import sys
 
-old_hot, new_hot = sys.argv[1], sys.argv[2]
+def executable(arg):
+    # The checks run inside the corpus, so a binary given as a path must not
+    # stay relative to where the script started.
+    return str(pathlib.Path(arg).resolve()) if os.sep in arg else arg
+
+
+old_hot, new_hot = executable(sys.argv[1]), executable(sys.argv[2])
 corpus = pathlib.Path(sys.argv[3]).resolve()
 allowlist_path = pathlib.Path(sys.argv[4])
 old_home = os.environ.get("OLD_HOT_HOME")

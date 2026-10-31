@@ -5,8 +5,10 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const source = readFileSync(new URL('../crates/hot_app/templates/scope_controls.html', import.meta.url), 'utf8')
-  .replace(/^<script>\s*/, '').replace(/\s*<\/script>\s*$/, '')
+// The template is one <script> block; fail loudly if it grows other markup.
+const template = readFileSync(new URL('../crates/hot_app/templates/scope_controls.html', import.meta.url), 'utf8').trim();
+assert.ok(template.startsWith('<script>') && template.endsWith('</script>'), 'scope_controls.html must be one <script> block');
+const source = template.slice('<script>'.length, -'</script>'.length)
   .replace(/const orgId = .*;/, "const orgId = 'org-a';")
   .replace(/const envId = .*;/, "const envId = 'env-a';");
 
