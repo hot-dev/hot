@@ -4,7 +4,9 @@
 // defined in ::hot::test::jit-parity::other, where a search for it by suffix
 // alone ends up.
 
-Circle type { radius: Dec }
+Circle type {
+    radius: Dec
+}
 
 Shape enum { Circle(Circle), Dot }
 
@@ -12,7 +14,9 @@ compute fn (x: Int): Str { `geo-compute ${x}` }
 
 ::hot::test::jit-parity::other ns
 
-Disc type { radius: Dec }
+Disc type {
+    radius: Dec
+}
 
 helper fn (x: Int): Str { `other-helper ${x}` }
 
@@ -49,6 +53,7 @@ pick-vec fn (n: Int): Vec {
         eq(n, 1) => { "a" }
         eq(n, 2) => { "b" }
     }
+
     picked
 }
 
@@ -57,6 +62,7 @@ pick-first fn (n: Int): Map {
         eq(n, 1) => one { "a" }
         eq(n, 2) => two { "b" }
     }
+
     picked
 }
 
