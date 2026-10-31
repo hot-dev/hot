@@ -367,7 +367,7 @@ async fn sub_org_lifecycle_and_browser_scope_use_a_restricted_runtime_login()
             .and_then(|row| row.split("</tr>").next())
             .unwrap_or_default();
         assert!(
-            row.contains(r#"<td class="p-2">active</td><td class="p-2">1</td><td class="p-2">0</td><td class="p-2">1</td>"#),
+            row.contains(r#"<td class="p-2"><span class="badge badge-success">active</span></td><td class="p-2">1</td><td class="p-2">0</td><td class="p-2">1</td>"#),
             "{row}"
         );
     }
@@ -412,7 +412,7 @@ async fn sub_org_lifecycle_and_browser_scope_use_a_restricted_runtime_login()
     let wrong_scope = client
         .post_form(&format!("/keys/new?{scope_b}"), &key_form)
         .await;
-    assert!(wrong_scope.body.contains("Session expired"));
+    assert!(wrong_scope.body.contains("This form expired"));
     let created = client
         .post_form(&format!("/keys/new?{scope_a}"), &key_form)
         .await;
