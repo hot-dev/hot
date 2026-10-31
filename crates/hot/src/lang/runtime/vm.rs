@@ -6,7 +6,9 @@ use crate::lang::bytecode::{
 };
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
 use crate::lang::runtime::error::RuntimeError;
-use crate::lang::runtime::jit::{CodeMemoryStatus, JitConfig, JitFunctionProfile, JitRuntimeState};
+use crate::lang::runtime::jit::{
+    CallNames, CodeMemoryStatus, JitConfig, JitFunctionProfile, JitRuntimeState,
+};
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
@@ -48,6 +50,29 @@ pub(crate) fn user_facing_branch_name(internal: &str) -> &str {
 /// and be hidden when the map is shown.
 pub(crate) fn pipe_step_key(index: usize) -> String {
     format!("pipe_{index}")
+}
+
+/// The core function an unqualified call to `name` reaches, as
+/// `core_functions` registers it. A qualified name wins over a bare one, and
+/// when several namespaces declare the same core name, the last one
+/// registered wins, as the core variable registry does, so `resolve("trim")`,
+/// parallel-flow captures and compiled code pick the same function as a
+/// direct call.
+pub(crate) fn core_function_name<'a>(
+    core_functions: &'a IndexMap<String, crate::lang::bytecode::FunctionId>,
+    name: &str,
+) -> Option<&'a str> {
+    let suffix = format!("/{name}");
+    let mut unqualified_match = None;
+    for registered_name in core_functions.keys().rev() {
+        if registered_name.contains('/') && registered_name.ends_with(&suffix) {
+            return Some(registered_name);
+        }
+        if registered_name == name && unqualified_match.is_none() {
+            unqualified_match = Some(registered_name.as_str());
+        }
+    }
+    unqualified_match
 }
 
 fn is_terminal_payload(val: &Val) -> bool {
@@ -7933,39 +7958,9 @@ impl VirtualMachine {
             self.core_functions.len()
         );
 
-        // Check the core functions registry - this contains all functions with "core" metadata
-        // PRIORITIZE qualified names over unqualified names. When several
-        // namespaces declare the same core name, take the last one registered,
-        // as the core variable registry does, so `resolve("trim")` and
-        // parallel-flow captures pick the same function as a direct call.
-        let mut unqualified_match = None;
-
-        for (registered_name, &function_id) in self.core_functions.iter().rev() {
-            // Check if this is a qualified name that ends with our unqualified name (PREFERRED)
-            if registered_name.contains('/') && registered_name.ends_with(&format!("/{}", name)) {
-                tracing::trace!(
-                    "VM: Found qualified core function '{}' -> '{}' (ID: {})",
-                    name,
-                    registered_name,
-                    function_id
-                );
-                return Some(registered_name.clone());
-            }
-
-            // Check if this is an exact match for unqualified name (FALLBACK)
-            if registered_name == name && unqualified_match.is_none() {
-                tracing::trace!(
-                    "VM: Found unqualified core function match '{}' (ID: {})",
-                    name,
-                    function_id
-                );
-                unqualified_match = Some(registered_name.clone());
-            }
-        }
-
-        // Return unqualified match if no qualified match was found
-        if let Some(unqualified) = unqualified_match {
-            return Some(unqualified);
+        if let Some(core_name) = core_function_name(&self.core_functions, name) {
+            tracing::trace!("VM: Found core function '{}' -> '{}'", name, core_name);
+            return Some(core_name.to_string());
         }
 
         tracing::trace!(
@@ -8647,7 +8642,13 @@ impl VirtualMachine {
         let program = Arc::clone(&self.program);
         let Some((compiled, effective_args)) = self
             .jit
-            .compiled_lambda(&program, lambda_info, &normalized_args, &captures)
+            .compiled_lambda(
+                &program,
+                lambda_info,
+                &normalized_args,
+                &captures,
+                CallNames::new(&self.namespace_variables, &self.core_functions),
+            )
             .map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?
         else {
             return Ok(None);
@@ -8816,9 +8817,13 @@ impl VirtualMachine {
             if self.jit.should_compile_now(function_id, args)
                 && !self.jit_blocked_by_overload_dispatch(function_id)
             {
-                let compile_result =
-                    self.jit
-                        .compile_function(&program, function_id, function_info, args);
+                let compile_result = self.jit.compile_function(
+                    &program,
+                    function_id,
+                    function_info,
+                    args,
+                    CallNames::new(&self.namespace_variables, &self.core_functions),
+                );
 
                 match compile_result {
                     Ok(()) => {
@@ -9195,6 +9200,10 @@ impl VirtualMachine {
                                             function_id,
                                             function_info,
                                             &new_args,
+                                            CallNames::new(
+                                                &self.namespace_variables,
+                                                &self.core_functions,
+                                            ),
                                         ) {
                                             Ok(()) => {}
                                             Err(err) => {

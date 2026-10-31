@@ -441,6 +441,7 @@ struct JitHelperRefs {
     ne_numeric: FuncRef,
     eq_numeric: FuncRef,
     eq_general: FuncRef,
+    eq_value: FuncRef,
     gt_numeric: FuncRef,
     gte_numeric: FuncRef,
     lt_numeric: FuncRef,
@@ -501,7 +502,7 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 40] {
+    fn scope_free(&self) -> [FuncRef; 41] {
         [
             self.call_vm,
             self.template_interpolate,
@@ -517,6 +518,7 @@ impl JitHelperRefs {
             self.ne_numeric,
             self.eq_numeric,
             self.eq_general,
+            self.eq_value,
             self.gt_numeric,
             self.gte_numeric,
             self.lt_numeric,
@@ -910,6 +912,7 @@ impl JitRuntimeState {
         function_id: FunctionId,
         function_info: &FunctionInfo,
         args: &[Val],
+        names: CallNames<'_>,
     ) -> Result<(), String> {
         let start = std::time::Instant::now();
         let signature = TypeSig::from_args(args);
@@ -926,7 +929,8 @@ impl JitRuntimeState {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        let compiled = compile_supported_function(program, function_id, function_info, &signature)?;
+        let compiled =
+            compile_supported_function(program, function_id, function_info, &signature, names)?;
 
         if let Some(entries) = self.compiled_functions.get_mut(function_id as usize) {
             entries.push(Rc::new(compiled));
@@ -948,8 +952,9 @@ impl JitRuntimeState {
         lambda: &LambdaInfo,
         args: &[Val],
         captures: &[Val],
+        names: CallNames<'_>,
     ) -> Result<Option<Val>, String> {
-        match self.compiled_lambda(program, lambda, args, captures)? {
+        match self.compiled_lambda(program, lambda, args, captures, names)? {
             Some((compiled, effective_args)) => call_compiled_lambda(&compiled, &effective_args),
             None => Ok(None),
         }
@@ -963,6 +968,7 @@ impl JitRuntimeState {
         lambda: &LambdaInfo,
         args: &[Val],
         captures: &[Val],
+        names: CallNames<'_>,
     ) -> Result<Option<CompiledLambdaCall>, String> {
         if !self.config.is_enabled()
             || matches!(
@@ -1017,7 +1023,13 @@ impl JitRuntimeState {
             effective_args.len(),
         )?;
         let start = std::time::Instant::now();
-        match compile_supported_function(&synthetic_program, u32::MAX, &function_info, &signature) {
+        match compile_supported_function(
+            &synthetic_program,
+            u32::MAX,
+            &function_info,
+            &signature,
+            names,
+        ) {
             Ok(compiled) => {
                 GLOBAL_JIT_COMPILE_COUNT.fetch_add(1, Ordering::Relaxed);
                 if let Some(profile) = self.lambda_profiles.get_mut(&key) {
@@ -1106,8 +1118,9 @@ fn thunk_calls_function(
     program: &BytecodeProgram,
     function_id: FunctionId,
     thunk: &crate::lang::bytecode::LambdaInfo,
+    scope: CallScope<'_>,
 ) -> bool {
-    body_calls_function(program, function_id, &thunk.instructions)
+    body_calls_function(program, function_id, &thunk.instructions, scope)
 }
 
 /// Whether `instructions`, or a thunk nested in them, call `function_id`.
@@ -1115,6 +1128,7 @@ fn body_calls_function(
     program: &BytecodeProgram,
     function_id: FunctionId,
     instructions: &[Instruction],
+    scope: CallScope<'_>,
 ) -> bool {
     let mut bodies: Vec<&[Instruction]> = vec![instructions];
     let mut seen = 0usize;
@@ -1139,13 +1153,7 @@ fn body_calls_function(
                     ..
                 } => {
                     let callee = resolve_const_function_name(body, program, ip, *function)
-                        .and_then(|name| {
-                            if name.starts_with("::") {
-                                find_function_exact(program, &name, Some(*args_count))
-                            } else {
-                                find_function_by_suffix(program, &name, Some(*args_count))
-                            }
-                        });
+                        .and_then(|name| scope.resolve(program, &name, *args_count));
                     if callee == Some(function_id as usize) {
                         return true;
                     }
@@ -1468,7 +1476,9 @@ fn compile_supported_function(
     function_id: FunctionId,
     function_info: &FunctionInfo,
     signature: &TypeSig,
+    names: CallNames<'_>,
 ) -> Result<JitCompiledFunction, String> {
+    let scope = names.scope_of(program, function_id, function_info);
     if signature.arity != function_info.arity {
         return Err("JIT arity mismatch".to_string());
     }
@@ -1493,13 +1503,13 @@ fn compile_supported_function(
                 .to_string(),
         ));
     }
-    if function_has_unsupported_lazy_paths(program, function_info) {
+    if function_has_unsupported_lazy_paths(program, function_info, scope) {
         return Err(unsupported_jit_bailout(
             "lazy_thunk_shape",
             "JIT does not yet compile this lazy thunk bytecode shape safely",
         ));
     }
-    if function_has_jit_bailout_hotlib_dependency(program, function_id, function_info) {
+    if function_has_jit_bailout_hotlib_dependency(program, function_id, function_info, names) {
         return Err(unsupported_jit_bailout(
             "hotlib_policy",
             "JIT policy marks a hotlib dependency as interpreter-only",
@@ -1529,6 +1539,7 @@ fn compile_supported_function(
         function_id,
         signature,
         &function_info.param_names,
+        scope,
     );
     let mut failure = String::new();
     for expected_return_kind in predictions {
@@ -1538,6 +1549,7 @@ fn compile_supported_function(
             function_info,
             signature,
             expected_return_kind,
+            scope,
         ) {
             Ok(compiled) => return Ok(compiled),
             Err(error) => failure = error,
@@ -1554,6 +1566,7 @@ fn compile_with_return_kind(
     function_info: &FunctionInfo,
     signature: &TypeSig,
     expected_return_kind: Option<JitValueKind>,
+    scope: CallScope<'_>,
 ) -> Result<JitCompiledFunction, String> {
     let mut flag_builder = settings::builder();
     flag_builder
@@ -1581,6 +1594,7 @@ fn compile_with_return_kind(
     builder.symbol("hot_jit_ne_numeric", hot_jit_ne_numeric as *const u8);
     builder.symbol("hot_jit_eq_numeric", hot_jit_eq_numeric as *const u8);
     builder.symbol("hot_jit_eq_general", hot_jit_eq_general as *const u8);
+    builder.symbol("hot_jit_eq_value", hot_jit_eq_value as *const u8);
     builder.symbol("hot_jit_gt_numeric", hot_jit_gt_numeric as *const u8);
     builder.symbol("hot_jit_gte_numeric", hot_jit_gte_numeric as *const u8);
     builder.symbol("hot_jit_lt_numeric", hot_jit_lt_numeric as *const u8);
@@ -1732,6 +1746,7 @@ fn compile_with_return_kind(
             self_func_ref,
             helper_refs,
             expected_return_kind,
+            scope,
         )?;
         fbx.finalize(module.target_config());
         result_kind
@@ -1762,6 +1777,7 @@ fn compile_with_return_kind(
 fn function_has_unsupported_lazy_paths(
     program: &BytecodeProgram,
     function_info: &FunctionInfo,
+    scope: CallScope<'_>,
 ) -> bool {
     let mut lazy_root_by_reg: AHashMap<u32, u32> = AHashMap::new();
     let mut used_lazy_roots = std::collections::HashSet::new();
@@ -1820,12 +1836,7 @@ fn function_has_unsupported_lazy_paths(
                 else {
                     continue;
                 };
-                let callee_id = if fn_name.starts_with("::") {
-                    find_function_exact(program, &fn_name, Some(*args_count))
-                } else {
-                    find_function_by_suffix(program, &fn_name, Some(*args_count))
-                };
-                let Some(callee_id) = callee_id else {
+                let Some(callee_id) = scope.resolve(program, &fn_name, *args_count) else {
                     continue;
                 };
                 let Some(callee) = program.functions.get(callee_id) else {
@@ -1880,12 +1891,14 @@ fn function_has_jit_bailout_hotlib_dependency(
     program: &BytecodeProgram,
     function_id: FunctionId,
     function_info: &FunctionInfo,
+    names: CallNames<'_>,
 ) -> bool {
     let mut visited = std::collections::HashSet::new();
     function_has_jit_bailout_hotlib_dependency_inner(
         program,
         function_id as usize,
         function_info,
+        names,
         &mut visited,
     )
 }
@@ -1894,11 +1907,13 @@ fn function_has_jit_bailout_hotlib_dependency_inner(
     program: &BytecodeProgram,
     function_id: usize,
     function_info: &FunctionInfo,
+    names: CallNames<'_>,
     visited: &mut std::collections::HashSet<usize>,
 ) -> bool {
     if !visited.insert(function_id) {
         return false;
     }
+    let scope = names.scope_of(program, function_id as FunctionId, function_info);
 
     for (ip, instruction) in function_info.instructions.iter().enumerate() {
         match instruction {
@@ -1920,7 +1935,7 @@ fn function_has_jit_bailout_hotlib_dependency_inner(
                 let callee_id = *callee_id as usize;
                 if let Some(callee) = program.functions.get(callee_id)
                     && function_has_jit_bailout_hotlib_dependency_inner(
-                        program, callee_id, callee, visited,
+                        program, callee_id, callee, names, visited,
                     )
                 {
                     return true;
@@ -1939,15 +1954,10 @@ fn function_has_jit_bailout_hotlib_dependency_inner(
                 if hotlib_jit_policy_bails_out(&fn_name) {
                     return true;
                 }
-                let callee_id = if fn_name.starts_with("::") {
-                    find_function_exact(program, &fn_name, Some(*args_count))
-                } else {
-                    find_function_by_suffix(program, &fn_name, Some(*args_count))
-                };
-                if let Some(callee_id) = callee_id
+                if let Some(callee_id) = scope.resolve(program, &fn_name, *args_count)
                     && let Some(callee) = program.functions.get(callee_id)
                     && function_has_jit_bailout_hotlib_dependency_inner(
-                        program, callee_id, callee, visited,
+                        program, callee_id, callee, names, visited,
                     )
                 {
                     return true;
@@ -1988,6 +1998,8 @@ const HELPER_VAL_KIND_BOOL: i64 = 2;
 const HELPER_VAL_KIND_DEC: i64 = 3;
 const HELPER_VAL_KIND_NULL: i64 = 4;
 const HELPER_VAL_KIND_OWNED: i64 = 5;
+/// A `TypeTag` or `StringConst` token, for `hot_jit_eq_value` only.
+const HELPER_VAL_KIND_TYPE_TOKEN: i64 = 6;
 
 unsafe extern "C" fn hot_jit_copy_dec(src: *const D256, dst: *mut D256) {
     unsafe { *dst = *src };
@@ -2156,6 +2168,37 @@ unsafe extern "C" fn hot_jit_lte_numeric(
         right_kind,
         right_raw,
     )
+}
+
+/// JIT helper: a match arm's comparison (`Instruction::Eq`), of the values
+/// as they are, as the interpreter's `Eq` compares them. An Ok or an Err is
+/// a value like any other here: never unwrapped, never consumed, so an Err
+/// subject is unequal to a literal arm and goes on to a `_` or `Any` arm.
+/// Returns 1 or 0.
+unsafe extern "C" fn hot_jit_eq_value(
+    left_kind: i64,
+    left_raw: i64,
+    right_kind: i64,
+    right_raw: i64,
+) -> i64 {
+    let left = unsafe { eq_value_operand(left_kind, left_raw) };
+    let right = unsafe { eq_value_operand(right_kind, right_raw) };
+    i64::from(left == right)
+}
+
+/// An operand of `hot_jit_eq_value`: an owned value borrowed in place, a
+/// type token as its type's name, or a decoded scalar.
+unsafe fn eq_value_operand<'a>(kind: i64, raw: i64) -> std::borrow::Cow<'a, Val> {
+    match kind {
+        HELPER_VAL_KIND_OWNED if raw != 0 => {
+            std::borrow::Cow::Borrowed(unsafe { &*(raw as *const Val) })
+        }
+        HELPER_VAL_KIND_OWNED => std::borrow::Cow::Owned(Val::Null),
+        HELPER_VAL_KIND_TYPE_TOKEN => {
+            std::borrow::Cow::Owned(type_token_name(raw).map_or(Val::Null, Val::from))
+        }
+        _ => std::borrow::Cow::Owned(unsafe { decode_helper_val(kind, raw) }),
+    }
 }
 
 unsafe extern "C" fn hot_jit_eq_general(
@@ -3442,6 +3485,14 @@ fn declare_jit_helpers(
             numeric_cmp,
             &[types::I64],
         )?,
+        eq_value: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_eq_value",
+            numeric_cmp,
+            &[types::I64],
+        )?,
         gt_numeric: declare_helper_func(
             module,
             func,
@@ -3998,6 +4049,17 @@ fn encode_special_string_const(s: &str) -> Option<i64> {
     }
 }
 
+/// The type name a type token stands for (see `encode_special_string_const`).
+fn type_token_name(token: i64) -> Option<&'static str> {
+    match token {
+        TYPE_TOKEN_NULL => Some("::hot::type/Null"),
+        TYPE_TOKEN_INT => Some("::hot::type/Int"),
+        TYPE_TOKEN_BOOL => Some("::hot::type/Bool"),
+        TYPE_TOKEN_DEC => Some("::hot::type/Dec"),
+        _ => None,
+    }
+}
+
 fn raw_type_token(kind: RawKind) -> Result<i64, String> {
     match kind {
         RawKind::Null => Ok(TYPE_TOKEN_NULL),
@@ -4224,6 +4286,61 @@ fn drop_owned_raw(
     raw: cranelift_codegen::ir::Value,
 ) {
     builder.ins().call(helper_refs.drop_owned_val, &[raw]);
+}
+
+/// The start of a collecting flow's accumulator: an owned reference to an
+/// empty collection, for `All<Map>` or `All<Vec>`. The empty collection is
+/// made once, at compile time; each run takes its own reference to it, since
+/// the flow's result owns what the accumulator holds at its end. Handing out
+/// the shared collection itself let a caller free it while the compiled code
+/// still used it.
+fn emit_empty_accumulator(
+    builder: &mut FunctionBuilder<'_>,
+    helper_refs: &JitHelperRefs,
+    modifier: FlowResultModifier,
+) -> cranelift_codegen::ir::Value {
+    let empty = match modifier {
+        FlowResultModifier::Map => new_owned_val(Val::Map(Box::new(indexmap::IndexMap::new()))),
+        FlowResultModifier::Vec => new_owned_val(Val::Vec(Vec::new())),
+        FlowResultModifier::One => {
+            unreachable!("flow accumulator only created for Map/Vec modifiers")
+        }
+    };
+    let empty = builder.ins().iconst(types::I64, empty);
+    clone_owned_raw(builder, helper_refs, empty)
+}
+
+/// Add `item`, an owned value, to a collecting flow's accumulator: appended
+/// for `All<Vec>`, under `key` for `All<Map>`. The helpers borrow both and
+/// return a new collection, so this releases `item` and the accumulator it
+/// replaces.
+fn emit_accumulate(
+    builder: &mut FunctionBuilder<'_>,
+    helper_refs: &JitHelperRefs,
+    acc_var: Variable,
+    modifier: FlowResultModifier,
+    key: impl FnOnce() -> Result<String, String>,
+    item: cranelift_codegen::ir::Value,
+) -> Result<(), String> {
+    let acc = builder.use_var(acc_var);
+    let call = match modifier {
+        FlowResultModifier::Map => {
+            let key = new_owned_val(Val::Str(key()?.into()));
+            let key = builder.ins().iconst(types::I64, key);
+            builder
+                .ins()
+                .call(helper_refs.set_element, &[acc, key, item])
+        }
+        FlowResultModifier::Vec => builder.ins().call(helper_refs.vec_push, &[acc, item]),
+        FlowResultModifier::One => {
+            unreachable!("flow accumulator only created for Map/Vec modifiers")
+        }
+    };
+    let new_acc = builder.inst_results(call)[0];
+    drop_owned_raw(builder, helper_refs, acc);
+    drop_owned_raw(builder, helper_refs, item);
+    builder.def_var(acc_var, new_acc);
+    Ok(())
 }
 
 fn collect_used_registers(instructions: &[Instruction]) -> std::collections::BTreeSet<u32> {
@@ -4532,6 +4649,7 @@ fn predict_return_kinds(
     function_id: FunctionId,
     signature: &TypeSig,
     param_names: &[String],
+    scope: CallScope<'_>,
 ) -> Vec<Option<JitValueKind>> {
     let conservative = prescan_return_kind(
         instructions,
@@ -4543,7 +4661,7 @@ fn predict_return_kinds(
     );
     let mut predictions = Vec::with_capacity(2);
     if matches!(conservative, None | Some(JitValueKind::OwnedVal))
-        && body_calls_function(program, function_id, instructions)
+        && body_calls_function(program, function_id, instructions, scope)
     {
         let raw = [
             (RawKind::Int, JitValueKind::Int),
@@ -5127,7 +5245,13 @@ struct EmitCtx<'a> {
     compile_time_owned: std::collections::HashSet<usize>,
     locals: AHashMap<String, (Variable, RawKind)>,
     thunk_registry: AHashMap<u32, crate::lang::bytecode::LambdaInfo>,
+    /// The bindings of each enclosing scope, saved at its `EnterScope`. A
+    /// binding in `locals` whose variable is also in the innermost snapshot
+    /// belongs to an enclosing scope.
     scope_snapshots: Vec<AHashMap<String, (Variable, RawKind)>>,
+    /// The accumulators of the collecting flows open here. Each owns its
+    /// collection until `EndFlow` hands it to the flow's result.
+    open_accumulators: Vec<Variable>,
     error_capture_active: bool,
     /// Code was emitted that reads a self-call's result as
     /// `expected_return_kind`, so the body must return that kind.
@@ -5137,6 +5261,8 @@ struct EmitCtx<'a> {
     /// What returning a numeric op's result amounts to (see
     /// `numeric_err::ErrUseScope::returned`).
     returned_use: NumericErrUse,
+    /// Where the body makes its calls, for resolving call names.
+    call_scope: CallScope<'a>,
 }
 
 enum EmitResult {
@@ -5461,15 +5587,12 @@ impl<'a> EmitCtx<'a> {
             self.finish_numeric_exits(builder, exits);
             return Ok(true);
         }
-        // For qualified names (e.g. "::hot::core/do"), resolve deterministically
-        // by exact match. For unqualified names (e.g. "if", "and"), also try
-        // resolving via suffix match so that thunk inlining can kick in for
-        // core functions whose qualified name differs from the call-site name.
-        let resolved_fid = if fn_name.starts_with("::") {
-            find_function_exact(self.program, &fn_name, Some(args_count))
-        } else {
-            find_function_by_suffix(self.program, &fn_name, Some(args_count))
-        };
+        // The function the interpreter's lookup reaches, when it is known
+        // here: a qualified name, or the core function an unqualified name
+        // the caller's namespace doesn't rebind calls. Any other call goes
+        // through the VM by name, which resolves aliases, imports and
+        // top-level lambdas as the interpreter does.
+        let resolved_fid = self.call_scope.resolve(self.program, &fn_name, args_count);
         // 2. Try lazy branch inlining (only with deterministically resolved ID)
         if let Some(called_fid) = resolved_fid
             && let Some((result_kind, result_val)) = try_inline_lazy_branch_call(
@@ -5491,13 +5614,14 @@ impl<'a> EmitCtx<'a> {
                 &self.register_kinds,
                 &self.thunk_registry,
                 self.numeric_err_use(instructions, ip, dest),
+                self.call_scope,
             )?
         {
             // An inlined branch that calls this function back reads that
             // call's result as the predicted return kind.
             if (args_start..args_start + u32::from(args_count)).any(|reg| {
                 self.thunk_registry.get(&reg).is_some_and(|thunk| {
-                    thunk_calls_function(self.program, self.function_id, thunk)
+                    thunk_calls_function(self.program, self.function_id, thunk, self.call_scope)
                 })
             }) {
                 self.relies_on_expected_return = true;
@@ -5598,12 +5722,13 @@ impl<'a> EmitCtx<'a> {
             &self.register_kinds,
             &self.thunk_registry,
             self.numeric_err_use(instructions, ip, dest),
+            self.call_scope,
         )? {
             // An inlined branch that calls this function back reads that
             // call's result as the predicted return kind.
             if (args_start..args_start + u32::from(args_count)).any(|reg| {
                 self.thunk_registry.get(&reg).is_some_and(|thunk| {
-                    thunk_calls_function(self.program, self.function_id, thunk)
+                    thunk_calls_function(self.program, self.function_id, thunk, self.call_scope)
                 })
             }) {
                 self.relies_on_expected_return = true;
@@ -5784,6 +5909,8 @@ impl<'a> EmitCtx<'a> {
                 .get(name)
                 .map(|(_, kind)| *kind != RawKind::OwnedVal)
         };
+        let resolve_call =
+            |name: &str, arity: u8| self.call_scope.resolve(self.program, name, arity);
         numeric_err_use(
             &ErrUseScope {
                 program: self.program,
@@ -5791,6 +5918,7 @@ impl<'a> EmitCtx<'a> {
                 returned: self.returned_use,
                 plain_register: &plain_register,
                 plain_local: &plain_local,
+                resolve_call: &resolve_call,
             },
             ip,
             dest,
@@ -5870,9 +5998,52 @@ impl<'a> EmitCtx<'a> {
                 drop_owned_var(builder, &self.helper_refs, self.registers[idx]);
             }
         }
-        for (var, local_kind) in self.locals.values() {
-            if *local_kind == RawKind::OwnedVal {
-                drop_owned_var(builder, &self.helper_refs, *var);
+        for var in self.owned_local_vars() {
+            drop_owned_var(builder, &self.helper_refs, var);
+        }
+        for &var in &self.open_accumulators {
+            drop_owned_var(builder, &self.helper_refs, var);
+        }
+    }
+
+    /// The variables of every owned binding live here: those in scope, and
+    /// those of enclosing scopes that an inner binding of the same name
+    /// hides.
+    fn owned_local_vars(&self) -> Vec<Variable> {
+        let mut vars = Vec::new();
+        for scope in self.scope_snapshots.iter().chain([&self.locals]) {
+            for &(var, kind) in scope.values() {
+                if kind == RawKind::OwnedVal && !vars.contains(&var) {
+                    vars.push(var);
+                }
+            }
+        }
+        vars
+    }
+
+    /// Whether `var`, the variable `name` is bound to, belongs to an
+    /// enclosing scope rather than the current one.
+    fn binding_from_enclosing_scope(&self, name: &str, var: Variable) -> bool {
+        self.scope_snapshots
+            .last()
+            .and_then(|outer| outer.get(name))
+            .is_some_and(|&(outer_var, _)| outer_var == var)
+    }
+
+    /// Release the owned bindings made since `outer` was saved, which go out
+    /// of scope here. The bindings `outer` holds stay.
+    fn emit_drop_scope_locals(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        outer: &AHashMap<String, (Variable, RawKind)>,
+    ) {
+        for (name, &(var, kind)) in &self.locals {
+            if kind == RawKind::OwnedVal
+                && outer
+                    .get(name)
+                    .is_none_or(|&(outer_var, _)| outer_var != var)
+            {
+                drop_owned_var(builder, &self.helper_refs, var);
             }
         }
     }
@@ -5904,11 +6075,12 @@ impl<'a> EmitCtx<'a> {
                 dropped.push(self.registers[idx]);
             }
         }
-        for (var, kind) in self.locals.values() {
-            if *kind == RawKind::OwnedVal && !param_locals.iter().any(|(param, _)| param == var) {
-                dropped.push(*var);
+        for var in self.owned_local_vars() {
+            if !param_locals.iter().any(|&(param, _)| param == var) {
+                dropped.push(var);
             }
         }
+        dropped.extend_from_slice(&self.open_accumulators);
         if dropped.is_empty() {
             return Ok(());
         }
@@ -6154,18 +6326,28 @@ impl<'a> EmitCtx<'a> {
                 if kind == RawKind::OwnedVal {
                     raw = clone_owned_raw(builder, &self.helper_refs, raw);
                 }
-                if let Some((var, existing_kind)) = self.locals.get(&name).copied() {
-                    if existing_kind != kind {
-                        return Err(format!("JIT local '{}' changes type", name));
+                match self.locals.get(&name).copied() {
+                    // Rebinding a name of this scope replaces its value.
+                    Some((var, existing_kind))
+                        if !self.binding_from_enclosing_scope(&name, var) =>
+                    {
+                        if existing_kind != kind {
+                            return Err(format!("JIT local '{}' changes type", name));
+                        }
+                        if existing_kind == RawKind::OwnedVal {
+                            drop_owned_var(builder, &self.helper_refs, var);
+                        }
+                        builder.def_var(var, raw);
                     }
-                    if existing_kind == RawKind::OwnedVal {
-                        drop_owned_var(builder, &self.helper_refs, var);
+                    // A new name, or one an enclosing scope binds: a binding
+                    // in a branch, an arm or a block gets a variable of its
+                    // own, as the interpreter binds it in the inner scope,
+                    // so the outer value is back once the scope ends.
+                    _ => {
+                        let var = builder.declare_var(types::I64);
+                        builder.def_var(var, raw);
+                        self.locals.insert(name, (var, kind));
                     }
-                    builder.def_var(var, raw);
-                } else {
-                    let var = builder.declare_var(types::I64);
-                    builder.def_var(var, raw);
-                    self.locals.insert(name, (var, kind));
                 }
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -6243,11 +6425,12 @@ impl<'a> EmitCtx<'a> {
                 self.finish_numeric_exits(builder, exits);
                 Ok(EmitResult::Handled)
             }
+            // The compiler emits `Eq` for a match arm's test, which compares
+            // the subject as it is (a call to `eq` consumes its arguments).
             Instruction::Eq { dest, left, right } => {
-                let (value, halt_block) = numeric_eq(
+                let value = value_eq(
                     builder,
-                    self.helper_refs.eq_numeric,
-                    self.helper_refs.eq_general,
+                    self.helper_refs.eq_value,
                     &self.remap,
                     &self.registers,
                     &self.register_kinds,
@@ -6256,9 +6439,6 @@ impl<'a> EmitCtx<'a> {
                 )?;
                 self.define_register(builder, *dest, RawKind::Bool, value)?;
                 self.jump_to_next(builder, ip)?;
-                if let Some(halt_block) = halt_block {
-                    self.emit_halt_return(builder, halt_block);
-                }
                 Ok(EmitResult::Handled)
             }
             Instruction::Gt { dest, left, right } => {
@@ -6466,10 +6646,12 @@ impl<'a> EmitCtx<'a> {
                 Ok(EmitResult::Handled)
             }
             Instruction::ExitScope => {
-                self.locals = self
+                let outer = self
                     .scope_snapshots
                     .pop()
                     .ok_or_else(|| "JIT ExitScope without matching EnterScope".to_string())?;
+                self.emit_drop_scope_locals(builder, &outer);
+                self.locals = outer;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
             }
@@ -7299,61 +7481,11 @@ impl<'a> EmitCtx<'a> {
                 Ok(EmitResult::Handled)
             }
             // Flow-level instructions (BeginFlow, EndFlow, CondBranch*, Pipe,
-            // DeferredVarExpr, Return, ReturnIfErr, TailCall) are handled by the
-            // second-phase dispatch in build_supported_body. Unrecognized instructions
+            // Return, ReturnIfErr, TailCall) are handled by the second-phase
+            // dispatch in build_supported_body. Unrecognized instructions
             // also flow through here and cause a bail-out in that second phase.
             _ => Ok(EmitResult::Unhandled),
         }
-    }
-
-    fn emit_deferred_var_expr(
-        &mut self,
-        builder: &mut FunctionBuilder<'_>,
-        ip: usize,
-        var_name: u32,
-        thunk: u32,
-        accumulator: Option<(Variable, FlowResultModifier)>,
-        flow_result_reg: Option<u32>,
-    ) -> Result<EmitResult, String> {
-        let (thunk_ptr, thunk_temp) = self.owned_operand(builder, thunk)?;
-        let zero_a = builder.ins().iconst(types::I64, 0);
-        let zero_b = builder.ins().iconst(types::I64, 0);
-        let call = builder.ins().call(
-            self.helper_refs.call_vm_by_name,
-            &[thunk_ptr, zero_a, zero_b],
-        );
-        let result = builder.inst_results(call)[0];
-        // A strict-argument halt inside the deferred expression comes back
-        // as HALT_SENTINEL — never a pointer; feeding it to set_element
-        // would crash. Route the frame to its error return instead.
-        let halt_block = emit_halt_check(builder, result);
-        self.drop_owned_temps(builder, &[thunk_temp]);
-
-        if let Some((acc_var, modifier)) = accumulator {
-            let acc_val = builder.use_var(acc_var);
-            // `All<Vec>` collects the values in order; `All<Map>` keys them
-            // by binding name.
-            let call = if modifier == FlowResultModifier::Vec {
-                builder
-                    .ins()
-                    .call(self.helper_refs.vec_push, &[acc_val, result])
-            } else {
-                let name_str = constant_string(self.program, var_name)?;
-                let key_val = new_owned_val(Val::Str(name_str.to_string().into()));
-                let key_raw = builder.ins().iconst(types::I64, key_val);
-                builder
-                    .ins()
-                    .call(self.helper_refs.set_element, &[acc_val, key_raw, result])
-            };
-            let new_acc = builder.inst_results(call)[0];
-            builder.def_var(acc_var, new_acc);
-        } else if let Some(reg) = flow_result_reg {
-            self.define_register(builder, reg, RawKind::OwnedVal, result)?;
-        }
-
-        self.jump_to_next(builder, ip)?;
-        self.emit_halt_return(builder, halt_block);
-        Ok(EmitResult::Handled)
     }
 }
 
@@ -7368,6 +7500,7 @@ fn build_supported_body(
     self_func_ref: FuncRef,
     helper_refs: JitHelperRefs,
     expected_return_kind: Option<JitValueKind>,
+    call_scope: CallScope<'_>,
 ) -> Result<JitValueKind, String> {
     let instructions = &function_info.instructions;
     if instructions.is_empty() {
@@ -7467,10 +7600,12 @@ fn build_supported_body(
         locals,
         thunk_registry: AHashMap::new(),
         scope_snapshots: Vec::new(),
+        open_accumulators: Vec::new(),
         error_capture_active: false,
         relies_on_expected_return: false,
         function_body: true,
         returned_use: NumericErrUse::Returned,
+        call_scope,
     };
 
     // Stack guard: compare a stack slot address (proxy for current SP) against
@@ -7508,8 +7643,7 @@ fn build_supported_body(
 
         // A collecting serial flow (`All<Vec>` / `All<Map>`) gathers each
         // binding made directly in its body, as the interpreter's StoreVar
-        // tracking does: the values in order, or name -> value. (Parallel
-        // flows bind through DeferredVarExpr instead.)
+        // tracking does: the values in order, or name -> value.
         if let Instruction::StoreVar {
             var_name, value, ..
         } = instruction
@@ -7524,26 +7658,14 @@ fn build_supported_body(
             } else {
                 promote_to_owned(builder, &ctx.helper_refs, kind, raw)?
             };
-            let acc_val = builder.use_var(acc_var);
-            let call = match flow.result_modifier {
-                FlowResultModifier::Map => {
-                    let name = constant_string(program, *var_name)?;
-                    let key_val = new_owned_val(Val::Str(name.to_string().into()));
-                    let key_raw = builder.ins().iconst(types::I64, key_val);
-                    builder.ins().call(
-                        ctx.helper_refs.set_element,
-                        &[acc_val, key_raw, value_owned],
-                    )
-                }
-                FlowResultModifier::Vec => builder
-                    .ins()
-                    .call(ctx.helper_refs.vec_push, &[acc_val, value_owned]),
-                FlowResultModifier::One => {
-                    unreachable!("flow accumulator only created for Map/Vec modifiers")
-                }
-            };
-            let new_acc = builder.inst_results(call)[0];
-            builder.def_var(acc_var, new_acc);
+            emit_accumulate(
+                builder,
+                &ctx.helper_refs,
+                acc_var,
+                flow.result_modifier,
+                || constant_string(program, *var_name).map(str::to_string),
+                value_owned,
+            )?;
         }
 
         match ctx.emit_instruction(builder, ip, instruction, instructions)? {
@@ -7561,6 +7683,17 @@ fn build_supported_body(
             } => {
                 let flow_type = *flow_type;
                 let result_modifier = *result_modifier;
+                // The interpreter runs a parallel flow's independent bindings
+                // concurrently, and binds each for the siblings that read it.
+                // Compiled code ran them one at a time and bound none, so a
+                // binding reading a sibling failed. The function stays
+                // interpreted: its body won't change, so this isn't retried.
+                if flow_type == FlowType::Parallel {
+                    return Err(
+                        "JIT does not compile parallel flows: the interpreter runs them"
+                            .to_string(),
+                    );
+                }
                 if !matches!(
                     flow_type,
                     FlowType::Cond
@@ -7569,7 +7702,6 @@ fn build_supported_body(
                         | FlowType::MatchAll
                         | FlowType::Serial
                         | FlowType::Pipe
-                        | FlowType::Parallel
                 ) {
                     return Err(format!("Unsupported flow type for JIT: {:?}", flow_type));
                 }
@@ -7600,16 +7732,10 @@ fn build_supported_body(
                     result_modifier,
                     FlowResultModifier::Map | FlowResultModifier::Vec
                 ) {
-                    let empty_val = match result_modifier {
-                        FlowResultModifier::Map => {
-                            new_owned_val(Val::Map(Box::new(indexmap::IndexMap::new())))
-                        }
-                        FlowResultModifier::Vec => new_owned_val(Val::Vec(Vec::new())),
-                        FlowResultModifier::One => unreachable!("guarded by outer if"),
-                    };
-                    let init = builder.ins().iconst(types::I64, empty_val);
+                    let init = emit_empty_accumulator(builder, &ctx.helper_refs, result_modifier);
                     let var = builder.declare_var(types::I64);
                     builder.def_var(var, init);
+                    ctx.open_accumulators.push(var);
                     Some(var)
                 } else {
                     None
@@ -7710,36 +7836,21 @@ fn build_supported_body(
                     } else {
                         promote_to_owned(builder, &ctx.helper_refs, kind, raw)?
                     };
-                    let acc_val = builder.use_var(acc_var);
-                    let new_acc = match flow.result_modifier {
-                        FlowResultModifier::Map => {
-                            // The branch's label, without the compiler's
-                            // uniqueness suffix, as the interpreter keys it.
-                            let branch_name_str = crate::lang::runtime::vm::user_facing_branch_name(
-                                constant_string(ctx.program, *branch_name)?,
-                            );
-                            let key_val =
-                                new_owned_val(Val::Str(branch_name_str.to_string().into()));
-                            let key_raw = builder.ins().iconst(types::I64, key_val);
-                            let call = builder.ins().call(
-                                ctx.helper_refs.set_element,
-                                &[acc_val, key_raw, result_owned],
-                            );
-                            builder.inst_results(call)[0]
-                        }
-                        FlowResultModifier::Vec => {
-                            let call = builder
-                                .ins()
-                                .call(ctx.helper_refs.vec_push, &[acc_val, result_owned]);
-                            builder.inst_results(call)[0]
-                        }
-                        FlowResultModifier::One => {
-                            unreachable!(
-                                "CondBranchEnd accumulator only created for Map/Vec modifiers"
-                            )
-                        }
-                    };
-                    builder.def_var(acc_var, new_acc);
+                    // The branch's label, without the compiler's uniqueness
+                    // suffix, as the interpreter keys it.
+                    let program = ctx.program;
+                    emit_accumulate(
+                        builder,
+                        &ctx.helper_refs,
+                        acc_var,
+                        flow.result_modifier,
+                        || {
+                            constant_string(program, *branch_name).map(|name| {
+                                crate::lang::runtime::vm::user_facing_branch_name(name).to_string()
+                            })
+                        },
+                        result_owned,
+                    )?;
                     flow.merged_result_kind = Some(RawKind::OwnedVal);
                     if matches!(flow.flow_type, FlowType::Cond | FlowType::Match) {
                         // The first matching arm is the only one collected:
@@ -7847,11 +7958,17 @@ fn build_supported_body(
                     .pop()
                     .ok_or_else(|| "JIT EndFlow without active flow".to_string())?;
                 if let Some(acc_var) = flow.accumulator_var {
+                    // The flow's result takes over the accumulator's
+                    // collection.
+                    ctx.open_accumulators.retain(|&var| var != acc_var);
                     let acc_val = builder.use_var(acc_var);
                     ctx.define_register(builder, *dest, RawKind::OwnedVal, acc_val)?;
                 } else if let Some(pipe_reg) = flow.last_pipe_reg {
                     let kind = ctx.register_kind(pipe_reg)?;
-                    let raw = ctx.reg_value(builder, pipe_reg)?;
+                    let mut raw = ctx.reg_value(builder, pipe_reg)?;
+                    if kind == RawKind::OwnedVal {
+                        raw = clone_owned_raw(builder, &ctx.helper_refs, raw);
+                    }
                     ctx.define_register(builder, *dest, kind, raw)?;
                 } else {
                     let result_reg = flow.result_reg.ok_or_else(|| {
@@ -8087,7 +8204,15 @@ fn build_supported_body(
             Instruction::Pipe { dest, src } => {
                 let kind = ctx.register_kind(*src)?;
                 let raw = ctx.reg_value(builder, *src)?;
-                ctx.define_register(builder, *dest, kind, raw)?;
+                // The step's register keeps its value: `dest` takes a
+                // reference of its own, as `Move` does, or both would be
+                // released.
+                let step_value = if kind == RawKind::OwnedVal {
+                    clone_owned_raw(builder, &ctx.helper_refs, raw)
+                } else {
+                    raw
+                };
+                ctx.define_register(builder, *dest, kind, step_value)?;
 
                 if let Some(flow) = active_flows.last_mut()
                     && flow.flow_type == FlowType::Pipe
@@ -8099,48 +8224,24 @@ fn build_supported_body(
                         } else {
                             promote_to_owned(builder, &ctx.helper_refs, kind, raw)?
                         };
-                        let acc_val = builder.use_var(acc_var);
-                        let new_acc = match flow.result_modifier {
-                            FlowResultModifier::Map => {
-                                let step_name =
-                                    crate::lang::runtime::vm::pipe_step_key(flow.pipe_steps);
-                                let key_val = new_owned_val(Val::Str(step_name.into()));
-                                let key_raw = builder.ins().iconst(types::I64, key_val);
-                                let call = builder.ins().call(
-                                    ctx.helper_refs.set_element,
-                                    &[acc_val, key_raw, result_owned],
-                                );
-                                builder.inst_results(call)[0]
-                            }
-                            FlowResultModifier::Vec => {
-                                let call = builder
-                                    .ins()
-                                    .call(ctx.helper_refs.vec_push, &[acc_val, result_owned]);
-                                builder.inst_results(call)[0]
-                            }
-                            FlowResultModifier::One => {
-                                unreachable!("Pipe accumulator only created for Map/Vec modifiers")
-                            }
-                        };
-                        builder.def_var(acc_var, new_acc);
+                        let step = flow.pipe_steps;
+                        emit_accumulate(
+                            builder,
+                            &ctx.helper_refs,
+                            acc_var,
+                            flow.result_modifier,
+                            || Ok(crate::lang::runtime::vm::pipe_step_key(step)),
+                            result_owned,
+                        )?;
                         flow.pipe_steps += 1;
                     }
                 }
                 ctx.jump_to_next(builder, ip)?;
             }
-            Instruction::DeferredVarExpr { var_name, thunk } => {
-                let (acc, result_reg) = if let Some(flow) = active_flows.last() {
-                    (
-                        flow.accumulator_var.map(|var| (var, flow.result_modifier)),
-                        flow.result_reg,
-                    )
-                } else {
-                    (None, None)
-                };
-                ctx.emit_deferred_var_expr(builder, ip, *var_name, *thunk, acc, result_reg)?;
-            }
             // Remaining unhandled instructions are VM-only (LoadGlobal,
-            // StoreScoped, VecPush) — not emitted by the compiler.
+            // StoreScoped, VecPush) — not emitted by the compiler — or only
+            // emitted in a parallel flow, which the JIT declines
+            // (DeferredVarExpr).
             _ => {
                 return Err(format!(
                     "Unsupported instruction for JIT: {:?}",
@@ -9673,6 +9774,52 @@ fn numeric_eq(
     Ok((result, Some(halt_block)))
 }
 
+/// `Instruction::Eq`: whether two values are the same value, compared as
+/// they are, as the interpreter's `Eq` does (`Val`'s equality: an Int and a
+/// Dec differ, a Result is never unwrapped). Two raw scalars of one kind,
+/// or two type tokens, compare directly; anything else goes to
+/// `hot_jit_eq_value`.
+fn value_eq(
+    builder: &mut FunctionBuilder<'_>,
+    helper: FuncRef,
+    remap: &AHashMap<u32, usize>,
+    registers: &[Variable],
+    register_kinds: &[Option<RawKind>],
+    left: u32,
+    right: u32,
+) -> Result<cranelift_codegen::ir::Value, String> {
+    let is_token = |kind: RawKind| matches!(kind, RawKind::TypeTag | RawKind::StringConst);
+    let left_kind = register_kind(remap, register_kinds, left)?;
+    let right_kind = register_kind(remap, register_kinds, right)?;
+    let left_raw = builder.use_var(registers[remap_reg(remap, left)?]);
+    let right_raw = builder.use_var(registers[remap_reg(remap, right)?]);
+    if (left_kind == right_kind && !matches!(left_kind, RawKind::Dec | RawKind::OwnedVal))
+        || (is_token(left_kind) && is_token(right_kind))
+    {
+        let cmp = builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            left_raw,
+            right_raw,
+        );
+        let one = builder.ins().iconst(types::I64, 1);
+        let zero = builder.ins().iconst(types::I64, 0);
+        return Ok(builder.ins().select(cmp, one, zero));
+    }
+    let tag = |kind: RawKind| {
+        if is_token(kind) {
+            HELPER_VAL_KIND_TYPE_TOKEN
+        } else {
+            helper_value_kind(kind)
+        }
+    };
+    let left_tag = builder.ins().iconst(types::I64, tag(left_kind));
+    let right_tag = builder.ins().iconst(types::I64, tag(right_kind));
+    let call = builder
+        .ins()
+        .call(helper, &[left_tag, left_raw, right_tag, right_raw]);
+    Ok(builder.inst_results(call)[0])
+}
+
 /// Promote a typed JIT value to an OwnedVal via the promote_to_owned trampoline.
 fn promote_to_owned(
     builder: &mut FunctionBuilder<'_>,
@@ -9793,6 +9940,7 @@ fn compile_thunk_inline(
     result_var: Variable,
     merge_block: cranelift_codegen::ir::Block,
     returned_use: NumericErrUse,
+    call_scope: CallScope<'_>,
 ) -> Result<RawKind, String> {
     let instructions = &lambda.instructions;
     if instructions.is_empty() {
@@ -9846,11 +9994,15 @@ fn compile_thunk_inline(
         compile_time_owned: std::collections::HashSet::new(),
         locals,
         thunk_registry: AHashMap::new(),
-        scope_snapshots: Vec::new(),
+        // The thunk's body is a scope of its own: a binding there of one of
+        // the caller's names leaves the caller's binding as it was.
+        scope_snapshots: vec![parent_locals.clone()],
+        open_accumulators: Vec::new(),
         error_capture_active: false,
         relies_on_expected_return: false,
         function_body: false,
         returned_use,
+        call_scope,
     };
 
     let mut return_kind: Option<RawKind> = None;
@@ -9887,6 +10039,7 @@ fn compile_thunk_inline(
                     };
                     builder.def_var(result_var, owned_error);
                     return_kind = Some(RawKind::OwnedVal);
+                    ctx.emit_drop_scope_locals(builder, parent_locals);
                     builder.ins().jump(merge_block, &[]);
                 }
             },
@@ -9911,6 +10064,7 @@ fn compile_thunk_inline(
                 };
                 builder.def_var(result_var, val);
                 return_kind = Some(kind);
+                ctx.emit_drop_scope_locals(builder, parent_locals);
                 builder.ins().jump(merge_block, &[]);
             }
             _ => {
@@ -10069,33 +10223,96 @@ fn emit_self_recursive_call(
     }
 }
 
-/// Look up a function by name, matching both qualified ("::hot::bool/if") and
-/// unqualified ("if") names against the program's function list.
-/// Find a function by unqualified name suffix (e.g. "if" matches "::hot::bool/if").
-/// Used for core functions referenced without full qualification in bytecode.
-/// Only returns a match if exactly one namespace contains the name at the given arity.
-fn find_function_by_suffix(
-    program: &BytecodeProgram,
-    short_name: &str,
-    arity: Option<u8>,
-) -> Option<usize> {
-    let suffix = format!("/{}", short_name);
-    let mut found = None;
-    for (i, f) in program.functions.iter().enumerate() {
-        if f.name.ends_with(&suffix) {
-            if let Some(a) = arity
-                && f.arity != a
-                && !f.is_variadic
-            {
-                continue;
-            }
-            if found.is_some() {
-                return None;
-            }
-            found = Some(i);
+/// What the VM knows of the names a call can reach beyond the caller's own
+/// frame: the namespaces' bindings and the core functions. Compiled code
+/// resolves a call name through them as the interpreter does (see
+/// [`CallScope::resolve`]). Without them (`Default`), every unqualified call
+/// goes through the VM by name.
+#[derive(Clone, Copy, Default)]
+pub struct CallNames<'a> {
+    namespace_variables: Option<&'a indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>>,
+    core_functions: Option<&'a indexmap::IndexMap<String, FunctionId>>,
+}
+
+impl<'a> CallNames<'a> {
+    pub fn new(
+        namespace_variables: &'a indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>,
+        core_functions: &'a indexmap::IndexMap<String, FunctionId>,
+    ) -> Self {
+        Self {
+            namespace_variables: Some(namespace_variables),
+            core_functions: Some(core_functions),
         }
     }
-    found
+
+    /// Where the code of `function` (the function with id `function_id`)
+    /// makes its calls.
+    fn scope_of(
+        self,
+        program: &BytecodeProgram,
+        function_id: FunctionId,
+        function: &'a FunctionInfo,
+    ) -> CallScope<'a> {
+        CallScope {
+            names: self,
+            namespace: &function.namespace,
+            local_function: program.local_functions.contains(&function_id),
+        }
+    }
+}
+
+/// Where a body makes its calls: the namespace it was defined in, and the
+/// names the VM resolves there.
+#[derive(Clone, Copy)]
+struct CallScope<'a> {
+    names: CallNames<'a>,
+    namespace: &'a str,
+    /// A function defined in another function's body, whose lookups go on
+    /// into its definer's locals.
+    local_function: bool,
+}
+
+impl CallScope<'_> {
+    /// The function a call by `name` with `arity` arguments reaches, when it
+    /// is known before the call runs; `None` when the call has to go through
+    /// the VM by name.
+    ///
+    /// A qualified name is that function. An unqualified one resolves as the
+    /// interpreter's lookup does: the caller's locals (which the emitter
+    /// handles before this), then a binding of the name in the caller's
+    /// namespace (a variable, an alias, an import or a top-level lambda),
+    /// then a core function. Only the core function is known here, and only
+    /// when the namespace doesn't bind the name. A local function's lookups
+    /// also reach its definer's locals, which compiled code can't see.
+    fn resolve(&self, program: &BytecodeProgram, name: &str, arity: u8) -> Option<usize> {
+        if name.starts_with("::") {
+            return find_function_exact(program, name, Some(arity));
+        }
+        if self.local_function || self.namespace_binds(program, name) {
+            return None;
+        }
+        let core_name =
+            crate::lang::runtime::vm::core_function_name(self.names.core_functions?, name)?;
+        program
+            .functions
+            .iter()
+            .position(|f| f.name == core_name && (f.arity == arity || f.is_variadic))
+    }
+
+    /// Whether the caller's namespace binds `name`: as the VM holds its
+    /// variables now, or as the program declares them (aliases and imports
+    /// included).
+    fn namespace_binds(&self, program: &BytecodeProgram, name: &str) -> bool {
+        self.names
+            .namespace_variables
+            .and_then(|namespaces| namespaces.get(self.namespace))
+            .is_some_and(|variables| variables.contains_key(name))
+            || program
+                .namespaces
+                .namespaces
+                .get(self.namespace)
+                .is_some_and(|namespace| namespace.variables.contains_key(name))
+    }
 }
 
 /// When `arity` is provided, prefer the overload that matches the arg count.
@@ -10147,6 +10364,7 @@ fn try_inline_lazy_branch_call(
     // How the call's result is used: what returning a value from a branch
     // amounts to.
     result_use: NumericErrUse,
+    call_scope: CallScope<'_>,
 ) -> Result<Option<(RawKind, cranelift_codegen::ir::Value)>, String> {
     let callee = match program.functions.get(called_function_id as usize) {
         Some(f) => f,
@@ -10243,6 +10461,7 @@ fn try_inline_lazy_branch_call(
             result_var,
             then_merge,
             result_use,
+            call_scope,
         )?;
 
         // Compile else-branch (writes to result_var, jumps to else_merge)
@@ -10264,6 +10483,7 @@ fn try_inline_lazy_branch_call(
                 result_var,
                 else_merge,
                 result_use,
+                call_scope,
             )?
         } else {
             builder.def_var(result_var, zero);
@@ -10318,7 +10538,7 @@ fn is_known_lazy_branch_selector(callee: &FunctionInfo) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        JitAvailability, JitConfig, JitMode, JitRuntimeState, JitTypeTag, TypeSig,
+        CallNames, JitAvailability, JitConfig, JitMode, JitRuntimeState, JitTypeTag, TypeSig,
         compile_supported_function,
     };
     use crate::lang::Engine;
@@ -10438,7 +10658,7 @@ mod tests {
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
         let mut jit = JitRuntimeState::new(program.functions.len(), &conf);
         let result = jit
-            .try_call_compiled_lambda(&program, &lambda, &[val!(41)], &[])
+            .try_call_compiled_lambda(&program, &lambda, &[val!(41)], &[], CallNames::default())
             .unwrap();
 
         assert_eq!(result, Some(val!(42)));
@@ -10487,7 +10707,13 @@ mod tests {
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
         let mut jit = JitRuntimeState::new(program.functions.len(), &conf);
         let result = jit
-            .try_call_compiled_lambda(&program, &lambda, &[val!(5)], &[val!(10)])
+            .try_call_compiled_lambda(
+                &program,
+                &lambda,
+                &[val!(5)],
+                &[val!(10)],
+                CallNames::default(),
+            )
             .unwrap();
 
         assert_eq!(result, Some(val!(15)));
@@ -10545,7 +10771,13 @@ mod tests {
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
         let mut jit = JitRuntimeState::new(program.functions.len(), &conf);
         let result = jit
-            .try_call_compiled_lambda(&program, &lambda, &[val!(41)], &[add_ref])
+            .try_call_compiled_lambda(
+                &program,
+                &lambda,
+                &[val!(41)],
+                &[add_ref],
+                CallNames::default(),
+            )
             .unwrap();
 
         assert_eq!(result, Some(val!(42)));
@@ -10571,7 +10803,7 @@ mod tests {
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
         let mut jit = JitRuntimeState::new(program.functions.len(), &conf);
         let result = jit
-            .try_call_compiled_lambda(&program, &lambda, &[], &[])
+            .try_call_compiled_lambda(&program, &lambda, &[], &[], CallNames::default())
             .unwrap();
 
         assert_eq!(result, None);
@@ -10616,7 +10848,8 @@ mod tests {
         };
 
         let sig = TypeSig::from_args(&[val!(41)]);
-        let compiled = compile_supported_function(&program, 0, &function, &sig).unwrap();
+        let compiled =
+            compile_supported_function(&program, 0, &function, &sig, CallNames::default()).unwrap();
         let result = compiled.call(&[val!(41)]).unwrap();
         assert_eq!(result, val!(42));
     }
@@ -10663,8 +10896,14 @@ mod tests {
         let args = [val!(10)];
         jit.record_call(0, &args);
         assert!(jit.should_compile_now(0, &args));
-        jit.compile_function(&program, 0, &program.functions[0], &args)
-            .unwrap();
+        jit.compile_function(
+            &program,
+            0,
+            &program.functions[0],
+            &args,
+            CallNames::default(),
+        )
+        .unwrap();
         let result = jit.try_call_compiled(0, &args).unwrap().unwrap();
         assert_eq!(result, val!(11));
     }
@@ -10712,7 +10951,8 @@ mod tests {
         let input = Val::Dec(D256::from_str("2.5", Context::default()).unwrap());
         let expected = Val::Dec(D256::from_str("4.0", Context::default()).unwrap());
         let sig = TypeSig::from_args(std::slice::from_ref(&input));
-        let compiled = compile_supported_function(&program, 0, &function, &sig).unwrap();
+        let compiled =
+            compile_supported_function(&program, 0, &function, &sig, CallNames::default()).unwrap();
         let result = compiled.call(std::slice::from_ref(&input)).unwrap();
         assert_eq!(result, expected);
     }
@@ -13497,8 +13737,19 @@ mod tests {
             source: None,
         });
 
+        // `if` is a core function: that is what the unqualified call reaches.
+        let mut core_functions = IndexMap::<String, FunctionId>::new();
+        core_functions.insert("::hot::bool/if".to_string(), 1);
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
-        let mut vm = make_test_vm(program, conf);
+        let mut vm = VirtualMachine::new(
+            Arc::new(program),
+            None,
+            Arc::new(IndexMap::<String, FunctionId>::new()),
+            Arc::new(core_functions),
+            Arc::new(IndexMap::<(String, String), String>::new()),
+            Arc::new(CoreVariableRegistry::new()),
+            Some(conf),
+        );
         assert_eq!(
             vm.execute_compiled_user_function(0, &[val!(10), val!(5)])
                 .unwrap(),
@@ -13982,7 +14233,13 @@ mod tests {
         });
 
         let sig = TypeSig::from_args(&[]);
-        let err = match compile_supported_function(&program, 0, &program.functions[0], &sig) {
+        let err = match compile_supported_function(
+            &program,
+            0,
+            &program.functions[0],
+            &sig,
+            CallNames::default(),
+        ) {
             Ok(_) => panic!("unconsumed lazy thunk should not compile"),
             Err(err) => err,
         };
@@ -14049,7 +14306,13 @@ mod tests {
         });
 
         let sig = TypeSig::from_args(&[]);
-        let err = match compile_supported_function(&program, 0, &program.functions[0], &sig) {
+        let err = match compile_supported_function(
+            &program,
+            0,
+            &program.functions[0],
+            &sig,
+            CallNames::default(),
+        ) {
             Ok(_) => panic!("lazy thunk escape should not compile"),
             Err(err) => err,
         };
@@ -14194,7 +14457,13 @@ mod tests {
         });
 
         let sig = TypeSig::from_args(&[]);
-        let err = match compile_supported_function(&program, 0, &program.functions[0], &sig) {
+        let err = match compile_supported_function(
+            &program,
+            0,
+            &program.functions[0],
+            &sig,
+            CallNames::default(),
+        ) {
             Ok(_) => panic!("JIT bailout hotlib wrapper should not compile"),
             Err(err) => err,
         };
@@ -14222,7 +14491,13 @@ mod tests {
             register_count: 1,
             source: None,
         });
-        let err = match compile_supported_function(&program, 1, &program.functions[1], &sig) {
+        let err = match compile_supported_function(
+            &program,
+            1,
+            &program.functions[1],
+            &sig,
+            CallNames::default(),
+        ) {
             Ok(_) => panic!("caller of JIT bailout hotlib wrapper should not compile"),
             Err(err) => err,
         };
@@ -14268,7 +14543,13 @@ mod tests {
         });
 
         let sig = TypeSig::from_args(&[]);
-        let result = compile_supported_function(&program, 0, &program.functions[0], &sig);
+        let result = compile_supported_function(
+            &program,
+            0,
+            &program.functions[0],
+            &sig,
+            CallNames::default(),
+        );
         assert!(
             result.is_ok(),
             "VM callback hotlib policy should compile: {:?}",
@@ -14464,8 +14745,14 @@ mod tests {
         });
 
         let sig = TypeSig::from_args(&[val!(10)]);
-        let compiled =
-            compile_supported_function(&program, 0, &program.functions[0], &sig).unwrap();
+        let compiled = compile_supported_function(
+            &program,
+            0,
+            &program.functions[0],
+            &sig,
+            CallNames::default(),
+        )
+        .unwrap();
         let result = compiled.call(&[val!(10)]).unwrap();
         let expected = Val::Dec(D256::from_str("11.5", Context::default()).unwrap());
         assert_eq!(
@@ -16156,5 +16443,245 @@ mod tests {
         // ExtractInnerVal on a plain value should pass it through
         let result = vm.execute_compiled_user_function(0, &[val!(42)]).unwrap();
         assert_eq!(result, val!(42));
+    }
+
+    // --- Source-level parity: the interpreter and code compiled at once ---
+
+    /// `source` compiled and its namespaces initialized, with `jit` as the
+    /// VM's JIT config.
+    fn source_vm(source: &str, jit: Val) -> VirtualMachine {
+        let mut program = crate::lang::parser::parse_hot(source).expect("test source parses");
+        let mut compiler = crate::lang::compiler::Compiler::new();
+        compiler
+            .compile_program_unchecked(&mut program)
+            .expect("test source compiles");
+        let mut vm = VirtualMachine::new(
+            compiler.get_program_arc(),
+            None,
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            Arc::new(CoreVariableRegistry::new()),
+            Some(val!({ "jit": jit })),
+        );
+        vm.execute().expect("namespace initialization runs");
+        vm
+    }
+
+    /// The results of calling `function` with each of `calls`, first
+    /// interpreted, then compiled from its first call; and whether it
+    /// compiled.
+    fn interpreted_and_compiled(
+        source: &str,
+        function: &str,
+        calls: &[Vec<Val>],
+    ) -> (Vec<Val>, Vec<Val>, bool) {
+        let run = |jit: Val| {
+            let mut vm = source_vm(source, jit);
+            let results: Vec<Val> = calls
+                .iter()
+                .map(|args| {
+                    vm.call_function_bypassing_unified_lookup(function, args)
+                        .expect("the call runs")
+                })
+                .collect();
+            let id = vm
+                .program
+                .functions
+                .iter()
+                .position(|f| f.name == function)
+                .expect("the function exists") as FunctionId;
+            (results, vm.jit_has_compiled_function(id))
+        };
+        let (interpreted, _) = run(val!({"mode": "disabled"}));
+        let (compiled, was_compiled) = run(val!({"mode": "enabled", "threshold": 1}));
+        (interpreted, compiled, was_compiled)
+    }
+
+    // A collecting flow whose arms all miss returns an empty collection of
+    // its own. The compiled code returned the one empty collection it was
+    // built with, which its caller then freed: later calls read freed
+    // memory.
+    #[test]
+    fn jit_collecting_flows_with_no_matching_arm_match_the_interpreter() {
+        let source = r#"
+::t ns
+
+pick-all fn (n: Int): Map {
+    cond-all {
+        eq(n, 1) => one { "a" }
+        eq(n, 2) => two { "b" }
+    }
+}
+
+pick-first fn (n: Int): Vec {
+    picked: All<Vec> cond {
+        eq(n, 1) => { "a" }
+        eq(n, 2) => { "b" }
+    }
+    picked
+}
+"#;
+        let calls: Vec<Vec<Val>> = (0..120i64).map(|i| vec![Val::Int(i % 3)]).collect();
+        for function in ["::t/pick-all", "::t/pick-first"] {
+            let (interpreted, compiled, was_compiled) =
+                interpreted_and_compiled(source, function, &calls);
+            assert!(was_compiled, "{function} compiles");
+            assert_eq!(compiled, interpreted, "{function}");
+        }
+        let (interpreted, _, _) = interpreted_and_compiled(source, "::t/pick-all", &calls[..3]);
+        assert_eq!(
+            interpreted,
+            vec![val!({}), val!({"one": "a"}), val!({"two": "b"})]
+        );
+    }
+
+    // A binding in a cond branch gets its own variable: the compiled code
+    // overwrote the parameter's, so the function's last line saw the
+    // branch's value.
+    #[test]
+    fn jit_branch_binding_leaves_the_outer_binding() {
+        let source = r#"
+::t ns
+
+shadow fn (x: Int): Map {
+    y cond {
+        gt(x, 0) => { x 5  add(x, 1) }
+        => { 0 }
+    }
+    {y: y, x-after: x}
+}
+"#;
+        let calls = vec![vec![val!(1)], vec![val!(0)], vec![val!(2)]];
+        let (interpreted, compiled, was_compiled) =
+            interpreted_and_compiled(source, "::t/shadow", &calls);
+        assert!(was_compiled, "the function compiles");
+        assert_eq!(compiled, interpreted);
+        assert_eq!(compiled[0], val!({"y": 6, "x-after": 1}));
+    }
+
+    // An unqualified call resolves as the interpreter resolves it: the
+    // namespace's alias or top-level lambda, never the one function anywhere
+    // whose name ends in the call's name.
+    #[test]
+    fn jit_unqualified_calls_resolve_namespace_bindings_first() {
+        let source = r#"
+::geo ns
+
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+
+::other ns
+
+label fn (x: Int): Str { "other" }
+
+::app ns
+
+Circle ::geo/Shape.Circle
+label (x) { "local" }
+
+make fn (r: Dec): Any { Circle({radius: r}) }
+call-label fn (x: Int): Str { label(x) }
+"#;
+        let dec = |s: &str| Val::Dec(D256::from_str(s, Context::default()).expect("a Dec"));
+        let (interpreted, compiled, was_compiled) =
+            interpreted_and_compiled(source, "::app/make", &[vec![dec("4.0")], vec![dec("1.5")]]);
+        assert!(was_compiled, "make compiles");
+        assert_eq!(compiled, interpreted);
+        let Val::Map(circle) = &compiled[0] else {
+            panic!("make builds a typed value: {:?}", compiled[0]);
+        };
+        assert_eq!(
+            crate::val::tagged_type_name(circle),
+            Some("::geo/Shape.Circle")
+        );
+        let (interpreted, compiled, was_compiled) =
+            interpreted_and_compiled(source, "::app/call-label", &[vec![val!(1)], vec![val!(2)]]);
+        assert!(was_compiled, "call-label compiles");
+        assert_eq!(compiled, interpreted);
+        assert_eq!(compiled, vec![val!("local"), val!("local")]);
+    }
+
+    // A match arm's value test compares the subject as it is, as the
+    // interpreter's `Eq` does: an Err differs from the literal rather than
+    // halting, a Dec differs from an Int literal, and an Int subject's type
+    // differs from a variant's.
+    #[test]
+    fn jit_match_value_arms_compare_without_consuming() {
+        let source = r#"
+::t ns
+
+Reply enum { Steps(Vec), Pending }
+
+status fn (x: Result): Str {
+    match x {
+        "active" => { "on" }
+        _ => { "default" }
+    }
+}
+
+number-kind fn (x: Any): Str {
+    match x {
+        5 => { "int five" }
+        5.0 => { "dec five" }
+        _ => { "other" }
+    }
+}
+
+pending-or-other fn (x: Any): Str {
+    match x {
+        Reply.Pending => { "pending" }
+        _ => { "other" }
+    }
+}
+"#;
+        let dec = |s: &str| Val::Dec(D256::from_str(s, Context::default()).expect("a Dec"));
+        let cases = [
+            (
+                "::t/status",
+                vec![vec![Val::err(val!("missing"))], vec![val!("active")]],
+                vec![val!("default"), val!("on")],
+            ),
+            (
+                "::t/number-kind",
+                vec![vec![dec("5.0")], vec![val!(5)], vec![val!(6)]],
+                vec![val!("dec five"), val!("int five"), val!("other")],
+            ),
+            (
+                "::t/pending-or-other",
+                vec![vec![val!(3)], vec![val!(4)]],
+                vec![val!("other"), val!("other")],
+            ),
+        ];
+        for (function, calls, expected) in cases {
+            let (interpreted, compiled, was_compiled) =
+                interpreted_and_compiled(source, function, &calls);
+            assert!(was_compiled, "{function} compiles");
+            assert_eq!(interpreted, expected, "{function} interpreted");
+            assert_eq!(compiled, expected, "{function} compiled");
+        }
+    }
+
+    // A parallel flow's binding reads the sibling it depends on. The
+    // compiled code ran the bindings one by one without binding them, so
+    // the read failed; such a function stays interpreted.
+    #[test]
+    fn jit_declines_parallel_flows() {
+        let source = r#"
+::t ns
+
+enrich fn (i: Int): Map {
+    parallel {
+        user mul(i, 2)
+        orders add(user, 1)
+    }
+}
+"#;
+        let calls = vec![vec![val!(3)], vec![val!(149)]];
+        let (interpreted, compiled, was_compiled) =
+            interpreted_and_compiled(source, "::t/enrich", &calls);
+        assert!(!was_compiled, "a parallel flow stays interpreted");
+        assert_eq!(compiled, interpreted);
+        assert_eq!(compiled[1], val!({"user": 298, "orders": 299}));
     }
 }
