@@ -22,6 +22,8 @@ mod layout;
 mod scan;
 
 #[cfg(test)]
+mod corpus_tests;
+#[cfg(test)]
 mod tests;
 
 use crate::lang::ast::Program;
