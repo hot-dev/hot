@@ -406,28 +406,18 @@ pub async fn orgs_create_handler(
             .await;
 
             // Set the current org cookie so user is on this org after checkout
-            let org_cookie = axum_extra::extract::cookie::Cookie::build((
+            let org_cookie = crate::auth::build_cookie(
                 crate::auth::current_org_cookie_name(),
                 org_id.to_string(),
-            ))
-            .path("/")
-            .max_age(time::Duration::days(30))
-            .http_only(true)
-            .same_site(axum_extra::extract::cookie::SameSite::Lax)
-            .secure(!hot::env::is_local_dev())
-            .build();
+                time::Duration::days(30),
+            );
 
             // Set the environment cookie to the new development env
-            let env_cookie = axum_extra::extract::cookie::Cookie::build((
+            let env_cookie = crate::auth::build_cookie(
                 crate::auth::current_env_cookie_name(),
                 env_id.to_string(),
-            ))
-            .path("/")
-            .max_age(time::Duration::days(30))
-            .http_only(true)
-            .same_site(axum_extra::extract::cookie::SameSite::Lax)
-            .secure(!hot::env::is_local_dev())
-            .build();
+                time::Duration::days(30),
+            );
 
             let jar = jar.add(org_cookie).add(env_cookie);
 
