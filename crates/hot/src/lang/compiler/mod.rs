@@ -6410,12 +6410,10 @@ impl Compiler {
                 && tr.name == existing_name
                 && !tr.variants.contains_key(variant_name)
             {
-                let mut variants = tr.variants.clone();
-                variants.insert(variant_name.to_string(), Some(resolved_source.clone()));
-                *c = Constant::VariantTypeRef(crate::lang::refs::TypeRef::new(
-                    existing_name.clone(),
-                    variants,
-                ));
+                // In place: copying the table for each arrow took time
+                // quadratic in the enum's variants.
+                std::sync::Arc::make_mut(&mut tr.variants)
+                    .insert(variant_name.to_string(), Some(resolved_source.clone()));
             }
         }
 

@@ -2502,80 +2502,13 @@ impl VirtualMachine {
                 // Serial flows are the default and don't need tracking
                 let (call_id, start_time) = if flow_type != FlowType::Serial && self.traces_calls()
                 {
-                    if let (Some(emitter), Some(execution_context)) =
-                        (&self.emitter, &self.execution_context)
-                    {
-                        let call_id = Uuid::now_v7();
-                        let start_time = chrono::Utc::now();
-                        let parent_call_id = self.call_stack.last().map(|ctx| ctx.call_id);
-                        let call_depth = self.call_stack.len();
-                        let runtime_path = self.build_runtime_path();
-
-                        // Traced call name for the inline flow. Flows the
-                        // compiler inlined from a named callable (e.g. `if()`)
-                        // carry that name so call-trace search still finds
-                        // them; ordinary flows get a synthetic name. The outer
-                        // `if flow_type != FlowType::Serial` makes Serial logically
-                        // impossible here, but we use a string fallback rather than
-                        // `unreachable!()` so a future refactor that changes the
-                        // outer guard can't take the worker down.
-                        let function_name =
-                            match origin_name.and_then(|id| self.get_string_constant(id).ok()) {
-                                Some(name) => (*name).to_owned(),
-                                None => match flow_type {
-                                    FlowType::Serial => "<serial>".to_string(),
-                                    FlowType::Parallel => "<parallel>".to_string(),
-                                    FlowType::Cond => "<cond>".to_string(),
-                                    FlowType::CondAll => "<cond-all>".to_string(),
-                                    FlowType::Pipe => "<pipe>".to_string(),
-                                    FlowType::Match => "<match>".to_string(),
-                                    FlowType::MatchAll => "<match-all>".to_string(),
-                                },
-                            };
-
-                        // Build flow info with inline marker
-                        let flow_type_str = match flow_type {
-                            FlowType::Serial => "serial",
-                            FlowType::Parallel => "parallel",
-                            FlowType::Cond => "cond",
-                            FlowType::CondAll => "cond-all",
-                            FlowType::Pipe => "pipe",
-                            FlowType::Match => "match",
-                            FlowType::MatchAll => "match-all",
-                        };
-                        let mut flow_map = IndexMap::new();
-                        flow_map.insert(Val::from("type"), Val::from(flow_type_str.to_string()));
-                        if origin_name.is_some() {
-                            // Compiler-inlined named callable (e.g. `if()`):
-                            // mirror the flow shape these calls emitted before
-                            // inlining, when they executed as `fn cond`
-                            // functions ({type: "cond", fn: true}).
-                            flow_map.insert(Val::from("fn"), Val::Bool(true));
-                        } else {
-                            flow_map.insert(Val::from("flow_id"), Val::from(flow_id.to_string()));
-                            flow_map.insert(Val::from("inline"), Val::Bool(true));
-                        }
-
-                        let start_event = crate::lang::emitter::EngineEvent::call_start(
-                            execution_context,
-                            call_id,
-                            parent_call_id,
-                            function_name.clone(),
-                            function_name, // static_scope same as function_name for inline flows
-                            runtime_path
-                                .unwrap_or_else(|| format!("run_{}", execution_context.run_id)),
-                            call_depth,
-                            vec![], // No args for inline flows
-                            source.as_deref(),
-                            start_time,
-                            Some(Val::Map(Box::new(flow_map))),
-                        );
-                        emitter.emit(start_event);
-
-                        (Some(call_id), Some(start_time))
-                    } else {
-                        (None, None)
-                    }
+                    let origin = origin_name.and_then(|id| self.get_string_constant(id).ok());
+                    self.trace_inline_flow_start(
+                        flow_type,
+                        flow_id,
+                        origin.as_deref(),
+                        source.as_deref(),
+                    )
                 } else {
                     (None, None)
                 };
@@ -2640,26 +2573,7 @@ impl VirtualMachine {
                     };
 
                     // Emit call:stop event for inline flows (those with a call_id)
-                    if let Some(call_id) = flow_context.call_id
-                        && let (Some(emitter), Some(execution_context)) =
-                            (&self.emitter, &self.execution_context)
-                    {
-                        let end_time = chrono::Utc::now();
-                        let duration_us = flow_context
-                            .start_time
-                            .map(|start| (end_time - start).num_microseconds().unwrap_or(0))
-                            .unwrap_or(0);
-
-                        let stop_event = crate::lang::emitter::EngineEvent::call_stop(
-                            execution_context,
-                            call_id,
-                            Some(result.clone()),
-                            None, // No error
-                            end_time,
-                            duration_us,
-                        );
-                        emitter.emit(stop_event);
-                    }
+                    self.trace_inline_flow_stop(&flow_context, &result);
 
                     self.set_register(dest, result)?;
                 } else {
@@ -8873,6 +8787,166 @@ impl VirtualMachine {
             self.registers[idx] = val;
         }
         result
+    }
+
+    /// Start tracing an inline flow of `flow_type`, as a call named for the
+    /// callable it was inlined from (`origin`) or for its flow type: emit its
+    /// `call:start` event. Returns the call's id and start time, for
+    /// [`Self::trace_inline_flow_stop`].
+    fn trace_inline_flow_start(
+        &self,
+        flow_type: FlowType,
+        flow_id: Uuid,
+        origin: Option<&str>,
+        source: Option<&crate::lang::bytecode::SourceLocation>,
+    ) -> (Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>) {
+        let (Some(emitter), Some(execution_context)) = (&self.emitter, &self.execution_context)
+        else {
+            return (None, None);
+        };
+        let call_id = Uuid::now_v7();
+        let start_time = chrono::Utc::now();
+        let parent_call_id = self.call_stack.last().map(|ctx| ctx.call_id);
+        let call_depth = self.call_stack.len();
+        let runtime_path = self.build_runtime_path();
+
+        // Traced call name for the inline flow. Flows the compiler inlined
+        // from a named callable (e.g. `if()`) carry that name so call-trace
+        // search still finds them; ordinary flows get a synthetic name.
+        let function_name = match origin {
+            Some(name) => name.to_owned(),
+            None => match flow_type {
+                FlowType::Serial => "<serial>".to_string(),
+                FlowType::Parallel => "<parallel>".to_string(),
+                FlowType::Cond => "<cond>".to_string(),
+                FlowType::CondAll => "<cond-all>".to_string(),
+                FlowType::Pipe => "<pipe>".to_string(),
+                FlowType::Match => "<match>".to_string(),
+                FlowType::MatchAll => "<match-all>".to_string(),
+            },
+        };
+
+        // Build flow info with inline marker
+        let flow_type_str = match flow_type {
+            FlowType::Serial => "serial",
+            FlowType::Parallel => "parallel",
+            FlowType::Cond => "cond",
+            FlowType::CondAll => "cond-all",
+            FlowType::Pipe => "pipe",
+            FlowType::Match => "match",
+            FlowType::MatchAll => "match-all",
+        };
+        let mut flow_map = IndexMap::new();
+        flow_map.insert(Val::from("type"), Val::from(flow_type_str.to_string()));
+        if origin.is_some() {
+            // Compiler-inlined named callable (e.g. `if()`): mirror the flow
+            // shape these calls emitted before inlining, when they executed
+            // as `fn cond` functions ({type: "cond", fn: true}).
+            flow_map.insert(Val::from("fn"), Val::Bool(true));
+        } else {
+            flow_map.insert(Val::from("flow_id"), Val::from(flow_id.to_string()));
+            flow_map.insert(Val::from("inline"), Val::Bool(true));
+        }
+
+        let start_event = crate::lang::emitter::EngineEvent::call_start(
+            execution_context,
+            call_id,
+            parent_call_id,
+            function_name.clone(),
+            function_name, // static_scope same as function_name for inline flows
+            runtime_path.unwrap_or_else(|| format!("run_{}", execution_context.run_id)),
+            call_depth,
+            vec![], // No args for inline flows
+            source,
+            start_time,
+            Some(Val::Map(Box::new(flow_map))),
+        );
+        emitter.emit(start_event);
+
+        (Some(call_id), Some(start_time))
+    }
+
+    /// Finish tracing the inline flow `flow_context`, which produced
+    /// `result`: emit its `call:stop` event.
+    fn trace_inline_flow_stop(&self, flow_context: &FlowContext, result: &Val) {
+        if let Some(call_id) = flow_context.call_id
+            && let (Some(emitter), Some(execution_context)) =
+                (&self.emitter, &self.execution_context)
+        {
+            let end_time = chrono::Utc::now();
+            let duration_us = flow_context
+                .start_time
+                .map(|start| (end_time - start).num_microseconds().unwrap_or(0))
+                .unwrap_or(0);
+
+            let stop_event = crate::lang::emitter::EngineEvent::call_stop(
+                execution_context,
+                call_id,
+                Some(result.clone()),
+                None, // No error
+                end_time,
+                duration_us,
+            );
+            emitter.emit(stop_event);
+        }
+    }
+
+    /// Compiled code of a traced call entered an inline flow: trace it, and
+    /// open its flow context, which the calls it makes report as theirs.
+    pub(crate) fn begin_compiled_flow(
+        &mut self,
+        flow_type: FlowType,
+        origin: Option<&str>,
+        source: Option<&crate::lang::bytecode::SourceLocation>,
+    ) {
+        let flow_id = Uuid::now_v7();
+        let (call_id, start_time) = if self.traces_calls() {
+            self.trace_inline_flow_start(flow_type, flow_id, origin, source)
+        } else {
+            (None, None)
+        };
+        self.flow_contexts.push(FlowContext {
+            flow_id,
+            call_id,
+            start_time,
+            flow_type,
+            _result_modifier: FlowResultModifier::One,
+            _flow_variables: Vec::new(),
+            flow_variable_refs: Vec::new(),
+            cond_branch_results: Vec::new(),
+            cond_branch_executed: false,
+            current_branch: None,
+            pipe_step_results: Vec::new(),
+            parallel: None,
+        });
+    }
+
+    /// Compiled code ended the inline flow [`Self::begin_compiled_flow`]
+    /// opened, with `result`: close its flow context and trace its end.
+    pub(crate) fn end_compiled_flow(&mut self, result: &Val) {
+        if let Some(flow_context) = self.flow_contexts.pop() {
+            self.trace_inline_flow_stop(&flow_context, result);
+        }
+    }
+
+    /// Compiled code entered branch `branch` of the inline flow it opened,
+    /// or left it (`None`).
+    pub(crate) fn set_compiled_flow_branch(&mut self, branch: Option<Arc<str>>) {
+        if let Some(flow_context) = self.flow_contexts.last_mut() {
+            flow_context.current_branch = branch;
+        }
+    }
+
+    /// How many flow contexts are open, for [`Self::close_flows_from`].
+    pub(crate) fn flow_context_depth(&self) -> usize {
+        self.flow_contexts.len()
+    }
+
+    /// Close the flow contexts opened since there were `depth`, untraced, as
+    /// the interpreter leaves those a self tail call or an early return
+    /// jumps out of.
+    pub(crate) fn close_flows_from(&mut self, depth: usize) {
+        self.flow_contexts.truncate(depth);
     }
 
     /// When calls are traced, start tracing a call of `function_info` with

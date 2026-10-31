@@ -585,21 +585,32 @@ fn a_function_over_the_size_cap_is_interpreted() {
     assert!(vm.jit_function_profile(id).is_some_and(|p| p.do_not_jit));
 }
 
-/// An emitter that keeps the functions of the call events it gets.
+/// One call event: its type, the function it names, and the flow a
+/// `call:start` reports the call in (its type and branch, as `type/branch`).
+type CallEvent = (String, String, String);
+
+/// An emitter that keeps the call events it gets.
 #[derive(Default)]
-struct CallEvents(Mutex<Vec<(String, String)>>);
+struct CallEvents(Mutex<Vec<CallEvent>>);
 
 impl EngineEventEmitter for CallEvents {
     fn emit(&self, event: EngineEvent) {
         if event.event_type.starts_with("call:") {
-            let function = match event.event_data.get("function_name") {
-                Some(Val::Str(name)) => name.to_string(),
+            let text = |val: Option<Val>| match val {
+                Some(Val::Str(text)) => text.to_string(),
+                _ => String::new(),
+            };
+            let function = text(event.event_data.get("function_name"));
+            let flow = match event.event_data.get("flow") {
+                Some(flow @ Val::Map(_)) => {
+                    format!("{}/{}", text(flow.get("type")), text(flow.get("branch")))
+                }
                 _ => String::new(),
             };
             self.0
                 .lock()
                 .expect("events lock")
-                .push((event.event_type, function));
+                .push((event.event_type, function, flow));
         }
     }
 }
@@ -610,8 +621,12 @@ impl CallEvents {
             .lock()
             .expect("events lock")
             .iter()
-            .filter(|(kind, name)| kind == event_type && function.is_none_or(|f| name == f))
+            .filter(|(kind, name, _)| kind == event_type && function.is_none_or(|f| name == f))
             .count()
+    }
+
+    fn all(&self) -> Vec<CallEvent> {
+        self.0.lock().expect("events lock").clone()
     }
 }
 
@@ -645,6 +660,13 @@ down fn (n: Int): Int {
         => { add(1, down(sub(n, 1))) }
     }
 }
+
+count fn (n: Int): Int {
+    cond {
+        eq(n, 0) => { inc(0) }
+        => { count(sub(n, 1)) }
+    }
+}
 "#;
     let traced = |jit: Val| {
         let mut vm = source_vm(source, jit);
@@ -656,25 +678,45 @@ down fn (n: Int): Int {
             );
         }
         assert_eq!(call(&mut vm, "::t/down", &[val!(4)]), Ok(val!(5)));
-        assert_eq!(
-            vm.jit_has_compiled_function(function_id(&vm, "::t/inc")),
-            vm.jit_config().is_enabled()
-        );
-        // Each call that starts stops. (The interpreter also traces the
-        // inline `cond` flows, which compiled code doesn't.)
-        let starts = events.count("call:start", None);
-        let flows = events.count("call:start", Some("<cond>"));
-        assert_eq!(events.count("call:stop", None), starts);
-        [
-            events.count("call:start", Some("::t/inc")),
-            events.count("call:start", Some("::t/down")),
-            starts - flows,
-        ]
+        // A self tail call leaves its cond each time round.
+        assert_eq!(call(&mut vm, "::t/count", &[val!(3)]), Ok(val!(1)));
+        for name in ["::t/inc", "::t/down", "::t/count"] {
+            assert_eq!(
+                vm.jit_has_compiled_function(function_id(&vm, name)),
+                vm.jit_config().is_enabled(),
+                "{name}"
+            );
+        }
+        assert_eq!(vm.flow_context_depth(), 0, "every flow is closed");
+        events.all()
     };
     let interpreted = traced(val!({"mode": "disabled"}));
     let compiled = traced(val!({"mode": "enabled", "threshold": 1}));
-    assert_eq!(interpreted, [6, 5, 11]);
     assert_eq!(compiled, interpreted);
+    let starts = |name: &str| {
+        interpreted
+            .iter()
+            .filter(|(kind, function, _)| kind == "call:start" && function == name)
+            .count()
+    };
+    assert_eq!(
+        [
+            starts("::t/inc"),
+            starts("::t/down"),
+            starts("::t/count"),
+            starts("<cond>")
+        ],
+        [7, 5, 1, 9]
+    );
+    // The call `down` makes in its cond's first branch reports the branch.
+    assert!(
+        interpreted
+            .iter()
+            .any(|(_, function, flow)| function == "::t/inc"
+                && flow.starts_with("cond/")
+                && flow.len() > 5),
+        "{interpreted:?}"
+    );
 
     // A self-call that compiled code makes natively when calls aren't
     // traced goes through the VM when they are, so each call is traced.

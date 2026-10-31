@@ -45,12 +45,25 @@ thread_local! {
     /// the code reads in place (see `owned_dec_constant`).
     static COMPILE_DEC_CONSTANTS: std::cell::RefCell<Vec<std::pin::Pin<Box<D256>>>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The flow traces of the code being compiled on this thread (see
+    /// `owned_flow_trace`).
+    static COMPILE_FLOW_TRACES: std::cell::RefCell<Vec<std::pin::Pin<Box<FlowTrace>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Where the code being compiled reads the Dec constant `value`: memory the
 /// compiled function owns. The program it is compiled from can be a
 /// temporary (a lambda's synthetic program is dropped once it compiles), so
 /// a pointer into its constants would dangle.
+/// Where the code being compiled reads `trace`: memory the compiled function
+/// owns, as for its Dec constants (see `owned_dec_constant`).
+fn owned_flow_trace(trace: FlowTrace) -> *const FlowTrace {
+    let trace = Box::pin(trace);
+    let ptr: *const FlowTrace = &*trace;
+    COMPILE_FLOW_TRACES.with(|traces| traces.borrow_mut().push(trace));
+    ptr
+}
+
 fn owned_dec_constant(value: D256) -> *const D256 {
     // Pinned: the code holds its address.
     let constant = Box::pin(value);
@@ -604,6 +617,12 @@ struct JitHelperRefs {
     vec_append: FuncRef,
     is_null: FuncRef,
     check_consumable: FuncRef,
+    /// Inline flow tracing, emitted only when calls are traced (see
+    /// `FlowTrace`).
+    flow_begin: FuncRef,
+    flow_end: FuncRef,
+    flow_branch: FuncRef,
+    flow_unwind: FuncRef,
 }
 
 impl JitHelperRefs {
@@ -759,6 +778,12 @@ pub struct JitCompiledFunction {
     /// The Dec constants the code reads, held for it (see
     /// `owned_dec_constant`).
     _dec_constants: Vec<std::pin::Pin<Box<D256>>>,
+    /// The inline flow traces the code reads, held for it (see
+    /// `owned_flow_trace`).
+    _flow_traces: Vec<std::pin::Pin<Box<FlowTrace>>>,
+    /// The code opens flow contexts in the VM for the inline flows it
+    /// traces; a call closes any an early return left open.
+    traces_flows: bool,
     func_id: FuncId,
     /// Argument ABI layout, computed once at compile time. Rebuilding it per
     /// call allocated two Vecs on every VM->JIT boundary crossing.
@@ -802,6 +827,9 @@ impl JitCompiledFunction {
     /// again there would repeat what it already did.
     pub fn call(&self, args: &[Val]) -> Result<Val, String> {
         let depth = jit_entry_call_depth();
+        let vm_ptr = get_jit_vm_ptr();
+        let flow_depth = (self.traces_flows && !vm_ptr.is_null())
+            .then(|| unsafe { &*vm_ptr }.flow_context_depth());
         let raw_args = self.signature.encode_args(args, &self.arg_layout)?;
         let mut raw_result = vec![0u64; self.result_word_len];
         let fn_ptr = self.module.get_finalized_function(self.func_id);
@@ -823,6 +851,11 @@ impl JitCompiledFunction {
             }
             _ => unsafe { Ok(take_owned_val(ret)) },
         };
+        // Flow contexts an early return left open close here, as the
+        // interpreter closes those of a call that leaves early.
+        if let Some(flow_depth) = flow_depth {
+            unsafe { &mut *vm_ptr }.close_flows_from(flow_depth);
+        }
         // A helper's panic goes on from here, where it can unwind.
         resume_helper_panic();
         result
@@ -1989,9 +2022,14 @@ fn compile_with_return_kind(
         "hot_jit_check_consumable",
         hot_jit_check_consumable as *const u8,
     );
+    builder.symbol("hot_jit_flow_begin", hot_jit_flow_begin as *const u8);
+    builder.symbol("hot_jit_flow_end", hot_jit_flow_end as *const u8);
+    builder.symbol("hot_jit_flow_branch", hot_jit_flow_branch as *const u8);
+    builder.symbol("hot_jit_flow_unwind", hot_jit_flow_unwind as *const u8);
     // Freed on every path out, a failed compile's included.
     let mut module = CodeModule::new(JITModule::new(builder));
     COMPILE_DEC_CONSTANTS.with(|constants| constants.borrow_mut().clear());
+    COMPILE_FLOW_TRACES.with(|traces| traces.borrow_mut().clear());
 
     let ptr_ty = module.target_config().pointer_type();
     let mut sig = module.make_signature();
@@ -2061,12 +2099,15 @@ fn compile_with_return_kind(
     let result_word_len = AbiLayout::for_result(result_kind).word_len();
     let dec_constants =
         COMPILE_DEC_CONSTANTS.with(|constants| mem::take(&mut *constants.borrow_mut()));
+    let flow_traces = COMPILE_FLOW_TRACES.with(|traces| mem::take(&mut *traces.borrow_mut()));
     Ok(JitCompiledFunction {
         signature: signature.clone(),
         result_kind,
         needs_vm_scope,
         module,
         _dec_constants: dec_constants,
+        traces_flows: !flow_traces.is_empty(),
+        _flow_traces: flow_traces,
         func_id,
         arg_layout,
         result_word_len,
@@ -2408,6 +2449,70 @@ contained_helpers! {
     hot_jit_check_constraint = hot_jit_check_constraint_body(
         src_ptr: i64, spec_ptr: i64, test: i64
     ) -> HALT_SENTINEL;
+}
+
+/// What a traced inline flow's `call:start` event says of it, for
+/// `hot_jit_flow_begin`: its type, the callable it was inlined from, and
+/// where it is. The compiled function owns it (see `owned_flow_trace`).
+struct FlowTrace {
+    flow_type: FlowType,
+    origin: Option<String>,
+    source: Option<Box<crate::lang::bytecode::SourceLocation>>,
+}
+
+/// Compiled code of a traced call enters an inline flow, as the
+/// interpreter's BeginFlow traces one (see `VirtualMachine::begin_compiled_flow`).
+unsafe extern "C" fn hot_jit_flow_begin(trace_ptr: i64) {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() || trace_ptr == 0 {
+        return;
+    }
+    let trace = unsafe { &*(trace_ptr as *const FlowTrace) };
+    unsafe { &mut *vm_ptr }.begin_compiled_flow(
+        trace.flow_type,
+        trace.origin.as_deref(),
+        trace.source.as_deref(),
+    );
+}
+
+/// Compiled code ends the inline flow it entered, with the result in
+/// `kind`/`raw` (a `HELPER_VAL_KIND_*` and its value). Borrows `raw`.
+unsafe extern "C" fn hot_jit_flow_end(kind: i64, raw: i64) {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return;
+    }
+    let result = unsafe { decode_helper_val(kind, raw) };
+    unsafe { &mut *vm_ptr }.end_compiled_flow(&result);
+}
+
+/// Compiled code enters the branch named by the `Str` at `name_ptr` of the
+/// inline flow it is in, or leaves it (0).
+unsafe extern "C" fn hot_jit_flow_branch(name_ptr: i64) {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return;
+    }
+    let branch = match name_ptr {
+        0 => None,
+        ptr => match unsafe { &*(ptr as *const Val) } {
+            Val::Str(name) => Some(Arc::clone(name)),
+            _ => None,
+        },
+    };
+    unsafe { &mut *vm_ptr }.set_compiled_flow_branch(branch);
+}
+
+/// A self tail call jumps out of the `count` inline flows it is in: close
+/// them untraced, as the interpreter's tail call does.
+unsafe extern "C" fn hot_jit_flow_unwind(count: i64) {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let depth = vm.flow_context_depth();
+    vm.close_flows_from(depth.saturating_sub(usize::try_from(count).unwrap_or(0)));
 }
 
 /// Intrinsic helpers return this sentinel when a Result.Err operand
@@ -4379,6 +4484,38 @@ fn declare_jit_helpers(
             "hot_jit_check_consumable",
             &[types::I64],
             &[types::I64],
+        )?,
+        flow_begin: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_flow_begin",
+            &[types::I64],
+            &[],
+        )?,
+        flow_end: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_flow_end",
+            &[types::I64, types::I64],
+            &[],
+        )?,
+        flow_branch: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_flow_branch",
+            &[types::I64],
+            &[],
+        )?,
+        flow_unwind: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_flow_unwind",
+            &[types::I64],
+            &[],
         )?,
     })
 }
@@ -8245,7 +8382,8 @@ fn build_supported_body(
             Instruction::BeginFlow {
                 flow_type,
                 result_modifier,
-                ..
+                source,
+                origin_name,
             } => {
                 let flow_type = *flow_type;
                 let result_modifier = *result_modifier;
@@ -8353,9 +8491,27 @@ fn build_supported_body(
                     pipe_steps: 0,
                     force_owned_result,
                 });
+                // A traced inline flow is a call record of its own, and the
+                // flow of the calls made in it, as in the interpreter.
+                if ctx.call_scope.traces_flows() && flow_type != FlowType::Serial {
+                    let origin = (*origin_name)
+                        .map(|id| constant_string(program, id).map(str::to_string))
+                        .transpose()?;
+                    let trace = owned_flow_trace(FlowTrace {
+                        flow_type,
+                        origin,
+                        source: source.clone(),
+                    });
+                    let trace = builder.ins().iconst(types::I64, trace as i64);
+                    builder.ins().call(ctx.helper_refs.flow_begin, &[trace]);
+                }
                 ctx.jump_to_next(builder, ip)?;
             }
-            Instruction::CondBranchStart { condition, .. } => {
+            Instruction::CondBranchStart {
+                condition,
+                branch_name,
+                ..
+            } => {
                 let Some(flow) = active_flows.last_mut() else {
                     return Err("JIT CondBranchStart without active flow".to_string());
                 };
@@ -8377,9 +8533,21 @@ fn build_supported_body(
                     &ctx.register_kinds,
                     *condition,
                 )?;
-                builder
-                    .ins()
-                    .brif(cond, execute_block, &[], skip_block, &[]);
+                if ctx.call_scope.traces_flows() && flow.flow_type != FlowType::Serial {
+                    // The calls a taken branch makes report it as theirs.
+                    let enter_block = builder.create_block();
+                    builder.ins().brif(cond, enter_block, &[], skip_block, &[]);
+                    builder.switch_to_block(enter_block);
+                    builder.seal_block(enter_block);
+                    let name = new_owned_val(Val::from(constant_string(program, *branch_name)?));
+                    let name = builder.ins().iconst(types::I64, name);
+                    builder.ins().call(ctx.helper_refs.flow_branch, &[name]);
+                    builder.ins().jump(execute_block, &[]);
+                } else {
+                    builder
+                        .ins()
+                        .brif(cond, execute_block, &[], skip_block, &[]);
+                }
             }
             Instruction::CondBranchEnd {
                 result,
@@ -8388,6 +8556,10 @@ fn build_supported_body(
                 let Some(flow) = active_flows.last_mut() else {
                     return Err("JIT CondBranchEnd without active flow".to_string());
                 };
+                if ctx.call_scope.traces_flows() && flow.flow_type != FlowType::Serial {
+                    let none = builder.ins().iconst(types::I64, 0);
+                    builder.ins().call(ctx.helper_refs.flow_branch, &[none]);
+                }
                 let kind_opt = ctx.register_kinds[ctx.remap_reg(*result)?];
                 if kind_opt.is_none() {
                     ctx.jump_to_next(builder, ip)?;
@@ -8547,6 +8719,18 @@ fn build_supported_body(
                         let raw = ctx.reg_value(builder, result_reg)?;
                         ctx.define_register(builder, *dest, kind, raw)?;
                     }
+                }
+                if ctx.call_scope.traces_flows() && flow.flow_type != FlowType::Serial {
+                    let (kind, raw) = match ctx.register_kinds[ctx.remap_reg(*dest)?] {
+                        Some(kind) if !matches!(kind, RawKind::TypeTag | RawKind::StringConst) => {
+                            (helper_value_kind(kind), ctx.reg_value(builder, *dest)?)
+                        }
+                        // A type token's text isn't at hand here: it traces
+                        // as null.
+                        _ => (HELPER_VAL_KIND_NULL, builder.ins().iconst(types::I64, 0)),
+                    };
+                    let kind = builder.ins().iconst(types::I64, kind);
+                    builder.ins().call(ctx.helper_refs.flow_end, &[kind, raw]);
                 }
                 ctx.jump_to_next(builder, ip)?;
             }
@@ -8711,6 +8895,16 @@ fn build_supported_body(
                         new_val
                     };
                     builder.def_var(param_var, new_val);
+                }
+                if ctx.call_scope.traces_flows() {
+                    let open = active_flows
+                        .iter()
+                        .filter(|flow| flow.flow_type != FlowType::Serial)
+                        .count();
+                    if open > 0 {
+                        let open = builder.ins().iconst(types::I64, open as i64);
+                        builder.ins().call(ctx.helper_refs.flow_unwind, &[open]);
+                    }
                 }
                 builder.ins().jump(ctx.blocks[0], &[]);
                 for halt_block in halts {
@@ -10920,6 +11114,12 @@ impl CallScope<'_> {
     /// (see [`CallNames::traced`]).
     fn native_self_calls(&self) -> bool {
         !self.names.traced
+    }
+
+    /// Whether the body traces its inline flows, as the interpreter does
+    /// when the VM traces calls.
+    fn traces_flows(&self) -> bool {
+        self.names.traced
     }
 
     /// The function a call by `name` with `arity` arguments reaches, when it

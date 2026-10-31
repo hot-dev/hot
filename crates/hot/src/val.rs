@@ -5000,10 +5000,8 @@ mod tests {
 
     #[test]
     fn test_resolve_boxes_type_ref() {
-        let type_ref = crate::lang::refs::TypeRef {
-            name: "::myapp/User".to_string(),
-            variants: indexmap::IndexMap::new(),
-        };
+        let type_ref =
+            crate::lang::refs::TypeRef::new("::myapp/User".to_string(), indexmap::IndexMap::new());
         let boxed = Val::Box(Box::new(type_ref));
         assert_eq!(boxed.resolve_boxes(), Val::from("::myapp/User"));
     }
