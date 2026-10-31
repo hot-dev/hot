@@ -999,7 +999,6 @@ impl Engine {
                 format!("::hot::$run::run-{}", short_id)
             };
 
-            run_namespaces.push(eval_ns.clone());
             let eval_code_with_namespace = format!("{} ns\n{}", eval_ns, code);
             // Store eval code for pretty error reporting later
             eval_source_content = Some(eval_code_with_namespace.clone());
@@ -1017,6 +1016,10 @@ impl Engine {
                     // previously an eval `::ns ns` declaration replaced the
                     // project's entire namespace.
                     for (ns_path, namespace) in eval_program.namespaces {
+                        // Eval input may declare namespaces of its own; its
+                        // result is the last one's last value.
+                        run_namespaces.retain(|ns| *ns != ns_path.to_string());
+                        run_namespaces.push(ns_path.to_string());
                         tracing::debug!(
                             "Merging eval namespace '{}' with {} variables",
                             ns_path,
