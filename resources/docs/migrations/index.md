@@ -74,8 +74,9 @@ environment key.
   password `hotdev` on any database. A PostgreSQL installation set up as the
   [PostgreSQL guide](/docs/configuration/postgres) describes therefore had an
   admin sign-in for the `local` organization that anyone could use.
-- 3.0.1 sets that password only on a local-development SQLite database, and
-  the App refuses it outside local development.
+- 3.0.1 gives the local identity no password, and the App refuses `hotdev`.
+  In local development the App still signs the local identity in
+  automatically.
 - Remove the old password as well. On PostgreSQL, run this as a superuser or
   `BYPASSRLS` role:
 

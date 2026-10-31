@@ -1285,10 +1285,6 @@ pub async fn check_default_data_exists(db: &DatabasePool) -> Result<(i64, i64), 
     Ok((org_count, user_count))
 }
 
-/// The local identity's sign-in password. Only a local-development SQLite
-/// database gets it, and the App refuses it outside local development.
-pub const LOCAL_DEV_PASSWORD: &str = "hotdev";
-
 /// Insert default organization and user if none exist
 pub async fn insert_default_data(
     db: &DatabasePool,
@@ -1302,7 +1298,6 @@ pub async fn insert_default_data(
     let org_id = Uuid::now_v7();
     let user_id = Uuid::now_v7();
     let org_user_id = Uuid::now_v7();
-    let user_auth_id = Uuid::now_v7();
     let env_id = Uuid::now_v7();
 
     // Begin transaction by using the entity functions
@@ -1316,36 +1311,8 @@ pub async fn insert_default_data(
     )
     .await?;
 
-    // A password only for a local-development SQLite database. `hot init`
-    // also bootstraps PostgreSQL, where a published password would be a
-    // way in for anyone who can reach the App.
-    if crate::env::is_local_dev() && matches!(db, DatabasePool::Sqlite(_)) {
-        let password_hash = crate::auth::hash_password_with_random_salt(LOCAL_DEV_PASSWORD)
-            .map_err(|e| {
-                DatabaseError::User(UserError::Database(sqlx::Error::Protocol(format!(
-                    "Password hashing failed: {}",
-                    e
-                ))))
-            })?;
-
-        let auth_data: serde_json::Value = serde_json::from_str(&password_hash).map_err(|e| {
-            DatabaseError::User(UserError::Database(sqlx::Error::Protocol(format!(
-                "JSON parsing failed: {}",
-                e
-            ))))
-        })?;
-
-        UserAuth::insert_user_auth(
-            db,
-            &user_auth_id,
-            &user_id,
-            "email_password",
-            "local@hot.dev",
-            Some(&auth_data),
-            &user_id,
-        )
-        .await?;
-    }
+    // The local identity has no password. The App signs it in automatically
+    // in local development; every other account signs up.
 
     // Insert org (individual type for local dev)
     Org::insert_org(db, &org_id, "Local", "local", "individual", &user_id).await?;
@@ -1589,14 +1556,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_sqlite_gets_the_local_dev_password() {
+    async fn sqlite_local_identity_has_no_password() {
         let db = test_db().await;
         insert_default_data(&db).await.unwrap();
-        let auth = UserAuth::get_user_auth(&db, "email_password", "local@hot.dev")
-            .await
-            .unwrap();
-        let stored = serde_json::to_string(&auth.auth_data.unwrap()).unwrap();
-        assert!(crate::auth::verify_password(LOCAL_DEV_PASSWORD, &stored).unwrap());
+        assert!(matches!(
+            UserAuth::get_user_auth(&db, "email_password", "local@hot.dev").await,
+            Err(UserError::Database(sqlx::Error::RowNotFound))
+        ));
     }
 
     #[tokio::test]
