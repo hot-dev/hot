@@ -35,7 +35,11 @@ hot.project.my-app.src.paths ["./hot/src", "./lib"]
 ```
 
 - List of directories containing `.hot` files
-- All paths are relative to the `hot.hot` file location
+- Relative paths resolve from the directory you run `hot` in, as do
+  `test.paths`, resource paths, `.hot/` and the local database. Run `hot`
+  from the directory that holds `hot.hot`: `hot check -c other/hot.hot` from
+  elsewhere doesn't find that project's files. (A package's `local`
+  dependency paths in `pkg.hot` resolve from the package.)
 
 ### test.paths
 
