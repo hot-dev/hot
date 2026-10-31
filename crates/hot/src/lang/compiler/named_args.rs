@@ -330,6 +330,34 @@ impl RecordTypes {
                 .find(|(name, _)| *name == type_name)
                 .map(|(_, target)| target.clone())
         };
+        // A local import of a variant (`Circle ::geo/Shape.Circle`) names
+        // the enum and the variant whose payload the call builds.
+        let (local, variant) = match (local, variant) {
+            (Some(Some(target)), None) => match target.rsplit_once('/') {
+                Some((target_ns, name)) if name.contains('.') => {
+                    let (enum_name, variant) = name.split_once('.').unwrap_or((name, ""));
+                    (
+                        Some(Some(format!("{target_ns}/{enum_name}"))),
+                        Some(variant.to_string()),
+                    )
+                }
+                _ => (Some(Some(target)), None),
+            },
+            // So does a namespace's var import of one.
+            (None, None) if !type_name.contains('/') => {
+                match self.imports.get(&(ns.to_string(), type_name.clone())) {
+                    Some((target_ns, name)) if name.contains('.') => {
+                        let (enum_name, variant) = name.split_once('.').unwrap_or((name, ""));
+                        (
+                            Some(Some(format!("{target_ns}/{enum_name}"))),
+                            Some(variant.to_string()),
+                        )
+                    }
+                    _ => (None, None),
+                }
+            }
+            other => other,
+        };
         let shadowed = matches!(local, Some(None));
         let found = match &local {
             Some(Some(target)) => self.find(ns, target),

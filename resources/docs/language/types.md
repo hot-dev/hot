@@ -115,8 +115,10 @@ literal outside a closed union, as in `pick-fruit("grape")`, is a compile-time
 runtime too: a computed value from outside the set, such as one parsed from
 JSON, fails where it enters the type with `Err(ConstraintError.Violation)`. An
 `open` union also accepts unknown values of the same type. Literal union values
-stay plain values, with no type tag. See
-[Constraints](/docs/language/constraints).
+stay plain values, with no type tag. A union can name other literal unions, as
+in `Day type Weekday | Weekend` or `Workday type Weekday | "holiday"`: its
+values stay plain too, and a `match` arm or `is-type` on it accepts a member of
+any of them. See [Constraints](/docs/language/constraints).
 
 They also work inline, without a named type:
 
@@ -325,12 +327,11 @@ Use `match` to check variant types (preferred):
 
 ### Matching a Variant's Payload
 
-Inside an `Enum.Variant` arm, the matched name and the arm's binding hold that
-variant's payload: a `Vec`, a `Str`, an `Int`, and so on. A record payload is
-the exception: the arm keeps the variant, whose fields read through to the
-payload, so it can still be passed on as the enum. A unit variant has no
-payload, so its arm keeps the variant too. Outside the arm the matched name is
-still the variant:
+Inside an `Enum.Variant` arm, a binding the arm names (`Reply.Declined (why)`)
+holds that variant's payload: a `Vec`, a `Str`, an `Int`, and so on. The
+matched name, including a `fn match` parameter, keeps the variant, so an arm
+can pass it on as the enum. A record payload's binding keeps the variant too:
+its fields read through to the payload. A unit variant has no payload:
 
 {{snippet:types#match-payload}}
 
@@ -376,6 +377,10 @@ can add members.
 Comparing a closed union's value with a literal outside it, as in
 `eq(severity, "hgih")`, is always false (`ne`: always true), so `hot check`
 warns with `impossible-comparison`. `null` and `open` unions aren't checked.
+
+Naming a variant an enum doesn't have, as in a misspelled `Direction.Upp`,
+makes `hot check` warn with `unknown-variant`: evaluating it fails at run
+time. An arm such as `Direction.Dwn =>` warns too, since it never matches.
 
 ```hot
 Severity type "low" | "medium" | "high"
@@ -523,6 +528,10 @@ See **[Error Handling](/docs/language/errors)** for the full story on Result typ
 exhaustive matches, and other statically visible constraints. It does not turn
 Hot into a fully static language: `Any`, dynamically shaped maps, and values
 from unresolved boundaries may defer failures until runtime.
+
+A type name that nothing declares or imports is an `unresolved-type` error in
+a parameter annotation, and an `unresolved-type` warning in a record field, a
+variant's payload or a return annotation.
 
 Structural compatibility and runtime identity answer different questions. A
 known record may satisfy a struct parameter by supplying every required field,

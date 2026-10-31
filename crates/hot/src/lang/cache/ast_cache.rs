@@ -1945,7 +1945,7 @@ named Greeting(text: greeting)
         let serialized = serialize_namespaces(&program.namespaces).unwrap();
         let hash = crate::hasher::HotHasher::hash_content(&serialized);
 
-        let expected = "7f68ab49c94c52c1e36e333aee0387720d051e906e569eb1abc1f8de18b4d7c0";
+        let expected = "d13025210e7351522190d497ef6df0242fc11fc76de3bda7f81295c2017b9dda";
         assert_eq!(
             hash, expected,
             "postcard cache wire layout changed (got hash {hash}). If this is \

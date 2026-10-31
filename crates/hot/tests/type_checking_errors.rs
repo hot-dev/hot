@@ -131,6 +131,12 @@ fn load_hot_std_from_path(
 /// file parsed with its path and merged member-wise, so namespaces can span
 /// files. Returns the compile errors.
 fn compile_files_and_get_errors(files: &[(&str, &str)]) -> Vec<CompilerError> {
+    compile_files(files).0
+}
+
+/// Like [`compile_files_and_get_errors`], returning the errors and the
+/// warnings.
+fn compile_files(files: &[(&str, &str)]) -> (Vec<CompilerError>, Vec<CompilerError>) {
     use hot::lang::engine::discover::merge_program_namespaces_strict;
 
     let hot_std_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hot/pkg/hot-std/src");
@@ -160,10 +166,12 @@ fn compile_files_and_get_errors(files: &[(&str, &str)]) -> Vec<CompilerError> {
         merge_program_namespaces_strict(&mut program.namespaces, parsed.namespaces).unwrap();
     }
 
-    match Compiler::new().compile_program(&mut program) {
+    let mut compiler = Compiler::new();
+    let errors = match compiler.compile_program(&mut program) {
         Ok(()) => vec![],
         Err(errors) => errors.errors,
-    }
+    };
+    (errors, compiler.diagnostics().warnings.clone())
 }
 
 /// Assert `errors` has a nested-placeholder error on `nested_line` and a
@@ -2081,6 +2089,63 @@ mod integration_tests {
         );
     }
 
+    /// A record's `where` clauses and closed literal-union fields still
+    /// apply when its constructor is declared separately, as `A type fn
+    /// (…)`, before or after the fields.
+    #[test]
+    fn test_where_kept_with_separate_type_fn() {
+        let source = r#"
+            ::test ns
+            Fruit type "apple" | "banana"
+            A type { x: Int, y: Int } where lte(%.x, 100)
+            A type fn (x: Int, y: Int): A { A({x, y}) }
+            B type fn (x: Int, y: Int): B { B({x, y}) }
+            B type { x: Int where lte(%, 100), y: Int }
+            Basket type { fruit: Fruit, n: Int }
+            Basket type fn (f: Str, n: Int): Basket { Basket({fruit: f, n}) }
+            a A({x: 200, y: 1})
+            b B({x: 300, y: 1})
+            c Basket({fruit: "kiwi", n: 1})
+            ok-a A({x: 1, y: 1})
+            ok-b B({x: 2, y: 1})
+            ok-c Basket({fruit: "apple", n: 1})
+        "#;
+        let found = violations(source);
+        assert_eq!(found.len(), 3, "Got: {:?}", found);
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("fails `A` (lte(%.x, 100))"))
+        );
+        assert!(found.iter().any(|m| m.contains("300 fails `lte(%, 100)`")));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("\"kiwi\" isn't one of the values of `Fruit`"))
+        );
+    }
+
+    /// An exact Dec meets an `Int` refinement as the Int it converts to at
+    /// run time, so `200.0` passes `in(%, [200, 204])`.
+    #[test]
+    fn test_where_converts_exact_numbers_before_the_predicate() {
+        let source = r#"
+            ::test ns
+            Code type Int where in(%, [200, 204])
+            Server type { code: Code }
+            Rate type Dec where eq(%, 2.0)
+            a Server({code: 200.0})
+            b: Code 204.0
+            c: Rate 2
+            d Server({code: 404.0})
+            e: Code 201.0
+        "#;
+        let found = violations(source);
+        assert_eq!(found.len(), 2, "Got: {:?}", found);
+        assert!(found.iter().any(|m| m.contains("404.0 fails `Code`")));
+        assert!(found.iter().any(|m| m.contains("201.0 fails `Code`")));
+    }
+
     fn violations(source: &str) -> Vec<String> {
         compile_and_get_type_errors(source)
             .iter()
@@ -2129,6 +2194,32 @@ mod integration_tests {
                 "Expected {expected:?} in {errors:?}"
             );
         }
+        assert!(
+            errors.iter().all(|m| !m.contains("TokenLiteral")),
+            "A diagnostic repeated a token: {errors:?}"
+        );
+    }
+
+    /// `registry-auth` is checked through var imports of `BoxConf`,
+    /// `BoxRegistryAuth` and `start` too.
+    #[test]
+    fn test_registry_auth_checked_through_var_imports() {
+        let source = r#"
+            ::test ns
+            BoxConf ::hot::box/BoxConf
+            BoxRegistryAuth ::hot::box/BoxRegistryAuth
+            start ::hot::box/start
+            conf BoxConf({image: "ghcr.io/a/b:1", registry-auth: {secret: "x", token: "ghp_confTokenLiteral"}})
+            auth BoxRegistryAuth({token: "ghp_authTokenLiteral"})
+            started fn () { start({image: "ghcr.io/a/b:1", registry-auth: {password: "ghp_startTokenLiteral"}}) }
+            good BoxConf({image: "ghcr.io/a/b:1", registry-auth: BoxRegistryAuth({secret: "ghcr-pull"})})
+        "#;
+        let errors: Vec<String> = compile_and_get_type_errors(source)
+            .iter()
+            .filter(|e| constraint_code(e) == Some("invalid-registry-auth"))
+            .map(|e| e.to_string())
+            .collect();
+        assert_eq!(errors.len(), 3, "Got: {:?}", errors);
         assert!(
             errors.iter().all(|m| !m.contains("TokenLiteral")),
             "A diagnostic repeated a token: {errors:?}"
@@ -2742,5 +2833,412 @@ mod integration_tests {
         "#;
         let found = impossible_comparisons(source);
         assert_eq!(found.len(), 1, "Only `::e/other` warns. Got: {:?}", found);
+    }
+
+    /// The names of the unresolved-name errors and warnings in `found`.
+    fn unresolved_names(found: &[CompilerError]) -> Vec<String> {
+        found
+            .iter()
+            .filter_map(|e| match e {
+                CompilerError::UnresolvedVariable { var_name, .. } => Some(var_name.clone()),
+                CompilerError::UnresolvedFunction { func_name, .. } => Some(func_name.clone()),
+                CompilerError::Constraint {
+                    code: "unresolved-variable" | "unresolved-function",
+                    message,
+                    ..
+                } => message.split('\'').nth(1).map(str::to_string),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An unresolved name is reported wherever it's written, not only as
+    /// a bare argument: inside Vec and Map literals, templates, cond and
+    /// match arms, spreads and `do(...)`. 3.0.0 didn't check these, and a
+    /// program that never evaluates the name runs, so these are warnings;
+    /// a bare argument stays an error.
+    #[test]
+    fn test_unresolved_names_inside_literals_and_arms_are_reported() {
+        let source = r#"
+            ::test ns
+            in-vec fn (): Vec { [::nope::b1/y()] }
+            in-map fn (): Map { {a: ::nope::b2/y()} }
+            in-tmpl fn (): Str { `v=${::nope::b3/y()}` }
+            in-vec-local fn (): Vec { [nope-vec] }
+            in-map-local fn (): Map { {a: nope-map} }
+            in-tmpl-local fn (): Str { `v=${nope-tmpl}` }
+            in-nested-arg fn (): Vec { [add(nope-nested, 1)] }
+            in-cond fn (n: Int): Int {
+              cond {
+                gt(n, 0) => { nope-cond }
+                => { 0 }
+              }
+            }
+            in-fn-cond fn cond (n: Int): Int {
+              gt(n, 0) => { nope-fn-cond }
+              => { 0 }
+            }
+            in-match fn (r: Any): Str {
+              match r {
+                Result.Ok => { nope-match }
+                Result.Err => { "e" }
+              }
+            }
+            in-fn-match fn match (r: Any): Str {
+              Result.Ok => { nope-fn-match }
+              _ => { "e" }
+            }
+            in-spread fn (m: Map): Map { {...m, a: nope-spread} }
+            in-spread-base fn (): Map { {...nope-spread-base, a: 1} }
+            in-vec-spread fn (): Vec { [...nope-vec-spread] }
+            in-do fn (): Int { do(nope-do) }
+            top {f: ::nonexistent::pkg/some-fn}
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            unresolved_names(&errors).is_empty(),
+            "Expected warnings, not errors. Got: {:?}",
+            errors
+        );
+        let warnings = compile_and_get_warnings(source);
+        let names = unresolved_names(&warnings);
+        for expected in [
+            "::nope::b1/y",
+            "::nope::b2/y",
+            "::nope::b3/y",
+            "nope-vec",
+            "nope-map",
+            "nope-tmpl",
+            "nope-nested",
+            "nope-cond",
+            "nope-fn-cond",
+            "nope-match",
+            "nope-fn-match",
+            "nope-spread",
+            "nope-spread-base",
+            "nope-vec-spread",
+            "nope-do",
+            "::nonexistent::pkg/some-fn",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "Expected `{}` to be reported. Got: {:?}",
+                expected,
+                warnings
+            );
+        }
+        assert_eq!(names.len(), 16, "One warning per name. Got: {:?}", names);
+
+        let bare = compile_and_get_type_errors("::test ns\nf fn (): Any { add(nope-bare, 1) }\n");
+        assert_eq!(unresolved_names(&bare), vec!["nope-bare".to_string()]);
+    }
+
+    /// Names a literal, template or arm can see resolve: parameters,
+    /// earlier locals, an arm's binding, lambda parameters, a binding made
+    /// inside an arm, and functions.
+    #[test]
+    fn test_resolved_names_inside_literals_and_arms_stay_quiet() {
+        let source = r#"
+            ::test ns
+            Shape enum { Circle(Map), Point }
+            helper fn (x: Int): Int { x }
+            f fn (n: Int, xs: Vec, m: Map): Any {
+              local add(n, 1)
+              a [n, local, helper(n), ...xs, {k: local, g: helper}]
+              b {...m, t: `${local} ${helper(n)}`}
+              c map(xs, (x) { {x: x, n: n} })
+              d cond {
+                gt(n, 0) => {
+                  inner add(local, 1)
+                  [inner, local]
+                }
+                => { [n] }
+              }
+              e match Shape.Circle({r: 1}) {
+                Shape.Circle(payload) => { [payload, n] }
+                _ => { [local] }
+              }
+              [a, b, c, d, e, do(local)]
+            }
+            g fn cond (n: Int): Vec {
+              gt(n, 0) => { [n, helper(n)] }
+              => { [`${n}`] }
+            }
+            top {f: helper, v: [helper(1)]}
+        "#;
+        let mut found = compile_and_get_type_errors(source);
+        found.extend(compile_and_get_warnings(source));
+        let names = unresolved_names(&found);
+        assert!(
+            names.is_empty(),
+            "Expected no unresolved names. Got: {:?}",
+            found
+        );
+    }
+
+    /// A chain of nested `if`, `or` or `and` calls type-checks in time
+    /// linear in its depth. Each level used to infer its arguments twice,
+    /// so 40 levels took 2^40 steps.
+    #[test]
+    fn test_deeply_nested_logic_calls_check_in_linear_time() {
+        let depth = 40;
+        let mut if_chain = r#""other""#.to_string();
+        let mut or_chain = format!("eq(x, {depth})");
+        let mut and_chain = format!("eq(x, {depth})");
+        let mut match_chain = "0".to_string();
+        for i in (0..depth).rev() {
+            if_chain = format!(r#"if(eq(x, {i}), "v{i}", {if_chain})"#);
+            or_chain = format!("or(eq(x, {i}), {or_chain})");
+            and_chain = format!("and(gt(x, {i}), {and_chain})");
+            match_chain = format!("match x {{ {i} => {{ {i} }}\n _ => {{ {match_chain} }} }}");
+        }
+        let source = format!(
+            "::test ns\n\
+             label fn (x: Int): Str {{ {if_chain} }}\n\
+             member fn (x: Int): Bool {{ {or_chain} }}\n\
+             all fn (x: Int): Bool {{ {and_chain} }}\n\
+             pick fn (x: Int): Int {{ {match_chain} }}\n"
+        );
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(compile_and_get_type_errors(&source));
+        });
+        let errors = finished
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("type checking a 40-deep chain should finish quickly");
+        assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+    }
+
+    /// `or(x, {})` with `x: Any?` can be any value, so reading a field off
+    /// the result doesn't warn. Each read off a closed record warns once,
+    /// not once per time `or` or `if` looked at its arguments.
+    #[test]
+    fn test_or_with_an_any_argument_is_any_and_warns_once() {
+        let source = r#"
+            ::test ns
+            HttpRequest ::hot::http/HttpRequest
+            any-opt fn (x: Any?): Str {
+              body or(x, {})
+              or(body.text, "")
+            }
+            request fn (request: HttpRequest): Str {
+              body or(request.body, {})
+              or(body.text, "")
+            }
+            closed-or fn (): Any {
+              body {a: 1}
+              or(body.text, "")
+            }
+            closed-if fn (): Any {
+              body {a: 1}
+              if(true, body.other, "")
+            }
+        "#;
+        let warnings = compile_and_get_warnings(source);
+        let count = |field: &str| {
+            warnings
+                .iter()
+                .filter(|w| matches!(w, CompilerError::UnknownField { field_name, .. } if field_name == field))
+                .count()
+        };
+        assert_eq!(
+            (count("text"), count("other")),
+            (1, 1),
+            "One warning per read off the closed records. Got: {:?}",
+            warnings
+        );
+    }
+
+    /// A cond flow's type includes every arm, the first one too, and a
+    /// default arm means it is never null: `fn cond` with only a default
+    /// arm has that arm's type.
+    #[test]
+    fn test_cond_flow_type_includes_every_arm() {
+        let source = r#"
+            ::test ns
+            only-default fn cond (acc: Map): Map {
+              => { acc }
+            }
+            two-arms fn cond (n: Int): Str {
+              gt(n, 0) => { "pos" }
+              => { "other" }
+            }
+            first-arm-mismatch fn cond (n: Int): Int {
+              gt(n, 0) => { "pos" }
+              => { "other" }
+            }
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+        let mismatched: Vec<String> = compile_and_get_warnings(source)
+            .iter()
+            .filter_map(|w| match w {
+                CompilerError::AnnotationMismatch { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            mismatched,
+            vec!["::test/first-arm-mismatch".to_string()],
+            "Only the function whose arms are all Str but declares Int warns"
+        );
+    }
+
+    /// The first arm of a cond flow is checked like the others.
+    #[test]
+    fn test_first_cond_arm_is_checked() {
+        let source = r#"
+            ::test ns
+            two fn (a: Int, b: Int): Int { add(a, b) }
+            in-fn-cond fn cond (n: Int): Int {
+              gt(n, 0) => { two(1) }
+              => { 0 }
+            }
+            in-cond fn (n: Int): Int {
+              cond {
+                gt(n, 0) => { two(2) }
+                => { 0 }
+              }
+            }
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        let arity_errors = errors
+            .iter()
+            .filter(|e| matches!(e, CompilerError::ArityMismatch { func_name, .. } if func_name.ends_with("two")))
+            .count();
+        assert_eq!(arity_errors, 2, "Got: {:?}", errors);
+    }
+
+    /// A wrong-arity call inside `${...}` is reported like one outside it.
+    #[test]
+    fn test_arity_mismatch_inside_template_is_reported() {
+        let source = r#"
+            ::test ns
+            two-args fn (a: Int, b: Int): Str { `a=${a} b=${b}` }
+            caller fn (): Str { `x ${two-args(5)}` }
+            nested fn (): Str { `x ${concat("a", two-args(1, 2, 3))}` }
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        let actual: Vec<usize> = errors
+            .iter()
+            .filter_map(|e| match e {
+                CompilerError::ArityMismatch {
+                    func_name, actual, ..
+                } if func_name.ends_with("two-args") => Some(*actual),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(actual, vec![1, 3], "Got: {:?}", errors);
+    }
+
+    fn constraint_messages(errors: &[CompilerError], code: &str) -> Vec<String> {
+        errors
+            .iter()
+            .filter(|e| constraint_code(e) == Some(code))
+            .map(|e| e.to_string())
+            .collect()
+    }
+
+    /// A type name nothing declares in a record field, a variant payload or
+    /// a return annotation warns (`unresolved-type`). Code like this ran on
+    /// 3.0.0, so it stays a warning.
+    #[test]
+    fn test_unresolved_type_in_field_payload_or_return_warns() {
+        let source = r#"
+            ::test ns
+            Item type { name: Str }
+            Order type { id: Str, customer: Custmer, items: Vec<Iteem>, ok: Vec<Item> }
+            Shape enum { Circle(Circcle), Square(Item), Point }
+            make fn (): Shapee { Shape.Point }
+            fine fn (): Item? { null }
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+        let warnings = compile_and_get_warnings(source);
+        let found = constraint_messages(&warnings, "unresolved-type");
+        for name in ["Custmer", "Iteem", "Circcle", "Shapee"] {
+            assert!(
+                found.iter().any(|m| m.contains(&format!("'{name}'"))),
+                "Expected a warning for `{}`. Got: {:?}",
+                name,
+                found
+            );
+        }
+        assert_eq!(found.len(), 4, "Got: {:?}", found);
+    }
+
+    /// `Enum.Variant` naming a variant its enum doesn't declare warns
+    /// (`unknown-variant`), as does a match arm naming one (the arm never
+    /// matches). Evaluating the reference fails at run time, but a
+    /// program that never evaluates it ran on 3.0.0. Variants enrolled by
+    /// an arrow, and references through an alias or a var import, resolve.
+    #[test]
+    fn test_unknown_enum_variants_warn() {
+        let files = [
+            (
+                "/app/a.hot",
+                r#"
+                ::app::a ns
+                Dir enum { Up, Down }
+                Animal enum open { Dog, Cat }
+                Bird type { name: Str }
+                Bird -> Animal.Bird
+                Shape enum { Circle(Map), Point }
+
+                bad-closed fn (): Dir { Dir.Upp }
+                bad-call fn (): Shape { Shape.Circel({r: 1}) }
+                bad-open fn (): Animal { Animal.Catt }
+                good fn (): Vec { [Dir.Up, Animal.Bird, Shape.Circle({r: 1}), Shape.Point] }
+
+                lab fn match (x: Dir): Str {
+                    Dir.Up => { "u" }
+                    Dir.Dwn => { "d" }
+                    _ => { "?" }
+                }
+                lab2 fn (x: Animal): Str {
+                    match x {
+                        Animal.Bird => { "b" }
+                        Animal.Dgo => { "d" }
+                        _ => { "?" }
+                    }
+                }
+                fine fn match (x: Dir): Str {
+                    Dir.Up => { "u" }
+                    Dir.Down => { "d" }
+                }
+                "#,
+            ),
+            (
+                "/app/b.hot",
+                r#"
+                ::app::b ns
+                ::a ::app::a
+                Dir ::app::a/Dir
+                bad-alias fn (): Any { ::a/Dir.Lft }
+                bad-import fn (): Any { Dir.Rgt }
+                good-alias fn (): Any { [::a/Dir.Up, Dir.Down, ::app::a/Animal.Bird] }
+                "#,
+            ),
+        ];
+        let (errors, warnings) = compile_files(&files);
+        assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+        let found = constraint_messages(&warnings, "unknown-variant");
+        for expected in [
+            "`Dir` has no variant `Upp` (its variants: Down, Up)",
+            "`Shape` has no variant `Circel`",
+            "`Animal` has no variant `Catt`",
+            "`Dir` has no variant `Dwn` (its variants: Down, Up), so this arm never matches",
+            "`Animal` has no variant `Dgo`",
+            "`Dir` has no variant `Lft`",
+            "`Dir` has no variant `Rgt`",
+        ] {
+            assert!(
+                found.iter().any(|m| m.contains(expected)),
+                "Expected `{}`. Got: {:?}",
+                expected,
+                found
+            );
+        }
+        assert_eq!(found.len(), 7, "Got: {:?}", found);
     }
 }

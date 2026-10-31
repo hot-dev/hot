@@ -946,8 +946,12 @@ impl Engine {
         // usually also discovered as part of its source unit (run pushes the
         // file's directory onto src paths), and the same-file bindings are
         // deduplicated by merge_namespace.
+        // The run's own namespaces (the target file's, then the eval
+        // input's) run last, so the run's result is their last value.
+        let mut run_namespaces: Vec<String> = Vec::new();
         for parsed in &extra_parsed_files {
             for (ns_path, namespace) in &parsed.namespaces {
+                run_namespaces.push(ns_path.to_string());
                 tracing::debug!(
                     "  Found namespace '{}' with {} variables (from target file)",
                     ns_path,
@@ -1012,6 +1016,10 @@ impl Engine {
                     // previously an eval `::ns ns` declaration replaced the
                     // project's entire namespace.
                     for (ns_path, namespace) in eval_program.namespaces {
+                        // Eval input may declare namespaces of its own; its
+                        // result is the last one's last value.
+                        run_namespaces.retain(|ns| *ns != ns_path.to_string());
+                        run_namespaces.push(ns_path.to_string());
                         tracing::debug!(
                             "Merging eval namespace '{}' with {} variables",
                             ns_path,
@@ -1079,6 +1087,8 @@ impl Engine {
                 compiler.set_current_file(std::path::PathBuf::from(target_file), content);
             }
         }
+
+        compiler.set_run_namespaces(run_namespaces);
 
         // Try comprehensive compilation with validation first
         match compiler.compile_program(&mut combined_program) {
@@ -1507,7 +1517,9 @@ impl Engine {
             let hot_std = resolver.get_hot_std_dependency();
             let hot_std_path = hot_std.resolved_path.to_string_lossy().to_string();
 
-            match Self::discover_hot_files(&hot_std_path) {
+            // hot-std's src-paths only, as `hot check` and `hot run` load it:
+            // its test/ folder and pkg.hot are not part of the program
+            match Self::discover_dependency_source_files(&hot_std.resolved_path) {
                 Ok(files) if !files.is_empty() => {
                     tracing::debug!(
                         "Injecting hot-std from system: {} ({} files)",
@@ -2199,10 +2211,38 @@ fn (): Str { "unused" }
         assert!(errors.is_empty(), "{:?}", errors.to_diagnostics());
     }
 
-    /// A dependency whose `src-paths` hold no `.hot` files is the first
+    /// A dependency that contributes no `.hot` files (a resources-only or
+    /// deps-only package) loads, as it did in 3.0.0.
+    #[test]
+    fn check_accepts_a_dependency_with_no_source_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("prompts");
+        write_file(
+            lib.join("pkg.hot"),
+            "::hot::pkg ns\n\nhot.pkg.prompts {\n  name: \"example.com/prompts\",\n  version: \"1.0.0\",\n  deps: {},\n  resource-paths: [\"resources/\"],\n}\n",
+        );
+        write_file(lib.join("resources/greeting.txt"), "hello\n");
+        let src = dir.path().join("src");
+        write_file(src.join("app.hot"), "::app ns\n\nx 1\n");
+        let conf = crate::lang::data::eval_data(&format!(
+            "hot.project.app.deps {{\"example.com/prompts\": {{local: {:?}}}}}\n",
+            lib.display().to_string()
+        ))
+        .unwrap();
+
+        let errors = Engine::check_sources_pipeline_diagnostics(
+            &[src.display().to_string()],
+            &[],
+            Some(&conf),
+            Some("app"),
+        );
+        assert!(errors.is_empty(), "{:?}", errors.to_diagnostics());
+    }
+
+    /// A dependency whose declared `src-paths` don't exist is the first
     /// error, by name, not the unresolved references it leads to.
     #[test]
-    fn check_reports_a_dependency_with_no_source_files() {
+    fn check_reports_a_dependency_with_missing_src_paths() {
         let dir = tempfile::tempdir().unwrap();
         // The sources are in hot/src, but pkg.hot points at src/.
         let (src_paths, conf) = write_project_using_a_hot_src_package(dir.path(), "[\"src/\"]");
@@ -2212,11 +2252,11 @@ fn (): Str { "unused" }
                 .to_diagnostics();
         let first = diagnostics
             .first()
-            .expect("an empty dependency is an error");
+            .expect("a missing src-paths folder is an error");
         assert!(
             first
                 .message
-                .contains("Package 'example.com/lib' has no source files")
+                .contains("Package 'example.com/lib' declares src-paths")
                 && first.message.contains("[\"src/\"]"),
             "{diagnostics:?}"
         );
@@ -2224,6 +2264,180 @@ fn (): Str { "unused" }
             !diagnostics.iter().any(|d| d.code == "named-argument"),
             "{diagnostics:?}"
         );
+    }
+
+    /// A dependency whose src-paths leave its folder is an error naming
+    /// them. Loaded, those files would be cached and watched as if they
+    /// weren't part of it, so edits there went unseen.
+    #[test]
+    fn check_rejects_dependency_src_paths_outside_the_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src_paths, conf) =
+            write_project_using_a_hot_src_package(dir.path(), "[\"hot/src/\", \"../shared/\"]");
+        write_file(
+            dir.path().join("shared/lib/shared.hot"),
+            "::lib::shared ns\n\nv fn (): Int { 1 }\n",
+        );
+
+        let diagnostics =
+            Engine::check_sources_pipeline_diagnostics(&src_paths, &[], Some(&conf), Some("app"))
+                .to_diagnostics();
+        assert!(
+            diagnostics.iter().any(|d| d
+                .message
+                .contains("declares src-paths [\"../shared/\"] outside its folder")),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// Write a local package `name` at `root` with one source file, and
+    /// return the dependency entry for it.
+    fn write_local_package(root: &std::path::Path, name: &str, deps: &str, source: &str) -> String {
+        write_file(
+            root.join("pkg.hot"),
+            &format!(
+                "::hot::pkg ns\n\nhot.pkg.p {{\n  name: \"{name}\",\n  version: \"0.1.0\",\n  deps: {deps},\n  src-paths: [\"src/\"],\n}}\n"
+            ),
+        );
+        write_file(root.join("src/lib.hot"), source);
+        format!("{name:?}: {{local: {:?}}}", root.display().to_string())
+    }
+
+    /// `acme.com/utils` and `other.com/utils` are two dependencies; before,
+    /// the second was dropped because they share the package name `utils`.
+    #[test]
+    fn eval_loads_two_dependencies_with_the_same_package_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let acme = write_local_package(
+            &dir.path().join("acme/utils"),
+            "acme.com/utils",
+            "{}",
+            "::acme::utils ns\n\nwho fn (): Str { \"acme\" }\n",
+        );
+        let other = write_local_package(
+            &dir.path().join("other/utils"),
+            "other.com/utils",
+            "{}",
+            "::other::utils ns\n\nwho fn (): Str { \"other\" }\n",
+        );
+        let src = dir.path().join("src");
+        write_file(
+            src.join("app.hot"),
+            "::app ns\n\nmain fn (): Vec<Str> { [::acme::utils/who(), ::other::utils/who()] }\n",
+        );
+        let conf =
+            crate::lang::data::eval_data(&format!("hot.project.app.deps {{{acme}, {other}}}\n"))
+                .unwrap();
+
+        let result = Engine::eval_code_pipeline_with_deps(
+            "::app/main()",
+            &[src.display().to_string()],
+            &[],
+            Some(&conf),
+            Some("app"),
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            crate::val::Val::Vec(vec![
+                crate::val::Val::from("acme"),
+                crate::val::Val::from("other")
+            ])
+        );
+    }
+
+    /// A package's `local: "../sibling"` dependency resolves from the
+    /// package's folder, not the directory hot runs in.
+    #[test]
+    fn check_resolves_a_package_local_dependency_from_the_package_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages = dir.path().join("packages");
+        write_local_package(
+            &packages.join("pkg-core"),
+            "example.com/pkg-core",
+            "{}",
+            "::pkgcore ns\n\ncore-val fn (): Int { 42 }\n",
+        );
+        let pkg_a = write_local_package(
+            &packages.join("pkg-a"),
+            "example.com/pkg-a",
+            "{\"example.com/pkg-core\": {local: \"../pkg-core\"}}",
+            "::pkga ns\n\na-val fn (): Int { add(::pkgcore/core-val(), 1) }\n",
+        );
+        let src = dir.path().join("app/src");
+        write_file(
+            src.join("app.hot"),
+            "::app ns\n\nmain fn (): Int { ::pkga/a-val() }\n",
+        );
+        let conf =
+            crate::lang::data::eval_data(&format!("hot.project.app.deps {{{pkg_a}}}\n")).unwrap();
+
+        let errors = Engine::check_sources_pipeline_diagnostics(
+            &[src.display().to_string()],
+            &[],
+            Some(&conf),
+            Some("app"),
+        );
+        assert!(errors.is_empty(), "{:?}", errors.to_diagnostics());
+    }
+
+    /// The worker's compile loads hot-std from its src-paths, as `hot check`
+    /// and `hot run` do: hot-std's test namespaces and pkg.hot are not part
+    /// of a deployed program.
+    #[test]
+    fn worker_compile_leaves_out_hot_std_tests() {
+        let hot_std = crate::lang::project::DependencyResolver::default()
+            .get_hot_std_dependency()
+            .resolved_path;
+        let test_only: Vec<String> = {
+            let declared = |files: Vec<String>| -> AHashSet<String> {
+                let (parsed, errors) = parse_files_parallel(&files, false);
+                assert!(errors.is_empty(), "{errors:?}");
+                parsed
+                    .iter()
+                    .flat_map(|file| file.namespaces.keys().map(|ns| ns.to_string()))
+                    .collect()
+            };
+            let sources = declared(Engine::discover_dependency_source_files(&hot_std).unwrap());
+            let tests = declared(
+                Engine::discover_hot_files(&hot_std.join("test").to_string_lossy()).unwrap(),
+            );
+            tests.difference(&sources).cloned().collect()
+        };
+        assert!(
+            !test_only.is_empty(),
+            "hot-std at {} has no test namespaces to leave out",
+            hot_std.display()
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write_file(src.join("app.hot"), "::app ns\n\nmain fn (): Int { 1 }\n");
+        let (_, artifacts) = Engine::compile_project_for_cache(
+            &[src.display().to_string()],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let loaded: Vec<String> = artifacts
+            .ast_program
+            .namespaces
+            .keys()
+            .map(|ns| ns.to_string())
+            .collect();
+        assert!(loaded.contains(&"::app".to_string()), "{loaded:?}");
+        let leaked: Vec<&String> = test_only.iter().filter(|ns| loaded.contains(ns)).collect();
+        assert!(
+            leaked.is_empty(),
+            "hot-std test namespaces compiled: {leaked:?}"
+        );
+        assert!(!loaded.contains(&"::hot::pkg".to_string()), "{loaded:?}");
     }
 
     #[test]

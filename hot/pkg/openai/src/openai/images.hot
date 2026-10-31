@@ -236,7 +236,7 @@ fn
                         }
                         => {
                             // Decode base64 to bytes and write to file
-                            image-bytes base64-decode(base64-data)
+                            image-bytes ::hot::base64/decode(base64-data)
                             file-meta write-file-bytes(path, image-bytes)
 
                             // Parse dimensions from size if available

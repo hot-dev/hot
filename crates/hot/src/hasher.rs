@@ -107,6 +107,13 @@ pub fn compute_hot_file_hashes(source_dir: &Path) -> Result<Vec<(String, String)
     hash_source_files(&files)
 }
 
+/// Hash the bytes of each listed file in parallel.
+/// Returns `Vec<(path_string, content_hash)>` in the order given.
+pub fn hash_files(paths: &[String]) -> Result<Vec<(String, String)>, String> {
+    let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    hash_source_files(&paths)
+}
+
 fn hash_source_files(files: &[PathBuf]) -> Result<Vec<(String, String)>, String> {
     files
         .par_iter()

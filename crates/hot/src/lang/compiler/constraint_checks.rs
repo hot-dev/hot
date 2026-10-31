@@ -19,12 +19,13 @@
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
 
+use super::constraint_specs::is_constructor_only;
 use super::core_registry::CoreVariableRegistry;
 use super::refinements::error_location;
 use crate::lang::ast::{
-    AstNode, DeepPath, Flow, FlowType, FnCall, FnDef, LiteralType, NamespaceAliases, Program, Ref,
-    Refinement, TemplatePart, TypeDef, TypeExpr, Value, Var, VarRef, WHERE_TYPE_PREFIX,
-    is_where_predicate,
+    AstNode, BuiltinType, DeepPath, Flow, FlowType, FnCall, FnDef, LiteralType, NamespaceAliases,
+    NsRef, Program, Ref, Refinement, TemplatePart, TypeDef, TypeExpr, Value, Var, VarRef,
+    WHERE_TYPE_PREFIX, is_where_predicate,
 };
 use crate::lang::errors::{CompilerError, ErrorLocation};
 use crate::lang::hot::libmap::is_pure_native;
@@ -377,8 +378,13 @@ struct Index<'a> {
     core: &'a CoreVariableRegistry,
     /// Every `where` clause, with a description of what it constrains.
     refinements: Vec<&'a Refinement>,
-    /// Type declarations by qualified name.
+    /// Type declarations by qualified name. A separate constructor-only
+    /// declaration (`A type fn (…)`) doesn't replace the one with the
+    /// fields and `where` clause.
     types: AHashMap<String, &'a TypeDef>,
+    /// Custom constructors of each type by qualified name, from every
+    /// declaration of it.
+    constructors: AHashMap<String, Vec<&'a FnDef>>,
     /// Members of each literal union by qualified name, accumulated across
     /// every declaration (an open union can be extended).
     literal_members: AHashMap<String, Vec<Val>>,
@@ -392,6 +398,7 @@ impl<'a> Index<'a> {
             core,
             refinements: Vec::new(),
             types: AHashMap::new(),
+            constructors: AHashMap::new(),
             literal_members: AHashMap::new(),
         };
         for (ns_path, namespace) in &program.namespaces {
@@ -410,7 +417,15 @@ impl<'a> Index<'a> {
                                 }
                             }
                         }
-                        index.types.insert(qualified, type_def);
+                        index
+                            .constructors
+                            .entry(qualified.clone())
+                            .or_default()
+                            .extend(type_def.constructor_functions.iter().flatten());
+                        if !(is_constructor_only(type_def) && index.types.contains_key(&qualified))
+                        {
+                            index.types.insert(qualified, type_def);
+                        }
                         if let Some(refinement) = &type_def.refinement {
                             index.refinements.push(refinement);
                         }
@@ -430,29 +445,42 @@ impl<'a> Index<'a> {
         index
     }
 
-    /// The namespace and name a call's function refers to.
+    /// The namespace and name a call's function refers to, through var
+    /// imports (`BoxConf ::hot::box/BoxConf`).
     fn resolve(&self, ns: &str, function: &Value) -> Option<(String, String)> {
-        match function {
+        let (mut ns, mut name) = match function {
             Value::Ref(Ref::Var(var_ref)) => {
                 let name = var_ref.var.sym.name();
                 if self.vars.contains_key(&(ns.to_string(), name.to_string())) {
-                    return Some((ns.to_string(), name.to_string()));
+                    (ns.to_string(), name.to_string())
+                } else {
+                    let info = self.core.get(name)?;
+                    (info.namespace_path.clone(), name.to_string())
                 }
-                let info = self.core.get(name)?;
-                Some((info.namespace_path.clone(), name.to_string()))
             }
-            Value::Ref(Ref::Ns(ns_ref)) => {
-                let name = ns_ref.function_name.clone()?;
-                let target = self
-                    .aliases
-                    .get(ns)
-                    .and_then(|aliases| aliases.get(&ns_ref.ns))
-                    .cloned()
-                    .unwrap_or_else(|| ns_ref.ns.clone());
-                Some((target.to_string(), name))
+            Value::Ref(Ref::Ns(ns_ref)) => self.ns_ref_target(ns, ns_ref)?,
+            _ => return None,
+        };
+        let mut seen = AHashSet::new();
+        while let Some(target) = self.import_target(&ns, &name) {
+            if !seen.insert(target.clone()) {
+                break;
             }
-            _ => None,
+            (ns, name) = target;
         }
+        Some((ns, name))
+    }
+
+    /// The namespace and name `::alias/name` refers to in `ns`, through the
+    /// namespace's aliases.
+    fn ns_ref_target(&self, ns: &str, ns_ref: &NsRef) -> Option<(String, String)> {
+        let name = ns_ref.function_name.clone()?;
+        let target = self
+            .aliases
+            .get(ns)
+            .and_then(|aliases| aliases.get(&ns_ref.ns))
+            .unwrap_or(&ns_ref.ns);
+        Some((target.to_string(), name))
     }
 
     /// The core function a call names, when it isn't shadowed locally.
@@ -695,7 +723,7 @@ impl<'a> Index<'a> {
     }
 
     /// The namespace and name a var import (`Port ::a/Port`) names, when
-    /// `name` in `ns` is one.
+    /// `name` in `ns` is one. One step: the target may be an import too.
     fn import_target(&self, ns: &str, name: &str) -> Option<(String, String)> {
         // A qualified name (`::c/Port`) names an import declared in `::c`.
         if name.contains('/') {
@@ -719,7 +747,7 @@ impl<'a> Index<'a> {
             })?,
             _ => return None,
         };
-        self.resolve(ns, &Value::Ref(Ref::Ns(target.clone())))
+        self.ns_ref_target(ns, target)
     }
 
     /// `type_key` for a type declared under `name`, without following
@@ -952,8 +980,12 @@ impl<'a> Index<'a> {
             check_registry_auth(registry_auth, location, out);
         }
         match self.vars.get(&(callee_ns.clone(), callee.clone())) {
-            Some((_, Value::TypeDef(type_def))) => {
+            Some((_, Value::TypeDef(_))) => {
                 let [arg] = call.args.as_slice() else {
+                    return;
+                };
+                let Some(type_def) = self.types.get(&format!("{callee_ns}/{callee}")).copied()
+                else {
                     return;
                 };
                 let location = arg.src.as_ref().map(error_location).or(location);
@@ -1114,10 +1146,15 @@ impl<'a> Index<'a> {
         };
         // A one-argument custom constructor receives the Map and decides
         // what it means.
-        if record
-            .constructor_functions
-            .as_ref()
-            .is_some_and(|ctors| ctors.iter().any(|c| c.args.args.len() == 1))
+        let constructors = self
+            .constructors
+            .get(&format!("{ns}/{}", record.name.name()));
+        if constructors.is_some_and(|ctors| ctors.iter().any(|c| c.args.args.len() == 1))
+            || record
+                .constructor_functions
+                .iter()
+                .flatten()
+                .any(|c| c.args.args.len() == 1)
         {
             return;
         }
@@ -1191,6 +1228,13 @@ impl<'a> Index<'a> {
         if depth > 4 {
             return None;
         }
+        // The boundary checks the base type first, converting an exact
+        // number to it: `200.0` is the Int `200`.
+        let converted = match &type_def.type_alias {
+            Some(base) => Some(self.exact_base_value(ns, base, literal, depth)?),
+            None => None,
+        };
+        let literal = converted.as_ref().unwrap_or(literal);
         // An alias of another refinement must satisfy that one too.
         if let Some(TypeExpr::Named(base) | TypeExpr::Simple(base)) = &type_def.type_alias
             && let Some(base_def) = self.type_def(ns, base)
@@ -1212,6 +1256,42 @@ impl<'a> Index<'a> {
         match evaluator.eval(&def.body) {
             Some(Val::Bool(false)) => Some(refinement.source.clone()),
             _ => None,
+        }
+    }
+
+    /// `literal` as the boundary's base check of `base` leaves it: an
+    /// integral Dec becomes an Int for an `Int` base, and an Int a Dec for a
+    /// `Dec` base. `None` for a Dec an `Int` base rejects, so no predicate
+    /// runs on it.
+    fn exact_base_value(
+        &self,
+        ns: &str,
+        base: &TypeExpr,
+        literal: &Val,
+        depth: usize,
+    ) -> Option<Val> {
+        let name = match base {
+            TypeExpr::Builtin(BuiltinType::Int) => "Int",
+            TypeExpr::Builtin(BuiltinType::Dec) => "Dec",
+            TypeExpr::Named(name) | TypeExpr::Simple(name) => name.as_str(),
+            _ => return Some(literal.clone()),
+        };
+        match (name, literal) {
+            ("Int", Val::Dec(d)) => {
+                if d.floor() == *d
+                    && let Ok(n) = d.to_i64()
+                {
+                    Some(Val::Int(n))
+                } else {
+                    None
+                }
+            }
+            ("Dec", Val::Int(n)) => Some(Val::Dec(fastnum::D256::from(*n))),
+            ("Int" | "Dec", _) => Some(literal.clone()),
+            _ => match self.type_def(ns, name).and_then(|t| t.type_alias.as_ref()) {
+                Some(inner) if depth < 4 => self.exact_base_value(ns, inner, literal, depth + 1),
+                _ => Some(literal.clone()),
+            },
         }
     }
 

@@ -135,7 +135,9 @@ validate fn cond (user: Map): Result {
 
 ## Conditional-All Flow
 
-Use `cond-all` when you want **all** matching branches to execute:
+Use `cond-all` when you want **all** matching branches to execute. Its
+default branch (`=>`) is not a fallback: it always runs, alongside every
+branch whose condition holds.
 
 {{snippet:flows#cond-all-discounts}}
 

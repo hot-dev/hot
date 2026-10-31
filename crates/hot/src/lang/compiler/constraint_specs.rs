@@ -95,6 +95,34 @@ const FAST_FUNCTIONS: &[&str] = &[
     "and", "between", "eq", "gt", "gte", "in", "length", "lt", "lte",
 ];
 
+/// Whether a type declaration only adds constructors to a type declared
+/// elsewhere in its namespace: `A type fn (…)`, with no fields, alias or
+/// variants of its own.
+pub(super) fn is_constructor_only(type_def: &TypeDef) -> bool {
+    type_def.fields.is_none() && type_def.type_alias.is_none() && type_def.variants.is_none()
+}
+
+/// Merge a later declaration of a type into an earlier one of the same
+/// namespace. A constructor-only declaration adds its constructors to the
+/// one that declares the fields and `where` clause, whichever comes first;
+/// a later full declaration replaces an earlier one.
+fn merge_type_declaration(def: &mut TypeDef, later: &TypeDef) {
+    let constructors = if is_constructor_only(later) {
+        let mut constructors = def.constructor_functions.take().unwrap_or_default();
+        constructors.extend(later.constructor_functions.iter().flatten().cloned());
+        constructors
+    } else if is_constructor_only(def) {
+        let mut constructors = def.constructor_functions.take().unwrap_or_default();
+        *def = later.clone();
+        constructors.extend(def.constructor_functions.take().unwrap_or_default());
+        constructors
+    } else {
+        *def = later.clone();
+        return;
+    };
+    def.constructor_functions = (!constructors.is_empty()).then_some(constructors);
+}
+
 /// Runtime type names a strict base check understands.
 fn is_base_type_name(name: &str) -> bool {
     matches!(
@@ -107,7 +135,7 @@ impl Compiler {
     /// Record the program's type declarations, so constraint specs can be
     /// built for any annotation during emission.
     pub(super) fn collect_constraint_types(&mut self, program: &crate::lang::ast::Program) {
-        let mut declared = Vec::new();
+        let mut declared = AHashSet::new();
         for (ns_path, namespace) in &program.namespaces {
             if !namespace.aliases.is_empty() {
                 self.constraint_ns_aliases
@@ -118,9 +146,18 @@ impl Compiler {
                 match value {
                     crate::lang::ast::Value::TypeDef(type_def) => {
                         let qualified = format!("{ns_path}/{name}");
-                        self.constraint_type_defs
-                            .insert(qualified.clone(), type_def.clone());
-                        declared.push(qualified);
+                        // `A type { … } where …` and a separate `A type fn
+                        // (…)` declare one type, in either order.
+                        match self.constraint_type_defs.get_mut(&qualified) {
+                            Some(earlier) if declared.contains(&qualified) => {
+                                merge_type_declaration(earlier, type_def);
+                            }
+                            _ => {
+                                self.constraint_type_defs
+                                    .insert(qualified.clone(), type_def.clone());
+                                declared.insert(qualified);
+                            }
+                        }
                     }
                     crate::lang::ast::Value::Fn(defs) => {
                         if crate::lang::ast::is_where_predicate(name)
@@ -151,6 +188,7 @@ impl Compiler {
             }
         }
         self.constrained_types.clear();
+        self.collect_composed_aliases();
         self.constraint_spec_ids = self.program.constraint_types.iter().cloned().collect();
         // A type declared again (a REPL input redefining it) gets a fresh spec;
         // the VM reads the table's last entry for a name.
@@ -158,6 +196,76 @@ impl Compiler {
             self.constraint_spec_ids.remove(qualified);
         }
         self.collect_param_annotations(program);
+    }
+
+    /// Find the aliases composed of constrained aliases, literals and base
+    /// types (see `composed_aliases`), to a fixed point, as one can name
+    /// another.
+    fn collect_composed_aliases(&mut self) {
+        enum Member {
+            Literal,
+            Base,
+            Alias(String),
+        }
+        let mut candidates = Vec::new();
+        let names: Vec<String> = self.constraint_type_defs.keys().cloned().collect();
+        for qualified in names {
+            let Some(type_def) = self.constraint_type_defs.get(&qualified) else {
+                continue;
+            };
+            if type_def.is_open || Self::is_constrained_alias(type_def) {
+                continue;
+            }
+            let members = match &type_def.type_alias {
+                Some(TypeExpr::Union(members)) => members.clone(),
+                Some(alias) => vec![alias.clone()],
+                None => continue,
+            };
+            let saved_namespace = std::mem::replace(
+                &mut self.current_namespace,
+                qualified
+                    .rsplit_once('/')
+                    .map_or_else(String::new, |(ns, _)| ns.to_string()),
+            );
+            let resolved: Option<Vec<Member>> = members
+                .iter()
+                .map(|member| match member {
+                    TypeExpr::Literal(_) => Some(Member::Literal),
+                    TypeExpr::Builtin(_) => Some(Member::Base),
+                    TypeExpr::Simple(name) | TypeExpr::Named(name) if is_base_type_name(name) => {
+                        Some(Member::Base)
+                    }
+                    TypeExpr::Simple(name) | TypeExpr::Named(name) => {
+                        self.resolve_constraint_type(name).map(Member::Alias)
+                    }
+                    _ => None,
+                })
+                .collect();
+            self.current_namespace = saved_namespace;
+            if let Some(resolved) = resolved {
+                candidates.push((qualified, resolved));
+            }
+        }
+        self.composed_aliases.clear();
+        loop {
+            let mut changed = false;
+            for (qualified, members) in &candidates {
+                if self.composed_aliases.contains(qualified) {
+                    continue;
+                }
+                let plain = members.iter().all(|member| match member {
+                    Member::Literal | Member::Base => true,
+                    Member::Alias(alias) => self.is_plain_alias(alias),
+                });
+                if plain && members.iter().any(|m| !matches!(m, Member::Base)) {
+                    self.composed_aliases.insert(qualified.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
     }
 
     /// The constraint spec for the type `annotation` names in the current
@@ -873,6 +981,18 @@ impl Compiler {
             || Self::is_literal_union(type_def)
     }
 
+    /// A constrained alias, or an alias composed of them, literals and base
+    /// types (`Day type Weekday | Weekend`), by qualified name: its values
+    /// stay plain base values, so its constructor, `match` arms and
+    /// `is-type` check them against its constraints.
+    pub(super) fn is_plain_alias(&self, qualified: &str) -> bool {
+        self.composed_aliases.contains(qualified)
+            || self
+                .constraint_type_defs
+                .get(qualified)
+                .is_some_and(Self::is_constrained_alias)
+    }
+
     fn is_literal_union(type_def: &TypeDef) -> bool {
         match &type_def.type_alias {
             Some(TypeExpr::Literal(_)) => true,
@@ -883,21 +1003,20 @@ impl Compiler {
         }
     }
 
-    /// The spec of a refinement alias or literal union, for a `match` arm
-    /// that guards on it.
+    /// The spec of a refinement alias or literal union, or an alias composed
+    /// of them, for a `match` arm that guards on it.
     pub(super) fn untagged_alias_spec(&mut self, qualified: &str) -> Option<Val> {
-        let type_def = self.constraint_type_defs.get(qualified)?;
-        if !Self::is_constrained_alias(type_def) {
+        if !self.is_plain_alias(qualified) {
             return None;
         }
         self.named_spec_id(qualified)?;
         Some(node("named", vec![("type", Val::from(qualified))]))
     }
 
-    /// Whether a type name resolves to a constrained alias.
+    /// Whether a type name resolves to a constrained alias, or an alias
+    /// composed of them.
     pub(super) fn names_constrained_alias(&self, name: &str) -> bool {
         self.resolve_constraint_type(name)
-            .and_then(|qualified| self.constraint_type_defs.get(&qualified))
-            .is_some_and(Self::is_constrained_alias)
+            .is_some_and(|qualified| self.is_plain_alias(&qualified))
     }
 }

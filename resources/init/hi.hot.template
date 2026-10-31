@@ -100,7 +100,7 @@ meta {
   ```
   """
 }
-fn parallel (num: Int): Map {
+fn parallel (num: Int): All<Map> {
   even-odd check-heat(num)
   doubled  mul(num, 2)
 }

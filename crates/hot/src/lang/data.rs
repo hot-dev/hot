@@ -38,8 +38,25 @@ pub fn eval_data(code: &str) -> Result<Val, String> {
                 continue;
             }
             let name = var.sym.name().to_string();
-            let literal =
-                literal_value(value).ok_or_else(|| format!("'{}' is not literal data", name))?;
+            let literal = literal_value(value).ok_or_else(|| {
+                let written = match &var.deep_set {
+                    Some(path) => key_path(path, &name)
+                        .map(|keys| format!("{}.{}", name, keys.join(".")))
+                        .unwrap_or_else(|_| name.clone()),
+                    None => name.clone(),
+                };
+                let line = var
+                    .src
+                    .as_ref()
+                    .map(|src| format!("line {}: ", src.line))
+                    .unwrap_or_default();
+                format!(
+                    "{}'{}' is not literal data. This file holds only literal maps, vectors, \
+                     strings, numbers, booleans and null: write each value out, with no \
+                     function calls, names, templates or spreads",
+                    line, written
+                )
+            })?;
             let bound = match &var.deep_set {
                 None => literal,
                 Some(path) => {

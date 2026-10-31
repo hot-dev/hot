@@ -172,7 +172,7 @@ fn
                         }
                         => {
                             // Decode base64 to bytes and write to file
-                            image-bytes base64-decode(base64-data)
+                            image-bytes ::hot::base64/decode(base64-data)
                             file-meta write-file-bytes(path, image-bytes)
 
                             // Parse dimensions from size if available
@@ -252,7 +252,7 @@ fn (path-template: Str, prompt: Str, count: Int): AIMediaBatch {
                         {success: false, error: AIMediaError({index: i, message: `No base64 data for image ${i}`})}
                     }
                     => {
-                        image-bytes base64-decode(base64-data)
+                        image-bytes ::hot::base64/decode(base64-data)
                         file-meta write-file-bytes(file-path, image-bytes)
 
                         media AIMedia.Image(AIImage({
