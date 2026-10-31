@@ -5046,6 +5046,14 @@ async fn process_code_task(
         )
         .ok()
         .map(|duration| chrono::Utc::now() + duration),
+        // Set below from the org's `call_tracing` feature.
+        trace_calls: true,
+    };
+    let execution_context = match org_id {
+        Some(org_id) => execution_context.with_trace_calls(
+            hot::db::features::Features::call_tracing_for_org_cached(&db, &org_id).await,
+        ),
+        None => execution_context,
     };
 
     let origin_run_id = execution_context.origin_run_id;

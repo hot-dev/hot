@@ -1307,6 +1307,17 @@ impl VirtualMachine {
         &self.emitter
     }
 
+    /// Whether calls and inline flows are traced: an emitter is attached and
+    /// the run hasn't turned call tracing off. Run lifecycle events only need
+    /// the emitter.
+    fn traces_calls(&self) -> bool {
+        self.emitter.is_some()
+            && self
+                .execution_context
+                .as_ref()
+                .is_none_or(|context| context.trace_calls)
+    }
+
     /// Set the stream publisher for real-time stream data delivery
     pub fn set_stream_publisher(&mut self, publisher: Arc<crate::stream::StreamPubSub>) {
         self.stream_publisher = Some(publisher);
@@ -2331,9 +2342,9 @@ impl VirtualMachine {
                 let flow_type = *flow_type;
                 let result_modifier = *result_modifier;
                 let origin_name = *origin_name;
-                // Only the emitter event needs the source; skip the Box clone
-                // on the hot no-emitter path.
-                let source = if self.emitter.is_some() {
+                // Only the call:start event needs the source; skip the Box
+                // clone on the hot untraced path.
+                let source = if self.traces_calls() {
                     source.clone()
                 } else {
                     None
@@ -2372,7 +2383,8 @@ impl VirtualMachine {
 
                 // For non-serial inline flows, emit a call:start event to track as a call record
                 // Serial flows are the default and don't need tracking
-                let (call_id, start_time) = if flow_type != FlowType::Serial {
+                let (call_id, start_time) = if flow_type != FlowType::Serial && self.traces_calls()
+                {
                     if let (Some(emitter), Some(execution_context)) =
                         (&self.emitter, &self.execution_context)
                     {
@@ -8835,10 +8847,9 @@ impl VirtualMachine {
         let function_source = &function_info.source;
         let function_flow_type = function_info.flow_type;
 
-        // Fast path: Skip CallContext creation when no emitter is attached
+        // Fast path: Skip CallContext creation when calls aren't traced
         // This avoids UUID generation, timestamp calls, and call stack management
-        let has_emitter = self.emitter.is_some();
-        let call_id = if has_emitter {
+        let call_id = if self.traces_calls() {
             // Create call context for tracking (only when observability is needed)
             let parent_call_id = self.call_stack.last().map(|ctx| ctx.call_id);
             let call_depth = self.call_stack.len();

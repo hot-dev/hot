@@ -55,6 +55,7 @@ for exactly one organization or environment.
 | `org:{org}/env:{env}/api-key:*` | `create`, `read`, `update`, `delete` | Mint, list, rotate, narrow, or revoke environment keys |
 | `org:{org}/api-key:*` | `create`, `read`, `update`, `delete` | The same for org keys of the key's own organization |
 | `org:{org}/usage:*` | `read` | Account usage (root organization only) |
+| `org:{org}/env:*/call:*` | `delete` | Purge call traces in every environment of the organization |
 | `org:{org}/env:{env}/{urn}` | that URN's actions | Any [environment permission](/docs/api#permissions) inside that environment |
 
 Three rules keep these grants narrow:
@@ -82,6 +83,7 @@ All routes accept only org keys. IDs are UUIDs.
 | `GET /v1/orgs/{org}` | `org:{org}` → `read` |
 | `PATCH /v1/orgs/{org}` | `org:{org}` → `update` |
 | `GET /v1/orgs/{org}/usage` | `org:{org}/usage:*` → `read` |
+| `DELETE /v1/orgs/{org}/calls` | `org:{org}/env:*/call:*` → `delete`, for each organization purged |
 | `GET`, `POST /v1/orgs/{org}/envs` | `org:{org}/env:*` → `read`, `create` |
 | `GET /v1/orgs/{org}/envs/{env}` | `org:{org}/env:{env}` → `read` |
 | `GET`, `POST /v1/orgs/{org}/envs/{env}/api-keys` | `org:{org}/env:{env}/api-key:*` → `read`, `create` |
@@ -104,6 +106,15 @@ are not revoked, so reactivating a suspended child restores them.
 
 **Environments.** `POST /v1/orgs/{org}/envs` accepts `name` and is idempotent
 by exact name within that organization.
+
+**Call traces.** `DELETE /v1/orgs/{org}/calls` deletes the call traces in
+every environment of the organization. Add `?include_sub_orgs=true` to purge
+its children too. The key needs `org:{org}/env:*/call:*` → `delete` for every
+organization the purge covers, so a root key purging its children also needs
+`org:*/env:*/call:*` → `delete`. All of them are checked before anything is
+deleted. Runs remain. The response and the 20-second limit match the
+[environment purge](/docs/api#purge-call-traces): repeat the request until
+`complete` is `true`.
 
 **API keys.** Minting accepts `description`, `permissions`, and an optional
 `expires_at`. The token is returned once. `PATCH /v1/api-keys/{id}` replaces
@@ -146,6 +157,8 @@ builds, administer files, or mint credentials. Missing policies deny access.
 | Update/delete context variable | `context:{project_id_or_slug}/{key}` with `update` / `delete` |
 | List runs or run statistics | `run:*` with `read` |
 | Read/subscribe to one run | `run:{run_id}` with `read` |
+| Purge one run's call traces | `call:{run_id}/*` with `delete` |
+| Purge a stream's or the environment's call traces | `call:*` with `delete` |
 | List/create/revoke all sessions | `session:*` with `read` / `create` / `delete` |
 | Revoke one session | `session:{session_id}` with `delete` |
 | List/create/revoke all service keys | `key:*` with `read` / `create` / `delete` |

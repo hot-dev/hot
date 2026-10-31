@@ -61,6 +61,7 @@ API keys, service keys, and sessions share a granular permission system. Permiss
 | `stream` | `read` | Stream subscription (e.g., `stream:*` or `stream:<id>`) |
 | `event` | `create`, `read` | Event publishing and reading |
 | `run` | `read` | Run inspection |
+| `call` | `delete` | Call trace purges (e.g., `call:<run_id>/*` or `call:*`) |
 | `project` | `create`, `read`, `update`, `delete` | Project management |
 | `build` | `create`, `read`, `execute` | Build management and deployment |
 | `context` | `create`, `read`, `update`, `delete` | Context variable management |
@@ -1019,6 +1020,46 @@ GET /v1/runs/stats
   "meta": {...}
 }
 ```
+
+#### Purge Call Traces
+
+```http
+DELETE /v1/runs/{run_id}/calls
+DELETE /v1/streams/{stream_id}/calls
+DELETE /v1/env/calls
+```
+
+Delete the call traces of one run, of every run in one stream, or of the whole
+environment. Runs, events, and results remain. Spilled call payloads are
+released, and blob garbage collection removes them after its grace period.
+
+A run purge needs `call:{run_id}/*` with `delete`. Stream and environment
+purges need `call:*` with `delete`. Run grants never allow a purge. A run or
+stream in another environment returns `404`.
+
+A task runs as its own run. Its run ID is its task ID, and it shares the stream
+of the run that started it. Purging a run leaves the calls of its tasks.
+Purge each task by its ID, or purge the stream to cover the run and its tasks.
+
+One request purges for up to 20 seconds. When `complete` is `false`, repeat the
+request to continue. Repeating a finished purge deletes nothing. A run that is
+still executing can record new calls after the purge.
+
+**Response:**
+
+```json
+{
+  "data": {
+    "calls_deleted": 18250,
+    "blob_refs_released": 42,
+    "complete": true
+  },
+  "meta": {...}
+}
+```
+
+To purge an organization, and its sub-organizations, use an org key with
+[`DELETE /v1/orgs/{org}/calls`](/docs/api/management#routes).
 
 ---
 

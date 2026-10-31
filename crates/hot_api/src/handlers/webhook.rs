@@ -650,6 +650,7 @@ async fn webhook_handler_inner(
         queue_timing: None,
         // Enqueue-only producer context; the worker stamps deadline_at at admission
         deadline_at: None,
+        trace_calls: true,
     };
 
     // Pre-compute secret value hashes for targeted masking of sensitive headers

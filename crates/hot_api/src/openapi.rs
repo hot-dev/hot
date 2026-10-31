@@ -7,10 +7,11 @@ use utoipa::{Modify, OpenApi, ToSchema};
 use uuid::Uuid;
 
 use crate::handlers::{
-    CreateDomainRequest, CreateServiceKeyRequest, CreateSessionRequest, DomainResponse,
-    DomainVerifyResponse, EnvSseEvent, EventPublishedEvent, Limits, OrgUsageResponse, PlanInfo,
-    RevokeAllResponse, RevokeAllServiceKeysResponse, RunEvent, ServiceKeyResponse, SessionResponse,
-    StreamEvent, SubscribeWithEventRequest, TaskEvent, UsagePercent, UsageStats,
+    CallPurgeResponse, CreateDomainRequest, CreateServiceKeyRequest, CreateSessionRequest,
+    DomainResponse, DomainVerifyResponse, EnvSseEvent, EventPublishedEvent, Limits,
+    OrgUsageResponse, PlanInfo, RevokeAllResponse, RevokeAllServiceKeysResponse, RunEvent,
+    ServiceKeyResponse, SessionResponse, StreamEvent, SubscribeWithEventRequest, TaskEvent,
+    UsagePercent, UsageStats,
 };
 use crate::models::{
     ApiError, ApiErrorResponse, ApiListResponse, ApiResponse, BuildResponse, BuildUploadResponse,
@@ -60,6 +61,7 @@ struct BinaryUploadBody {
         orgs_get_doc,
         orgs_update_doc,
         orgs_usage_doc,
+        orgs_purge_calls_doc,
         orgs_list_envs_doc,
         orgs_create_env_doc,
         orgs_get_env_doc,
@@ -95,6 +97,7 @@ struct BinaryUploadBody {
         get_run_stats_doc,
         get_run_doc,
         subscribe_to_run_doc,
+        purge_run_calls_doc,
         get_task_doc,
         subscribe_to_task_doc,
         publish_event_doc,
@@ -119,9 +122,11 @@ struct BinaryUploadBody {
         delete_domain_doc,
         verify_domain_doc,
         get_env_info_doc,
+        purge_env_calls_doc,
         subscribe_to_env_doc,
         get_org_usage_doc,
         subscribe_to_stream_doc,
+        purge_stream_calls_doc,
         subscribe_to_stream_post_doc,
         subscribe_with_event_doc,
         list_files_doc,
@@ -156,6 +161,7 @@ struct BinaryUploadBody {
         ApiResponse<ContextVariableResponse>,
         ApiResponse<RunResponse>,
         ApiResponse<RunStatsResponse>,
+        ApiResponse<CallPurgeResponse>,
         ApiResponse<TaskResponse>,
         ApiResponse<EventResponse>,
         ApiResponse<SessionResponse>,
@@ -173,6 +179,7 @@ struct BinaryUploadBody {
         BuildResponse,
         BuildUploadResponse,
         BuildWithProjectResponse,
+        CallPurgeResponse,
         ContextVariableResponse,
         CreateContextVariableRequest,
         CreateDomainRequest,
@@ -529,6 +536,17 @@ fn get_run_doc() {}
 fn subscribe_to_run_doc() {}
 
 #[utoipa::path(
+    delete,
+    path = "/v1/runs/{run_id}/calls",
+    tag = "Runs",
+    description = "Delete a run's call traces (`call:{run_id}/*` with `delete`). The run itself remains. A task is its own run: pass its task ID.",
+    params(("run_id" = Uuid, Path, description = "Run UUID")),
+    security(("bearer_auth" = [])),
+    responses((status = 200, description = "Calls deleted, payloads released, and whether the purge finished; repeat until `complete` is true", body = ApiResponse<CallPurgeResponse>), (status = "default", description = "Error", body = ApiErrorResponse))
+)]
+fn purge_run_calls_doc() {}
+
+#[utoipa::path(
     get,
     path = "/v1/tasks/{task_id}",
     tag = "Tasks",
@@ -775,6 +793,16 @@ fn verify_domain_doc() {}
 fn get_env_info_doc() {}
 
 #[utoipa::path(
+    delete,
+    path = "/v1/env/calls",
+    tag = "Env",
+    description = "Delete every call trace in the environment (`call:*` with `delete`). Runs remain.",
+    security(("bearer_auth" = [])),
+    responses((status = 200, description = "Calls deleted, payloads released, and whether the purge finished; repeat until `complete` is true", body = ApiResponse<CallPurgeResponse>), (status = "default", description = "Error", body = ApiErrorResponse))
+)]
+fn purge_env_calls_doc() {}
+
+#[utoipa::path(
     get,
     path = "/v1/env/subscribe",
     tag = "Env",
@@ -804,6 +832,17 @@ fn get_org_usage_doc() {}
     responses((status = 200, description = "Stream SSE events", body = StreamEvent, content_type = "text/event-stream"), (status = "default", description = "Error", body = ApiErrorResponse))
 )]
 fn subscribe_to_stream_doc() {}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/streams/{stream_id}/calls",
+    tag = "Streams",
+    description = "Delete the call traces of every run in a stream, including the tasks those runs started (`call:*` with `delete`). Runs remain.",
+    params(("stream_id" = Uuid, Path, description = "Stream UUID")),
+    security(("bearer_auth" = [])),
+    responses((status = 200, description = "Calls deleted, payloads released, and whether the purge finished; repeat until `complete` is true", body = ApiResponse<CallPurgeResponse>), (status = "default", description = "Error", body = ApiErrorResponse))
+)]
+fn purge_stream_calls_doc() {}
 
 #[utoipa::path(
     post,
@@ -1005,6 +1044,12 @@ fn orgs_update_doc() {}
     params(("org_id" = Uuid, Path)),
     responses((status = 200, description = "Account usage", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
 fn orgs_usage_doc() {}
+
+#[utoipa::path(delete, path = "/v1/orgs/{org_id}/calls", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Delete every call trace in an organization's environments, and its children's with `include_sub_orgs` (`org:{org}/env:*/call:*` with `delete` for each organization). Runs remain. Repeat until `complete` is true.",
+    params(("org_id" = Uuid, Path), crate::handlers::orgs::PurgeCallsQuery),
+    responses((status = 200, description = "Calls deleted, payloads released, and whether the purge finished", body = ApiResponse<CallPurgeResponse>), (status = "default", body = ApiErrorResponse)))]
+fn orgs_purge_calls_doc() {}
 
 #[utoipa::path(get, path = "/v1/orgs/{org_id}/envs", tag = "Orgs", security(("bearer_auth" = [])),
     description = "Environments of an organization (`org:{org}/env:*` with `read`).",

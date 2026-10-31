@@ -837,3 +837,265 @@ async fn org_keys_mint_narrower_org_keys_and_suspension_blocks_children() {
     )
     .await;
 }
+
+impl App {
+    async fn env_key(&self, env_id: Uuid, permissions: Value) -> String {
+        let key_id = Uuid::now_v7();
+        let (token, hash) = ApiKey::generate_api_key(&key_id).unwrap();
+        ApiKey::insert_api_key(
+            &self.db,
+            &key_id,
+            &env_id,
+            "calls",
+            &serde_json::from_str(&hash).unwrap(),
+            &self.data.user_id,
+            &permissions,
+        )
+        .await
+        .unwrap();
+        token
+    }
+
+    async fn run_in(&self, env_id: Uuid, stream_id: Uuid) -> Uuid {
+        self.insert_run(env_id, stream_id, hot::db::run::RunType::Run, None)
+            .await
+    }
+
+    /// A task runs as its own run, in the stream of the run that started it.
+    async fn task_of(&self, env_id: Uuid, stream_id: Uuid, origin_run_id: Uuid) -> Uuid {
+        self.insert_run(
+            env_id,
+            stream_id,
+            hot::db::run::RunType::Task,
+            Some(origin_run_id),
+        )
+        .await
+    }
+
+    async fn insert_run(
+        &self,
+        env_id: Uuid,
+        stream_id: Uuid,
+        run_type: hot::db::run::RunType,
+        origin_run_id: Option<Uuid>,
+    ) -> Uuid {
+        let run_id = Uuid::now_v7();
+        hot::db::Stream::create_or_get_stream(&self.db, stream_id, env_id)
+            .await
+            .unwrap();
+        hot::db::run::Run::insert_run(
+            &self.db,
+            &run_id,
+            &env_id,
+            &stream_id,
+            Some(&self.data.build_id),
+            run_type.as_id(),
+            origin_run_id.as_ref(),
+            &self.data.user_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        run_id
+    }
+
+    async fn trace_calls(&self, env_id: Uuid, run_id: Uuid, count: usize) {
+        let DatabasePool::Sqlite(pool) = self.db.as_ref() else {
+            unreachable!("SQLite fixture");
+        };
+        for _ in 0..count {
+            sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES(?,?,?,'::purge/test','root','root',0,CURRENT_TIMESTAMP,1)")
+                .bind(Uuid::now_v7())
+                .bind(run_id)
+                .bind(env_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn calls_in(&self, run_id: Uuid) -> i64 {
+        let DatabasePool::Sqlite(pool) = self.db.as_ref() else {
+            unreachable!("SQLite fixture");
+        };
+        sqlx::query_scalar("SELECT COUNT(*) FROM call WHERE run_id = ?")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+}
+
+fn purged(body: &Value, calls: i64) {
+    assert_eq!(body["data"]["calls_deleted"], calls, "{body}");
+    assert_eq!(body["data"]["complete"], true, "{body}");
+}
+
+#[tokio::test]
+async fn environment_keys_purge_calls_only_with_call_delete_and_in_scope() {
+    let app = App::new().await;
+    let (_, org_token) = app.org_key(json!({"org:*": ["create"]})).await;
+    let (_, child_env) = app.create_child(&org_token, "elsewhere").await;
+    let env = app.data.env_id;
+    let run = app.run_in(env, app.data.stream_id).await;
+    let other_stream = Uuid::now_v7();
+    let stream_run = app.run_in(env, other_stream).await;
+    let foreign_run = app.run_in(child_env, Uuid::now_v7()).await;
+    app.trace_calls(env, run, 2).await;
+    app.trace_calls(env, stream_run, 1).await;
+    app.trace_calls(child_env, foreign_run, 1).await;
+    let run_calls = format!("/v1/runs/{run}/calls");
+
+    // Every run action still grants no call purge.
+    let reader = app.env_key(env, json!({"run:*": ["*"]})).await;
+    let one_run = app
+        .env_key(env, json!({(format!("call:{run}/*")): ["delete"]}))
+        .await;
+    let all_runs = app
+        .env_key(env, json!({"run:*": ["read"], "call:*": ["delete"]}))
+        .await;
+    for (token, path) in [
+        (&reader, run_calls.clone()),
+        (&one_run, format!("/v1/runs/{stream_run}/calls")),
+        (&one_run, format!("/v1/streams/{other_stream}/calls")),
+        (&one_run, "/v1/env/calls".into()),
+    ] {
+        app.expect("DELETE", &path, token, None, StatusCode::FORBIDDEN)
+            .await;
+    }
+    assert_eq!(app.calls_in(run).await, 2);
+
+    let body = app
+        .expect("DELETE", &run_calls, &one_run, None, StatusCode::OK)
+        .await;
+    purged(&body, 2);
+    // The run itself remains.
+    app.expect(
+        "GET",
+        &format!("/v1/runs/{run}"),
+        &all_runs,
+        None,
+        StatusCode::OK,
+    )
+    .await;
+
+    // Another environment's run or stream is not found, and keeps its calls.
+    for path in [
+        format!("/v1/runs/{foreign_run}/calls"),
+        format!("/v1/runs/{}/calls", Uuid::now_v7()),
+        format!("/v1/streams/{}/calls", Uuid::now_v7()),
+    ] {
+        app.expect("DELETE", &path, &all_runs, None, StatusCode::NOT_FOUND)
+            .await;
+    }
+    // Purging a run leaves the calls of tasks it started; purging its stream
+    // reaches them.
+    let task = app.task_of(env, other_stream, stream_run).await;
+    app.trace_calls(env, task, 1).await;
+    let body = app
+        .expect(
+            "DELETE",
+            &format!("/v1/runs/{stream_run}/calls"),
+            &all_runs,
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    purged(&body, 1);
+    assert_eq!(app.calls_in(task).await, 1);
+    let body = app
+        .expect(
+            "DELETE",
+            &format!("/v1/streams/{other_stream}/calls"),
+            &all_runs,
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    purged(&body, 1);
+
+    app.trace_calls(env, run, 3).await;
+    let body = app
+        .expect("DELETE", "/v1/env/calls", &all_runs, None, StatusCode::OK)
+        .await;
+    purged(&body, 3);
+    assert_eq!(app.calls_in(foreign_run).await, 1);
+    // Org keys purge through /v1/orgs.
+    let mismatch = app
+        .expect(
+            "DELETE",
+            "/v1/env/calls",
+            &org_token,
+            None,
+            StatusCode::FORBIDDEN,
+        )
+        .await;
+    assert_eq!(mismatch["error"]["code"], "key_scope_mismatch");
+}
+
+#[tokio::test]
+async fn org_keys_purge_calls_of_every_org_they_may_delete_calls_in() {
+    let app = App::new().await;
+    let root = app.data.org_id;
+    let (_, provisioner) = app.org_key(json!({"org:*": ["create"]})).await;
+    let (child, child_env) = app.create_child(&provisioner, "purged").await;
+    let root_run = app.run_in(app.data.env_id, Uuid::now_v7()).await;
+    let child_run = app.run_in(child_env, Uuid::now_v7()).await;
+    app.trace_calls(app.data.env_id, root_run, 2).await;
+    app.trace_calls(child_env, child_run, 1).await;
+    let root_calls = format!("/v1/orgs/{root}/calls");
+    let with_children = format!("{root_calls}?include_sub_orgs=true");
+
+    let (_, reader) = app
+        .org_key(json!({(format!("org:{root}/env:*/run:*")): ["*"], "org:*/env:*/run:*": ["*"]}))
+        .await;
+    let (_, own_only) = app
+        .org_key(json!({(org_urn::calls(&root)): ["delete"]}))
+        .await;
+    let (_, children_only) = app.org_key(json!({"org:*/env:*/call:*": ["delete"]})).await;
+    for (token, path) in [
+        (&reader, root_calls.clone()),
+        // `org:*` names the children, never the key's own org.
+        (&children_only, root_calls.clone()),
+        // Every org is authorized before anything is deleted.
+        (&own_only, with_children.clone()),
+    ] {
+        app.expect("DELETE", &path, token, None, StatusCode::FORBIDDEN)
+            .await;
+    }
+    assert_eq!(app.calls_in(root_run).await, 2);
+    assert_eq!(app.calls_in(child_run).await, 1);
+
+    let body = app
+        .expect("DELETE", &root_calls, &own_only, None, StatusCode::OK)
+        .await;
+    purged(&body, 2);
+    assert_eq!(app.calls_in(child_run).await, 1);
+    let body = app
+        .expect(
+            "DELETE",
+            &format!("/v1/orgs/{child}/calls"),
+            &children_only,
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    purged(&body, 1);
+
+    app.trace_calls(app.data.env_id, root_run, 1).await;
+    app.trace_calls(child_env, child_run, 1).await;
+    let (_, both) = app
+        .org_key(json!({(org_urn::calls(&root)): ["delete"], "org:*/env:*/call:*": ["delete"]}))
+        .await;
+    let body = app
+        .expect("DELETE", &with_children, &both, None, StatusCode::OK)
+        .await;
+    purged(&body, 2);
+    // Environment keys purge through their own routes.
+    let env_key = app.env_key(app.data.env_id, json!({"*:*": ["*"]})).await;
+    let mismatch = app
+        .expect("DELETE", &root_calls, &env_key, None, StatusCode::FORBIDDEN)
+        .await;
+    assert_eq!(mismatch["error"]["code"], "key_scope_mismatch");
+}

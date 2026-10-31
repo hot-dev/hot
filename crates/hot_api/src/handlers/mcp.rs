@@ -2281,6 +2281,7 @@ async fn handle_tools_call_streaming(
         queue_timing: None,
         // Enqueue-only producer context; the worker stamps deadline_at at admission
         deadline_at: None,
+        trace_calls: true,
     };
 
     // Convert MCP named arguments (JSON object) to positional Vec for Hot's call() function.

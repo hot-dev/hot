@@ -119,6 +119,15 @@ pub struct ExecutionContext {
     /// persist its terminal state before the worker hard timeout.
     #[serde(default)]
     pub deadline_at: Option<DateTime<Utc>>,
+    /// Whether this run records call traces (`call:start`/`call:stop`). The
+    /// worker sets it from the org's `call_tracing` feature before the run
+    /// executes; run lifecycle events are recorded either way.
+    #[serde(default = "default_trace_calls")]
+    pub trace_calls: bool,
+}
+
+fn default_trace_calls() -> bool {
+    true
 }
 
 impl ExecutionContext {
@@ -154,6 +163,7 @@ impl ExecutionContext {
             agent_type: None,
             queue_timing: None,
             deadline_at: None,
+            trace_calls: true,
         }
     }
 
@@ -191,6 +201,7 @@ impl ExecutionContext {
             agent_type: None,
             queue_timing: None,
             deadline_at: None,
+            trace_calls: true,
         }
     }
 
@@ -232,6 +243,7 @@ impl ExecutionContext {
             agent_type: None,
             queue_timing: None,
             deadline_at: None,
+            trace_calls: true,
         }
     }
 
@@ -258,6 +270,7 @@ impl ExecutionContext {
             agent_type: None,
             queue_timing: None,
             deadline_at: None,
+            trace_calls: true,
         }
     }
 
@@ -312,6 +325,11 @@ impl ExecutionContext {
 
     pub fn with_queue_timing(mut self, queue_timing: QueueExecutionTiming) -> Self {
         self.queue_timing = Some(queue_timing);
+        self
+    }
+
+    pub fn with_trace_calls(mut self, trace_calls: bool) -> Self {
+        self.trace_calls = trace_calls;
         self
     }
 

@@ -1464,6 +1464,20 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         }))
     }
 
+    /// The `info` a run starts with: its queue timing, and `call_tracing:
+    /// false` when the run doesn't record calls, so a run with no calls can
+    /// say why.
+    fn run_start_info(
+        ctx: &ExecutionContext,
+        start_time: chrono::DateTime<chrono::Utc>,
+    ) -> Option<serde_json::Value> {
+        let mut info = Self::queue_timing_info(ctx, start_time);
+        if !ctx.trace_calls {
+            info.get_or_insert_with(|| serde_json::json!({}))["call_tracing"] = false.into();
+        }
+        info
+    }
+
     /// Write a run:start record.
     ///
     /// `start_time` is the EngineEvent timestamp captured when execution
@@ -1477,7 +1491,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         // Use event_time which is captured when EngineEvent::run_start() is created
         // (the actual moment the run starts executing), not when this DB write happens
         let start_time = event_time;
-        let timing_info = Self::queue_timing_info(ctx, start_time);
+        let timing_info = Self::run_start_info(ctx, start_time);
         tracing::debug!(
             "DatabaseWriter: Writing run:start for run_id={}, event_id={:?}, origin_run_id={:?}",
             ctx.run_id,
@@ -1653,7 +1667,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         ctx: &ExecutionContext,
         start_time: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), sqlx::Error> {
-        let timing_info = Self::queue_timing_info(ctx, start_time);
+        let timing_info = Self::run_start_info(ctx, start_time);
         match pool {
             DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
@@ -1739,7 +1753,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         result: &Val,
     ) -> Result<(), sqlx::Error> {
         let result_json = val_to_jsonb_string(result);
-        let timing_info = Self::queue_timing_info(ctx, start_time);
+        let timing_info = Self::run_start_info(ctx, start_time);
 
         crate::db::stream::Stream::create_or_get_stream(
             pool,
@@ -2807,6 +2821,31 @@ mod tests {
             serde_json::json!(20_000_000)
         );
         assert_eq!(info["queue_timing"]["redelivered"], true);
+    }
+
+    #[test]
+    fn run_start_info_records_that_calls_are_untraced() {
+        let now = chrono::Utc::now();
+        let mut context = ExecutionContext::minimal(Uuid::now_v7(), Uuid::now_v7(), 4);
+        assert_eq!(DatabaseWriter::run_start_info(&context, now), None);
+
+        context.trace_calls = false;
+        assert_eq!(
+            DatabaseWriter::run_start_info(&context, now),
+            Some(serde_json::json!({"call_tracing": false}))
+        );
+
+        context.queue_timing = Some(crate::lang::event::QueueExecutionTiming {
+            backend: "redis".to_string(),
+            enqueued_at: None,
+            claimed_at: now,
+            queue_wait_us: 1,
+            redelivered: false,
+            handler_dispatched_at: None,
+        });
+        let info = DatabaseWriter::run_start_info(&context, now).unwrap();
+        assert_eq!(info["call_tracing"], false);
+        assert_eq!(info["queue_timing"]["backend"], "redis");
     }
 
     #[tokio::test]

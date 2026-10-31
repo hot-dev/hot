@@ -9,6 +9,7 @@
 //! environment and the request is re-dispatched to those handlers with that
 //! principal, so they authorize exactly as they do for an environment key.
 use super::ListQueryParams;
+use super::calls::{CallPurgeResponse, PURGE_BATCH_SIZE, purge_deadline, purge_failed};
 use crate::auth::{AuthContext, authenticate_token, authorize_route, key_scope_mismatch};
 use crate::{
     ApiStateData,
@@ -24,7 +25,7 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{any, delete, get, post},
 };
 use chrono::{DateTime, Duration, Utc};
 use hot::db::api_key::ApiKey;
@@ -33,7 +34,9 @@ use hot::db::org_api_key::{
     CreateOrgApiKey, DEFAULT_ROTATION_OVERLAP_SECONDS, EffectiveOrgGrants,
     MAX_ROTATION_OVERLAP_SECONDS, MintEnvApiKey, OrgApiKey, OrgApiKeyError,
 };
-use hot::db::{BootstrapOperation, DatabasePool, DatabaseScope, Env, Org, with_database_scope};
+use hot::db::{
+    BootstrapOperation, Call, DatabasePool, DatabaseScope, Env, Org, with_database_scope,
+};
 use hot::permission::{Permissions, actions, org_urn};
 use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
@@ -77,6 +80,7 @@ pub(crate) fn router(
         .route("/v1/orgs", get(list_orgs).post(create_org))
         .route("/v1/orgs/{org_id}", get(get_org).patch(update_org))
         .route("/v1/orgs/{org_id}/usage", get(get_usage))
+        .route("/v1/orgs/{org_id}/calls", delete(purge_calls))
         .route("/v1/orgs/{org_id}/envs", get(list_envs).post(create_env))
         .route("/v1/orgs/{org_id}/envs/{env_id}", get(get_env))
         .route(
@@ -461,6 +465,40 @@ pub async fn get_usage(
         "period_end": period_end,
         "usage": usage,
     }))))
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct PurgeCallsQuery {
+    /// Also purge the organization's children.
+    #[serde(default)]
+    pub include_sub_orgs: bool,
+}
+
+/// Delete every call trace in an organization's environments, and in its
+/// children's with `include_sub_orgs`. Every organization purged needs
+/// `org:{org}/env:*/call:*` with `delete`, checked before anything is deleted.
+pub async fn purge_calls(
+    State((db, _, _, _)): State<ApiStateData>,
+    Extension(principal): Extension<OrgPrincipal>,
+    Path(org_id): Path<Uuid>,
+    Query(query): Query<PurgeCallsQuery>,
+) -> Result<Json<ApiResponse<CallPurgeResponse>>, ApiError> {
+    principal.require(&org_urn::calls(&org_id), actions::DELETE)?;
+    let org = principal
+        .key
+        .resolve_org(&db, org_id, false)
+        .await
+        .map_err(|e| key_error(e, "Organization"))?;
+    let envs = Call::org_purge_envs(&db, &org.org_id, query.include_sub_orgs)
+        .await
+        .map_err(internal)?;
+    for (env_org, _) in &envs {
+        principal.require(&org_urn::calls(env_org), actions::DELETE)?;
+    }
+    let purged = Call::purge_envs(&db, &envs, PURGE_BATCH_SIZE, Some(purge_deadline()))
+        .await
+        .map_err(purge_failed)?;
+    Ok(Json(ApiResponse::new(purged.into())))
 }
 
 // ============================================================================

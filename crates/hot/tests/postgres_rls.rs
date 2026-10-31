@@ -2185,9 +2185,103 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .await?,
         expected
     );
+
     sqlx::query("DELETE FROM call WHERE call_id=$1")
         .bind(counter_call)
         .execute(&a)
+        .await?;
+
+    // A purge deletes its scope's calls and deactivates their payload refs
+    // under the environment's own scope; another environment's scope sees
+    // nothing to purge.
+    let purge_calls = [Uuid::new_v4(), Uuid::new_v4()];
+    let purge_object = Uuid::new_v4();
+    sqlx::query("INSERT INTO hot.blob_object(blob_object_id,org_id,env_id,hash,size,storage_backend,storage_path) VALUES($1,$2,$3,$4,1,'local',$4)")
+        .bind(purge_object).bind(child_a).bind(env_a).bind(purge_object.to_string())
+        .execute(&admin).await?;
+    for call_id in purge_calls {
+        sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES($1,$2,$3,'purge','purge','purge',0,now(),5)")
+            .bind(call_id).bind(run_a).bind(env_a).execute(&a).await?;
+        sqlx::query("INSERT INTO hot.blob_ref(blob_object_id,org_id,env_id,source_kind,source_id,created_by_run_id) VALUES($1,$2,$3,'call_args',$4,$5)")
+            .bind(purge_object).bind(child_a).bind(env_a).bind(call_id.to_string()).bind(run_a)
+            .execute(&admin).await?;
+    }
+    assert_eq!(
+        db::Call::purge(&db_b, &env_a, db::CallPurgeScope::Run(run_a), 1, None).await?,
+        db::CallPurge {
+            calls: 0,
+            blob_refs: 0,
+            complete: true
+        }
+    );
+    assert_eq!(
+        db::Call::purge(&db_a, &env_a, db::CallPurgeScope::Stream(stream_a), 1, None).await?,
+        db::CallPurge {
+            calls: 2,
+            blob_refs: 2,
+            complete: true
+        }
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM hot.blob_ref WHERE blob_object_id=$1 AND active"
+        )
+        .bind(purge_object)
+        .fetch_one(&admin)
+        .await?,
+        0
+    );
+    sqlx::query("DELETE FROM hot.blob_ref WHERE blob_object_id=$1")
+        .bind(purge_object)
+        .execute(&admin)
+        .await?;
+    sqlx::query("DELETE FROM hot.blob_object WHERE blob_object_id=$1")
+        .bind(purge_object)
+        .execute(&admin)
+        .await?;
+
+    // An org purge sets each scope itself: a child's purge leaves its sibling
+    // alone, and the root reaches its children only when asked.
+    let unscoped = db::DatabasePool::Postgres(pool.clone());
+    let (org_call_a, org_call_b) = (Uuid::new_v4(), Uuid::new_v4());
+    for (call_id, run_id, env_id, runtime) in [
+        (org_call_a, run_a, env_a, &a),
+        (org_call_b, run_b, env_b, &b),
+    ] {
+        sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES($1,$2,$3,'purge','purge','purge',0,now(),5)")
+            .bind(call_id).bind(run_id).bind(env_id).execute(runtime).await?;
+    }
+    let remaining = |call_ids: Vec<Uuid>| {
+        sqlx::query_scalar::<_, Uuid>("SELECT call_id FROM hot.call WHERE call_id=ANY($1)")
+            .bind(call_ids)
+            .fetch_all(&admin)
+    };
+    assert!(
+        db::Call::purge_org(&unscoped, &child_a, false, 100, None)
+            .await?
+            .complete
+    );
+    assert_eq!(
+        remaining(vec![org_call_a, org_call_b]).await?,
+        vec![org_call_b]
+    );
+    db::Call::purge_org(&unscoped, &root, false, 100, None).await?;
+    assert_eq!(remaining(vec![org_call_b]).await?, vec![org_call_b]);
+    db::Call::purge_org(&unscoped, &root, true, 100, None).await?;
+    assert!(remaining(vec![org_call_b]).await?.is_empty());
+
+    // A sub-org's own override turns call tracing off for it alone.
+    assert!(db::Features::call_tracing_for_org(&db_a, &child_a).await?);
+    sqlx::query("UPDATE hot.org SET features=$1 WHERE org_id=$2")
+        .bind(serde_json::json!({"call_tracing": false}))
+        .bind(child_a)
+        .execute(&admin)
+        .await?;
+    assert!(!db::Features::call_tracing_for_org(&db_a, &child_a).await?);
+    assert!(db::Features::call_tracing_for_org(&db_b, &child_b).await?);
+    sqlx::query("UPDATE hot.org SET features=NULL WHERE org_id=$1")
+        .bind(child_a)
+        .execute(&admin)
         .await?;
     sqlx::query("DELETE FROM hot.task WHERE task_id=$1")
         .bind(queued_task)

@@ -5,6 +5,16 @@ use uuid::Uuid;
 
 use super::DatabasePool;
 
+/// How long a run's call tracing lookup is reused for the same org.
+pub const CALL_TRACING_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Cache size at which expired call tracing entries are swept.
+const CALL_TRACING_CACHE_SWEEP_LEN: usize = 4096;
+
+static CALL_TRACING_CACHE: std::sync::LazyLock<
+    parking_lot::Mutex<ahash::AHashMap<Uuid, (bool, std::time::Instant)>>,
+> = std::sync::LazyLock::new(Default::default);
+
 #[derive(Error, Debug)]
 pub enum FeaturesError {
     #[error("Database error: {0}")]
@@ -72,6 +82,12 @@ pub mod keys {
     pub const SERVICE_KEYS: &str = "service_keys";
     pub const ALERTS: &str = "alerts";
     pub const SELF_HOSTED: &str = "self_hosted";
+
+    /// Whether runs record call traces. On unless set to `false` (or `0`).
+    /// Unlike the other boolean features, an absent key means on, and a
+    /// sub-org's own override can turn it off (see
+    /// [`super::Features::call_tracing_for_org`]).
+    pub const CALL_TRACING: &str = "call_tracing";
 }
 
 /// Resolved feature set for an organization.
@@ -401,6 +417,59 @@ impl Features {
         Ok(Self::for_account(plan.as_ref(), overrides.as_ref()))
     }
 
+    /// Whether runs in `org_id` record call traces. The account's features
+    /// (plan, then the billing root's overrides) turn tracing off for the
+    /// root and every sub-org. A sub-org's own `call_tracing: false` turns it
+    /// off for just that sub-org; it can't turn back on what the root turned
+    /// off.
+    pub async fn call_tracing_for_org(
+        db: &DatabasePool,
+        org_id: &Uuid,
+    ) -> Result<bool, super::subscription::PlanError> {
+        if !Self::try_resolve_for_org(db, org_id).await?.call_tracing() {
+            return Ok(false);
+        }
+        let db = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::Billing,
+            org_id: Some(*org_id),
+        });
+        match Self::get_org_features(&db, org_id).await {
+            Ok(overrides) => Ok(Self::for_account(None, overrides.as_ref()).call_tracing()),
+            Err(sqlx::Error::RowNotFound) => Ok(true),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// [`Self::call_tracing_for_org`] behind a short per-process cache, for
+    /// the lookup each run makes before it executes. A change to the feature
+    /// reaches new runs within [`CALL_TRACING_CACHE_TTL`]. A lookup that
+    /// fails turns tracing off for that run, so an org that opted out isn't
+    /// traced because its settings couldn't be read, and isn't cached.
+    pub async fn call_tracing_for_org_cached(db: &DatabasePool, org_id: &Uuid) -> bool {
+        let now = std::time::Instant::now();
+        if let Some((on, fetched_at)) = CALL_TRACING_CACHE.lock().get(org_id)
+            && now.duration_since(*fetched_at) < CALL_TRACING_CACHE_TTL
+        {
+            return *on;
+        }
+        match Self::call_tracing_for_org(db, org_id).await {
+            Ok(on) => {
+                let mut cache = CALL_TRACING_CACHE.lock();
+                if cache.len() >= CALL_TRACING_CACHE_SWEEP_LEN {
+                    cache.retain(|_, (_, fetched_at)| {
+                        now.duration_since(*fetched_at) < CALL_TRACING_CACHE_TTL
+                    });
+                }
+                cache.insert(*org_id, (on, now));
+                on
+            }
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "Cannot read call tracing setting; not tracing this run");
+                false
+            }
+        }
+    }
+
     /// Resolve features for an organization by looking up plan + org overrides.
     /// Falls back to unlimited defaults if no plan exists (self-hosted / local dev).
     pub async fn resolve_for_org(db: &DatabasePool, org_id: &Uuid) -> Self {
@@ -725,6 +794,16 @@ impl Features {
         self.has(keys::ALERTS)
     }
 
+    /// Whether runs record call traces: on unless `call_tracing` is `false`
+    /// or `0`.
+    pub fn call_tracing(&self) -> bool {
+        match self.inner.get(keys::CALL_TRACING) {
+            Some(JsonValue::Bool(on)) => *on,
+            Some(JsonValue::Number(n)) => n.as_i64() != Some(0),
+            _ => true,
+        }
+    }
+
     /// Get the rate limit in requests per second.
     /// Returns -1 for unlimited, or a positive value for the limit.
     pub fn rate_limit_rps(&self) -> i64 {
@@ -840,6 +919,76 @@ mod tests {
                 .await
                 .is_unlimited_runs()
         );
+    }
+
+    #[test]
+    fn call_tracing_is_on_unless_turned_off() {
+        assert!(Features::empty().call_tracing());
+        assert!(Features::resolve(None, None).call_tracing());
+        for (value, on) in [
+            (json!(true), true),
+            (json!(false), false),
+            (json!(0), false),
+            (json!(1), true),
+            (json!("off"), true),
+        ] {
+            let features = Features::resolve(None, Some(&json!({"call_tracing": value})));
+            assert_eq!(features.call_tracing(), on, "call_tracing: {value}");
+        }
+    }
+
+    /// The root's setting covers its sub-orgs; a sub-org can turn tracing off
+    /// for itself but not back on.
+    #[tokio::test]
+    async fn sqlite_call_tracing_follows_root_and_sub_org_overrides() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            return;
+        };
+        sqlx::query("UPDATE org SET org_type='organization' WHERE org_id=?")
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let child = Uuid::now_v7();
+        sqlx::query("INSERT INTO org (org_id,parent_org_id,name,slug,org_type,created_by_user_id) VALUES (?,?,'Child',?,'organization',?)")
+            .bind(child)
+            .bind(data.org_id)
+            .bind(child.to_string())
+            .bind(data.user_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let set = |org: Uuid, features: Option<&'static str>| async move {
+            sqlx::query("UPDATE org SET features=? WHERE org_id=?")
+                .bind(features)
+                .bind(org)
+                .execute(pool)
+                .await
+                .unwrap();
+        };
+        let tracing = |org: Uuid| {
+            let db = &db;
+            async move { Features::call_tracing_for_org(db, &org).await.unwrap() }
+        };
+
+        assert!(tracing(data.org_id).await);
+        assert!(tracing(child).await);
+
+        set(child, Some(r#"{"call_tracing":false}"#)).await;
+        assert!(tracing(data.org_id).await);
+        assert!(!tracing(child).await);
+
+        set(data.org_id, Some(r#"{"call_tracing":false}"#)).await;
+        set(child, Some(r#"{"call_tracing":true}"#)).await;
+        assert!(!tracing(data.org_id).await);
+        assert!(!tracing(child).await);
+
+        set(data.org_id, None).await;
+        assert!(tracing(child).await);
+        // An org that doesn't exist keeps tracing on.
+        assert!(tracing(Uuid::now_v7()).await);
     }
 
     #[test]

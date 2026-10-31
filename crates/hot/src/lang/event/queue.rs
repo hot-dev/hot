@@ -630,6 +630,7 @@ impl TryFrom<Message> for EventMessage {
                 }
             }),
             deadline_at: None,
+            trace_calls: true,
             queue_timing: None,
         };
 

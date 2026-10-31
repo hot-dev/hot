@@ -128,6 +128,43 @@ mod tests {
         println!("✅ Run events test passed!");
     }
 
+    /// A run with call tracing off still records its lifecycle, but no calls
+    /// or inline flows.
+    #[test]
+    fn test_untraced_run_emits_run_events_but_no_calls() {
+        let code = r#"
+            same fn (x) { x }
+            label cond {
+                same(true) => { "two" }
+                => { "other" }
+            }
+            label
+        "#;
+        let call_events = |trace_calls: bool| {
+            let test_emitter = Arc::new(TestEmitter::new());
+            let execution_context = ExecutionContext::new(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                crate::db::run::RunType::Run.as_id(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .with_trace_calls(trace_calls);
+            let engine = Engine::new_with_emitter(test_emitter.clone(), execution_context);
+            let result = engine.eval_code(code, &[], &[], None, None).unwrap();
+            assert_eq!(result, Val::from("two"));
+            let events = test_emitter.get_events();
+            let types: Vec<_> = events.iter().map(|e| e.event_type.as_str()).collect();
+            assert!(types.contains(&"run:start"), "{types:?}");
+            assert!(types.contains(&"run:stop"), "{types:?}");
+            types.iter().filter(|t| t.starts_with("call:")).count()
+        };
+        assert!(call_events(true) > 0);
+        assert_eq!(call_events(false), 0);
+    }
+
     #[test]
     fn test_multiple_executions_emit_separate_run_events() {
         // Create a test emitter to capture events

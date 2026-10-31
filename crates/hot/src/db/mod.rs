@@ -162,7 +162,7 @@ pub use agent::{
     AgentWithProject,
 };
 pub use build::{Build, BuildError};
-pub use call::{Call, CallHeader};
+pub use call::{CALL_BLOB_REF_KINDS, Call, CallHeader, CallPurge, CallPurgeScope};
 pub use context::{Context, ContextError};
 pub use domain::{Domain, DomainError};
 pub use email_verification::{EmailVerification, EmailVerificationError, VerificationStatus};

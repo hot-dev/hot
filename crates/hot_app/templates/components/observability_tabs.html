@@ -980,6 +980,11 @@ window.ObservabilityTabs = class ObservabilityTabs {
                     <p>Collecting execution trace data&hellip;</p>
                     <p class="text-xs mt-2">Execution trace data will appear as the run executes</p>
                 </div>`;
+            case 'disabled':
+                return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
+                    <p>Call tracing is off</p>
+                    <p class="text-xs mt-2">Your organization turned off call tracing, so this run recorded no calls</p>
+                </div>`;
             case 'empty':
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
                     <p>No calls recorded</p>

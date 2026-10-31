@@ -68,6 +68,9 @@ use crate::handlers::{
     mcp_sse_handler,
     mcp_sse_handler_domain,
     publish_event,
+    purge_env_calls,
+    purge_run_calls,
+    purge_stream_calls,
     revoke_all_service_keys,
     revoke_all_sessions,
     revoke_service_key,
@@ -436,6 +439,10 @@ pub(crate) fn build_router(
         .route("/v1/runs/stats", get(get_run_stats))
         .route("/v1/runs/{run_id}", get(get_run))
         .route("/v1/runs/{run_id}/subscribe", get(subscribe_to_run))
+        .route(
+            "/v1/runs/{run_id}/calls",
+            axum::routing::delete(purge_run_calls),
+        )
         // Tasks
         .route("/v1/tasks/{task_id}", get(get_task))
         .route("/v1/tasks/{task_id}/subscribe", get(subscribe_to_task))
@@ -487,6 +494,12 @@ pub(crate) fn build_router(
         .route("/v1/env", get(get_env_info))
         // Environment SSE subscription (real-time dashboard updates)
         .route("/v1/env/subscribe", get(subscribe_to_env))
+        // Call trace purges
+        .route("/v1/env/calls", axum::routing::delete(purge_env_calls))
+        .route(
+            "/v1/streams/{stream_id}/calls",
+            axum::routing::delete(purge_stream_calls),
+        )
         // Organization usage and limits
         .route("/v1/org/usage", get(get_org_usage))
         // Stream subscription (SSE) — GET (classic) + POST (Streamable HTTP)

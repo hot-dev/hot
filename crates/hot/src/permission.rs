@@ -65,6 +65,8 @@ pub mod resource_types {
     pub const STREAM: &str = "stream";
     pub const EVENT: &str = "event";
     pub const RUN: &str = "run";
+    /// Call traces, addressed by run: `call:{run_id}/*`.
+    pub const CALL: &str = "call";
     pub const PROJECT: &str = "project";
     pub const BUILD: &str = "build";
     pub const CONTEXT: &str = "context";
@@ -83,8 +85,8 @@ pub mod resource_types {
 
     /// All known resource types
     pub const ALL: &[&str] = &[
-        MCP, WEBHOOK, STREAM, EVENT, RUN, PROJECT, BUILD, CONTEXT, KEY, SESSION, ENV, FILE, BLOB,
-        DOMAIN,
+        MCP, WEBHOOK, STREAM, EVENT, RUN, CALL, PROJECT, BUILD, CONTEXT, KEY, SESSION, ENV, FILE,
+        BLOB, DOMAIN,
     ];
 
     /// Resource types that service keys are allowed to use.
@@ -107,6 +109,7 @@ pub mod resource_types {
             STREAM => Some(&[READ]),
             EVENT => Some(&[CREATE, READ]),
             RUN => Some(&[READ]),
+            CALL => Some(&[DELETE]),
             PROJECT => Some(&[CREATE, READ, UPDATE, DELETE]),
             BUILD => Some(&[CREATE, READ, EXECUTE]),
             CONTEXT => Some(&[CREATE, READ, UPDATE, DELETE]),
@@ -695,6 +698,10 @@ pub mod org_urn {
     }
     pub fn usage(org: &Uuid) -> String {
         format!("org:{org}/usage:*")
+    }
+    /// Every call trace in every environment of `org`.
+    pub fn calls(org: &Uuid) -> String {
+        format!("org:{org}/env:*/call:*")
     }
     /// Qualify each grant of an environment-scoped key with its environment.
     pub fn qualify(org: &Uuid, env: &Uuid, grants: &super::Permissions) -> super::Permissions {
@@ -1348,6 +1355,18 @@ mod tests {
     }
 
     #[test]
+    fn call_traces_are_deleted_through_call_not_run() {
+        assert!(perms(&[("call:*", &["delete"])]).validate().is_ok());
+        for (resource, action) in [("call:*", "read"), ("run:*", "delete")] {
+            assert!(matches!(
+                perms(&[(resource, &[action])]).validate(),
+                Err(PermissionError::ActionNotValidForResource { .. })
+            ));
+        }
+        assert!(!resource_types::SERVICE_KEY_ALLOWED.contains(&resource_types::CALL));
+    }
+
+    #[test]
     fn validate_rejects_create_on_run() {
         let p = perms(&[("run:abc-123", &["create"])]);
         let err = p.validate().unwrap_err();
@@ -1672,6 +1691,7 @@ mod tests {
         assert!(resource_types::is_known("stream"));
         assert!(resource_types::is_known("event"));
         assert!(resource_types::is_known("run"));
+        assert!(resource_types::is_known("call"));
         assert!(resource_types::is_known("project"));
         assert!(resource_types::is_known("build"));
         assert!(resource_types::is_known("context"));
