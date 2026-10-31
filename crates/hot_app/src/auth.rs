@@ -107,6 +107,9 @@ pub struct Session {
     pub product_pricing_url: String,
     /// Product support contact email.
     pub product_support_email: String,
+    /// Why the selected workspace is held (suspended or archived itself, or its account), if it is.
+    /// Pages show it as a notice; only recovery paths stay open while it is set.
+    pub current_org_hold: Option<String>,
 }
 
 /// Why a signed session could not be loaded.
@@ -333,6 +336,7 @@ impl Session {
         let value_format = user.get_value_format();
 
         Ok(Session {
+            current_org_hold: None,
             user,
             user_initials,
             user_name,
@@ -515,6 +519,8 @@ impl Session {
                     .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                     .ok_or(StatusCode::NOT_FOUND)?;
+                self.current_org_hold =
+                    (!access.runtime_allowed).then(|| hold_reason(org, &self.user_orgs));
                 if !access.runtime_allowed
                     && !(access.can_manage_account && is_recovery_path(path, &method))
                 {
@@ -902,6 +908,67 @@ fn onboarding_redirect(session: &Session, path: &str) -> Option<String> {
     }
 }
 
+/// Explain a held workspace: its own lifecycle state, or its account's.
+fn hold_reason(org: &hot::db::org::Org, user_orgs: &[hot::db::org::Org]) -> String {
+    if org.lifecycle_state != "active" {
+        return format!("This workspace is {}.", org.lifecycle_state);
+    }
+    let root_id = org.billing_owner_id();
+    match user_orgs
+        .iter()
+        .find(|candidate| candidate.org_id == root_id)
+    {
+        Some(root) if root.org_id != org.org_id => {
+            format!(
+                "This workspace's account, {}, is {}.",
+                root.name, root.lifecycle_state
+            )
+        }
+        _ => "This workspace's account is not active.".to_string(),
+    }
+}
+
+/// The response for a request whose explicit scope was refused: the shared error page, or a
+/// short fragment for HTMX widgets, instead of an empty body.
+fn scope_error_response(session: &Session, status: StatusCode, is_htmx: bool) -> Response {
+    let message = match (status, &session.current_org_hold) {
+        (StatusCode::FORBIDDEN, Some(hold)) => format!(
+            "{hold} Runs, deploys and data are unavailable until a root administrator restores it."
+        ),
+        (StatusCode::FORBIDDEN, None) if session.current_env.as_ref().is_some_and(|env| !env.active) => {
+            "This environment is inactive. Choose another environment or reactivate it.".to_string()
+        }
+        (StatusCode::NOT_FOUND, _) => {
+            "That organization or environment doesn't exist, or you aren't a member of it.".to_string()
+        }
+        (StatusCode::BAD_REQUEST, _) => {
+            "This request names a different workspace than the page it came from. Reload the page and try again.".to_string()
+        }
+        _ => "You don't have access to this page.".to_string(),
+    };
+    if is_htmx {
+        // The reason names the organization, so it is escaped like any other text.
+        let escaped = message
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        let fragment = format!("<div class=\"error-box\" role=\"alert\">{escaped}</div>");
+        return (status, axum::response::Html(fragment)).into_response();
+    }
+    if status == StatusCode::FORBIDDEN && session.current_org_hold.is_some() {
+        return crate::handlers::error_page_with(
+            session,
+            status,
+            "Workspace unavailable",
+            message,
+            "/account",
+            "Go to your account",
+        );
+    }
+    crate::handlers::error_page(session, status, message)
+}
+
 fn is_scope_selection_path(path: &str) -> bool {
     path.starts_with("/switch-org/")
         || path.starts_with("/switch-env/")
@@ -1085,7 +1152,9 @@ pub async fn session_middleware(
         // Create session from user_id and cookies
         match Session::from_user_id(&db, &conf, &user_id, &cookies).await {
             Ok(mut session) => {
-                session.select_request_scope(&db, &request).await?;
+                if let Err(status) = session.select_request_scope(&db, &request).await {
+                    return Ok((cookies, scope_error_response(&session, status, is_htmx)));
+                }
                 // Check if we need to update cookies due to fallback
                 let mut updated_cookies = cookies.clone();
                 let mut cookies_changed = false;
@@ -1216,7 +1285,12 @@ pub async fn session_middleware(
                         .await
                         {
                             Ok(mut session) => {
-                                session.select_request_scope(&db, &request).await?;
+                                if let Err(status) =
+                                    session.select_request_scope(&db, &request).await
+                                {
+                                    let response = scope_error_response(&session, status, is_htmx);
+                                    return Ok((cookies_with_defaults, response));
+                                }
                                 if let Some(path) =
                                     onboarding_redirect(&session, request.uri().path())
                                 {

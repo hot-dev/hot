@@ -3,21 +3,24 @@
 {% block content %}
 <div class="max-w-7xl mx-auto py-6 space-y-6">
     <div>
-        <h1 class="text-2xl font-bold">Child organizations</h1>
-        <p class="mt-2 text-sm text-gray-500">{{ root.name }} manages billing and account members. Each child has its own environments, deployments, credentials, and data.</p>
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Child organizations</h1>
+        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ root.name }} manages billing and account members. Each child has its own environments, deployments, credentials, and data.</p>
         {% include "org_tabs.html" %}
     </div>
+    {% match form.error %}{% when Some with (error) %}
+    <div class="error-box" role="alert">{{ error }}</div>
+    {% when None %}{% endmatch %}
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4" aria-label="Account workspace overview">
         <h2 class="text-lg font-semibold">Account overview</h2>
-        <p class="text-sm text-gray-500">Read-only activity across this account and its children. Runs this month use the UTC calendar month and retained history; file storage is current active file bytes. Open an environment to work in its explicit scope.</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Read-only activity across this account and its children. Runs this month use the UTC calendar month and retained history; file storage is current active file bytes. Open an environment to work in its explicit scope.</p>
         <div class="overflow-x-auto">
             <table class="w-full text-sm text-left">
-                <thead><tr class="border-b"><th class="p-2">Workspace</th><th class="p-2">Status</th><th class="p-2">Running</th><th class="p-2">Failed · 24h</th><th class="p-2">Runs · month</th><th class="p-2">File bytes</th><th class="p-2">Last run</th><th class="p-2">Environments</th></tr></thead>
+                <thead class="table-head"><tr class="border-b border-gray-200 dark:border-gray-700"><th class="p-2">Workspace</th><th class="p-2">Status</th><th class="p-2">Running</th><th class="p-2">Failed · 24h</th><th class="p-2">Runs · month</th><th class="p-2">File storage</th><th class="p-2">Last run</th><th class="p-2">Environments</th></tr></thead>
                 <tbody>{% for row in overview %}
-                    <tr class="border-b" data-overview-org="{{ row.org_id }}">
-                        <td class="p-2"><a class="link" href="/@{{ row.slug }}">{{ row.name }}</a><div class="text-xs text-gray-500">@{{ row.slug }}{% if row.root %} · Account root{% endif %}</div></td>
-                        <td class="p-2">{{ row.lifecycle }}</td><td class="p-2">{{ row.running }}</td><td class="p-2">{{ row.failed_24h }}</td><td class="p-2">{{ row.month_runs }}</td><td class="p-2">{{ row.file_bytes }}</td><td class="p-2 whitespace-nowrap">{{ row.last_run }}</td>
-                        <td class="p-2">{% for env in row.envs %}<a class="link block" href="/runs?org_id={{ row.org_id }}&amp;env_id={{ env.env_id }}">{{ env.name }}{% if !env.active %} (inactive){% endif %}</a>{% endfor %}{% if row.envs.is_empty() %}<span class="text-gray-500">No environments</span>{% endif %}</td>
+                    <tr class="border-b border-gray-200 dark:border-gray-700" data-overview-org="{{ row.org_id }}">
+                        <td class="p-2"><a class="link" href="/@{{ row.slug }}">{{ row.name }}</a><div class="text-xs text-gray-500 dark:text-gray-400">@{{ row.slug }}{% if row.root %} · Account root{% endif %}</div></td>
+                        <td class="p-2"><span class="badge {{ row.lifecycle_badge }}">{{ row.lifecycle }}</span></td><td class="p-2">{{ row.running|commafy }}</td><td class="p-2">{{ row.failed_24h|commafy }}</td><td class="p-2">{{ row.month_runs|commafy }}</td><td class="p-2 whitespace-nowrap">{{ row.file_bytes }}</td><td class="p-2 whitespace-nowrap">{{ row.last_run }}</td>
+                        <td class="p-2">{% for env in row.envs %}<a class="link block" href="/runs?org_id={{ row.org_id }}&amp;env_id={{ env.env_id }}">{{ env.name }}{% if !env.active %} (inactive){% endif %}</a>{% endfor %}{% if row.envs.is_empty() %}<span class="text-gray-500 dark:text-gray-400">No environments</span>{% endif %}</td>
                     </tr>
                 {% endfor %}</tbody>
             </table>
@@ -25,51 +28,52 @@
     </section>
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4">
         <h2 class="text-lg font-semibold">Account status: {{ root.lifecycle_state }}</h2>
-        <p class="text-sm text-gray-500">Suspending the account holds new work in every child. Root administrators retain recovery and billing access.</p>
-        <form method="post" action="/@{{ root.slug }}/lifecycle" class="flex gap-2">
-            <select name="state" aria-label="Account status"><option value="active" {% if root.lifecycle_state == "active" %}selected{% endif %}>Active</option><option value="suspended" {% if root.lifecycle_state == "suspended" %}selected{% endif %}>Suspended</option><option value="archived" {% if root.lifecycle_state == "archived" %}selected{% endif %}>Archived</option></select>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Suspending the account holds new work in every child. Root administrators retain recovery and billing access.</p>
+        <form method="post" action="/@{{ root.slug }}/lifecycle" class="flex flex-wrap gap-2">
+            <select class="form-select" name="state" aria-label="Account status"><option value="active" {% if root.lifecycle_state == "active" %}selected{% endif %}>Active</option><option value="suspended" {% if root.lifecycle_state == "suspended" %}selected{% endif %}>Suspended</option><option value="archived" {% if root.lifecycle_state == "archived" %}selected{% endif %}>Archived</option></select>
             <button class="btn btn-secondary" type="submit">Update account status</button>
         </form>
     </section>
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4">
         <h2 class="text-lg font-semibold">Create child organization</h2>
-        <form method="post" action="/@{{ root.slug }}/children" class="space-y-3">
+        <form method="post" action="/@{{ root.slug }}/children" class="space-y-3 max-w-xl">
             <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
-            <label class="block text-sm">Name <input class="form-input block w-full" name="name" required maxlength="200"></label>
-            <label class="block text-sm">Handle <input class="form-input block w-full" name="slug" required maxlength="63" pattern="[a-z0-9][a-z0-9-]*"></label>
-            <label class="block text-sm">Customer reference (optional) <input class="form-input block w-full" name="external_id" maxlength="200"></label>
+            <label class="form-label">Name <input class="form-input block w-full mt-1" name="name" value="{{ form.child_name }}" required maxlength="200"></label>
+            <label class="form-label">Handle <input class="form-input block w-full mt-1" name="slug" value="{{ form.child_slug }}" required minlength="2" maxlength="32" pattern="[a-z0-9][a-z0-9-]*" aria-describedby="child-handle-help"></label>
+            <p id="child-handle-help" class="text-xs text-gray-500 dark:text-gray-400">2–32 lowercase letters, numbers and hyphens. The workspace URL is /@handle.</p>
+            <label class="form-label">Customer reference (optional) <input class="form-input block w-full mt-1" name="external_id" value="{{ form.child_external_id }}" maxlength="200"></label>
             <button class="btn btn-primary" type="submit">Create child organization</button>
         </form>
     </section>
     {% match issued_token %}{% when Some with (token) %}
-    <section class="rounded-lg border p-4"><h2 class="font-semibold">Save this org API key now</h2><p class="text-sm">It will not be shown again. Revoking it also stops every key it created.</p><code class="block break-all mt-2">{{ token }}</code></section>
+    <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4"><h2 class="font-semibold">Save this org API key now</h2><p class="text-sm">It will not be shown again. Revoking it also stops every key it created.</p><code class="block break-all mt-2">{{ token }}</code></section>
     {% when None %}{% endmatch %}
-    <details class="rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+    <details class="rounded-lg border border-gray-200 dark:border-gray-700 p-4" {% if form.key_permissions.is_some() %}open{% endif %}>
         <summary class="font-semibold cursor-pointer">Org API keys</summary>
-        <p class="my-3 text-sm text-gray-500">An org API key manages child organizations, their environments and API keys through <code>/v1/orgs</code> and <code>/v1/api-keys</code>. It cannot call runtime routes: environment API keys and service keys stay bound to one environment. <code>org:*</code> means this organization's children, never this organization itself; grant <code>org:{{ root.org_id }}/…</code> explicitly for that.</p>
-        <form method="post" action="/@{{ root.slug }}/org-api-keys" class="space-y-3">
-            <label class="block text-sm">Description <input class="form-input block w-full" name="description" required maxlength="200"></label>
-            <label class="block text-sm">Permissions (JSON) <textarea class="form-input block w-full font-mono" name="permissions" rows="8" required>{{ org_key_example }}</textarea></label>
-            <p class="text-xs text-gray-500">Grants inside an environment, such as <code>org:*/env:*/event:*</code>, only set the ceiling for environment keys this key creates. Creating more org keys needs <code>org:{{ root.org_id }}/api-key:*</code> with <code>create</code>.</p>
-            <label class="block text-sm">Expires in days (optional) <input class="form-input" type="number" name="expires_in_days" min="1" max="3650"></label>
+        <p class="my-3 text-sm text-gray-500 dark:text-gray-400">An org API key manages child organizations, their environments and API keys through <code>/v1/orgs</code> and <code>/v1/api-keys</code>. It cannot call runtime routes: environment API keys and service keys stay bound to one environment. <code>org:*</code> means this organization's children, never this organization itself; grant <code>org:{{ root.org_id }}/…</code> explicitly for that.</p>
+        <form method="post" action="/@{{ root.slug }}/org-api-keys" class="space-y-3 max-w-3xl">
+            <label class="form-label">Description <input class="form-input block w-full mt-1" name="description" value="{{ form.key_description }}" required maxlength="200"></label>
+            <label class="form-label">Permissions (JSON) <textarea class="form-input block w-full mt-1 font-mono" name="permissions" rows="8" required>{{ org_key_example }}</textarea></label>
+            <p class="text-xs text-gray-500 dark:text-gray-400">Grants inside an environment, such as <code>org:*/env:*/event:*</code>, only set the ceiling for environment keys this key creates. Creating more org keys needs <code>org:{{ root.org_id }}/api-key:*</code> with <code>create</code>.</p>
+            <label class="form-label">Expires in days (optional) <input class="form-input block mt-1 w-40" type="number" name="expires_in_days" value="{{ form.key_expires_in_days }}" min="1" max="3650"></label>
             <button class="btn btn-primary" type="submit">Create org API key</button>
         </form>
-        {% for key in org_api_keys %}
-        <div class="mt-4 border-t pt-3"><p>{{ key.description }} · {{ key.org_api_key_id }}{% match key.expires_at %}{% when Some with (at) %} · expires {{ at }}{% when None %}{% endmatch %}{% match key.issuer_org_api_key_id %}{% when Some with (issuer) %} · created by key {{ issuer }}{% when None %}{% endmatch %}</p>
-            <pre class="text-xs text-gray-500 whitespace-pre-wrap">{{ key.permissions }}</pre>
-            {% if key.is_usable() %}<form method="post" action="/@{{ root.slug }}/org-api-keys/{{ key.org_api_key_id }}/revoke"><button class="btn btn-secondary" type="submit">Revoke</button></form>{% else %}<p class="text-sm text-gray-500">Inactive</p>{% endif %}
+        {% for row in org_api_keys %}
+        <div class="mt-4 border-t border-gray-200 dark:border-gray-700 pt-3"><p>{{ row.key.description }} · {{ row.key.org_api_key_id }}{% match row.expires_at %}{% when Some with (at) %} · expires {{ at }}{% when None %}{% endmatch %}{% match row.key.issuer_org_api_key_id %}{% when Some with (issuer) %} · created by key {{ issuer }}{% when None %}{% endmatch %}</p>
+            <pre class="text-xs text-gray-500 dark:text-gray-400 whitespace-pre-wrap">{{ row.key.permissions }}</pre>
+            {% if row.key.is_usable() %}<form method="post" action="/@{{ root.slug }}/org-api-keys/{{ row.key.org_api_key_id }}/revoke"><button class="btn btn-secondary" type="submit">Revoke</button></form>{% else %}<span class="badge badge-neutral">Inactive</span>{% endif %}
         </div>
         {% endfor %}
     </details>
     {% for child in children %}
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4">
-        <div class="flex items-center justify-between">
-            <div><h2 class="text-lg font-semibold"><a class="link" href="/@{{ child.slug }}">{{ child.name }}</a></h2><p class="text-sm text-gray-500">@{{ child.slug }} · {{ child.lifecycle_state }} · {{ child.org_id }}</p></div>
+        <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="min-w-0"><h2 class="text-lg font-semibold"><a class="link" href="/@{{ child.slug }}">{{ child.name }}</a></h2><p class="text-sm text-gray-500 dark:text-gray-400 break-all">@{{ child.slug }} · <span class="badge {% if child.lifecycle_state == "active" %}badge-success{% else if child.lifecycle_state == "suspended" %}badge-pending{% else %}badge-neutral{% endif %}">{{ child.lifecycle_state }}</span> · {{ child.org_id }}</p></div>
             <form action="/switch-org/{{ child.org_id }}" method="post"><button class="btn btn-secondary" type="submit">Open workspace</button></form>
         </div>
-        <form method="post" action="/@{{ root.slug }}/children/{{ child.org_id }}/lifecycle" class="flex gap-2">
-            <label class="text-sm">Status
-                <select class="form-select" name="state">
+        <form method="post" action="/@{{ root.slug }}/children/{{ child.org_id }}/lifecycle" class="flex flex-wrap items-end gap-2">
+            <label class="form-label">Status
+                <select class="form-select block mt-1" name="state">
                     <option value="active" {% if child.lifecycle_state == "active" %}selected{% endif %}>Active</option>
                     <option value="suspended" {% if child.lifecycle_state == "suspended" %}selected{% endif %}>Suspended</option>
                     <option value="archived" {% if child.lifecycle_state == "archived" %}selected{% endif %}>Archived</option>
@@ -77,21 +81,21 @@
             </label>
             <button class="btn btn-secondary" type="submit">Update status</button>
         </form>
-        <p class="text-sm text-gray-500">Root administrators have inherited access. Assign other account members below. Restore an archived child to suspended before activating it.</p>
-        <form method="post" action="/@{{ root.slug }}/children/{{ child.org_id }}/access" class="flex flex-wrap gap-2">
-            <label class="text-sm">Member
-                <select class="form-select" name="user_id" required>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Root administrators have inherited access. Assign other account members below. Restore an archived child to suspended before activating it.</p>
+        <form method="post" action="/@{{ root.slug }}/children/{{ child.org_id }}/access" class="flex flex-wrap items-end gap-2">
+            <label class="form-label">Member
+                <select class="form-select block mt-1 max-w-full" name="user_id" required>
                     {% for member in members %}<option value="{{ member.user_id }}">{{ member.email }}</option>{% endfor %}
                 </select>
             </label>
-            <label class="text-sm">Child access
-                <select class="form-select" name="role_id"><option value="1">Member</option><option value="2">Administrator</option><option value="0">Remove explicit access</option></select>
+            <label class="form-label">Child access
+                <select class="form-select block mt-1" name="role_id"><option value="1">Member</option><option value="2">Administrator</option><option value="0">Remove explicit access</option></select>
             </label>
             <button class="btn btn-secondary" type="submit">Save access</button>
         </form>
         <a class="link text-sm" href="/@{{ child.slug }}/users">View explicit child access</a>
     </section>
     {% endfor %}
-    {% if children.is_empty() %}<p class="text-sm text-gray-500">No child organizations yet.</p>{% endif %}
+    {% if children.is_empty() %}<p class="text-sm text-gray-500 dark:text-gray-400">No child organizations yet.</p>{% endif %}
 </div>
 {% endblock %}

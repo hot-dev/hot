@@ -1038,12 +1038,12 @@ pub async fn org_users_edit_handler(
         "Users".to_string(),
         format!("/@{}/users", org_slug),
     ));
-    breadcrumbs.push(templates::BreadcrumbItem::clickable(
+    // There is no user detail page.
+    breadcrumbs.push(templates::BreadcrumbItem::current(
         org_user_display
             .name
             .clone()
             .unwrap_or_else(|| "User".to_string()),
-        format!("/@{}/users/{}", org_slug, user_id),
     ));
     breadcrumbs.push(templates::BreadcrumbItem::current("Edit".to_string()));
 
@@ -1281,9 +1281,9 @@ fn render_org_users_edit_with_error(
         "Users".to_string(),
         format!("/@{}/users", org.slug),
     ));
-    breadcrumbs.push(templates::BreadcrumbItem::clickable(
+    // There is no user detail page.
+    breadcrumbs.push(templates::BreadcrumbItem::current(
         org_user.name.clone().unwrap_or_else(|| "User".to_string()),
-        format!("/@{}/users/{}", org.slug, org_user.user_id),
     ));
     breadcrumbs.push(templates::BreadcrumbItem::current("Edit".to_string()));
 

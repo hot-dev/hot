@@ -1,3 +1,6 @@
+// Handlers answer errors with a rendered page: an axum Response, which is large by design.
+#![allow(clippy::result_large_err)]
+
 use crate::auth::Session;
 use crate::handlers::list_query;
 use crate::handlers::stream_graph;
@@ -131,20 +134,15 @@ pub async fn task_detail_handler(
     State(db): State<Arc<DatabasePool>>,
     State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
-) -> Result<Html<String>, (StatusCode, String)> {
-    let task_uuid: Uuid = task_id
-        .parse()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid task ID".to_string()))?;
-    let env_id = session
-        .current_env_id()
-        .ok_or((StatusCode::NOT_FOUND, "Task not found".to_string()))?;
+) -> Result<Html<String>, axum::response::Response> {
+    let not_found = || super::not_found_page(&session, "Task", "/tasks", "Back to tasks");
+    let task_uuid: Uuid = task_id.parse().map_err(|_| not_found())?;
+    let env_id = session.current_env_id().ok_or_else(not_found)?;
 
-    let mut task = Task::get(&db, &task_uuid)
-        .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "Task not found".to_string()))?;
+    let mut task = Task::get(&db, &task_uuid).await.map_err(|_| not_found())?;
 
     if task.env_id != env_id {
-        return Err((StatusCode::NOT_FOUND, "Task not found".to_string()));
+        return Err(not_found());
     }
 
     crate::handlers::rehydrate_opt_json_for_session(blob_store.as_ref(), &session, &mut task.args)
@@ -169,7 +167,6 @@ pub async fn task_detail_handler(
         stream_graph::FocusElement::Task(task_uuid),
     )
     .await;
-    let graph_data_json = templates::script_safe_json(&graph_data, "{}");
 
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::clickable(
@@ -187,10 +184,10 @@ pub async fn task_detail_handler(
         title: &templates::get_uuid_short(&task_uuid),
         page_context,
         task: task_display,
-        graph_data_json,
+        graph_data,
     };
 
     Ok(Html(template.render().map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
     })?))
 }

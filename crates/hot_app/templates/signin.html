@@ -13,7 +13,7 @@
             </p>
             {% endif %}
             {% if error_message != "" %}
-            <div class="mt-4 p-3 bg-red-100 border border-red-500 text-red-700 rounded-md">
+            <div class="mt-4 error-box">
                 {{ error_message }}
             </div>
             {% endif %}
@@ -56,7 +56,7 @@
             </div>
 
             <div class="flex items-center mb-6">
-                <input type="checkbox" id="remember" name="remember" class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded" />
+                <input type="checkbox" id="remember" name="remember" class="h-4 w-4 text-hot-red-700 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded" />
                 <label for="remember" class="ml-2 block text-sm">Remember me</label>
             </div>
 

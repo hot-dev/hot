@@ -30,10 +30,10 @@
                         <label class="flex items-center space-x-3 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 p-2 rounded">
                             <input type="checkbox" name="channel_checkbox" value="{{ ch.alert_channel_id }}"
                                 {% if selected_channel_ids.contains(&ch.alert_channel_id) %}checked{% endif %}
-                                class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
+                                class="h-4 w-4 text-hot-red-700 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
                             <span class="text-sm text-gray-900 dark:text-white flex-grow">{{ ch.name }}</span>
                             {% if ch.org_id.is_none() %}
-                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">
+                            <span class="badge badge-running">
                                 System
                             </span>
                             {% endif %}
@@ -61,7 +61,7 @@
                         <label class="flex items-center space-x-3 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 p-2 rounded">
                             <input type="checkbox" name="destination_checkbox" value="{{ dest.alert_destination_id }}"
                                 {% if selected_destination_ids.contains(&dest.alert_destination_id) %}checked{% endif %}
-                                class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
+                                class="h-4 w-4 text-hot-red-700 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
                             <span class="text-sm text-gray-900 dark:text-white flex-grow">{{ dest.name }}</span>
                             <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium 
                                 {% match dest.destination_type_id %}
@@ -95,7 +95,7 @@
                         {% if subscription.env_id.is_some() %}<input type="hidden" name="env_specific" value="true">{% endif %}
                     <input type="checkbox" disabled name="env_specific" value="true"
                             {% if subscription.env_id.is_some() %}checked{% endif %}
-                            class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
+                            class="h-4 w-4 text-hot-red-700 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
                         <span class="text-sm text-gray-900 dark:text-white">Environment-specific (scope is fixed)</span>
                     </label>
                     <p class="mt-1 ml-7 text-sm text-gray-500 dark:text-gray-400">
@@ -109,7 +109,7 @@
                     <label class="flex items-center space-x-3 cursor-pointer">
                         <input type="checkbox" name="enabled" value="true"
                             {% if subscription.enabled %}checked{% endif %}
-                            class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
+                            class="h-4 w-4 text-hot-red-700 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
                         <span class="text-sm text-gray-900 dark:text-white">Enabled</span>
                     </label>
                     <p class="mt-1 ml-7 text-sm text-gray-500 dark:text-gray-400">

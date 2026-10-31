@@ -402,8 +402,8 @@ pub fn generate_pkg_index_html(docs: &PkgDocs, pkg_name: &str, base_url: &str) -
 "#, pkg_name, docs.meta.version));
     }
 
-    // Namespace list grouped by prefix
-    html.push_str("<h2>Namespaces</h2>\n");
+    // Namespace list grouped by prefix ("On this page" links to #namespaces)
+    html.push_str("<h2 id=\"namespaces\">Namespaces</h2>\n");
 
     let mut groups: BTreeMap<String, Vec<&DocNamespace>> = BTreeMap::new();
     for ns in &docs.namespaces {
@@ -656,6 +656,28 @@ pub fn generate_namespace_html_with_registry_and_aliases(
     base_url: &str,
     alias_target_index: &AHashMap<String, String>,
 ) -> String {
+    generate_namespace_html_with_root(
+        ns,
+        pkg_name,
+        pkg_type_index,
+        cross_pkg_registry,
+        base_url,
+        alias_target_index,
+        &format!("{}/{}", base_url, pkg_name),
+    )
+}
+
+/// [`generate_namespace_html_with_registry_and_aliases`] with an explicit breadcrumb root link,
+/// for callers whose docs index is not at `{base_url}/{pkg_name}` (a project's own namespaces).
+pub fn generate_namespace_html_with_root(
+    ns: &DocNamespace,
+    pkg_name: &str,
+    pkg_type_index: &AHashMap<String, String>,
+    cross_pkg_registry: Option<&AHashMap<String, String>>,
+    base_url: &str,
+    alias_target_index: &AHashMap<String, String>,
+    root_href: &str,
+) -> String {
     let mut html = String::new();
 
     // Build the type registry for this namespace
@@ -689,12 +711,13 @@ pub fn generate_namespace_html_with_registry_and_aliases(
     // Breadcrumb
     html.push_str("<p class=\"breadcrumb\">");
     html.push_str(&format!(
-        "<a href=\"{}/{}\">{}</a> / ",
-        base_url, pkg_name, pkg_name
+        "<a href=\"{}\">{}</a> / ",
+        html_escape(root_href),
+        html_escape(pkg_name)
     ));
     html.push_str(&format!(
         "<span class=\"ns-current\">{}</span>",
-        ns.namespace
+        html_escape(&ns.namespace)
     ));
     html.push_str("</p>\n\n");
 

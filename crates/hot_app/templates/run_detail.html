@@ -114,7 +114,7 @@
                     Waiting
                     <span class="timing-breakdown-info" aria-hidden="true">i</span>
                 </h3>
-                <p class="text-xs font-semibold text-amber-600 dark:text-amber-400">{% match r.pre_run_wait_formatted %}{% when Some with (t) %}{{ t }}{% when None %}—{% endmatch %}</p>
+                <p class="text-xs font-semibold text-amber-700 dark:text-amber-400">{% match r.pre_run_wait_formatted %}{% when Some with (t) %}{{ t }}{% when None %}—{% endmatch %}</p>
                 <div id="run-waiting-breakdown" class="timing-breakdown-popover" role="tooltip">
                     <div class="timing-breakdown-heading">Waiting · {% match r.pre_run_wait_formatted %}{% when Some with (t) %}{{ t }}{% when None %}—{% endmatch %}</div>
                     <div class="timing-breakdown-description">Event created → handler started</div>
@@ -180,7 +180,7 @@
         <div class="mt-4 flex gap-2">
             {% if r.status == "failed" %}
             <button
-                onclick="retryRun('{{ r.run_id }}')"
+                onclick="retryRun({{ r.run_id|js }})"
                 class="btn btn-secondary btn-sm inline-flex items-center gap-1.5"
                 title="Retry this failed run in the same stream">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -190,7 +190,7 @@
             </button>
             {% endif %}
             <button
-                onclick="rerunRun('{{ r.run_id }}')"
+                onclick="rerunRun({{ r.run_id|js }})"
                 class="btn btn-secondary btn-sm inline-flex items-center gap-1.5"
                 title="Re-run this function in a new stream">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -288,7 +288,7 @@
     </div>
 
     <!-- Hidden script to pass graph data safely -->
-    <script type="application/json" id="graph-data">{{ graph_data_json|safe }}</script>
+    <script type="application/json" id="graph-data">{{ graph_data|js|safe }}</script>
 
     <!-- Main Content Area with integrated Value Inspector -->
     <div class="w-full rounded-b-lg backdrop-blur-sm border border-t-0 border-gray-200 dark:border-gray-700 transition-all duration-300 bg-white dark:bg-gray-800 text-gray-800 dark:text-white flex flex-col">
@@ -676,37 +676,8 @@ document.addEventListener('DOMContentLoaded', function() {
         showRawCheckbox.addEventListener('change', function() {
             // Trigger HTMX request to refresh table with new raw state
             refreshTableWithRawState(showRawCheckbox.checked);
-
-            // Re-display the current value with updated processing if inspector is open
-            const currentVarId = showRawCheckbox.getAttribute('data-current-var-id');
-            const currentType = showRawCheckbox.getAttribute('data-current-type');
-            if (currentVarId && currentType) {
-                fetchAndShowFullValue(currentVarId, currentType);
-            }
         });
     }
-
-    // Use event delegation to handle clicks on rows
-    document.addEventListener('click', function(e) {
-        // Check if any part of a clickable row was clicked
-            const row = e.target.closest('.clickable-row');
-        if (row) {
-            const varId = row.getAttribute('data-var-id');
-
-            // Check if we're in a tab (Table tab of observability tabs)
-            const isInTab = e.target.closest('#table-view-container');
-
-            if (isInTab && window.observabilityTabs) {
-                // Use tabs' Value Inspector - show both meta and value
-                window.observabilityTabs.showVarInInspector(varId);
-            } else {
-                // Use original Value Inspector - show value by default
-            showValueInspector();
-            highlightRow(row);
-                fetchAndShowFullValue(varId, 'value');
-            }
-        }
-    });
 });
 
 function showValueInspector() {
@@ -972,47 +943,6 @@ function extractArgName(arg) {
 
     // Fallback
     return 'arg';
-}
-
-async function fetchAndShowFullValue(varId, type) {
-    const content = document.getElementById('value-panel-content');
-    const typeIndicator = document.getElementById('value-panel-type');
-    const showRawCheckbox = document.getElementById('show-raw-values');
-
-    // Store current variable info for checkbox updates
-    if (showRawCheckbox) {
-        showRawCheckbox.setAttribute('data-current-var-id', varId);
-        showRawCheckbox.setAttribute('data-current-type', type);
-    }
-
-    // Show loading state
-    content.innerHTML = '<div class="text-gray-500 dark:text-gray-400 italic text-center py-4">Loading...</div>';
-    typeIndicator.textContent = 'Loading...';
-    typeIndicator.title = 'Loading...';
-
-    try {
-        const response = await fetch(`/vars/${varId}`);
-        if (!response.ok) {
-            throw new Error('Failed to fetch variable details');
-        }
-
-        const data = await response.json();
-        if (!data.success) {
-            throw new Error(data.error || 'Unknown error');
-        }
-
-        const value = type === 'meta' ? data.meta : data.value;
-        // Pass the formatted_value to the display function
-        showInValuePanel(value, type, data, data.formatted_value);
-    } catch (error) {
-        content.replaceChildren();
-        const errorMessage = document.createElement('div');
-        errorMessage.className = 'text-red-500 dark:text-red-500';
-        errorMessage.textContent = `Error loading data: ${error.message}`;
-        content.appendChild(errorMessage);
-        typeIndicator.textContent = 'Error';
-        typeIndicator.title = `Error: ${error.message}`;
-    }
 }
 
 // Helper functions for unwrapping values

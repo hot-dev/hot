@@ -119,13 +119,13 @@
                 <div class="mb-6 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-4">
                     <div class="flex">
                         <div class="flex-shrink-0">
-                            <svg class="h-5 w-5 text-amber-600 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
+                            <svg class="h-5 w-5 text-amber-700 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
                                 <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
                             </svg>
                         </div>
                         <div class="ml-3">
                             <p class="text-sm text-yellow-700 dark:text-yellow-200">
-                                <strong>Warning:</strong> Changing this value will affect all code using <code class="bg-yellow-100 dark:bg-yellow-800 px-1 rounded text-xs">::hot::ctx/get("{{ context.key }}")</code>{% if scope == "env" %} in this environment{% else %} in this project{% endif %}.
+                                <strong>Warning:</strong> Changing this value will affect all code using <code class="badge badge-pending">::hot::ctx/get("{{ context.key }}")</code>{% if scope == "env" %} in this environment{% else %} in this project{% endif %}.
                             </p>
                         </div>
                     </div>
@@ -165,11 +165,11 @@
                     <p class="text-gray-500 dark:text-gray-400">Status</p>
                     <p class="text-gray-900 dark:text-white">
                         {% if context.active %}
-                        <span class="inline-flex items-center rounded-full bg-green-100 dark:bg-green-900/30 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:text-green-300">
+                        <span class="badge badge-success">
                             Active
                         </span>
                         {% else %}
-                        <span class="inline-flex items-center rounded-full bg-red-100 dark:bg-red-900/30 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:text-red-300">
+                        <span class="badge badge-failure">
                             Inactive
                         </span>
                         {% endif %}

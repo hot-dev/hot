@@ -6,6 +6,13 @@
     border-bottom: 1px solid rgba(229, 231, 235, 1);
     background: white;
     padding: 0 0 0 16px;
+    overflow-x: auto;
+    scrollbar-width: thin;
+}
+
+.observability-tabs > * {
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .dark .observability-tabs {
@@ -492,6 +499,24 @@
 .timing-breakdown-popover-align-right {
     right: 0;
     left: auto;
+}
+
+@media (max-width: 640px) {
+    /* Pinned between the screen gutters below its metric, so a popover for a metric in the
+       right column neither runs off the screen nor widens the page while hidden. After the
+       base and placement rules, which it overrides. */
+    .timing-breakdown-popover,
+    .timing-breakdown-popover.timing-breakdown-popover-wide,
+    .timing-breakdown-popover.timing-breakdown-popover-above,
+    .timing-breakdown-popover.timing-breakdown-popover-align-right {
+        position: fixed;
+        top: auto;
+        bottom: auto;
+        left: 16px;
+        right: 16px;
+        width: auto;
+        margin-top: 8px;
+    }
 }
 
 .timing-breakdown-trigger:hover > .timing-breakdown-popover,
@@ -2815,7 +2840,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             console.error('Error loading hierarchy:', error);
             this.hierarchyTree.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-4">
                 <p>Failed to load hierarchy</p>
-                <p class="text-xs mt-2">${error.message}</p>
+                <p class="text-xs mt-2">${this.escapeHtml(error.message)}</p>
             </div>`;
         }
     }
@@ -2859,7 +2884,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             console.error('Error loading timeline:', error);
             this.renderTimeline(`<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
                 <p>Failed to load timeline</p>
-                <p class="text-xs mt-2">${error.message}</p>
+                <p class="text-xs mt-2">${this.escapeHtml(error.message)}</p>
             </div>`);
         }
     }
@@ -2962,7 +2987,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             console.error('Error loading files:', error);
             this.filesView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
                 <p>Failed to load files</p>
-                <p class="text-xs mt-2">${error.message}</p>
+                <p class="text-xs mt-2">${this.escapeHtml(error.message)}</p>
             </div>`;
         }
     }
@@ -2980,7 +3005,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
         } catch (error) {
             this.tasksView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
                 <p>Failed to load tasks</p>
-                <p class="text-xs mt-2">${error.message}</p>
+                <p class="text-xs mt-2">${this.escapeHtml(error.message)}</p>
             </div>`;
         }
     }
@@ -3009,7 +3034,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
         let html = `
             <div class="overflow-auto">
                 <table class="w-full table-auto divide-y divide-gray-200 dark:divide-gray-700">
-                    <thead class="bg-gray-100 dark:bg-gray-700 sticky top-0">
+                    <thead class="table-head sticky top-0">
                         <tr>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Path</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Size</th>
@@ -3038,7 +3063,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
                         ${this.escapeHtml(file.size_formatted)}
                     </td>
                     <td class="px-4 py-3 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300 hidden md:table-cell">
-                        ${contentType !== '-' ? `<span class="px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">${this.escapeHtml(contentType)}</span>` : '<span class="text-gray-400 dark:text-gray-500 italic">-</span>'}
+                        ${contentType !== '-' ? `<span class="badge badge-running">${this.escapeHtml(contentType)}</span>` : '<span class="text-gray-500 dark:text-gray-400 italic">-</span>'}
                     </td>
                     <td class="px-4 py-3 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300 hidden lg:table-cell">
                         ${this.escapeHtml(file.updated_at)}
@@ -3968,7 +3993,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
                  style="${finalIndentStyle}">
                 <div class="timeline-bar-header">
                     <div class="timeline-bar-title">
-                        ${condPrefix.html}${displayName ? `<span>${displayName}</span>` : ''}${flowPill}
+                        ${condPrefix.html}${displayName ? `<span>${this.escapeHtml(displayName)}</span>` : ''}${flowPill}
                     </div>
                     <div class="timeline-bar-duration">${resultMatchBadge}${this.formatDuration(item.duration_us)}</div>
                 </div>
@@ -4031,7 +4056,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
                      data-node-type="${node.type}"
                      style="${extraPadding}">
                     <span class="tree-toggle" data-node-id="${node.id}" style="width: 14px; cursor: ${hasChildren ? 'pointer' : 'default'}">${toggleIcon}</span>
-                    ${condPrefix.html}<span class="node-name" style="flex: 1" title="${name}">${displayName}${flowPill}</span>
+                    ${condPrefix.html}<span class="node-name" style="flex: 1" title="${this.escapeAttribute(name)}">${this.escapeHtml(displayName)}${flowPill}</span>
                     ${resultMatchBadge}${durationBadge}
                 </div>
                 ${hasChildren && isExpanded ? `
@@ -4220,7 +4245,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             const source = node.line ? `${node.file}:${node.line}` : node.file;
             const sourceHtml = this.hierarchyBuildId ? `
                     <button type="button"
-                            class="font-mono text-hot-red-600 dark:text-hot-red-400 hover:underline text-left"
+                            class="font-mono text-hot-red-700 dark:text-hot-red-400 hover:underline text-left"
                             title="${this.escapeAttribute(source)}"
                             data-source-build-id="${this.escapeAttribute(this.hierarchyBuildId)}"
                             data-source-file="${this.escapeAttribute(node.file)}"

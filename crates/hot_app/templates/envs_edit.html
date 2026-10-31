@@ -5,7 +5,7 @@
     <div class="max-w-2xl">
         <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
             {% if error_message != "" %}
-            <div class="mb-4 p-3 bg-red-100 border border-red-500 text-red-700 rounded-md">
+            <div class="mb-4 error-box">
                 {{ error_message }}
             </div>
             {% endif %}
@@ -47,14 +47,14 @@
                             <dt class="text-xs font-medium text-gray-500 dark:text-gray-400">Status</dt>
                             <dd class="mt-1 text-xs">
                                 {% if env.active %}
-                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300">
+                                <span class="badge badge-success">
                                     <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
                                         <circle cx="4" cy="4" r="3" />
                                     </svg>
                                     Active
                                 </span>
                                 {% else %}
-                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                                <span class="badge badge-neutral">
                                     <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
                                         <circle cx="4" cy="4" r="3" />
                                     </svg>

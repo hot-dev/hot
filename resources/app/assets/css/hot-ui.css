@@ -186,6 +186,83 @@
   .badge-neutral { background: var(--color-gray-100); color: var(--color-gray-800); }
   .dark .badge-neutral { background: var(--color-gray-700); color: var(--color-gray-200); }
 
+  /* ===================================================================
+     Form controls — the canonical text input, textarea and select recipe.
+     Compose with layout utilities (block w-full, max-w-*) only.
+     =================================================================== */
+
+  .form-input,
+  .form-select {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-gray-300);
+    border-radius: var(--radius-control);
+    background-color: #ffffff;
+    color: var(--color-gray-900);
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .form-input::placeholder { color: var(--color-gray-500); }
+
+  .form-input:focus,
+  .form-select:focus {
+    outline: none;
+    border-color: var(--color-hot-red-500);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-hot-red-500) 35%, transparent);
+  }
+
+  .form-input:disabled,
+  .form-select:disabled {
+    background-color: var(--color-gray-100);
+    color: var(--color-gray-600);
+    cursor: not-allowed;
+  }
+
+  .dark .form-input,
+  .dark .form-select {
+    background-color: var(--color-gray-900);
+    border-color: var(--color-gray-700);
+    color: #ffffff;
+  }
+
+  .dark .form-input:disabled,
+  .dark .form-select:disabled {
+    background-color: var(--color-gray-800);
+    color: var(--color-gray-400);
+  }
+
+  .form-label {
+    display: block;
+    margin-bottom: 0.25rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--color-gray-700);
+  }
+
+  .dark .form-label { color: #d1d5db; }
+
+  /* Validation and failure messages: soft red panel with a dark variant. */
+  .error-box {
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--color-red-300);
+    border-radius: var(--radius-control);
+    background-color: var(--color-red-50);
+    color: var(--color-red-800);
+    font-size: 0.875rem;
+  }
+
+  .dark .error-box {
+    border-color: var(--color-red-800);
+    background-color: color-mix(in srgb, var(--color-red-900) 30%, transparent);
+    color: var(--color-red-200);
+  }
+
+  /* List table header row: one shade per theme on full pages and HTMX partials alike. */
+  .table-head { background-color: var(--color-gray-100); }
+  .dark .table-head { background-color: var(--color-gray-800); }
+
   /* Selectable chip: pill-shaped bordered toggle (key scopes, filters). */
   .chip {
     display: inline-flex;

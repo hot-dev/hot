@@ -27,7 +27,7 @@
             </p>
             {% endif %}
             {% if error_message != "" %}
-            <div class="mt-4 p-3 bg-red-100 border border-red-500 text-red-700 rounded-md">
+            <div class="mt-4 error-box">
                 {{ error_message }}
                 {% if show_signin_link %}
                 <a href="/signin{% if invite_code != "" %}?invite_code={{ invite_code }}{% if plan != "" %}&plan={{ plan }}{% if billing != "" %}&billing={{ billing }}{% endif %}{% endif %}{% elif plan != "" %}?plan={{ plan }}{% if billing != "" %}&billing={{ billing }}{% endif %}{% endif %}" class="underline font-medium">Sign in instead</a>

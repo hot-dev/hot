@@ -138,6 +138,14 @@ pub async fn webhook_service_detail_handler(
             .into_iter()
             .filter(|ep| ep.service == service)
             .collect();
+        if service_endpoints.is_empty() {
+            return super::not_found_page(
+                &session,
+                "Webhook service",
+                "/webhooks",
+                "Back to webhooks",
+            );
+        }
 
         // Apply search filter
         let filtered: Vec<_> = if search_query.is_empty() {

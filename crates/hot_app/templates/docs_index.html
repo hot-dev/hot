@@ -108,7 +108,7 @@
                         No documentation found for this project's own source code.
                     </div>
                 {% else if project_namespaces.is_empty() && docs_generating %}
-                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+                    <div class="text-center py-8 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
                         <div class="flex items-center justify-center">
                             <svg class="animate-spin h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -125,7 +125,7 @@
                                 {% if ns.description.is_some() %}
                                     <p class="text-sm text-gray-600 dark:text-gray-400 mb-3 line-clamp-2">{{ ns.description.as_ref().unwrap() }}</p>
                                 {% else %}
-                                    <p class="text-sm text-gray-400 dark:text-gray-500 mb-3 italic">No description provided.</p>
+                                    <p class="text-sm text-gray-500 dark:text-gray-400 mb-3 italic">No description provided.</p>
                                 {% endif %}
                                 <div class="flex justify-between text-xs text-gray-500 dark:text-gray-400">
                                     <span>{{ ns.function_count }} Functions</span>
@@ -152,7 +152,7 @@
                     {% endif %}
                 </h2>
                 {% if dependencies.is_empty() && docs_generating %}
-                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+                    <div class="text-center py-8 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
                         <div class="flex items-center justify-center">
                             <svg class="animate-spin h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -173,7 +173,7 @@
                                 {% if dep.description.is_some() %}
                                     <p class="text-sm text-gray-600 dark:text-gray-400 mb-3 line-clamp-2">{{ dep.description.as_ref().unwrap() }}</p>
                                 {% else %}
-                                    <p class="text-sm text-gray-400 dark:text-gray-500 mb-3 italic">No description provided.</p>
+                                    <p class="text-sm text-gray-500 dark:text-gray-400 mb-3 italic">No description provided.</p>
                                 {% endif %}
                                 <div class="text-xs text-gray-500 dark:text-gray-400">
                                     {{ dep.namespace_count }} Namespaces

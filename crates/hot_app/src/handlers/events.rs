@@ -299,10 +299,7 @@ pub async fn events_detail_handler(
 
             Html(template.render().unwrap()).into_response()
         }
-        Err(_) => {
-            // Event not found, redirect to events list
-            Redirect::to("/events").into_response()
-        }
+        Err(_) => super::not_found_page(&session, "Event", "/events", "Back to events"),
     }
 }
 
@@ -325,11 +322,19 @@ pub async fn event_detail_table_handler(
     match hot::db::Event::get_event(&db, &event_id).await {
         Ok(event) => {
             if event.env_id != env_id {
-                return Html("<div>Event not found</div>".to_string()).into_response();
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Html("<div>Event not found</div>"),
+                )
+                    .into_response();
             }
         }
         Err(_) => {
-            return Html("<div>Event not found</div>".to_string()).into_response();
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                Html("<div>Event not found</div>"),
+            )
+                .into_response();
         }
     }
 

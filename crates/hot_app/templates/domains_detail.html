@@ -96,10 +96,10 @@
                         </div>
                         {% else %}
                         <div class="w-8 h-8 rounded-full border-2 border-gray-300 dark:border-gray-600 flex items-center justify-center">
-                            <span class="text-xs font-medium text-gray-400 dark:text-gray-500">1</span>
+                            <span class="text-xs font-medium text-gray-500 dark:text-gray-400">1</span>
                         </div>
                         {% endif %}
-                        <span class="mt-1.5 text-xs text-center leading-tight {% if step1_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step1_done %}text-green-600 dark:text-green-400 font-medium{% else %}text-gray-400 dark:text-gray-500{% endif %}">Request Certificate</span>
+                        <span class="mt-1.5 text-xs text-center leading-tight {% if step1_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step1_done %}text-green-700 dark:text-green-400 font-medium{% else %}text-gray-500 dark:text-gray-400{% endif %}">Request Certificate</span>
                     </div>
 
                     <!-- Connector 1-2 -->
@@ -119,10 +119,10 @@
                         </div>
                         {% else %}
                         <div class="w-8 h-8 rounded-full border-2 border-gray-300 dark:border-gray-600 flex items-center justify-center">
-                            <span class="text-xs font-medium text-gray-400 dark:text-gray-500">2</span>
+                            <span class="text-xs font-medium text-gray-500 dark:text-gray-400">2</span>
                         </div>
                         {% endif %}
-                        <span class="mt-1.5 text-xs text-center leading-tight {% if step2_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step2_done %}text-green-600 dark:text-green-400 font-medium{% else %}text-gray-400 dark:text-gray-500{% endif %}">Validate &amp; Issue</span>
+                        <span class="mt-1.5 text-xs text-center leading-tight {% if step2_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step2_done %}text-green-700 dark:text-green-400 font-medium{% else %}text-gray-500 dark:text-gray-400{% endif %}">Validate &amp; Issue</span>
                     </div>
 
                     <!-- Connector 2-3 -->
@@ -142,10 +142,10 @@
                         </div>
                         {% else %}
                         <div class="w-8 h-8 rounded-full border-2 border-gray-300 dark:border-gray-600 flex items-center justify-center">
-                            <span class="text-xs font-medium text-gray-400 dark:text-gray-500">3</span>
+                            <span class="text-xs font-medium text-gray-500 dark:text-gray-400">3</span>
                         </div>
                         {% endif %}
-                        <span class="mt-1.5 text-xs text-center leading-tight {% if step3_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step3_done %}text-green-600 dark:text-green-400 font-medium{% else %}text-gray-400 dark:text-gray-500{% endif %}">Domain CNAME</span>
+                        <span class="mt-1.5 text-xs text-center leading-tight {% if step3_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step3_done %}text-green-700 dark:text-green-400 font-medium{% else %}text-gray-500 dark:text-gray-400{% endif %}">Domain CNAME</span>
                     </div>
                 </div>
 
@@ -173,9 +173,9 @@
                         <div class="flex items-center justify-between mb-3">
                             <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Step 2: Certificate Validation CNAME</span>
                             {% if domain.is_verified() %}
-                            <span class="text-xs text-green-600 dark:text-green-400 font-medium">Done</span>
+                            <span class="text-xs text-green-700 dark:text-green-400 font-medium">Done</span>
                             {% else %}
-                            <span class="text-xs text-yellow-600 dark:text-yellow-400 font-medium">Required</span>
+                            <span class="text-xs text-yellow-700 dark:text-yellow-400 font-medium">Required</span>
                             {% endif %}
                         </div>
                         <div class="space-y-3">
@@ -183,7 +183,7 @@
                                 <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Name</label>
                                 <div class="flex items-center gap-1" x-data="{ copied: false }">
                                     <code class="flex-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-900 dark:text-white break-all">{{ domain.validation_cname_name.as_deref().unwrap_or("") }}</code>
-                                    <button @click="navigator.clipboard.writeText('{{ domain.validation_cname_name.as_deref().unwrap_or("") }}'); copied = true; setTimeout(() => copied = false, 2000)" class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0" title="Copy name">
+                                    <button @click="navigator.clipboard.writeText({{ domain.validation_cname_name.as_deref().unwrap_or("")|js }}); copied = true; setTimeout(() => copied = false, 2000)" class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0" title="Copy name">
                                         <span x-show="!copied"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg></span>
                                         <span x-show="copied" x-cloak><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg></span>
                                     </button>
@@ -193,7 +193,7 @@
                                 <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Value</label>
                                 <div class="flex items-center gap-1" x-data="{ copied: false }">
                                     <code class="flex-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-900 dark:text-white break-all">{{ domain.validation_cname_value.as_deref().unwrap_or("") }}</code>
-                                    <button @click="navigator.clipboard.writeText('{{ domain.validation_cname_value.as_deref().unwrap_or("") }}'); copied = true; setTimeout(() => copied = false, 2000)" class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0" title="Copy value">
+                                    <button @click="navigator.clipboard.writeText({{ domain.validation_cname_value.as_deref().unwrap_or("")|js }}); copied = true; setTimeout(() => copied = false, 2000)" class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0" title="Copy value">
                                         <span x-show="!copied"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg></span>
                                         <span x-show="copied" x-cloak><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg></span>
                                     </button>
@@ -208,7 +208,7 @@
                         <div class="flex items-center justify-between mb-3">
                             <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Step 3: Domain CNAME</span>
                             {% if domain.is_tls_provisioned() %}
-                            <span class="text-xs text-green-600 dark:text-green-400 font-medium">Ready</span>
+                            <span class="text-xs text-green-700 dark:text-green-400 font-medium">Ready</span>
                             {% else %}
                             <span class="text-xs text-blue-600 dark:text-blue-400 font-medium">Add now</span>
                             {% endif %}
@@ -218,7 +218,7 @@
                                 <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Name</label>
                                 <div class="flex items-center gap-1" x-data="{ copied: false }">
                                     <code class="flex-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-900 dark:text-white break-all">{{ domain.domain }}</code>
-                                    <button @click="navigator.clipboard.writeText('{{ domain.domain }}'); copied = true; setTimeout(() => copied = false, 2000)" class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0" title="Copy name">
+                                    <button @click="navigator.clipboard.writeText({{ domain.domain|js }}); copied = true; setTimeout(() => copied = false, 2000)" class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0" title="Copy name">
                                         <span x-show="!copied"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg></span>
                                         <span x-show="copied" x-cloak><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg></span>
                                     </button>
@@ -228,7 +228,7 @@
                                 <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Value</label>
                                 <div class="flex items-center gap-1" x-data="{ copied: false }">
                                     <code class="flex-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-900 dark:text-white break-all">{{ domain.routing_domain.as_deref().unwrap_or("") }}</code>
-                                    <button @click="navigator.clipboard.writeText('{{ domain.routing_domain.as_deref().unwrap_or("") }}'); copied = true; setTimeout(() => copied = false, 2000)" class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0" title="Copy value">
+                                    <button @click="navigator.clipboard.writeText({{ domain.routing_domain.as_deref().unwrap_or("")|js }}); copied = true; setTimeout(() => copied = false, 2000)" class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0" title="Copy value">
                                         <span x-show="!copied"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg></span>
                                         <span x-show="copied" x-cloak><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg></span>
                                     </button>
@@ -272,7 +272,7 @@
                     <div class="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md p-4 opacity-60">
                         <div class="flex items-center justify-between mb-1">
                             <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Step 3: Domain CNAME</span>
-                            <span class="text-xs text-gray-400 dark:text-gray-500 font-medium">Available after validation</span>
+                            <span class="text-xs text-gray-500 dark:text-gray-400 font-medium">Available after validation</span>
                         </div>
                         <p class="text-sm text-gray-500 dark:text-gray-400">
                             The domain CNAME will appear here once your certificate is validated and the distribution is created.
@@ -300,13 +300,13 @@
                 {% if let Some(verified) = domain.verified_at %}
                 <div class="py-3 flex justify-between">
                     <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Certificate Validated</dt>
-                    <dd class="text-sm text-green-600 dark:text-green-400">{{ verified|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%b %d, %Y at %H:%M") }}</dd>
+                    <dd class="text-sm text-green-700 dark:text-green-400">{{ verified|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%b %d, %Y at %H:%M") }}</dd>
                 </div>
                 {% endif %}
                 {% if let Some(tls) = domain.tls_provisioned_at %}
                 <div class="py-3 flex justify-between">
                     <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">TLS Provisioned</dt>
-                    <dd class="text-sm text-green-600 dark:text-green-400">{{ tls|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%b %d, %Y at %H:%M") }}</dd>
+                    <dd class="text-sm text-green-700 dark:text-green-400">{{ tls|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%b %d, %Y at %H:%M") }}</dd>
                 </div>
                 {% endif %}
             </dl>

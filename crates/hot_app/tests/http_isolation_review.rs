@@ -181,7 +181,7 @@ async fn pending_api_keys_cannot_move_between_organizations_environments_or_user
     // An explicit new target must not rebind a previously displayed secret.
     let response = client.post_form(&create_path(other_env), &form).await;
     assert!(
-        response.body.contains("Session expired"),
+        response.body.contains("This form expired"),
         "{}",
         response.body
     );
@@ -223,14 +223,14 @@ async fn pending_api_keys_cannot_move_between_organizations_environments_or_user
         )
         .await;
     assert!(
-        response.body.contains("Session expired"),
+        response.body.contains("This form expired"),
         "{}",
         response.body
     );
     client.login_as(&other_user);
     let response = client.post_form(&create_path(td.env_id), &form).await;
     assert!(
-        response.body.contains("Session expired"),
+        response.body.contains("This form expired"),
         "{}",
         response.body
     );

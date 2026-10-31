@@ -142,6 +142,9 @@ pub async fn mcp_service_detail_handler(
             .into_iter()
             .filter(|t| t.service == service)
             .collect();
+        if service_tools.is_empty() {
+            return super::not_found_page(&session, "MCP service", "/mcp", "Back to MCP services");
+        }
 
         // Apply search filter
         let filtered: Vec<_> = if search_query.is_empty() {

@@ -84,9 +84,13 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
     assert!(
         stale_tab
             .body
-            .contains(&format!("const orgId = '{}'", a.org_id))
+            .contains(&format!("const orgId = \"{}\"", a.org_id))
     );
-    assert!(stale_tab.body.contains(&format!("const envId = '{env_a}'")));
+    assert!(
+        stale_tab
+            .body
+            .contains(&format!("const envId = \"{env_a}\""))
+    );
     client
         .get(&format!("/stores?org_id={}&env_id={env_b}", a.org_id))
         .await
@@ -105,10 +109,16 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
         .post_form(&lifecycle, &[("state", "suspended")])
         .await
         .assert_status(StatusCode::SEE_OTHER);
-    client
-        .get(&page_a)
-        .await
-        .assert_status(StatusCode::FORBIDDEN);
+    // A held workspace explains itself instead of answering with an empty 403.
+    let held = client.get(&page_a).await;
+    held.assert_status(StatusCode::FORBIDDEN);
+    assert!(held.body.contains("Workspace unavailable"), "{}", held.body);
+    assert!(held.body.contains("This workspace is suspended."));
+    let widget = client
+        .get_with_headers(&page_a, &[("HX-Request", "true")])
+        .await;
+    widget.assert_status(StatusCode::FORBIDDEN);
+    assert!(widget.body.starts_with("<div class=\"error-box\""));
     client.get(&path).await.assert_status(StatusCode::OK);
     client
         .post_form(&lifecycle, &[("state", "active")])
@@ -159,11 +169,14 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
         .post_form(&root_lifecycle, &[("state", "suspended")])
         .await
         .assert_status(StatusCode::SEE_OTHER);
-    client
-        .get(&page_a)
-        .await
-        .assert_status(StatusCode::FORBIDDEN);
-    client.get(&path).await.assert_status(StatusCode::OK);
+    let held = client.get(&page_a).await;
+    held.assert_status(StatusCode::FORBIDDEN);
+    assert!(held.body.contains("is suspended."), "{}", held.body);
+    // The recovery page stays open and says why work is held.
+    let recovery = client.get(&path).await;
+    recovery.assert_status(StatusCode::OK);
+    assert!(recovery.body.contains("Manage account status"));
+    assert!(recovery.body.contains("data-workspace-held=\"true\""));
     client
         .post_form(&root_lifecycle, &[("state", "active")])
         .await
@@ -608,23 +621,18 @@ async fn the_account_overview_counts_each_environments_runs() {
         let rest = page.body.split(&marker).nth(1).expect("overview row");
         rest.split("</tr>").next().unwrap().to_owned()
     };
-    // Status, running, failed in 24h and runs this month.
-    let cells = |values: [&str; 4]| {
-        values
+    // Status badge, then running, failed in 24h and runs this month.
+    let cells = |values: [&str; 3]| {
+        let counts: String = values
             .iter()
             .map(|value| format!("<td class=\"p-2\">{value}</td>"))
-            .collect::<String>()
+            .collect();
+        format!("<td class=\"p-2\"><span class=\"badge badge-success\">active</span></td>{counts}")
     };
     let root_row = row(td.org_id);
-    assert!(
-        root_row.contains(&cells(["active", "1", "1", "2"])),
-        "{root_row}"
-    );
+    assert!(root_row.contains(&cells(["1", "1", "2"])), "{root_row}");
     let child_row = row(child.org.org_id);
-    assert!(
-        child_row.contains(&cells(["active", "0", "0", "0"])),
-        "{child_row}"
-    );
+    assert!(child_row.contains(&cells(["0", "0", "0"])), "{child_row}");
     assert!(child_row.contains(&long_ago.format("%Y-%m-%d %H:%M UTC").to_string()));
 }
 

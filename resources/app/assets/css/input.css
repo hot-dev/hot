@@ -135,7 +135,7 @@
   --color-gray-200: #dddddd;
   --color-gray-300: #cccccc;
   --color-gray-400: #aaaaaa;
-  --color-gray-500: #767676;  /* AA on white (4.54:1); was #888888 (3.54:1) */
+  --color-gray-500: #707070;  /* AA on white (4.95:1) and on gray-50/100 table headers (4.66:1) */
   --color-gray-600: #666666;
   --color-gray-700: #444444;
   --color-gray-800: #111111;
@@ -238,6 +238,23 @@ pre,
   --color-gray-900: #0a0a0c;  /* app background */
   --color-gray-800: #17171a;  /* raised surfaces: cards, menus, inputs */
   --color-gray-700: #2a2a30;  /* hairline borders, dividers, hover/selected */
+  --color-gray-500: #8c8c8c;  /* muted text: AA on raised surfaces (5.3:1 on gray-800) */
+}
+
+/* Checkboxes, radios and range inputs use the brand red rather than the browser's blue. */
+:root {
+  accent-color: var(--color-hot-red-700);
+}
+
+.dark {
+  accent-color: var(--color-hot-red-400);
+}
+
+/* A visible focus ring for every keyboard-focusable element. Zero specificity, so a
+   template's own focus utilities still win. */
+:where(a[href], button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-hot-red-500);
+  outline-offset: 2px;
 }
 
 /* Accent aura: a subtle purple secondary-accent wash used only on select

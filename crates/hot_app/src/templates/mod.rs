@@ -24,7 +24,7 @@ pub(crate) fn script_safe_json<T: serde::Serialize>(value: &T, fallback: &str) -
 }
 
 /// Human-readable size for blob summaries (e.g. "5.2 MB").
-fn format_blob_size(size: i64) -> String {
+pub(crate) fn format_blob_size(size: i64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut size = size.max(0) as f64;
     let mut unit = 0;
@@ -295,6 +295,18 @@ pub fn build_url_with_params(
 // Askama custom filters
 pub mod filters {
     use std::fmt;
+
+    /// Serialize a value as a JavaScript literal that cannot break out of its context.
+    ///
+    /// This is the only way to put a value into JavaScript (`scripts/browser-security.test.mjs`
+    /// lints the templates for it):
+    ///   - in event-handler and Alpine attributes: `onclick="go({{ id|js }})"` (auto-escaping
+    ///     encodes the quotes, and the browser decodes them before the code runs);
+    ///   - in executable `<script>` blocks: `const id = {{ id|js|safe }};`.
+    #[askama::filter_fn]
+    pub fn js<T: serde::Serialize>(value: T, _: &dyn askama::Values) -> askama::Result<String> {
+        Ok(super::script_safe_json(&value, "null").replace('\'', "\\u0027"))
+    }
 
     /// Round a float to the nearest integer
     #[askama::filter_fn]
@@ -1625,6 +1637,20 @@ impl GlobalNotice {
 fn build_global_notices(session: &crate::auth::Session) -> Vec<GlobalNotice> {
     let mut notices = Vec::new();
 
+    // A held workspace only serves recovery pages; say why on each of them.
+    if let Some(hold) = &session.current_org_hold {
+        let notice = GlobalNotice::warning(format!(
+            "{hold} Runs, deploys and data are unavailable until it is restored."
+        ));
+        notices.push(match session.billing_org() {
+            Some(root) => notice.with_action(
+                "Manage account status →",
+                format!("/@{}/children", root.slug),
+            ),
+            None => notice,
+        });
+    }
+
     // Check hosted billing status only when billing is enabled for this product experience.
     if session.billing_enabled
         && let Some(ref org) = session.current_org
@@ -1666,7 +1692,9 @@ const DOCS_PATH_MAPPINGS: &[(&str, &str)] = &[
     ("files", "/docs/app#files"),
     ("schedules", "/docs/app#scheduled-runs"),
     ("event_handlers", "/docs/app#event-handlers"),
-    ("agents", "/docs/agents"),
+    ("workflows", "/docs/agents"),
+    ("tasks", "/docs/app#tasks"),
+    ("stores", "/docs/app#stores"),
     ("mcp_services", "/docs/mcp"),
     ("webhook_services", "/docs/webhooks"),
     ("projects", "/docs/app#projects"),
@@ -1738,6 +1766,8 @@ pub struct PrivatePageContext {
     pub web_url: String,
     // Optional docs path for a "Docs" link in the breadcrumb bar (e.g. "/docs/app#runs")
     pub docs_path: Option<String>,
+    // The selected workspace is suspended or archived (itself or its account); pages skip data loads
+    pub workspace_held: bool,
 }
 
 impl PrivatePageContext {
@@ -1796,6 +1826,7 @@ impl PrivatePageContext {
             value_format: session.value_format.clone(),
             web_url: session.product_web_url.clone(),
             docs_path: default_docs_path(current_page).map(|s| s.to_string()),
+            workspace_held: session.current_org_hold.is_some(),
         }
     }
 
@@ -1859,6 +1890,7 @@ impl PrivatePageContext {
             value_format: session.value_format.clone(),
             web_url: session.product_web_url.clone(),
             docs_path: default_docs_path(current_page).map(|s| s.to_string()),
+            workspace_held: session.current_org_hold.is_some(),
         }
     }
 
@@ -1922,6 +1954,7 @@ impl PrivatePageContext {
             value_format: session.value_format.clone(),
             web_url: session.product_web_url.clone(),
             docs_path: default_docs_path(current_page).map(|s| s.to_string()),
+            workspace_held: session.current_org_hold.is_some(),
         }
     }
 
@@ -2075,7 +2108,7 @@ pub struct Dashboard<'a> {
     pub chart_data_json: &'a str,
     pub status_chart_data_json: &'a str,
     pub projects: Vec<hot::db::Project>,
-    pub projects_json: String,
+    pub projects_json: serde_json::Value,
 }
 
 #[derive(Template)]
@@ -2100,13 +2133,6 @@ pub struct DashboardRecentStreamsTable {
 #[template(path = "components/dashboard_recent_tasks_rows.html")]
 pub struct DashboardRecentTasksTable {
     pub recent_tasks: Vec<TaskDisplay>,
-}
-
-#[derive(Template)]
-#[template(path = "checkout_success.html")]
-pub struct CheckoutSuccess<'a> {
-    pub title: &'a str,
-    pub page_context: PrivatePageContext,
 }
 
 #[derive(Template)]
@@ -2260,7 +2286,7 @@ pub struct RunDetail<'a> {
     pub stream_id: Uuid,
     pub raw_mode: bool,
     pub inspect_mode: bool,
-    pub graph_data_json: String,
+    pub graph_data: GraphNodeData,
     pub access_info: Option<AccessInfo>,
     pub associated_task_id: Option<Uuid>,
 }
@@ -2308,7 +2334,7 @@ pub struct TaskDetail<'a> {
     pub title: &'a str,
     pub page_context: PrivatePageContext,
     pub task: TaskDisplay,
-    pub graph_data_json: String,
+    pub graph_data: GraphNodeData,
 }
 
 #[derive(Template)]
@@ -2585,8 +2611,24 @@ pub struct ApiKeysNew<'a> {
     pub error_message: &'a str,
     pub description: &'a str,
     pub access_level: &'a str,
-    pub mcp_tools_json: String,
-    pub webhooks_json: String,
+    /// Initial rules for a Restricted key (an error re-render keeps the submitted ones).
+    pub permissions: serde_json::Value,
+    pub mcp_tool_options: serde_json::Value,
+    pub webhook_options: serde_json::Value,
+}
+
+/// The shared error page: unknown ids, held workspaces and rejected requests render inside the
+/// app layout with their real status code.
+#[derive(Template)]
+#[template(path = "error.html")]
+pub struct ErrorPage {
+    pub title: String,
+    pub page_context: PrivatePageContext,
+    pub status: u16,
+    pub heading: String,
+    pub message: String,
+    pub back_href: String,
+    pub back_label: String,
 }
 
 #[derive(Template)]
@@ -2596,10 +2638,11 @@ pub struct ApiKeysEdit<'a> {
     pub page_context: PrivatePageContext,
     pub api_key: hot::db::api_key::ApiKey,
     pub error_message: &'a str,
+    pub description: &'a str,
     pub access_level: &'a str,
-    pub permissions_json: String,
-    pub mcp_tools_json: String,
-    pub webhooks_json: String,
+    pub permissions: serde_json::Value,
+    pub mcp_tool_options: serde_json::Value,
+    pub webhook_options: serde_json::Value,
 }
 
 #[derive(Template)]
@@ -2902,7 +2945,6 @@ pub struct StreamDetail<'a> {
     pub events: Vec<EventListItem>,
     pub tasks: Vec<TaskDisplay>,
     pub graph_data: GraphNodeData,
-    pub graph_data_json: String,
     pub current_page_num: i64,
     pub total_pages: i64,
     pub start_page: i64,
@@ -3953,8 +3995,8 @@ pub struct ServiceKeysNew<'a> {
     pub error_message: &'a str,
     pub generated_key: Option<String>,
     pub service_key_id: Option<Uuid>,
-    pub mcp_tools_json: String,
-    pub webhooks_json: String,
+    pub mcp_tool_options: serde_json::Value,
+    pub webhook_options: serde_json::Value,
 }
 
 /// A single parsed permission rule for display purposes.
@@ -4225,6 +4267,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn js_filter_output_cannot_leave_a_script_attribute_or_string() {
+        use super::filters;
+
+        #[derive(Template)]
+        #[template(
+            source = "<b onclick=\"go({{ value|js }})\"></b><script>go({{ value|js|safe }});</script>",
+            ext = "html"
+        )]
+        struct Page<'a> {
+            value: &'a str,
+        }
+
+        let value = "x',a:alert(1),b:'\"</script><script>&amp;\u{2028}\\";
+        let html = Page { value }.render().unwrap();
+        let attribute = &html[html.find("go(").unwrap() + 3..html.find(")\"></b>").unwrap()];
+        let script =
+            &html[html.find("<script>go(").unwrap() + 11..html.rfind(");</script>").unwrap()];
+        // No raw quote, angle bracket, ampersand or line separator survives in either context.
+        assert!(
+            !script.contains(['\'', '<', '>', '&', '\u{2028}']),
+            "{script}"
+        );
+        assert!(!attribute.contains(['\'', '"', '<', '>']), "{attribute}");
+        // Both decode back to the value: the attribute after the browser decodes its entities.
+        assert_eq!(serde_json::from_str::<String>(script).unwrap(), value);
+        let decoded = attribute
+            .replace("&#34;", "\"")
+            .replace("&#39;", "'")
+            .replace("&amp;", "&");
+        assert_eq!(serde_json::from_str::<String>(&decoded).unwrap(), value);
+    }
+
     /// Slugify a heading the same way package docs routes do.
     /// Non-alphanumeric chars become hyphens; consecutive hyphens collapse; leading/trailing stripped.
     fn slugify(text: &str) -> String {
@@ -4281,6 +4356,36 @@ mod tests {
         assert_eq!(truncate_string("hello", 3), "hel...");
         assert_eq!(truncate_string("🔥🔥🔥", 2), "🔥🔥...");
         assert_eq!(truncate_string("éclair", 1), "é...");
+    }
+
+    /// Every docs mapping must name a page key that some handler renders, or its link never
+    /// shows (the old "agents" key did nothing: the page is "workflows").
+    #[test]
+    fn docs_path_mappings_name_rendered_pages() {
+        let handlers = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/handlers");
+        let mut sources = String::new();
+        for entry in std::fs::read_dir(handlers).unwrap() {
+            sources.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap_or_default());
+        }
+        // The page key is the first argument of a PrivatePageContext constructor.
+        let mut keys = std::collections::HashSet::new();
+        for (index, _) in sources.match_indices("PrivatePageContext::") {
+            let rest = &sources[index..];
+            let Some(open) = rest.find('(') else { continue };
+            let argument = rest[open + 1..].trim_start();
+            if let Some(literal) = argument.strip_prefix('"') {
+                keys.insert(literal[..literal.find('"').unwrap()].to_string());
+            }
+        }
+        let unused: Vec<&str> = DOCS_PATH_MAPPINGS
+            .iter()
+            .map(|(page, _)| *page)
+            .filter(|page| !keys.contains(*page))
+            .collect();
+        assert!(
+            unused.is_empty(),
+            "docs mappings for pages no handler renders: {unused:?}"
+        );
     }
 
     /// Validate that every docs_path in DOCS_PATH_MAPPINGS points to a real
