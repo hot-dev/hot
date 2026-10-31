@@ -79,7 +79,9 @@ linux_use_terminal = true
 [package.metadata.deb]
 maintainer = "Hot Dev, LLC <support@hot.dev>"
 copyright = "2025-2026, Hot Dev, LLC <support@hot.dev>"
-depends = "libc6 (>= 2.39), libgcc-s1 (>= 3.0), libssl3t64 (>= 3.0.0)"
+# hot uses rustls with aws-lc-rs and links no OpenSSL, so libssl is not a
+# runtime dependency.
+depends = "libc6 (>= 2.39), libgcc-s1 (>= 3.0)"
 maintainer-scripts = "debian"
 section = "devel"
 priority = "optional"

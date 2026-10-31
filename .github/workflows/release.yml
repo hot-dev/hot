@@ -413,7 +413,7 @@ jobs:
           -f - \
           --output "type=local,dest=target/hotbox-musl-build" \
           . <<'DOCKERFILE'
-        FROM rust:1.99.1-slim AS builder
+        FROM rust:1.99.1-slim-bookworm AS builder
         RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
         RUN rustup target add aarch64-unknown-linux-musl
         RUN apt-get update && apt-get install -y gcc-aarch64-linux-gnu && rm -rf /var/lib/apt/lists/*
