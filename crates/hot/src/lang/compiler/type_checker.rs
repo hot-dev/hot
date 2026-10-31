@@ -571,6 +571,17 @@ struct DeferredVariable {
     value: Value,
 }
 
+/// The implicit subject of a `fn match` / `fn match-all` body: the
+/// function's first parameter.
+struct FnMatchSubject {
+    /// The parameter's name, which each arm narrows as a standalone
+    /// `match` narrows its subject variable.
+    name: Option<String>,
+    /// The parameter's declared type, which exhaustiveness is checked
+    /// against. `None` when the function has no parameters.
+    ty: Option<TypeExpr>,
+}
+
 pub struct TypeChecker {
     context: TypeContext,
     errors: CompilerErrors,
@@ -669,15 +680,15 @@ pub struct TypeChecker {
     /// of walking bodies. Top-level expressions still get the full check,
     /// so nothing existing is lost.
     in_fn_body: u32,
-    /// Stack of inferred match-subject types. Pushed when we descend into
-    /// the body of a `fn match (s: T) { ... }` (the subject is the first
-    /// parameter); popped on exit. Match arms inside the body consult the
-    /// top of the stack to enforce exhaustiveness against `T`'s enum
-    /// definition. A `None` entry means we're inside a match flow whose
-    /// subject type couldn't be inferred (function with no annotation,
-    /// untyped REPL expression, etc.) — exhaustiveness is then skipped
-    /// rather than raising spurious errors.
-    match_subject_stack: Vec<Option<TypeExpr>>,
+    /// Stack of `fn match` subjects. Pushed when we descend into the body
+    /// of a `fn match (s: T) { ... }` or `fn match-all` (the subject is
+    /// the first parameter); popped on exit. The arms inside the body
+    /// consult the top of the stack: their bodies are walked with the
+    /// subject's name narrowed per arm, and a `fn match` enforces
+    /// exhaustiveness against `T`'s enum definition. An entry without a
+    /// type means the subject type couldn't be determined — exhaustiveness
+    /// is then skipped rather than raising spurious errors.
+    match_subject_stack: Vec<FnMatchSubject>,
     /// Fully-qualified name (`::ns/name`) → optional custom note for every
     /// definition declared with `meta { deprecated: true }` or
     /// `meta { deprecated: "note" }`. Populated during the qualified-variable
@@ -1581,7 +1592,7 @@ impl TypeChecker {
     /// literals, on `Any`, on a call whose callee declares no return
     /// type), no error is emitted.
     fn check_match_exhaustiveness(&mut self, flow: &Flow) {
-        let Some(subject_type) = self.match_subject_stack.last().cloned().flatten() else {
+        let Some(subject_type) = self.match_subject_stack.last().and_then(|s| s.ty.clone()) else {
             return;
         };
         let arms: Vec<&MatchArm> = Self::flow_arms(flow).collect();
@@ -3870,7 +3881,9 @@ impl TypeChecker {
     /// Walk a match arm's body. Inside an `Enum.Variant` arm the arm's
     /// binding holds that variant's payload. The matched name keeps the
     /// variant, whose fields read through to a record payload, so it is
-    /// bound to the payload type only for a record payload.
+    /// bound to the payload type only for a record payload. A binding
+    /// whose type the pattern doesn't tell is bound as `Any`, so it still
+    /// shadows an outer name or a function of the same name.
     fn infer_match_arm_body(&mut self, arm: &MatchArm, subject: Option<&str>) -> TypeExpr {
         let (payload, subject) = match (&arm.type_name, &arm.variant) {
             (Some(type_name), Some(variant)) if arm.alternatives.is_empty() => {
@@ -3883,13 +3896,25 @@ impl TypeChecker {
             }
             _ => (None, subject),
         };
-        let names: Vec<&str> = subject.into_iter().chain(arm.binding.as_deref()).collect();
-        let Some(payload) = payload.filter(|_| !names.is_empty()) else {
-            return self.infer_value_type(&arm.body);
+        let bindings: Vec<(&str, TypeExpr)> = match payload {
+            Some(payload) => subject
+                .into_iter()
+                .chain(arm.binding.as_deref())
+                .map(|name| (name, payload.clone()))
+                .collect(),
+            None => arm
+                .binding
+                .as_deref()
+                .map(|name| (name, TypeExpr::Any))
+                .into_iter()
+                .collect(),
         };
+        if bindings.is_empty() {
+            return self.infer_value_type(&arm.body);
+        }
         self.context.push_scope();
-        for name in names {
-            self.context.add_variable(name.to_string(), payload.clone());
+        for (name, ty) in bindings {
+            self.context.add_variable(name.to_string(), ty);
         }
         let body_type = self.infer_value_type(&arm.body);
         self.context.pop_scope();
@@ -4731,25 +4756,7 @@ impl TypeChecker {
             let saved_pipe = self.in_pipe_flow;
             self.in_pipe_flow = false;
 
-            // If the body is a `match` flow, the implicit match subject is
-            // the function's first parameter. Push its type so the arm
-            // walk can enforce exhaustiveness against the corresponding
-            // enum. We push `None` for non-match bodies and for match
-            // bodies whose first parameter type we can't determine, so
-            // exhaustiveness checking is naturally skipped in those cases.
-            let pushed_subject = matches!(
-                &fn_def.body,
-                Value::Flow(f) if matches!(
-                    f.flow_type,
-                    FlowType::Match | FlowType::MatchShort
-                )
-            );
-            if pushed_subject {
-                let subject_type = parameter_types.first().cloned();
-                self.match_subject_stack.push(subject_type);
-            }
-
-            let body_type = self.infer_value_type(&fn_def.body);
+            let body_type = self.infer_fn_body(fn_def, &parameter_types);
 
             // Declared return types get the same definite-mismatch warning
             // as binding annotations. Body inference is weak for anything
@@ -4776,9 +4783,6 @@ impl TypeChecker {
                 );
             }
 
-            if pushed_subject {
-                self.match_subject_stack.pop();
-            }
             self.in_pipe_flow = saved_pipe;
             self.in_fn_body -= 1;
 
@@ -4796,6 +4800,39 @@ impl TypeChecker {
             first_param_types.unwrap_or_default(),
             Box::new(first_return_type.unwrap_or(TypeExpr::Any)),
         )
+    }
+
+    /// Walk a function body whose parameters are already bound.
+    ///
+    /// A `fn match` / `fn match-all` body matches the function's first
+    /// parameter. Its name and type are pushed as the match subject, so the
+    /// arm walk narrows the name per arm (`infer_flow_arm_bodies`) and a
+    /// `fn match` enforces exhaustiveness against its enum or literal union.
+    fn infer_fn_body(&mut self, fn_def: &FnDef, parameter_types: &[TypeExpr]) -> TypeExpr {
+        let is_match_body = matches!(
+            &fn_def.body,
+            Value::Flow(f) if matches!(
+                f.flow_type,
+                FlowType::Match
+                    | FlowType::MatchShort
+                    | FlowType::MatchAll
+                    | FlowType::MatchAllShort
+            )
+        );
+        if !is_match_body {
+            return self.infer_value_type(&fn_def.body);
+        }
+        self.match_subject_stack.push(FnMatchSubject {
+            name: fn_def
+                .args
+                .args
+                .first()
+                .map(|a| a.var.sym.name().to_string()),
+            ty: parameter_types.first().cloned(),
+        });
+        let body_type = self.infer_value_type(&fn_def.body);
+        self.match_subject_stack.pop();
+        body_type
     }
 
     /// Process a type implementation and validate it
@@ -4889,7 +4926,7 @@ impl TypeChecker {
             };
 
             // Type-check the function body and verify it matches the expected return type
-            let body_type = self.infer_value_type(&fn_def.body);
+            let body_type = self.infer_fn_body(fn_def, &parameter_types);
             if !self.types_are_compatible(&declared_return_type, &body_type) {
                 self.errors
                     .errors
@@ -5835,11 +5872,7 @@ impl TypeChecker {
             // Match flows are similar to Cond flows for typing
             FlowType::Match | FlowType::MatchShort => {
                 self.check_arm_variants(Self::flow_arms(flow));
-                let result_types: Vec<TypeExpr> = flow
-                    .expressions
-                    .iter()
-                    .map(|expr| self.infer_value_type(expr))
-                    .collect();
+                let result_types = self.infer_flow_arm_bodies(flow);
                 self.check_match_exhaustiveness(flow);
                 if flow.result_modifier.is_some() {
                     return self.flow_result_type(
@@ -5859,14 +5892,20 @@ impl TypeChecker {
             }
             FlowType::MatchAll | FlowType::MatchAllShort => {
                 self.check_arm_variants(Self::flow_arms(flow));
-                let result_types: Vec<TypeExpr> = flow
-                    .expressions
-                    .iter()
-                    .map(|expr| self.infer_value_type(expr))
-                    .collect();
+                let result_types = self.infer_flow_arm_bodies(flow);
                 self.flow_result_type(flow.result_modifier.as_ref(), result_types, true, false)
             }
         }
+    }
+
+    /// Walk the arm bodies of a `fn match` / `fn match-all` body as a
+    /// standalone `match` walks its arms, with the function's first
+    /// parameter (the top of `match_subject_stack`) as the matched name.
+    fn infer_flow_arm_bodies(&mut self, flow: &Flow) -> Vec<TypeExpr> {
+        let subject = self.match_subject_stack.last().and_then(|s| s.name.clone());
+        Self::flow_arms(flow)
+            .map(|arm| self.infer_match_arm_body(arm, subject.as_deref()))
+            .collect()
     }
 }
 
@@ -6625,6 +6664,101 @@ mod tests {
             !has_nonexh,
             "closed-enum match with `_` arm should not error: {:?}",
             checker.errors.errors
+        );
+    }
+
+    #[test]
+    fn test_fn_match_arm_body_errors_are_reported_with_location() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        // A `fn match` / `fn match-all` arm body is checked as any fn body
+        // is: a literal argument no overload accepts and a wrong-arity call
+        // are errors, located at the call inside the arm.
+        let source = r#"
+        ::t ns
+        takes-int fn (n: Int): Int { n }
+        Shape enum { Circle, Square }
+        describe fn match (s: Shape): Int {
+            Shape.Circle => { add("a", 1) }
+            Shape.Square => { 2 }
+        }
+        tally fn match-all (n: Int): All<Vec> {
+            Int => { takes-int(n, 2) }
+        }
+        "#;
+        let line_of = |needle: &str| {
+            source
+                .lines()
+                .position(|l| l.contains(needle))
+                .map(|i| i + 1)
+                .expect("needle in source")
+        };
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+
+        let located = |pred: &dyn Fn(&CompilerError) -> bool| {
+            checker
+                .errors
+                .errors
+                .iter()
+                .filter(|e| pred(e))
+                .map(|e| e.location().map(|l| l.line))
+                .collect::<Vec<_>>()
+        };
+        let mismatches = located(&|e| matches!(e, CompilerError::TypeMismatch { .. }));
+        assert_eq!(
+            mismatches,
+            vec![Some(line_of("add(\"a\", 1)"))],
+            "got: {:?}",
+            checker.errors.errors
+        );
+        let arity = located(&|e| matches!(e, CompilerError::ArityMismatch { .. }));
+        assert_eq!(
+            arity,
+            vec![Some(line_of("takes-int(n, 2)"))],
+            "got: {:?}",
+            checker.errors.errors
+        );
+    }
+
+    #[test]
+    fn test_fn_match_arm_bindings_check_clean() {
+        use crate::lang::parser::parse_hot;
+
+        // Each arm sees the function's parameters and its own bindings: a
+        // payload binding, a record payload read through the matched
+        // parameter, and a binding whose type the pattern doesn't tell,
+        // which shadows the function of the same name.
+        let source = r#"
+        ::t ns
+        takes-one fn (x: Int): Int { x }
+        Circle type { radius: Dec }
+        Shape enum { Round(Circle), Dot }
+        Reply enum { Steps(Vec), Declined(Str), Pending }
+        area fn match (s: Shape): Dec {
+            Shape.Round => { mul(s.radius, s.radius) }
+            Shape.Dot => { 0.0 }
+        }
+        summarize fn match (r: Reply, prefix: Str): Str {
+            Reply.Steps (steps) => { `${prefix}${steps}` }
+            Reply.Declined (why) => { `${prefix}${why}` }
+            Reply.Pending => { prefix }
+        }
+        call-it fn match (v: Any, n: Int): Any {
+            Int (i) => { add(i, n) }
+            Any (takes-one) => { takes-one(n, n) }
+        }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let result = checker.check_program(&program);
+        assert!(result.is_ok(), "no errors expected: {:?}", result);
+        assert!(
+            checker.errors.warnings.is_empty(),
+            "no warnings expected: {:?}",
+            checker.errors.warnings
         );
     }
 
