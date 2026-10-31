@@ -10,6 +10,10 @@ fn main() {
         embed_windows_resources();
     }
 
+    if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "macos" {
+        link_clang_runtime();
+    }
+
     // Capture git SHA at build time
     let git_sha = get_git_sha();
     println!("cargo:rustc-env=GIT_SHA={}", git_sha);
@@ -24,6 +28,28 @@ fn main() {
     // Rerun if git HEAD changes (this catches new commits)
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs/heads");
+}
+
+/// Link clang's runtime library on macOS. The prebuilt ONNX Runtime that
+/// fastembed links has CoreML code built with `@available`, which calls
+/// `__isPlatformVersionAtLeast` from that library, and rustc doesn't link it:
+/// release builds then fail with an undefined symbol.
+fn link_clang_runtime() {
+    println!("cargo:rerun-if-env-changed=CC");
+    // `CC` may be a wrapper command such as `ccache clang`; fall back to clang.
+    let compilers = env::var("CC").into_iter().chain(["clang".to_string()]);
+    for compiler in compilers {
+        if let Ok(output) = Command::new(&compiler)
+            .arg("-print-file-name=libclang_rt.osx.a")
+            .output()
+            && output.status.success()
+            && let Ok(path) = String::from_utf8(output.stdout)
+            && Path::new(path.trim()).is_file()
+        {
+            println!("cargo:rustc-link-arg={}", path.trim());
+            return;
+        }
+    }
 }
 
 fn get_git_sha() -> String {
