@@ -71,15 +71,15 @@ fn (body: Map): ::transport/IncomingMessage {
     session-id or(body.session_id, body.session, "default")
     callback-url or(body.callback_url, get(or(body.session_meta, {}), "callback-url"))
     reply-mode or(body.reply_mode, get(or(body.session_meta, {}), "reply-mode"), "stream")
-    meta {
+    session-meta {
     callback-url: callback-url,
     reply-mode: reply-mode,
     client: or(body.client,
-    "web"),
+    "web")
 }
 
     ::transport/IncomingMessage({
-        session: session-from-id(Str(session-id), meta),
+        session: session-from-id(Str(session-id), session-meta),
         sender: identity-from-body(body),
         text: or(body.text, body.message, ""),
         message-id: Str(or(body.message_id, Uuid())),

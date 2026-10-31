@@ -1017,7 +1017,14 @@ impl Compiler {
         for (file_path, content) in &self.file_contents {
             resolver.add_source_file(file_path.clone(), content.clone());
         }
-        resolver.resolve_program(program)?;
+        let resolve_result = resolver.resolve_program(program);
+        let mut early_warnings = constraint_warnings;
+        early_warnings.extend(resolver.take_warnings());
+        if let Err(errors) = resolve_result {
+            self.diagnostics = crate::lang::errors::CompilerErrors::new();
+            self.diagnostics.warnings = early_warnings;
+            return Err(errors);
+        }
 
         // Phase 2: Type checking pass
         tracing::debug!("Compiler: Phase 2 - Type checking");
@@ -1032,7 +1039,7 @@ impl Compiler {
         // success and failure paths. Warnings live on the compiler, not in the
         // returned error, so they never count toward compilation failure.
         self.diagnostics = type_checker.take_warnings();
-        self.diagnostics.warnings.extend(constraint_warnings);
+        self.diagnostics.warnings.extend(early_warnings);
         if let Err(mut errors) = check_result {
             errors.warnings.clear();
             return Err(errors);
@@ -1100,7 +1107,14 @@ impl Compiler {
         for (file_path, content) in &self.file_contents {
             resolver.add_source_file(file_path.clone(), content.clone());
         }
-        resolver.resolve_program(validation_program)?;
+        let resolve_result = resolver.resolve_program(validation_program);
+        let mut early_warnings = constraint_warnings;
+        early_warnings.extend(resolver.take_warnings());
+        if let Err(errors) = resolve_result {
+            self.diagnostics = crate::lang::errors::CompilerErrors::new();
+            self.diagnostics.warnings = early_warnings;
+            return Err(errors);
+        }
 
         let mut type_checker = TypeChecker::new();
         type_checker.set_source_info(self.current_file.clone(), self.get_source_content());
@@ -1109,7 +1123,7 @@ impl Compiler {
         }
         let check_result = type_checker.check_program(validation_program);
         self.diagnostics = type_checker.take_warnings();
-        self.diagnostics.warnings.extend(constraint_warnings);
+        self.diagnostics.warnings.extend(early_warnings);
         if let Err(mut errors) = check_result {
             errors.warnings.clear();
             return Err(errors);

@@ -378,6 +378,10 @@ Comparing a closed union's value with a literal outside it, as in
 `eq(severity, "hgih")`, is always false (`ne`: always true), so `hot check`
 warns with `impossible-comparison`. `null` and `open` unions aren't checked.
 
+Naming a variant an enum doesn't have, as in a misspelled `Direction.Upp`,
+makes `hot check` warn with `unknown-variant`: evaluating it fails at run
+time. An arm such as `Direction.Dwn =>` warns too, since it never matches.
+
 ```hot
 Severity type "low" | "medium" | "high"
 
@@ -524,6 +528,10 @@ See **[Error Handling](/docs/language/errors)** for the full story on Result typ
 exhaustive matches, and other statically visible constraints. It does not turn
 Hot into a fully static language: `Any`, dynamically shaped maps, and values
 from unresolved boundaries may defer failures until runtime.
+
+A type name that nothing declares or imports is an `unresolved-type` error in
+a parameter annotation, and an `unresolved-type` warning in a record field, a
+variant's payload or a return annotation.
 
 Structural compatibility and runtime identity answer different questions. A
 known record may satisfy a struct parameter by supplying every required field,

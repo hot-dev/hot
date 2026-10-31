@@ -169,7 +169,7 @@ fn
                     HttpError({status: 500, headers: {}, body: "No images generated"})
                 }
 
-                eq(count(predictions), 0) => {
+                eq(length(predictions), 0) => {
                     HttpError({status: 500, headers: {}, body: "No images generated"})
                 }
                 => {
@@ -285,8 +285,8 @@ fn (directory: Str, request: GenerateImageRequest): AIMediaBatch | HttpError {
 
                     AIMediaBatch({
                         items: items,
-                        succeeded: count(items),
-                        failed: count(errors),
+                        succeeded: length(items),
+                        failed: length(errors),
                         errors: errors
                     })
                 }
@@ -362,7 +362,7 @@ fn (path: Str, prompt: Str): AIMedia | HttpError {
                     HttpError({status: 500, headers: {}, body: "No candidates in response"})
                 }
 
-                eq(count(candidates), 0) => {
+                eq(length(candidates), 0) => {
                     HttpError({status: 500, headers: {}, body: "No candidates in response"})
                 }
                 => {
@@ -373,7 +373,7 @@ fn (path: Str, prompt: Str): AIMedia | HttpError {
                     image-parts filter(parts, not(is-null(%.inlineData)))
 
                     cond {
-                        eq(count(image-parts), 0) => {
+                        eq(length(image-parts), 0) => {
                             HttpError({status: 500, headers: {}, body: "No images in response"})
                         }
                         => {

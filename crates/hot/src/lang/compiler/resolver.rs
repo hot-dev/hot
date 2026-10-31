@@ -4,9 +4,13 @@
 // references before runtime. It walks the AST and validates that all variable
 // references can be resolved within their scope.
 
-use crate::lang::ast::{Flow, FnCall, Namespace, NamespaceAliases, Program, Ref, Value};
+use crate::lang::ast::{
+    AstNode, Flow, FnCall, MatchArm, Namespace, NamespaceAliases, Program, Ref, Source,
+    TemplatePart, Value,
+};
 use crate::lang::errors::{CompilerError, CompilerErrors, CompilerResult, ErrorLocation};
 use crate::lang::runtime::resolution::UnifiedResolver;
+use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use std::path::PathBuf;
 
@@ -232,6 +236,15 @@ pub struct Resolver {
     /// (e.g. `::http/get` where `::http` is an alias for `::hot::http`)
     /// can be resolved during validation.
     current_aliases: NamespaceAliases,
+    /// Source of the top-level definition being validated, for a reference
+    /// with no source of its own (`...name` in a Vec literal).
+    current_def_src: Option<Source>,
+    /// How many literals, templates, flow arms, spreads or `do(...)` the
+    /// walk is inside. 3.0.0 didn't check the names in these, so an
+    /// unresolved one there is a warning (see `report_unresolved`).
+    unchecked_before: u32,
+    /// Non-fatal diagnostics.
+    warnings: Vec<CompilerError>,
 }
 
 impl Resolver {
@@ -240,6 +253,9 @@ impl Resolver {
             context: ResolutionContext::new(),
             errors: CompilerErrors::new(),
             current_aliases: NamespaceAliases::new(),
+            current_def_src: None,
+            unchecked_before: 0,
+            warnings: Vec::new(),
         }
     }
 
@@ -252,6 +268,9 @@ impl Resolver {
             context: ResolutionContext::with_namespace_registry(namespace_registry),
             errors: CompilerErrors::new(),
             current_aliases: NamespaceAliases::new(),
+            current_def_src: None,
+            unchecked_before: 0,
+            warnings: Vec::new(),
         }
     }
 
@@ -265,6 +284,9 @@ impl Resolver {
             context: ResolutionContext::with_registries(namespace_registry, core_variables),
             errors: CompilerErrors::new(),
             current_aliases: NamespaceAliases::new(),
+            current_def_src: None,
+            unchecked_before: 0,
+            warnings: Vec::new(),
         }
     }
 
@@ -336,10 +358,39 @@ impl Resolver {
 
     /// Validate references in a namespace
     fn validate_namespace_references(&mut self, namespace: &Namespace) -> CompilerResult<()> {
-        for (_var, value) in &namespace.scope.vars {
+        for (var, value) in &namespace.scope.vars {
+            self.current_def_src = var.src.clone();
             self.validate_value_references(value)?;
         }
+        self.current_def_src = None;
         Ok(())
+    }
+
+    /// Where `text` first appears in the definition being validated, from
+    /// the definition's start; the definition itself when it doesn't.
+    fn definition_location_of(&self, text: &str) -> Option<ErrorLocation> {
+        let src = self.current_def_src.as_ref()?;
+        let content = src
+            .file
+            .as_ref()
+            .and_then(|file| self.context.source_files.get(file));
+        let (line, column, position, length) = match content
+            .and_then(|content| Some((content, content.get(src.position..)?.find(text)?)))
+        {
+            Some((content, offset)) => {
+                let position = src.position + offset;
+                let (line, column) = self.context.calculate_line_column(content, position);
+                (line, column, position, text.len())
+            }
+            None => (src.line, src.column, src.position, src.length),
+        };
+        Some(ErrorLocation {
+            line,
+            column,
+            position,
+            length,
+            file: src.file.as_ref().map(PathBuf::from),
+        })
     }
 
     /// Validate references in a value
@@ -454,11 +505,146 @@ impl Resolver {
                 // Type definitions don't contain variable references that need validation
                 // Type field names are not variables
             }
-            _ => {
-                // Other value types don't contain references
+            Value::Cond(..)
+            | Value::CondDefault(_)
+            | Value::Match(_)
+            | Value::MatchArm(_)
+            | Value::TemplateLiteral(_)
+            | Value::Raw(_)
+            | Value::Do(_)
+            | Value::MapWithSpread { .. } => {
+                self.unchecked_before += 1;
+                let result = self.validate_nested_references(value);
+                self.unchecked_before -= 1;
+                result?;
+            }
+            Value::VariadicExpansion(name) => {
+                // `...name` reads the variable `name`. Unchecked before,
+                // so a warning (see `report_unresolved`).
+                let var_name = name.split('.').next().unwrap_or(name);
+                if !self.context.can_resolve_variable(var_name) {
+                    self.unchecked_before += 1;
+                    self.report_unresolved(CompilerError::UnresolvedVariable {
+                        var_name: var_name.to_string(),
+                        namespace: self.context.unified_resolver.current_namespace.clone(),
+                        message: format!("Variable '{}' cannot be resolved", var_name),
+                        location: self
+                            .definition_location_of(&format!("...{name}"))
+                            .or_else(|| self.context.create_error_location(var_name)),
+                    });
+                    self.unchecked_before -= 1;
+                }
+            }
+            Value::TypeImplementation(_) | Value::Unbound(_) | Value::Placeholder(_) => {
+                // No references to validate
             }
         }
         Ok(())
+    }
+
+    /// Validate the references inside a flow arm, template, spread, `do`
+    /// or `raw`.
+    fn validate_nested_references(&mut self, value: &Value) -> CompilerResult<()> {
+        match value {
+            Value::Cond(_, predicate, body) => {
+                self.validate_value_references(predicate)?;
+                self.validate_flow_references(body)?;
+            }
+            Value::CondDefault(body) => {
+                self.validate_flow_references(body)?;
+            }
+            Value::Match(match_expr) => {
+                self.validate_value_references(&match_expr.value)?;
+                for arm in &match_expr.arms {
+                    self.validate_match_arm_references(arm)?;
+                }
+            }
+            Value::MatchArm(arm) => {
+                self.validate_match_arm_references(arm)?;
+            }
+            Value::TemplateLiteral(template) => {
+                for part in &template.parts {
+                    if let TemplatePart::Expression(expr) = part {
+                        self.validate_value_references(expr)?;
+                    }
+                }
+            }
+            Value::Raw(inner) | Value::Do(inner) => {
+                self.validate_value_references(inner)?;
+            }
+            Value::MapWithSpread {
+                base_entries,
+                spread_entries,
+            } => {
+                for value in base_entries.values() {
+                    self.validate_val_references(value)?;
+                }
+                for (_, value) in spread_entries {
+                    self.validate_value_references(value)?;
+                }
+            }
+            _ => self.validate_value_references(value)?,
+        }
+        Ok(())
+    }
+
+    /// Report an unresolved reference. Inside a literal, template, flow
+    /// arm, spread or `do(...)` it is a warning: 3.0.0 didn't check these,
+    /// and a program whose unresolved name there is never evaluated ran.
+    fn report_unresolved(&mut self, error: CompilerError) {
+        if self.unchecked_before == 0 {
+            self.errors.add(error);
+            return;
+        }
+        let (code, headline, detail, location) = match error {
+            CompilerError::UnresolvedVariable {
+                var_name,
+                message,
+                location,
+                ..
+            } => (
+                "unresolved-variable",
+                format!("Unresolved variable '{var_name}'"),
+                message,
+                location,
+            ),
+            CompilerError::UnresolvedFunction {
+                func_name,
+                message,
+                location,
+                ..
+            } => (
+                "unresolved-function",
+                format!("Unresolved function '{func_name}'"),
+                message,
+                location,
+            ),
+            other => {
+                self.errors.add(other);
+                return;
+            }
+        };
+        self.warnings.push(CompilerError::Constraint {
+            code,
+            message: format!("{headline}: {detail}"),
+            help: Some("evaluating it fails at run time".to_string()),
+            warning: true,
+            location,
+        });
+    }
+
+    /// Move out the non-fatal diagnostics collected by `resolve_program`.
+    pub fn take_warnings(&mut self) -> Vec<CompilerError> {
+        std::mem::take(&mut self.warnings)
+    }
+
+    /// Validate a match arm's body, with the arm's binding (`Variant(v) =>`)
+    /// in scope.
+    fn validate_match_arm_references(&mut self, arm: &MatchArm) -> CompilerResult<()> {
+        if let Some(binding) = &arm.binding {
+            self.context.current_local_variables.insert(binding.clone());
+        }
+        self.validate_value_references(&arm.body)
     }
 
     /// Validate references in a Ref
@@ -479,7 +665,7 @@ impl Resolver {
                     } else {
                         self.context.create_error_location(var_name)
                     };
-                    self.errors.add(CompilerError::UnresolvedVariable {
+                    self.report_unresolved(CompilerError::UnresolvedVariable {
                         var_name: var_name.to_string(),
                         namespace: self.context.unified_resolver.current_namespace.clone(),
                         message: format!("Variable '{}' cannot be resolved", var_name),
@@ -554,7 +740,7 @@ impl Resolver {
                                     available.join(", ")
                                 )
                             };
-                            self.errors.add(CompilerError::UnresolvedFunction {
+                            self.report_unresolved(CompilerError::UnresolvedFunction {
                                 func_name: qualified_name.clone(),
                                 namespace: self.context.unified_resolver.current_namespace.clone(),
                                 message: format!(
@@ -564,7 +750,7 @@ impl Resolver {
                                 location,
                             });
                         } else {
-                            self.errors.add(CompilerError::UnresolvedVariable {
+                            self.report_unresolved(CompilerError::UnresolvedVariable {
                                 var_name: qualified_name.clone(),
                                 namespace: self.context.unified_resolver.current_namespace.clone(),
                                 message: format!(
@@ -842,6 +1028,34 @@ impl Resolver {
                 self.context.current_function_params = saved_params;
                 self.context.current_local_variables = saved_locals;
             }
+            // Bindings inside flow arms and literals are collected too, so
+            // a body's later references to them resolve.
+            Value::Cond(_, predicate, body) => {
+                self.collect_local_variables(predicate)?;
+                for expr in &body.expressions {
+                    self.collect_local_variables(expr)?;
+                }
+            }
+            Value::CondDefault(body) => {
+                for expr in &body.expressions {
+                    self.collect_local_variables(expr)?;
+                }
+            }
+            Value::Match(match_expr) => {
+                self.collect_local_variables(&match_expr.value)?;
+                for arm in &match_expr.arms {
+                    self.collect_local_variables(&arm.body)?;
+                }
+            }
+            Value::MatchArm(arm) => {
+                self.collect_local_variables(&arm.body)?;
+            }
+            Value::Raw(inner) | Value::Do(inner) => {
+                self.collect_local_variables(inner)?;
+            }
+            Value::Val(val, _) => {
+                self.collect_val_local_variables(val)?;
+            }
             _ => {
                 // For other value types, no local variables to collect
             }
@@ -849,25 +1063,61 @@ impl Resolver {
         Ok(())
     }
 
-    /// Validate references in a Val (for nested structures)
-    #[allow(clippy::only_used_in_recursion)]
-    fn validate_val_references(&mut self, val: &crate::val::Val) -> CompilerResult<()> {
+    /// Collect local variable definitions from the expressions inside a
+    /// Vec or Map literal.
+    fn collect_val_local_variables(&mut self, val: &Val) -> CompilerResult<()> {
         match val {
-            crate::val::Val::Vec(elements) => {
+            Val::Vec(elements) => {
+                for element in elements {
+                    self.collect_val_local_variables(element)?;
+                }
+            }
+            Val::Map(map) => {
+                for value in map.values() {
+                    self.collect_val_local_variables(value)?;
+                }
+            }
+            Val::Box(boxed) => {
+                if let Some(node) = boxed.as_any().downcast_ref::<AstNode>() {
+                    self.collect_local_variables(&node.0)?;
+                } else if let Some(fn_call) = boxed.as_any().downcast_ref::<FnCall>() {
+                    for arg in &fn_call.args {
+                        self.collect_local_variables(&arg.value)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validate references in a Val (for nested structures)
+    fn validate_val_references(&mut self, val: &Val) -> CompilerResult<()> {
+        match val {
+            Val::Vec(elements) => {
                 for element in elements {
                     self.validate_val_references(element)?;
                 }
             }
-            crate::val::Val::Map(map) => {
+            Val::Map(map) => {
                 for (key, value) in map.iter() {
                     self.validate_val_references(key)?;
                     self.validate_val_references(value)?;
                 }
             }
-            crate::val::Val::Box(_boxed) => {
-                // Box contains a trait object, we can't validate its contents directly
-                // This would require a more sophisticated approach to handle boxed values
-                // For now, we skip validation of boxed contents
+            Val::Box(boxed) => {
+                // The parser boxes each element of a literal that is not
+                // itself a literal (`[f(x)]`, `{a: x}`, `[...xs]`).
+                self.unchecked_before += 1;
+                let result = if let Some(node) = boxed.as_any().downcast_ref::<AstNode>() {
+                    self.validate_value_references(&node.0)
+                } else if let Some(fn_call) = boxed.as_any().downcast_ref::<FnCall>() {
+                    self.validate_function_call_references(fn_call)
+                } else {
+                    Ok(())
+                };
+                self.unchecked_before -= 1;
+                result?;
             }
             _ => {
                 // Other Val types don't contain references

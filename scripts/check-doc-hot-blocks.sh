@@ -55,6 +55,7 @@ MISSING_CTX = re.compile(r"Missing required context variable '([^']+)'")
 PACKAGES = {
     "hot.dev/hot-ai": "hot/pkg/hot-ai",
     "hot.dev/hot-ai-agent": "hot/pkg/hot-ai-agent",
+    "hot.dev/anthropic": "hot/pkg/anthropic",
 }
 MAX_ROUNDS = 6
 
