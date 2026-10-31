@@ -652,6 +652,16 @@ async fn assert_runtime_contract(fixture: &UpgradeDatabase, rows: &ExistingRows)
     sqlx::query("INSERT INTO store_map_entry(org_id,env_id,store_name,key,value) VALUES($1,$2,'retained','\"key\"','\"child\"')")
         .bind(child).bind(child_env).execute(&child_scope).await?;
     assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT key_text FROM store_map_entry WHERE env_id=$1"
+        )
+        .bind(child_env)
+        .fetch_one(&fixture.admin)
+        .await?,
+        Some("key".to_string()),
+        "the runtime's writes keep the key text for prefix reads"
+    );
+    assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM store_map_entry")
             .fetch_one(&env)
             .await?,
@@ -672,6 +682,14 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
         let result: TestResult = async {
             let rows = ExistingRows::seed(&fixture.admin).await?;
             if baseline >= 13 { rows.add_management_issuer(&fixture.admin).await?; }
+            for (env, org, key) in [
+                (rows.sibling_env, rows.org, "\"case:1\""),
+                (rows.sibling_env, rows.org, "7"),
+                (rows.other_env, rows.other_org, "\"other\""),
+            ] {
+                sqlx::query("INSERT INTO store_map_entry(org_id,env_id,store_name,key,value) VALUES($1,$2,'prefix-backfill',$3::jsonb,'1')")
+                    .bind(org).bind(env).bind(key).execute(&fixture.admin).await?;
+            }
             let old_ledger = ledger(&fixture.owner).await?;
             let owner_privileged: bool = sqlx::query_scalar("SELECT rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb FROM pg_roles WHERE rolname=current_user")
                 .fetch_one(&fixture.owner).await?;
@@ -682,6 +700,15 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
             assert_latest_ledger(&fixture.owner).await?;
             fixture.upgrade().await?;
             assert_eq!(ledger(&fixture.owner).await?, final_ledger);
+            // 022 fills in the text of existing string keys, for prefix reads,
+            // though the non-bypass owner updates one environment at a time.
+            let key_texts: Vec<(Uuid, String, Option<String>)> = sqlx::query_as("SELECT env_id, key::text, key_text FROM store_map_entry WHERE store_name='prefix-backfill' ORDER BY seq")
+                .fetch_all(&fixture.admin).await?;
+            assert_eq!(key_texts, [
+                (rows.sibling_env, "\"case:1\"".to_string(), Some("case:1".to_string())),
+                (rows.sibling_env, "7".to_string(), None),
+                (rows.other_env, "\"other\"".to_string(), Some("other".to_string())),
+            ]);
             // 019 retires management credentials: the key one issued is kept
             // but deactivated, and the management tables are gone.
             let retired: (bool, bool, bool) = sqlx::query_as("SELECT active, to_regclass('hot.management_key') IS NULL, to_regclass('hot.api_key_management_issuer') IS NULL FROM api_key WHERE api_key_id=$1")
