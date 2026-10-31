@@ -60,6 +60,7 @@ meta ["test"] fn () {
         Status.Open (owed) => { map(owed, %.step) }
         _ => { null }
     }
+
     assert-eq(["a", "b", "c"], steps, "a binding the arm names is the Vec payload")
 }
 
