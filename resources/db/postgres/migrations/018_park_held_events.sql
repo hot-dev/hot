@@ -9,6 +9,9 @@ CREATE TABLE hot.parked_event (
     leased_until timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX parked_event_lease_idx ON hot.parked_event(leased_until);
+-- Replay finds the environments with parked events, which are few, without
+-- reading their rows, which can be many.
+CREATE INDEX parked_event_env_idx ON hot.parked_event(env_id, leased_until);
 ALTER TABLE hot.parked_event ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hot.parked_event FORCE ROW LEVEL SECURITY;
 CREATE POLICY parked_queue ON hot.parked_event USING (

@@ -110,6 +110,7 @@ impl DatabaseWriterPressureStats {
                 | DatabaseWrite::RunStop { .. }
                 | DatabaseWrite::RunFail { .. }
                 | DatabaseWrite::RunCancel { .. }
+                | DatabaseWrite::RunInfo { .. }
         ) {
             self.enqueued_run.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -244,6 +245,11 @@ pub enum DatabaseWrite {
         event_time: chrono::DateTime<chrono::Utc>,
         cancellation: Val,
     },
+    /// Merge keys into a run's info
+    RunInfo {
+        run_id: Uuid,
+        info: serde_json::Value,
+    },
     /// Insert or update a call record
     Call {
         execution_context: Box<ExecutionContext>,
@@ -278,7 +284,8 @@ impl DatabaseWrite {
             } => execution_context.run_id,
             DatabaseWrite::RunStop { run_id, .. }
             | DatabaseWrite::RunFail { run_id, .. }
-            | DatabaseWrite::RunCancel { run_id, .. } => *run_id,
+            | DatabaseWrite::RunCancel { run_id, .. }
+            | DatabaseWrite::RunInfo { run_id, .. } => *run_id,
         }
     }
 }
@@ -403,7 +410,7 @@ impl DatabaseWriter {
                                     // shard affinity. They still flush promptly, but only this
                                     // shard is blocked; sibling runs drain on sibling shards.
                                     let has_run_write = pending_writes.iter().any(|w| {
-                                        matches!(w.write, DatabaseWrite::RunStart { .. } | DatabaseWrite::RunStop { .. } | DatabaseWrite::RunFail { .. } | DatabaseWrite::RunCancel { .. })
+                                        matches!(w.write, DatabaseWrite::RunStart { .. } | DatabaseWrite::RunStop { .. } | DatabaseWrite::RunFail { .. } | DatabaseWrite::RunCancel { .. } | DatabaseWrite::RunInfo { .. })
                                     });
 
                                     let should_flush = has_run_write
@@ -872,6 +879,7 @@ impl DatabaseWriter {
                     | DatabaseWrite::RunStop { .. }
                     | DatabaseWrite::RunFail { .. }
                     | DatabaseWrite::RunCancel { .. }
+                    | DatabaseWrite::RunInfo { .. }
             )
         });
         let run_write_count = run_writes.len();
@@ -955,6 +963,24 @@ impl DatabaseWriter {
                     {
                         batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
+                    }
+                }
+                DatabaseWrite::RunInfo { run_id, info } => {
+                    if let Some((execution_context, start_time)) = pending_starts.remove(&run_id)
+                        && let Err(e) =
+                            Self::write_run_start(pool, &execution_context, start_time).await
+                    {
+                        batch_failed = true;
+                        tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
+                    }
+                    if let Err(e) =
+                        crate::db::run::Run::update_info(pool, &run_id, Some(&info)).await
+                    {
+                        tracing::warn!(
+                            "DatabaseWriter: Run info write failed for {}: {}",
+                            run_id,
+                            e
+                        );
                     }
                 }
                 DatabaseWrite::Call { .. } => unreachable!("call writes were partitioned out"),

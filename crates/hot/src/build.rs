@@ -1691,6 +1691,45 @@ pub async fn load_build_manifest_data_from_path(
     load_build_manifest_data(db, build_id, env_id, &manifest_zip).await
 }
 
+/// Why this runtime can't run the build in `build_data` when a newer runtime
+/// of the same major version could, such as a worker a rolling deploy is
+/// starting. None when this runtime can run it, or when no runtime of its
+/// major version can.
+pub fn newer_runtime_requirement(build_data: &[u8]) -> Result<Option<String>, String> {
+    use std::io::Cursor;
+    use zip::ZipArchive;
+
+    let mut archive = ZipArchive::new(Cursor::new(build_data))
+        .map_err(|e| format!("Failed to read build zip: {}", e))?;
+    let manifest_file = archive
+        .by_name("manifest.hot")
+        .map_err(|_| "Build does not contain manifest.hot".to_string())?;
+    let crate::val::Val::Map(map) = crate::bundle::read_manifest_data(manifest_file)? else {
+        return Ok(None);
+    };
+    for (key, bundle_val) in map.iter() {
+        if let crate::val::Val::Str(key_str) = key
+            && key_str.starts_with("hot.bundle.")
+            && let crate::val::Val::Map(bundle_map) = bundle_val
+        {
+            let check = validate_build_version(bundle_map);
+            if !check.compatible
+                && crate::version::needs_newer_runtime(
+                    check.build_engine_version.as_deref(),
+                    check.build_hot_std_version.as_deref(),
+                    &check.server_version,
+                )
+            {
+                return Ok(Some(format!(
+                    "Build needs a newer Hot runtime: {}",
+                    check.warnings.join("; ")
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Load event handlers and schedules from an in-memory build zip.
 pub async fn load_build_manifest_data(
     db: &DatabasePool,
@@ -3355,6 +3394,35 @@ hot.pkg.demo {
         )
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn only_builds_of_a_newer_same_major_runtime_wait_for_one() {
+        let runtime = crate::version::current_runtime_version();
+        let core = runtime.split(['-', '+']).next().unwrap();
+        let mut parts = core.split('.').map(|part| part.parse::<u64>().unwrap());
+        let (major, minor, patch) = (
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+        );
+        let manifest = |engine: &str| {
+            build_manifest_zip(&format!(
+                r#"{{"hot.bundle.demo": {{"engine_version": "{engine}", "hot_std_version": "{engine}"}}}}"#
+            ))
+        };
+
+        let newer = manifest(&format!("{major}.{minor}.{}", patch + 1));
+        let reason = newer_runtime_requirement(&newer).unwrap().unwrap();
+        assert!(
+            reason.starts_with("Build needs a newer Hot runtime"),
+            "{reason}"
+        );
+        assert_eq!(newer_runtime_requirement(&manifest(core)).unwrap(), None);
+        assert_eq!(
+            newer_runtime_requirement(&manifest(&format!("{}.0.0", major + 1))).unwrap(),
+            None
+        );
     }
 
     #[test]

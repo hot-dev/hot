@@ -17,6 +17,15 @@ pub(crate) async fn run_scheduler(env: Env, conf: Val) {
         build_info::git_sha_short()
     );
 
+    // A standalone scheduler that stops on an error, such as losing its
+    // singleton lock, exits non-zero so its supervisor restarts it.
+    let exit_on_error = matches!(env, Env::Production);
+    let failed = move || {
+        if exit_on_error {
+            std::process::exit(1);
+        }
+    };
+
     // Extract configuration values from conf
     let queue_type = QueueType::from_str(&conf.get_str("queue.type")).unwrap_or(QueueType::Memory);
 
@@ -48,12 +57,14 @@ pub(crate) async fn run_scheduler(env: Env, conf: Val) {
                         "hot.dev: SCHEDULER failed to verify database connection: {}",
                         e
                     );
+                    failed();
                     return;
                 }
             }
         }
         Err(e) => {
             error!("hot.dev: SCHEDULER failed to create database pool: {}", e);
+            failed();
             return;
         }
     };
@@ -104,37 +115,44 @@ pub(crate) async fn run_scheduler(env: Env, conf: Val) {
 
     let schedule_policy = hot::db::SchedulePolicy::from_conf(&conf);
 
-    // A standalone scheduler that stops on an error, such as losing its
-    // singleton lock, exits non-zero so its supervisor restarts it.
-    let exit_on_error = matches!(env, Env::Production);
+    // `hot dev` and integration `hot test` restart a scheduler that lost its
+    // lock, so a brief database stall doesn't end scheduling for the session.
+    let restart = matches!(env, Env::Development);
     let server = tokio::spawn(async move {
-        match hot_scheduler::server::run_for_environment(
-            queue_type,
-            redis_uri,
-            redis_cluster,
-            serialization,
-            db,
-            sync_interval_seconds,
-            retry_interval_seconds,
-            at_interval_seconds,
-            backfill_enabled,
-            schedule_policy,
-            singleton,
-            selected_env,
-        )
-        .await
-        {
+        let start = || {
+            hot_scheduler::server::run_for_environment(
+                queue_type,
+                redis_uri.clone(),
+                redis_cluster,
+                serialization,
+                db.clone(),
+                sync_interval_seconds,
+                retry_interval_seconds,
+                at_interval_seconds,
+                backfill_enabled,
+                schedule_policy,
+                singleton,
+                selected_env,
+            )
+        };
+        let result = if restart {
+            hot_scheduler::server::run_restarting(start).await
+        } else {
+            start().await
+        };
+        match result {
             Ok(_) => info!("hot.dev: SCHEDULER shut down"),
             Err(e) => {
                 error!("hot.dev: Scheduler error: {}", e);
-                if exit_on_error {
-                    std::process::exit(1);
-                }
+                failed();
             }
         }
     });
 
     // Wait for the server task to complete
     // The server has its own Ctrl-C handler that triggers graceful shutdown
-    let _ = server.await;
+    if let Err(error) = server.await {
+        error!("hot.dev: SCHEDULER stopped unexpectedly: {error}");
+        failed();
+    }
 }

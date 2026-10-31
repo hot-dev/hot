@@ -322,7 +322,7 @@ fn (): Map {
 }
 ```
 
-See [Caller Identity](#caller-identity-hotrequest) for the full `hot.request` structure.
+See [Caller Identity](#caller-identity) for the full `hot.request` structure.
 
 #### Public Tools
 
@@ -571,7 +571,7 @@ Most MCP-compatible AI clients can connect directly to your Hot MCP endpoint. Co
 - **Transport**: Streamable HTTP (preferred) or HTTP+SSE (deprecated compatibility)
 - **Authentication**: Bearer token (API key, service key, or session). Not required for tools with `auth: "none"`.
 
-## Caller Identity (`hot.request`)
+## Caller Identity (`hot.request`) {#caller-identity}
 
 When an MCP tool is invoked, Hot automatically populates the `hot.request` context variable with an `::hot::http/HttpRequest` containing HTTP request details and caller identity. Access it via `::hot::ctx/get("hot.request")`.
 
@@ -715,9 +715,12 @@ API keys can be restricted to only allow MCP access, and further restricted to s
 |------------|--------|--------|
 | Full Access | `{"*:*": ["*"]}` | Unrestricted access to all API endpoints including MCP |
 | MCP (all services) | `{"mcp:*": ["execute"]}` | MCP tool invocation for all services |
-| MCP (specific service) | `{"mcp:weather": ["execute"]}` | MCP tool invocation for a specific service only |
+| MCP (specific service) | `{"mcp:weather/*": ["execute"]}` | MCP tool invocation for a specific service only |
+| MCP (one tool) | `{"mcp:weather/get-forecast": ["execute"]}` | One tool only |
 
-For example, an API key with permission `{"mcp:weather": ["execute"]}` can only invoke tools in the `weather` service. It cannot access other services or any non-MCP API endpoints.
+For example, an API key with permission `{"mcp:weather/*": ["execute"]}` can only invoke tools in the `weather` service. It cannot access other services or any non-MCP API endpoints. Name the service's tools with `/*`: a bare `{"mcp:weather": ["execute"]}` matches no tool and grants nothing.
+
+MCP needs an environment credential. An [org API key](/docs/api/management) gets `403` with the error code `key_scope_mismatch`.
 
 Permissions are configured when creating or editing API keys in the Hot App. See [Hot App > API Keys](/docs/app#api-keys) for details.
 

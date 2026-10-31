@@ -24,12 +24,21 @@ impl Admission {
         build_id: &Uuid,
         configured_limit: i64,
     ) -> Result<Self, ScheduleError> {
+        // A missing owner denies the schedule. A database failure stays
+        // retryable, as it is in the admission queries below, so a pool
+        // timeout doesn't fail a build or reject a request.
         let env_id = crate::db::Build::get_env_id_for_build(db, build_id)
             .await
-            .map_err(|e| ScheduleError::PolicyError(e.to_string()))?;
+            .map_err(|e| match e {
+                crate::db::BuildError::Database(e) => ScheduleError::Database(e),
+                e => ScheduleError::PolicyError(e.to_string()),
+            })?;
         let env = crate::db::Env::get_env_uncached(db, &env_id)
             .await
-            .map_err(|e| ScheduleError::PolicyError(e.to_string()))?;
+            .map_err(|e| match e {
+                crate::db::EnvError::Database(e) => ScheduleError::Database(e),
+                e => ScheduleError::PolicyError(e.to_string()),
+            })?;
         if let DatabasePool::Postgres(pool) = db
             && !matches!(pool.scope()?, DatabaseScope::Environment { org_id, env_id: selected } if org_id == env.org_id && selected == env_id)
         {
@@ -39,7 +48,10 @@ impl Admission {
         }
         let root = crate::db::Org::billing_owner_id_for(db, &env.org_id)
             .await
-            .map_err(|e| ScheduleError::PolicyError(e.to_string()))?;
+            .map_err(|e| match e {
+                crate::db::OrgError::Database(e) => ScheduleError::Database(e),
+                e => ScheduleError::PolicyError(e.to_string()),
+            })?;
         let billing = db.with_scope(DatabaseScope::Maintenance {
             operation: MaintenanceOperation::Billing,
             org_id: Some(root),
@@ -167,6 +179,28 @@ fn validate_count(count: i64, limit: i64) -> Result<(), ScheduleError> {
 mod tests {
     use super::*;
     use crate::db::{Build, Env, Org, Project, Schedule};
+
+    /// A failed owner lookup is retried, like the admission queries; only a
+    /// missing owner denies the schedule.
+    #[tokio::test]
+    async fn owner_lookup_database_failures_stay_retryable() {
+        let db = crate::db::test_db().await;
+        let missing = Admission::begin(&db, &Uuid::now_v7(), 10).await;
+        assert!(
+            matches!(missing, Err(ScheduleError::PolicyError(_))),
+            "a missing build denies the schedule"
+        );
+
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        pool.close().await;
+        let failed = Admission::begin(&db, &Uuid::now_v7(), 10).await;
+        assert!(
+            matches!(failed, Err(ScheduleError::Database(_))),
+            "a database failure stays retryable"
+        );
+    }
 
     /// A downgrade can leave an account over its schedule cap. Redeploying
     /// what it already runs must not silently drop every schedule; growing

@@ -41,7 +41,7 @@ const MAX_PROCESSING_RETRIES: usize = 3;
 /// infrastructure requeue.
 ///
 /// `requeue_msg_for_infrastructure_retry` XADDs a FRESH stream entry (and
-/// ACKs the old one), which resets the Redis delivery counter — so by
+/// ACKs the old one), which starts its retry count over — so by
 /// default infrastructure retries never consume the
 /// `MAX_PROCESSING_RETRIES` budget. That is deliberate for healthy
 /// deferrals (e.g. a running task redelivered while it executes, which can
@@ -51,8 +51,8 @@ const MAX_PROCESSING_RETRIES: usize = 3;
 ///
 /// Workers opt a requeue into bounded escalation by including this token in
 /// the `QueueInfrastructureError` message: the fresh entry is then stamped
-/// with a `prior_deliveries` field carrying `redis_delivery_count +
-/// old_prior_deliveries`, and the DLQ gate compares the cumulative total
+/// with a `prior_deliveries` field carrying `attempts + old_prior_deliveries`
+/// (see `record_attempt`), and the DLQ gate compares the cumulative total
 /// against `MAX_PROCESSING_RETRIES`. Entries without the field read as 0,
 /// so old in-flight messages and never-counted requeues keep today's
 /// behavior.
@@ -112,14 +112,142 @@ const DEFAULT_STREAM_RETENTION_MS: u64 = 30 * 24 * 3_600_000; // 30 days
 /// PEL/prefetch; high-capacity workers opt in via `with_read_batch_size`.
 const READ_BATCH_SIZE: usize = 1;
 
-/// Soft upper bound on stream length. XADD uses `MAXLEN ~ N` so Redis can
-/// efficiently trim near this number without exact-cap overhead. Combined
-/// with `trim_stream` (which uses the oldest pending message as the floor),
-/// this ensures streams don't grow unbounded between janitor passes.
+/// Soft upper bound on stream length. Every XADD trims back toward it (see
+/// `trim_stream_lua!`), but never past the oldest entry still pending in a
+/// consumer group: trimming a delivery a worker is still running would leave
+/// nothing to redeliver if that worker died.
 const STREAM_MAXLEN: u64 = 100_000;
+
+/// Hard upper bound on stream length. An entry pending for a very long time
+/// (an hours-long run on a busy shared stream) pins the soft trim floor;
+/// past this length the stream is trimmed to it regardless, pending entries
+/// included, so Redis memory stays bounded. A worker still running a trimmed
+/// entry keeps running it (see [`PendingTouch::Trimmed`]).
+const STREAM_HARD_MAXLEN: u64 = 10 * STREAM_MAXLEN;
 
 /// Soft upper bound on dead-letter stream length (`XADD MAXLEN ~`).
 const DLQ_MAXLEN: u64 = 10_000;
+
+/// Most delayed retries moved back into the stream by one promotion pass.
+const DELAYED_PROMOTE_BATCH: usize = 100;
+
+/// Lua helpers shared by every script that appends to a work stream.
+///
+/// `trim_stream` replaces `XADD MAXLEN ~`: once the stream is longer than
+/// `maxlen` it trims with `MINID ~ <oldest pending id>` across all groups,
+/// so ACKed history goes but pending deliveries stay; only past
+/// `hard_maxlen` does it fall back to `MAXLEN ~ hard_maxlen`. Without
+/// pending entries it trims to `maxlen` as `XADD MAXLEN ~` did. The
+/// XINFO/XPENDING scan only runs once the stream is over `maxlen`.
+///
+/// A macro rather than a `const` so scripts can `concat!` it at compile time.
+macro_rules! trim_stream_lua {
+    () => {
+        r#"
+local function stream_id_before(a, b)
+    local a_ms, a_seq = string.match(a, '^(%d+)-(%d+)$')
+    local b_ms, b_seq = string.match(b, '^(%d+)-(%d+)$')
+    if tonumber(a_ms) ~= tonumber(b_ms) then
+        return tonumber(a_ms) < tonumber(b_ms)
+    end
+    return tonumber(a_seq) < tonumber(b_seq)
+end
+
+local function trim_stream(stream, maxlen, hard_maxlen)
+    if redis.call('XLEN', stream) <= maxlen then
+        return
+    end
+    local floor = nil
+    for _, group in ipairs(redis.call('XINFO', 'GROUPS', stream)) do
+        local name, pending = nil, 0
+        for i = 1, #group, 2 do
+            if group[i] == 'name' then
+                name = group[i + 1]
+            elseif group[i] == 'pending' then
+                pending = group[i + 1]
+            end
+        end
+        if name and pending > 0 then
+            local oldest = redis.call('XPENDING', stream, name)[2]
+            if oldest and (floor == nil or stream_id_before(oldest, floor)) then
+                floor = oldest
+            end
+        end
+    end
+    if floor == nil then
+        redis.call('XTRIM', stream, 'MAXLEN', '~', maxlen)
+        return
+    end
+    redis.call('XTRIM', stream, 'MINID', '~', floor)
+    if redis.call('XLEN', stream) > hard_maxlen then
+        redis.call('XTRIM', stream, 'MAXLEN', '~', hard_maxlen)
+    end
+end
+"#
+    };
+}
+
+/// XADD one item, then trim. KEYS[1] stream; ARGV[1] payload, ARGV[2]
+/// maxlen, ARGV[3] hard maxlen.
+const ENQUEUE_LUA: &str = concat!(
+    trim_stream_lua!(),
+    r#"
+local id = redis.call('XADD', KEYS[1], '*', 'payload', ARGV[1])
+trim_stream(KEYS[1], tonumber(ARGV[2]), tonumber(ARGV[3]))
+return id
+"#
+);
+
+/// Move due delayed retries back into the stream. KEYS[1] stream, KEYS[2]
+/// delayed ZSET (member: the deferred entry's id, score: due Unix ms),
+/// KEYS[3] delayed entries hash (`<id>:<field>`); ARGV[1] now ms, ARGV[2]
+/// batch size, ARGV[3] maxlen, ARGV[4] hard maxlen. Returns the number moved
+/// and the next due score (nil when none is left).
+const PROMOTE_DELAYED_LUA: &str = concat!(
+    trim_stream_lua!(),
+    r#"
+local due = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))
+for _, id in ipairs(due) do
+    local names = {id .. ':payload', id .. ':reason', id .. ':timestamp', id .. ':prior_deliveries'}
+    local f = redis.call('HMGET', KEYS[3], unpack(names))
+    if f[1] then
+        local fields = {
+            'payload', f[1],
+            'retry_reason', f[2] or '',
+            'original_id', id,
+            'timestamp', f[3] or ''
+        }
+        if f[4] and f[4] ~= '' then
+            fields[#fields + 1] = 'prior_deliveries'
+            fields[#fields + 1] = f[4]
+        end
+        redis.call('XADD', KEYS[1], '*', unpack(fields))
+    end
+    redis.call('HDEL', KEYS[3], unpack(names))
+    redis.call('ZREM', KEYS[2], id)
+end
+if #due > 0 then
+    trim_stream(KEYS[1], tonumber(ARGV[3]), tonumber(ARGV[4]))
+end
+local next_due = redis.call('ZRANGE', KEYS[2], 0, 0, 'WITHSCORES')
+return {#due, next_due[2] or false}
+"#
+);
+
+/// What a keepalive touch found for a delivery this consumer claimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingTouch {
+    /// The idle clock was reset: this consumer still owns the delivery.
+    Touched,
+    /// The stream entry is gone (trimmed or deleted). No consumer can be
+    /// handed it again, so the claim stands, but its idle clock can no
+    /// longer be reset: an XCLAIM of a deleted entry drops it from the PEL.
+    Trimmed,
+    /// Another consumer owns the delivery now: it was reclaimed.
+    Reclaimed,
+    /// The delivery is no longer pending: it was acknowledged.
+    Acked,
+}
 
 /// Block duration (ms) used by `process_blocking` for the new-message read.
 /// Workers that select! over multiple queues park here so we avoid hot
@@ -303,6 +431,7 @@ impl RedisClient {
                     Ok(RedisConnectionOwned {
                         conn: RedisConnectionKind::Standalone(conn),
                         broken: false,
+                        dropped: false,
                     })
                 }
                 RedisClient::Cluster(client) => {
@@ -310,6 +439,7 @@ impl RedisClient {
                     Ok(RedisConnectionOwned {
                         conn: RedisConnectionKind::Cluster(conn),
                         broken: false,
+                        dropped: false,
                     })
                 }
             }
@@ -329,6 +459,12 @@ struct RedisConnectionOwned {
     /// its own, so without eviction every later command would time out
     /// forever and stall the queue.
     broken: bool,
+    /// Set with `broken` when the connection failed outright (IO error,
+    /// dropped connection) rather than timing out. Such a command was most
+    /// likely never executed, typically the first one on a connection that
+    /// went stale while the server restarted, so it is safe to send again on
+    /// a fresh connection. After a timeout the server may still have run it.
+    dropped: bool,
 }
 
 enum RedisConnectionKind {
@@ -351,6 +487,7 @@ impl RedisConnectionOwned {
             Ok(Err(e)) => {
                 if crate::redis::error_indicates_broken_connection(&e) {
                     self.broken = true;
+                    self.dropped = true;
                 }
                 Err(e.into())
             }
@@ -368,14 +505,13 @@ impl RedisConnectionOwned {
     }
 }
 
-/// Source of a buffered message — determines whether we need XPENDING to
-/// learn the delivery count, or whether we can short-circuit to 1.
+/// Source of a buffered message.
 #[derive(Clone, Copy, Debug)]
 enum FetchSource {
     /// Fresh `>` read — first delivery, count is implicitly 1.
     Fresh,
-    /// `0` read of the consumer's PEL — re-read after a previous failure.
-    /// Caller must consult XPENDING for the real delivery count.
+    /// Redelivery of an entry already in the consumer's PEL: a retry after
+    /// a worker error, or an orphan reclaimed from a dead consumer.
     Pending,
 }
 
@@ -388,6 +524,9 @@ struct PrefetchedMessage {
     /// Cumulative delivery count carried across opted-in infrastructure
     /// requeues (`prior_deliveries` entry field); 0 when absent.
     prior_deliveries: usize,
+    /// When Redis handed the entry to this consumer, which starts its PEL
+    /// idle clock.
+    delivered_at: tokio::time::Instant,
 }
 
 fn duration_ms(duration: Duration) -> u64 {
@@ -599,6 +738,10 @@ pub struct RedisStreamQueue<T> {
     /// `None` preserves the historical "consume from beginning" behavior.
     startup_window_ms: Option<u64>,
     drain_stats: Arc<RedisQueueDrainStats>,
+    /// Unix time (ms) at which this handle next moves due delayed retries
+    /// (see `promote_due_delayed`) back into the stream: the earliest due
+    /// time it knows of, else one blocking-read period after its last check.
+    next_delayed_check_ms: Arc<AtomicU64>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -627,6 +770,7 @@ impl<T> Clone for RedisStreamQueue<T> {
             orphan_idle_ms: self.orphan_idle_ms,
             startup_window_ms: self.startup_window_ms,
             drain_stats: Arc::new(RedisQueueDrainStats::new()),
+            next_delayed_check_ms: Arc::new(AtomicU64::new(0)),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -664,6 +808,7 @@ impl<T> RedisStreamQueue<T> {
             orphan_idle_ms: ORPHAN_IDLE_MS,
             startup_window_ms: None,
             drain_stats: Arc::new(RedisQueueDrainStats::new()),
+            next_delayed_check_ms: Arc::new(AtomicU64::new(0)),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -699,6 +844,7 @@ impl<T> RedisStreamQueue<T> {
             orphan_idle_ms: ORPHAN_IDLE_MS,
             startup_window_ms: None,
             drain_stats: Arc::new(RedisQueueDrainStats::new()),
+            next_delayed_check_ms: Arc::new(AtomicU64::new(0)),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -753,6 +899,7 @@ impl<T> RedisStreamQueue<T> {
             orphan_idle_ms: self.orphan_idle_ms,
             startup_window_ms: self.startup_window_ms,
             drain_stats: Arc::clone(&self.drain_stats),
+            next_delayed_check_ms: Arc::clone(&self.next_delayed_check_ms),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -824,11 +971,17 @@ impl<T> RedisStreamQueue<T> {
     /// counter unchanged, so touches never consume `MAX_PROCESSING_RETRIES`
     /// budget.
     ///
-    /// Returns `Ok(true)` when the idle clock was reset, `Ok(false)` when
-    /// there was nothing to touch — entry already ACKed (post-ACK touches
-    /// are harmless no-ops, not errors) or now owned by another consumer.
-    /// Bounded by `REDIS_COMMAND_TIMEOUT` like every other queue command.
-    pub async fn touch_pending_entry(&self, msg_id: &str) -> Result<bool, StreamsQueueError> {
+    /// The result tells a reclaimed delivery ([`PendingTouch::Reclaimed`])
+    /// apart from one nobody else can run any more: trimmed from the stream
+    /// by the length cap ([`PendingTouch::Trimmed`]; the script then skips
+    /// the XCLAIM, which would drop the PEL record) or already acknowledged
+    /// ([`PendingTouch::Acked`]; post-ACK touches are harmless no-ops, not
+    /// errors). Bounded by `REDIS_COMMAND_TIMEOUT` like every other queue
+    /// command.
+    pub async fn touch_pending_entry(
+        &self,
+        msg_id: &str,
+    ) -> Result<PendingTouch, StreamsQueueError> {
         let mut guard = self.get_connection().await?;
         let conn = guard.as_mut().unwrap();
 
@@ -837,20 +990,28 @@ impl<T> RedisStreamQueue<T> {
         // returns the entry when it is both still pending AND still owned
         // by ARGV[2]. Guard and XCLAIM are atomic inside the script, so a
         // concurrent XAUTOCLAIM cannot slip between them.
+        // Returns 1 touched, 2 trimmed, 3 reclaimed, 0 acknowledged.
         let script = r#"
+            local function entry_exists()
+                return #redis.call('XRANGE', KEYS[1], ARGV[3], ARGV[3]) > 0
+            end
             local owned = redis.call(
                 'XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1, ARGV[2]
             )
-            if owned == false or #owned == 0 then
-                return 0
+            if #owned > 0 then
+                if not entry_exists() then
+                    return 2
+                end
+                redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'JUSTID')
+                return 1
             end
-            local touched = redis.call(
-                'XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'JUSTID'
-            )
-            if touched == false or #touched == 0 then
-                return 0
+            if #redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1) > 0 then
+                return 3
             end
-            return 1
+            if not entry_exists() then
+                return 2
+            end
+            return 0
         "#;
 
         let value = conn
@@ -865,8 +1026,13 @@ impl<T> RedisStreamQueue<T> {
                     .clone(),
             )
             .await?;
-        let touched: i64 = redis::from_redis_value_ref(&value)?;
-        Ok(touched == 1)
+        let outcome: i64 = redis::from_redis_value_ref(&value)?;
+        Ok(match outcome {
+            1 => PendingTouch::Touched,
+            2 => PendingTouch::Trimmed,
+            3 => PendingTouch::Reclaimed,
+            _ => PendingTouch::Acked,
+        })
     }
 
     pub fn with_consumer_group(mut self, group: String) -> Self {
@@ -1079,7 +1245,11 @@ impl<T> RedisStreamQueue<T> {
         let mut cursor = "0-0".to_string();
 
         loop {
-            // XAUTOCLAIM stream group consumer min-idle-time start [COUNT count]
+            // XAUTOCLAIM stream group consumer min-idle-time start [COUNT count] JUSTID
+            //
+            // JUSTID: the reclaim only moves the entry into this consumer's
+            // PEL, no body needed. Retries are counted when a worker starts
+            // the entry (see `record_attempt`), never on a reclaim.
             let result = conn
                 .cmd(
                     &redis::cmd("XAUTOCLAIM")
@@ -1090,11 +1260,12 @@ impl<T> RedisStreamQueue<T> {
                         .arg(&cursor)
                         .arg("COUNT")
                         .arg(100)
+                        .arg("JUSTID")
                         .clone(),
                 )
                 .await?;
 
-            // XAUTOCLAIM returns: [next-cursor, [[id, [field, value, ...]], ...], [deleted-ids]]
+            // XAUTOCLAIM returns: [next-cursor, [id, ...], [deleted-ids]]
             let parts: Vec<redis::Value> = redis::from_redis_value_ref(&result)?;
 
             if parts.len() < 2 {
@@ -1489,7 +1660,7 @@ impl<T> RedisStreamQueue<T> {
     ///
     /// Two-tier strategy to avoid killing workers on long-running tasks (up to 7 days):
     /// - Tier 1: 0 pending + idle > 1 hour → clearly dead, safe to remove
-    /// - Tier 2: has pending + idle > 14 days → XAUTOCLAIM pending first, then remove
+    /// - Tier 2: has pending + idle > 14 days → claim its pending entries first, then remove
     pub async fn cleanup_stale_consumers(&self) -> Result<usize, StreamsQueueError> {
         self.ensure_consumer_group().await?;
 
@@ -1605,7 +1776,7 @@ impl<T> RedisStreamQueue<T> {
                 continue;
             }
 
-            // If the consumer has pending messages, XAUTOCLAIM them first
+            // If the consumer has pending messages, claim them first.
             if pending > 0 {
                 tracing::info!(
                     "Reclaiming {} pending messages from stale consumer {} on {} (idle {}ms)",
@@ -1614,34 +1785,7 @@ impl<T> RedisStreamQueue<T> {
                     self.stream_name,
                     idle,
                 );
-                let mut cursor = "0-0".to_string();
-                loop {
-                    let claim_result = conn
-                        .cmd(
-                            &redis::cmd("XAUTOCLAIM")
-                                .arg(&self.stream_name)
-                                .arg(&self.consumer_group)
-                                .arg(&self.consumer_name)
-                                .arg(0u64) // min-idle 0 — take everything from this consumer
-                                .arg(&cursor)
-                                .arg("COUNT")
-                                .arg(100)
-                                .clone(),
-                        )
-                        .await?;
-
-                    let parts: Vec<redis::Value> =
-                        redis::from_redis_value_ref(&claim_result).unwrap_or_default();
-                    if parts.len() < 2 {
-                        break;
-                    }
-                    let new_cursor: String =
-                        redis::from_redis_value_ref(&parts[0]).unwrap_or_default();
-                    if new_cursor == "0-0" {
-                        break;
-                    }
-                    cursor = new_cursor;
-                }
+                self.claim_consumer_pending(conn, &consumer_name).await?;
             }
 
             // XGROUP DELCONSUMER <stream> <group> <consumer>
@@ -1692,6 +1836,55 @@ impl<T> RedisStreamQueue<T> {
         }
 
         Ok(removed)
+    }
+
+    /// Move every entry pending for `consumer` into this consumer's PEL.
+    ///
+    /// Only ITS entries: XAUTOCLAIM has no consumer filter, so the min-idle-0
+    /// XAUTOCLAIM this replaced took every pending entry in the group, live
+    /// deliveries of healthy workers included, whose claim fences then
+    /// stopped those runs as taken over. JUSTID: moving an entry is not a
+    /// delivery (see `recover_orphaned_items`).
+    async fn claim_consumer_pending(
+        &self,
+        conn: &mut RedisConnectionOwned,
+        consumer: &str,
+    ) -> Result<(), StreamsQueueError> {
+        let script = r#"
+            local entries = redis.call('XPENDING', KEYS[1], ARGV[1], '-', '+', 100, ARGV[2])
+            if #entries == 0 then
+                return 0
+            end
+            local args = {KEYS[1], ARGV[1], ARGV[3], 0}
+            for _, entry in ipairs(entries) do
+                args[#args + 1] = entry[1]
+            end
+            args[#args + 1] = 'JUSTID'
+            redis.call('XCLAIM', unpack(args))
+            return #entries
+        "#;
+        // XCLAIM drops deleted entries from the PEL instead of moving them,
+        // so every pass shrinks the consumer's list.
+        loop {
+            let moved: i64 = redis::from_redis_value_ref(
+                &conn
+                    .cmd(
+                        &redis::cmd("EVAL")
+                            .arg(script)
+                            .arg(1)
+                            .arg(&self.stream_name)
+                            .arg(&self.consumer_group)
+                            .arg(consumer)
+                            .arg(&self.consumer_name)
+                            .clone(),
+                    )
+                    .await?,
+            )
+            .unwrap_or(0);
+            if moved < 100 {
+                return Ok(());
+            }
+        }
     }
 
     /// Trim stream entries that are fully processed and no longer needed.
@@ -1788,74 +1981,191 @@ impl<T> RedisStreamQueue<T> {
         Ok(trimmed)
     }
 
-    /// Get the delivery count for a message from XPENDING
-    async fn get_delivery_count(
+    /// Run `cmd` on the cached connection. When that connection turns out
+    /// to be dead (the first command after a server restart or failover
+    /// writes to a stale socket), reconnect and send it once more instead of
+    /// failing: for an enqueue the failed attempt was the only copy of the
+    /// work. Timeouts are not resent; the server may have run the command.
+    async fn cmd_resending_once(
         &self,
-        conn: &mut RedisConnectionOwned,
-        msg_id: &str,
-    ) -> Result<usize, StreamsQueueError> {
-        // XPENDING stream group - + 1 consumer
-        // This gives us detailed info including delivery count
-        let result = conn
+        cmd: &redis::Cmd,
+    ) -> Result<redis::Value, StreamsQueueError> {
+        let error = {
+            let mut guard = self.get_connection().await?;
+            let conn = guard.as_mut().unwrap();
+            match conn.cmd(cmd).await {
+                Ok(value) => return Ok(value),
+                Err(error) if conn.dropped => error,
+                Err(error) => return Err(error),
+            }
+        };
+        tracing::debug!(
+            "Redis connection for {} was dropped ({}); resending on a fresh connection",
+            self.stream_name,
+            error
+        );
+        let mut guard = self.get_connection().await?;
+        guard.as_mut().unwrap().cmd(cmd).await
+    }
+
+    fn delayed_key(&self) -> String {
+        format!("{}:delayed", self.stream_name)
+    }
+
+    fn attempts_key(&self, msg_id: &str) -> String {
+        format!("{}:attempts:{}", self.stream_name, msg_id)
+    }
+
+    /// Count one start of `msg_id` by a worker; returns the starts so far,
+    /// this one included, for the `MAX_PROCESSING_RETRIES` gate.
+    ///
+    /// Retries are counted here rather than read from the entry's Redis
+    /// delivery counter, which also moves for entries no worker started:
+    /// every read into a prefetch buffer counts, so a worker that crashed
+    /// charged the entries buffered behind its delivery a retry each time
+    /// (and the old PEL re-read and reclaim charged in-flight ones on top).
+    /// The counter sits beside the entry (`<stream>:attempts:<id>`, same hash
+    /// slot), goes when the entry is ACKed, dead-lettered or requeued, and
+    /// otherwise expires once a pending entry would be purged anyway.
+    async fn record_attempt(&self, msg_id: &str) -> Result<usize, StreamsQueueError> {
+        let mut guard = self.get_connection().await?;
+        let value = guard
+            .as_mut()
+            .unwrap()
             .cmd(
-                &redis::cmd("XPENDING")
-                    .arg(&self.stream_name)
-                    .arg(&self.consumer_group)
-                    .arg("-")
-                    .arg("+")
+                &redis::cmd("EVAL")
+                    .arg(
+                        r#"
+                        local starts = redis.call('INCR', KEYS[1])
+                        redis.call('PEXPIRE', KEYS[1], ARGV[1])
+                        return starts
+                    "#,
+                    )
                     .arg(1)
-                    .arg(&self.consumer_name)
+                    .arg(self.attempts_key(msg_id))
+                    .arg(IDLE_CONSUMER_WITH_PENDING_MS)
                     .clone(),
             )
             .await?;
+        Ok(redis::from_redis_value_ref::<i64>(&value)?.max(1) as usize)
+    }
 
-        // Result is an array of [message-id, consumer, idle-time, delivery-count]
-        let entries: Vec<Vec<redis::Value>> =
-            redis::from_redis_value_ref(&result).unwrap_or_default();
+    fn delayed_entries_key(&self) -> String {
+        format!("{}:delayed:entries", self.stream_name)
+    }
 
-        for entry in entries {
-            if entry.len() >= 4 {
-                let id: String = redis::from_redis_value_ref(&entry[0]).unwrap_or_default();
-                if id == msg_id {
-                    let count: usize = redis::from_redis_value_ref(&entry[3]).unwrap_or(1);
-                    return Ok(count);
+    /// Move delayed infrastructure retries whose time has come back into
+    /// the stream (see `requeue_msg_for_infrastructure_retry`), at most once
+    /// per blocking-read period unless a known retry falls due sooner.
+    /// Returns the Unix time (ms) of the next check.
+    ///
+    /// Any claimer of the queue promotes, so a retry deferred by a worker
+    /// that has since stopped still comes back. Failures only delay retries
+    /// until the next check, so they are logged rather than returned.
+    async fn promote_due_delayed(&self) -> u64 {
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        // Claim this check by moving the next one a period out. A retry this
+        // handle defers meanwhile lowers it again (`fetch_min`).
+        let period_ms = now_ms.saturating_add(PROCESS_BLOCKING_MS);
+        if let Err(next_check_ms) =
+            self.next_delayed_check_ms
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |next| {
+                    (now_ms >= next).then_some(period_ms)
+                })
+        {
+            return next_check_ms;
+        }
+        let result = {
+            let mut guard = match self.get_connection().await {
+                Ok(guard) => guard,
+                Err(error) => {
+                    tracing::debug!(
+                        "Could not promote delayed retries on {}: {}",
+                        self.stream_name,
+                        error
+                    );
+                    return self.next_delayed_check_ms.load(Ordering::Acquire);
+                }
+            };
+            guard
+                .as_mut()
+                .unwrap()
+                .cmd(
+                    &redis::cmd("EVAL")
+                        .arg(PROMOTE_DELAYED_LUA)
+                        .arg(3)
+                        .arg(&self.stream_name)
+                        .arg(self.delayed_key())
+                        .arg(self.delayed_entries_key())
+                        .arg(now_ms)
+                        .arg(DELAYED_PROMOTE_BATCH)
+                        .arg(STREAM_MAXLEN)
+                        .arg(STREAM_HARD_MAXLEN)
+                        .clone(),
+                )
+                .await
+        };
+        let mut next_check_ms = period_ms;
+        match result {
+            Ok(value) => {
+                let parts: Vec<redis::Value> =
+                    redis::from_redis_value_ref(&value).unwrap_or_default();
+                let promoted: usize = parts
+                    .first()
+                    .and_then(|v| redis::from_redis_value_ref(v).ok())
+                    .unwrap_or(0);
+                if promoted > 0 {
+                    tracing::debug!(
+                        "Moved {} delayed retr{} back into {}",
+                        promoted,
+                        if promoted == 1 { "y" } else { "ies" },
+                        self.stream_name
+                    );
+                }
+                if promoted >= DELAYED_PROMOTE_BATCH {
+                    next_check_ms = now_ms;
+                } else if let Some(next_due) = parts
+                    .get(1)
+                    .and_then(|v| redis::from_redis_value_ref::<String>(v).ok())
+                    .and_then(|score| score.parse::<f64>().ok())
+                {
+                    next_check_ms = next_check_ms.min(next_due.max(0.0) as u64);
                 }
             }
+            Err(error) => tracing::debug!(
+                "Could not promote delayed retries on {}: {}",
+                self.stream_name,
+                error
+            ),
         }
-
-        // Default to 1 if not found
-        Ok(1)
+        self.next_delayed_check_ms
+            .fetch_min(next_check_ms, Ordering::AcqRel)
+            .min(next_check_ms)
     }
 }
 
 #[async_trait::async_trait]
 impl<T: Send + Sync + Serialize + DeserializeOwned> Queue<T> for RedisStreamQueue<T> {
     async fn enqueue(&self, item: T) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut guard = self.get_connection().await?;
-        let conn = guard.as_mut().unwrap();
-
         // Serialize the item
         let data = serialize(&item, self.serialization)
             .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
 
-        // XADD stream MAXLEN ~ <cap> * payload <data>
-        // The `~` makes Redis use efficient approximate trimming; combined
-        // with `trim_stream` in the janitor, this bounds memory growth so
-        // we no longer need a per-message XDEL after successful processing.
-        let _: String = conn
-            .cmd(
-                &redis::cmd("XADD")
-                    .arg(&self.stream_name)
-                    .arg("MAXLEN")
-                    .arg("~")
-                    .arg(STREAM_MAXLEN)
-                    .arg("*")
-                    .arg("payload")
-                    .arg(&data)
-                    .clone(),
-            )
-            .await
-            .map(|v| redis::from_redis_value_ref(&v).unwrap_or_default())?;
+        // XADD, then trim toward STREAM_MAXLEN without trimming pending
+        // deliveries (see `trim_stream_lua!`); with `trim_stream` in the
+        // janitor this bounds memory growth, so we no longer need a
+        // per-message XDEL after successful processing.
+        self.cmd_resending_once(
+            &redis::cmd("EVAL")
+                .arg(ENQUEUE_LUA)
+                .arg(1)
+                .arg(&self.stream_name)
+                .arg(&data)
+                .arg(STREAM_MAXLEN)
+                .arg(STREAM_HARD_MAXLEN)
+                .clone(),
+        )
+        .await?;
 
         Ok(())
     }
@@ -2082,62 +2392,66 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         // Try pending (PEL) first, non-blocking. We must filter out
         // msg_ids that are *currently in flight* (handed off to a worker
         // but not yet ACKed): those entries are still in our PEL on Redis
-        // until the XACK lands, so a `0` read happily re-includes them.
-        // Without this filter, a refill that fires *between* batches —
-        // while an earlier batch is still being processed — would
-        // re-buffer the same un-ACKed entries and the next worker would
-        // execute them a second time.
+        // until the XACK lands. Without this filter, a refill that fires
+        // *between* batches — while an earlier batch is still being
+        // processed — would re-buffer the same un-ACKed entries and the next
+        // worker would execute them a second time. `read_own_pending` does
+        // the filtering inside Redis, so in-flight entries are never
+        // re-delivered (or re-counted) at all.
         self.drain_stats
             .pending_reads
             .fetch_add(1, Ordering::Relaxed);
         let pending_read_started = Instant::now();
-        let pending = self
-            .read_batch_with(FetchSource::Pending, self.read_batch_size, 0)
+        let in_flight: Vec<String> = self.in_flight.lock().await.iter().cloned().collect();
+        self.drain_stats.observe_in_flight_depth(in_flight.len());
+        let (live, pending) = self
+            .read_own_pending(self.read_batch_size, &in_flight)
             .await?;
         self.drain_stats.pending_read_ms.fetch_add(
             duration_ms(pending_read_started.elapsed()),
             Ordering::Relaxed,
         );
-        let mut pending_all_inflight = false;
+        self.drain_stats
+            .pending_messages
+            .fetch_add((live + pending.len()) as u64, Ordering::Relaxed);
+        self.drain_stats
+            .pending_filtered_inflight
+            .fetch_add(live as u64, Ordering::Relaxed);
         if !pending.is_empty() {
-            let pending_count = pending.len();
-            let in_flight = self.in_flight.lock().await;
-            self.drain_stats.observe_in_flight_depth(in_flight.len());
-            let filtered: Vec<PrefetchedMessage> = pending
-                .into_iter()
-                .filter(|m| !in_flight.contains(&m.msg_id))
-                .collect();
-            drop(in_flight);
             self.drain_stats
-                .pending_messages
-                .fetch_add(pending_count as u64, Ordering::Relaxed);
-            self.drain_stats.pending_filtered_inflight.fetch_add(
-                pending_count.saturating_sub(filtered.len()) as u64,
-                Ordering::Relaxed,
+                .pending_buffered
+                .fetch_add(pending.len() as u64, Ordering::Relaxed);
+            let mut buf = self.prefetched.lock().await;
+            buf.extend(pending);
+            self.drain_stats.observe_prefetch_depth(buf.len());
+            self.drain_stats.maybe_log(
+                &self.stream_name,
+                &self.consumer_name,
+                self.read_batch_size,
             );
-            if !filtered.is_empty() {
-                self.drain_stats
-                    .pending_buffered
-                    .fetch_add(filtered.len() as u64, Ordering::Relaxed);
-                let mut buf = self.prefetched.lock().await;
-                buf.extend(filtered);
-                self.drain_stats.observe_prefetch_depth(buf.len());
-                self.drain_stats.maybe_log(
-                    &self.stream_name,
-                    &self.consumer_name,
-                    self.read_batch_size,
-                );
-                return Ok(true);
-            }
-            // Every entry the PEL handed back is currently being processed
-            // by a sibling worker. Keep going to the fresh read below so a
-            // full in-flight PEL does not starve new backlog or spin on
-            // repeated non-blocking pending reads.
+            return Ok(true);
+        }
+        // Every entry in our PEL is currently being processed by a sibling
+        // worker. Keep going to the fresh read below so a full in-flight PEL
+        // does not starve new backlog or spin on repeated pending reads.
+        let pending_all_inflight = live > 0;
+        if pending_all_inflight {
             self.drain_stats
                 .pending_all_inflight
                 .fetch_add(1, Ordering::Relaxed);
-            pending_all_inflight = true;
         }
+
+        // Delayed infrastructure retries that are due go back into the
+        // stream first, where the fresh read below picks them up. A blocking
+        // read must also wake for the next one, or it would wait for
+        // unrelated work.
+        let next_delayed_check_ms = self.promote_due_delayed().await;
+        let block_ms = match next_delayed_check_ms
+            .checked_sub(chrono::Utc::now().timestamp_millis().max(0) as u64)
+        {
+            Some(until_check_ms) => block_ms.min(until_check_ms.max(1)),
+            None => block_ms.min(1),
+        };
 
         // No pending → try fresh, optionally blocking. We hold the refill
         // lock across the BLOCK to serialize fresh reads as well; otherwise
@@ -2148,7 +2462,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         self.drain_stats.fresh_reads.fetch_add(1, Ordering::Relaxed);
         let fresh_read_started = Instant::now();
         let fresh = self
-            .read_batch_with(FetchSource::Fresh, self.read_batch_size, fresh_block_ms)
+            .read_fresh(self.read_batch_size, fresh_block_ms)
             .await?;
         self.drain_stats
             .fresh_read_ms
@@ -2185,33 +2499,141 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         Ok(true)
     }
 
-    /// Perform a single XREADGROUP, returning the raw messages tagged with
-    /// their fetch source. `block_ms == 0` means the read does not BLOCK
-    /// (a missing BLOCK arg is equivalent to non-blocking on `>` reads,
-    /// and BLOCK is meaningless on `0` reads).
-    async fn read_batch_with(
+    /// Redeliver up to `count` entries of this consumer's own PEL that no
+    /// worker of this handle is processing (`in_flight`): retries after a
+    /// worker error, and orphans reclaimed from dead consumers. Returns how
+    /// many in-flight entries the PEL still held, and the redeliveries.
+    ///
+    /// This replaces an `XREADGROUP ... 0` re-read, which re-delivered every
+    /// pending entry, in-flight ones included, about every 50 ms while a
+    /// sibling executor was busy. Here XPENDING lists the PEL, only the
+    /// entries handed out are XCLAIMed with their bodies, and the in-flight
+    /// ones get a JUSTID XCLAIM that resets their idle clocks, as the re-read
+    /// did. Retries are counted apart from all this (see `record_attempt`).
+    async fn read_own_pending(
         &self,
-        source: FetchSource,
+        count: usize,
+        in_flight: &[String],
+    ) -> Result<(usize, Vec<PrefetchedMessage>), StreamsQueueError> {
+        // KEYS[1] stream; ARGV[1] group, ARGV[2] consumer, ARGV[3] count,
+        // ARGV[4..] in-flight ids. Returns {in-flight count, XCLAIM reply}.
+        let script = r#"
+            local want = tonumber(ARGV[3])
+            local busy = {}
+            for i = 4, #ARGV do
+                busy[ARGV[i]] = true
+            end
+            local pending = redis.call(
+                'XPENDING', KEYS[1], ARGV[1], '-', '+', want + #ARGV - 3, ARGV[2]
+            )
+            local live = {KEYS[1], ARGV[1], ARGV[2], 0}
+            local redeliver = {KEYS[1], ARGV[1], ARGV[2], 0}
+            local live_count, redeliver_count = 0, 0
+            for _, entry in ipairs(pending) do
+                if busy[entry[1]] then
+                    live[#live + 1] = entry[1]
+                    live_count = live_count + 1
+                elseif redeliver_count < want then
+                    redeliver[#redeliver + 1] = entry[1]
+                    redeliver_count = redeliver_count + 1
+                end
+            end
+            if live_count > 0 then
+                live[#live + 1] = 'JUSTID'
+                redis.call('XCLAIM', unpack(live))
+            end
+            local claimed = {}
+            if redeliver_count > 0 then
+                claimed = redis.call('XCLAIM', unpack(redeliver))
+            end
+            return {live_count, claimed}
+        "#;
+
+        let mut cmd = redis::cmd("EVAL");
+        cmd.arg(script)
+            .arg(1)
+            .arg(&self.stream_name)
+            .arg(&self.consumer_group)
+            .arg(&self.consumer_name)
+            .arg(count);
+        for id in in_flight {
+            cmd.arg(id);
+        }
+
+        let result = match self.cmd_on_group(&cmd).await {
+            Ok(result) => result,
+            // A consumer group that does not exist yet has no PEL.
+            Err(StreamsQueueError::RedisError(e)) if e.contains("NOGROUP") => {
+                return Ok((0, Vec::new()));
+            }
+            Err(e) => return Err(e),
+        };
+        let delivered_at = tokio::time::Instant::now();
+        let parts: Vec<redis::Value> = redis::from_redis_value_ref(&result)?;
+        let live: usize = parts
+            .first()
+            .and_then(|v| redis::from_redis_value_ref(v).ok())
+            .unwrap_or(0);
+        let claimed: Vec<redis::Value> = parts
+            .get(1)
+            .and_then(|v| redis::from_redis_value_ref(v).ok())
+            .unwrap_or_default();
+        let pending = claimed
+            .iter()
+            .filter_map(parse_stream_entry)
+            .map(
+                |(msg_id, payload, redelivered, prior_deliveries)| PrefetchedMessage {
+                    msg_id,
+                    payload,
+                    source: FetchSource::Pending,
+                    redelivered,
+                    prior_deliveries,
+                    delivered_at,
+                },
+            )
+            .collect();
+        Ok((live, pending))
+    }
+
+    /// Perform a single fresh (`>`) XREADGROUP. `block_ms == 0` means the
+    /// read does not BLOCK.
+    async fn read_fresh(
+        &self,
         count: usize,
         block_ms: u64,
     ) -> Result<Vec<PrefetchedMessage>, StreamsQueueError> {
-        let id_arg = match source {
-            FetchSource::Fresh => ">",
-            FetchSource::Pending => "0",
-        };
-
         let mut cmd = redis::cmd("XREADGROUP");
         cmd.arg("GROUP")
             .arg(&self.consumer_group)
             .arg(&self.consumer_name)
             .arg("COUNT")
             .arg(count);
-        if matches!(source, FetchSource::Fresh) && block_ms > 0 {
+        if block_ms > 0 {
             cmd.arg("BLOCK").arg(block_ms);
         }
-        cmd.arg("STREAMS").arg(&self.stream_name).arg(id_arg);
+        cmd.arg("STREAMS").arg(&self.stream_name).arg(">");
 
-        // Hold the cached-connection lock only for the read itself: the
+        let result = self.cmd_on_group(&cmd).await?;
+        let delivered_at = tokio::time::Instant::now();
+        Ok(parse_stream_messages(&result)
+            .into_iter()
+            .map(
+                |(msg_id, payload, redelivered, prior_deliveries)| PrefetchedMessage {
+                    msg_id,
+                    payload,
+                    source: FetchSource::Fresh,
+                    redelivered,
+                    prior_deliveries,
+                    delivered_at,
+                },
+            )
+            .collect())
+    }
+
+    /// Run a consumer-group command, recreating the group once when it has
+    /// gone missing.
+    async fn cmd_on_group(&self, cmd: &redis::Cmd) -> Result<redis::Value, StreamsQueueError> {
+        // Hold the cached-connection lock only for the command itself: the
         // NOGROUP recovery below re-enters `ensure_consumer_group()` and
         // `get_connection()`, which re-lock the same non-reentrant mutex —
         // recovering while this guard was still alive would permanently
@@ -2219,16 +2641,16 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         let first_attempt = {
             let mut guard = self.get_connection().await?;
             let conn = guard.as_mut().unwrap();
-            conn.cmd(&cmd).await
+            conn.cmd(cmd).await
         };
 
-        let result = match first_attempt {
-            Ok(result) => result,
+        match first_attempt {
+            Ok(result) => Ok(result),
             Err(StreamsQueueError::RedisError(e)) if e.contains("NOGROUP") => {
                 // `hot queue clear` deletes Redis stream keys, which also
                 // deletes consumer groups. Long-lived workers keep queue
                 // handles, so recover by recreating the group and retrying
-                // the read once.
+                // the command once.
                 self.consumer_group_ensured
                     .store(false, std::sync::atomic::Ordering::Release);
                 self.drain_stats
@@ -2237,22 +2659,10 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 self.ensure_consumer_group().await?;
                 let mut guard = self.get_connection().await?;
                 let conn = guard.as_mut().unwrap();
-                conn.cmd(&cmd).await?
+                conn.cmd(cmd).await
             }
-            Err(e) => return Err(e),
-        };
-        Ok(parse_stream_messages(&result)
-            .into_iter()
-            .map(
-                |(msg_id, payload, redelivered, prior_deliveries)| PrefetchedMessage {
-                    msg_id,
-                    payload,
-                    source,
-                    redelivered,
-                    prior_deliveries,
-                },
-            )
-            .collect())
+            Err(e) => Err(e),
+        }
     }
 
     /// Shared implementation behind `dequeue_and_work` and `process_blocking`.
@@ -2284,17 +2694,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         self.ensure_consumer_group().await?;
 
         // Pop one message from the prefetch buffer; refill if empty.
-        let prefetched = {
-            let mut buf = self.prefetched.lock().await;
-            buf.pop_front()
-        };
-        let PrefetchedMessage {
-            msg_id,
-            payload,
-            source,
-            redelivered,
-            prior_deliveries,
-        } = match prefetched {
+        let prefetched = match self.pop_prefetched().await {
             Some(m) => m,
             None => {
                 if !self.refill_prefetch(block_ms).await? {
@@ -2306,9 +2706,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                     );
                     return Ok(None);
                 }
-                let mut buf = self.prefetched.lock().await;
-                self.drain_stats.observe_prefetch_depth(buf.len());
-                match buf.pop_front() {
+                match self.pop_prefetched().await {
                     Some(m) => m,
                     None => {
                         self.drain_stats.claim_none.fetch_add(1, Ordering::Relaxed);
@@ -2322,14 +2720,14 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 }
             }
         };
-
-        // Mark this message as in-flight so any concurrent refill that
-        // re-reads our PEL while we're still processing won't see it as fresh
-        // work and re-buffer it for a sibling worker.
-        let mut in_flight = self.in_flight.lock().await;
-        in_flight.insert(msg_id.clone());
-        self.drain_stats.observe_in_flight_depth(in_flight.len());
-        drop(in_flight);
+        let PrefetchedMessage {
+            msg_id,
+            payload,
+            source,
+            redelivered,
+            prior_deliveries,
+            delivered_at,
+        } = prefetched;
         self.drain_stats.claims.fetch_add(1, Ordering::Relaxed);
         self.drain_stats
             .maybe_log(&self.stream_name, &self.consumer_name, self.read_batch_size);
@@ -2347,11 +2745,27 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             source,
             redelivered,
             prior_deliveries,
+            delivered_at,
             claimed_at,
             enqueued_at,
             queue_wait,
             completed: false,
         }))
+    }
+
+    /// Pop one buffered message and mark it in-flight, so a concurrent
+    /// refill that reads our PEL while we're still processing won't see it
+    /// as a retry and buffer it for a sibling worker. The marker is set
+    /// before the buffer lock is released: a refill checks the buffer, then
+    /// the in-flight set, so it can never see the message in neither.
+    async fn pop_prefetched(&self) -> Option<PrefetchedMessage> {
+        let mut buf = self.prefetched.lock().await;
+        self.drain_stats.observe_prefetch_depth(buf.len());
+        let message = buf.pop_front()?;
+        let mut in_flight = self.in_flight.lock().await;
+        in_flight.insert(message.msg_id.clone());
+        self.drain_stats.observe_in_flight_depth(in_flight.len());
+        Some(message)
     }
 
     /// Inner half of `process_inner`: runs delivery-count check, DLQ
@@ -2371,20 +2785,10 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
         R: Send + Sync,
     {
-        // Phase 3c: skip XPENDING for fresh reads — delivery count is 1 on
-        // first delivery. Only consult XPENDING for messages we re-read out
-        // of our own PEL (i.e. previous failures).
-        let delivery_count = match source {
-            FetchSource::Fresh => 1,
-            FetchSource::Pending => {
-                let mut guard = self.get_connection().await?;
-                let conn = guard.as_mut().unwrap();
-                self.get_delivery_count(conn, &msg_id).await?
-            }
-        };
-        // Cumulative deliveries: what Redis counted for THIS entry plus what
-        // opted-in infrastructure requeues carried over from its ancestors
-        // (each requeue is a fresh entry, so the Redis counter alone resets).
+        let delivery_count = self.record_attempt(&msg_id).await?;
+        // Cumulative deliveries: this entry's starts plus what opted-in
+        // infrastructure requeues carried over from its ancestors (each
+        // requeue is a fresh entry, so its own count starts over).
         let effective_delivery_count = delivery_count.saturating_add(prior_deliveries);
         let queue_wait_ms = stream_message_age_ms(&msg_id);
         let wait_target_p99_ms = queue_wait_target_p99_ms();
@@ -2420,7 +2824,11 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 ),
             )
             .await?;
-            return Err(Box::new(QueueProcessingError::RetryLimitExceeded));
+            // The payload goes back to the caller: an earlier delivery may
+            // have died mid-run, and nothing else will settle its runs.
+            return Err(Box::new(QueueProcessingError::DeadLettered(
+                super::RecoveredQueueMessage::new(payload, self.serialization),
+            )));
         }
 
         // Deserialize the item
@@ -2468,18 +2876,8 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 // `XADD MAXLEN ~` keeps the stream bounded and `trim_stream`
                 // periodically prunes below the oldest pending ID. This
                 // halves the per-message Redis command count on success.
-                let mut guard = self.get_connection().await?;
-                let conn = guard.as_mut().unwrap();
-                let ack_value = conn
-                    .cmd(
-                        &redis::cmd("XACK")
-                            .arg(&self.stream_name)
-                            .arg(&self.consumer_group)
-                            .arg(&msg_id)
-                            .clone(),
-                    )
-                    .await?;
-                require_single_stream_ack(&ack_value, &msg_id)
+                self.ack_processed(&msg_id)
+                    .await
                     .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
                 if queue_timing_enabled() {
                     tracing::info!(
@@ -2519,9 +2917,6 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                             "queue item deferred for infrastructure retry"
                         );
                     }
-                    if !backoff.is_zero() {
-                        tokio::time::sleep(backoff).await;
-                    }
                     // Requeues that opt in (via the reason token) carry the
                     // cumulative delivery count into the fresh entry so a
                     // deterministic failure escalates to the DLQ instead of
@@ -2543,6 +2938,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                         &payload,
                         reason,
                         carry_prior_deliveries,
+                        backoff,
                     )
                     .await?;
                     return Err(Box::new(QueueProcessingError::QueueError(e)));
@@ -2584,11 +2980,68 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         }
     }
 
+    /// ACK a delivery its worker finished. An ACK that removes nothing is an
+    /// error (see `require_single_stream_ack`) unless the entry is gone from
+    /// the stream: a delivery trimmed while it ran loses its PEL record once
+    /// any XCLAIM touches it, and there is nothing left to retry.
+    async fn ack_processed(&self, msg_id: &str) -> Result<(), StreamsQueueError> {
+        let mut guard = self.get_connection().await?;
+        let conn = guard.as_mut().unwrap();
+        let ack_value = conn
+            .cmd(
+                &redis::cmd("EVAL")
+                    .arg(
+                        r#"
+                        local acked = redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+                        redis.call('DEL', KEYS[2])
+                        return acked
+                    "#,
+                    )
+                    .arg(2)
+                    .arg(&self.stream_name)
+                    .arg(self.attempts_key(msg_id))
+                    .arg(&self.consumer_group)
+                    .arg(msg_id)
+                    .clone(),
+            )
+            .await?;
+        let Err(error) = require_single_stream_ack(&ack_value, msg_id) else {
+            return Ok(());
+        };
+        let entry = conn
+            .cmd(
+                &redis::cmd("XRANGE")
+                    .arg(&self.stream_name)
+                    .arg(msg_id)
+                    .arg(msg_id)
+                    .clone(),
+            )
+            .await?;
+        let entries: Vec<redis::Value> = redis::from_redis_value_ref(&entry).unwrap_or_default();
+        if !entries.is_empty() {
+            return Err(error);
+        }
+        tracing::warn!(
+            "Message {} on {} was trimmed from the stream while it was processed; nothing to ACK",
+            msg_id,
+            self.stream_name
+        );
+        Ok(())
+    }
+
     /// Copy the payload to a fresh stream entry and ACK the current pending
     /// entry. This is for infrastructure failures where the work item is still
     /// healthy, but the worker could not make a conclusive ownership decision.
     ///
-    /// The fresh entry resets the Redis delivery counter. When
+    /// With a non-zero `backoff` the copy goes to the queue's delayed set
+    /// instead and returns to the stream once the backoff has passed (see
+    /// `promote_due_delayed`), the way the SQLite queue's visible-after time
+    /// works. The executor is free at once: sleeping out a 5-minute
+    /// awaiting-redeploy backoff inside `process_one` held one of a worker's
+    /// few executors, so two held events stopped it, and a worker stopped
+    /// during the sleep left the entry orphaned.
+    ///
+    /// The fresh entry starts its retry count over. When
     /// `carry_prior_deliveries` is non-zero, the entry is stamped with a
     /// `prior_deliveries` field carrying that value so the DLQ gate in
     /// `process_one` sees the cumulative total and a repeat offender
@@ -2603,11 +3056,75 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         payload: &[u8],
         reason: String,
         carry_prior_deliveries: usize,
+        backoff: Duration,
     ) -> Result<(), StreamsQueueError> {
-        let mut guard = self.get_connection().await?;
-        let conn = guard.as_mut().unwrap();
+        // An empty carry means "do not stamp the field" — requeues of
+        // never-counted messages stay byte-identical to the previous format.
+        // Any carried value > 0 is stamped, even for opted-out reasons, so
+        // the accrued count survives the requeue.
+        let carry_arg = if carry_prior_deliveries > 0 {
+            carry_prior_deliveries.to_string()
+        } else {
+            String::new()
+        };
+        let timestamp = chrono::Utc::now().timestamp();
 
-        let script = r#"
+        if !backoff.is_zero() {
+            let due_ms = (chrono::Utc::now().timestamp_millis().max(0) as u64)
+                .saturating_add(duration_ms(backoff));
+            // KEYS[1] stream, KEYS[2] delayed ZSET, KEYS[3] delayed entries,
+            // KEYS[4] attempts; ARGV[1] group, ARGV[2] entry id, ARGV[3] due
+            // ms, ARGV[4] payload, ARGV[5] reason, ARGV[6] timestamp, ARGV[7]
+            // carry. The ACK comes first, so a failed one writes nothing.
+            let script = r#"
+                local acked = redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+                if acked ~= 1 then
+                    return redis.error_reply('infra retry XACK failed for ' .. ARGV[2])
+                end
+                local id = ARGV[2]
+                redis.call(
+                    'HSET', KEYS[3],
+                    id .. ':payload', ARGV[4],
+                    id .. ':reason', ARGV[5],
+                    id .. ':timestamp', ARGV[6],
+                    id .. ':prior_deliveries', ARGV[7]
+                )
+                redis.call('ZADD', KEYS[2], ARGV[3], id)
+                redis.call('DEL', KEYS[4])
+                return 1
+            "#;
+            let mut guard = self.get_connection().await?;
+            guard
+                .as_mut()
+                .unwrap()
+                .cmd(
+                    &redis::cmd("EVAL")
+                        .arg(script)
+                        .arg(4)
+                        .arg(&self.stream_name)
+                        .arg(self.delayed_key())
+                        .arg(self.delayed_entries_key())
+                        .arg(self.attempts_key(msg_id))
+                        .arg(&self.consumer_group)
+                        .arg(msg_id)
+                        .arg(due_ms)
+                        .arg(payload)
+                        .arg(&reason)
+                        .arg(timestamp)
+                        .arg(&carry_arg)
+                        .clone(),
+                )
+                .await?;
+            // The claimer sharing this handle caps its next blocking read at
+            // the due time, so the retry is not left waiting for other work.
+            self.next_delayed_check_ms
+                .fetch_min(due_ms, Ordering::AcqRel);
+            return Ok(());
+        }
+
+        let script = concat!(
+            trim_stream_lua!(),
+            r#"
             local fields = {
                 'payload',
                 ARGV[4],
@@ -2622,46 +3139,35 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 fields[#fields + 1] = 'prior_deliveries'
                 fields[#fields + 1] = ARGV[7]
             end
-            local new_id = redis.call(
-                'XADD',
-                KEYS[1],
-                'MAXLEN',
-                '~',
-                ARGV[3],
-                '*',
-                unpack(fields)
-            )
+            local new_id = redis.call('XADD', KEYS[1], '*', unpack(fields))
             local acked = redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
             if acked ~= 1 then
                 redis.call('XDEL', KEYS[1], new_id)
                 return redis.error_reply('infra retry XACK failed for ' .. ARGV[2])
             end
+            redis.call('DEL', KEYS[2])
+            trim_stream(KEYS[1], tonumber(ARGV[3]), tonumber(ARGV[8]))
             return new_id
-        "#;
+        "#
+        );
 
-        // An empty ARGV[7] means "do not stamp the field" — requeues of
-        // never-counted messages stay byte-identical to the previous format.
-        // Any carried value > 0 is stamped, even for opted-out reasons, so
-        // the accrued count survives the requeue.
-        let carry_arg = if carry_prior_deliveries > 0 {
-            carry_prior_deliveries.to_string()
-        } else {
-            String::new()
-        };
-
+        let mut guard = self.get_connection().await?;
+        let conn = guard.as_mut().unwrap();
         let _: String = conn
             .cmd(
                 &redis::cmd("EVAL")
                     .arg(script)
-                    .arg(1)
+                    .arg(2)
                     .arg(&self.stream_name)
+                    .arg(self.attempts_key(msg_id))
                     .arg(&self.consumer_group)
                     .arg(msg_id)
                     .arg(STREAM_MAXLEN)
                     .arg(payload)
                     .arg(&reason)
-                    .arg(chrono::Utc::now().timestamp())
+                    .arg(timestamp)
                     .arg(&carry_arg)
+                    .arg(STREAM_HARD_MAXLEN)
                     .clone(),
             )
             .await
@@ -2713,6 +3219,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 redis.call('XDEL', KEYS[2], new_id)
                 return redis.error_reply('DLQ move XACK failed for ' .. ARGV[2])
             end
+            redis.call('DEL', KEYS[3])
             return new_id
         "#;
 
@@ -2720,9 +3227,10 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             .cmd(
                 &redis::cmd("EVAL")
                     .arg(script)
-                    .arg(2)
+                    .arg(3)
                     .arg(&self.stream_name)
                     .arg(&self.dlq_stream)
+                    .arg(self.attempts_key(msg_id))
                     .arg(&self.consumer_group)
                     .arg(msg_id)
                     .arg(DLQ_MAXLEN)
@@ -2750,6 +3258,8 @@ where
     /// Cumulative delivery count carried across opted-in infrastructure
     /// requeues (`prior_deliveries` entry field); 0 when absent.
     prior_deliveries: usize,
+    /// When Redis handed the entry to this consumer (see `PrefetchedMessage`).
+    delivered_at: tokio::time::Instant,
     claimed_at: chrono::DateTime<chrono::Utc>,
     enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
     queue_wait: Duration,
@@ -2769,6 +3279,13 @@ where
         }
     }
 
+    /// Whether this delivery was read from the consumer's pending list: a
+    /// delivery that never settled, reclaimed from a stopped worker or left
+    /// pending by a failed attempt.
+    pub fn reclaimed(&self) -> bool {
+        matches!(self.source, FetchSource::Pending)
+    }
+
     /// Keepalive handle for this delivery, used to refresh its PEL idle
     /// clock while `process` runs (see [`RedisLeaseKeepalive`]). Returns
     /// `None` once the lease has been consumed.
@@ -2777,6 +3294,7 @@ where
         Some(RedisLeaseKeepalive {
             queue: self.queue.clone_for_lease(),
             msg_id,
+            delivered_at: self.delivered_at,
         })
     }
 
@@ -2869,8 +3387,8 @@ where
 /// by `process`, and typically moved into a periodic task that calls
 /// [`touch`](Self::touch) while the worker executes. Holding this handle does
 /// NOT extend the lease's lifecycle — it only refreshes the PEL idle clock —
-/// so a keepalive whose entry has been ACKed or reclaimed by another consumer
-/// simply observes `Ok(false)` and should stop touching.
+/// so a keepalive whose entry has been ACKed, trimmed or reclaimed by another
+/// consumer observes that outcome and should stop touching.
 ///
 /// The handle shares the lease's cached connection (and its mutex) with the
 /// claiming queue handle, so a touch may briefly wait behind an in-flight
@@ -2878,6 +3396,7 @@ where
 pub struct RedisLeaseKeepalive<T> {
     queue: RedisStreamQueue<T>,
     msg_id: String,
+    delivered_at: tokio::time::Instant,
 }
 
 impl<T> RedisLeaseKeepalive<T> {
@@ -2886,9 +3405,15 @@ impl<T> RedisLeaseKeepalive<T> {
         &self.msg_id
     }
 
+    /// When Redis handed the entry to this consumer: its PEL idle clock has
+    /// run since then until the first touch.
+    pub fn delivered_at(&self) -> tokio::time::Instant {
+        self.delivered_at
+    }
+
     /// Reset the entry's PEL idle clock for the owning consumer. See
     /// [`RedisStreamQueue::touch_pending_entry`] for exact semantics.
-    pub async fn touch(&self) -> Result<bool, StreamsQueueError> {
+    pub async fn touch(&self) -> Result<PendingTouch, StreamsQueueError> {
         self.queue.touch_pending_entry(&self.msg_id).await
     }
 }
@@ -2928,10 +3453,7 @@ fn parse_stream_message(result: &redis::Value) -> Option<(String, Vec<u8>)> {
 ///
 /// Shape: `[[stream-name, [[id, [field, value, ...]], ...]]]` or nil.
 /// We extract every `(id, payload, redelivered, prior_deliveries)` tuple, in
-/// order. Messages without a `payload` field are silently skipped — the
-/// consumer group still has them in its PEL until ACKed. A missing or
-/// malformed `prior_deliveries` field reads as 0, so entries written before
-/// the field existed (and opted-out requeues) are unaffected.
+/// order (see [`parse_stream_entry`]).
 fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>, bool, usize)> {
     if matches!(result, redis::Value::Nil) {
         return Vec::new();
@@ -2955,49 +3477,45 @@ fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>, bool, u
             Ok(v) => v,
             Err(_) => continue,
         };
-        for msg_val in messages {
-            let msg: Vec<redis::Value> = match redis::from_redis_value_ref(&msg_val) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if msg.len() < 2 {
-                continue;
-            }
-            let msg_id: String = match redis::from_redis_value_ref(&msg[0]) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let fields: Vec<redis::Value> = match redis::from_redis_value_ref(&msg[1]) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let mut payload: Option<Vec<u8>> = None;
-            let mut redelivered = false;
-            let mut prior_deliveries = 0usize;
-            let mut i = 0;
-            while i + 1 < fields.len() {
-                let name: String = redis::from_redis_value_ref(&fields[i]).unwrap_or_default();
-                if name == "payload" {
-                    if let Ok(p) = redis::from_redis_value_ref::<Vec<u8>>(&fields[i + 1]) {
-                        payload = Some(p);
-                    }
-                } else if name == "original_id" {
-                    let original_id: String =
-                        redis::from_redis_value_ref(&fields[i + 1]).unwrap_or_default();
-                    redelivered = !original_id.is_empty();
-                } else if name == "prior_deliveries" {
-                    let raw: String =
-                        redis::from_redis_value_ref(&fields[i + 1]).unwrap_or_default();
-                    prior_deliveries = raw.parse().unwrap_or(0);
-                }
-                i += 2;
-            }
-            if let Some(p) = payload {
-                out.push((msg_id, p, redelivered, prior_deliveries));
-            }
-        }
+        out.extend(messages.iter().filter_map(parse_stream_entry));
     }
     out
+}
+
+/// Parse one stream entry, `[id, [field, value, ...]]`, as
+/// `(id, payload, redelivered, prior_deliveries)`. Entries without a
+/// `payload` field are skipped — the consumer group still has them in its
+/// PEL until ACKed. A missing or malformed `prior_deliveries` field reads as
+/// 0, so entries written before the field existed (and opted-out requeues)
+/// are unaffected.
+fn parse_stream_entry(msg_val: &redis::Value) -> Option<(String, Vec<u8>, bool, usize)> {
+    let msg: Vec<redis::Value> = redis::from_redis_value_ref(msg_val).ok()?;
+    if msg.len() < 2 {
+        return None;
+    }
+    let msg_id: String = redis::from_redis_value_ref(&msg[0]).ok()?;
+    let fields: Vec<redis::Value> = redis::from_redis_value_ref(&msg[1]).ok()?;
+    let mut payload: Option<Vec<u8>> = None;
+    let mut redelivered = false;
+    let mut prior_deliveries = 0usize;
+    let mut i = 0;
+    while i + 1 < fields.len() {
+        let name: String = redis::from_redis_value_ref(&fields[i]).unwrap_or_default();
+        if name == "payload" {
+            if let Ok(p) = redis::from_redis_value_ref::<Vec<u8>>(&fields[i + 1]) {
+                payload = Some(p);
+            }
+        } else if name == "original_id" {
+            let original_id: String =
+                redis::from_redis_value_ref(&fields[i + 1]).unwrap_or_default();
+            redelivered = !original_id.is_empty();
+        } else if name == "prior_deliveries" {
+            let raw: String = redis::from_redis_value_ref(&fields[i + 1]).unwrap_or_default();
+            prior_deliveries = raw.parse().unwrap_or(0);
+        }
+        i += 2;
+    }
+    Some((msg_id, payload?, redelivered, prior_deliveries))
 }
 
 #[cfg(test)]
@@ -3009,7 +3527,10 @@ mod tests {
     /// Lets tests skip cleanly in environments without Redis (CI without the
     /// service, sandboxed builds) instead of failing.
     async fn try_client() -> Option<redis::Client> {
-        let client = redis::Client::open("redis://127.0.0.1/").ok()?;
+        // CI points REDIS_URL at its Redis service; locally it can select a
+        // logical database on a shared server.
+        let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
+        let client = redis::Client::open(url).ok()?;
         // Fail fast if Redis isn't actually running.
         client.get_multiplexed_async_connection().await.ok()?;
         Some(client)
@@ -3018,10 +3539,11 @@ mod tests {
     async fn cleanup(client: &redis::Client, queue_name: &str) {
         if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
             let stream_key = format!("{{{}}}", queue_name);
-            let dlq_key = format!("{}:deadletter", stream_key);
             let _: redis::RedisResult<()> = redis::cmd("DEL")
                 .arg(&stream_key)
-                .arg(&dlq_key)
+                .arg(format!("{}:deadletter", stream_key))
+                .arg(format!("{}:delayed", stream_key))
+                .arg(format!("{}:delayed:entries", stream_key))
                 .query_async(&mut conn)
                 .await;
         }
@@ -3365,6 +3887,7 @@ mod tests {
             source: FetchSource::Fresh,
             redelivered: false,
             prior_deliveries: 0,
+            delivered_at: tokio::time::Instant::now(),
             claimed_at: chrono::Utc::now(),
             enqueued_at: None,
             queue_wait: Duration::ZERO,
@@ -3389,12 +3912,14 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_redis_lease_processing_clears_in_flight_marker() {
-        // This exercises cancellation after the lease has entered the worker,
-        // without requiring a live Redis server. No Redis command is issued
-        // until the worker returns.
-        let client = redis::Client::open("redis://127.0.0.1/").unwrap();
+        // This exercises cancellation after the lease has entered the worker.
+        // The only Redis command before the worker returns counts the start.
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
         let queue_name = format!("test_stream_cancel_{}", Uuid::new_v4());
-        let queue = RedisStreamQueue::<i64>::new(client, queue_name);
+        let queue = RedisStreamQueue::<i64>::new(client.clone(), queue_name);
         let msg_id = "1-0".to_string();
         queue.in_flight.lock().await.insert(msg_id.clone());
         let lease = RedisQueueLease {
@@ -3404,6 +3929,7 @@ mod tests {
             source: FetchSource::Fresh,
             redelivered: false,
             prior_deliveries: 0,
+            delivered_at: tokio::time::Instant::now(),
             claimed_at: chrono::Utc::now(),
             enqueued_at: None,
             queue_wait: Duration::ZERO,
@@ -3433,6 +3959,7 @@ mod tests {
         })
         .await
         .expect("cancelled lease should clear its in-flight marker");
+        admin_cmd(&client, redis::cmd("DEL").arg(queue.attempts_key(&msg_id))).await;
     }
 
     #[tokio::test]
@@ -3809,7 +4336,7 @@ mod tests {
         assert_eq!(count_before, 1);
 
         // Touch resets idle toward zero and leaves the delivery counter alone.
-        assert!(keepalive.touch().await.unwrap());
+        assert_eq!(keepalive.touch().await.unwrap(), PendingTouch::Touched);
         let (owner, idle_after, count_after) =
             xpending_entry(&client, &stream_key, DEFAULT_CONSUMER_GROUP, &msg_id)
                 .await
@@ -3830,8 +4357,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, Some(7));
-        assert!(
-            !keepalive.touch().await.unwrap(),
+        assert_eq!(
+            keepalive.touch().await.unwrap(),
+            PendingTouch::Acked,
             "post-ACK touch must be a no-op, not an error"
         );
         assert_eq!(
@@ -3880,8 +4408,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
-            !keepalive.touch().await.unwrap(),
+        assert_eq!(
+            keepalive.touch().await.unwrap(),
+            PendingTouch::Reclaimed,
             "touching an entry owned by another consumer must be a no-op"
         );
         let (owner, _idle, _count) =
@@ -3969,13 +4498,10 @@ mod tests {
 
         // The next read hits NOGROUP and must recover (recreate the group,
         // retry once) instead of hanging forever on the connection mutex.
-        let batch = tokio::time::timeout(
-            Duration::from_secs(5),
-            queue.read_batch_with(FetchSource::Fresh, 1, 0),
-        )
-        .await
-        .expect("NOGROUP recovery must not deadlock read_batch_with")
-        .expect("recovery should recreate the group and retry the read");
+        let batch = tokio::time::timeout(Duration::from_secs(5), queue.read_fresh(1, 0))
+            .await
+            .expect("NOGROUP recovery must not deadlock read_fresh")
+            .expect("recovery should recreate the group and retry the read");
         assert!(batch.is_empty(), "recreated stream has no entries yet");
         assert!(
             queue
@@ -4001,9 +4527,9 @@ mod tests {
     }
 
     /// Phase 3c: a worker that fails leaves the message in the consumer's
-    /// PEL. The next call re-reads it from `0` (Pending source) and the
-    /// delivery count comes from XPENDING. After exceeding MAX_PROCESSING_RETRIES
-    /// the message lands in the DLQ.
+    /// PEL. The next call redelivers it (Pending source), counting one more
+    /// delivery. After exceeding MAX_PROCESSING_RETRIES the message lands in
+    /// the DLQ.
     #[tokio::test]
     async fn test_failed_message_retries_then_dlq() {
         let Some(client) = try_client().await else {
@@ -4031,7 +4557,8 @@ mod tests {
             queue.prefetched.lock().await.clear();
         }
 
-        // The next attempt should detect retries-exceeded and route to DLQ.
+        // The next attempt should detect retries-exceeded and route to DLQ,
+        // handing the payload back so the caller can settle its runs.
         let res = queue
             .dequeue_and_work(|_: String| async move { Ok::<(), Box<dyn Error + Send + Sync>>(()) })
             .await;
@@ -4039,10 +4566,16 @@ mod tests {
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("Retry limit exceeded") || msg.contains("retry"),
+                    msg.contains("Retry limit exceeded"),
                     "unexpected error: {}",
                     msg
                 );
+                let Some(QueueProcessingError::DeadLettered(message)) =
+                    e.downcast_ref::<QueueProcessingError>()
+                else {
+                    panic!("expected the dead-lettered payload, got {msg}");
+                };
+                assert_eq!(message.decode::<String>().unwrap(), "flaky");
             }
             Ok(_) => panic!("expected RetryLimitExceeded after exhausting retries"),
         }
@@ -4175,7 +4708,7 @@ mod tests {
             queue.prefetched.lock().await.clear();
 
             // Each opted-in requeue must carry the cumulative delivery
-            // count into the fresh entry (the Redis counter alone resets).
+            // count into the fresh entry (its own count starts over).
             let fields = latest_entry_fields(&client, &stream_key).await;
             let carried = fields
                 .iter()
@@ -5035,6 +5568,458 @@ mod tests {
             pending_after, 1,
             "PEL must remain on dead-worker, not transferred to UUID admin"
         );
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// Run `cmd` on a fresh admin connection.
+    async fn admin_cmd(client: &redis::Client, cmd: &redis::Cmd) -> redis::Value {
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        cmd.query_async(&mut conn).await.unwrap()
+    }
+
+    async fn entry_exists(client: &redis::Client, stream: &str, msg_id: &str) -> bool {
+        let entries = admin_cmd(
+            client,
+            redis::cmd("XRANGE").arg(stream).arg(msg_id).arg(msg_id),
+        )
+        .await;
+        !redis::from_redis_value_ref::<Vec<redis::Value>>(&entries)
+            .unwrap_or_default()
+            .is_empty()
+    }
+
+    /// A delivery trimmed from the stream while it runs (here by a producer
+    /// that still trims with `XADD MAXLEN`, as a 3.0.0 process does during a
+    /// rolling upgrade) is reported as trimmed, not reclaimed, and its
+    /// worker's ACK still succeeds, including after a sibling's orphan
+    /// reclaim dropped its PEL record.
+    #[tokio::test]
+    async fn trimmed_in_flight_entry_is_not_reported_as_reclaimed() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        for (item, sibling_reclaims) in [(1, false), (2, true)] {
+            let queue_name = format!("test_stream_trimmed_{}", Uuid::new_v4());
+            let stream_key = format!("{{{}}}", queue_name);
+            let queue = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+                .with_consumer_name("worker-trimmed".to_string());
+            queue.enqueue(item).await.unwrap();
+            let lease = queue.claim_now().await.unwrap().expect("claimed");
+            let keepalive = lease.keepalive().unwrap();
+            let msg_id = keepalive.msg_id().to_string();
+
+            admin_cmd(
+                &client,
+                redis::cmd("XADD")
+                    .arg(&stream_key)
+                    .arg("MAXLEN")
+                    .arg(1)
+                    .arg("*")
+                    .arg("filler")
+                    .arg("x"),
+            )
+            .await;
+            assert!(!entry_exists(&client, &stream_key, &msg_id).await);
+
+            assert_eq!(keepalive.touch().await.unwrap(), PendingTouch::Trimmed);
+            // The touch must not drop the PEL record (an XCLAIM would).
+            assert!(
+                xpending_entry(&client, &stream_key, DEFAULT_CONSUMER_GROUP, &msg_id)
+                    .await
+                    .is_some()
+            );
+            if sibling_reclaims {
+                let sibling = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+                    .with_consumer_name("worker-sibling".to_string())
+                    .with_orphan_idle_ms(1);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                assert_eq!(sibling.recover_orphaned_items().await.unwrap(), 0);
+                assert_eq!(keepalive.touch().await.unwrap(), PendingTouch::Trimmed);
+            }
+
+            let got = lease
+                .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+                .await
+                .expect("a trimmed delivery's ACK succeeds");
+            assert_eq!(got, Some(item));
+            assert_eq!(
+                xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+                0
+            );
+            cleanup(&client, &queue_name).await;
+        }
+    }
+
+    /// The enqueue trim never removes an entry still pending in a consumer
+    /// group until the hard cap, and trims as `XADD MAXLEN ~` did once
+    /// nothing is pending. Small caps stand in for the real ones; Redis
+    /// trims whole 100-entry nodes, hence the margins.
+    #[tokio::test]
+    async fn enqueue_trim_keeps_pending_entries() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_trim_pending_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone());
+        let enqueue = |maxlen: u64, hard_maxlen: u64| {
+            let client = client.clone();
+            let stream_key = stream_key.clone();
+            async move {
+                admin_cmd(
+                    &client,
+                    redis::cmd("EVAL")
+                        .arg(ENQUEUE_LUA)
+                        .arg(1)
+                        .arg(&stream_key)
+                        .arg("x")
+                        .arg(maxlen)
+                        .arg(hard_maxlen),
+                )
+                .await
+            }
+        };
+
+        queue.enqueue(0).await.unwrap();
+        let lease = queue.claim_now().await.unwrap().expect("claimed");
+        let pending_id = lease.keepalive().unwrap().msg_id().to_string();
+        for _ in 0..300 {
+            enqueue(10, 100_000).await;
+        }
+        assert!(entry_exists(&client, &stream_key, &pending_id).await);
+        assert_eq!(xlen(&client, &stream_key).await, 301);
+
+        // Past the hard cap the pending entry goes too.
+        enqueue(10, 150).await;
+        assert!(!entry_exists(&client, &stream_key, &pending_id).await);
+        let len = xlen(&client, &stream_key).await;
+        assert!((150..301).contains(&len), "len {len}");
+        drop(lease);
+
+        // Nothing pending: trimmed to about maxlen.
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let _: i64 = redis::cmd("XACK")
+            .arg(&stream_key)
+            .arg(DEFAULT_CONSUMER_GROUP)
+            .arg(&pending_id)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        enqueue(10, 100_000).await;
+        assert!(xlen(&client, &stream_key).await < 110);
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// Simulated worker crash mid-run. Worker A starts event 7 and dies with
+    /// event 8 still in its prefetch buffer. Worker B reclaims both and runs
+    /// each exactly once: 7 as its second start, 8 as its first. Counting
+    /// from the Redis delivery counter dead-lettered such orphans on reclaim
+    /// (every PEL poll raised it) and charged buffered bystanders a retry
+    /// for each crash.
+    #[tokio::test]
+    async fn orphan_of_a_crashed_worker_runs_again_once() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_crash_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let attempts = |msg_id: &str| format!("{stream_key}:attempts:{msg_id}");
+        let worker_a = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+            .with_consumer_name("worker-a".to_string())
+            .with_read_batch_size(2);
+
+        worker_a.enqueue(7).await.unwrap();
+        worker_a.enqueue(8).await.unwrap();
+        let lease = worker_a.claim_now().await.unwrap().expect("claimed");
+        let started_id = lease.keepalive().unwrap().msg_id().to_string();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let run = tokio::spawn(lease.process(|_| async move {
+            let _ = started_tx.send(());
+            std::future::pending::<Result<(), Box<dyn Error + Send + Sync>>>().await
+        }));
+        started_rx.await.unwrap();
+        let buffered_id = worker_a.prefetched.lock().await[0].msg_id.clone();
+
+        // Worker A dies: both deliveries stay pending under its name.
+        run.abort();
+        let _ = run.await;
+        drop(worker_a);
+        let get = |key: String| {
+            let client = client.clone();
+            async move {
+                redis::from_redis_value_ref::<Option<i64>>(
+                    &admin_cmd(&client, redis::cmd("GET").arg(key)).await,
+                )
+                .unwrap()
+            }
+        };
+        assert_eq!(get(attempts(&started_id)).await, Some(1));
+        assert_eq!(get(attempts(&buffered_id)).await, None);
+
+        let worker_b = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+            .with_consumer_name("worker-b".to_string())
+            .with_orphan_idle_ms(1);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(worker_b.recover_orphaned_items().await.unwrap(), 2);
+
+        let mut runs = Vec::new();
+        while let Some(lease) = worker_b.claim_now().await.unwrap() {
+            assert!(lease.timing().redelivered);
+            let msg_id = lease.keepalive().unwrap().msg_id().to_string();
+            let starts = get(attempts(&msg_id));
+            let item = lease
+                .process(|item| async move {
+                    let starts = starts.await;
+                    Ok::<(i64, Option<i64>), Box<dyn Error + Send + Sync>>((item, starts))
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            runs.push(item);
+        }
+        runs.sort();
+        assert_eq!(runs, vec![(7, Some(2)), (8, Some(1))]);
+        assert_eq!(
+            xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+            0
+        );
+        assert_eq!(xlen(&client, &format!("{stream_key}:deadletter")).await, 0);
+        assert_eq!(get(attempts(&started_id)).await, None, "the ACK clears it");
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// Infrastructure retries with a backoff wait outside the executor: two
+    /// held events (here with a 5-minute backoff) do not keep a worker from
+    /// the events behind them, and a short backoff's event comes back once
+    /// it has passed.
+    #[tokio::test]
+    async fn held_events_do_not_block_other_events() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_held_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = Arc::new(RedisStreamQueue::<i64>::new(
+            client.clone(),
+            queue_name.clone(),
+        ));
+        let hold = |item: i64, backoff: Duration| async move {
+            if item < 0 {
+                return Err::<i64, Box<dyn Error + Send + Sync>>(Box::new(
+                    QueueInfrastructureError::new("waits for a redeploy", backoff),
+                ));
+            }
+            Ok(item)
+        };
+
+        for item in [-1, -2, 1, 2, 3] {
+            queue.enqueue(item).await.unwrap();
+        }
+        // Two executors drain the queue.
+        let started = Instant::now();
+        let executors: Vec<_> = (0..2)
+            .map(|_| {
+                let queue = Arc::clone(&queue);
+                tokio::spawn(async move {
+                    let mut done = Vec::new();
+                    while let Ok(Some(lease)) = queue.claim_now().await {
+                        if let Ok(Some(item)) = lease
+                            .process(|item| hold(item, Duration::from_secs(300)))
+                            .await
+                        {
+                            done.push(item);
+                        }
+                    }
+                    done
+                })
+            })
+            .collect();
+        let mut done = Vec::new();
+        for executor in executors {
+            done.extend(executor.await.unwrap());
+        }
+        done.sort();
+        assert_eq!(done, vec![1, 2, 3]);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(
+            xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+            0
+        );
+        let delayed: i64 = redis::from_redis_value_ref(
+            &admin_cmd(
+                &client,
+                redis::cmd("ZCARD").arg(format!("{stream_key}:delayed")),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(delayed, 2, "both held events wait in the delayed set");
+
+        // A short backoff: the event is back, as a redelivery, once it passed.
+        queue.enqueue(-3).await.unwrap();
+        let lease = queue.claim_now().await.unwrap().expect("claimed");
+        assert!(
+            lease
+                .process(|item| hold(item, Duration::from_millis(300)))
+                .await
+                .is_err()
+        );
+        let deferred = Instant::now();
+        // A claimer loops over its blocking reads, as the worker's does.
+        let lease = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(lease) = queue.claim_blocking().await.unwrap() {
+                    return lease;
+                }
+            }
+        })
+        .await
+        .expect("the claimer wakes for the due retry");
+        assert!(deferred.elapsed() >= Duration::from_millis(300));
+        assert!(lease.timing().redelivered);
+        let got = lease
+            .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+        assert_eq!(got, Some(-3));
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// Delayed retries come back through any claimer, here a fresh handle
+    /// of another process, and keep their carried delivery count.
+    #[tokio::test]
+    async fn delayed_retry_is_promoted_by_another_claimer() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_delayed_other_{}", Uuid::new_v4());
+        let deferring = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone());
+        deferring.enqueue(5).await.unwrap();
+        let lease = deferring.claim_now().await.unwrap().expect("claimed");
+        let _ = lease
+            .process(|_| async move {
+                Err::<i64, Box<dyn Error + Send + Sync>>(Box::new(QueueInfrastructureError::new(
+                    format!("setup timed out {PRESERVE_DELIVERY_COUNT_TOKEN}"),
+                    Duration::from_millis(50),
+                )))
+            })
+            .await;
+        drop(deferring);
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let other = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone());
+        let lease = tokio::time::timeout(Duration::from_secs(3), other.claim_blocking())
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("the first claim promotes the due retry and reads it");
+        assert_eq!(lease.prior_deliveries, 1);
+        assert!(lease.timing().redelivered);
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// The first enqueue after the server dropped the cached connection (a
+    /// Valkey restart, here a CLIENT KILL) is resent on a fresh connection
+    /// instead of failing.
+    #[tokio::test]
+    async fn enqueue_resends_after_a_dropped_connection() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_resend_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone());
+        queue.enqueue(1).await.unwrap();
+
+        let client_id: i64 = {
+            let mut guard = queue.get_connection().await.unwrap();
+            redis::from_redis_value_ref(
+                &guard
+                    .as_mut()
+                    .unwrap()
+                    .cmd(redis::cmd("CLIENT").arg("ID"))
+                    .await
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let killed: i64 = redis::from_redis_value_ref(
+            &admin_cmd(
+                &client,
+                redis::cmd("CLIENT").arg("KILL").arg("ID").arg(client_id),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(killed, 1);
+
+        queue
+            .enqueue(2)
+            .await
+            .expect("resent on a fresh connection");
+        assert_eq!(xlen(&client, &stream_key).await, 2);
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// Draining a stale consumer moves only its own entries: a live worker's
+    /// delivery stays with it.
+    #[tokio::test]
+    async fn stale_consumer_drain_takes_only_its_entries() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_stale_drain_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let janitor = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+            .with_consumer_name("janitor".to_string());
+        janitor.ensure_consumer_group().await.unwrap();
+        janitor.enqueue(1).await.unwrap();
+        assert_eq!(
+            xreadgroup_drain(&client, &stream_key, DEFAULT_CONSUMER_GROUP, "stale").await,
+            1
+        );
+        janitor.enqueue(2).await.unwrap();
+        assert_eq!(
+            xreadgroup_drain(&client, &stream_key, DEFAULT_CONSUMER_GROUP, "live").await,
+            1
+        );
+
+        {
+            let mut guard = janitor.get_connection().await.unwrap();
+            janitor
+                .claim_consumer_pending(guard.as_mut().unwrap(), "stale")
+                .await
+                .unwrap();
+        }
+        let owners = admin_cmd(
+            &client,
+            redis::cmd("XPENDING")
+                .arg(&stream_key)
+                .arg(DEFAULT_CONSUMER_GROUP)
+                .arg("-")
+                .arg("+")
+                .arg(10),
+        )
+        .await;
+        let owners: Vec<(String, String, i64, i64)> = redis::from_redis_value_ref(&owners).unwrap();
+        let owners: Vec<(&str, i64)> = owners
+            .iter()
+            .map(|(_, owner, _, count)| (owner.as_str(), *count))
+            .collect();
+        assert_eq!(owners, vec![("janitor", 1), ("live", 1)]);
 
         cleanup(&client, &queue_name).await;
     }

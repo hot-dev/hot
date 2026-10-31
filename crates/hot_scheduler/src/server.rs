@@ -75,24 +75,174 @@ pub const DEFAULT_AT_INTERVAL_SECONDS: u64 = 1;
 /// The session advisory lock that elects the one active scheduler. Operators can
 /// find the active scheduler's database session by this key in `pg_locks`.
 pub const SCHEDULER_ADVISORY_LOCK_ID: i64 = 4_849_672_113_597_841;
-/// How often the scheduler confirms it still holds its singleton lock, and how
-/// long one confirmation may take. Together they bound how long a scheduler
-/// that lost its lock keeps dispatching alongside a successor.
+/// How often the scheduler confirms it still holds its singleton lock, how
+/// long one confirmation may take, and how many confirmations in a row may
+/// take longer. Together they bound how long a scheduler that lost its lock
+/// keeps dispatching alongside a successor: one check when its session ends,
+/// about three intervals when its session stops answering.
 const SINGLETON_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 const SINGLETON_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
+const SINGLETON_MAX_SLOW_CHECKS: u32 = 3;
 
-/// One bounded singleton check. A check that times out counts as lost: a
-/// partitioned session can hang until TCP gives up, while the server has
-/// already freed the lock for a successor.
+/// Why a singleton check did not confirm the lock.
+#[derive(Debug, PartialEq)]
+enum LockCheckFailure {
+    /// No answer in time. A stalled database (a laptop waking, a paused
+    /// container, a long vacuum) answers late; a partitioned session can hang
+    /// until TCP gives up while the server has already freed the lock for a
+    /// successor. Only several in a row count as lost.
+    Slow(Duration),
+    /// The session answered that it no longer holds the lock, or failed.
+    Lost(String),
+}
+
+impl std::fmt::Display for LockCheckFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Slow(limit) => write!(f, "the lock check did not finish within {limit:?}"),
+            Self::Lost(reason) => f.write_str(reason),
+        }
+    }
+}
+
+/// One bounded singleton check.
 async fn confirm_singleton_lock<E: std::fmt::Display>(
     check: impl std::future::Future<Output = Result<bool, E>>,
     limit: Duration,
-) -> Result<(), String> {
+) -> Result<(), LockCheckFailure> {
     match tokio::time::timeout(limit, check).await {
         Ok(Ok(true)) => Ok(()),
-        Ok(Ok(false)) => Err("its session no longer holds the lock".into()),
-        Ok(Err(e)) => Err(format!("its lock session failed: {e}")),
-        Err(_) => Err(format!("the lock check did not finish within {limit:?}")),
+        Ok(Ok(false)) => Err(LockCheckFailure::Lost(
+            "its session no longer holds the lock".into(),
+        )),
+        Ok(Err(e)) => Err(LockCheckFailure::Lost(format!(
+            "its lock session failed: {e}"
+        ))),
+        Err(_) => Err(LockCheckFailure::Slow(limit)),
+    }
+}
+
+/// The session that holds the scheduler's singleton lock.
+trait LockSession: Send {
+    fn still_held(&mut self) -> impl std::future::Future<Output = Result<bool, String>> + Send;
+}
+
+impl LockSession for hot::db::AdvisoryLock {
+    async fn still_held(&mut self) -> Result<bool, String> {
+        self.ensure_held().await.map_err(|e| e.to_string())
+    }
+}
+
+/// Confirm the singleton lock every `interval` until shutdown. Returns why
+/// the lock counts as lost, or None on shutdown.
+async fn watch_singleton_lock(
+    session: &mut impl LockSession,
+    interval: Duration,
+    limit: Duration,
+    shutdown: &mut tokio::sync::broadcast::Receiver<()>,
+) -> Option<String> {
+    let mut timer = tokio::time::interval(interval);
+    timer.tick().await;
+    let mut slow_checks = 0;
+    loop {
+        tokio::select! {
+            _ = timer.tick() => {
+                match confirm_singleton_lock(session.still_held(), limit).await {
+                    Ok(()) => slow_checks = 0,
+                    Err(LockCheckFailure::Lost(reason)) => return Some(reason),
+                    Err(slow) => {
+                        slow_checks += 1;
+                        if slow_checks >= SINGLETON_MAX_SLOW_CHECKS {
+                            return Some(format!("{slow}, {slow_checks} times in a row"));
+                        }
+                        warn!(
+                            "hot.dev: SCHEDULER {slow} ({slow_checks} in a row; {SINGLETON_MAX_SLOW_CHECKS} count as a lost singleton lock)"
+                        );
+                    }
+                }
+            }
+            _ = shutdown.recv() => return None,
+        }
+    }
+}
+
+/// The error a scheduler stops with when it loses its singleton lock.
+#[derive(Debug)]
+pub struct SingletonLockLost;
+
+impl std::fmt::Display for SingletonLockLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("scheduler singleton lock was lost; stopping to avoid duplicate scheduling")
+    }
+}
+
+impl std::error::Error for SingletonLockLost {}
+
+type SchedulerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+const RESTART_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// A scheduler that ran this long before losing its lock again restarts with
+/// the initial backoff.
+const RESTART_BACKOFF_RESET_AFTER: Duration = Duration::from_secs(60);
+
+/// Run a scheduler until shutdown, starting it again with backoff whenever it
+/// loses its singleton lock. For `hot dev` and integration `hot test`, where a
+/// brief database stall must not end scheduling for the rest of the session.
+/// Restarting is safe: each start takes the lock afresh, and fails while any
+/// other scheduler (or this one's old session, until the server ends it) holds
+/// it. A production scheduler stops instead and leaves the restart to its
+/// supervisor.
+pub async fn run_restarting<F, Fut>(start: F) -> SchedulerResult
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = SchedulerResult>,
+{
+    restart_after_lock_loss(
+        start,
+        RESTART_BACKOFF_INITIAL,
+        RESTART_BACKOFF_MAX,
+        hot::signal::shutdown_signal,
+    )
+    .await
+}
+
+async fn restart_after_lock_loss<F, Fut, S, SFut>(
+    mut start: F,
+    initial: Duration,
+    max: Duration,
+    mut shutdown: S,
+) -> SchedulerResult
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = SchedulerResult>,
+    S: FnMut() -> SFut,
+    SFut: std::future::Future<Output = ()>,
+{
+    let mut backoff = initial;
+    // After a loss every failed start is retried: the database can still be
+    // stalled, and the old session can still hold the lock.
+    let mut recovering = false;
+    loop {
+        let started = tokio::time::Instant::now();
+        let error = match start().await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        let lost = error.is::<SingletonLockLost>();
+        if !lost && !recovering {
+            return Err(error);
+        }
+        if lost && started.elapsed() >= RESTART_BACKOFF_RESET_AFTER {
+            backoff = initial;
+        }
+        recovering = true;
+        warn!("hot.dev: SCHEDULER stopped ({error}); restarting in {backoff:?}");
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {}
+            _ = shutdown() => return Ok(()),
+        }
+        backoff = (backoff * 2).min(max);
     }
 }
 
@@ -108,15 +258,23 @@ async fn acquire_scheduler_singleton_guard(
     // A transaction- or statement-mode pooler can run the next statement on a
     // different backend, where the session lock is invisible. Fail here, before
     // any work, rather than at the first periodic check.
-    if let Err(reason) = confirm_singleton_lock(guard.ensure_held(), SINGLETON_CHECK_TIMEOUT).await
-    {
-        guard.release().await;
-        return Err(format!(
-            "the scheduler could not confirm its singleton lock ({reason}); its database \
-             connection must keep one session, so do not route it through a transaction- or \
-             statement-mode pooler"
-        )
-        .into());
+    match confirm_singleton_lock(guard.ensure_held(), SINGLETON_CHECK_TIMEOUT).await {
+        Ok(()) => {}
+        Err(slow @ LockCheckFailure::Slow(_)) => {
+            guard.release().await;
+            return Err(
+                format!("the scheduler could not confirm its singleton lock ({slow})").into(),
+            );
+        }
+        Err(LockCheckFailure::Lost(reason)) => {
+            guard.release().await;
+            return Err(format!(
+                "the scheduler could not confirm its singleton lock ({reason}); its database \
+                 connection must keep one session, so do not route it through a transaction- or \
+                 statement-mode pooler"
+            )
+            .into());
+        }
     }
     Ok(Some(guard))
 }
@@ -600,21 +758,20 @@ pub async fn run_for_environment(
     let guard_task = singleton_guard.map(|mut guard| {
         let mut shutdown_rx = shutdown_tx.subscribe();
         tokio::spawn(async move {
-            let mut timer = interval(SINGLETON_CHECK_INTERVAL);
-            timer.tick().await;
-            loop {
-                tokio::select! {
-                    _ = timer.tick() => {
-                        if let Err(reason) =
-                            confirm_singleton_lock(guard.ensure_held(), SINGLETON_CHECK_TIMEOUT).await
-                        {
-                            error!("hot.dev: SCHEDULER lost its singleton lock ({reason}); stopping");
-                            let _ = lock_lost_tx.send(());
-                            return None;
-                        }
-                    }
-                    _ = shutdown_rx.recv() => return Some(guard),
+            let lost = watch_singleton_lock(
+                &mut guard,
+                SINGLETON_CHECK_INTERVAL,
+                SINGLETON_CHECK_TIMEOUT,
+                &mut shutdown_rx,
+            )
+            .await;
+            match lost {
+                Some(reason) => {
+                    error!("hot.dev: SCHEDULER lost its singleton lock ({reason}); stopping");
+                    let _ = lock_lost_tx.send(());
+                    None
                 }
+                None => Some(guard),
             }
         })
     });
@@ -646,9 +803,7 @@ pub async fn run_for_environment(
         guard.release().await;
     }
     if lost {
-        return Err(
-            "scheduler singleton lock was lost; stopping to avoid duplicate scheduling".into(),
-        );
+        return Err(Box::new(SingletonLockLost));
     }
 
     Ok(())
@@ -968,7 +1123,16 @@ async fn create_scheduled_job(
     // This ensures the Job constructor gets a valid cron expression
     let scheduler_cron = convert_to_scheduler_cron(&cron)?;
 
-    let queue_clone = Arc::clone(event_queue);
+    // A failed enqueue skips the occurrence, so retry it within the interval
+    // (a Redis restart or failover); only the enqueue, not the event row the
+    // run's other steps write.
+    let queue_clone: Arc<dyn Queue<Message>> = Arc::new(hot::queue::RetryingEnqueue::new(
+        Arc::clone(event_queue),
+        vec![
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
+        ],
+    ));
     let db_clone = Arc::clone(db);
     let schedule_clone = schedule.clone();
     let job = Job::new_async(&scheduler_cron, move |_uuid, _lock| {
@@ -1315,10 +1479,21 @@ async fn queue_schedule_execution(
         trace_calls: true,
     };
 
-    // Create the event data
-    let event_data = val!({
-        "fn": format!("{}/{}", schedule.ns, schedule.var),
-        "args": [val!({
+    // A dynamic schedule calls its function with the args it was created
+    // with, as `::hot::test/run-due` does. A metadata schedule stores none and
+    // passes one argument describing the schedule that fired.
+    let args = match &schedule.value {
+        Some(stored) => match serde_json::from_value::<Val>(stored.clone()) {
+            Ok(args @ Val::Vec(_)) => args,
+            _ => {
+                return Err(format!(
+                    "schedule {} has malformed args: {stored}",
+                    schedule.schedule_id
+                )
+                .into());
+            }
+        },
+        None => val!([val!({
             "type": "hot:schedule",
             "schedule_id": schedule.schedule_id.to_string(),
             "scheduled_at": scheduled_time.to_rfc3339(),
@@ -1328,7 +1503,15 @@ async fn queue_schedule_execution(
             } else {
                 None
             }
-        })]
+        })]),
+    };
+
+    // Create the event data. The worker attributes the run to its schedule
+    // by `schedule_id`.
+    let event_data = val!({
+        "fn": format!("{}/{}", schedule.ns, schedule.var),
+        "args": args,
+        "schedule_id": schedule.schedule_id.to_string()
     });
 
     // Create the event
@@ -1485,7 +1668,8 @@ async fn process_pending_retries(
             }
         };
         let db = &Arc::new(scoped_db);
-        // Get the original event to re-send
+        // Get the original event to re-send. An attempt without one can't be
+        // retried, and fails as the attempt it ran as.
         let event_id = match run.event_id {
             Some(id) => id,
             None => {
@@ -1493,7 +1677,7 @@ async fn process_pending_retries(
                     "Run {} has no event_id, cannot retry - marking as failed",
                     run.run_id
                 );
-                if let Err(e) = hot::db::run::Run::mark_retry_as_failed(db, &run.run_id).await {
+                if let Err(e) = hot::db::run::Run::mark_retry_abandoned(db, &run.run_id).await {
                     error!("Failed to mark run {} as failed: {}", run.run_id, e);
                 }
                 continue;
@@ -1503,14 +1687,22 @@ async fn process_pending_retries(
         // Get the original event
         let original_event = match hot::db::Event::get_event(db, &event_id).await {
             Ok(evt) => evt,
-            Err(e) => {
+            Err(hot::db::event::EventError::NotFound) => {
                 warn!(
-                    "Failed to get event {} for retry, marking run {} as failed: {}",
-                    event_id, run.run_id, e
+                    "Event {} for retry is gone, marking run {} as failed",
+                    event_id, run.run_id
                 );
-                if let Err(e) = hot::db::run::Run::mark_retry_as_failed(db, &run.run_id).await {
+                if let Err(e) = hot::db::run::Run::mark_retry_abandoned(db, &run.run_id).await {
                     error!("Failed to mark run {} as failed: {}", run.run_id, e);
                 }
+                continue;
+            }
+            Err(e) => {
+                // A database error leaves the retry pending for the next tick.
+                warn!(
+                    "Failed to get event {} for retry of run {}: {}",
+                    event_id, run.run_id, e
+                );
                 continue;
             }
         };
@@ -1610,9 +1802,11 @@ async fn process_pending_retries(
                     run.retry_attempt, run.run_id, run.event_fn
                 );
 
-                // Mark the original run as failed now that we've queued a retry
-                // The retry is a separate run linked via origin_run_id
-                if let Err(e) = hot::db::run::Run::mark_retry_as_failed(db, &run.run_id).await {
+                // Mark the original run as failed now that we've queued a retry,
+                // naming the retry: a separate run linked via origin_run_id
+                if let Err(e) =
+                    hot::db::run::Run::mark_retry_queued(db, &run.run_id, &new_run_id).await
+                {
                     error!(
                         "Failed to mark run {} as failed after queueing retry: {}",
                         run.run_id, e
@@ -1750,22 +1944,153 @@ mod tests {
             confirm_singleton_lock(async { Ok::<_, String>(false) }, limit)
                 .await
                 .unwrap_err()
+                .to_string()
                 .contains("no longer holds")
         );
         assert!(
             confirm_singleton_lock(async { Err::<bool, _>("connection reset") }, limit)
                 .await
                 .unwrap_err()
+                .to_string()
                 .contains("connection reset")
         );
         // A partitioned session never answers; the check must not wait for TCP.
         let hung = std::future::pending::<Result<bool, String>>();
-        assert!(
-            confirm_singleton_lock(hung, limit)
-                .await
-                .unwrap_err()
-                .contains("did not finish")
+        assert_eq!(
+            confirm_singleton_lock(hung, limit).await,
+            Err(LockCheckFailure::Slow(limit))
         );
+    }
+
+    /// Answers each check as scripted: `Some(answer)` at once, `None` never.
+    /// After the script it keeps confirming the lock.
+    struct ScriptedSession(std::collections::VecDeque<Option<Result<bool, String>>>);
+
+    impl LockSession for ScriptedSession {
+        async fn still_held(&mut self) -> Result<bool, String> {
+            match self.0.pop_front() {
+                Some(Some(answer)) => answer,
+                Some(None) => std::future::pending().await,
+                None => Ok(true),
+            }
+        }
+    }
+
+    async fn watch_script(
+        script: Vec<Option<Result<bool, String>>>,
+        within: Duration,
+    ) -> Option<Option<String>> {
+        let mut session = ScriptedSession(script.into());
+        let (_shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
+        tokio::time::timeout(
+            within,
+            watch_singleton_lock(
+                &mut session,
+                Duration::from_millis(20),
+                Duration::from_millis(10),
+                &mut shutdown_rx,
+            ),
+        )
+        .await
+        .ok()
+    }
+
+    #[tokio::test]
+    async fn a_stalled_lock_check_is_lost_only_after_consecutive_slow_checks() {
+        // A stall that delays two checks in a row, twice, keeps the lock: an
+        // answer in between resets the count.
+        let stalls = vec![None, None, Some(Ok(true)), None, None];
+        assert_eq!(
+            watch_script(stalls, Duration::from_millis(600)).await,
+            None,
+            "the scheduler keeps running"
+        );
+
+        let lost = watch_script(vec![None, None, None], Duration::from_secs(5))
+            .await
+            .expect("three slow checks in a row count as lost")
+            .expect("a lost lock has a reason");
+        assert!(lost.contains("3 times in a row"), "{lost}");
+
+        // An answer that the lock is gone, or a failed session, counts at once.
+        let gone = watch_script(vec![Some(Ok(false))], Duration::from_secs(5)).await;
+        assert!(gone.flatten().unwrap().contains("no longer holds"));
+        let failed = watch_script(
+            vec![None, Some(Err("connection reset".into()))],
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(failed.flatten().unwrap().contains("connection reset"));
+    }
+
+    #[tokio::test]
+    async fn watching_the_lock_ends_on_shutdown() {
+        let mut session = ScriptedSession(Default::default());
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
+        shutdown_tx.send(()).unwrap();
+        let lost = watch_singleton_lock(
+            &mut session,
+            Duration::from_millis(20),
+            Duration::from_millis(10),
+            &mut shutdown_rx,
+        )
+        .await;
+        assert_eq!(lost, None);
+    }
+
+    fn scripted_starts(
+        script: Vec<SchedulerResult>,
+    ) -> (
+        Arc<std::sync::Mutex<usize>>,
+        impl FnMut() -> std::future::Ready<SchedulerResult>,
+    ) {
+        let starts = Arc::new(std::sync::Mutex::new(0));
+        let counter = Arc::clone(&starts);
+        let mut script = std::collections::VecDeque::from(script);
+        let start = move || {
+            *counter.lock().unwrap() += 1;
+            std::future::ready(script.pop_front().unwrap_or(Ok(())))
+        };
+        (starts, start)
+    }
+
+    fn lost() -> SchedulerResult {
+        Err(Box::new(SingletonLockLost))
+    }
+
+    #[tokio::test]
+    async fn development_scheduler_restarts_after_losing_its_lock() {
+        let backoff = Duration::from_millis(1);
+        // Lost twice; the first restart finds the old session still holding
+        // the lock, the next one runs until shutdown.
+        let (starts, start) = scripted_starts(vec![
+            lost(),
+            Err("another hot_scheduler instance already holds the scheduler singleton lock".into()),
+            lost(),
+            Ok(()),
+        ]);
+        restart_after_lock_loss(start, backoff, backoff, std::future::pending::<()>)
+            .await
+            .unwrap();
+        assert_eq!(*starts.lock().unwrap(), 4);
+
+        // A scheduler that never started (here, its configuration) is not
+        // retried.
+        let (starts, start) = scripted_starts(vec![Err("singleton=false".into())]);
+        let error = restart_after_lock_loss(start, backoff, backoff, std::future::pending::<()>)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "singleton=false");
+        assert_eq!(*starts.lock().unwrap(), 1);
+
+        // Shutdown during the backoff ends it without another start.
+        let (starts, start) = scripted_starts(vec![lost()]);
+        restart_after_lock_loss(start, Duration::from_secs(3600), backoff, || {
+            std::future::ready(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(*starts.lock().unwrap(), 1);
     }
 
     #[test]
@@ -1907,6 +2232,132 @@ mod tests {
         );
     }
 
+    /// The event data the worker runs for `schedule`: the queued message
+    /// names the event, and the worker reads its data from the database.
+    async fn scheduled_event_data(db: &Arc<DatabasePool>, schedule: &Schedule) -> Val {
+        let queue: Arc<dyn Queue<Message>> = Arc::new(
+            MemQueue::new(format!("test:schedule-args:{}", Uuid::now_v7())).expect("memory queue"),
+        );
+        queue_schedule_execution(db, &queue, schedule, Utc::now(), false)
+            .await
+            .expect("queue_schedule_execution should succeed");
+        let message = queue.dequeue().await.unwrap().expect("an enqueued event");
+        let event = EventMessage::try_from(message)
+            .expect("queued message should decode as EventMessage")
+            .body
+            .event;
+        assert_eq!(event.event_type, "hot:schedule");
+        let stored = hot::db::Event::get_event(db, &event.event_id)
+            .await
+            .unwrap();
+        serde_json::from_value(stored.event_data).unwrap()
+    }
+
+    #[tokio::test]
+    async fn dynamic_schedules_call_their_function_with_their_args() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+
+        // As `::hot::schedule/create` stores a `hot:schedule:new` event's args.
+        let create = |var: &'static str, args: Option<Val>| {
+            let db = Arc::clone(&db);
+            async move {
+                let schedule_id = Uuid::now_v7();
+                let stored =
+                    args.map(|args| serde_json::to_value(args.to_hot_data_repr()).unwrap());
+                Schedule::insert_dynamic_schedule(
+                    &db,
+                    &schedule_id,
+                    &data.build_id,
+                    &hot::db::ScheduleType::Cron("0 0 * * * *".into()),
+                    Some(&data.org_id),
+                    SchedulePolicy::self_hosted_default(),
+                    "::app::steps",
+                    var,
+                    None,
+                    stored.as_ref(),
+                )
+                .await
+                .unwrap();
+                Schedule::get_schedule(&db, &schedule_id).await.unwrap()
+            }
+        };
+
+        let with_args = create("check-due", Some(val!(["s-1"]))).await;
+        let event_data = scheduled_event_data(&db, &with_args).await;
+        assert_eq!(event_data.get("fn"), Some(val!("::app::steps/check-due")));
+        assert_eq!(event_data.get("args"), Some(val!(["s-1"])));
+        // The worker attributes the run to its schedule by this id.
+        assert_eq!(
+            event_data.get("schedule_id"),
+            Some(val!(with_args.schedule_id.to_string()))
+        );
+
+        // What the worker's `schedule-event-handler` then runs: a target that
+        // declares `fn (id: Str)` receives the id.
+        let source = format!(
+            "::app::steps ns\n\
+             check-due fn (id: Str): Str {{ `late ${{id}}` }}\n\
+             call(resolve({}), {})",
+            event_data.get("fn").unwrap(),
+            event_data.get("args").unwrap()
+        );
+        let result = tokio::task::spawn_blocking(move || {
+            hot::lang::engine::Engine::new().eval_code(
+                &source,
+                &[],
+                &[],
+                Some(&Val::map_empty()),
+                None,
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, Ok(val!("late s-1")));
+
+        // No args call the function with none.
+        let without_args = create("sweep", None).await;
+        let event_data = scheduled_event_data(&db, &without_args).await;
+        assert_eq!(event_data.get("args"), Some(val!([])));
+    }
+
+    #[tokio::test]
+    async fn metadata_schedules_pass_the_schedule_that_fired() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let schedule = Schedule {
+            schedule_id: Uuid::now_v7(),
+            build_id: data.build_id,
+            cron: "0 0 * * * *".to_string(),
+            ns: "::app::jobs".to_string(),
+            var: "nightly".to_string(),
+            meta: Some(serde_json::json!({"schedule": "0 0 * * * *"})),
+            value: None,
+            file: None,
+            line: None,
+            column: None,
+            position: None,
+            active: true,
+            created_at: None,
+            deactivated_at: None,
+        };
+
+        let event_data = scheduled_event_data(&db, &schedule).await;
+        let Some(Val::Vec(args)) = event_data.get("args") else {
+            panic!("args are a Vec: {event_data}");
+        };
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].get("type"), Some(val!("hot:schedule")));
+        assert_eq!(
+            args[0].get("schedule_id"),
+            Some(val!(schedule.schedule_id.to_string()))
+        );
+        assert_eq!(
+            event_data.get("schedule_id"),
+            Some(val!(schedule.schedule_id.to_string()))
+        );
+    }
+
     #[tokio::test]
     async fn requeued_retry_context_carries_no_deadline() {
         let db = Arc::new(hot::db::test_db().await);
@@ -1974,6 +2425,112 @@ mod tests {
             Some(data.run_id)
         );
         assert_eq!(event_message.body.execution_context.retry_attempt, 1);
+    }
+
+    /// The fixture run's status, retry attempt and info.
+    async fn run_state(db: &DatabasePool, run_id: Uuid) -> (i16, i32, Option<serde_json::Value>) {
+        let DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should be SQLite");
+        };
+        let (status, attempt, info): (i16, i32, Option<String>) =
+            sqlx::query_as("SELECT status_id, retry_attempt, info FROM run WHERE run_id = ?")
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        (
+            status,
+            attempt,
+            info.map(|info| serde_json::from_str(&info).unwrap()),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_queued_retry_is_named_on_its_attempt() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let event_id = Uuid::now_v7();
+        hot::db::event::Event::insert_event(
+            &db,
+            &event_id,
+            &data.env_id,
+            &data.stream_id,
+            "order:created",
+            &serde_json::json!({"fn": "test/handler"}),
+            Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        let hot::db::DatabasePool::Sqlite(pool) = db.as_ref() else {
+            panic!("test_db should be SQLite");
+        };
+        sqlx::query(
+            "UPDATE run SET status_id = ?, retry_attempt = 1, next_retry_at = ?, event_id = ?, info = ? WHERE run_id = ?",
+        )
+        .bind(hot::db::run::RunStatus::PendingRetry.as_id())
+        .bind(Utc::now() - chrono::Duration::seconds(60))
+        .bind(event_id)
+        .bind(r#"{"warnings":["kept"]}"#)
+        .bind(data.run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let queue: Arc<dyn Queue<Message>> = Arc::new(
+            MemQueue::new(format!("test:retry-named:{}", Uuid::now_v7())).expect("memory queue"),
+        );
+
+        process_pending_retries(&db, &queue, None).await.unwrap();
+
+        let message = queue
+            .dequeue()
+            .await
+            .unwrap()
+            .expect("retry should be enqueued");
+        let retry_run_id = EventMessage::try_from(message)
+            .unwrap()
+            .body
+            .execution_context
+            .run_id;
+        let (status, attempt, info) = run_state(&db, data.run_id).await;
+        assert_eq!(status, hot::db::run::RunStatus::Failed.as_id());
+        assert_eq!(attempt, 1, "a retried attempt keeps its raised attempt");
+        let info = info.expect("the attempt records its retry");
+        assert_eq!(info["retry_run_id"], retry_run_id.to_string());
+        assert_eq!(info["warnings"], serde_json::json!(["kept"]));
+    }
+
+    #[tokio::test]
+    async fn an_unretryable_attempt_fails_as_the_attempt_it_ran_as() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let hot::db::DatabasePool::Sqlite(pool) = db.as_ref() else {
+            panic!("test_db should be SQLite");
+        };
+        // The worker raised retry_attempt from 1 to 2 when it scheduled the
+        // retry; the attempt has no event to retry from.
+        sqlx::query(
+            "UPDATE run SET status_id = ?, retry_attempt = 2, next_retry_at = ?, event_id = NULL WHERE run_id = ?",
+        )
+        .bind(hot::db::run::RunStatus::PendingRetry.as_id())
+        .bind(Utc::now() - chrono::Duration::seconds(60))
+        .bind(data.run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let queue: Arc<dyn Queue<Message>> = Arc::new(
+            MemQueue::new(format!("test:retry-unretryable:{}", Uuid::now_v7()))
+                .expect("memory queue"),
+        );
+
+        process_pending_retries(&db, &queue, None).await.unwrap();
+        process_pending_retries(&db, &queue, None).await.unwrap();
+
+        assert!(queue.is_empty().await.unwrap(), "nothing to retry");
+        let (status, attempt, _) = run_state(&db, data.run_id).await;
+        assert_eq!(status, hot::db::run::RunStatus::Failed.as_id());
+        assert_eq!(attempt, 1, "back at the attempt it ran as, once");
     }
 
     #[tokio::test]

@@ -1331,8 +1331,24 @@ pub async fn collectable_retired_objects(
     limit: i64,
 ) -> Result<Vec<String>, String> {
     match db {
+        // Under RLS the planner misjudges the anti-join and reads the whole
+        // retired backlog for each batch, so take the batch from the due index
+        // first. An object a live version still references isn't collectable
+        // and would hold the head of that index, so it is forgotten: the
+        // retire trigger records it again when its last reference goes.
         DatabasePool::Postgres(pool) => sqlx::query_scalar(
-            "SELECT r.storage_path FROM retired_file_object r WHERE r.storage_backend = $1 AND r.retired_at < $2 AND NOT EXISTS (SELECT 1 FROM file f WHERE f.active = true AND f.storage_backend = r.storage_backend AND f.storage_path = r.storage_path) ORDER BY r.retired_at LIMIT $3",
+            "WITH due AS MATERIALIZED (
+                SELECT r.storage_path, r.retired_at FROM retired_file_object r
+                WHERE r.storage_backend = $1 AND r.retired_at < $2 ORDER BY r.retired_at LIMIT $3
+            ), referenced AS MATERIALIZED (
+                SELECT due.storage_path FROM due WHERE EXISTS (SELECT 1 FROM file f WHERE f.active = true AND f.storage_backend = $1 AND f.storage_path = due.storage_path)
+            ), forgotten AS (
+                DELETE FROM retired_file_object r USING referenced
+                WHERE r.storage_backend = $1 AND r.storage_path = referenced.storage_path AND r.retired_at < $2
+            )
+            SELECT due.storage_path FROM due
+            WHERE NOT EXISTS (SELECT 1 FROM referenced WHERE referenced.storage_path = due.storage_path)
+            ORDER BY due.retired_at",
         )
         .bind(storage_backend)
         .bind(retired_before)

@@ -113,7 +113,10 @@ fn (event) {
 The clock starts when the worker hands the run to a VM thread, so loading the
 program counts against it, and until the program has loaded the run has the
 default timeout. Waits inside the run, such as `::hot::task/await`, are capped
-to the time it has left.
+to the time it has left minus 5 seconds, which the run keeps to record its
+result. A run with a `timeout` of 5 seconds or less therefore can't await a
+task, and an await in a longer run waits at most its timeout minus 5 seconds
+minus the time already spent.
 
 When a run reaches its timeout, the worker asks it to stop and frees the
 executor slot once it has unwound, or after 5 more seconds if it hasn't. Either
@@ -174,6 +177,12 @@ Hot captures a full execution trace for every run, showing:
 - Function calls and returns
 - Timing for each step
 - Any errors with stack traces
+
+A run records its first 10,000 function calls. A run that makes more keeps
+running but records no further calls; its info then shows
+`call_tracing: "truncated"`, and once it ends, how many calls went unrecorded
+(`untraced_calls`). Set `hot.emitter.max-calls-per-run` in the worker's
+configuration to change the limit (`0` records every call).
 
 ### Triggering Runs
 
@@ -315,6 +324,18 @@ Hot guarantees **at-least-once delivery** for events:
 - Retry status is visible in the Hot App UI
 
 Delivery is optimized for durability and throughput, not strict global ordering. Concurrent workers may process different events from the same stream at the same time, and retries or infrastructure redelivery can arrive after newer events. Queue message fields are additive so rolling deploys can read older messages; workers hydrate the authoritative event payload from the database before routing.
+
+When a worker stops while it runs an event (it crashes or is killed), the next
+worker runs each event that was in flight on it alone, with no other event
+beside it, so one event that brings workers down can't take the others with
+it. With the SQLite queue, only such a stop, of an event running alone,
+counts toward the event's retry limit, and a worker restarted on the same
+host takes over the events of the one that stopped at once. An event that
+stops its worker each time it runs alone is dead-lettered, and its runs fail
+with that reason. If a handler's setup fails
+before it starts (its bundle can't be downloaded, extracted or compiled), the
+event is delivered again, and its run waits as `pending_retry` with the setup
+error until the handler starts or the event's retries run out.
 
 Handlers should be idempotent when they perform external side effects, because the same event can be delivered more than once after a retry, worker crash, Redis pending-entry reclaim, or task reconciliation pass. This also applies to [run timeouts](#run-timeouts): when a handler exceeds its run timeout it is recorded as a failure and retried according to its retry policy. The worker cancels the timed-out run cooperatively, but a handler stuck in non-cooperative work (a tight native loop or blocking syscall) can keep running in the background while its retry begins, so the two attempts may briefly overlap.
 

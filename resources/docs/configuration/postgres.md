@@ -102,12 +102,27 @@ from a production outage.
    login is still unsafe, for example through a `PUBLIC` or group grant. Fix
    the reported grant and run it again. It is safe to run more than once.
 
-4. Start the services with `HOT_DB_URI` only. Don't give them
+4. Create the first identity. Services and CLI commands act as a user in an
+   organization, and a new database has none. `hot init` creates the local
+   identity (user `local@hot.dev`, organization `local`, environment
+   `development`); on PostgreSQL it needs the schema owner too:
+
+   ```bash
+   hot init --db.migration-uri "$HOT_DB_MIGRATION_URI"
+   ```
+
+   Without it, CLI commands fail with "User with email 'local@hot.dev' not
+   found". A hosted setup that signs users in through the app can skip this
+   step.
+
+5. Start the services with `HOT_DB_URI` only. Don't give them
    `HOT_DB_MIGRATION_URI`.
 
 Run `provision_runtime.sql` again after any later migration that adds tables,
 or the runtime login can't use them. Since rerunning it is safe, the simplest
-rule is to run it after every `hot db migrate`.
+rule is to run it after every `hot db migrate`. Services refuse to start when
+the runtime login can't use one of Hot's tables, or when the schema is behind
+the release, and name the table or migration.
 
 `hot app` applies migrations at startup only when it has `db.migration-uri`.
 Without it, run `hot db migrate` from your deployment's migration job before
@@ -177,7 +192,45 @@ Start them again.
 
 If a migration fails, stop the rollout. A failed migration rolls back, but
 earlier migrations in the chain may already be committed. Check
-`hot db status` before you retry.
+`hot db status --db.migration-uri "$HOT_DB_MIGRATION_URI"` before you retry:
+it lists applied, pending and mismatched migrations. See
+[Troubleshooting Migrations](/docs/migrations#troubleshooting-migrations).
+
+## Upgrading from Hot 3.0.0 {#upgrading-from-hot-300}
+
+Hot 3.0.1 adds migrations 017 to 022. You can apply them while 3.0.0 keeps
+serving, then roll the services:
+
+1. **Take a backup.** See [Backups](#backups).
+2. **Migrate** with the 3.0.1 CLI and both URIs, as for a new installation.
+   3.0.0 processes keep working on the migrated schema: migration 020 keeps
+   the tables they read for authentication, though no longer the `hm_`
+   management credentials it retires. See
+   [API Keys and Webhooks](/docs/migrations#api-keys-and-webhooks).
+3. **Provision the runtime login** with the 3.0.1 `provision_runtime.sql`.
+   The migrations add tables, and 3.0.1 services refuse to start until the
+   runtime login can use them.
+4. **Roll the services** to 3.0.1, workers and task workers first.
+
+Each migration waits at most 5 seconds for a lock that running traffic
+holds, then retries (see
+[Troubleshooting Migrations](/docs/migrations#troubleshooting-migrations)).
+While they run, migrations 019 and 021 block writes to the tables they
+index: projects and stores, and files. With millions of files, create 021's
+index ahead of time as the schema owner, without blocking writes. The
+migration then keeps it:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS file_active_storage_path_idx
+    ON hot.file(storage_backend, storage_path) WHERE active = true;
+```
+
+A `CREATE INDEX CONCURRENTLY` that fails leaves an invalid index. Check
+`SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid`, and drop and
+recreate any index it lists before you migrate.
+
+Rolling back to 3.0.0 after the migration works, except for `hm_` management
+credentials, which stay revoked.
 
 ## Backups
 
@@ -213,12 +266,19 @@ connections per transaction can keep working. Two cautions:
 
 - The scheduler holds a session-level lock. Connect it directly, or through a
   pinned session.
-- When Hot opens a connection, it sets `search_path`, `statement_timeout`, and
-  `lock_timeout` with session `SET` statements. A proxy that pools per
+- When Hot opens a connection, it sets `search_path`, `statement_timeout`,
+  `lock_timeout`, and `jit` with session `SET` statements. A proxy that pools per
   transaction may run a later transaction on a server connection that never
   saw them. Set the same values on the runtime login with `ALTER ROLE ... SET`
   so every server connection starts with them. Some proxies, such as RDS
   Proxy, also pin a session after a `SET`; check how yours handles them.
+
+## JIT Compilation
+
+Hot turns PostgreSQL's JIT compilation off on its connections. Its queries
+are short lookups, and under row-level security their cost estimates can
+cross the JIT thresholds, so compiling them takes longer than running them.
+Set `db.jit = true` to leave it on.
 
 ## Reference
 

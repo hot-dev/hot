@@ -222,7 +222,7 @@ pub(crate) struct EmitterOptions {
     pub(crate) emitter_type: Option<String>,
 }
 
-// Server options for services (api, app, worker, scheduler, dev)
+// Server options for services (api, app, worker, task-worker, scheduler, dev)
 #[derive(Args, Debug, Clone)]
 pub(crate) struct ServerOptions {
     #[arg(
@@ -466,6 +466,8 @@ pub(crate) enum Command {
         #[command(flatten)]
         global: GlobalOptions,
         #[command(flatten)]
+        server: ServerOptions,
+        #[command(flatten)]
         queue: QueueOptions,
         #[command(flatten)]
         show_conf: ShowConfOptions,
@@ -504,13 +506,16 @@ pub(crate) enum Command {
         global: GlobalOptions,
         #[command(flatten)]
         show_conf: ShowConfOptions,
-        /// Output format: pretty (ariadne, default), simple (one line per error),
-        /// json (pretty-printed array of LSP-shaped Diagnostic objects),
-        /// or json-min (single-line JSON, ideal for CI / editor tooling).
-        /// Exit code is 0 on success, 1 if any diagnostics are emitted.
+        /// Output format: pretty (ariadne, default), simple (one line per
+        /// diagnostic), json (pretty-printed array of LSP-shaped Diagnostic
+        /// objects), or json-min (single-line JSON, ideal for CI / editor
+        /// tooling). Exit code is 0 when the check passes (warnings alone
+        /// pass unless --check.deny-warnings is set), 1 when it reports
+        /// errors, and 2 when the check cannot run (bad format, missing path,
+        /// no .hot files).
         #[arg(long = "check.format", value_name = "FORMAT")]
         format: Option<String>,
-        /// Raw output (pretty/simple): suppresses success banners and headers
+        /// Raw output (pretty/simple): suppresses the "No issues found" banner
         #[arg(long = "check.raw", action = clap::ArgAction::SetTrue)]
         raw: bool,
         /// Treat warnings (e.g. deprecated-API usage) as errors: exit non-zero
@@ -518,6 +523,11 @@ pub(crate) enum Command {
         /// config value (false).
         #[arg(long = "check.deny-warnings", action = clap::ArgAction::SetTrue)]
         deny_warnings: bool,
+        /// Skip the secret-shape scan (as `hot build --allow-secret-shape`
+        /// does). For per-file exceptions prefer `hot.build.allow-secret-shape`
+        /// in hot.hot.
+        #[arg(long = "allow-secret-shape")]
+        allow_secret_shape: bool,
         /// Optional path to a specific .hot file or directory to check (if not provided, checks all project sources)
         #[arg(value_hint = ValueHint::AnyPath)]
         path: Option<String>,
@@ -529,36 +539,38 @@ pub(crate) enum Command {
         global: GlobalOptions,
         #[command(flatten)]
         show_conf: ShowConfOptions,
-        /// Output format: pretty (ariadne, default), simple (one line per error),
-        /// json (pretty-printed array of LSP-shaped Diagnostic objects),
-        /// or json-min (single-line JSON, ideal for CI / editor tooling).
-        /// Re-emitted on each file change. Exit code mirrors the most recent run.
+        /// Output format: pretty (ariadne, default), simple (one line per
+        /// diagnostic), json (pretty-printed array of LSP-shaped Diagnostic
+        /// objects), or json-min (single-line JSON, ideal for CI / editor
+        /// tooling). Re-emitted on each file change. Watch runs until
+        /// interrupted; it exits 2 only if it cannot start.
         #[arg(long = "check.format", value_name = "FORMAT")]
         format: Option<String>,
-        /// Raw output (pretty/simple): suppresses success banners and headers
+        /// Raw output (pretty/simple): suppresses the "No issues found" banner
         #[arg(long = "check.raw", action = clap::ArgAction::SetTrue)]
         raw: bool,
-        /// Treat warnings (e.g. deprecated-API usage) as errors: exit non-zero
-        /// if any warnings are emitted. Defaults to the `check.deny-warnings`
-        /// config value (false).
+        /// Treat warnings (e.g. deprecated-API usage) as errors in each run's
+        /// report. Defaults to the `check.deny-warnings` config value (false).
         #[arg(long = "check.deny-warnings", action = clap::ArgAction::SetTrue)]
         deny_warnings: bool,
+        /// Skip the secret-shape scan (as `hot build --allow-secret-shape`
+        /// does). For per-file exceptions prefer `hot.build.allow-secret-shape`
+        /// in hot.hot.
+        #[arg(long = "allow-secret-shape")]
+        allow_secret_shape: bool,
         /// Debounce in milliseconds for watch mode
         #[arg(long = "watch.debounce", value_name = "MILLISECONDS")]
         watch_debounce_ms: Option<u64>,
     },
-    /// Format Hot source files (safe mode: only writes files that pass CHAR-AUDIT)
+    /// Format Hot source files (whitespace only; refuses any change that would alter the program)
     #[command(display_order = 23)]
     Fmt {
         #[command(flatten)]
         global: GlobalOptions,
-        /// Optional path to a specific .hot file to format (if not provided, formats all files in src/pkg paths)
-        #[arg(value_hint = ValueHint::FilePath)]
-        file: Option<String>,
-        /// Force writing files even if they fail CHAR-AUDIT (default: safe mode, only write files that pass audit)
-        #[arg(long = "force", action = clap::ArgAction::SetTrue)]
-        force: bool,
-        /// Check if files are formatted without writing changes (preview mode)
+        /// Files or directories to format (default: the current directory and the project's source paths)
+        #[arg(value_name = "PATH", value_hint = ValueHint::AnyPath)]
+        paths: Vec<String>,
+        /// Check that files are formatted without writing changes; exit 1 if a file is unformatted or cannot be formatted
         #[arg(long = "check", action = clap::ArgAction::SetTrue)]
         check: bool,
     },
@@ -670,6 +682,10 @@ pub(crate) enum Command {
         /// Directory to initialize (default: current directory)
         #[arg(value_name = "PATH", value_hint = ValueHint::DirPath)]
         path: Option<String>,
+        /// Project name (lowercase letters, digits and '-'; default: derived
+        /// from the directory name)
+        #[arg(long = "name", value_name = "NAME")]
+        name: Option<String>,
         #[command(flatten)]
         global: GlobalOptions,
         #[command(flatten)]
@@ -974,7 +990,7 @@ pub(crate) enum DepsAction {
     List,
     /// Show detailed information about dependencies
     Show,
-    /// Add a new dependency to the project
+    /// Not implemented yet: add dependencies to hot.project.<name>.deps in hot.hot
     Add {
         /// Package name (e.g., "hot.dev/anthropic")
         package: String,
@@ -997,12 +1013,12 @@ pub(crate) enum DepsAction {
         #[arg(long = "path")]
         path: Option<String>,
     },
-    /// Remove a dependency from the project
+    /// Not implemented yet: remove dependencies from hot.project.<name>.deps in hot.hot
     Remove {
         /// Package name to remove
         package: String,
     },
-    /// Update dependencies (resolve and cache)
+    /// Resolve dependencies (fetching branch dependencies again)
     Update,
     /// Migrate from pkg.paths to deps format
     Migrate,

@@ -146,7 +146,14 @@ This is useful for:
 | `hot.log.rotation` | File rotation: hourly, daily, none | `daily` |
 | `hot.log.retention` | Number of log files to keep (0 = keep all) | `7` |
 
+With `log.format` `json` on stdout, output from `print`, `println`, `eprint` and
+`eprintln` in Hot code is logged too, so every line stays one JSON object. Each
+call is one record with target `hot::user_output` and a `stream` field
+(`stdout` or `stderr`), shown at any log level.
+
 When `log.target` is set to `file`, logs are written to the configured directory with automatic rotation and cleanup based on the retention setting.
+
+The Docker client library logs at `info` at most, even at `debug` or `trace`: its debug output includes each container's environment, and with it the secrets passed to Hot Box containers.
 
 ## Queue Configuration
 
@@ -179,6 +186,29 @@ publish into a running dev session.
 Integration-mode `hot test` runs all requested services in one process and forces
 the memory queue, isolating tests from both `hot dev` and durable project queues.
 
+### Running Several Replicas
+
+With `redis`, several `hot api`, `hot app`, `hot worker`, and `hot task-worker`
+processes can share one deployment. Where their state lives:
+
+- **Redis:** stream pub/sub (`stream:data`, run events, dashboard updates, task
+  messages) and MCP HTTP+SSE transport sessions, so any API replica can serve
+  any subscription. `hot api` and `hot app` PING Redis at startup, up to ten
+  times one second apart, and refuse to start if it never answers. A subscription that
+  loses its Redis connection reconnects with backoff and resumes after the last
+  entry it delivered. Each stream keeps about its last 1,000 entries, and a
+  Redis restart without persistence loses them; run events are also recovered
+  from the database, but `stream:data` is not stored anywhere else.
+- **Database:** the per-account request rate window, shared by every replica.
+- **Each process:** in-flight request and SSE connection limits (with N API
+  replicas an account can hold N times each limit, so size them per replica),
+  and 60-second caches of environment ownership, features, and custom-domain
+  lookups. A domain lookup that misses is cached too, so a newly verified
+  domain can take up to a minute to resolve on every replica.
+- **Configuration:** every `hot app` replica needs the same
+  `HOT_APP_SESSION_SECRET`. Sessions and the one-time API key handoff are
+  signed with it, so a request can land on any replica.
+
 ## Trusted Proxy Client IPs
 
 Client IP forwarding stays in compatibility mode by default: the API uses the
@@ -204,14 +234,25 @@ environment-backed deployment setting.
 
 ## Secrets from Files
 
-Settings supplied through `HOT_*` environment variables, plus `HOT_ENCRYPTION_KEY`
-and `HOT_APP_SESSION_SECRET`, can instead name a file that holds the value:
-set `<NAME>_FILE`, for example `HOT_DB_URI_FILE=/run/secrets/db-uri`. Hot
-reads the file at startup, drops one trailing newline, and does not copy the
-value into the process environment. Setting both `<NAME>` and `<NAME>_FILE`,
-or naming an empty or unreadable file, stops startup with an error that names
-the variable and path but not the value. `--show-conf` prints such values as
-`***` and lists their source files under `_secret-files`.
+Settings supplied through `HOT_*` environment variables can instead name a
+file that holds the value: set `<NAME>_FILE`, for example
+`HOT_DB_URI_FILE=/run/secrets/db-uri`. This covers the configuration overlay,
+values `hot.hot` reads with `::hot::env/get("HOT_...")` (such as the API key
+and Stripe settings in the generated templates), `HOT_ENCRYPTION_KEY`,
+`HOT_APP_SESSION_SECRET`, and the GitHub and Google OAuth client settings. Hot
+drops one trailing newline and does not copy the value into the process
+environment. `HOT_ENCRYPTION_KEY` and `HOT_APP_SESSION_SECRET` are kept once
+found: rotating either takes a restart.
+
+Setting both `<NAME>` and `<NAME>_FILE`, or naming an empty or unreadable
+file, stops the command with an error that names the variable and path but
+not the value. For a `HOT_*_FILE` name that is not a Hot setting, Hot prints a
+warning and ignores it. `hot conf` and `--show-conf` print such values as
+`***` and list their source files under `_secret-files`.
+
+Hyphenated settings map from their environment names too:
+`HOT_WORKER_RUN_TIMEOUT` sets `worker.run-timeout`, and a variable whose
+dotted spelling isn't a setting sets the hyphenated key `hot.hot` already has.
 
 ## Configuration Format
 

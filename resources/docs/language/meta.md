@@ -312,7 +312,8 @@ The value must be a positive whole number; `hot check` reports any other
 value as `invalid-timeout`. The worker caps it at `worker.max-run-timeout`
 (1 hour by default, at most 24 hours) and says so in the failure of a run
 that hits the cap. For longer work, start a [task](/docs/tasks), whose
-timeout can reach 24 hours. See
+timeout can reach 24 hours. A run keeps its last 5 seconds to record its
+result, so `::hot::task/await` needs a `timeout` above 5. See
 [Run Timeouts](/docs/platform/runs-events-streams#run-timeouts).
 
 ## Context Requirements

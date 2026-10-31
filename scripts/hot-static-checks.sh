@@ -247,32 +247,31 @@ cmd_check() {
 }
 
 # Command: fmt - verify all Hot source is formatted (no writes)
-# `hot fmt --check` takes one path per invocation, so loop the source roots.
+# Every tree with tracked .hot files, plus the top-level project files, in
+# one `hot fmt --check` run. It names each file that needs formatting or
+# that fmt cannot format, and exits non-zero for either. resources/ai/skills
+# joins once its examples (mirrored in hot-skills) are reformatted.
 cmd_fmt() {
-    local roots=("hot/pkg" "hot/src" "hot/test")
-    local errors=0
-
-    echo "Checking Hot formatting..."
-    echo "=========================="
+    local roots=(
+        "hot/pkg" "hot/src" "hot/test" "hot/docs" "benchmarks"
+        "hot.hot" "hot.test.hot" "pg.pkg.test.hot" "pg.redis.test.hot"
+        "redis.pkg.test.hot" "store-load.hot" "hot/ci.ctx.hot"
+    )
+    local paths=()
     for root in "${roots[@]}"; do
-        local dir="$PROJECT_ROOT/$root"
-        [[ -d "$dir" ]] || continue
-        if cargo run --quiet -- fmt --check "$dir" > /dev/null 2>&1; then
-            echo -e "${GREEN}✓ $root${NC}"
-        else
-            echo -e "${RED}✗ $root has unformatted files:${NC}"
-            cargo run --quiet -- fmt --check "$dir" 2>&1 | grep -v "properly formatted" || true
-            errors=$((errors + 1))
+        if [[ -e "$PROJECT_ROOT/$root" ]]; then
+            paths+=("$root")
         fi
     done
 
-    echo ""
-    if [[ $errors -eq 0 ]]; then
+    echo "Checking Hot formatting..."
+    echo "=========================="
+    if (cd "$PROJECT_ROOT" && cargo run --quiet -- fmt --check "${paths[@]}"); then
         echo -e "${GREEN}All Hot source is formatted.${NC}"
-        echo "(run 'cargo run -- fmt <dir>' to fix)"
+        echo "(run 'cargo run -- fmt <path>' to fix)"
         return 0
     else
-        echo -e "${RED}$errors source root(s) have formatting drift — run 'cargo run -- fmt <dir>'${NC}"
+        echo -e "${RED}Hot source has formatting drift — run 'cargo run -- fmt <path>'${NC}"
         return 1
     fi
 }

@@ -23,6 +23,24 @@ pub(crate) fn build_secret_scan_opts(
     conf: &hot::val::Val,
     cli_allow_all: bool,
 ) -> hot::secret_scan::SecretScanOpts {
+    let opts = secret_scan_opts_from_conf(conf, cli_allow_all);
+    if cli_allow_all {
+        eprintln!("⚠️  --allow-secret-shape is set: build-time secret-shape scan is disabled.");
+    } else if opts.allow_all {
+        eprintln!(
+            "⚠️  hot.build.allow-secret-shape is set: build-time secret-shape scan is disabled."
+        );
+    }
+    opts
+}
+
+/// The secret-scan allowlist from `hot.build.allow-secret-shape` (a list of
+/// patterns, or `true` for no scan) plus the `--allow-secret-shape` override,
+/// without the warning `hot build` prints.
+pub(crate) fn secret_scan_opts_from_conf(
+    conf: &hot::val::Val,
+    cli_allow_all: bool,
+) -> hot::secret_scan::SecretScanOpts {
     use hot::val::Val;
     let raw = conf.get("build").and_then(|b| b.get("allow-secret-shape"));
     let (mut allow_all, allow_patterns) = match raw {
@@ -41,13 +59,6 @@ pub(crate) fn build_secret_scan_opts(
     };
     if cli_allow_all {
         allow_all = true;
-    }
-    if cli_allow_all {
-        eprintln!("⚠️  --allow-secret-shape is set: build-time secret-shape scan is disabled.");
-    } else if allow_all {
-        eprintln!(
-            "⚠️  hot.build.allow-secret-shape is set: build-time secret-shape scan is disabled."
-        );
     }
     hot::secret_scan::SecretScanOpts::new(allow_patterns, allow_all)
 }
@@ -91,6 +102,9 @@ pub(crate) async fn run_build(
     allow_secret_shape: bool,
     providers: &crate::CliProviders,
 ) -> Result<(), String> {
+    // A fresh checkout's local SQLite database is created on first use,
+    // before the profile is resolved against it.
+    crate::command::init::prepare_local_database(conf, providers).await?;
     let db_uri = conf.get_str("db.uri");
 
     // Extract and resolve profile IDs for execution context
@@ -156,8 +170,6 @@ pub(crate) async fn run_build(
 
     let secret_scan_opts = build_secret_scan_opts(conf, allow_secret_shape);
 
-    // A fresh checkout's local SQLite database is created on first use.
-    crate::command::init::prepare_local_database(conf, providers).await?;
     if let Err(e) = setup_live_build_for_dev_with_secret_scan_opts(
         conf,
         &global_options,

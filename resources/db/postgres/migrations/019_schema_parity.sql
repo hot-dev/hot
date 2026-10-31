@@ -4,26 +4,56 @@
 -- engines genuinely differ (RLS, column types, generated defaults). The schema
 -- parity test holds the two chains together from here.
 
--- Refuse an upgrade over rows the new keys would reject. Repair the named rows
--- and retry instead of rewriting them here.
+-- Refuse an upgrade over rows the new keys would reject, naming them so they
+-- can be repaired before a retry. A plain query here would see only what
+-- FORCE RLS shows the schema owner, which is nothing, and so would a foreign
+-- key's validation, which then passes over any row. Building the unique index
+-- reads every row, but PostgreSQL leaves the key values out of its error, so
+-- on failure the owner lifts FORCE RLS to name the rows; the failed migration
+-- rolls that back. https://hot.dev/docs/migrations#migration-019-refuses-to-run
+-- lists the repairs.
 DO $$
+DECLARE duplicates text;
 BEGIN
-    IF EXISTS (SELECT 1 FROM hot.project GROUP BY env_id, name HAVING count(*) > 1) THEN
-        RAISE EXCEPTION 'Migration 019: an environment has two projects with the same name; rename one and retry';
-    END IF;
-    IF EXISTS (SELECT 1 FROM hot.store_map s WHERE NOT EXISTS (SELECT 1 FROM hot.org o WHERE o.org_id = s.org_id)
-               OR NOT EXISTS (SELECT 1 FROM hot.env e WHERE e.env_id = s.env_id))
-       OR EXISTS (SELECT 1 FROM hot.store_map_entry s WHERE NOT EXISTS (SELECT 1 FROM hot.org o WHERE o.org_id = s.org_id)
-               OR NOT EXISTS (SELECT 1 FROM hot.env e WHERE e.env_id = s.env_id)) THEN
-        RAISE EXCEPTION 'Migration 019: a store references a missing organization or environment';
-    END IF;
+    -- Deploys look projects up by name within an environment.
+    CREATE UNIQUE INDEX idx_project_env_name ON hot.project(env_id, name);
+EXCEPTION WHEN unique_violation THEN
+    ALTER TABLE hot.project NO FORCE ROW LEVEL SECURITY;
+    SELECT string_agg(format('%L in environment %s', name, env_id), ', ') INTO duplicates
+    FROM (SELECT env_id, name FROM hot.project GROUP BY env_id, name HAVING count(*) > 1
+          ORDER BY env_id, name LIMIT 10) duplicated;
+    RAISE EXCEPTION 'Migration 019: an environment has two projects with the same name (%). Rename all but one and retry', duplicates
+        USING HINT = 'See https://hot.dev/docs/migrations#migration-019-refuses-to-run';
 END $$;
 
--- Deploys look projects up by name within an environment.
-CREATE UNIQUE INDEX idx_project_env_name ON hot.project(env_id, name);
-
 -- Stores belong to their organization and environment, as every other
--- runtime resource does.
+-- runtime resource does. The owner checks the store rows with FORCE RLS lifted
+-- on the store tables, which also keeps writers out until this migration
+-- commits, and reads organizations and environments through the
+-- authentication scope, which shows every one without locking them.
+DO $$
+DECLARE orphans text;
+BEGIN
+    ALTER TABLE hot.store_map NO FORCE ROW LEVEL SECURITY;
+    ALTER TABLE hot.store_map_entry NO FORCE ROW LEVEL SECURITY;
+    PERFORM set_config('hot.scope_mode', 'bootstrap', true);
+    PERFORM set_config('hot.scope_operation', 'authentication', true);
+    SELECT string_agg(format('%L in organization %s, environment %s', store_name, org_id, env_id), ', ') INTO orphans
+    FROM (SELECT DISTINCT store_name, org_id, env_id FROM (
+              SELECT name, org_id, env_id FROM hot.store_map
+              UNION ALL SELECT store_name, org_id, env_id FROM hot.store_map_entry) s(store_name, org_id, env_id)
+          WHERE NOT EXISTS (SELECT 1 FROM hot.org o WHERE o.org_id = s.org_id)
+             OR (s.env_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM hot.env e WHERE e.env_id = s.env_id))
+          ORDER BY org_id, env_id, store_name LIMIT 10) missing;
+    PERFORM set_config('hot.scope_mode', '', true);
+    PERFORM set_config('hot.scope_operation', '', true);
+    ALTER TABLE hot.store_map FORCE ROW LEVEL SECURITY;
+    ALTER TABLE hot.store_map_entry FORCE ROW LEVEL SECURITY;
+    IF orphans IS NOT NULL THEN
+        RAISE EXCEPTION 'Migration 019: a store references a missing organization or environment (%). Delete its rows and retry', orphans
+            USING HINT = 'See https://hot.dev/docs/migrations#migration-019-refuses-to-run';
+    END IF;
+END $$;
 ALTER TABLE hot.store_map
     ADD CONSTRAINT store_map_org_id_fkey FOREIGN KEY (org_id) REFERENCES hot.org(org_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     ADD CONSTRAINT store_map_env_id_fkey FOREIGN KEY (env_id) REFERENCES hot.env(env_id) ON UPDATE RESTRICT ON DELETE RESTRICT;

@@ -50,6 +50,14 @@ const STATE_READY: i64 = 0;
 const STATE_LEASED: i64 = 1;
 const STATE_DEAD_LETTER: i64 = 2;
 
+/// `last_error` of a message recovered from a lease whose holder stopped
+/// without settling it. Its next delivery is `recovered`.
+const RECOVERED_MARK: &str = "[recovered: its worker stopped while processing it]";
+/// `last_error` of a delivery its worker processes alone (see
+/// `SqliteQueue::with_crash_quarantine`). Its next delivery is `recovered`
+/// too.
+const PROCESSING_ALONE_MARK: &str = "[processing alone in its worker]";
+
 #[derive(Debug, Error)]
 pub enum SqliteQueueError {
     #[error("queue filesystem error: {0}")]
@@ -155,6 +163,86 @@ fn deserialize<T: DeserializeOwned>(
     }
 }
 
+fn recovered_messages(
+    requeued: impl IntoIterator<Item = (Vec<u8>, i64)>,
+    dead_lettered: impl IntoIterator<Item = (Vec<u8>, i64)>,
+) -> Result<OrphanRecovery, SqliteQueueError> {
+    let decode = |(payload, serialization): (Vec<u8>, i64)| {
+        Ok::<_, SqliteQueueError>(RecoveredQueueMessage::new(
+            payload,
+            serialization_from_id(serialization)?,
+        ))
+    };
+    let requeued_messages = requeued
+        .into_iter()
+        .map(decode)
+        .collect::<Result<Vec<_>, _>>()?;
+    let dead_lettered_messages = dead_lettered
+        .into_iter()
+        .map(decode)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(OrphanRecovery {
+        requeued_count: requeued_messages.len(),
+        requeued_messages,
+        dead_lettered_messages,
+    })
+}
+
+/// This process's host as lease recovery compares it: its host name and, on
+/// Linux, its PID namespace, so a process of another container on the same
+/// host is never taken for one of this host's. Empty when unknown.
+fn process_host() -> &'static str {
+    static HOST: OnceLock<String> = OnceLock::new();
+    HOST.get_or_init(|| {
+        let host = host_name();
+        #[cfg(target_os = "linux")]
+        let host = match std::fs::read_link("/proc/self/ns/pid") {
+            Ok(namespace) if !host.is_empty() => {
+                format!("{host}/{}", namespace.to_string_lossy())
+            }
+            _ => String::new(),
+        };
+        host
+    })
+}
+
+fn host_name() -> String {
+    #[cfg(unix)]
+    {
+        let mut buffer = [0u8; 256];
+        // SAFETY: the buffer is valid for writes of its whole length.
+        if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0 {
+            let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(0);
+            return String::from_utf8_lossy(&buffer[..end]).into_owned();
+        }
+    }
+    String::new()
+}
+
+/// Whether this host's process `process_id` no longer exists. Unknown counts
+/// as alive.
+fn process_gone(process_id: i64) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = libc::pid_t::try_from(process_id) else {
+            return false;
+        };
+        if pid <= 0 {
+            return false;
+        }
+        // SAFETY: signal 0 only checks that the process exists.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return false;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = process_id;
+        false
+    }
+}
+
 /// Queue databases are always project-local and are not affected by `db.uri`.
 pub fn default_queue_dir() -> PathBuf {
     PathBuf::from(".hot/db/queue")
@@ -193,6 +281,8 @@ struct SharedQueue {
     notifications_tx: async_channel::Sender<String>,
     notifications_rx: async_channel::Receiver<String>,
     initialized: OnceCell<()>,
+    /// Consumers of this process already recorded in `queue_consumer`.
+    registered_consumers: Mutex<std::collections::HashSet<String>>,
 }
 
 type SharedRegistry = Mutex<HashMap<PathBuf, Arc<SharedQueue>>>;
@@ -219,6 +309,7 @@ fn create_shared(queue_name: &str, path: &Path) -> Result<Arc<SharedQueue>, Sqli
         notifications_tx,
         notifications_rx,
         initialized: OnceCell::new(),
+        registered_consumers: Mutex::new(std::collections::HashSet::new()),
     }))
 }
 
@@ -350,6 +441,19 @@ impl SharedQueue {
         )
         .execute(&mut *tx)
         .await?;
+        // Which process holds a consumer's leases, so recovery can take the
+        // leases of a process that is gone before they expire. Older builds
+        // ignore the table.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS queue_consumer (\
+                        consumer_name TEXT PRIMARY KEY NOT NULL,\
+                        process_host TEXT NOT NULL,\
+                        process_id INTEGER NOT NULL,\
+                        registered_at_ms INTEGER NOT NULL\
+                    )",
+        )
+        .execute(&mut *tx)
+        .await?;
 
         sqlx::query(
             "INSERT OR IGNORE INTO queue_metadata \
@@ -397,6 +501,7 @@ struct StoredMessage {
     retry_count: i64,
     redelivered: i64,
     lease_token: String,
+    last_error: Option<String>,
 }
 
 pub struct SqliteQueue<T> {
@@ -406,6 +511,7 @@ pub struct SqliteQueue<T> {
     lease_duration: Duration,
     poll_interval: Duration,
     startup_window: Option<Duration>,
+    crash_quarantine: bool,
     _item: PhantomData<fn() -> T>,
 }
 
@@ -418,6 +524,7 @@ impl<T> Clone for SqliteQueue<T> {
             lease_duration: self.lease_duration,
             poll_interval: self.poll_interval,
             startup_window: self.startup_window,
+            crash_quarantine: self.crash_quarantine,
             _item: PhantomData,
         }
     }
@@ -438,6 +545,7 @@ impl<T> SqliteQueue<T> {
             lease_duration: DEFAULT_LEASE_DURATION,
             poll_interval: CROSS_PROCESS_POLL_INTERVAL,
             startup_window: None,
+            crash_quarantine: false,
             _item: PhantomData,
         })
     }
@@ -459,6 +567,20 @@ impl<T> SqliteQueue<T> {
 
     pub fn with_startup_window(mut self, startup_window: Duration) -> Self {
         self.startup_window = Some(startup_window);
+        self
+    }
+
+    /// For a consumer that processes the deliveries of stopped workers alone
+    /// (`SqliteQueueLease::recovered`, `SoleDeliveryMarker`): a worker that
+    /// stops kills every delivery it holds, but only one it processed alone
+    /// is known to have stopped it. So a lease whose holder stopped counts
+    /// toward the message's retry limit only when its delivery was marked as
+    /// processing alone; the others are requeued for another attempt.
+    /// Expired leases are then recovered only through
+    /// `recover_orphaned_items*`, never taken over by a claim, so the caller
+    /// can settle a recovered message before it runs again.
+    pub fn with_crash_quarantine(mut self) -> Self {
+        self.crash_quarantine = true;
         self
     }
 
@@ -490,60 +612,203 @@ impl<T> SqliteQueue<T> {
     pub async fn recover_orphaned_items_with_data(
         &self,
     ) -> Result<OrphanRecovery, SqliteQueueError> {
+        self.recover_orphaned_items_then(|_| async {}).await
+    }
+
+    /// Recover the messages of leases whose holders stopped without settling
+    /// them: expired leases and, with crash quarantine, the leases of this
+    /// host's processes that are gone. A message is dead-lettered once its
+    /// retries are spent; otherwise it is requeued, marked `recovered`.
+    /// `settle` sees the recovery before a requeued message can be claimed
+    /// again, so it can prepare the message's next delivery.
+    pub async fn recover_orphaned_items_then<F, Fut>(
+        &self,
+        settle: F,
+    ) -> Result<OrphanRecovery, SqliteQueueError>
+    where
+        F: FnOnce(&OrphanRecovery) -> Fut,
+        Fut: Future<Output = ()>,
+    {
         self.shared.ensure_initialized().await?;
-        let current_ms = now_ms();
-        let mut tx = self.shared.pool().begin().await?;
-        let dead_lettered: Vec<(Vec<u8>, i64)> = sqlx::query_as(
-            "UPDATE queue_message SET state = 2, retry_count = retry_count + 1, \
-             redelivered = 1, last_error = COALESCE(last_error, 'lease expired after retry limit'), \
-             lease_owner = NULL, lease_token = NULL, lease_until_ms = NULL \
-             WHERE state = 1 AND lease_until_ms <= ? AND retry_count + 1 >= ? \
-             RETURNING payload, serialization",
-        )
-        .bind(current_ms)
-        .bind(MAX_PROCESSING_RETRIES)
-        .fetch_all(&mut *tx)
-        .await?;
-        let requeued: Vec<(String, Vec<u8>, i64)> = sqlx::query_as(
-            "UPDATE queue_message SET state = 0, retry_count = retry_count + 1, redelivered = 1, \
-             available_at_ms = ?, lease_owner = NULL, lease_token = NULL, lease_until_ms = NULL \
-             WHERE state = 1 AND lease_until_ms <= ? AND retry_count + 1 < ? \
-             RETURNING message_id, payload, serialization",
-        )
-        .bind(current_ms)
-        .bind(current_ms)
-        .bind(MAX_PROCESSING_RETRIES)
-        .fetch_all(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        for (message_id, _, _) in &requeued {
-            self.shared.notify(message_id.clone());
+        if self.crash_quarantine {
+            self.expire_leases_of_gone_processes().await?;
         }
+        let current_ms = now_ms();
+        let recovery_token = Uuid::now_v7().to_string();
+        let mut tx = self.shared.pool().begin().await?;
+        // With crash quarantine only a delivery processed alone counts its
+        // worker's stop: the others were bystanders.
+        let dead_lettered: Vec<(Vec<u8>, i64)> = if self.crash_quarantine {
+            sqlx::query_as(
+                "UPDATE queue_message SET state = 2, retry_count = retry_count + 1, \
+                 redelivered = 1, last_error = ?, \
+                 lease_owner = NULL, lease_token = NULL, lease_until_ms = NULL \
+                 WHERE state = 1 AND lease_until_ms <= ? AND IFNULL(last_error, '') = ? \
+                 AND retry_count + 1 >= ? \
+                 RETURNING payload, serialization",
+            )
+            .bind(format!(
+                "its worker stopped each time it processed it alone, {MAX_PROCESSING_RETRIES} times"
+            ))
+            .bind(current_ms)
+            .bind(PROCESSING_ALONE_MARK)
+            .bind(MAX_PROCESSING_RETRIES)
+            .fetch_all(&mut *tx)
+            .await?
+        } else {
+            sqlx::query_as(
+                "UPDATE queue_message SET state = 2, retry_count = retry_count + 1, \
+                 redelivered = 1, last_error = COALESCE(last_error, 'lease expired after retry limit'), \
+                 lease_owner = NULL, lease_token = NULL, lease_until_ms = NULL \
+                 WHERE state = 1 AND lease_until_ms <= ? AND retry_count + 1 >= ? \
+                 RETURNING payload, serialization",
+            )
+            .bind(current_ms)
+            .bind(MAX_PROCESSING_RETRIES)
+            .fetch_all(&mut *tx)
+            .await?
+        };
+        // Requeued messages stay leased to the recovery until `settle` has
+        // seen them.
+        let requeued: Vec<(String, Vec<u8>, i64)> = if self.crash_quarantine {
+            sqlx::query_as(
+                "UPDATE queue_message SET \
+                    retry_count = retry_count + CASE WHEN IFNULL(last_error, '') = ? THEN 1 ELSE 0 END, \
+                    redelivered = 1, last_error = ?, \
+                    lease_owner = ?, lease_token = ?, lease_until_ms = ? \
+                 WHERE state = 1 AND lease_until_ms <= ? \
+                 RETURNING message_id, payload, serialization",
+            )
+            .bind(PROCESSING_ALONE_MARK)
+            .bind(RECOVERED_MARK)
+            .bind(&self.consumer_name)
+            .bind(&recovery_token)
+            .bind(self.lease_until_ms())
+            .bind(current_ms)
+            .fetch_all(&mut *tx)
+            .await?
+        } else {
+            sqlx::query_as(
+                "UPDATE queue_message SET retry_count = retry_count + 1, \
+                    redelivered = 1, last_error = ?, \
+                    lease_owner = ?, lease_token = ?, lease_until_ms = ? \
+                 WHERE state = 1 AND lease_until_ms <= ? AND retry_count + 1 < ? \
+                 RETURNING message_id, payload, serialization",
+            )
+            .bind(RECOVERED_MARK)
+            .bind(&self.consumer_name)
+            .bind(&recovery_token)
+            .bind(self.lease_until_ms())
+            .bind(current_ms)
+            .bind(MAX_PROCESSING_RETRIES)
+            .fetch_all(&mut *tx)
+            .await?
+        };
+        tx.commit().await?;
         self.trim_dead_letters().await?;
 
-        let requeued_messages = requeued
-            .into_iter()
-            .map(|(_, payload, serialization)| {
-                Ok(RecoveredQueueMessage::new(
-                    payload,
-                    serialization_from_id(serialization)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, SqliteQueueError>>()?;
-        let dead_lettered_messages = dead_lettered
-            .into_iter()
-            .map(|(payload, serialization)| {
-                Ok(RecoveredQueueMessage::new(
-                    payload,
-                    serialization_from_id(serialization)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, SqliteQueueError>>()?;
-        Ok(OrphanRecovery {
-            requeued_count: requeued_messages.len(),
-            requeued_messages,
-            dead_lettered_messages,
-        })
+        let recovery = recovered_messages(
+            requeued
+                .iter()
+                .map(|(_, payload, serialization)| (payload.clone(), *serialization)),
+            dead_lettered,
+        );
+        if let Ok(recovery) = &recovery {
+            settle(recovery).await;
+        }
+        // Release the requeued messages even when one could not be decoded.
+        if !requeued.is_empty() {
+            let released: Vec<(String,)> = sqlx::query_as(
+                "UPDATE queue_message SET state = 0, available_at_ms = ?, \
+                 lease_owner = NULL, lease_token = NULL, lease_until_ms = NULL \
+                 WHERE state = 1 AND lease_token = ? RETURNING message_id",
+            )
+            .bind(now_ms())
+            .bind(&recovery_token)
+            .fetch_all(self.shared.pool())
+            .await?;
+            for (message_id,) in released {
+                self.shared.notify(message_id);
+            }
+        }
+        recovery
+    }
+
+    /// With crash quarantine: expire the leases of this host's consumers
+    /// whose processes are gone, so a restarted worker recovers the
+    /// deliveries of the one that stopped at once instead of after the lease.
+    async fn expire_leases_of_gone_processes(&self) -> Result<(), SqliteQueueError> {
+        let host = process_host();
+        if host.is_empty() {
+            return Ok(());
+        }
+        let consumers: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT consumer_name, process_id FROM queue_consumer WHERE process_host = ?",
+        )
+        .bind(host)
+        .fetch_all(self.shared.pool())
+        .await?;
+        for (consumer_name, process_id) in consumers {
+            if process_id == i64::from(std::process::id()) || !process_gone(process_id) {
+                continue;
+            }
+            sqlx::query(
+                "UPDATE queue_message SET lease_until_ms = 0 \
+                 WHERE state = 1 AND lease_owner = ?",
+            )
+            .bind(&consumer_name)
+            .execute(self.shared.pool())
+            .await?;
+            sqlx::query("DELETE FROM queue_consumer WHERE consumer_name = ? AND process_id = ?")
+                .bind(&consumer_name)
+                .bind(process_id)
+                .execute(self.shared.pool())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// With crash quarantine: record which process holds this consumer's
+    /// leases (see `expire_leases_of_gone_processes`).
+    async fn register_consumer(&self) {
+        let host = process_host();
+        if !self.crash_quarantine || host.is_empty() {
+            return;
+        }
+        if self
+            .shared
+            .registered_consumers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&self.consumer_name)
+        {
+            return;
+        }
+        let registered = sqlx::query(
+            "INSERT OR REPLACE INTO queue_consumer \
+             (consumer_name, process_host, process_id, registered_at_ms) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&self.consumer_name)
+        .bind(host)
+        .bind(i64::from(std::process::id()))
+        .bind(now_ms())
+        .execute(self.shared.pool())
+        .await;
+        match registered {
+            Ok(_) => {
+                self.shared
+                    .registered_consumers
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(self.consumer_name.clone());
+            }
+            Err(error) => tracing::warn!(
+                queue = self.shared.queue_name,
+                consumer = self.consumer_name,
+                "Failed to register SQLite queue consumer: {}",
+                error
+            ),
+        }
     }
 
     pub async fn purge_old_pending(&self, _max_age_ms: u64) -> Result<usize, SqliteQueueError> {
@@ -600,7 +865,10 @@ where
         message_id: Option<&str>,
     ) -> Result<Option<SqliteQueueLease<T>>, SqliteQueueError> {
         self.shared.ensure_initialized().await?;
+        self.register_consumer().await;
         let current_ms = now_ms();
+        // With crash quarantine only recovery takes over expired leases.
+        let takeover = i64::from(!self.crash_quarantine);
 
         let lease_token = Uuid::now_v7().to_string();
         let row = if let Some(message_id) = message_id {
@@ -608,13 +876,15 @@ where
                 "UPDATE queue_message SET \
                     retry_count = retry_count + CASE WHEN state = 1 THEN 1 ELSE 0 END, \
                     redelivered = CASE WHEN state = 1 OR retry_count > 0 THEN 1 ELSE redelivered END, \
+                    last_error = CASE WHEN state = 1 THEN ? ELSE last_error END, \
                     state = 1, lease_owner = ?, lease_token = ?, lease_until_ms = ? \
                  WHERE message_id = ? AND (\
                     (state = 0 AND available_at_ms <= ?) OR \
-                    (state = 1 AND lease_until_ms <= ? AND retry_count + 1 < ?)\
+                    (state = 1 AND lease_until_ms <= ? AND retry_count + 1 < ? AND ? = 1)\
                  ) \
-                 RETURNING message_id, payload, serialization, created_at_ms, retry_count, redelivered, lease_token",
+                 RETURNING message_id, payload, serialization, created_at_ms, retry_count, redelivered, lease_token, last_error",
             )
+            .bind(RECOVERED_MARK)
             .bind(&self.consumer_name)
             .bind(&lease_token)
             .bind(self.lease_until_ms())
@@ -622,6 +892,7 @@ where
             .bind(current_ms)
             .bind(current_ms)
             .bind(MAX_PROCESSING_RETRIES)
+            .bind(takeover)
             .fetch_optional(self.shared.pool())
             .await?
         } else {
@@ -629,21 +900,24 @@ where
                 "UPDATE queue_message SET \
                     retry_count = retry_count + CASE WHEN state = 1 THEN 1 ELSE 0 END, \
                     redelivered = CASE WHEN state = 1 OR retry_count > 0 THEN 1 ELSE redelivered END, \
+                    last_error = CASE WHEN state = 1 THEN ? ELSE last_error END, \
                     state = 1, lease_owner = ?, lease_token = ?, lease_until_ms = ? \
                  WHERE message_id = (\
                     SELECT message_id FROM queue_message WHERE \
                         (state = 0 AND available_at_ms <= ?) OR \
-                        (state = 1 AND lease_until_ms <= ? AND retry_count + 1 < ?) \
+                        (state = 1 AND lease_until_ms <= ? AND retry_count + 1 < ? AND ? = 1) \
                     ORDER BY created_at_ms, message_id LIMIT 1\
                  ) \
-                 RETURNING message_id, payload, serialization, created_at_ms, retry_count, redelivered, lease_token",
+                 RETURNING message_id, payload, serialization, created_at_ms, retry_count, redelivered, lease_token, last_error",
             )
+            .bind(RECOVERED_MARK)
             .bind(&self.consumer_name)
             .bind(&lease_token)
             .bind(self.lease_until_ms())
             .bind(current_ms)
             .bind(current_ms)
             .bind(MAX_PROCESSING_RETRIES)
+            .bind(takeover)
             .fetch_optional(self.shared.pool())
             .await?
         };
@@ -661,6 +935,10 @@ where
                 serialization: row.serialization,
                 retry_count: row.retry_count,
                 redelivered: row.redelivered != 0,
+                recovered: matches!(
+                    row.last_error.as_deref(),
+                    Some(RECOVERED_MARK | PROCESSING_ALONE_MARK)
+                ),
                 lease_token: row.lease_token,
                 claimed_at,
                 enqueued_at,
@@ -831,6 +1109,29 @@ where
     }
 }
 
+/// Marks a delivery as processing alone in its worker, so the worker's stop
+/// counts toward the message's retry limit.
+pub struct SoleDeliveryMarker {
+    shared: Arc<SharedQueue>,
+    message_id: String,
+    lease_token: String,
+}
+
+impl SoleDeliveryMarker {
+    pub async fn mark(&self) -> Result<(), SqliteQueueError> {
+        sqlx::query(
+            "UPDATE queue_message SET last_error = ? \
+             WHERE message_id = ? AND state = 1 AND lease_token = ?",
+        )
+        .bind(PROCESSING_ALONE_MARK)
+        .bind(&self.message_id)
+        .bind(&self.lease_token)
+        .execute(self.shared.pool())
+        .await?;
+        Ok(())
+    }
+}
+
 pub struct SqliteQueueLease<T>
 where
     T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
@@ -841,6 +1142,7 @@ where
     serialization: i64,
     retry_count: i64,
     redelivered: bool,
+    recovered: bool,
     lease_token: String,
     claimed_at: chrono::DateTime<chrono::Utc>,
     enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -859,6 +1161,30 @@ where
             queue_wait: self.queue_wait,
             redelivered: self.redelivered,
         }
+    }
+
+    /// Whether the message's previous delivery never settled: its worker
+    /// stopped while holding the lease.
+    pub fn recovered(&self) -> bool {
+        self.recovered
+    }
+
+    /// Whether a counted failure of this delivery dead-letters the message.
+    pub fn last_attempt(&self) -> bool {
+        self.retry_count + 1 >= MAX_PROCESSING_RETRIES
+    }
+
+    /// With crash quarantine, a handle to mark this delivery as processing
+    /// alone in its worker (see `SqliteQueue::with_crash_quarantine`).
+    pub fn sole_delivery_marker(&self) -> Option<super::SoleDeliveryMarker> {
+        if !self.queue.crash_quarantine {
+            return None;
+        }
+        Some(super::SoleDeliveryMarker(SoleDeliveryMarker {
+            shared: Arc::clone(&self.queue.shared),
+            message_id: self.message_id.clone()?,
+            lease_token: self.lease_token.clone(),
+        }))
     }
 
     pub async fn process<F, Fut, R>(
@@ -1323,6 +1649,9 @@ impl SqliteQueueAdmin {
         sqlx::query("DROP TABLE IF EXISTS queue_metadata")
             .execute(&mut *tx)
             .await?;
+        sqlx::query("DROP TABLE IF EXISTS queue_consumer")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("PRAGMA user_version = 0")
             .execute(&mut *tx)
             .await?;
@@ -1515,6 +1844,7 @@ mod tests {
             lease_duration: DEFAULT_LEASE_DURATION,
             poll_interval: Duration::from_millis(10),
             startup_window: None,
+            crash_quarantine: false,
             _item: PhantomData,
         }
     }
@@ -1805,6 +2135,182 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(row, (STATE_DEAD_LETTER, MAX_PROCESSING_RETRIES));
+    }
+
+    /// Expire a lease as if its holder stopped, keeping its delivery's mark.
+    async fn expire_lease<T>(queue: &SqliteQueue<T>, message_id: &str) {
+        sqlx::query("UPDATE queue_message SET lease_until_ms = ? WHERE message_id = ?")
+            .bind(now_ms() - 1)
+            .bind(message_id)
+            .execute(queue.shared.pool())
+            .await
+            .unwrap();
+    }
+
+    async fn state_and_retries<T>(queue: &SqliteQueue<T>, message_id: &str) -> (i64, i64) {
+        sqlx::query_as("SELECT state, retry_count FROM queue_message WHERE message_id = ?")
+            .bind(message_id)
+            .fetch_one(queue.shared.pool())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn crash_quarantine_counts_only_the_stops_of_deliveries_processed_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue =
+            test_queue::<String>(temp.path(), "quarantine-counting").with_crash_quarantine();
+        queue.enqueue("bystander".to_string()).await.unwrap();
+        let mut lease = queue.claim_now().await.unwrap().unwrap();
+        assert!(!lease.recovered());
+        let message_id = lease.message_id.clone().unwrap();
+        lease.completed = true;
+
+        // A stopped worker's bystander comes back, uncounted, however often,
+        // and only recovery takes over its expired lease.
+        for _ in 0..MAX_PROCESSING_RETRIES + 1 {
+            expire_lease(&queue, &message_id).await;
+            assert!(queue.claim_now().await.unwrap().is_none());
+            let recovery = queue.recover_orphaned_items_with_data().await.unwrap();
+            assert_eq!(recovery.requeued_count, 1);
+            assert!(recovery.dead_lettered_messages.is_empty());
+            assert_eq!(
+                state_and_retries(&queue, &message_id).await,
+                (STATE_READY, 0)
+            );
+            let mut lease = queue.claim_now().await.unwrap().unwrap();
+            assert!(lease.recovered());
+            lease.completed = true;
+        }
+
+        // Processed alone, each stop counts, until the message is dead-lettered.
+        let mut lease = queue.claim_now().await.unwrap_or(None);
+        assert!(lease.is_none());
+        for attempt in 1..=MAX_PROCESSING_RETRIES {
+            let mark = SoleDeliveryMarker {
+                shared: Arc::clone(&queue.shared),
+                message_id: message_id.clone(),
+                lease_token: sqlx::query_scalar(
+                    "SELECT lease_token FROM queue_message WHERE message_id = ?",
+                )
+                .bind(&message_id)
+                .fetch_one(queue.shared.pool())
+                .await
+                .unwrap(),
+            };
+            mark.mark().await.unwrap();
+            expire_lease(&queue, &message_id).await;
+            let recovery = queue.recover_orphaned_items_with_data().await.unwrap();
+            if attempt < MAX_PROCESSING_RETRIES {
+                assert_eq!(recovery.requeued_count, 1);
+                assert_eq!(
+                    state_and_retries(&queue, &message_id).await,
+                    (STATE_READY, attempt)
+                );
+                lease = queue.claim_now().await.unwrap();
+                let lease = lease.as_mut().unwrap();
+                assert!(lease.recovered());
+                assert_eq!(lease.last_attempt(), attempt + 1 == MAX_PROCESSING_RETRIES);
+                lease.completed = true;
+            } else {
+                assert_eq!(recovery.dead_lettered_messages.len(), 1);
+                assert_eq!(
+                    state_and_retries(&queue, &message_id).await,
+                    (STATE_DEAD_LETTER, MAX_PROCESSING_RETRIES)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_settles_requeued_messages_before_they_can_be_claimed() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = test_queue::<String>(temp.path(), "settle-before-release");
+        queue.enqueue("orphan".to_string()).await.unwrap();
+        let mut lease = queue.claim_now().await.unwrap().unwrap();
+        let message_id = lease.message_id.clone().unwrap();
+        lease.completed = true;
+        expire_lease(&queue, &message_id).await;
+
+        let claimer = queue.clone().with_consumer_name("claimer".to_string());
+        let claimed_while_settling = Arc::new(AtomicUsize::new(0));
+        let claimed = Arc::clone(&claimed_while_settling);
+        let recovery = queue
+            .recover_orphaned_items_then(|recovery| {
+                assert_eq!(recovery.requeued_count, 1);
+                let claimer = claimer.clone();
+                async move {
+                    if let Some(mut lease) = claimer.claim_now().await.unwrap() {
+                        lease.completed = true;
+                        claimed.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(recovery.requeued_count, 1);
+        assert_eq!(claimed_while_settling.load(Ordering::SeqCst), 0);
+        let mut lease = claimer.claim_now().await.unwrap().unwrap();
+        assert!(lease.recovered());
+        lease.completed = true;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn crash_quarantine_recovers_the_leases_of_a_process_that_is_gone() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = test_queue::<String>(temp.path(), "gone-process").with_crash_quarantine();
+        queue.enqueue("orphan".to_string()).await.unwrap();
+        let mut lease = queue.claim_now().await.unwrap().unwrap();
+        let message_id = lease.message_id.clone().unwrap();
+        lease.completed = true;
+        if process_host().is_empty() {
+            return;
+        }
+
+        // A live process keeps its unexpired lease.
+        assert_eq!(
+            queue
+                .recover_orphaned_items_with_data()
+                .await
+                .unwrap()
+                .total_count(),
+            0
+        );
+
+        // Hand the lease to a process that has exited.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let gone_pid = i64::from(child.id());
+        child.wait().unwrap();
+        assert!(process_gone(gone_pid));
+        sqlx::query("UPDATE queue_message SET lease_owner = 'stopped-worker' WHERE message_id = ?")
+            .bind(&message_id)
+            .execute(queue.shared.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO queue_consumer (consumer_name, process_host, process_id, registered_at_ms) \
+             VALUES ('stopped-worker', ?, ?, 0)",
+        )
+        .bind(process_host())
+        .bind(gone_pid)
+        .execute(queue.shared.pool())
+        .await
+        .unwrap();
+
+        let recovery = queue.recover_orphaned_items_with_data().await.unwrap();
+        assert_eq!(recovery.requeued_count, 1);
+        assert_eq!(
+            state_and_retries(&queue, &message_id).await,
+            (STATE_READY, 0)
+        );
+        let registered: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM queue_consumer WHERE consumer_name = 'stopped-worker'",
+        )
+        .fetch_one(queue.shared.pool())
+        .await
+        .unwrap();
+        assert_eq!(registered, 0);
     }
 
     #[tokio::test]

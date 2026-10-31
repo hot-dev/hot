@@ -2122,6 +2122,355 @@ async fn test_stream_subscription_multiplexes_durable_task_updates() {
     assert!(completed.contains("\"answer\":42"));
 }
 
+/// Forward an SSE body's events (`event:` name and `data:` JSON) to a
+/// channel as they arrive.
+fn spawn_sse_reader<S>(
+    mut body: S,
+) -> (
+    tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
+    tokio::task::JoinHandle<()>,
+)
+where
+    S: futures::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let reader = tokio::spawn(async move {
+        let mut buffer = String::new();
+        while let Some(Ok(chunk)) = body.next().await {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(end) = buffer.find("\n\n") {
+                let frame: String = buffer.drain(..end + 2).collect();
+                let name = frame.lines().find_map(|l| l.strip_prefix("event: "));
+                let data = frame.lines().find_map(|l| l.strip_prefix("data: "));
+                if let (Some(name), Some(data)) = (name, data)
+                    && tx
+                        .send((name.to_string(), serde_json::from_str(data).unwrap()))
+                        .is_err()
+                {
+                    return;
+                }
+            }
+        }
+    });
+    (rx, reader)
+}
+
+/// Pushed `stream:data` and a run's end can reach the SSE handler before
+/// the run's `run:start` (it used to come only from the DB poll, after the
+/// run had ended). Each run's `run:start` must come first, then its data,
+/// then its end, each once.
+#[tokio::test]
+async fn test_stream_subscription_announces_each_run_before_its_data_and_end() {
+    use hot::db::run::RunStatus;
+    use hot::stream::{
+        StreamEvent as PubSubEvent, StreamPubSub, StreamPubSubType, StreamPublisher,
+    };
+
+    let mut state = create_test_db().await;
+    let pubsub = Arc::new(StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap());
+    state.3 = Some(Arc::clone(&pubsub));
+    let db = state.0.clone();
+    let (_api_key_id, api_key) = create_test_api_key(&db).await;
+    let (_, user_id) = hot::db::get_default_org_and_user_ids(&db).await.unwrap();
+    let env_id = Env::get_default_env(&db).await.unwrap().env_id;
+    let project_id = create_test_project(&db, &env_id, &user_id).await;
+    let build_id = create_test_build(&db, &project_id, &user_id, false).await;
+    let stream_id = Uuid::now_v7();
+    Stream::create_or_get_stream(&db, stream_id, env_id)
+        .await
+        .unwrap();
+
+    let api_v1_routes = axum::Router::new()
+        .route(
+            "/v1/streams/{stream_id}/subscribe",
+            axum::routing::get(hot_api::handlers::subscribe_to_stream),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            hot_api::auth::api_key_auth_middleware,
+        ));
+    let app = axum::Router::new()
+        .merge(api_v1_routes)
+        .with_state(state.clone());
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/v1/streams/{stream_id}/subscribe"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let (mut sse, reader) = spawn_sse_reader(response.into_body().into_data_stream());
+    // Past the subscription's first DB poll, which finds no runs; the next
+    // is a second later.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let data = |run_id, n: i64| PubSubEvent::StreamData {
+        stream_data_id: Uuid::now_v7(),
+        run_id,
+        env_id: Some(env_id),
+        stream_id,
+        data_type: "chunk".to_string(),
+        payload: json!(n),
+    };
+    let stop = |run_id| PubSubEvent::RunStop {
+        run_id,
+        env_id,
+        stream_id,
+        event_id: None,
+        result: None,
+    };
+    let insert = |run_id| {
+        let db = db.clone();
+        async move {
+            Run::insert_run(
+                &db,
+                &run_id,
+                &env_id,
+                &stream_id,
+                Some(&build_id),
+                RunType::Call.as_id(),
+                None,
+                &user_id,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let finish = |run_id| {
+        let db = db.clone();
+        async move {
+            Run::update_stop_time_and_status(&db, &run_id, None, &RunStatus::Succeeded)
+                .await
+                .unwrap();
+        }
+    };
+
+    // A run whose run:start was never pushed streams and ends at once.
+    let first = Uuid::now_v7();
+    insert(first).await;
+    for n in 1..=3 {
+        pubsub.publish(data(first, n)).await.unwrap();
+    }
+    finish(first).await;
+    pubsub.publish(stop(first)).await.unwrap();
+    // A run that announces itself, as the worker now does.
+    let second = Uuid::now_v7();
+    insert(second).await;
+    pubsub
+        .publish(PubSubEvent::RunStart {
+            run_id: second,
+            env_id,
+            stream_id,
+            event_id: None,
+        })
+        .await
+        .unwrap();
+    pubsub.publish(data(second, 4)).await.unwrap();
+    finish(second).await;
+    pubsub.publish(stop(second)).await.unwrap();
+
+    let mut events: Vec<(String, Value)> = Vec::new();
+    while events.iter().filter(|(name, _)| name == "run:stop").count() < 2 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), sse.recv())
+            .await
+            .expect("both runs should end")
+            .expect("SSE stream ended early");
+        events.push(event);
+    }
+    // Let the DB poll (every second with pub/sub) see both finished runs:
+    // it must not repeat their events.
+    let settle = tokio::time::Instant::now() + std::time::Duration::from_millis(2_500);
+    while let Ok(Some(event)) = tokio::time::timeout_at(settle, sse.recv()).await {
+        events.push(event);
+    }
+    reader.abort();
+
+    let observed: Vec<(String, String)> = events
+        .iter()
+        .filter(|(name, _)| name.starts_with("run:") || name == "stream:data")
+        .map(|(name, data)| {
+            let run_id = data["run"]["run_id"]
+                .as_str()
+                .or_else(|| data["run_id"].as_str())
+                .unwrap()
+                .to_string();
+            (name.clone(), run_id)
+        })
+        .collect();
+    let expected: Vec<(String, String)> = [
+        ("run:start", first),
+        ("stream:data", first),
+        ("stream:data", first),
+        ("stream:data", first),
+        ("run:stop", first),
+        ("run:start", second),
+        ("stream:data", second),
+        ("run:stop", second),
+    ]
+    .into_iter()
+    .map(|(name, run_id)| (name.to_string(), run_id.to_string()))
+    .collect();
+    assert_eq!(observed, expected);
+}
+
+/// Open `/v1/streams/{stream_id}/subscribe` and forward its events.
+async fn subscribe_stream_events(
+    state: &hot_api::ApiStateData,
+    api_key: &str,
+    stream_id: Uuid,
+) -> (
+    tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
+    tokio::task::JoinHandle<()>,
+) {
+    let api_v1_routes = axum::Router::new()
+        .route(
+            "/v1/streams/{stream_id}/subscribe",
+            axum::routing::get(hot_api::handlers::subscribe_to_stream),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            hot_api::auth::api_key_auth_middleware,
+        ));
+    let app = axum::Router::new()
+        .merge(api_v1_routes)
+        .with_state(state.clone());
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/v1/streams/{stream_id}/subscribe"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    spawn_sse_reader(response.into_body().into_data_stream())
+}
+
+/// Receive run events until `count` `run:fail` events have arrived.
+async fn receive_run_fails(
+    sse: &mut tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
+    count: usize,
+) -> Vec<(String, Value)> {
+    let mut events = Vec::new();
+    while events.iter().filter(|(name, _)| name == "run:fail").count() < count {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), sse.recv())
+            .await
+            .expect("run:fail should arrive")
+            .expect("SSE stream ended early");
+        if event.0.starts_with("run:") {
+            events.push(event);
+        }
+    }
+    events
+}
+
+/// A failed attempt whose retry is scheduled is never a success and never
+/// a final failure on the stream, whether it is still `pending_retry` or
+/// the retry scheduler has already stored it as `failed`: its `run:fail`
+/// reports `status: pending_retry`, and names the retry once that runs.
+#[tokio::test]
+async fn test_stream_subscription_reports_retried_attempts_as_pending_retry() {
+    let state = create_test_db().await;
+    let db = state.0.clone();
+    let hot::db::DatabasePool::Sqlite(pool) = db.as_ref() else {
+        unreachable!("integration tests use SQLite")
+    };
+    let (_api_key_id, api_key) = create_test_api_key(&db).await;
+    let (_, user_id) = hot::db::get_default_org_and_user_ids(&db).await.unwrap();
+    let env_id = Env::get_default_env(&db).await.unwrap().env_id;
+    let project_id = create_test_project(&db, &env_id, &user_id).await;
+    let build_id = create_test_build(&db, &project_id, &user_id, false).await;
+    let stream_id = Uuid::now_v7();
+    let started = chrono::Utc::now() - chrono::Duration::seconds(60);
+    let insert = |run_id: Uuid, origin: Option<Uuid>, seconds: i64| {
+        let db = db.clone();
+        async move {
+            Run::insert_run(
+                &db,
+                &run_id,
+                &env_id,
+                &stream_id,
+                Some(&build_id),
+                RunType::Event.as_id(),
+                origin.as_ref(),
+                &user_id,
+                Some(started + chrono::Duration::seconds(seconds)),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+    };
+    // What the worker stores for a failed attempt: its status, and its
+    // retry_attempt raised by one when a retry is scheduled.
+    let fail = |run_id: Uuid, status_id: i16, retry_attempt: i16| async move {
+        sqlx::query(
+            "UPDATE run SET stop_time = ?, status_id = ?, retry_attempt = ? WHERE run_id = ?",
+        )
+        .bind(chrono::Utc::now())
+        .bind(status_id)
+        .bind(retry_attempt)
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    };
+
+    // A retry is scheduled and queued: the scheduler marks the attempt failed.
+    let queued = Uuid::now_v7();
+    insert(queued, None, 0).await;
+    fail(queued, 5, 1).await;
+    Run::mark_retry_as_failed(&db, &queued).await.unwrap();
+    // A failure with no retry.
+    let final_failure = Uuid::now_v7();
+    insert(final_failure, None, 1).await;
+    fail(final_failure, 3, 0).await;
+    // A retry that is scheduled but not yet queued.
+    let pending = Uuid::now_v7();
+    insert(pending, None, 2).await;
+    fail(pending, 5, 1).await;
+
+    let (mut sse, reader) = subscribe_stream_events(&state, &api_key, stream_id).await;
+    let run_fail = |events: &[(String, Value)], run_id: Uuid| {
+        events
+            .iter()
+            .find(|(name, data)| {
+                name == "run:fail" && data["run"]["run_id"] == json!(run_id.to_string())
+            })
+            .map(|(_, data)| data.clone())
+            .expect("run:fail for the run")
+    };
+    let events = receive_run_fails(&mut sse, 3).await;
+    assert!(
+        events.iter().all(|(name, _)| name != "run:stop"),
+        "{events:?}"
+    );
+    let queued_fail = run_fail(&events, queued);
+    assert_eq!(queued_fail["run"]["status"], "pending_retry");
+    assert!(queued_fail.get("retry_run_id").is_none());
+    assert_eq!(run_fail(&events, final_failure)["run"]["status"], "failed");
+    assert_eq!(run_fail(&events, pending)["run"]["status"], "pending_retry");
+
+    // The retry runs, as attempt 1, and fails for good.
+    let retry = Uuid::now_v7();
+    insert(retry, Some(queued), 3).await;
+    fail(retry, 3, 1).await;
+    let events = receive_run_fails(&mut sse, 1).await;
+    assert_eq!(run_fail(&events, retry)["run"]["status"], "failed");
+    reader.abort();
+
+    // A replay names the retry of the queued attempt.
+    let (mut sse, reader) = subscribe_stream_events(&state, &api_key, stream_id).await;
+    let events = receive_run_fails(&mut sse, 4).await;
+    let queued_fail = run_fail(&events, queued);
+    assert_eq!(queued_fail["run"]["status"], "pending_retry");
+    assert_eq!(queued_fail["retry_run_id"], json!(retry.to_string()));
+    assert_eq!(run_fail(&events, retry)["run"]["status"], "failed");
+    reader.abort();
+}
+
 // ============================================================================
 // Subscribe with Event Tests (Atomic SSE + Publish)
 // ============================================================================

@@ -131,9 +131,11 @@ pub(crate) async fn run_run(
     }
 
     // Get paths for dependency resolution - include the file's directory as a source path
+    // A bare file name's parent is "", which must mean the current directory.
     let file_dir = path
         .parent()
         .and_then(|p| p.to_str())
+        .filter(|p| !p.is_empty())
         .unwrap_or(".")
         .to_string();
 

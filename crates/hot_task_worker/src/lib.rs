@@ -14,6 +14,7 @@ pub mod build_info;
 mod cancellation_quota;
 #[cfg(all(target_os = "linux", feature = "kata"))]
 mod cni;
+mod container_cancel;
 mod data_volume;
 mod executor;
 pub mod file_server;
@@ -1661,6 +1662,9 @@ async fn reap_zombie_tasks(
 
         // Attempt retry if the task had retry config
         maybe_retry_zombie_task(db, &task, task_queue).await;
+        if task.task_type == "container" {
+            finish_adopted_task_run(db, &task).await;
+        }
 
         tracing::warn!(
             task_id = %task.task_id,
@@ -2484,6 +2488,24 @@ async fn process_task_inner(
     if !project.active {
         return Ok(());
     }
+    // During a rolling upgrade, a code task of a build made by a newer Hot of
+    // this major version waits for a newer task worker instead of failing.
+    // One no newer task worker took in time fails below, saying so.
+    if task.task_type != "container"
+        && build_awaits_newer_runtime(&build)
+        && chrono::Utc::now() - task.created_at < NEWER_RUNTIME_WAIT
+    {
+        tracing::info!(
+            task_id = %task_id,
+            build_id = %build.build_id,
+            engine_version = ?build.engine_version,
+            "Task build needs a newer Hot runtime; deferring it to a newer task worker"
+        );
+        return Err(Box::new(QueueInfrastructureError::new(
+            "task build needs a newer Hot runtime",
+            std::time::Duration::from_millis(infra_retry_backoff_ms.max(5_000)),
+        )));
+    }
     let mut request = synthesize_task_request_from_row(&task);
     request.org_id = Some(env.org_id.to_string());
     request.project_id = Some(project.project_id.to_string());
@@ -2627,7 +2649,8 @@ async fn process_task_inner(
                     return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
                 }
             };
-            process_container_task(
+            let run_db = Arc::clone(&db);
+            let result = process_container_task(
                 request,
                 task_id,
                 env_id,
@@ -2646,7 +2669,9 @@ async fn process_task_inner(
                 queue_timing,
                 worker_id.clone(),
             )
-            .await
+            .await;
+            finish_container_task_run(&run_db, env_id, task_id).await;
+            result
         } else {
             // Code tasks use high-limit semaphore. Bound the wait so a claimed
             // code task does not hold its queue lease + shared inflight slot
@@ -2908,6 +2933,25 @@ async fn finish_container_setup_timeout<G: Send>(
     }
 }
 
+/// Why this worker won't run a container task row, if it won't. Only
+/// `::hot::box/start` creates container tasks, after checking that Hot Box
+/// is enabled and the image allowed; refuse any other row, and every row
+/// while this worker has Hot Box turned off.
+fn container_task_refusal(function_name: &str, worker_conf: &Val, image: &str) -> Option<String> {
+    if function_name != hot::lang::hot::r#box::START_FUNCTION {
+        Some(format!(
+            "Container tasks start only through {}",
+            hot::lang::hot::r#box::START_FUNCTION
+        ))
+    } else if !hot::lang::hot::r#box::is_box_enabled_from_conf(worker_conf) {
+        Some("Hot Box is disabled on this task worker (hot.box.enabled is false)".to_string())
+    } else if image.is_empty() {
+        Some("Missing 'image' in container task args".to_string())
+    } else {
+        None
+    }
+}
+
 /// Execute a container task (task_type == "container").
 /// Resolves limits, performs quota checks, acquires resources, then dispatches.
 #[allow(clippy::too_many_arguments)]
@@ -2945,8 +2989,8 @@ async fn process_container_task(
         .unwrap_or_default()
         .to_string();
 
-    if image.is_empty() {
-        let error = task_failure_json("Missing 'image' in container task args", None);
+    if let Some(refusal) = container_task_refusal(&function_name, &worker_conf, &image) {
+        let error = task_failure_json(&refusal, None);
         // Pre-claim failure: the row was never claimed by this worker, so no
         // ownership fence applies here (or at the other pre-claim sites).
         if complete_container_setup(
@@ -3107,6 +3151,7 @@ async fn process_container_task(
                 let period_start = hot::db::subscription::monthly_usage_start(
                     chrono::Utc::now(),
                     subscription.current_period_start,
+                    subscription.current_period_end,
                 );
                 cached_usage_stats(
                     &db,
@@ -3311,11 +3356,20 @@ async fn process_container_task(
     // The user-visible TIMEOUT budget starts once this worker owns the task.
     // Every post-claim setup operation and the container runtime share this
     // one deadline, so storage/file-server preparation cannot pin a running
-    // row outside the advertised task budget. Billing deliberately does NOT
-    // share this anchor — see `execution_start` below.
+    // row outside the advertised task budget (and the plan's maximum
+    // timeout). The docs say so: a slow pull uses up the timeout. Billing
+    // deliberately does NOT share this anchor — see `execution_start` below.
     let total_timeout =
         std::time::Duration::from_millis(timeout_ms.min(limits.timeout_secs.saturating_mul(1000)));
     let task_deadline = tokio::time::Instant::now() + total_timeout;
+
+    // From here on a cancel stops the container (see `container_cancel`).
+    let cancel = container_cancel::CancelWatch::start(
+        Arc::clone(&db),
+        Arc::clone(&stream_publisher),
+        task_id,
+        env_id,
+    );
 
     let trace_id = request.task_id.clone();
 
@@ -3352,7 +3406,7 @@ async fn process_container_task(
             hot::db::run::RunType::Task.as_id(),
             origin_run_id.as_ref(),
             &user_id,
-            org_id.as_ref(),
+            None,
         )
         .await
         {
@@ -3954,25 +4008,29 @@ async fn process_container_task(
     // before log collection and container/VM teardown — so cleanup time
     // (which runs behind its own bounded envelopes, up to
     // KATA_TIMEOUT_CLEANUP_ENVELOPE after a Kata timeout) is never billed
-    // as user compute. See `bill_before_cleanup`.
+    // as user compute. See `bill_before_cleanup`. A cancel ends execution
+    // the same way: the window stops when the cancel is seen.
     let is_docker = matches!(executor.backend(), executor::Backend::Docker);
-    let (execution_result, raw_window_ms, timings) = if is_docker {
+    let (run, raw_window_ms, timings) = if is_docker {
         let mut timings = executor::ContainerTimings::default();
-        match tokio::time::timeout_at(
-            task_deadline,
-            executor.create_and_start(
-                &image,
-                cmd,
-                env,
-                Some(&trace_id),
-                Some(&limits),
-                extras_ref,
-                &mut timings,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(container_id)) => {
+        let started = tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            started = tokio::time::timeout_at(
+                task_deadline,
+                executor.create_and_start(
+                    &image,
+                    cmd,
+                    env,
+                    Some(&trace_id),
+                    Some(&limits),
+                    extras_ref,
+                    &mut timings,
+                ),
+            ) => Some(started),
+        };
+        match started {
+            Some(Ok(Ok(container_id))) => {
                 // Persist container_id so a new worker can adopt it
                 match tokio::time::timeout_at(
                     task_deadline.min(tokio::time::Instant::now() + DB_CALL_TIMEOUT),
@@ -3989,71 +4047,46 @@ async fn process_container_task(
                     }
                 }
                 let workload_execution_started = std::time::Instant::now();
-
-                // Poll-based monitoring loop
-                let poll_interval = std::time::Duration::from_secs(2);
-                let exit_code = loop {
-                    let now = tokio::time::Instant::now();
-                    if now >= task_deadline {
-                        break None;
-                    }
-                    tokio::time::sleep(poll_interval.min(task_deadline - now)).await;
-                    match tokio::time::timeout_at(
-                        task_deadline,
-                        executor.inspect_status(&container_id),
-                    )
-                    .await
-                    {
-                        Ok(Ok(Some(code))) => break Some(code),
-                        Ok(Ok(None)) => {
-                            if tokio::time::Instant::now() >= task_deadline {
-                                break None; // timed out
-                            }
-                        }
-                        Ok(Err(e)) => {
-                            if matches!(e, executor::ExecutorError::ContainerNotFound(_)) {
-                                tracing::warn!(
-                                    task_id = %task_id,
-                                    container_id = %container_id,
-                                    "Container disappeared during execution"
-                                );
-                                break Some(-1);
-                            }
-                            tracing::warn!(
-                                task_id = %task_id,
-                                container_id = %container_id,
-                                "Poll inspect failed: {}", e
-                            );
-                            if tokio::time::Instant::now() >= task_deadline {
-                                break None;
-                            }
-                        }
-                        Err(_) => break None,
-                    }
-                };
+                let watched = watch_docker_container(
+                    &executor,
+                    &container_id,
+                    &task_id,
+                    task_deadline,
+                    &cancel,
+                    DOCKER_POLL_INTERVAL,
+                )
+                .await;
                 timings.execution_ms = workload_execution_started
                     .elapsed()
                     .as_millis()
                     .min(i64::MAX as u128) as i64;
 
-                // Execution has ended (exit observed or wall-clock deadline
-                // hit): everything below — log collection, kill/remove — is
-                // worker teardown, so snapshot the billable window first.
-                let (duration_ms, output) = bill_before_cleanup(execution_start, async {
-                    match exit_code {
-                        Some(code) => {
-                            let logs_start = std::time::Instant::now();
-                            let (stdout, stderr) = tokio::time::timeout(
-                                CONTAINER_LOGS_TIMEOUT,
-                                executor.collect_logs(&container_id),
-                            )
-                            .await
-                            .ok()
-                            .and_then(Result::ok)
-                            .unwrap_or_default();
-                            timings.logs_collect_ms = logs_start.elapsed().as_millis() as i64;
+                // Execution has ended (exit observed, wall-clock deadline
+                // hit, or cancel seen): everything below — log collection,
+                // kill/remove — is worker teardown, so snapshot the billable
+                // window first.
+                let (duration_ms, run) = bill_before_cleanup(execution_start, async {
+                    if watched == DockerWatch::Cancelled {
+                        tracing::info!(task_id = %task_id, container_id = %container_id, "Container task cancelled; stopping its container");
+                        kill_and_remove_with_timeout(&executor, &container_id, Some(&task_id))
+                            .await;
+                        return ContainerRun::Cancelled {
+                            container_id: Some(container_id),
+                        };
+                    }
+                    let logs_start = std::time::Instant::now();
+                    let (stdout, stderr) = tokio::time::timeout(
+                        CONTAINER_LOGS_TIMEOUT,
+                        executor.collect_logs(&container_id),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default();
+                    timings.logs_collect_ms = logs_start.elapsed().as_millis() as i64;
+                    let output = match watched {
+                        DockerWatch::Exited(code) => {
                             remove_container_with_timeout(&executor, &container_id, &task_id).await;
-
                             executor::ContainerOutput {
                                 exit_code: code,
                                 stdout,
@@ -4063,21 +4096,9 @@ async fn process_container_task(
                                 oom_killed: code == 137,
                             }
                         }
-                        None => {
-                            // Timed out
-                            let logs_start = std::time::Instant::now();
-                            let (stdout, stderr) = tokio::time::timeout(
-                                CONTAINER_LOGS_TIMEOUT,
-                                executor.collect_logs(&container_id),
-                            )
-                            .await
-                            .ok()
-                            .and_then(Result::ok)
-                            .unwrap_or_default();
-                            timings.logs_collect_ms = logs_start.elapsed().as_millis() as i64;
+                        DockerWatch::DeadlineExceeded | DockerWatch::Cancelled => {
                             kill_and_remove_with_timeout(&executor, &container_id, Some(&task_id))
                                 .await;
-
                             executor::ContainerOutput {
                                 exit_code: -1,
                                 stdout,
@@ -4087,20 +4108,30 @@ async fn process_container_task(
                                 oom_killed: false,
                             }
                         }
-                    }
+                    };
+                    ContainerRun::Finished(Ok(output))
                 })
                 .await;
 
-                (Ok(Ok(output)), duration_ms, timings)
+                (run, duration_ms, timings)
             }
-            Ok(Err(e)) => (Ok(Err(e)), billable_execution_ms(execution_start), timings),
-            Err(elapsed) => {
-                tracing::warn!(
-                    task_id = %task_id,
-                    image = %image,
-                    timeout_ms,
-                    "Docker image pull/create/start exceeded the task wall-clock timeout"
-                );
+            Some(Ok(Err(e))) => (
+                ContainerRun::Finished(Err(e)),
+                billable_execution_ms(execution_start),
+                timings,
+            ),
+            setup_ended => {
+                let cancelled = setup_ended.is_none();
+                if cancelled {
+                    tracing::info!(task_id = %task_id, image = %image, "Container task cancelled during image pull/create/start");
+                } else {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        image = %image,
+                        timeout_ms,
+                        "Docker image pull/create/start exceeded the task wall-clock timeout"
+                    );
+                }
                 let (duration_ms, ()) = bill_before_cleanup(execution_start, async {
                     if tokio::time::timeout(
                         CONTAINER_KILL_TIMEOUT,
@@ -4111,60 +4142,72 @@ async fn process_container_task(
                     {
                         tracing::error!(
                             task_id = %task_id,
-                            "Docker setup-timeout cleanup also timed out; orphan cleanup will retry on restart"
+                            "Docker setup cleanup timed out; orphan cleanup will retry on restart"
                         );
                     }
                 })
                 .await;
                 // `timings` keeps whatever create_and_start stamped before
-                // the deadline dropped it (e.g. an in-flight pull start),
-                // so the platform-phase deduction below still applies.
-                (Err(elapsed), duration_ms, timings)
+                // the deadline or cancel dropped it (e.g. an in-flight pull
+                // start), so the platform-phase deduction below still applies.
+                let run = if cancelled {
+                    ContainerRun::Cancelled { container_id: None }
+                } else {
+                    ContainerRun::DeadlineExceeded
+                };
+                (run, duration_ms, timings)
             }
         }
     } else {
         // Kata: use atomic execute_with_extras (phased not supported).
         // Timings are owned HERE, not inside the executor, so the phase
         // stamps made before a cancellation point (slot wait, image pull)
-        // survive when the outer deadline drops the future mid-flight.
+        // survive when the outer deadline or a cancel drops the future
+        // mid-flight.
         let mut timings = executor::ContainerTimings::default();
-        let result = tokio::time::timeout_at(
-            task_deadline,
-            executor.execute_with_extras(
-                &image,
-                cmd,
-                env,
-                limits.timeout_secs,
-                &mut timings,
-                Some(&trace_id),
-                Some(&limits),
-                extras_ref,
-                pre_start_hook,
-            ),
-        )
-        .await;
-        // Execution has ended (result returned or the outer timeout fired):
-        // determine the billable window before the leaked-VM reaping below,
-        // whose bounded envelope (up to KATA_TIMEOUT_CLEANUP_ENVELOPE) is
-        // infrastructure teardown, not user compute. Prefer the workload-end
-        // instant the executor stamped before its own internal teardown
-        // (FIFO/log finalize, kill, VM/snapshot/CNI cleanup): on every path
-        // that completed inside the deadline the executor tears down BEFORE
-        // returning, so a post-await snapshot alone would bill that teardown.
-        // The snapshot below remains the fallback for paths that never stamp
-        // it (outer-timeout cancellation, setup failures).
+        let result = tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            result = tokio::time::timeout_at(
+                task_deadline,
+                executor.execute_with_extras(
+                    &image,
+                    cmd,
+                    env,
+                    limits.timeout_secs,
+                    &mut timings,
+                    Some(&trace_id),
+                    Some(&limits),
+                    extras_ref,
+                    pre_start_hook,
+                ),
+            ) => Some(result),
+        };
+        // Execution has ended (result returned, the outer timeout fired, or
+        // a cancel arrived): determine the billable window before the
+        // leaked-VM reaping below, whose bounded envelope (up to
+        // KATA_TIMEOUT_CLEANUP_ENVELOPE) is infrastructure teardown, not user
+        // compute. Prefer the workload-end instant the executor stamped
+        // before its own internal teardown (FIFO/log finalize, kill,
+        // VM/snapshot/CNI cleanup): on every path that completed inside the
+        // deadline the executor tears down BEFORE returning, so a post-await
+        // snapshot alone would bill that teardown. The snapshot below remains
+        // the fallback for paths that never stamp it (outer-timeout
+        // cancellation, setup failures).
         let workload_ended_at = timings.workload_ended_at;
         let (fallback_ms, ()) = bill_before_cleanup(execution_start, async {
-            if result.is_err() {
+            if !matches!(result, Some(Ok(_))) {
                 // The executor's internal timeout starts counting only once
                 // the VM is booted, so this outer wall-clock timeout (which
                 // also covers slot wait, image pull, and boot) fires first —
                 // dropping the execute future before its own cleanup can run.
-                // Reap the leaked VM, snapshot, FIFOs, and netns here.
+                // A cancel drops it the same way. Reap the leaked VM,
+                // snapshot, FIFOs, and netns here.
                 tracing::warn!(
                     task_id = %task_id,
                     timeout_ms,
-                    "Kata execution cancelled by outer timeout — cleaning up leaked VM state"
+                    cancelled = result.is_none(),
+                    "Kata execution stopped by the outer timeout or a cancel — cleaning up its VM state"
                 );
                 if !bounded_cleanup(
                     KATA_TIMEOUT_CLEANUP_ENVELOPE,
@@ -4183,7 +4226,12 @@ async fn process_container_task(
         .await;
         let duration_ms =
             billable_ms_preferring_executor_window(execution_start, workload_ended_at, fallback_ms);
-        (result, duration_ms, timings)
+        let run = match result {
+            Some(Ok(result)) => ContainerRun::Finished(result),
+            Some(Err(_)) => ContainerRun::DeadlineExceeded,
+            None => ContainerRun::Cancelled { container_id: None },
+        };
+        (run, duration_ms, timings)
     };
 
     // SINGLE BILLING SEAM — deduct the platform-owned phases (slot wait +
@@ -4225,35 +4273,53 @@ async fn process_container_task(
 
     // Release resource budget
     drop(resource_guard);
+    drop(cancel);
 
     // The user may have cancelled while this executor was still running.
     // Preserve that terminal state, and release quota only after proven exit.
-    if Task::get(&db, &task_id)
-        .await
-        .is_ok_and(|task| task.task_status_id == TaskStatus::Cancelled.as_id())
+    if matches!(run, ContainerRun::Cancelled { .. })
+        || Task::get(&db, &task_id)
+            .await
+            .is_ok_and(|task| task.task_status_id == TaskStatus::Cancelled.as_id())
     {
-        let terminated = match &execution_result {
-            Ok(Ok(output)) if !output.timed_out => true,
-            Ok(Ok(output)) => {
-                cancellation_quota::runtime_stopped(&executor, &output.container_id).await
+        let termination = match &run {
+            ContainerRun::Finished(Ok(output)) if !output.timed_out => {
+                cancellation_quota::Termination::AlreadyEnded
             }
-            _ => match Task::get(&db, &task_id)
-                .await
-                .ok()
-                .and_then(|task| task.container_id)
-            {
-                Some(id) => cancellation_quota::runtime_stopped(&executor, &id).await,
-                // Setup failed before a container ID was saved: exited if no
-                // container for this task exists on this worker's runtime.
-                None => cancellation_quota::no_local_container(&executor, &task_id).await,
-            },
+            run => {
+                // Kata's runtime has no status to inspect, and its executor
+                // or the timeout cleanup above removed every container it ran
+                // for this task, so absence is the proof there.
+                let stopped = match run {
+                    _ if !is_docker => {
+                        cancellation_quota::no_local_container(&executor, &task_id).await
+                    }
+                    ContainerRun::Finished(Ok(output)) => {
+                        cancellation_quota::runtime_stopped(&executor, &output.container_id).await
+                    }
+                    ContainerRun::Cancelled {
+                        container_id: Some(id),
+                    } => cancellation_quota::runtime_stopped(&executor, id).await,
+                    _ => match Task::get(&db, &task_id)
+                        .await
+                        .ok()
+                        .and_then(|task| task.container_id)
+                    {
+                        Some(id) => cancellation_quota::runtime_stopped(&executor, &id).await,
+                        // Setup failed before a container ID was saved: exited
+                        // if no container for this task exists on this
+                        // worker's runtime.
+                        None => cancellation_quota::no_local_container(&executor, &task_id).await,
+                    },
+                };
+                if stopped {
+                    cancellation_quota::Termination::Confirmed
+                } else {
+                    cancellation_quota::Termination::Unconfirmed
+                }
+            }
         };
         let compute_units = limits.size.compute_units(duration_ms);
-        let termination = if terminated {
-            cancellation_quota::Termination::Confirmed
-        } else {
-            cancellation_quota::Termination::Unconfirmed
-        };
         cancellation_quota::settle(
             &db,
             &task_id,
@@ -4265,8 +4331,8 @@ async fn process_container_task(
         return Ok(());
     }
 
-    match execution_result {
-        Ok(Ok(output)) => {
+    match run {
+        ContainerRun::Finished(Ok(output)) => {
             persist_container_timings(
                 &db,
                 &task_id,
@@ -4377,7 +4443,7 @@ async fn process_container_task(
                 "Container task finished"
             );
         }
-        Ok(Err(e)) => {
+        ContainerRun::Finished(Err(e)) => {
             // Some backend errors can occur after the container has started
             // (for example while waiting for it or collecting its result).
             // Preserve that boundary so the elapsed workload time is not
@@ -4391,27 +4457,37 @@ async fn process_container_task(
             )
             .await;
             // Every executor error means the workload itself never ran to
-            // completion — the failure is in container infrastructure
-            // (pull, create, start, containerd/wait plumbing) — so don't
-            // charge CUS and don't surface raw backend errors to the user.
-            // (`Start` was previously misclassified as a user failure,
-            // charging CUS and leaking containerd internals when Kata
-            // setup retries were exhausted.)
-            let is_infra_failure = true;
+            // completion, so don't charge CUS, and don't surface raw backend
+            // errors to the user. Most are container infrastructure (create,
+            // start, containerd/wait plumbing); `infra-failure` marks those.
+            // An image the policy refuses, or a pull the registry refuses,
+            // is the user's to fix and says how. (`Start` was previously
+            // misclassified as a user failure, charging CUS and leaking
+            // containerd internals when Kata setup retries were exhausted.)
             let compute_units = 0;
-            let user_message = match &e {
-                ExecutorError::ImageNotAllowed(img) => {
+            let (user_message, is_infra_failure) = match &e {
+                ExecutorError::ImageNotAllowed(img) => (
                     format!(
                         "Image '{}' is not allowed by the container image policy",
                         img
-                    )
+                    ),
+                    false,
+                ),
+                ExecutorError::SlotTimeout(secs) => (
+                    format!("Timed out waiting for execution slot ({}s)", secs),
+                    true,
+                ),
+                ExecutorError::ImagePull(detail) => {
+                    // registry-auth names the ctx entry holding the credential.
+                    let auth_entry = args
+                        .get("registry_auth")
+                        .and_then(|auth| auth.get("secret"))
+                        .and_then(|entry| entry.as_str());
+                    let failure = executor::describe_pull_failure(detail, &image, auth_entry);
+                    (failure.message, failure.infra)
                 }
-                ExecutorError::SlotTimeout(secs) => {
-                    format!("Timed out waiting for execution slot ({}s)", secs)
-                }
-                ExecutorError::ImagePull(_) => "Failed to pull container image".to_string(),
-                ExecutorError::Start(_) => "Failed to start container".to_string(),
-                _ => "Container infrastructure error".to_string(),
+                ExecutorError::Start(_) => ("Failed to start container".to_string(), true),
+                _ => ("Container infrastructure error".to_string(), true),
             };
             let error = task_failure_json(
                 &user_message,
@@ -4457,7 +4533,7 @@ async fn process_container_task(
                 "Container task failed: {}", e
             );
         }
-        Err(_) => {
+        ContainerRun::DeadlineExceeded => {
             let compute_units = limits.size.compute_units(duration_ms);
             let error = task_failure_json(
                 "Container task timed out",
@@ -4499,9 +4575,136 @@ async fn process_container_task(
                 "Container task timed out"
             );
         }
+        // Settled with its cancellation above.
+        ContainerRun::Cancelled { .. } => {}
     }
 
     Ok(())
+}
+
+/// How a container task's workload ended.
+enum ContainerRun {
+    /// The backend returned: the container exited, the backend's own timeout
+    /// stopped it, or the backend failed.
+    Finished(executor::ExecutorResult<executor::ContainerOutput>),
+    /// The claim-anchored task deadline passed before the backend returned.
+    DeadlineExceeded,
+    /// `::hot::task/cancel` arrived and the worker stopped the workload.
+    /// `container_id` names the Docker container it killed, if one started.
+    Cancelled { container_id: Option<String> },
+}
+
+/// How often a running Docker container's status is read when its exit
+/// isn't reported sooner.
+const DOCKER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The last status read, at the deadline, gets this long, so a container
+/// that exited just before the deadline is not reported as timed out.
+const DOCKER_FINAL_INSPECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DockerWatch {
+    Exited(i64),
+    DeadlineExceeded,
+    Cancelled,
+}
+
+/// Watch a started Docker container until it exits, the task deadline
+/// passes, or the task is cancelled. Docker's wait endpoint wakes the loop
+/// as soon as the container stops; `inspect` every `poll_interval` covers a
+/// wait that ended early or never answers. The status is read once more at
+/// the deadline, so an exit in the last interval still counts as one.
+async fn watch_docker_container(
+    executor: &executor::BoxExecutor,
+    container_id: &str,
+    task_id: &Uuid,
+    deadline: tokio::time::Instant,
+    cancel: &container_cancel::CancelWatch,
+    poll_interval: std::time::Duration,
+) -> DockerWatch {
+    use futures::future::{FusedFuture, FutureExt};
+
+    let stopped = executor.wait_not_running(container_id).fuse();
+    tokio::pin!(stopped);
+    loop {
+        let wake = (tokio::time::Instant::now() + poll_interval).min(deadline);
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => return DockerWatch::Cancelled,
+            () = &mut stopped, if !stopped.is_terminated() => {}
+            () = tokio::time::sleep_until(wake) => {}
+        }
+        let at_deadline = tokio::time::Instant::now() >= deadline;
+        let inspect_by = if at_deadline {
+            tokio::time::Instant::now() + DOCKER_FINAL_INSPECT_TIMEOUT
+        } else {
+            deadline
+        };
+        match tokio::time::timeout_at(inspect_by, executor.inspect_status(container_id)).await {
+            Ok(Ok(Some(code))) => return DockerWatch::Exited(code),
+            Ok(Err(executor::ExecutorError::ContainerNotFound(_))) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    container_id = %container_id,
+                    "Container disappeared during execution"
+                );
+                return DockerWatch::Exited(-1);
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    container_id = %container_id,
+                    "Poll inspect failed: {}", e
+                );
+            }
+            Ok(Ok(None)) | Err(_) => {}
+        }
+        if at_deadline {
+            return DockerWatch::DeadlineExceeded;
+        }
+    }
+}
+
+/// A container task's run has no VM to end it, so finish it from the task's
+/// terminal status. A task that isn't terminal (deferred, or still running on
+/// another worker) keeps its run as it is, and one that failed before its
+/// claim never had a run.
+async fn finish_container_task_run(db: &DatabasePool, env_id: Uuid, task_id: Uuid) {
+    let task = match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, &task_id)).await {
+        Ok(Ok(task)) => task,
+        _ => return,
+    };
+    let (Some(run_id), Some(status)) = (task.run_id, run_status_for_task(task.task_status_id))
+    else {
+        return;
+    };
+    match tokio::time::timeout(
+        DB_CALL_TIMEOUT,
+        hot::db::run::Run::finish_if_running(db, &env_id, &run_id, &status),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(task_id = %task_id, run_id = %run_id, "Failed to finish container task run: {}", e);
+        }
+        Err(_) => {
+            tracing::warn!(task_id = %task_id, run_id = %run_id, "Finishing container task run timed out");
+        }
+    }
+}
+
+/// The run status that matches a terminal task status.
+fn run_status_for_task(task_status_id: i16) -> Option<hot::db::run::RunStatus> {
+    use hot::db::run::RunStatus;
+    match task_status_id {
+        id if id == TaskStatus::Completed.as_id() => Some(RunStatus::Succeeded),
+        id if id == TaskStatus::Failed.as_id() || id == TaskStatus::TimedOut.as_id() => {
+            Some(RunStatus::Failed)
+        }
+        id if id == TaskStatus::Cancelled.as_id() => Some(RunStatus::Cancelled),
+        _ => None,
+    }
 }
 
 /// Elapsed billable milliseconds for a container task, measured from the
@@ -4812,6 +5015,40 @@ async fn finalize_task_timing(db: &DatabasePool, task_id: &Uuid) {
 }
 
 /// Execute a Hot code task (task_type == "code" or default).
+/// How long a code task whose build needs a newer Hot waits for a newer task
+/// worker before an older one fails it. A rolling upgrade replaces every task
+/// worker well within this.
+const NEWER_RUNTIME_WAIT: chrono::Duration = chrono::Duration::minutes(30);
+
+/// Whether this runtime refuses `build` only because a newer Hot of the same
+/// major version made it, so a newer task worker can run it. A build of
+/// another major version needs a redeploy instead.
+fn build_awaits_newer_runtime(build: &Build) -> bool {
+    build.runtime_version_error_message().is_some()
+        && newer_runtime_of_major_runs(
+            build.engine_version.as_deref(),
+            build.hot_std_version.as_deref(),
+            hot::version::current_runtime_version(),
+        )
+}
+
+/// Whether the newest release of `runtime`'s major version can run a build
+/// with these versions: it can exactly when the build's only problem on
+/// `runtime` is being newer.
+fn newer_runtime_of_major_runs(
+    engine_version: Option<&str>,
+    hot_std_version: Option<&str>,
+    runtime: &str,
+) -> bool {
+    let major = runtime.split('.').next().unwrap_or(runtime);
+    hot::version::check_runtime_version_compatibility(
+        engine_version,
+        hot_std_version,
+        &format!("{major}.{}.{}", u64::MAX, u64::MAX),
+    )
+    .compatible
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_code_task(
     request: TaskRequest,
@@ -4852,13 +5089,21 @@ async fn process_code_task(
         .await;
 
         // A build this runtime can't run, made with another major version of
-        // Hot, never runs here, even after its project is redeployed.
+        // Hot, never runs here, even after its project is redeployed. One
+        // made by a newer Hot of this major version only reaches this point
+        // after waiting `NEWER_RUNTIME_WAIT` for a newer task worker.
         if let Ok(build) = Build::get_build(&db, &build_id).await
             && let Some(reason) = build.runtime_version_error_message()
         {
-            return Err(format!(
-                "{reason}. Redeploy the project, and start the task again"
-            ));
+            return Err(if build_awaits_newer_runtime(&build) {
+                format!(
+                    "{reason}. No task worker running a newer Hot took the task within {} \
+                     minutes; upgrade the task workers, and start the task again",
+                    NEWER_RUNTIME_WAIT.num_minutes()
+                )
+            } else {
+                format!("{reason}. Redeploy the project, and start the task again")
+            });
         }
 
         let (cached, blocking_execution_permit) = load_bytecode(
@@ -5949,6 +6194,10 @@ async fn check_cus_thresholds_inner(
             .as_ref()
             .ok()
             .and_then(|s| s.current_period_start),
+        subscription
+            .as_ref()
+            .ok()
+            .and_then(|s| s.current_period_end),
     );
 
     let Some(usage) = cached_usage_stats(
@@ -7274,6 +7523,7 @@ async fn monitor_adopted_container(
                 if persisted && status == TaskStatus::Failed {
                     maybe_retry_zombie_task(db, &task, task_queue).await;
                 }
+                finish_adopted_task_run(db, &task).await;
 
                 tracing::debug!(
                     task_id = %task_id,
@@ -7284,6 +7534,19 @@ async fn monitor_adopted_container(
                 return;
             }
             Ok(None) => {
+                // A cancel has no message path to an adopted container: the
+                // row is all there is. Its quota is settled by the
+                // cancellation reaper once this monitor lets the task go.
+                if container_cancel::row_is_cancelled(db, &task_id).await {
+                    tracing::info!(
+                        task_id = %task_id,
+                        container_id = %container_id,
+                        "Adopted container task cancelled; stopping its container"
+                    );
+                    kill_and_remove_with_timeout(executor, &container_id, Some(&task_id)).await;
+                    finish_adopted_task_run(db, &task).await;
+                    return;
+                }
                 // Still running — check timeout
                 if chrono::Utc::now() >= timeout_deadline {
                     tracing::warn!(
@@ -7322,6 +7585,7 @@ async fn monitor_adopted_container(
                     {
                         maybe_retry_zombie_task(db, &task, task_queue).await;
                     }
+                    finish_adopted_task_run(db, &task).await;
                     return;
                 }
             }
@@ -7355,6 +7619,7 @@ async fn monitor_adopted_container(
                     {
                         maybe_retry_zombie_task(db, &task, task_queue).await;
                     }
+                    finish_adopted_task_run(db, &task).await;
                     return;
                 }
                 tracing::warn!(
@@ -7365,6 +7630,25 @@ async fn monitor_adopted_container(
             }
         }
     }
+}
+
+/// [`finish_container_task_run`] for a task found through the worker-wide
+/// pool: scope the pool to the task's environment first.
+async fn finish_adopted_task_run(db: &DatabasePool, task: &Task) {
+    let env = match tokio::time::timeout(DB_CALL_TIMEOUT, Env::get_env_uncached(db, &task.env_id))
+        .await
+    {
+        Ok(Ok(env)) => env,
+        _ => {
+            tracing::warn!(task_id = %task.task_id, "Cannot resolve the environment to finish a container task run");
+            return;
+        }
+    };
+    let scoped = db.with_scope(DatabaseScope::Environment {
+        org_id: env.org_id,
+        env_id: task.env_id,
+    });
+    finish_container_task_run(&scoped, task.env_id, task.task_id).await;
 }
 
 /// Clean up stale data volume mounts from a previous worker crash.
@@ -10401,5 +10685,251 @@ mod tests {
                 .unwrap()
                 .starts_with("Monthly task minutes exhausted (10/10)")
         );
+    }
+
+    #[test]
+    fn only_box_start_rows_run_as_containers_and_only_with_box_enabled() {
+        let enabled = val!({"box": {"enabled": true}});
+        let disabled = val!({"box": {"enabled": false}});
+        let start = hot::lang::hot::r#box::START_FUNCTION;
+        assert_eq!(container_task_refusal(start, &enabled, "alpine:3.21"), None);
+        assert!(
+            container_task_refusal("::app/work", &enabled, "alpine:3.21")
+                .unwrap()
+                .contains("only through ::hot::box/start")
+        );
+        assert!(
+            container_task_refusal(start, &disabled, "alpine:3.21")
+                .unwrap()
+                .contains("hot.box.enabled is false")
+        );
+        assert!(
+            container_task_refusal(start, &Val::map_empty(), "alpine:3.21").is_some(),
+            "Hot Box is off unless the worker's conf turns it on"
+        );
+        assert!(container_task_refusal(start, &enabled, "").is_some());
+    }
+
+    #[test]
+    fn only_same_major_newer_builds_wait_for_a_newer_runtime() {
+        // Newer patch or minor of the runtime's major: a newer worker runs it.
+        assert!(newer_runtime_of_major_runs(Some("3.0.2"), None, "3.0.1"));
+        assert!(newer_runtime_of_major_runs(
+            Some("3.1.0"),
+            Some("3.1.0"),
+            "3.0.1"
+        ));
+        // Another major: no task worker of this deployment runs it.
+        assert!(!newer_runtime_of_major_runs(Some("4.0.0"), None, "3.0.1"));
+        assert!(!newer_runtime_of_major_runs(Some("2.6.11"), None, "3.0.1"));
+        assert!(!newer_runtime_of_major_runs(
+            Some("3.0.2"),
+            Some("4.0.0"),
+            "3.0.1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn container_task_runs_finish_with_their_task() {
+        use hot::db::run::{Run, RunStatus, RunType};
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let db = db.with_scope(DatabaseScope::Environment {
+            org_id: data.org_id,
+            env_id: data.env_id,
+        });
+        for (status, run_status) in [
+            (TaskStatus::Completed, RunStatus::Succeeded),
+            (TaskStatus::Failed, RunStatus::Failed),
+            (TaskStatus::TimedOut, RunStatus::Failed),
+            (TaskStatus::Cancelled, RunStatus::Cancelled),
+        ] {
+            let task_id = Uuid::now_v7();
+            Task::insert(
+                &db,
+                &task_id,
+                &data.env_id,
+                &data.stream_id,
+                &data.build_id,
+                Some(&data.run_id),
+                hot::lang::hot::r#box::START_FUNCTION,
+                None,
+                None,
+                "container",
+                60_000,
+                None,
+            )
+            .await
+            .unwrap();
+            // A task that failed before its claim has no run to finish.
+            finish_container_task_run(&db, data.env_id, task_id).await;
+
+            assert!(
+                Task::claim_for_worker(&db, &task_id, "owner")
+                    .await
+                    .unwrap()
+            );
+            Run::ensure_run_exists(
+                &db,
+                &task_id,
+                &data.env_id,
+                &data.stream_id,
+                Some(&data.build_id),
+                RunType::Task.as_id(),
+                Some(&data.run_id),
+                &data.user_id,
+                None,
+            )
+            .await
+            .unwrap();
+            Task::set_run_id(&db, &task_id, &task_id).await.unwrap();
+            finish_container_task_run(&db, data.env_id, task_id).await;
+            assert_eq!(
+                Run::get_run(&db, &task_id).await.unwrap().status_id,
+                RunStatus::Running.as_id(),
+                "a running task keeps its run running"
+            );
+
+            if status == TaskStatus::Cancelled {
+                assert!(Task::cancel(&db, &task_id, &data.env_id).await.unwrap());
+            } else {
+                assert!(
+                    Task::complete(&db, &task_id, &status, None, None, Some("owner"))
+                        .await
+                        .unwrap()
+                );
+            }
+            finish_container_task_run(&db, data.env_id, task_id).await;
+            let run = Run::get_run(&db, &task_id).await.unwrap();
+            assert_eq!(run.status_id, run_status.as_id(), "{}", status.as_str());
+            assert!(run.stop_time.is_some());
+        }
+    }
+
+    /// Run on a Docker host:
+    /// `cargo test -p hot_task_worker docker_container_watch -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires a local Docker daemon and may pull alpine:3.21"]
+    async fn docker_container_watch_stops_for_a_cancel_and_sees_exits_before_the_deadline() {
+        let executor = executor::BoxExecutor::new(executor::Backend::Docker, 2, 5, None, None)
+            .await
+            .unwrap();
+        let db = Arc::new(hot::db::test_db().await);
+        let publisher = Arc::new(
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap(),
+        );
+        let env_id = Uuid::now_v7();
+        let task_id = Uuid::now_v7();
+        Task::insert(
+            &db,
+            &task_id,
+            &env_id,
+            &Uuid::now_v7(),
+            &Uuid::now_v7(),
+            None,
+            hot::lang::hot::r#box::START_FUNCTION,
+            None,
+            None,
+            "container",
+            60_000,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            Task::claim_for_worker(&db, &task_id, "owner")
+                .await
+                .unwrap()
+        );
+        let start = |script: &'static str| {
+            let executor = &executor;
+            let trace = task_id.to_string();
+            async move {
+                let mut timings = executor::ContainerTimings::default();
+                executor
+                    .create_and_start(
+                        "alpine:3.21",
+                        Some(vec!["sh".into(), "-c".into(), script.into()]),
+                        None,
+                        Some(&trace),
+                        None,
+                        None,
+                        &mut timings,
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        let far = || tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let cancel = container_cancel::CancelWatch::start(
+            Arc::clone(&db),
+            Arc::clone(&publisher),
+            task_id,
+            env_id,
+        );
+
+        // An exit is seen as it happens, not at the next 30 s poll.
+        let container = start("sleep 1; exit 3").await;
+        let watched_at = std::time::Instant::now();
+        let watched = watch_docker_container(
+            &executor,
+            &container,
+            &task_id,
+            far(),
+            &cancel,
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(watched, DockerWatch::Exited(3));
+        assert!(watched_at.elapsed() < std::time::Duration::from_secs(10));
+        executor.kill_and_remove(&container).await;
+
+        // The deadline still stops a container that runs on.
+        let container = start("sleep 60").await;
+        let watched = watch_docker_container(
+            &executor,
+            &container,
+            &task_id,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(2),
+            &cancel,
+            DOCKER_POLL_INTERVAL,
+        )
+        .await;
+        assert_eq!(watched, DockerWatch::DeadlineExceeded);
+        executor.kill_and_remove(&container).await;
+
+        // `::hot::task/cancel` stops it within moments.
+        let container = start("sleep 60").await;
+        let canceller = {
+            let db = Arc::clone(&db);
+            let publisher = Arc::clone(&publisher);
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                assert!(Task::cancel(&db, &task_id, &env_id).await.unwrap());
+                publisher
+                    .publish(StreamEvent::TaskMessage {
+                        task_id: task_id.to_string(),
+                        env_id: Some(env_id),
+                        payload: serde_json::json!({"$cancel": true}),
+                    })
+                    .await
+                    .unwrap();
+            })
+        };
+        let watched_at = std::time::Instant::now();
+        let watched = watch_docker_container(
+            &executor,
+            &container,
+            &task_id,
+            far(),
+            &cancel,
+            DOCKER_POLL_INTERVAL,
+        )
+        .await;
+        canceller.await.unwrap();
+        assert_eq!(watched, DockerWatch::Cancelled);
+        assert!(watched_at.elapsed() < std::time::Duration::from_secs(5));
+        kill_and_remove_with_timeout(&executor, &container, Some(&task_id)).await;
+        assert!(cancellation_quota::runtime_stopped(&executor, &container).await);
     }
 }

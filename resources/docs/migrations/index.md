@@ -46,9 +46,9 @@ this section before you upgrade.
 - **Back up your database.** For a local project, stop `hot dev` and any
   other Hot process, then copy the `.hot/db/` directory. For PostgreSQL, take
   a snapshot. See [Backups](/docs/configuration/postgres#backups).
-- **Hot 3.0 applies migrations 012 to 016 on PostgreSQL.**
-  Hot 2.6.11 added 010 and 011. Downgrading a migrated database is not
-  supported. To go back, restore your backup.
+- **Hot 3.0.0 applies migrations 012 to 016 on PostgreSQL, and 3.0.1 applies
+  017 to 022.** Hot 2.6.11 added 010 and 011. Downgrading a migrated database
+  is not supported. To go back, restore your backup.
 - **Ignore the "Hot 1.x database" hint.** A 2.x release that opens a migrated
   database says it is a Hot 1.x database and suggests `hot db port-v1-to-v2`
   or deleting the SQLite file. That hint is wrong. Never delete the database.
@@ -225,12 +225,29 @@ reject real API values on Hot 3.0, so upgrade them:
   environment and adds `env_id`, `usage_scope`, and `limits_scope`.
   `team_members` is `0`. A request whose `org_id` or `env_id` doesn't match
   the credential returns 403.
-- **Org API keys.** Root administrators can create child organizations and
-  manage them with org-scoped API keys. See
-  [Sub-organizations](/docs/api/management). Hot 3.0.0 shipped this as
-  `hm_` management credentials and `/v1/management/*`; both are removed.
-  The upgrade deactivates runtime keys an `hm_` credential issued. Create an
-  org key in the app and mint new keys through `/v1/orgs`.
+- **Org API keys replace management credentials.** Root administrators can
+  create child organizations and manage them with org-scoped API keys. See
+  [Sub-organizations](/docs/api/management). Hot 3.0.0 shipped this as `hm_`
+  management credentials and `/v1/management/*`. Hot 3.0.1 removes both:
+  `/v1/management/*` returns 410 Gone, and an `hm_` credential is refused.
+  Migration 020 revokes every management credential and deactivates the
+  environment keys one issued, so they stop working. Before you upgrade, list
+  those keys and the clients that use them. On PostgreSQL, run this as a
+  superuser or a `BYPASSRLS` role, since row-level security hides the rows
+  from other logins; on SQLite, drop the `hot.` prefixes:
+
+  ```sql
+  SELECT k.api_key_id, k.description, e.name AS env, m.name AS issued_by
+  FROM hot.api_key_management_issuer i
+  JOIN hot.api_key k ON k.api_key_id = i.api_key_id
+  JOIN hot.env e ON e.env_id = k.env_id
+  JOIN hot.management_key m ON m.management_key_id = i.management_key_id
+  WHERE k.active;
+  ```
+
+  After the upgrade, create an org key in the app and mint replacement keys
+  through `/v1/orgs`. A deactivated key can also be reactivated in the app;
+  it then works as an ordinary environment key.
 
 ### Account Limits
 
@@ -248,9 +265,61 @@ Hot 3.0 uses row-level security on PostgreSQL. It needs a separate schema
 owner for migrations (`db.migration-uri`) and a restricted runtime login
 (`db.uri`). `hot db migrate` with only `db.uri` now fails with "PostgreSQL
 requires a separate db.migration-uri". Migration 013 rewrites the `call`
-table, and there is no rolling upgrade. Follow
+table, and there is no rolling upgrade from 2.x. Follow
 [Upgrading from Hot 2.x](/docs/configuration/postgres#upgrading-from-hot-2x)
 before you upgrade.
+
+From 3.0.0 to 3.0.1 you can upgrade while 3.0.0 keeps serving. See
+[Upgrading from Hot 3.0.0](/docs/configuration/postgres#upgrading-from-hot-300).
+
+## Troubleshooting Migrations {#troubleshooting-migrations}
+
+`hot db status` shows which migrations a database has applied, which are
+pending, and which were applied from a different file. On PostgreSQL, pass the
+schema owner's `--db.migration-uri`: the runtime login can't read the
+migration ledger. A migration that fails rolls back on its own, while the ones
+before it stay applied, so check the status before you retry.
+
+On PostgreSQL, each migration statement waits at most 5 seconds for a lock
+held by running traffic, then the migration rolls back and is retried, up to
+five times. Set `db.migration-lock-timeout-ms` to change the wait.
+
+### Migration 019 refuses to run {#migration-019-refuses-to-run}
+
+Migration 019 adds keys that earlier releases didn't enforce, and stops with
+the first row that breaks one. Repair the rows and run `hot db migrate`
+again. On PostgreSQL, run these queries as a superuser or a `BYPASSRLS` role:
+row-level security hides the rows from every other login, the schema owner
+included. On SQLite, drop the `hot.` prefixes.
+
+- **An environment has two projects with the same name.** List them, then
+  rename all but one in each group, for example with
+  `PATCH /v1/projects/{project_id}` on Hot 3.0.0:
+
+  ```sql
+  SELECT env_id, name, count(*) FROM hot.project
+  GROUP BY env_id, name HAVING count(*) > 1;
+  ```
+
+- **A store references a missing organization or environment.** Its
+  organization or environment was deleted, so nothing can read it. Delete its
+  rows:
+
+  ```sql
+  DELETE FROM hot.store_map_entry s WHERE NOT EXISTS (SELECT 1 FROM hot.org o WHERE o.org_id = s.org_id)
+    OR NOT EXISTS (SELECT 1 FROM hot.env e WHERE e.env_id = s.env_id);
+  DELETE FROM hot.store_map s WHERE NOT EXISTS (SELECT 1 FROM hot.org o WHERE o.org_id = s.org_id)
+    OR (s.env_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM hot.env e WHERE e.env_id = s.env_id));
+  ```
+
+### A migration was applied from a different file {#a-migration-was-applied-from-a-different-file}
+
+Hot checks that every migration a database has applied matches the file this
+release ships. When one doesn't, a Hot build with different migrations, such
+as an unreleased development build, migrated the database. Hot stops instead
+of guessing. Don't delete the database: restore the backup you took before
+that build ran, then upgrade with a release. A database a newer Hot release
+migrated says so instead: upgrade Hot to that release.
 
 ## Upgrading to Hot 2.6 {#upgrading-to-hot-26}
 

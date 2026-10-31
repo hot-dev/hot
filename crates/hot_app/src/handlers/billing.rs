@@ -399,6 +399,9 @@ pub async fn view_usage_handler(
         subscription
             .as_ref()
             .and_then(|subscription| subscription.current_period_start),
+        subscription
+            .as_ref()
+            .and_then(|subscription| subscription.current_period_end),
     );
 
     // The stats partial covers the whole account only for a root
@@ -475,6 +478,9 @@ pub async fn usage_stats_handler(
         subscription
             .as_ref()
             .and_then(|subscription| subscription.current_period_start),
+        subscription
+            .as_ref()
+            .and_then(|subscription| subscription.current_period_end),
     );
 
     // Get call retention days from features

@@ -748,3 +748,53 @@ async fn a_stale_tab_switches_environments_within_its_own_org() {
         .await
         .assert_redirect_to(&format!("/dashboard?org_id={}&env_id={staging}", td.org_id));
 }
+
+#[tokio::test]
+async fn org_keys_show_their_issuer_chain_status() {
+    use hot::db::org_api_key::{CreateOrgApiKey, OrgApiKey};
+    let mut client = TestClient::new().await;
+    let td = insert_test_data(client.db()).await.unwrap();
+    sqlx::query("UPDATE org SET org_type='organization' WHERE org_id=?")
+        .bind(td.org_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    let root = Org::get_org_uncached(client.db(), &td.org_id)
+        .await
+        .unwrap();
+    let (issuer, _) = OrgApiKey::create_for_user(
+        client.db(),
+        td.org_id,
+        td.user_id,
+        &CreateOrgApiKey {
+            description: "issuer".into(),
+            permissions: serde_json::json!({"org:*": ["read"]}),
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    // A key the issuer minted, as the org API records one.
+    let minted = Uuid::now_v7();
+    sqlx::query("INSERT INTO org_api_key(org_api_key_id,org_id,description,key_data,permissions,issuer_org_api_key_id,created_by_user_id) SELECT ?,org_id,'minted',key_data,permissions,org_api_key_id,created_by_user_id FROM org_api_key WHERE org_api_key_id=?")
+        .bind(minted)
+        .bind(issuer.org_api_key_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    OrgApiKey::revoke_for_user(client.db(), td.org_id, td.user_id, issuer.org_api_key_id)
+        .await
+        .unwrap();
+    client.login_as(&td.user_id);
+
+    let page = client.get(&format!("/@{}/children", root.slug)).await;
+    page.assert_status(StatusCode::OK);
+    assert!(page.body.contains(">Revoked<"), "{}", page.body);
+    // The minted key's own row is active, but it no longer authenticates.
+    assert!(page.body.contains(">Issuer inactive<"), "{}", page.body);
+    assert!(
+        !page.body.contains(&format!("org-api-keys/{minted}/revoke")),
+        "a dead key offers no revoke: {}",
+        page.body
+    );
+}

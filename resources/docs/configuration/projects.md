@@ -35,7 +35,11 @@ hot.project.my-app.src.paths ["./hot/src", "./lib"]
 ```
 
 - List of directories containing `.hot` files
-- All paths are relative to the `hot.hot` file location
+- Relative paths resolve from the directory you run `hot` in, as do
+  `test.paths`, resource paths, `.hot/` and the local database. Run `hot`
+  from the directory that holds `hot.hot`: `hot check -c other/hot.hot` from
+  elsewhere doesn't find that project's files. (A package's `local`
+  dependency paths in `pkg.hot` resolve from the package.)
 
 ### test.paths
 
@@ -93,7 +97,8 @@ hot.set.project "dev"
 Switch between projects:
 
 ```bash
-hot run -p prod
+hot check -p prod
+hot run -p prod path/to/file.hot
 hot test -p dev
 ```
 
@@ -110,9 +115,14 @@ This project is used when no `-p/--project` flag is specified.
 If `hot.hot` defines no projects, Hot uses a default project with
 `./hot/src` sources and `./hot/test` tests. Once `hot.hot` defines projects,
 name the one to use with `hot.set.project` or `-p`. `hot check`, `hot watch`,
-`hot test`, `hot run`, `hot eval`, `hot repl` and `hot dev` stop with an error
-when neither names one, or when `-p` names a project `hot.hot` doesn't define.
-The error lists the projects `hot.hot` defines.
+`hot test`, `hot run`, `hot eval`, `hot repl`, `hot compile`, `hot build` and
+`hot deploy` stop with an error when neither names one, or when `-p` names a
+project `hot.hot` doesn't define. The error lists the projects `hot.hot`
+defines.
+
+`hot dev` always serves the default project, so it doesn't take `-p`: it stops
+with an error when `-p` names another project, or when `hot.set.project` names
+none that `hot.hot` defines.
 
 ## Store Configuration
 

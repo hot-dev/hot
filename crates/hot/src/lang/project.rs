@@ -1182,10 +1182,14 @@ impl PackageMetadata {
                 "email" => meta.email = Self::val_to_string(val),
                 "license" => meta.license = Self::val_to_string(val),
                 "url" => meta.url = Self::val_to_string(val),
-                "src-paths" | "src_paths" => meta.src_paths = Self::val_to_string_vec(val),
-                "test-paths" | "test_paths" => meta.test_paths = Self::val_to_string_vec(val),
+                "src-paths" | "src_paths" => {
+                    meta.src_paths = Self::enclosed_paths("src-paths", val)?
+                }
+                "test-paths" | "test_paths" => {
+                    meta.test_paths = Self::enclosed_paths("test-paths", val)?
+                }
                 "resource-paths" | "resource_paths" | "resources-paths" | "resources_paths" => {
-                    meta.resource_paths = Self::val_to_string_vec(val)
+                    meta.resource_paths = Self::enclosed_paths("resource-paths", val)?
                 }
                 "resources" => {
                     if let Val::Map(resources) = val
@@ -1193,7 +1197,7 @@ impl PackageMetadata {
                             .get(&Val::from("paths"))
                             .or_else(|| resources.get(&Val::from("path")))
                     {
-                        meta.resource_paths = Self::val_to_string_vec(paths);
+                        meta.resource_paths = Self::enclosed_paths("resources.paths", paths)?;
                     }
                 }
                 "deps" => meta.deps = Self::parse_deps_from_val(val)?,
@@ -1207,6 +1211,32 @@ impl PackageMetadata {
             }
         }
         Ok(())
+    }
+
+    /// Package paths must stay inside the package root: caches, the dev
+    /// watcher and bundles only cover files under it.
+    fn enclosed_paths(field: &str, val: &Val) -> Result<Vec<String>, String> {
+        let paths = Self::val_to_string_vec(val);
+        for path in &paths {
+            let mut depth: i32 = 0;
+            for component in Path::new(path).components() {
+                match component {
+                    std::path::Component::Normal(_) => depth += 1,
+                    std::path::Component::ParentDir => depth -= 1,
+                    std::path::Component::CurDir => {}
+                    std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                        depth = -1;
+                    }
+                }
+                if depth < 0 {
+                    return Err(format!(
+                        "pkg.hot {field} entry '{path}' leaves the package directory; \
+                         package paths must be relative paths inside it"
+                    ));
+                }
+            }
+        }
+        Ok(paths)
     }
 
     /// Convert a Val to a string
@@ -1685,5 +1715,33 @@ mod tests {
         );
         let hot_std = resolver.resolve_from_defaults("hot.dev/hot-std").unwrap();
         assert_eq!(hot_std.name, "hot-std");
+    }
+}
+
+#[cfg(test)]
+mod enclosed_path_tests {
+    use super::*;
+
+    fn parse(pkg_hot: &str) -> Result<PackageMetadata, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pkg.hot");
+        std::fs::write(&path, pkg_hot).unwrap();
+        PackageMetadata::parse_from_file(&path)
+    }
+
+    #[test]
+    fn package_paths_must_stay_inside_the_package() {
+        let ok = parse(
+            "hot.pkg.lib {name: \"example.com/lib\", src-paths: [\"src\", \"./more/../lib\"]}\n",
+        )
+        .unwrap();
+        assert_eq!(ok.src_paths, vec!["src", "./more/../lib"]);
+        for bad in ["../shared", "src/../../shared", "/abs/src"] {
+            let err = parse(&format!(
+                "hot.pkg.lib {{name: \"example.com/lib\", src-paths: [\"{bad}\"]}}\n"
+            ))
+            .unwrap_err();
+            assert!(err.contains("leaves the package directory"), "{bad}: {err}");
+        }
     }
 }

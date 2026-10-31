@@ -9,3 +9,6 @@ CREATE TABLE parked_event (
     leased_until TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX parked_event_lease_idx ON parked_event(leased_until);
+-- Replay finds the environments with parked events, which are few, without
+-- reading their rows, which can be many.
+CREATE INDEX parked_event_env_idx ON parked_event(env_id, leased_until);

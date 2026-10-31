@@ -226,6 +226,18 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
 
         match StreamPubSub::new(pubsub_type, redis_uri, redis_cluster) {
             Ok(pubsub) => {
+                // Creating the pub/sub only parses the URI: confirm Redis
+                // answers before reporting healthy.
+                if matches!(pubsub_type, StreamPubSubType::Redis)
+                    && let Err(e) = pubsub
+                        .wait_until_reachable(
+                            hot::stream::STARTUP_PING_ATTEMPTS,
+                            hot::stream::STARTUP_PING_DELAY,
+                        )
+                        .await
+                {
+                    panic!("Redis stream pub/sub is not reachable: {}", e);
+                }
                 debug!(
                     "hot.dev: API created stream pub/sub (type: {:?})",
                     pubsub_type
@@ -427,6 +439,15 @@ pub(crate) fn build_router(
             "/mcp/{service}/messages",
             axum::routing::post(mcp_http_sse_messages_handler_domain),
         )
+        // Hot 3.0.0's sub-org management API, replaced by /v1/orgs in 3.0.1.
+        .route(
+            "/v1/management",
+            axum::routing::any(crate::handlers::orgs::management_api_gone),
+        )
+        .route(
+            "/v1/management/{*rest}",
+            axum::routing::any(crate::handlers::orgs::management_api_gone),
+        )
         .merge(SwaggerUi::new("/docs/api").url("/openapi.json", ApiDoc::openapi()))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB for webhooks/MCP
         .layer(GlobalConcurrencyLimitLayer::new(public_concurrency_limit));
@@ -576,6 +597,7 @@ pub(crate) fn build_router(
         ))
         .layer(Extension(file_storage))
         .layer(Extension(blob_store))
+        .layer(middleware::from_fn(error_envelope_middleware))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &axum::http::Request<_>| {
@@ -603,4 +625,45 @@ pub(crate) fn build_router(
 
 pub async fn handler() -> &'static str {
     "hot.dev api server"
+}
+
+/// Give `/v1` errors that carry no JSON body the documented error envelope:
+/// bare statuses (authentication, 404 for unknown routes, 405) and the plain
+/// text that axum's extractor rejections send (400, 413, 415, 422). Webhook
+/// and MCP responses are left alone; webhook handlers write their own.
+async fn error_envelope_middleware(
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+    let api = request.uri().path().starts_with("/v1/");
+    let response = next.run(request).await;
+    let status = response.status();
+    if !api || !(status.is_client_error() || status.is_server_error()) {
+        return response;
+    }
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let plain = content_type.starts_with("text/plain");
+    if !content_type.is_empty() && !plain {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let mut error = crate::models::ApiErrorResponse::for_status(status);
+    if plain && let Ok(bytes) = axum::body::to_bytes(body, 8 * 1024).await {
+        let message = String::from_utf8_lossy(&bytes).trim().to_string();
+        if !message.is_empty() {
+            error.error.message = message;
+        }
+    }
+    parts.headers.remove(CONTENT_LENGTH);
+    parts.headers.insert(
+        CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    let body = serde_json::to_vec(&error).unwrap_or_default();
+    axum::response::Response::from_parts(parts, axum::body::Body::from(body))
 }

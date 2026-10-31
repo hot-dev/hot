@@ -181,6 +181,18 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
 
         match StreamPubSub::new(pubsub_type, redis_uri, redis_cluster) {
             Ok(pubsub) => {
+                // Creating the pub/sub only parses the URI: confirm Redis
+                // answers before reporting healthy.
+                if matches!(pubsub_type, StreamPubSubType::Redis)
+                    && let Err(e) = pubsub
+                        .wait_until_reachable(
+                            hot::stream::STARTUP_PING_ATTEMPTS,
+                            hot::stream::STARTUP_PING_DELAY,
+                        )
+                        .await
+                {
+                    panic!("Redis stream pub/sub is not reachable: {}", e);
+                }
                 debug!(
                     "hot.dev: APP created stream pub/sub (type: {:?})",
                     pubsub_type

@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use hot::db::org::{CreateChild, Org, OrgLifecycle, OrgUser};
-use hot::db::org_api_key::{CreateOrgApiKey, OrgApiKey};
+use hot::db::org_api_key::{CreateOrgApiKey, KeyStatus, OrgApiKey};
 use hot::db::{BootstrapOperation, DatabasePool, DatabaseScope};
 use hot::val::Val;
 use serde::Deserialize;
@@ -86,6 +86,10 @@ fn org_error_message(error: &hot::db::org::OrgError, fallback: &str) -> String {
         }
         OrgError::Forbidden => "You don't have permission to make that change.".to_string(),
         OrgError::NotFound => "That organization no longer exists.".to_string(),
+        OrgError::SlugTaken => "That handle is already in use.".to_string(),
+        OrgError::ExternalIdTaken => {
+            "A child organization already uses that customer reference.".to_string()
+        }
         OrgError::Database(error)
             if error
                 .as_database_error()
@@ -116,6 +120,20 @@ struct SubOrgsPage {
 struct OrgApiKeyRow {
     key: OrgApiKey,
     expires_at: Option<String>,
+    /// Whether the key still authenticates, following its issuer chain: a
+    /// key whose issuing key was revoked is dead though its own row is not.
+    revocable: bool,
+    status_label: Option<&'static str>,
+}
+
+fn status_label(status: KeyStatus) -> Option<&'static str> {
+    match status {
+        KeyStatus::Active => None,
+        KeyStatus::Revoked => Some("Revoked"),
+        KeyStatus::Expired => Some("Expired"),
+        KeyStatus::IssuerInactive => Some("Issuer inactive"),
+        KeyStatus::Suspended => Some("Suspended"),
+    }
 }
 
 struct OrgOverview {
@@ -315,20 +333,25 @@ async fn render_page_inner(
     issued_token: Option<String>,
     form: FormState,
 ) -> Result<Response, PageError> {
-    let org_api_keys = OrgApiKey::list_for_user(db, root.org_id, session.current_user_id())
+    let load_failed = |_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to load org API keys",
+        )
+    };
+    let keys = OrgApiKey::list_for_user(db, root.org_id, session.current_user_id())
         .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to load org API keys",
-            )
-        })?
-        .into_iter()
-        .map(|key| OrgApiKeyRow {
+        .map_err(load_failed)?;
+    let mut org_api_keys = Vec::with_capacity(keys.len());
+    for key in keys {
+        let status = key.status(db).await.map_err(load_failed)?;
+        org_api_keys.push(OrgApiKeyRow {
             expires_at: key.expires_at.map(|at| display_time(session, &at)),
+            revocable: status.is_active(),
+            status_label: status_label(status),
             key,
-        })
-        .collect();
+        });
+    }
     let org_key_example = serde_json::to_string_pretty(&serde_json::json!({
         "org:*": ["create", "read", "update"],
         "org:*/env:*": ["create", "read"],

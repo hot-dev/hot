@@ -3,7 +3,7 @@
 //! creates its own database plus NOSUPERUSER/NOBYPASSRLS owner/runtime logins.
 //! Requires psql to exercise the actual operator provisioning script.
 
-use hot::db::{self, DatabasePool, DatabaseScope, MaintenanceOperation};
+use hot::db::{self, BootstrapOperation, DatabasePool, DatabaseScope, MaintenanceOperation};
 use sqlx::{Executor, PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use std::{
     path::{Path, PathBuf},
@@ -419,6 +419,35 @@ async fn assert_runtime_contract(fixture: &UpgradeDatabase, rows: &ExistingRows)
         env_id: rows.other_env,
     });
     let organization = pool.with_scope(DatabaseScope::Organization { org_id: rows.org });
+    // A 3.0.0 API still serving during the upgrade authenticates every
+    // request through these reads, so they must keep working, and finding no
+    // issuer, while management credentials can no longer be created.
+    let authentication =
+        pool.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Authentication));
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT management_key_id FROM api_key_management_issuer WHERE api_key_id = $1"
+        )
+        .bind(rows.key)
+        .fetch_optional(&authentication)
+        .await?,
+        None
+    );
+    assert!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT management_key_id FROM management_key WHERE revoked_at IS NULL"
+        )
+        .fetch_optional(&authentication)
+        .await?
+        .is_none()
+    );
+    assert!(
+        sqlx::query("INSERT INTO management_key(management_key_id,root_org_id,created_by_user_id,name,secret_hash,capabilities,expires_at) VALUES($1,$2,$3,'new',decode('01','hex'),'[]','2099-01-01T00:00:00Z')")
+            .bind(Uuid::new_v4()).bind(rows.org).bind(rows.user)
+            .execute(&organization)
+            .await
+            .is_err()
+    );
     assert_eq!(
         sqlx::query_scalar::<_, Uuid>("SELECT env_id FROM call WHERE call_id=$1")
             .bind(rows.call)
@@ -677,7 +706,8 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         return Ok(());
     };
-    for baseline in [9, 12, 13] {
+    // 16 is the Hot 3.0.0 schema.
+    for baseline in [9, 12, 13, 16] {
         let fixture = UpgradeDatabase::new(&admin_uri, baseline).await?;
         let result: TestResult = async {
             let rows = ExistingRows::seed(&fixture.admin).await?;
@@ -710,17 +740,20 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
                 (rows.sibling_env, "7".to_string(), None),
                 (rows.other_env, "\"other\"".to_string(), Some("other".to_string())),
             ]);
-            // 019 retires management credentials: the key one issued is kept
-            // but deactivated, and the management tables are gone.
-            let retired: (bool, bool, bool) = sqlx::query_as("SELECT active, to_regclass('hot.management_key') IS NULL, to_regclass('hot.api_key_management_issuer') IS NULL FROM api_key WHERE api_key_id=$1")
+            // 020 retires management credentials: the key one issued is kept
+            // but deactivated, and the management tables stay for 3.0.0
+            // readers with no issuer rows and every credential revoked.
+            let retired: (bool, i64, i64) = sqlx::query_as("SELECT active, (SELECT count(*) FROM api_key_management_issuer), (SELECT count(*) FROM management_key WHERE revoked_at IS NULL) FROM api_key WHERE api_key_id=$1")
                 .bind(rows.key).fetch_one(&fixture.admin).await?;
-            assert_eq!(retired, (baseline < 13, true, true));
+            assert_eq!(retired, (baseline < 13, 0, 0));
             rows.add_org_key_issuer(&fixture.admin).await?;
-            // Every baseline precedes 014, which backfills admissions; 013
+            // 014 backfills admissions from the runs before it; 013
             // reconciles the sizes of traces written before it.
-            let admission: (Uuid,Uuid,Uuid,bool) = sqlx::query_as("SELECT root_org_id,org_id,env_id,admitted_at='2026-09-01 12:00:00+00'::timestamptz FROM run_admission WHERE run_id=$1")
-                .bind(rows.run).fetch_one(&fixture.admin).await?;
-            assert_eq!(admission,(rows.org,rows.org,rows.env,true));
+            if baseline < 14 {
+                let admission: (Uuid,Uuid,Uuid,bool) = sqlx::query_as("SELECT root_org_id,org_id,env_id,admitted_at='2026-09-01 12:00:00+00'::timestamptz FROM run_admission WHERE run_id=$1")
+                    .bind(rows.run).fetch_one(&fixture.admin).await?;
+                assert_eq!(admission,(rows.org,rows.org,rows.env,true));
+            }
             if baseline < 13 {
                 let trace_size: i64 = sqlx::query_scalar("SELECT size FROM call WHERE call_id=$1").bind(rows.call).fetch_one(&fixture.admin).await?;
                 assert_eq!(trace_size, 59);
@@ -958,6 +991,134 @@ async fn bypass_rls_migrations_initialize_each_account_counter_once() -> TestRes
         let mut expected = vec![(rows.env, 1, 0, 59), (rows.other_env, 1, 40, 0)];
         expected.sort();
         assert_eq!(counters, expected);
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+/// Under the documented NOBYPASSRLS owner, FORCE RLS shows 019 no rows, so a
+/// preflight query passes vacuously. Building the key is the check, and its
+/// error names the duplicated key.
+#[tokio::test]
+async fn duplicate_project_names_stop_019_with_the_key_then_retry_after_repair() -> TestResult {
+    let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+        return Ok(());
+    };
+    let fixture = UpgradeDatabase::new(&admin_uri, 16).await?;
+    let result: TestResult = async {
+        let rows = ExistingRows::seed(&fixture.admin).await?;
+        // 3.0.0 renames a project without checking for a conflict.
+        let duplicate = Uuid::new_v4();
+        sqlx::query("INSERT INTO project(project_id,env_id,name,created_by_user_id) VALUES($1,$2,'retained',$3)")
+            .bind(duplicate).bind(rows.env).bind(rows.user).execute(&fixture.admin).await?;
+        let error = fixture.upgrade().await.expect_err("019 must refuse").to_string();
+        assert!(error.contains("two projects with the same name"), "{error}");
+        assert!(error.contains("retained"), "the duplicated key is named: {error}");
+        assert!(error.contains("migration-019-refuses-to-run"), "{error}");
+        assert_eq!(ledger(&fixture.owner).await?.last().map(|entry| entry.0), Some(18));
+        sqlx::query("UPDATE project SET name='renamed' WHERE project_id=$1")
+            .bind(duplicate).execute(&fixture.admin).await?;
+        // A store entry left behind by a deleted environment, as older
+        // releases could leave one; its ownership triggers predate the data.
+        let gone = Uuid::new_v4();
+        let mut legacy = fixture.admin.begin().await?;
+        sqlx::query("SET LOCAL session_replication_role = replica").execute(&mut *legacy).await?;
+        sqlx::query("INSERT INTO store_map_entry(org_id,env_id,store_name,key,value) VALUES($1,$2,'orphaned','\"key\"','\"value\"')")
+            .bind(rows.org).bind(gone).execute(&mut *legacy).await?;
+        legacy.commit().await?;
+        let error = fixture.upgrade().await.expect_err("019 must refuse").to_string();
+        assert!(error.contains("store references a missing"), "{error}");
+        assert!(error.contains("orphaned") && error.contains(&gone.to_string()), "{error}");
+        sqlx::query("DELETE FROM store_map_entry WHERE env_id=$1")
+            .bind(gone).execute(&fixture.admin).await?;
+        fixture.upgrade().await?;
+        assert_latest_ledger(&fixture.owner).await?;
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+/// A deploy migrates while the previous release serves. 020 gives up waiting
+/// for a lock a long request holds instead of stalling every reader queued
+/// behind it, and the migration is retried once the lock frees.
+#[tokio::test]
+async fn migrations_retry_after_waiting_out_a_lock_timeout() -> TestResult {
+    let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+        return Ok(());
+    };
+    let fixture = UpgradeDatabase::new(&admin_uri, 19).await?;
+    let result: TestResult = async {
+        let mut request = fixture.admin.begin().await?;
+        sqlx::query("LOCK TABLE hot.api_key IN ACCESS SHARE MODE")
+            .execute(&mut *request)
+            .await?;
+        let held = std::time::Duration::from_millis(1500);
+        let finish = tokio::spawn(async move {
+            tokio::time::sleep(held).await;
+            request.rollback().await
+        });
+        let started = std::time::Instant::now();
+        db::run_migrations(&hot::val!({
+            "uri": fixture.runtime_uri.clone(),
+            "migration-uri": fixture.owner_uri.clone(),
+            "migration-lock-timeout-ms": 200,
+        }))
+        .await?;
+        finish.await??;
+        assert!(started.elapsed() >= held);
+        assert_latest_ledger(&fixture.owner).await?;
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+/// A runtime that missed re-provisioning, or started before the migration,
+/// used to pass every startup check and fail each request instead.
+#[tokio::test]
+async fn runtime_refuses_missing_grants_and_a_schema_behind_its_release() -> TestResult {
+    let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+        return Ok(());
+    };
+    let fixture = UpgradeDatabase::new(&admin_uri, 16).await?;
+    let result: TestResult = async {
+        fixture.upgrade().await?;
+        fixture.provision_ok().await?;
+        let conf = hot::val!({"uri": fixture.runtime_uri.clone()});
+        let runtime = || db::create_db_pool(&conf);
+        runtime().await?;
+        fixture
+            .owner
+            .execute(sqlx::AssertSqlSafe(format!(
+                "REVOKE ALL ON hot.api_key_issuer FROM {}",
+                fixture.runtime_role
+            )))
+            .await?;
+        let error = runtime()
+            .await
+            .err()
+            .expect("missing grants refused")
+            .to_string();
+        assert!(error.contains("api_key_issuer"), "{error}");
+        assert!(error.contains("provision_runtime.sql"), "{error}");
+        fixture.provision_ok().await?;
+        runtime().await?;
+        fixture
+            .owner
+            .execute("COMMENT ON SCHEMA hot IS 'Hot schema migration 21'")
+            .await?;
+        let error = runtime()
+            .await
+            .err()
+            .expect("old schema refused")
+            .to_string();
+        assert!(error.contains("migration 21"), "{error}");
+        assert!(error.contains("hot db migrate"), "{error}");
         Ok(())
     }
     .await;

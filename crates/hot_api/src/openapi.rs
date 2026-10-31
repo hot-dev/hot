@@ -6,6 +6,10 @@ use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi, ToSchema};
 use uuid::Uuid;
 
+use crate::handlers::orgs::{
+    ApiKeyResponse, CreateApiKeyRequest, CreateEnvRequest, CreateOrgRequest, CreateOrgResponse,
+    OrgEnvResponse, OrgResponse, RotateApiKeyRequest, UpdateApiKeyRequest, UpdateOrgRequest,
+};
 use crate::handlers::{
     CallPurgeResponse, CreateDomainRequest, CreateServiceKeyRequest, CreateSessionRequest,
     DomainResponse, DomainVerifyResponse, EnvSseEvent, EventPublishedEvent, Limits,
@@ -74,6 +78,7 @@ struct BinaryUploadBody {
         api_keys_revoke_doc,
         api_keys_rotate_doc,
         orgs_env_projects_doc,
+        orgs_env_builds_doc,
         list_projects_doc,
         create_project_doc,
         get_project_doc,
@@ -138,6 +143,7 @@ struct BinaryUploadBody {
         upload_part_doc,
         complete_upload_doc,
         abort_upload_doc,
+        download_blob_doc,
     ),
     components(schemas(
         ApiError,
@@ -154,6 +160,13 @@ struct BinaryUploadBody {
         ApiListResponse<ServiceKeyResponse>,
         ApiListResponse<DomainResponse>,
         ApiListResponse<FileResponse>,
+        ApiListResponse<OrgResponse>,
+        ApiListResponse<OrgEnvResponse>,
+        ApiListResponse<ApiKeyResponse>,
+        ApiResponse<OrgResponse>,
+        ApiResponse<CreateOrgResponse>,
+        ApiResponse<OrgEnvResponse>,
+        ApiResponse<ApiKeyResponse>,
         ApiResponse<ProjectResponse>,
         ApiResponse<ProjectActivateResponse>,
         ApiResponse<BuildResponse>,
@@ -175,13 +188,18 @@ struct BinaryUploadBody {
         ApiResponse<FileResponse>,
         ApiResponse<InitiateUploadResponse>,
         ApiResponse<UploadPartResponse>,
+        ApiKeyResponse,
         BinaryUploadBody,
         BuildResponse,
         BuildUploadResponse,
         BuildWithProjectResponse,
         CallPurgeResponse,
         ContextVariableResponse,
+        CreateApiKeyRequest,
         CreateContextVariableRequest,
+        CreateEnvRequest,
+        CreateOrgRequest,
+        CreateOrgResponse,
         CreateDomainRequest,
         CreateProjectRequest,
         CreateServiceKeyRequest,
@@ -197,6 +215,8 @@ struct BinaryUploadBody {
         InitiateUploadRequest,
         InitiateUploadResponse,
         Limits,
+        OrgEnvResponse,
+        OrgResponse,
         OrgUsageResponse,
         PaginationMeta,
         PlanInfo,
@@ -206,6 +226,7 @@ struct BinaryUploadBody {
         ResponseMeta,
         RevokeAllResponse,
         RevokeAllServiceKeysResponse,
+        RotateApiKeyRequest,
         RunResponse,
         RunStatsResponse,
         RunEvent,
@@ -217,7 +238,9 @@ struct BinaryUploadBody {
         SubscribeWithEventRequest,
         TaskEvent,
         TaskResponse,
+        UpdateApiKeyRequest,
         UpdateContextVariableRequest,
+        UpdateOrgRequest,
         UpdateProjectRequest,
         UploadBuildMultipart,
         UploadPartResponse,
@@ -967,6 +990,17 @@ fn complete_upload_doc() {}
 )]
 fn abort_upload_doc() {}
 
+#[utoipa::path(
+    get,
+    path = "/v1/blobs/{blob_ref_id}/download",
+    tag = "Files",
+    description = "Raw bytes of a large payload spilled to blob storage, in the caller's environment (`blob:{blob_ref_id}` with `read`). API keys only; string payloads are served as UTF-8 text.",
+    params(("blob_ref_id" = Uuid, Path, description = "Blob reference UUID")),
+    security(("bearer_auth" = [])),
+    responses((status = 200, description = "Blob bytes", content_type = "application/octet-stream"), (status = "default", description = "Error", body = ApiErrorResponse))
+)]
+fn download_blob_doc() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1013,112 +1047,316 @@ mod tests {
             "missing bearer_auth security scheme"
         );
     }
+
+    /// OpenAPI 3.1 requires a description on every response, and strict
+    /// generators reject a document whose `$ref`s do not resolve.
+    #[test]
+    fn openapi_document_is_valid_for_strict_tooling() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).expect("serialize OpenAPI document");
+        let schemas = doc["components"]["schemas"]
+            .as_object()
+            .expect("component schemas");
+        for (path, item) in doc["paths"].as_object().expect("paths") {
+            for (method, operation) in item.as_object().expect("path item") {
+                for (status, response) in operation["responses"]
+                    .as_object()
+                    .unwrap_or_else(|| panic!("{method} {path} has no responses"))
+                {
+                    assert!(
+                        response["description"]
+                            .as_str()
+                            .is_some_and(|text| !text.is_empty()),
+                        "{method} {path} {status}: response without a description"
+                    );
+                }
+            }
+        }
+        fn refs<'a>(value: &'a serde_json::Value, found: &mut Vec<&'a str>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if let Some(target) = map.get("$ref").and_then(|v| v.as_str()) {
+                        found.push(target);
+                    }
+                    map.values().for_each(|v| refs(v, found));
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|v| refs(v, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        refs(&doc, &mut found);
+        for target in found {
+            let name = target
+                .strip_prefix("#/components/schemas/")
+                .unwrap_or_else(|| panic!("unexpected $ref {target}"));
+            assert!(schemas.contains_key(name), "unresolved $ref {target}");
+        }
+    }
+
+    /// The OpenAPI document of the last release. Replace it with the new
+    /// release's `/openapi.json` when tagging, and empty the allowlists below.
+    const RELEASED: &str = include_str!("../tests/fixtures/openapi-v3.0.0.json");
+
+    /// Intentional removals since the last release, each listed in the
+    /// release's upgrade notes. Hot 3.0.1 replaced 3.0.0's `/v1/management`
+    /// API and its `hm_` credentials with org API keys.
+    const REMOVED_OPERATIONS: &[(&str, &str)] = &[
+        ("get", "/v1/management/children"),
+        ("post", "/v1/management/children"),
+        ("post", "/v1/management/children/{child_id}/environments"),
+        (
+            "post",
+            "/v1/management/children/{child_id}/environments/{env_id}/api-keys",
+        ),
+        ("patch", "/v1/management/children/{child_id}/state"),
+        ("get", "/v1/management/usage"),
+    ];
+    const REMOVED_SECURITY_SCHEMES: &[&str] = &["management_auth"];
+    const REMOVED_SCHEMAS: &[&str] = &[
+        "ChildStateRequest",
+        "CreateChildRequest",
+        "CreateEnvironmentRequest",
+        "IssueRuntimeKeyRequest",
+    ];
+
+    fn names(value: &serde_json::Value) -> std::collections::BTreeSet<String> {
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A patch must not break clients of the last release: no operation,
+    /// response status, security scheme or schema may disappear, a response
+    /// schema keeps its properties and required fields, and a request schema
+    /// gains no required field. Removals need an entry in the allowlists above.
+    #[test]
+    fn public_api_keeps_the_last_release_surface() {
+        let released: serde_json::Value =
+            serde_json::from_str(RELEASED).expect("parse released OpenAPI document");
+        let current = serde_json::to_value(ApiDoc::openapi()).expect("serialize OpenAPI document");
+        let mut breaks = Vec::new();
+
+        let mut request_schemas = std::collections::BTreeSet::new();
+        for (path, item) in released["paths"].as_object().expect("released paths") {
+            for (method, operation) in item.as_object().expect("path item") {
+                if let Some(target) =
+                    operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+                        .as_str()
+                {
+                    request_schemas.insert(target.trim_start_matches("#/components/schemas/"));
+                }
+                if REMOVED_OPERATIONS.contains(&(method.as_str(), path.as_str())) {
+                    continue;
+                }
+                let now = &current["paths"][path][method];
+                if now.is_null() {
+                    breaks.push(format!("operation removed: {method} {path}"));
+                    continue;
+                }
+                for status in operation["responses"].as_object().into_iter().flatten() {
+                    if now["responses"][status.0].is_null() {
+                        breaks.push(format!("response removed: {method} {path} {}", status.0));
+                    }
+                }
+            }
+        }
+
+        for name in released["components"]["securitySchemes"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(name, _)| name)
+        {
+            if !REMOVED_SECURITY_SCHEMES.contains(&name.as_str())
+                && current["components"]["securitySchemes"][name].is_null()
+            {
+                breaks.push(format!("security scheme removed: {name}"));
+            }
+        }
+
+        for (name, schema) in released["components"]["schemas"]
+            .as_object()
+            .expect("released schemas")
+        {
+            if REMOVED_SCHEMAS.contains(&name.as_str()) {
+                continue;
+            }
+            let now = &current["components"]["schemas"][name];
+            if now.is_null() {
+                breaks.push(format!("schema removed: {name}"));
+                continue;
+            }
+            for property in schema["properties"].as_object().into_iter().flatten() {
+                if now["properties"][property.0].is_null() {
+                    breaks.push(format!("property removed: {name}.{}", property.0));
+                }
+            }
+            let (was, is) = (names(&schema["required"]), names(&now["required"]));
+            if request_schemas.contains(name.as_str()) {
+                for field in is.difference(&was) {
+                    breaks.push(format!("request field became required: {name}.{field}"));
+                }
+            } else {
+                for field in was.difference(&is) {
+                    breaks.push(format!("response field became optional: {name}.{field}"));
+                }
+            }
+        }
+
+        assert!(
+            breaks.is_empty(),
+            "the public API changed incompatibly since the last release:\n{}",
+            breaks.join("\n")
+        );
+    }
+
+    /// The org API's responses are typed, so generated clients get models.
+    #[test]
+    fn org_operations_reference_response_schemas() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).expect("serialize OpenAPI document");
+        for (path, item) in doc["paths"].as_object().expect("paths") {
+            if !(path.starts_with("/v1/orgs") || path.starts_with("/v1/api-keys")) {
+                continue;
+            }
+            for (method, operation) in item.as_object().expect("path item") {
+                for (status, response) in operation["responses"].as_object().unwrap() {
+                    if status == "204" || path.ends_with("/usage") {
+                        continue;
+                    }
+                    let schema = &response["content"]["application/json"]["schema"];
+                    assert!(
+                        schema.get("$ref").is_some(),
+                        "{method} {path} {status}: untyped response {schema}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[utoipa::path(get, path = "/v1/orgs", tag = "Orgs", security(("bearer_auth" = [])),
     description = "Children of the key's organization that it may read (`org:*` or `org:{org}` with `read`).",
-    params(("limit" = Option<i64>, Query), ("offset" = Option<i64>, Query)),
-    responses((status = 200, description = "Child organizations", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    params(("limit" = Option<i64>, Query, description = "Max results (default 20, maximum 500)"), ("offset" = Option<i64>, Query, description = "Pagination offset")),
+    responses((status = 200, description = "Child organizations", body = ApiListResponse<OrgResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_list_doc() {}
 
 #[utoipa::path(post, path = "/v1/orgs", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Create a child organization and its default environment (`org:*` with `create`). Idempotent by `idempotency_key`.",
+    description = "Create a child organization and its default environment (`org:*` with `create`). Idempotent by `idempotency_key`: a replay returns the original child with `created: false` and status 200. A slug taken by any account answers 409 `slug_taken`; an `external_id` another child of the account uses answers 409 `external_id_taken`.",
     request_body = crate::handlers::orgs::CreateOrgRequest,
-    responses((status = 201, description = "Child organization, default environment ID, and created flag", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    responses(
+        (status = 201, description = "Child organization and its default environment", body = ApiResponse<CreateOrgResponse>),
+        (status = 200, description = "Replay of an earlier request with the same idempotency key", body = ApiResponse<CreateOrgResponse>),
+        (status = 409, description = "`slug_taken` or `external_id_taken`", body = ApiErrorResponse),
+        (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_create_doc() {}
 
 #[utoipa::path(get, path = "/v1/orgs/{org_id}", tag = "Orgs", security(("bearer_auth" = [])),
     description = "The key's organization or one of its children (`org:{org}` with `read`).",
-    params(("org_id" = Uuid, Path)),
-    responses((status = 200, description = "Organization", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    params(("org_id" = Uuid, Path, description = "Organization UUID")),
+    responses((status = 200, description = "Organization", body = ApiResponse<OrgResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_get_doc() {}
 
 #[utoipa::path(patch, path = "/v1/orgs/{org_id}", tag = "Orgs", security(("bearer_auth" = [])),
     description = "Change a child's lifecycle state (`org:{org}` with `update`).",
-    params(("org_id" = Uuid, Path)), request_body = crate::handlers::orgs::UpdateOrgRequest,
-    responses((status = 200, description = "Updated organization", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    params(("org_id" = Uuid, Path, description = "Organization UUID")), request_body = crate::handlers::orgs::UpdateOrgRequest,
+    responses((status = 200, description = "Updated organization", body = ApiResponse<OrgResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_update_doc() {}
 
 #[utoipa::path(get, path = "/v1/orgs/{org_id}/usage", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Account usage across the root and its children (`org:{root}/usage:*` with `read`).",
-    params(("org_id" = Uuid, Path)),
-    responses((status = 200, description = "Account usage", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    description = "Account usage across the root and its children (`org:{root}/usage:*` with `read`). The response has `org_id`, `usage_scope: \"account\"`, `period_start`, `period_end` and `usage`.",
+    params(("org_id" = Uuid, Path, description = "Organization UUID")),
+    responses((status = 200, description = "Account usage", body = serde_json::Value), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_usage_doc() {}
 
 #[utoipa::path(delete, path = "/v1/orgs/{org_id}/calls", tag = "Orgs", security(("bearer_auth" = [])),
     description = "Delete every call trace in an organization's environments, and its children's with `include_sub_orgs` (`org:{org}/env:*/call:*` with `delete` for each organization). Runs remain. Repeat until `complete` is true.",
-    params(("org_id" = Uuid, Path), crate::handlers::orgs::PurgeCallsQuery),
-    responses((status = 200, description = "Calls deleted, payloads released, and whether the purge finished", body = ApiResponse<CallPurgeResponse>), (status = "default", body = ApiErrorResponse)))]
+    params(("org_id" = Uuid, Path, description = "Organization UUID"), crate::handlers::orgs::PurgeCallsQuery),
+    responses((status = 200, description = "Calls deleted, payloads released, and whether the purge finished", body = ApiResponse<CallPurgeResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_purge_calls_doc() {}
 
 #[utoipa::path(get, path = "/v1/orgs/{org_id}/envs", tag = "Orgs", security(("bearer_auth" = [])),
     description = "Environments of an organization (`org:{org}/env:*` with `read`).",
-    params(("org_id" = Uuid, Path)),
-    responses((status = 200, description = "Environments", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    params(("org_id" = Uuid, Path, description = "Organization UUID"), ("limit" = Option<i64>, Query, description = "Max results (default 20, maximum 500)"), ("offset" = Option<i64>, Query, description = "Pagination offset")),
+    responses((status = 200, description = "Environments", body = ApiListResponse<OrgEnvResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_list_envs_doc() {}
 
 #[utoipa::path(post, path = "/v1/orgs/{org_id}/envs", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Create an environment (`org:{org}/env:*` with `create`). Idempotent by exact name.",
-    params(("org_id" = Uuid, Path)), request_body = crate::handlers::orgs::CreateEnvRequest,
-    responses((status = 201, description = "Environment created or existing exact-name environment returned", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    description = "Create an environment (`org:{org}/env:*` with `create`). Idempotent by exact name: an existing environment with the name is returned with status 200.",
+    params(("org_id" = Uuid, Path, description = "Organization UUID")), request_body = crate::handlers::orgs::CreateEnvRequest,
+    responses(
+        (status = 201, description = "Environment created", body = ApiResponse<OrgEnvResponse>),
+        (status = 200, description = "Existing environment with that name", body = ApiResponse<OrgEnvResponse>),
+        (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_create_env_doc() {}
 
 #[utoipa::path(get, path = "/v1/orgs/{org_id}/envs/{env_id}", tag = "Orgs", security(("bearer_auth" = [])),
     description = "One environment (`org:{org}/env:{env}` with `read`).",
-    params(("org_id" = Uuid, Path), ("env_id" = Uuid, Path)),
-    responses((status = 200, description = "Environment", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    params(("org_id" = Uuid, Path, description = "Organization UUID"), ("env_id" = Uuid, Path, description = "Environment UUID")),
+    responses((status = 200, description = "Environment", body = ApiResponse<OrgEnvResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_get_env_doc() {}
 
 #[utoipa::path(get, path = "/v1/orgs/{org_id}/envs/{env_id}/api-keys", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Environment API keys (`org:{org}/env:{env}/api-key:*` with `read`).",
-    params(("org_id" = Uuid, Path), ("env_id" = Uuid, Path), ("limit" = Option<i64>, Query), ("offset" = Option<i64>, Query)),
-    responses((status = 200, description = "API keys, without secrets", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    description = "Environment API keys, newest first (`org:{org}/env:{env}/api-key:*` with `read`).",
+    params(("org_id" = Uuid, Path, description = "Organization UUID"), ("env_id" = Uuid, Path, description = "Environment UUID"), ("limit" = Option<i64>, Query, description = "Max results (default 20, maximum 500)"), ("offset" = Option<i64>, Query, description = "Pagination offset")),
+    responses((status = 200, description = "API keys, without secrets", body = ApiListResponse<ApiKeyResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_list_env_keys_doc() {}
 
 #[utoipa::path(post, path = "/v1/orgs/{org_id}/envs/{env_id}/api-keys", tag = "Orgs", security(("bearer_auth" = [])),
     description = "Mint an environment API key (`org:{org}/env:{env}/api-key:*` with `create`). Its grants must fit inside the org key's grants for that environment, and its expiry inside the org key's.",
-    params(("org_id" = Uuid, Path), ("env_id" = Uuid, Path)), request_body = crate::handlers::orgs::CreateApiKeyRequest,
-    responses((status = 201, description = "Environment API key; token returned once", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    params(("org_id" = Uuid, Path, description = "Organization UUID"), ("env_id" = Uuid, Path, description = "Environment UUID")), request_body = crate::handlers::orgs::CreateApiKeyRequest,
+    responses((status = 201, description = "Environment API key; token returned once", body = ApiResponse<ApiKeyResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_mint_env_key_doc() {}
 
 #[utoipa::path(get, path = "/v1/orgs/{org_id}/api-keys", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Org API keys of the key's own organization (`org:{org}/api-key:*` with `read`).",
-    params(("org_id" = Uuid, Path)),
-    responses((status = 200, description = "Org API keys, without secrets", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    description = "Org API keys of the key's own organization, newest first (`org:{org}/api-key:*` with `read`).",
+    params(("org_id" = Uuid, Path, description = "Organization UUID"), ("limit" = Option<i64>, Query, description = "Max results (default 20, maximum 500)"), ("offset" = Option<i64>, Query, description = "Pagination offset")),
+    responses((status = 200, description = "Org API keys, without secrets", body = ApiListResponse<ApiKeyResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_list_org_keys_doc() {}
 
 #[utoipa::path(post, path = "/v1/orgs/{org_id}/api-keys", tag = "Orgs", security(("bearer_auth" = [])),
     description = "Mint an org API key in the key's own organization (`org:{org}/api-key:*` with `create`). Its grants must fit inside the issuer's; chains are at most two org keys deep.",
-    params(("org_id" = Uuid, Path)), request_body = crate::handlers::orgs::CreateApiKeyRequest,
-    responses((status = 201, description = "Org API key; token returned once", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    params(("org_id" = Uuid, Path, description = "Organization UUID")), request_body = crate::handlers::orgs::CreateApiKeyRequest,
+    responses((status = 201, description = "Org API key; token returned once", body = ApiResponse<ApiKeyResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_mint_org_key_doc() {}
 
 #[utoipa::path(get, path = "/v1/api-keys/{key_id}", tag = "Orgs", security(("bearer_auth" = [])),
     description = "An org or environment API key in the caller's organization or a child (`api-key:{key}` with `read`, qualified by its org and environment).",
-    params(("key_id" = Uuid, Path)),
-    responses((status = 200, description = "API key, without its secret", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    params(("key_id" = Uuid, Path, description = "Org or environment API key UUID")),
+    responses((status = 200, description = "API key, without its secret", body = ApiResponse<ApiKeyResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn api_keys_get_doc() {}
 
 #[utoipa::path(patch, path = "/v1/api-keys/{key_id}", tag = "Orgs", security(("bearer_auth" = [])),
     description = "Replace a key's grants with ones inside the caller's own (`update`). The caller must have issued the key, directly or through keys it issued.",
-    params(("key_id" = Uuid, Path)), request_body = crate::handlers::orgs::UpdateApiKeyRequest,
-    responses((status = 200, description = "Updated API key", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    params(("key_id" = Uuid, Path, description = "Org or environment API key UUID")), request_body = crate::handlers::orgs::UpdateApiKeyRequest,
+    responses((status = 200, description = "Updated API key", body = ApiResponse<ApiKeyResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn api_keys_update_doc() {}
 
 #[utoipa::path(delete, path = "/v1/api-keys/{key_id}", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Revoke a key the caller issued (`delete`). Keys it issued stop working too.",
-    params(("key_id" = Uuid, Path)),
-    responses((status = 204, description = "Revoked"), (status = "default", body = ApiErrorResponse)))]
+    description = "Revoke a key the caller issued (`delete`). Keys it issued stop working too. Revoking an org key is permanent; an environment key can be re-enabled in the app.",
+    params(("key_id" = Uuid, Path, description = "Org or environment API key UUID")),
+    responses((status = 204, description = "Revoked"), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn api_keys_revoke_doc() {}
 
 #[utoipa::path(post, path = "/v1/api-keys/{key_id}/rotate", tag = "Orgs", security(("bearer_auth" = [])),
     description = "Issue a new secret for a key the caller issued (`update`). The key ID, lineage and keys it issued are unchanged; the previous secret works until the overlap ends.",
-    params(("key_id" = Uuid, Path)), request_body(content = Option<crate::handlers::orgs::RotateApiKeyRequest>),
-    responses((status = 200, description = "API key with its new token", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    params(("key_id" = Uuid, Path, description = "Org or environment API key UUID")), request_body(content = Option<crate::handlers::orgs::RotateApiKeyRequest>),
+    responses((status = 200, description = "API key with its new token", body = ApiResponse<ApiKeyResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn api_keys_rotate_doc() {}
 
 #[utoipa::path(get, path = "/v1/orgs/{org_id}/envs/{env_id}/projects", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Every `/v1/projects…` and `/v1/builds` route is also served under `/v1/orgs/{org_id}/envs/{env_id}` for org keys. The org key's grants for that environment (`org:{org}/env:{env}/project:*`, `…/context:*`, `…/build:*`) are checked exactly as an environment key's grants are.",
-    params(("org_id" = Uuid, Path), ("env_id" = Uuid, Path)),
-    responses((status = 200, description = "Projects in the environment", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+    description = "Every `/v1/projects…` route is also served under `/v1/orgs/{org_id}/envs/{env_id}` for org keys, with the same request and response as the environment route. The org key's grants for that environment (`org:{org}/env:{env}/project:*`, `…/context:*`, `…/build:*`) are checked exactly as an environment key's grants are.",
+    params(("org_id" = Uuid, Path, description = "Organization UUID"), ("env_id" = Uuid, Path, description = "Environment UUID"), ("limit" = Option<i64>, Query, description = "Max results (default 20, maximum 500)"), ("offset" = Option<i64>, Query, description = "Pagination offset")),
+    responses((status = 200, description = "Projects in the environment", body = ApiListResponse<ProjectResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_env_projects_doc() {}
+
+#[utoipa::path(get, path = "/v1/orgs/{org_id}/envs/{env_id}/builds", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "`GET /v1/builds` for org keys, in one environment (`org:{org}/env:{env}/build:*` with `read`).",
+    params(("org_id" = Uuid, Path, description = "Organization UUID"), ("env_id" = Uuid, Path, description = "Environment UUID"), ("limit" = Option<i64>, Query, description = "Max results (default 20, maximum 500)"), ("offset" = Option<i64>, Query, description = "Pagination offset")),
+    responses((status = 200, description = "Builds across the environment", body = ApiListResponse<BuildWithProjectResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
+fn orgs_env_builds_doc() {}

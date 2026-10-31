@@ -34,7 +34,7 @@ A `lazy` parameter changes argument evaluation only. Each `do` forces its
 deferred computation again; it does not turn the surrounding body into a
 parallel flow. Likewise, `Iter` defers sequence-element production rather than
 function-argument evaluation. See [Functions](/docs/language/functions#lazy-arguments)
-for lazy parameters and the [`Iter` package](/pkg/hot-std/hot/iter) for sequence
+for lazy parameters and the [`Iter` package](/pkg/hot.dev/hot-std/hot/iter) for sequence
 laziness.
 
 An explicit `parallel` flow changes scheduling within that flow. Hot derives
