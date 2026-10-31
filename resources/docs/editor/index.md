@@ -11,10 +11,11 @@ Hot provides first-class editor support through a Language Server Protocol (LSP)
 The Hot VS Code extension provides a complete development experience:
 
 - **Syntax highlighting** — Full Hot language support
-- **Diagnostics** — Real-time error checking and warnings
-- **Autocomplete** — Function, type, and namespace completion
-- **Hover information** — Type info and documentation
-- **Go to definition** — Navigate to function and type definitions
+- **Diagnostics** — The same errors and warnings `hot check` reports, as you type
+- **Autocomplete** — Namespaces, functions, types, enum variants, record fields and local variables
+- **Hover information** — Signatures, documentation and type info
+- **Go to definition and find references** — Navigate functions, types and local variables
+- **Formatting** — Format a document with `hot fmt`
 
 ### Installation
 
@@ -51,12 +52,20 @@ Hot files (`.hot`) are automatically recognized with full syntax highlighting:
 
 #### Diagnostics
 
-See errors and warnings in real-time as you type:
+The language server runs the same check as `hot check --check.format json`
+over the whole project, with your unsaved changes, shortly after you stop
+typing:
 
-- Type mismatches
-- Undefined functions or variables
 - Syntax errors
-- Unused variables (warnings)
+- Undefined functions, variables and types
+- Type and arity mismatches
+- Invalid `meta` values, such as schedules, timeouts, event handlers and box sizes
+- Warnings, such as deprecated functions and missing context values
+
+Diagnostics cover every file in the project's source and test paths, not
+just the open ones, and an edit to one file updates the diagnostics of the
+files that use it. Problems with `hot.hot` itself, or project errors that
+belong to no source file, appear on `hot.hot`.
 
 Errors appear as red squiggles in the editor and in the Problems panel (Cmd+Shift+M).
 
@@ -64,21 +73,26 @@ Errors appear as red squiggles in the editor and in the Problems panel (Cmd+Shif
 
 Get intelligent code completion as you type:
 
-- Function names with signatures
-- Type names and fields
-- Namespace paths
-- Local variables
-- Core library functions
+- Namespace paths after `::`, and the functions and types of a namespace after `::ns/`
+- Local variables and parameters, the current namespace's definitions, and core library functions
+- Enum variants after `Type.`
+- Record fields after `value.` when the value's type is known, and inside `Type({ ... })`
 
 Press `Ctrl+Space` to trigger autocomplete manually.
 
 #### Go to Definition
 
-Jump to where a function or type is defined:
+Jump to where a function, type or local variable is defined:
 
 - `F12` or `Cmd+Click` — Go to definition
 - `Cmd+Shift+F12` — Peek definition (inline)
-- `Shift+F12` — Find all references
+- `Shift+F12` — Find all references, across every file in the project
+
+#### Formatting
+
+**Format Document** (`Shift+Alt+F`, or format on save) runs the same
+formatter as `hot fmt`. A file the formatter can't format safely is left
+unchanged.
 
 ### Configuration
 
@@ -108,7 +122,11 @@ The Hot LSP can be used with any editor that supports LSP.
 hot lsp
 ```
 
-The server communicates over stdin/stdout using JSON-RPC.
+The server communicates over stdin/stdout using JSON-RPC. It loads the
+project from the workspace folder (or root URI) the editor sends, so it does
+not need to start in the project directory; with no `hot.hot` there, opening
+a file inside a project loads that project. Positions use UTF-16 columns,
+the LSP default.
 
 ### Neovim Setup
 
@@ -166,8 +184,12 @@ Then configure `lsp-mode`:
 | `textDocument/formatting` | ✅ |
 | `textDocument/publishDiagnostics` | ✅ |
 | `textDocument/signatureHelp` | ✅ |
-| `textDocument/rename` | ✅ |
 | `workspace/symbol` | ✅ |
+| `workspace/didChangeWatchedFiles` | ✅ |
+| `textDocument/rename` | ❌ Not yet supported |
+| `textDocument/rangeFormatting` | ❌ Not yet supported |
+| `textDocument/documentSymbol` | ❌ Not yet supported |
+| `textDocument/codeAction` | ❌ Not yet supported |
 
 ## Commands
 
