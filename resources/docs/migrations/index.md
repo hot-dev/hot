@@ -291,6 +291,8 @@ compiled code fails the run instead of aborting the worker. Functions over
     `hot/dev.key`.
 - **Dependencies:** `hot deps add`/`remove` exit 1 with the `hot.hot` snippet
   to write. They were placeholders.
+- **Queues:** `hot queue status` prints the backend and where its queues live.
+  It and `hot queue clear` no longer print the Redis password.
 - **Environment:**
   - `HOT_WORKER_RUN_TIMEOUT`, `HOT_WORKER_MAX_RUN_TIMEOUT` and
     `HOT_WORKER_CANCEL_ON_TIMEOUT` take effect.
@@ -332,6 +334,8 @@ compiled code fails the run instead of aborting the worker. Functions over
   - Setup failures are retried.
   - An event that crashes its worker three times alone is dead-lettered with a
     failed run.
+  - On memory queues, an event whose handler panics every time is
+    dead-lettered when its attempts run out instead of redelivered forever.
   - A run records at most 10,000 calls by default
     (`hot.emitter.max-calls-per-run`).
 - **Schedules:**
