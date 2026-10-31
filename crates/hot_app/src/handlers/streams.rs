@@ -284,7 +284,6 @@ pub async fn stream_detail_handler(
         stream_graph::FocusElement::None,
     )
     .await;
-    let graph_data_json = templates::script_safe_json(&graph_data, "{}");
 
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::clickable(
@@ -307,7 +306,6 @@ pub async fn stream_detail_handler(
         events,
         tasks,
         graph_data,
-        graph_data_json,
         current_page_num: page.current_page_num,
         total_pages: pagination.total_pages,
         start_page: pagination.start_page,

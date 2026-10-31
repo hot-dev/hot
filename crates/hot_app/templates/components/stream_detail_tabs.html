@@ -268,11 +268,11 @@
                             {% when Some with (result) %}
                                 <div class="flex items-center gap-2">
                                     <button class="result-btn text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 cursor-pointer font-mono text-xs truncate max-w-xs flex-1 text-left"
-                                            onclick="window.showStreamNodeInspector('{{ run.run_id }}', 'run', {})"
+                                            onclick="window.showStreamNodeInspector({{ run.run_id|js }}, 'run', {})"
                                             title="Click to inspect">
                                         <code class="language-hot truncate inline-block max-w-full">{{ result }}</code>
                                     </button>
-                                    <button onclick="openContentModalWithFormats('Result', `{{ result|escape }}`, `{% match run.result_json %}{% when Some with (json) %}{{ json|escape }}{% when None %}{{ result|escape }}{% endmatch %}`)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full result">
+                                    <button data-modal-title="Result" data-modal-hot="{{ result }}" data-modal-json="{% match run.result_json %}{% when Some with (json) %}{{ json }}{% when None %}{{ result }}{% endmatch %}" onclick="openContentModalFromData(this)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full result">
                                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
                                         </svg>
@@ -360,7 +360,7 @@
                             <span class="text-gray-600 dark:text-gray-400 flex-shrink-0">Result:</span>
                             <div class="flex items-center justify-between gap-2 flex-1 min-w-0">
                                 <code class="language-hot text-gray-700 dark:text-gray-300 font-mono text-xs truncate">{{ result|truncate(length=30) }}</code>
-                                <button onclick="openContentModalWithFormats('Result', `{{ result|escape }}`, `{% match run.result_json %}{% when Some with (json) %}{{ json|escape }}{% when None %}{{ result|escape }}{% endmatch %}`)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full result">
+                                <button data-modal-title="Result" data-modal-hot="{{ result }}" data-modal-json="{% match run.result_json %}{% when Some with (json) %}{{ json }}{% when None %}{{ result }}{% endmatch %}" onclick="openContentModalFromData(this)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full result">
                                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
                                     </svg>
@@ -434,11 +434,11 @@
                         <td class="px-6 py-4 text-xs">
                             <div class="flex items-center gap-2">
                                 <button class="result-btn text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 cursor-pointer font-mono text-xs truncate max-w-xs flex-1 text-left"
-                                        onclick="window.showStreamNodeInspector('{{ event.event_id }}', 'event', {})"
+                                        onclick="window.showStreamNodeInspector({{ event.event_id|js }}, 'event', {})"
                                         title="Click to inspect">
                                     <code class="language-hot truncate inline-block max-w-full">{{ crate::templates::truncate_string(&event.event_data_formatted, 50) }}</code>
                                 </button>
-                                <button onclick="openContentModalWithFormats('Event Data', `{{ event.event_data_formatted|escape }}`, `{{ event.event_data_json|escape }}`)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full event data">
+                                <button data-modal-title="Event Data" data-modal-hot="{{ event.event_data_formatted }}" data-modal-json="{{ event.event_data_json }}" onclick="openContentModalFromData(this)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full event data">
                                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
                                     </svg>
@@ -502,7 +502,7 @@
                             <span class="text-gray-600 dark:text-gray-400 flex-shrink-0">Data:</span>
                             <div class="flex items-center justify-between gap-2 flex-1 min-w-0">
                                 <code class="language-hot text-gray-700 dark:text-gray-300 font-mono text-xs truncate">{{ crate::templates::truncate_string(&event.event_data_formatted, 20) }}</code>
-                                <button onclick="openContentModalWithFormats('Event Data', `{{ event.event_data_formatted|escape }}`, `{{ event.event_data_json|escape }}`)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full event data">
+                                <button data-modal-title="Event Data" data-modal-hot="{{ event.event_data_formatted }}" data-modal-json="{{ event.event_data_json }}" onclick="openContentModalFromData(this)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full event data">
                                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
                                     </svg>

@@ -102,7 +102,7 @@ pub async fn service_keys_new_handler(
         "No environment selected".to_string(),
     ))?;
 
-    let (mcp_tools_json, webhooks_json) =
+    let (mcp_tool_options, webhook_options) =
         super::build_permission_path_options(&db, &env.env_id).await;
 
     let template = crate::templates::ServiceKeysNew {
@@ -115,8 +115,8 @@ pub async fn service_keys_new_handler(
         error_message: "",
         generated_key: None,
         service_key_id: None,
-        mcp_tools_json,
-        webhooks_json,
+        mcp_tool_options,
+        webhook_options,
     };
 
     Ok(Html(
@@ -258,8 +258,8 @@ pub async fn service_keys_create_handler(
                 error_message: "",
                 generated_key: Some(token),
                 service_key_id: Some(service_key.service_key_id),
-                mcp_tools_json: "[]".into(),
-                webhooks_json: "[]".into(),
+                mcp_tool_options: serde_json::Value::Array(Vec::new()),
+                webhook_options: serde_json::Value::Array(Vec::new()),
             };
 
             Ok(Html(
@@ -279,8 +279,8 @@ pub async fn service_keys_create_handler(
                 error_message: &format!("Failed to create service key: {}", e),
                 generated_key: None,
                 service_key_id: None,
-                mcp_tools_json: "[]".into(),
-                webhooks_json: "[]".into(),
+                mcp_tool_options: serde_json::Value::Array(Vec::new()),
+                webhook_options: serde_json::Value::Array(Vec::new()),
             };
 
             Ok(Html(

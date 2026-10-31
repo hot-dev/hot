@@ -27,11 +27,12 @@
     return t === 'schedule' || t === 'webhook' || t === 'mcp_tool';
   }
 
+  // Escape for HTML text and quoted attribute values (node ids carry deployed event types).
   function esc(s) {
     if (!s) return '';
     var d = document.createElement('div');
     d.appendChild(document.createTextNode(s));
-    return d.innerHTML;
+    return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   // -----------------------------------------------------------------------

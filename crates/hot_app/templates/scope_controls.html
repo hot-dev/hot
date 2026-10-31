@@ -1,8 +1,8 @@
 <script>
 // The page's scope is immutable. Cookies only choose the next navigation default.
 (() => {
-    const orgId = '{% match page_context.current_org %}{% when Some with (org) %}{{ org.org_id }}{% when None %}{% endmatch %}';
-    const envId = '{% match page_context.current_env %}{% when Some with (env) %}{{ env.env_id }}{% when None %}{% endmatch %}';
+    const orgId = {% match page_context.current_org %}{% when Some with (org) %}{{ org.org_id|js|safe }}{% when None %}''{% endmatch %};
+    const envId = {% match page_context.current_env %}{% when Some with (env) %}{{ env.env_id|js|safe }}{% when None %}''{% endmatch %};
     function localScope(raw) {
         const url = new URL(raw, window.location.href);
         if (url.origin !== window.location.origin || !orgId || url.pathname.startsWith('/@') ||

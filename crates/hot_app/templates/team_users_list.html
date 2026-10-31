@@ -101,7 +101,7 @@
                                     <button type="button" data-local-dev-restricted class="text-gray-500 hover:text-red-600 dark:text-gray-400 dark:hover:text-red-400 cursor-pointer">Remove</button>
                                     {% else %}
                                     <form id="remove-user-{{ team_user.user_id }}" action="/@{{ org.slug }}/teams/{{ team.team_id }}/users/{{ team_user.user_id }}/remove" method="POST" class="inline">
-                                        <button type="button" onclick="confirmRemoveUser('{{ team_user.user_id }}')" class="text-gray-500 hover:text-red-600 dark:text-gray-400 dark:hover:text-red-400">Remove</button>
+                                        <button type="button" onclick="confirmRemoveUser({{ team_user.user_id|js }})" class="text-gray-500 hover:text-red-600 dark:text-gray-400 dark:hover:text-red-400">Remove</button>
                                     </form>
                                     {% endif %}
                                     {% when None %}

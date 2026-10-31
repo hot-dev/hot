@@ -65,12 +65,16 @@ pub struct SearchAndTimeRange {
 
 impl SearchAndTimeRange {
     pub fn parse(params: &AHashMap<String, String>, now: DateTime<Utc>) -> Self {
-        let selected_time_range = selected_value(params, "time_range", "all");
         let search_query = selected_value(params, "search", "");
         let time_range_cutoff = hot::time_range::parse_time_range_cutoff(
             params.get("time_range").map(|s| s.as_str()),
             now,
         );
+        // Only echo a range that parsed, so pages never render arbitrary query text as a range.
+        let selected_time_range = match params.get("time_range") {
+            Some(range) if time_range_cutoff.is_some() => range.clone(),
+            _ => "all".to_string(),
+        };
 
         Self {
             selected_time_range,
@@ -125,10 +129,11 @@ pub fn non_empty_filter(selected: &[String]) -> Option<Vec<&str>> {
     }
 }
 
+/// Parse an optional UUID query parameter. The returned string is the canonical UUID, or empty
+/// when the parameter is missing or invalid.
 pub fn optional_uuid_param(params: &AHashMap<String, String>, key: &str) -> (String, Option<Uuid>) {
-    let selected = selected_value(params, key, "");
-    let uuid = non_empty_str(&selected).and_then(|s| Uuid::parse_str(s).ok());
-    (selected, uuid)
+    let uuid = params.get(key).and_then(|s| Uuid::parse_str(s).ok());
+    (uuid.map(|u| u.to_string()).unwrap_or_default(), uuid)
 }
 
 pub fn non_empty_str(value: &str) -> Option<&str> {
@@ -258,7 +263,7 @@ mod tests {
         assert_eq!(uuid, Some(Uuid::parse_str(valid).unwrap()));
 
         let (raw, uuid) = optional_uuid_param(&params(&[("project", "nope")]), "project");
-        assert_eq!(raw, "nope");
+        assert_eq!(raw, "");
         assert!(uuid.is_none());
 
         let (raw, uuid) = optional_uuid_param(&params(&[]), "project");
@@ -276,5 +281,14 @@ mod tests {
 
         let empty = SearchAndTimeRange::parse(&params(&[]), now);
         assert_eq!(empty.search_term(), None);
+
+        let ranged = SearchAndTimeRange::parse(&params(&[("time_range", "P7D")]), now);
+        assert_eq!(ranged.selected_time_range, "P7D");
+        assert!(ranged.time_range_cutoff.is_some());
+
+        let hostile =
+            SearchAndTimeRange::parse(&params(&[("time_range", "x',a:alert(1),b:'")]), now);
+        assert_eq!(hostile.selected_time_range, "all");
+        assert!(hostile.time_range_cutoff.is_none());
     }
 }

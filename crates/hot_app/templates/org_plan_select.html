@@ -118,7 +118,7 @@ function setBilling(period) {
     // Update links
     document.querySelectorAll('.plan-link').forEach(link => {
         const planId = link.dataset.planId;
-        link.href = `/@{{ org.slug }}/billing/checkout?plan=${planId}&billing=${period}`;
+        link.href = '/@' + {{ org.slug|js|safe }} + `/billing/checkout?plan=${planId}&billing=${period}`;
     });
 }
 </script>

@@ -307,7 +307,7 @@ html.dark .deps-code-block, html.dark .docs-content .deps-code-block, html.dark 
 {% include "components/docs/docs_shared_scripts.html" %}
 <script>
 // Search state consumed by the shared docs script + page renderers
-var projectName = '{{ project_name }}';
+var projectName = {{ project_name|js|safe }};
 
 function searchResultUrl(item) {
   return item.path;
@@ -403,7 +403,7 @@ function renderSearchResults() {
         var kindIcon = getKindIcon(item.kind);
         var kindBadge = getKindBadge(item.kind);
 
-        html += '<a href="' + item.path + '" class="block px-4 py-3 ' +
+        html += '<a href="' + escapeHtml(item.path).replace(/"/g, '&quot;') + '" class="block px-4 py-3 ' +
             (isSelected ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-100 dark:hover:bg-gray-700/50') +
             ' transition-colors cursor-pointer" data-index="' + i + '">' +
             '<div class="flex items-start gap-3">' +

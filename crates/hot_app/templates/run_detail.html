@@ -180,7 +180,7 @@
         <div class="mt-4 flex gap-2">
             {% if r.status == "failed" %}
             <button
-                onclick="retryRun('{{ r.run_id }}')"
+                onclick="retryRun({{ r.run_id|js }})"
                 class="btn btn-secondary btn-sm inline-flex items-center gap-1.5"
                 title="Retry this failed run in the same stream">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -190,7 +190,7 @@
             </button>
             {% endif %}
             <button
-                onclick="rerunRun('{{ r.run_id }}')"
+                onclick="rerunRun({{ r.run_id|js }})"
                 class="btn btn-secondary btn-sm inline-flex items-center gap-1.5"
                 title="Re-run this function in a new stream">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -288,7 +288,7 @@
     </div>
 
     <!-- Hidden script to pass graph data safely -->
-    <script type="application/json" id="graph-data">{{ graph_data_json|safe }}</script>
+    <script type="application/json" id="graph-data">{{ graph_data|js|safe }}</script>
 
     <!-- Main Content Area with integrated Value Inspector -->
     <div class="w-full rounded-b-lg backdrop-blur-sm border border-t-0 border-gray-200 dark:border-gray-700 transition-all duration-300 bg-white dark:bg-gray-800 text-gray-800 dark:text-white flex flex-col">

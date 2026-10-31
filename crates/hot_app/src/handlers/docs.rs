@@ -5,6 +5,7 @@
 //! - Dependency documentation
 //! - hot-std documentation (shared across all projects)
 
+use crate::templates::filters;
 use ahash::AHashMap;
 use askama::Template;
 use axum::{

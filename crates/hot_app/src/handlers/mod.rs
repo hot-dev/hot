@@ -795,12 +795,13 @@ pub async fn status_handler() -> Json<JsonValue> {
 }
 
 /// Build grouped JSON for MCP tools and webhooks in an environment.
-/// Returns `(mcp_tools_json, webhooks_json)` — each a JSON array of
-/// `{"service":"...","items":["..."]}` objects, grouped by service.
+/// Returns `(mcp_tools, webhooks)` — each a JSON array of
+/// `{"service":"...","items":["..."]}` objects, grouped by service. Templates embed them with
+/// the `js` filter: tool names and webhook paths come from deployed code.
 pub async fn build_permission_path_options(
     db: &hot::db::DatabasePool,
     env_id: &uuid::Uuid,
-) -> (String, String) {
+) -> (JsonValue, JsonValue) {
     use std::collections::BTreeMap;
 
     // MCP tools grouped by service
@@ -828,9 +829,9 @@ pub async fn build_permission_path_options(
                     serde_json::json!({"service": service, "items": items})
                 })
                 .collect();
-            serde_json::to_string(&groups).unwrap_or_else(|_| "[]".into())
+            JsonValue::Array(groups)
         }
-        Err(_) => "[]".into(),
+        Err(_) => JsonValue::Array(Vec::new()),
     };
 
     // Webhooks grouped by service
@@ -852,9 +853,9 @@ pub async fn build_permission_path_options(
                     serde_json::json!({"service": service, "items": items})
                 })
                 .collect();
-            serde_json::to_string(&groups).unwrap_or_else(|_| "[]".into())
+            JsonValue::Array(groups)
         }
-        Err(_) => "[]".into(),
+        Err(_) => JsonValue::Array(Vec::new()),
     };
 
     (mcp_json, webhooks_json)

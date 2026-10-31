@@ -266,7 +266,7 @@
 
 <script>
 function copyApiKey() {
-    const apiKey = "{{ generated_key }}";
+    const apiKey = {{ generated_key|js|safe }};
 
     if (navigator.clipboard && window.isSecureContext) {
         navigator.clipboard.writeText(apiKey).then(() => {
@@ -339,13 +339,23 @@ function permissionBuilder() {
     };
 
     const PATH_OPTIONS = {
-        'mcp': {{ mcp_tools_json|safe }},
-        'webhook': {{ webhooks_json|safe }},
+        'mcp': {{ mcp_tool_options|js|safe }},
+        'webhook': {{ webhook_options|js|safe }},
     };
 
     return {
-        accessLevel: '{{ access_level }}',
+        accessLevel: {{ access_level|js|safe }},
         rules: [],
+        init() {
+            // After a validation error the form comes back with the submitted rules.
+            const initial = {{ permissions|js|safe }};
+            if (this.accessLevel !== 'restricted' || !initial || typeof initial !== 'object') return;
+            for (const [key, actions] of Object.entries(initial)) {
+                const colonIdx = key.indexOf(':');
+                if (colonIdx < 0 || !Array.isArray(actions)) continue;
+                this.rules.push({ type: key.substring(0, colonIdx), path: key.substring(colonIdx + 1), actions: [...actions] });
+            }
+        },
         validActions(type) {
             return VALID_ACTIONS[type] || VALID_ACTIONS['*'];
         },

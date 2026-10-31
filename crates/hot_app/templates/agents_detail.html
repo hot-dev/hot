@@ -453,7 +453,7 @@
                 <tbody>
                     {% for run in runs %}
                     <tr class="border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer"
-                        onclick="window.location=window.hotScopeUrl('/runs/{{ run.run_id }}')">
+                        onclick="window.location=window.hotScopeUrl('/runs/' + {{ run.run_id|js }})">
                         <td class="py-2.5 px-4 font-mono text-xs text-purple-600 dark:text-purple-400">{{ run.run_id.to_string()[..12] }}</td>
                         <td class="py-2.5 px-4">
                             <span class="badge
@@ -512,7 +512,7 @@
                 <tbody>
                     {% for s in streams %}
                     <tr class="border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer"
-                        onclick="window.location=window.hotScopeUrl('/streams/{{ s.stream_id }}')">
+                        onclick="window.location=window.hotScopeUrl('/streams/' + {{ s.stream_id|js }})">
                         <td class="py-2.5 px-4 font-mono text-xs text-purple-600 dark:text-purple-400">{{ s.stream_id }}</td>
                         <td class="py-2.5 px-4 text-gray-600 dark:text-gray-400">{{ s.total_runs|commafy }}</td>
                         <td class="py-2.5 px-4 text-gray-600 dark:text-gray-400">{{ s.total_events|commafy }}</td>

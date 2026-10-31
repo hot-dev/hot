@@ -31,9 +31,9 @@
                         Default
                     </button>
                     {% for domain in &custom_domains %}
-                    <button @click="selectDomain('{{ domain }}'); open = false"
+                    <button @click="selectDomain({{ domain|js }}); open = false"
                         class="block w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 truncate"
-                        :class="selectedDomain === '{{ domain }}' ? 'font-semibold bg-gray-50 dark:bg-gray-700' : ''">
+                        :class="selectedDomain === {{ domain|js }} ? 'font-semibold bg-gray-50 dark:bg-gray-700' : ''">
                         {{ domain }}
                     </button>
                     {% endfor %}
@@ -250,8 +250,8 @@
 <script>
 function mcpEndpointUrl() {
     return {
-        defaultUrl: '{{ endpoint_url }}',
-        service: '{{ service }}',
+        defaultUrl: {{ endpoint_url|js|safe }},
+        service: {{ service|js|safe }},
         selectedDomain: '',
         copied: false,
         get currentUrl() {

@@ -169,7 +169,6 @@ pub async fn task_detail_handler(
         stream_graph::FocusElement::Task(task_uuid),
     )
     .await;
-    let graph_data_json = templates::script_safe_json(&graph_data, "{}");
 
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::clickable(
@@ -187,7 +186,7 @@ pub async fn task_detail_handler(
         title: &templates::get_uuid_short(&task_uuid),
         page_context,
         task: task_display,
-        graph_data_json,
+        graph_data,
     };
 
     Ok(Html(template.render().map_err(|e| {

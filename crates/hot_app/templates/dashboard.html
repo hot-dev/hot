@@ -16,7 +16,7 @@ document.addEventListener('alpine:init', () => {
         timeRange: 'P1D',
         timeUnit: 'hour',  // Auto-selected based on timeRange
 {% endraw %}
-        projects: {{ projects_json|safe }},
+        projects: {{ projects_json|js|safe }},
 {% raw %}
 
         // Auto-select appropriate time unit based on time range
@@ -351,7 +351,7 @@ function formatPartialTooltip(params, totalPoints) {
         const displayName = param.seriesName.replace(/^__partial__/, '');
         if (!seen.has(displayName) && param.value != null) {
             seen.add(displayName);
-            result += `${param.marker} ${displayName}: ${param.value}<br/>`;
+            result += `${param.marker} ${echarts.format.encodeHTML(displayName)}: ${param.value}<br/>`;
         }
     });
     return result;
@@ -1422,7 +1422,8 @@ function updateEventTypeTimelineChart(data) {
                         }
                         result += '<br/>';
                         params.forEach(param => {
-                            result += `${param.marker} ${param.seriesName}: ${param.value}<br/>`;
+                            // Series are deployed event types; echarts renders tooltips as HTML.
+                            result += `${param.marker} ${echarts.format.encodeHTML(param.seriesName)}: ${param.value}<br/>`;
                         });
                         return result;
                     }
@@ -1879,7 +1880,7 @@ function updateLatencyTimelineChart(kind, data) {
                     const name = param.seriesName.replace(/^__partial__/, '');
                     if (!seen.has(name) && param.value != null) {
                         seen.add(name);
-                        result += `${param.marker} ${name} ${percentile}: ${formatLatencyMs(param.value)}<br/>`;
+                        result += `${param.marker} ${echarts.format.encodeHTML(name)} ${percentile}: ${formatLatencyMs(param.value)}<br/>`;
                     }
                 });
                 const count = (data.sample_counts || [])[index] || 0;
@@ -1981,7 +1982,7 @@ function updateTaskCusTimelineChart(data) {
                         if (isLastPoint) result += ' <span style="color: ' + getSecondaryTextColor() + '">(partial)</span>';
                         result += '<br/>';
                         params.forEach(p => {
-                            if (p.value != null) result += `${p.marker} ${p.seriesName}: ${formatNumber(p.value)}<br/>`;
+                            if (p.value != null) result += `${p.marker} ${echarts.format.encodeHTML(p.seriesName)}: ${formatNumber(p.value)}<br/>`;
                         });
                         return result;
                     }

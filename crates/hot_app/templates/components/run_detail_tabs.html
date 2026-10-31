@@ -2815,7 +2815,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             console.error('Error loading hierarchy:', error);
             this.hierarchyTree.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-4">
                 <p>Failed to load hierarchy</p>
-                <p class="text-xs mt-2">${error.message}</p>
+                <p class="text-xs mt-2">${this.escapeHtml(error.message)}</p>
             </div>`;
         }
     }
@@ -2859,7 +2859,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             console.error('Error loading timeline:', error);
             this.renderTimeline(`<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
                 <p>Failed to load timeline</p>
-                <p class="text-xs mt-2">${error.message}</p>
+                <p class="text-xs mt-2">${this.escapeHtml(error.message)}</p>
             </div>`);
         }
     }
@@ -2962,7 +2962,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             console.error('Error loading files:', error);
             this.filesView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
                 <p>Failed to load files</p>
-                <p class="text-xs mt-2">${error.message}</p>
+                <p class="text-xs mt-2">${this.escapeHtml(error.message)}</p>
             </div>`;
         }
     }
@@ -2980,7 +2980,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
         } catch (error) {
             this.tasksView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
                 <p>Failed to load tasks</p>
-                <p class="text-xs mt-2">${error.message}</p>
+                <p class="text-xs mt-2">${this.escapeHtml(error.message)}</p>
             </div>`;
         }
     }
@@ -3968,7 +3968,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
                  style="${finalIndentStyle}">
                 <div class="timeline-bar-header">
                     <div class="timeline-bar-title">
-                        ${condPrefix.html}${displayName ? `<span>${displayName}</span>` : ''}${flowPill}
+                        ${condPrefix.html}${displayName ? `<span>${this.escapeHtml(displayName)}</span>` : ''}${flowPill}
                     </div>
                     <div class="timeline-bar-duration">${resultMatchBadge}${this.formatDuration(item.duration_us)}</div>
                 </div>
@@ -4031,7 +4031,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
                      data-node-type="${node.type}"
                      style="${extraPadding}">
                     <span class="tree-toggle" data-node-id="${node.id}" style="width: 14px; cursor: ${hasChildren ? 'pointer' : 'default'}">${toggleIcon}</span>
-                    ${condPrefix.html}<span class="node-name" style="flex: 1" title="${name}">${displayName}${flowPill}</span>
+                    ${condPrefix.html}<span class="node-name" style="flex: 1" title="${this.escapeAttribute(name)}">${this.escapeHtml(displayName)}${flowPill}</span>
                     ${resultMatchBadge}${durationBadge}
                 </div>
                 ${hasChildren && isExpanded ? `

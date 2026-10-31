@@ -810,7 +810,7 @@
     <script>
         // Initialize modal format from page context
         if (typeof initModalFormat === 'function') {
-            initModalFormat('{{ page_context.value_format }}');
+            initModalFormat({{ page_context.value_format|js|safe }});
         }
     </script>
 

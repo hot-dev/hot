@@ -56,7 +56,7 @@
     </div>
 
     <!-- Hidden script to pass graph data safely -->
-    <script type="application/json" id="stream-graph-data">{{ graph_data_json|safe }}</script>
+    <script type="application/json" id="stream-graph-data">{{ graph_data|js|safe }}</script>
 
     <!-- Tabbed Content Area -->
     <div class="w-full rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-800 dark:text-white flex flex-col" style="min-height: 500px;">

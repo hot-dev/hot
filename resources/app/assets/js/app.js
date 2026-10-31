@@ -219,6 +219,22 @@
      * Open modal with pre-formatted Hot and JSON strings from backend
      */
     function openContentModalWithFormats(title, hotContent, jsonContent) {
+        // Decode HTML entities from script tags
+        showContentModalWithFormats(title, decodeHtmlEntities(hotContent), decodeHtmlEntities(jsonContent));
+    }
+
+    /**
+     * Open the two-format modal from an element's data-modal-title, data-modal-hot and
+     * data-modal-json attributes. Templates use this instead of passing data in onclick code.
+     */
+    function openContentModalFromData(element) {
+        if (!element) return;
+        var hotContent = element.getAttribute('data-modal-hot') || '';
+        var jsonContent = element.getAttribute('data-modal-json') || hotContent;
+        showContentModalWithFormats(element.getAttribute('data-modal-title') || '', hotContent, jsonContent);
+    }
+
+    function showContentModalWithFormats(title, decodedHotContent, decodedJsonContent) {
         var modal = document.getElementById('content-modal');
         var modalTitle = document.getElementById('content-modal-title');
         var modalBody = document.getElementById('content-modal-body');
@@ -227,10 +243,6 @@
         if (!modal || !modalTitle || !modalBody) return;
 
         modalTitle.textContent = title;
-
-        // Decode HTML entities from script tags
-        var decodedHotContent = decodeHtmlEntities(hotContent);
-        var decodedJsonContent = decodeHtmlEntities(jsonContent);
 
         // Store both formats in data attributes for toggling
         modalBody.setAttribute('data-hot-content', decodedHotContent);
@@ -1858,6 +1870,7 @@
     window.initModalFormat = initModalFormat;
     window.openContentModal = openContentModal;
     window.openContentModalWithFormats = openContentModalWithFormats;
+    window.openContentModalFromData = openContentModalFromData;
     window.openContentModalFromElement = openContentModalFromElement;
     window.openContentModalFromScript = openContentModalFromScript;
     window.openPlainTextModal = openPlainTextModal;

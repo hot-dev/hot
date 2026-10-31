@@ -31,9 +31,9 @@
                         Default
                     </button>
                     {% for domain in &custom_domains %}
-                    <button @click="selectDomain('{{ domain }}'); open = false"
+                    <button @click="selectDomain({{ domain|js }}); open = false"
                         class="block w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 truncate"
-                        :class="selectedDomain === '{{ domain }}' ? 'font-semibold bg-gray-50 dark:bg-gray-700' : ''">
+                        :class="selectedDomain === {{ domain|js }} ? 'font-semibold bg-gray-50 dark:bg-gray-700' : ''">
                         {{ domain }}
                     </button>
                     {% endfor %}
@@ -124,9 +124,9 @@
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm" x-data="{ copied: false }">
                                     <div class="flex items-center gap-1.5">
-                                        <code class="text-xs text-gray-500 dark:text-gray-400 font-mono truncate max-w-[240px]" :title="currentBase + '{{ ep.path }}/{{ ep.token }}'">...{{ ep.path }}/{{ ep.token }}</code>
+                                        <code class="text-xs text-gray-500 dark:text-gray-400 font-mono truncate max-w-[240px]" :title="currentBase + {{ ep.path|js }} + '/' + {{ ep.token|js }}">...{{ ep.path }}/{{ ep.token }}</code>
                                         <button
-                                            @click="navigator.clipboard.writeText(currentBase + '{{ ep.path }}/{{ ep.token }}'); copied = true; setTimeout(() => copied = false, 2000)"
+                                            @click="navigator.clipboard.writeText(currentBase + {{ ep.path|js }} + '/' + {{ ep.token|js }}); copied = true; setTimeout(() => copied = false, 2000)"
                                             class="flex-shrink-0 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors"
                                             :title="copied ? 'Copied!' : 'Copy URL'">
                                             <template x-if="!copied">
@@ -187,7 +187,7 @@
                         <div class="flex items-center gap-1">
                             <code class="text-xs text-gray-500 dark:text-gray-400 font-mono truncate max-w-[180px]">...{{ ep.path }}/{{ ep.token }}</code>
                             <button
-                                @click="navigator.clipboard.writeText(currentBase + '{{ ep.path }}/{{ ep.token }}'); copied = true; setTimeout(() => copied = false, 2000)"
+                                @click="navigator.clipboard.writeText(currentBase + {{ ep.path|js }} + '/' + {{ ep.token|js }}); copied = true; setTimeout(() => copied = false, 2000)"
                                 class="flex-shrink-0 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
                                 :title="copied ? 'Copied!' : 'Copy URL'">
                                 <template x-if="!copied">
@@ -238,8 +238,8 @@
 <script>
 function webhookBaseUrl() {
     return {
-        defaultBase: '{{ base_url }}',
-        service: '{{ service }}',
+        defaultBase: {{ base_url|js|safe }},
+        service: {{ service|js|safe }},
         selectedDomain: '',
         get currentBase() {
             if (this.selectedDomain) {

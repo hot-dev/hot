@@ -63,7 +63,7 @@
                             type="text"
                             name="description"
                             id="description"
-                            value="{{ api_key.description }}"
+                            value="{{ description }}"
                             required
                             class="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-md shadow-sm text-sm focus:ring-hot-red-500 focus:border-hot-red-500 dark:bg-gray-900 dark:text-white"
                             placeholder="e.g., Production CI/CD Pipeline"
@@ -348,8 +348,8 @@ function permissionBuilder() {
     };
 
     const PATH_OPTIONS = {
-        'mcp': {{ mcp_tools_json|safe }},
-        'webhook': {{ webhooks_json|safe }},
+        'mcp': {{ mcp_tool_options|js|safe }},
+        'webhook': {{ webhook_options|js|safe }},
     };
 
     // Parse existing permissions JSON into rules
@@ -371,11 +371,11 @@ function permissionBuilder() {
     }
 
     return {
-        accessLevel: '{{ access_level }}',
+        accessLevel: {{ access_level|js|safe }},
         rules: [],
         init() {
             if (this.accessLevel === 'restricted') {
-                const existingJson = {{ permissions_json|safe }};
+                const existingJson = {{ permissions|js|safe }};
                 if (typeof existingJson === 'string') {
                     this.rules = parseExistingPermissions(existingJson);
                 } else if (typeof existingJson === 'object') {

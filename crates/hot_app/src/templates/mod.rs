@@ -296,6 +296,18 @@ pub fn build_url_with_params(
 pub mod filters {
     use std::fmt;
 
+    /// Serialize a value as a JavaScript literal that cannot break out of its context.
+    ///
+    /// This is the only way to put a value into JavaScript (`scripts/browser-security.test.mjs`
+    /// lints the templates for it):
+    ///   - in event-handler and Alpine attributes: `onclick="go({{ id|js }})"` (auto-escaping
+    ///     encodes the quotes, and the browser decodes them before the code runs);
+    ///   - in executable `<script>` blocks: `const id = {{ id|js|safe }};`.
+    #[askama::filter_fn]
+    pub fn js<T: serde::Serialize>(value: T, _: &dyn askama::Values) -> askama::Result<String> {
+        Ok(super::script_safe_json(&value, "null").replace('\'', "\\u0027"))
+    }
+
     /// Round a float to the nearest integer
     #[askama::filter_fn]
     pub fn round<T: fmt::Display>(value: T, _: &dyn askama::Values) -> askama::Result<String> {
@@ -2075,7 +2087,7 @@ pub struct Dashboard<'a> {
     pub chart_data_json: &'a str,
     pub status_chart_data_json: &'a str,
     pub projects: Vec<hot::db::Project>,
-    pub projects_json: String,
+    pub projects_json: serde_json::Value,
 }
 
 #[derive(Template)]
@@ -2260,7 +2272,7 @@ pub struct RunDetail<'a> {
     pub stream_id: Uuid,
     pub raw_mode: bool,
     pub inspect_mode: bool,
-    pub graph_data_json: String,
+    pub graph_data: GraphNodeData,
     pub access_info: Option<AccessInfo>,
     pub associated_task_id: Option<Uuid>,
 }
@@ -2308,7 +2320,7 @@ pub struct TaskDetail<'a> {
     pub title: &'a str,
     pub page_context: PrivatePageContext,
     pub task: TaskDisplay,
-    pub graph_data_json: String,
+    pub graph_data: GraphNodeData,
 }
 
 #[derive(Template)]
@@ -2585,8 +2597,10 @@ pub struct ApiKeysNew<'a> {
     pub error_message: &'a str,
     pub description: &'a str,
     pub access_level: &'a str,
-    pub mcp_tools_json: String,
-    pub webhooks_json: String,
+    /// Initial rules for a Restricted key (an error re-render keeps the submitted ones).
+    pub permissions: serde_json::Value,
+    pub mcp_tool_options: serde_json::Value,
+    pub webhook_options: serde_json::Value,
 }
 
 #[derive(Template)]
@@ -2596,10 +2610,11 @@ pub struct ApiKeysEdit<'a> {
     pub page_context: PrivatePageContext,
     pub api_key: hot::db::api_key::ApiKey,
     pub error_message: &'a str,
+    pub description: &'a str,
     pub access_level: &'a str,
-    pub permissions_json: String,
-    pub mcp_tools_json: String,
-    pub webhooks_json: String,
+    pub permissions: serde_json::Value,
+    pub mcp_tool_options: serde_json::Value,
+    pub webhook_options: serde_json::Value,
 }
 
 #[derive(Template)]
@@ -2902,7 +2917,6 @@ pub struct StreamDetail<'a> {
     pub events: Vec<EventListItem>,
     pub tasks: Vec<TaskDisplay>,
     pub graph_data: GraphNodeData,
-    pub graph_data_json: String,
     pub current_page_num: i64,
     pub total_pages: i64,
     pub start_page: i64,
@@ -3953,8 +3967,8 @@ pub struct ServiceKeysNew<'a> {
     pub error_message: &'a str,
     pub generated_key: Option<String>,
     pub service_key_id: Option<Uuid>,
-    pub mcp_tools_json: String,
-    pub webhooks_json: String,
+    pub mcp_tool_options: serde_json::Value,
+    pub webhook_options: serde_json::Value,
 }
 
 /// A single parsed permission rule for display purposes.
@@ -4223,6 +4237,39 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&json).unwrap()["name"],
             "</script><script>alert(1)</script>"
         );
+    }
+
+    #[test]
+    fn js_filter_output_cannot_leave_a_script_attribute_or_string() {
+        use super::filters;
+
+        #[derive(Template)]
+        #[template(
+            source = "<b onclick=\"go({{ value|js }})\"></b><script>go({{ value|js|safe }});</script>",
+            ext = "html"
+        )]
+        struct Page<'a> {
+            value: &'a str,
+        }
+
+        let value = "x',a:alert(1),b:'\"</script><script>&amp;\u{2028}\\";
+        let html = Page { value }.render().unwrap();
+        let attribute = &html[html.find("go(").unwrap() + 3..html.find(")\"></b>").unwrap()];
+        let script =
+            &html[html.find("<script>go(").unwrap() + 11..html.rfind(");</script>").unwrap()];
+        // No raw quote, angle bracket, ampersand or line separator survives in either context.
+        assert!(
+            !script.contains(['\'', '<', '>', '&', '\u{2028}']),
+            "{script}"
+        );
+        assert!(!attribute.contains(['\'', '"', '<', '>']), "{attribute}");
+        // Both decode back to the value: the attribute after the browser decodes its entities.
+        assert_eq!(serde_json::from_str::<String>(script).unwrap(), value);
+        let decoded = attribute
+            .replace("&#34;", "\"")
+            .replace("&#39;", "'")
+            .replace("&amp;", "&");
+        assert_eq!(serde_json::from_str::<String>(&decoded).unwrap(), value);
     }
 
     /// Slugify a heading the same way package docs routes do.

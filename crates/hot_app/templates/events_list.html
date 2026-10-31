@@ -228,7 +228,7 @@
                                     <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
                                         <div class="flex items-center gap-2">
                                             <code class="language-hot text-xs truncate block max-w-xs">{{ crate::templates::truncate_string(&event.event_data_formatted, 40) }}</code>
-                                            <button onclick="event.stopPropagation(); openContentModalWithFormats('Event Data', '{{ event.event_data_formatted|escape }}', '{{ event.event_data_json|escape }}')" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full event data">
+                                            <button data-modal-title="Event Data" data-modal-hot="{{ event.event_data_formatted }}" data-modal-json="{{ event.event_data_json }}" onclick="event.stopPropagation(); openContentModalFromData(this)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full event data">
                                                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
                                                 </svg>
@@ -280,10 +280,10 @@
                         <div class="flex items-center justify-between">
                             <div class="flex-1 flex justify-between sm:hidden">
                                 {% if has_prev_page %}
-                                <button onclick="window.eventsListComponent && window.eventsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-700 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Previous</button>
+                                <button onclick="window.eventsListComponent && window.eventsListComponent.goToPage({{ (current_page_num - 1)|js }})" class="relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-700 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Previous</button>
                                 {% endif %}
                                 {% if has_next_page %}
-                                <button onclick="window.eventsListComponent && window.eventsListComponent.goToPage({{ current_page_num + 1 }})" class="ml-3 relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-700 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Next</button>
+                                <button onclick="window.eventsListComponent && window.eventsListComponent.goToPage({{ (current_page_num + 1)|js }})" class="ml-3 relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-700 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Next</button>
                                 {% endif %}
                             </div>
                             <div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
@@ -295,7 +295,7 @@
                                 <div>
                                     <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
                                         {% if has_prev_page %}
-                                        <button onclick="window.eventsListComponent && window.eventsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                                        <button onclick="window.eventsListComponent && window.eventsListComponent.goToPage({{ (current_page_num - 1)|js }})" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                                             <span class="sr-only">Previous</span>
                                             <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                                                 <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
@@ -307,12 +307,12 @@
                                         {% if page_num == current_page_num %}
                                         <span aria-current="page" class="relative inline-flex items-center px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-700 bg-hot-red-700 text-xs sm:text-sm font-medium text-white">{{ page_num }}</span>
                                         {% else %}
-                                        <button onclick="window.eventsListComponent && window.eventsListComponent.goToPage({{ page_num }})" class="relative inline-flex items-center px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">{{ page_num }}</button>
+                                        <button onclick="window.eventsListComponent && window.eventsListComponent.goToPage({{ page_num|js }})" class="relative inline-flex items-center px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">{{ page_num }}</button>
                                         {% endif %}
                                         {% endfor %}
 
                                         {% if has_next_page %}
-                                        <button onclick="window.eventsListComponent && window.eventsListComponent.goToPage({{ current_page_num + 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                                        <button onclick="window.eventsListComponent && window.eventsListComponent.goToPage({{ (current_page_num + 1)|js }})" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                                             <span class="sr-only">Next</span>
                                             <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                                                 <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
@@ -417,7 +417,7 @@
                         <span class="text-gray-600 dark:text-gray-400 flex-shrink-0">Data:</span>
                         <div class="flex items-center justify-between gap-2 flex-1 min-w-0">
                             <code class="language-hot text-xs truncate">{{ crate::templates::truncate_string(&event.event_data_formatted, 20) }}</code>
-                            <button onclick="openContentModalWithFormats('Event Data', '{{ event.event_data_formatted|escape }}', '{{ event.event_data_json|escape }}')" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full event data">
+                            <button data-modal-title="Event Data" data-modal-hot="{{ event.event_data_formatted }}" data-modal-json="{{ event.event_data_json }}" onclick="openContentModalFromData(this)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full event data">
                                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
                                 </svg>
@@ -823,7 +823,7 @@ function eventsListFilters() {
             this.selectedHandled = handled || 'all';
             this.selectedTimeRange = timeRange || 'all';
             this.searchQuery = search || '';
-            this.currentPage = {{ current_page_num }};
+            this.currentPage = {{ current_page_num|js|safe }};
 
             // Watch for changes and apply filters automatically
             this.$watch('selectedHandled', () => { this.currentPage = 1; this.applyFilters(); });
