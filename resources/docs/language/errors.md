@@ -114,7 +114,9 @@ A parameter declared `Result` receives its argument as it is, an `Err`
 included. Any other parameter consumes its argument: an `Ok` unwraps, and an
 `Err` halts before the function body runs. This holds however the function is
 called: directly, through a higher-order function such as `map`, or with
-`call`.
+`call`. The exception is a `fn match` with `Result` arms: its first parameter
+receives an `Err` intact, so the `Result.Err` arm can handle it (see
+[Flows](/docs/language/flows)).
 
 ```hot
 // ❌ An `Any` parameter consumes its argument: an Err halts at the call

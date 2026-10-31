@@ -333,6 +333,19 @@ fn lower_value(
     lower_value_inner(value, current_ns, aliases, registry, 0)
 }
 
+/// Lower a cond arm's body as the block it is.
+fn lower_arm_flow(
+    flow: crate::lang::ast::Flow,
+    current_ns: &NsPath,
+    aliases: &NamespaceAliases,
+    registry: &SignatureRegistry,
+) -> crate::lang::ast::Flow {
+    match lower_value(Value::Flow(flow), current_ns, aliases, registry) {
+        Value::Flow(flow) => flow,
+        _ => unreachable!("lowering a flow returns a flow"),
+    }
+}
+
 /// `arg_index_offset` shifts how source-level argument indices map onto
 /// declared parameter indices for the **outermost** call in `value`. This
 /// is used by the pipe-flow case to model that every non-leading stage of
@@ -458,6 +471,23 @@ fn lower_value_inner(
                 .records
                 .enter_block(&flow.expressions, &flow.aliases);
             let mark = registry.records.shadow([]);
+            // A binding is one `MultipleValues([name, value])` expression, or
+            // (in a braced block) a bare `name` followed by its value, as the
+            // compiler pairs them. `pair_names[i]` names the binding whose
+            // value is expression `i` in the second form.
+            let mut pair_names: Vec<Option<String>> = vec![None; flow.expressions.len()];
+            if !is_pipe {
+                let mut i = 0;
+                while i < flow.expressions.len() {
+                    match &flow.expressions[i] {
+                        Value::Ref(Ref::Var(name)) if i + 1 < flow.expressions.len() => {
+                            pair_names[i + 1] = Some(name.var.sym.name().to_string());
+                            i += 2;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
             flow.expressions = flow
                 .expressions
                 .into_iter()
@@ -471,10 +501,17 @@ fn lower_value_inner(
                     // A local shadows a type of its name from the next
                     // expression on. Functions and types a body defines don't,
                     // and a local import names the type it is bound to.
-                    if let Value::MultipleValues(binding) = &lowered
-                        && let [Value::Ref(Ref::Var(name)), value] = binding.as_slice()
-                    {
-                        let name = name.var.sym.name().to_string();
+                    let binding = match (&lowered, &pair_names[i]) {
+                        (Value::MultipleValues(binding), _) => match binding.as_slice() {
+                            [Value::Ref(Ref::Var(name)), value] => {
+                                Some((name.var.sym.name().to_string(), value))
+                            }
+                            _ => None,
+                        },
+                        (value, Some(name)) => Some((name.clone(), value)),
+                        _ => None,
+                    };
+                    if let Some((name, value)) = binding {
                         match value {
                             Value::Fn(_) | Value::TypeDef(_) | Value::TypeImplementation(_) => {}
                             Value::Ref(Ref::Ns(NsRef {
@@ -534,23 +571,19 @@ fn lower_value_inner(
             Value::Lambda(lambda)
         }
 
-        Value::Cond(label, cond, mut flow) => {
+        // An arm's body is a block: lower it as one, so its local imports
+        // and shadows apply to its later expressions.
+        Value::Cond(label, cond, flow) => {
             let cond = lower_value(*cond, current_ns, aliases, registry);
-            flow.expressions = flow
-                .expressions
-                .into_iter()
-                .map(|e| lower_value(e, current_ns, aliases, registry))
-                .collect();
-            Value::Cond(label, Box::new(cond), flow)
+            Value::Cond(
+                label,
+                Box::new(cond),
+                lower_arm_flow(flow, current_ns, aliases, registry),
+            )
         }
 
-        Value::CondDefault(mut flow) => {
-            flow.expressions = flow
-                .expressions
-                .into_iter()
-                .map(|e| lower_value(e, current_ns, aliases, registry))
-                .collect();
-            Value::CondDefault(flow)
+        Value::CondDefault(flow) => {
+            Value::CondDefault(lower_arm_flow(flow, current_ns, aliases, registry))
         }
 
         Value::TemplateLiteral(mut tl) => {

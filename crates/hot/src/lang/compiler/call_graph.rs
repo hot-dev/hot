@@ -125,15 +125,33 @@ impl CallGraph {
             // Collect ctx requirements from this function
             if let Some(keys) = self.fn_ctx_requirements.get(&fqn) {
                 let source_file = self.fn_source_files.get(&fqn).cloned();
+                // Declarations of one key merge: it is required if any
+                // reachable function requires it (attributed to the first
+                // such function), secret if any says so, and its default
+                // applies only while no declaration requires it.
                 for key in keys {
-                    let attributed_earlier = all_keys
-                        .get(&key.key)
-                        .is_some_and(|(owner, _, _)| owner <= &fqn);
-                    if !attributed_earlier {
+                    let replace = match all_keys.get(&key.key) {
+                        None => true,
+                        Some((owner, _, existing)) => {
+                            (key.required && !existing.required)
+                                || (key.required == existing.required && fqn < *owner)
+                        }
+                    };
+                    let secret = key.secret
+                        || all_keys
+                            .get(&key.key)
+                            .is_some_and(|(_, _, existing)| existing.secret);
+                    if replace {
                         all_keys.insert(
                             key.key.clone(),
                             (fqn.clone(), source_file.clone(), key.clone()),
                         );
+                    }
+                    if let Some((_, _, merged)) = all_keys.get_mut(&key.key) {
+                        merged.secret = secret;
+                        if merged.required {
+                            merged.default = None;
+                        }
                     }
                 }
             }
@@ -944,6 +962,44 @@ mod tests {
         let reqs = graph.resolve_ctx_requirements(&["::app/fn-a".to_string()]);
         let required = reqs.all_required_keys();
         assert!(required.contains("cycle.key"));
+    }
+
+    /// An optional declaration of a key in one function doesn't hide
+    /// another reachable function's required declaration of it, whichever
+    /// sorts first.
+    #[test]
+    fn test_required_declaration_wins_over_optional() {
+        let mut program = Program {
+            namespaces: IndexMap::new(),
+            current_namespace: make_ns_path("app"),
+        };
+
+        // ::app/a-optional calls ::app/b-required; both declare api.key.
+        let mut scope = Scope {
+            vars: IndexMap::new(),
+        };
+        scope.vars.insert(
+            make_var_with_ctx("a-optional", vec![("api.key", false)]),
+            make_simple_fn(make_fn_call_local("b-required")),
+        );
+        scope.vars.insert(
+            make_var_with_ctx("b-required", vec![("api.key", true)]),
+            make_simple_fn(Value::Val(Val::Null, None)),
+        );
+        program.namespaces.insert(
+            make_ns_path("app"),
+            Namespace {
+                path: make_ns_path("app"),
+                scope,
+                meta: None,
+                source_file: Some("src/app.hot".into()),
+                aliases: IndexMap::new(),
+            },
+        );
+
+        let graph = CallGraph::build(&program);
+        let reqs = graph.resolve_ctx_requirements(&["::app/a-optional".to_string()]);
+        assert!(reqs.all_required_keys().contains("api.key"));
     }
 
     #[test]

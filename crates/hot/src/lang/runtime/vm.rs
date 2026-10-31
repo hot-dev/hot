@@ -9551,8 +9551,11 @@ impl VirtualMachine {
             Val::Vec(items) => Ok(Val::Vec(
                 items
                     .iter()
-                    .map(|item| self.resolve_meta_refs(item))
-                    .collect::<VmResult<_>>()?,
+                    .map(|item| {
+                        self.resolve_meta_refs(item)
+                            .unwrap_or_else(|_| item.clone())
+                    })
+                    .collect(),
             )),
             Val::Box(boxed) => match boxed.as_any().downcast_ref::<crate::lang::ast::AstNode>() {
                 Some(crate::lang::ast::AstNode(crate::lang::ast::Value::Ref(
@@ -9579,8 +9582,22 @@ impl VirtualMachine {
                         || self.core_functions.contains_key(&qualified)
                     {
                         Ok(crate::lang::runtime::function_ref::function_ref(qualified))
-                    } else {
+                    } else if let Some(value) = self.lookup_qualified_variable_immutable(&qualified)
+                    {
+                        Ok(value)
+                    } else if qualified.rsplit_once('/').is_some_and(|(ns, _)| {
+                        self.namespace_variables
+                            .contains_key(&format!("::{}", ns.trim_start_matches("::")))
+                    }) {
                         self.lookup_variable(&qualified)
+                    } else {
+                        // Its namespace hasn't run yet. Evaluating the
+                        // initializer here would run it a second time when
+                        // the namespace does, so the name stays as written.
+                        Err(VmError::runtime(format!(
+                            "'{}' has no value yet: its namespace hasn't run",
+                            qualified
+                        )))
                     }
                 }
                 Some(crate::lang::ast::AstNode(
