@@ -37,8 +37,8 @@ jobs:
     timeout-minutes: 5
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
       - run: node --test scripts/browser-security.test.mjs
@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Free disk space when low
         uses: ./.github/actions/free-disk-space
@@ -87,7 +87,7 @@ jobs:
         run: node --test scripts/test-app-scope.mjs
 
       - name: Checkout published AI skill mirror
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           repository: hot-dev/hot-skills
           # Keep the second checkout outside Cargo's disposable target tree so
@@ -134,7 +134,7 @@ jobs:
         ports:
           - 6379:6379
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Free disk space when low
         uses: ./.github/actions/free-disk-space
@@ -213,7 +213,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Free disk space when low
         uses: ./.github/actions/free-disk-space
@@ -312,7 +312,7 @@ jobs:
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Free disk space when low
         uses: ./.github/actions/free-disk-space
@@ -368,7 +368,7 @@ jobs:
   #   runs-on: ubuntu-24.04
   #   if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
   #   steps:
-  #     - uses: actions/checkout@v5
+  #     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
   #     - name: Setup toolchain, cache, sccache, tailwind
   #       uses: ./.github/actions/rust-setup

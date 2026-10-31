@@ -56,7 +56,7 @@ jobs:
       publish_package_cdn: ${{ steps.version.outputs.publish_package_cdn }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         fetch-depth: 0
 
@@ -138,7 +138,7 @@ jobs:
       id-token: write
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Setup toolchain, cache, sccache, tailwind
       uses: ./.github/actions/rust-setup
@@ -166,7 +166,7 @@ jobs:
       run: ./scripts/hot-pkg-cdn.sh ./cdn-output
 
     - name: Upload package CDN artifact
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: package-cdn
         path: cdn-output/
@@ -205,9 +205,9 @@ jobs:
       contents: read
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-    - uses: actions/setup-node@v6
+    - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
       with:
         node-version: '24'
 
@@ -282,7 +282,7 @@ jobs:
       run: Set-MpPreference -DisableRealtimeMonitoring $true
 
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -337,7 +337,7 @@ jobs:
     # for this runner (see the rust-setup action; the paths must match it).
     # A tag's own caches are never restored by a later run, so don't save.
     - name: Restore ORT downloads
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           ~/.cache/ort.pyke.io
@@ -461,7 +461,7 @@ jobs:
         copy target\${{ matrix.target }}\release\hot.exe artifacts\hot-${{ matrix.platform }}-${{ matrix.arch }}.exe
 
     - name: Upload binary artifact
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: binary-${{ matrix.platform }}-${{ matrix.arch }}
         path: artifacts/
@@ -473,10 +473,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Download Linux binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-linux-*
         path: binaries/
@@ -496,7 +496,7 @@ jobs:
       run: ./scripts/package-linux.sh
 
     - name: Upload Linux packages
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: packages-linux
         path: |
@@ -510,17 +510,17 @@ jobs:
     runs-on: macos-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Download macOS binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-macos-*
         path: binaries/
         merge-multiple: true
 
     - name: Download Linux hotbox binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-linux-*
         path: binaries/
@@ -594,7 +594,7 @@ jobs:
         fi
 
     - name: Upload macOS packages
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: packages-macos
         path: target/packages/*.pkg
@@ -606,17 +606,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Download macOS binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-macos-*
         path: binaries/
         merge-multiple: true
 
     - name: Download Linux binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-linux-*
         path: binaries/
@@ -707,7 +707,7 @@ jobs:
         cat packages/homebrew-checksums.txt
 
     - name: Upload Homebrew tarballs
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: packages-homebrew
         path: |
@@ -721,17 +721,17 @@ jobs:
     runs-on: windows-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Download Windows binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-windows-*
         path: binaries/
         merge-multiple: true
 
     - name: Download Linux hotbox binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-linux-*
         path: binaries/
@@ -1185,7 +1185,7 @@ jobs:
         exclude-interactive-browser-credential: true
 
     - name: Upload Windows packages
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: packages-windows
         path: target/packages/*.exe
@@ -1229,7 +1229,7 @@ jobs:
       id-token: write  # Required for AWS OIDC
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Get version
       id: version
@@ -1239,7 +1239,7 @@ jobs:
         echo "Release version: $VERSION"
 
     - name: Download all packages
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: packages-*
         path: packages/

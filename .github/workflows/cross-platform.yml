@@ -85,7 +85,7 @@ jobs:
         shell: pwsh
         run: Set-MpPreference -DisableRealtimeMonitoring $true
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Setup toolchain, cache, sccache, tailwind
         uses: ./.github/actions/rust-setup
@@ -107,7 +107,7 @@ jobs:
       # them like release.yml does.
       - name: Cache ORT downloads (macOS)
         if: runner.os == 'macOS' && github.ref == 'refs/heads/main'
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/Library/Caches/ort.pyke.io
           key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -116,7 +116,7 @@ jobs:
 
       - name: Restore ORT downloads (macOS, restore-only)
         if: runner.os == 'macOS' && github.ref != 'refs/heads/main'
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/Library/Caches/ort.pyke.io
           key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
