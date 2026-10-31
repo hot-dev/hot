@@ -90,7 +90,7 @@ echo "Targets: ${TARGETS[*]}"
 
 for TARGET in "${TARGETS[@]}"; do
     echo "Building $TARGET..."
-    cargo build --release --target "$TARGET"
+    cargo build --release --locked --target "$TARGET"
 done
 
 echo "macOS builds created successfully!"

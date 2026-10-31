@@ -383,7 +383,7 @@ jobs:
         if [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
           export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
         fi
-        cargo build --release --target ${{ matrix.target }} -j 4
+        cargo build --release --locked --target ${{ matrix.target }} -j 4
 
     - name: Smoke test Windows x64 release binary
       if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -402,7 +402,7 @@ jobs:
 
     - name: Build hotbox binary (Linux x86_64, static musl)
       if: matrix.platform == 'linux' && matrix.arch == 'x86_64'
-      run: cargo build --release --target x86_64-unknown-linux-musl -p hotbox -j 4
+      run: cargo build --release --locked --target x86_64-unknown-linux-musl -p hotbox -j 4
 
     - name: Build hotbox binary (Linux aarch64, static musl via Docker)
       if: matrix.platform == 'linux' && matrix.arch == 'aarch64'
@@ -426,7 +426,7 @@ jobs:
         RUN --mount=type=cache,id=hotbox-arm64-registry-${CARGO_LOCK_HASH},target=/usr/local/cargo/registry \
             --mount=type=cache,id=hotbox-arm64-git-${CARGO_LOCK_HASH},target=/usr/local/cargo/git \
             --mount=type=cache,id=hotbox-arm64-target-${CARGO_LOCK_HASH},target=/workspace/target \
-            cargo build --release --target aarch64-unknown-linux-musl -p hotbox && \
+            cargo build --release --locked --target aarch64-unknown-linux-musl -p hotbox && \
             cp /workspace/target/aarch64-unknown-linux-musl/release/hotbox /hotbox
         FROM scratch
         COPY --from=builder /hotbox /hotbox

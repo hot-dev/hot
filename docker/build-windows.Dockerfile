@@ -31,6 +31,6 @@ WORKDIR /workspace
 COPY . .
 
 # Build for Windows (64-bit)
-RUN cargo build --release --target x86_64-pc-windows-gnu
+RUN cargo build --release --locked --target x86_64-pc-windows-gnu
 
 # The builder stage contains our binaries - we'll extract them with docker cp

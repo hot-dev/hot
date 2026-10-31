@@ -38,7 +38,7 @@ WORKDIR /workspace
 COPY . .
 
 # Build for both Linux architectures
-RUN cargo build --release --target x86_64-unknown-linux-gnu
-RUN cargo build --release --target aarch64-unknown-linux-gnu
+RUN cargo build --release --locked --target x86_64-unknown-linux-gnu
+RUN cargo build --release --locked --target aarch64-unknown-linux-gnu
 
 # The builder stage contains our binaries - we'll extract them with docker cp
