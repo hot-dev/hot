@@ -1,7 +1,7 @@
 # Multi-stage build for Windows targets using cross-compilation
 FROM rust:1.99.1 as builder
 
-ARG TAILWIND_VERSION=v4.3.0
+ARG TAILWIND_VERSION=v4.3.3
 
 # Download the Tailwind CSS standalone executable for the container
 # architecture, verified against the SHA-256 the script pins per asset.

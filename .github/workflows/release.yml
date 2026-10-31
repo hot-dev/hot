@@ -36,7 +36,7 @@ env:
   CARGO_NET_RETRY: 2
   CARGO_HTTP_TIMEOUT: 30
   SQLX_OFFLINE: 'true'
-  TAILWIND_VERSION: v4.3.0
+  TAILWIND_VERSION: v4.3.3
 
 jobs:
   validate-release:
