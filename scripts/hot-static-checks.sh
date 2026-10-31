@@ -306,11 +306,10 @@ cmd_check() {
 # Command: fmt - verify all Hot source is formatted (no writes)
 # Every tree with tracked .hot files, plus the top-level project files, in
 # one `hot fmt --check` run. It names each file that needs formatting or
-# that fmt cannot format, and exits non-zero for either. resources/ai/skills
-# joins once its examples (mirrored in hot-skills) are reformatted.
+# that fmt cannot format, and exits non-zero for either.
 cmd_fmt() {
     local roots=(
-        "hot/pkg" "hot/src" "hot/test" "hot/docs" "benchmarks"
+        "hot/pkg" "hot/src" "hot/test" "hot/docs" "benchmarks" "resources/ai/skills"
         "hot.hot" "hot.test.hot" "pg.pkg.test.hot" "pg.redis.test.hot"
         "redis.pkg.test.hot" "store-load.hot" "hot/ci.ctx.hot"
     )
