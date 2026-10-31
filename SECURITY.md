@@ -21,13 +21,13 @@ reporting.
 **Do not open a public GitHub issue, discussion, or pull request for security
 problems.** Public reports give attackers a head start.
 
-Please use one of the private channels below:
+Report it privately by email to **`security@hot.dev`**. Please encrypt
+sensitive details if you can.
 
-1. **Preferred:** GitHub's private vulnerability reporting. Go to the
-   [Security tab](https://github.com/hot-dev/hot/security/advisories/new) of
-   this repository and click "Report a vulnerability". This creates a private
-   advisory only maintainers can see.
-2. **Email:** `security@hot.dev`. Please encrypt sensitive details if you can.
+If this repository's [Security tab](https://github.com/hot-dev/hot/security)
+shows a "Report a vulnerability" button, you can use GitHub's private
+vulnerability reporting instead. It creates a private advisory that only
+maintainers can see. When the button isn't there, use the email address.
 
 Include as much of the following as you can:
 

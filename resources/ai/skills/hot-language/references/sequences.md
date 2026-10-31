@@ -50,7 +50,7 @@ length([1, 2, 3])      // 3
 reverse([1, 2, 3])     // [3, 2, 1]
 sort([3, 1, 2])        // [1, 2, 3]
 concat([1, 2], [3, 4]) // [1, 2, 3, 4]
-flatten([[1, 2], [3]]) // [1, 2, 3]
+flatten([[1, [2]], ["ab"]]) // [1, 2, "ab"]: every depth, strings kept whole
 distinct([1, 2, 2, 3]) // [1, 2, 3]
 ```
 

@@ -4,5 +4,5 @@ contact_links:
     url: https://hot.dev/docs
     about: Most "how do I..." questions are answered in the docs.
   - name: Security vulnerability
-    url: https://github.com/hot-dev/hot/security/advisories/new
-    about: Report security issues privately. Do not open a public issue.
+    url: https://github.com/hot-dev/hot/security/policy
+    about: Email security@hot.dev to report security issues privately. Do not open a public issue.

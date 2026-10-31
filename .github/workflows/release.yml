@@ -47,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read  # to find the hot workflow's run for the tagged commit
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
@@ -113,6 +114,21 @@ jobs:
         echo "publish_package_cdn=$PUBLISH_PACKAGE_CDN" >> "$GITHUB_OUTPUT"
         echo "Validated release ${TAG_NAME} (beta: ${IS_BETA}, package-only: ${IS_PACKAGE_ONLY}, publish package CDN: ${PUBLISH_PACKAGE_CDN})"
 
+    # Tag a commit only after its CI passed: a release must ship exactly
+    # what the hot workflow tested.
+    - name: Require green CI on the tagged commit
+      if: github.ref_type == 'tag'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        conclusions="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow hot.yml \
+          --commit "$GITHUB_SHA" --status completed --json conclusion --jq '.[].conclusion')"
+        if ! grep -qx success <<<"$conclusions"; then
+          echo "::error::The hot workflow has no successful run for ${GITHUB_SHA}. Wait for CI on that commit to pass, then push the tag again."
+          exit 1
+        fi
+        echo "The hot workflow passed for ${GITHUB_SHA}"
+
   package-cdn:
     name: Generate Package CDN
     needs: validate-release
@@ -177,6 +193,46 @@ jobs:
         CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.PKG_CLOUDFRONT_DIST_ID }}
       run: ./scripts/hot-pkg-cdn-upload.sh ./cdn-output
 
+  # Checks that need the network. A vendored browser library with an
+  # unreviewed advisory stops the release; the SDK pin check only warns,
+  # because the SDKs are published after Hot (they need its API).
+  release-checks:
+    name: Release Checks
+    needs: validate-release
+    if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '24'
+
+    - name: Versions are in sync
+      run: ./scripts/check-version-sync.sh
+
+    # Exit 1: an advisory nobody reviewed (record a reviewed one under
+    # ignored_advisories in resources/app/assets/js/vendor.json). Exit 2: the
+    # OSV query failed, which only warns.
+    - name: Vendored browser libraries have no unreviewed advisories
+      run: |
+        status=0
+        node scripts/check-vendored-js.mjs || status=$?
+        if [[ $status -eq 2 ]]; then
+          echo "::warning::The OSV query failed; the vendored browser libraries were not checked."
+        elif [[ $status -ne 0 ]]; then
+          exit "$status"
+        fi
+
+    - name: The SDK version the docs pin is published
+      run: |
+        if ! node scripts/check-sdk-doc-pins.mjs; then
+          echo "::warning::resources/docs/api/sdks.md pins an SDK version some registries don't have yet. Publish the SDKs before hot.dev deploys these docs."
+        fi
+
   # Build binaries for all targets
   build:
     needs: validate-release
@@ -234,41 +290,23 @@ jobs:
         toolchain: 1.99.1
         targets: ${{ matrix.target }}
 
-    - name: Install TailwindCSS CLI (macOS/Linux)
-      if: runner.os != 'Windows'
+    # Downloads the standalone binary from GitHub releases (no npm or winget)
+    # and verifies it against the SHA-256 the script pins per asset.
+    - name: Install TailwindCSS CLI
       shell: bash
       run: |
-        case "$RUNNER_OS-$RUNNER_ARCH" in
-          Linux-X64)   asset=tailwindcss-linux-x64 ;;
-          Linux-ARM64) asset=tailwindcss-linux-arm64 ;;
-          macOS-ARM64) asset=tailwindcss-macos-arm64 ;;
-          macOS-X64)   asset=tailwindcss-macos-x64 ;;
-          *) echo "unsupported runner: $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
-        esac
-        install_dir="$RUNNER_TEMP/tailwindcss-bin"
-        mkdir -p "$install_dir"
-        curl -sSfL --retry 3 -o "$install_dir/tailwindcss" \
-          "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/$asset"
-        chmod +x "$install_dir/tailwindcss"
-        echo "$install_dir" >> "$GITHUB_PATH"
-
-    - name: Install TailwindCSS CLI (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        # Download TailwindCSS standalone binary directly from GitHub releases
-        # This avoids winget issues with msstore source agreements in CI
-        $tailwindVersion = "${{ env.TAILWIND_VERSION }}"
-        $url = "https://github.com/tailwindlabs/tailwindcss/releases/download/${tailwindVersion}/tailwindcss-windows-x64.exe"
-        $installDir = "C:\Program Files\TailwindCSS"
-
-        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-        Invoke-WebRequest -Uri $url -OutFile "$installDir\tailwindcss.exe"
-
-        # Add to PATH for this workflow
-        echo $installDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-        echo "TailwindCSS installed to $installDir"
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          install_dir="$(cygpath -u "$RUNNER_TEMP")/tailwindcss-bin"
+        else
+          install_dir="$RUNNER_TEMP/tailwindcss-bin"
+        fi
+        bash scripts/install-tailwind.sh "$TAILWIND_VERSION" "$install_dir"
+        # Later steps run native processes, so Windows needs a Windows path.
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          cygpath -w "$install_dir" >> "$GITHUB_PATH"
+        else
+          echo "$install_dir" >> "$GITHUB_PATH"
+        fi
 
     - name: Verify TailwindCSS installation
       run: |
@@ -295,14 +333,18 @@ jobs:
     # builds release targets, so sccache and rust-cache hit 0% and only cost
     # time to save, pushing main's CI caches past the 10 GB budget.
 
-    - name: Cache ORT downloads (macOS)
-      if: runner.os == 'macOS'
-      uses: actions/cache@v5
+    # The ONNX Runtime prebuilt fastembed downloads, as main's CI saved it
+    # for this runner (see the rust-setup action; the paths must match it).
+    # A tag's own caches are never restored by a later run, so don't save.
+    - name: Restore ORT downloads
+      uses: actions/cache/restore@v5
       with:
-        path: ~/Library/Caches/ort.pyke.io
-        key: ort-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
-        restore-keys: |
-          ort-${{ runner.os }}-${{ matrix.target }}-
+        path: |
+          ~/.cache/ort.pyke.io
+          ~/Library/Caches/ort.pyke.io
+          ~/AppData/Local/ort.pyke.io
+        key: ort-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: ort-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Verify macOS linker runtime
       if: runner.os == 'macOS'
@@ -1179,7 +1221,7 @@ jobs:
 
   # Create GitHub Release with all packages
   create-release:
-    needs: [validate-release, package-linux, package-macos, package-homebrew, package-windows, determine-release-channel]
+    needs: [validate-release, release-checks, package-linux, package-macos, package-homebrew, package-windows, determine-release-channel]
     if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
     runs-on: ubuntu-latest
     permissions:
@@ -1208,6 +1250,18 @@ jobs:
         echo "Packages to release:"
         ls -la packages/
 
+    # Curated notes (Breaking, Upgrade, Features, Fixes) go in
+    # .github/release-notes/<tag>.md; the generated PR list follows them.
+    - name: Find curated release notes
+      id: notes
+      run: |
+        notes=".github/release-notes/${{ needs.validate-release.outputs.tag_name }}.md"
+        if [[ -f "$notes" ]]; then
+          echo "body_path=$notes" >> "$GITHUB_OUTPUT"
+        elif [[ "${{ needs.determine-release-channel.outputs.is_stable_release }}" == "true" ]]; then
+          echo "::warning::No curated release notes at $notes; the release body lists merged PRs only."
+        fi
+
     - name: Create GitHub Release
       if: ${{ needs.validate-release.outputs.is_beta != 'true' }}
       uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
@@ -1215,6 +1269,7 @@ jobs:
         tag_name: ${{ needs.validate-release.outputs.tag_name }}
         name: Hot v${{ steps.version.outputs.version }}
         files: packages/*
+        body_path: ${{ steps.notes.outputs.body_path }}
         generate_release_notes: true
         draft: false
         prerelease: ${{ needs.determine-release-channel.outputs.is_stable_release != 'true' }}

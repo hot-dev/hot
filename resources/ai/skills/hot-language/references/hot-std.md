@@ -120,7 +120,7 @@ is-empty fn (coll: Str | Vec | Map): Bool              // true if no elements
 concat fn (a: Vec, b: Vec, ...rest: Vec): Vec           // Concatenate vectors
 concat fn (a: Str, b: Str, ...rest: Str): Str           // Concatenate strings
 concat fn (a: Bytes, b: Bytes, ...rest: Bytes): Bytes   // Concatenate bytes
-flatten fn (coll: Str | Vec | Map): Str | Vec | Map     // Flatten one level
+flatten fn (coll: Vec): Vec                             // Flatten nested vectors at every depth; strings and maps stay whole
 merge fn (a: Map, b: Map): Map                          // Deep merge maps (b overrides a)
 assoc fn (map: Map, key: Any, value: Any): Map          // Set key-value (immutable)
 assoc-some fn (map: Map, key: Any, value: Any): Map     // Like assoc, but no-op if value is null
@@ -385,13 +385,15 @@ patch fn (url: Str, body: Any): HttpResponse
 delete fn (url: Str): HttpResponse
 request fn (request: HttpRequest): HttpResponse         // Transport errors (DNS, TLS, timeouts) return Result.Err
 request fn (method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): HttpResponse
-request-stream fn (method: Str, url: Str, headers: Map, body: Any): StreamingResponse
-request-stream fn (method: Str, url: Str, headers: Map, body: Any, format: Str): StreamingResponse
-get-stream fn (url: Str): StreamingResponse
-get-stream fn (url: Str, format: Str): StreamingResponse
-post-stream fn (url: Str, body: Any): StreamingResponse
-post-stream fn (url: Str, body: Any, headers: Map): StreamingResponse
-post-stream fn (url: Str, body: Any, headers: Map, format: Str): StreamingResponse
+request-stream fn (request: HttpRequest): StreamingHttpResponse
+request-stream fn (request: HttpRequest, format: StreamFormat): StreamingHttpResponse
+request-stream fn (method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): StreamingHttpResponse
+request-stream fn (method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any, format: StreamFormat): StreamingHttpResponse
+get-stream fn (url: Str): StreamingHttpResponse
+get-stream fn (url: Str, format: StreamFormat): StreamingHttpResponse
+post-stream fn (url: Str, body: Any): StreamingHttpResponse
+post-stream fn (url: Str, body: Any, headers: Map<Str, Str>): StreamingHttpResponse
+post-stream fn (url: Str, body: Any, headers: Map<Str, Str>, format: StreamFormat): StreamingHttpResponse
 is-ok-response fn (response: HttpResponse): Bool         // true if status is 2xx
 ```
 
@@ -427,7 +429,9 @@ encode-query fn (params: Map): Str                       // Map to query string 
 decode-query fn (query: Str): Map                        // Query string to Map (strips leading ?)
 parse fn (uri: Str): Uri                                 // Parse string into Uri type
 build fn (parts: Map): Str                               // Build URI string from components map
-join fn (base: Str | Uri, ...parts: Str): Str            // Join/resolve URI path segments
+join fn (base: Str, part: Str): Str                      // Join/resolve a path segment against base
+join fn (base: Str, part1: Str, part2: Str): Str         // Two segments
+join fn (base: Str, part1: Str, part2: Str, part3: Str): Str // Three segments (the most join takes)
 is-valid fn (uri: Str): Bool                             // Check if valid URI
 ```
 
@@ -501,7 +505,7 @@ now fn (): Instant                                        // Current instant (UT
 now-zoned fn (timezone: Str): ZonedDateTime               // Current time in timezone
 
 // Parsing
-parse fn (date-string: Str): PlainDateTime                // Parse ISO date/time string
+parse fn (date-string: Str): PlainDateTime | PlainDate | PlainTime // By the string's shape
 
 // Instant accessors
 epoch-millis fn (instant: Instant): Int                   // Milliseconds since Unix epoch
@@ -560,19 +564,30 @@ ZonedDateTime(PlainDateTime(2026, 3, 8, 2, 30, 0), "US/Central") // From PlainDa
 ::time/format(PlainDateTime(2026, 2, 17, 14, 30, 0), "h:mm A") // "2:30 PM"
 ```
 
-### ::hot::run
+### ::hot::exec
 
-Run control functions. `fail`, `cancel`, `exit`, and `info` are also core (auto-imported).
+Execution control. `fail`, `cancel`, and `exit` are core (auto-imported), so
+call them without a prefix. They live in `::hot::exec`, not `::hot::run`.
 
 <!-- hot-check: skip -->
 ```hot
-fail fn (msg: Str): Failure                              // Halt with error
-fail fn (msg: Str, data: Any): Failure                   // Halt with error and data
-cancel fn (msg: Str): Any                                // Cancel current run
-cancel fn (msg: Str, data: Any): Any                     // Cancel current run with data
+fail fn (err: Any): Failure                              // Halt with error
+fail fn (msg: Str, err: Any): Failure                    // Halt with error and data
+cancel fn (msg: Str): Cancellation                       // Cancel current run
+cancel fn (msg: Str, data: Any): Cancellation            // Cancel current run with data
 exit fn (code: Int): Any                                 // Exit with status code
+```
+
+### ::hot::run
+
+Run information. `info`, `is-inline-run`, and `is-local-dev` are also core
+(auto-imported).
+
+<!-- hot-check: skip -->
+```hot
 info fn (): RunInfo                                      // Information about the current run
-is-inline-run fn (): Bool                                // true if running inline (not deployed)
+is-inline-run fn (): Bool                                // true for run, eval, repl, and test runs
+is-local-dev fn (): Bool                                 // true under `hot dev` and `hot run` defaults
 ```
 
 `info()` returns a `RunInfo` with nested `run`, `stream`, `build`, `project`,
@@ -715,20 +730,20 @@ Available in CLI, event handlers, and tasks.
 ::store ::hot::store
 
 // Types
-Map type { name: Str, embedding: Embedding? }            // Named persistent map
+Map type { name: Str, embedding: EmbeddingOptions? }     // Named persistent map
 Embedding type { model: Str?, field: Str?, text-search: Bool? }
 
 // CRUD
 put fn (store: Map, key: Str, value: Any): Any           // Set entry, replacing existing value
 put-if-missing fn (store: Map, key: Str, value: Any): Bool // Atomically create; false if key exists
-put-if fn (store: Map, key: Str, expected: Any, value: Any): Bool // Compare-and-set; null expects a missing key
-increment fn (store: Map, key: Str): Int                 // Atomically add 1; a missing key counts from 0
+put-if fn (store: Map, key: Str, expected: Any, value: Any): Bool // Compare-and-set; null expects a missing key (since 3.0.1)
+increment fn (store: Map, key: Str): Int                 // Atomically add 1; a missing key counts from 0 (since 3.0.1)
 increment fn (store: Map, key: Str, by: Int): Int        // Atomically add by; returns the new value
 get fn (store: Map, key: Str): Any?                      // Get by key (null if missing)
 get fn (store: Map, key: Str, default: Any): Any         // Get with default
 delete fn (store: Map, key: Str): Bool                   // Remove entry
 keys fn (store: Map): Vec<Str>                           // All keys
-keys fn (store: Map, opts: Map): Vec<Str>                // Keys with {prefix, limit, offset}
+keys fn (store: Map, opts: Map): Vec<Str>                // Keys with {prefix (since 3.0.1), limit, offset}
 vals fn (store: Map): Vec<Any>                           // All values
 length fn (store: Map): Int                              // Entry count
 is-empty fn (store: Map): Bool                           // True if no entries
@@ -736,8 +751,8 @@ first fn (store: Map): Any?                              // First entry
 last fn (store: Map): Any?                               // Last entry
 
 // Bulk operations
-put-many fn (store: Map, entries: Map): Map              // Insert multiple entries
-merge fn (store: Map, entries: Map): Map                 // Alias for put-many
+put-many fn (store: Map, entries: Map): Int              // Insert multiple entries; returns how many
+merge fn (store: Map, entries: Map): Int                 // Alias for put-many
 list fn (store: Map): Vec                                // List entries (default limit 1000)
 list fn (store: Map, opts: Map): Vec                     // List with {limit, offset, prefix}
 clear fn (store: Map): Bool                              // Remove all entries
@@ -759,22 +774,28 @@ slice fn (store: Map, start: Int, end: Int): Vec         // Entries in range
 
 Handlers can run at the same time, so `get` then `put` on a shared key can
 lose another handler's write. Use `put-if-missing` to create an entry once,
-`increment` for counters, and a `put-if` retry loop to change a value
-(the computation must be pure, since it can run more than once):
+`increment` for counters, and a bounded `put-if` retry loop to change a value.
+The computation must be pure, since it can run more than once. Give the loop
+an attempt budget, so a bug (an `expected` that isn't what `get` returned)
+fails with an error instead of retrying forever:
 
 ```hot
 ::store ::hot::store
 
 cases ::store/Map({name: "cases"})
 
-add-answer fn (case-id: Str, answer-id: Str, answer: Any): Map {
+add-answer fn (case-id: Str, answer-id: Str, answer: Any, attempts: Int): Map {
     current ::store/get(cases, case-id)
     next assoc(if(is-null(current), {}, current), answer-id, answer)
+    wrote ::store/put-if(cases, case-id, current, next)
     cond {
-        ::store/put-if(cases, case-id, current, next) => { next }
-        => { add-answer(case-id, answer-id, answer) }
+        wrote => { next }
+        lte(attempts, 1) => { err(`case ${case-id} kept changing`) }
+        => { add-answer(case-id, answer-id, answer, sub(attempts, 1)) }
     }
 }
+
+add-answer("case-1", "answer-1", {score: 4}, 20)
 ```
 
 `list` and `keys` with `prefix` read only the Str keys that start with it,

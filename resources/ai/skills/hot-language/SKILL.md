@@ -108,7 +108,8 @@ max-retries: Int 3
 // Functions (return type is the success type, not Result)
 get-user fn (id: Str): Map {
     response ::http/get(`${api-url}/users/${id}`)
-    if(is-ok(response), ok(response.body), err("Failed"))
+    // A 404 or 500 is still a response: check the status, not just is-ok.
+    if(::http/is-ok-response(response), response.body, err("Failed"))  // no ok() needed
 }
 ```
 
@@ -254,13 +255,21 @@ result 5 |> add(2) |> mul(3)  // add(5,2)=7, mul(7,3)=21
 ### App and Platform Patterns
 
 ```hot
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
 // Function aliases can carry metadata and point at another function.
+// Define the function first: an alias is a namespace value, and a
+// namespace value can't refer to a definition later in the file.
+handle-signup fn (request: HttpRequest): HttpResponse {
+    HttpResponse({status: 200, body: {ok: true}})
+}
+
 signup-webhook
 meta {webhook: {service: "leads", path: "/signup"}}
 handle-signup
 
 // Use HttpRequest for headers/raw body; simple get/post helpers have fixed arity.
-HttpRequest ::hot::http/HttpRequest
 response ::hot::http/request(HttpRequest({
     method: "POST",
     url: "https://api.example.com/users",

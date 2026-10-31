@@ -38,7 +38,7 @@ runs:
       uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       with:
         toolchain: ${{ inputs.rust-toolchain }}
-        components: clippy
+        components: clippy, rustfmt
 
     - name: Install sccache
       uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
@@ -119,7 +119,9 @@ runs:
       uses: actions/cache@v5
       with:
         path: ~/.local/bin/tailwindcss*
-        key: tailwindcss-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tailwind-version }}
+        # Keyed on the install script too, so a binary cached before a digest
+        # pin changed is downloaded and verified again.
+        key: tailwindcss-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tailwind-version }}-${{ hashFiles('scripts/install-tailwind.sh') }}
 
     - name: Restore Tailwind CSS CLI (restore-only)
       if: inputs.save-cache != 'true'
@@ -127,30 +129,15 @@ runs:
       uses: actions/cache/restore@v5
       with:
         path: ~/.local/bin/tailwindcss*
-        key: tailwindcss-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tailwind-version }}
+        key: tailwindcss-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tailwind-version }}-${{ hashFiles('scripts/install-tailwind.sh') }}
 
     - name: Install Tailwind CSS CLI
       if: >-
         steps.tailwind-cache.outputs.cache-hit != 'true' &&
         steps.tailwind-restore.outputs.cache-hit != 'true'
       shell: bash
-      run: |
-        case "$RUNNER_OS-$RUNNER_ARCH" in
-          Linux-X64)   asset=tailwindcss-linux-x64 ;;
-          Linux-ARM64) asset=tailwindcss-linux-arm64 ;;
-          macOS-ARM64) asset=tailwindcss-macos-arm64 ;;
-          macOS-X64)   asset=tailwindcss-macos-x64 ;;
-          Windows-X64) asset=tailwindcss-windows-x64.exe ;;
-          *) echo "unsupported runner: $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
-        esac
-        mkdir -p ~/.local/bin
-        bin="$HOME/.local/bin/tailwindcss"
-        if [[ "$RUNNER_OS" == "Windows" ]]; then
-          bin="$bin.exe"
-        fi
-        curl -sSfL --retry 3 -o "$bin" \
-          "https://github.com/tailwindlabs/tailwindcss/releases/download/${{ inputs.tailwind-version }}/$asset"
-        chmod +x "$bin"
+      # Verifies the download against the SHA-256 the script pins per asset.
+      run: bash "$GITHUB_WORKSPACE/scripts/install-tailwind.sh" "${{ inputs.tailwind-version }}" "$HOME/.local/bin"
 
     - name: Add Tailwind to PATH
       shell: bash
@@ -166,6 +153,33 @@ runs:
     - name: Verify Tailwind version
       shell: bash
       run: tailwindcss --version
+
+    # fastembed's build script downloads the ONNX Runtime prebuilt into the
+    # user cache directory. Keeping it means a build doesn't depend on that
+    # download, and release builds restore it from main's caches. Keep the
+    # paths identical to the restore step in release.yml: the cache version
+    # is computed from them.
+    - name: Cache ONNX Runtime download
+      if: inputs.save-cache == 'true'
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cache/ort.pyke.io
+          ~/Library/Caches/ort.pyke.io
+          ~/AppData/Local/ort.pyke.io
+        key: ort-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: ort-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Restore ONNX Runtime download (restore-only)
+      if: inputs.save-cache != 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          ~/.cache/ort.pyke.io
+          ~/Library/Caches/ort.pyke.io
+          ~/AppData/Local/ort.pyke.io
+        key: ort-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: ort-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Setup Cargo optimizations
       shell: bash

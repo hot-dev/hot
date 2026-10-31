@@ -220,22 +220,29 @@ holds the entry's lock:
 | `put-if(store, key, expected, value)` | Replaces the value only if it still equals `expected`; `null` expects a missing key |
 | `increment(store, key, by)` | Adds to an Int and returns the new value; a missing key counts from 0 |
 
-To change a value, read it, compute the new one, and retry until `put-if`
-succeeds. The computation must be pure, because it can run more than once:
+To change a value, read it, compute the new one, and retry while `put-if`
+returns `false`. The computation must be pure, because it can run more than
+once. Each retry means another writer changed the value first, so give the
+loop a budget: a bug, such as an `expected` that isn't what `get` returned,
+then fails with an error instead of retrying forever:
 
 ```hot
 ::store ::hot::store
 
 cases ::store/Map({name: "cases"})
 
-record-answer fn (case-id: Str, answer-id: Str, answer: Any): Map {
+record-answer fn (case-id: Str, answer-id: Str, answer: Any, attempts: Int): Map {
   current ::store/get(cases, case-id)
   next assoc(if(is-null(current), {}, current), answer-id, answer)
+  wrote ::store/put-if(cases, case-id, current, next)
   cond {
-    ::store/put-if(cases, case-id, current, next) => { next }
-    => { record-answer(case-id, answer-id, answer) }
+    wrote => { next }
+    lte(attempts, 1) => { err(`case ${case-id} kept changing`) }
+    => { record-answer(case-id, answer-id, answer, sub(attempts, 1)) }
   }
 }
+
+record-answer("case-1", "answer-1", {score: 4}, 20)
 ```
 
 `increment` gives each caller its own value, so it can number a case's facts.

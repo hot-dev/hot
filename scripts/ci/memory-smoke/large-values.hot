@@ -1,0 +1,10 @@
+// expect: ok
+// A handler that builds half a million values and a 2 MB string fits in the
+// 1 GiB the smoke test allows (about 600 MB interpreted).
+::smoke::large-values ns
+
+numbers range(0, 500000)
+total reduce(map(numbers, mul(%, 2)), add(%1, %2), 0)
+text join(map(range(0, 200000), (i) { `line ${i}` }), "\n")
+
+println(`${total} ${length(text)}`)

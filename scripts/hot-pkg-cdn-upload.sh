@@ -15,6 +15,9 @@
 # Authentication:
 #   CI should configure AWS credentials via OIDC before running this script.
 #   Local runs may use an AWS profile or standard AWS_* environment variables.
+#   The role needs s3:GetObject, s3:PutObject and s3:ListBucket on the bucket.
+#   Without s3:ListBucket, S3 answers 403 instead of 404 for a missing key,
+#   and the script stops rather than guess.
 #
 # Usage:
 #   ./hot-pkg-cdn-upload.sh [cdn-output-dir]
@@ -23,7 +26,7 @@
 #   ./scripts/hot-pkg-cdn.sh     # Respects pkg-publish.txt
 #   ./scripts/hot-pkg-cdn-upload.sh
 
-set -e
+set -euo pipefail
 
 CDN_OUTPUT_DIR="${1:-./cdn-output}"
 S3_BUCKET="${PACKAGE_CDN_BUCKET:-${S3_BUCKET:-}}"
@@ -47,6 +50,32 @@ if [ -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
     echo "Warning: CLOUDFRONT_DISTRIBUTION_ID not set, skipping cache invalidation"
 fi
 
+# Succeed when the key exists and fail when S3 says it doesn't. Any other
+# error (no permission, no network) stops the script: treating it as "missing"
+# would re-upload published tarballs and skip the versions.json merge.
+s3_key_exists() {
+    local key="$1" error
+    if error=$(aws s3api head-object --bucket "$S3_BUCKET" --key "$key" 2>&1 >/dev/null); then
+        return 0
+    fi
+    if [[ "$error" == *"(404)"* || "$error" == *"Not Found"* || "$error" == *"NoSuchKey"* ]]; then
+        return 1
+    fi
+    echo "Error: could not read s3://$S3_BUCKET/$key: $error" >&2
+    if [[ "$error" == *"(403)"* ]]; then
+        echo "S3 answers 403 for a missing key when the role lacks s3:ListBucket." >&2
+    fi
+    exit 1
+}
+
+# Every version with a published tarball under a package's CDN directory.
+published_versions() {
+    local prefix="$1"
+    aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$prefix/" \
+        --query 'Contents[].Key' --output json |
+        jq -r --arg prefix "$prefix/" '(. // [])[] | ltrimstr($prefix) | select(test("^[^/]+\\.tar\\.gz$")) | rtrimstr(".tar.gz")'
+}
+
 echo "=== Checking published versions ==="
 # A published <package>/<version>.tar.gz is immutable: users who pin that
 # version must keep getting the same package. Each build regenerates every
@@ -58,11 +87,11 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 SYNC_EXCLUDES=()
 CHANGED=()
 while IFS= read -r -d '' tarball; do
-    key="${tarball#$CDN_OUTPUT_DIR/}"
+    key="${tarball#"$CDN_OUTPUT_DIR"/}"
     case "$key" in
         releases/beta/*) continue ;; # beta builds may republish a version
     esac
-    if ! aws s3api head-object --bucket "$S3_BUCKET" --key "$key" > /dev/null 2>&1; then
+    if ! s3_key_exists "$key"; then
         continue # a new version
     fi
     rm -rf "$WORK_DIR/published" "$WORK_DIR/built"
@@ -87,17 +116,24 @@ if [ "${#CHANGED[@]}" -gt 0 ]; then
 fi
 
 # versions.json lists every published version. A build lists only the current
-# one, so merge it with the published list rather than replace it.
+# one, so rebuild it from the tarballs the bucket holds, the published
+# versions.json and this build. Listing the tarballs also repairs a
+# versions.json that an earlier upload left behind.
 while IFS= read -r -d '' versions_file; do
-    key="${versions_file#$CDN_OUTPUT_DIR/}"
-    if aws s3 cp --quiet "s3://$S3_BUCKET/$key" "$WORK_DIR/versions.json" 2>/dev/null; then
-        jq -s '
-            def semver: split(".") | map(tonumber? // 0);
-            ((.[0].versions // []) + (.[1].versions // []) | unique | sort_by(semver)) as $all
-            | {latest: ($all | last), versions: $all}
-        ' "$WORK_DIR/versions.json" "$versions_file" > "$WORK_DIR/merged.json"
-        mv "$WORK_DIR/merged.json" "$versions_file"
+    key="${versions_file#"$CDN_OUTPUT_DIR"/}"
+    prefix="${key%/versions.json}"
+    echo '{"versions": []}' > "$WORK_DIR/versions.json"
+    if s3_key_exists "$key"; then
+        aws s3 cp --quiet "s3://$S3_BUCKET/$key" "$WORK_DIR/versions.json"
     fi
+    published_versions "$prefix" | jq -R . | jq -s '{versions: .}' > "$WORK_DIR/tarballs.json"
+    jq -s '
+        def semver: split(".") | map(tonumber? // 0);
+        (map(.versions // []) | add | unique | sort_by(semver)) as $all
+        | {latest: ($all | last), versions: $all}
+    ' "$WORK_DIR/versions.json" "$WORK_DIR/tarballs.json" "$versions_file" > "$WORK_DIR/merged.json"
+    mv "$WORK_DIR/merged.json" "$versions_file"
+    echo "  $key: latest $(jq -r .latest "$versions_file")"
 done < <(find "$CDN_OUTPUT_DIR" -name 'versions.json' -print0)
 
 echo "=== Uploading to S3 ==="
@@ -106,12 +142,20 @@ echo "Bucket: s3://$S3_BUCKET"
 echo ""
 
 # Sync to S3. Published tarballs with unchanged contents are excluded above;
-# everything else (new versions, docs, versions.json) is uploaded.
+# everything else (new versions and docs) is uploaded. No --size-only: a
+# regenerated file the same size as the published one must still replace it.
 aws s3 sync "$CDN_OUTPUT_DIR" "s3://$S3_BUCKET" \
-    --size-only \
     --exclude ".DS_Store" \
     --exclude "*.tmp" \
-    "${SYNC_EXCLUDES[@]}"
+    --exclude "*/versions.json" \
+    "${SYNC_EXCLUDES[@]+"${SYNC_EXCLUDES[@]}"}"
+
+# Upload every versions.json explicitly, so a merged list always replaces the
+# published one.
+while IFS= read -r -d '' versions_file; do
+    key="${versions_file#"$CDN_OUTPUT_DIR"/}"
+    aws s3 cp --quiet "$versions_file" "s3://$S3_BUCKET/$key" --content-type application/json
+done < <(find "$CDN_OUTPUT_DIR" -name 'versions.json' -print0)
 
 echo ""
 echo "✓ S3 sync complete"
@@ -123,13 +167,13 @@ INVALIDATION_PATHS=()
 # Find all versions.json files (these are updated when new versions are published)
 while IFS= read -r -d '' file; do
     # Convert local path to CDN path
-    rel_path="${file#$CDN_OUTPUT_DIR/}"
+    rel_path="${file#"$CDN_OUTPUT_DIR"/}"
     INVALIDATION_PATHS+=("/$rel_path")
 done < <(find "$CDN_OUTPUT_DIR" -name "versions.json" -print0)
 
 # If we had latest.txt files, we'd add them here too
 # while IFS= read -r -d '' file; do
-#     rel_path="${file#$CDN_OUTPUT_DIR/}"
+#     rel_path="${file#"$CDN_OUTPUT_DIR"/}"
 #     INVALIDATION_PATHS+=("/$rel_path")
 # done < <(find "$CDN_OUTPUT_DIR" -name "latest.txt" -print0)
 

@@ -1,0 +1,268 @@
+name: nightly
+
+# Checks too slow, too networked or too large for every pull request:
+# advisories for vendored libraries, published SDK pins, doc snippets compiled
+# against the SDKs, a Linux aarch64 release-build lane with the JIT under
+# glibc heap checks and a 1 GiB memory cap, the self-host bundle against real
+# images, fuzzing, and a differential check against the previous release.
+# Nothing here needs a secret.
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: 1.99.1
+  TAILWIND_VERSION: v4.3.0
+  CARGO_INCREMENTAL: '0'
+  CARGO_NET_RETRY: 2
+  CARGO_HTTP_TIMEOUT: 30
+  SQLX_OFFLINE: 'true'
+  CI: 'true'
+
+jobs:
+  supply-chain:
+    name: Vendored JS advisories and SDK doc pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      # Exit 1: a vendored library has an advisory nobody reviewed (record a
+      # reviewed one under ignored_advisories in vendor.json). Exit 2: the OSV
+      # query failed.
+      - name: Vendored browser libraries have no unreviewed advisories
+        run: node scripts/check-vendored-js.mjs
+      - name: The SDK version the docs pin is published everywhere
+        if: success() || failure()
+        run: node scripts/check-sdk-doc-pins.mjs
+
+  go-doc-snippets:
+    name: Go doc snippets compile against hot-go
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: hot-dev/hot-go
+          path: .ci/hot-go
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - run: ./scripts/check-go-doc-snippets.sh .ci/hot-go
+
+  self-host-bundle:
+    name: Self-host bundle against real images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # The official images, which keep nginx temp files under /var/cache by
+      # default; nginx-unprivileged already uses /tmp.
+      HOT_INFRA_TEST_VALKEY_IMAGE: valkey/valkey:8.1
+      HOT_INFRA_TEST_NGINX_IMAGE: nginx:1.29-alpine
+    steps:
+      - uses: actions/checkout@v5
+      - name: Pull the test images
+        run: |
+          docker pull "$HOT_INFRA_TEST_VALKEY_IMAGE"
+          docker pull "$HOT_INFRA_TEST_NGINX_IMAGE"
+      - name: Runtime bundle tests, including the container checks
+        run: python3 -m unittest discover -s infra/tests -v
+
+  linux-arm64:
+    name: Linux aarch64 release build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space when low
+        uses: ./.github/actions/free-disk-space
+
+      - name: Setup toolchain, cache, sccache, tailwind
+        uses: ./.github/actions/rust-setup
+        with:
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          tailwind-version: ${{ env.TAILWIND_VERSION }}
+          # Release-profile objects would push the per-PR caches out of the
+          # repository's cache budget.
+          save-cache: "false"
+          cache-rust-targets: "false"
+
+      # The binary production runs: the release profile, on aarch64, where
+      # the JIT emits different machine code than on the x86_64 PR lanes.
+      - name: Build the release binary
+        run: cargo build --release --locked --bin hot -j 4
+
+      - name: Library tests (release profile)
+        run: cargo test --release --locked --workspace --lib -j 4
+
+      - name: Hot tests
+        env:
+          HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
+        run: |
+          ./target/release/hot init -c hot.test.hot --ctx hot/ci.ctx.hot
+          ./target/release/hot test -c hot.test.hot --ctx hot/ci.ctx.hot
+
+      # Every function compiled on its first call, with glibc checking the
+      # heap on every allocation and filling freed memory, so a JIT
+      # use-after-free or double free aborts instead of passing by luck.
+      - name: Hot tests, JIT threshold 1, under MALLOC_CHECK_=3
+        env:
+          HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
+          MALLOC_CHECK_: '3'
+          MALLOC_PERTURB_: '165'
+        run: ./target/release/hot test -c hot.test.hot --ctx hot/ci.ctx.hot --jit.threshold 1
+
+      # The memory smoke fixtures in a container capped at 1 GiB, the size
+      # of the smallest self-host worker.
+      - name: Memory smoke test (1 GiB, MALLOC_CHECK_=3)
+        run: |
+          docker run --rm --memory 1g --memory-swap 1g \
+            -e HOT_HOME=/work/hot -e MALLOC_CHECK_=3 -e MALLOC_PERTURB_=165 \
+            -v "$PWD:/work" -w /work ubuntu:24.04 \
+            ./scripts/ci/memory-smoke.sh ./target/release/hot
+
+  fuzz:
+    name: Fuzz the parser, formatter and checker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: nightly
+
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+
+      # The corpus grows night to night: restore the last one, seed it with
+      # the repository's Hot sources, and save what this run found.
+      - name: Restore the fuzz corpus
+        uses: actions/cache/restore@v5
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: Seed the corpus
+        run: |
+          for target in parse fmt check; do
+            mkdir -p "fuzz/corpus/$target"
+            find hot/test resources/ai/skills -name '*.hot' -size -64k \
+              -exec cp {} "fuzz/corpus/$target/" \;
+          done
+
+      - name: Fuzz parse
+        run: cargo +nightly fuzz run parse -- -max_total_time=900 -rss_limit_mb=4096
+
+      - name: Fuzz fmt
+        if: success() || failure()
+        run: cargo +nightly fuzz run fmt -- -max_total_time=900 -rss_limit_mb=4096
+
+      # Each input loads hot-std, so this target runs far fewer inputs.
+      - name: Fuzz check
+        if: success() || failure()
+        env:
+          HOT_HOME: ${{ github.workspace }}/hot
+        run: cargo +nightly fuzz run check -- -max_total_time=900 -rss_limit_mb=4096
+
+      - name: Save the fuzz corpus
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+
+  previous-release:
+    name: Previous release still checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space when low
+        uses: ./.github/actions/free-disk-space
+
+      - name: Setup toolchain, cache, sccache, tailwind
+        uses: ./.github/actions/rust-setup
+        with:
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          tailwind-version: ${{ env.TAILWIND_VERSION }}
+          save-cache: "false"
+          ci-tuning: "true"
+
+      - name: Build this revision's hot
+        run: cargo build --locked --bin hot -j 4
+
+      - name: Download the previous release
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD)"
+          version="${tag#v}"
+          asset="hot_${version}_linux_x86_64.tar.gz"
+          dir="$RUNNER_TEMP/previous"
+          mkdir -p "$dir"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$dir"
+          expected="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq ".assets[] | select(.name == \"$asset\") | .digest" | sed 's/^sha256://')"
+          if [[ -z "$expected" ]]; then
+            echo "::error::$tag has no digest for $asset"
+            exit 1
+          fi
+          echo "$expected  $dir/$asset" | sha256sum --check -
+          tar -xzf "$dir/$asset" -C "$dir"
+          git worktree add --detach "$RUNNER_TEMP/corpus" "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "home=$dir" >> "$GITHUB_OUTPUT"
+
+      # Code the previous release accepted must still check, unless the break
+      # is intended and listed in scripts/ci/compat-allowlist.txt.
+      - name: Compare checks with ${{ steps.previous.outputs.tag }}
+        env:
+          OLD_HOT_HOME: ${{ steps.previous.outputs.home }}
+          NEW_HOT_HOME: ${{ github.workspace }}/hot
+        run: |
+          ./scripts/ci/compat-diff.sh \
+            "$OLD_HOT_HOME/hot" ./target/debug/hot "$RUNNER_TEMP/corpus"
+
+  # TODO(nightly): cloud-mode RLS crawl. Provision PostgreSQL with the
+  # restricted runtime role (as the hot-tests job in hot.yml does), seed two
+  # organizations with an owner, a member and a child-organization user, and
+  # GET every App and API route as each of them with the product experience
+  # set to cloud. Fail when a page shows another tenant's marker, and when a
+  # seeded `<script>` name comes back unescaped. This needs a route crawler
+  # in crates/hot_app/tests built on test_support::TestClient (extending
+  # postgres_scope.rs); no secrets are required.
+  #
+  # TODO(nightly): release-build performance. Build the previous tag and
+  # HEAD with --release on the same runner, run benchmarks/ under both, and
+  # fail on a regression beyond an agreed threshold. Needs a benchmark
+  # harness that prints comparable timings and a threshold to hold.

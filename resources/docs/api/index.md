@@ -2092,12 +2092,19 @@ ctx := context.Background()
 
 // List projects
 projects, err := client.Projects.List(ctx, nil)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(projects["data"])
 
 // Publish an event
 event, err := client.Events.Publish(ctx, map[string]any{
 	"event_type": "user:signup",
 	"event_data": map[string]any{"user_id": "123", "email": "alice@example.com"},
 })
+if err != nil {
+	log.Fatal(err)
+}
 fmt.Println(event["stream_id"])
 ```
 

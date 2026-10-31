@@ -171,6 +171,31 @@ render fn match (shape: Shape, color: Str): Str {
 }
 ```
 
+### Matching a Variant's Payload
+
+Inside an `Enum.Variant` arm, a binding the arm names (`Reply.Declined (why)`)
+holds that variant's payload: a `Vec`, a `Str`, an `Int`, and so on. The
+matched name, including a `fn match` parameter, keeps the variant, so an arm
+can pass it on as the enum. A record payload's fields read through the matched
+name, as `shape.radius` does above. A union arm (`Reply.Steps | Reply.Declined
+=>`) and a type-level arm (`Reply =>`) keep the whole variant.
+
+```hot
+Reply enum { Steps(Vec), Declined(Str), Pending }
+
+summarize fn match (r: Reply): Str {
+    Reply.Steps (steps) => { `${length(steps)} steps` }  // steps is the Vec
+    Reply.Declined (why) => { `declined: ${why}` }      // why is the Str
+    Reply.Pending => { "pending" }
+}
+
+// Without a binding, the matched name is the variant: pass it on as the enum
+keep-declined fn match (r: Reply): Reply {
+    Reply.Declined => { r }
+    _ => { Reply.Pending }
+}
+```
+
 ### Exhaustiveness
 
 A `match` on a closed `enum` must cover every variant or include a `_` /
@@ -199,12 +224,14 @@ label fn match (a: Animal): Str {
 }
 ```
 
-The same exhaustiveness rules apply to **open literal unions** (`type
-open "a" | "b"`) — the accumulated member set is unbounded across
-declarations, so a `match` against an open literal union also requires
-a default arm. The bare `=>` form reads naturally for catch-all fallbacks
-in dispatch helpers; `::hot::media/is-image` is a canonical example, where
-an open `Media` alias is matched and unknown subtypes fall through to the
+An **open literal union** (`type open "a" | "b"`) is not checked for
+exhaustiveness: other declarations can add members, so `hot check` accepts
+a `match` on one with no default arm, and a value that no arm matches makes
+the `match` return `null`. Nothing reports the missing default, so add a
+`_` / bare `=>` default arm yourself whenever a value can fall outside your
+arms. The bare `=>` form reads naturally for catch-all fallbacks in
+dispatch helpers; `::hot::media/is-image` is a canonical example, where an
+open `Media` alias is matched and unknown subtypes fall through to the
 default arm.
 
 ### Value Arms
@@ -346,7 +373,7 @@ handle fn (event: Event): Action {
 
 Pattern matching where ALL matching arms execute. Returns Map keyed by the arm's pattern.
 
-For type arms, the key is the type string (e.g., `"Int"`, `"Shape.Circle"`). For value arms, the key is the value itself (e.g., `200`, `"hello"`). A union arm produces a single key joining its atoms (e.g., `"Int | Dec"`).
+Each key is the arm's pattern as written, as a string. For type arms, the key is the type string (e.g., `"Int"`, `"Shape.Circle"`). For value arms, the key is the pattern's source text, not the value: a `200` arm's key is `"200"`, and a `"hello"` arm's key is `"\"hello\""`, quotes included. So `get(results, 200)` and `get(results, "hello")` return `null`. A union arm produces a single key joining its atoms (e.g., `"Int | Dec"`).
 
 ```hot
 Trait enum { Flying, Swimming, Walking }
@@ -368,6 +395,7 @@ results match-all x {
     Int => { "is integer" }
 }
 // results: {"200": "is 200", "Int": "is integer"}
+// get(results, "200") is "is 200"; get(results, 200) is null
 ```
 
 ## Parallel Flow

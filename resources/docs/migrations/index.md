@@ -192,7 +192,6 @@ reject real API values on Hot 3.0, so upgrade them:
 | `hot.dev/openai` | `1.2.8` | Hot 3.0 |
 | `hot.dev/gemini` | `1.1.3` | Hot 3.0 |
 | `hot.dev/xai` | `1.1.3` | Hot 3.0 |
-| `hot.dev/qwen` | `1.0.3` | Hot 3.0 |
 | `hot.dev/aws-bedrock` | `1.2.2` | |
 | `hot.dev/postmark` | `1.1.1` | |
 | `hot.dev/supabase` | `1.0.1` | |

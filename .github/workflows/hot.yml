@@ -44,6 +44,9 @@ jobs:
       - run: node --test scripts/browser-security.test.mjs
         env:
           CHROME_BIN: google-chrome
+      # Parses the SDK page's version pins; the registry lookup itself runs
+      # nightly and in the release workflow.
+      - run: node --test scripts/check-sdk-doc-pins.test.mjs
 
   clippy-and-checks:
     name: Clippy and Static Checks
@@ -62,6 +65,17 @@ jobs:
           tailwind-version: ${{ env.TAILWIND_VERSION }}
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           ci-tuning: "true"
+
+      - name: Cargo fmt
+        run: cargo fmt --all --check
+
+      - name: Versions are in sync
+        run: ./scripts/check-version-sync.sh
+
+      # Unit tests for the self-host bundle renderer. The container checks
+      # skip here; the nightly workflow runs them against real images.
+      - name: Self-host bundle tests
+        run: python3 -m unittest discover -s infra/tests
 
       # Clippy intentionally uses the workspace default feature set. Keeping it
       # aligned with the workspace test feature set avoids forcing cargo to

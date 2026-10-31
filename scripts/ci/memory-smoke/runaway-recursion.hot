@@ -1,0 +1,10 @@
+// expect: error recursion limit reached
+// Unbounded non-tail recursion must stop with a Hot error, not overflow the
+// native stack.
+::smoke::runaway-recursion ns
+
+grow fn (n: Int): Int {
+    add(grow(add(n, 1)), 1)
+}
+
+grow(0)

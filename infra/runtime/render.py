@@ -9,6 +9,8 @@ import re
 import sys
 
 SERVICES = ("app", "api", "worker", "scheduler", "task-worker")
+# `--askpass` reads the password from stdin; PING is the command it then sends.
+VALKEY_HEALTHCHECK = "valkey-cli --askpass PING < /run/secrets/VALKEY_PASSWORD | grep -qx PONG"
 IMAGES = {"hot", "postgres", "valkey", "ingress"}
 DIGEST = re.compile(r"^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$")
 CONFIG_KEYS = {"schema_version", "name", "cloud", "region", "zone", "project", "size", "host_image", "release_pointer", "secret_references", "app_hostname", "api_hostname", "app_exposure", "api_exposure", "storage", "network"}
@@ -100,7 +102,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "HOT_ENGINE_ISOLATION": "true", "HOT_NETWORK_ALLOW_PRIVATE": "false",
         "HOT_QUEUE_TYPE": "redis", "HOT_EMITTER_TYPE": "db",
         "HOT_FILE_MODE": "service", "HOT_BLOB_MODE": "service", "HOT_LOG_FORMAT": "json",
-        "HOT_LOG_TARGET": "stdout", "HOT_LOG_LEVEL": "info", "HOT_DAEMON": "true",
+        "HOT_LOG_TARGET": "stdout", "HOT_LOG_LEVEL": "info",
         "HOT_APP_HOST": "0.0.0.0", "HOT_API_HOST": "0.0.0.0",
         "HOT_TASK_MAX_CONCURRENT": "1", "HOT_TASK_CODE_MAX_CONCURRENT": "2",
         "HOT_TASK_CONTAINER_MAX_CONCURRENT": "1", "HOT_TASK_WORKER_MEMORY_MB": "1536",
@@ -109,6 +111,10 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "HOT_BOX_BACKEND": "kata", "HOT_BOX_CONTAINERD_SOCKET": "/run/kata-containerd/containerd.sock",
         "HOT_BOX_VMM": "qemu",
     }
+    # Links the app and API print (webhook and MCP URLs, emails) default to
+    # hot.dev under HOT_ENV=production, so name this installation's hosts.
+    common_env["HOT_APP_URL"] = "https://" + config["app_hostname"]
+    common_env["HOT_API_URL"] = "https://" + config["api_hostname"]
     for role in SERVICES:
         env, mounts = dict(common_env), []
         keys = ["HOT_DB_URI", "HOT_REDIS_URI"]
@@ -163,7 +169,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
         "command": ["valkey-server", "/etc/valkey/valkey.conf"],
         "secrets": [secret("valkey", k) for k in ("VALKEY_ACL", "VALKEY_PASSWORD")],
         "volumes": [bind(Path(data_root) / "valkey", "/data"), {"type": "bind", "source": "./valkey.conf", "target": "/etc/valkey/valkey.conf", "read_only": True}],
-        "healthcheck": {"test": ["CMD-SHELL", "valkey-cli --askpass < /run/secrets/VALKEY_PASSWORD | grep -qx PONG"], "interval": "5s", "timeout": "3s", "retries": 12},
+        "healthcheck": {"test": ["CMD-SHELL", VALKEY_HEALTHCHECK], "interval": "5s", "timeout": "3s", "retries": 12},
         "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}},
     }
     services["ingress"] = {
@@ -227,8 +233,13 @@ http {
   log_format operational escape=json '{"status":$status,"duration":$request_time,"request_id":"$request_id","method":"$request_method"}';
   access_log /dev/stdout operational;
   client_max_body_size 300m;
+  # The root filesystem is read-only, so every temp path nginx creates at
+  # startup, used or not, goes under the /tmp tmpfs.
   client_body_temp_path /tmp/client_body;
   proxy_temp_path /tmp/proxy;
+  fastcgi_temp_path /tmp/fastcgi;
+  uwsgi_temp_path /tmp/uwsgi;
+  scgi_temp_path /tmp/scgi;
   ssl_protocols TLSv1.2 TLSv1.3;
   ssl_certificate /run/secrets/TLS_CERTIFICATE;
   ssl_certificate_key /run/secrets/TLS_PRIVATE_KEY;

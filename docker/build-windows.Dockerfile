@@ -3,19 +3,10 @@ FROM rust:1.99.1 as builder
 
 ARG TAILWIND_VERSION=v4.3.0
 
-# Download Tailwind CSS standalone executable (for the container architecture)
-RUN ARCH=$(uname -m) && \
-    if [ "$ARCH" = "x86_64" ]; then \
-        curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64 && \
-        chmod +x tailwindcss-linux-x64 && \
-        mv tailwindcss-linux-x64 /usr/local/bin/tailwindcss; \
-    elif [ "$ARCH" = "aarch64" ]; then \
-        curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-arm64 && \
-        chmod +x tailwindcss-linux-arm64 && \
-        mv tailwindcss-linux-arm64 /usr/local/bin/tailwindcss; \
-    else \
-        echo "Unsupported architecture: $ARCH" && exit 1; \
-    fi
+# Download the Tailwind CSS standalone executable for the container
+# architecture, verified against the SHA-256 the script pins per asset.
+COPY scripts/install-tailwind.sh /tmp/install-tailwind.sh
+RUN bash /tmp/install-tailwind.sh "${TAILWIND_VERSION}" /usr/local/bin && rm /tmp/install-tailwind.sh
 
 # Install mingw-w64 and build dependencies for Windows cross-compilation
 RUN apt-get update && apt-get install -y \

@@ -108,6 +108,35 @@ cmd_extract() {
     done
 }
 
+# Create a throwaway project whose sources are a skill's examples/ and test/
+# directories, and print its path. Fails when the skill has no Hot source.
+skill_test_project() {
+    local skill_dir="$1"
+    local paths=()
+    local sub
+    for sub in examples test; do
+        if [[ -d "$skill_dir/$sub" ]] && find "$skill_dir/$sub" -type f -name '*.hot' -print -quit | grep -q .; then
+            paths+=("\"$skill_dir/$sub\"")
+        fi
+    done
+    [[ ${#paths[@]} -gt 0 ]] || return 1
+    local project
+    project="$(mktemp -d)"
+    local joined
+    joined="$(IFS=,; echo "${paths[*]}")"
+    # The skills use the AI packages; load this checkout's copies.
+    {
+        printf '::hot::conf ns\n\nhot.set.project "skill"\nhot.project.skill.src.paths [%s]\n' "$joined"
+        printf 'hot.project.skill.deps {\n'
+        local pkg
+        for pkg in hot-ai hot-ai-agent anthropic; do
+            printf '    "hot.dev/%s": { "local": "%s" },\n' "$pkg" "$PROJECT_ROOT/hot/pkg/$pkg"
+        done
+        printf '}\n'
+    } > "$project/hot.hot"
+    echo "$project"
+}
+
 # Command: check - run Hot static checks and verify doc snippets
 cmd_check() {
     local errors=0
@@ -206,6 +235,34 @@ cmd_check() {
     done < <(find "$skills_root" -mindepth 2 -maxdepth 2 -type d \( -name test -o -name examples \) -print | sort)
     if [[ $skill_source_errors -ne 0 ]]; then
         errors=$((errors + skill_source_errors))
+    fi
+
+    # 5b. Load and test each skill's Hot source as one project, interpreted and
+    # with every function JIT-compiled on its first call. `hot check` passes
+    # code that fails when the project loads, such as a top-level value that
+    # names a function defined later in the file.
+    echo ""
+    echo -e "${YELLOW}Step 5b: Bundled skill source loads and its tests pass${NC}"
+    local skill_test_errors=0
+    while IFS= read -r skill_dir; do
+        local skill_project
+        if ! skill_project="$(skill_test_project "$skill_dir")"; then
+            continue
+        fi
+        local threshold
+        for threshold in 100 1; do
+            if (cd "$skill_project" && cargo run --quiet --manifest-path "$PROJECT_ROOT/Cargo.toml" -- test --jit.threshold "$threshold" --ctx "$PROJECT_ROOT/hot/ci.ctx.hot" > "$skill_project/test.log" 2>&1); then
+                echo -e "${GREEN}✓ ${skill_dir#"$PROJECT_ROOT/"} (JIT threshold $threshold)${NC}"
+            else
+                echo -e "${RED}✗ ${skill_dir#"$PROJECT_ROOT/"} (JIT threshold $threshold)${NC}"
+                cat "$skill_project/test.log"
+                skill_test_errors=$((skill_test_errors + 1))
+            fi
+        done
+        rm -rf "$skill_project"
+    done < <(find "$skills_root" -mindepth 1 -maxdepth 1 -type d -print | sort)
+    if [[ $skill_test_errors -ne 0 ]]; then
+        errors=$((errors + skill_test_errors))
     fi
 
     # 6. Reject the removed suffix-based flow-result syntax in canonical skill

@@ -113,18 +113,14 @@ result fetch-user(id)
 message match result {
     Result.Ok => { `Found: ${result.name}` }
     Result.Err => { `Error: ${result}` }
-    _ => { `Unknown: ${result}` }
 }
 ```
 
 Inside a `Result.Ok` or `Result.Err` match arm, using the matched variable reads
 the payload.
 
-> Closed-enum exhaustiveness: a `match` typed against `Result` requires a `_`
-> default arm because the runtime carries internal `OkVal`/`ErrVal` variants. If
-> the inferred subject type is narrower (e.g., the value of a known
-> Result-returning function), the `_` may not be required, but adding it is
-> always safe.
+> Exhaustiveness: `Result.Ok` and `Result.Err` arms cover every `Result`, so a
+> `match` with both needs no `_` default arm.
 
 ## Lazy Arguments
 

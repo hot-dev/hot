@@ -1,0 +1,10 @@
+# Intended compatibility breaks for scripts/ci/compat-diff.sh.
+#
+# Each line is "<diagnostic code> <path glob>": a new error with that code
+# (or any code, for "*") in a file matching the glob, relative to the
+# previous release's checkout, is expected. List a break here only when the
+# upgrade notes tell users how to change their code, and say which release
+# introduced it.
+#
+# Example:
+#   invalid-schedule hot/src/jobs/*.hot   # 3.0.1: a meta schedule must repeat

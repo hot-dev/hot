@@ -106,8 +106,8 @@ Point type fn (x: Int, y: Int): Point {
 
 // Now construct with positional args
 p Point(10, 20)
-p.x  // 10
-p.y  // 20
+x p.x  // 10
+y p.y  // 20
 ```
 
 Custom constructors can have multiple arities:
@@ -158,7 +158,7 @@ alice Person({
     })
 })
 
-alice.address.city  // "Springfield"
+city alice.address.city  // "Springfield"
 ```
 
 ## Literal Union Types
@@ -394,8 +394,8 @@ rect Shape.Rectangle({width: 10.0, height: 20.0})
 point Shape.Point
 
 // Access fields on variant values
-circle.radius  // 5.0
-rect.width     // 10.0
+radius circle.radius  // 5.0
+width rect.width      // 10.0
 ```
 
 A payload can be any type expression (`Vec<Ask>`, `Map<Str, Int>`, `Ask?`,
