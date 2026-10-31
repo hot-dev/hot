@@ -2773,7 +2773,7 @@ impl TypeChecker {
         }
 
         // First registration — remember its source for future diagnostics.
-        self.impl_locations.insert(key.clone(), new_loc);
+        self.impl_locations.insert(key.clone(), new_loc.clone());
 
         // If the target is a dotted variant (`Enum.Variant`), enroll the
         // variant in the enum's known-variant set. For open enums this is
@@ -2785,6 +2785,37 @@ impl TypeChecker {
         // The enum part of the FQN target needs to come back to the short
         // name to look the type up in `context.types` (which is keyed by
         // short name).
+        // The qualified entry is the target's own declaration; the short-name
+        // entry merges every namespace's enum of that name, so one module's
+        // open `Media` would let arrows extend another's closed one.
+        if let Some((enum_fqn, variant_name)) = key.1.split_once('.')
+            && let Some(td) = self.context.types.get(enum_fqn)
+            && td.is_enum
+            && !td.enum_is_open
+            && !td.variants.contains(variant_name)
+        {
+            self.errors.add(CompilerError::UnresolvedType {
+                type_name: format!("{}.{}", Self::short_type_name(enum_fqn), variant_name),
+                namespace: ns_str.to_string(),
+                message: format!(
+                    "`{}` is a closed enum, so an arrow can't add `{}`: declare the variant in \
+                     it, or declare it `enum open`",
+                    Self::short_type_name(enum_fqn),
+                    variant_name
+                ),
+                location: new_loc,
+            });
+            return;
+        }
+        if let Some((enum_fqn, variant_name)) = key.1.split_once('.')
+            && let Some(td) = self.context.types.get_mut(enum_fqn)
+            && td.enum_is_open
+        {
+            td.variants.insert(variant_name.to_string());
+            td.variant_payloads
+                .entry(variant_name.to_string())
+                .or_insert_with(|| key.0.clone());
+        }
         if let Some((enum_fqn, variant_name)) = key.1.split_once('.')
             && let enum_short = Self::short_type_name(enum_fqn)
             && let Some(td) = self.context.types.get_mut(&enum_short)
