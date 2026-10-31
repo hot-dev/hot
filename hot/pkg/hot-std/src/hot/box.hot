@@ -41,11 +41,11 @@ meta {
     **Example**
 
     ```hot
-    // Simple curl — use nano
-    ::box/start(BoxConf({"image": "alpine", "cmd": ["curl", "-s", url], "size": "nano"}))
+    // Simple HTTP fetch (alpine's busybox has wget, not curl) — use nano
+    ::box/start(BoxConf({"image": "alpine:3.21", "cmd": ["wget", "-qO-", url], "size": "nano"}))
 
     // ML inference — use large
-    ::box/start(BoxConf({"image": "pytorch:latest", "size": "large"}))
+    ::box/start(BoxConf({"image": "pytorch/pytorch:latest", "size": "large"}))
     ```
     """
 }
@@ -69,26 +69,32 @@ meta {
 
     **Fields**
 
-    - `image` — Docker/OCI image to run (required)
+    - `image` — Docker/OCI image to run (required). A name without a tag or
+      digest, like `"alpine"`, means `"alpine:latest"`.
     - `size` — Container size preset (default: `"small"`). See `BoxSize` for available sizes.
     - `cmd` — Command and arguments as a Vec (optional, mutually exclusive with `script`)
     - `script` — Shell script to execute (optional, mutually exclusive with `cmd`).
-      Written to `/tmp/hot-run.sh` and executed with `sh -ex`. Each line runs
-      as a separate command; execution stops on the first failure, and `stderr`
-      shows each command before it runs (via `-x`), so you can tell exactly
-      which step failed.
+      Written to `/tmp/hot-run.sh` and run with `set -e`: each line runs as a
+      separate command, and execution stops at the first failure. Commands
+      are not traced, because their expanded arguments can hold secrets;
+      start the script with `set -x` to trace it.
     - `env` — Environment variables (optional)
-    - `timeout` — Timeout in seconds (overrides size default, system max: 86400)
+    - `timeout` — Timeout in seconds (overrides size default, system max: 86400).
+      It is measured from when a task worker picks the task up, so pulling
+      the image and preparing the container count against it (they are
+      never billed).
     - `network` — `"internet"` (default) or `"none"`
     - `tmp-size` — `/tmp` tmpfs size in MB (overrides size default)
     - `disk-size` — `/data` writable disk in MB (overrides size default)
     - `memory` — Container memory in MB (overrides size default)
     - `mounts` — Vec of `BoxMount` records that materialize project resources
       (declared via `hot.project.<x>.resources.paths`) into the container
-      filesystem. Mounts are read-only; populated from the build manifest
-      (production) or directly from disk (dev mode). The `resource` field is
-      a path relative to a configured resource root; the `dest` field is the
-      absolute destination path inside the container.
+      filesystem, read-only. The `resource` field is a path relative to a
+      configured resource root; the `dest` field is the absolute destination
+      path inside the container. A Map of destination path to resource path
+      (`{"/app": "fetcher"}`) works too, and a Map value of
+      `{path: "fetcher", readonly: false}` makes that mount writable. Mounts
+      need the Docker backend; Kata task workers refuse them for now.
     - `registry-auth` — `BoxRegistryAuth` naming the context secret that
       holds the registry credential for a private image. The token never
       goes in source. See `BoxRegistryAuth`.
@@ -96,16 +102,16 @@ meta {
     Individual resource fields override the values from the size preset.
     If no `size` is specified, defaults to `"small"`.
 
-    Only one of `cmd` or `script` may be specified. Both run with `sh -ex`
-    for error tracing (stop on first failure, trace each command to stderr).
+    Only one of `cmd` or `script` may be specified. A `script`, or a `cmd`
+    of the form `["sh", "-c", "..."]`, stops at its first failing command.
 
     **Examples**
 
     ```hot
     // Quick CLI task with cmd
     ::box/start(BoxConf({
-        image: "alpine:latest",
-        cmd: ["curl", "-s", "https://api.example.com"],
+        image: "alpine:3.21",
+        cmd: ["wget", "-qO-", "https://api.example.com"],
         size: "nano",
     }))
 
@@ -129,7 +135,7 @@ type {
     tmp-size: Int?,
     disk-size: Int?,
     memory: Int?,
-    mounts: Vec<BoxMount>?,
+    mounts: Vec<BoxMount> | Map<Str, Any>?,
     registry-auth: BoxRegistryAuth?
 }
 

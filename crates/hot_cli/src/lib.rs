@@ -100,7 +100,8 @@ fn enforce_persistent_queue_for_standalone_service(service_name: &str, conf: &Va
              drop messages between producers and consumers.\n\
              \n\
              To fix:\n\
-               • Use the default project-local SQLite queue, OR\n\
+               • Run it in the project directory (next to hot.hot), where the\n\
+                 queue defaults to the project-local SQLite queue, OR\n\
                • Set `hot.queue.type \"sqlite\"` or `\"redis\"` in hot.hot, OR\n\
                • Pass `--queue.type=sqlite` (or redis) on the CLI\n\
              \n\
@@ -708,6 +709,16 @@ async fn async_main(providers: CliProviders) {
     );
     // Only enable queue/emitter defaults for runtime commands in a project
     let in_project_runtime = in_project && is_runtime_command;
+    // Standalone servers that enqueue work for the project's workers share
+    // their queue default.
+    let in_project_queue_user = in_project_runtime
+        || (in_project
+            && matches!(
+                &cli.command,
+                Some(Command::Api { .. })
+                    | Some(Command::App { .. })
+                    | Some(Command::Scheduler { .. })
+            ));
     let managed_runtime = !hot::env::is_local_dev();
 
     // First, check if hot.hot exists in current directory
@@ -850,7 +861,7 @@ async fn async_main(providers: CliProviders) {
     // default (sqlite for in-project, none otherwise) if type is not set.
     let queue_conf_from_user = conf.get("queue").unwrap_or_else(Val::map_empty);
     let resolved_queue_conf =
-        hot::queue::get_resolved_conf(queue_conf_from_user, in_project_runtime);
+        hot::queue::get_resolved_conf(queue_conf_from_user, in_project_queue_user);
     conf = conf.set("queue", resolved_queue_conf);
 
     // Apply file storage defaults AFTER configuration files are loaded.

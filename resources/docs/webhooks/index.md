@@ -96,11 +96,11 @@ HttpRequest type {
 }
 ```
 
-When Hot delivers a webhook request, all common fields are populated. The `ip` field is extracted from `x-forwarded-for` or `x-real-ip` proxy headers. The `auth` field is only present when the endpoint has `auth: "required"` and the caller authenticates successfully — see [Caller Identity](#caller-identity-hotrequest) for the full structure.
+When Hot delivers a webhook request, all common fields are populated. The `ip` field is extracted from `x-forwarded-for` or `x-real-ip` proxy headers. The `auth` field is only present when the endpoint has `auth: "required"` and the caller authenticates successfully — see [Caller Identity](#caller-identity) for the full structure.
 
 Two fields exist specifically for signature verification. `original-url` is the full URL the provider actually called — scheme, host, path (webhook token included), and query string intact — which is what providers that sign their request URL (Twilio, HubSpot) hash; it contains the webhook token, so don't log it. `body-bytes` carries the verbatim body bytes only when the body is not valid UTF-8 (in that case `body-raw` is a lossy conversion); use `::hot::http/raw-body(request)` to get the right one without checking.
 
-This is the same `HttpRequest` type used by [MCP tools](/docs/mcp#caller-identity-hotrequest) (via `hot.request`), providing a unified request representation across both systems.
+This is the same `HttpRequest` type used by [MCP tools](/docs/mcp#caller-identity) (via `hot.request`), providing a unified request representation across both systems.
 
 ### HttpResponse
 
@@ -199,14 +199,14 @@ fn (request: HttpRequest): Map {
 }
 ```
 
-When `auth` is set to `"required"`, the caller must include an `Authorization: Bearer <token>` header. The token can be an API key, service key, or session token. The credential must have a `webhook` permission (e.g., `{"webhook:*": ["execute"]}` or `{"webhook:internal/*": ["execute"]}`).
+When `auth` is set to `"required"`, the caller must include an `Authorization: Bearer <token>` header. The token can be an API key, service key, or session token. The credential must have a `webhook` permission (e.g., `{"webhook:*": ["execute"]}` or `{"webhook:internal/*": ["execute"]}`). An [org API key](/docs/api/management) is not a runtime credential and gets `403` with the error code `key_scope_mismatch`.
 
 Only `"none"` and `"required"` are supported. An invalid explicit `auth` value
 requires authentication; omitting `auth` retains the public default.
 
 Authenticated webhook handlers receive the caller's identity in the `auth` field of the `HttpRequest` argument. The same data is also available via `::hot::ctx/get("hot.request")` for consistency with MCP tools.
 
-### Caller Identity (`hot.request`)
+### Caller Identity (`hot.request`) {#caller-identity}
 
 Every webhook invocation — authenticated or not — populates the `hot.request` context variable with the same `HttpRequest` that your function receives as its argument. Access it via `::hot::ctx/get("hot.request")`.
 
@@ -280,9 +280,10 @@ API keys can be restricted to only allow webhook access, and further restricted 
 |------------|--------|--------|
 | Full Access | `{"*:*": ["*"]}` | Unrestricted access to all API endpoints including webhooks |
 | Webhooks (all services) | `{"webhook:*": ["execute"]}` | Webhook endpoint access for all services |
-| Webhooks (specific service) | `{"webhook:internal": ["execute"]}` | Webhook endpoint access for a specific service only |
+| Webhooks (specific service) | `{"webhook:internal/*": ["execute"]}` | Webhook endpoint access for a specific service only |
+| Webhooks (one path) | `{"webhook:internal/sync": ["execute"]}` | One endpoint path only |
 
-For example, an API key with permission `{"webhook:internal": ["execute"]}` can only call webhook endpoints in the `internal` service. It cannot access other services or any non-webhook API endpoints.
+For example, an API key with permission `{"webhook:internal/*": ["execute"]}` can only call webhook endpoints in the `internal` service. It cannot access other services or any non-webhook API endpoints. Name the service's paths with `/*`: a bare `{"webhook:internal": ["execute"]}` matches no endpoint and grants nothing.
 
 Permissions are configured when creating or editing API keys in the Hot App. See [Hot App > API Keys](/docs/app#api-keys) for details.
 

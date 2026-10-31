@@ -126,6 +126,14 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         Some(Val::Str(s)) => s.to_string(),
         _ => "code".to_string(),
     };
+    // A container task runs an image, not `task-fn`. Only `::hot::box/start`
+    // creates one, after checking that Hot Box is enabled.
+    if task_type.eq_ignore_ascii_case("container") {
+        return HotResult::Err(err_val(format!(
+            "::hot::task/start: type \"container\" is reserved; start containers with {}",
+            crate::lang::hot::r#box::START_FUNCTION
+        )));
+    }
 
     // Get execution context
     let ctx = match vm.get_execution_context() {
@@ -1738,6 +1746,22 @@ mod tests {
             start(&mut vm, &[Val::from("::app/work")]),
             HotResult::Err(_)
         ));
+    }
+
+    /// `type: "container"` would run an image as a container task without
+    /// `::hot::box/start`'s Hot Box and image checks.
+    #[test]
+    fn task_start_refuses_the_container_type() {
+        let mut vm = create_test_vm();
+        for task_type in ["container", "Container"] {
+            let options = crate::val!({"type": task_type});
+            let HotResult::Err(error) =
+                start(&mut vm, &[Val::from("::app/work"), Val::Null, options])
+            else {
+                panic!("::hot::task/start accepted type {task_type:?}");
+            };
+            assert!(error.to_string().contains("::hot::box/start"), "{error}");
+        }
     }
 
     #[test]

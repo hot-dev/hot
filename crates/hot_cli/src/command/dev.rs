@@ -348,7 +348,10 @@ pub(crate) async fn run_dev(
             // `hot init` can't help when the database is unreachable or refuses
             // the configured credentials.
             if !e.starts_with("Cannot connect to the database") {
-                error!("Please run 'hot init' manually to set up your environment");
+                error!(
+                    "Please run 'hot init' manually to set up your environment; on PostgreSQL, \
+                     pass the schema owner's --db.migration-uri"
+                );
             }
             std::process::exit(1);
         }

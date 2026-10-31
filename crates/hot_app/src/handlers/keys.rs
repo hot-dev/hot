@@ -147,11 +147,9 @@ pub async fn keys_list_handler(
         .await
         .unwrap_or_default();
 
-        // Get total count by fetching all keys first
-        let all_keys = hot::db::api_key::ApiKey::get_api_keys_by_env(&db, &env.env_id, None, None)
+        let total = hot::db::api_key::ApiKey::count_api_keys_by_env(&db, &env.env_id)
             .await
             .unwrap_or_default();
-        let total = all_keys.len() as i64;
 
         (keys, total)
     } else {

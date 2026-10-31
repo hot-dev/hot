@@ -31,7 +31,9 @@ pub(crate) async fn resolve_profile_to_uuids(
         Ok(user) => user,
         Err(_) => {
             return Err(format!(
-                "Profile error: User with email '{}' not found or not active",
+                "Profile error: User with email '{}' not found or not active. Run `hot init` \
+                 to create the local identity; on PostgreSQL, pass the schema owner's \
+                 --db.migration-uri",
                 user_email
             ));
         }

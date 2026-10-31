@@ -178,6 +178,12 @@ Hot captures a full execution trace for every run, showing:
 - Timing for each step
 - Any errors with stack traces
 
+A run records its first 10,000 function calls. A run that makes more keeps
+running but records no further calls; its info then shows
+`call_tracing: "truncated"`, and once it ends, how many calls went unrecorded
+(`untraced_calls`). Set `hot.emitter.max-calls-per-run` in the worker's
+configuration to change the limit (`0` records every call).
+
 ### Triggering Runs
 
 Runs can be triggered in several ways:
@@ -318,6 +324,18 @@ Hot guarantees **at-least-once delivery** for events:
 - Retry status is visible in the Hot App UI
 
 Delivery is optimized for durability and throughput, not strict global ordering. Concurrent workers may process different events from the same stream at the same time, and retries or infrastructure redelivery can arrive after newer events. Queue message fields are additive so rolling deploys can read older messages; workers hydrate the authoritative event payload from the database before routing.
+
+When a worker stops while it runs an event (it crashes or is killed), the next
+worker runs each event that was in flight on it alone, with no other event
+beside it, so one event that brings workers down can't take the others with
+it. With the SQLite queue, only such a stop, of an event running alone,
+counts toward the event's retry limit, and a worker restarted on the same
+host takes over the events of the one that stopped at once. An event that
+stops its worker each time it runs alone is dead-lettered, and its runs fail
+with that reason. If a handler's setup fails
+before it starts (its bundle can't be downloaded, extracted or compiled), the
+event is delivered again, and its run waits as `pending_retry` with the setup
+error until the handler starts or the event's retries run out.
 
 Handlers should be idempotent when they perform external side effects, because the same event can be delivered more than once after a retry, worker crash, Redis pending-entry reclaim, or task reconciliation pass. This also applies to [run timeouts](#run-timeouts): when a handler exceeds its run timeout it is recorded as a failure and retried according to its retry policy. The worker cancels the timed-out run cooperatively, but a handler stuck in non-cooperative work (a tight native loop or blocking syscall) can keep running in the background while its retry begins, so the two attempts may briefly overlap.
 

@@ -76,6 +76,26 @@ unsafe impl GlobalAlloc for LoggingAllocator {
     }
 }
 
+/// Arenas `limit_malloc_arenas` allows when `MALLOC_ARENA_MAX` is unset.
+pub const DEFAULT_MALLOC_ARENAS: i32 = 4;
+
+/// Cap glibc's malloc arenas at `max`, unless `MALLOC_ARENA_MAX` sets the cap.
+/// glibc gives threads that contend for the heap arenas of their own, up to
+/// eight per core, and keeps the memory they once held: a worker whose
+/// threads ran a burst of large runs stays near its peak resident size. Call
+/// it before the threads that do the allocating start. A no-op off glibc.
+pub fn limit_malloc_arenas(max: i32) {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        // SAFETY: mallopt only adjusts allocator parameters.
+        unsafe {
+            libc::mallopt(libc::M_ARENA_MAX, max);
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    let _ = max;
+}
+
 /// Write a single OOM diagnostic line to stderr without allocating.
 ///
 /// Format (one line):

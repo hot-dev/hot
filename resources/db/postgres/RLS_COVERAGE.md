@@ -62,7 +62,10 @@ Reference tables deliberately have no RLS; runtime receives SELECT only:
 
 SQLx migration metadata is deployment control state and receives no runtime grants.
 Org API key tables carry their own policies. Migration 020 replaced 013's
-management credential tables (`management_key`, `api_key_management_issuer`).
+management credential tables (`management_key`, `api_key_management_issuer`)
+and kept them, read only, for Hot 3.0.0 processes that still serve during an
+upgrade: the issuer table is empty, every management key is revoked, and their
+insert and update policies are gone. A later release drops them.
 
 | Added control table | Ownership and operation |
 | --- | --- |

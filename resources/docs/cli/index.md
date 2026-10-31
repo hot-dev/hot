@@ -196,9 +196,9 @@ runs on its own. The test delivers events itself:
   times counted from the test's clock; `hot:schedule:cancel` disarms it.
   `::hot::test/schedules()` lists what is armed.
 - `::hot::test/run-due()` calls each schedule due by the test's clock,
-  soonest first. Each call runs with the clock at its due time, as the
-  scheduler would have run it, and its events are delivered. Afterwards the
-  clock is back where the test left it.
+  soonest first, with its `args`. Each call runs with the clock at its due
+  time, as the scheduler would have run it, and its events are delivered.
+  Afterwards the clock is back where the test left it.
 
 A handler or scheduled call that fails counts as a failed assertion; the
 others still run. Handlers run as plain calls: retries and run records don't

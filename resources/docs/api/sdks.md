@@ -14,7 +14,7 @@ Official client libraries for the Hot API, released in lockstep versions:
 | Rust | [`hot-dev`](https://crates.io/crates/hot-dev) (crates.io) | [hot-dev/hot-rust](https://github.com/hot-dev/hot-rust) | [docs.rs](https://docs.rs/hot-dev) |
 | Java | `dev.hot:hot-sdk` (Maven Central) | [hot-dev/hot-java](https://github.com/hot-dev/hot-java) | [javadoc.io](https://javadoc.io/doc/dev.hot/hot-sdk) |
 
-Every SDK covers the thirteen runtime API v1 resources ([Endpoints](api)),
+Every SDK covers the thirteen runtime API v1 resources ([Endpoints](/docs/api#endpoints)),
 SSE run-stream subscriptions with automatic reconnection across the API's
 5-minute stream timeout, durable run and task waiters, structured API errors,
 and escape hatches for endpoints that do not yet have a helper.

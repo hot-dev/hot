@@ -83,32 +83,134 @@ mod tests {
         // An annual or never-renewing plan keeps its first start, and its
         // allowance still resets every month from that anniversary.
         let anchor = parse("2024-01-31T12:00:00Z");
+        let annual_end = Some(parse("2025-01-31T12:00:00Z"));
+        for end in [None, annual_end] {
+            assert_eq!(
+                monthly_usage_start(parse("2024-03-15T00:00:00Z"), Some(anchor), end),
+                parse("2024-02-29T12:00:00Z")
+            );
+            assert_eq!(
+                monthly_usage_start(parse("2024-04-01T00:00:00Z"), Some(anchor), end),
+                parse("2024-03-31T12:00:00Z")
+            );
+        }
         assert_eq!(
-            monthly_usage_start(parse("2024-03-15T00:00:00Z"), Some(anchor)),
-            parse("2024-02-29T12:00:00Z")
-        );
-        assert_eq!(
-            monthly_usage_start(parse("2024-04-01T00:00:00Z"), Some(anchor)),
-            parse("2024-03-31T12:00:00Z")
-        );
-        assert_eq!(
-            monthly_usage_start(parse("2025-02-01T00:00:00Z"), Some(anchor)),
+            monthly_usage_start(parse("2025-02-01T00:00:00Z"), Some(anchor), annual_end),
             parse("2025-01-31T12:00:00Z")
         );
         // A monthly plan's own period start is already the window.
         let monthly = parse("2024-09-15T00:00:00Z");
         assert_eq!(
-            monthly_usage_start(parse("2024-10-05T00:00:00Z"), Some(monthly)),
+            monthly_usage_start(
+                parse("2024-10-05T00:00:00Z"),
+                Some(monthly),
+                Some(parse("2024-10-15T00:00:00Z"))
+            ),
             monthly
         );
         // No plan, or a start in the future, uses the calendar month rather
         // than moving the window (and resetting its counter) every request.
         for start in [None, Some(parse("2024-01-05T00:00:00Z"))] {
             assert_eq!(
-                monthly_usage_start(parse("2024-01-04T12:00:00Z"), start),
+                monthly_usage_start(parse("2024-01-04T12:00:00Z"), start, None),
                 parse("2024-01-01T00:00:00Z")
             );
         }
+    }
+
+    #[test]
+    fn monthly_windows_keep_the_providers_month_end_anchor() {
+        use crate::db::subscription::monthly_usage_window;
+        let parse = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let window = |now: &str, start: &str, end: Option<&str>| {
+            monthly_usage_window(parse(now), Some(parse(start)), end.map(parse))
+        };
+        let expect = |start: &str, end: &str| (parse(start), parse(end));
+        // A 31st anchor renews Feb 28 -> Mar 31. Anniversaries of the clamped
+        // start would restart the window on Mar 28 with three days left.
+        let (feb, mar) = ("2026-02-28T09:00:00Z", Some("2026-03-31T09:00:00Z"));
+        assert_eq!(
+            window("2026-03-29T00:00:00Z", feb, mar),
+            expect(feb, "2026-03-31T09:00:00Z")
+        );
+        // Until billing records the next period, the window follows the
+        // anchor the stored end recovers, not the 28th.
+        assert_eq!(
+            window("2026-04-02T00:00:00Z", feb, mar),
+            expect("2026-03-31T09:00:00Z", "2026-04-30T09:00:00Z")
+        );
+        assert_eq!(
+            window("2026-05-02T00:00:00Z", feb, mar),
+            expect("2026-04-30T09:00:00Z", "2026-05-31T09:00:00Z")
+        );
+        // A 30th anchor (Feb 28 -> Mar 30) and a clamped end (Jan 31 ->
+        // Feb 28) are the same month-long periods.
+        assert_eq!(
+            window(
+                "2026-03-29T00:00:00Z",
+                "2026-02-28T09:00:00Z",
+                Some("2026-03-30T09:00:00Z")
+            ),
+            expect("2026-02-28T09:00:00Z", "2026-03-30T09:00:00Z")
+        );
+        assert_eq!(
+            window(
+                "2026-03-30T00:00:00Z",
+                "2026-01-31T09:00:00Z",
+                Some("2026-02-28T09:00:00Z")
+            ),
+            expect("2026-02-28T09:00:00Z", "2026-03-31T09:00:00Z")
+        );
+        // A leap-day annual anchor: the non-leap renewal starts Feb 28, the
+        // monthly windows return to the 29th, and the last ends with the year.
+        let (start, end) = ("2027-02-28T00:00:00Z", Some("2028-02-29T00:00:00Z"));
+        assert_eq!(
+            window("2027-03-28T12:00:00Z", start, end),
+            expect(start, "2027-03-29T00:00:00Z")
+        );
+        assert_eq!(
+            window("2027-03-29T12:00:00Z", start, end),
+            expect("2027-03-29T00:00:00Z", "2027-04-29T00:00:00Z")
+        );
+        assert_eq!(
+            window("2028-02-29T00:00:00Z", start, end),
+            expect("2028-02-29T00:00:00Z", "2028-03-29T00:00:00Z")
+        );
+        assert_eq!(
+            window("2028-02-28T12:00:00Z", start, end),
+            expect("2028-01-29T00:00:00Z", "2028-02-29T00:00:00Z")
+        );
+        // A leap-day monthly start keeps the 29th after billing stops
+        // advancing the period.
+        assert_eq!(
+            window(
+                "2024-04-15T00:00:00Z",
+                "2024-02-29T00:00:00Z",
+                Some("2024-03-29T00:00:00Z")
+            ),
+            expect("2024-03-29T00:00:00Z", "2024-04-29T00:00:00Z")
+        );
+        // A free plan's 30-day period never renews: windows continue on the
+        // start's day and the end is never before the start.
+        let free = "2026-08-21T10:00:00Z";
+        let free_end = Some("2026-09-20T10:00:00Z");
+        assert_eq!(
+            window("2026-09-20T12:00:00Z", free, free_end),
+            expect(free, "2026-09-21T10:00:00Z")
+        );
+        assert_eq!(
+            window("2026-10-21T12:00:00Z", free, free_end),
+            expect("2026-10-21T10:00:00Z", "2026-11-21T10:00:00Z")
+        );
+        // No plan: the calendar month, ending at the next one.
+        assert_eq!(
+            monthly_usage_window(parse("2026-12-15T00:00:00Z"), None, None),
+            expect("2026-12-01T00:00:00Z", "2027-01-01T00:00:00Z")
+        );
     }
 
     #[tokio::test]
@@ -178,6 +280,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(days(&db).await, -1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_account_usage_counts_store_data() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        for (key, size) in [("a", 10i64), ("b", 32)] {
+            sqlx::query("INSERT INTO store_map_entry(org_id,env_id,store_name,key,value,size) VALUES (?,?,'test',?,'value',?)")
+                .bind(data.org_id).bind(data.env_id).bind(key).bind(size).execute(pool).await.unwrap();
+        }
+        let usage = OrgUsageStats::calculate_account(&db, &data.org_id, Utc::now(), -1)
+            .await
+            .unwrap();
+        assert_eq!(usage.store_storage_bytes, 42);
     }
 
     #[tokio::test]

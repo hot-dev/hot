@@ -50,8 +50,10 @@ pub(super) async fn runtime_stopped(executor: &executor::BoxExecutor, container_
 pub(super) enum Termination {
     /// Nothing shows it stopped: the reservation stays.
     Unconfirmed,
-    /// Its runtime confirmed it stopped.
+    /// Its runtime confirmed it stopped after the cancel.
     Confirmed,
+    /// It ran to its end on its own before the cancel reached it.
+    AlreadyEnded,
     /// Nothing shows it running, and its deadline is long past.
     PastDeadline,
 }
@@ -97,10 +99,12 @@ pub(super) async fn settle(
     if compute_units < 0 || duration_ms < 0 {
         return false;
     }
-    let msg = if termination == Termination::Confirmed {
-        "Task cancelled; execution termination confirmed"
-    } else {
-        "Task cancelled; quota released after the deadline without termination evidence"
+    let msg = match termination {
+        Termination::Confirmed => "Task cancelled; its execution was stopped",
+        Termination::AlreadyEnded => "Task cancelled after its execution had already ended",
+        Termination::Unconfirmed | Termination::PastDeadline => {
+            "Task cancelled; quota released after the deadline without termination evidence"
+        }
     };
     let result = serde_json::json!({
         "$type": "::hot::task/Cancellation",
@@ -108,7 +112,10 @@ pub(super) async fn settle(
         "compute-units": compute_units,
         "duration-ms": duration_ms,
         "quota-estimated": measured.is_none(),
-        "termination-confirmed": termination == Termination::Confirmed,
+        "termination-confirmed": matches!(
+            termination,
+            Termination::Confirmed | Termination::AlreadyEnded
+        ),
     });
     match Task::complete(
         db,
@@ -209,7 +216,7 @@ pub(super) async fn reap(
             Termination::PastDeadline => {
                 tracing::warn!(task_id=%task.task_id, worker_id=%owner, "Releasing a cancelled execution's quota after its deadline without termination evidence");
             }
-            Termination::Unconfirmed | Termination::Confirmed => {}
+            Termination::Unconfirmed | Termination::Confirmed | Termination::AlreadyEnded => {}
         }
         let Ok(env) = Env::get_env_uncached(db, &task.env_id).await else {
             continue;

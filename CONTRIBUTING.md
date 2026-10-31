@@ -85,10 +85,15 @@ Install optional git hooks:
 The repository uses SQLx's runtime query APIs and does not commit `.sqlx/`
 offline-query metadata. Do not run `cargo sqlx prepare`.
 
-For schema changes, add the next numbered migration under
-`resources/db/sqlite/migrations/` and `resources/db/postgres/migrations/` when
-the change applies to both databases. Follow the public/private migration
-boundary in [`resources/db/V2_MIGRATIONS.md`](resources/db/V2_MIGRATIONS.md).
+For schema changes, add the next numbered migration to both
+`resources/db/sqlite/migrations/` and `resources/db/postgres/migrations/`,
+with the same file name. A change only one engine needs still gets a file in
+the other, containing just `SELECT 1;`: the `schema_parity` test keeps the two
+chains in lockstep. Never edit or rename a migration a release has shipped
+(listed in [`resources/db/RELEASED_MIGRATIONS`](resources/db/RELEASED_MIGRATIONS));
+add a new one instead, and append each release's migrations to that list.
+Follow the public/private migration boundary in
+[`resources/db/V2_MIGRATIONS.md`](resources/db/V2_MIGRATIONS.md).
 
 A new PostgreSQL table needs row-level security: enable and force RLS with its
 policies in the same migration, and list the table in

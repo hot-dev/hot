@@ -16,21 +16,24 @@ Configure a container with `BoxConf`:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `image` | `Str` | Docker/OCI image to run (required) |
+| `image` | `Str` | Docker/OCI image to run (required). A name without a tag, like `alpine`, means `alpine:latest` |
 | `size` | `BoxSize` | Size preset (default: `"small"`) |
 | `script` | `Str` | Shell script to execute (mutually exclusive with `cmd`) |
 | `cmd` | `Vec<Str>` | Command and arguments (optional, uses image default) |
 | `entrypoint` | `Vec<Str>` | Override image entrypoint (e.g. `[""]` to clear it) |
 | `env` | `Map<Str, Str>` | Environment variables (optional) |
-| `timeout` | `Int` | Timeout in seconds (overrides size default, max: 86400) |
+| `timeout` | `Int` | Timeout in seconds, from when a task worker picks the task up (overrides size default, max: 86400). Pulling the image and preparing the container count against it |
 | `network` | `Str` | `"internet"` (default) or `"none"` |
 | `writable` | `Bool` | Writable root filesystem (default: `true`) |
 | `tmp-size` | `Int` | `/tmp` tmpfs size in MB (overrides size default) |
 | `disk-size` | `Int` | `/data` writable disk in MB (overrides size default) |
 | `memory` | `Int` | Container memory in MB (overrides size default) |
+| `mounts` | `Vec<BoxMount>` | Project resources to mount into the container, read-only (see [Resource Mounts](#resource-mounts)) |
 | `registry-auth` | `BoxRegistryAuth` | Names the context secret that holds a private image's registry credential (see [Private Images](#private-images)) |
 
-`script` runs with `set -ex` (trace commands, exit on error). Use `script` for multi-line shell commands; use `cmd` for non-shell executables. Only one of `script` or `cmd` may be specified.
+`script` runs with `set -e`: it stops at the first failing command. Commands aren't traced, because their expanded arguments can hold secrets; put `set -x` at the top of a script to trace it. Use `script` for multi-line shell commands; use `cmd` for non-shell executables. Only one of `script` or `cmd` may be specified.
+
+A task's `timeout` covers the whole task on the worker, image pull included, so give a large image's first run some room. Pulls and other preparation are never billed; see [Container Billing](/docs/box/billing#what-counts-as-billable-time).
 
 ## BoxSize Presets
 
@@ -60,7 +63,7 @@ Network access may be restricted by your plan. See [Container Billing](/docs/box
 
 - **Writable root** — Root filesystem is writable (for `apk add`, `pip install`, etc.)
 - **Runs as root** — Process runs as UID 0 with a subset of Linux capabilities
-- **Process limit** — Maximum 512 processes
+- **Process limit** — Maximum 512 processes on the Kata backend, 100 on the Docker backend (which `hot dev` uses)
 - **Image denylist** — Dangerous images (e.g. `docker:*`) are blocked
 - **Internet access** — Outbound network access enabled
 
@@ -69,7 +72,7 @@ Network access may be restricted by your plan. See [Container Billing](/docs/box
 - **Read-only root** — Root filesystem is read-only
 - **Capabilities dropped** — All Linux capabilities are dropped
 - **Runs as nobody** — Process runs as unprivileged user (UID 65534)
-- **Process limit** — Maximum 100 processes
+- **Process limit** — Maximum 100 processes on both backends
 - **Image denylist** — Same denylist applies
 
 Both modes provide `/data` (disk-backed) and `/tmp` (tmpfs) as writable directories. Use `writable: false` for maximum isolation; use `network: "none"` to disable outbound access.
@@ -81,6 +84,20 @@ Both modes provide `/data` (disk-backed) and `/tmp` (tmpfs) as writable director
 | `/data` | Writable disk | Persistent writable storage (size from `disk-size`) |
 | `/tmp` | tmpfs | Ephemeral tmpfs (size from `tmp-size`) |
 | `hot://` | Storage | Access Hot storage via built-in file server |
+
+## Resource Mounts
+
+`mounts` puts files from your project's resources (`hot.project.<name>.resources.paths`) into the container. Each `BoxMount` names a `resource` path, relative to a resource root, and its `dest`, an absolute path in the container:
+
+```hot
+task ::box/start(BoxConf({
+  image: "node:22-alpine",
+  cmd: ["node", "/app/index.js"],
+  mounts: [BoxMount({resource: "fetcher/index.js", dest: "/app/index.js"})],
+}))
+```
+
+Mounts are read-only. `mounts` also takes a map of container path to resource path, `{"/app": "fetcher"}`, where a value of `{path: "fetcher", readonly: false}` makes that mount writable. Mounts need the Docker backend for now: a Kata task worker fails the task.
 
 ## Image Policy
 

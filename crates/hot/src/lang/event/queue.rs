@@ -777,10 +777,17 @@ impl EventPublisher for QueueEventPublisher {
         // Convert to unified Message format
         let message: Message = event_message.into();
 
-        // Send to queue (fire and forget)
+        // Send to queue (fire and forget). The event row is already written,
+        // so a failed enqueue would lose the event: retry a few times.
         let queue = self.queue.clone();
         let handle = tokio::spawn(async move {
-            queue.enqueue(message).await.map_err(|error| {
+            crate::queue::enqueue_with_retries(
+                &*queue,
+                message,
+                &crate::queue::PUBLISH_RETRY_DELAYS,
+            )
+            .await
+            .map_err(|error| {
                 let error = format!("QueueEventPublisher: Failed to enqueue event: {error}");
                 tracing::error!("{}", error);
                 error

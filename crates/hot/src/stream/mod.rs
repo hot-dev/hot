@@ -526,6 +526,47 @@ impl StreamPubSub {
     }
 }
 
+impl StreamPubSub {
+    /// Check that the backend answers. Always true for the in-memory one.
+    pub async fn ping(&self) -> Result<(), StreamPubSubError> {
+        match self {
+            StreamPubSub::Memory(_) => Ok(()),
+            StreamPubSub::Redis(r) => r.ping().await,
+        }
+    }
+
+    /// PING the backend up to `attempts` times, `delay` apart, and return the
+    /// last error if it never answers.
+    ///
+    /// Creating a Redis pub/sub only parses its URI. Services that need it
+    /// across processes call this at startup so a Redis that is down or
+    /// misaddressed stops the deploy instead of passing health checks while
+    /// every subscription fails.
+    pub async fn wait_until_reachable(
+        &self,
+        attempts: u32,
+        delay: Duration,
+    ) -> Result<(), StreamPubSubError> {
+        let mut attempt = 1;
+        loop {
+            match self.ping().await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt >= attempts => return Err(e),
+                Err(e) => {
+                    tracing::warn!(
+                        "Stream pub/sub not reachable (attempt {}/{}): {}",
+                        attempt,
+                        attempts,
+                        e
+                    );
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl StreamPublisher for StreamPubSub {
     async fn publish(&self, event: StreamEvent) -> Result<(), StreamPubSubError> {
@@ -646,6 +687,12 @@ pub fn get_resolved_conf(conf: Val) -> Val {
     // Merge with provided conf (the provided conf will override defaults)
     default_conf.merge(&conf)
 }
+
+/// Startup PINGs a service makes before it gives up on Redis (see
+/// `StreamPubSub::wait_until_reachable`): about 10 s, enough for a Redis
+/// that starts alongside the service.
+pub const STARTUP_PING_ATTEMPTS: u32 = 10;
+pub const STARTUP_PING_DELAY: Duration = Duration::from_secs(1);
 
 /// Channel name prefix for stream events
 pub const STREAM_CHANNEL_PREFIX: &str = "hot:stream";
@@ -781,6 +828,29 @@ mod tests {
         assert_eq!(event.env_id(), Some(env_id));
         assert_eq!(event.event_id(), None);
         assert_eq!(event.channel_name(), channel_name(&env_id, &sid));
+    }
+
+    #[tokio::test]
+    async fn wait_until_reachable_reports_an_unreachable_redis() {
+        // Nothing listens on port 1; creating the pub/sub only parses the URI.
+        let pubsub = StreamPubSub::new(
+            StreamPubSubType::Redis,
+            Some("redis://127.0.0.1:1/".to_string()),
+            false,
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let result = pubsub
+            .wait_until_reachable(3, Duration::from_millis(10))
+            .await;
+        assert!(result.is_err(), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        let memory = StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap();
+        memory
+            .wait_until_reachable(1, Duration::from_millis(10))
+            .await
+            .unwrap();
     }
 
     #[test]

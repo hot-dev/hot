@@ -224,6 +224,36 @@ pub fn parse_schedule_expression_at(
     ))
 }
 
+/// Whether a schedule names one run rather than a recurrence: a date or
+/// datetime (`2026-11-01`, `2026-11-01T10:00:00Z`), a delay (`10 minutes`,
+/// `in 2h`, `1 day from now`) or a relative day (`tomorrow at 9am`).
+/// English-to-cron conversion drops those parts, so `2026-11-01` would run
+/// every minute.
+fn is_one_time_schedule(expr: &str) -> bool {
+    static CALENDAR_DATE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\b\d{4}-\d{1,2}-\d{1,2}|\b\d{1,2}/\d{1,2}/\d{2,4}\b")
+            .expect("calendar date pattern")
+    });
+    if DateTime::parse_from_rfc3339(expr).is_ok() || CALENDAR_DATE.is_match(expr) {
+        return true;
+    }
+    let lower = expr.to_ascii_lowercase();
+    let delay = lower
+        .trim_start_matches("in ")
+        .trim_end_matches(" from now")
+        .trim_start_matches("after ")
+        .trim();
+    humantime::parse_duration(delay).is_ok()
+        || lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| {
+                matches!(
+                    word,
+                    "today" | "tonight" | "tomorrow" | "yesterday" | "now" | "next"
+                )
+            })
+}
+
 fn contains_unsupported_subsecond_unit(expr: &str) -> bool {
     let lower = expr.to_ascii_lowercase();
     [
@@ -271,6 +301,15 @@ pub fn normalize_recurring_schedule_expression(expr: &str) -> Result<String, Str
 
     if parse_cron(expr).is_ok() {
         return Ok(expr.to_string());
+    }
+
+    if is_one_time_schedule(expr) {
+        return Err(format!(
+            "'{}' is a one-time schedule (a date, time or delay), but a recurring schedule \
+             is needed here. Write one such as \"every 10 minutes\" or \"every day at 9am\", \
+             or send a `hot:schedule:new` event to run a function once",
+            expr
+        ));
     }
 
     match english_to_cron::str_cron_syntax(expr) {
@@ -1047,6 +1086,13 @@ impl Schedule {
     ) -> Result<(), ScheduleError> {
         // First, validate all cron expressions before inserting any schedules
         for (cron_expression, functions) in scheduled_functions {
+            // A one-time `@at:` schedule names its run; it has no recurrence.
+            if cron_expression
+                .strip_prefix(AT_SCHEDULE_PREFIX)
+                .is_some_and(|at| DateTime::parse_from_rfc3339(at).is_ok())
+            {
+                continue;
+            }
             if let Err(validation_error) =
                 Self::validate_cron_expression(cron_expression).and_then(|_| {
                     validate_recurring_schedule_interval(
@@ -1840,7 +1886,7 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id)
+                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=CASE WHEN qo.parent_org_id IS NULL THEN qo.org_id ELSE qo.parent_org_id END
                      WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = true AND b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true
                      AND ($3::uuid IS NULL OR qe.env_id=$3)
                      ORDER BY s.cron, s.ns, s.var
@@ -1859,7 +1905,7 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id)
+                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=CASE WHEN qo.parent_org_id IS NULL THEN qo.org_id ELSE qo.parent_org_id END
                      WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1
                      AND (? IS NULL OR qe.env_id=?)
                      ORDER BY s.cron, s.ns, s.var
@@ -1902,7 +1948,7 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id)
+                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=CASE WHEN qo.parent_org_id IS NULL THEN qo.org_id ELSE qo.parent_org_id END
                      WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = true
                        AND b.deployed = true
                        AND b.runtime_status = 'ready'
@@ -1928,7 +1974,7 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id)
+                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=CASE WHEN qo.parent_org_id IS NULL THEN qo.org_id ELSE qo.parent_org_id END
                      WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = 1
                        AND b.deployed = 1
                        AND b.runtime_status = 'ready'
@@ -2155,6 +2201,11 @@ impl Schedule {
         }
 
         let cron_field = schedule_type.to_cron_field();
+        // A dynamic schedule always stores its args, [] for none: the
+        // scheduler passes them, where a metadata schedule (no value) gets the
+        // argument describing the schedule that fired.
+        let no_args = JsonValue::Array(Vec::new());
+        let args = Some(args.unwrap_or(&no_args));
 
         let admission = quota::Admission::begin(db, build_id, policy.max_active_per_org).await?;
         match admission {
@@ -2772,6 +2823,55 @@ mod tests {
                 expr
             );
         }
+    }
+
+    #[test]
+    fn test_one_time_schedules_are_not_recurring() {
+        for expr in [
+            "2026-11-01",
+            "2026-11-01T10:00:00Z",
+            "2026-11-01 10:00",
+            "11/01/2026",
+            "in 10 minutes",
+            "10 minutes",
+            "2h",
+            "2 hours from now",
+            "after 1 day",
+            "tomorrow at 9am",
+            "today at 5pm",
+            "next monday at 9am",
+        ] {
+            let err = normalize_recurring_schedule_expression(expr).unwrap_err();
+            assert!(err.contains("one-time"), "'{}': {}", expr, err);
+            assert!(err.contains("hot:schedule:new"), "'{}': {}", expr, err);
+        }
+        for expr in [
+            "every 10 minutes",
+            "every day at 9am",
+            "at 10:00 am",
+            "on Sunday at 12:00",
+            "run at midnight on the 1st and 15th of the month",
+            "7pm every Thursday",
+            "midnight on Tuesdays",
+            "0 0/5 * * * ? *",
+        ] {
+            assert!(
+                normalize_recurring_schedule_expression(expr).is_ok(),
+                "'{}' should stay a recurring schedule",
+                expr
+            );
+        }
+        // A one-time schedule created at run time still parses as one.
+        assert!(
+            parse_schedule_expression("2026-11-01T10:00:00Z")
+                .unwrap()
+                .is_at_schedule()
+        );
+        assert!(
+            parse_schedule_expression("in 10 minutes")
+                .unwrap()
+                .is_at_schedule()
+        );
     }
 
     #[test]

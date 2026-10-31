@@ -232,7 +232,7 @@ async fn create_child(app: &Router, manager_token: &str, label: &str) -> Child {
         "/v1/orgs",
         manager_token,
         Some(payload),
-        StatusCode::CREATED,
+        StatusCode::OK,
     )
     .await;
     assert_eq!(child["data"]["created"], true);
@@ -259,7 +259,7 @@ async fn create_child(app: &Router, manager_token: &str, label: &str) -> Child {
         &env_path,
         manager_token,
         Some(json!({"name":"production"})),
-        StatusCode::CREATED,
+        StatusCode::OK,
     )
     .await;
     assert_eq!(env["data"]["env_id"], repeated["data"]["env_id"]);
@@ -373,6 +373,28 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
         )));
         let a = create_child(&app, &manager_token, "lifecycle-alpha").await;
         let b = create_child(&app, &manager_token, "lifecycle-beta").await;
+        // Unique violations under the runtime role are conflicts, not faults.
+        for (payload, code) in [
+            (
+                json!({"name":"Again","slug":"lifecycle-alpha","idempotency_key":"again-slug"}),
+                "slug_taken",
+            ),
+            (
+                json!({"name":"Again","slug":"lifecycle-gamma","external_id":"lifecycle-alpha","idempotency_key":"again-external"}),
+                "external_id_taken",
+            ),
+        ] {
+            let conflict = expect(
+                &app,
+                "POST",
+                "/v1/orgs",
+                &manager_token,
+                Some(payload),
+                StatusCode::CONFLICT,
+            )
+            .await;
+            assert_eq!(conflict["error"]["code"], code);
+        }
         assert_ne!(a.env, b.env);
         assert_ne!(a.project, b.project);
         assert_eq!(

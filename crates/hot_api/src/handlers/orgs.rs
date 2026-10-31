@@ -10,7 +10,11 @@
 //! principal, so they authorize exactly as they do for an environment key.
 use super::ListQueryParams;
 use super::calls::{CallPurgeResponse, PURGE_BATCH_SIZE, purge_deadline, purge_failed};
-use crate::auth::{AuthContext, authenticate_token, authorize_route, key_scope_mismatch};
+use crate::auth::{
+    AuthContext, auth_rejection, authenticate_token, authorize_route, bearer_token,
+    is_retired_management_token, key_scope_mismatch, missing_credential,
+    retired_management_credential,
+};
 use crate::{
     ApiStateData,
     domain_resolver::ResolvedDomain,
@@ -31,7 +35,7 @@ use chrono::{DateTime, Duration, Utc};
 use hot::db::api_key::ApiKey;
 use hot::db::org::{CreateChild, OrgLifecycle};
 use hot::db::org_api_key::{
-    CreateOrgApiKey, DEFAULT_ROTATION_OVERLAP_SECONDS, EffectiveOrgGrants,
+    CreateOrgApiKey, DEFAULT_ROTATION_OVERLAP_SECONDS, EffectiveOrgGrants, KeyStatus,
     MAX_ROTATION_OVERLAP_SECONDS, MintEnvApiKey, OrgApiKey, OrgApiKeyError,
 };
 use hot::db::{
@@ -149,6 +153,27 @@ fn bad_request(message: &str) -> ApiError {
     )
 }
 
+fn conflict(code: &str, message: &str) -> ApiError {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiErrorResponse::new(code, message)),
+    )
+}
+
+fn forbidden(code: &str, message: &str) -> ApiError {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ApiErrorResponse::new(code, message)),
+    )
+}
+
+fn account_suspended() -> ApiError {
+    forbidden(
+        "account_suspended",
+        "The account is suspended or archived; its org keys work again when it is reactivated",
+    )
+}
+
 fn internal(error: impl std::fmt::Display) -> ApiError {
     tracing::error!(%error, "org API operation failed");
     (
@@ -162,6 +187,10 @@ fn key_error(error: OrgApiKeyError, what: &str) -> ApiError {
         OrgApiKeyError::Unauthorized => denied(),
         OrgApiKeyError::NotFound => not_found(what),
         OrgApiKeyError::Invalid(message) => bad_request(&message),
+        OrgApiKeyError::AccountSuspended => account_suspended(),
+        OrgApiKeyError::OrgSuspended => {
+            forbidden("org_suspended", "The organization is suspended or archived")
+        }
         OrgApiKeyError::Database(error) => internal(error),
     }
 }
@@ -174,8 +203,33 @@ fn org_error(error: hot::db::org::OrgError) -> ApiError {
         }
         OrgError::Database(error) => internal(error),
         OrgError::Forbidden => denied(),
-        other => bad_request(&other.to_string()),
+        OrgError::SlugTaken => conflict(
+            "slug_taken",
+            "Organization slug is already taken; slugs are unique across all accounts",
+        ),
+        OrgError::ExternalIdTaken => conflict(
+            "external_id_taken",
+            "A child organization with this external_id already exists",
+        ),
+        OrgError::LimitReached => forbidden(
+            "org_limit_reached",
+            "The account's organization or environment limit is reached",
+        ),
+        OrgError::Invalid(message) => bad_request(&message),
     }
+}
+
+/// Hot 3.0.0's `/v1/management` API. Org API keys and `/v1/orgs` replaced it
+/// in 3.0.1, so every route answers 410 with a pointer to the replacement.
+pub(crate) async fn management_api_gone() -> Response {
+    (
+        StatusCode::GONE,
+        Json(ApiErrorResponse::new(
+            "gone",
+            "The /v1/management API was removed in Hot 3.0.1. Use an org API key with /v1/orgs and /v1/api-keys; see /docs/api/management.",
+        )),
+    )
+        .into_response()
 }
 
 /// Authenticate an org key, apply the account rate limit, and audit the
@@ -184,36 +238,43 @@ pub async fn org_key_auth_middleware(
     State((db, _, _, _)): State<ApiStateData>,
     mut request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Response {
     if request.extensions().get::<ResolvedDomain>().is_some() {
-        return Err(StatusCode::FORBIDDEN);
+        return forbidden(
+            "forbidden",
+            "Org API keys cannot be used through a custom domain",
+        )
+        .into_response();
     }
-    let token = request
-        .headers()
-        .get("authorization")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .ok_or(StatusCode::UNAUTHORIZED)?
-        .to_owned();
+    let Some(token) = bearer_token(request.headers()).map(str::to_owned) else {
+        return missing_credential().into_response();
+    };
+    if is_retired_management_token(&token) {
+        return retired_management_credential().into_response();
+    }
     // A credential the database could not check is unavailable, not invalid:
     // clients retry a 503 but discard a credential that got a 401.
     let key = match OrgApiKey::verify_token(&db, &token).await {
         Ok(key) => key,
         Err(OrgApiKeyError::Database(error)) => {
             tracing::error!(%error, "Org API key lookup failed");
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
+            return auth_rejection(StatusCode::SERVICE_UNAVAILABLE).into_response();
         }
         Err(_) if authenticate_token(&db, &token).await.is_ok() => {
-            return Ok(key_scope_mismatch(
+            return key_scope_mismatch(
                 "This route needs an org API key; environment keys, sessions and service keys call runtime routes",
-            ));
+            );
         }
-        Err(_) => return Err(StatusCode::UNAUTHORIZED),
+        Err(_) => return auth_rejection(StatusCode::UNAUTHORIZED).into_response(),
     };
-    let effective = key.effective(&db).await.map_err(|error| match error {
-        OrgApiKeyError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
-        _ => StatusCode::UNAUTHORIZED,
-    })?;
+    let effective = match key.effective(&db).await {
+        Ok(effective) => effective,
+        Err(OrgApiKeyError::Database(_)) => {
+            return auth_rejection(StatusCode::SERVICE_UNAVAILABLE).into_response();
+        }
+        Err(OrgApiKeyError::AccountSuspended) => return account_suspended().into_response(),
+        Err(_) => return auth_rejection(StatusCode::UNAUTHORIZED).into_response(),
+    };
     if let Err(exceeded) = crate::rate_limit::check_org_rate_limit(
         &db,
         &key.org_id,
@@ -222,7 +283,7 @@ pub async fn org_key_auth_middleware(
     )
     .await
     {
-        return Ok(crate::rate_limit::rate_limit_response(exceeded));
+        return crate::rate_limit::rate_limit_response(exceeded);
     }
     let org_id = key.org_id;
     let audit_db = db.with_scope(DatabaseScope::Organization { org_id });
@@ -232,7 +293,7 @@ pub async fn org_key_auth_middleware(
         "method": request.method().as_str(),
         "path": request.uri().path(),
     });
-    hot::db::org_note::OrgNote::create_system(
+    if let Err(error) = hot::db::org_note::OrgNote::create_system(
         &audit_db,
         &org_id,
         "security",
@@ -241,7 +302,10 @@ pub async fn org_key_auth_middleware(
         Some(&metadata),
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    {
+        // Every org key request is audited before it runs.
+        return internal(error).into_response();
+    }
     request
         .extensions_mut()
         .insert(OrgPrincipal { key, effective });
@@ -260,7 +324,7 @@ pub async fn org_key_auth_middleware(
     {
         tracing::error!(%error, %org_id, "Failed to persist org API response audit; request audit retained");
     }
-    Ok(response)
+    response
 }
 
 // ============================================================================
@@ -331,9 +395,10 @@ pub async fn list_orgs(
         .filter(|child| principal.allows(&org_urn::org(&child.org_id), actions::READ))
         .collect();
     let total = readable.len() as i64;
+    let offset = params.offset.max(0);
     let page = readable
         .into_iter()
-        .skip(params.offset.max(0) as usize)
+        .skip(offset as usize)
         .take(params.limit as usize)
         .map(OrgResponse::from)
         .collect();
@@ -341,7 +406,7 @@ pub async fn list_orgs(
         page,
         total,
         params.limit,
-        params.offset,
+        offset,
     )))
 }
 
@@ -369,8 +434,14 @@ pub async fn create_org(
     .await
     .map_err(org_error)?;
     tracing::info!(org_api_key_id = %principal.key.org_api_key_id, org_id = %principal.key.org_id, child_org_id = %child.org.org_id, action = "org.create", "org API mutation");
+    // A replay of an earlier request returns that child unchanged.
+    let status = if child.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
     Ok((
-        StatusCode::CREATED,
+        status,
         Json(ApiResponse::new(CreateOrgResponse {
             org: child.org.into(),
             env_id: child.env_id,
@@ -535,6 +606,7 @@ pub async fn list_envs(
     State((db, _, _, _)): State<ApiStateData>,
     Extension(principal): Extension<OrgPrincipal>,
     Path(org_id): Path<Uuid>,
+    Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<OrgEnvResponse>>, ApiError> {
     principal.require(&org_urn::envs(&org_id), actions::READ)?;
     let org = principal
@@ -543,14 +615,22 @@ pub async fn list_envs(
         .await
         .map_err(|e| key_error(e, "Organization"))?;
     let scoped = db.with_scope(DatabaseScope::Organization { org_id: org.org_id });
-    let envs: Vec<OrgEnvResponse> = Env::get_envs_by_org(&scoped, &org.org_id)
+    let envs = Env::get_envs_by_org(&scoped, &org.org_id)
         .await
-        .map_err(internal)?
+        .map_err(internal)?;
+    let total = envs.len() as i64;
+    let page = envs
         .into_iter()
+        .skip(params.offset.max(0) as usize)
+        .take(params.limit as usize)
         .map(OrgEnvResponse::from)
         .collect();
-    let total = envs.len() as i64;
-    Ok(Json(ApiListResponse::new(envs, total, total.max(1), 0)))
+    Ok(Json(ApiListResponse::new(
+        page,
+        total,
+        params.limit,
+        params.offset.max(0),
+    )))
 }
 
 /// Idempotent by exact name within the organization.
@@ -566,7 +646,7 @@ pub async fn create_env(
         .resolve_org(&db, org_id, true)
         .await
         .map_err(|e| key_error(e, "Organization"))?;
-    let env = Org::provision_environment_authorized(
+    let (env, created) = Org::provision_environment_reporting(
         &db,
         &org.org_id,
         &principal.key.created_by_user_id,
@@ -575,7 +655,13 @@ pub async fn create_env(
     )
     .await
     .map_err(org_error)?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::new(env.into()))))
+    // An environment that already had this name is returned unchanged.
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(ApiResponse::new(env.into()))))
 }
 
 pub async fn get_env(
@@ -612,7 +698,13 @@ pub struct ApiKeyResponse {
     pub env_id: Option<Uuid>,
     pub description: String,
     pub permissions: serde_json::Value,
+    /// False once the key, or an org key in its issuer chain, is revoked or
+    /// expired. A suspension leaves it true.
     pub active: bool,
+    /// `active`, `revoked`, `expired`, `issuer_inactive` (a key in its issuer
+    /// chain is revoked or expired) or `suspended` (its organization or
+    /// environment is suspended; the key works again on reactivation).
+    pub status: &'static str,
     pub expires_at: Option<DateTime<Utc>>,
     /// The org key that minted this key; null when a person created it.
     pub issuer_api_key_id: Option<Uuid>,
@@ -625,21 +717,23 @@ pub struct ApiKeyResponse {
     pub previous_secret_expires_at: Option<DateTime<Utc>>,
 }
 
-fn org_key_response(key: &OrgApiKey) -> ApiKeyResponse {
-    ApiKeyResponse {
+async fn org_key_response(db: &DatabasePool, key: &OrgApiKey) -> Result<ApiKeyResponse, ApiError> {
+    let status = key.status(db).await.map_err(|e| key_error(e, "API key"))?;
+    Ok(ApiKeyResponse {
         api_key_id: key.org_api_key_id,
         scope: "org",
         org_id: key.org_id,
         env_id: None,
         description: key.description.clone(),
         permissions: key.permissions.clone(),
-        active: key.is_usable(),
+        active: status.is_active(),
+        status: status.as_str(),
         expires_at: key.expires_at,
         issuer_api_key_id: key.issuer_org_api_key_id,
         created_at: key.created_at,
         token: None,
         previous_secret_expires_at: None,
-    }
+    })
 }
 
 async fn env_key_response(
@@ -654,6 +748,9 @@ async fn env_key_response(
     let issuer = OrgApiKey::issuer_of_env_key(&lookup, key.api_key_id)
         .await
         .map_err(internal)?;
+    let status = OrgApiKey::env_key_status(&lookup, key, &state, issuer, env)
+        .await
+        .map_err(|e| key_error(e, "API key"))?;
     Ok(ApiKeyResponse {
         api_key_id: key.api_key_id,
         scope: "env",
@@ -661,7 +758,8 @@ async fn env_key_response(
         env_id: Some(env.env_id),
         description: key.description.clone(),
         permissions: key.permissions.clone(),
-        active: key.active && !state.is_expired(),
+        active: status.is_active(),
+        status: status.as_str(),
         expires_at: state.expires_at,
         issuer_api_key_id: issuer,
         created_at: key.created_at,
@@ -686,32 +784,40 @@ pub async fn list_env_keys(
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<ApiKeyResponse>>, ApiError> {
     principal.require(&org_urn::env_api_keys(&org_id, &env_id), actions::READ)?;
-    let (org, env) = principal
+    // A read, like GET /v1/api-keys/{id}: it works while the organization or
+    // environment is suspended, so its keys can still be found and revoked.
+    let org = principal
         .key
-        .resolve_env(&db, org_id, env_id)
+        .resolve_org(&db, org_id, false)
         .await
         .map_err(|e| key_error(e, "Environment"))?;
+    let lookup = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Authentication));
+    let env = Env::get_env_uncached(&lookup, &env_id)
+        .await
+        .map_err(|_| not_found("Environment"))?;
+    if env.org_id != org.org_id {
+        return Err(not_found("Environment"));
+    }
     let scoped = db.with_scope(DatabaseScope::Environment {
         org_id: org.org_id,
         env_id: env.env_id,
     });
-    let keys = ApiKey::get_api_keys_by_env(&scoped, &env.env_id, None, None)
+    let offset = params.offset.max(0);
+    let total = ApiKey::count_api_keys_by_env(&scoped, &env.env_id)
         .await
         .map_err(|e| internal(format!("{e:?}")))?;
-    let total = keys.len() as i64;
+    let keys = ApiKey::get_api_keys_by_env(&scoped, &env.env_id, Some(params.limit), Some(offset))
+        .await
+        .map_err(|e| internal(format!("{e:?}")))?;
     let mut page = Vec::new();
-    for key in keys
-        .iter()
-        .skip(params.offset.max(0) as usize)
-        .take(params.limit as usize)
-    {
+    for key in &keys {
         page.push(env_key_response(&db, &env, key).await?);
     }
     Ok(Json(ApiListResponse::new(
         page,
         total,
         params.limit,
-        params.offset,
+        offset,
     )))
 }
 
@@ -748,6 +854,7 @@ pub async fn mint_env_key(
             description: body.description.trim().to_string(),
             permissions: body.permissions,
             active: true,
+            status: KeyStatus::Active.as_str(),
             expires_at,
             issuer_api_key_id: Some(principal.key.org_api_key_id),
             created_at: Utc::now(),
@@ -761,19 +868,31 @@ pub async fn list_org_keys(
     State((db, _, _, _)): State<ApiStateData>,
     Extension(principal): Extension<OrgPrincipal>,
     Path(org_id): Path<Uuid>,
+    Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<ApiKeyResponse>>, ApiError> {
     principal.require(&org_urn::org_api_keys(&org_id), actions::READ)?;
     if org_id != principal.key.org_id {
         return Err(not_found("Organization"));
     }
-    let keys: Vec<ApiKeyResponse> = OrgApiKey::list_for_org(&db, org_id)
+    let keys = OrgApiKey::list_for_org(&db, org_id)
         .await
-        .map_err(|e| key_error(e, "Organization"))?
-        .iter()
-        .map(org_key_response)
-        .collect();
+        .map_err(|e| key_error(e, "Organization"))?;
     let total = keys.len() as i64;
-    Ok(Json(ApiListResponse::new(keys, total, total.max(1), 0)))
+    let offset = params.offset.max(0);
+    let mut page = Vec::new();
+    for key in keys
+        .iter()
+        .skip(offset as usize)
+        .take(params.limit as usize)
+    {
+        page.push(org_key_response(&db, key).await?);
+    }
+    Ok(Json(ApiListResponse::new(
+        page,
+        total,
+        params.limit,
+        offset,
+    )))
 }
 
 pub async fn mint_org_key(
@@ -800,7 +919,7 @@ pub async fn mint_org_key(
         .await
         .map_err(|e| key_error(e, "Organization"))?;
     tracing::info!(org_api_key_id = %principal.key.org_api_key_id, minted = %key.org_api_key_id, action = "org-api-key.create", "org API mutation");
-    let mut response = org_key_response(&key);
+    let mut response = org_key_response(&db, &key).await?;
     response.token = Some(token);
     Ok((StatusCode::CREATED, Json(ApiResponse::new(response))))
 }
@@ -897,7 +1016,7 @@ pub async fn get_api_key(
     let target = resolve_target(&db, &principal, key_id).await?;
     principal.require(&target.urn(), actions::READ)?;
     let response = match &target {
-        Target::Org(key) => org_key_response(key),
+        Target::Org(key) => org_key_response(&db, key).await?,
         Target::Env { key, env } => env_key_response(&db, env, key).await?,
     };
     Ok(Json(ApiResponse::new(response)))
@@ -931,14 +1050,13 @@ pub async fn update_api_key(
             key.set_permissions(&db, &grants)
                 .await
                 .map_err(|e| key_error(e, "API key"))?;
-            org_key_response(
-                &OrgApiKey::get(
-                    &db.with_scope(DatabaseScope::Organization { org_id: caller_org }),
-                    key.org_api_key_id,
-                )
-                .await
-                .map_err(|e| key_error(e, "API key"))?,
+            let updated = OrgApiKey::get(
+                &db.with_scope(DatabaseScope::Organization { org_id: caller_org }),
+                key.org_api_key_id,
             )
+            .await
+            .map_err(|e| key_error(e, "API key"))?;
+            org_key_response(&db, &updated).await?
         }
         Target::Env { key, env } => {
             let grants = Permissions::from_json_validated(&body.permissions)
@@ -1036,7 +1154,7 @@ pub async fn rotate_api_key(
                 .rotate(&db, overlap)
                 .await
                 .map_err(|e| key_error(e, "API key"))?;
-            let mut response = org_key_response(key);
+            let mut response = org_key_response(&db, key).await?;
             response.token = Some(token);
             response
         }

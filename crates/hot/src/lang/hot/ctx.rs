@@ -6,6 +6,12 @@ use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
 use crate::validate_args;
 
+/// The context key under which a context loaded from files (`hot/ctx.hot`)
+/// lists the keys it set with `set-secret`. Those files run once, outside any
+/// run, so the flags travel with the values, and `hot dev`'s worker masks
+/// those values in the runs it starts.
+pub const LOADED_SECRET_KEYS: &str = "hot.ctx.secret-keys";
+
 /// Set context variable(s) (uses VM-specific context storage)
 /// Supports two arities:
 /// - set(key: Str, value: Any) - set a single key-value pair
@@ -60,10 +66,10 @@ pub fn set(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
             // Store in VM-specific context storage
             vm.context_storage.insert(key.clone(), value.clone());
+            // Never the value: code may set a secret with `set`.
             tracing::debug!(
-                "::hot::ctx/set: Set '{}' = {:?} (context size: {})",
+                "::hot::ctx/set: Set '{}' (context size: {})",
                 key,
-                value,
                 vm.context_storage.len()
             );
             HotResult::Ok(value)
@@ -93,10 +99,11 @@ pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
     match value {
         Some(value) => {
+            // Never the value: whether it is secret depends on declarations
+            // this run may not have.
             tracing::debug!(
-                "::hot::ctx/get: Found '{}' = {:?} (context size: {}, is_secret: {})",
+                "::hot::ctx/get: Found '{}' (context size: {}, is_secret: {})",
                 key,
-                value,
                 vm.context_storage.len(),
                 is_secret
             );

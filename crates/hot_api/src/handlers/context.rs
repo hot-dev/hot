@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use hot::context_encryption::ContextEncryption;
+use hot::context_encryption::{ContextEncryption, EncryptionError};
 use hot::db::{api_key::ApiKey, context::Context};
 use uuid::Uuid;
 
@@ -13,6 +13,28 @@ use super::{ListQueryParams, get_and_verify_project, get_org_id_for_env};
 use crate::ApiStateData;
 use crate::auth::AuthContext;
 use crate::models::*;
+
+/// The master key that encrypts context values. `hot dev` keeps it in
+/// hot/dev.key when HOT_ENCRYPTION_KEY is unset, as the worker that decrypts
+/// the values does. Without a key, writes are unavailable, not a server error.
+fn context_encryption() -> Result<ContextEncryption, (StatusCode, Json<ApiErrorResponse>)> {
+    ContextEncryption::from_env_or_existing_dev_key().map_err(encryption_unavailable)
+}
+
+fn encryption_unavailable(error: EncryptionError) -> (StatusCode, Json<ApiErrorResponse>) {
+    tracing::warn!("Context encryption is unavailable: {error}");
+    let message = match error {
+        EncryptionError::KeyNotConfigured => {
+            "Context encryption is not configured: set HOT_ENCRYPTION_KEY on the API server"
+                .to_string()
+        }
+        error => format!("Context encryption key is unusable: {error}"),
+    };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ApiErrorResponse::new("encryption_not_configured", message)),
+    )
+}
 
 pub async fn list_context_variables(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
@@ -75,16 +97,7 @@ pub async fn create_context_variable(
     // Get org_id for encryption
     let org_id = get_org_id_for_env(&db, &api_key.env_id).await?;
 
-    // Initialize encryption
-    let encryption = ContextEncryption::from_env().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&format!(
-                "Encryption not configured: {}",
-                e
-            ))),
-        )
-    })?;
+    let encryption = context_encryption()?;
 
     // Encrypt the value
     let encrypted_value = encryption.encrypt(&req.value, &org_id).map_err(|e| {
@@ -164,16 +177,7 @@ pub async fn update_context_variable(
             Json(ApiErrorResponse::not_found("Context variable")),
         ))?;
 
-    // Initialize encryption
-    let encryption = ContextEncryption::from_env().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&format!(
-                "Encryption not configured: {}",
-                e
-            ))),
-        )
-    })?;
+    let encryption = context_encryption()?;
 
     // Encrypt the new value
     let encrypted_value = encryption.encrypt(&req.value, &org_id).map_err(|e| {
@@ -244,4 +248,23 @@ pub async fn delete_context_variable(
         })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_or_unusable_key_is_unavailable_not_internal() {
+        for error in [
+            EncryptionError::KeyNotConfigured,
+            EncryptionError::InvalidKeyFormat,
+        ] {
+            let (status, Json(body)) = encryption_unavailable(error);
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body.error.code, "encryption_not_configured");
+        }
+        let (_, Json(body)) = encryption_unavailable(EncryptionError::KeyNotConfigured);
+        assert!(body.error.message.contains("HOT_ENCRYPTION_KEY"));
+    }
 }

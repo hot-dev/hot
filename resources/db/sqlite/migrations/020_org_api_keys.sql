@@ -2,17 +2,25 @@
 -- /v1/management. An org key belongs to one root organization and calls only
 -- control-plane routes. Environment API keys keep their exact binding.
 
--- Runtime keys that a management credential issued depended on it. Dropping
+-- Runtime keys that a management credential issued depended on it. Retiring
 -- the issuer must not turn them into independent keys, so they are
 -- deactivated first.
 UPDATE api_key SET active = 0, active_toggle_at = CURRENT_TIMESTAMP
 WHERE api_key_id IN (SELECT api_key_id FROM api_key_management_issuer);
+
+-- The management tables stay, as in PostgreSQL, where a 3.0.0 process still
+-- serving during an upgrade reads them on every authentication; a later
+-- release drops them. The issuer rows go, because they would block deleting
+-- the keys they name, every management key is revoked, and nothing can
+-- create new ones.
 DROP TRIGGER delegated_api_key_no_delete;
 DROP TRIGGER api_key_management_issuer_no_delete;
-DROP TRIGGER immutable_api_key_management_issuer;
-DROP TRIGGER management_key_scope_immutable;
-DROP TABLE api_key_management_issuer;
-DROP TABLE management_key;
+DELETE FROM api_key_management_issuer;
+UPDATE management_key SET revoked_at = CURRENT_TIMESTAMP WHERE revoked_at IS NULL;
+CREATE TRIGGER management_key_retired BEFORE INSERT ON management_key
+BEGIN SELECT RAISE(ABORT, 'Management credentials were retired in Hot 3.0.1; use org API keys'); END;
+CREATE TRIGGER api_key_management_issuer_retired BEFORE INSERT ON api_key_management_issuer
+BEGIN SELECT RAISE(ABORT, 'Management credentials were retired in Hot 3.0.1; use org API keys'); END;
 
 -- An org key is owned by its organization; its creator is attribution only.
 -- A minted org key names its issuing org key, in the same organization.

@@ -24,6 +24,20 @@ pub enum OrgError {
     Invalid(String),
     #[error("Organization limit reached")]
     LimitReached,
+    /// Slugs are global, so another account may already hold this one.
+    #[error("Organization slug is already taken")]
+    SlugTaken,
+    #[error("A child organization with this external ID already exists")]
+    ExternalIdTaken,
+}
+
+/// Stored slugs are looked up and rendered verbatim, so one with whitespace or
+/// invisible characters can pass for another account's handle and never resolve.
+fn check_stored_slug(slug: &str) -> Result<(), OrgError> {
+    if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(OrgError::Invalid("invalid organization slug".into()));
+    }
+    Ok(())
 }
 
 /// Organization settings structure stored as JSON
@@ -214,6 +228,7 @@ impl Org {
         org_type: &str,
         created_by_user_id: &Uuid,
     ) -> Result<(), OrgError> {
+        check_stored_slug(slug)?;
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query("INSERT INTO org (org_id, name, slug, org_type, created_by_user_id) VALUES ($1, $2, $3, $4::org_type, $5)")
@@ -258,7 +273,7 @@ impl Org {
                     o.org_type::text AS org_type, o.settings, o.active, o.created_at,
                     o.created_by_user_id, o.updated_at, o.updated_by_user_id,
                     o.active_toggle_at, o.active_toggle_by_user_id
-                FROM org o JOIN org root ON root.org_id = COALESCE(o.parent_org_id, o.org_id)
+                FROM org o JOIN org root ON root.org_id = CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END
                 JOIN org_user ru ON ru.org_id = root.org_id AND ru.user_id = $1 AND ru.active = true
                 JOIN "user" u ON u.user_id = ru.user_id AND u.active = true
                 WHERE ru.org_user_role_id = 2 OR
@@ -271,7 +286,7 @@ impl Org {
                 r#"SELECT o.org_id, o.parent_org_id, o.external_id, o.lifecycle_state, o.name, o.slug,
                     o.org_type, o.settings, o.active, o.created_at, o.created_by_user_id,
                     o.updated_at, o.updated_by_user_id, o.active_toggle_at, o.active_toggle_by_user_id
-                FROM org o JOIN org root ON root.org_id = COALESCE(o.parent_org_id, o.org_id)
+                FROM org o JOIN org root ON root.org_id = CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END
                 JOIN org_user ru ON ru.org_id = root.org_id AND ru.user_id = ?1 AND ru.active = 1
                 JOIN user u ON u.user_id = ru.user_id AND u.active = 1
                 WHERE ru.org_user_role_id = 2 OR
@@ -390,6 +405,7 @@ impl Org {
         slug: &str,
         updated_by_user_id: &Uuid,
     ) -> Result<(), OrgError> {
+        check_stored_slug(slug)?;
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query("UPDATE org SET name = $2, slug = $3, updated_at = NOW(), updated_by_user_id = $4 WHERE org_id = $1")
@@ -786,5 +802,38 @@ mod tests {
                 .is_some(),
             "archiving must not free the user's individual org"
         );
+    }
+
+    #[tokio::test]
+    async fn stored_slugs_reject_whitespace_look_alikes() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        for slug in [
+            "victim-co\u{a0}",
+            " victim-co",
+            "victim\tco",
+            "victim-co\u{200b}x",
+        ] {
+            assert!(
+                matches!(
+                    Org::insert_org(
+                        &db,
+                        &Uuid::now_v7(),
+                        "Look-alike",
+                        slug,
+                        "organization",
+                        &data.user_id
+                    )
+                    .await,
+                    Err(OrgError::Invalid(_))
+                ),
+                "{slug:?}"
+            );
+        }
+        assert!(matches!(
+            Org::update_org(&db, &data.org_id, "Renamed", "local\u{a0}", &data.user_id).await,
+            Err(OrgError::Invalid(_))
+        ));
+        assert_eq!(Org::get_org(&db, &data.org_id).await.unwrap().slug, "local");
     }
 }

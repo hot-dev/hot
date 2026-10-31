@@ -27,6 +27,12 @@ A root administrator creates the first org key on the organization's
 **Children** tab in the app. It belongs to the organization and keeps working
 if its creator leaves, until it expires or is revoked. Expiry is optional.
 
+Org keys replaced Hot 3.0.0's `/v1/management` API and its `hm_` management
+credentials in Hot 3.0.1. Every `/v1/management` route answers `410` with the
+error code `gone`, and an `hm_` token gets `401`
+`management_credential_retired` on every route. Create an org key instead; the
+[upgrade notes](/docs/migrations) list what changed.
+
 An org key can mint more keys:
 
 - **Environment keys** in its own organization or a child. Their permissions
@@ -56,7 +62,7 @@ for exactly one organization or environment.
 | `org:{org}/api-key:*` | `create`, `read`, `update`, `delete` | The same for org keys of the key's own organization |
 | `org:{org}/usage:*` | `read` | Account usage (root organization only) |
 | `org:{org}/env:*/call:*` | `delete` | Purge call traces in every environment of the organization |
-| `org:{org}/env:{env}/{urn}` | that URN's actions | Any [environment permission](/docs/api#permissions) inside that environment |
+| `org:{org}/env:{env}/{urn}` | that URN's actions | Any [environment permission](/docs/api#permissions-model) inside that environment |
 
 Three rules keep these grants narrow:
 
@@ -74,7 +80,8 @@ on them. A full-access `{"*:*": ["*"]}` environment key gains no org authority.
 
 ## Routes
 
-All routes accept only org keys. IDs are UUIDs.
+All routes accept only org keys. IDs are UUIDs. List routes accept `limit`
+(default 20, maximum 500) and `offset`, and report `pagination.total`.
 
 | Method and route | Required grant |
 | --- | --- |
@@ -95,17 +102,32 @@ All routes accept only org keys. IDs are UUIDs.
 | `/v1/orgs/{org}/envs/{env}/projects…`, `/v1/orgs/{org}/envs/{env}/builds` | Today's project, context, and build grants, qualified by `org:{org}/env:{env}/` |
 
 **Children.** `POST /v1/orgs` accepts `name`, globally unique `slug`, optional
-`external_id`, and a required `idempotency_key`. Retrying with the same key
-returns the original child and default environment with `created: false`;
-reusing the key with different values is rejected. Children do not create
-billing subscriptions. `PATCH /v1/orgs/{org}` accepts `state` equal to
-`active`, `suspended`, or `archived`, for a child only. A suspended or archived
-child can still be read and have its state changed; every other route under it
-is refused. Its environment keys, sessions and service keys get `403`; they
-are not revoked, so reactivating a suspended child restores them.
+`external_id`, and a required `idempotency_key`. It answers `201` with the new
+child and its default environment. Retrying with the same key answers `200`
+with the original child and `created: false`; reusing the key with different
+values is rejected with `400`. A slug any account already uses answers `409`
+`slug_taken`, and an `external_id` another child of the account uses answers
+`409` `external_id_taken`. Reaching the account's child or environment limit
+answers `403` `org_limit_reached`. Children do not create billing
+subscriptions.
+
+**Suspended children.** `PATCH /v1/orgs/{org}` accepts `state` equal to
+`active`, `suspended`, or `archived`, for a child only. While a child is
+suspended or archived, the org API still reads it, its environments, and its
+keys, changes its state, purges its call traces, and rotates, narrows, or
+revokes its keys, so a leaked key can be contained. Creating environments,
+minting keys, and the project, context, and build routes under it answer `403`
+`org_suspended`. Its environment keys, sessions and service keys get `403`;
+they are not revoked, so reactivating a suspended child restores them.
+
+**Suspended accounts.** While the root account is suspended or archived, its
+org keys get `403` `account_suspended` and keys they minted get `403`, as
+app-created keys do. These keys are not revoked and work again when the
+account is reactivated, so clients should not discard them.
 
 **Environments.** `POST /v1/orgs/{org}/envs` accepts `name` and is idempotent
-by exact name within that organization.
+by exact name within that organization: it answers `201` when it creates the
+environment and `200` with the existing one.
 
 **Call traces.** `DELETE /v1/orgs/{org}/calls` deletes the call traces in
 every environment of the organization. Add `?include_sub_orgs=true` to purge
@@ -126,6 +148,18 @@ revoking needs more than a grant: the caller must have issued the key, directly
 or through keys it issued. Rotation returns the new secret, so a grant alone
 would hand over another key's secret. No key rotates or revokes itself; a root
 administrator can revoke any org key in the app.
+
+Revoking an org key is permanent. `DELETE /v1/api-keys/{id}` on an environment
+key deactivates it, and an administrator can re-enable it in the app. If a
+secret leaks, revoke the key rather than rotating it: the leaked secret keeps
+working for the whole overlap after a rotation, unless you pass
+`"overlap_seconds": 0`.
+
+Key responses report `active` and `status`. `status` is `active`, `revoked`,
+`expired`, `issuer_inactive` (an org key in its issuer chain is revoked or
+expired), or `suspended` (its organization or environment is suspended).
+`active` is `false` for `revoked`, `expired`, and `issuer_inactive`; a
+suspended key stays `active` because it works again on reactivation.
 
 **Projects, context, and builds.** Every `/v1/projects…` route and
 `/v1/builds` is also served under `/v1/orgs/{org}/envs/{env}`. The handler is
@@ -212,8 +246,10 @@ slot if later setup or execution fails. Deleting retained run history, suspendin
 and resuming a child, or retrying admission does not reset account usage. The
 admission ledger is separate from run history and is seeded with existing usage
 when the migration is applied. Daily maintenance prunes ledger rows older than
-400 days, longer than any billing period. The billing period start controls the monthly
-window; accounts without a subscription use the calendar month. An account
+400 days, longer than any billing period. A monthly subscription's billing period
+is the monthly window. An annual or free plan's window restarts each month on
+the day its period started (the last day of a shorter month), and accounts
+without a subscription use the calendar month. An account
 without a plan has unlimited execution. If it has feature overrides but no
 plan, any limit the overrides leave out stays unlimited.
 
@@ -231,7 +267,8 @@ seat consumption require an org key with `org:{root}/usage:*`. A plan lookup err
 returns an error, never an unlimited plan.
 
 Account usage (`GET /v1/orgs/{root}/usage`) reports `period_start` and
-`period_end` from the root's subscription, with the calendar month as the fallback. Its `runs_this_period`
+`period_end` of the current monthly window, as described in
+[Monthly run admission](#monthly-run-admission). Its `runs_this_period`
 counts durable admissions across root and children, including task runs and
 reservations; history retention cannot lower that count. Root billing views use
 the same ledger and subscription period.

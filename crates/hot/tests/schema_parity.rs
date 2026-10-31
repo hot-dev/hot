@@ -102,6 +102,52 @@ fn migration_chains_share_numbers_and_names() {
     );
 }
 
+/// A version number names one migration: two files with the same number would
+/// apply in an arbitrary order, and a ledger records only one of them.
+#[test]
+fn migration_versions_are_unique() {
+    for backend in ["sqlite", "postgres"] {
+        let mut versions = BTreeMap::new();
+        for file in migration_files(backend) {
+            let version = file.split('_').next().unwrap_or_default().to_string();
+            if let Some(other) = versions.insert(version.clone(), file.clone()) {
+                panic!("{backend} migrations {other} and {file} share version {version}");
+            }
+        }
+    }
+}
+
+/// A database that applied a released migration recorded its checksum, and
+/// refuses to upgrade once the file changes. Released files are append-only;
+/// `resources/db/RELEASED_MIGRATIONS` lists them.
+#[test]
+fn released_migrations_are_unchanged() {
+    use sha2::{Digest, Sha384};
+    let db = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/db");
+    let released = std::fs::read_to_string(db.join("RELEASED_MIGRATIONS"))
+        .expect("RELEASED_MIGRATIONS should be readable");
+    let mut checked = 0;
+    for line in released
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+    {
+        let (file, checksum) = line
+            .split_once(' ')
+            .expect("each line names a file and its checksum");
+        let (backend, name) = file.split_once('/').expect("files are named backend/name");
+        let path = migrations(backend).join(name);
+        let contents = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("released migration {file} is gone ({e}); restore it"));
+        assert_eq!(
+            hex::encode(Sha384::digest(&contents)),
+            checksum,
+            "released migration {file} was edited; add a new migration instead"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0);
+}
+
 #[derive(Debug, Default, PartialEq)]
 struct Schema {
     tables: BTreeSet<String>,

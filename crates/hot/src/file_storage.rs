@@ -510,6 +510,7 @@ async fn check_write_quota(ctx: &FileStorageContext, content_len: i64) -> Result
 const LOCAL_NAME_MAX: usize = 255;
 
 /// Object stores bound whole keys, not their segments.
+#[cfg(any(feature = "s3-storage", feature = "gcs-storage", test))]
 const KEY_NAME_MAX: usize = usize::MAX;
 
 /// `normalized_path` with `suffix` appended to its file name. The suffix makes

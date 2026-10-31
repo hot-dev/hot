@@ -4,6 +4,7 @@ use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
 use crate::{validate_args, validate_no_args};
 use std::io::{self, BufWriter, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// A trait for writable streams that can be captured
@@ -190,9 +191,33 @@ static STDOUT_STREAM: std::sync::LazyLock<Mutex<ManagedStream>> =
 static STDERR_STREAM: std::sync::LazyLock<Mutex<ManagedStream>> =
     std::sync::LazyLock::new(|| Mutex::new(ManagedStream::new_stderr()));
 
+/// Whether user output becomes log records instead of raw process output.
+/// Set while logs are JSON on stdout, where a raw line breaks the
+/// one-object-per-line stream and output without a newline fuses into the
+/// next record.
+static USER_OUTPUT_TO_LOG: AtomicBool = AtomicBool::new(false);
+
+/// Send user `print`/`eprint` output to the log (target `hot::user_output`,
+/// field `stream`) instead of the process's stdout and stderr. Captures
+/// still receive stdout output.
+pub fn route_user_output_to_log(enabled: bool) {
+    USER_OUTPUT_TO_LOG.store(enabled, Ordering::Relaxed);
+}
+
+/// One log record per write, without its trailing newline.
+pub(crate) fn log_user_output(stream: &'static str, text: &str) {
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    tracing::info!(target: "hot::user_output", stream, "{text}");
+}
+
 /// Write to stdout
 pub fn write_stdout(text: &str) -> io::Result<()> {
     if let Ok(mut stream) = STDOUT_STREAM.lock() {
+        if stream.capture_buffer.is_none() && USER_OUTPUT_TO_LOG.load(Ordering::Relaxed) {
+            drop(stream);
+            log_user_output("stdout", text);
+            return Ok(());
+        }
         stream.write_all(text.as_bytes())?;
         stream.flush()
     } else {
@@ -378,18 +403,11 @@ pub fn eprint(args: &[Val]) -> HotResult<Val> {
 
 /// Print to stderr with newline
 pub fn eprintln(args: &[Val]) -> HotResult<Val> {
-    for arg in args {
-        let output = format_val_for_raw_output(arg);
-        match write_stderr(&output) {
-            Ok(()) => {}
-            Err(e) => {
-                return HotResult::Err(Val::from(format!("Failed to write to stderr: {}", e)));
-            }
-        }
-    }
-    match write_stderr("\n") {
-        Ok(()) => {}
-        Err(e) => return HotResult::Err(Val::from(format!("Failed to write to stderr: {}", e))),
+    // One write, so a logged line is one record.
+    let mut line: String = args.iter().map(format_val_for_raw_output).collect();
+    line.push('\n');
+    if let Err(e) = write_stderr(&line) {
+        return HotResult::Err(Val::from(format!("Failed to write to stderr: {}", e)));
     }
 
     // Return the first argument instead of Null so it can be used in expressions
@@ -446,6 +464,10 @@ pub fn tap(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
 /// Helper function to write to stderr
 fn write_stderr(s: &str) -> Result<(), std::io::Error> {
     use std::io::Write;
+    if USER_OUTPUT_TO_LOG.load(Ordering::Relaxed) {
+        log_user_output("stderr", s);
+        return Ok(());
+    }
     std::io::stderr().write_all(s.as_bytes())?;
     std::io::stderr().flush()?;
     Ok(())
