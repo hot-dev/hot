@@ -246,12 +246,27 @@ async fn rebuild(
         Vec::new(),
     );
 
+    let build_dir = workspace.path().join("build");
+    let strict = conf.get_bool_or_default("deploy.ctx.strict", false);
     if options.dry_run {
-        crate::build::create_build(db, context, Some(&build_conf)).await?;
+        // The checks the real run makes, on a zip that nothing records.
+        let zip_path =
+            crate::build::write_unrecorded_build_zip(db, &build_dir, context, Some(&build_conf))
+                .await?;
+        let data = std::fs::read(&zip_path)
+            .map_err(|e| format!("Cannot read {}: {e}", zip_path.display()))?;
+        crate::build::check_deploy_requirements(
+            db,
+            &data,
+            &project.project_id,
+            &env.org_id,
+            conf,
+            strict,
+        )
+        .await?;
         return Ok(None);
     }
 
-    let build_dir = workspace.path().join("build");
     let result = crate::build::build_create(
         db,
         Some(&build_dir.to_string_lossy()),
@@ -271,7 +286,6 @@ async fn rebuild(
         .await
         .map_err(|e| format!("Cannot record the new build's storage: {e}"))?;
 
-    let strict = conf.get_bool_or_default("deploy.ctx.strict", false);
     crate::build::validate_ctx_requirements_for_deploy(
         db,
         &new_build_id,
@@ -747,6 +761,82 @@ fn (event) { greet("there") }
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn dry_run_fails_what_the_deploy_checks_refuse() {
+        let db = crate::db::test_db().await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let (org, env, user) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        // The account's own limit, which compiling doesn't see: only the
+        // deploy checks resolve an organization's features.
+        sqlx::query("INSERT INTO org(org_id,name,slug,org_type,features,created_by_user_id) VALUES (?,'Acme','acme','organization','{\"schedule_min_interval_secs\":60}',?)")
+            .bind(org).bind(user).execute(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO env(env_id,org_id,name,created_by_user_id) VALUES (?,?,'production',?)",
+        )
+        .bind(env)
+        .bind(org)
+        .bind(user)
+        .execute(pool)
+        .await
+        .unwrap();
+        let work = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::LocalBuildStorage::new(work.path().join("builds"));
+        let conf = crate::val!({"queue": {"type": "memory"}});
+
+        // It compiles, but runs more often than the account allows.
+        let fast = format!(
+            "{SOURCE}\ntick\nmeta {{schedule: \"every 30 seconds\"}}\nfn (event) {{ greet(\"tick\") }}\n"
+        );
+        let (build, _) = deploy_earlier_major(
+            &db,
+            &conf,
+            &storage,
+            work.path(),
+            org,
+            env,
+            user,
+            "fast",
+            &fast,
+        )
+        .await;
+        let failure = |reports: Vec<RedeployReport>| match reports
+            .into_iter()
+            .find(|report| report.build_id == build)
+            .map(|report| report.result)
+        {
+            Some(RedeployResult::Failed { reason, .. }) => reason,
+            other => panic!("{other:?}"),
+        };
+
+        let dry_run = RedeployOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let previewed = failure(
+            redeploy_with_storage(&db, &conf, &storage, &dry_run)
+                .await
+                .unwrap(),
+        );
+        assert!(
+            previewed.contains("violates schedule interval policy"),
+            "{previewed}"
+        );
+        let project = Build::get_build(&db, &build).await.unwrap().project_id;
+        let builds = Build::get_builds_by_project(&db, &project, None, None)
+            .await
+            .unwrap();
+        assert_eq!(builds.len(), 1, "a dry run makes no build");
+
+        let failed = failure(
+            redeploy_with_storage(&db, &conf, &storage, &RedeployOptions::default())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(previewed, failed);
     }
 
     #[test]
