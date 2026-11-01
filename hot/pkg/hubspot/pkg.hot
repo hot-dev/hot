@@ -4,7 +4,7 @@ hot.pkg.hubspot {
   name: "hot.dev/hubspot",
   version: "0.1.0",
   hot-min-version: "2.6.1",
-  description: "HubSpot CRM bindings for Hot. Contacts, companies, deals, and any CRM v3 object — CRUD, search, associations, notes — plus v3 webhook verification.",
+  description: "HubSpot CRM bindings for Hot on the 2026-09 date-versioned APIs. Contacts, companies, deals, tickets, and any CRM object: CRUD, search, batch read/create/update/upsert, associations, and pagination; notes, tasks, calls, meetings, and emails; pipelines and stages, owners, properties, and lists; plus v3 webhook signature verification.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",

@@ -1,8 +1,8 @@
 ::telegram::api ns
 
 ::ctx ::hot::ctx
+::uri ::hot::uri
 
-http-request ::hot::http/request
 is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
 HttpResponse ::hot::http/HttpResponse
@@ -21,19 +21,253 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-TelegramError type {
+TelegramError
+meta {
+    doc: """
+    A Bot API error: the `{ok: false, error_code, description, parameters}`
+    envelope Telegram answers with (usually alongside HTTP 4xx). `status`
+    is the HTTP status. `retry_after` (seconds to wait, on 429 flood
+    control) and `migrate_to_chat_id` (a group upgraded to a supergroup)
+    are lifted out of `parameters`.
+
+    **Example**
+
+    ```hot
+    sent ::telegram::messages/send-message(::telegram::messages/SendMessageRequest({chat_id: 123, text: "hi"}))
+    if-err(sent, (e) {
+      cond {
+        is-some(e.retry_after) => { println(`flood control: retry in ${e.retry_after}s`) }
+        => { println(`telegram error ${e.error_code}: ${e.description}`) }
+      }
+    })
+    ```
+    """
+}
+type {
     ok: Bool,
+    status: Int?,
     error_code: Int?,
-    description: Str?
+    description: Str?,
+    retry_after: Int?,
+    migrate_to_chat_id: Int?,
+    parameters: Map?
+}
+
+// ============================================================================
+// Files for upload
+// ============================================================================
+
+InputFile
+meta {
+    doc: """
+    A file to upload with multipart/form-data. Pass one anywhere the Bot API
+    accepts InputFile (`photo`, `document`, `audio`, `video`, `voice`,
+    `thumbnail`, an InputMedia's `media`); a Str there is still sent as a
+    file_id or URL. Build one with `input-file`.
+    """
+}
+type {
+    content: Bytes,
+    filename: Str,
+    mime-type: Str?
+}
+
+input-file
+meta {
+    doc: """
+    Wrap bytes as an `InputFile` for upload.
+
+    **Example**
+
+    ```hot
+    ::api ::telegram::api
+    ::messages ::telegram::messages
+
+    report ::api/input-file(::hot::file/read-file-bytes("report.pdf"), "report.pdf", "application/pdf")
+    ::messages/send-document(::messages/SendDocumentRequest({chat_id: 123456789, document: report}))
+    ```
+    """
+}
+fn
+(content: Bytes, filename: Str): InputFile {
+  InputFile({content: content, filename: filename})
+},
+(content: Bytes, filename: Str, mime-type: Str): InputFile {
+  InputFile({content: content, filename: filename, mime-type: mime-type})
+}
+
+is-input-file
+meta {
+    doc: """True for an `InputFile` (or its untyped Map form: a Map whose `content` is Bytes). Exposed for testing."""
+}
+fn (value: Any): Bool {
+  plain untype(value)
+  cond {
+    not(is-map(plain)) => { false }
+    => { is-bytes(get(plain, "content")) }
+  }
+}
+
+// Fields of an InputMedia object that may carry a file.
+MEDIA_FILE_KEYS ["media", "thumbnail", "cover"]
+
+attach-media fn (item: Any, prefix: Str): Map {
+  cond {
+    not(is-map(item)) => { {item: item, files: []} }
+    => {
+      reduce(MEDIA_FILE_KEYS, (acc, sub) {
+        v get(acc.item, sub)
+        cond {
+          is-input-file(v) => {
+            name `${prefix}_${sub}`
+            {item: assoc(acc.item, sub, `attach://${name}`), files: concat(acc.files, [{name: name, file: v}])}
+          }
+          => { acc }
+        }
+      }, {item: item, files: []})
+    }
+  }
+}
+
+prepare-upload
+meta {
+    doc: """
+    Split a request body into JSON-able `fields` and the `files` to upload.
+    Top-level InputFile values become file parts named after their field;
+    InputFile values inside InputMedia objects (`media: [...]` in
+    sendMediaGroup, `media: {...}` in editMessageMedia) become parts named
+    `<field><index>_<key>` and are referenced as `attach://<name>`, per the
+    Bot API. Exposed for testing.
+    """
+}
+fn (body: Map): Map {
+  reduce(keys(body), (acc, k) {
+    v get(body, k)
+    cond {
+      is-input-file(v) => {
+        {fields: acc.fields, files: concat(acc.files, [{name: k, file: v}])}
+      }
+
+      is-vec(v) => {
+        parts map-indexed(v, (i, item) { attach-media(item, `${k}${i}`) })
+        {
+          fields: assoc(acc.fields, k, map(parts, (p) { p.item })),
+          files: reduce(parts, (fs, p) { concat(fs, p.files) }, acc.files)
+        }
+      }
+
+      is-map(v) => {
+        part attach-media(v, k)
+        {fields: assoc(acc.fields, k, part.item), files: concat(acc.files, part.files)}
+      }
+      => { {fields: assoc(acc.fields, k, v), files: acc.files} }
+    }
+  }, {fields: {}, files: []})
+}
+
+field-text
+meta {
+    doc: """A multipart field's text: Str as-is, Map/Vec as JSON (the Bot API's "JSON-serialized" parameters), anything else interpolated. Exposed for testing."""
+}
+fn (value: Any): Str {
+  cond {
+    is-str(value) => { value }
+    or(is-map(value), is-vec(value)) => { to-json(value) }
+    => { `${value}` }
+  }
+}
+
+header-safe fn (value: Str): Str {
+  value
+    |> ::hot::str/replace("\"", "%22")
+    |> ::hot::str/replace("\r", "")
+    |> ::hot::str/replace("\n", "")
+}
+
+multipart-body
+meta {
+    doc: """
+    Encode a prepared upload (`prepare-upload`) as a multipart/form-data
+    body. Built as Bytes with `concat`, so binary file content is never
+    passed through a string. Exposed for testing.
+    """
+}
+fn (upload: Map, boundary: Str): Bytes {
+  field-parts reduce(keys(upload.fields), (acc, k) {
+    concat(acc, Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${header-safe(k)}"\r\n\r\n${field-text(get(upload.fields, k))}\r\n`))
+  }, Bytes(""))
+  file-parts reduce(upload.files, (acc, f) {
+    mime or(get(f.file, "mime-type"), "application/octet-stream")
+    head Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${header-safe(f.name)}"; filename="${header-safe(f.file.filename)}"\r\nContent-Type: ${mime}\r\n\r\n`)
+    concat(acc, head, f.file.content, Bytes("\r\n"))
+  }, Bytes(""))
+  concat(field-parts, file-parts, Bytes(`--${boundary}--\r\n`))
+}
+
+// ============================================================================
+// Requests
+// ============================================================================
+
+method-url
+meta {
+    doc: """`https://api.telegram.org/bot<token>/<method>`. The token is a secret: never log this URL. Exposed for testing."""
+}
+fn (method: Str, bot-token: Str): Str {
+  `${::telegram::core/BASE_URL}/bot${bot-token}/${method}`
+}
+
+clean-body
+meta {
+    doc: """`untype` a request body and drop its top-level nulls, so unset or explicitly-null optional parameters are never sent. Exposed for testing."""
+}
+fn (body: Map): Map {
+  filter-vals(untype(body), is-some)
+}
+
+parse-response
+meta {
+    doc: """
+    Unwrap a Bot API response envelope: `result` when `ok` is true;
+    `err(TelegramError)` when Telegram answered `ok: false` (whatever the
+    HTTP status, typically 400/403/429); `err(HttpError)` for anything
+    else (a non-JSON proxy error, a 5xx without an envelope). Exposed for
+    testing.
+    """
+}
+fn (response: HttpResponse): Any {
+  body response.body
+  ok-flag cond {
+    is-map(body) => { get(body, "ok") }
+    => { null }
+  }
+
+  cond {
+    and(eq(ok-flag, true), is-ok-response(response)) => { get(body, "result") }
+    eq(ok-flag, false) => {
+      params or(get(body, "parameters"), {})
+      err(TelegramError({
+        ok: false,
+        status: response.status,
+        error_code: get(body, "error_code"),
+        description: get(body, "description"),
+        retry_after: get(params, "retry_after"),
+        migrate_to_chat_id: get(params, "migrate_to_chat_id"),
+        parameters: get(body, "parameters")
+      }))
+    }
+    => { err(HttpError(response)) }
+  }
 }
 
 request
 meta {
     ctx: {"telegram.bot.token": {required: true}},
     doc: """
-    Call a Telegram Bot API method. The bot token is read from the `telegram.bot.token` context variable and placed in the URL path per Telegram's convention.
+    Call a Telegram Bot API method. The bot token is read from the `telegram.bot.token` context variable (or passed as the 3rd argument) and placed in the URL path per Telegram's convention.
 
-    Returns the `result` field from the Telegram response envelope (`{ok: true, result: ...}`). Returns an error if `ok` is false or the HTTP request fails.
+    Bodies are sent as JSON, or as multipart/form-data when they carry an `InputFile` (see `input-file`). Unset and null top-level fields are omitted; a call with no parameters is a GET.
+
+    Returns the `result` field of the response envelope (`{ok: true, result: ...}`). An `ok: false` answer returns `err(TelegramError)` with `error_code`, `description`, and `retry_after`; other failures return `err(HttpError)`.
 
     **Example**
 
@@ -41,10 +275,10 @@ meta {
     ::api ::telegram::api
 
     // GET method (no body)
-    response ::api/request("getMe")
+    me ::api/request("getMe")
 
     // POST method with JSON body
-    response ::api/request("sendMessage", {chat_id: 123456, text: "Hello"})
+    sent ::api/request("sendMessage", {chat_id: 123456, text: "Hello"})
     ```
     """
 }
@@ -56,27 +290,60 @@ fn
   request(method, body, ::ctx/get("telegram.bot.token"))
 },
 (method: Str, body: Map, bot-token: Str): Any {
-  url `${::telegram::core/BASE_URL}/bot${bot-token}/${method}`
+  url method-url(method, bot-token)
+  prepared clean-body(body)
+  upload prepare-upload(prepared)
 
-  has-body not(is-empty(body))
-  headers if(has-body, {Content-Type: "application/json"}, {})
-  encoded-body if(has-body, to-json(untype(body)), "")
-  http-method if(has-body, "POST", "GET")
+  http cond {
+    not(is-empty(upload.files)) => {
+      boundary `hot-telegram-${Uuid()}`
+      HttpRequest({
+        method: "POST",
+        url: url,
+        headers: {Content-Type: `multipart/form-data; boundary=${boundary}`},
+        body: multipart-body(upload, boundary)
+      })
+    }
 
-  response ::hot::http/request(HttpRequest({
-    method: http-method,
-    url: url,
-    headers: headers,
-    body: encoded-body
-  }))
-
-  cond {
-    not(is-ok-response(response)) => { err(HttpError(response)) }
-    not(response.body.ok) => { err(TelegramError({
-      ok: false,
-      error_code: response.body.error_code,
-      description: response.body.description
-    })) }
-    => { response.body.result }
+    is-empty(prepared) => { HttpRequest({method: "GET", url: url, headers: {}, body: ""}) }
+    => {
+      HttpRequest({
+        method: "POST",
+        url: url,
+        headers: {Content-Type: "application/json"},
+        body: to-json(prepared)
+      })
+    }
   }
+
+  parse-response(::hot::http/request(http))
+}
+
+// ============================================================================
+// File download
+// ============================================================================
+
+file-url
+meta {
+    doc: """`https://api.telegram.org/file/bot<token>/<file_path>` for a `file_path` from getFile. Contains the token: never log or share it. Exposed for testing."""
+}
+fn (file-path: Str, bot-token: Str): Str {
+  segments map(split(file-path, "/"), (s) { ::uri/encode(s) })
+  `${::telegram::core/BASE_URL}/file/bot${bot-token}/${join(segments, "/")}`
+}
+
+download
+meta {
+    ctx: {"telegram.bot.token": {required: true}},
+    doc: """
+    Download a file by its `file_path` (from `::telegram::files/get-file`) and return its `Bytes`. Bots can download files up to 20 MB. Prefer `::telegram::files/download-file`, which takes a file_id.
+    """
+}
+fn
+(file-path: Str): Bytes {
+  download(file-path, ::ctx/get("telegram.bot.token"))
+},
+(file-path: Str, bot-token: Str): Bytes {
+  response ::hot::http/request(HttpRequest({method: "GET", url: file-url(file-path, bot-token), headers: {}, body: ""}))
+  if(is-ok-response(response), response.body-bytes, parse-response(response))
 }

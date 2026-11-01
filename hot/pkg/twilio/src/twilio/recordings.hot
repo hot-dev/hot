@@ -1,0 +1,184 @@
+::twilio::recordings ns
+
+::uri ::hot::uri
+
+api-request ::twilio::api/request
+account-url ::twilio::api/account-url
+client-from-ctx ::twilio::api/client-from-ctx
+Client ::twilio::api/Client
+HttpError ::twilio::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Recordings
+// ============================================================================
+
+Recording type {
+  sid: Str?,
+  account_sid: Str?,
+  call_sid: Str?,
+  conference_sid: Str?,
+  status: Str?,
+  source: Str?,
+  channels: Int?,
+  duration: Str?,
+  start_time: Str?,
+  price: Str?,
+  price_unit: Str?,
+  error_code: Int?,
+  media_url: Str?,
+  api_version: Str?,
+  uri: Str?,
+  subresource_uris: Map?,
+  date_created: Str?,
+  date_updated: Str?
+}
+
+ListRecordingsRequest
+meta {
+    doc: """Filters for GET /Recordings.json. `DateCreated` matches one day (`YYYY-MM-DD`); `DateCreatedBefore`/`DateCreatedAfter` send Twilio's inclusive `DateCreated<`/`DateCreated>` filters."""
+}
+type {
+  CallSid: Str?,
+  ConferenceSid: Str?,
+  DateCreated: Str?,
+  DateCreatedBefore: Str?,
+  DateCreatedAfter: Str?,
+  IncludeSoftDeleted: Bool?,
+  PageSize: Int?,
+  Page: Int?,
+  PageToken: Str?
+}
+
+ListRecordingsResponse type {
+  recordings: Vec<Map>?,
+  end: Int?,
+  first_page_uri: Str?,
+  next_page_uri: Str?,
+  page: Int?,
+  page_size: Int?,
+  previous_page_uri: Str?,
+  start: Int?,
+  uri: Str?
+}
+
+list-recordings-query
+meta {
+    doc: """The query string `list-recordings` sends. Exposed for testing."""
+}
+fn (request: ListRecordingsRequest): Str {
+  ::twilio::api/query-string({
+    CallSid: request.CallSid,
+    ConferenceSid: request.ConferenceSid,
+    DateCreated: request.DateCreated,
+    "DateCreated<": request.DateCreatedBefore,
+    "DateCreated>": request.DateCreatedAfter,
+    IncludeSoftDeleted: request.IncludeSoftDeleted,
+    PageSize: request.PageSize,
+    Page: request.Page,
+    PageToken: request.PageToken
+  })
+}
+
+list-recordings
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """
+GET /Accounts/{AccountSid}/Recordings.json - List call and conference recordings, newest first. Filter by `CallSid` to get one call's recordings.
+
+**Example**
+
+```hot
+::recordings ::twilio::recordings
+
+page ::recordings/list-recordings(::recordings/ListRecordingsRequest({CallSid: "CA123"}))
+page.recordings  // => [{sid: "RE...", duration: "14", status: "completed", ...}]
+```
+"""
+}
+fn
+(request: ListRecordingsRequest): ListRecordingsResponse {
+  list-recordings(client-from-ctx(), request)
+},
+(client: Client, request: ListRecordingsRequest): ListRecordingsResponse {
+  response api-request(client, "GET", `${account-url(client)}/Recordings.json${list-recordings-query(request)}`, {}, {})
+  if(is-ok-response(response), ListRecordingsResponse(response.body), err(HttpError(response)))
+}
+
+GetRecordingRequest type {
+  sid: Str
+}
+
+get-recording
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """GET /Accounts/{AccountSid}/Recordings/{Sid}.json - Get a recording's metadata (status, duration, source, price)."""
+}
+fn
+(request: GetRecordingRequest): Recording {
+  get-recording(client-from-ctx(), request)
+},
+(client: Client, request: GetRecordingRequest): Recording {
+  response api-request(client, "GET", `${account-url(client)}/Recordings/${::uri/encode(request.sid)}.json`, {}, {})
+  if(is-ok-response(response), Recording(response.body), err(HttpError(response)))
+}
+
+DownloadRecordingRequest
+meta {
+    doc: """`format` is `"mp3"` or `"wav"` (the default)."""
+}
+type {
+  sid: Str,
+  format: Str?
+}
+
+recording-media-url
+meta {
+    doc: """The media URL `download-recording` fetches: the recording URI with `.mp3` or `.wav` in place of `.json`. Exposed for testing."""
+}
+fn (client: Client, request: DownloadRecordingRequest): Str {
+  ext if(eq(request.format, "mp3"), "mp3", "wav")
+  `${account-url(client)}/Recordings/${::uri/encode(request.sid)}.${ext}`
+}
+
+download-recording
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """
+GET /Accounts/{AccountSid}/Recordings/{Sid}.mp3|.wav - Download the recording audio as `Bytes`. Authenticated, so it works with HTTP Basic auth for media enabled.
+
+**Example**
+
+```hot
+::recordings ::twilio::recordings
+
+audio ::recordings/download-recording(::recordings/DownloadRecordingRequest({sid: "RE123", format: "mp3"}))
+::hot::file/write-file-bytes("call.mp3", audio)
+```
+"""
+}
+fn
+(request: DownloadRecordingRequest): Bytes {
+  download-recording(client-from-ctx(), request)
+},
+(client: Client, request: DownloadRecordingRequest): Bytes {
+  response api-request(client, "GET", recording-media-url(client, request), {}, {})
+  if(is-ok-response(response), response.body-bytes, err(HttpError(response)))
+}
+
+DeleteRecordingRequest type {
+  sid: Str
+}
+
+delete-recording
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """DELETE /Accounts/{AccountSid}/Recordings/{Sid}.json - Delete a recording and its media. Permanent."""
+}
+fn
+(request: DeleteRecordingRequest): Bool {
+  delete-recording(client-from-ctx(), request)
+},
+(client: Client, request: DeleteRecordingRequest): Bool {
+  ::twilio::api/delete-request(client, `${account-url(client)}/Recordings/${::uri/encode(request.sid)}.json`)
+}

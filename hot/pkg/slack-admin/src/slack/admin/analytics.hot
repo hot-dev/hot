@@ -1,0 +1,57 @@
+::slack::admin::analytics ns
+meta {
+    doc: """
+    `admin.analytics.getFile`: daily member or public-channel analytics
+    for an Enterprise organization. Scope: `admin.analytics:read`.
+    """
+}
+
+::api ::slack::admin::api
+
+GetFileRequest type {
+  type: Str,
+  date: Str?,
+  metadata_only: Bool?
+}
+
+file-result
+meta {
+    doc: """Turn a getFile response into its result: the gzip bytes on success, otherwise the `Err(SlackError)` from the JSON error body. Exposed for testing."""
+}
+fn (response: ::hot::http/HttpResponse): Any {
+  content-type lowercase(or(get(or(response.headers, {}), "content-type"), ""))
+  cond {
+    and(::hot::http/is-ok-response(response), contains(content-type, "gzip")) => { response.body-bytes }
+    => { ::api/parse-response("admin.analytics.getFile", response) }
+  }
+}
+
+get-file
+meta {
+    doc: """
+    admin.analytics.getFile - Analytics for one day (`date`, `YYYY-MM-DD`
+    UTC; data is kept for 13 months). `type` is `member` or
+    `public_channel`. Returns the file as Bytes: gzip-compressed,
+    newline-delimited JSON, one record per member or channel. Decompress
+    it with a gzip tool (for example write it to `analytics.json.gz` and
+    run `gunzip`); hot-std has no gzip decoder yet.
+
+    With `type: "public_channel"` and `metadata_only: true` (and no `date`)
+    Slack returns channel metadata, also as gzipped JSON lines.
+
+    Failures (`file_not_yet_available`, `data_not_available`,
+    `invalid_date`, ...) come back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::analytics ::slack::admin::analytics
+
+    gz ::analytics/get-file(::analytics/GetFileRequest({type: "member", date: "2026-10-31"}))
+    ::hot::file/write-file-bytes("member-2026-10-31.json.gz", gz)
+    ```
+    """
+}
+fn (request: GetFileRequest): Bytes {
+  file-result(::hot::http/request(::api/build-request("admin.analytics.getFile", request)))
+}

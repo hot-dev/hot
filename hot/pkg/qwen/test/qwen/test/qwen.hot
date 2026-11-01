@@ -1,0 +1,195 @@
+::qwen::test ns
+meta ["test"]
+
+// Hermetic tests: region/base-URL selection, request bodies, hot-ai adapter.
+
+::q       ::qwen
+::api     ::qwen::api
+::chat    ::qwen::chat
+::emb     ::qwen::embeddings
+::models  ::qwen::models
+::qai     ::qwen::ai
+::ai-chat ::ai::chat
+
+// ============================================================================
+// Regions and base URLs
+// ============================================================================
+
+test-region-shared-domains
+meta ["test"]
+fn () {
+    assert-eq("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", ::q/resolve-base-url(null, null, null))
+    assert-eq("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", ::q/resolve-base-url(null, "Singapore", null))
+    assert-eq("https://dashscope-us.aliyuncs.com/compatible-mode/v1", ::q/resolve-base-url(null, "us", null))
+    assert-eq("https://dashscope-us.aliyuncs.com/compatible-mode/v1", ::q/resolve-base-url(null, "us-east-1", null))
+    assert-eq("https://dashscope.aliyuncs.com/compatible-mode/v1", ::q/resolve-base-url(null, "cn", null))
+    assert-eq("https://dashscope.aliyuncs.com/compatible-mode/v1", ::q/resolve-base-url(null, "Beijing", null))
+    assert-eq("https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1", ::q/resolve-base-url(null, "hk", null))
+}
+
+test-region-workspace-domains
+meta ["test"]
+fn () {
+    assert-eq("https://ws1.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", ::q/resolve-base-url(null, null, "ws1"))
+    assert-eq("https://ws1.us-east-1.maas.aliyuncs.com/compatible-mode/v1", ::q/resolve-base-url(null, "us", "ws1"))
+    assert-eq("https://ws1.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", ::q/resolve-base-url(null, "cn", "ws1"))
+    assert-eq("https://ws1.eu-central-1.maas.aliyuncs.com/compatible-mode/v1", ::q/resolve-base-url(null, "frankfurt", "ws1"))
+    assert-eq("https://ws1.ap-northeast-1.maas.aliyuncs.com/compatible-mode/v1", ::q/resolve-base-url(null, "tokyo", "ws1"))
+}
+
+test-explicit-base-url-wins
+meta ["test"]
+fn () {
+    assert-eq("https://proxy.example.com/v1", ::q/resolve-base-url("https://proxy.example.com/v1/", "cn", "ws1"))
+}
+
+test-region-errors
+meta ["test"]
+fn () {
+    assert(is-err(::q/region-info("mars")), "unknown region is an Err")
+    assert(is-err(::q/resolve-base-url(null, "eu", null)), "eu needs a workspace id")
+    assert(is-err(::q/resolve-base-url(null, "jp", "")), "jp needs a workspace id")
+}
+
+test-base-url-reads-ctx
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"qwen.base.url": null, "qwen.region": null, "qwen.workspace.id": null})
+    assert-eq(::q/BASE_URL, ::q/base-url())
+    ::hot::ctx/set({"qwen.region": "us"})
+    assert-eq(::q/BASE_URL_US, ::q/base-url())
+    ::hot::ctx/set({"qwen.workspace.id": "ws9"})
+    assert-eq("https://ws9.us-east-1.maas.aliyuncs.com/compatible-mode/v1", ::q/base-url())
+    ::hot::ctx/set({"qwen.base.url": "https://dashscope.aliyuncs.com/compatible-mode/v1"})
+    assert-eq(::q/BASE_URL_CN, ::q/base-url())
+    ::hot::ctx/set({"qwen.base.url": null, "qwen.region": null, "qwen.workspace.id": null})
+}
+
+test-endpoint-uses-region-and-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"qwen.api.key": "sk-test", "qwen.region": "cn"})
+    ep ::api/endpoint()
+    assert-eq(::q/BASE_URL_CN, ep.base-url)
+    assert-eq("sk-test", ep.api-key)
+    req ::openai::api/build-endpoint-request(ep, "GET", "/models", {}, "")
+    assert-eq("https://dashscope.aliyuncs.com/compatible-mode/v1/models", req.url)
+    assert-eq("Bearer sk-test", req.headers.Authorization)
+    ::hot::ctx/set({"qwen.region": null})
+
+    us ::api/endpoint-for("us", null, "sk-us")
+    assert-eq(::q/BASE_URL_US, us.base-url)
+    assert-eq("sk-us", us.api-key)
+}
+
+// ============================================================================
+// Request bodies
+// ============================================================================
+
+test-chat-request-body-omits-unset
+meta ["test"]
+fn () {
+    body ::chat/request-body(::chat/ChatCompletionRequest({
+        model: "qwen3.7-plus",
+        messages: [::chat/user-message("Hi")],
+        enable_thinking: false,
+        search_options: {forced_search: true, search_strategy: "max"}
+    }))
+    assert-eq("qwen3.7-plus", body.model)
+    assert-eq(false, body.enable_thinking)
+    assert-eq("max", body.search_options.search_strategy)
+    assert(is-null(get(body, "thinking_budget")), "unset thinking_budget omitted")
+    assert(is-null(get(body, "max_tokens")), "unset max_tokens omitted")
+    assert(not(contains(to-json(body), "null")), "no JSON nulls in the body")
+}
+
+test-chat-accepts-developer-role
+meta ["test"]
+fn () {
+    m ::chat/Message({role: "developer", content: "Be terse."})
+    assert-eq("developer", m.role)
+}
+
+test-embedding-request-body-omits-unset
+meta ["test"]
+fn () {
+    body ::emb/request-body(::emb/EmbeddingRequest({input: "hi", model: "text-embedding-v4"}))
+    assert-eq("text-embedding-v4", body.model)
+    assert(is-null(get(body, "dimensions")), "unset dimensions omitted")
+    with-dims ::emb/request-body(::emb/EmbeddingRequest({input: "hi", model: "text-embedding-v4", dimensions: 256}))
+    assert-eq(256, with-dims.dimensions)
+}
+
+test-model-path-encodes
+meta ["test"]
+fn () {
+    assert-eq("/models/qwen3.8-max", ::models/model-path("qwen3.8-max"))
+    assert-eq("/models/a%2Fb", ::models/model-path("a/b"))
+}
+
+// ============================================================================
+// hot-ai adapter
+// ============================================================================
+
+test-extra-body
+meta ["test"]
+fn () {
+    assert-eq({}, ::qai/extra-body(null))
+    body ::qai/extra-body(::qai/QwenOptions({
+        enable-thinking: true,
+        thinking-budget: 2048,
+        enable-search: true,
+        search-options: {forced_search: true},
+        top-k: 20,
+        extra: {vl_high_resolution_images: true}
+    }))
+    assert-eq(true, body.enable_thinking)
+    assert-eq(2048, body.thinking_budget)
+    assert-eq(true, body.enable_search)
+    assert-eq(true, body.search_options.forced_search)
+    assert-eq(20, body.top_k)
+    assert-eq(true, body.vl_high_resolution_images)
+    assert(is-null(get(body, "preserve_thinking")), "unset options omitted")
+}
+
+test-request-options-and-chat-body
+meta ["test"]
+fn () {
+    opts ::qai/request-options(::qai/QwenOptions({enable-thinking: false, max-tokens: 800}))
+    assert-eq("max_tokens", opts.max-tokens-param)
+    assert-eq(800, opts.max-completion-tokens)
+    body ::openai::chat-tools/build-chat-body("qwen3.8-flash", [::ai-chat/user-message("Hi")], null, null, opts, true)
+    assert-eq(800, body.max_tokens)
+    assert(is-null(get(body, "max_completion_tokens")), "Qwen gets max_tokens")
+    assert-eq(false, body.enable_thinking)
+    assert-eq(true, body.stream_options.include_usage)
+
+    defaults ::qai/request-options(null)
+    assert-eq(4096, defaults.max-completion-tokens)
+    assert(is-null(defaults.extra-body), "no extra body by default")
+}
+
+test-provider-registration
+meta ["test"]
+fn () {
+    reg ::qai/provider-for(::api/endpoint-for("intl", null, "sk-test"), null)
+    assert-eq("Qwen", reg.display-name)
+    assert(reg.detect("qwen3.8-max"), "claims qwen models")
+    assert(reg.detect("Qwen/kimi-k3"), "claims qwen/ routed models")
+    assert(not(reg.detect("gpt-4o")), "ignores other models")
+    assert(not(is-null(reg.chat-fn)), "chat-fn wired")
+    assert(not(is-null(reg.chat-stream-fn)), "chat-stream-fn wired")
+    assert-eq(::q/BASE_URL, reg.meta.base-url)
+    assert(not(contains(to-json(reg.meta), "sk-test")), "key never copied into meta")
+
+    registry ::ai-chat/with-providers([reg])
+    found ::ai-chat/resolve-registration(::ai-chat/ChatOptions({model: "qwen3.7-plus", providers: registry}))
+    assert-eq("Qwen", found.display-name)
+}
+
+test-routing-prefix-stripped
+meta ["test"]
+fn () {
+    assert-eq("kimi-k3", ::openai::compatible/strip-model-prefix("qwen/kimi-k3", ::qai/MODEL_PREFIX))
+    assert-eq("qwen3.8-max", ::openai::compatible/strip-model-prefix("qwen3.8-max", ::qai/MODEL_PREFIX))
+}

@@ -1,0 +1,34 @@
+::cal-com::users ns
+meta {
+    ctx: {"cal-com.api.key": {required: true}},
+    doc: """The API key owner's own profile (`/me`)."""
+}
+
+::api ::cal-com::api
+
+me
+meta {
+    doc: """
+    GET /me - The authenticated user: `id`, `username`, `email`,
+    `timeZone`, `weekStart`, `defaultScheduleId`, `organizationId`, ...
+    The cheapest way to check an API key.
+
+    **Example**
+
+    ```hot
+    profile ::cal-com::users/me()
+    profile.timeZone
+    ```
+    """
+}
+fn (): Any {
+  ::api/request("GET", "/me", "", "")
+}
+
+update-me
+meta {
+    doc: """PATCH /me - Update the profile (`name`, `email`, `timeZone`, `weekStart`, `timeFormat` (12/24), `defaultScheduleId`, `locale`, `avatarUrl`, `bio`, `metadata`). Unset fields are omitted. An email change waits for verification before it takes effect."""
+}
+fn (changes: Map): Any {
+  ::api/request("PATCH", "/me", ::api/compact(changes), "")
+}

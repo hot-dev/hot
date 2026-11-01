@@ -1,0 +1,228 @@
+::shopify::webhooks ns
+meta {
+    doc: """
+    Shopify webhooks: verify deliveries (base64 HMAC-SHA256 of the raw
+    body in `X-Shopify-Hmac-Sha256`), read the topic, shop and
+    delivery-id headers for routing and dedupe, and manage webhook
+    subscriptions over the Admin API. See
+    https://shopify.dev/docs/apps/build/webhooks/subscribe/https.
+    """
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::api ::shopify::api
+
+// ---------------------------------------------------------------------------
+// Verification
+// ---------------------------------------------------------------------------
+
+verify-request
+meta {
+    ctx: {"shopify.webhook.secret": {required: false}},
+    doc: """
+    Verify a Shopify webhook: base64 HMAC-SHA256 of the raw body in
+    `X-Shopify-Hmac-Sha256`, keyed by your app's client secret (or the
+    shop's webhook signing secret for admin-created webhooks). Uses the
+    `shopify.webhook.secret` context variable by default (failing when it
+    is unset), or an explicit secret; an empty explicit secret never
+    verifies. Shopify signs no timestamp, so dedupe on `webhook-id`.
+
+    **Example**
+
+    ```hot
+    shopify-webhook
+    meta {webhook: {service: "shopify", path: "/shopify/webhook"}}
+    fn (request) {
+      if(not(::shopify::webhooks/verify-request(request)),
+        ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
+        handle-event(::shopify::webhooks/topic(request), request.body))
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("shopify.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("shopify.webhook.secret is not set. Add it in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str): Bool {
+  signature header(request, "x-shopify-hmac-sha256")
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(secret) => { false }
+    is-empty(signature) => { false }
+    => {
+      raw-body ::hot::http/raw-body(request)
+      ::hmac/hmac-verify-base64(secret, raw-body, signature, "sha256")
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Delivery headers
+// ---------------------------------------------------------------------------
+
+header
+meta {
+    doc: """A request header by name, case-insensitively (inbound header keys are lowercase; this also accepts maps with other casing). Returns `""` when absent."""
+}
+fn (request: Map, name: Str): Str {
+  headers or(get(request, "headers"), {})
+  wanted lowercase(name)
+  direct get(headers, wanted)
+  cond {
+    is-some(direct) => { Str(direct) }
+    => {
+      match-key find-first(keys(headers), (k) { eq(lowercase(Str(k)), wanted) })
+      if(is-null(match-key), "", Str(get(headers, match-key)))
+    }
+  }
+}
+
+topic
+meta {
+    doc: """The delivery's topic from `X-Shopify-Topic`, e.g. `"orders/create"`."""
+}
+fn (request: Map): Str {
+  header(request, "x-shopify-topic")
+}
+
+shop-domain
+meta {
+    doc: """The sending shop from `X-Shopify-Shop-Domain`, e.g. `"acme.myshopify.com"`."""
+}
+fn (request: Map): Str {
+  header(request, "x-shopify-shop-domain")
+}
+
+webhook-id
+meta {
+    doc: """The per-delivery id from `X-Shopify-Webhook-Id`. Shopify retries failed deliveries with the same id, so record it to skip duplicates."""
+}
+fn (request: Map): Str {
+  header(request, "x-shopify-webhook-id")
+}
+
+event-id
+meta {
+    doc: """`X-Shopify-Event-Id`: shared by deliveries that came from the same merchant action across several subscriptions. For correlation, not dedupe."""
+}
+fn (request: Map): Str {
+  header(request, "x-shopify-event-id")
+}
+
+delivery
+meta {
+    doc: """All the routing headers at once: `{topic, shop-domain, webhook-id, event-id, api-version, triggered-at, name}` (`""` for absent ones)."""
+}
+fn (request: Map): Map {
+  {
+    topic: topic(request),
+    shop-domain: shop-domain(request),
+    webhook-id: webhook-id(request),
+    event-id: event-id(request),
+    api-version: header(request, "x-shopify-api-version"),
+    triggered-at: header(request, "x-shopify-triggered-at"),
+    name: header(request, "x-shopify-name")
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subscriptions
+// ---------------------------------------------------------------------------
+
+SUBSCRIPTION_FIELDS "id topic uri filter includeFields metafieldNamespaces format name createdAt updatedAt"
+
+build-subscription-input
+meta {
+    doc: """`WebhookSubscriptionInput` from a delivery `uri` (HTTPS URL, or a Pub/Sub / EventBridge URI) and options `filter`, `includeFields`, `metafieldNamespaces`, `format` (`JSON` or `XML`), `name`. Unset options are omitted. Exposed for testing."""
+}
+fn (uri: Str, options: Map): Map {
+  filter-vals({
+    uri: uri,
+    filter: get(options, "filter"),
+    includeFields: get(options, "includeFields"),
+    metafieldNamespaces: get(options, "metafieldNamespaces"),
+    format: get(options, "format"),
+    name: get(options, "name")
+  }, is-some)
+}
+
+create-subscription
+meta {
+    doc: """
+    Subscribe the app to a topic (`webhookSubscriptionCreate`). `topic`
+    is a `WebhookSubscriptionTopic` enum value such as `ORDERS_CREATE`
+    or `PRODUCTS_UPDATE`. Returns the subscription.
+
+    **Example**
+
+    ```hot
+    ::shopify::webhooks/create-subscription("ORDERS_CREATE", "https://example.com/shopify/webhook", {
+      includeFields: ["id", "name", "total_price"]
+    })
+    ```
+    """
+}
+fn
+(topic: Str, uri: Str): Map {
+  create-subscription(topic, uri, {})
+},
+(topic: Str, uri: Str, options: Map): Map {
+  mutation ```
+  mutation WebhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
+    webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
+      webhookSubscription { ${SUBSCRIPTION_FIELDS} }
+      userErrors { field message }
+    }
+  }
+  ```
+  payload ::api/mutate(mutation, {
+    topic: topic,
+    webhookSubscription: build-subscription-input(uri, options)
+  }, "webhookSubscriptionCreate")
+  payload.webhookSubscription
+}
+
+list-subscriptions
+meta {
+    doc: """One page of the app's webhook subscriptions. Options: `first`, `after`, `topics` (Vec of topic enum values), `uri`. Returns `{nodes, pageInfo}`."""
+}
+fn
+(): Map {
+  list-subscriptions({})
+},
+(options: Map): Map {
+  query ```
+  query WebhookSubscriptions($first: Int!, $after: String, $topics: [WebhookSubscriptionTopic!], $uri: String) {
+    webhookSubscriptions(first: $first, after: $after, topics: $topics, uri: $uri) {
+      nodes { ${SUBSCRIPTION_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+  ```
+  vars ::api/connection-variables(options)
+  data ::api/graphql(query, filter-vals({...vars, topics: get(options, "topics"), uri: get(options, "uri")}, is-some))
+  data.webhookSubscriptions
+}
+
+delete-subscription
+meta {
+    doc: """Delete a webhook subscription by id (`webhookSubscriptionDelete`). Returns the deleted id."""
+}
+fn (id: Str): Str {
+  mutation """
+  mutation WebhookSubscriptionDelete($id: ID!) {
+    webhookSubscriptionDelete(id: $id) {
+      deletedWebhookSubscriptionId
+      userErrors { field message }
+    }
+  }
+  """
+  payload ::api/mutate(mutation, {id: id}, "webhookSubscriptionDelete")
+  payload.deletedWebhookSubscriptionId
+}

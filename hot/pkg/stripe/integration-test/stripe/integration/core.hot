@@ -4,36 +4,68 @@ meta ["test"]
 // =============================================================================
 // Integration Tests
 // =============================================================================
-// These tests require stripe.api.key to be set in context (use a test-mode
-// sk_test_... key). All operations are read-only.
+// Require ctx stripe.api.key (from STRIPE_API_KEY) holding a TEST-MODE key:
+// sk_test_... or rk_test_.... All operations are read-only. With no key, or
+// with a live key (sk_live_/rk_live_), every test skips without calling
+// Stripe, so this suite can never touch a live account.
+// Run with: hot test --project pkg-integration-stripe
+
+test-mode-key fn (): Bool {
+    key or(::hot::ctx/get("stripe.api.key"), "")
+    or(starts-with(key, "sk_test_"), starts-with(key, "rk_test_"))
+}
+
+skip fn (): Bool {
+    println("STRIPE_API_KEY is unset or not a test-mode key (sk_test_/rk_test_): skipping")
+    assert(true, "Skipped - no test-mode Stripe key")
+}
 
 test-stripe-api-connection
 meta ["test"]
 fn () {
-    // Test basic API connectivity by checking balance (read-only)
-    balance ::stripe::balance/get-balance()
-    assert(balance.available, "Balance response should have 'available' field")
+    cond {
+        not(test-mode-key()) => { skip() }
+        => {
+            // Test basic API connectivity by checking balance (read-only)
+            balance ::stripe::balance/get-balance()
+            assert(balance.available, "Balance response should have 'available' field")
+        }
+    }
 }
 
 test-stripe-list-customers
 meta ["test"]
 fn () {
-    // List customers (read-only, safe operation)
-    page ::stripe::customers/list-customers(::stripe::customers/ListCustomersRequest({limit: 1}))
-    assert(page.data, "Response should have 'data' field")
-    assert-eq("list", page.object, "Response object should be 'list'")
+    cond {
+        not(test-mode-key()) => { skip() }
+        => {
+            page ::stripe::customers/list-customers(::stripe::customers/ListCustomersRequest({limit: 1}))
+            assert(page.data, "Response should have 'data' field")
+            assert-eq("list", page.object, "Response object should be 'list'")
+        }
+    }
 }
 
 test-stripe-list-products
 meta ["test"]
 fn () {
-    page ::stripe::products/list-products(::stripe::products/ListProductsRequest({limit: 1}))
-    assert-eq("list", page.object, "Response object should be 'list'")
+    cond {
+        not(test-mode-key()) => { skip() }
+        => {
+            page ::stripe::products/list-products(::stripe::products/ListProductsRequest({limit: 1}))
+            assert-eq("list", page.object, "Response object should be 'list'")
+        }
+    }
 }
 
 test-stripe-list-events
 meta ["test"]
 fn () {
-    page ::stripe::events/list-events(::stripe::events/ListEventsRequest({limit: 1}))
-    assert-eq("list", page.object, "Response object should be 'list'")
+    cond {
+        not(test-mode-key()) => { skip() }
+        => {
+            page ::stripe::events/list-events(::stripe::events/ListEventsRequest({limit: 1}))
+            assert-eq("list", page.object, "Response object should be 'list'")
+        }
+    }
 }

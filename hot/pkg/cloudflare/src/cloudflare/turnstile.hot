@@ -1,0 +1,144 @@
+::cloudflare::turnstile ns
+meta {
+    doc: """
+    Cloudflare Turnstile server-side validation. A widget token is valid
+    for 300 seconds and can be verified once; always verify on the server
+    before trusting a form submission. Uses the widget's secret key, not
+    the API token. See
+    https://developers.cloudflare.com/turnstile/get-started/server-side-validation/.
+    """,
+    ctx: {"cloudflare.turnstile.secret": {required: true}}
+}
+
+::ctx ::hot::ctx
+
+HttpRequest ::hot::http/HttpRequest
+ConfigError ::cloudflare::api/ConfigError
+
+SITEVERIFY_URL "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+
+// Turnstile rejects tokens longer than this without a network round trip.
+MAX_TOKEN_LENGTH 2048
+
+secret fn (): Str {
+  value ::cloudflare::api/ctx-str("cloudflare.turnstile.secret")
+  cond {
+    is-null(value) => {
+      err(ConfigError({message: "cloudflare.turnstile.secret is not set. Add the widget's secret key in Context Variables to verify Turnstile tokens."}))
+    }
+    => { value }
+  }
+}
+
+siteverify-body
+meta {
+    doc: """The siteverify JSON body: `{secret, response, remoteip?, idempotency_key?}`; unset options are omitted. Exposed for testing."""
+}
+fn (secret: Str, token: Str, opts: Map): Map {
+  {secret: secret, response: token}
+    |> assoc-some("remoteip", get(opts, "remoteip"))
+    |> assoc-some("idempotency_key", get(opts, "idempotency_key"))
+}
+
+siteverify
+meta {
+    doc: """
+    POST https://challenges.cloudflare.com/turnstile/v0/siteverify -
+    Validate a widget token and return Cloudflare's answer:
+    `{success, challenge_ts, hostname, action, cdata, error-codes, metadata?}`.
+    `opts`: `remoteip` (the visitor IP), `idempotency_key` (a UUID, to
+    retry safely), and `secret` to override `cloudflare.turnstile.secret`.
+    A failed validation is a normal result (`success: false`); only
+    transport errors, non-2xx responses, and a missing secret are Errs.
+    """
+}
+fn
+(token: Str): Map {
+  siteverify(token, {})
+},
+(token: Str, opts: Map): Map {
+  explicit get(opts, "secret")
+  key cond {
+    is-some(explicit) => { explicit }
+    => { secret() }
+  }
+
+  cond {
+    is-err(key) => { key }
+    is-empty(key) => { err(ConfigError({message: "Turnstile secret is empty."})) }
+    => {
+      response ::hot::http/request(HttpRequest({
+        method: "POST",
+        url: SITEVERIFY_URL,
+        headers: {Content-Type: "application/json"},
+        body: to-json(siteverify-body(key, token, opts))
+      }))
+      cond {
+        is-err(response) => { response }
+        not(::hot::http/is-ok-response(response)) => { err(::cloudflare::api/to-error(response)) }
+        => { response.body }
+      }
+    }
+  }
+}
+
+check-result
+meta {
+    doc: """
+    Decide a siteverify result: `success` must be true, and when `opts`
+    names `expected_action` or `expected_hostname` they must match the
+    result's `action` / `hostname`. Exposed for testing; `is-valid`
+    applies it.
+    """
+}
+fn (result: Map, opts: Map): Bool {
+  expected-action get(opts, "expected_action")
+  expected-hostname get(opts, "expected_hostname")
+  cond {
+    not(eq(get(result, "success"), true)) => { false }
+    and(is-some(expected-action), ne(get(result, "action"), expected-action)) => { false }
+    and(is-some(expected-hostname), ne(get(result, "hostname"), expected-hostname)) => { false }
+    => { true }
+  }
+}
+
+is-valid
+meta {
+    doc: """
+    True when a Turnstile token verifies. `opts` as in `siteverify`, plus
+    `expected_action` and `expected_hostname` to pin the widget action and
+    the site hostname. Empty or over-long tokens are rejected without a
+    request. A missing secret is an Err, never `true`.
+
+    **Example**
+
+    ```hot
+    signup
+    meta {webhook: {service: "forms", path: "/signup"}}
+    fn (request) {
+      token or(get(request.body, "cf-turnstile-response"), "")
+      ok ::cloudflare::turnstile/is-valid(token, {remoteip: request.ip, expected_hostname: "example.com"})
+      if(ok,
+        ::hot::http/HttpResponse({status: 200, body: {ok: true}}),
+        ::hot::http/HttpResponse({status: 403, body: "verification failed"}))
+    }
+    ```
+    """
+}
+fn
+(token: Str): Bool {
+  is-valid(token, {})
+},
+(token: Str, opts: Map): Bool {
+  cond {
+    is-empty(token) => { false }
+    gt(length(token), MAX_TOKEN_LENGTH) => { false }
+    => {
+      result siteverify(token, filter-vals(opts, is-some))
+      cond {
+        is-err(result) => { result }
+        => { check-result(result, opts) }
+      }
+    }
+  }
+}

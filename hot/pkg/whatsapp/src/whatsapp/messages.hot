@@ -1,6 +1,63 @@
 ::whatsapp::messages ns
+meta {
+    doc: """
+    Send WhatsApp messages: text, media, location, contacts, reactions,
+    templates, and interactive messages (reply buttons, lists, CTA URL,
+    location request, Flows), plus read receipts with a typing indicator.
+
+    Every send request takes an optional `reply_to` — the `wamid` of a
+    message to quote — sent as Meta's `context: {message_id}`. Each
+    `send-*` function has a pure `build-*-body` counterpart that returns
+    the exact JSON payload (unset optionals omitted), exposed for testing.
+    Sends return `{messaging_product, contacts, messages: [{id}]}` on
+    success, or an Err carrying `::whatsapp::api/HttpError`.
+    """
+}
 
 ::api ::whatsapp::api
+
+// ============================================================================
+// Shared helpers
+// ============================================================================
+
+build-message
+meta {
+    doc: """The common message envelope: `messaging_product`, `recipient_type`, `to`, `type`, the type-specific object under the key named by `type`, and `context.message_id` when `reply-to` is set. Exposed for testing."""
+}
+fn (to: Str, message-type: Str, content: Map, reply-to: Str?): Map {
+  {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: to,
+    type: message-type
+  }
+    |> assoc(message-type, content)
+    |> assoc-some("context", if(is-some(reply-to), {message_id: reply-to}, null))
+}
+
+media-object
+meta {
+    doc: """A media reference: `{id}` for uploaded media (preferred when both are given) or `{link}` for a public HTTPS URL. Fails when neither is set. Exposed for testing."""
+}
+fn (kind: Str, id: Str?, link: Str?): Map {
+  cond {
+    is-some(id) => { {id: id} }
+    is-some(link) => { {link: link} }
+    => { fail(`whatsapp: provide either ${kind}_id or ${kind}_url`) }
+  }
+}
+
+text-object fn (text: Str?): Map? {
+  if(is-some(text), {text: text}, null)
+}
+
+send-message
+meta {
+    doc: """POST /{phone-number-id}/messages with a prebuilt payload — the escape hatch for message types without a dedicated function."""
+}
+fn (phone-number-id: Str, body: Map): Map {
+  ::api/request("POST", ::api/url(`${::api/segment(phone-number-id)}/messages`), {}, body)
+}
 
 // ============================================================================
 // Text Messages
@@ -10,41 +67,37 @@ SendTextRequest type {
   phone_number_id: Str,
   to: Str,
   text: Str,
-  preview_url: Bool?
+  preview_url: Bool?,
+  reply_to: Str?
+}
+
+build-text-body fn (request: SendTextRequest): Map {
+  build-message(request.to, "text",
+    {body: request.text} |> assoc-some("preview_url", request.preview_url),
+    request.reply_to)
 }
 
 send-text
 meta {
     doc: """
-Send a text message. `to` is the recipient's phone number in international format (e.g. "15551234567").
+    Send a text message (max 4096 characters). `to` is the recipient's phone number in international format (e.g. "15551234567"). Set `preview_url: true` to render a link preview; `reply_to` quotes an earlier message.
 
-**Example**
+    **Example**
 
-```hot
-::messages ::whatsapp::messages
+    ```hot
+    ::messages ::whatsapp::messages
 
-response ::messages/send-text(::messages/SendTextRequest({
-  phone_number_id: "109876543210",
-  to: "15551234567",
-  text: "Hello from Hot!"
-}))
-response.messages[0].id  // => "wamid.HBg..."
-```
-"""
+    response ::messages/send-text(::messages/SendTextRequest({
+      phone_number_id: "109876543210",
+      to: "15551234567",
+      text: "Hello from Hot!"
+    }))
+    first(response.messages).id  // => "wamid.HBg..."
+    ```
+    """
 }
 fn (request: SendTextRequest): Map {
-  body {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: request.to,
-    type: "text",
-    text: {
-      preview_url: or(request.preview_url, false),
-      body: request.text
-    }
-  }
-
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+  send-message(request.phone_number_id, build-text-body(request))
 }
 
 // ============================================================================
@@ -56,44 +109,38 @@ SendImageRequest type {
   to: Str,
   image_url: Str?,
   image_id: Str?,
-  caption: Str?
+  caption: Str?,
+  reply_to: Str?
+}
+
+build-image-body fn (request: SendImageRequest): Map {
+  build-message(request.to, "image",
+    media-object("image", request.image_id, request.image_url)
+      |> assoc-some("caption", request.caption),
+    request.reply_to)
 }
 
 send-image
 meta {
     doc: """
-Send an image. Provide either `image_url` (public HTTPS URL) or `image_id` (uploaded media ID). Supported: JPEG, PNG. Max 5 MB.
+    Send an image. Provide either `image_id` (from `::whatsapp::media/upload-media`) or `image_url` (public HTTPS URL). Supported: JPEG, PNG; max 5 MB.
 
-**Example**
+    **Example**
 
-```hot
-::messages ::whatsapp::messages
+    ```hot
+    ::messages ::whatsapp::messages
 
-response ::messages/send-image(::messages/SendImageRequest({
-  phone_number_id: "109876543210",
-  to: "15551234567",
-  image_url: "https://example.com/photo.jpg",
-  caption: "Check this out!"
-}))
-```
-"""
+    response ::messages/send-image(::messages/SendImageRequest({
+      phone_number_id: "109876543210",
+      to: "15551234567",
+      image_url: "https://example.com/photo.jpg",
+      caption: "Check this out!"
+    }))
+    ```
+    """
 }
 fn (request: SendImageRequest): Map {
-  image cond {
-    is-some(request.image_id) => { {id: request.image_id} }
-    is-some(request.image_url) => { {link: request.image_url} }
-    => { fail("Provide either image_url or image_id") }
-  }
-
-  body {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: request.to,
-    type: "image",
-    image: image |> assoc-some("caption", request.caption)
-  }
-
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+  send-message(request.phone_number_id, build-image-body(request))
 }
 
 SendDocumentRequest type {
@@ -102,31 +149,24 @@ SendDocumentRequest type {
   document_url: Str?,
   document_id: Str?,
   caption: Str?,
-  filename: Str?
+  filename: Str?,
+  reply_to: Str?
+}
+
+build-document-body fn (request: SendDocumentRequest): Map {
+  build-message(request.to, "document",
+    media-object("document", request.document_id, request.document_url)
+      |> assoc-some("caption", request.caption)
+      |> assoc-some("filename", request.filename),
+    request.reply_to)
 }
 
 send-document
 meta {
-    doc: """Send a document. Provide either `document_url` or `document_id`. Supports PDF, DOC, DOCX, PPT, XLS, etc. Max 100 MB."""
+    doc: """Send a document. Provide either `document_id` or `document_url`. `filename` sets the name shown to the recipient. Supports PDF, Office formats, plain text; max 100 MB."""
 }
 fn (request: SendDocumentRequest): Map {
-  doc cond {
-    is-some(request.document_id) => { {id: request.document_id} }
-    is-some(request.document_url) => { {link: request.document_url} }
-    => { fail("Provide either document_url or document_id") }
-  }
-
-  body {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: request.to,
-    type: "document",
-    document: doc
-      |> assoc-some("caption", request.caption)
-      |> assoc-some("filename", request.filename)
-  }
-
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+  send-message(request.phone_number_id, build-document-body(request))
 }
 
 SendVideoRequest type {
@@ -134,87 +174,67 @@ SendVideoRequest type {
   to: Str,
   video_url: Str?,
   video_id: Str?,
-  caption: Str?
+  caption: Str?,
+  reply_to: Str?
+}
+
+build-video-body fn (request: SendVideoRequest): Map {
+  build-message(request.to, "video",
+    media-object("video", request.video_id, request.video_url)
+      |> assoc-some("caption", request.caption),
+    request.reply_to)
 }
 
 send-video
 meta {
-    doc: """Send a video. Provide either `video_url` or `video_id`. Supports MP4, 3GPP. Max 16 MB."""
+    doc: """Send a video. Provide either `video_id` or `video_url`. Supports MP4 and 3GPP (H.264 video, AAC audio); max 16 MB."""
 }
 fn (request: SendVideoRequest): Map {
-  video cond {
-    is-some(request.video_id) => { {id: request.video_id} }
-    is-some(request.video_url) => { {link: request.video_url} }
-    => { fail("Provide either video_url or video_id") }
-  }
-
-  body {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: request.to,
-    type: "video",
-    video: video |> assoc-some("caption", request.caption)
-  }
-
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+  send-message(request.phone_number_id, build-video-body(request))
 }
 
 SendAudioRequest type {
   phone_number_id: Str,
   to: Str,
   audio_url: Str?,
-  audio_id: Str?
+  audio_id: Str?,
+  reply_to: Str?
+}
+
+build-audio-body fn (request: SendAudioRequest): Map {
+  build-message(request.to, "audio",
+    media-object("audio", request.audio_id, request.audio_url),
+    request.reply_to)
 }
 
 send-audio
 meta {
-    doc: """Send an audio file. Provide either `audio_url` or `audio_id`. Supports AAC, MP4, MPEG, AMR, OGG (OPUS only). Max 16 MB."""
+    doc: """Send an audio file. Provide either `audio_id` or `audio_url`. Supports AAC, AMR, MP3, MP4 audio, OGG (OPUS codec only, which plays as a voice note); max 16 MB."""
 }
 fn (request: SendAudioRequest): Map {
-  audio cond {
-    is-some(request.audio_id) => { {id: request.audio_id} }
-    is-some(request.audio_url) => { {link: request.audio_url} }
-    => { fail("Provide either audio_url or audio_id") }
-  }
-
-  body {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: request.to,
-    type: "audio",
-    audio: audio
-  }
-
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+  send-message(request.phone_number_id, build-audio-body(request))
 }
 
 SendStickerRequest type {
   phone_number_id: Str,
   to: Str,
   sticker_url: Str?,
-  sticker_id: Str?
+  sticker_id: Str?,
+  reply_to: Str?
+}
+
+build-sticker-body fn (request: SendStickerRequest): Map {
+  build-message(request.to, "sticker",
+    media-object("sticker", request.sticker_id, request.sticker_url),
+    request.reply_to)
 }
 
 send-sticker
 meta {
-    doc: """Send a sticker. Provide either `sticker_url` or `sticker_id`. Supports WebP. Static: 100 KB, animated: 500 KB."""
+    doc: """Send a sticker. Provide either `sticker_id` or `sticker_url`. WebP only; static max 100 KB, animated max 500 KB."""
 }
 fn (request: SendStickerRequest): Map {
-  sticker cond {
-    is-some(request.sticker_id) => { {id: request.sticker_id} }
-    is-some(request.sticker_url) => { {link: request.sticker_url} }
-    => { fail("Provide either sticker_url or sticker_id") }
-  }
-
-  body {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: request.to,
-    type: "sticker",
-    sticker: sticker
-  }
-
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+  send-message(request.phone_number_id, build-sticker-body(request))
 }
 
 // ============================================================================
@@ -227,7 +247,16 @@ SendLocationRequest type {
   latitude: Dec,
   longitude: Dec,
   name: Str?,
-  address: Str?
+  address: Str?,
+  reply_to: Str?
+}
+
+build-location-body fn (request: SendLocationRequest): Map {
+  build-message(request.to, "location",
+    {latitude: request.latitude, longitude: request.longitude}
+      |> assoc-some("name", request.name)
+      |> assoc-some("address", request.address),
+    request.reply_to)
 }
 
 send-location
@@ -235,17 +264,7 @@ meta {
     doc: """Send a location pin. Optionally include a `name` and `address` for the pin label."""
 }
 fn (request: SendLocationRequest): Map {
-  body {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: request.to,
-    type: "location",
-    location: {latitude: request.latitude, longitude: request.longitude}
-      |> assoc-some("name", request.name)
-      |> assoc-some("address", request.address)
-  }
-
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+  send-message(request.phone_number_id, build-location-body(request))
 }
 
 // ============================================================================
@@ -255,40 +274,44 @@ fn (request: SendLocationRequest): Map {
 SendContactsRequest type {
   phone_number_id: Str,
   to: Str,
-  contacts: Vec<Map>
+  contacts: Vec<Map>,
+  reply_to: Str?
 }
 
-send-contacts
-meta {
-    doc: """
-Send one or more contact cards. Each contact is a Map with `name` (required: `{formatted_name: "..."`}) and optional `phones`, `emails`, `urls`, `addresses`, `org`, `birthday`.
-
-**Example**
-
-```hot
-::messages ::whatsapp::messages
-
-::messages/send-contacts(::messages/SendContactsRequest({
-  phone_number_id: "109876543210",
-  to: "15551234567",
-  contacts: [{
-    name: {formatted_name: "Jane Doe", first_name: "Jane", last_name: "Doe"},
-    phones: [{phone: "+15559876543", type: "WORK"}]
-  }]
-}))
-```
-"""
-}
-fn (request: SendContactsRequest): Map {
-  body {
+build-contacts-body fn (request: SendContactsRequest): Map {
+  // `contacts` is an array, so the generic envelope's Map slot doesn't fit.
+  {
     messaging_product: "whatsapp",
     recipient_type: "individual",
     to: request.to,
     type: "contacts",
     contacts: request.contacts
-  }
+  } |> assoc-some("context", if(is-some(request.reply_to), {message_id: request.reply_to}, null))
+}
 
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+send-contacts
+meta {
+    doc: """
+    Send one or more contact cards. Each contact is a Map with `name` (required: `{formatted_name: "..."}`) and optional `phones`, `emails`, `urls`, `addresses`, `org`, `birthday`.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    ::messages/send-contacts(::messages/SendContactsRequest({
+      phone_number_id: "109876543210",
+      to: "15551234567",
+      contacts: [{
+        name: {formatted_name: "Jane Doe", first_name: "Jane", last_name: "Doe"},
+        phones: [{phone: "+15559876543", type: "WORK"}]
+      }]
+    }))
+    ```
+    """
+}
+fn (request: SendContactsRequest): Map {
+  send-message(request.phone_number_id, build-contacts-body(request))
 }
 
 // ============================================================================
@@ -302,38 +325,31 @@ SendReactionRequest type {
   emoji: Str
 }
 
+build-reaction-body fn (request: SendReactionRequest): Map {
+  build-message(request.to, "reaction", {message_id: request.message_id, emoji: request.emoji}, null)
+}
+
 send-reaction
 meta {
     doc: """
-React to a message with an emoji. Set `emoji` to "" (empty string) to remove a reaction.
+    React to a message with an emoji. Set `emoji` to "" (empty string) to remove a reaction. Reactions can only target messages less than 30 days old.
 
-**Example**
+    **Example**
 
-```hot
-::messages ::whatsapp::messages
+    ```hot
+    ::messages ::whatsapp::messages
 
-::messages/send-reaction(::messages/SendReactionRequest({
-  phone_number_id: "109876543210",
-  to: "15551234567",
-  message_id: "wamid.HBg...",
-  emoji: "👍"
-}))
-```
-"""
+    ::messages/send-reaction(::messages/SendReactionRequest({
+      phone_number_id: "109876543210",
+      to: "15551234567",
+      message_id: "wamid.HBg...",
+      emoji: "👍"
+    }))
+    ```
+    """
 }
 fn (request: SendReactionRequest): Map {
-  body {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: request.to,
-    type: "reaction",
-    reaction: {
-      message_id: request.message_id,
-      emoji: request.emoji
-    }
-  }
-
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+  send-message(request.phone_number_id, build-reaction-body(request))
 }
 
 // ============================================================================
@@ -345,61 +361,70 @@ SendTemplateRequest type {
   to: Str,
   template_name: Str,
   language_code: Str,
-  components: Vec<Map>?
+  components: Vec<Map>?,
+  reply_to: Str?
+}
+
+build-template-body fn (request: SendTemplateRequest): Map {
+  build-message(request.to, "template",
+    {name: request.template_name, language: {code: request.language_code}}
+      |> assoc-some("components", request.components),
+    request.reply_to)
 }
 
 send-template
 meta {
     doc: """
-Send a pre-approved message template. Templates must be created and approved in Meta Business Manager before use. `components` provides variable values for header, body, and button parameters.
+    Send a pre-approved message template — the only message type allowed outside the 24-hour customer service window. `components` supplies header, body, and button parameters.
 
-**Example**
+    **Example**
 
-```hot
-::messages ::whatsapp::messages
+    ```hot
+    ::messages ::whatsapp::messages
 
-// Simple template with no variables
-::messages/send-template(::messages/SendTemplateRequest({
-  phone_number_id: "109876543210",
-  to: "15551234567",
-  template_name: "hello_world",
-  language_code: "en_US"
-}))
+    // Simple template with no variables
+    ::messages/send-template(::messages/SendTemplateRequest({
+      phone_number_id: "109876543210",
+      to: "15551234567",
+      template_name: "hello_world",
+      language_code: "en_US"
+    }))
 
-// Template with body variables
-::messages/send-template(::messages/SendTemplateRequest({
-  phone_number_id: "109876543210",
-  to: "15551234567",
-  template_name: "order_confirmation",
-  language_code: "en_US",
-  components: [
-    {type: "body", parameters: [
-      {type: "text", text: "ORDER-123"},
-      {type: "text", text: "$49.99"}
-    ]}
-  ]
-}))
-```
-"""
+    // Template with body variables
+    ::messages/send-template(::messages/SendTemplateRequest({
+      phone_number_id: "109876543210",
+      to: "15551234567",
+      template_name: "order_confirmation",
+      language_code: "en_US",
+      components: [
+        {type: "body", parameters: [
+          {type: "text", text: "ORDER-123"},
+          {type: "text", text: "$49.99"}
+        ]}
+      ]
+    }))
+    ```
+    """
 }
 fn (request: SendTemplateRequest): Map {
-  body {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: request.to,
-    type: "template",
-    template: {
-      name: request.template_name,
-      language: {code: request.language_code}
-    } |> assoc-some("components", request.components)
-  }
-
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+  send-message(request.phone_number_id, build-template-body(request))
 }
 
 // ============================================================================
 // Interactive Messages
 // ============================================================================
+
+build-interactive
+meta {
+    doc: """An interactive message: `interactive: {type, body: {text}, action, header?, footer?}`. Exposed for testing."""
+}
+fn (to: Str, kind: Str, body-text: Str, action: Map, header: Map?, footer-text: Str?, reply-to: Str?): Map {
+  build-message(to, "interactive",
+    {type: kind, body: {text: body-text}, action: action}
+      |> assoc-some("header", header)
+      |> assoc-some("footer", text-object(footer-text)),
+    reply-to)
+}
 
 SendButtonsRequest type {
   phone_number_id: Str,
@@ -407,48 +432,40 @@ SendButtonsRequest type {
   body_text: Str,
   buttons: Vec<Map>,
   header: Map?,
-  footer_text: Str?
+  footer_text: Str?,
+  reply_to: Str?
+}
+
+build-buttons-body fn (request: SendButtonsRequest): Map {
+  build-interactive(request.to, "button", request.body_text, {buttons: request.buttons},
+    request.header, request.footer_text, request.reply_to)
 }
 
 send-buttons
 meta {
     doc: """
-Send an interactive message with reply buttons (max 3). Each button is `{type: "reply", reply: {id: "btn_1", title: "Click Me"}}`. Buttons are displayed below the message body.
+    Send an interactive message with up to 3 reply buttons. Each button is `{type: "reply", reply: {id: "btn_1", title: "Click Me"}}` (title max 20 characters). `header` is a header object, e.g. `{type: "text", text: "..."}` or `{type: "image", image: {link: "..."}}`.
 
-**Example**
+    **Example**
 
-```hot
-::messages ::whatsapp::messages
+    ```hot
+    ::messages ::whatsapp::messages
 
-::messages/send-buttons(::messages/SendButtonsRequest({
-  phone_number_id: "109876543210",
-  to: "15551234567",
-  body_text: "How can we help?",
-  buttons: [
-    {type: "reply", reply: {id: "sales", title: "Sales"}},
-    {type: "reply", reply: {id: "support", title: "Support"}},
-    {type: "reply", reply: {id: "info", title: "More Info"}}
-  ]
-}))
-```
-"""
+    ::messages/send-buttons(::messages/SendButtonsRequest({
+      phone_number_id: "109876543210",
+      to: "15551234567",
+      body_text: "How can we help?",
+      buttons: [
+        {type: "reply", reply: {id: "sales", title: "Sales"}},
+        {type: "reply", reply: {id: "support", title: "Support"}},
+        {type: "reply", reply: {id: "info", title: "More Info"}}
+      ]
+    }))
+    ```
+    """
 }
 fn (request: SendButtonsRequest): Map {
-  body {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: request.to,
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: {text: request.body_text},
-      action: {buttons: request.buttons}
-    }
-      |> assoc-some("header", request.header)
-      |> assoc-some("footer", if(is-some(request.footer_text), {text: request.footer_text}, null))
-  }
-
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+  send-message(request.phone_number_id, build-buttons-body(request))
 }
 
 SendListRequest type {
@@ -458,92 +475,224 @@ SendListRequest type {
   button_text: Str,
   sections: Vec<Map>,
   header_text: Str?,
-  footer_text: Str?
+  footer_text: Str?,
+  reply_to: Str?
+}
+
+build-list-body fn (request: SendListRequest): Map {
+  build-interactive(request.to, "list", request.body_text,
+    {button: request.button_text, sections: request.sections},
+    if(is-some(request.header_text), {type: "text", text: request.header_text}, null),
+    request.footer_text, request.reply_to)
 }
 
 send-list
 meta {
     doc: """
-Send an interactive list message. Users tap a button to reveal a menu of options organized in sections. Max 10 rows across all sections.
+    Send an interactive list message. Users tap a button to reveal a menu of options organized in sections. Max 10 sections and 10 rows in total.
 
-Each section: `{title: "Category", rows: [{id: "1", title: "Option", description: "Details"}, ...]}`.
+    Each section: `{title: "Category", rows: [{id: "1", title: "Option", description: "Details"}, ...]}`.
 
-**Example**
+    **Example**
 
-```hot
-::messages ::whatsapp::messages
+    ```hot
+    ::messages ::whatsapp::messages
 
-::messages/send-list(::messages/SendListRequest({
-  phone_number_id: "109876543210",
-  to: "15551234567",
-  body_text: "Choose a product:",
-  button_text: "View Options",
-  sections: [
-    {title: "Electronics", rows: [
-      {id: "phone", title: "Phone", description: "$999"},
-      {id: "laptop", title: "Laptop", description: "$1499"}
-    ]},
-    {title: "Accessories", rows: [
-      {id: "case", title: "Phone Case", description: "$29"}
-    ]}
-  ]
-}))
-```
-"""
+    ::messages/send-list(::messages/SendListRequest({
+      phone_number_id: "109876543210",
+      to: "15551234567",
+      body_text: "Choose a product:",
+      button_text: "View Options",
+      sections: [
+        {title: "Electronics", rows: [
+          {id: "phone", title: "Phone", description: "$999"},
+          {id: "laptop", title: "Laptop", description: "$1499"}
+        ]},
+        {title: "Accessories", rows: [
+          {id: "case", title: "Phone Case", description: "$29"}
+        ]}
+      ]
+    }))
+    ```
+    """
 }
 fn (request: SendListRequest): Map {
-  body {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: request.to,
-    type: "interactive",
-    interactive: {
-      type: "list",
-      body: {text: request.body_text},
-      action: {
-        button: request.button_text,
-        sections: request.sections
-      }
-    }
-      |> assoc-some("header", if(is-some(request.header_text), {type: "text", text: request.header_text}, null))
-      |> assoc-some("footer", if(is-some(request.footer_text), {text: request.footer_text}, null))
+  send-message(request.phone_number_id, build-list-body(request))
+}
+
+SendCtaUrlRequest type {
+  phone_number_id: Str,
+  to: Str,
+  body_text: Str,
+  display_text: Str,
+  url: Str,
+  header: Map?,
+  footer_text: Str?,
+  reply_to: Str?
+}
+
+build-cta-url-body fn (request: SendCtaUrlRequest): Map {
+  build-interactive(request.to, "cta_url", request.body_text,
+    {name: "cta_url", parameters: {display_text: request.display_text, url: request.url}},
+    request.header, request.footer_text, request.reply_to)
+}
+
+send-cta-url
+meta {
+    doc: """
+    Send an interactive call-to-action URL button: body text plus one button that opens `url`, so you can link out without showing a raw URL. `display_text` is the button label (max 20 characters); `body_text` max 1024, `footer_text` max 60. `header` is optional: `{type: "text", text}` or an image/video/document header such as `{type: "image", image: {link: "https://..."}}`.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    ::messages/send-cta-url(::messages/SendCtaUrlRequest({
+      phone_number_id: "109876543210",
+      to: "15551234567",
+      body_text: "Your invoice is ready.",
+      display_text: "View invoice",
+      url: "https://example.com/invoices/123"
+    }))
+    ```
+    """
+}
+fn (request: SendCtaUrlRequest): Map {
+  send-message(request.phone_number_id, build-cta-url-body(request))
+}
+
+SendLocationRequestRequest type {
+  phone_number_id: Str,
+  to: Str,
+  body_text: Str,
+  reply_to: Str?
+}
+
+build-location-request-body fn (request: SendLocationRequestRequest): Map {
+  build-interactive(request.to, "location_request_message", request.body_text,
+    {name: "send_location"}, null, null, request.reply_to)
+}
+
+send-location-request
+meta {
+    doc: """
+    Ask the user to share their location: shows `body_text` with a "Send location" button. The shared location arrives as a `location` message on the messages webhook.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    ::messages/send-location-request(::messages/SendLocationRequestRequest({
+      phone_number_id: "109876543210",
+      to: "15551234567",
+      body_text: "Where should we deliver your order?"
+    }))
+    ```
+    """
+}
+fn (request: SendLocationRequestRequest): Map {
+  send-message(request.phone_number_id, build-location-request-body(request))
+}
+
+SendFlowRequest type {
+  phone_number_id: Str,
+  to: Str,
+  body_text: Str,
+  flow_cta: Str,
+  flow_id: Str?,
+  flow_name: Str?,
+  flow_token: Str?,
+  mode: Str?,
+  flow_action: Str?,
+  screen: Str?,
+  data: Map?,
+  header: Map?,
+  footer_text: Str?,
+  reply_to: Str?
+}
+
+build-flow-body fn (request: SendFlowRequest): Map {
+  flow-ref cond {
+    is-some(request.flow_id) => { {flow_id: request.flow_id} }
+    is-some(request.flow_name) => { {flow_name: request.flow_name} }
+    => { fail("whatsapp: provide either flow_id or flow_name") }
   }
 
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+  payload if(or(is-some(request.screen), is-some(request.data)),
+    {} |> assoc-some("screen", request.screen) |> assoc-some("data", request.data),
+    null)
+  parameters {flow_message_version: "3", flow_cta: request.flow_cta, ...flow-ref}
+    |> assoc-some("flow_token", request.flow_token)
+    |> assoc-some("mode", request.mode)
+    |> assoc-some("flow_action", request.flow_action)
+    |> assoc-some("flow_action_payload", payload)
+
+  build-interactive(request.to, "flow", request.body_text,
+    {name: "flow", parameters: parameters},
+    request.header, request.footer_text, request.reply_to)
+}
+
+send-flow
+meta {
+    doc: """
+    Send a WhatsApp Flow as an interactive message. Identify the Flow by `flow_id` or `flow_name` (one of them). `flow_cta` is the button label (keep it under 30 characters, no emoji). Optional: `flow_token` (your correlation id, echoed back on completion), `mode` (`"published"` default, or `"draft"` for testing), `flow_action` (`"navigate"` default, or `"data_exchange"`), and for navigate, the entry `screen` and initial `data` Map.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    ::messages/send-flow(::messages/SendFlowRequest({
+      phone_number_id: "109876543210",
+      to: "15551234567",
+      body_text: "Book your appointment in a few taps.",
+      flow_cta: "Book now",
+      flow_id: "1234567890",
+      flow_token: "booking-42",
+      screen: "APPOINTMENT",
+      data: {service: "haircut"}
+    }))
+    ```
+    """
+}
+fn (request: SendFlowRequest): Map {
+  send-message(request.phone_number_id, build-flow-body(request))
 }
 
 // ============================================================================
-// Read Receipts
+// Read Receipts and Typing Indicator
 // ============================================================================
 
 MarkReadRequest type {
   phone_number_id: Str,
-  message_id: Str
+  message_id: Str,
+  typing_indicator: Bool?
+}
+
+build-mark-read-body fn (request: MarkReadRequest): Map {
+  {messaging_product: "whatsapp", status: "read", message_id: request.message_id}
+    |> assoc-some("typing_indicator", if(eq(request.typing_indicator, true), {type: "text"}, null))
 }
 
 mark-read
 meta {
     doc: """
-Mark a message as read (shows blue checkmarks to the sender).
+    Mark a received message as read (blue checkmarks for the sender; earlier messages in the thread are marked too). Set `typing_indicator: true` to also show the "typing..." indicator, which stays until you reply or 25 seconds pass — only use it when you are about to respond. Returns `{success: true}`.
 
-**Example**
+    **Example**
 
-```hot
-::messages ::whatsapp::messages
+    ```hot
+    ::messages ::whatsapp::messages
 
-::messages/mark-read(::messages/MarkReadRequest({
-  phone_number_id: "109876543210",
-  message_id: "wamid.HBg..."
-}))
-```
-"""
+    ::messages/mark-read(::messages/MarkReadRequest({
+      phone_number_id: "109876543210",
+      message_id: "wamid.HBg...",
+      typing_indicator: true
+    }))
+    ```
+    """
 }
 fn (request: MarkReadRequest): Map {
-  body {
-    messaging_product: "whatsapp",
-    status: "read",
-    message_id: request.message_id
-  }
-
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/messages`), {}, body)
+  send-message(request.phone_number_id, build-mark-read-body(request))
 }

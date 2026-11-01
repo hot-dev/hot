@@ -1,0 +1,335 @@
+::zendesk::api ns
+meta {
+    ctx: {
+        "zendesk.subdomain": {required: true, secret: false},
+        "zendesk.email": {required: false, secret: false},
+        "zendesk.api.token": {required: false},
+        "zendesk.oauth.token": {required: false}
+    },
+    doc: """
+    Low-level Zendesk transport: subdomain normalising, API token
+    (Basic) or OAuth (Bearer) auth, `HttpError` with a parsed
+    `retry-after` for 429s, and cursor pagination (`page[size]`,
+    `page[after]`, `meta.has_more`, `meta.after_cursor`).
+    """
+}
+
+::ctx ::hot::ctx
+::b64 ::hot::base64
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError
+meta {
+    doc: """A non-2xx Zendesk response. `retry-after` is the parsed `Retry-After` header in seconds (set on 429 rate limits and some 503s), or null."""
+}
+type {
+    status: Int,
+    headers: Map,
+    body: Any,
+    retry-after: Int?
+}
+
+http-error
+meta {
+    doc: """Build the `HttpError` for a non-2xx response, parsing `Retry-After`. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse): HttpError {
+  headers or(response.headers, {})
+  HttpError({
+    status: response.status,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers)
+  })
+}
+
+retry-after
+meta {
+    doc: """Parse the `Retry-After` header (seconds) from response headers, or null when absent or not a number. Exposed for testing."""
+}
+fn (headers: Map): Int? {
+  value get(headers, "retry-after")
+  match value {
+    Null => { null }
+    _ => {
+      parsed Int(trim(Str(value)))
+      match parsed {
+        Result.Err => { null }
+        _ => { parsed }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subdomain and auth
+// ---------------------------------------------------------------------------
+
+normalize-subdomain
+meta {
+    doc: """
+    Reduce `acme`, `acme.zendesk.com`, `https://acme.zendesk.com/` or
+    `https://acme.zendesk.com/agent` to the bare handle `acme`
+    (lowercased). Anything that isn't a plain Zendesk handle afterwards
+    (dots, slashes, `@`, empty) is an Err, so a bad value can't point
+    requests and credentials at another host. Exposed for testing.
+    """
+}
+fn (subdomain: Str): Str {
+  stripped lowercase(trim(subdomain))
+    |> ::re/replace-all("^https?://", "")
+    |> ::re/replace-all("/.*$", "")
+    |> ::re/replace-all("\\.zendesk\\.com$", "")
+  cond {
+    ::re/is-match(stripped, "^[a-z0-9][a-z0-9-]*$") => { stripped }
+    => { err(`zendesk.subdomain must be a Zendesk handle like "acme" or "acme.zendesk.com" (got '${subdomain}')`) }
+  }
+}
+
+base-url
+meta {
+    doc: """`https://{subdomain}.zendesk.com/api/v2` for a handle or full `*.zendesk.com` host (see `normalize-subdomain`)."""
+}
+fn (subdomain: Str): Str {
+  `https://${normalize-subdomain(subdomain)}.zendesk.com/api/v2`
+}
+
+auth-header
+meta {
+    doc: """Zendesk API token auth: `Basic base64("{email}/token:{api-token}")`. Exposed for testing."""
+}
+fn (email: Str, token: Str): Str {
+  credentials `${email}/token:${token}`
+  `Basic ${::b64/encode(Bytes(credentials))}`
+}
+
+resolve-auth
+meta {
+    doc: """
+    Pick the Authorization header: an OAuth access token gives `Bearer
+    {token}` and wins when set; otherwise email plus API token gives
+    Basic token auth. Returns an Err naming the missing context
+    variables when neither is complete. Exposed for testing.
+    """
+}
+fn (oauth-token: Str?, email: Str?, api-token: Str?): Str {
+  present (v) { and(is-some(v), not(is-empty(trim(Str(or(v, "")))))) }
+  cond {
+    present(oauth-token) => { `Bearer ${oauth-token}` }
+    and(present(email), present(api-token)) => { auth-header(email, api-token) }
+    => { err("Zendesk auth is not configured: set zendesk.oauth.token, or both zendesk.email and zendesk.api.token.") }
+  }
+}
+
+ctx-auth
+meta {
+    ctx: {
+        "zendesk.email": {required: false, secret: false},
+        "zendesk.api.token": {required: false},
+        "zendesk.oauth.token": {required: false}
+    },
+    doc: """The Authorization header from context (see `resolve-auth`)."""
+}
+fn (): Str {
+  resolve-auth(::ctx/get("zendesk.oauth.token"), ::ctx/get("zendesk.email"), ::ctx/get("zendesk.api.token"))
+}
+
+build-headers
+meta {
+    doc: """Request headers: Authorization, `Accept: application/json`, and `Content-Type` only when there is a body. Exposed for testing."""
+}
+fn (authorization: Str, has-body: Bool): Map {
+  base {Authorization: authorization, Accept: "application/json"}
+  if(has-body, {...base, Content-Type: "application/json"}, base)
+}
+
+response-body
+meta {
+    doc: """Normalize a decoded 2xx body: empty text (204 No Content, e.g. deletes) becomes null; anything else passes through. Exposed for testing."""
+}
+fn (body: Any): Any {
+  match body {
+    Str => { if(is-empty(trim(body)), null, body) }
+    _ => { body }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+request-with-auth
+meta {
+    doc: """Make a Zendesk request with an explicit subdomain and Authorization header value. `path` is relative to `/api/v2`; `body` is a Map, or `""` for none. Returns the decoded body on 2xx (null when empty), or an Err carrying `HttpError`."""
+}
+fn (method: Str, path: Str, body: Any, subdomain: Str, authorization: Str): Any {
+  has-body not(eq(body, ""))
+  response ::hot::http/request(HttpRequest({
+    method,
+    url: `${base-url(subdomain)}${path}`,
+    headers: build-headers(authorization, has-body),
+    body: if(has-body, to-json(untype(body)), "")
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response-body(response.body) }
+    => { err(http-error(response)) }
+  }
+}
+
+request
+meta {
+    ctx: {"zendesk.subdomain": {required: true, secret: false}},
+    doc: """
+    Make an authenticated Zendesk Support request using the context's
+    subdomain and credentials. `path` is relative to `/api/v2` (e.g.
+    `/groups`). Returns the decoded body on 2xx (null when empty), or an
+    Err carrying `HttpError`. The 6-arity form takes an explicit
+    subdomain, email and API token.
+
+    **Example**
+
+    ```hot
+    groups ::zendesk::api/request("GET", "/groups", "")
+    ```
+    """
+}
+fn
+(method: Str, path: Str, body: Any): Any {
+  request-with-auth(method, path, body, ::ctx/get("zendesk.subdomain"), ctx-auth())
+},
+// 6-arity: explicit subdomain + API token credential override
+(method: Str, path: Str, body: Any, subdomain: Str, email: Str, api-token: Str): Any {
+  request-with-auth(method, path, body, subdomain, auth-header(email, api-token))
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment (an id). Ints pass through as text."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+query-string
+meta {
+    doc: """Build a `?a=1` suffix from a Map, dropping null values; `""` when nothing remains. Vec values are comma-joined (Zendesk's `ids=1,2,3` form)."""
+}
+fn (options: Map): Str {
+  ::uri/query-string(map-vals(options, (v) {
+    match v {
+      Vec => { join(map(v, (x) { Str(x) }), ",") }
+      _ => { v }
+    }
+  }))
+}
+
+compact
+meta {
+    doc: """Drop null-valued keys so unset optionals are omitted rather than sent as JSON null."""
+}
+fn (body: Map): Map {
+  filter-vals(body, is-some)
+}
+
+// ---------------------------------------------------------------------------
+// Cursor pagination
+// ---------------------------------------------------------------------------
+
+cursor-query
+meta {
+    doc: """
+    Build a cursor-paginated query string. `options` takes `page_size`
+    (sent as `page[size]`, default 100) and `after` (sent as
+    `page[after]`, the previous page's `meta.after_cursor`); every other
+    key (`sort`, `include`, filters) passes through. Exposed for testing.
+    """
+}
+fn (options: Map): Str {
+  rest delete(delete(options, "page_size"), "after")
+  query-string({
+    ...rest,
+    "page[size]": or(get(options, "page_size"), ::zendesk/DEFAULT_PAGE_SIZE),
+    "page[after]": get(options, "after")
+  })
+}
+
+next-after
+meta {
+    doc: """The `page[after]` cursor for the page after `page`: `meta.after_cursor` when `meta.has_more` is true, otherwise null."""
+}
+fn (page: Any): Str? {
+  meta-block or(get(or(page, {}), "meta"), {})
+  if(eq(get(meta-block, "has_more"), true), get(meta-block, "after_cursor"), null)
+}
+
+list-page
+meta {
+    doc: """
+    GET one cursor page of `path` (relative to `/api/v2`, without a
+    query string). Returns the body: the item Vec under its resource key
+    plus `meta: {has_more, after_cursor, before_cursor}` and `links`.
+    Read the next cursor with `next-after`.
+
+    **Example**
+
+    ```hot
+    page ::zendesk::api/list-page("/groups", {page_size: 50})
+    more ::zendesk::api/list-page("/groups", {page_size: 50, after: ::zendesk::api/next-after(page)})
+    ```
+    """
+}
+fn (path: Str, options: Map): Any {
+  request("GET", `${path}${cursor-query(options)}`, "")
+}
+
+collect-pages
+meta {
+    doc: """
+    Follow cursors, concatenating each page's `key` Vec, until `limit`
+    items or `meta.has_more` is false. `fetch` is a Fn taking the cursor
+    (null for the first page) and returning one page. Exposed for
+    testing; `collect` uses it.
+    """
+}
+fn (fetch: Fn, key: Str, cursor: Str?, limit: Int, acc: Vec): Vec {
+  cond {
+    lte(limit, length(acc)) => { slice(acc, 0, max(limit, 0)) }
+    => {
+      page fetch(cursor)
+      items or(get(page, key), [])
+      combined concat(acc, items)
+      next next-after(page)
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        is-null(next) => { combined }
+        => { collect-pages(fetch, key, next, limit, combined) }
+      }
+    }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Collect up to `limit` items from a cursor-paginated list: `key` is
+    the resource key in each page (`"tickets"`, `"users"`, ...).
+    `options` takes the same filters as `list-page`.
+
+    **Example**
+
+    ```hot
+    groups ::zendesk::api/collect("/groups", "groups", {}, 500)
+    ```
+    """
+}
+fn (path: Str, key: Str, options: Map, limit: Int): Vec {
+  size min(::zendesk/DEFAULT_PAGE_SIZE, max(1, limit))
+  collect-pages((cursor) { list-page(path, {page_size: size, ...options, after: cursor}) }, key, null, limit, [])
+}

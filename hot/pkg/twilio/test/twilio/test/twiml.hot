@@ -1,0 +1,109 @@
+::twilio::test::twiml ns
+meta ["test"]
+
+::twiml ::twilio::twiml
+
+DECL """<?xml version="1.0" encoding="UTF-8"?>"""
+
+test-escape-xml
+meta ["test"]
+fn () {
+    assert-eq("Tom &amp; Jerry &lt;3 &gt; &quot;hi&quot; &apos;x&apos;", ::twiml/escape-xml("Tom & Jerry <3 > \"hi\" 'x'"))
+    assert-eq("&amp;amp;", ::twiml/escape-xml("&amp;"))
+}
+
+test-say-escapes-text
+meta ["test"]
+fn () {
+    assert-eq("<Say>a &lt;Hangup/&gt; b</Say>", ::twiml/say("a <Hangup/> b"))
+}
+
+test-attributes-escaped-ordered-and-nulls-omitted
+meta ["test"]
+fn () {
+    xml ::twiml/say("hi", {voice: "Polly.Joanna", language: null, loop: 2})
+    assert-eq("<Say voice=\"Polly.Joanna\" loop=\"2\">hi</Say>", xml)
+    assert-eq("<Redirect method=\"GET\">https://a.example/x?a=1&amp;b=&quot;2&quot;</Redirect>",
+        ::twiml/redirect("https://a.example/x?a=1&b=\"2\"", {method: "GET"}))
+    assert-eq("<Play loop=\"1\">https://a.example/&quot;&gt;&lt;x</Play>", ::twiml/play("https://a.example/\"><x", {loop: 1}))
+}
+
+test-attribute-value-injection-is-escaped
+meta ["test"]
+fn () {
+    xml ::twiml/gather({action: "/x\" method=\"GET"}, [])
+    assert-eq("<Gather action=\"/x&quot; method=&quot;GET\"/>", xml)
+}
+
+test-vec-attributes-space-joined-and-bools
+meta ["test"]
+fn () {
+    xml ::twiml/number("+15558675310", {statusCallbackEvent: ["initiated", "ringing", "answered"], machineDetection: "Enable"})
+    assert-eq("<Number statusCallbackEvent=\"initiated ringing answered\" machineDetection=\"Enable\">+15558675310</Number>", xml)
+    assert-eq("<Record playBeep=\"false\" maxLength=\"30\"/>", ::twiml/record({playBeep: false, maxLength: 30}))
+}
+
+test-gather-nests-prompts
+meta ["test"]
+fn () {
+    xml ::twiml/gather({input: "dtmf speech", numDigits: 1, action: "/menu"}, [::twiml/say("Press 1"), ::twiml/pause(1)])
+    assert-eq("<Gather input=\"dtmf speech\" numDigits=\"1\" action=\"/menu\"><Say>Press 1</Say><Pause length=\"1\"/></Gather>", xml)
+}
+
+test-dial-text-and-nouns
+meta ["test"]
+fn () {
+    assert-eq("<Dial callerId=\"+15017122661\">+15558675310</Dial>", ::twiml/dial("+15558675310", {callerId: "+15017122661"}))
+    assert-eq("<Dial><Number>+15558675310</Number><Client>alice</Client><Conference startConferenceOnEnter=\"true\">room &amp; co</Conference></Dial>",
+        ::twiml/dial([::twiml/number("+15558675310"), ::twiml/client("alice"), ::twiml/conference("room & co", {startConferenceOnEnter: true})]))
+}
+
+test-self-closing-verbs
+meta ["test"]
+fn () {
+    assert-eq("<Hangup/>", ::twiml/hangup())
+    assert-eq("<Pause/>", ::twiml/pause())
+    assert-eq("<Record/>", ::twiml/record())
+    assert-eq("<Reject reason=\"busy\"/>", ::twiml/reject({reason: "busy"}))
+}
+
+test-voice-response-document
+meta ["test"]
+fn () {
+    xml ::twiml/voice-response([::twiml/say("Hello"), ::twiml/hangup()])
+    assert-eq(`${DECL}<Response><Say>Hello</Say><Hangup/></Response>`, xml)
+    assert-eq(`${DECL}<Response/>`, ::twiml/voice-response([]))
+}
+
+test-messaging-response-with-media
+meta ["test"]
+fn () {
+    xml ::twiml/messaging-response([
+        ::twiml/message([::twiml/body("Map & directions"), ::twiml/media("https://a.example/m.png")], {to: "+15558675310"})
+    ])
+    assert-eq(`${DECL}<Response><Message to="+15558675310"><Body>Map &amp; directions</Body><Media>https://a.example/m.png</Media></Message></Response>`, xml)
+    assert-eq("<Message>5 &lt; 6</Message>", ::twiml/message("5 < 6"))
+}
+
+test-twiml-parses-as-xml
+meta ["test"]
+fn () {
+    // Escaped specials must still yield well-formed XML. (hot-std's
+    // ::hot::xml/text drops entity-decoded characters, so the text check
+    // uses plain text and the escaped document is only checked to parse.)
+    escaped ::hot::xml/from-xml(::twiml/voice-response([::twiml/say("a & b <c>", {voice: "a\"b"})]))
+    assert-eq("Response", escaped.tag)
+    xml ::twiml/voice-response([::twiml/say("Hello there", {voice: "alice"})])
+    parsed ::hot::xml/from-xml(xml)
+    say ::hot::xml/child(parsed, "Say")
+    assert-eq("Hello there", ::hot::xml/text(say))
+    assert-eq("alice", ::hot::xml/attr(say, "voice"))
+}
+
+test-http-response
+meta ["test"]
+fn () {
+    r ::twiml/http-response(::twiml/messaging-response([]))
+    assert-eq(200, r.status)
+    assert-eq("text/xml", get(r.headers, "Content-Type"))
+}

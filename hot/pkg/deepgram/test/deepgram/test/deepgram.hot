@@ -1,20 +1,185 @@
 ::deepgram::test ns
 meta ["test"]
 
-test-transcript-extraction
+::dg ::deepgram
+::api ::deepgram::api
+
+// ============================================================================
+// Query strings
+// ============================================================================
+
+test-query-string-repeats-vec-keys
 meta ["test"] fn () {
-    response {
+    q ::api/query-string({model: "nova-3", keyterm: ["Hot Dev", "Deepgram"]})
+    assert-eq("?model=nova-3&keyterm=Hot%20Dev&keyterm=Deepgram", q)
+}
+
+test-query-string-omits-nulls-and-encodes
+meta ["test"] fn () {
+    q ::api/query-string({smart_format: true, diarize: null, search: ["a&b"], utt_split: 0.5})
+    assert-eq("?smart_format=true&search=a%26b&utt_split=0.5", q)
+    assert-eq("", ::api/query-string({}))
+    assert-eq("", ::api/query-string({language: null}))
+    assert-eq("", ::api/query-string({keyterm: []}), "an empty Vec adds nothing")
+}
+
+test-listen-path-defaults
+meta ["test"] fn () {
+    assert-eq("/v1/listen?model=nova-3&smart_format=true", ::dg/listen-path({}))
+}
+
+test-listen-path-overrides-and-drops-defaults
+meta ["test"] fn () {
+    path ::dg/listen-path({model: "nova-2", smart_format: null, diarize_model: "latest"})
+    assert-eq("/v1/listen?model=nova-2&diarize_model=latest", path)
+}
+
+test-listen-params-map-extra-becomes-pairs
+meta ["test"] fn () {
+    params ::dg/listen-params({extra: {job: "42", user: "ada", skip: null}})
+    assert-eq(["job:42", "user:ada"], params.extra)
+    path ::dg/listen-path({extra: {job: "42"}})
+    assert(contains(path, "extra=job%3A42"), "extra pair is encoded as key:value")
+}
+
+test-speak-path-default-model
+meta ["test"] fn () {
+    assert-eq("/v1/speak?model=aura-2-thalia-en", ::dg/speak-path({}))
+    assert-eq("/v1/speak?model=aura-2-orion-en&encoding=mulaw&sample_rate=8000",
+        ::dg/speak-path({model: "aura-2-orion-en", encoding: "mulaw", sample_rate: 8000}))
+}
+
+// ============================================================================
+// Callback params
+// ============================================================================
+
+test-callback-params-with-secret
+meta ["test"] fn () {
+    params ::dg/callback-params("https://example.com/hook", "abc123")
+    assert-eq("https://example.com/hook", params.callback)
+    assert-eq(["callback_secret:abc123"], params.extra)
+}
+
+test-callback-params-without-secret-omits-extra
+meta ["test"] fn () {
+    params ::dg/callback-params("https://example.com/hook", null)
+    assert(not(in("extra", keys(params))), "no secret, no extra")
+    empty ::dg/callback-params("https://example.com/hook", "")
+    assert(not(in("extra", keys(empty))), "empty secret, no extra")
+}
+
+test-with-callback-keeps-caller-extra
+meta ["test"] fn () {
+    params ::dg/with-callback({extra: {job: "7"}}, "https://example.com/hook")
+    assert-eq("https://example.com/hook", params.callback)
+    assert-eq("nova-3", params.model, "defaults still apply")
+    assert(in("job:7", params.extra), "caller extra kept")
+}
+
+// ============================================================================
+// Response helpers
+// ============================================================================
+
+sample-response fn (): Map {
+    {
+        metadata: {request_id: "req-1"},
         results: {
-            channels: [{alternatives: [{transcript: "hello hot", confidence: 0.99}]}]
+            channels: [
+                {alternatives: [{
+                    transcript: "hello hot. how are you?",
+                    confidence: 0.99,
+                    words: [{word: "hello", start: 0.1, end: 0.4}, {word: "hot", start: 0.5, end: 0.8}],
+                    paragraphs: {
+                        transcript: "\nhello hot.\n\nhow are you?",
+                        paragraphs: [
+                            {sentences: [{text: "hello hot.", start: 0.1, end: 0.8}], speaker: 0, num_words: 2},
+                            {sentences: [{text: "how are you?", start: 1.0, end: 1.6}], speaker: 1, num_words: 3}
+                        ]
+                    }
+                }]},
+                {alternatives: [{transcript: "second channel"}]}
+            ],
+            utterances: [
+                {speaker: 0, transcript: "hello hot.", start: 0.1, end: 0.8},
+                {speaker: 1, transcript: "how are you?", start: 1.0, end: 1.6}
+            ]
         }
     }
+}
 
-    assert-eq("hello hot", ::deepgram/transcript(response))
+test-transcript-extraction
+meta ["test"] fn () {
+    response sample-response()
+    assert-eq("hello hot. how are you?", ::dg/transcript(response))
+    assert-eq(["hello hot. how are you?", "second channel"], ::dg/transcripts(response))
+    assert-eq(2, length(::dg/words(response)))
+    assert-eq("req-1", ::dg/request-id(response))
+}
+
+test-utterances-and-paragraphs
+meta ["test"] fn () {
+    response sample-response()
+    assert-eq(2, length(::dg/utterances(response)))
+    assert-eq("[Speaker 0] hello hot.\n[Speaker 1] how are you?", ::dg/format-utterances(response))
+    assert-eq(2, length(::dg/paragraphs(response)))
+    assert-eq("how are you?", ::dg/paragraphs(response)[1].sentences[0].text)
+    assert-eq("\nhello hot.\n\nhow are you?", ::dg/paragraph-transcript(response))
+}
+
+test-format-utterances-without-speakers-and-fallback
+meta ["test"] fn () {
+    no-speakers {results: {channels: [], utterances: [{transcript: "one"}, {transcript: "two"}]}}
+    assert-eq("one\ntwo", ::dg/format-utterances(no-speakers))
+    plain {results: {channels: [{alternatives: [{transcript: "only text"}]}]}}
+    assert-eq("only text", ::dg/format-utterances(plain), "falls back to transcript")
+    assert-eq("only text", ::dg/paragraph-transcript(plain), "falls back to transcript")
 }
 
 test-transcript-empty-shapes
 meta ["test"] fn () {
-    assert-eq("", ::deepgram/transcript({}))
-    assert-eq("", ::deepgram/transcript({results: {channels: []}}))
-    assert-eq("", ::deepgram/transcript({results: {channels: [{alternatives: []}]}}))
+    assert-eq("", ::dg/transcript({}))
+    assert-eq("", ::dg/transcript({results: {channels: []}}))
+    assert-eq("", ::dg/transcript({results: {channels: [{alternatives: []}]}}))
+    assert-eq([], ::dg/words({}))
+    assert-eq([], ::dg/utterances({}))
+    assert-eq([], ::dg/paragraphs({}))
+    assert-eq([], ::dg/transcripts({}))
+}
+
+test-async-acknowledgement
+meta ["test"] fn () {
+    ack {request_id: "c22bea24-ecd3-4b53-bcbf-8ef087d905a5"}
+    assert(::dg/is-accepted(ack))
+    assert-eq("c22bea24-ecd3-4b53-bcbf-8ef087d905a5", ::dg/request-id(ack))
+    assert(not(::dg/is-accepted(sample-response())), "a finished transcription is not an ack")
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-error-message-legacy-shape
+meta ["test"] fn () {
+    msg ::api/error-message(401, {err_code: "INVALID_AUTH", err_msg: "Invalid credentials.", request_id: "r"})
+    assert-eq("Deepgram API error (HTTP 401): INVALID_AUTH: Invalid credentials.", msg)
+}
+
+test-error-message-modern-and-text-shapes
+meta ["test"] fn () {
+    assert-eq("Deepgram API error (HTTP 400): INVALID_QUERY_PARAMETER: Unknown model",
+        ::api/error-message(400, {category: "INVALID_QUERY_PARAMETER", message: "Unknown model"}))
+    assert-eq("Deepgram API error (HTTP 502): Bad gateway", ::api/error-message(502, "Bad gateway\n"))
+    assert-eq("Deepgram API error (HTTP 500)", ::api/error-message(500, null))
+    assert-eq("Deepgram API error (HTTP 500)", ::api/error-message(500, ""))
+}
+
+test-http-error-from-response
+meta ["test"] fn () {
+    e ::api/http-error(::hot::http/HttpResponse({
+        status: 402,
+        headers: {},
+        body: {err_code: "ASR_PAYMENT_REQUIRED", err_msg: "Project does not have enough credits."}
+    }))
+    assert-eq(402, e.status)
+    assert(contains(e.message, "enough credits"), "message carries Deepgram's err_msg")
 }

@@ -1,11 +1,18 @@
 ::stripe::api ns
-meta {ctx: {"stripe.api.key": {required: true}}}
+meta {
+    ctx: {
+        "stripe.api.key": {required: true},
+        "stripe.api.version": {required: false}
+    },
+    doc: """
+    Authenticated access to the Stripe REST API: form encoding, the `Stripe-Version` / `Idempotency-Key` / `Stripe-Account` headers, error handling, and auto-pagination. The typed modules (`::stripe::customers`, `::stripe::payment-intents`, ...) are built on `call`; use it directly for any endpoint they don't cover.
+    """
+}
 
 // Namespace aliases
 ::ctx ::hot::ctx
 ::uri ::hot::uri
 
-http-request ::hot::http/request
 is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
 HttpResponse ::hot::http/HttpResponse
@@ -13,7 +20,7 @@ HttpResponse ::hot::http/HttpResponse
 HttpError
 meta {
     doc: """
-    Represents an error response from the Stripe API. Wraps the HTTP status code, response headers, and error body returned by a failed request.
+    Represents an error response from the Stripe API. Wraps the HTTP status code, response headers, and error body returned by a failed request. Stripe's structured details (`type`, `code`, `message`, `param`, ...) are in `body.error`; see `::stripe/Error`.
 
     **Example**
 
@@ -21,7 +28,7 @@ meta {
     response ::stripe::api/request("GET", `${::stripe/BASE_URL}/v1/balance`)
     error ::stripe::api/HttpError(response)
     error.status  // => 401
-    error.body.error.type  // => "authentication_error"
+    error.body.error.type  // => "invalid_request_error"
     ```
     """
 }
@@ -42,6 +49,72 @@ fn (response: HttpResponse): HttpError {
     body: response.body
   })
 }
+
+// ============================================================================
+// Request options
+// ============================================================================
+
+RequestOptions
+meta {
+    doc: """
+    Per-request options, accepted as the last argument by every typed write function (and by `call`). Field names match Stripe's official SDKs.
+
+    - `idempotency_key`: sent as `Idempotency-Key`. Stripe returns the stored result for a repeated key (within 24 hours) instead of performing the write again, so a retried create/confirm/capture/refund can never double-charge. Use a value tied to your own record, e.g. `order-42-charge`. Only POST requests use it.
+    - `stripe_account`: sent as `Stripe-Account` to act on behalf of a connected account (Connect).
+    - `stripe_version`: overrides the `Stripe-Version` for this call.
+
+    **Example**
+
+    ```hot
+    ::pi ::stripe::payment-intents
+
+    ::pi/create-payment-intent(
+      ::pi/CreatePaymentIntentRequest({amount: 2000, currency: "usd"}),
+      ::stripe::api/RequestOptions({idempotency_key: "order-42-payment"})
+    )
+    ```
+    """
+}
+type {
+    idempotency_key: Str?,
+    stripe_account: Str?,
+    stripe_version: Str?
+}
+
+api-version
+meta {
+    doc: """The `Stripe-Version` sent when a call doesn't override it: the `stripe.api.version` context variable when set, otherwise `::stripe/API_VERSION`."""
+}
+fn (): Str {
+  configured ::ctx/get("stripe.api.version")
+  if(or(is-null(configured), eq(configured, "")), ::stripe/API_VERSION, configured)
+}
+
+option-headers
+meta {
+    doc: """
+    The headers a `RequestOptions` adds to a request: `Idempotency-Key`, `Stripe-Account`, and `Stripe-Version` (only those that are set).
+
+    **Example**
+
+    ```hot
+    ::stripe::api/option-headers(::stripe::api/RequestOptions({idempotency_key: "k1"}))
+    // => {Idempotency-Key: "k1"}
+    ```
+    """
+}
+fn (options: RequestOptions): Map {
+  opts untype(options)
+  filter-vals({
+    Idempotency-Key: get(opts, "idempotency_key"),
+    Stripe-Account: get(opts, "stripe_account"),
+    Stripe-Version: get(opts, "stripe_version")
+  }, (v) { and(is-some(v), not(eq(v, ""))) })
+}
+
+// ============================================================================
+// Encoding
+// ============================================================================
 
 encode-pairs fn (key: Str, value: Any): Vec<Str> {
   cond {
@@ -92,16 +165,63 @@ fn (params: Map): Str {
   if(is-empty(encoded), "", `?${encoded}`)
 }
 
+encode-id
+meta {
+    doc: """Percent-encode an object ID for use as a URL path segment, so an ID taken from user input can't change which endpoint is called."""
+}
+fn (id: Str): Str {
+  ::uri/encode(id)
+}
+
+// ============================================================================
+// Requests
+// ============================================================================
+
+build-request
+meta {
+    doc: """
+    Build (without sending) the `HttpRequest` for a Stripe call. GET and DELETE parameters go in the query string and POST parameters in a form-encoded body, as Stripe's SDKs do. Every request carries `Authorization` and `Stripe-Version`; `additional-headers` are merged last, so they can override either.
+
+    **Example**
+
+    ```hot
+    req ::stripe::api/build-request("POST", `${::stripe/BASE_URL}/v1/customers`, {Idempotency-Key: "k1"}, {name: "Alice"}, "sk_test_123")
+    req.headers.Stripe-Version  // => "2026-10-28.endive"
+    req.body                    // => "name=Alice"
+    ```
+    """
+}
+fn (method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpRequest {
+  default-headers {
+    Authorization: `Bearer ${api-key}`,
+    Stripe-Version: api-version()
+  }
+
+  encoded if(or(is-null(body), eq(body, "")), "", form-encode(untype(body)))
+  in-query or(eq(uppercase(method), "GET"), eq(uppercase(method), "DELETE"))
+  separator if(contains(url, "?"), "&", "?")
+  final-url if(and(in-query, not(is-empty(encoded))), `${url}${separator}${encoded}`, url)
+  encoded-body if(in-query, "", encoded)
+  headers if(is-empty(encoded-body), default-headers, {...default-headers, Content-Type: "application/x-www-form-urlencoded"})
+
+  HttpRequest({
+    method,
+    url: final-url,
+    headers: {...headers, ...additional-headers},
+    body: encoded-body
+  })
+}
+
 request
 meta {
     doc: """
-    Make an authenticated HTTP request to the Stripe API with pre-filled authorization headers. Supports multiple arities for convenience.
+    Make an authenticated HTTP request to the Stripe API and return the raw `HttpResponse`. Supports multiple arities for convenience.
 
-    The API key is read from context (`stripe.api.key`) by default, or can be provided explicitly via the 5-arity form. Additional headers can be provided to merge with or override the defaults.
+    The API key is read from context (`stripe.api.key`) by default, or can be provided explicitly via the 5-arity form. `Stripe-Version` is always sent (see `api-version`). Additional headers are merged over the defaults.
 
-    Request bodies are form-encoded (`application/x-www-form-urlencoded`) per Stripe's API convention — Stripe does not accept JSON bodies. Nested maps and arrays use Stripe's bracket syntax (see `form-encode`).
+    Parameters are form-encoded with Stripe's bracket syntax (see `form-encode`): in the body for POST, in the query string for GET and DELETE.
 
-    Use this directly for any Stripe endpoint not covered by the typed module functions.
+    Prefer `call`, which also unwraps the body and turns non-2xx responses into `err(HttpError)`.
 
     **Example**
 
@@ -128,23 +248,114 @@ fn
 },
 // 4-arity: use ctx api key (default) — delegates to 5-arity
 (method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, url, additional-headers, body, ::ctx/get("stripe.api.key"))
+  request(method, url, additional-headers, body, or(::ctx/get("stripe.api.key"), ""))
 },
 // 5-arity: explicit api key override
 (method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
-  default-headers {
-    Authorization: `Bearer ${api-key}`
+  ::hot::http/request(build-request(method, url, additional-headers, body, api-key))
+}
+
+call
+meta {
+    doc: """
+    Call a Stripe endpoint by path (relative to `::stripe/BASE_URL`) and return the decoded JSON body, or an Err carrying `HttpError` for non-2xx responses. `params` are sent as the query string for GET/DELETE and as the form body for POST; null values are omitted. `options` adds idempotency, Connect, and version headers (see `RequestOptions`).
+
+    **Example**
+
+    ```hot
+    // Endpoints without a typed wrapper
+    clock ::stripe::api/call("POST", "/v1/test_helpers/test_clocks", {frozen_time: 1767225600})
+    ::stripe::api/call("DELETE", `/v1/test_helpers/test_clocks/${clock.id}`)
+
+    // With an idempotency key
+    ::stripe::api/call("POST", "/v1/customers", {email: "alice@example.com"},
+      ::stripe::api/RequestOptions({idempotency_key: "signup-alice"}))
+    ```
+    """
+}
+fn
+(method: Str, path: Str): Any {
+  call(method, path, "", RequestOptions({}))
+},
+(method: Str, path: Str, params: Any): Any {
+  call(method, path, params, RequestOptions({}))
+},
+(method: Str, path: Str, params: Any, options: RequestOptions): Any {
+  response request(method, `${::stripe/BASE_URL}${path}`, option-headers(options), params)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
   }
+}
 
-  encoded-body if(eq(body, ""), "", form-encode(untype(body)))
-  has-body not(is-empty(encoded-body))
-  headers if(has-body, {...default-headers, Content-Type: "application/x-www-form-urlencoded"}, default-headers)
-  final-headers {...headers, ...additional-headers}
+// ============================================================================
+// Pagination
+// ============================================================================
 
-  ::hot::http/request(HttpRequest({
-    method,
-    url,
-    headers: final-headers,
-    body: encoded-body
-  }))
+next-page-params
+meta {
+    doc: """
+    The params for the page after `page`, or null when `page` is the last one. List pages (`object: "list"`) continue with `starting_after` set to the last object's ID (or `ending_before` with the first, when paging backwards); search pages (`object: "search_result"`) continue with `page: next_page`.
+
+    **Example**
+
+    ```hot
+    ::stripe::api/next-page-params({limit: 2}, {object: "list", has_more: true, data: [{id: "cus_1"}, {id: "cus_2"}]})
+    // => {limit: 2, starting_after: "cus_2"}
+    ```
+    """
+}
+fn (params: Map, page: Map): Map? {
+  data or(get(page, "data"), [])
+  cond {
+    not(eq(get(page, "has_more"), true)) => { null }
+    is-empty(data) => { null }
+    eq(get(page, "object"), "search_result") => {
+      next get(page, "next_page")
+      if(is-some(next), {...params, page: next}, null)
+    }
+
+    is-some(get(params, "ending_before")) => { {...params, ending_before: first(data).id} }
+    => { {...params, starting_after: last(data).id} }
+  }
+}
+
+collect-pages fn (path: Str, params: Map, max-items: Int, acc: Vec): Vec {
+  page call("GET", path, params)
+  items concat(acc, or(page.data, []))
+  next next-page-params(params, page)
+  cond {
+    and(gt(max-items, 0), gte(length(items), max-items)) => { take(items, max-items) }
+    is-null(next) => { items }
+    => { collect-pages(path, next, max-items, items) }
+  }
+}
+
+list-all
+meta {
+    doc: """
+    Auto-paginate a list or search endpoint: follows `has_more` (with `starting_after`, or `page` for `/search` endpoints) and returns every object as one Vec. `max-items` caps the total (default 1000; 0 means no cap). Pages are fetched 100 at a time unless `params.limit` says otherwise. An error on any page returns that page's Err.
+
+    **Example**
+
+    ```hot
+    // Every active subscription for a customer
+    subs ::stripe::api/list-all("/v1/subscriptions", {customer: "cus_...", status: "active"})
+
+    // Search results, capped at 250
+    hits ::stripe::api/list-all("/v1/customers/search", {query: `email:"alice@example.com"`}, 250)
+    ```
+    """
+}
+fn
+(path: Str): Vec {
+  list-all(path, {}, 1000)
+},
+(path: Str, params: Map): Vec {
+  list-all(path, params, 1000)
+},
+(path: Str, params: Map, max-items: Int): Vec {
+  p untype(params)
+  collect-pages(path, {...p, limit: or(get(p, "limit"), 100)}, max-items, [])
 }

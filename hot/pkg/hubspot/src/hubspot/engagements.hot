@@ -1,0 +1,122 @@
+::hubspot::engagements ns
+meta {
+    doc: """
+    Activities (HubSpot "engagements"): notes, tasks, calls, meetings, and
+    emails, created and associated to contacts, companies, deals, or
+    tickets in one call. Each activity is a CRM object, so reading,
+    updating, searching, and archiving them works through
+    `::hubspot::objects` with the activity's type (`"tasks"`, ...).
+    """
+}
+
+::api ::hubspot::api
+::objects ::hubspot::objects
+::time ::hot::time
+
+// HUBSPOT_DEFINED association type ids, activity -> record, from
+// HubSpot's association type id tables (2026-09 associations guide).
+ASSOCIATION_TYPE_IDS {
+  notes: {contacts: 202, companies: 190, deals: 214, tickets: 228},
+  tasks: {contacts: 204, companies: 192, deals: 216, tickets: 230},
+  calls: {contacts: 194, companies: 182, deals: 206, tickets: 220},
+  meetings: {contacts: 200, companies: 188, deals: 212, tickets: 226},
+  emails: {contacts: 198, companies: 186, deals: 210, tickets: 224}
+}
+
+association-type-id
+meta {
+    doc: """The HUBSPOT_DEFINED association type id linking an activity type (`notes`, `tasks`, `calls`, `meetings`, `emails`) to a record type (`contacts`, `companies`, `deals`, `tickets`). Fails for other pairs."""
+}
+fn (activity-type: Str, object-type: Str): Int {
+  id get(or(get(ASSOCIATION_TYPE_IDS, activity-type), {}), object-type)
+  cond {
+    is-null(id) => { fail(`hubspot: no ${activity-type} association type for '${object-type}' (use contacts/companies/deals/tickets)`) }
+    => { id }
+  }
+}
+
+now-ms fn (): Int {
+  ::time/epoch-millis(::time/now())
+}
+
+build-activity-body
+meta {
+    doc: """
+    The create payload for an activity: `properties` plus one association
+    per target. `targets` is a Vec of `{type, id}` (e.g. `{type:
+    "contacts", id: "123"}`). `hs_timestamp` defaults to `timestamp-ms`
+    when the properties don't set it. Exposed for testing.
+    """
+}
+fn (activity-type: Str, properties: Map, targets: Vec, timestamp-ms: Int): Map {
+  props if(is-some(get(properties, "hs_timestamp")), properties, assoc(properties, "hs_timestamp", timestamp-ms))
+  associations map(targets, (t) {
+    ::objects/association-input(Str(t.id), association-type-id(activity-type, t.type))
+  })
+  ::objects/build-create-body(props, associations)
+}
+
+create-activity
+meta {
+    doc: """POST /crm/objects/{version}/{activityType} - Create an activity of any type with properties and associated records. `hs_timestamp` defaults to now. The typed helpers below call this."""
+}
+fn (activity-type: Str, properties: Map, targets: Vec): Map {
+  ::api/json("POST", ::api/crm-path("objects", `/${activity-type}`), {}, build-activity-body(activity-type, properties, targets, now-ms()))
+}
+
+create-task
+meta {
+    doc: """
+    Create a task. Properties: `hs_task_subject`, `hs_task_body`,
+    `hs_timestamp` (the due date, epoch ms; defaults to now),
+    `hs_task_status` (`NOT_STARTED` or `COMPLETED`; portals may define
+    more, see `::hubspot::properties/get-property("tasks", "hs_task_status")`), `hs_task_priority` (`LOW`, `MEDIUM`,
+    `HIGH`), `hs_task_type` (`TODO`, `CALL`, `EMAIL`), `hubspot_owner_id`,
+    `hs_task_reminders`.
+
+    **Example**
+
+    ```hot
+    ::hubspot::engagements/create-task({
+      hs_task_subject: "Send pricing",
+      hs_task_priority: "HIGH",
+      hs_timestamp: add(::hot::time/epoch-millis(::hot::time/now()), 86400000)
+    }, [{type: "contacts", id: "12345"}, {type: "deals", id: "67890"}])
+    ```
+    """
+}
+fn (properties: Map, targets: Vec): Map {
+  create-activity("tasks", properties, targets)
+}
+
+create-call
+meta {
+    doc: """Log a call. Properties: `hs_call_title`, `hs_call_body`, `hs_timestamp` (defaults to now), `hs_call_direction` (`INBOUND`/`OUTBOUND`), `hs_call_duration` (milliseconds), `hs_call_status` (`COMPLETED`, `NO_ANSWER`, `BUSY`, `FAILED`, ...), `hs_call_disposition` (outcome GUID), `hs_call_from_number`, `hs_call_to_number`, `hs_call_recording_url` (HTTPS), `hubspot_owner_id`."""
+}
+fn (properties: Map, targets: Vec): Map {
+  create-activity("calls", properties, targets)
+}
+
+create-meeting
+meta {
+    doc: """Log a meeting. Properties: `hs_meeting_title`, `hs_meeting_body`, `hs_internal_meeting_notes`, `hs_timestamp` (defaults to now; set it to the start time), `hs_meeting_start_time`, `hs_meeting_end_time`, `hs_meeting_location`, `hs_meeting_external_url`, `hs_meeting_outcome` (`SCHEDULED`, `COMPLETED`, `RESCHEDULED`, `NO_SHOW`, `CANCELED`), `hubspot_owner_id`. This logs the meeting on the timeline; it does not send calendar invites."""
+}
+fn (properties: Map, targets: Vec): Map {
+  create-activity("meetings", properties, targets)
+}
+
+create-email
+meta {
+    doc: """Log an email on the timeline (it is not sent). Properties: `hs_email_subject`, `hs_email_text`, `hs_email_html`, `hs_timestamp` (defaults to now), `hs_email_direction` (`EMAIL` outgoing, `INCOMING_EMAIL`, `FORWARDED_EMAIL`), `hs_email_status` (`SENT`, `BOUNCED`, `FAILED`, `SCHEDULED`, `SENDING`), `hs_email_headers` (a JSON string with `from`, `to`, `cc`, `bcc`), `hubspot_owner_id`."""
+}
+fn (properties: Map, targets: Vec): Map {
+  create-activity("emails", properties, targets)
+}
+
+create-note
+meta {
+    doc: """Create a note. Properties: `hs_note_body` (HTML allowed), `hs_timestamp` (defaults to now), `hubspot_owner_id`, `hs_attachment_ids`. `::hubspot::notes/log-note` is the one-record shorthand."""
+}
+fn (properties: Map, targets: Vec): Map {
+  create-activity("notes", properties, targets)
+}

@@ -1,0 +1,87 @@
+::cal-com::schedules ns
+meta {
+    ctx: {"cal-com.api.key": {required: true}},
+    doc: """
+    Availability schedules (`cal-api-version: 2024-06-11`): the working
+    hours and date overrides that event types book against. Each user has
+    one default schedule; event types without a `scheduleId` use it.
+    `availability` entries are `{days: ["Monday", ...], startTime:
+    "09:00", endTime: "17:00"}`; `overrides` are `{date: "2026-07-04",
+    startTime, endTime}`.
+    """
+}
+
+::api ::cal-com::api
+
+v fn (): Str { ::cal-com/VERSION_SCHEDULES }
+
+list-schedules
+meta {
+    doc: """GET /schedules - All of the API key owner's schedules (Vec)."""
+}
+fn (): Any {
+  ::api/request("GET", "/schedules", "", v())
+}
+
+get-default-schedule
+meta {
+    doc: """GET /schedules/default - The owner's default schedule."""
+}
+fn (): Any {
+  ::api/request("GET", "/schedules/default", "", v())
+}
+
+get-schedule
+meta {
+    doc: """GET /schedules/{id} - One schedule."""
+}
+fn (id: Any): Any {
+  ::api/request("GET", `/schedules/${::api/path-segment(id)}`, "", v())
+}
+
+build-create-body
+meta {
+    doc: """Build the create body from the required `name`, `timeZone` and `isDefault`, plus `options` (`availability`, `overrides`). Without `availability`, Cal.com defaults to Monday–Friday 09:00–17:00. Exposed for testing."""
+}
+fn (name: Str, time-zone: Str, is-default: Bool, options: Map): Map {
+  ::api/compact({...options, name: name, timeZone: time-zone, isDefault: is-default})
+}
+
+create-schedule
+meta {
+    doc: """
+    POST /schedules - Create a schedule.
+
+    **Example**
+
+    ```hot
+    ::cal-com::schedules/create-schedule("Support hours", "America/Chicago", false, {
+      availability: [{days: ["Monday", "Wednesday", "Friday"], startTime: "10:00", endTime: "14:00"}],
+      overrides: [{date: "2026-07-03", startTime: "10:00", endTime: "12:00"}]
+    })
+    ```
+    """
+}
+fn
+(name: Str, time-zone: Str, is-default: Bool): Any {
+  create-schedule(name, time-zone, is-default, {})
+},
+(name: Str, time-zone: Str, is-default: Bool, options: Map): Any {
+  ::api/request("POST", "/schedules", build-create-body(name, time-zone, is-default, options), v())
+}
+
+update-schedule
+meta {
+    doc: """PATCH /schedules/{id} - Update `name`, `timeZone`, `isDefault`, `availability` or `overrides`. `availability` and `overrides` replace the existing lists. Unset fields are omitted."""
+}
+fn (id: Any, changes: Map): Any {
+  ::api/request("PATCH", `/schedules/${::api/path-segment(id)}`, ::api/compact(changes), v())
+}
+
+delete-schedule
+meta {
+    doc: """DELETE /schedules/{id} - Delete a schedule."""
+}
+fn (id: Any): Any {
+  ::api/request("DELETE", `/schedules/${::api/path-segment(id)}`, "", v())
+}

@@ -1,0 +1,105 @@
+::shopify::draft-orders ns
+meta {
+    doc: """
+    Draft orders: build an order for a customer (custom pricing, B2B,
+    phone orders), send its invoice URL, then complete it into a real
+    order. Needs `write_draft_orders`.
+    """
+}
+
+::api ::shopify::api
+
+DRAFT_ORDER_FIELDS """
+  id name status invoiceUrl createdAt
+  totalPriceSet { shopMoney { amount currencyCode } }
+  order { id name }
+"""
+
+create-draft-order
+meta {
+    doc: """
+    Create a draft order (`draftOrderCreate`) from a `DraftOrderInput`:
+    `lineItems` (`[{variantId, quantity}]` or custom
+    `[{title, originalUnitPriceWithCurrency: {amount, currencyCode}, quantity}]`),
+    `customerId` via `purchasingEntity: {customerId}`, `email`,
+    `shippingAddress`, `note`, `tags`, `appliedDiscount`, ... Returns the
+    draft order with its `invoiceUrl`.
+
+    **Example**
+
+    ```hot
+    draft ::shopify::draft-orders/create-draft-order({
+      email: "ada@example.com",
+      lineItems: [{variantId: variant.id, quantity: 2}]
+    })
+    ```
+    """
+}
+fn (input: Map): Map {
+  mutation ```
+  mutation DraftOrderCreate($input: DraftOrderInput!) {
+    draftOrderCreate(input: $input) {
+      draftOrder { ${DRAFT_ORDER_FIELDS} }
+      userErrors { field message }
+    }
+  }
+  ```
+  payload ::api/mutate(mutation, {input: input}, "draftOrderCreate")
+  payload.draftOrder
+}
+
+get-draft-order
+meta {
+    doc: """One draft order by GraphQL id with its line items. Returns null when not found."""
+}
+fn (id: Str): Map? {
+  query ```
+  query DraftOrder($id: ID!) {
+    draftOrder(id: $id) {
+      ${DRAFT_ORDER_FIELDS}
+      lineItems(first: 100) { nodes { id title quantity sku variant { id } } }
+    }
+  }
+  ```
+  data ::api/graphql(query, {id: id})
+  data.draftOrder
+}
+
+build-complete-variables
+meta {
+    doc: """Variables for `draftOrderComplete`. Options: `paymentGatewayId`, `sourceName`. Unset options are omitted. Exposed for testing."""
+}
+fn (id: Str, options: Map): Map {
+  filter-vals({
+    id: id,
+    paymentGatewayId: get(options, "paymentGatewayId"),
+    sourceName: get(options, "sourceName")
+  }, is-some)
+}
+
+complete-draft-order
+meta {
+    doc: """
+    Turn a draft order into an order (`draftOrderComplete`), marked paid.
+    Options: `paymentGatewayId`, `sourceName` (a channel handle for
+    attribution). To leave it payment pending, give the draft order
+    payment terms instead (Shopify deprecated `paymentPending`). Returns
+    the draft order with the new `order {id name}`.
+    """
+}
+fn
+(id: Str): Map {
+  complete-draft-order(id, {})
+},
+(id: Str, options: Map): Map {
+  mutation ```
+  mutation DraftOrderComplete($id: ID!, $paymentGatewayId: ID, $sourceName: String) {
+    draftOrderComplete(id: $id, paymentGatewayId: $paymentGatewayId, sourceName: $sourceName) {
+      draftOrder { ${DRAFT_ORDER_FIELDS} }
+      userErrors { field message }
+    }
+  }
+  ```
+  payload ::api/mutate(mutation, build-complete-variables(id, options), "draftOrderComplete")
+  payload.draftOrder
+}

@@ -1,4 +1,7 @@
 ::whatsapp::business ns
+meta {
+    doc: """Business profile and phone number information."""
+}
 
 ::api ::whatsapp::api
 
@@ -23,7 +26,7 @@ response.data[0].description  // => "We build tools for developers"
 """
 }
 fn (phone-number-id: Str): Map {
-  ::api/request("GET", ::api/url(`${phone-number-id}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`))
+  ::api/request("GET", ::api/url(`${::api/segment(phone-number-id)}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`))
 }
 
 UpdateBusinessProfileRequest type {
@@ -42,7 +45,7 @@ meta {
     doc: """
 Update the WhatsApp Business Profile. All fields are optional -- only provided fields are updated.
 
-`vertical` is the business category: "AUTOMOTIVE", "BEAUTY", "EDUCATION", "ENTERTAINMENT", "FINANCE", "FOOD", "GOVT", "HEALTH", "HOTEL", "NONPROFIT", "PROF_SERVICES", "RETAIL", "TECH", "TRAVEL", "OTHER".
+`vertical` is the business category: "OTHER", "AUTO", "BEAUTY", "APPAREL", "EDU", "ENTERTAIN", "EVENT_PLAN", "FINANCE", "GROCERY", "GOVT", "HOTEL", "HEALTH", "NONPROFIT", "PROF_SERVICES", "RETAIL", "TRAVEL", "RESTAURANT", "ALCOHOL", "ONLINE_GAMBLING", "PHYSICAL_GAMBLING", "OTC_DRUGS". `about` is max 139 characters, `description` max 512, `websites` max 2. `profile_picture_handle` is an upload handle from Meta's Resumable Upload API (not a media id).
 
 **Example**
 
@@ -68,7 +71,7 @@ fn (request: UpdateBusinessProfileRequest): Map {
     |> assoc-some("vertical", request.vertical)
     |> assoc-some("profile_picture_handle", request.profile_picture_handle)
 
-  ::api/request("POST", ::api/url(`${request.phone_number_id}/whatsapp_business_profile`), {}, body)
+  ::api/request("POST", ::api/url(`${::api/segment(request.phone_number_id)}/whatsapp_business_profile`), {}, body)
 }
 
 // ============================================================================
@@ -93,7 +96,7 @@ response.quality_rating       // => "GREEN"
 """
 }
 fn (phone-number-id: Str): Map {
-  ::api/request("GET", ::api/url(`${phone-number-id}?fields=display_phone_number,verified_name,quality_rating,platform_type,status,name_status,code_verification_status`))
+  ::api/request("GET", ::api/url(`${::api/segment(phone-number-id)}?fields=display_phone_number,verified_name,quality_rating,platform_type,status,name_status,code_verification_status`))
 }
 
 ListPhoneNumbersRequest type {
@@ -102,8 +105,8 @@ ListPhoneNumbersRequest type {
 
 list-phone-numbers
 meta {
-    doc: """List all phone numbers registered to a WhatsApp Business Account."""
+    doc: """GET /{waba-id}/phone_numbers - List the phone numbers registered to a WhatsApp Business Account (`data: [{id, display_phone_number, verified_name, quality_rating, status}]`). The `id` is the `phone_number_id` the send functions take."""
 }
 fn (request: ListPhoneNumbersRequest): Map {
-  ::api/request("GET", ::api/url(`${request.waba_id}/phone_numbers?fields=display_phone_number,verified_name,quality_rating,status`))
+  ::api/request("GET", ::api/url(`${::api/segment(request.waba_id)}/phone_numbers?fields=display_phone_number,verified_name,quality_rating,status`))
 }

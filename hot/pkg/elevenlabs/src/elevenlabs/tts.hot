@@ -1,40 +1,82 @@
 ::elevenlabs::tts ns
+meta {
+    doc: """ElevenLabs text-to-speech: full audio, audio with character timestamps, and streaming."""
+}
 
-api-request ::elevenlabs::api/request
-api-request-stream ::elevenlabs::api/request-stream
-HttpError ::elevenlabs::api/HttpError
-is-ok-response ::hot::http/is-ok-response
+::api ::elevenlabs::api
 
 // ============================================================================
 // Text to Speech
 // ============================================================================
 
-TextToSpeechRequest type {
+TextToSpeechRequest
+meta {
+    doc: """
+    Body of the text-to-speech endpoints. Only `text` is required;
+    unset fields are omitted from the request. `model_id` defaults to
+    "eleven_multilingual_v2" server-side. `voice_settings` takes
+    `{stability, similarity_boost, style, use_speaker_boost, speed}`.
+    `previous_request_ids`/`next_request_ids` (up to 3) and
+    `previous_text`/`next_text` keep prosody continuous across chunks.
+    """
+}
+type {
     text: Str,
     model_id: Str?,
     voice_settings: Map?,
     language_code: Str?,
+    pronunciation_dictionary_locators: Vec?,
     seed: Int?,
     previous_text: Str?,
     next_text: Str?,
-    apply_text_normalization: Str?
+    previous_request_ids: Vec?,
+    next_request_ids: Vec?,
+    apply_text_normalization: Str?,
+    apply_language_text_normalization: Bool?
 }
 
-tts-path fn (voice-id: Str, output-format: Any): Str {
-  base `/v1/text-to-speech/${voice-id}`
-  if(is-null(output-format), base, `${base}?output_format=${output-format}`)
+tts-query
+meta {
+    doc: """
+    Query params for a TTS call: a Str is the `output_format` (e.g.
+    "mp3_44100_128", "pcm_16000", "ulaw_8000"); a Map passes
+    `output_format`, `enable_logging`, `optimize_streaming_latency`
+    as given; null means none. Exposed for testing.
+    """
+}
+fn (output: Any): Map {
+  cond {
+    is-null(output) => { {} }
+    is-str(output) => { {output_format: output} }
+    is-map(output) => { output }
+    => { {} }
+  }
+}
+
+tts-path
+meta {
+    doc: """`/v1/text-to-speech/{voice_id}{suffix}` with the voice id encoded and the query from `tts-query`. Exposed for testing."""
+}
+fn
+(voice-id: Str, output: Any): Str {
+  tts-path(voice-id, "", output)
+},
+(voice-id: Str, suffix: Str, output: Any): Str {
+  `/v1/text-to-speech/${::api/path-segment(voice-id)}${suffix}${::api/query-string(tts-query(output))}`
 }
 
 text-to-speech
 meta {
+    ctx: {"elevenlabs.api.key": {required: true}},
     doc: """
-    POST /v1/text-to-speech/{voice_id} - Convert text to speech. Returns
-    the audio as Bytes (mp3 44.1kHz 128kbps by default; pass an
-    `output-format` like "mp3_44100_192", "pcm_16000", or "ulaw_8000" for
-    telephony).
+    POST /v1/text-to-speech/{voice_id}: convert text to speech. Returns
+    the audio as `Bytes` (mp3 44.1kHz 128kbps by default). The optional
+    third argument is an output format such as "mp3_44100_192",
+    "pcm_16000", "opus_48000_64", or "ulaw_8000" (telephony), or a Map
+    of query params (`output_format`, `enable_logging`).
 
-    `model_id` defaults to the provider default; "eleven_multilingual_v2"
-    is the quality choice, "eleven_flash_v2_5" the low-latency one.
+    "eleven_multilingual_v2" is the quality model, "eleven_flash_v2_5"
+    the low-latency one, "eleven_v3" the most expressive.
 
     **Example**
 
@@ -46,31 +88,109 @@ meta {
       model_id: "eleven_multilingual_v2",
       voice_settings: {stability: 0.5, similarity_boost: 0.75}
     }))
-    ::hot::file/write("hot://out/speech.mp3", audio)
+    ::hot::file/write-file-bytes("speech.mp3", audio)
     ```
     """
 }
 fn
-(voice-id: Str, request: TextToSpeechRequest): Any {
+(voice-id: Str, request: TextToSpeechRequest): Bytes {
   text-to-speech(voice-id, request, null)
 },
-(voice-id: Str, request: TextToSpeechRequest, output-format: Any): Any {
-  response api-request("POST", tts-path(voice-id, output-format), {}, request)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+(voice-id: Str, request: TextToSpeechRequest, output: Any): Bytes {
+  ::api/bytes("POST", tts-path(voice-id, output), request)
 }
 
-text-to-speech-stream
+text-to-speech-with-timestamps
 meta {
+    ctx: {"elevenlabs.api.key": {required: true}},
     doc: """
-    POST /v1/text-to-speech/{voice_id}/stream - Stream speech as it is
-    generated. Returns a `StreamingHttpResponse` whose body iterates raw
-    audio chunks (Bytes) — collect them or forward them as they arrive.
+    POST /v1/text-to-speech/{voice_id}/with-timestamps: speech plus
+    character-level timing. Returns `{audio, alignment,
+    normalized_alignment}` where `audio` is the decoded `Bytes` and each
+    alignment is `{characters, character_start_times_seconds,
+    character_end_times_seconds}`. `alignment-words` turns one into
+    word timings for captions.
 
     **Example**
 
     ```hot
-    response ::elevenlabs::tts/text-to-speech-stream(voice-id, ::elevenlabs::tts/TextToSpeechRequest({
-      text: long-article,
+    ::tts ::elevenlabs::tts
+
+    out ::tts/text-to-speech-with-timestamps(::elevenlabs/GEORGE_VOICE_ID, ::tts/TextToSpeechRequest({text: "Hello there."}))
+    ::hot::file/write-file-bytes("hello.mp3", out.audio)
+    ::tts/alignment-words(out.alignment)  // [{word: "Hello", start: 0.0, end: 0.35}, ...]
+    ```
+    """
+}
+fn
+(voice-id: Str, request: TextToSpeechRequest): Map {
+  text-to-speech-with-timestamps(voice-id, request, null)
+},
+(voice-id: Str, request: TextToSpeechRequest, output: Any): Map {
+  body ::api/json("POST", tts-path(voice-id, "/with-timestamps", output), request)
+  decode-timestamped(body)
+}
+
+decode-timestamped
+meta {
+    doc: """Decode a with-timestamps response body: `audio_base64` becomes `audio` Bytes. Exposed for testing."""
+}
+fn (body: Map): Map {
+  {
+    audio: ::hot::base64/decode(body.audio_base64),
+    alignment: get(body, "alignment"),
+    normalized_alignment: get(body, "normalized_alignment")
+  }
+}
+
+alignment-words
+meta {
+    doc: """
+    Group a character alignment into words: `[{word, start, end}]`,
+    splitting on whitespace. Returns `[]` for a null alignment.
+    """
+}
+fn (alignment: Any): Vec {
+  cond {
+    not(is-map(alignment)) => { [] }
+    => {
+      chars or(get(alignment, "characters"), [])
+      starts or(get(alignment, "character_start_times_seconds"), [])
+      ends or(get(alignment, "character_end_times_seconds"), [])
+      state reduce(range(0, length(chars)), (acc, i) {
+        ch chars[i]
+        cond {
+          is-blank(ch) => { {words: close-word(acc), current: null} }
+          is-null(acc.current) => { {words: acc.words, current: {word: ch, start: starts[i], end: ends[i]}} }
+          => {
+            cur acc.current
+            {words: acc.words, current: {word: `${cur.word}${ch}`, start: cur.start, end: ends[i]}}
+          }
+        }
+      }, {words: [], current: null})
+      close-word(state)
+    }
+  }
+}
+
+close-word fn (acc: Map): Vec {
+  if(is-null(acc.current), acc.words, concat(acc.words, [acc.current]))
+}
+
+text-to-speech-stream
+meta {
+    ctx: {"elevenlabs.api.key": {required: true}},
+    doc: """
+    POST /v1/text-to-speech/{voice_id}/stream: stream speech as it is
+    generated. Returns a `StreamingHttpResponse` whose body iterates raw
+    audio chunks (Bytes); collect them or forward them as they arrive.
+    Takes the same optional output format as `text-to-speech`.
+
+    **Example**
+
+    ```hot
+    response ::elevenlabs::tts/text-to-speech-stream(::elevenlabs/GEORGE_VOICE_ID, ::elevenlabs::tts/TextToSpeechRequest({
+      text: "A long article, read aloud as it is generated.",
       model_id: "eleven_flash_v2_5"
     }))
     chunks collect(response.body)
@@ -79,8 +199,8 @@ meta {
 }
 fn
 (voice-id: Str, request: TextToSpeechRequest): ::hot::http/StreamingHttpResponse {
-  api-request-stream("POST", `/v1/text-to-speech/${voice-id}/stream`, {}, request)
+  text-to-speech-stream(voice-id, request, null)
 },
-(voice-id: Str, request: TextToSpeechRequest, output-format: Str): ::hot::http/StreamingHttpResponse {
-  api-request-stream("POST", `/v1/text-to-speech/${voice-id}/stream?output_format=${output-format}`, {}, request)
+(voice-id: Str, request: TextToSpeechRequest, output: Any): ::hot::http/StreamingHttpResponse {
+  ::api/request-stream("POST", tts-path(voice-id, "/stream", output), {}, request)
 }

@@ -1,140 +1,89 @@
 ::qwen::api ns
+meta {
+    doc: """
+    Low-level authenticated requests to Model Studio's OpenAI-compatible
+    endpoint, through `::openai::api/Endpoint`. Paths are relative to
+    `::qwen/base-url()` (e.g. `/chat/completions`).
+    """
+}
 
 ::ctx ::hot::ctx
+::oai ::openai::api
 
-http-request ::hot::http/request
-http-request-stream ::hot::http/request-stream
-is-ok-response ::hot::http/is-ok-response
-HttpRequest ::hot::http/HttpRequest
+HttpError ::oai/HttpError
 HttpResponse ::hot::http/HttpResponse
 StreamingHttpResponse ::hot::http/StreamingHttpResponse
 
-HttpError type {
-    status: Int,
-    headers: Map,
-    body: Any
+endpoint
+meta {
+    doc: """
+    The ctx-configured Qwen endpoint: `::qwen/base-url()` with the
+    `qwen.api.key` key (your DashScope API key, `DASHSCOPE_API_KEY` in
+    Alibaba's docs).
+
+    **Example**
+
+    ```hot
+    ep ::qwen::api/endpoint()
+    ep.base-url  // => "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    ```
+    """,
+    ctx: {"qwen.api.key": {}}
+}
+fn (): ::oai/Endpoint {
+    ::oai/endpoint(::qwen/base-url(), ::ctx/get("qwen.api.key"))
 }
 
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
-  HttpError({
-    status: response.status,
-    headers: response.headers,
-    body: response.body
-  })
+endpoint-for
+meta {
+    doc: """
+    An explicit Qwen endpoint for a region (and optional workspace id),
+    with an explicit key. Reads no ctx.
+
+    **Example**
+
+    ```hot
+    us ::qwen::api/endpoint-for("us", null, "sk-...")
+    us.base-url  // => "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+    ```
+    """
+}
+fn (region: Str?, workspace-id: Str?, api-key: Str): ::oai/Endpoint {
+    ::oai/endpoint(::qwen/resolve-base-url(null, region, workspace-id), api-key)
 }
 
 request
 meta {
     doc: """
-    Make an authenticated HTTP request to the Qwen (DashScope) API.
-
-    Automatically includes the Authorization header using the qwen.api.key from context
-    (this is your DashScope API key — the same key the Qwen docs refer to as
-    DASHSCOPE_API_KEY). Additional headers can be provided to merge/override defaults.
-    When a body is provided, Content-Type is set to application/json and the body is
-    serialized.
-
-    Supports 2 to 5 arguments: (method, url), (method, url, headers),
-    (method, url, headers, body), or (method, url, headers, body, api-key).
+    Authenticated request to the ctx-configured endpoint. Returns the raw
+    `HttpResponse`.
 
     **Example**
 
     ```hot
-    // Simple GET request
-    response request("GET", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models")
-
-    // POST with body
-    response request("POST", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", {}, {
-        model: "qwen3.6-plus",
+    response ::qwen::api/request("GET", "/models")
+    response ::qwen::api/request("POST", "/chat/completions", {}, {
+        model: "qwen3.7-plus",
         messages: [{role: "user", content: "Hello"}]
     })
     ```
-    """,
-    ctx: {"qwen.api.key": {}}
+    """
 }
 fn
-(method: Str, url: Str): HttpResponse {
-  request(method, url, {}, "")
+(method: Str, path: Str): HttpResponse {
+    request(method, path, {}, "")
 },
-(method: Str, url: Str, additional-headers: Map): HttpResponse {
-  request(method, url, additional-headers, "")
+(method: Str, path: Str, additional-headers: Map): HttpResponse {
+    request(method, path, additional-headers, "")
 },
-(method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, url, additional-headers, body, ::ctx/get("qwen.api.key"))
-},
-(method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
-  default-headers {
-    Authorization: `Bearer ${api-key}`
-  }
-
-  match body {
-    "" | Null => {
-      final-headers {...default-headers, ...additional-headers}
-      ::hot::http/request(HttpRequest({
-        method,
-        url,
-        headers: final-headers
-      }))
-    }
-
-    _ => {
-      headers {...default-headers, Content-Type: "application/json"}
-      final-headers {...headers, ...additional-headers}
-      ::hot::http/request(HttpRequest({
-        method,
-        url,
-        headers: final-headers,
-        body: to-json(untype(body))
-      }))
-    }
-  }
+(method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
+    ::oai/endpoint-request(endpoint(), method, path, additional-headers, body)
 }
 
 request-stream
 meta {
-    doc: """
-    Make an authenticated streaming HTTP request to the Qwen (DashScope) API.
-
-    Returns a StreamingHttpResponse with an iterator body for processing SSE events.
-    Automatically includes the Authorization header using the qwen.api.key from context.
-
-    Supports 4 to 6 arguments: (method, url, headers, body),
-    (method, url, headers, body, format), or (method, url, headers, body, format, api-key).
-
-    **Example**
-
-    ```hot
-    response request-stream("POST", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", {}, {
-        model: "qwen3.6-plus",
-        messages: [{role: "user", content: "Hello"}],
-        stream: true
-    })
-
-    events collect(response.body)
-    // events is a Vec of SSE event objects
-    ```
-    """,
-    ctx: {"qwen.api.key": {}}
+    doc: """Streaming (SSE) request to the ctx-configured endpoint. Returns a `StreamingHttpResponse`."""
 }
-fn
-(method: Str, url: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
-  request-stream(method, url, additional-headers, body, "sse")
-},
-(method: Str, url: Str, additional-headers: Map, body: Any, format: Str): StreamingHttpResponse {
-  request-stream(method, url, additional-headers, body, format, ::ctx/get("qwen.api.key"))
-},
-(method: Str, url: Str, additional-headers: Map, body: Any, format: Str, api-key: Str): StreamingHttpResponse {
-  default-headers {
-    Authorization: `Bearer ${api-key}`
-  }
-
-  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
-  final-headers {...headers, ...additional-headers}
-
-  ::hot::http/request-stream(HttpRequest({
-    method,
-    url,
-    headers: final-headers,
-    body: to-json(untype(body))
-  }), format)
+fn (method: Str, path: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
+    ::oai/endpoint-request-stream(endpoint(), method, path, additional-headers, body)
 }

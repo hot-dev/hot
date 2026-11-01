@@ -1,0 +1,68 @@
+::plaid::accounts ns
+meta {
+    doc: """
+    Accounts and the account-level products: cached accounts, real-time
+    balance, Auth (account and routing numbers) and Identity (owner
+    names, emails, phones, addresses). Auth and Identity return PII:
+    don't log the responses, and store account numbers encrypted.
+    """
+}
+
+::api ::plaid::api
+
+with-options fn (access-token: Str, options: Map?): Map {
+  {access_token: access-token, options: options}
+}
+
+get-accounts
+meta {
+    doc: """POST /accounts/get: the Item's accounts with cached balances (free; may be hours old). Options: `account_ids`. Returns `{accounts, item, request_id}`."""
+}
+fn
+(access-token: Str): Map {
+  get-accounts(access-token, null)
+},
+(access-token: Str, options: Map?): Map {
+  ::api/post("/accounts/get", with-options(access-token, options))
+}
+
+get-balances
+meta {
+    doc: """
+    POST /accounts/balance/get: real-time balances, fetched from the
+    institution (slower, billed per call). Options: `account_ids`,
+    `min_last_updated_datetime` (required for some institutions that only
+    serve cached balances, as an ISO 8601 timestamp).
+    """
+}
+fn
+(access-token: Str): Map {
+  get-balances(access-token, null)
+},
+(access-token: Str, options: Map?): Map {
+  ::api/post("/accounts/balance/get", with-options(access-token, options))
+}
+
+get-auth
+meta {
+    doc: """POST /auth/get: account and routing numbers (`numbers.ach`, `eft`, `international`, `bacs`) for ACH and similar transfers. Options: `account_ids`. The response is sensitive: never log it."""
+}
+fn
+(access-token: Str): Map {
+  get-auth(access-token, null)
+},
+(access-token: Str, options: Map?): Map {
+  ::api/post("/auth/get", with-options(access-token, options))
+}
+
+get-identity
+meta {
+    doc: """POST /identity/get: account owners' names, emails, phone numbers and addresses as the institution holds them. Options: `account_ids`. PII: never log it."""
+}
+fn
+(access-token: Str): Map {
+  get-identity(access-token, null)
+},
+(access-token: Str, options: Map?): Map {
+  ::api/post("/identity/get", with-options(access-token, options))
+}

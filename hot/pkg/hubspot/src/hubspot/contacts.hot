@@ -66,3 +66,33 @@ meta {
 fn (options: Map): Map {
   ::objects/search-objects("contacts", options)
 }
+
+upsert-by-email
+meta {
+    doc: """
+    Create or update contacts keyed by email in one batch call (max 100):
+    `records` is a Vec of properties Maps that each include `email`.
+    Returns `{status, results}`; each result's `new` says whether it was
+    created. Unlike search-then-write, this is not affected by search
+    indexing delay.
+
+    **Example**
+
+    ```hot
+    ::hubspot::contacts/upsert-by-email([
+      {email: "ada@example.com", firstname: "Ada", lifecyclestage: "lead"}
+    ])
+    ```
+    """
+}
+fn (records: Vec): Map {
+  ::objects/batch-upsert("contacts", "email", map(records, (r) { {id: r.email, properties: r} }))
+}
+
+archive-contact
+meta {
+    doc: """Archive a contact (recycle bin, restorable for 90 days)."""
+}
+fn (id: Str): Any {
+  ::objects/archive-object("contacts", id)
+}

@@ -2,15 +2,225 @@
 meta ["test"]
 
 ::api ::pinecone::api
+::indexes ::pinecone::indexes
+::vectors ::pinecone::vectors
+::records ::pinecone::records
+::inference ::pinecone::inference
 
-test-normalize-host
-meta ["test"] fn () {
-    assert-eq("https://docs-abc.svc.aped-4627.pinecone.io", ::api/normalize-host("docs-abc.svc.aped-4627.pinecone.io"))
-    assert-eq("https://docs-abc.svc.aped-4627.pinecone.io", ::api/normalize-host("https://docs-abc.svc.aped-4627.pinecone.io"))
-}
+HOST "docs-abc.svc.aped-4627.pinecone.io"
+
+// ============================================================================
+// Constants and API version
+// ============================================================================
 
 test-constants
 meta ["test"] fn () {
     assert-eq("https://api.pinecone.io", ::pinecone/CONTROL_URL)
-    assert-eq("2025-01", ::pinecone/API_VERSION)
+    assert-eq("2026-07", ::pinecone/API_VERSION)
+    assert-eq("__default__", ::pinecone/DEFAULT_NAMESPACE)
+}
+
+test-api-version-default-and-override
+meta ["test"] fn () {
+    assert-eq("2026-07", ::api/api-version(), "defaults to the pinned stable version")
+    ::hot::ctx/set("pinecone.api.version", "2026-04")
+    assert-eq("2026-04", ::api/api-version(), "the context variable overrides it")
+    ::hot::ctx/set("pinecone.api.version", "")
+    assert-eq("2026-07", ::api/api-version(), "a blank override falls back")
+}
+
+// ============================================================================
+// URLs
+// ============================================================================
+
+test-normalize-host
+meta ["test"] fn () {
+    assert-eq("https://docs-abc.svc.aped-4627.pinecone.io", ::api/normalize-host(HOST))
+    assert-eq("https://docs-abc.svc.aped-4627.pinecone.io", ::api/normalize-host(`https://${HOST}`))
+    assert-eq("https://docs-abc.svc.aped-4627.pinecone.io", ::api/normalize-host(`https://${HOST}/`), "drops a trailing slash")
+    assert-eq("http://localhost:5080", ::api/normalize-host("http://localhost:5080"), "keeps http for Pinecone Local")
+}
+
+test-control-url-encodes-segments
+meta ["test"] fn () {
+    assert-eq("https://api.pinecone.io/indexes", ::api/control-url("indexes"))
+    assert-eq("https://api.pinecone.io/indexes/docs", ::api/control-url("indexes", "docs"))
+    assert-eq("https://api.pinecone.io/indexes/a%2Fb", ::api/control-url("indexes", "a/b"), "names cannot escape the path")
+}
+
+test-data-url
+meta ["test"] fn () {
+    assert-eq(`https://${HOST}/namespaces/my%20ns`, ::api/data-url(HOST, ["namespaces", "my ns"], {}))
+    assert-eq(`https://${HOST}/namespaces?limit=10`, ::api/data-url(HOST, ["namespaces"], {limit: 10, prefix: null}))
+}
+
+test-fetch-url-repeats-ids-and-adds-namespace
+meta ["test"] fn () {
+    assert-eq(`https://${HOST}/vectors/fetch?ids=a&ids=b%20c`, ::vectors/fetch-url(HOST, ["a", "b c"], null))
+    assert-eq(`https://${HOST}/vectors/fetch?ids=a&namespace=guides`, ::vectors/fetch-url(HOST, ["a"], "guides"))
+}
+
+test-list-ids-url-omits-unset
+meta ["test"] fn () {
+    assert-eq(`https://${HOST}/vectors/list`, ::vectors/list-ids-url(HOST, {}))
+    assert-eq(`https://${HOST}/vectors/list?prefix=doc-1%23&limit=50&namespace=guides`,
+        ::vectors/list-ids-url(HOST, {prefix: "doc-1#", limit: 50, namespace: "guides"}))
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-error-message-control-plane
+meta ["test"] fn () {
+    body {error: {code: "INVALID_ARGUMENT", message: "Index name must contain only lowercase alphanumeric characters"}, status: 400}
+    assert-eq("Pinecone API error 400 (INVALID_ARGUMENT): Index name must contain only lowercase alphanumeric characters",
+        ::api/error-message(400, body))
+}
+
+test-error-message-data-plane-and-fallbacks
+meta ["test"] fn () {
+    assert-eq("Pinecone API error 400: Vector dimension 3 does not match the dimension of the index 4",
+        ::api/error-message(400, {code: 3, message: "Vector dimension 3 does not match the dimension of the index 4", details: []}))
+    assert-eq("Pinecone API error 401: Invalid API Key", ::api/error-message(401, "Invalid API Key"))
+    assert-eq("Pinecone API error 500", ::api/error-message(500, null))
+}
+
+test-http-error-from-response
+meta ["test"] fn () {
+    e ::api/http-error(::hot::http/HttpResponse({status: 404, body: {error: {code: "NOT_FOUND", message: "Resource docs not found"}, status: 404}}))
+    assert-eq(404, e.status)
+    assert-eq("Pinecone API error 404 (NOT_FOUND): Resource docs not found", e.message)
+}
+
+// ============================================================================
+// Control-plane bodies
+// ============================================================================
+
+test-create-index-body-is-schema-based
+meta ["test"] fn () {
+    body ::indexes/build-create-index-body("docs", 1536, {})
+    assert-eq({fields: {_values: {type: "dense_vector", dimension: 1536, metric: "cosine"}}}, body.schema)
+    assert-eq({deployment_type: "managed", cloud: "aws", region: "us-east-1"}, body.deployment)
+    assert(not(in("dimension", keys(body))), "2026-07 has no top-level dimension")
+    assert(not(in("spec", keys(body))), "2026-07 has no top-level spec")
+    assert(not(in("tags", keys(body))), "unset options are omitted, not null")
+    assert(not(in("deletion_protection", keys(body))))
+}
+
+test-create-index-body-options
+meta ["test"] fn () {
+    body ::indexes/build-create-index-body("docs", 8, {
+        metric: "dotproduct", cloud: "gcp", region: "us-central1",
+        deletion_protection: "enabled", tags: {team: "search"}
+    })
+    assert-eq("dotproduct", body.schema.fields._values.metric)
+    assert-eq("gcp", body.deployment.cloud)
+    assert-eq("enabled", body.deletion_protection)
+    assert-eq({team: "search"}, body.tags)
+}
+
+test-create-for-model-body
+meta ["test"] fn () {
+    body ::indexes/build-create-for-model-body("notes", "llama-text-embed-v2", {field_map: {text: "chunk_text"}})
+    assert-eq({model: "llama-text-embed-v2", field_map: {text: "chunk_text"}}, body.embed, "unset embed options are omitted")
+    assert-eq("aws", body.cloud)
+    assert-eq("us-east-1", body.region)
+}
+
+test-configure-body-only-set-fields
+meta ["test"] fn () {
+    assert-eq({deletion_protection: "disabled"}, ::indexes/build-configure-body({deletion_protection: "disabled"}))
+    assert-eq({tags: {team: ""}}, ::indexes/build-configure-body({tags: {team: ""}}))
+    assert-eq({}, ::indexes/build-configure-body({}))
+}
+
+// ============================================================================
+// Readiness
+// ============================================================================
+
+test-ready-check
+meta ["test"] fn () {
+    assert-eq("ready", ::indexes/ready-check({status: {ready: true, state: "Ready"}}))
+    assert-eq("pending", ::indexes/ready-check({status: {ready: false, state: "Initializing"}}))
+    assert-eq("failed", ::indexes/ready-check({status: {ready: false, state: "InitializationFailed"}}))
+    assert-eq("pending", ::indexes/ready-check({}), "missing status is not ready")
+}
+
+test-is-ready
+meta ["test"] fn () {
+    assert(::indexes/is-ready({name: "docs", host: HOST, status: {ready: true, state: "Ready"}}))
+    assert(not(::indexes/is-ready({status: {ready: false, state: "Initializing"}})))
+    assert(not(::indexes/is-ready({status: {ready: false, state: "InitializationFailed"}})))
+    assert(not(::indexes/is-ready({})), "missing status is not ready")
+}
+
+// ============================================================================
+// Data-plane bodies and pagination
+// ============================================================================
+
+test-update-body
+meta ["test"] fn () {
+    assert-eq({id: "v1", setMetadata: {genre: "drama"}, namespace: "films"},
+        ::vectors/build-update-body("v1", {setMetadata: {genre: "drama"}}, "films"))
+    assert-eq({id: "v1", values: [0.1, 0.2]}, ::vectors/build-update-body("v1", {values: [0.1, 0.2]}, null),
+        "no namespace and no unset fields")
+}
+
+test-collect-ids-follows-pagination
+meta ["test"] fn () {
+    pages {
+        first: {vectors: [{id: "a"}, {id: "b"}], pagination: {next: "t1"}},
+        t1: {vectors: [{id: "c"}], pagination: {next: "t2"}},
+        t2: {vectors: [{id: "d"}]}
+    }
+
+    ids ::vectors/collect-ids((token) { get(pages, or(token, "first")) }, null)
+    assert-eq(["a", "b", "c", "d"], ids)
+}
+
+test-collect-ids-stops-on-repeated-token-and-errors
+meta ["test"] fn () {
+    ids ::vectors/collect-ids((token) { {vectors: [{id: "x"}], pagination: {next: "same"}} }, "same")
+    assert-eq(["x"], ids, "a repeated token ends the loop")
+    out ::vectors/collect-ids((token) { err({status: 500}) }, null)
+    assert(is-err(out))
+}
+
+test-ndjson-body
+meta ["test"] fn () {
+    assert-eq("""{"_id":"n1","chunk_text":"a"}
+{"_id":"n2","chunk_text":"b"}""", ::api/ndjson-body([{_id: "n1", chunk_text: "a"}, {_id: "n2", chunk_text: "b"}]))
+}
+
+test-records-search-body
+meta ["test"] fn () {
+    body ::records/build-search-body("what runs workflows?", {})
+    assert-eq({query: {inputs: {text: "what runs workflows?"}, top_k: 10}}, body, "defaults, nothing unset sent")
+
+    full ::records/build-search-body("q", {top_k: 3, filter: {category: {"$eq": "docs"}}, fields: ["chunk_text"],
+        rerank: {model: "bge-reranker-v2-m3", rank_fields: ["chunk_text"]}})
+    assert-eq(3, full.query.top_k)
+    assert-eq({category: {"$eq": "docs"}}, full.query.filter)
+    assert-eq(["chunk_text"], full.fields)
+    assert-eq("bge-reranker-v2-m3", full.rerank.model)
+}
+
+// ============================================================================
+// Inference bodies
+// ============================================================================
+
+test-embed-body
+meta ["test"] fn () {
+    assert-eq({model: "llama-text-embed-v2", inputs: [{text: "a"}, {text: "b"}]},
+        ::inference/build-embed-body("llama-text-embed-v2", ["a", "b"], null))
+    assert-eq({input_type: "query"}, ::inference/build-embed-body("m", ["a"], {input_type: "query"}).parameters)
+}
+
+test-rerank-body
+meta ["test"] fn () {
+    body ::inference/build-rerank-body("bge-reranker-v2-m3", "q", ["one", {text: "two", id: "2"}], {top_n: 1})
+    assert-eq([{text: "one"}, {text: "two", id: "2"}], body.documents, "strings become {text}")
+    assert-eq(1, body.top_n)
+    assert(not(in("return_documents", keys(body))), "unset options are omitted")
 }

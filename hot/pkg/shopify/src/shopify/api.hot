@@ -1,0 +1,338 @@
+::shopify::api ns
+meta {
+    ctx: {
+        "shopify.shop": {required: true},
+        "shopify.access.token": {required: true},
+        "shopify.api.version": {required: false}
+    },
+    doc: """
+    Transport for the Shopify GraphQL Admin API: shop and URL building,
+    the `graphql` escape hatch, error unwrapping (GraphQL `errors`,
+    throttling, mutation `userErrors`) and cursor pagination helpers
+    shared by the curated namespaces.
+    """
+}
+
+::ctx ::hot::ctx
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+// ---------------------------------------------------------------------------
+// Error shapes
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """A non-2xx HTTP response from the Admin API (401 bad token, 402 frozen shop, 404 unknown shop or version, 429, 5xx)."""
+}
+type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: or(response.headers, {}),
+    body: response.body
+  })
+}
+
+GraphQLError
+meta {
+    doc: """
+    A 200 response whose body carries top-level GraphQL `errors`. `data`
+    holds any partial data, `cost` the `extensions.cost` block. When
+    Shopify throttled the request (`extensions.code` `THROTTLED`),
+    `throttled` is true and `retry-after-ms` estimates how long the
+    bucket needs to refill enough for the requested cost.
+    """
+}
+type {
+    errors: Vec,
+    data: Any,
+    cost: Map?,
+    throttled: Bool,
+    retry-after-ms: Int?
+}
+
+UserErrors
+meta {
+    doc: """A mutation that ran but was rejected: `user-errors` is the payload's `userErrors` list (each `{field, message, code?}`), `payload` the full mutation payload."""
+}
+type {
+    mutation: Str,
+    user-errors: Vec,
+    payload: Any
+}
+
+// ---------------------------------------------------------------------------
+// Shop, version and URL
+// ---------------------------------------------------------------------------
+
+normalize-shop
+meta {
+    doc: """
+    Reduce a shop reference to its bare handle: `acme`,
+    `acme.myshopify.com`, `https://acme.myshopify.com/admin` all give
+    `acme`. Errs on anything else (custom storefront domains don't serve
+    the Admin API).
+    """
+}
+fn (shop: Str): Str {
+  lowered lowercase(trim(shop))
+  no-scheme cond {
+    starts-with(lowered, "https://") => { slice(lowered, 8) }
+    starts-with(lowered, "http://") => { slice(lowered, 7) }
+    => { lowered }
+  }
+
+  host first(split(no-scheme, "/"))
+  handle cond {
+    ends-with(host, ".myshopify.com") => { slice(host, 0, sub(length(host), 14)) }
+    => { host }
+  }
+
+  cond {
+    ::hot::regex/is-match(handle, "^[a-z0-9][a-z0-9-]*$") => { handle }
+    => {
+      err(`shopify: '${shop}' is not a shop handle or *.myshopify.com domain (custom domains don't serve the Admin API)`)
+    }
+  }
+}
+
+api-version
+meta {
+    doc: """The Admin API version in use: the `shopify.api.version` context variable when set, otherwise `::shopify/API_VERSION`."""
+}
+fn (): Str {
+  configured or(::ctx/get("shopify.api.version"), "")
+  if(is-empty(configured), ::shopify/API_VERSION, configured)
+}
+
+graphql-url
+meta {
+    doc: """The GraphQL Admin endpoint for a shop (handle or myshopify domain) and API version (`YYYY-MM` or `unstable`). Exposed for testing."""
+}
+fn
+(shop: Str): Str {
+  graphql-url(shop, api-version())
+},
+(shop: Str, version: Str): Str {
+  handle normalize-shop(shop)
+  cond {
+    not(or(::hot::regex/is-match(version, "^[0-9]{4}-[0-9]{2}$"), eq(version, "unstable"))) => {
+      err(`shopify: API version '${version}' must look like 2026-10 (or be "unstable")`)
+    }
+    => { `https://${handle}.myshopify.com/admin/api/${version}/graphql.json` }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Response handling
+// ---------------------------------------------------------------------------
+
+is-throttled-error fn (error: Map): Bool {
+  eq(get-in(error, ["extensions", "code"]), "THROTTLED")
+}
+
+throttle-wait-ms
+meta {
+    doc: """
+    Estimate milliseconds until the cost bucket can afford the request,
+    from an `extensions.cost` block: `(requestedQueryCost -
+    currentlyAvailable) / restoreRate`, at least Shopify's recommended
+    one second. Exposed for testing.
+    """
+}
+fn (cost: Map?): Int {
+  c or(cost, {})
+  requested or(get(c, "requestedQueryCost"), 0)
+  available or(get-in(c, ["throttleStatus", "currentlyAvailable"]), 0)
+  rate or(get-in(c, ["throttleStatus", "restoreRate"]), 0)
+  deficit max(0, sub(requested, available))
+  cond {
+    lte(rate, 0) => { 1000 }
+    => { max(1000, Int(ceil(div(mul(deficit, 1000), rate)))) }
+  }
+}
+
+parse-graphql-response
+meta {
+    doc: """Unwrap a GraphQL response body: `data` when there are no errors, otherwise an Err carrying `GraphQLError`. Exposed for testing; `graphql` applies it."""
+}
+fn (body: Any): Any {
+  errors or(get-in(body, ["errors"]), [])
+  cost get-in(body, ["extensions", "cost"])
+  throttled some(errors, is-throttled-error)
+  cond {
+    is-empty(errors) => { get-in(body, ["data"]) }
+    => {
+      err(GraphQLError({
+        errors: errors,
+        data: get-in(body, ["data"]),
+        cost: cost,
+        throttled: throttled,
+        retry-after-ms: if(throttled, throttle-wait-ms(cost), null)
+      }))
+    }
+  }
+}
+
+mutation-payload
+meta {
+    doc: """
+    Pull one mutation's payload out of `data` and turn a non-empty
+    `userErrors` list into an Err carrying `UserErrors`. Pass
+    `errors-key` for mutations that report errors under another name
+    (e.g. `orderCancelUserErrors`). Exposed for testing.
+    """
+}
+fn
+(data: Any, field: Str): Any {
+  mutation-payload(data, field, "userErrors")
+},
+(data: Any, field: Str, errors-key: Str): Any {
+  payload get-in(data, [field])
+  user-errors or(get-in(payload, [errors-key]), [])
+  cond {
+    is-empty(user-errors) => { payload }
+    => { err(UserErrors({mutation: field, user-errors: user-errors, payload: payload})) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GraphQL
+// ---------------------------------------------------------------------------
+
+graphql
+meta {
+    doc: """
+    Execute a GraphQL query or mutation against the Admin API. Returns
+    `data`, or an Err carrying `GraphQLError` (GraphQL errors, including
+    throttling) or `HttpError` (non-2xx).
+
+    Throttled requests are not retried in-process (Hot has no sleep);
+    read `retry-after-ms` from the Err, or let a handler's `retry`
+    metadata back off.
+
+    **Example**
+
+    ```hot
+    out ::shopify::api/graphql("query { shop { name currencyCode } }")
+    out.shop.name
+    ```
+    """
+}
+fn
+(query: Str): Any {
+  graphql(query, {})
+},
+(query: Str, variables: Map): Any {
+  graphql(query, variables, ::ctx/get("shopify.shop"), ::ctx/get("shopify.access.token"))
+},
+// 4-arity: explicit shop (handle or myshopify domain) + access token
+(query: Str, variables: Map, shop: Str, access-token: Str): Any {
+  response ::hot::http/request(HttpRequest({
+    method: "POST",
+    url: graphql-url(shop),
+    headers: {
+      X-Shopify-Access-Token: access-token,
+      Content-Type: "application/json",
+      Accept: "application/json"
+    },
+    body: to-json({query: query, variables: untype(variables)})
+  }))
+  cond {
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err(HttpError(response)) }
+    => { parse-graphql-response(response.body) }
+  }
+}
+
+mutate
+meta {
+    doc: """Run a mutation and return its payload (`data[field]`), with `userErrors` (or `errors-key`) turned into an Err carrying `UserErrors`."""
+}
+fn
+(query: Str, variables: Map, field: Str): Any {
+  mutate(query, variables, field, "userErrors")
+},
+(query: Str, variables: Map, field: Str, errors-key: Str): Any {
+  data graphql(query, variables)
+  mutation-payload(data, field, errors-key)
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+page-size fn (requested: Any): Int {
+  size or(requested, ::shopify/DEFAULT_PAGE_SIZE)
+  max(1, min(size, ::shopify/MAX_PAGE_SIZE))
+}
+
+connection-variables
+meta {
+    doc: """
+    Build connection variables from list options: `first` (default 50,
+    capped at 250), `after`, `query`, `sortKey`, `reverse`. Unset options
+    are omitted. Exposed for testing.
+    """
+}
+fn (options: Map): Map {
+  filter-vals({
+    first: page-size(get(options, "first")),
+    after: get(options, "after"),
+    query: get(options, "query"),
+    sortKey: get(options, "sortKey"),
+    reverse: get(options, "reverse")
+  }, is-some)
+}
+
+collect-pages fn (page-fn: Fn, options: Map, max-items: Int, acc: Vec): Vec {
+  remaining sub(max-items, length(acc))
+  page page-fn({...options, first: min(page-size(get(options, "first")), remaining)})
+  combined concat(acc, or(page.nodes, []))
+  has-next and(get-in(page, ["pageInfo", "hasNextPage"]), is-some(get-in(page, ["pageInfo", "endCursor"])))
+  cond {
+    gte(length(combined), max-items) => { slice(combined, 0, max-items) }
+    not(has-next) => { combined }
+    => { collect-pages(page-fn, {...options, after: page.pageInfo.endCursor}, max-items, combined) }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Follow a connection's cursors and gather up to `max-items` nodes.
+    `page-fn` takes list options (with `first` and `after` filled in) and
+    returns a connection `{nodes, pageInfo: {hasNextPage, endCursor}}`,
+    which is what every `list-*` function here returns.
+
+    **Example**
+
+    ```hot
+    paid ::shopify::api/collect(::shopify::orders/list-orders, {query: "financial_status:paid"}, 1000)
+    ```
+    """
+}
+fn (page-fn: Fn, options: Map, max-items: Int): Vec {
+  cond {
+    lte(max-items, 0) => { [] }
+    => { collect-pages(page-fn, options, max-items, []) }
+  }
+}
+
+quote-search-term
+meta {
+    doc: """Quote a value as an exact term for Shopify's search syntax (backslashes and quotes escaped, wrapped in double quotes) so operators or spaces in the value can't broaden the search. Exposed for testing."""
+}
+fn (value: Str): Str {
+  no-backslash join(split(value, "\\"), "\\\\")
+  escaped join(split(no-backslash, "\""), "\\\"")
+  `"${escaped}"`
+}

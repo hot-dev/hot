@@ -1,0 +1,94 @@
+::intercom::tags ns
+meta {
+    ctx: {
+        "intercom.token": {required: true},
+        "intercom.admin.id": {required: false, secret: false}
+    },
+    doc: """Tags: list, create or rename, delete, and tag or untag contacts and conversations. Tagging conversations is recorded as the admin in `intercom.admin.id`."""
+}
+
+::api ::intercom::api
+
+list-tags
+meta {
+    doc: """GET /tags - Every tag in the workspace: `{type: "list", data: [...]}`."""
+}
+fn (): Any {
+  ::api/request("GET", "/tags", "")
+}
+
+create-tag
+meta {
+    doc: """POST /tags - Create a tag by name, or return the existing tag with that name."""
+}
+fn (name: Str): Any {
+  ::api/request("POST", "/tags", {name: name})
+}
+
+rename-tag
+meta {
+    doc: """POST /tags with an `id` - Rename an existing tag."""
+}
+fn (id: Str, name: Str): Any {
+  ::api/request("POST", "/tags", {id: id, name: name})
+}
+
+get-tag
+meta {
+    doc: """GET /tags/{id} - One tag."""
+}
+fn (id: Str): Any {
+  ::api/request("GET", `/tags/${::api/path-segment(id)}`, "")
+}
+
+delete-tag
+meta {
+    doc: """DELETE /tags/{id} - Delete a tag. Intercom refuses while the tag is used by rules or messages."""
+}
+fn (id: Str): Any {
+  ::api/request("DELETE", `/tags/${::api/path-segment(id)}`, "")
+}
+
+tag-contact
+meta {
+    doc: """POST /contacts/{id}/tags - Apply a tag (by tag id) to a contact. Returns the tag."""
+}
+fn (contact-id: Str, tag-id: Str): Any {
+  ::api/request("POST", `/contacts/${::api/path-segment(contact-id)}/tags`, {id: tag-id})
+}
+
+untag-contact
+meta {
+    doc: """DELETE /contacts/{id}/tags/{tag_id} - Remove a tag from a contact. Returns the tag."""
+}
+fn (contact-id: Str, tag-id: Str): Any {
+  ::api/request("DELETE", `/contacts/${::api/path-segment(contact-id)}/tags/${::api/path-segment(tag-id)}`, "")
+}
+
+tag-conversation
+meta {
+    ctx: {"intercom.admin.id": {required: true, secret: false}},
+    doc: """
+    POST /conversations/{id}/tags - Apply a tag (by tag id) to a
+    conversation, as the configured admin.
+
+    **Example**
+
+    ```hot
+    bug ::intercom::tags/create-tag("bug")
+    ::intercom::tags/tag-conversation(conversation-id, bug.id)
+    ```
+    """
+}
+fn (conversation-id: Str, tag-id: Str): Any {
+  ::api/request("POST", `/conversations/${::api/path-segment(conversation-id)}/tags`, {id: tag-id, admin_id: ::api/admin-id()})
+}
+
+untag-conversation
+meta {
+    ctx: {"intercom.admin.id": {required: true, secret: false}},
+    doc: """DELETE /conversations/{id}/tags/{tag_id} - Remove a tag from a conversation, as the configured admin."""
+}
+fn (conversation-id: Str, tag-id: Str): Any {
+  ::api/request("DELETE", `/conversations/${::api/path-segment(conversation-id)}/tags/${::api/path-segment(tag-id)}`, {admin_id: ::api/admin-id()})
+}

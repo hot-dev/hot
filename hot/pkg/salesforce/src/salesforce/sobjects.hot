@@ -1,11 +1,33 @@
 ::salesforce::sobjects ns
+meta {
+    doc: """Single-record sObject CRUD, external-id upserts, and describe. For up to 200 records per call see `::salesforce::composite`; for more, `::salesforce::bulk`."""
+}
 
 ::api ::salesforce::api
+
+record-path
+meta {
+    doc: """`/sobjects/{type}`, plus `/{id}` segments when given, each URL-encoded. Exposed for testing."""
+}
+fn
+(sobject-type: Str): Str {
+  `/sobjects/${::api/segment(sobject-type)}`
+},
+(sobject-type: Str, id: Str): Str {
+  `${record-path(sobject-type)}/${::api/segment(id)}`
+},
+(sobject-type: Str, external-id-field: Str, value: Any): Str {
+  `${record-path(sobject-type)}/${::api/segment(external-id-field)}/${::api/segment(value)}`
+}
+
+fields-query fn (fields: Vec): Str {
+  ::api/query-string({fields: if(is-empty(fields), null, fields)})
+}
 
 create-record
 meta {
     doc: """
-    POST /sobjects/{type} - Create a record. Returns `{id, success}`.
+    POST /sobjects/{type} - Create a record. Returns `{id, success, errors}`.
 
     **Example**
 
@@ -16,49 +38,103 @@ meta {
     """
 }
 fn (sobject-type: Str, fields: Map): Map {
-  ::api/json("POST", `/sobjects/${sobject-type}`, fields)
+  ::api/json("POST", record-path(sobject-type), fields)
 }
 
 get-record
 meta {
-    doc: """GET /sobjects/{type}/{id} - One record; the 3-arity form limits the returned `fields` (Vec of names)."""
+    doc: """GET /sobjects/{type}/{id} - One record; the 3-arity form limits the returned `fields` (Vec of API names)."""
 }
 fn
 (sobject-type: Str, id: Str): Map {
-  ::api/json("GET", `/sobjects/${sobject-type}/${id}`)
+  ::api/json("GET", record-path(sobject-type, id))
 },
 (sobject-type: Str, id: Str, fields: Vec): Map {
-  ::api/json("GET", `/sobjects/${sobject-type}/${id}?fields=${join(fields, ",")}`)
+  ::api/json("GET", `${record-path(sobject-type, id)}${fields-query(fields)}`)
 }
 
 update-record
 meta {
-    doc: """PATCH /sobjects/{type}/{id} - Update fields. Salesforce replies 204; returns null on success."""
+    doc: """PATCH /sobjects/{type}/{id} - Update the given fields; others are untouched. Salesforce replies 204: returns null on success."""
 }
 fn (sobject-type: Str, id: Str, fields: Map): Any {
-  ::api/json("PATCH", `/sobjects/${sobject-type}/${id}`, fields)
+  ::api/json("PATCH", record-path(sobject-type, id), fields)
 }
 
 delete-record
 meta {
-    doc: """DELETE /sobjects/{type}/{id} - Delete a record (goes to the recycle bin)."""
+    doc: """DELETE /sobjects/{type}/{id} - Delete a record (it goes to the recycle bin). Returns null on success."""
 }
 fn (sobject-type: Str, id: Str): Any {
-  ::api/json("DELETE", `/sobjects/${sobject-type}/${id}`)
+  ::api/json("DELETE", record-path(sobject-type, id))
 }
 
 upsert-record
 meta {
-    doc: """PATCH /sobjects/{type}/{externalIdField}/{value} - Create-or-update by external id — the idempotent way to sync records in."""
+    doc: """
+    PATCH /sobjects/{type}/{externalIdField}/{value} - Create or update
+    by external id: the idempotent way to sync records in. Returns
+    `{id, success, errors, created}` (`created` is true for an insert).
+    Use `Id` as the field to update by record id. More than one match is
+    a 300 Err listing the candidates.
+
+    **Example**
+
+    ```hot
+    out ::salesforce::sobjects/upsert-record("Contact", "External_Id__c", "u-42", {LastName: "Lovelace"})
+    out.created
+    ```
+    """
 }
-fn (sobject-type: Str, external-id-field: Str, value: Str, fields: Map): Any {
-  ::api/json("PATCH", `/sobjects/${sobject-type}/${external-id-field}/${::hot::uri/encode(value)}`, fields)
+fn (sobject-type: Str, external-id-field: Str, value: Any, fields: Map): Map {
+  ::api/json("PATCH", record-path(sobject-type, external-id-field, value), fields)
+}
+
+get-by-external-id
+meta {
+    doc: """GET /sobjects/{type}/{externalIdField}/{value} - Fetch a record by an external id field; the 4-arity form limits the returned `fields`."""
+}
+fn
+(sobject-type: Str, external-id-field: Str, value: Any): Map {
+  ::api/json("GET", record-path(sobject-type, external-id-field, value))
+},
+(sobject-type: Str, external-id-field: Str, value: Any, fields: Vec): Map {
+  ::api/json("GET", `${record-path(sobject-type, external-id-field, value)}${fields-query(fields)}`)
+}
+
+describe-global
+meta {
+    doc: """GET /sobjects - Every object in the org (`sobjects`: `name`, `label`, `custom`, `queryable`, `createable`, ...) plus `maxBatchSize`."""
+}
+fn (): Map {
+  ::api/json("GET", "/sobjects")
 }
 
 describe-object
 meta {
-    doc: """GET /sobjects/{type}/describe - The object's schema: fields, picklist values, relationships."""
+    doc: """
+    GET /sobjects/{type}/describe - The object's full schema: `fields`
+    (name, type, length, `picklistValues`, `referenceTo`, `nillable`,
+    `createable`, `updateable`, `externalId`), `childRelationships`,
+    and `recordTypeInfos`.
+
+    **Example**
+
+    ```hot
+    schema ::salesforce::sobjects/describe-object("Opportunity")
+    stage first(filter(schema.fields, (f) { eq(f.name, "StageName") }))
+    map(stage.picklistValues, (p) { p.value })
+    ```
+    """
 }
 fn (sobject-type: Str): Map {
-  ::api/json("GET", `/sobjects/${sobject-type}/describe`)
+  ::api/json("GET", `${record-path(sobject-type)}/describe`)
+}
+
+field-names
+meta {
+    doc: """The field API names from a `describe-object` result. Handy for building `SELECT` lists."""
+}
+fn (description: Map): Vec {
+  map(or(get(description, "fields"), []), (f) { f.name })
 }

@@ -1,8 +1,217 @@
 ::intercom::test ns
 meta ["test"]
 
-test-constants
+::api ::intercom::api
+::conversations ::intercom::conversations
+::contacts ::intercom::contacts
+::tickets ::intercom::tickets
+::events ::intercom::events
+::webhooks ::intercom::webhooks
+
+// ============================================================================
+// Version and regions
+// ============================================================================
+
+test-version-pinned
 meta ["test"] fn () {
-    assert-eq("https://api.intercom.io", ::intercom/BASE_URL)
-    assert-eq("2.13", ::intercom/API_VERSION)
+    assert-eq("2.17", ::intercom/API_VERSION)
+    assert-eq("2.17", ::api/api-version(), "no intercom.version override in tests")
+}
+
+test-region-base-urls
+meta ["test"] fn () {
+    assert-eq("https://api.intercom.io", ::api/base-url(), "default region is US")
+    assert-eq("https://api.intercom.io", ::api/base-url(null))
+    assert-eq("https://api.intercom.io", ::api/base-url("us"))
+    assert-eq("https://api.eu.intercom.io", ::api/base-url("eu"))
+    assert-eq("https://api.eu.intercom.io", ::api/base-url(" EU "), "case and whitespace insensitive")
+    assert-eq("https://api.au.intercom.io", ::api/base-url("au"))
+}
+
+test-unknown-region-is-err
+meta ["test"] fn () {
+    out ::api/base-url("mars")
+    assert(is-err(out), "unknown region errs rather than silently using US")
+}
+
+// ============================================================================
+// Headers and response handling
+// ============================================================================
+
+test-headers
+meta ["test"] fn () {
+    h ::api/build-headers("tok", "2.17", true)
+    assert-eq("Bearer tok", h.Authorization)
+    assert-eq("2.17", get(h, "Intercom-Version"))
+    assert-eq("application/json", h.Accept)
+    assert-eq("application/json", get(h, "Content-Type"))
+    assert(not(in("Content-Type", keys(::api/build-headers("tok", "2.17", false)))), "no content type without a body")
+}
+
+test-response-body-empty-is-null
+meta ["test"] fn () {
+    assert(is-null(::api/response-body("")), "202/204 empty body")
+    assert-eq({type: "admin"}, ::api/response-body({type: "admin"}))
+}
+
+test-http-error-from-response
+meta ["test"] fn () {
+    e ::api/http-error(::hot::http/HttpResponse({status: 401, headers: {}, body: {type: "error.list", errors: [{code: "unauthorized"}]}}))
+    assert-eq(401, e.status)
+    assert-eq("unauthorized", first(e.body.errors).code)
+}
+
+test-path-and-query
+meta ["test"] fn () {
+    assert-eq("a%2Fb", ::api/path-segment("a/b"))
+    assert-eq("?per_page=20", ::api/query-string({per_page: 20, starting_after: null}))
+    assert-eq("", ::api/query-string({}))
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-search-body-pagination
+meta ["test"] fn () {
+    q {field: "open", operator: "=", value: true}
+    bare ::api/build-search-body(q, {})
+    assert-eq({query: q}, bare, "no pagination object when unset")
+
+    paged ::api/build-search-body(q, {per_page: 50, starting_after: "WzE3MDk"})
+    assert-eq({per_page: 50, starting_after: "WzE3MDk"}, paged.pagination)
+
+    first-page ::api/build-search-body(q, {per_page: 50, starting_after: null})
+    assert-eq({per_page: 50}, first-page.pagination, "null cursor omitted")
+}
+
+test-next-cursor
+meta ["test"] fn () {
+    assert-eq("abc", ::api/next-cursor({pages: {type: "pages", page: 1, next: {page: 2, starting_after: "abc"}}}))
+    assert(is-null(::api/next-cursor({pages: {type: "pages", page: 3}})), "last page has no next")
+    assert(is-null(::api/next-cursor({})))
+    assert(is-null(::api/next-cursor(null)))
+}
+
+// Fake cursor API: items 1..5 in pages of 2, cursors "c2", "c4".
+fake-page fn (cursor: Str?): Map {
+    cond {
+        is-null(cursor) => { {conversations: [1, 2], pages: {next: {starting_after: "c2"}}} }
+        eq(cursor, "c2") => { {conversations: [3, 4], pages: {next: {starting_after: "c4"}}} }
+        => { {conversations: [5], pages: {}} }
+    }
+}
+
+test-collect-pages
+meta ["test"] fn () {
+    assert-eq([1, 2, 3, 4, 5], ::api/collect-pages(fake-page, "conversations", null, 100, []))
+    assert-eq([1, 2, 3], ::api/collect-pages(fake-page, "conversations", null, 3, []), "stops at limit")
+    assert-eq([], ::api/collect-pages(fake-page, "conversations", null, 0, []), "zero limit fetches nothing")
+    assert-eq(150, ::api/page-size(1000))
+    assert-eq(1, ::api/page-size(0))
+}
+
+// ============================================================================
+// Bodies
+// ============================================================================
+
+test-reply-and-note-bodies
+meta ["test"] fn () {
+    reply ::conversations/build-reply-body("comment", "991", "Thanks!", {})
+    assert-eq({message_type: "comment", type: "admin", admin_id: "991", body: "Thanks!"}, reply)
+
+    note ::conversations/build-reply-body("note", "991", "Internal", {attachment_urls: null})
+    assert-eq("note", note.message_type)
+    assert(not(in("attachment_urls", keys(note))), "unset options omitted")
+}
+
+test-state-bodies
+meta ["test"] fn () {
+    assert-eq({message_type: "close", type: "admin", admin_id: "991"}, ::conversations/build-close-body("991", null))
+    assert-eq("Bye", ::conversations/build-close-body("991", "Bye").body)
+    assert-eq({message_type: "snoozed", admin_id: "991", snoozed_until: 1767225600}, ::conversations/build-snooze-body("991", 1767225600))
+    assert-eq({message_type: "open", admin_id: "991"}, ::conversations/build-open-body("991"))
+}
+
+test-assign-body
+meta ["test"] fn () {
+    to-admin ::conversations/build-assign-body("991", "123", {})
+    assert-eq({message_type: "assignment", type: "admin", admin_id: "991", assignee_id: "123"}, to-admin)
+
+    to-team ::conversations/build-assign-body("991", "456", {type: "team", body: "Billing", skip_reopen: true})
+    assert-eq("team", to-team.type)
+    assert-eq("Billing", to-team.body)
+    assert-eq(true, to-team.skip_reopen)
+}
+
+test-contact-note-body
+meta ["test"] fn () {
+    assert-eq({body: "VIP"}, ::contacts/build-note-body("VIP", null))
+    assert-eq({body: "VIP", admin_id: "991"}, ::contacts/build-note-body("VIP", "991"))
+}
+
+test-ticket-create-body
+meta ["test"] fn () {
+    body ::tickets/build-create-body("67", [{email: "ada@example.com"}], {company_id: null, ticket_attributes: {_default_title_: "Bug"}})
+    assert-eq("67", body.ticket_type_id)
+    assert-eq([{email: "ada@example.com"}], body.contacts)
+    assert-eq("Bug", body.ticket_attributes._default_title_)
+    assert(not(in("company_id", keys(body))))
+}
+
+test-event-body
+meta ["test"] fn () {
+    body ::events/build-event-body("upgraded-plan", {email: "ada@example.com"}, {created_at: 1767225600, metadata: {plan: "pro"}})
+    assert-eq({event_name: "upgraded-plan", created_at: 1767225600, email: "ada@example.com", metadata: {plan: "pro"}}, body)
+
+    now-body ::events/build-event-body("signed-in", {id: "abc"}, {})
+    assert(gt(now-body.created_at, 1700000000), "created_at defaults to now")
+    assert-eq(["event_name", "created_at", "id"], keys(now-body), "unset identity fields and metadata omitted")
+}
+
+// ============================================================================
+// Webhook verification (vectors generated independently with Python's hmac)
+// ============================================================================
+
+NOTIFICATION """{"type":"notification_event","topic":"conversation.user.created","id":"notif_1"}"""
+
+test-webhook-signature-header-parsing
+meta ["test"] fn () {
+    assert-eq("abc123", ::webhooks/signature-from-header("sha1=abc123"))
+    assert-eq("", ::webhooks/signature-from-header("sha256=abc123"), "other schemes rejected")
+    assert-eq("", ::webhooks/signature-from-header("abc123"), "bare digest rejected")
+    assert-eq("", ::webhooks/signature-from-header(""))
+}
+
+test-webhook-verify-accepts-vector
+meta ["test"] fn () {
+    request {
+        headers: {x-hub-signature: "sha1=627a08874544adff60a619f4f2419c8ec6baba5b"},
+        body-raw: NOTIFICATION
+    }
+
+    assert(::webhooks/verify-request(request, "ic_client_secret"))
+}
+
+test-webhook-verify-rejects
+meta ["test"] fn () {
+    // The signature of a conversation.admin.closed body must not verify this one.
+    tampered {headers: {x-hub-signature: "sha1=319de28d45095a6989a26d936045e1941b6738ac"}, body-raw: NOTIFICATION}
+    assert(not(::webhooks/verify-request(tampered, "ic_client_secret")), "wrong-body signature fails")
+
+    wrong-secret {headers: {x-hub-signature: "sha1=627a08874544adff60a619f4f2419c8ec6baba5b"}, body-raw: NOTIFICATION}
+    assert(not(::webhooks/verify-request(wrong-secret, "other_secret")), "wrong secret fails")
+
+    // A correct HMAC-SHA256 digest is still the wrong algorithm.
+    sha256 {headers: {x-hub-signature: "sha256=5e660950acc20f635022eb1576c2ec139df060f3568cc159ef6c3d97a9da0cad"}, body-raw: NOTIFICATION}
+    assert(not(::webhooks/verify-request(sha256, "ic_client_secret")), "sha256 scheme fails")
+
+    assert(not(::webhooks/verify-request({headers: {}, body-raw: NOTIFICATION}, "ic_client_secret")), "missing header fails")
+}
+
+test-webhook-empty-secret-fails-closed
+meta ["test"] fn () {
+    sig ::hot::hmac/hmac-sha1("", NOTIFICATION)
+    request {headers: {x-hub-signature: `sha1=${sig}`}, body-raw: NOTIFICATION}
+    assert(not(::webhooks/verify-request(request, "")), "empty secret fails closed")
 }

@@ -1,8 +1,288 @@
 ::zendesk::test ns
 meta ["test"]
 
+::api ::zendesk::api
+::tickets ::zendesk::tickets
+::macros ::zendesk::macros
+::search ::zendesk::search
+::sc ::zendesk::side-conversations
+::webhooks ::zendesk::webhooks
+
+// ============================================================================
+// Auth
+// ============================================================================
+
 test-auth-header-vector
 meta ["test"] fn () {
     // base64("agent@acme.com/token:abc123") generated independently
-    assert-eq("Basic YWdlbnRAYWNtZS5jb20vdG9rZW46YWJjMTIz", ::zendesk/auth-header("agent@acme.com", "abc123"))
+    assert-eq("Basic YWdlbnRAYWNtZS5jb20vdG9rZW46YWJjMTIz", ::api/auth-header("agent@acme.com", "abc123"))
+}
+
+test-resolve-auth
+meta ["test"] fn () {
+    assert-eq("Bearer oauth-tok", ::api/resolve-auth("oauth-tok", "agent@acme.com", "abc123"), "OAuth wins when set")
+    assert-eq("Basic YWdlbnRAYWNtZS5jb20vdG9rZW46YWJjMTIz", ::api/resolve-auth(null, "agent@acme.com", "abc123"))
+    assert-eq("Basic YWdlbnRAYWNtZS5jb20vdG9rZW46YWJjMTIz", ::api/resolve-auth("", "agent@acme.com", "abc123"), "blank OAuth token ignored")
+    assert(is-err(::api/resolve-auth(null, "agent@acme.com", null)), "email without token errs")
+    assert(is-err(::api/resolve-auth(null, null, null)), "nothing configured errs")
+}
+
+test-headers
+meta ["test"] fn () {
+    h ::api/build-headers("Bearer t", true)
+    assert-eq("Bearer t", h.Authorization)
+    assert-eq("application/json", get(h, "Content-Type"))
+    assert-eq(["Authorization", "Accept"], keys(::api/build-headers("Bearer t", false)))
+}
+
+// ============================================================================
+// Subdomain and URLs
+// ============================================================================
+
+test-normalize-subdomain
+meta ["test"] fn () {
+    assert-eq("acme", ::api/normalize-subdomain("acme"))
+    assert-eq("acme", ::api/normalize-subdomain("acme.zendesk.com"))
+    assert-eq("acme", ::api/normalize-subdomain("https://acme.zendesk.com/"))
+    assert-eq("acme", ::api/normalize-subdomain("https://ACME.zendesk.com/agent/tickets/1"))
+    assert-eq("acme-support", ::api/normalize-subdomain("  acme-support "))
+}
+
+test-normalize-subdomain-rejects-other-hosts
+meta ["test"] fn () {
+    assert(is-err(::api/normalize-subdomain("evil.com")), "a non-Zendesk host is rejected")
+    assert(is-err(::api/normalize-subdomain("acme.zendesk.com.evil.com")), "suffix tricks are rejected")
+    assert(is-err(::api/normalize-subdomain("user@evil.com")), "userinfo is rejected")
+    assert(is-err(::api/normalize-subdomain("")), "empty is rejected")
+}
+
+test-base-url
+meta ["test"] fn () {
+    assert-eq("https://acme.zendesk.com/api/v2", ::api/base-url("acme"))
+    assert-eq("https://acme.zendesk.com/api/v2", ::api/base-url("acme.zendesk.com"))
+}
+
+test-path-and-query
+meta ["test"] fn () {
+    assert-eq("12%2F..", ::api/path-segment("12/.."))
+    assert-eq("35436", ::api/path-segment(35436))
+    assert-eq("?ids=1%2C2%2C3", ::api/query-string({ids: [1, 2, 3], include: null}))
+    assert-eq("", ::api/query-string({}))
+}
+
+// ============================================================================
+// Responses and errors
+// ============================================================================
+
+test-response-body
+meta ["test"] fn () {
+    assert(is-null(::api/response-body("")), "204 No Content")
+    assert-eq({ticket: {id: 1}}, ::api/response-body({ticket: {id: 1}}))
+}
+
+test-retry-after
+meta ["test"] fn () {
+    assert-eq(37, ::api/retry-after({"retry-after": "37"}))
+    assert(is-null(::api/retry-after({})), "absent")
+    assert(is-null(::api/retry-after({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"})), "HTTP-date form is not seconds")
+}
+
+test-http-error-surfaces-retry-after
+meta ["test"] fn () {
+    e ::api/http-error(::hot::http/HttpResponse({status: 429, headers: {"retry-after": "12"}, body: "Too Many Requests"}))
+    assert-eq(429, e.status)
+    assert-eq(12, e.retry-after)
+
+    e404 ::api/http-error(::hot::http/HttpResponse({status: 404, headers: {}, body: {error: "RecordNotFound"}}))
+    assert(is-null(e404.retry-after))
+}
+
+// ============================================================================
+// Cursor pagination
+// ============================================================================
+
+test-cursor-query
+meta ["test"] fn () {
+    assert-eq("?page%5Bsize%5D=100", ::api/cursor-query({}), "default page size")
+    assert-eq("?sort=-updated_at&page%5Bsize%5D=25&page%5Bafter%5D=xyz", ::api/cursor-query({page_size: 25, after: "xyz", sort: "-updated_at"}))
+    assert-eq("?page%5Bsize%5D=50", ::api/cursor-query({page_size: 50, after: null}), "null cursor omitted")
+}
+
+test-next-after
+meta ["test"] fn () {
+    assert-eq("abc", ::api/next-after({meta: {has_more: true, after_cursor: "abc"}}))
+    assert(is-null(::api/next-after({meta: {has_more: false, after_cursor: "abc"}})), "has_more false ends paging")
+    assert(is-null(::api/next-after({tickets: []})), "no meta")
+    assert(is-null(::api/next-after(null)))
+}
+
+// Fake cursor API: tickets 1..5 in pages of 2.
+fake-page fn (cursor: Str?): Map {
+    cond {
+        is-null(cursor) => { {tickets: [1, 2], meta: {has_more: true, after_cursor: "c2"}} }
+        eq(cursor, "c2") => { {tickets: [3, 4], meta: {has_more: true, after_cursor: "c4"}} }
+        => { {tickets: [5], meta: {has_more: false, after_cursor: "c5"}} }
+    }
+}
+
+test-collect-pages
+meta ["test"] fn () {
+    assert-eq([1, 2, 3, 4, 5], ::api/collect-pages(fake-page, "tickets", null, 100, []))
+    assert-eq([1, 2, 3], ::api/collect-pages(fake-page, "tickets", null, 3, []), "stops at limit")
+    assert-eq([], ::api/collect-pages(fake-page, "tickets", null, 0, []), "zero limit fetches nothing")
+}
+
+// ============================================================================
+// Bodies (unset optionals omitted)
+// ============================================================================
+
+test-create-ticket-body
+meta ["test"] fn () {
+    body ::tickets/build-create-body("Login down", "500s on /login", {priority: "urgent", assignee_id: null})
+    assert-eq("Login down", body.ticket.subject)
+    assert-eq({body: "500s on /login"}, body.ticket.comment)
+    assert-eq("urgent", body.ticket.priority)
+    assert(not(in("assignee_id", keys(body.ticket))), "unset options are omitted, not null")
+}
+
+test-comment-body
+meta ["test"] fn () {
+    assert-eq({ticket: {comment: {body: "Note", public: false}}}, ::tickets/build-comment-body("Note", false, {}))
+    html ::tickets/build-comment-body("plain", true, {html_body: "<p>Hi</p>"})
+    assert-eq({html_body: "<p>Hi</p>", public: true}, html.ticket.comment, "html_body replaces body")
+}
+
+test-merge-body
+meta ["test"] fn () {
+    assert-eq({ids: [123, 456]}, ::tickets/build-merge-body([123, 456], {target_comment: null}))
+    with-comment ::tickets/build-merge-body([123], {target_comment: "Combining", source_comment_is_public: false})
+    assert-eq("Combining", with-comment.target_comment)
+    assert-eq(false, with-comment.source_comment_is_public)
+}
+
+test-macro-update
+meta ["test"] fn () {
+    result {ticket: {
+        id: 35436,
+        url: "https://acme.zendesk.com/api/v2/tickets/35436.json",
+        assignee_id: 235323,
+        group_id: 98738,
+        fields: [{id: 27642, value: "745"}],
+        comment: {body: "Assigned to Agent Uno.", public: false, scoped_body: [["channel:all", "Assigned to Agent Uno."]]}
+    }}
+    changes ::macros/macro-update(result)
+    assert-eq(235323, changes.assignee_id)
+    assert-eq({body: "Assigned to Agent Uno.", public: false}, changes.comment, "scoped_body dropped")
+    assert(not(in("id", keys(changes))), "ticket id not sent back")
+    assert(not(in("url", keys(changes))))
+
+    no-comment ::macros/macro-update({ticket: {status: "solved"}})
+    assert-eq({status: "solved"}, no-comment)
+}
+
+test-search-queries
+meta ["test"] fn () {
+    assert-eq("?query=type%3Aticket+status%3Aopen&sort_by=updated_at", ::search/build-search-query("type:ticket status:open", {sort_by: "updated_at", sort_order: null}))
+    assert-eq("?query=status%3Apending&filter%5Btype%5D=ticket&page%5Bsize%5D=100", ::search/build-export-query("status:pending", "ticket", {}))
+}
+
+test-side-conversation-message
+meta ["test"] fn () {
+    msg ::sc/build-message("Order 1042", "Confirm the address?", [{email: "ops@vendor.example"}], {})
+    assert-eq({subject: "Order 1042", body: "Confirm the address?", to: [{email: "ops@vendor.example"}]}, msg.message)
+    reply ::sc/build-message(null, "Thanks", null, {})
+    assert-eq({body: "Thanks"}, reply.message, "reply omits subject and to")
+}
+
+// ============================================================================
+// Webhook verification (fixed vectors generated independently with Python)
+// ============================================================================
+
+SECRET "dGhpc19zZWNyZXRfaXNfZm9yX3Rlc3Rpbmdfb25seQ=="
+TS "2021-03-25T05:09:27Z"
+BODY """{"type":"zen:event-type:ticket.created","detail":{"id":"35436"}}"""
+
+test-parse-timestamp
+meta ["test"] fn () {
+    assert-eq(1616648967, ::webhooks/parse-timestamp(TS))
+    assert-eq(1616648967, ::webhooks/parse-timestamp("2021-03-25T05:09:27.123Z"), "fractional seconds")
+    assert-eq(1616648967, ::webhooks/parse-timestamp("2021-03-25T05:09:27+00:00"))
+    assert-eq(1616648967, ::webhooks/parse-timestamp("1616648967"), "Unix seconds")
+    assert(is-null(::webhooks/parse-timestamp("yesterday")))
+    assert(is-null(::webhooks/parse-timestamp("2021-03-25T05:09:27-05:00")), "non-UTC offsets are not accepted")
+}
+
+test-webhook-verify-accepts-vector
+meta ["test"] fn () {
+    request {
+        headers: {
+            x-zendesk-webhook-signature: "mhGHyndTFLGR3UMLseERutJPp3XdywYNr0gnLiJ9vEM=",
+            x-zendesk-webhook-signature-timestamp: TS
+        },
+        body-raw: BODY
+    }
+    // The fixed vector's timestamp is years old: the HMAC verifies with
+    // the replay check disabled, and the default window rejects it.
+    assert(::webhooks/verify-request(request, SECRET, 0), "signature verifies")
+    assert(not(::webhooks/verify-request(request, SECRET)), "stale timestamp rejected by default")
+}
+
+test-webhook-verify-rejects-tampered
+meta ["test"] fn () {
+    // Signature of a ticket.deleted body with the same timestamp.
+    tampered {
+        headers: {
+            x-zendesk-webhook-signature: "olNHxELIR8M9Q5rRoyKUoEslNUIl8AN19j+ReNT4DrE=",
+            x-zendesk-webhook-signature-timestamp: TS
+        },
+        body-raw: BODY
+    }
+
+    assert(not(::webhooks/verify-request(tampered, SECRET, 0)), "wrong-body signature fails")
+
+    moved {
+        headers: {
+            x-zendesk-webhook-signature: "mhGHyndTFLGR3UMLseERutJPp3XdywYNr0gnLiJ9vEM=",
+            x-zendesk-webhook-signature-timestamp: "2021-03-25T05:09:28Z"
+        },
+        body-raw: BODY
+    }
+
+    assert(not(::webhooks/verify-request(moved, SECRET, 0)), "the timestamp is part of the signed data")
+}
+
+test-webhook-verify-rejects-missing
+meta ["test"] fn () {
+    no-sig {headers: {x-zendesk-webhook-signature-timestamp: TS}, body-raw: BODY}
+    assert(not(::webhooks/verify-request(no-sig, SECRET, 0)), "missing signature fails")
+    no-ts {headers: {x-zendesk-webhook-signature: "mhGHyndTFLGR3UMLseERutJPp3XdywYNr0gnLiJ9vEM="}, body-raw: BODY}
+    assert(not(::webhooks/verify-request(no-ts, SECRET, 0)), "missing timestamp fails")
+}
+
+signed-request fn (timestamp: Str, body: Str): Map {
+    sig ::hot::base64/encode(::hot::hmac/hmac-sha256-bytes(SECRET, `${timestamp}${body}`))
+    {headers: {x-zendesk-webhook-signature: sig, x-zendesk-webhook-signature-timestamp: timestamp}, body-raw: body}
+}
+
+test-webhook-replay-window
+meta ["test"] fn () {
+    now-iso Str(::hot::time/now())
+    fresh signed-request(now-iso, BODY)
+    assert(::webhooks/verify-request(fresh, SECRET), `fresh ISO timestamp verifies (${now-iso})`)
+
+    stale-ts Str(sub(::hot::time/epoch-seconds(), 600))
+    stale signed-request(stale-ts, BODY)
+    assert(not(::webhooks/verify-request(stale, SECRET)), "10-minute-old delivery rejected")
+    assert(::webhooks/verify-request(stale, SECRET, 900), "wider explicit window accepts it")
+
+    garbage signed-request("not-a-time", BODY)
+    assert(not(::webhooks/verify-request(garbage, SECRET)), "unparseable timestamp fails closed")
+    assert(::webhooks/verify-request(garbage, SECRET, 0), "replay check can be disabled explicitly")
+}
+
+test-webhook-empty-secret-fails-closed
+meta ["test"] fn () {
+    sig ::hot::base64/encode(::hot::hmac/hmac-sha256-bytes("", `${TS}${BODY}`))
+    request {headers: {x-zendesk-webhook-signature: sig, x-zendesk-webhook-signature-timestamp: TS}, body-raw: BODY}
+    assert(not(::webhooks/verify-request(request, "", 0)), "empty secret fails closed")
 }

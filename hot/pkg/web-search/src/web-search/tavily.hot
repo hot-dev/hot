@@ -1,15 +1,17 @@
 ::web-search::tavily ns
 meta {
-    doc: """Tavily — search built for LLM agents (https://docs.tavily.com). Context variable: `tavily.api.key` (`tvly-...`)."""
+    doc: """Tavily: search built for LLM agents (https://docs.tavily.com). Context variable: `tavily.api.key` (`tvly-...`), sent as `Authorization: Bearer`."""
 }
 
 ::ctx ::hot::ctx
+::http ::web-search::http
 
-http-request ::hot::http/request
-is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
 
 BASE_URL "https://api.tavily.com"
+
+// Tavily's documented max_results range is 0-20.
+MAX_RESULTS 20
 
 post fn
 (path: Str, body: Map): Any {
@@ -17,35 +19,33 @@ post fn
 },
 // 3-arity: explicit API key override
 (path: Str, body: Map, api-key: Str): Any {
-  response ::hot::http/request(HttpRequest({
+  ::http/send("tavily", "Tavily", HttpRequest({
     method: "POST",
     url: `${BASE_URL}${path}`,
     headers: {
       Authorization: `Bearer ${api-key}`,
       Content-Type: "application/json"
     },
-    body: to-json(untype(body))
+    body: to-json(untype(filter-vals(body, is-some)))
   }))
-  cond {
-    is-err(response) => { response }
-    is-ok-response(response) => { response.body }
-    => { err({status: response.status, body: response.body}) }
-  }
 }
 
 search
 meta {
     ctx: {"tavily.api.key": {required: true}},
     doc: """
-    POST /search - Tavily search. `options` supports `search_depth`
-    ("basic"/"advanced"), `topic` ("general"/"news"), `max_results`,
-    `include_answer` (LLM-written answer in `.answer`), `include_domains`,
-    `exclude_domains`, `time_range`.
+    POST /search - Tavily search. `options`: `search_depth` ("basic",
+    "advanced", "fast", "ultra-fast"), `topic` ("general", "news",
+    "finance"), `max_results` (0-20), `time_range` ("day", "week",
+    "month", "year"), `start_date`/`end_date` (YYYY-MM-DD),
+    `include_domains`/`exclude_domains`, `include_answer` (LLM-written
+    answer in `.answer`), `include_raw_content` ("markdown"/"text"),
+    `country`, `include_usage`. Null options are dropped.
 
     **Example**
 
     ```hot
-    out ::web-search::tavily/search("qdrant vs pinecone pricing", {include_answer: true})
+    out ::web-search::tavily/search("qdrant vs pinecone pricing", {include_answer: true, max_results: 5})
     out.answer
     map(out.results, (r) { r.url })
     ```
@@ -56,16 +56,35 @@ fn
   search(query, {})
 },
 (query: Str, options: Map): Map {
-  post("/search", {query: query, ...options})
+  post("/search", {...options, query: query})
 }
 
 extract
 meta {
     ctx: {"tavily.api.key": {required: true}},
-    doc: """POST /extract - Fetch and clean page content for a Vec of URLs. Returns `{results: [{url, raw_content}], failed_results}` — the read-a-page half of an agent's browsing loop."""
+    doc: """POST /extract - Fetch and clean page content for up to 20 URLs. `options`: `extract_depth` ("basic"/"advanced"), `format` ("markdown"/"text"), `query` (rerank chunks by relevance), `include_images`, `timeout` (seconds). Returns `{results: [{url, raw_content}], failed_results: [{url, error}]}`; check both."""
 }
-fn (urls: Vec): Map {
-  post("/extract", {urls: urls})
+fn
+(urls: Vec): Map {
+  extract(urls, {})
+},
+(urls: Vec, options: Map): Map {
+  post("/extract", {...options, urls: urls})
+}
+
+TIME_RANGES {day: "day", week: "week", month: "month", year: "year"}
+
+build-search-options
+meta {
+    doc: """Tavily search options for the normalized `search`: `max_results` clamped to 1-20, plus `time_range` for a `freshness` filter and `include_domains`/`exclude_domains`. Unset filters are omitted. Exposed for testing."""
+}
+fn (max-results: Int, filters: Map): Map {
+  filter-vals({
+    max_results: ::http/clamp(max-results, 1, MAX_RESULTS),
+    time_range: get(TIME_RANGES, or(get(filters, "freshness"), "")),
+    include_domains: get(filters, "include-domains"),
+    exclude_domains: get(filters, "exclude-domains")
+  }, is-some)
 }
 
 normalize
@@ -73,21 +92,16 @@ meta {
     doc: """Normalize a Tavily search response into `Vec<::web-search/SearchResult>`. Exposed for testing."""
 }
 fn (body: Map): Vec {
-  map(get(body, "results", []), (r) {
+  map(or(get(body, "results"), []), (r) {
     ::web-search/SearchResult({
-      title: get(r, "title", ""),
-      url: get(r, "url", ""),
+      title: or(get(r, "title"), ""),
+      url: or(get(r, "url"), ""),
       content: get(r, "content"),
       score: get(r, "score")
     })
   })
 }
 
-search-normalized fn (query: Str, max-results: Int): Vec {
-  out search(query, {max_results: max-results})
-  match out {
-    Result.Err => { err(out) }
-
-    _ => { normalize(out) }
-  }
+search-normalized fn (query: Str, max-results: Int, filters: Map): Vec {
+  search(query, build-search-options(max-results, filters)) |> if-ok((body) { normalize(body) })
 }

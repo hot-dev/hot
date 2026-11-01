@@ -1,0 +1,203 @@
+::shopify::products ns
+meta {
+    doc: """
+    Products and variants: list and search with cursor pagination, fetch
+    one with variants, create, update, bulk-update variants and delete.
+    Needs `read_products` / `write_products`.
+    """
+}
+
+::api ::shopify::api
+
+PRODUCT_FIELDS """
+  id title handle status vendor productType tags totalInventory createdAt updatedAt
+  priceRangeV2 {
+    minVariantPrice { amount currencyCode }
+    maxVariantPrice { amount currencyCode }
+  }
+"""
+
+VARIANT_FIELDS """
+  id title sku price compareAtPrice inventoryQuantity
+  selectedOptions { name value }
+  inventoryItem { id tracked }
+"""
+
+list-products
+meta {
+    doc: """
+    One page of products. Options: `first` (default 50, max 250),
+    `after`, `query` (e.g. `"title:*sticker* status:active"`), `sortKey`
+    (`TITLE`, `CREATED_AT`, `UPDATED_AT`, `INVENTORY_TOTAL`, ...),
+    `reverse`. Returns `{nodes, pageInfo}`.
+    """
+}
+fn
+(): Map {
+  list-products({})
+},
+(options: Map): Map {
+  query ```
+  query Products($first: Int!, $after: String, $query: String, $sortKey: ProductSortKeys, $reverse: Boolean) {
+    products(first: $first, after: $after, query: $query, sortKey: $sortKey, reverse: $reverse) {
+      nodes { ${PRODUCT_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+  ```
+  data ::api/graphql(query, ::api/connection-variables(options))
+  data.products
+}
+
+search-products
+meta {
+    doc: """One page of products matching Shopify's search syntax (e.g. `"title:*sticker* status:active"`). Options as in `list-products`."""
+}
+fn
+(search-query: Str): Map {
+  search-products(search-query, {})
+},
+(search-query: Str, options: Map): Map {
+  list-products({...options, query: search-query})
+}
+
+collect-products
+meta {
+    doc: """Follow cursors and return up to `max-items` products (a Vec of nodes). Options as in `list-products`."""
+}
+fn (options: Map, max-items: Int): Vec {
+  ::api/collect(list-products, options, max-items)
+}
+
+get-product
+meta {
+    doc: """One product by GraphQL id with its options and first 100 variants (price, SKU, inventory item id). Returns null when not found."""
+}
+fn (id: Str): Map? {
+  query ```
+  query Product($id: ID!) {
+    product(id: $id) {
+      ${PRODUCT_FIELDS}
+      descriptionHtml
+      options { id name values }
+      variants(first: 100) {
+        nodes { ${VARIANT_FIELDS} }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+  ```
+  data ::api/graphql(query, {id: id})
+  data.product
+}
+
+create-product
+meta {
+    doc: """
+    Create a product (`productCreate`) from a `ProductCreateInput`:
+    `title` plus optional `descriptionHtml`, `vendor`, `productType`,
+    `tags`, `status` (`ACTIVE`, `DRAFT`, `ARCHIVED`), `productOptions`,
+    `metafields`, ... Shopify creates one default variant; set prices
+    and SKUs afterwards with `update-variants`.
+
+    **Example**
+
+    ```hot
+    product ::shopify::products/create-product({title: "Cool socks", status: "DRAFT", tags: ["socks"]})
+    ```
+    """
+}
+fn (product: Map): Map {
+  mutation ```
+  mutation ProductCreate($product: ProductCreateInput!) {
+    productCreate(product: $product) {
+      product {
+        ${PRODUCT_FIELDS}
+        variants(first: 10) { nodes { ${VARIANT_FIELDS} } }
+      }
+      userErrors { field message }
+    }
+  }
+  ```
+  payload ::api/mutate(mutation, {product: product}, "productCreate")
+  payload.product
+}
+
+update-product
+meta {
+    doc: """Update a product (`productUpdate`) from a `ProductUpdateInput` that includes the product `id` and the fields to change."""
+}
+fn (product: Map): Map {
+  mutation ```
+  mutation ProductUpdate($product: ProductUpdateInput!) {
+    productUpdate(product: $product) {
+      product { ${PRODUCT_FIELDS} }
+      userErrors { field message }
+    }
+  }
+  ```
+  cond {
+    is-null(get(product, "id")) => { err("shopify: update-product needs the product id in the input") }
+    => {
+      payload ::api/mutate(mutation, {product: product}, "productUpdate")
+      payload.product
+    }
+  }
+}
+
+update-variants
+meta {
+    doc: """
+    Update several variants of one product (`productVariantsBulkUpdate`).
+    Each variant is a `ProductVariantsBulkInput` with `id` plus fields
+    such as `price`, `compareAtPrice`, `inventoryItem: {sku, tracked}`,
+    `optionValues`. Option `allowPartialUpdates` lets valid variants
+    save when others fail. Returns the updated variants.
+
+    **Example**
+
+    ```hot
+    ::shopify::products/update-variants(product.id, [
+      {id: variant.id, price: "19.00", inventoryItem: {sku: "SOCK-RED-M"}}
+    ])
+    ```
+    """
+}
+fn
+(product-id: Str, variants: Vec): Vec {
+  update-variants(product-id, variants, {})
+},
+(product-id: Str, variants: Vec, options: Map): Vec {
+  mutation ```
+  mutation ProductVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $allowPartialUpdates: Boolean) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants, allowPartialUpdates: $allowPartialUpdates) {
+      productVariants { ${VARIANT_FIELDS} }
+      userErrors { field message code }
+    }
+  }
+  ```
+  vars filter-vals({
+    productId: product-id,
+    variants: variants,
+    allowPartialUpdates: get(options, "allowPartialUpdates")
+  }, is-some)
+  payload ::api/mutate(mutation, vars, "productVariantsBulkUpdate")
+  payload.productVariants
+}
+
+delete-product
+meta {
+    doc: """Permanently delete a product and its variants (`productDelete`). Returns the deleted product id. Prefer `update-product` with `status: "ARCHIVED"` when the product may be needed again."""
+}
+fn (id: Str): Str {
+  mutation """
+  mutation ProductDelete($input: ProductDeleteInput!) {
+    productDelete(input: $input) {
+      deletedProductId
+      userErrors { field message }
+    }
+  }
+  """
+  payload ::api/mutate(mutation, {input: {id: id}}, "productDelete")
+  payload.deletedProductId
+}

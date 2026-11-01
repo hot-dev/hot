@@ -1,0 +1,47 @@
+::plaid::investments ns
+meta {
+    doc: """Investments (holdings and investment transactions) and Liabilities (credit cards, student loans, mortgages)."""
+}
+
+::api ::plaid::api
+
+get-holdings
+meta {
+    doc: """POST /investments/holdings/get: positions per account plus the referenced `securities`. Options: `account_ids`. Returns `{accounts, holdings, securities, item}`."""
+}
+fn
+(access-token: Str): Map {
+  get-holdings(access-token, null)
+},
+(access-token: Str, options: Map?): Map {
+  ::api/post("/investments/holdings/get", {access_token: access-token, options: options})
+}
+
+get-investment-transactions
+meta {
+    doc: """POST /investments/transactions/get: buys, sells, dividends, fees and transfers between two `YYYY-MM-DD` dates, offset-paginated. Options: `account_ids`, `count` (max 500), `offset`, `async_update`. Returns `{investment_transactions, total_investment_transactions, securities, accounts}`."""
+}
+fn
+(access-token: Str, start-date: Str, end-date: Str): Map {
+  get-investment-transactions(access-token, start-date, end-date, null)
+},
+(access-token: Str, start-date: Str, end-date: Str, options: Map?): Map {
+  ::api/post("/investments/transactions/get", {
+    access_token: access-token,
+    start_date: start-date,
+    end_date: end-date,
+    options: options
+  })
+}
+
+get-liabilities
+meta {
+    doc: """POST /liabilities/get: credit card, student loan and mortgage details (APRs, minimum payments, due dates). Options: `account_ids`. Returns `{accounts, liabilities: {credit, student, mortgage}, item}`."""
+}
+fn
+(access-token: Str): Map {
+  get-liabilities(access-token, null)
+},
+(access-token: Str, options: Map?): Map {
+  ::api/post("/liabilities/get", {access_token: access-token, options: options})
+}

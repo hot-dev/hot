@@ -1,0 +1,197 @@
+::firecrawl::api ns
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """
+    Low-level Firecrawl HTTP client plus the pure helpers behind the
+    job functions: body building, `next`-page following, and job
+    status checks. Most code wants the functions in `::firecrawl` instead.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+// =============================================================================
+// Errors
+// =============================================================================
+
+HttpError
+meta {
+    doc: """
+    A non-2xx Firecrawl response. `message` is readable text built from
+    Firecrawl's `{success: false, error, code?}` body; the raw body is
+    kept in `body`.
+    """
+}
+type {
+    status: Int,
+    message: Str,
+    headers: Map,
+    body: Any
+}
+
+error-message
+meta {
+    doc: """Readable text for a failed response: Firecrawl's `error` (or `message`) field when present, prefixed with the HTTP status. Exposed for testing."""
+}
+fn (status: Int, body: Any): Str {
+  detail cond {
+    is-map(body) => { or(text-or-null(get(body, "error")), text-or-null(get(body, "message"))) }
+    is-str(body) => { text-or-null(body) }
+    => { null }
+  }
+
+  if(is-some(detail), `Firecrawl API error ${status}: ${detail}`, `Firecrawl API error ${status}`)
+}
+
+text-or-null fn (value: Any): Any {
+  if(and(is-str(value), not(is-blank(value))), value, null)
+}
+
+http-error
+meta {
+    doc: """Build the `HttpError` for a non-2xx response. Exposed for testing."""
+}
+fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    message: error-message(response.status, response.body),
+    headers: or(response.headers, {}),
+    body: response.body
+  })
+}
+
+// =============================================================================
+// Requests
+// =============================================================================
+
+request
+meta {
+    doc: """
+    Make an authenticated Firecrawl request. `path` is relative to the
+    v2 base URL; pass `""` as `body` for requests without one. Returns
+    the decoded JSON body on 2xx, an Err carrying `HttpError` otherwise,
+    or the transport Err.
+    """
+}
+fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, ::ctx/get("firecrawl.api.key"))
+},
+// 4-arity: explicit API key override
+(method: Str, path: Str, body: Any, api-key: Str): Any {
+  headers if(eq(body, ""),
+    {Authorization: `Bearer ${api-key}`},
+    {Authorization: `Bearer ${api-key}`, Content-Type: "application/json"})
+
+  encoded if(eq(body, ""), "", to-json(untype(body)))
+  response ::hot::http/request(HttpRequest({
+    method,
+    url: `${::firecrawl/BASE_URL}${path}`,
+    headers: headers,
+    body: encoded
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(http-error(response)) }
+  }
+}
+
+job-path
+meta {
+    doc: """`/<kind>/<id>` with the id URL-encoded, plus an optional suffix (e.g. `"/errors"`). Exposed for testing."""
+}
+fn
+(kind: Str, id: Str): Str {
+  job-path(kind, id, "")
+},
+(kind: Str, id: Str, suffix: Str): Str {
+  `/${kind}/${::uri/encode(id)}${suffix}`
+}
+
+body-with
+meta {
+    doc: """Merge caller `options` with the required fields (required fields win) and drop null values, so unset options are omitted rather than sent as JSON null. Exposed for testing."""
+}
+fn (required: Map, options: Map): Map {
+  filter-vals({...options, ...required}, is-some)
+}
+
+// =============================================================================
+// Pagination: crawl and batch-scrape results arrive in ~10MB pages
+// =============================================================================
+
+// Upper bound on followed `next` pages, as a guard against a cursor loop.
+MAX_PAGES 1000
+
+next-path
+meta {
+    doc: """
+    The path to request for a status response's `next` URL, relative to
+    the v2 base URL, or null when there is no next page. A `next` that
+    points anywhere other than the Firecrawl API is never followed, so
+    the API key is only ever sent to Firecrawl. Exposed for testing.
+    """
+}
+fn (next: Any): Any {
+  prefix `${::firecrawl/BASE_URL}/`
+  cond {
+    not(is-str(next)) => { null }
+    starts-with(next, prefix) => { slice(next, sub(length(prefix), 1)) }
+    => { null }
+  }
+}
+
+collect-pages
+meta {
+    doc: """
+    Follow `next` from a crawl or batch-scrape status page, calling
+    `fetch(path)` for each further page, and return the latest page's
+    status fields with `data` holding every page's documents. Stops on
+    the last page, on a running job's repeated empty cursor (keeping
+    `next` so you can resume), or on an Err from `fetch` (returned).
+    Exposed for testing.
+    """
+}
+fn (page: Map, fetch: Fn): Map {
+  collect-loop(page, or(get(page, "data"), []), fetch, 0)
+}
+
+collect-loop fn (page: Map, docs: Vec, fetch: Fn, count: Int): Map {
+  path next-path(get(page, "next"))
+  cond {
+    is-null(path) => { {...page, data: docs} }
+    gte(count, MAX_PAGES) => { {...page, data: docs} }
+    => {
+      next-page fetch(path)
+      cond {
+        is-err(next-page) => { next-page }
+        // A running job repeats its cursor on an empty page until more
+        // documents finish; stop and leave `next` for a later call.
+        and(is-empty(or(get(next-page, "data"), [])), eq(get(next-page, "next"), get(page, "next"))) => {
+          {...next-page, data: docs}
+        }
+        => {
+          collect-loop(next-page, concat(docs, or(get(next-page, "data"), [])), fetch, add(count, 1))
+        }
+      }
+    }
+  }
+}
+
+// =============================================================================
+// Job status
+// =============================================================================
+
+is-terminal
+meta {
+    doc: """True for a job status that will not change again: "completed", "failed", or "cancelled". Exposed for testing."""
+}
+fn (status: Any): Bool {
+  in(status, ["completed", "failed", "cancelled"])
+}

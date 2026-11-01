@@ -1,0 +1,366 @@
+::twilio::verify ns
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+api-request ::twilio::api/request
+client-from-ctx ::twilio::api/client-from-ctx
+Client ::twilio::api/Client
+HttpError ::twilio::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Twilio Verify v2 (https://verify.twilio.com/v2)
+// ============================================================================
+// One-time passcodes over SMS, WhatsApp, voice, or email. Create a Verify
+// Service once (Console or `create-service`), then for each sign-in:
+// `start-verification` sends the code, `check-verification` checks what the
+// user typed. Twilio generates, delivers, rate-limits, and expires the code.
+
+service-sid
+meta {
+    ctx: {"twilio.verify.service.sid": {required: false, secret: false}},
+    doc: """The Verify Service SID (`VA...`) to use: `explicit` when set, else the `twilio.verify.service.sid` context variable. Halts when neither is set. Exposed for testing."""
+}
+fn (explicit: Str?): Str {
+  sid or(explicit, or(::ctx/get("twilio.verify.service.sid"), ""))
+  if(is-empty(sid),
+    fail("No Verify Service SID: pass service_sid or set twilio.verify.service.sid in Context Variables."),
+    sid)
+}
+
+service-url fn (sid: Str): Str {
+  `${::twilio::core/VERIFY_URL}/Services/${::uri/encode(sid)}`
+}
+
+form-value
+meta {
+    doc: """Twilio takes object-valued Verify parameters (`RateLimits`, `ChannelConfiguration`, template substitutions, `Tags`) as JSON strings; Maps are serialized, everything else passes through. Exposed for testing."""
+}
+fn (value: Any): Any {
+  if(is-map(value), to-json(value), value)
+}
+
+// ============================================================================
+// Verifications
+// ============================================================================
+
+StartVerificationRequest
+meta {
+    doc: """
+    Parameters of POST /Services/{ServiceSid}/Verifications. `To` is an
+    E.164 phone number (or an email address for the `email` channel);
+    `Channel` is `sms`, `whatsapp`, `call`, `email`, `sna`, or `auto`.
+    `service_sid` defaults to the `twilio.verify.service.sid` context
+    variable. Map-valued fields are sent as JSON strings.
+    """
+}
+type {
+  service_sid: Str?,
+  To: Str,
+  Channel: Str,
+  Locale: Str?,
+  CustomFriendlyName: Str?,
+  CustomCode: Str?,
+  SendDigits: Str?,
+  Amount: Str?,
+  Payee: Str?,
+  RateLimits: Map?,
+  ChannelConfiguration: Map?,
+  AppHash: Str?,
+  TemplateSid: Str?,
+  TemplateCustomSubstitutions: Map?,
+  DeviceIp: Str?,
+  RiskCheck: Str?,
+  Tags: Map?
+}
+
+Verification type {
+  sid: Str?,
+  service_sid: Str?,
+  account_sid: Str?,
+  to: Str?,
+  channel: Str?,
+  status: Str?,
+  valid: Bool?,
+  lookup: Map?,
+  amount: Str?,
+  payee: Str?,
+  send_code_attempts: Vec<Map>?,
+  sna: Map?,
+  date_created: Str?,
+  date_updated: Str?,
+  url: Str?
+}
+
+start-verification-body
+meta {
+    doc: """The form parameters `start-verification` sends (without `service_sid`, which is in the path). Exposed for testing."""
+}
+fn (request: StartVerificationRequest): Map {
+  untype(request)
+    |> delete("service_sid")
+    |> filter-vals(is-some)
+    |> map-vals(form-value)
+}
+
+start-verification
+meta {
+    ctx: {"twilio.account.sid": {required: true}, "twilio.verify.service.sid": {required: false, secret: false}},
+    doc: """
+POST /v2/Services/{ServiceSid}/Verifications - Send a one-time code. Returns the Verification with `status: "pending"`. Calling it again for the same `To` within the code's lifetime resends the same code.
+
+**Example**
+
+```hot
+::verify ::twilio::verify
+
+v ::verify/start-verification(::verify/StartVerificationRequest({
+  To: "+15558675310",
+  Channel: "sms"
+}))
+v.status  // => "pending"
+```
+"""
+}
+fn
+(request: StartVerificationRequest): Verification {
+  start-verification(client-from-ctx(), request)
+},
+(client: Client, request: StartVerificationRequest): Verification {
+  url `${service-url(service-sid(request.service_sid))}/Verifications`
+  response api-request(client, "POST", url, {}, start-verification-body(request))
+  if(is-ok-response(response), Verification(response.body), err(HttpError(response)))
+}
+
+CheckVerificationRequest
+meta {
+    doc: """Parameters of POST /Services/{ServiceSid}/VerificationCheck. Pass `Code` with either `To` or `VerificationSid`."""
+}
+type {
+  service_sid: Str?,
+  Code: Str?,
+  To: Str?,
+  VerificationSid: Str?,
+  Amount: Str?,
+  Payee: Str?,
+  SnaClientToken: Str?
+}
+
+VerificationCheck type {
+  sid: Str?,
+  service_sid: Str?,
+  account_sid: Str?,
+  to: Str?,
+  channel: Str?,
+  status: Str?,
+  valid: Bool?,
+  amount: Str?,
+  payee: Str?,
+  sna_attempts_error_codes: Vec<Map>?,
+  date_created: Str?,
+  date_updated: Str?
+}
+
+check-verification-body
+meta {
+    doc: """The form parameters `check-verification` sends. Exposed for testing."""
+}
+fn (request: CheckVerificationRequest): Map {
+  filter-vals(delete(untype(request), "service_sid"), is-some)
+}
+
+check-verification
+meta {
+    ctx: {"twilio.account.sid": {required: true}, "twilio.verify.service.sid": {required: false, secret: false}},
+    doc: """
+POST /v2/Services/{ServiceSid}/VerificationCheck - Check a code the user entered. `status` is `"approved"` (and `valid` true) when it matches; a wrong code returns `status: "pending"`. Once a verification is approved, canceled, expired (10 minutes), or out of attempts, Twilio answers 404, which comes back as `err(HttpError)` with status 404.
+
+**Example**
+
+```hot
+::verify ::twilio::verify
+
+check ::verify/check-verification(::verify/CheckVerificationRequest({
+  To: "+15558675310",
+  Code: "123456"
+}))
+signed-in eq(check.status, "approved")
+```
+"""
+}
+fn
+(request: CheckVerificationRequest): VerificationCheck {
+  check-verification(client-from-ctx(), request)
+},
+(client: Client, request: CheckVerificationRequest): VerificationCheck {
+  url `${service-url(service-sid(request.service_sid))}/VerificationCheck`
+  response api-request(client, "POST", url, {}, check-verification-body(request))
+  if(is-ok-response(response), VerificationCheck(response.body), err(HttpError(response)))
+}
+
+GetVerificationRequest type {
+  service_sid: Str?,
+  sid: Str
+}
+
+get-verification
+meta {
+    ctx: {"twilio.account.sid": {required: true}, "twilio.verify.service.sid": {required: false, secret: false}},
+    doc: """GET /v2/Services/{ServiceSid}/Verifications/{Sid} - Fetch a verification (`VE...`) to see its status."""
+}
+fn
+(request: GetVerificationRequest): Verification {
+  get-verification(client-from-ctx(), request)
+},
+(client: Client, request: GetVerificationRequest): Verification {
+  url `${service-url(service-sid(request.service_sid))}/Verifications/${::uri/encode(request.sid)}`
+  response api-request(client, "GET", url, {}, {})
+  if(is-ok-response(response), Verification(response.body), err(HttpError(response)))
+}
+
+UpdateVerificationRequest
+meta {
+    doc: """`Status` is `"canceled"` or `"approved"` (approve out of band, e.g. after a passkey or Silent Network Auth step)."""
+}
+type {
+  service_sid: Str?,
+  sid: Str,
+  Status: Str
+}
+
+update-verification
+meta {
+    ctx: {"twilio.account.sid": {required: true}, "twilio.verify.service.sid": {required: false, secret: false}},
+    doc: """
+POST /v2/Services/{ServiceSid}/Verifications/{Sid} - Cancel or approve a pending verification.
+
+**Example**
+
+```hot
+::verify ::twilio::verify
+
+::verify/update-verification(::verify/UpdateVerificationRequest({sid: "VE123", Status: "canceled"}))
+```
+"""
+}
+fn
+(request: UpdateVerificationRequest): Verification {
+  update-verification(client-from-ctx(), request)
+},
+(client: Client, request: UpdateVerificationRequest): Verification {
+  url `${service-url(service-sid(request.service_sid))}/Verifications/${::uri/encode(request.sid)}`
+  response api-request(client, "POST", url, {}, {Status: request.Status})
+  if(is-ok-response(response), Verification(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Services
+// ============================================================================
+
+CreateServiceRequest
+meta {
+    doc: """Parameters of POST /v2/Services. `FriendlyName` appears in the message text ("Your {FriendlyName} verification code is ..."). `CodeLength` is 4-10 (default 6)."""
+}
+type {
+  FriendlyName: Str,
+  CodeLength: Int?,
+  LookupEnabled: Bool?,
+  SkipSmsToLandlines: Bool?,
+  DtmfInputRequired: Bool?,
+  TtsName: Str?,
+  Psd2Enabled: Bool?,
+  DoNotShareWarningEnabled: Bool?,
+  CustomCodeEnabled: Bool?,
+  DefaultTemplateSid: Str?
+}
+
+Service type {
+  sid: Str?,
+  account_sid: Str?,
+  friendly_name: Str?,
+  code_length: Int?,
+  lookup_enabled: Bool?,
+  psd2_enabled: Bool?,
+  skip_sms_to_landlines: Bool?,
+  dtmf_input_required: Bool?,
+  tts_name: Str?,
+  do_not_share_warning_enabled: Bool?,
+  custom_code_enabled: Bool?,
+  default_template_sid: Str?,
+  date_created: Str?,
+  date_updated: Str?,
+  url: Str?,
+  links: Map?
+}
+
+create-service
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """
+POST /v2/Services - Create a Verify Service. Its `sid` (`VA...`) goes in `twilio.verify.service.sid`.
+
+**Example**
+
+```hot
+::verify ::twilio::verify
+
+service ::verify/create-service(::verify/CreateServiceRequest({FriendlyName: "Acme", CodeLength: 6}))
+service.sid  // => "VA..."
+```
+"""
+}
+fn
+(request: CreateServiceRequest): Service {
+  create-service(client-from-ctx(), request)
+},
+(client: Client, request: CreateServiceRequest): Service {
+  response api-request(client, "POST", `${::twilio::core/VERIFY_URL}/Services`, {}, filter-vals(untype(request), is-some))
+  if(is-ok-response(response), Service(response.body), err(HttpError(response)))
+}
+
+get-service
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """GET /v2/Services/{Sid} - Fetch a Verify Service."""
+}
+fn
+(sid: Str): Service {
+  get-service(client-from-ctx(), sid)
+},
+(client: Client, sid: Str): Service {
+  response api-request(client, "GET", service-url(sid), {}, {})
+  if(is-ok-response(response), Service(response.body), err(HttpError(response)))
+}
+
+ListServicesResponse type {
+  services: Vec<Map>?,
+  meta: Map?
+}
+
+list-services
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """GET /v2/Services - List Verify Services (one page; `meta.next_page_url` feeds `::twilio::api/next-page`)."""
+}
+fn
+(): ListServicesResponse {
+  list-services(client-from-ctx())
+},
+(client: Client): ListServicesResponse {
+  response api-request(client, "GET", `${::twilio::core/VERIFY_URL}/Services?PageSize=50`, {}, {})
+  if(is-ok-response(response), ListServicesResponse(response.body), err(HttpError(response)))
+}
+
+delete-service
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """DELETE /v2/Services/{Sid} - Delete a Verify Service."""
+}
+fn
+(sid: Str): Bool {
+  delete-service(client-from-ctx(), sid)
+},
+(client: Client, sid: Str): Bool {
+  ::twilio::api/delete-request(client, service-url(sid))
+}

@@ -1,0 +1,150 @@
+::shopify::customers ns
+meta {
+    doc: """
+    Customers: list and search with cursor pagination, exact-email
+    lookup, fetch, create and update. Needs `read_customers` /
+    `write_customers`; customer names, emails and addresses are
+    protected customer data, so the app needs Shopify's approval for
+    those fields.
+    """
+}
+
+::api ::shopify::api
+
+CUSTOMER_FIELDS """
+  id firstName lastName displayName state tags note createdAt updatedAt
+  defaultEmailAddress { emailAddress marketingState }
+  defaultPhoneNumber { phoneNumber }
+  numberOfOrders
+  amountSpent { amount currencyCode }
+"""
+
+list-customers
+meta {
+    doc: """
+    One page of customers. Options: `first` (default 50, max 250),
+    `after`, `query` (e.g. `"country:canada orders_count:>5"`), `sortKey`
+    (`NAME`, `CREATED_AT`, `UPDATED_AT`, ...), `reverse`. Returns
+    `{nodes, pageInfo}`.
+    """
+}
+fn
+(): Map {
+  list-customers({})
+},
+(options: Map): Map {
+  query ```
+  query Customers($first: Int!, $after: String, $query: String, $sortKey: CustomerSortKeys, $reverse: Boolean) {
+    customers(first: $first, after: $after, query: $query, sortKey: $sortKey, reverse: $reverse) {
+      nodes { ${CUSTOMER_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+  ```
+  data ::api/graphql(query, ::api/connection-variables(options))
+  data.customers
+}
+
+search-customers
+meta {
+    doc: """One page of customers matching Shopify's customer search syntax. Options as in `list-customers`."""
+}
+fn
+(search-query: Str): Map {
+  search-customers(search-query, {})
+},
+(search-query: Str, options: Map): Map {
+  list-customers({...options, query: search-query})
+}
+
+collect-customers
+meta {
+    doc: """Follow cursors and return up to `max-items` customers (a Vec of nodes). Options as in `list-customers`."""
+}
+fn (options: Map, max-items: Int): Vec {
+  ::api/collect(list-customers, options, max-items)
+}
+
+email-query
+meta {
+    doc: """The search query for an exact email match, with the value quoted so operators in it can't widen the search. Exposed for testing."""
+}
+fn (email: Str): Str {
+  `email:${::api/quote-search-term(email)}`
+}
+
+find-customer-by-email
+meta {
+    doc: """Find a customer by exact email. Returns the customer or null."""
+}
+fn (email: Str): Map? {
+  page list-customers({first: 1, query: email-query(email)})
+  if(is-empty(page.nodes), null, first(page.nodes))
+}
+
+get-customer
+meta {
+    doc: """One customer by GraphQL id, with the default address. Returns null when not found."""
+}
+fn (id: Str): Map? {
+  query ```
+  query Customer($id: ID!) {
+    customer(id: $id) {
+      ${CUSTOMER_FIELDS}
+      defaultAddress { address1 address2 city provinceCode zip countryCodeV2 }
+    }
+  }
+  ```
+  data ::api/graphql(query, {id: id})
+  data.customer
+}
+
+create-customer
+meta {
+    doc: """
+    Create a customer (`customerCreate`) from a `CustomerInput`: `email`,
+    `phone`, `firstName`, `lastName`, `tags`, `note`, `addresses`,
+    `metafields`, ... Set marketing consent separately with
+    `customerEmailMarketingConsentUpdate` via `graphql`.
+
+    **Example**
+
+    ```hot
+    c ::shopify::customers/create-customer({email: "ada@example.com", firstName: "Ada", tags: ["vip"]})
+    ```
+    """
+}
+fn (customer: Map): Map {
+  mutation ```
+  mutation CustomerCreate($input: CustomerInput!) {
+    customerCreate(input: $input) {
+      customer { ${CUSTOMER_FIELDS} }
+      userErrors { field message }
+    }
+  }
+  ```
+  payload ::api/mutate(mutation, {input: customer}, "customerCreate")
+  payload.customer
+}
+
+update-customer
+meta {
+    doc: """Update a customer (`customerUpdate`) from a `CustomerInput` that includes the customer `id` and the fields to change."""
+}
+fn (customer: Map): Map {
+  mutation ```
+  mutation CustomerUpdate($input: CustomerInput!) {
+    customerUpdate(input: $input) {
+      customer { ${CUSTOMER_FIELDS} }
+      userErrors { field message }
+    }
+  }
+  ```
+  cond {
+    is-null(get(customer, "id")) => { err("shopify: update-customer needs the customer id in the input") }
+    => {
+      payload ::api/mutate(mutation, {input: customer}, "customerUpdate")
+      payload.customer
+    }
+  }
+}

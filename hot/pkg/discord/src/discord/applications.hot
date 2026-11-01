@@ -1,0 +1,65 @@
+::discord::applications ns
+meta {
+    doc: """The bot's own application: read it (id, name, flags, install settings) and edit its settings."""
+}
+
+::api ::discord::api
+
+get-current-application
+meta {
+    doc: """
+    GET /applications/@me - The application that owns the bot token. Its
+    `id` is the `application_id` the command and interaction calls need.
+
+    **Example**
+
+    ```hot
+    app ::discord::applications/get-current-application()
+    app.id
+    app.approximate_guild_count
+    ```
+    """
+}
+fn (): Map {
+  ::api/call("GET", "/applications/@me")
+}
+
+EditCurrentApplicationRequest type {
+  custom_install_url: Str?,
+  description: Str?,
+  role_connections_verification_url: Str?,
+  install_params: Map?,
+  integration_types_config: Map?,
+  flags: Int?,
+  icon: Str?,
+  cover_image: Str?,
+  interactions_endpoint_url: Str?,
+  tags: Vec<Str>?,
+  event_webhooks_url: Str?,
+  event_webhooks_status: Int?,
+  event_webhooks_types: Vec<Str>?,
+  clear: Vec<Str>?
+}
+
+edit-current-application
+meta {
+    doc: """
+    PATCH /applications/@me - Change application settings. Only fields you
+    set are sent; `clear: ["icon"]` removes the icon. Setting
+    `interactions_endpoint_url` makes Discord send a signed PING to it
+    first, so the endpoint must already verify requests.
+
+    **Example**
+
+    ```hot
+    ::applications ::discord::applications
+
+    ::applications/edit-current-application(::applications/EditCurrentApplicationRequest({
+      description: "Deploy notifications and on-call tools"
+    }))
+    ```
+    """
+}
+fn (request: EditCurrentApplicationRequest): Map {
+  ::api/call("PATCH", "/applications/@me", {body: ::api/body(request, [])})
+}

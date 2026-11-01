@@ -1,0 +1,115 @@
+::slack::admin::barriers ns
+meta {
+    doc: """
+    `admin.barriers.*`: information barriers that stop members of one IDP
+    group from DMing or calling members of others. `restricted_subjects`
+    must currently be `["im", "mpim", "call"]`. Scope:
+    `admin.barriers:read` / `admin.barriers:write`.
+
+    **Example**
+
+    ```hot
+    ::barriers ::slack::admin::barriers
+
+    ::barriers/create(::barriers/CreateRequest({
+      primary_usergroup_id: "S0123ABCDEF",
+      barriered_from_usergroup_ids: ["S0456GHIJKL"],
+      restricted_subjects: ["im", "mpim", "call"]
+    }))
+    ```
+    """
+}
+
+::api ::slack::admin::api
+
+ListRequest type {
+  cursor: Str?,
+  limit: Int?
+}
+
+list
+meta {
+    doc: """
+    admin.barriers.list - List information barriers (`barriers`).
+
+    Scope: `admin.barriers:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `list-all`.
+    """
+}
+fn
+(): Map {
+  list(ListRequest({}))
+},
+(request: ListRequest): Map {
+  ::api/call("admin.barriers.list", request)
+}
+
+list-all
+meta {
+    doc: """
+    Every `barriers` entry from `admin.barriers.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  list-all(ListRequest({}), 1000)
+},
+(request: ListRequest): Vec {
+  list-all(request, 1000)
+},
+(request: ListRequest, max-items: Int): Vec {
+  ::api/paginate("admin.barriers.list", request, "barriers", max-items)
+}
+
+CreateRequest type {
+  primary_usergroup_id: Str,
+  barriered_from_usergroup_ids: Vec<Str>,
+  restricted_subjects: Vec<Str>
+}
+
+create
+meta {
+    doc: """
+    admin.barriers.create - Create a barrier between IDP groups.
+
+    Scope: `admin.barriers:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn (request: CreateRequest): Map {
+  ::api/call("admin.barriers.create", request)
+}
+
+UpdateBarrierRequest type {
+  barrier_id: Str,
+  primary_usergroup_id: Str,
+  barriered_from_usergroup_ids: Vec<Str>,
+  restricted_subjects: Vec<Str>
+}
+
+update-barrier
+meta {
+    doc: """
+    admin.barriers.update - Replace a barrier's groups and subjects.
+
+    Scope: `admin.barriers:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn (request: UpdateBarrierRequest): Map {
+  ::api/call("admin.barriers.update", request)
+}
+
+DeleteBarrierRequest type {
+  barrier_id: Str
+}
+
+delete-barrier
+meta {
+    doc: """
+    admin.barriers.delete - Delete a barrier.
+
+    Scope: `admin.barriers:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn (request: DeleteBarrierRequest): Map {
+  ::api/call("admin.barriers.delete", request)
+}

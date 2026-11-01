@@ -1,0 +1,167 @@
+::intercom::contacts ns
+meta {
+    ctx: {
+        "intercom.token": {required: true},
+        "intercom.admin.id": {required: false, secret: false}
+    },
+    doc: """Contacts (users and leads): create, read, update, list and search with `starting_after` paging, find by email or external id, contact notes, and company attachment."""
+}
+
+::api ::intercom::api
+
+create-contact
+meta {
+    doc: """POST /contacts - Create a contact. `fields`: `email`, `external_id`, `name`, `phone`, `role` ("user" by default, or "lead"), `owner_id`, `signed_up_at`, `custom_attributes` (attributes must already exist). Unset fields are omitted."""
+}
+fn (fields: Map): Any {
+  ::api/request("POST", "/contacts", ::api/compact({role: "user", ...fields}))
+}
+
+get-contact
+meta {
+    doc: """GET /contacts/{id} - One contact by Intercom id."""
+}
+fn (id: Str): Any {
+  ::api/request("GET", `/contacts/${::api/path-segment(id)}`, "")
+}
+
+find-contact-by-external-id
+meta {
+    doc: """GET /contacts/find_by_external_id/{external_id} - The contact with your `external_id`, or an Err with status 404."""
+}
+fn (external-id: Str): Any {
+  ::api/request("GET", `/contacts/find_by_external_id/${::api/path-segment(external-id)}`, "")
+}
+
+update-contact
+meta {
+    doc: """PUT /contacts/{id} - Update a contact's fields (same names as create). Unset fields are omitted."""
+}
+fn (id: Str, fields: Map): Any {
+  ::api/request("PUT", `/contacts/${::api/path-segment(id)}`, ::api/compact(fields))
+}
+
+list-contacts
+meta {
+    doc: """GET /contacts - One page of contacts: `{data, pages, total_count}`. `options`: `per_page` (default 10, max 150), `starting_after`."""
+}
+fn
+(): Any {
+  list-contacts({})
+},
+(options: Map): Any {
+  ::api/request("GET", `/contacts${::api/query-string(options)}`, "")
+}
+
+search-contacts
+meta {
+    doc: """
+    POST /contacts/search - One page of contacts matching a query
+    (`{field, operator, value}` or an `AND`/`OR` combinator). `options`:
+    `per_page`, `starting_after`, `sort` (`{field, order}`). Returns
+    `{data, pages, total_count}`.
+
+    **Example**
+
+    ```hot
+    page ::intercom::contacts/search-contacts({field: "custom_attributes.plan", operator: "=", value: "enterprise"}, {per_page: 50})
+    ```
+    """
+}
+fn
+(query: Map): Any {
+  search-contacts(query, {})
+},
+(query: Map, options: Map): Any {
+  ::api/request("POST", "/contacts/search", ::api/build-search-body(query, options))
+}
+
+search-all-contacts
+meta {
+    doc: """Run `search-contacts` across pages until `limit` contacts or the last page. Returns a Vec."""
+}
+fn (query: Map, limit: Int): Vec {
+  ::api/collect-pages(
+    (cursor) { search-contacts(query, {per_page: ::api/page-size(limit), starting_after: cursor}) },
+    "data", null, limit, []
+  )
+}
+
+find-contact-by-email
+meta {
+    doc: """POST /contacts/search by exact email. Returns the first matching contact, or null."""
+}
+fn (email: Str): Any {
+  out search-contacts({field: "email", operator: "=", value: email}, {per_page: 1})
+  cond {
+    is-err(out) => { out }
+    is-empty(or(get(out, "data"), [])) => { null }
+    => { first(out.data) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Notes
+// ---------------------------------------------------------------------------
+
+build-note-body
+meta {
+    doc: """Contact note body: `{body, admin_id?}`. A null admin id is omitted (Intercom then attributes the note to the token's admin). Exposed for testing."""
+}
+fn (body: Str, admin-id: Str?): Map {
+  ::api/compact({body: body, admin_id: admin-id})
+}
+
+create-note
+meta {
+    ctx: {"intercom.admin.id": {required: false, secret: false}},
+    doc: """POST /contacts/{id}/notes - Add a note to a contact's profile (HTML allowed), authored by `intercom.admin.id` when set, or by an explicit admin id."""
+}
+fn
+(contact-id: Str, body: Str): Any {
+  admin ::hot::ctx/get("intercom.admin.id")
+  create-note(contact-id, body, if(is-null(admin), null, Str(admin)))
+},
+(contact-id: Str, body: Str, admin-id: Str?): Any {
+  ::api/request("POST", `/contacts/${::api/path-segment(contact-id)}/notes`, build-note-body(body, admin-id))
+}
+
+list-notes
+meta {
+    doc: """GET /contacts/{id}/notes - A contact's notes, newest first: `{data, pages, total_count}`. `options`: `page`, `per_page`, `order` ("asc"/"desc")."""
+}
+fn
+(contact-id: Str): Any {
+  list-notes(contact-id, {})
+},
+(contact-id: Str, options: Map): Any {
+  ::api/request("GET", `/contacts/${::api/path-segment(contact-id)}/notes${::api/query-string(options)}`, "")
+}
+
+// ---------------------------------------------------------------------------
+// Companies
+// ---------------------------------------------------------------------------
+
+attach-company
+meta {
+    doc: """POST /contacts/{id}/companies - Attach a contact to a company by the company's Intercom `id` (not your `company_id`)."""
+}
+fn (contact-id: Str, company-id: Str): Any {
+  ::api/request("POST", `/contacts/${::api/path-segment(contact-id)}/companies`, {id: company-id})
+}
+
+detach-company
+meta {
+    doc: """DELETE /contacts/{id}/companies/{company_id} - Detach a contact from a company (Intercom ids)."""
+}
+fn (contact-id: Str, company-id: Str): Any {
+  ::api/request("DELETE", `/contacts/${::api/path-segment(contact-id)}/companies/${::api/path-segment(company-id)}`, "")
+}
+
+list-companies
+meta {
+    doc: """GET /contacts/{id}/companies - The companies a contact belongs to."""
+}
+fn (contact-id: Str): Any {
+  ::api/request("GET", `/contacts/${::api/path-segment(contact-id)}/companies`, "")
+}

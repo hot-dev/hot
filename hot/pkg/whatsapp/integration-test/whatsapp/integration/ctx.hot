@@ -10,3 +10,14 @@
     "whatsapp.app.secret": ::env/get("WHATSAPP_APP_SECRET", ""),
     "whatsapp.verify.token": ::env/get("WHATSAPP_VERIFY_TOKEN", ""),
 }, (v) { not(is-empty(v)) }))
+
+// True when the access token and every named env var are set. Tests
+// call this first and skip (pass with a note) when it is false, so an
+// unconfigured run makes no network calls.
+configured fn (vars: Vec<Str>): Bool {
+    missing filter(["WHATSAPP_ACCESS_TOKEN", ...vars], (name) { is-empty(::env/get(name, "")) })
+    if(is-empty(missing), true, {
+        println(`skipped: set ${join(missing, ", ")} to run this live test`)
+        false
+    })
+}

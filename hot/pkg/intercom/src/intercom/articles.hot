@@ -1,0 +1,51 @@
+::intercom::articles ns
+meta {
+    ctx: {"intercom.token": {required: true}},
+    doc: """Help Center articles: list, read and search. Search is the quickest way for an agent to find the article to link in a reply."""
+}
+
+::api ::intercom::api
+
+list-articles
+meta {
+    doc: """GET /articles - Articles by page number, most recently updated first: `{data, pages, total_count}`. `options`: `page`, `per_page`."""
+}
+fn
+(): Any {
+  list-articles({})
+},
+(options: Map): Any {
+  ::api/request("GET", `/articles${::api/query-string(options)}`, "")
+}
+
+get-article
+meta {
+    doc: """GET /articles/{id} - One article with its `body` (HTML), `url`, `state` and translations."""
+}
+fn (id: Any): Any {
+  ::api/request("GET", `/articles/${::api/path-segment(id)}`, "")
+}
+
+search-articles
+meta {
+    doc: """
+    GET /articles/search - Articles matching `phrase`. `options`:
+    `state` ("published" (the API default), "draft" or "all"),
+    `help_center_id`, `highlight` (Bool), `page`, `per_page`. Returns
+    `{data: {articles: [...]}, total_count, pages}`; `data` is an empty
+    Vec when nothing matches.
+
+    **Example**
+
+    ```hot
+    hits ::intercom::articles/search-articles("reset password", {state: "published"})
+    ```
+    """
+}
+fn
+(phrase: Str): Any {
+  search-articles(phrase, {})
+},
+(phrase: Str, options: Map): Any {
+  ::api/request("GET", `/articles/search${::api/query-string({...options, phrase: phrase})}`, "")
+}

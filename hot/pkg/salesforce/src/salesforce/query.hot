@@ -1,14 +1,118 @@
 ::salesforce::query ns
+meta {
+    doc: """
+    SOQL: single pages (`soql`, `query-all`, `next-page`), an
+    auto-paging helper (`soql-records`), and literal escaping for
+    building queries from untrusted values (`escape`, `escape-like`,
+    `literal`).
+    """
+}
 
 ::api ::salesforce::api
 ::uri ::hot::uri
 
+// ---------------------------------------------------------------------------
+// Escaping (pure)
+// ---------------------------------------------------------------------------
+
+escape
+meta {
+    doc: """
+    Escape a string for use inside a quoted SOQL literal: backslash,
+    single and double quotes, and the control characters `\n \r \t
+    \b \f`, per the SOQL escape-sequence rules. Wrap the result in
+    single quotes yourself, or use `literal`.
+
+    **Example**
+
+    ```hot
+    name "O'Brien"
+    ::salesforce::query/soql(`SELECT Id FROM Contact WHERE LastName = '${::salesforce::query/escape(name)}'`)
+    ```
+    """
+}
+fn (value: Str): Str {
+  replacements [
+    ["\\", "\\\\"],
+    ["'", "\\'"],
+    ["\"", "\\\""],
+    ["\n", "\\n"],
+    ["\r", "\\r"],
+    ["\t", "\\t"],
+    ["\b", "\\b"],
+    ["\f", "\\f"]
+  ]
+  reduce(replacements, (acc, pair) { replace(acc, pair[0], pair[1]) }, value)
+}
+
+escape-like
+meta {
+    doc: """Like `escape`, and also escapes the LIKE wildcards `%` and `_` so the value matches literally. Add your own `%` around it: `` `Name LIKE '%${escape-like(term)}%'` ``."""
+}
+fn (value: Str): Str {
+  replace(replace(escape(value), "%", "\\%"), "_", "\\_")
+}
+
+literal
+meta {
+    doc: """
+    Render a value as a SOQL literal: Str → quoted and escaped, Int/Dec
+    → as is, Bool → `true`/`false`, null → `null`, Vec → `('a', 'b')`
+    for `IN`. Date and datetime literals are unquoted in SOQL: interpolate
+    those directly.
+
+    **Example**
+
+    ```hot
+    ids ["001A", "001B"]
+    `SELECT Id, Name FROM Account WHERE Id IN ${::salesforce::query/literal(ids)}`
+    ```
+    """
+}
+fn (value: Any): Str {
+  cond {
+    is-null(value) => { "null" }
+    is-bool(value) => { if(value, "true", "false") }
+    or(is-int(value), is-dec(value)) => { Str(value) }
+    is-vec(value) => { `(${join(map(value, (v) { literal(v) }), ", ")})` }
+    => { `'${escape(Str(value))}'` }
+  }
+}
+
+query-path
+meta {
+    doc: """The `/query` (or `/queryAll`, with `include-deleted`) path for a SOQL string. Exposed for testing."""
+}
+fn (query: Str, include-deleted: Bool): Str {
+  resource if(include-deleted, "/queryAll", "/query")
+  `${resource}${::api/query-string({q: query})}`
+}
+
+query-headers
+meta {
+    doc: """Request options for a query: `batch-size` (200 to 2000) becomes `Sforce-Query-Options: batchSize=N`. Exposed for testing."""
+}
+fn (options: Map): Map {
+  batch-size get(options, "batch-size")
+  cond {
+    is-null(batch-size) => { {} }
+    => { {headers: {Sforce-Query-Options: `batchSize=${batch-size}`}} }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
+
 soql
 meta {
     doc: """
-    GET /query?q= - Run a SOQL query. Returns `{totalSize, done, records,
-    nextRecordsUrl?}`; pass `nextRecordsUrl` to `next-page` when `done`
-    is false.
+    GET /query?q= - Run a SOQL query and return one page:
+    `{totalSize, done, records, nextRecordsUrl?}`. Pass `nextRecordsUrl`
+    to `next-page` while `done` is false, or use `soql-records` to
+    collect every page. `options`: `include-deleted` (use `/queryAll`,
+    which also returns deleted and archived rows), `batch-size` (200 to
+    2000 records per page; a hint Salesforce may lower).
 
     **Example**
 
@@ -18,34 +122,69 @@ meta {
     ```
     """
 }
+fn
+(query: Str): Map {
+  soql(query, {})
+},
+(query: Str, options: Map): Map {
+  path query-path(query, Bool(get(options, "include-deleted", false)))
+  ::api/unwrap(::api/send("GET", path, null, query-headers(options)))
+}
+
+query-all
+meta {
+    doc: """GET /queryAll?q= - Like `soql`, but includes deleted (recycle bin) and archived records (`IsDeleted = true` rows, archived Tasks and Events). One page; see `soql-records` with `include-deleted` for every page."""
+}
 fn (query: Str): Map {
-  ::api/json("GET", `/query?q=${::uri/encode(query)}`)
+  soql(query, {include-deleted: true})
 }
 
 next-page
 meta {
-    doc: """Fetch the next page of a SOQL result from its `nextRecordsUrl` (which Salesforce returns as a full data-API path)."""
+    doc: """Fetch the next page of a SOQL result from its `nextRecordsUrl` (a full `/services/data/vXX.X/query/...` path, used as is)."""
 }
 fn (next-records-url: Str): Map {
-  // nextRecordsUrl already includes /services/data/vXX.0; strip to the
-  // /query... suffix so the api helper doesn't double the prefix.
-  marker "/query"
-  idx index-of-str(next-records-url, marker)
   cond {
-    lt(idx, 0) => { err(`salesforce: unexpected nextRecordsUrl shape: ${next-records-url}`) }
-    => { ::api/json("GET", slice(next-records-url, idx)) }
+    not(starts-with(next-records-url, "/services/")) => { err(`salesforce: unexpected nextRecordsUrl shape: ${next-records-url}`) }
+    => { ::api/json("GET", next-records-url) }
   }
 }
 
-// Position of the first occurrence of `needle` in `haystack`, or -1.
-index-of-str fn (haystack: Str, needle: Str): Int {
-  scan-index(haystack, needle, 0)
+collect-pages fn (page: Any, acc: Vec, max-records: Any): Vec {
+  cond {
+    is-err(page) => { page }
+    => {
+      records concat(acc, or(get(page, "records"), []))
+      reached and(is-some(max-records), gte(length(records), max-records))
+      cond {
+        reached => { slice(records, 0, max-records) }
+        or(get(page, "done", true), is-null(get(page, "nextRecordsUrl"))) => { records }
+        => { collect-pages(next-page(page.nextRecordsUrl), records, max-records) }
+      }
+    }
+  }
 }
 
-scan-index fn (haystack: Str, needle: Str, i: Int): Int {
-  cond {
-    gt(add(i, length(needle)), length(haystack)) => { -1 }
-    eq(slice(haystack, i, add(i, length(needle))), needle) => { i }
-    => { scan-index(haystack, needle, add(i, 1)) }
-  }
+soql-records
+meta {
+    doc: """
+    Run a SOQL query and follow `nextRecordsUrl` until done, returning
+    the records as one Vec. `options`: `max-records` (stop once this
+    many are collected; strongly advised for large objects),
+    `include-deleted`, `batch-size`. Each page is one API call.
+
+    **Example**
+
+    ```hot
+    contacts ::salesforce::query/soql-records("SELECT Id, Email FROM Contact WHERE Email != null", {max-records: 5000})
+    length(contacts)
+    ```
+    """
+}
+fn
+(query: Str): Vec {
+  soql-records(query, {})
+},
+(query: Str, options: Map): Vec {
+  collect-pages(soql(query, options), [], get(options, "max-records"))
 }

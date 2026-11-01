@@ -1,0 +1,118 @@
+::zendesk::webhooks ns
+meta {
+    ctx: {"zendesk.webhook.secret": {required: false}},
+    doc: """
+    Zendesk webhook verification. Zendesk sends
+    `X-Zendesk-Webhook-Signature`, the base64 HMAC-SHA256 of the
+    `X-Zendesk-Webhook-Signature-Timestamp` value followed by the raw
+    body, keyed with the webhook's signing secret (Admin Center →
+    Webhooks → the webhook → Reveal secret, or `GET
+    /webhooks/{id}/signing_secret`). Because the timestamp is signed,
+    `verify-request` also rejects deliveries older than a replay window.
+    See https://developer.zendesk.com/documentation/webhooks/verifying/.
+    """
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::time ::hot::time
+::re ::hot::regex
+
+// Replay tolerance: reject deliveries whose signed timestamp is more
+// than five minutes from now. Zendesk documents no window of its own.
+DEFAULT_MAX_AGE_SECONDS 300
+
+// The signing secret Zendesk uses for test deliveries sent before a
+// webhook is created (documented on the verification page).
+TEST_SIGNING_SECRET "dGhpc19zZWNyZXRfaXNfZm9yX3Rlc3Rpbmdfb25seQ=="
+
+parse-timestamp
+meta {
+    doc: """
+    Parse a `X-Zendesk-Webhook-Signature-Timestamp` value to Unix
+    seconds. Zendesk sends ISO 8601 UTC (`2026-07-10T15:00:00Z`,
+    optionally with fractional seconds); Unix seconds are accepted too.
+    Returns null for anything else. Exposed for testing.
+    """
+}
+fn (value: Str): Int? {
+  text trim(value)
+  cond {
+    ::re/is-match(text, "^[0-9]{9,11}$") => { Int(text) }
+    ::re/is-match(text, "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|\\+00:00)$") => {
+      plain ::re/replace-all(text, "(\\.[0-9]+)?(Z|\\+00:00)$", "")
+      parsed ::time/parse(plain)
+      match parsed {
+        Result.Err => { null }
+        _ => { Int(div(::time/epoch-millis(::time/Instant(parsed)), 1000)) }
+      }
+    }
+    => { null }
+  }
+}
+
+verify-request
+meta {
+    ctx: {"zendesk.webhook.secret": {required: false}},
+    doc: """
+    Verify a Zendesk webhook request: the `x-zendesk-webhook-signature`
+    header must be the base64 HMAC-SHA256 of timestamp + raw body,
+    compared in constant time, and the signed timestamp must be within
+    `max-age-seconds` of now (default 300). Pass a `max-age-seconds` of 0
+    or less to skip the replay check. Uses the `zendesk.webhook.secret`
+    context variable by default (failing when it is unset), or accepts an
+    explicit secret. An empty explicit secret never verifies.
+
+    **Example**
+
+    ```hot
+    zendesk-webhook
+    meta {webhook: {service: "zendesk", path: "/zendesk/webhook"}}
+    fn (request) {
+      if(not(::zendesk::webhooks/verify-request(request)),
+        ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
+        handle-ticket-event(request.body))
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("zendesk.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("zendesk.webhook.secret is not set. Add the webhook's signing secret in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str): Bool {
+  verify-request(request, secret, DEFAULT_MAX_AGE_SECONDS)
+},
+(request: Map, secret: Str, max-age-seconds: Int): Bool {
+  headers or(request.headers, {})
+  signature trim(get(headers, "x-zendesk-webhook-signature", ""))
+  timestamp trim(get(headers, "x-zendesk-webhook-signature-timestamp", ""))
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(secret) => { false }
+    is-empty(signature) => { false }
+    is-empty(timestamp) => { false }
+    => {
+      signed `${timestamp}${::hot::http/raw-body(request)}`
+      cond {
+        not(::hmac/hmac-verify-base64(secret, signed, signature, "sha256")) => { false }
+        // The signature is what makes the timestamp trustworthy, so the
+        // replay check runs only after verification succeeds.
+        lte(max-age-seconds, 0) => { true }
+        => { timestamp-fresh(timestamp, max-age-seconds) }
+      }
+    }
+  }
+}
+
+timestamp-fresh fn (timestamp: Str, max-age-seconds: Int): Bool {
+  seconds parse-timestamp(timestamp)
+  cond {
+    is-null(seconds) => { false }
+    => { ::time/within-seconds-of-now(seconds, max-age-seconds) }
+  }
+}

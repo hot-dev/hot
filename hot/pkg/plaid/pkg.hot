@@ -3,13 +3,19 @@
 hot.pkg.plaid {
   name: "hot.dev/plaid",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
-  description: "Plaid bindings for Hot. Link tokens, account balances, identity, and incremental transaction sync.",
+  hot-min-version: "3.0.2",
+  description: "Plaid bindings for Hot: the Link token flow, Items, accounts, real-time balance, Auth, Identity, transactions sync with the has_more loop, institutions, investments, liabilities, sandbox helpers, and ES256 webhook verification.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["fintech", "plaid"],
-  deps: {},
+  tags: ["fintech", "plaid", "banking", "open-banking"],
+  deps: {
+    "hot.dev/jwt": {
+      local: "../jwt",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/jwt"
+    }
+  },
   src-paths: ["src/"],
   test-paths: ["test/"]
 }

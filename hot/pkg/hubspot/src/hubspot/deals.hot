@@ -6,17 +6,21 @@ create-deal
 meta {
     doc: """
     Create a deal from a properties Map (`dealname`, `amount`,
-    `dealstage`, `pipeline`, `closedate`, ...).
+    `dealstage`, `pipeline`, `closedate`, `hubspot_owner_id`, ...).
+    `dealstage` and `pipeline` are ids, not labels: resolve them with
+    `::hubspot::pipelines/find-stage`.
 
     **Example**
 
     ```hot
+    stage ::hubspot::pipelines/find-stage("deals", "default", "Qualified To Buy")
     deal ::hubspot::deals/create-deal({
       dealname: "Acme expansion",
       amount: "24000",
-      dealstage: "qualifiedtobuy"
+      pipeline: stage.pipeline_id,
+      dealstage: stage.stage_id
     })
-    ::hubspot::objects/associate("deals", deal.id, "companies", company.id)
+    ::hubspot::objects/associate("deals", deal.id, "companies", "9876")
     ```
     """
 }
@@ -50,4 +54,12 @@ meta {
 }
 fn (options: Map): Map {
   ::objects/search-objects("deals", options)
+}
+
+archive-deal
+meta {
+    doc: """Archive a deal (recycle bin, restorable for 90 days)."""
+}
+fn (id: Str): Any {
+  ::objects/archive-object("deals", id)
 }

@@ -1,3 +1,9 @@
 ::twilio::core ns
 
+// Twilio serves each product from its own host. The 2010-04-01 REST API
+// (Messages, Calls, Accounts, Recordings) lives on api.twilio.com; Verify
+// and Lookup are v2 APIs on their own subdomains.
+API_HOST "https://api.twilio.com"
 BASE_URL "https://api.twilio.com/2010-04-01"
+VERIFY_URL "https://verify.twilio.com/v2"
+LOOKUPS_URL "https://lookups.twilio.com/v2"

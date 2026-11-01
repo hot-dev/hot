@@ -3,8 +3,7 @@ meta {
     doc: """Qwen Embeddings API — generate vector embeddings via DashScope's OpenAI-compatible endpoint."""
 }
 
-api-request ::qwen::api/request
-HttpError ::qwen::api/HttpError
+HttpError ::openai::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
 // ============================================================================
@@ -51,6 +50,7 @@ meta {
     **Supported models** (as of 2026):
     - `text-embedding-v4` — latest, supports dimensions 2048 / 1536 / 1024 (default) /
       768 / 512 / 256 / 128 / 64.
+    - `qwen3.7-text-embedding` — Qwen3.7 text embeddings.
     - `text-embedding-v3` — previous generation.
 
     **Example — single text**
@@ -90,8 +90,16 @@ meta {
     """
 }
 fn (request: EmbeddingRequest): EmbeddingResponse | HttpError {
-    response api-request("POST", `${::qwen/BASE_URL}/embeddings`, {}, request)
+    response ::qwen::api/request("POST", "/embeddings", {}, request-body(request))
     if(is-ok-response(response), EmbeddingResponse(response.body), err(HttpError(response)))
+}
+
+request-body
+meta {
+    doc: """The JSON body for an `EmbeddingRequest`, with unset optional fields omitted. Pure; exposed for testing."""
+}
+fn (request: EmbeddingRequest): Map {
+    filter-vals(untype(request), is-some)
 }
 
 // ============================================================================
@@ -102,7 +110,7 @@ embed
 meta {
     doc: """
     Simple embedding — returns the embedding vector for a single text. Defaults
-    to `text-embedding-v4` at 1024 dimensions.
+    to `text-embedding-v4` at 1024 dimensions. API errors propagate as an Err.
 
     **Example**
 
@@ -121,15 +129,10 @@ fn (text: Str): Vec<Dec> {
         model: model
     }))
 
-    match response {
-        EmbeddingResponse => {
-            cond {
-                gt(length(response.data), 0) => { response.data[0].embedding }
-                => { [] }
-            }
-        }
-        => { [] }
-    }
+    // An Err (bad key, wrong region, ...) propagates instead of
+    // collapsing into an empty vector.
+    data response.data
+    if(is-empty(data), [], data[0].embedding)
 }
 
 embed-batch
@@ -155,10 +158,7 @@ fn (texts: Vec<Str>): Vec<Vec<Dec>> {
         model: model
     }))
 
-    match response {
-        EmbeddingResponse => { map(response.data, %.embedding) }
-        => { [] }
-    }
+    map(response.data, %.embedding)
 }
 
 // ============================================================================
@@ -166,4 +166,5 @@ fn (texts: Vec<Str>): Vec<Vec<Dec>> {
 // ============================================================================
 
 TEXT_EMBEDDING_V4 "text-embedding-v4"
+QWEN3_7_TEXT_EMBEDDING "qwen3.7-text-embedding"
 TEXT_EMBEDDING_V3 "text-embedding-v3"

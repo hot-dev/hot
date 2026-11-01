@@ -1,0 +1,186 @@
+::cal-com::api ns
+meta {
+    ctx: {
+        "cal-com.api.key": {required: true},
+        "cal-com.url": {required: false, secret: false}
+    },
+    doc: """Low-level Cal.com v2 transport: auth and version headers, response unwrapping, and `HttpError` for non-2xx responses. Endpoint namespaces build on `request` and `request-envelope`."""
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+http-error
+meta {
+    doc: """Build the `HttpError` for a non-2xx response. A plain `HttpError(response)` would copy fields structurally; this also defaults missing headers to `{}`. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: or(response.headers, {}),
+    body: response.body
+  })
+}
+
+base-url
+meta {
+    ctx: {"cal-com.url": {required: false, secret: false}},
+    doc: """The API base URL: `cal-com.url` when set (self-hosted, trailing slash removed), otherwise `https://api.cal.com/v2`."""
+}
+fn (): Str {
+  normalize-base-url(::ctx/get("cal-com.url"))
+}
+
+normalize-base-url
+meta {
+    doc: """Pick the base URL from an optional override: null or blank gives the cloud default; a trailing `/` is dropped. Exposed for testing."""
+}
+fn (override: Str?): Str {
+  cond {
+    or(is-null(override), is-empty(trim(or(override, "")))) => { ::cal-com/DEFAULT_BASE_URL }
+    ends-with(override, "/") => { slice(override, 0, sub(length(override), 1)) }
+    => { override }
+  }
+}
+
+build-headers
+meta {
+    doc: """Request headers: Bearer auth, the family's `cal-api-version` (omitted when `api-version` is empty, for unversioned families such as webhooks), and `Content-Type` only when there is a body. Exposed for testing."""
+}
+fn (api-key: Str, api-version: Str, has-body: Bool): Map {
+  auth {Authorization: `Bearer ${api-key}`}
+  versioned if(is-empty(api-version), auth, {...auth, cal-api-version: api-version})
+  if(has-body, {...versioned, Content-Type: "application/json"}, versioned)
+}
+
+response-data
+meta {
+    doc: """
+    Unwrap a decoded Cal.com response body. Cal.com wraps payloads as
+    `{status, data}`; this returns `data` when present, the body itself
+    for other Maps, and null for an empty body (204, or a 2xx with no
+    content). Exposed for testing.
+    """
+}
+fn (body: Any): Any {
+  match body {
+    Null => { null }
+    Map => { if(in("data", keys(body)), get(body, "data"), body) }
+    Str => { if(is-empty(trim(body)), null, body) }
+    _ => { body }
+  }
+}
+
+response-envelope
+meta {
+    doc: """Like `response-data`, but keeps the whole envelope (`{status, data, pagination}`) so callers can page. Empty bodies become null. Exposed for testing."""
+}
+fn (body: Any): Any {
+  match body {
+    Str => { if(is-empty(trim(body)), null, body) }
+    _ => { body }
+  }
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment (a booking uid, an id). Ints pass through as text."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+send fn (method: Str, path: Str, body: Any, api-version: Str, api-key: Str): HttpResponse {
+  has-body not(eq(body, ""))
+  ::hot::http/request(HttpRequest({
+    method,
+    url: `${base-url()}${path}`,
+    headers: build-headers(api-key, api-version, has-body),
+    body: if(has-body, to-json(untype(body)), "")
+  }))
+}
+
+request
+meta {
+    ctx: {"cal-com.api.key": {required: true}},
+    doc: """
+    Make an authenticated Cal.com v2 request with an explicit
+    per-family `cal-api-version` header (pass `""` for unversioned
+    families). `body` is a Map, or `""` for none. Returns the response's
+    `data` (null for an empty 2xx body), or an Err carrying `HttpError`.
+    The escape hatch for endpoints not wrapped by this package.
+
+    **Example**
+
+    ```hot
+    calendars ::cal-com::api/request("GET", "/calendars", "", "")
+    ```
+    """
+}
+fn
+(method: Str, path: Str, body: Any, api-version: Str): Any {
+  request(method, path, body, api-version, ::ctx/get("cal-com.api.key"))
+},
+// 5-arity: explicit API key override (e.g. a managed user's access token)
+(method: Str, path: Str, body: Any, api-version: Str, api-key: Str): Any {
+  response send(method, path, body, api-version, api-key)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response-data(response.body) }
+    => { err(http-error(response)) }
+  }
+}
+
+request-envelope
+meta {
+    ctx: {"cal-com.api.key": {required: true}},
+    doc: """Like `request`, but returns the whole decoded body (`{status, data, pagination?}`) instead of just `data`. Used by paged lists."""
+}
+fn
+(method: Str, path: Str, body: Any, api-version: Str): Any {
+  request-envelope(method, path, body, api-version, ::ctx/get("cal-com.api.key"))
+},
+(method: Str, path: Str, body: Any, api-version: Str, api-key: Str): Any {
+  response send(method, path, body, api-version, api-key)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response-envelope(response.body) }
+    => { err(http-error(response)) }
+  }
+}
+
+query-string
+meta {
+    doc: """
+    Build a `?a=1&b=2` suffix from an options Map: null values are
+    dropped, Vec values are joined with commas (Cal.com's multi-value
+    form, e.g. `status: ["upcoming", "unconfirmed"]`), and an empty
+    result yields `""`. Exposed for testing.
+    """
+}
+fn (options: Map): Str {
+  ::uri/query-string(map-vals(options, (v) {
+    match v {
+      Vec => { join(map(v, (x) { Str(x) }), ",") }
+      _ => { v }
+    }
+  }))
+}
+
+compact
+meta {
+    doc: """Drop null-valued keys from a request body Map so unset optionals are omitted rather than sent as JSON null."""
+}
+fn (body: Map): Map {
+  filter-vals(body, is-some)
+}

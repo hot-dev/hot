@@ -3,21 +3,24 @@ meta {
     doc: """
     Web search for agents and apps.
 
-    Three providers behind one normalized call: set whichever key you
-    have — `tavily.api.key`, `brave.api.key`, or `exa.api.key` — and
-    `::web-search/search` uses it. Each provider module also exposes its
-    full native API (`::web-search::tavily`, `::web-search::brave`,
-    `::web-search::exa`).
+    Four providers behind one normalized call: set a key for any of
+    Tavily, Brave, Exa, or Firecrawl, and `::web-search/search` uses
+    it. Choose one explicitly with the `provider` option (or the
+    `web-search.provider` context variable), fall back to the next
+    configured provider on failure with `fallback: true`, and filter by
+    `freshness` and domains, mapped to each provider's own parameters.
+    Each provider module also exposes its native API
+    (`::web-search::tavily`, `::web-search::brave`, `::web-search::exa`,
+    `::web-search::firecrawl`).
 
     **Quick start**
 
     ```hot
-    results ::web-search/search("hot programming language site:news.ycombinator.com")
-    map(results, (r) { `${r.title} — ${r.url}` })
+    results ::web-search/search("PostgreSQL 18 release notes", 5, {freshness: "month"})
+    map(results, (r) { `${r.title} - ${r.url}` })
     ```
 
-    Normalized results are `Vec<{title, url, content, score}>`, best
-    match first. `content` is the provider's snippet/summary text.
+    Normalized results are `Vec<SearchResult>`, best match first.
     """
 }
 
@@ -25,7 +28,7 @@ meta {
 
 SearchResult
 meta {
-    doc: """One normalized search hit: `title`, `url`, `content` (snippet text), `score` (provider relevance, 0-1 range where available)."""
+    doc: """One normalized search hit: `title`, `url`, `content` (snippet or page text, plain text), `score` (provider relevance, 0-1, when the provider reports one: Tavily does, Brave and Firecrawl do not, Exa only sometimes)."""
 }
 type {
   title: Str,
@@ -34,16 +37,112 @@ type {
   score: Dec?
 }
 
+// Default provider order: the first configured one is used.
+PROVIDERS ["tavily", "brave", "exa", "firecrawl"]
+
+PROVIDER_KEYS {
+  tavily: "tavily.api.key",
+  brave: "brave.api.key",
+  exa: "exa.api.key",
+  firecrawl: "firecrawl.api.key"
+}
+
+FRESHNESS ["day", "week", "month", "year"]
+
+DEFAULT_MAX_RESULTS 10
+
+is-configured
+meta {
+    doc: """True when `provider`'s API key is set in context."""
+}
+fn (provider: Str): Bool {
+  key get(PROVIDER_KEYS, provider)
+  and(is-some(key), not(is-empty(or(::ctx/get(key), ""))))
+}
+
+configured-providers
+meta {
+    doc: """The providers with an API key set in context, in default order."""
+}
+fn (): Vec {
+  filter(PROVIDERS, (p) { is-configured(p) })
+}
+
 configured-provider
 meta {
-    doc: """Which provider the context is configured for: "tavily", "brave", or "exa" (checked in that order), or null when no key is set."""
+    doc: """The provider `search` uses by default: `web-search.provider` from context when set, otherwise the first configured of "tavily", "brave", "exa", "firecrawl"; null when no key is set."""
 }
 fn (): Any {
+  preferred ::ctx/get("web-search.provider")
+  if(and(is-str(preferred), not(is-blank(preferred))), preferred, first(configured-providers()))
+}
+
+provider-order
+meta {
+    doc: """
+    The providers `search` tries, in order. `preferred` (the
+    `provider` option, else the `web-search.provider` context value;
+    null for none) goes first; without one, the first configured
+    provider does. With `fallback`, the other configured providers
+    follow in default order. Errs for an unknown provider, or when
+    nothing is configured. Exposed for testing.
+    """
+}
+fn (preferred: Any, fallback: Bool, configured: Vec): Vec {
   cond {
-    not(is-empty(or(::ctx/get("tavily.api.key"), ""))) => { "tavily" }
-    not(is-empty(or(::ctx/get("brave.api.key"), ""))) => { "brave" }
-    not(is-empty(or(::ctx/get("exa.api.key"), ""))) => { "exa" }
-    => { null }
+    and(is-some(preferred), not(in(preferred, PROVIDERS))) => {
+      err(`web-search: unknown provider "${preferred}". Use one of: ${join(PROVIDERS, ", ")}.`)
+    }
+
+    and(is-null(preferred), is-empty(configured)) => {
+      err("web-search: no provider configured. Set tavily.api.key, brave.api.key, exa.api.key, or firecrawl.api.key in Context Variables.")
+    }
+    => {
+      head or(preferred, first(configured))
+      rest filter(configured, (p) { ne(p, head) })
+      if(fallback, [head, ...rest], [head])
+    }
+  }
+}
+
+search-filters
+meta {
+    doc: """The provider-neutral filters from `search` options: `freshness` ("day", "week", "month", "year"), `include-domains`, `exclude-domains` (Vecs of hostnames). Errs for an unknown freshness. Exposed for testing."""
+}
+fn (options: Map): Map {
+  freshness get(options, "freshness")
+  cond {
+    and(is-some(freshness), not(in(freshness, FRESHNESS))) => {
+      err(`web-search: unknown freshness "${freshness}". Use one of: ${join(FRESHNESS, ", ")}.`)
+    }
+    => {
+      filter-vals({
+        freshness: freshness,
+        include-domains: non-empty(get(options, "include-domains")),
+        exclude-domains: non-empty(get(options, "exclude-domains"))
+      }, is-some)
+    }
+  }
+}
+
+non-empty fn (v: Any): Any {
+  if(and(is-vec(v), not(is-empty(v))), v, null)
+}
+
+search-with
+meta {
+    doc: """Run the normalized search on one named provider, failing clearly when its key is not set."""
+}
+fn (provider: Str, query: Str, max-results: Int, filters: Map): Vec {
+  cond {
+    not(is-configured(provider)) => {
+      err(`web-search: provider "${provider}" is not configured. Set ${get(PROVIDER_KEYS, provider)} in Context Variables.`)
+    }
+
+    eq(provider, "tavily") => { ::web-search::tavily/search-normalized(query, max-results, filters) }
+    eq(provider, "brave") => { ::web-search::brave/search-normalized(query, max-results, filters) }
+    eq(provider, "exa") => { ::web-search::exa/search-normalized(query, max-results, filters) }
+    => { ::web-search::firecrawl/search-normalized(query, max-results, filters) }
   }
 }
 
@@ -52,35 +151,78 @@ meta {
     ctx: {
         "tavily.api.key": {required: false},
         "brave.api.key": {required: false},
-        "exa.api.key": {required: false}
+        "exa.api.key": {required: false},
+        "firecrawl.api.key": {required: false},
+        "web-search.provider": {required: false}
     },
     doc: """
-    Search the web with whichever provider is configured. Returns
-    normalized `Vec<SearchResult>` (best first), or an Err when no
-    provider key is set or the provider call fails.
+    Search the web and return normalized `Vec<SearchResult>`, best
+    first. `max-results` defaults to 10 and is clamped to each
+    provider's limit (Tavily and Brave 20, Exa and Firecrawl 100).
 
-    The 2-arity form caps results (default 10).
+    `options`:
+    - `provider`: "tavily", "brave", "exa", or "firecrawl" (default:
+      `web-search.provider` from context, else the first configured)
+    - `fallback`: true to try the other configured providers, in
+      order, when one fails (default false)
+    - `freshness`: "day", "week", "month", or "year"
+    - `include-domains` / `exclude-domains`: Vecs of hostnames
+
+    Returns an Err when no provider is configured, the chosen one is
+    not, or every attempted provider fails. With fallback, that Err
+    carries `{message, errors: [{provider, error}]}`.
 
     **Example**
 
     ```hot
-    results ::web-search/search("PostgreSQL 18 release notes", 5)
+    results ::web-search/search("hot.dev release notes", 5, {
+      provider: "brave",
+      fallback: true,
+      freshness: "week",
+      include-domains: ["hot.dev"]
+    })
     first(results).url
     ```
     """
 }
 fn
 (query: Str): Vec<SearchResult> {
-  search(query, 10)
+  search(query, DEFAULT_MAX_RESULTS, {})
 },
 (query: Str, max-results: Int): Vec<SearchResult> {
-  provider configured-provider()
+  search(query, max-results, {})
+},
+(query: Str, options: Map): Vec<SearchResult> {
+  search(query, or(get(options, "max-results"), DEFAULT_MAX_RESULTS), options)
+},
+(query: Str, max-results: Int, options: Map): Vec<SearchResult> {
+  preferred or(get(options, "provider"), ::ctx/get("web-search.provider"))
+  chosen if(and(is-str(preferred), not(is-blank(preferred))), preferred, null)
+  order provider-order(chosen, eq(get(options, "fallback"), true), configured-providers())
+  filters search-filters(options)
   cond {
-    eq(provider, "tavily") => { ::web-search::tavily/search-normalized(query, max-results) }
-    eq(provider, "brave") => { ::web-search::brave/search-normalized(query, max-results) }
-    eq(provider, "exa") => { ::web-search::exa/search-normalized(query, max-results) }
+    is-err(order) => { order }
+    is-err(filters) => { filters }
+    eq(length(order), 1) => { search-with(first(order), query, max-results, filters) }
+    => { try-in-order(order, query, max-results, filters, []) }
+  }
+}
+
+try-in-order fn (providers: Vec, query: Str, max-results: Int, filters: Map, errors: Vec): Vec {
+  cond {
+    is-empty(providers) => {
+      err({
+        message: `web-search: every provider failed (${join(map(errors, (e) { e.provider }), ", ")})`,
+        errors: errors
+      })
+    }
     => {
-      err("web-search: no provider configured. Set tavily.api.key, brave.api.key, or exa.api.key in Context Variables.")
+      provider first(providers)
+      out search-with(provider, query, max-results, filters)
+      if(is-err(out),
+        try-in-order(rest(providers), query, max-results, filters,
+          [...errors, {provider: provider, error: if-err(out, (e) { e })}]),
+        out)
     }
   }
 }

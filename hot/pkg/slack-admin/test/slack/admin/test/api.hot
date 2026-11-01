@@ -1,0 +1,184 @@
+::slack::admin::test::api ns
+meta ["test"]
+
+::api ::slack::admin::api
+::conversations ::slack::admin::conversations
+::users ::slack::admin::users
+::analytics ::slack::admin::analytics
+
+HttpResponse ::hot::http/HttpResponse
+
+ok-response fn (body: Any): HttpResponse {
+  HttpResponse({status: 200, headers: {content-type: "application/json"}, body: body})
+}
+
+// ============================================================================
+// Request building
+// ============================================================================
+
+test-form-body-omits-unset-fields
+meta ["test"] fn () {
+    body ::api/form-body(::users/ListRequest({team_id: "T1", limit: 50}))
+    assert-eq("team_id=T1&limit=50", body, "cursor/is_active never sent when unset")
+}
+
+test-form-body-joins-string-lists
+meta ["test"] fn () {
+    body ::api/form-body(::conversations/BulkArchiveRequest({channel_ids: ["C1", "C2"]}))
+    assert-eq("channel_ids=C1%2CC2", body, "string arrays are comma-separated")
+}
+
+test-form-body-json-encodes-maps
+meta ["test"] fn () {
+    body ::api/form-body(::conversations/SetConversationPrefsRequest({channel_id: "C1", prefs: {who_can_post: "type:admin"}}))
+    assert-eq({channel_id: "C1", prefs: "{\"who_can_post\":\"type:admin\"}"}, ::hot::uri/decode-query(body), "prefs is stringified JSON")
+}
+
+test-form-body-encodes-booleans
+meta ["test"] fn () {
+    body ::api/form-body(::conversations/CreateRequest({name: "ops", is_private: false, org_wide: true}))
+    assert-eq({name: "ops", is_private: "false", org_wide: "true"}, ::hot::uri/decode-query(body))
+}
+
+test-build-request-shape
+meta ["test"] fn () {
+    req ::api/build-request("admin.conversations.archive", ::conversations/ArchiveRequest({channel_id: "C1"}), "xoxp-test")
+    assert-eq("POST", req.method)
+    assert-eq("https://slack.com/api/admin.conversations.archive", req.url)
+    assert-eq("Bearer xoxp-test", req.headers.Authorization)
+    assert-eq("application/x-www-form-urlencoded", req.headers.Content-Type)
+    assert-eq("channel_id=C1", req.body)
+}
+
+test-build-request-reads-admin-token-from-ctx
+meta ["test"] fn () {
+    ::hot::ctx/set("slack.admin.token", "xoxp-from-ctx")
+    req ::api/build-request("admin.teams.list", {})
+    assert-eq("Bearer xoxp-from-ctx", req.headers.Authorization)
+}
+
+// ============================================================================
+// ok:false and HTTP error handling
+// ============================================================================
+
+test-ok-true-returns-body
+meta ["test"] fn () {
+    body ::api/parse-response("admin.conversations.create", ok-response({ok: true, channel_id: "C9"}))
+    assert-eq("C9", body.channel_id)
+}
+
+test-ok-false-is-an-err
+meta ["test"] fn () {
+    result ::api/parse-response("admin.conversations.delete", ok-response({
+      ok: false,
+      error: "invalid_arguments",
+      response_metadata: {messages: ["[ERROR] missing required field: channel_id"]}
+    }))
+    assert(is-err(result), "HTTP 200 with ok:false must not look like success")
+    e err-value(result)
+    assert-eq("invalid_arguments", e.error)
+    assert-eq("admin.conversations.delete", e.method)
+    assert-eq(["[ERROR] missing required field: channel_id"], e.messages)
+    assert-eq(200, e.status)
+}
+
+test-missing-scope-carries-needed-and-provided
+meta ["test"] fn () {
+    e err-value(::api/parse-response("admin.users.remove", ok-response({
+      ok: false, error: "missing_scope", needed: "admin.users:write", provided: "admin.users:read"
+    })))
+    assert-eq("missing_scope", e.error)
+    assert-eq("admin.users:write", e.needed)
+    assert-eq("admin.users:read", e.provided)
+}
+
+test-bot-token-error
+meta ["test"] fn () {
+    e err-value(::api/parse-response("admin.teams.list", ok-response({ok: false, error: "not_allowed_token_type"})))
+    assert-eq("not_allowed_token_type", e.error, "bot tokens are rejected by admin methods")
+}
+
+test-rate-limit
+meta ["test"] fn () {
+    e err-value(::api/parse-response("admin.users.list", HttpResponse({status: 429, headers: {retry-after: "30"}, body: ""})))
+    assert(::api/is-rate-limited(e), "429 is a rate limit")
+    assert-eq(30, e.retry_after)
+}
+
+test-http-error
+meta ["test"] fn () {
+    e err-value(::api/parse-response("admin.users.list", HttpResponse({status: 503, headers: {}, body: "unavailable"})))
+    assert-eq("http_503", e.error)
+    assert(not(::api/is-rate-limited(e)), "503 is not a rate limit")
+}
+
+test-body-without-ok-is-an-err
+meta ["test"] fn () {
+    assert(is-err(::api/parse-response("admin.users.list", ok-response({users: []}))), "a body without ok:true fails closed")
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-next-cursor
+meta ["test"] fn () {
+    assert-eq("dXNlcjpVMDYx", ::api/next-cursor({ok: true, response_metadata: {next_cursor: "dXNlcjpVMDYx"}}))
+    assert(is-null(::api/next-cursor({ok: true, response_metadata: {next_cursor: ""}})), "empty cursor ends paging")
+    assert(is-null(::api/next-cursor({ok: true})), "missing cursor ends paging")
+    assert-eq("top", ::api/next-cursor({ok: true, next_cursor: "top"}), "top-level next_cursor (admin.conversations.search)")
+}
+
+test-collect-pages-follows-cursors
+meta ["test"] fn () {
+    pages {
+      first: {ok: true, users: [{id: "U1"}, {id: "U2"}], response_metadata: {next_cursor: "c2"}},
+      c2: {ok: true, users: [{id: "U3"}], response_metadata: {next_cursor: "c3"}},
+      c3: {ok: true, users: [{id: "U4"}], response_metadata: {next_cursor: ""}}
+    }
+
+    all ::api/collect-pages((params) {
+      get(pages, or(get(params, "cursor"), "first"))
+    }, {team_id: "T1", limit: 2}, "users", 100, [])
+    assert-eq(["U1", "U2", "U3", "U4"], map(all, (u) { u.id }))
+}
+
+test-collect-pages-passes-filters-and-cursor
+meta ["test"] fn () {
+    all ::api/collect-pages((params) {
+      assert-eq("T1", params.team_id, "filters kept on every page")
+      cond {
+        is-null(get(params, "cursor")) => { {ok: true, users: [{id: "a"}], response_metadata: {next_cursor: "next"}} }
+        => {
+          assert-eq("next", params.cursor, "cursor from the previous page")
+          {ok: true, users: [{id: "b"}]}
+        }
+      }
+    }, {team_id: "T1"}, "users", 100, [])
+    assert-eq(2, length(all))
+}
+
+test-collect-pages-stops-at-max-items
+meta ["test"] fn () {
+    all ::api/collect-pages((params) {
+      {ok: true, users: [{id: "x"}, {id: "y"}], response_metadata: {next_cursor: "more"}}
+    }, {}, "users", 3, [])
+    assert-eq(3, length(all), "max-items caps an endless cursor")
+}
+
+// ============================================================================
+// Analytics
+// ============================================================================
+
+test-analytics-returns-gzip-bytes
+meta ["test"] fn () {
+    gz Bytes([31, 139, 8, 0])
+    result ::analytics/file-result(HttpResponse({status: 200, headers: {content-type: "application/gzip"}, body: null, body-bytes: gz}))
+    assert-eq(gz, result, "gzip body returned as Bytes")
+}
+
+test-analytics-error-body
+meta ["test"] fn () {
+    result ::analytics/file-result(ok-response({ok: false, error: "file_not_yet_available"}))
+    assert-eq("file_not_yet_available", err-value(result).error)
+}

@@ -1,0 +1,74 @@
+::web-search::firecrawl ns
+meta {
+    doc: """Firecrawl search as a web-search backend (https://docs.firecrawl.dev/api-reference/endpoint/search). Calls Firecrawl's v2 HTTP API directly; for scraping and crawling use the `firecrawl` package. Context variable: `firecrawl.api.key`, sent as `Authorization: Bearer`."""
+}
+
+::ctx ::hot::ctx
+::http ::web-search::http
+
+HttpRequest ::hot::http/HttpRequest
+
+BASE_URL "https://api.firecrawl.dev/v2"
+
+// Firecrawl's documented limit range is 1-100.
+MAX_RESULTS 100
+
+search
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """POST /search - Firecrawl web search. `options`: `limit` (1-100), `sources` (`["web", "news"]`), `tbs` ("qdr:d", "qdr:w", ...), `country`, `location`, `includeDomains`/`excludeDomains`, `scrapeOptions` (`{formats: ["markdown"]}` to scrape each hit). Returns `{success, data: {web: [{title, url, description, markdown?}]}}`."""
+}
+fn
+(query: Str): Map {
+  search(query, {})
+},
+(query: Str, options: Map): Map {
+  search(query, options, ::ctx/get("firecrawl.api.key"))
+},
+// 3-arity: explicit API key override
+(query: Str, options: Map, api-key: Str): Map {
+  ::http/send("firecrawl", "Firecrawl", HttpRequest({
+    method: "POST",
+    url: `${BASE_URL}/search`,
+    headers: {
+      Authorization: `Bearer ${api-key}`,
+      Content-Type: "application/json"
+    },
+    body: to-json(untype(filter-vals({...options, query: query}, is-some)))
+  }))
+}
+
+TBS {day: "qdr:d", week: "qdr:w", month: "qdr:m", year: "qdr:y"}
+
+build-search-options
+meta {
+    doc: """Firecrawl search options for the normalized `search`: `limit` clamped to 1-100, `tbs` for a freshness filter, `includeDomains`/`excludeDomains`. Exposed for testing."""
+}
+fn (max-results: Int, filters: Map): Map {
+  filter-vals({
+    limit: ::http/clamp(max-results, 1, MAX_RESULTS),
+    tbs: get(TBS, or(get(filters, "freshness"), "")),
+    includeDomains: get(filters, "include-domains"),
+    excludeDomains: get(filters, "exclude-domains")
+  }, is-some)
+}
+
+normalize
+meta {
+    doc: """Normalize a Firecrawl search response's `data.web` hits into `Vec<::web-search/SearchResult>`; `content` is the description (or scraped markdown when no description). Firecrawl has no score. Exposed for testing."""
+}
+fn (body: Map): Vec {
+  web or(get(or(get(body, "data"), {}), "web"), [])
+  map(web, (r) {
+    ::web-search/SearchResult({
+      title: or(::http/clean-text(get(r, "title")), ""),
+      url: or(get(r, "url"), ""),
+      content: or(::http/clean-text(get(r, "description")), get(r, "markdown")),
+      score: null
+    })
+  })
+}
+
+search-normalized fn (query: Str, max-results: Int, filters: Map): Vec {
+  search(query, build-search-options(max-results, filters)) |> if-ok((body) { normalize(body) })
+}

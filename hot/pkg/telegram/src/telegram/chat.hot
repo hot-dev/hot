@@ -150,6 +150,34 @@ fn (request: PromoteChatMemberRequest): Bool {
 // Chat Settings
 // ============================================================================
 
+SetChatPermissionsRequest type {
+  chat_id: Any,
+  permissions: Map,
+  use_independent_chat_permissions: Bool?
+}
+
+set-chat-permissions
+meta {
+    doc: """
+setChatPermissions - Set the default permissions for all members of a group or supergroup. `permissions` is a ChatPermissions object (`can_send_messages`, `can_send_photos`, `can_send_polls`, `can_invite_users`, `can_pin_messages`, ...). The bot must be an administrator with `can_restrict_members`.
+
+**Example**
+
+```hot
+::chat ::telegram::chat
+
+// Read-only announcement group
+::chat/set-chat-permissions(::chat/SetChatPermissionsRequest({
+  chat_id: -1001234567890,
+  permissions: {can_send_messages: false, can_send_polls: false, can_invite_users: true}
+}))
+```
+"""
+}
+fn (request: SetChatPermissionsRequest): Bool {
+  api-request("setChatPermissions", untype(request))
+}
+
 LeaveChatRequest type {
   chat_id: Any
 }

@@ -1,14 +1,17 @@
 ::crm ns
 meta {
     doc: """
-    CRM-agnostic operations for agents: upsert a contact, find them, log
-    an activity — against whichever CRM the workspace has configured.
+    CRM-agnostic operations for agents and workflows: contacts,
+    companies, deals, and activities against HubSpot, Salesforce, or
+    Attio through one normalized surface.
 
-    Provider selection (checked in order): `hubspot.token` → HubSpot,
-    any `salesforce.*` credential → Salesforce, `attio.api.key` → Attio.
-    The provider-native packages remain available for anything beyond
-    this normalized surface; every normalized value carries the provider
-    name and the raw payload.
+    **Provider selection**: per call with `options.provider`, else the
+    `crm.provider` context variable, else the first configured of
+    HubSpot (`hubspot.token`), Salesforce (a complete
+    `::salesforce::auth` flow), Attio (`attio.api.key`). Every
+    normalized value carries `provider` and the provider's `raw`
+    payload; the provider-native packages remain available for anything
+    beyond this surface.
 
     **Quick start**
 
@@ -23,29 +26,37 @@ meta {
 
     ::crm/log-activity(contact, "Demo call went well; wants pricing for 50 seats.")
 
-    existing ::crm/find-contact("ada@example.com")
+    existing ::crm/find-contact("ada@example.com", {provider: "hubspot"})
     ```
     """
 }
 
 ::ctx ::hot::ctx
 
+PROVIDERS ["hubspot", "salesforce", "attio"]
+
+// ============================================================================
+// Normalized types
+// ============================================================================
+
 Contact
 meta {
-    doc: """A normalized CRM contact: `id` (provider record id), `email`, `first-name`, `last-name`, `provider` ("hubspot"/"salesforce"/"attio"), and `raw` (the provider payload)."""
+    doc: """A normalized CRM contact: `id` (provider record id), `email`, `first-name`, `last-name`, `phone`, `company-id` (the linked company/account record id, when known), `provider` ("hubspot"/"salesforce"/"attio"), and `raw` (the provider payload)."""
 }
 type {
   id: Str,
   email: Str?,
   first-name: Str?,
   last-name: Str?,
+  phone: Str?,
+  company-id: Str?,
   provider: Str,
   raw: Any?
 }
 
 Company
 meta {
-    doc: """A normalized CRM company: `id`, `name`, `domain`, `provider`, `raw`."""
+    doc: """A normalized CRM company (a Salesforce Account): `id`, `name`, `domain` (normalized, e.g. `acme.com`), `provider`, `raw`."""
 }
 type {
   id: Str,
@@ -55,117 +66,460 @@ type {
   raw: Any?
 }
 
-configured-provider
+Deal
 meta {
-    ctx: {
-        "hubspot.token": {required: false},
-        "salesforce.access.token": {required: false},
-        "salesforce.client-secret": {required: false},
-        "salesforce.private.key": {required: false},
-        "attio.api.key": {required: false}
-    },
-    doc: """Which CRM the context is configured for: "hubspot", "salesforce", or "attio" (checked in that order), or null when none is. Salesforce is selected only when a credential that can actually mint a session is present (an access token, a client secret, or a private key) — a bare `salesforce.client-id` is not enough to authenticate."""
+    doc: """A normalized deal (a Salesforce Opportunity): `id`, `name`, `stage` (the provider's stage value: a HubSpot stage id, a Salesforce StageName, an Attio status title), `amount`, `close-date` (`YYYY-MM-DD`; Attio has none), `company-id` (when known), `provider`, `raw`."""
 }
-fn (): Any {
-  select-provider(
-    or(::ctx/get("hubspot.token"), ""),
-    or(::ctx/get("salesforce.access.token"), ""),
-    or(::ctx/get("salesforce.client-secret"), ""),
-    or(::ctx/get("salesforce.private.key"), ""),
-    or(::ctx/get("attio.api.key"), "")
-  )
+type {
+  id: Str,
+  name: Str?,
+  stage: Str?,
+  amount: Any?,
+  close-date: Str?,
+  company-id: Str?,
+  provider: Str,
+  raw: Any?
 }
+
+Activity
+meta {
+    doc: """A normalized activity on a contact (a HubSpot note, a Salesforce Task, an Attio note): `id`, `subject`, `body`, `occurred-at` (provider timestamp, when known), `provider`, `raw`."""
+}
+type {
+  id: Str,
+  subject: Str?,
+  body: Str?,
+  occurred-at: Any?,
+  provider: Str,
+  raw: Any?
+}
+
+// ============================================================================
+// Shared pure helpers
+// ============================================================================
+
+is-blank-value fn (value: Any): Bool {
+  or(is-null(value), and(is-str(value), is-blank(value)))
+}
+
+cut-at fn (value: Str, marker: Str): Str {
+  first(split(value, marker))
+}
+
+strip-prefix fn (value: Str, prefix: Str): Str {
+  if(starts-with(value, prefix), slice(value, length(prefix)), value)
+}
+
+normalize-domain
+meta {
+    doc: """
+    Reduce a domain or website to its bare host for matching:
+    lowercase, no scheme, no `www.`, no port, path, query, or trailing
+    dot. `https://www.Acme.com/about` → `acme.com`. Null or blank stays
+    null. Exposed for testing.
+    """
+}
+fn (value: Any): Any {
+  cond {
+    is-blank-value(value) => { null }
+    => {
+      lowered lowercase(trim(Str(value)))
+      no-scheme strip-prefix(strip-prefix(lowered, "https://"), "http://")
+      host cut-at(cut-at(cut-at(cut-at(cut-at(no-scheme, "/"), "?"), "#"), ":"), " ")
+      bare strip-prefix(host, "www.")
+      trimmed if(ends-with(bare, "."), slice(bare, 0, sub(length(bare), 1)), bare)
+      if(is-empty(trimmed), null, trimmed)
+    }
+  }
+}
+
+full-name
+meta {
+    doc: """Join first and last name, skipping blanks. Exposed for testing."""
+}
+fn (first-name: Any, last-name: Any): Str {
+  trim(join(filter([or(first-name, ""), or(last-name, "")], (p) { not(is-blank(p)) }), " "))
+}
+
+// ============================================================================
+// Provider selection
+// ============================================================================
 
 select-provider
 meta {
-    doc: """The provider-selection rule behind `configured-provider`, as a pure function of the credential values. Salesforce requires a credential that can mint a session (mirroring `::salesforce::auth/session`'s three flows: explicit token, client-credentials, JWT-bearer) — a bare client-id cannot authenticate. Exposed for testing."""
+    doc: """
+    The provider-selection rule as a pure function. `preferred` (from
+    `options.provider` or `crm.provider`) wins when set and must be one
+    of hubspot, salesforce, attio (else an Err). Otherwise the first
+    provider marked true in `available` (`{hubspot, salesforce, attio}`
+    Bools), in that order, or null when none is. Exposed for testing.
+    """
 }
-fn (hubspot-token: Str, sf-access-token: Str, sf-client-secret: Str, sf-private-key: Str, attio-key: Str): Any {
+fn (preferred: Any, available: Map): Any {
   cond {
-    not(is-empty(hubspot-token)) => { "hubspot" }
-    not(is-empty(sf-access-token)) => { "salesforce" }
-    not(is-empty(sf-client-secret)) => { "salesforce" }
-    not(is-empty(sf-private-key)) => { "salesforce" }
-    not(is-empty(attio-key)) => { "attio" }
+    not(is-blank-value(preferred)) => {
+      name lowercase(trim(Str(preferred)))
+      if(in(name, PROVIDERS), name, err(`crm: unknown provider '${preferred}' (use hubspot, salesforce, or attio)`))
+    }
+
+    Bool(get(available, "hubspot", false)) => { "hubspot" }
+    Bool(get(available, "salesforce", false)) => { "salesforce" }
+    Bool(get(available, "attio", false)) => { "attio" }
     => { null }
   }
 }
 
-no-provider fn (): Any {
-  err("crm: no CRM configured. Set hubspot.token, salesforce.* credentials, or attio.api.key in Context Variables.")
+available-providers
+meta {
+    ctx: {
+        "hubspot.token": {required: false},
+        "attio.api.key": {required: false}
+    },
+    doc: """Which providers have credentials in context: `{hubspot, salesforce, attio}` Bools. Salesforce counts only when a complete auth flow is configured (`::salesforce::auth/is-configured`), so a bare `salesforce.client-id` does not select it."""
 }
+fn (): Map {
+  {
+    hubspot: not(is-blank-value(::ctx/get("hubspot.token"))),
+    salesforce: ::salesforce::auth/is-configured(),
+    attio: not(is-blank-value(::ctx/get("attio.api.key")))
+  }
+}
+
+configured-provider
+meta {
+    ctx: {"crm.provider": {required: false, secret: false}},
+    doc: """The provider the context selects: `crm.provider` when set, else the first configured of hubspot, salesforce, attio; null when none is."""
+}
+fn (): Any {
+  select-provider(::ctx/get("crm.provider"), available-providers())
+}
+
+resolve-provider
+meta {
+    doc: """The provider for one call: `options.provider` when set, else `configured-provider()`. An Err when nothing is configured or the name is unknown."""
+}
+fn (options: Map): Str {
+  explicit get(options, "provider")
+  chosen cond {
+    is-blank-value(explicit) => { configured-provider() }
+    => { select-provider(explicit, {}) }
+  }
+
+  cond {
+    is-err(chosen) => { chosen }
+    is-null(chosen) => { no-provider() }
+    => { chosen }
+  }
+}
+
+no-provider fn (): Any {
+  err("crm: no CRM configured. Set hubspot.token, a salesforce.* auth flow, or attio.api.key in Context Variables (and crm.provider to choose between several).")
+}
+
+require-field fn (fields: Map, key: Str, what: Str): Any {
+  cond {
+    is-blank-value(get(fields, key)) => { err(`crm: ${what} needs '${key}'`) }
+    => { null }
+  }
+}
+
+// ============================================================================
+// Contacts
+// ============================================================================
 
 upsert-contact
 meta {
     doc: """
-    Create-or-update a contact by email. `fields`: `email` (required),
-    `first-name`, `last-name`, `phone`, `company` (name). Returns a
-    normalized `Contact`.
+    Create or update a contact by email. `fields`: `email` (required),
+    `first-name`, `last-name`, `phone`, `company` (a company name),
+    `company-id` (a provider company/account id; wins over `company`).
+    Only the fields you pass are written. Returns a `Contact`.
+
+    - HubSpot: one batch upsert keyed on email (no search lag); `company`
+      sets the contact's company text property and `company-id`
+      associates the company record.
+    - Salesforce: `company` links the Account with that exact Name,
+      creating it when none exists; `LastName` (required by Salesforce)
+      defaults to "Unknown" only when creating a contact.
+    - Attio: `company` links the company record with that exact name,
+      creating it when none exists. Attio stores a name as one value, so
+      when only one of first/last name is given the other is kept from
+      the existing record.
     """
 }
-fn (fields: Map): Contact {
-  provider configured-provider()
+fn
+(fields: Map): Contact {
+  upsert-contact(fields, {})
+},
+(fields: Map, options: Map): Contact {
+  provider resolve-provider(options)
+  missing require-field(fields, "email", "upsert-contact")
   cond {
+    is-err(provider) => { provider }
+    is-err(missing) => { missing }
     eq(provider, "hubspot") => { ::crm::hubspot/upsert-contact(fields) }
     eq(provider, "salesforce") => { ::crm::salesforce/upsert-contact(fields) }
-    eq(provider, "attio") => { ::crm::attio/upsert-contact(fields) }
-    => { no-provider() }
+    => { ::crm::attio/upsert-contact(fields) }
   }
 }
 
 find-contact
 meta {
-    doc: """Find a contact by exact email. Returns a normalized `Contact` or null."""
+    doc: """Find a contact by exact email. Returns a `Contact` or null. HubSpot looks the email up directly (no search lag)."""
 }
-fn (email: Str): Any {
-  provider configured-provider()
+fn
+(email: Str): Any {
+  find-contact(email, {})
+},
+(email: Str, options: Map): Any {
+  provider resolve-provider(options)
   cond {
+    is-err(provider) => { provider }
     eq(provider, "hubspot") => { ::crm::hubspot/find-contact(email) }
     eq(provider, "salesforce") => { ::crm::salesforce/find-contact(email) }
-    eq(provider, "attio") => { ::crm::attio/find-contact(email) }
-    => { no-provider() }
+    => { ::crm::attio/find-contact(email) }
   }
 }
 
-log-activity
-meta {
-    doc: """
-    Log an activity note on a contact — a HubSpot note, a Salesforce
-    completed Task, or an Attio note, depending on the provider. Accepts
-    a `Contact` (from `upsert-contact`/`find-contact`) or an email
-    string.
-    """
-}
-fn (contact: Any, body: Str): Any {
+resolve-contact fn (contact: Any, options: Map): Any {
   resolved cond {
-    is-str(contact) => { find-contact(contact) }
+    is-str(contact) => { find-contact(contact, options) }
     => { contact }
   }
 
   cond {
     is-err(resolved) => { resolved }
     is-null(resolved) => { err(`crm: no contact found for '${contact}'`) }
+    => { resolved }
+  }
+}
+
+// ============================================================================
+// Activities
+// ============================================================================
+
+log-activity
+meta {
+    doc: """
+    Log an activity on a contact: a HubSpot note, a Salesforce completed
+    Task, or an Attio note. `contact` is a `Contact` (its `provider` is
+    used) or an email. `options`: `subject` (a HubSpot note's first
+    line, a Task's Subject, an Attio note's title; default "Note"),
+    `provider`. Returns an `Activity`.
+    """
+}
+fn
+(contact: Any, body: Str): Activity {
+  log-activity(contact, body, {})
+},
+(contact: Any, body: Str, options: Map): Activity {
+  resolved resolve-contact(contact, options)
+  cond {
+    is-err(resolved) => { resolved }
+    eq(resolved.provider, "hubspot") => { ::crm::hubspot/log-activity(resolved.id, body, options) }
+    eq(resolved.provider, "salesforce") => { ::crm::salesforce/log-activity(resolved.id, body, options) }
+    eq(resolved.provider, "attio") => { ::crm::attio/log-activity(resolved.id, body, options) }
+    => { err(`crm: unknown provider '${resolved.provider}' on contact`) }
+  }
+}
+
+list-activities
+meta {
+    doc: """The activities on a contact, newest first: HubSpot notes, Salesforce Tasks, Attio notes. `contact` is a `Contact` or an email. `options`: `limit` (default 20), `provider`. Returns a Vec of `Activity`."""
+}
+fn
+(contact: Any): Vec {
+  list-activities(contact, {})
+},
+(contact: Any, options: Map): Vec {
+  resolved resolve-contact(contact, options)
+  limit or(get(options, "limit"), 20)
+  cond {
+    is-err(resolved) => { resolved }
+    eq(resolved.provider, "hubspot") => { ::crm::hubspot/list-activities(resolved.id, limit) }
+    eq(resolved.provider, "salesforce") => { ::crm::salesforce/list-activities(resolved.id, limit) }
+    eq(resolved.provider, "attio") => { ::crm::attio/list-activities(resolved.id, limit) }
+    => { err(`crm: unknown provider '${resolved.provider}' on contact`) }
+  }
+}
+
+// ============================================================================
+// Companies
+// ============================================================================
+
+upsert-company
+meta {
+    doc: """
+    Create or update a company by domain. `fields`: `domain` (required;
+    normalized, so `https://www.acme.com/` and `acme.com` match), `name`.
+    Returns a `Company`.
+
+    - Salesforce matches Accounts whose `Website` normalizes to the same
+      domain (`acme.com`, `www.acme.com`, `https://acme.com/`), or an exact
+      match on a custom field named by `crm.salesforce.domain-field`
+      (e.g. `Domain__c`) when set.
+    - HubSpot matches on the `domain` property through search, which can
+      lag a few seconds behind writes.
+    - Attio asserts on the unique `domains` attribute.
+    """
+}
+fn
+(fields: Map): Company {
+  upsert-company(fields, {})
+},
+(fields: Map, options: Map): Company {
+  provider resolve-provider(options)
+  domain normalize-domain(get(fields, "domain"))
+  normalized {...fields, domain: domain}
+  cond {
+    is-err(provider) => { provider }
+    is-null(domain) => { err("crm: upsert-company needs 'domain'") }
+    eq(provider, "hubspot") => { ::crm::hubspot/upsert-company(normalized) }
+    eq(provider, "salesforce") => { ::crm::salesforce/upsert-company(normalized) }
+    => { ::crm::attio/upsert-company(normalized) }
+  }
+}
+
+find-company
+meta {
+    doc: """Find a company by domain (normalized as in `upsert-company`). Returns a `Company` or null."""
+}
+fn
+(domain: Str): Any {
+  find-company(domain, {})
+},
+(domain: Str, options: Map): Any {
+  provider resolve-provider(options)
+  normalized normalize-domain(domain)
+  cond {
+    is-err(provider) => { provider }
+    is-null(normalized) => { null }
+    eq(provider, "hubspot") => { ::crm::hubspot/find-company(normalized) }
+    eq(provider, "salesforce") => { ::crm::salesforce/find-company(normalized) }
+    => { ::crm::attio/find-company(normalized) }
+  }
+}
+
+// ============================================================================
+// Deals
+// ============================================================================
+
+find-deals
+meta {
+    doc: """
+    Find deals. `filter`: `name` (exact), `stage`, `company-id`,
+    `contact-id`, `limit` (default 20). Unset keys do not filter.
+    Returns a Vec of `Deal`, newest first. HubSpot search can lag a few
+    seconds behind writes.
+    """
+}
+fn
+(criteria: Map): Vec {
+  find-deals(criteria, {})
+},
+(criteria: Map, options: Map): Vec {
+  provider resolve-provider(options)
+  cond {
+    is-err(provider) => { provider }
+    eq(provider, "hubspot") => { ::crm::hubspot/find-deals(criteria) }
+    eq(provider, "salesforce") => { ::crm::salesforce/find-deals(criteria) }
+    => { ::crm::attio/find-deals(criteria) }
+  }
+}
+
+create-deal fn (provider: Str, fields: Map): Deal {
+  cond {
+    eq(provider, "hubspot") => { ::crm::hubspot/create-deal(fields) }
+    eq(provider, "salesforce") => { ::crm::salesforce/create-deal(fields) }
+    => { ::crm::attio/create-deal(fields) }
+  }
+}
+
+update-deal fn (provider: Str, id: Str, fields: Map): Deal {
+  cond {
+    eq(provider, "hubspot") => { ::crm::hubspot/update-deal(id, fields) }
+    eq(provider, "salesforce") => { ::crm::salesforce/update-deal(id, fields) }
+    => { ::crm::attio/update-deal(id, fields) }
+  }
+}
+
+upsert-deal
+meta {
+    doc: """
+    Create or update a deal. `fields`: `id` (update that deal), `name`,
+    `stage`, `amount`, `close-date` (`YYYY-MM-DD`), `company-id`,
+    `contact-id`, plus `pipeline` (HubSpot) and `owner` (Attio: the
+    owner's workspace-member email; required to create, or set
+    `crm.attio.deal-owner`). Without `id` the deal is matched by exact
+    `name` (within `company-id` when given): no match creates one, one
+    match updates it, several is an Err. Returns a `Deal`.
+
+    Creating needs `name` and `stage` everywhere, and `close-date` on
+    Salesforce. `stage` is the provider's own value: a HubSpot stage id
+    (resolve labels with `::hubspot::pipelines/find-stage`), a
+    Salesforce StageName, an Attio status title.
+
+    **Example**
+
+    ```hot
+    company ::crm/upsert-company({domain: "acme.com", name: "Acme"})
+    deal ::crm/upsert-deal({
+      name: "Acme expansion",
+      stage: "Prospecting",
+      amount: 24000,
+      close-date: "2026-12-31",
+      company-id: company.id
+    })
+    ::crm/move-stage(deal, "Negotiation/Review")
+    ```
+    """
+}
+fn
+(fields: Map): Deal {
+  upsert-deal(fields, {})
+},
+(fields: Map, options: Map): Deal {
+  provider resolve-provider(options)
+  id get(fields, "id")
+  cond {
+    is-err(provider) => { provider }
+    not(is-blank-value(id)) => { update-deal(provider, Str(id), fields) }
+    is-blank-value(get(fields, "name")) => { err("crm: upsert-deal needs 'id' or 'name'") }
     => {
+      matches find-deals(filter-vals({name: fields.name, company-id: get(fields, "company-id"), limit: 2}, is-some), {provider: provider})
       cond {
-        eq(resolved.provider, "hubspot") => { ::crm::hubspot/log-activity(resolved.id, body) }
-        eq(resolved.provider, "salesforce") => { ::crm::salesforce/log-activity(resolved.id, body) }
-        eq(resolved.provider, "attio") => { ::crm::attio/log-activity(resolved.id, body) }
-        => { no-provider() }
+        is-err(matches) => { matches }
+        is-empty(matches) => { create-deal(provider, fields) }
+        eq(length(matches), 1) => { update-deal(provider, first(matches).id, fields) }
+        => { err(`crm: several deals are named '${fields.name}'; pass 'id' to pick one`) }
       }
     }
   }
 }
 
-upsert-company
+move-stage
 meta {
-    doc: """Create-or-update a company by domain. `fields`: `domain` (required), `name`. Returns a normalized `Company`."""
+    doc: """Move a deal to another stage. `deal` is a `Deal` (its `provider` is used) or a deal id (with `options.provider` or the configured provider). Returns the updated `Deal`."""
 }
-fn (fields: Map): Company {
-  provider configured-provider()
+fn
+(deal: Any, stage: Str): Deal {
+  move-stage(deal, stage, {})
+},
+(deal: Any, stage: Str, options: Map): Deal {
+  provider cond {
+    is-str(deal) => { resolve-provider(options) }
+    => { deal.provider }
+  }
+
+  id cond {
+    is-str(deal) => { deal }
+    => { deal.id }
+  }
+
   cond {
-    eq(provider, "hubspot") => { ::crm::hubspot/upsert-company(fields) }
-    eq(provider, "salesforce") => { ::crm::salesforce/upsert-company(fields) }
-    eq(provider, "attio") => { ::crm::attio/upsert-company(fields) }
-    => { no-provider() }
+    is-err(provider) => { provider }
+    eq(provider, "hubspot") => { ::crm::hubspot/move-stage(id, stage) }
+    eq(provider, "salesforce") => { ::crm::salesforce/move-stage(id, stage) }
+    => { ::crm::attio/move-stage(id, stage) }
   }
 }

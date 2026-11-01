@@ -1,0 +1,130 @@
+::hubspot::lists ns
+meta {
+    doc: """
+    Lists (segments) of contacts, companies, deals, and other records.
+    `MANUAL` and `SNAPSHOT` lists take explicit membership changes;
+    `DYNAMIC` lists are driven by a `filterBranch`. List APIs address
+    object types by type id: `object-type-id("contacts")` gives `"0-1"`.
+    """
+}
+
+::api ::hubspot::api
+crm-path ::hubspot::api/crm-path
+segment ::hubspot::api/segment
+query-string ::hubspot::api/query-string
+
+OBJECT_TYPE_IDS {contacts: "0-1", companies: "0-2", deals: "0-3", tickets: "0-5"}
+
+object-type-id
+meta {
+    doc: """The object type id for a standard object name (`contacts` 0-1, `companies` 0-2, `deals` 0-3, `tickets` 0-5). Anything else (e.g. an id like `"2-123456"` for a custom object) passes through."""
+}
+fn (object-type: Str): Str {
+  or(get(OBJECT_TYPE_IDS, object-type), object-type)
+}
+
+build-list-body
+meta {
+    doc: """The create-list payload. `options`: `filterBranch` (required for `DYNAMIC` lists), `listFolderId`. Exposed for testing."""
+}
+fn (name: Str, object-type: Str, processing-type: Str, options: Map): Map {
+  {name: name, objectTypeId: object-type-id(object-type), processingType: processing-type}
+    |> assoc-some("filterBranch", get(options, "filterBranch"))
+    |> assoc-some("listFolderId", get(options, "listFolderId"))
+}
+
+create-list
+meta {
+    doc: """
+    POST /crm/lists/{version} - Create a list. `processing-type` is
+    `"MANUAL"` (you add and remove members), `"SNAPSHOT"` (filters
+    evaluated once, then manual), or `"DYNAMIC"` (pass a `filterBranch` in
+    `options`). Returns `{list: {listId, name, ...}}`.
+
+    **Example**
+
+    ```hot
+    ::lists ::hubspot::lists
+
+    created ::lists/create-list("Webinar attendees", "contacts", "MANUAL")
+    ::lists/add-members(created.list.listId, ["12345", "67890"])
+    ```
+    """
+}
+fn
+(name: Str, object-type: Str, processing-type: Str): Map {
+  create-list(name, object-type, processing-type, {})
+},
+(name: Str, object-type: Str, processing-type: Str, options: Map): Map {
+  ::api/json("POST", crm-path("lists", ""), {}, build-list-body(name, object-type, processing-type, options))
+}
+
+get-list
+meta {
+    doc: """GET /crm/lists/{version}/{listId} - One list: `{list: {listId, name, processingType, objectTypeId, size?, ...}}`."""
+}
+fn (list-id: Str): Map {
+  ::api/json("GET", crm-path("lists", `/${segment(list-id)}`))
+}
+
+find-list-by-name
+meta {
+    doc: """GET /crm/lists/{version}/object-type-id/{objectTypeId}/name/{listName} - Look up a list by exact name. Returns `{list}`, or an Err (404) when no list has that name."""
+}
+fn (object-type: Str, name: Str): Map {
+  ::api/json("GET", crm-path("lists", `/object-type-id/${segment(object-type-id(object-type))}/name/${segment(name)}`))
+}
+
+search-lists
+meta {
+    doc: """POST /crm/lists/{version}/search - Search lists by name. `options`: `processingTypes` (Vec), `count` (page size), `offset`, `objectTypeId` (or an object name). Returns `{lists, hasMore, offset, total}`."""
+}
+fn
+(query: Str): Map {
+  search-lists(query, {})
+},
+(query: Str, options: Map): Map {
+  type-id get(options, "objectTypeId")
+  body {query: query}
+    |> assoc-some("processingTypes", get(options, "processingTypes"))
+    |> assoc-some("count", get(options, "count"))
+    |> assoc-some("offset", get(options, "offset"))
+    |> assoc-some("objectTypeId", if(is-some(type-id), object-type-id(type-id), null))
+  ::api/json("POST", crm-path("lists", "/search"), {}, body)
+}
+
+delete-list
+meta {
+    doc: """DELETE /crm/lists/{version}/{listId} - Delete a list (restorable for 90 days with HubSpot's restore endpoint). Members are not deleted."""
+}
+fn (list-id: Str): Any {
+  ::api/json("DELETE", crm-path("lists", `/${segment(list-id)}`))
+}
+
+add-members
+meta {
+    doc: """PUT /crm/lists/{version}/{listId}/memberships/add - Add records (Vec of record ids) to a `MANUAL` or `SNAPSHOT` list. Returns `{recordsIdsAdded, recordIdsMissing}`."""
+}
+fn (list-id: Str, record-ids: Vec): Map {
+  ::api/json("PUT", crm-path("lists", `/${segment(list-id)}/memberships/add`), {}, map(record-ids, Str))
+}
+
+remove-members
+meta {
+    doc: """PUT /crm/lists/{version}/{listId}/memberships/remove - Remove records (Vec of record ids) from a `MANUAL` or `SNAPSHOT` list. Returns `{recordIdsRemoved, recordIdsMissing}`."""
+}
+fn (list-id: Str, record-ids: Vec): Map {
+  ::api/json("PUT", crm-path("lists", `/${segment(list-id)}/memberships/remove`), {}, map(record-ids, Str))
+}
+
+list-members
+meta {
+    doc: """GET /crm/lists/{version}/{listId}/memberships - One page of members: `{results: [{recordId, membershipTimestamp}], paging?}`. `params`: `limit` (max 250), `after`, `before`."""
+}
+fn
+(list-id: Str): Map {
+  list-members(list-id, {})
+},
+(list-id: Str, params: Map): Map {
+  ::api/json("GET", crm-path("lists", `/${segment(list-id)}/memberships${query-string(params)}`))
+}

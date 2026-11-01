@@ -1,9 +1,54 @@
 ::shopify::integration ns
 meta ["test"]
 
-// Requires ctx: shopify.shop + shopify.access.token
+// =============================================================================
+// Integration tests (live Shopify Admin API, read-only)
+// =============================================================================
+// Requires ctx: shopify.shop (SHOPIFY_SHOP) + shopify.access.token
+// (SHOPIFY_ACCESS_TOKEN), e.g. a development store's custom-app token with
+// read_products and read_orders. Every test only reads. Without
+// credentials each test records a skip and passes.
+// Run with: hot test --project pkg-integration-shopify
+
+configured fn (): Bool {
+    and(is-some(::hot::ctx/get("shopify.shop")), is-some(::hot::ctx/get("shopify.access.token")))
+}
+
+skip fn (): Bool {
+    println("SHOPIFY_SHOP / SHOPIFY_ACCESS_TOKEN not set - skipping")
+    assert(true, "skipped: no Shopify credentials")
+}
+
 test-shop-query
 meta ["test"] fn () {
-    out ::shopify/graphql("{ shop { name } }")
-    assert(is-some(out.shop.name), "should resolve the shop")
+    cond {
+        not(configured()) => { skip() }
+        => {
+            out ::shopify::api/graphql("{ shop { name myshopifyDomain } }")
+            assert(is-some(out.shop.name), "should resolve the shop")
+        }
+    }
+}
+
+test-list-products-page
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            page ::shopify::products/list-products({first: 5})
+            assert(is-vec(page.nodes), "products connection has nodes")
+            assert(is-some(page.pageInfo), "and pageInfo for cursoring")
+        }
+    }
+}
+
+test-list-orders-page
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            page ::shopify::orders/list-orders({first: 5})
+            assert(is-vec(page.nodes), "orders connection has nodes")
+        }
+    }
 }

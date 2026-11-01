@@ -62,3 +62,100 @@ fn () {
     // "+" must be percent-encoded or Twilio decodes it as a space
     assert-eq("?To=%2B15558675310", ::api/query-string({To: "+15558675310"}))
 }
+
+// ============================================================================
+// Credentials: explicit clients flow to both auth and the account URL
+// ============================================================================
+
+test-auth-token-client
+meta ["test"]
+fn () {
+    c ::api/auth-token-client("AC123", "secret")
+    // base64("AC123:secret")
+    assert-eq("Basic QUMxMjM6c2VjcmV0", ::api/auth-header(c))
+    assert-eq("https://api.twilio.com/2010-04-01/Accounts/AC123", ::api/account-url(c))
+}
+
+test-api-key-client-scopes-url-to-account-not-key
+meta ["test"]
+fn () {
+    c ::api/api-key-client("AC123", "SK456", "keysecret")
+    // base64("SK456:keysecret")
+    assert-eq("Basic U0s0NTY6a2V5c2VjcmV0", ::api/auth-header(c))
+    assert-eq("https://api.twilio.com/2010-04-01/Accounts/AC123", ::api/account-url(c))
+}
+
+test-client-from-ctx-prefers-api-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({
+        "twilio.account.sid": "ACctx",
+        "twilio.auth.token": "tok",
+        "twilio.api.key.sid": "SKctx",
+        "twilio.api.key.secret": "sec"
+    })
+    c ::api/client-from-ctx()
+    assert-eq("ACctx", c.account-sid)
+    assert-eq("SKctx", c.username)
+    assert-eq("sec", c.password)
+}
+
+test-client-from-ctx-auth-token
+meta ["test"]
+fn () {
+    ::hot::ctx/set({
+        "twilio.account.sid": "ACctx",
+        "twilio.auth.token": "tok",
+        "twilio.api.key.sid": "",
+        "twilio.api.key.secret": ""
+    })
+    c ::api/client-from-ctx()
+    assert-eq("ACctx", c.username)
+    assert-eq("tok", c.password)
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-next-page-ref-2010
+meta ["test"]
+fn () {
+    page {messages: [], next_page_uri: "/2010-04-01/Accounts/AC1/Messages.json?PageSize=50&Page=1&PageToken=PASM1"}
+    assert-eq("/2010-04-01/Accounts/AC1/Messages.json?PageSize=50&Page=1&PageToken=PASM1", ::api/next-page-ref(page))
+}
+
+test-next-page-ref-v2-meta
+meta ["test"]
+fn () {
+    page {services: [], meta: {next_page_url: "https://verify.twilio.com/v2/Services?PageSize=50&Page=1&PageToken=PA1"}}
+    assert-eq("https://verify.twilio.com/v2/Services?PageSize=50&Page=1&PageToken=PA1", ::api/next-page-ref(page))
+}
+
+test-next-page-ref-last-page
+meta ["test"]
+fn () {
+    assert(is-null(::api/next-page-ref({messages: [], next_page_uri: null})), "null next_page_uri is the last page")
+    assert(is-null(::api/next-page-ref({services: [], meta: {next_page_url: null}})), "null next_page_url is the last page")
+    assert(is-null(::api/next-page-ref({messages: []})), "absent link is the last page")
+}
+
+test-page-url-joins-paths-to-api-host
+meta ["test"]
+fn () {
+    assert-eq("https://api.twilio.com/2010-04-01/Accounts/AC1/Calls.json?Page=1",
+        ::api/page-url("/2010-04-01/Accounts/AC1/Calls.json?Page=1"))
+}
+
+test-page-url-only-follows-twilio-hosts
+meta ["test"]
+fn () {
+    assert(::api/is-twilio-url("https://verify.twilio.com/v2/Services?Page=1"))
+    assert(::api/is-twilio-url("https://api.twilio.com/2010-04-01/x"))
+    assert(not(::api/is-twilio-url("https://api.twilio.com.evil.example/x")), "suffix trick")
+    assert(not(::api/is-twilio-url("https://evil.example/#.twilio.com/")), "fragment trick")
+    assert(not(::api/is-twilio-url("https://evil.example?x=.twilio.com/")), "query trick")
+    assert(not(::api/is-twilio-url("https://user@api.twilio.com/")), "userinfo")
+    assert(not(::api/is-twilio-url("http://api.twilio.com/x")), "plain http")
+    assert(is-err(::api/page-url("https://evil.example/steal")), "non-Twilio URL is refused")
+}

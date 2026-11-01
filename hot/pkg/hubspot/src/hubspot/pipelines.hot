@@ -1,0 +1,100 @@
+::hubspot::pipelines ns
+meta {
+    doc: """
+    Pipelines and their stages for deals, tickets, and other
+    pipeline-backed objects. Deal and ticket `dealstage`/`hs_pipeline_stage`
+    values are stage ids (`"appointmentscheduled"`, or numeric ids in
+    custom pipelines), not the labels users see, so resolve labels here
+    before writing them.
+    """
+}
+
+::api ::hubspot::api
+crm-path ::hubspot::api/crm-path
+segment ::hubspot::api/segment
+
+list-pipelines
+meta {
+    doc: """
+    GET /crm/pipelines/{version}/{objectType} - Every pipeline for an
+    object type (`"deals"`, `"tickets"`, ...) with its stages: `{results:
+    [{id, label, displayOrder, stages: [{id, label, displayOrder,
+    metadata}]}]}`. Deal stage `metadata.probability` is the win
+    probability; `metadata.isClosed` marks closed stages.
+    """
+}
+fn (object-type: Str): Map {
+  ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}`))
+}
+
+get-pipeline
+meta {
+    doc: """GET /crm/pipelines/{version}/{objectType}/{pipelineId} - One pipeline with its stages. The default deal pipeline's id is `"default"`."""
+}
+fn (object-type: Str, pipeline-id: Str): Map {
+  ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}/${segment(pipeline-id)}`))
+}
+
+list-stages
+meta {
+    doc: """GET /crm/pipelines/{version}/{objectType}/{pipelineId}/stages - The stages of one pipeline: `{results: [{id, label, displayOrder, metadata}]}`."""
+}
+fn (object-type: Str, pipeline-id: Str): Map {
+  ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}/${segment(pipeline-id)}/stages`))
+}
+
+get-stage
+meta {
+    doc: """GET /crm/pipelines/{version}/{objectType}/{pipelineId}/stages/{stageId} - One stage."""
+}
+fn (object-type: Str, pipeline-id: Str, stage-id: Str): Map {
+  ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}/${segment(pipeline-id)}/stages/${segment(stage-id)}`))
+}
+
+matches fn (item: Map, wanted: Str): Bool {
+  w lowercase(trim(wanted))
+  or(eq(lowercase(Str(get(item, "id"))), w), eq(lowercase(Str(or(get(item, "label"), ""))), w))
+}
+
+find-stage-in
+meta {
+    doc: """
+    Resolve a stage from a `list-pipelines` response. `pipeline` and
+    `stage` each match an id or a label (case-insensitive). Returns
+    `{pipeline_id, stage_id, stage}` or null. Exposed for testing;
+    `find-stage` calls the API.
+    """
+}
+fn (pipelines: Map, pipeline: Str, stage: Str): Map? {
+  found-pipeline find-first(or(get(pipelines, "results"), []), (p) { matches(p, pipeline) })
+  found-stage if(is-some(found-pipeline), find-first(or(get(found-pipeline, "stages"), []), (s) { matches(s, stage) }), null)
+  cond {
+    is-null(found-stage) => { null }
+    => { {pipeline_id: Str(found-pipeline.id), stage_id: Str(found-stage.id), stage: found-stage} }
+  }
+}
+
+find-stage
+meta {
+    doc: """
+    Look up a stage by pipeline and stage id or label, e.g.
+    `find-stage("deals", "Sales Pipeline", "Contract Sent")`. Returns
+    `{pipeline_id, stage_id, stage}` or null.
+
+    **Example**
+
+    ```hot
+    found ::hubspot::pipelines/find-stage("deals", "default", "Contract Sent")
+    if(is-some(found),
+      ::hubspot::deals/update-deal("12345", {pipeline: found.pipeline_id, dealstage: found.stage_id}),
+      null)
+    ```
+    """
+}
+fn (object-type: Str, pipeline: Str, stage: Str): Any {
+  pipelines list-pipelines(object-type)
+  cond {
+    is-err(pipelines) => { pipelines }
+    => { find-stage-in(pipelines, pipeline, stage) }
+  }
+}

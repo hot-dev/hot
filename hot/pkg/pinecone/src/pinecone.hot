@@ -1,11 +1,15 @@
 ::pinecone ns
 meta {
     doc: """
-    Pinecone vector database bindings — production RAG beyond Hot-store
-    prototypes. Pair with an embeddings source (`openai`,
-    `openai-compatible`, `qwen`) for the vectors.
+    Pinecone vector database bindings: serverless index management,
+    vector upsert/query/fetch/update/list/delete with namespaces,
+    integrated-embedding records, and hosted inference (embed and
+    rerank). Pair with an embeddings source (`::pinecone::inference`,
+    `openai`, `openai-compatible`) for the vectors.
 
-    **Setup** — context variable `pinecone.api.key`.
+    **Setup**: context variable `pinecone.api.key`. Optionally
+    `pinecone.api.version` to pin a different API version than
+    `API_VERSION`.
 
     **Quick start**
 
@@ -13,26 +17,38 @@ meta {
     ::indexes ::pinecone::indexes
     ::vectors ::pinecone::vectors
 
-    index ::indexes/describe-index("docs")
+    // Once, at setup: a new index takes a few seconds to be ready
+    ::indexes/create-index("docs", 3, {metric: "cosine"})
 
+    // Later: check it is ready, then write and query
+    index ::indexes/describe-index("docs")
     ::vectors/upsert(index.host, [
-      {id: "doc-1", values: embedding, metadata: {source: "guide.md"}}
-    ])
+      {id: "doc-1", values: [0.1, 0.2, 0.3], metadata: {source: "guide.md"}}
+    ], "guides")
 
     hits ::vectors/query(index.host, {
-      vector: question-embedding,
+      vector: [0.1, 0.2, 0.3],
       topK: 5,
+      namespace: "guides",
       includeMetadata: true,
       filter: {source: {"$eq": "guide.md"}}
     })
     map(hits.matches, (m) { m.metadata.source })
     ```
 
-    Data-plane calls (`::pinecone::vectors`) take the index `host` from
-    `describe-index` / `create-index`; control-plane calls
-    (`::pinecone::indexes`) go to api.pinecone.io.
+    Data-plane calls (`::pinecone::vectors`, `::pinecone::namespaces`,
+    `::pinecone::records`) take the index `host` from `describe-index`;
+    control-plane and inference calls go to api.pinecone.io. Non-2xx
+    responses are an Err carrying `::pinecone::api/HttpError`.
     """
 }
 
 CONTROL_URL "https://api.pinecone.io"
-API_VERSION "2025-01"
+
+// Latest stable Pinecone API version as of November 2026. Each stable
+// version is supported for at least 12 months after release; override
+// per deployment with the `pinecone.api.version` context variable.
+API_VERSION "2026-07"
+
+// The namespace Pinecone uses when none is given.
+DEFAULT_NAMESPACE "__default__"

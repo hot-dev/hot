@@ -1,0 +1,43 @@
+::stripe::billing-portal ns
+meta {
+    doc: """Customer portal sessions: a Stripe-hosted page where customers update payment methods, view invoices, and change or cancel subscriptions. Configure what the portal allows in the Dashboard (or `/v1/billing_portal/configurations` via `::stripe::api/call`). See https://docs.stripe.com/api/customer_portal/sessions."""
+}
+
+api-call ::stripe::api/call
+RequestOptions ::stripe::api/RequestOptions
+
+CreatePortalSessionRequest type {
+  customer: Str,
+  return_url: Str?,
+  configuration: Str?,
+  flow_data: Map?,
+  locale: Str?,
+  on_behalf_of: Str?,
+  expand: Vec<Str>?
+}
+
+create-portal-session
+meta {
+    doc: """
+POST /v1/billing_portal/sessions - Create a customer portal session and redirect the customer to its short-lived `url`. `flow_data` deep-links into one flow, e.g. `{type: "payment_method_update"}` or `{type: "subscription_cancel", subscription_cancel: {subscription: "sub_..."}}`.
+
+**Example**
+
+```hot
+::portal ::stripe::billing-portal
+
+session ::portal/create-portal-session(::portal/CreatePortalSessionRequest({
+  customer: "cus_...",
+  return_url: "https://example.com/account"
+}))
+session.url  // => "https://billing.stripe.com/p/session/..."
+```
+"""
+}
+fn
+(request: CreatePortalSessionRequest): Map {
+  create-portal-session(request, RequestOptions({}))
+},
+(request: CreatePortalSessionRequest, options: RequestOptions): Map {
+  api-call("POST", "/v1/billing_portal/sessions", request, options)
+}

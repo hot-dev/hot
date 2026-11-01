@@ -1,28 +1,160 @@
 ::elevenlabs::api ns
-meta {ctx: {"elevenlabs.api.key": {required: true}}}
+meta {
+    doc: """Internal HTTP plumbing for the ElevenLabs API: authenticated requests (`xi-api-key` header), query strings, multipart bodies, and the `HttpError` returned for non-2xx responses.""",
+    ctx: {"elevenlabs.api.key": {required: true}}
+}
 
 ::ctx ::hot::ctx
+::uri ::hot::uri
 
-http-request ::hot::http/request
-http-request-stream ::hot::http/request-stream
 is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
 HttpResponse ::hot::http/HttpResponse
 StreamingHttpResponse ::hot::http/StreamingHttpResponse
 
-HttpError type {
+HttpError
+meta {
+    doc: """
+    A non-2xx ElevenLabs response. `message` is a readable summary of
+    ElevenLabs' error body (`detail.status`/`detail.message`, a plain
+    `detail` string, or a validation-error list); `body` keeps the
+    decoded payload.
+    """
+}
+type {
     status: Int,
-    headers: Map,
-    body: Any
+    headers: Map?,
+    body: Any?,
+    message: Str
 }
 
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+http-error
+meta {
+    doc: """Build an `HttpError` (with its readable `message`) from a non-2xx `HttpResponse`."""
+}
+fn (response: HttpResponse): HttpError {
   HttpError({
     status: response.status,
     headers: response.headers,
-    body: response.body
+    body: response.body,
+    message: error-message(response.status, response.body)
   })
 }
+
+error-message
+meta {
+    doc: """Build a readable message from an ElevenLabs error status and body. Exposed for testing."""
+}
+fn (status: Int, body: Any): Str {
+  detail if(is-map(body), get(body, "detail"), null)
+  text cond {
+    is-map(detail) => {
+      code get(detail, "status")
+      msg get(detail, "message")
+      cond {
+        and(is-some(code), is-some(msg)) => { `${code}: ${msg}` }
+        => { or(msg, code) }
+      }
+    }
+
+    is-str(detail) => { detail }
+    is-vec(detail) => {
+      msgs filter(map(detail, (d) { if(is-map(d), get(d, "msg"), null) }), is-some)
+      if(is-empty(msgs), null, join(msgs, "; "))
+    }
+
+    is-str(body) => { if(is-blank(body), null, trim(body)) }
+    => { null }
+  }
+
+  if(is-some(text), `ElevenLabs API error (HTTP ${status}): ${text}`, `ElevenLabs API error (HTTP ${status})`)
+}
+
+query-string
+meta {
+    doc: """
+    Build a query-string suffix (`?a=1&b=2`, or `""` when nothing is
+    set) from a Map. Null values are dropped, Bools render as
+    `true`/`false`, Vec values repeat the key, and keys and values are
+    percent-encoded.
+
+    **Example**
+
+    ```hot
+    ::elevenlabs::api/query-string({page_size: 20, search: "narrator", voice_type: null})
+    // "?page_size=20&search=narrator"
+    ```
+    """
+}
+fn (params: Map): Str {
+  pairs reduce(params, (acc, entry) {
+    key ::uri/encode(Str(first(entry)))
+    value entry[1]
+    cond {
+      is-null(value) => { acc }
+      is-vec(value) => {
+        concat(acc, map(filter(value, is-some), (item) { `${key}=${::uri/encode(Str(item))}` }))
+      }
+      => { concat(acc, [`${key}=${::uri/encode(Str(value))}`]) }
+    }
+  }, [])
+  if(is-empty(pairs), "", `?${join(pairs, "&")}`)
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment (a voice or history item id)."""
+}
+fn (value: Str): Str {
+  ::uri/encode(value)
+}
+
+api-key
+meta {
+    doc: """The configured `elevenlabs.api.key`, or an Err naming the missing context variable."""
+}
+fn (): Str {
+  key or(::ctx/get("elevenlabs.api.key"), "")
+  if(is-empty(key), err("elevenlabs.api.key is not set. Add it in Context Variables to call the ElevenLabs API."), key)
+}
+
+// ============================================================================
+// Multipart
+// ============================================================================
+
+multipart-field
+meta {
+    doc: """One `multipart/form-data` text field as Bytes. Bools render as `true`/`false`; Maps and Vecs as JSON. Exposed for testing."""
+}
+fn (boundary: Str, name: Str, value: Any): Bytes {
+  text cond {
+    is-str(value) => { value }
+    or(is-map(value), is-vec(value)) => { to-json(untype(value)) }
+    => { Str(value) }
+  }
+
+  Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${text}\r\n`)
+}
+
+multipart-file
+meta {
+    doc: """One `multipart/form-data` file part as Bytes. The file bytes are concatenated verbatim, never interpolated into a string. Exposed for testing."""
+}
+fn (boundary: Str, name: Str, filename: Str, mime-type: Str, data: Bytes): Bytes {
+  concat(
+    Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${filename}"\r\nContent-Type: ${mime-type}\r\n\r\n`),
+    data,
+    Bytes("\r\n")
+  )
+}
+
+multipart-close fn (boundary: Str): Bytes {
+  Bytes(`--${boundary}--\r\n`)
+}
+
+// ============================================================================
+// Requests
+// ============================================================================
 
 request
 meta {
@@ -30,6 +162,10 @@ meta {
     Make an authenticated request to the ElevenLabs API. `path` is
     relative to the API root (e.g. `/v1/voices`). ElevenLabs
     authenticates with an `xi-api-key` header (not a Bearer token).
+    A Map or typed record `body` is sent as JSON (unset optional fields
+    omitted); `Bytes` are sent verbatim (set `Content-Type` in
+    `additional-headers`); `""` sends no body. Returns the raw
+    `HttpResponse`; `json` and `bytes` unwrap it.
 
     **Example**
 
@@ -47,45 +183,80 @@ fn
   request(method, path, additional-headers, "")
 },
 (method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, path, additional-headers, body, ::ctx/get("elevenlabs.api.key"))
+  request(method, path, additional-headers, body, api-key())
 },
-(method: Str, path: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
-  default-headers {
-    xi-api-key: api-key
+// 5-arity: explicit API key override
+(method: Str, path: Str, additional-headers: Map, body: Any, key: Str): HttpResponse {
+  base-headers {xi-api-key: key}
+  encoded match body {
+    "" | Null => { {headers: base-headers, body: ""} }
+    Bytes => { {headers: base-headers, body: body} }
+    _ => { {headers: {...base-headers, Content-Type: "application/json"}, body: to-json(untype(body))} }
   }
 
-  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
-  final-headers {...headers, ...additional-headers}
-
-  encoded-body if(eq(body, ""), "", to-json(untype(body)))
   ::hot::http/request(HttpRequest({
     method,
     url: `${::elevenlabs/BASE_URL}${path}`,
-    headers: final-headers,
-    body: encoded-body
+    headers: {...encoded.headers, ...additional-headers},
+    body: encoded.body
   }))
+}
+
+json
+meta {
+    doc: """Like `request`, but returns the decoded JSON body on 2xx, or an Err carrying `HttpError`."""
+}
+fn
+(method: Str, path: Str): Any {
+  json(method, path, {}, "")
+},
+(method: Str, path: Str, body: Any): Any {
+  json(method, path, {}, body)
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): Any {
+  response request(method, path, additional-headers, body)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(http-error(response)) }
+  }
+}
+
+bytes
+meta {
+    doc: """Like `request`, but returns the verbatim response `Bytes` on 2xx (for audio), or an Err carrying `HttpError`."""
+}
+fn
+(method: Str, path: Str): Bytes {
+  bytes(method, path, "")
+},
+(method: Str, path: Str, body: Any): Bytes {
+  response request(method, path, {}, body)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body-bytes }
+    => { err(http-error(response)) }
+  }
 }
 
 request-stream
 meta {
-    doc: """Make an authenticated streaming request with raw (binary chunk) framing — used for streaming audio endpoints."""
+    doc: """Make an authenticated streaming request with raw (binary chunk) framing, used for streaming audio endpoints."""
 }
 fn
 (method: Str, path: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
-  request-stream(method, path, additional-headers, body, ::ctx/get("elevenlabs.api.key"))
+  request-stream(method, path, additional-headers, body, api-key())
 },
-(method: Str, path: Str, additional-headers: Map, body: Any, api-key: Str): StreamingHttpResponse {
+(method: Str, path: Str, additional-headers: Map, body: Any, key: Str): StreamingHttpResponse {
   default-headers {
-    xi-api-key: api-key,
+    xi-api-key: key,
     Content-Type: "application/json"
   }
-
-  final-headers {...default-headers, ...additional-headers}
 
   ::hot::http/request-stream(HttpRequest({
     method,
     url: `${::elevenlabs/BASE_URL}${path}`,
-    headers: final-headers,
+    headers: {...default-headers, ...additional-headers},
     body: to-json(untype(body))
   }), "raw")
 }

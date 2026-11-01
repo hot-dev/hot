@@ -1,0 +1,42 @@
+::plaid::items ns
+meta {
+    doc: """Items (one user's login at one institution): status, webhook URL, and removal."""
+}
+
+::api ::plaid::api
+
+get-item
+meta {
+    doc: """POST /item/get: the Item's institution, products, consent expiry, webhook and `error` (e.g. `ITEM_LOGIN_REQUIRED` when the user must re-authenticate through Link update mode). Returns `{item, status, request_id}`."""
+}
+fn (access-token: Str): Map {
+  ::api/post("/item/get", {access_token: access-token})
+}
+
+remove-item
+meta {
+    doc: """
+    POST /item/remove: invalidate the access token and stop billing for
+    the Item. Irreversible. Options: `reason_code` (e.g.
+    `"USER_REQUEST"`, `"FRAUD_FIRST_PARTY"`), `reason_note`.
+    """
+}
+fn
+(access-token: Str): Map {
+  remove-item(access-token, {})
+},
+(access-token: Str, options: Map): Map {
+  ::api/post("/item/remove", {
+    access_token: access-token,
+    reason_code: get(options, "reason_code"),
+    reason_note: get(options, "reason_note")
+  })
+}
+
+update-item-webhook
+meta {
+    doc: """POST /item/webhook/update: point the Item's webhooks at a new URL (Plaid then sends `WEBHOOK_UPDATE_ACKNOWLEDGED`). Returns `{item, request_id}`."""
+}
+fn (access-token: Str, webhook: Str): Map {
+  ::api/post("/item/webhook/update", {access_token: access-token, webhook: webhook})
+}

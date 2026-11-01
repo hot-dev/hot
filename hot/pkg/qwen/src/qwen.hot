@@ -1,16 +1,152 @@
 ::qwen ns
+meta {
+    doc: """
+    Qwen on Alibaba Cloud Model Studio (DashScope), through its
+    OpenAI-compatible endpoint. Built on `hot.dev/openai`: requests go
+    through `::openai::api/Endpoint`, and `::qwen::ai/provider` registers
+    Qwen with the hot-ai run loop via OpenAI's chat-tools adapter.
 
-// Qwen is hosted on Alibaba Cloud Model Studio (DashScope). The OpenAI-compatible
-// endpoint exposes Chat Completions, Models, Embeddings, Files, and Batches.
-//
-// See: https://docs.qwencloud.com/api-reference/toolkitframework/openai-compatible/overview
+    The base URL is chosen by `base-url()`, in this order:
 
-// Default (international / Singapore) OpenAI-compatible base URL.
-BASE_URL "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    1. `qwen.base.url`: used as-is.
+    2. `qwen.workspace.id` + `qwen.region`: the workspace domain
+       `https://{workspace}.{region-id}.maas.aliyuncs.com/compatible-mode/v1`.
+    3. `qwen.region` alone: the region's shared domain.
 
-// Mainland China base URL (alternative). Swap into context via the `qwen.base.url`
-// ctx var if you want to target the Beijing endpoint instead of Singapore.
-BASE_URL_CN "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    API keys are bound to the region they were created in; a key sent to
+    another region's endpoint gets a 401.
+    """
+}
 
-// Base URL for the (non-OpenAI-compatible subset of the) Responses / Conversations API.
-RESPONSES_BASE_URL "https://dashscope-intl.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1"
+::ctx ::hot::ctx
+
+COMPATIBLE_PATH "/compatible-mode/v1"
+
+// Shared (legacy) OpenAI-compatible domains, still supported by Alibaba.
+BASE_URL
+meta {doc: "International (Singapore) OpenAI-compatible base URL; the default."}
+"https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+BASE_URL_US
+meta {doc: "US (Virginia) OpenAI-compatible base URL."}
+"https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+
+BASE_URL_CN
+meta {doc: "Mainland China (Beijing) OpenAI-compatible base URL."}
+"https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+BASE_URL_HK
+meta {doc: "China (Hong Kong) OpenAI-compatible base URL."}
+"https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1"
+
+DEFAULT_REGION "intl"
+
+REGIONS
+meta {
+    doc: """
+    Model Studio regions: `id` is the Alibaba Cloud region id used in
+    workspace domains, `base-url` the shared domain (null where the region
+    is only reachable through a workspace domain). Aliases map to the same
+    entry: `intl`/`singapore`/`ap-southeast-1`, `us`/`virginia`/`us-east-1`,
+    `cn`/`beijing`/`cn-beijing`, `hk`/`hongkong`/`cn-hongkong`,
+    `eu`/`frankfurt`/`eu-central-1`, `jp`/`tokyo`/`ap-northeast-1`.
+    """
+}
+{
+    intl: {id: "ap-southeast-1", base-url: BASE_URL},
+    us: {id: "us-east-1", base-url: BASE_URL_US},
+    cn: {id: "cn-beijing", base-url: BASE_URL_CN},
+    hk: {id: "cn-hongkong", base-url: BASE_URL_HK},
+    eu: {id: "eu-central-1", base-url: null},
+    jp: {id: "ap-northeast-1", base-url: null}
+}
+
+REGION_ALIASES {
+    intl: "intl", international: "intl", singapore: "intl", "ap-southeast-1": "intl",
+    us: "us", virginia: "us", "us-east-1": "us",
+    cn: "cn", china: "cn", beijing: "cn", "cn-beijing": "cn",
+    hk: "hk", hongkong: "hk", "hong-kong": "hk", "cn-hongkong": "hk",
+    eu: "eu", frankfurt: "eu", germany: "eu", "eu-central-1": "eu",
+    jp: "jp", japan: "jp", tokyo: "jp", "ap-northeast-1": "jp"
+}
+
+region-info
+meta {
+    doc: """
+    Look up a region by name or alias (case-insensitive). Null or empty
+    means the default (`intl`). Unknown names return an Err.
+
+    **Example**
+
+    ```hot
+    ::qwen/region-info("Singapore").id  // => "ap-southeast-1"
+    ::qwen/region-info("us").base-url    // => "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+    ```
+    """
+}
+fn (region: Str?): Map {
+    name lowercase(trim(or(region, "")))
+    key get(REGION_ALIASES, if(is-empty(name), DEFAULT_REGION, name))
+    cond {
+        is-null(key) => { err(`Unknown qwen.region '${region}'. Use one of: intl, us, cn, hk, eu, jp`) }
+        => { get(REGIONS, key) }
+    }
+}
+
+resolve-base-url
+meta {
+    doc: """
+    Pure base-URL selection: an explicit `base-url` wins, then a workspace
+    domain when `workspace-id` is set, then the region's shared domain.
+    Regions without a shared domain (`eu`, `jp`) need a workspace id.
+
+    **Example**
+
+    ```hot
+    ::qwen/resolve-base-url(null, "us", null)
+    // => "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+    ::qwen/resolve-base-url(null, "eu", "ws-123")
+    // => "https://ws-123.eu-central-1.maas.aliyuncs.com/compatible-mode/v1"
+    ```
+    """
+}
+fn (base-url: Str?, region: Str?, workspace-id: Str?): Str {
+    explicit trim(or(base-url, ""))
+    ws trim(or(workspace-id, ""))
+    cond {
+        not(is-empty(explicit)) => { ::openai::api/normalize-base-url(explicit) }
+        => {
+            info region-info(region)
+            cond {
+                not(is-empty(ws)) => { `https://${ws}.${info.id}.maas.aliyuncs.com${COMPATIBLE_PATH}` }
+                is-null(info.base-url) => {
+                    err(`qwen.region '${region}' has no shared domain; set qwen.workspace.id (or qwen.base.url)`)
+                }
+                => { info.base-url }
+            }
+        }
+    }
+}
+
+base-url
+meta {
+    doc: """
+    The base URL from ctx: `qwen.base.url`, else `qwen.workspace.id` +
+    `qwen.region`, else the `qwen.region` shared domain (default `intl`,
+    Singapore).
+
+    **Example**
+
+    ```hot
+    ::qwen/base-url()  // => "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    ```
+    """,
+    ctx: {
+        "qwen.base.url": {required: false, secret: false},
+        "qwen.region": {required: false, default: "intl", secret: false},
+        "qwen.workspace.id": {required: false, secret: false}
+    }
+}
+fn (): Str {
+    resolve-base-url(::ctx/get("qwen.base.url"), ::ctx/get("qwen.region"), ::ctx/get("qwen.workspace.id"))
+}

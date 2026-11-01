@@ -1,0 +1,112 @@
+::cloudflare::d1 ns
+meta {
+    doc: """
+    Cloudflare D1 over the REST API: list databases and run SQL with
+    bound parameters. The REST API suits admin jobs, migrations, and
+    workflow reads; latency-sensitive traffic belongs in a Worker binding.
+    """,
+    ctx: {"cloudflare.token": {required: true}, "cloudflare.account.id": {required: true}}
+}
+
+::api ::cloudflare::api
+
+ListPage ::cloudflare::api/ListPage
+
+list-databases
+meta {
+    doc: """GET /accounts/{account_id}/d1/database - One page of databases (`name` search, `page`, `per_page` 10–10000). Returns a `ListPage` of `{uuid, name, version, created_at}`."""
+}
+fn
+(): ListPage {
+  list-databases({})
+},
+(params: Map): ListPage {
+  ::api/account-page(`/d1/database${::api/query(params)}`)
+}
+
+list-all-databases
+meta {
+    doc: """Every database matching `params`, following pages up to `max` (default 10000)."""
+}
+fn
+(): Vec {
+  list-all-databases({})
+},
+(params: Map): Vec {
+  list-all-databases(params, ::api/DEFAULT_MAX_ITEMS)
+},
+(params: Map, max: Int): Vec {
+  ::api/collect-pages(list-databases, {per_page: 100, ...params}, max)
+}
+
+find-database
+meta {
+    doc: """The database named exactly `name`, or null."""
+}
+fn (name: Str): Map? {
+  matches list-all-databases({name: name})
+  cond {
+    is-err(matches) => { matches }
+    => { find-first(matches, (db) { eq(db.name, name) }) }
+  }
+}
+
+get-database
+meta {
+    doc: """GET /accounts/{account_id}/d1/database/{database_id} - One database, including `num_tables` and `file_size`."""
+}
+fn (database-id: Str): Map {
+  ::api/account-json("GET", `/d1/database/${::api/seg(database-id)}`)
+}
+
+query-body
+meta {
+    doc: """The query body `{sql, params?}`; params are sent as strings, as the API requires, and omitted when empty. Exposed for testing."""
+}
+fn (sql: Str, params: Vec): Map {
+  cond {
+    is-empty(params) => { {sql: sql} }
+    => { {sql: sql, params: map(params, (p) { if(is-null(p), p, Str(p)) })} }
+  }
+}
+
+query
+meta {
+    doc: """
+    POST /accounts/{account_id}/d1/database/{database_id}/query - Run
+    SQL with `?` placeholders bound to `params`. Several `;`-separated
+    statements run as a batch. Returns one result per statement:
+    `[{results: [rows], success, meta: {changes, last_row_id, rows_read, rows_written, duration}}]`.
+
+    **Example**
+
+    ```hot
+    out ::cloudflare::d1/query(db-id, "SELECT id, email FROM users WHERE plan = ? LIMIT ?", ["pro", 50])
+    first(out).results
+    ```
+    """
+}
+fn
+(database-id: Str, sql: Str): Vec {
+  query(database-id, sql, [])
+},
+(database-id: Str, sql: Str, params: Vec): Vec {
+  ::api/account-json("POST", `/d1/database/${::api/seg(database-id)}/query`, query-body(sql, params))
+}
+
+rows
+meta {
+    doc: """Run a single statement and return just its rows."""
+}
+fn
+(database-id: Str, sql: Str): Vec {
+  rows(database-id, sql, [])
+},
+(database-id: Str, sql: Str, params: Vec): Vec {
+  out query(database-id, sql, params)
+  cond {
+    is-err(out) => { out }
+    is-empty(out) => { [] }
+    => { or(first(out).results, []) }
+  }
+}

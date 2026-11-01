@@ -1,0 +1,72 @@
+::plaid::institutions ns
+meta {
+    doc: """Institutions supported by Plaid: list, fetch one by id, and search by name. Country codes are ISO-3166-1 alpha-2 (`"US"`, `"CA"`, `"GB"`, ...)."""
+}
+
+::api ::plaid::api
+
+get-institutions
+meta {
+    doc: """
+    POST /institutions/get: a page of institutions. `count` is 1-500,
+    `offset` starts at 0. Options (Plaid's `options` object): `products`,
+    `routing_numbers`, `oauth`, `include_optional_metadata` (logo, colour,
+    URL), `include_auth_metadata`. Returns `{institutions, total}`.
+    """
+}
+fn
+(count: Int, offset: Int, country-codes: Vec<Str>): Map {
+  get-institutions(count, offset, country-codes, null)
+},
+(count: Int, offset: Int, country-codes: Vec<Str>, options: Map?): Map {
+  ::api/post("/institutions/get", {
+    count: count,
+    offset: offset,
+    country_codes: country-codes,
+    options: options
+  })
+}
+
+get-institution
+meta {
+    doc: """POST /institutions/get_by_id: one institution (`ins_...`). Options: `include_optional_metadata`, `include_status` (per-product health), `include_auth_metadata`. Returns `{institution}`."""
+}
+fn
+(institution-id: Str, country-codes: Vec<Str>): Map {
+  get-institution(institution-id, country-codes, null)
+},
+(institution-id: Str, country-codes: Vec<Str>, options: Map?): Map {
+  ::api/post("/institutions/get_by_id", {
+    institution_id: institution-id,
+    country_codes: country-codes,
+    options: options
+  })
+}
+
+search-institutions
+meta {
+    doc: """
+    POST /institutions/search: institutions whose name matches `query`.
+    `products` filters to institutions supporting all of them (null for
+    any). Options: `oauth`, `include_optional_metadata`,
+    `include_auth_metadata`. Returns `{institutions}`.
+
+    **Example**
+
+    ```hot
+    hits ::plaid::institutions/search-institutions("chase", ["transactions"], ["US"])
+    ```
+    """
+}
+fn
+(query: Str, products: Vec<Str>?, country-codes: Vec<Str>): Map {
+  search-institutions(query, products, country-codes, null)
+},
+(query: Str, products: Vec<Str>?, country-codes: Vec<Str>, options: Map?): Map {
+  ::api/post("/institutions/search", {
+    query: query,
+    products: products,
+    country_codes: country-codes,
+    options: options
+  })
+}

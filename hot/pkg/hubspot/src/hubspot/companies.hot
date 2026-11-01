@@ -53,3 +53,11 @@ meta {
 fn (options: Map): Map {
   ::objects/search-objects("companies", options)
 }
+
+archive-company
+meta {
+    doc: """Archive a company (recycle bin, restorable for 90 days)."""
+}
+fn (id: Str): Any {
+  ::objects/archive-object("companies", id)
+}

@@ -1,0 +1,107 @@
+::slack::admin::emoji ns
+meta {
+    doc: """
+    `admin.emoji.*`: add, alias, list, rename and remove custom emoji
+    across an Enterprise organization. Scope: `admin.teams:write`
+    (`admin.teams:read` for `list`).
+
+    **Example**
+
+    ```hot
+    ::emoji ::slack::admin::emoji
+
+    ::emoji/add-emoji(::emoji/AddEmojiRequest({name: "shipit", url: "https://example.com/shipit.png"}))
+    ::emoji/add-alias(::emoji/AddAliasRequest({name: "ship", alias_for: "shipit"}))
+    ```
+    """
+}
+
+::api ::slack::admin::api
+
+AddEmojiRequest type {
+  name: Str,
+  url: Str
+}
+
+add-emoji
+meta {
+    doc: """
+    admin.emoji.add - Add a custom emoji from an image URL (square, under 128 KB).
+
+    Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn (request: AddEmojiRequest): Map {
+  ::api/call("admin.emoji.add", request)
+}
+
+AddAliasRequest type {
+  name: Str,
+  alias_for: Str
+}
+
+add-alias
+meta {
+    doc: """
+    admin.emoji.addAlias - Add an alias for an existing emoji.
+
+    Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn (request: AddAliasRequest): Map {
+  ::api/call("admin.emoji.addAlias", request)
+}
+
+ListRequest type {
+  cursor: Str?,
+  limit: Int?
+}
+
+list
+meta {
+    doc: """
+    admin.emoji.list - List custom emoji: `emoji` is a Map of name to `{url, date_created, uploaded_by}`.
+
+    Scope: `admin.teams:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(): Map {
+  list(ListRequest({}))
+},
+(request: ListRequest): Map {
+  ::api/call("admin.emoji.list", request)
+}
+
+RemoveEmojiRequest type {
+  name: Str
+}
+
+remove-emoji
+meta {
+    doc: """
+    admin.emoji.remove - Remove a custom emoji or alias.
+
+    Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn (request: RemoveEmojiRequest): Map {
+  ::api/call("admin.emoji.remove", request)
+}
+
+RenameRequest type {
+  name: Str,
+  new_name: Str
+}
+
+rename
+meta {
+    doc: """
+    admin.emoji.rename - Rename a custom emoji.
+
+    Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn (request: RenameRequest): Map {
+  ::api/call("admin.emoji.rename", request)
+}

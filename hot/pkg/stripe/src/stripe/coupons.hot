@@ -1,0 +1,185 @@
+::stripe::coupons ns
+meta {
+    doc: """Coupons and promotion codes. A coupon defines the discount; a promotion code is a customer-facing code that redeems it. Apply either to subscriptions, invoices, and Checkout with `discounts: [{coupon}]` or `[{promotion_code}]`. See https://docs.stripe.com/api/coupons and https://docs.stripe.com/api/promotion_codes."""
+}
+
+api-call ::stripe::api/call
+seg ::stripe::api/encode-id
+RequestOptions ::stripe::api/RequestOptions
+
+// ============================================================================
+// Coupons
+// ============================================================================
+
+CreateCouponRequest type {
+  id: Str?,
+  name: Str?,
+  percent_off: Dec?,
+  amount_off: Int?,
+  currency: Str?,
+  currency_options: Map?,
+  duration: Str?,
+  duration_in_months: Int?,
+  max_redemptions: Int?,
+  redeem_by: Int?,
+  applies_to: Map?,
+  metadata: Map?,
+  expand: Vec<Str>?
+}
+
+create-coupon
+meta {
+    doc: """
+POST /v1/coupons - Create a coupon. Give `percent_off`, or `amount_off` with `currency`. `duration` is "once" (default), "repeating" (with `duration_in_months`), or "forever".
+
+**Example**
+
+```hot
+::coupons ::stripe::coupons
+
+coupon ::coupons/create-coupon(::coupons/CreateCouponRequest({
+  percent_off: 25.0,
+  duration: "repeating",
+  duration_in_months: 3,
+  name: "Launch 25%"
+}))
+code ::coupons/create-promotion-code(::coupons/CreatePromotionCodeRequest({
+  promotion: {type: "coupon", coupon: coupon.id},
+  code: "LAUNCH25"
+}))
+```
+"""
+}
+fn
+(request: CreateCouponRequest): Map {
+  create-coupon(request, RequestOptions({}))
+},
+(request: CreateCouponRequest, options: RequestOptions): Map {
+  api-call("POST", "/v1/coupons", request, options)
+}
+
+get-coupon
+meta {
+    doc: """GET /v1/coupons/{coupon} - Retrieve a coupon by ID."""
+}
+fn (coupon: Str): Map {
+  api-call("GET", `/v1/coupons/${seg(coupon)}`)
+}
+
+UpdateCouponRequest type {
+  name: Str?,
+  metadata: Map?,
+  currency_options: Map?,
+  expand: Vec<Str>?
+}
+
+update-coupon
+meta {
+    doc: """POST /v1/coupons/{coupon} - Update a coupon's `name`, `metadata`, or `currency_options`. Discount terms are immutable."""
+}
+fn
+(coupon: Str, request: UpdateCouponRequest): Map {
+  update-coupon(coupon, request, RequestOptions({}))
+},
+(coupon: Str, request: UpdateCouponRequest, options: RequestOptions): Map {
+  api-call("POST", `/v1/coupons/${seg(coupon)}`, request, options)
+}
+
+delete-coupon
+meta {
+    doc: """DELETE /v1/coupons/{coupon} - Delete a coupon so it can't be redeemed again. Existing discounts that use it are unaffected."""
+}
+fn (coupon: Str): Map {
+  api-call("DELETE", `/v1/coupons/${seg(coupon)}`)
+}
+
+list-coupons
+meta {
+    doc: """GET /v1/coupons - List coupons. Optional `params`: `created`, `limit`, `starting_after`, `ending_before`."""
+}
+fn
+(): Map {
+  list-coupons({})
+},
+(params: Map): Map {
+  api-call("GET", "/v1/coupons", params)
+}
+
+// ============================================================================
+// Promotion Codes
+// ============================================================================
+
+CreatePromotionCodeRequest type {
+  promotion: Map,
+  code: Str?,
+  active: Bool?,
+  customer: Str?,
+  expires_at: Int?,
+  max_redemptions: Int?,
+  restrictions: Map?,
+  metadata: Map?,
+  expand: Vec<Str>?
+}
+
+create-promotion-code
+meta {
+    doc: """POST /v1/promotion_codes - Create a customer-facing code for a coupon. `promotion` is `{type: "coupon", coupon: "..."}` (it replaced the top-level `coupon` parameter in 2025-09-30.clover). Omit `code` to have Stripe generate one. `restrictions` can require `first_time_transaction` or a `minimum_amount`."""
+}
+fn
+(request: CreatePromotionCodeRequest): Map {
+  create-promotion-code(request, RequestOptions({}))
+},
+(request: CreatePromotionCodeRequest, options: RequestOptions): Map {
+  api-call("POST", "/v1/promotion_codes", request, options)
+}
+
+get-promotion-code
+meta {
+    doc: """GET /v1/promotion_codes/{promotion_code} - Retrieve a promotion code by ID (`promo_...`). To look one up by its customer-facing code, use `list-promotion-codes({code: "LAUNCH25"})`."""
+}
+fn (promotion-code: Str): Map {
+  api-call("GET", `/v1/promotion_codes/${seg(promotion-code)}`)
+}
+
+UpdatePromotionCodeRequest type {
+  active: Bool?,
+  restrictions: Map?,
+  metadata: Map?,
+  expand: Vec<Str>?
+}
+
+update-promotion-code
+meta {
+    doc: """POST /v1/promotion_codes/{promotion_code} - Update a promotion code. Set `active: false` to stop redemptions."""
+}
+fn
+(promotion-code: Str, request: UpdatePromotionCodeRequest): Map {
+  update-promotion-code(promotion-code, request, RequestOptions({}))
+},
+(promotion-code: Str, request: UpdatePromotionCodeRequest, options: RequestOptions): Map {
+  api-call("POST", `/v1/promotion_codes/${seg(promotion-code)}`, request, options)
+}
+
+ListPromotionCodesRequest type {
+  code: Str?,
+  coupon: Str?,
+  customer: Str?,
+  active: Bool?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?,
+  expand: Vec<Str>?
+}
+
+list-promotion-codes
+meta {
+    doc: """GET /v1/promotion_codes - List promotion codes. Filter by `code` (case-insensitive), `coupon`, `customer`, or `active`."""
+}
+fn
+(): Map {
+  list-promotion-codes(ListPromotionCodesRequest({}))
+},
+(request: ListPromotionCodesRequest): Map {
+  api-call("GET", "/v1/promotion_codes", request)
+}

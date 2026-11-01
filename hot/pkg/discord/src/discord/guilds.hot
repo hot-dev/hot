@@ -1,11 +1,21 @@
 ::discord::guilds ns
+meta {
+    doc: """
+    Guilds: settings, members (list, search, modify, timeout, kick),
+    roles, bans (single and bulk), custom emoji, prune, the audit log, and
+    invites.
 
-api-request ::discord::api/request
-HttpError ::discord::api/HttpError
-is-ok-response ::hot::http/is-ok-response
+    Moderation and modify calls accept `reason`, recorded in the guild
+    audit log (sent as the URL-encoded `X-Audit-Log-Reason` header).
+    """
+}
+
+::api ::discord::api
+
+seg ::discord::api/seg
 
 // ============================================================================
-// Guild Info
+// Guild
 // ============================================================================
 
 GetGuildRequest type {
@@ -16,25 +26,21 @@ GetGuildRequest type {
 get-guild
 meta {
     doc: """
-GET /guilds/{guild_id} - Get a guild by ID. Set `with_counts: true` to include approximate member and presence counts.
+    GET /guilds/{guild_id} - A guild. `with_counts: true` adds
+    `approximate_member_count` and `approximate_presence_count`.
 
-**Example**
+    **Example**
 
-```hot
-::guilds ::discord::guilds
+    ```hot
+    ::guilds ::discord::guilds
 
-response ::guilds/get-guild(::guilds/GetGuildRequest({
-  guild_id: "123456789",
-  with_counts: true
-}))
-response.name                      // => "My Server"
-response.approximate_member_count  // => 150
-```
-"""
+    guild ::guilds/get-guild(::guilds/GetGuildRequest({guild_id: "1000000000000000000", with_counts: true}))
+    guild.approximate_member_count
+    ```
+    """
 }
 fn (request: GetGuildRequest): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}?with_counts=${or(request.with_counts, "")}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}`, {query: {with_counts: request.with_counts}})
 }
 
 GetGuildPreviewRequest type {
@@ -43,11 +49,10 @@ GetGuildPreviewRequest type {
 
 get-guild-preview
 meta {
-    doc: """GET /guilds/{guild_id}/preview - Get a guild preview. Available for discoverable guilds; returns name, icon, splash, emojis, features, and counts."""
+    doc: """GET /guilds/{guild_id}/preview - Public preview of a guild the bot is in or a discoverable guild: name, icon, emojis, features and counts."""
 }
 fn (request: GetGuildPreviewRequest): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/preview`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/preview`)
 }
 
 ModifyGuildRequest type {
@@ -59,41 +64,48 @@ ModifyGuildRequest type {
   afk_channel_id: Str?,
   afk_timeout: Int?,
   icon: Str?,
-  owner_id: Str?,
   splash: Str?,
+  discovery_splash: Str?,
+  banner: Str?,
   system_channel_id: Str?,
   system_channel_flags: Int?,
   rules_channel_id: Str?,
   public_updates_channel_id: Str?,
+  safety_alerts_channel_id: Str?,
   preferred_locale: Str?,
-  description: Str?
+  features: Vec<Str>?,
+  description: Str?,
+  premium_progress_bar_enabled: Bool?,
+  reason: Str?,
+  clear: Vec<Str>?
 }
 
 modify-guild
 meta {
-    doc: """PATCH /guilds/{guild_id} - Modify guild settings. Requires MANAGE_GUILD. Only specified fields are updated."""
+    doc: """
+    PATCH /guilds/{guild_id} - Change guild settings. Only fields you set
+    are sent, so the icon, splash, banner and channel ids stay as they are
+    unless you name them. To remove one, list it in `clear`, e.g.
+    `clear: ["icon", "afk_channel_id"]`. Needs MANAGE_GUILD.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ::guilds/modify-guild(::guilds/ModifyGuildRequest({
+      guild_id: "1000000000000000000",
+      description: "Home of the Hot community",
+      reason: "Refresh description"
+    }))
+    ```
+    """
 }
 fn (request: ModifyGuildRequest): Map {
-  body {
-    name: request.name,
-    verification_level: request.verification_level,
-    default_message_notifications: request.default_message_notifications,
-    explicit_content_filter: request.explicit_content_filter,
-    afk_channel_id: request.afk_channel_id,
-    afk_timeout: request.afk_timeout,
-    icon: request.icon,
-    owner_id: request.owner_id,
-    splash: request.splash,
-    system_channel_id: request.system_channel_id,
-    system_channel_flags: request.system_channel_flags,
-    rules_channel_id: request.rules_channel_id,
-    public_updates_channel_id: request.public_updates_channel_id,
-    preferred_locale: request.preferred_locale,
-    description: request.description
-  }
-
-  response api-request("PATCH", `${::discord::core/BASE_URL}/guilds/${request.guild_id}`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("PATCH", `/guilds/${seg(request.guild_id)}`, {
+    body: ::api/body(request, ["guild_id"]),
+    reason: request.reason
+  })
 }
 
 // ============================================================================
@@ -108,26 +120,23 @@ GetGuildMemberRequest type {
 get-guild-member
 meta {
     doc: """
-GET /guilds/{guild_id}/members/{user_id} - Get a specific guild member. Returns the member object with roles, nickname, and join date.
+    GET /guilds/{guild_id}/members/{user_id} - A guild member (user, nick, roles, joined_at, timeout).
 
-**Example**
+    **Example**
 
-```hot
-::guilds ::discord::guilds
+    ```hot
+    ::guilds ::discord::guilds
 
-response ::guilds/get-guild-member(::guilds/GetGuildMemberRequest({
-  guild_id: "123456789",
-  user_id: "987654321"
-}))
-response.user.username  // => "some-user"
-response.nick           // => "Server Nickname"
-response.roles          // => ["role-id-1", "role-id-2"]
-```
-"""
+    member ::guilds/get-guild-member(::guilds/GetGuildMemberRequest({
+      guild_id: "1000000000000000000",
+      user_id: "1300000000000000000"
+    }))
+    member.roles
+    ```
+    """
 }
 fn (request: GetGuildMemberRequest): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/members/${request.user_id}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}`)
 }
 
 ListGuildMembersRequest type {
@@ -138,11 +147,37 @@ ListGuildMembersRequest type {
 
 list-guild-members
 meta {
-    doc: """GET /guilds/{guild_id}/members - List members of a guild. Returns up to 1000 members. Use `after` with a user ID for pagination."""
+    doc: """GET /guilds/{guild_id}/members - Up to `limit` (1-1000, default 1) members ordered by user id; page with `after`, or use `list-all-guild-members`. Needs the privileged GUILD_MEMBERS intent."""
 }
 fn (request: ListGuildMembersRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/members?limit=${or(request.limit, "")}&after=${or(request.after, "")}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/members`, {query: {limit: request.limit, after: request.after}})
+}
+
+list-all-guild-members
+meta {
+    doc: """
+    Every member of a guild (up to `max-items`, default 10000), paging
+    1000 at a time with `after`. Needs the GUILD_MEMBERS intent.
+
+    **Example**
+
+    ```hot
+    members ::discord::guilds/list-all-guild-members("1000000000000000000", 5000)
+    bots filter(members, (m) { m.user.bot })
+    ```
+    """
+}
+fn
+(guild-id: Str): Vec<Map> {
+  list-all-guild-members(guild-id, 10000)
+},
+(guild-id: Str, max-items: Int): Vec<Map> {
+  ::api/paginate(
+    (after) { list-guild-members(ListGuildMembersRequest({guild_id: guild-id, limit: 1000, after: after})) },
+    (page) { last(page).user.id },
+    1000,
+    max-items
+  )
 }
 
 SearchGuildMembersRequest type {
@@ -153,11 +188,25 @@ SearchGuildMembersRequest type {
 
 search-guild-members
 meta {
-    doc: """GET /guilds/{guild_id}/members/search - Search for guild members by username or nickname. Returns up to 1000 matching members."""
+    doc: """
+    GET /guilds/{guild_id}/members/search - Members whose username or
+    nickname starts with `query` (up to `limit`, 1-1000, default 1).
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    hits ::guilds/search-guild-members(::guilds/SearchGuildMembersRequest({
+      guild_id: "1000000000000000000",
+      query: "ada",
+      limit: 10
+    }))
+    ```
+    """
 }
 fn (request: SearchGuildMembersRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/members/search?query=${request.query}&limit=${or(request.limit, "")}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/members/search`, {query: {query: request.query, limit: request.limit}})
 }
 
 ModifyGuildMemberRequest type {
@@ -168,39 +217,122 @@ ModifyGuildMemberRequest type {
   mute: Bool?,
   deaf: Bool?,
   channel_id: Str?,
-  communication_disabled_until: Str?
+  communication_disabled_until: Str?,
+  flags: Int?,
+  reason: Str?,
+  clear: Vec<Str>?
 }
 
 modify-guild-member
 meta {
-    doc: """PATCH /guilds/{guild_id}/members/{user_id} - Modify a guild member. Can change nickname, roles, mute/deaf, voice channel, or timeout. Set `communication_disabled_until` to an ISO 8601 timestamp to timeout a user (max 28 days)."""
+    doc: """
+    PATCH /guilds/{guild_id}/members/{user_id} - Change a member. Only the
+    fields you set are sent, so setting `nick` leaves roles, voice state
+    and timeouts alone.
+
+    - `roles` replaces the member's whole role list (use
+      `add-guild-member-role` to add one).
+    - `communication_disabled_until` (ISO8601, up to 28 days ahead) times
+      a member out; `clear: ["communication_disabled_until"]` lifts it.
+    - `channel_id` moves the member between voice channels;
+      `clear: ["channel_id"]` disconnects them from voice.
+    - `clear: ["nick"]` resets the nickname.
+
+    Needs MANAGE_NICKNAMES, MANAGE_ROLES, MUTE_MEMBERS, DEAFEN_MEMBERS,
+    MOVE_MEMBERS or MODERATE_MEMBERS depending on the field.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    // Time out for an hour, with an audit-log reason
+    ::guilds/modify-guild-member(::guilds/ModifyGuildMemberRequest({
+      guild_id: "1000000000000000000",
+      user_id: "1300000000000000000",
+      communication_disabled_until: "2026-11-01T18:00:00Z",
+      reason: "Spam in #general"
+    }))
+
+    // Lift the timeout
+    ::guilds/modify-guild-member(::guilds/ModifyGuildMemberRequest({
+      guild_id: "1000000000000000000",
+      user_id: "1300000000000000000",
+      clear: ["communication_disabled_until"]
+    }))
+    ```
+    """
 }
 fn (request: ModifyGuildMemberRequest): Map {
-  body {
-    nick: request.nick,
-    roles: request.roles,
-    mute: request.mute,
-    deaf: request.deaf,
-    channel_id: request.channel_id,
-    communication_disabled_until: request.communication_disabled_until
-  }
+  ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}`, {
+    body: ::api/body(request, ["guild_id", "user_id"]),
+    reason: request.reason
+  })
+}
 
-  response api-request("PATCH", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/members/${request.user_id}`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+ModifyCurrentMemberRequest type {
+  guild_id: Str,
+  nick: Str?,
+  avatar: Str?,
+  banner: Str?,
+  bio: Str?,
+  reason: Str?,
+  clear: Vec<Str>?
+}
+
+modify-current-member
+meta {
+    doc: """PATCH /guilds/{guild_id}/members/@me - Change the bot's own per-guild `nick`, `avatar`, `banner` (data URIs) or `bio`. Only fields you set are sent; list fields in `clear` to reset them."""
+}
+fn (request: ModifyCurrentMemberRequest): Map {
+  ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/members/@me`, {
+    body: ::api/body(request, ["guild_id"]),
+    reason: request.reason
+  })
+}
+
+AddGuildMemberRoleRequest type {
+  guild_id: Str,
+  user_id: Str,
+  role_id: Str,
+  reason: Str?
+}
+
+RemoveGuildMemberRoleRequest type {
+  guild_id: Str,
+  user_id: Str,
+  role_id: Str,
+  reason: Str?
+}
+
+add-guild-member-role
+meta {
+    doc: """PUT /guilds/{guild_id}/members/{user_id}/roles/{role_id} - Give a member a role. Needs MANAGE_ROLES."""
+}
+fn (request: AddGuildMemberRoleRequest): Bool {
+  ::api/call-ok("PUT", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}/roles/${seg(request.role_id)}`, {reason: request.reason})
+}
+
+remove-guild-member-role
+meta {
+    doc: """DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id} - Take a role from a member. Needs MANAGE_ROLES."""
+}
+fn (request: RemoveGuildMemberRoleRequest): Bool {
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}/roles/${seg(request.role_id)}`, {reason: request.reason})
 }
 
 RemoveGuildMemberRequest type {
   guild_id: Str,
-  user_id: Str
+  user_id: Str,
+  reason: Str?
 }
 
 remove-guild-member
 meta {
-    doc: """DELETE /guilds/{guild_id}/members/{user_id} - Remove (kick) a member from the guild. Requires KICK_MEMBERS permission."""
+    doc: """DELETE /guilds/{guild_id}/members/{user_id} - Kick a member. Needs KICK_MEMBERS."""
 }
 fn (request: RemoveGuildMemberRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/members/${request.user_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}`, {reason: request.reason})
 }
 
 // ============================================================================
@@ -213,11 +345,23 @@ GetGuildRolesRequest type {
 
 get-guild-roles
 meta {
-    doc: """GET /guilds/{guild_id}/roles - List all roles in a guild. Returns role objects with name, color, permissions, and position."""
+    doc: """GET /guilds/{guild_id}/roles - Every role in a guild. The @everyone role's id is the guild id."""
 }
 fn (request: GetGuildRolesRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/roles`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/roles`)
+}
+
+GetGuildRoleRequest type {
+  guild_id: Str,
+  role_id: Str
+}
+
+get-guild-role
+meta {
+    doc: """GET /guilds/{guild_id}/roles/{role_id} - One role."""
+}
+fn (request: GetGuildRoleRequest): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/roles/${seg(request.role_id)}`)
 }
 
 CreateGuildRoleRequest type {
@@ -225,25 +369,40 @@ CreateGuildRoleRequest type {
   name: Str?,
   permissions: Str?,
   color: Int?,
+  colors: Map?,
   hoist: Bool?,
-  mentionable: Bool?
+  icon: Str?,
+  unicode_emoji: Str?,
+  mentionable: Bool?,
+  reason: Str?
 }
 
 create-guild-role
 meta {
-    doc: """POST /guilds/{guild_id}/roles - Create a new role. Requires MANAGE_ROLES. `permissions` is a bitfield string. `color` is an integer RGB value. `hoist: true` displays the role separately in the member list."""
+    doc: """
+    POST /guilds/{guild_id}/roles - Create a role. `permissions` is a bit
+    set as a string; `colors: {primary_color, secondary_color?, tertiary_color?}`
+    supersedes the older `color`. Needs MANAGE_ROLES.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    role ::guilds/create-guild-role(::guilds/CreateGuildRoleRequest({
+      guild_id: "1000000000000000000",
+      name: "On call",
+      colors: {primary_color: 15105570},
+      mentionable: true
+    }))
+    ```
+    """
 }
 fn (request: CreateGuildRoleRequest): Map {
-  body {
-    name: request.name,
-    permissions: request.permissions,
-    color: request.color,
-    hoist: request.hoist,
-    mentionable: request.mentionable
-  }
-
-  response api-request("POST", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/roles`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("POST", `/guilds/${seg(request.guild_id)}/roles`, {
+    body: ::api/body(request, ["guild_id"]),
+    reason: request.reason
+  })
 }
 
 ModifyGuildRoleRequest type {
@@ -252,69 +411,55 @@ ModifyGuildRoleRequest type {
   name: Str?,
   permissions: Str?,
   color: Int?,
+  colors: Map?,
   hoist: Bool?,
-  mentionable: Bool?
+  icon: Str?,
+  unicode_emoji: Str?,
+  mentionable: Bool?,
+  reason: Str?,
+  clear: Vec<Str>?
 }
 
 modify-guild-role
 meta {
-    doc: """PATCH /guilds/{guild_id}/roles/{role_id} - Modify a role. Requires MANAGE_ROLES. Only specified fields are updated."""
+    doc: """PATCH /guilds/{guild_id}/roles/{role_id} - Change a role. Only fields you set are sent; `clear: ["icon"]` removes the role icon. Needs MANAGE_ROLES."""
 }
 fn (request: ModifyGuildRoleRequest): Map {
-  body {
-    name: request.name,
-    permissions: request.permissions,
-    color: request.color,
-    hoist: request.hoist,
-    mentionable: request.mentionable
-  }
+  ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/roles/${seg(request.role_id)}`, {
+    body: ::api/body(request, ["guild_id", "role_id"]),
+    reason: request.reason
+  })
+}
 
-  response api-request("PATCH", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/roles/${request.role_id}`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+ModifyGuildRolePositionsRequest type {
+  guild_id: Str,
+  positions: Vec<Map>,
+  reason: Str?
+}
+
+modify-guild-role-positions
+meta {
+    doc: """PATCH /guilds/{guild_id}/roles - Reorder roles. `positions` is `[{id, position}]`. Returns every role. Needs MANAGE_ROLES."""
+}
+fn (request: ModifyGuildRolePositionsRequest): Vec<Map> {
+  ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/roles`, {
+    body: map(request.positions, (p) { ::api/body(p, []) }),
+    reason: request.reason
+  })
 }
 
 DeleteGuildRoleRequest type {
   guild_id: Str,
-  role_id: Str
+  role_id: Str,
+  reason: Str?
 }
 
 delete-guild-role
 meta {
-    doc: """DELETE /guilds/{guild_id}/roles/{role_id} - Delete a role. Requires MANAGE_ROLES."""
+    doc: """DELETE /guilds/{guild_id}/roles/{role_id} - Delete a role. Needs MANAGE_ROLES."""
 }
 fn (request: DeleteGuildRoleRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/roles/${request.role_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
-}
-
-AddGuildMemberRoleRequest type {
-  guild_id: Str,
-  user_id: Str,
-  role_id: Str
-}
-
-add-guild-member-role
-meta {
-    doc: """PUT /guilds/{guild_id}/members/{user_id}/roles/{role_id} - Add a role to a guild member. Requires MANAGE_ROLES."""
-}
-fn (request: AddGuildMemberRoleRequest): Bool {
-  response api-request("PUT", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/members/${request.user_id}/roles/${request.role_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
-}
-
-RemoveGuildMemberRoleRequest type {
-  guild_id: Str,
-  user_id: Str,
-  role_id: Str
-}
-
-remove-guild-member-role
-meta {
-    doc: """DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id} - Remove a role from a guild member. Requires MANAGE_ROLES."""
-}
-fn (request: RemoveGuildMemberRoleRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/members/${request.user_id}/roles/${request.role_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/roles/${seg(request.role_id)}`, {reason: request.reason})
 }
 
 // ============================================================================
@@ -330,11 +475,29 @@ GetGuildBansRequest type {
 
 get-guild-bans
 meta {
-    doc: """GET /guilds/{guild_id}/bans - List guild bans. Returns ban objects with user and reason. Requires BAN_MEMBERS. Supports pagination."""
+    doc: """GET /guilds/{guild_id}/bans - Bans (`{user, reason}`), up to `limit` (1-1000). Page with `before`/`after` user ids, or use `get-all-guild-bans`. Needs BAN_MEMBERS."""
 }
 fn (request: GetGuildBansRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/bans?limit=${or(request.limit, "")}&before=${or(request.before, "")}&after=${or(request.after, "")}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/bans`, {
+    query: {limit: request.limit, before: request.before, after: request.after}
+  })
+}
+
+get-all-guild-bans
+meta {
+    doc: """Every ban in a guild (up to `max-items`, default 10000), paging 1000 at a time with `after`."""
+}
+fn
+(guild-id: Str): Vec<Map> {
+  get-all-guild-bans(guild-id, 10000)
+},
+(guild-id: Str, max-items: Int): Vec<Map> {
+  ::api/paginate(
+    (after) { get-guild-bans(GetGuildBansRequest({guild_id: guild-id, limit: 1000, after: after})) },
+    (page) { last(page).user.id },
+    1000,
+    max-items
+  )
 }
 
 GetGuildBanRequest type {
@@ -344,44 +507,77 @@ GetGuildBanRequest type {
 
 get-guild-ban
 meta {
-    doc: """GET /guilds/{guild_id}/bans/{user_id} - Get ban info for a specific user. Returns the ban object with reason, or 404 if not banned."""
+    doc: """GET /guilds/{guild_id}/bans/{user_id} - One ban; a 404 `Err` means the user is not banned."""
 }
 fn (request: GetGuildBanRequest): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/bans/${request.user_id}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/bans/${seg(request.user_id)}`)
 }
 
 CreateGuildBanRequest type {
   guild_id: Str,
   user_id: Str,
-  delete_message_seconds: Int?
+  delete_message_seconds: Int?,
+  reason: Str?
 }
 
 create-guild-ban
 meta {
-    doc: """PUT /guilds/{guild_id}/bans/{user_id} - Ban a user from the guild. `delete_message_seconds` (0-604800) controls how many seconds of messages to delete. Requires BAN_MEMBERS."""
+    doc: """
+    PUT /guilds/{guild_id}/bans/{user_id} - Ban a user.
+    `delete_message_seconds` (0-604800) also deletes their recent messages.
+    Needs BAN_MEMBERS.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ::guilds/create-guild-ban(::guilds/CreateGuildBanRequest({
+      guild_id: "1000000000000000000",
+      user_id: "1300000000000000000",
+      delete_message_seconds: 3600,
+      reason: "Raid account"
+    }))
+    ```
+    """
 }
 fn (request: CreateGuildBanRequest): Bool {
-  body {
-    delete_message_seconds: request.delete_message_seconds
-  }
-
-  response api-request("PUT", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/bans/${request.user_id}`, {}, body)
-  if(is-ok-response(response), true, err(HttpError(response)))
+  ::api/call-ok("PUT", `/guilds/${seg(request.guild_id)}/bans/${seg(request.user_id)}`, {
+    body: ::api/body(request, ["guild_id", "user_id"]),
+    reason: request.reason
+  })
 }
 
 RemoveGuildBanRequest type {
   guild_id: Str,
-  user_id: Str
+  user_id: Str,
+  reason: Str?
 }
 
 remove-guild-ban
 meta {
-    doc: """DELETE /guilds/{guild_id}/bans/{user_id} - Unban a user from the guild. Requires BAN_MEMBERS."""
+    doc: """DELETE /guilds/{guild_id}/bans/{user_id} - Unban a user. Needs BAN_MEMBERS."""
 }
 fn (request: RemoveGuildBanRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/bans/${request.user_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/bans/${seg(request.user_id)}`, {reason: request.reason})
+}
+
+BulkGuildBanRequest type {
+  guild_id: Str,
+  user_ids: Vec<Str>,
+  delete_message_seconds: Int?,
+  reason: Str?
+}
+
+bulk-guild-ban
+meta {
+    doc: """POST /guilds/{guild_id}/bulk-ban - Ban up to 200 users at once. Returns `{banned_users, failed_users}`. Needs BAN_MEMBERS and MANAGE_GUILD."""
+}
+fn (request: BulkGuildBanRequest): Map {
+  ::api/call("POST", `/guilds/${seg(request.guild_id)}/bulk-ban`, {
+    body: ::api/body(request, ["guild_id"]),
+    reason: request.reason
+  })
 }
 
 // ============================================================================
@@ -394,11 +590,10 @@ ListGuildEmojisRequest type {
 
 list-guild-emojis
 meta {
-    doc: """GET /guilds/{guild_id}/emojis - List all custom emojis for a guild."""
+    doc: """GET /guilds/{guild_id}/emojis - The guild's custom emoji."""
 }
 fn (request: ListGuildEmojisRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/emojis`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/emojis`)
 }
 
 GetGuildEmojiRequest type {
@@ -408,37 +603,105 @@ GetGuildEmojiRequest type {
 
 get-guild-emoji
 meta {
-    doc: """GET /guilds/{guild_id}/emojis/{emoji_id} - Get a specific custom emoji by ID."""
+    doc: """GET /guilds/{guild_id}/emojis/{emoji_id} - One custom emoji."""
 }
 fn (request: GetGuildEmojiRequest): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/emojis/${request.emoji_id}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/emojis/${seg(request.emoji_id)}`)
 }
 
 CreateGuildEmojiRequest type {
   guild_id: Str,
   name: Str,
   image: Str,
-  roles: Vec<Str>?
+  roles: Vec<Str>?,
+  reason: Str?
 }
 
 create-guild-emoji
 meta {
-    doc: """POST /guilds/{guild_id}/emojis - Create a custom emoji. `image` is a base64-encoded data URI. Max 256 KB. `roles` restricts which roles can use it. Requires MANAGE_GUILD_EXPRESSIONS."""
+    doc: """POST /guilds/{guild_id}/emojis - Create a custom emoji. `image` is a data URI (max 256 KiB); `roles` limits who may use it. Needs CREATE_GUILD_EXPRESSIONS."""
 }
 fn (request: CreateGuildEmojiRequest): Map {
-  body {
-    name: request.name,
-    image: request.image,
-    roles: request.roles
-  }
+  ::api/call("POST", `/guilds/${seg(request.guild_id)}/emojis`, {
+    body: ::api/body(request, ["guild_id"]),
+    reason: request.reason
+  })
+}
 
-  response api-request("POST", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/emojis`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+ModifyGuildEmojiRequest type {
+  guild_id: Str,
+  emoji_id: Str,
+  name: Str?,
+  roles: Vec<Str>?,
+  reason: Str?,
+  clear: Vec<Str>?
+}
+
+modify-guild-emoji
+meta {
+    doc: """PATCH /guilds/{guild_id}/emojis/{emoji_id} - Rename an emoji or change its `roles`; `clear: ["roles"]` opens it to everyone. Needs MANAGE_GUILD_EXPRESSIONS."""
+}
+fn (request: ModifyGuildEmojiRequest): Map {
+  ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/emojis/${seg(request.emoji_id)}`, {
+    body: ::api/body(request, ["guild_id", "emoji_id"]),
+    reason: request.reason
+  })
+}
+
+DeleteGuildEmojiRequest type {
+  guild_id: Str,
+  emoji_id: Str,
+  reason: Str?
+}
+
+delete-guild-emoji
+meta {
+    doc: """DELETE /guilds/{guild_id}/emojis/{emoji_id} - Delete a custom emoji. Needs MANAGE_GUILD_EXPRESSIONS."""
+}
+fn (request: DeleteGuildEmojiRequest): Bool {
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/emojis/${seg(request.emoji_id)}`, {reason: request.reason})
 }
 
 // ============================================================================
-// Audit Log
+// Prune
+// ============================================================================
+
+GetGuildPruneCountRequest type {
+  guild_id: Str,
+  days: Int?,
+  include_roles: Vec<Str>?
+}
+
+get-guild-prune-count
+meta {
+    doc: """GET /guilds/{guild_id}/prune - How many members a prune of inactive (`days`, 1-30, default 7) members would remove. Needs MANAGE_GUILD and KICK_MEMBERS."""
+}
+fn (request: GetGuildPruneCountRequest): Map {
+  roles if(is-null(request.include_roles), null, join(request.include_roles, ","))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/prune`, {query: {days: request.days, include_roles: roles}})
+}
+
+BeginGuildPruneRequest type {
+  guild_id: Str,
+  days: Int?,
+  compute_prune_count: Bool?,
+  include_roles: Vec<Str>?,
+  reason: Str?
+}
+
+begin-guild-prune
+meta {
+    doc: """POST /guilds/{guild_id}/prune - Kick members inactive for `days`. Set `compute_prune_count: false` on large guilds. Returns `{pruned}`. Needs MANAGE_GUILD and KICK_MEMBERS."""
+}
+fn (request: BeginGuildPruneRequest): Map {
+  ::api/call("POST", `/guilds/${seg(request.guild_id)}/prune`, {
+    body: ::api/body(request, ["guild_id"]),
+    reason: request.reason
+  })
+}
+
+// ============================================================================
+// Audit log and invites
 // ============================================================================
 
 GetGuildAuditLogRequest type {
@@ -452,16 +715,37 @@ GetGuildAuditLogRequest type {
 
 get-guild-audit-log
 meta {
-    doc: """GET /guilds/{guild_id}/audit-logs - Get the guild audit log. Filter by `user_id` and `action_type`. Requires VIEW_AUDIT_LOG. Returns up to 100 entries."""
+    doc: """
+    GET /guilds/{guild_id}/audit-logs - Audit log entries (up to `limit`,
+    1-100), filtered by actor `user_id` and `action_type`. Returns
+    `{audit_log_entries, users, ...}`. Needs VIEW_AUDIT_LOG.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    // Recent bans (action type 22)
+    log ::guilds/get-guild-audit-log(::guilds/GetGuildAuditLogRequest({
+      guild_id: "1000000000000000000",
+      action_type: 22,
+      limit: 20
+    }))
+    map(log.audit_log_entries, (e) { e.reason })
+    ```
+    """
 }
 fn (request: GetGuildAuditLogRequest): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/audit-logs?user_id=${or(request.user_id, "")}&action_type=${or(request.action_type, "")}&before=${or(request.before, "")}&after=${or(request.after, "")}&limit=${or(request.limit, "")}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/audit-logs`, {
+    query: {
+      user_id: request.user_id,
+      action_type: request.action_type,
+      before: request.before,
+      after: request.after,
+      limit: request.limit
+    }
+  })
 }
-
-// ============================================================================
-// Invites
-// ============================================================================
 
 GetGuildInvitesRequest type {
   guild_id: Str
@@ -469,9 +753,8 @@ GetGuildInvitesRequest type {
 
 get-guild-invites
 meta {
-    doc: """GET /guilds/{guild_id}/invites - List all invites for a guild. Requires MANAGE_GUILD."""
+    doc: """GET /guilds/{guild_id}/invites - Every invite in a guild, with metadata. Needs MANAGE_GUILD or VIEW_AUDIT_LOG."""
 }
 fn (request: GetGuildInvitesRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/invites`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/invites`)
 }

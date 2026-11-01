@@ -1,0 +1,72 @@
+::zendesk::organizations ns
+meta {
+    ctx: {"zendesk.subdomain": {required: true, secret: false}},
+    doc: """Organizations: list with cursor pagination, read, create, update, delete, upsert, and exact-match search by name or external id."""
+}
+
+::api ::zendesk::api
+
+list-organizations
+meta {
+    doc: """GET /organizations - One cursor page: `{organizations, meta, links}`. `options`: `page_size`, `after`, `sort`."""
+}
+fn
+(): Any {
+  list-organizations({})
+},
+(options: Map): Any {
+  ::api/list-page("/organizations", options)
+}
+
+get-organization
+meta {
+    doc: """GET /organizations/{id} - One organization: `{organization}`."""
+}
+fn (id: Any): Any {
+  ::api/request("GET", `/organizations/${::api/path-segment(id)}`, "")
+}
+
+create-organization
+meta {
+    doc: """POST /organizations - Create an organization. `fields`: `name` (required, unique), `external_id`, `domain_names` (Vec), `details`, `notes`, `group_id`, `shared_tickets`, `tags`, `organization_fields`. Unset fields are omitted."""
+}
+fn (fields: Map): Any {
+  ::api/request("POST", "/organizations", {organization: ::api/compact(fields)})
+}
+
+update-organization
+meta {
+    doc: """PUT /organizations/{id} - Update an organization's fields. Unset fields are omitted."""
+}
+fn (id: Any, fields: Map): Any {
+  ::api/request("PUT", `/organizations/${::api/path-segment(id)}`, {organization: ::api/compact(fields)})
+}
+
+create-or-update-organization
+meta {
+    doc: """POST /organizations/create_or_update - Upsert an organization matched on `id` or `external_id`."""
+}
+fn (fields: Map): Any {
+  ::api/request("POST", "/organizations/create_or_update", {organization: ::api/compact(fields)})
+}
+
+delete-organization
+meta {
+    doc: """DELETE /organizations/{id} - Delete an organization. Returns null."""
+}
+fn (id: Any): Any {
+  ::api/request("DELETE", `/organizations/${::api/path-segment(id)}`, "")
+}
+
+search-organizations
+meta {
+    doc: """
+    GET /organizations/search - Exact-match (case-insensitive) lookup:
+    pass `{name: "Acme"}` or `{external_id: "acme-42"}`, not both.
+    Returns `{organizations, count}`. For fuzzy matches use
+    `::zendesk::search/search("type:organization acme")`.
+    """
+}
+fn (by: Map): Any {
+  ::api/request("GET", `/organizations/search${::api/query-string(by)}`, "")
+}

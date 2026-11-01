@@ -1,0 +1,48 @@
+::cal-com::slots ns
+meta {
+    ctx: {"cal-com.api.key": {required: true}},
+    doc: """Available slots (`cal-api-version: 2024-09-04`): the bookable start times for an event type."""
+}
+
+::api ::cal-com::api
+
+build-slots-query
+meta {
+    doc: """Build the GET /slots query: `eventTypeId`, `start`, `end`, `timeZone`, plus any `options` (`duration`, `format: "range"`, `bookingUidToReschedule`, or `eventTypeSlug`/`username`/`teamSlug`/`usernames` lookups). Nulls are dropped. Exposed for testing."""
+}
+fn (event-type-id: Any, start: Str, end: Str, time-zone: Str?, options: Map): Str {
+  ::api/query-string({
+    ...options,
+    eventTypeId: event-type-id,
+    start: start,
+    end: end,
+    timeZone: time-zone
+  })
+}
+
+get-slots
+meta {
+    doc: """
+    GET /slots - Available start times for an event type between
+    `start` and `end` (UTC ISO 8601: a `YYYY-MM-DD` date means the whole
+    day), returned in `time-zone` (UTC when null). Returns a Map of
+    date → `[{start}]` (or `[{start, end}]` with `format: "range"`).
+    `options`: `duration` (multi-duration event types), `format`,
+    `bookingUidToReschedule` (keep the original slot visible while
+    rescheduling).
+
+    **Example**
+
+    ```hot
+    open ::cal-com::slots/get-slots(123, "2026-07-10", "2026-07-14", "America/Chicago")
+    ```
+    """
+}
+fn
+(event-type-id: Any, start: Str, end: Str, time-zone: Str): Any {
+  get-slots(event-type-id, start, end, time-zone, {})
+},
+(event-type-id: Any, start: Str, end: Str, time-zone: Str?, options: Map): Any {
+  query build-slots-query(event-type-id, start, end, time-zone, options)
+  ::api/request("GET", `/slots${query}`, "", ::cal-com/VERSION_SLOTS)
+}

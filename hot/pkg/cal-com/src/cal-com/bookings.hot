@@ -1,0 +1,226 @@
+::cal-com::bookings ns
+meta {
+    ctx: {"cal-com.api.key": {required: true}},
+    doc: """Bookings (`cal-api-version: 2024-08-13`): create, list with filters and take/skip paging, get, confirm, decline, cancel, reschedule, and mark absences (no-shows)."""
+}
+
+::api ::cal-com::api
+
+// Cal.com caps `take` at 250 on most lists; 100 is its documented
+// default for bookings and keeps responses small.
+DEFAULT_PAGE_SIZE 100
+
+v fn (): Str { ::cal-com/VERSION_BOOKINGS }
+
+create-booking
+meta {
+    doc: """
+    POST /bookings - Book a slot. `booking`: `start` (UTC ISO 8601 from
+    `get-slots`), `attendee` (`{name, email, timeZone, phoneNumber?,
+    language?}`), and either `eventTypeId` or `eventTypeSlug` with
+    `username`/`teamSlug`. Optional: `guests` (emails), `metadata`,
+    `bookingFieldsResponses`, `lengthInMinutes`, `location`. Booking a
+    recurring event type takes `recurrenceCount`. Unset fields are
+    omitted.
+
+    **Example**
+
+    ```hot
+    ::cal-com::bookings/create-booking({
+      eventTypeId: 123,
+      start: "2026-07-10T15:00:00Z",
+      attendee: {name: "Ada Lovelace", email: "ada@example.com", timeZone: "America/Chicago"}
+    })
+    ```
+    """
+}
+fn (booking: Map): Any {
+  ::api/request("POST", "/bookings", ::api/compact(booking), v())
+}
+
+build-list-query
+meta {
+    doc: """
+    Build the GET /bookings query string. `options` takes the API's own
+    filter names: `status` (Str or Vec of "upcoming", "recurring",
+    "past", "cancelled", "unconfirmed"), `attendeeEmail`,
+    `attendeeName`, `eventTypeId`, `eventTypeIds` (Vec), `afterStart`,
+    `beforeEnd`, `afterCreatedAt`, `beforeCreatedAt`, `afterUpdatedAt`,
+    `beforeUpdatedAt` (ISO 8601), `sortStart`/`sortEnd`/`sortCreated`
+    ("asc"/"desc"), `take` and `skip`. Nulls are dropped and Vecs are
+    comma-joined. Exposed for testing.
+    """
+}
+fn (options: Map): Str {
+  ::api/query-string(options)
+}
+
+list-bookings
+meta {
+    doc: """
+    GET /bookings - One page of the API key owner's bookings. Returns
+    the envelope `{status, data, pagination}`; `pagination` carries
+    `totalItems`, `remainingItems`, `hasNextPage` and friends. Page with
+    `take` (default 100) and `skip`. See `build-list-query` for filters,
+    or `list-all-bookings` to collect several pages.
+
+    **Example**
+
+    ```hot
+    page ::cal-com::bookings/list-bookings({status: ["upcoming", "unconfirmed"], afterStart: "2026-07-01T00:00:00Z", take: 50})
+    page.data
+    page.pagination.hasNextPage
+    ```
+    """
+}
+fn
+(): Any {
+  list-bookings({})
+},
+(options: Map): Any {
+  ::api/request-envelope("GET", `/bookings${build-list-query(options)}`, "", v())
+}
+
+collect-pages
+meta {
+    doc: """
+    Collect take/skip pages from `fetch` (a Fn taking the options Map,
+    returning a `{data, pagination}` envelope) until `limit` items, an
+    empty page, or `pagination.hasNextPage` false. Each request asks for
+    at most the remaining count. Exposed for testing; `list-all-bookings`
+    uses it.
+    """
+}
+fn (fetch: Fn, options: Map, skip: Int, limit: Int, acc: Vec): Vec {
+  remaining sub(limit, length(acc))
+  page fetch({...options, take: min(DEFAULT_PAGE_SIZE, remaining), skip: skip})
+  items or(get(page, "data"), [])
+  combined concat(acc, items)
+  has-next get(or(get(page, "pagination"), {}), "hasNextPage", false)
+  cond {
+    is-empty(items) => { combined }
+    gte(length(combined), limit) => { slice(combined, 0, limit) }
+    not(eq(has-next, true)) => { combined }
+    => { collect-pages(fetch, options, add(skip, length(items)), limit, combined) }
+  }
+}
+
+list-all-bookings
+meta {
+    doc: """
+    Collect bookings across pages (take/skip) until `limit` bookings or
+    the last page. `options` takes the same filters as `list-bookings`
+    (any `take`/`skip` in it are overridden). Returns a Vec of bookings.
+
+    **Example**
+
+    ```hot
+    past ::cal-com::bookings/list-all-bookings({status: "past", afterStart: "2026-06-01T00:00:00Z"}, 500)
+    ```
+    """
+}
+fn (options: Map, limit: Int): Vec {
+  cond {
+    lte(limit, 0) => { [] }
+    => { collect-pages(list-bookings, options, or(get(options, "skip"), 0), limit, []) }
+  }
+}
+
+get-booking
+meta {
+    doc: """GET /bookings/{uid} - One booking by uid."""
+}
+fn (uid: Str): Any {
+  ::api/request("GET", `/bookings/${::api/path-segment(uid)}`, "", v())
+}
+
+confirm-booking
+meta {
+    doc: """POST /bookings/{uid}/confirm - Confirm a booking that is waiting for approval (event types that require confirmation). Must be called by the booking's owner."""
+}
+fn (uid: Str): Any {
+  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/confirm`, "", v())
+}
+
+decline-booking
+meta {
+    doc: """POST /bookings/{uid}/decline - Decline a booking that is waiting for approval, optionally with a `reason` the attendee sees."""
+}
+fn
+(uid: Str): Any {
+  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/decline`, {}, v())
+},
+(uid: Str, reason: Str): Any {
+  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/decline`, {reason: reason}, v())
+}
+
+cancel-booking
+meta {
+    doc: """
+    POST /bookings/{uid}/cancel - Cancel a booking. The 2-arity form
+    takes a reason; the Map form takes the API's body: `cancellationReason`,
+    `cancelSubsequentBookings` (recurring), or `seatUid` (cancel one seat
+    of a seated booking).
+    """
+}
+fn
+(uid: Str, reason: Str): Any {
+  cancel-booking(uid, {cancellationReason: reason})
+},
+(uid: Str, options: Map): Any {
+  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/cancel`, ::api/compact(options), v())
+}
+
+reschedule-booking
+meta {
+    doc: """
+    POST /bookings/{uid}/reschedule - Move a booking to a new `start`
+    (UTC ISO 8601). `options`: `reschedulingReason`, `rescheduledBy`
+    (email), `seatUid` (seated bookings). Returns the new booking; the old
+    uid is cancelled.
+    """
+}
+fn
+(uid: Str, new-start: Str): Any {
+  reschedule-booking(uid, new-start, {})
+},
+(uid: Str, new-start: Str, options: Map): Any {
+  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/reschedule`, ::api/compact({...options, start: new-start}), v())
+}
+
+build-absent-body
+meta {
+    doc: """Build the mark-absent body: `host` (Bool, optional) and `attendees` as `[{email, absent}]` from a list of absent attendee emails. Unset parts are omitted. Exposed for testing."""
+}
+fn (host: Bool?, absent-emails: Vec): Map {
+  attendees map(absent-emails, (email) { {email: email, absent: true} })
+  ::api/compact({
+    host: host,
+    attendees: if(is-empty(attendees), null, attendees)
+  })
+}
+
+mark-absent
+meta {
+    doc: """
+    POST /bookings/{uid}/mark-absent - Record no-shows after a meeting.
+    The Map form takes the API's body directly: `host` (Bool) and
+    `attendees` (`[{email, absent}]`, `absent: false` to undo). The
+    2-arity form marks the listed attendee emails absent. Must be called
+    by the booking's owner.
+
+    **Example**
+
+    ```hot
+    ::cal-com::bookings/mark-absent(booking.uid, ["ada@example.com"])
+    ::cal-com::bookings/mark-absent(booking.uid, {host: true})
+    ```
+    """
+}
+fn
+(uid: Str, absent-emails: Vec): Any {
+  mark-absent(uid, build-absent-body(null, absent-emails))
+},
+(uid: Str, body: Map): Any {
+  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/mark-absent`, ::api/compact(body), v())
+}

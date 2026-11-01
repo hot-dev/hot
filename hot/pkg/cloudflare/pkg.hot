@@ -3,12 +3,12 @@
 hot.pkg.cloudflare {
   name: "hot.dev/cloudflare",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
-  description: "Cloudflare bindings for Hot. Zones, DNS records, and Workers KV (use aws-s3 against your R2 endpoint for object storage).",
+  hot-min-version: "3.0.0",
+  description: "Cloudflare API bindings for Hot. Zones and DNS, cache purge, Workers KV, Worker scripts and routes, R2 buckets, D1 queries, Pages deployments, and Turnstile verification, with pagination and readable errors.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["infrastructure", "cloudflare"],
+  tags: ["cloudflare", "infrastructure", "dns", "cdn", "workers", "serverless"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

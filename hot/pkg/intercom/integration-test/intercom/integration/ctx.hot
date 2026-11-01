@@ -8,4 +8,5 @@
 ::hot::ctx/set(filter-vals({
     "intercom.token": ::env/get("INTERCOM_TOKEN", ""),
     "intercom.admin.id": ::env/get("INTERCOM_ADMIN_ID", ""),
+    "intercom.region": ::env/get("INTERCOM_REGION", ""),
 }, (v) { not(is-empty(v)) }))

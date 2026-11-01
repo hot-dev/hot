@@ -1,10 +1,12 @@
 ::openai-compatible::embeddings ns
 
-api-request ::openai-compatible::api/request
-HttpError ::openai-compatible::api/HttpError
-is-ok-response ::hot::http/is-ok-response
+::compat ::openai::compatible
 
-EmbeddingsRequest type {
+CompatibleProvider ::compat/CompatibleProvider
+
+EmbeddingsRequest
+meta {doc: "OpenAI embeddings request. Unset optional fields are not sent."}
+type {
     model: Str,
     input: Any,
     dimensions: Int?,
@@ -12,25 +14,36 @@ EmbeddingsRequest type {
     user: Str?
 }
 
+embeddings-body
+meta {
+    doc: """
+    The JSON body for an `EmbeddingsRequest`, with unset optionals omitted.
+    Pure; exposed for testing.
+    """
+}
+fn (request: EmbeddingsRequest): Map {
+    filter-vals(untype(request), is-some)
+}
+
 create-embeddings
 meta {
     doc: """
-    POST /embeddings - Create embeddings for a string or Vec of strings.
+    POST /embeddings on the provider. Returns the decoded body
+    (`data[].embedding`, `usage`), or an Err carrying `HttpError`.
 
     **Example**
 
     ```hot
-    ::embeddings ::openai-compatible::embeddings
+    ::emb ::openai-compatible::embeddings
 
-    out ::embeddings/create-embeddings(::embeddings/EmbeddingsRequest({
-      model: "openai/text-embedding-3-small",
-      input: ["first text", "second text"]
+    out ::emb/create-embeddings(::openai-compatible/ollama(), ::emb/EmbeddingsRequest({
+        model: "nomic-embed-text",
+        input: ["first text", "second text"]
     }))
-    out.data[0].embedding  // => [0.0123, ...]
+    out.data[0].embedding
     ```
     """
 }
-fn (request: EmbeddingsRequest): Map {
-  response api-request("POST", "/embeddings", {}, request)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn (p: CompatibleProvider, request: EmbeddingsRequest): Map {
+    ::compat/create-embeddings(p, embeddings-body(request))
 }

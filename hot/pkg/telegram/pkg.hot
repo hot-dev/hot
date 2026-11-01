@@ -3,12 +3,12 @@
 hot.pkg.telegram {
   name: "hot.dev/telegram",
   version: "1.1.0",
-  hot-min-version: "1.2.0",
-  description: "Telegram Bot API bindings for Hot. Send messages, manage chats, handle commands, and process webhooks.",
+  hot-min-version: "3.0.0",
+  description: "Telegram Bot API bindings for Hot. Send text, media, albums, and polls (with multipart uploads from Bytes), download files, react, answer callback and inline queries, manage chats and bot commands, receive updates by webhook or polling, and verify webhook secret tokens. Typed errors carry retry_after.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["messaging"],
+  tags: ["telegram", "messaging", "bots"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

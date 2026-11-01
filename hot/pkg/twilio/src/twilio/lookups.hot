@@ -1,0 +1,104 @@
+::twilio::lookups ns
+
+::uri ::hot::uri
+
+api-request ::twilio::api/request
+client-from-ctx ::twilio::api/client-from-ctx
+Client ::twilio::api/Client
+HttpError ::twilio::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Lookup v2 (https://lookups.twilio.com/v2)
+// ============================================================================
+
+LookupPhoneNumberRequest
+meta {
+    doc: """
+    Parameters of GET /v2/PhoneNumbers/{PhoneNumber}. `PhoneNumber` is E.164
+    or national format (with `CountryCode`, ISO 3166 alpha-2, for the
+    latter). With no `Fields`, Lookup does free formatting and validation
+    only. `Fields` adds paid data packages: `line_type_intelligence`,
+    `caller_name`, `sim_swap`, `call_forwarding`, `line_status`,
+    `identity_match`, `reassigned_number`, `sms_pumping_risk`,
+    `phone_number_quality_score`, `pre_fill` (sent comma-separated).
+    """
+}
+type {
+  PhoneNumber: Str,
+  Fields: Vec<Str>?,
+  CountryCode: Str?,
+  FirstName: Str?,
+  LastName: Str?,
+  AddressLine1: Str?,
+  AddressLine2: Str?,
+  City: Str?,
+  State: Str?,
+  PostalCode: Str?,
+  AddressCountryCode: Str?,
+  DateOfBirth: Str?,
+  LastVerifiedDate: Str?,
+  VerificationSid: Str?,
+  PartnerSubId: Str?
+}
+
+PhoneNumberLookup type {
+  phone_number: Str?,
+  national_format: Str?,
+  country_code: Str?,
+  calling_country_code: Str?,
+  valid: Bool?,
+  validation_errors: Vec<Str>?,
+  caller_name: Map?,
+  sim_swap: Map?,
+  call_forwarding: Map?,
+  line_type_intelligence: Map?,
+  line_status: Map?,
+  identity_match: Map?,
+  reassigned_number: Map?,
+  sms_pumping_risk: Map?,
+  phone_number_quality_score: Map?,
+  pre_fill: Map?,
+  url: Str?
+}
+
+lookup-url
+meta {
+    doc: """The URL `lookup-phone-number` fetches: the number path-encoded (so `+` survives) and the set parameters as a query, `Fields` joined with commas. Exposed for testing."""
+}
+fn (request: LookupPhoneNumberRequest): Str {
+  params untype(request) |> delete("PhoneNumber") |> filter-vals(is-some)
+  fields if(is-some(request.Fields), join(request.Fields, ","), null)
+  query ::twilio::api/query-string({...params, Fields: fields})
+  `${::twilio::core/LOOKUPS_URL}/PhoneNumbers/${::uri/encode(request.PhoneNumber)}${query}`
+}
+
+lookup-phone-number
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """
+GET /v2/PhoneNumbers/{PhoneNumber} - Validate and format a phone number, plus any requested data packages. An invalid number still answers 200 with `valid: false` and `validation_errors`.
+
+**Example**
+
+```hot
+::lookups ::twilio::lookups
+
+info ::lookups/lookup-phone-number(::lookups/LookupPhoneNumberRequest({
+  PhoneNumber: "+14159929960",
+  Fields: ["line_type_intelligence"]
+}))
+info.valid                          // => true
+info.national_format                // => "(415) 992-9960"
+info.line_type_intelligence.type    // => "mobile"
+```
+"""
+}
+fn
+(request: LookupPhoneNumberRequest): PhoneNumberLookup {
+  lookup-phone-number(client-from-ctx(), request)
+},
+(client: Client, request: LookupPhoneNumberRequest): PhoneNumberLookup {
+  response api-request(client, "GET", lookup-url(request), {}, {})
+  if(is-ok-response(response), PhoneNumberLookup(response.body), err(HttpError(response)))
+}

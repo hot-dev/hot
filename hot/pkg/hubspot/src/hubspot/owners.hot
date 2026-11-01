@@ -1,0 +1,55 @@
+::hubspot::owners ns
+meta {
+    doc: """Owners: the HubSpot users (and queues) that records can be assigned to via `hubspot_owner_id`."""
+}
+
+::api ::hubspot::api
+crm-path ::hubspot::api/crm-path
+segment ::hubspot::api/segment
+query-string ::hubspot::api/query-string
+
+list-owners
+meta {
+    doc: """GET /crm/owners/{version} - One page of owners: `{results: [{id, email, firstName, lastName, userId, type, teams, archived}], paging?}`. `params`: `email` (exact match), `limit` (max 500), `after`, `archived`."""
+}
+fn
+(): Map {
+  list-owners({})
+},
+(params: Map): Map {
+  ::api/json("GET", crm-path("owners", query-string(params)))
+}
+
+get-owner
+meta {
+    doc: """GET /crm/owners/{version}/{ownerId} - One owner by owner id. The 2-arity form looks up by `"userId"` instead (`id-property` is `"id"` or `"userId"`)."""
+}
+fn
+(owner-id: Str): Map {
+  ::api/json("GET", crm-path("owners", `/${segment(owner-id)}`))
+},
+(owner-id: Str, id-property: Str): Map {
+  ::api/json("GET", crm-path("owners", `/${segment(owner-id)}${query-string({idProperty: id-property})}`))
+}
+
+find-owner-by-email
+meta {
+    doc: """
+    The owner with this email, or null. Use its `id` as a record's `hubspot_owner_id`.
+
+    **Example**
+
+    ```hot
+    owner ::hubspot::owners/find-owner-by-email("rep@example.com")
+    if(is-some(owner), ::hubspot::contacts/update-contact("12345", {hubspot_owner_id: owner.id}), null)
+    ```
+    """
+}
+fn (email: Str): Any {
+  page list-owners({email: email, limit: 1})
+  cond {
+    is-err(page) => { page }
+    is-empty(or(get(page, "results"), [])) => { null }
+    => { first(page.results) }
+  }
+}

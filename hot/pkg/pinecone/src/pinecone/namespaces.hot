@@ -1,0 +1,54 @@
+::pinecone::namespaces ns
+meta {
+    doc: """Namespace management on an index host (serverless indexes): list, describe, create, and delete namespaces."""
+}
+
+::api ::pinecone::api
+
+list-namespaces
+meta {
+    ctx: {"pinecone.api.key": {required: true}},
+    doc: """GET {host}/namespaces - One page of namespaces. `options`: `prefix`, `limit` (default 100), `paginationToken`. Returns `{namespaces: [{name, record_count}], pagination?: {next}, total_count}`; `record_count` is a decimal string."""
+}
+fn
+(host: Str): Map {
+  list-namespaces(host, {})
+},
+(host: Str, options: Map): Map {
+  ::api/json("GET", ::api/data-url(host, ["namespaces"], {
+    prefix: get(options, "prefix"),
+    limit: get(options, "limit"),
+    paginationToken: get(options, "paginationToken")
+  }), "")
+}
+
+describe-namespace
+meta {
+    ctx: {"pinecone.api.key": {required: true}},
+    doc: """GET {host}/namespaces/{namespace} - One namespace: `{name, record_count, schema?, indexed_fields?}`."""
+}
+fn (host: Str, namespace: Str): Map {
+  ::api/json("GET", ::api/data-url(host, ["namespaces", namespace], {}), "")
+}
+
+create-namespace
+meta {
+    ctx: {"pinecone.api.key": {required: true}},
+    doc: """POST {host}/namespaces - Create an empty namespace, optionally with a metadata `schema` (`{fields: {genre: {filterable: true}}}`) restricting which metadata fields are indexed. Namespaces are also created implicitly by the first upsert."""
+}
+fn
+(host: Str, name: Str): Map {
+  ::api/json("POST", ::api/data-url(host, ["namespaces"], {}), {name: name})
+},
+(host: Str, name: Str, schema: Map): Map {
+  ::api/json("POST", ::api/data-url(host, ["namespaces"], {}), {name: name, schema: schema})
+}
+
+delete-namespace
+meta {
+    ctx: {"pinecone.api.key": {required: true}},
+    doc: """DELETE {host}/namespaces/{namespace} - Delete a namespace and every record in it. Irreversible."""
+}
+fn (host: Str, namespace: Str): Any {
+  ::api/json("DELETE", ::api/data-url(host, ["namespaces", namespace], {}), "")
+}

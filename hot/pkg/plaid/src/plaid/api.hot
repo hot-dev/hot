@@ -1,0 +1,201 @@
+::plaid::api ns
+meta {
+    ctx: {
+        "plaid.client-id": {required: true},
+        "plaid.secret": {required: true},
+        "plaid.env": {required: false},
+        "plaid.version": {required: false}
+    },
+    doc: """
+    Transport for the Plaid API: environment selection, the credentialed
+    `post` escape hatch, request-body building that drops unset fields,
+    and Plaid's error object unwrapped into `HttpError`.
+    """
+}
+
+::ctx ::hot::ctx
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx Plaid response. `status`, `headers` and `body` as in the
+    sibling packages, plus Plaid's error object lifted to the top:
+    `error_type` (e.g. `ITEM_ERROR`, `INVALID_REQUEST`, `RATE_LIMIT_EXCEEDED`),
+    `error_code` (e.g. `ITEM_LOGIN_REQUIRED`), `error_message`,
+    `display_message` (safe to show end users, often null), `request_id`
+    (quote it to Plaid support), `documentation_url` and
+    `suggested_action`.
+    """
+}
+type {
+    status: Int,
+    headers: Map,
+    body: Any,
+    error_type: Str?,
+    error_code: Str?,
+    error_message: Str?,
+    display_message: Str?,
+    request_id: Str?,
+    documentation_url: Str?,
+    suggested_action: Str?
+}
+
+plaid-field fn (body: Any, key: Str): Any {
+  if(is-map(body), get(body, key), null)
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response, lifting Plaid's error fields out of the body. Exposed for testing; `post` applies it."""
+}
+fn (response: HttpResponse): HttpError {
+  body response.body
+  HttpError({
+    status: response.status,
+    headers: or(response.headers, {}),
+    body: body,
+    error_type: plaid-field(body, "error_type"),
+    error_code: plaid-field(body, "error_code"),
+    error_message: plaid-field(body, "error_message"),
+    display_message: plaid-field(body, "display_message"),
+    request_id: plaid-field(body, "request_id"),
+    documentation_url: plaid-field(body, "documentation_url"),
+    suggested_action: plaid-field(body, "suggested_action")
+  })
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  http-error(response)
+}
+
+is-error-code
+meta {
+    doc: """True when `e` is a Plaid `HttpError` with this `error_code` (e.g. `"ITEM_LOGIN_REQUIRED"`, `"TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"`)."""
+}
+fn (e: Any, code: Str): Bool {
+  cond {
+    or(is-null(e), is-str(e)) => { false }
+    => { eq(get-in(e, ["error_code"]), code) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Environment and version
+// ---------------------------------------------------------------------------
+
+env-base-url
+meta {
+    doc: """The base URL for a Plaid environment: `"sandbox"` or `"production"`. Anything else errs (including the decommissioned `"development"`). Exposed for testing."""
+}
+fn (env: Str): Str {
+  name lowercase(trim(env))
+  url get(::plaid/ENVIRONMENTS, name)
+  cond {
+    is-some(url) => { url }
+    eq(name, "development") => {
+      err("plaid: the development environment was decommissioned in June 2024; use \"sandbox\" or \"production\"")
+    }
+    => { err(`plaid: unknown environment '${env}'; use "sandbox" or "production"`) }
+  }
+}
+
+current-env
+meta {
+    doc: """The configured environment name: `plaid.env`, or `"sandbox"` when unset or empty."""
+}
+fn (): Str {
+  configured or(::ctx/get("plaid.env"), "")
+  if(is-empty(configured), ::plaid/DEFAULT_ENV, configured)
+}
+
+base-url fn (): Str {
+  env-base-url(current-env())
+}
+
+plaid-version
+meta {
+    doc: """The `Plaid-Version` header value: `plaid.version`, or `::plaid/PLAID_VERSION`."""
+}
+fn (): Str {
+  configured or(::ctx/get("plaid.version"), "")
+  if(is-empty(configured), ::plaid/PLAID_VERSION, configured)
+}
+
+// ---------------------------------------------------------------------------
+// Bodies
+// ---------------------------------------------------------------------------
+
+compact
+meta {
+    doc: """Drop null-valued keys from a request body. An `options` sub-object that is null or empty is dropped too, so Plaid never sees `"options": null`. Exposed for testing."""
+}
+fn (body: Map): Map {
+  kept filter-vals(body, is-some)
+  options get(kept, "options")
+  cond {
+    and(is-map(options), is-empty(options)) => { filter-keys(kept, (k) { ne(k, "options") }) }
+    => { kept }
+  }
+}
+
+with-credentials
+meta {
+    doc: """The full request body: `client_id` and `secret` first, then the (compacted) body. Exposed for testing."""
+}
+fn (body: Map, client-id: Str, secret: Str): Map {
+  {client_id: client-id, secret: secret, ...compact(body)}
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+post
+meta {
+    doc: """
+    POST a Plaid endpoint with credentials injected into the body and the
+    `Plaid-Version` header set. Returns the decoded JSON body on 2xx, or
+    an Err carrying `HttpError`. The escape hatch for endpoints not
+    wrapped by this package.
+
+    **Example**
+
+    ```hot
+    out ::plaid::api/post("/categories/get", {})
+    ```
+    """
+}
+fn
+(path: Str, body: Map): Any {
+  post(path, body, ::ctx/get("plaid.client-id"), ::ctx/get("plaid.secret"))
+},
+// 4-arity: explicit credentials (environment still from `plaid.env`)
+(path: Str, body: Map, client-id: Str, secret: Str): Any {
+  post(path, body, client-id, secret, current-env())
+},
+// 5-arity: explicit credentials and environment ("sandbox" or "production")
+(path: Str, body: Map, client-id: Str, secret: Str, env: Str): Any {
+  response ::hot::http/request(HttpRequest({
+    method: "POST",
+    url: `${env-base-url(env)}${path}`,
+    headers: {
+      Content-Type: "application/json",
+      Plaid-Version: plaid-version(),
+      User-Agent: "hot-dev-plaid-pkg"
+    },
+    body: to-json(untype(with-credentials(body, client-id, secret)))
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(http-error(response)) }
+  }
+}

@@ -1,0 +1,243 @@
+::intercom::api ns
+meta {
+    ctx: {
+        "intercom.token": {required: true},
+        "intercom.admin.id": {required: false, secret: false},
+        "intercom.region": {required: false, secret: false},
+        "intercom.version": {required: false, secret: false}
+    },
+    doc: """Low-level Intercom transport: regional base URL, auth and `Intercom-Version` headers, `HttpError` for non-2xx responses, and the cursor (`starting_after`) pagination helpers the endpoint namespaces share."""
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+http-error
+meta {
+    doc: """Build the `HttpError` for a non-2xx response. A plain `HttpError(response)` would copy fields structurally; this also defaults missing headers to `{}`. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: or(response.headers, {}),
+    body: response.body
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+base-url
+meta {
+    ctx: {"intercom.region": {required: false, secret: false}},
+    doc: """
+    The regional API host. The 1-arity form takes `"us"`, `"eu"` or
+    `"au"` (case-insensitive; null means `us`) and returns an Err for
+    anything else. The 0-arity form reads `intercom.region`.
+    """
+}
+fn
+(): Str {
+  base-url(::ctx/get("intercom.region"))
+},
+(region: Str?): Str {
+  key lowercase(trim(or(region, "us")))
+  url get(::intercom/BASE_URLS, if(is-empty(key), "us", key))
+  cond {
+    is-null(url) => { err(`intercom.region must be one of us, eu, au (got '${region}')`) }
+    => { url }
+  }
+}
+
+api-version
+meta {
+    ctx: {"intercom.version": {required: false, secret: false}},
+    doc: """The `Intercom-Version` to send: `intercom.version` when set, otherwise the pinned `::intercom/API_VERSION`."""
+}
+fn (): Str {
+  or(::ctx/get("intercom.version"), ::intercom/API_VERSION)
+}
+
+admin-id
+meta {
+    ctx: {"intercom.admin.id": {required: true, secret: false}},
+    doc: """The admin to act as, from `intercom.admin.id`. Halts with a hint when it is unset (look it up with `::intercom::admins/me()`)."""
+}
+fn (): Str {
+  id ::ctx/get("intercom.admin.id")
+  if(or(is-null(id), is-empty(Str(or(id, "")))),
+    fail("intercom.admin.id is not set. Set it to the admin to act as; ::intercom::admins/me() returns the token's admin.")
+  )
+  Str(id)
+}
+
+build-headers
+meta {
+    doc: """Request headers: Bearer auth, `Intercom-Version`, `Accept: application/json`, and `Content-Type` only when there is a body. Exposed for testing."""
+}
+fn (token: Str, version: Str, has-body: Bool): Map {
+  base {
+    Authorization: `Bearer ${token}`,
+    Intercom-Version: version,
+    Accept: "application/json"
+  }
+
+  if(has-body, {...base, Content-Type: "application/json"}, base)
+}
+
+response-body
+meta {
+    doc: """Normalize a decoded 2xx body: empty text (202/204 with no content, e.g. data events) becomes null; anything else passes through. Exposed for testing."""
+}
+fn (body: Any): Any {
+  match body {
+    Str => { if(is-empty(trim(body)), null, body) }
+    _ => { body }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+request
+meta {
+    ctx: {"intercom.token": {required: true}},
+    doc: """
+    Make an authenticated Intercom request. `path` is relative to the
+    regional host (e.g. `/contacts`); `body` is a Map, or `""` for none.
+    Returns the decoded body on 2xx (null when empty), or an Err carrying
+    `HttpError` (Intercom's `errors` list is in `body`).
+
+    **Example**
+
+    ```hot
+    segments ::intercom::api/request("GET", "/segments", "")
+    ```
+    """
+}
+fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, ::ctx/get("intercom.token"))
+},
+// 4-arity: explicit access token override (e.g. an OAuth token per workspace)
+(method: Str, path: Str, body: Any, token: Str): Any {
+  has-body not(eq(body, ""))
+  response ::hot::http/request(HttpRequest({
+    method,
+    url: `${base-url()}${path}`,
+    headers: build-headers(token, api-version(), has-body),
+    body: if(has-body, to-json(untype(body)), "")
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response-body(response.body) }
+    => { err(http-error(response)) }
+  }
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment (an id). Ints pass through as text."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+query-string
+meta {
+    doc: """Build a `?a=1` suffix from a Map, dropping null values; `""` when nothing remains."""
+}
+fn (options: Map): Str {
+  ::uri/query-string(options)
+}
+
+compact
+meta {
+    doc: """Drop null-valued keys so unset optionals are omitted rather than sent as JSON null."""
+}
+fn (body: Map): Map {
+  filter-vals(body, is-some)
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+build-search-body
+meta {
+    doc: """
+    Build a `POST /…/search` body: `{query, pagination?, sort?}`.
+    `options`: `per_page` (max 150), `starting_after` (the cursor from
+    the previous page's `pages.next.starting_after`), and `sort`
+    (`{field, order: "ascending"|"descending"}`, contacts only). The
+    pagination object is omitted when neither is set. Exposed for testing.
+    """
+}
+fn (query: Map, options: Map): Map {
+  pagination compact({per_page: get(options, "per_page"), starting_after: get(options, "starting_after")})
+  compact({
+    query: query,
+    pagination: if(is-empty(pagination), null, pagination),
+    sort: get(options, "sort")
+  })
+}
+
+next-cursor
+meta {
+    doc: """The `starting_after` cursor for the page after `page` (from `pages.next.starting_after`), or null on the last page. Works for list and search responses."""
+}
+fn (page: Any): Str? {
+  next get(or(get(or(page, {}), "pages"), {}), "next")
+  match next {
+    Map => { get(next, "starting_after") }
+    _ => { null }
+  }
+}
+
+collect-pages
+meta {
+    doc: """
+    Follow `starting_after` cursors, concatenating each page's `key`
+    Vec (e.g. `"conversations"`, `"contacts"`, `"tickets"`, `"data"`),
+    until `limit` items or the last page. `fetch` is a Fn taking the
+    cursor (null for the first page) and returning one page. Exposed for
+    testing; the `search-all-*` functions use it.
+    """
+}
+fn (fetch: Fn, key: Str, cursor: Str?, limit: Int, acc: Vec): Vec {
+  cond {
+    lte(limit, length(acc)) => { slice(acc, 0, max(limit, 0)) }
+    => {
+      page fetch(cursor)
+      items or(get(page, key), [])
+      combined concat(acc, items)
+      next next-cursor(page)
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        is-null(next) => { combined }
+        => { collect-pages(fetch, key, next, limit, combined) }
+      }
+    }
+  }
+}
+
+page-size
+meta {
+    doc: """The `per_page` to request when collecting up to `limit` items: `limit` clamped to 1..150 (Intercom's maximum)."""
+}
+fn (limit: Int): Int {
+  max(1, min(150, limit))
+}

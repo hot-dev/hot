@@ -1,55 +1,515 @@
 ::openai-compatible ns
 meta {
     doc: """
-    Generic client for OpenAI-compatible APIs.
+    Presets for OpenAI-compatible APIs, built on `hot.dev/openai`.
 
-    One package for every provider that speaks the OpenAI wire format:
-    OpenRouter, Together, Fireworks, DeepSeek, Groq, Ollama, and private
-    OpenAI-compatible gateways. Point it at a base URL, give it a key, and
-    use the same chat/models/embeddings surface everywhere.
+    Each preset knows a provider's base URL, routing prefix, ctx key name
+    and request quirks. The ctx-reading functions (`ollama()`, `groq()`,
+    `openrouter()`, ...) return an `::openai::compatible/CompatibleProvider`;
+    `provider(...)` turns that into an `::ai::chat/ProviderRegistration`
+    for `::ai::chat/run-loop`, using OpenAI's chat-tools adapter.
 
-    **Setup** — context variables:
-    - `openai-compatible.url` — e.g. `https://openrouter.ai/api/v1`
-    - `openai-compatible.api.key` — the provider's API key
-
-    **Example (OpenRouter)**
+    **Example**
 
     ```hot
-    ::chat ::openai-compatible::chat
+    ::oc ::openai-compatible
 
-    response ::chat/chat-completion(::chat/ChatCompletionRequest({
-      model: "anthropic/claude-sonnet-4.5",
-      messages: [{role: "user", content: "Hello!"}]
-    }))
-    response.choices[0].message.content
+    registry ::ai::chat/with-providers([
+        ::oc/provider(::oc/ollama()),
+        ::oc/provider(::oc/groq())
+    ])
+    opts ::ai::chat/ChatOptions({model: "groq/llama-3.3-70b-versatile", providers: registry})
+    ::ai::chat/run-loop(opts, "Hello!")
     ```
-
-    Known base URLs are provided as constants for convenience.
     """
 }
 
-OPENROUTER_BASE_URL
+::ctx    ::hot::ctx
+::compat ::openai::compatible
+::api    ::openai::api
+
+CompatibleProvider ::compat/CompatibleProvider
+
+DEFAULT_MAX_TOKENS 4096
+
+// ============================================================================
+// Presets
+// ============================================================================
+
+Preset
 meta {
-    doc: """OpenRouter: one key for hundreds of models with fallback and routing. https://openrouter.ai/docs"""
+    doc: """
+    Static description of an OpenAI-compatible provider.
+
+    - `name`: display name.
+    - `base-url`: default OpenAI-compatible base URL.
+    - `model-prefix`: routing prefix for `::ai::chat` registries.
+    - `key-ctx`: ctx variable the named preset function reads the key from
+      (null for keyless servers).
+    - `key-env`: the provider's conventional env var, for your ctx file.
+    - `max-tokens-param`: body field for the output ceiling
+      (`max_tokens` or `max_completion_tokens`).
+    - `stream-usage`: whether to send `stream_options.include_usage`.
+    - `capabilities`: advertised on the registration.
+    - `docs-url`: the provider's OpenAI-compatibility docs.
+    """
 }
-"https://openrouter.ai/api/v1"
+type {
+    name: Str,
+    base-url: Str,
+    model-prefix: Str,
+    key-ctx: Str?,
+    key-env: Str?,
+    max-tokens-param: Str,
+    stream-usage: Bool,
+    capabilities: Vec<Str>,
+    docs-url: Str
+}
 
-TOGETHER_BASE_URL
-meta {doc: """Together AI serverless endpoints."""}
-"https://api.together.xyz/v1"
+OLLAMA
+meta {
+    doc: "Ollama (local). Keyless; the key is only for Ollama's hosted API or an authenticating proxy."
+}
 
-FIREWORKS_BASE_URL
-meta {doc: """Fireworks AI serverless inference."""}
-"https://api.fireworks.ai/inference/v1"
+Preset({
+    name: "Ollama",
+    base-url: "http://localhost:11434/v1",
+    model-prefix: "ollama/",
+    key-ctx: "ollama.api.key",
+    key-env: "OLLAMA_API_KEY",
+    max-tokens-param: "max_tokens",
+    stream-usage: true,
+    capabilities: ["tools", "streaming", "vision", "json-mode"],
+    docs-url: "https://docs.ollama.com/api/openai-compatibility"
+})
 
-DEEPSEEK_BASE_URL
-meta {doc: """DeepSeek platform API."""}
-"https://api.deepseek.com/v1"
+VLLM
+meta {
+    doc: "vLLM's OpenAI-compatible server (local or self-hosted). The key is only needed when the server runs with `--api-key`."
+}
 
-GROQ_BASE_URL
-meta {doc: """Groq cloud inference."""}
-"https://api.groq.com/openai/v1"
+Preset({
+    name: "vLLM",
+    base-url: "http://localhost:8000/v1",
+    model-prefix: "vllm/",
+    key-ctx: "vllm.api.key",
+    key-env: "VLLM_API_KEY",
+    max-tokens-param: "max_tokens",
+    stream-usage: true,
+    capabilities: ["tools", "streaming", "json-mode"],
+    docs-url: "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html"
+})
 
-OLLAMA_BASE_URL
-meta {doc: """Local Ollama with its OpenAI-compatible endpoint enabled."""}
-"http://localhost:11434/v1"
+LM_STUDIO
+meta {doc: "LM Studio's local server. Keyless."}
+Preset({
+    name: "LM Studio",
+    base-url: "http://localhost:1234/v1",
+    model-prefix: "lmstudio/",
+    key-ctx: null,
+    key-env: null,
+    max-tokens-param: "max_tokens",
+    stream-usage: false,
+    capabilities: ["tools", "streaming", "json-mode"],
+    docs-url: "https://lmstudio.ai/docs/app/api/endpoints/openai"
+})
+
+GROQ
+meta {
+    doc: "Groq. Rejects `logprobs`, `logit_bias`, `top_logprobs`, `messages[].name` and `n` other than 1."
+}
+
+Preset({
+    name: "Groq",
+    base-url: "https://api.groq.com/openai/v1",
+    model-prefix: "groq/",
+    key-ctx: "groq.api.key",
+    key-env: "GROQ_API_KEY",
+    max-tokens-param: "max_completion_tokens",
+    stream-usage: true,
+    capabilities: ["tools", "streaming", "json-mode"],
+    docs-url: "https://console.groq.com/docs/openai"
+})
+
+OPENROUTER
+meta {
+    doc: "OpenRouter: one key for hundreds of models. Model ids keep their vendor prefix (`anthropic/claude-sonnet-4.5`), so route them as `openrouter/anthropic/claude-sonnet-4.5`."
+}
+
+Preset({
+    name: "OpenRouter",
+    base-url: "https://openrouter.ai/api/v1",
+    model-prefix: "openrouter/",
+    key-ctx: "openrouter.api.key",
+    key-env: "OPENROUTER_API_KEY",
+    max-tokens-param: "max_tokens",
+    stream-usage: true,
+    capabilities: ["tools", "streaming", "vision", "json-mode"],
+    docs-url: "https://openrouter.ai/docs/api/reference/overview"
+})
+
+DEEPSEEK
+meta {
+    doc: "DeepSeek platform API. Uses `max_tokens`; `deepseek-reasoner` streams `reasoning_content`, which the adapter ignores."
+}
+
+Preset({
+    name: "DeepSeek",
+    base-url: "https://api.deepseek.com",
+    model-prefix: "deepseek/",
+    key-ctx: "deepseek.api.key",
+    key-env: "DEEPSEEK_API_KEY",
+    max-tokens-param: "max_tokens",
+    stream-usage: true,
+    capabilities: ["tools", "streaming", "json-mode"],
+    docs-url: "https://api-docs.deepseek.com/"
+})
+
+TOGETHER
+meta {
+    doc: "Together AI serverless inference. Model ids look like `meta-llama/Llama-3.3-70B-Instruct-Turbo`."
+}
+
+Preset({
+    name: "Together AI",
+    base-url: "https://api.together.ai/v1",
+    model-prefix: "together/",
+    key-ctx: "together.api.key",
+    key-env: "TOGETHER_API_KEY",
+    max-tokens-param: "max_tokens",
+    stream-usage: false,
+    capabilities: ["tools", "streaming", "json-mode"],
+    docs-url: "https://docs.together.ai/docs/openai-api-compatibility"
+})
+
+FIREWORKS
+meta {
+    doc: "Fireworks AI serverless inference. Model ids look like `accounts/fireworks/models/<name>`."
+}
+
+Preset({
+    name: "Fireworks AI",
+    base-url: "https://api.fireworks.ai/inference/v1",
+    model-prefix: "fireworks/",
+    key-ctx: "fireworks.api.key",
+    key-env: "FIREWORKS_API_KEY",
+    max-tokens-param: "max_tokens",
+    stream-usage: false,
+    capabilities: ["tools", "streaming", "json-mode"],
+    docs-url: "https://docs.fireworks.ai/tools-sdks/openai-compatibility"
+})
+
+MISTRAL
+meta {
+    doc: "Mistral La Plateforme. Rejects unknown fields, so `stream_options` is not sent; usage still arrives on the last chunk."
+}
+
+Preset({
+    name: "Mistral",
+    base-url: "https://api.mistral.ai/v1",
+    model-prefix: "mistral/",
+    key-ctx: "mistral.api.key",
+    key-env: "MISTRAL_API_KEY",
+    max-tokens-param: "max_tokens",
+    stream-usage: false,
+    capabilities: ["tools", "streaming", "vision", "json-mode"],
+    docs-url: "https://docs.mistral.ai/api/"
+})
+
+CEREBRAS
+meta {
+    doc: "Cerebras inference. `n` must be 1; non-standard fields (`disable_reasoning`, ...) go in `extra-body`."
+}
+
+Preset({
+    name: "Cerebras",
+    base-url: "https://api.cerebras.ai/v1",
+    model-prefix: "cerebras/",
+    key-ctx: "cerebras.api.key",
+    key-env: "CEREBRAS_API_KEY",
+    max-tokens-param: "max_completion_tokens",
+    stream-usage: false,
+    capabilities: ["tools", "streaming", "json-mode"],
+    docs-url: "https://inference-docs.cerebras.ai/resources/openai"
+})
+
+PERPLEXITY
+meta {
+    doc: """
+    Perplexity Sonar through its OpenAI-compatible `/chat/completions`
+    alias. No tool calling. Perplexity ended Sonar Chat Completions
+    support on 2026-09-27 and now translates these requests to its Agent
+    API; prefer Perplexity's native API for new work.
+    """
+}
+
+Preset({
+    name: "Perplexity",
+    base-url: "https://api.perplexity.ai",
+    model-prefix: "perplexity/",
+    key-ctx: "perplexity.api.key",
+    key-env: "PERPLEXITY_API_KEY",
+    max-tokens-param: "max_tokens",
+    stream-usage: false,
+    capabilities: ["streaming"],
+    docs-url: "https://docs.perplexity.ai/docs/sonar/openai-compatibility"
+})
+
+PRESETS
+meta {doc: "Every built-in preset."}
+[OLLAMA, VLLM, LM_STUDIO, GROQ, OPENROUTER, DEEPSEEK, TOGETHER, FIREWORKS, MISTRAL, CEREBRAS, PERPLEXITY]
+
+// ============================================================================
+// Building providers
+// ============================================================================
+
+configure
+meta {
+    doc: """
+    Turn a `Preset` into an `::openai::compatible/CompatibleProvider` with
+    an explicit key (null for keyless servers). Reads no ctx.
+
+    `overrides` may set `base-url`, `model-prefix`, `name`, `headers`,
+    `max-tokens` (output ceiling, default 4096) and `extra-body`
+    (provider-specific request fields).
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    groq ::oc/configure(::oc/GROQ, "gsk_...")
+    remote-ollama ::oc/configure(::oc/OLLAMA, null, {base-url: "http://gpu-box.internal:11434/v1"})
+    routed ::oc/configure(::oc/OPENROUTER, "sk-or-...", {
+        headers: {"HTTP-Referer": "https://example.com", "X-OpenRouter-Title": "Example"},
+        extra-body: {provider: {sort: "throughput"}}
+    })
+    ```
+    """
+}
+fn
+(preset: Preset, api-key: Str?): CompatibleProvider {
+    configure(preset, api-key, {})
+},
+(preset: Preset, api-key: Str?, overrides: Map): CompatibleProvider {
+    options ::openai::chat-tools/ChatRequestOptions({
+        max-completion-tokens: or(get(overrides, "max-tokens"), DEFAULT_MAX_TOKENS),
+        reasoning-effort: get(overrides, "reasoning-effort"),
+        max-tokens-param: preset.max-tokens-param,
+        stream-usage: preset.stream-usage,
+        extra-body: get(overrides, "extra-body")
+    })
+    headers get(overrides, "headers")
+    ep ::api/endpoint(or(get(overrides, "base-url"), preset.base-url), api-key, if(is-empty(or(headers, {})), null, headers))
+
+    CompatibleProvider({
+        name: or(get(overrides, "name"), preset.name),
+        endpoint: ep,
+        model-prefix: or(get(overrides, "model-prefix"), preset.model-prefix),
+        options: options,
+        capabilities: preset.capabilities
+    })
+}
+
+provider
+meta {
+    doc: """
+    Build an `::ai::chat/ProviderRegistration` from a configured provider,
+    via `::openai::compatible/provider`. Models starting with the preset's
+    prefix route to it; the prefix is stripped before the request.
+
+    **Example**
+
+    ```hot
+    registry ::ai::chat/with-providers([::openai-compatible/provider(::openai-compatible/ollama())])
+    ```
+    """
+}
+fn (p: CompatibleProvider): ::ai::chat/ProviderRegistration {
+    ::compat/provider(p)
+}
+
+chat-fn
+meta {
+    doc: "The `::ai::chat/run-loop` chat function bound to `p` (for `ChatOptions.chat-fn`)."
+}
+fn (p: CompatibleProvider): Fn {
+    ::compat/chat-fn(p)
+}
+
+chat-stream-fn
+meta {
+    doc: "The `::ai::chat/run-loop-stream` chat function bound to `p` (for `ChatOptions.chat-stream-fn`)."
+}
+fn (p: CompatibleProvider): Fn {
+    ::compat/chat-stream-fn(p)
+}
+
+// ============================================================================
+// Named presets (read keys from ctx)
+// ============================================================================
+
+ollama
+meta {
+    doc: """
+    Local Ollama. `ollama.base.url` overrides the default
+    `http://localhost:11434/v1` (e.g. `https://ollama.com/v1` for Ollama's
+    hosted API, with `ollama.api.key`). Keyless by default.
+    """,
+    ctx: {
+        "ollama.base.url": {required: false, default: "http://localhost:11434/v1", secret: false},
+        "ollama.api.key": {required: false}
+    }
+}
+fn (): CompatibleProvider {
+    configure(OLLAMA, ::ctx/get("ollama.api.key"), {base-url: ::ctx/get("ollama.base.url", OLLAMA.base-url)})
+}
+
+vllm
+meta {
+    doc: """vLLM server at `vllm.base.url` (default `http://localhost:8000/v1`). `vllm.api.key` only when the server runs with `--api-key`.""",
+    ctx: {
+        "vllm.base.url": {required: false, default: "http://localhost:8000/v1", secret: false},
+        "vllm.api.key": {required: false}
+    }
+}
+fn (): CompatibleProvider {
+    configure(VLLM, ::ctx/get("vllm.api.key"), {base-url: ::ctx/get("vllm.base.url", VLLM.base-url)})
+}
+
+lm-studio
+meta {
+    doc: """LM Studio server at `lm-studio.base.url` (default `http://localhost:1234/v1`). Keyless.""",
+    ctx: {"lm-studio.base.url": {required: false, default: "http://localhost:1234/v1", secret: false}}
+}
+fn (): CompatibleProvider {
+    configure(LM_STUDIO, null, {base-url: ::ctx/get("lm-studio.base.url", LM_STUDIO.base-url)})
+}
+
+groq
+meta {
+    doc: "Groq with the `groq.api.key` ctx key.",
+    ctx: {"groq.api.key": {}}
+}
+fn (): CompatibleProvider {
+    configure(GROQ, ::ctx/get("groq.api.key"))
+}
+
+openrouter
+meta {
+    doc: """
+    OpenRouter with the `openrouter.api.key` ctx key. Optional
+    `openrouter.app.url` and `openrouter.app.title` are sent as the
+    `HTTP-Referer` and `X-OpenRouter-Title` attribution headers.
+    """,
+    ctx: {
+        "openrouter.api.key": {},
+        "openrouter.app.url": {required: false, secret: false},
+        "openrouter.app.title": {required: false, secret: false}
+    }
+}
+fn (): CompatibleProvider {
+    headers openrouter-headers(::ctx/get("openrouter.app.url"), ::ctx/get("openrouter.app.title"))
+    configure(OPENROUTER, ::ctx/get("openrouter.api.key"), {headers: headers})
+}
+
+openrouter-headers
+meta {
+    doc: """
+    OpenRouter app-attribution headers. Unset values are omitted.
+
+    **Example**
+
+    ```hot
+    ::openai-compatible/openrouter-headers("https://example.com", "Example")
+    // => {"HTTP-Referer": "https://example.com", "X-OpenRouter-Title": "Example"}
+    ```
+    """
+}
+fn (app-url: Str?, app-title: Str?): Map {
+    {}
+    |> assoc-some("HTTP-Referer", if(is-empty(or(app-url, "")), null, app-url))
+    |> assoc-some("X-OpenRouter-Title", if(is-empty(or(app-title, "")), null, app-title))
+}
+
+deepseek
+meta {
+    doc: "DeepSeek with the `deepseek.api.key` ctx key.",
+    ctx: {"deepseek.api.key": {}}
+}
+fn (): CompatibleProvider {
+    configure(DEEPSEEK, ::ctx/get("deepseek.api.key"))
+}
+
+together
+meta {
+    doc: "Together AI with the `together.api.key` ctx key.",
+    ctx: {"together.api.key": {}}
+}
+fn (): CompatibleProvider {
+    configure(TOGETHER, ::ctx/get("together.api.key"))
+}
+
+fireworks
+meta {
+    doc: "Fireworks AI with the `fireworks.api.key` ctx key.",
+    ctx: {"fireworks.api.key": {}}
+}
+fn (): CompatibleProvider {
+    configure(FIREWORKS, ::ctx/get("fireworks.api.key"))
+}
+
+mistral
+meta {
+    doc: "Mistral with the `mistral.api.key` ctx key.",
+    ctx: {"mistral.api.key": {}}
+}
+fn (): CompatibleProvider {
+    configure(MISTRAL, ::ctx/get("mistral.api.key"))
+}
+
+cerebras
+meta {
+    doc: "Cerebras with the `cerebras.api.key` ctx key.",
+    ctx: {"cerebras.api.key": {}}
+}
+fn (): CompatibleProvider {
+    configure(CEREBRAS, ::ctx/get("cerebras.api.key"))
+}
+
+perplexity
+meta {
+    doc: "Perplexity Sonar with the `perplexity.api.key` ctx key. No tool calling.",
+    ctx: {"perplexity.api.key": {}}
+}
+fn (): CompatibleProvider {
+    configure(PERPLEXITY, ::ctx/get("perplexity.api.key"))
+}
+
+custom
+meta {
+    doc: """
+    Any other OpenAI-compatible server or private gateway:
+    `openai-compatible.url` (required) and optional
+    `openai-compatible.api.key`. Routing prefix `custom/`; sends
+    `max_tokens` and no `stream_options`, the most widely accepted shape.
+    """,
+    ctx: {
+        "openai-compatible.url": {secret: false},
+        "openai-compatible.api.key": {required: false}
+    }
+}
+fn (): CompatibleProvider {
+    custom-preset ::openai-compatible/Preset({
+        name: "OpenAI-compatible",
+        base-url: ::ctx/get("openai-compatible.url"),
+        model-prefix: "custom/",
+        key-ctx: "openai-compatible.api.key",
+        key-env: "OPENAI_COMPATIBLE_API_KEY",
+        max-tokens-param: "max_tokens",
+        stream-usage: false,
+        capabilities: ["tools", "streaming"],
+        docs-url: "https://platform.openai.com/docs/api-reference/chat"
+    })
+    configure(custom-preset, ::ctx/get("openai-compatible.api.key"))
+}

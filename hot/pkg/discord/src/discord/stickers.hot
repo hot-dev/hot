@@ -1,0 +1,130 @@
+::discord::stickers ns
+meta {
+    doc: """Stickers: read standard and guild stickers, and create, modify or delete guild stickers."""
+}
+
+::api ::discord::api
+
+seg ::discord::api/seg
+
+GetStickerRequest type {
+  sticker_id: Str
+}
+
+get-sticker
+meta {
+    doc: """GET /stickers/{sticker_id} - Any sticker by id."""
+}
+fn (request: GetStickerRequest): Map {
+  ::api/call("GET", `/stickers/${seg(request.sticker_id)}`)
+}
+
+list-sticker-packs
+meta {
+    doc: """GET /sticker-packs - Discord's standard sticker packs. Returns `{sticker_packs}`."""
+}
+fn (): Map {
+  ::api/call("GET", "/sticker-packs")
+}
+
+ListGuildStickersRequest type {
+  guild_id: Str
+}
+
+list-guild-stickers
+meta {
+    doc: """GET /guilds/{guild_id}/stickers - The guild's custom stickers."""
+}
+fn (request: ListGuildStickersRequest): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/stickers`)
+}
+
+GetGuildStickerRequest type {
+  guild_id: Str,
+  sticker_id: Str
+}
+
+get-guild-sticker
+meta {
+    doc: """GET /guilds/{guild_id}/stickers/{sticker_id} - One guild sticker."""
+}
+fn (request: GetGuildStickerRequest): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/stickers/${seg(request.sticker_id)}`)
+}
+
+CreateGuildStickerRequest type {
+  guild_id: Str,
+  name: Str,
+  tags: Str,
+  file: ::discord::api/FileUpload,
+  description: Str?,
+  reason: Str?
+}
+
+create-guild-sticker
+meta {
+    doc: """
+    POST /guilds/{guild_id}/stickers - Upload a sticker (PNG, APNG, GIF or
+    Lottie JSON, max 512 KiB) as multipart/form-data. `name` 2-30
+    characters, `tags` an autocomplete word (a Unicode emoji name).
+    Needs CREATE_GUILD_EXPRESSIONS.
+
+    **Example**
+
+    ```hot
+    ::stickers ::discord::stickers
+
+    ::stickers/create-guild-sticker(::stickers/CreateGuildStickerRequest({
+      guild_id: "1000000000000000000",
+      name: "shipit",
+      tags: "rocket",
+      file: {filename: "shipit.png", content: ::hot::file/read-file-bytes("shipit.png")}
+    }))
+    ```
+    """
+}
+fn (request: CreateGuildStickerRequest): Map {
+  ::api/call("POST", `/guilds/${seg(request.guild_id)}/stickers`, {
+    form: {
+      fields: {name: request.name, description: or(request.description, ""), tags: request.tags},
+      file_field: "file",
+      file: untype(request.file)
+    },
+    reason: request.reason
+  })
+}
+
+ModifyGuildStickerRequest type {
+  guild_id: Str,
+  sticker_id: Str,
+  name: Str?,
+  description: Str?,
+  tags: Str?,
+  reason: Str?,
+  clear: Vec<Str>?
+}
+
+modify-guild-sticker
+meta {
+    doc: """PATCH /guilds/{guild_id}/stickers/{sticker_id} - Change a sticker's name, description or tags. Only fields you set are sent. Needs MANAGE_GUILD_EXPRESSIONS."""
+}
+fn (request: ModifyGuildStickerRequest): Map {
+  ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/stickers/${seg(request.sticker_id)}`, {
+    body: ::api/body(request, ["guild_id", "sticker_id"]),
+    reason: request.reason
+  })
+}
+
+DeleteGuildStickerRequest type {
+  guild_id: Str,
+  sticker_id: Str,
+  reason: Str?
+}
+
+delete-guild-sticker
+meta {
+    doc: """DELETE /guilds/{guild_id}/stickers/{sticker_id} - Delete a sticker. Needs MANAGE_GUILD_EXPRESSIONS."""
+}
+fn (request: DeleteGuildStickerRequest): Bool {
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/stickers/${seg(request.sticker_id)}`, {reason: request.reason})
+}

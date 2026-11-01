@@ -1,0 +1,164 @@
+::deepgram::api ns
+meta {
+    doc: """Internal HTTP plumbing for the Deepgram API: authenticated requests, repeated-key query strings, and the `HttpError` returned for non-2xx responses.""",
+    ctx: {"deepgram.api.key": {required: true}}
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError
+meta {
+    doc: """
+    A non-2xx Deepgram response. `message` is a readable summary built
+    from Deepgram's error body (`err_code`/`err_msg` on older endpoints,
+    `category`/`message`/`details` on newer ones); `body` keeps the
+    decoded payload for anything else.
+    """
+}
+type {
+    status: Int,
+    headers: Map?,
+    body: Any?,
+    message: Str
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` (with its readable `message`) from a non-2xx `HttpResponse`."""
+}
+fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body,
+    message: error-message(response.status, response.body)
+  })
+}
+
+error-message
+meta {
+    doc: """Build a readable message from a Deepgram error status and body. Exposed for testing."""
+}
+fn (status: Int, body: Any): Str {
+  detail cond {
+    is-str(body) => { if(is-blank(body), null, trim(body)) }
+    is-map(body) => {
+      code or(get(body, "err_code"), get(body, "category"))
+      text or(get(body, "err_msg"), get(body, "message"), get(body, "details"))
+      cond {
+        and(is-some(code), is-some(text)) => { `${code}: ${text}` }
+        => { or(text, code) }
+      }
+    }
+    => { null }
+  }
+
+  if(is-some(detail), `Deepgram API error (HTTP ${status}): ${detail}`, `Deepgram API error (HTTP ${status})`)
+}
+
+query-string
+meta {
+    doc: """
+    Build a query-string suffix (`?a=1&b=2`, or `""` when nothing is
+    set) from a Map of options. Null values are dropped, Bools render as
+    `true`/`false`, and Vec values repeat the key (`keyterm=a&keyterm=b`),
+    which is how Deepgram takes multi-value options such as `keyterm`,
+    `keywords`, `search`, `replace`, `redact`, `tag`, and `extra`.
+    Keys and values are percent-encoded.
+
+    **Example**
+
+    ```hot
+    ::deepgram::api/query-string({model: "nova-3", keyterm: ["Hot", "Deepgram"], diarize: null})
+    // "?model=nova-3&keyterm=Hot&keyterm=Deepgram"
+    ```
+    """
+}
+fn (params: Map): Str {
+  pairs reduce(params, (acc, entry) {
+    key ::uri/encode(Str(first(entry)))
+    value entry[1]
+    cond {
+      is-null(value) => { acc }
+      is-vec(value) => {
+        concat(acc, map(filter(value, is-some), (item) { `${key}=${::uri/encode(Str(item))}` }))
+      }
+      => { concat(acc, [`${key}=${::uri/encode(Str(value))}`]) }
+    }
+  }, [])
+  if(is-empty(pairs), "", `?${join(pairs, "&")}`)
+}
+
+api-key
+meta {
+    doc: """The configured `deepgram.api.key`, or an Err naming the missing context variable."""
+}
+fn (): Str {
+  key or(::ctx/get("deepgram.api.key"), "")
+  if(is-empty(key), err("deepgram.api.key is not set. Add it in Context Variables to call the Deepgram API."), key)
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated request to the Deepgram API (`Authorization:
+    Token <key>`). `path` is relative to `https://api.deepgram.com`
+    (e.g. `/v1/listen?model=nova-3`). `body` is sent as-is: a JSON
+    string, raw audio `Bytes`, or `""` for none. Returns the raw
+    `HttpResponse`; `json` and `bytes` unwrap it.
+    """
+}
+fn
+(method: Str, path: Str): HttpResponse {
+  request(method, path, "", "")
+},
+(method: Str, path: Str, content-type: Str, body: Any): HttpResponse {
+  request(method, path, content-type, body, api-key())
+},
+// 5-arity: explicit API key override
+(method: Str, path: Str, content-type: Str, body: Any, key: Str): HttpResponse {
+  headers if(is-empty(content-type),
+    {Authorization: `Token ${key}`},
+    {Authorization: `Token ${key}`, Content-Type: content-type})
+  ::hot::http/request(HttpRequest({
+    method,
+    url: `${::deepgram/BASE_URL}${path}`,
+    headers,
+    body
+  }))
+}
+
+json
+meta {
+    doc: """Like `request`, but returns the decoded JSON body on 2xx, or an Err carrying `HttpError`."""
+}
+fn
+(method: Str, path: Str): Any {
+  json(method, path, "", "")
+},
+(method: Str, path: Str, content-type: Str, body: Any): Any {
+  response request(method, path, content-type, body)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(http-error(response)) }
+  }
+}
+
+bytes
+meta {
+    doc: """Like `request`, but returns the verbatim response `Bytes` on 2xx (for audio), or an Err carrying `HttpError`."""
+}
+fn (method: Str, path: Str, content-type: Str, body: Any): Bytes {
+  response request(method, path, content-type, body)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body-bytes }
+    => { err(http-error(response)) }
+  }
+}

@@ -1,0 +1,197 @@
+::telegram::test::api ns
+meta ["test"]
+
+::api ::telegram::api
+::messages ::telegram::messages
+
+HttpResponse ::hot::http/HttpResponse
+
+resp fn (status: Int, body: Any): HttpResponse {
+  HttpResponse({status: status, headers: {content-type: "application/json"}, body: body})
+}
+
+// ============================================================================
+// Response envelope
+// ============================================================================
+
+test-parse-response-returns-result
+meta ["test"]
+fn () {
+    assert-eq({message_id: 42}, ::api/parse-response(resp(200, {ok: true, result: {message_id: 42}})))
+    assert-eq(false, ::api/parse-response(resp(200, {ok: true, result: false})))
+    assert-eq([], ::api/parse-response(resp(200, {ok: true, result: []})))
+}
+
+test-parse-response-4xx-envelope-is-telegram-error
+meta ["test"]
+fn () {
+    out ::api/parse-response(resp(400, {ok: false, error_code: 400, description: "Bad Request: chat not found"}))
+    assert(is-err(out), "ok:false is an Err")
+    e if-err(out, (x) { x })
+    assert-eq(400, e.error_code)
+    assert-eq(400, e.status)
+    assert-eq("Bad Request: chat not found", e.description)
+    assert(is-null(e.retry_after), "no retry_after without flood control")
+}
+
+test-parse-response-429-carries-retry-after
+meta ["test"]
+fn () {
+    out ::api/parse-response(resp(429, {ok: false, error_code: 429, description: "Too Many Requests: retry after 7", parameters: {retry_after: 7}}))
+    e if-err(out, (x) { x })
+    assert-eq(429, e.error_code)
+    assert-eq(7, e.retry_after)
+    assert-eq({retry_after: 7}, e.parameters)
+}
+
+test-parse-response-migrated-group
+meta ["test"]
+fn () {
+    out ::api/parse-response(resp(400, {ok: false, error_code: 400, description: "Bad Request: group chat was upgraded to a supergroup chat", parameters: {migrate_to_chat_id: -1001234567890}}))
+    e if-err(out, (x) { x })
+    assert-eq(-1001234567890, e.migrate_to_chat_id)
+}
+
+test-parse-response-403-blocked
+meta ["test"]
+fn () {
+    out ::api/parse-response(resp(403, {ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user"}))
+    e if-err(out, (x) { x })
+    assert-eq(403, e.error_code)
+    assert(not(e.ok))
+}
+
+test-parse-response-non-envelope-is-http-error
+meta ["test"]
+fn () {
+    out ::api/parse-response(HttpResponse({status: 502, headers: {content-type: "text/html"}, body: "<html>Bad Gateway</html>"}))
+    assert(is-err(out), "proxy error is an Err")
+    e if-err(out, (x) { x })
+    assert-eq(502, e.status)
+    assert-eq("<html>Bad Gateway</html>", e.body)
+}
+
+// ============================================================================
+// Body building
+// ============================================================================
+
+test-clean-body-drops-unset-and-null-fields
+meta ["test"]
+fn () {
+    body ::api/clean-body(::messages/SendMessageRequest({chat_id: 123, text: "hi", reply_parameters: null}))
+    assert-eq({chat_id: 123, text: "hi"}, body)
+}
+
+test-clean-body-keeps-set-optionals
+meta ["test"]
+fn () {
+    body ::api/clean-body(::messages/SendMessageRequest({
+        chat_id: "@channel", text: "<b>x</b>", parse_mode: "HTML",
+        reply_markup: {inline_keyboard: [[{text: "A", callback_data: "a"}]]}
+    }))
+    assert-eq(["chat_id", "text", "parse_mode", "reply_markup"], keys(body))
+    assert-eq("a", body.reply_markup.inline_keyboard[0][0].callback_data)
+}
+
+test-method-url
+meta ["test"]
+fn () {
+    assert-eq("https://api.telegram.org/bot123:ABC/sendMessage", ::api/method-url("sendMessage", "123:ABC"))
+}
+
+test-file-url-encodes-path-segments
+meta ["test"]
+fn () {
+    assert-eq("https://api.telegram.org/file/bot123:ABC/photos/file%201.jpg", ::api/file-url("photos/file 1.jpg", "123:ABC"))
+}
+
+// ============================================================================
+// Uploads
+// ============================================================================
+
+PNG Bytes([137, 80, 78, 71, 0, 255, 10, 13])
+
+test-string-photo-stays-json
+meta ["test"]
+fn () {
+    body ::api/clean-body(::messages/SendPhotoRequest({chat_id: 1, photo: "https://example.com/a.jpg"}))
+    upload ::api/prepare-upload(body)
+    assert(is-empty(upload.files), "a URL is not an upload")
+    assert-eq("https://example.com/a.jpg", upload.fields.photo)
+}
+
+test-input-file-photo-becomes-file-part
+meta ["test"]
+fn () {
+    body ::api/clean-body(::messages/SendPhotoRequest({
+        chat_id: 1, caption: "chart", photo: ::api/input-file(PNG, "chart.png", "image/png")
+    }))
+    upload ::api/prepare-upload(body)
+    assert-eq({chat_id: 1, caption: "chart"}, upload.fields)
+    assert-eq(1, length(upload.files))
+    assert-eq("photo", first(upload.files).name)
+    assert-eq("chart.png", first(upload.files).file.filename)
+}
+
+test-media-group-uses-attach-references
+meta ["test"]
+fn () {
+    body ::api/clean-body(::messages/SendMediaGroupRequest({
+        chat_id: 1,
+        media: [
+            {type: "photo", media: "https://example.com/a.jpg"},
+            {type: "document", media: ::api/input-file(PNG, "b.png"), thumbnail: ::api/input-file(PNG, "t.png")}
+        ]
+    }))
+    upload ::api/prepare-upload(body)
+    assert-eq("https://example.com/a.jpg", upload.fields.media[0].media)
+    assert-eq("attach://media1_media", upload.fields.media[1].media)
+    assert-eq("attach://media1_thumbnail", upload.fields.media[1].thumbnail)
+    assert-eq(["media1_media", "media1_thumbnail"], map(upload.files, (f) { f.name }))
+}
+
+test-edit-message-media-single-object
+meta ["test"]
+fn () {
+    upload ::api/prepare-upload(::api/clean-body(::messages/EditMessageMediaRequest({
+        chat_id: 1, message_id: 2, media: {type: "photo", media: ::api/input-file(PNG, "new.png")}
+    })))
+    assert-eq("attach://media_media", upload.fields.media.media)
+    assert-eq("media_media", first(upload.files).name)
+}
+
+test-multipart-body-is-byte-exact
+meta ["test"]
+fn () {
+    upload {
+        fields: {chat_id: 7, reply_markup: {inline_keyboard: []}},
+        files: [{name: "photo", file: ::api/input-file(PNG, "a\"b.png", "image/png")}]
+    }
+
+    expected concat(
+        Bytes("--B\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n7\r\n"),
+        Bytes("--B\r\nContent-Disposition: form-data; name=\"reply_markup\"\r\n\r\n{\"inline_keyboard\":[]}\r\n"),
+        Bytes("--B\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"a%22b.png\"\r\nContent-Type: image/png\r\n\r\n"),
+        PNG,
+        Bytes("\r\n--B--\r\n")
+    )
+    assert-eq(expected, ::api/multipart-body(upload, "B"))
+}
+
+test-multipart-default-content-type
+meta ["test"]
+fn () {
+    upload {fields: {}, files: [{name: "document", file: ::api/input-file(PNG, "x.bin")}]}
+    body ::api/multipart-body(upload, "B")
+    head Bytes("--B\r\nContent-Disposition: form-data; name=\"document\"; filename=\"x.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n")
+    assert-eq(head, slice(body, 0, length(head)))
+}
+
+test-is-input-file
+meta ["test"]
+fn () {
+    assert(::api/is-input-file(::api/input-file(PNG, "a.png")))
+    assert(::api/is-input-file(untype(::api/input-file(PNG, "a.png"))), "untyped form too")
+    assert(not(::api/is-input-file("file_id_123")))
+    assert(not(::api/is-input-file({content: "text"})), "content must be Bytes")
+}

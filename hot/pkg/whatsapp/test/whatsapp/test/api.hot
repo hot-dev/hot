@@ -1,0 +1,50 @@
+::whatsapp::test::api ns
+meta ["test"]
+
+::api ::whatsapp::api
+::core ::whatsapp::core
+
+test-default-version-url
+meta ["test"] fn () {
+    // The integration ctx may set whatsapp.api.version; unit runs use the default.
+    assert-eq(`https://graph.facebook.com/${::core/api-version()}/123/messages`, ::api/url("123/messages"))
+    assert(starts-with(::core/DEFAULT_API_VERSION, "v"))
+}
+
+test-normalize-version
+meta ["test"] fn () {
+    assert-eq("v25.0", ::core/normalize-version("25.0"))
+    assert-eq("v25.0", ::core/normalize-version(" v25.0 "))
+}
+
+test-segment-encodes
+meta ["test"] fn () {
+    assert-eq("a%2Fb%3Fc", ::api/segment("a/b?c"))
+    assert-eq("123", ::api/segment(123))
+}
+
+test-handle-response-ok
+meta ["test"] fn () {
+    out ::api/handle-response(::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "1"}}))
+    assert-eq({id: "1"}, out)
+}
+
+test-handle-response-error-is-http-error
+meta ["test"] fn () {
+    body {error: {message: "(#100) Invalid parameter", type: "OAuthException", code: 100, fbtrace_id: "Ab"}}
+    out ::api/handle-response(::hot::http/HttpResponse({status: 400, headers: {}, body: body}))
+    assert(is-err(out), "non-2xx is an Err")
+    e if-err(out, (x) { x })
+    assert-eq(400, e.status)
+    assert-eq(100, e.body.error.code)
+    assert-eq("(#100) Invalid parameter", ::api/error-message(e))
+}
+
+test-handle-response-non-map-body
+meta ["test"] fn () {
+    // An HTML or plain-text error page must not crash the unwrapping.
+    out ::api/handle-response(::hot::http/HttpResponse({status: 502, headers: {}, body: "Bad Gateway"}))
+    assert(is-err(out))
+    e if-err(out, (x) { x })
+    assert-eq("Bad Gateway", ::api/error-message(e))
+}

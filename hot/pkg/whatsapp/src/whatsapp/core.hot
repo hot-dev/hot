@@ -1,3 +1,42 @@
 ::whatsapp::core ns
+meta {
+    doc: """Shared configuration: the Graph API host and version. Calls go to `https://graph.facebook.com/{version}`, where the version is the `whatsapp.api.version` context variable when set, otherwise `DEFAULT_API_VERSION`."""
+}
 
-BASE_URL "https://graph.facebook.com/v21.0"
+GRAPH_HOST "https://graph.facebook.com"
+
+// Meta's latest Graph API version as of Nov 2026 (released 2026-07-29).
+// Each version is supported for about two years; override per project
+// with the `whatsapp.api.version` context variable.
+DEFAULT_API_VERSION "v26.0"
+
+normalize-version
+meta {
+    doc: """Normalize a Graph API version string to the `vNN.N` path form (`"26.0"` and `"v26.0"` both give `"v26.0"`). Exposed for testing."""
+}
+fn (version: Str): Str {
+  trimmed trim(version)
+  if(starts-with(trimmed, "v"), trimmed, `v${trimmed}`)
+}
+
+api-version
+meta {
+    ctx: {"whatsapp.api.version": {required: false}},
+    doc: """
+    The Graph API version used for every call: the `whatsapp.api.version`
+    context variable when set (e.g. `"v25.0"`), otherwise
+    `DEFAULT_API_VERSION`.
+    """
+}
+fn (): Str {
+  configured or(::hot::ctx/get("whatsapp.api.version"), "")
+  if(is-blank(configured), DEFAULT_API_VERSION, normalize-version(configured))
+}
+
+base-url
+meta {
+    doc: """The versioned Graph API base URL, e.g. `https://graph.facebook.com/v26.0`."""
+}
+fn (): Str {
+  `${GRAPH_HOST}/${api-version()}`
+}

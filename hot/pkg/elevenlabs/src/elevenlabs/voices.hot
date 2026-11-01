@@ -1,51 +1,71 @@
 ::elevenlabs::voices ns
+meta {
+    doc: """ElevenLabs voices: list and search the voices on your account, and read one voice's metadata and settings."""
+}
 
-api-request ::elevenlabs::api/request
-HttpError ::elevenlabs::api/HttpError
-is-ok-response ::hot::http/is-ok-response
+::api ::elevenlabs::api
 
 list-voices
 meta {
+    ctx: {"elevenlabs.api.key": {required: true}},
     doc: """
-    GET /v2/voices - List the voices available to your account (premade
-    and cloned). Returns `{voices: [...], has_more, total_count}`.
+    GET /v2/voices: the voices available to your account (premade,
+    cloned, generated, and saved library voices). Returns `{voices,
+    has_more, total_count, next_page_token}`. `options` are query
+    params: `page_size` (default 10, max 100), `next_page_token`,
+    `search`, `sort` ("created_at_unix" or "name"), `sort_direction`,
+    `voice_type` ("personal", "community", "default", ...),
+    `category` ("premade", "cloned", "generated", "professional"),
+    `voice_ids` (Vec).
 
     **Example**
 
     ```hot
-    page ::elevenlabs::voices/list-voices()
+    page ::elevenlabs::voices/list-voices({page_size: 50})
     map(page.voices, (v) { {id: v.voice_id, name: v.name} })
     ```
     """
 }
-fn (): Map {
-  response api-request("GET", "/v2/voices")
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(): Map {
+  list-voices({})
+},
+(options: Map): Map {
+  ::api/json("GET", `/v2/voices${::api/query-string(options)}`)
 }
 
 search-voices
 meta {
-    doc: """GET /v2/voices?search= - Search your voices by name, description, or labels."""
+    ctx: {"elevenlabs.api.key": {required: true}},
+    doc: """GET /v2/voices?search=: search your voices by name, description, labels, or category."""
 }
 fn (search: Str): Map {
-  response api-request("GET", `/v2/voices?search=${::hot::uri/encode(search)}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  list-voices({search: search})
 }
 
 get-voice
 meta {
-    doc: """GET /v1/voices/{voice_id} - Retrieve one voice's metadata and settings."""
+    ctx: {"elevenlabs.api.key": {required: true}},
+    doc: """GET /v1/voices/{voice_id}: one voice's metadata, labels, preview URL, and settings."""
 }
 fn (voice-id: Str): Map {
-  response api-request("GET", `/v1/voices/${voice-id}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/json("GET", `/v1/voices/${::api/path-segment(voice-id)}`)
+}
+
+get-voice-settings
+meta {
+    ctx: {"elevenlabs.api.key": {required: true}},
+    doc: """GET /v1/voices/{voice_id}/settings: the voice's saved settings (`stability`, `similarity_boost`, `style`, `use_speaker_boost`, `speed`)."""
+}
+fn (voice-id: Str): Map {
+  ::api/json("GET", `/v1/voices/${::api/path-segment(voice-id)}/settings`)
 }
 
 get-default-voice-settings
 meta {
-    doc: """GET /v1/voices/settings/default - The default voice settings (stability, similarity_boost, ...) as a starting point for tuning."""
+    ctx: {"elevenlabs.api.key": {required: true}},
+    doc: """GET /v1/voices/settings/default: the default voice settings, a starting point for tuning."""
 }
 fn (): Map {
-  response api-request("GET", "/v1/voices/settings/default")
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/json("GET", "/v1/voices/settings/default")
 }

@@ -1,0 +1,307 @@
+::zendesk::tickets ns
+meta {
+    ctx: {"zendesk.subdomain": {required: true, secret: false}},
+    doc: """
+    Tickets: create, read, update, comment, merge and tag; list with
+    cursor pagination; ticket fields; satisfaction ratings; and the
+    cursor-based incremental ticket export for syncing changes.
+    """
+}
+
+::api ::zendesk::api
+
+// ---------------------------------------------------------------------------
+// Tickets
+// ---------------------------------------------------------------------------
+
+list-tickets
+meta {
+    doc: """
+    GET /tickets - One cursor page of tickets: `{tickets, meta:
+    {has_more, after_cursor}, links}`. `options`: `page_size` (max 100),
+    `after` (the previous page's cursor, via
+    `::zendesk::api/next-after`), `sort` (`id`, `updated_at`,
+    `created_at`, `status`, ...; prefix `-` for descending),
+    `external_id`. Use `list-all-tickets` to collect several pages.
+    """
+}
+fn
+(): Any {
+  list-tickets({})
+},
+(options: Map): Any {
+  ::api/list-page("/tickets", options)
+}
+
+list-all-tickets
+meta {
+    doc: """Collect up to `limit` tickets across cursor pages. Returns a Vec. For syncing every ticket that changed, prefer `export-tickets`."""
+}
+fn
+(limit: Int): Vec {
+  list-all-tickets(limit, {})
+},
+(limit: Int, options: Map): Vec {
+  ::api/collect("/tickets", "tickets", options, limit)
+}
+
+get-ticket
+meta {
+    doc: """GET /tickets/{id} - One ticket: `{ticket}`."""
+}
+fn (id: Any): Any {
+  ::api/request("GET", `/tickets/${::api/path-segment(id)}`, "")
+}
+
+show-many-tickets
+meta {
+    doc: """GET /tickets/show_many?ids= - Up to 100 tickets by id in one call: `{tickets}`."""
+}
+fn (ids: Vec): Any {
+  ::api/request("GET", `/tickets/show_many${::api/query-string({ids: ids})}`, "")
+}
+
+build-create-body
+meta {
+    doc: """Build the create body `{ticket: {subject, comment: {body}, ...options}}`. Unset options are omitted. Exposed for testing."""
+}
+fn (subject: Str, body: Str, options: Map): Map {
+  {ticket: ::api/compact({...options, subject: subject, comment: {body: body}})}
+}
+
+create-ticket
+meta {
+    doc: """
+    POST /tickets - Open a ticket. `options`: `priority`
+    ("low"/"normal"/"high"/"urgent"), `type`
+    ("problem"/"incident"/"question"/"task"), `status`, `tags` (Vec),
+    `requester` (`{name, email}`) or `requester_id`, `assignee_id`,
+    `group_id`, `organization_id`, `custom_fields` (`[{id, value}]`),
+    `external_id`. Returns `{ticket, audit}`.
+    """
+}
+fn
+(subject: Str, body: Str): Any {
+  create-ticket(subject, body, {})
+},
+(subject: Str, body: Str, options: Map): Any {
+  ::api/request("POST", "/tickets", build-create-body(subject, body, options))
+}
+
+update-ticket
+meta {
+    doc: """PUT /tickets/{id} - Update ticket fields (`status`, `priority`, `assignee_id`, `group_id`, `tags` (replaces), `custom_fields`, `comment`, ...). Unset fields are omitted. Add `safe_update: true` and `updated_stamp` to fail with 409 on a concurrent change."""
+}
+fn (id: Any, changes: Map): Any {
+  ::api/request("PUT", `/tickets/${::api/path-segment(id)}`, {ticket: ::api/compact(changes)})
+}
+
+delete-ticket
+meta {
+    doc: """DELETE /tickets/{id} - Move a ticket to Deleted tickets (recoverable for 30 days). Returns null."""
+}
+fn (id: Any): Any {
+  ::api/request("DELETE", `/tickets/${::api/path-segment(id)}`, "")
+}
+
+// ---------------------------------------------------------------------------
+// Comments
+// ---------------------------------------------------------------------------
+
+build-comment-body
+meta {
+    doc: """Comment update body `{ticket: {comment: {body, public, ...options}}}`. `options`: `author_id`, `html_body` (sent instead of the plain body when set), `uploads` (attachment tokens). Exposed for testing."""
+}
+fn (body: Str, public: Bool, options: Map): Map {
+  text if(is-some(get(options, "html_body")), null, body)
+  {ticket: {comment: ::api/compact({...options, body: text, public: public})}}
+}
+
+add-comment
+meta {
+    doc: """PUT /tickets/{id} with a comment - Add a public reply (`public: true`) or internal note (`public: false`). `options`: `author_id`, `html_body`, `uploads`; plus ticket changes to apply in the same update via `update-ticket`."""
+}
+fn
+(id: Any, body: Str, public: Bool): Any {
+  add-comment(id, body, public, {})
+},
+(id: Any, body: Str, public: Bool, options: Map): Any {
+  ::api/request("PUT", `/tickets/${::api/path-segment(id)}`, build-comment-body(body, public, options))
+}
+
+list-comments
+meta {
+    doc: """GET /tickets/{id}/comments - One cursor page of a ticket's comments, oldest first: `{comments, meta, links}`. `options`: `page_size` (max 100), `after`, `sort` ("created_at" or "-created_at"), `include` ("users"), `include_inline_images`."""
+}
+fn
+(id: Any): Any {
+  list-comments(id, {})
+},
+(id: Any, options: Map): Any {
+  ::api/list-page(`/tickets/${::api/path-segment(id)}/comments`, options)
+}
+
+list-all-comments
+meta {
+    doc: """Collect a ticket's whole conversation (up to `limit` comments) across cursor pages. Returns a Vec."""
+}
+fn
+(id: Any, limit: Int): Vec {
+  list-all-comments(id, limit, {})
+},
+(id: Any, limit: Int, options: Map): Vec {
+  ::api/collect(`/tickets/${::api/path-segment(id)}/comments`, "comments", options, limit)
+}
+
+// ---------------------------------------------------------------------------
+// Merge and tags
+// ---------------------------------------------------------------------------
+
+build-merge-body
+meta {
+    doc: """Merge body: `ids` (source tickets) plus `options` (`target_comment`, `source_comment`, `target_comment_is_public`, `source_comment_is_public`). Unset options are omitted. Exposed for testing."""
+}
+fn (source-ids: Vec, options: Map): Map {
+  ::api/compact({...options, ids: source-ids})
+}
+
+merge-tickets
+meta {
+    doc: """
+    POST /tickets/{id}/merge - Merge `source-ids` into the target
+    ticket. The work runs as a background job: returns `{job_status}`;
+    poll `GET /job_statuses/{id}` with `::zendesk::api/request`.
+    Zendesk recommends a private comment on both sides.
+
+    **Example**
+
+    ```hot
+    ::zendesk::tickets/merge-tickets(111, [123, 456], {
+      target_comment: "Combining duplicates #123 and #456",
+      source_comment: "Closing in favor of #111"
+    })
+    ```
+    """
+}
+fn
+(target-id: Any, source-ids: Vec): Any {
+  merge-tickets(target-id, source-ids, {})
+},
+(target-id: Any, source-ids: Vec, options: Map): Any {
+  ::api/request("POST", `/tickets/${::api/path-segment(target-id)}/merge`, build-merge-body(source-ids, options))
+}
+
+list-ticket-tags
+meta {
+    doc: """GET /tickets/{id}/tags - A ticket's tags: `{tags}`."""
+}
+fn (id: Any): Any {
+  ::api/request("GET", `/tickets/${::api/path-segment(id)}/tags`, "")
+}
+
+add-ticket-tags
+meta {
+    doc: """PUT /tickets/{id}/tags - Add tags, keeping existing ones. Returns the ticket's tags."""
+}
+fn (id: Any, tags: Vec): Any {
+  ::api/request("PUT", `/tickets/${::api/path-segment(id)}/tags`, {tags: tags})
+}
+
+set-ticket-tags
+meta {
+    doc: """POST /tickets/{id}/tags - Replace all of a ticket's tags."""
+}
+fn (id: Any, tags: Vec): Any {
+  ::api/request("POST", `/tickets/${::api/path-segment(id)}/tags`, {tags: tags})
+}
+
+remove-ticket-tags
+meta {
+    doc: """DELETE /tickets/{id}/tags - Remove the given tags from a ticket."""
+}
+fn (id: Any, tags: Vec): Any {
+  ::api/request("DELETE", `/tickets/${::api/path-segment(id)}/tags`, {tags: tags})
+}
+
+list-tags
+meta {
+    doc: """GET /tags - The account's most used tags with counts: one cursor page `{tags, meta, links}`. `options`: `page_size`, `after`."""
+}
+fn
+(): Any {
+  list-tags({})
+},
+(options: Map): Any {
+  ::api/list-page("/tags", options)
+}
+
+// ---------------------------------------------------------------------------
+// Ticket fields and satisfaction ratings
+// ---------------------------------------------------------------------------
+
+list-ticket-fields
+meta {
+    doc: """GET /ticket_fields - System and custom ticket fields (`{ticket_fields}`), with the `id`s that `custom_fields` entries use and, for dropdowns, `custom_field_options`. `options`: `locale`, `creator`."""
+}
+fn
+(): Any {
+  list-ticket-fields({})
+},
+(options: Map): Any {
+  ::api/request("GET", `/ticket_fields${::api/query-string(options)}`, "")
+}
+
+list-satisfaction-ratings
+meta {
+    doc: """GET /satisfaction_ratings - One cursor page of CSAT ratings (admins only): `{satisfaction_ratings, meta, links}`. `options`: `score` ("good", "bad", "received", "bad_with_comment", ...), `start_time`/`end_time` (Unix seconds), `page_size`, `after`."""
+}
+fn
+(): Any {
+  list-satisfaction-ratings({})
+},
+(options: Map): Any {
+  ::api/list-page("/satisfaction_ratings", options)
+}
+
+// ---------------------------------------------------------------------------
+// Incremental export (cursor-based)
+// ---------------------------------------------------------------------------
+
+export-tickets
+meta {
+    doc: """
+    GET /incremental/tickets/cursor?start_time= - Start a cursor-based
+    incremental export of every ticket changed since `start-time` (Unix
+    seconds, at least a minute in the past). Returns `{tickets,
+    after_cursor, end_of_stream}`; continue with `export-tickets-next`
+    until `end_of_stream` is true, then keep the last `after_cursor` for
+    the next sync. Admins only; rate-limited to 10 requests a minute.
+    `options`: `include` (e.g. "users,groups"), `exclude_deleted`.
+
+    **Example**
+
+    ```hot
+    batch ::zendesk::tickets/export-tickets(sub(::hot::time/epoch-seconds(), 86400))
+    next ::zendesk::tickets/export-tickets-next(batch.after_cursor)
+    ```
+    """
+}
+fn
+(start-time: Int): Any {
+  export-tickets(start-time, {})
+},
+(start-time: Int, options: Map): Any {
+  ::api/request("GET", `/incremental/tickets/cursor${::api/query-string({...options, start_time: start-time})}`, "")
+}
+
+export-tickets-next
+meta {
+    doc: """GET /incremental/tickets/cursor?cursor= - The next batch of an incremental ticket export, from the previous batch's `after_cursor`."""
+}
+fn
+(cursor: Str): Any {
+  export-tickets-next(cursor, {})
+},
+(cursor: Str, options: Map): Any {
+  ::api/request("GET", `/incremental/tickets/cursor${::api/query-string({...options, cursor: cursor})}`, "")
+}

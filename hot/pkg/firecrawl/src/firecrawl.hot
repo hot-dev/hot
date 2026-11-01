@@ -1,64 +1,62 @@
 ::firecrawl ns
 meta {
     doc: """
-    Firecrawl bindings — turn any website into clean, LLM-ready content.
+    Firecrawl v2 bindings: turn websites into clean, LLM-ready content.
     Completes the browsing loop with `web-search`: search finds URLs,
-    Firecrawl reads them (single pages, whole sites, or structured
-    extraction).
+    Firecrawl reads them as single pages, batches, whole sites, or
+    structured extraction.
 
-    **Setup** — context variable `firecrawl.api.key` (`fc-...`).
+    **Setup**: context variable `firecrawl.api.key` (`fc-...`).
 
     **Quick start**
 
     ```hot
     ::fc ::firecrawl
 
-    page ::fc/scrape("https://hot.dev/docs", {formats: ["markdown"]})
+    page ::fc/scrape("https://example.com", {formats: ["markdown"]})
     page.markdown
 
-    site ::fc/crawl("https://hot.dev/docs", {limit: 50})
-    status ::fc/get-crawl(site.id)   // poll until status == "completed"
+    job ::fc/crawl("https://docs.firecrawl.dev", {limit: 10})
+    // later (a webhook, a schedule, or the next run):
+    site ::fc/get-crawl-all(job.id)
+    if(::fc/is-done(site), map(site.data, (doc) { doc.metadata.sourceURL }), [])
     ```
+
+    Crawls, batch scrapes, and extractions are async jobs: the start
+    function returns `{id}`, `get-*` reads the current status, and
+    `is-done` says whether it has finished. Learn that a job finished
+    from a `webhook` (verify it with `::firecrawl::webhooks`) or by
+    calling `get-*` from a later run or a schedule; nothing here
+    blocks waiting for a job.
+    Non-2xx responses are an Err carrying `::firecrawl::api/HttpError`.
     """
 }
 
-::ctx ::hot::ctx
+::api ::firecrawl::api
 
 BASE_URL "https://api.firecrawl.dev/v2"
 
-request fn
-(method: Str, path: Str, body: Any): Any {
-  request(method, path, body, ::ctx/get("firecrawl.api.key"))
-},
-// 4-arity: explicit API key override
-(method: Str, path: Str, body: Any, api-key: Str): Any {
-  headers cond {
-    eq(body, "") => { {Authorization: `Bearer ${api-key}`} }
-    => { {Authorization: `Bearer ${api-key}`, Content-Type: "application/json"} }
-  }
-
-  encoded if(eq(body, ""), "", to-json(untype(body)))
-  response ::hot::http/request(::hot::http/HttpRequest({
-    method,
-    url: `${BASE_URL}${path}`,
-    headers: headers,
-    body: encoded
-  }))
-  cond {
-    is-err(response) => { response }
-    ::hot::http/is-ok-response(response) => { response.body }
-    => { err({status: response.status, body: response.body}) }
-  }
-}
+// =============================================================================
+// Scrape, map, search
+// =============================================================================
 
 scrape
 meta {
     ctx: {"firecrawl.api.key": {required: true}},
     doc: """
-    POST /scrape - Fetch one URL as clean content. `options`: `formats`
-    (Vec of "markdown"/"html"/"links"/"screenshot", default markdown),
-    `onlyMainContent` (default true), `waitFor` (ms for JS-heavy pages).
-    Returns the data object (`markdown`, `metadata`, ...).
+    POST /scrape - Fetch one URL as clean content. `options` (camelCase,
+    as Firecrawl documents them) include `formats` (e.g. `["markdown",
+    "links"]`, or format objects like `{type: "json", prompt: "..."}`),
+    `onlyMainContent` (default true), `waitFor` (ms), `timeout` (ms),
+    `maxAge` (ms of cache to accept), `actions`, `location`, `proxy`.
+    Returns the document (`markdown`, `metadata`, ...).
+
+    **Example**
+
+    ```hot
+    page ::firecrawl/scrape("https://example.com", {formats: ["markdown", "links"]})
+    page.metadata.title
+    ```
     """
 }
 fn
@@ -66,62 +64,286 @@ fn
   scrape(url, {})
 },
 (url: Str, options: Map): Map {
-  out request("POST", "/scrape", {url: url, ...options})
-  match out {
-    Result.Err => { err(out) }
-
-    _ => { out.data }
-  }
+  ::api/request("POST", "/scrape", ::api/body-with({url: url}, options))
+    |> if-ok((body) { body.data })
 }
 
 map-site
 meta {
     ctx: {"firecrawl.api.key": {required: true}},
-    doc: """POST /map - Discover a site's URLs fast (sitemap + crawl heuristics). Returns `{links: [...]}` — feed the interesting ones to `scrape`."""
+    doc: """
+    POST /map - Discover a site's URLs fast (sitemap plus link
+    discovery). `options`: `search` (rank links by relevance to a
+    query), `limit` (default 5000), `sitemap` ("include"/"skip"/"only"),
+    `includeSubdomains`, `ignoreQueryParameters`. Returns `{links:
+    [{url, title?, description?}]}`; feed the interesting ones to
+    `scrape` or `batch-scrape`.
+    """
 }
-fn (url: Str): Map {
-  request("POST", "/map", {url: url})
+fn
+(url: Str): Map {
+  map-site(url, {})
+},
+(url: Str, options: Map): Map {
+  ::api/request("POST", "/map", ::api/body-with({url: url}, options))
 }
+
+search
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """
+    POST /search - Web search, optionally scraping each hit. `options`:
+    `limit` (1-100, default 10), `sources` (e.g. `["web", "news"]`),
+    `tbs` (time filter, e.g. `"qdr:w"`), `location`, `country`,
+    `includeDomains`/`excludeDomains`, `scrapeOptions` (e.g.
+    `{formats: ["markdown"]}` to get page content with each hit).
+    Returns the data map: `{web: [{title, url, description, markdown?}],
+    news?, images?}`.
+
+    **Example**
+
+    ```hot
+    hits ::firecrawl/search("firecrawl changelog", {limit: 3, scrapeOptions: {formats: ["markdown"]}})
+    map(hits.web, (hit) { hit.url })
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  search(query, {})
+},
+(query: Str, options: Map): Map {
+  ::api/request("POST", "/search", ::api/body-with({query: query}, options))
+    |> if-ok((body) { body.data })
+}
+
+// =============================================================================
+// Crawl
+// =============================================================================
 
 crawl
 meta {
     ctx: {"firecrawl.api.key": {required: true}},
-    doc: """POST /crawl - Start crawling a site. `options`: `limit` (page cap), `includePaths`/`excludePaths`, `scrapeOptions` (per-page scrape options). Returns `{id}` — poll with `get-crawl`."""
+    doc: """
+    POST /crawl - Start crawling a site. `options`: `limit` (page cap,
+    default 10000; always set one), `includePaths`/`excludePaths`
+    (regexes), `maxDiscoveryDepth`, `sitemap`, `crawlEntireDomain`,
+    `allowSubdomains`, `scrapeOptions` (per-page scrape options),
+    `webhook` (`{url, events?, metadata?}`; verify deliveries with
+    `::firecrawl::webhooks/verify-request`). Returns `{id, url}`; check on
+    it later with `get-crawl` / `get-crawl-all` and `is-done`.
+    """
 }
 fn
 (url: Str): Map {
   crawl(url, {})
 },
 (url: Str, options: Map): Map {
-  request("POST", "/crawl", {url: url, ...options})
+  ::api/request("POST", "/crawl", ::api/body-with({url: url}, options))
 }
 
 get-crawl
 meta {
     ctx: {"firecrawl.api.key": {required: true}},
-    doc: """GET /crawl/{id} - Crawl status and results: `{status, completed, total, data: [pages...]}`."""
+    doc: """
+    GET /crawl/{id} - One status page: `{status, total, completed,
+    creditsUsed, expiresAt, next?, data: [documents]}`. `status` is
+    "scraping", "completed", "failed", or "cancelled". Results arrive in
+    pages of about 10MB; `next` is set while more remain. Use
+    `get-crawl-all` to follow every page.
+    """
 }
 fn (id: Str): Map {
-  request("GET", `/crawl/${id}`, "")
+  ::api/request("GET", ::api/job-path("crawl", id), "")
 }
+
+get-crawl-all
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """GET /crawl/{id}, following `next` - The current status with `data` holding the documents from every page fetched so far. While the crawl is still running, `next` stays set when the cursor has caught up with the crawler."""
+}
+fn (id: Str): Map {
+  first-page get-crawl(id)
+  if-ok(first-page, (page) { ::api/collect-pages(page, (path) { ::api/request("GET", path, "") }) })
+}
+
+cancel-crawl
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """DELETE /crawl/{id} - Cancel a running crawl. Returns `{status: "cancelled"}`."""
+}
+fn (id: Str): Map {
+  ::api/request("DELETE", ::api/job-path("crawl", id), "")
+}
+
+get-crawl-errors
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """GET /crawl/{id}/errors - Pages that failed (`errors: [{id, timestamp, url, error}]`) and URLs blocked by robots.txt (`robotsBlocked`)."""
+}
+fn (id: Str): Map {
+  ::api/request("GET", ::api/job-path("crawl", id, "/errors"), "")
+}
+
+list-active-crawls
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """GET /crawl/active - The team's running crawls: `{crawls: [{id, teamId, url, options}]}`."""
+}
+fn (): Map {
+  ::api/request("GET", "/crawl/active", "")
+}
+
+// =============================================================================
+// Batch scrape
+// =============================================================================
+
+batch-scrape
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """
+    POST /batch/scrape - Start scraping many URLs at once. `options`
+    take the same scrape options as `scrape` at the top level
+    (`formats`, `onlyMainContent`, ...), plus `maxConcurrency`,
+    `ignoreInvalidURLs` (default true), and `webhook`. Returns `{id,
+    url, invalidURLs?}`; check on it later with `get-batch-scrape-all`
+    and `is-done`.
+
+    **Example**
+
+    ```hot
+    job ::firecrawl/batch-scrape(["https://example.com", "https://firecrawl.dev"], {formats: ["markdown"]})
+    // in a later run, with job.id saved:
+    pages ::firecrawl/get-batch-scrape-all(job.id)
+    if(::firecrawl/is-done(pages), map(pages.data, (doc) { doc.metadata.title }), [])
+    ```
+    """
+}
+fn
+(urls: Vec): Map {
+  batch-scrape(urls, {})
+},
+(urls: Vec, options: Map): Map {
+  ::api/request("POST", "/batch/scrape", ::api/body-with({urls: urls}, options))
+}
+
+get-batch-scrape
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """GET /batch/scrape/{id} - One status page, shaped like `get-crawl`: `{status, total, completed, creditsUsed, next?, data}`."""
+}
+fn (id: Str): Map {
+  ::api/request("GET", ::api/job-path("batch/scrape", id), "")
+}
+
+get-batch-scrape-all
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """GET /batch/scrape/{id}, following `next` - The current status with `data` from every page fetched so far."""
+}
+fn (id: Str): Map {
+  first-page get-batch-scrape(id)
+  if-ok(first-page, (page) { ::api/collect-pages(page, (path) { ::api/request("GET", path, "") }) })
+}
+
+cancel-batch-scrape
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """DELETE /batch/scrape/{id} - Cancel a running batch scrape. Returns `{status: "cancelled"}`."""
+}
+fn (id: Str): Map {
+  ::api/request("DELETE", ::api/job-path("batch/scrape", id), "")
+}
+
+get-batch-scrape-errors
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """GET /batch/scrape/{id}/errors - Failed URLs (`errors: [{id, timestamp, url, error}]`) and `robotsBlocked`."""
+}
+fn (id: Str): Map {
+  ::api/request("GET", ::api/job-path("batch/scrape", id, "/errors"), "")
+}
+
+// =============================================================================
+// Extract
+// =============================================================================
 
 extract
 meta {
     ctx: {"firecrawl.api.key": {required: true}},
     doc: """
-    POST /extract - LLM-structured extraction across URLs. Provide a
-    `prompt` and/or JSON `schema`; wildcard URLs (`https://site.com/*`)
-    extract from a whole site.
+    POST /extract - Start an LLM-structured extraction across URLs.
+    Provide a `prompt` and/or a JSON `schema`; wildcard URLs
+    (`https://site.com/*`) extract from a whole site. Other `options`:
+    `enableWebSearch`, `showSources`, `scrapeOptions`. Returns `{id,
+    invalidURLs?}`: extraction is async, so read the result later
+    with `get-extract` once `is-done`.
 
     **Example**
 
     ```hot
-    out ::firecrawl/extract(["https://hot.dev/pricing"], {
-      prompt: "Extract the plan names and monthly prices"
+    job ::firecrawl/extract(["https://firecrawl.dev/pricing"], {
+      prompt: "List the plan names and their monthly prices"
     })
+    // in a later run, with job.id saved:
+    out ::firecrawl/get-extract(job.id)
+    if(::firecrawl/is-done(out), out.data, null)
     ```
     """
 }
 fn (urls: Vec, options: Map): Map {
-  request("POST", "/extract", {urls: urls, ...options})
+  ::api/request("POST", "/extract", ::api/body-with({urls: urls}, options))
+}
+
+get-extract
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """GET /extract/{id} - Extraction status: `{status, data, expiresAt, tokensUsed?}`; `status` is "processing", "completed", "failed", or "cancelled"."""
+}
+fn (id: Str): Map {
+  ::api/request("GET", ::api/job-path("extract", id), "")
+}
+
+// =============================================================================
+// Job status
+// =============================================================================
+
+is-done
+meta {
+    doc: """
+    True when a job status from `get-crawl`, `get-crawl-all`,
+    `get-batch-scrape`, `get-batch-scrape-all`, or `get-extract` will
+    not change again: `status` is "completed", "failed", or
+    "cancelled". Check `status` itself to tell success from failure.
+
+    **Example**
+
+    ```hot
+    // On a schedule: check a crawl started earlier
+    check-crawl fn (id: Str): Any {
+      job ::firecrawl/get-crawl-all(id)
+      cond {
+        not(::firecrawl/is-done(job)) => { null }
+        eq(job.status, "completed") => { job.data }
+        => { err(`crawl ${id} ended ${job.status}`) }
+      }
+    }
+    ```
+    """
+}
+fn (job: Map): Bool {
+  ::api/is-terminal(get(job, "status"))
+}
+
+// =============================================================================
+// Account
+// =============================================================================
+
+credit-usage
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """GET /team/credit-usage - Remaining credits: `{remainingCredits, planCredits, billingPeriodStart, billingPeriodEnd}`. Free, so it doubles as a key check."""
+}
+fn (): Map {
+  ::api/request("GET", "/team/credit-usage", "") |> if-ok((body) { body.data })
 }

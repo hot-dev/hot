@@ -1,15 +1,30 @@
 ::hubspot::api ns
-meta {ctx: {"hubspot.token": {required: true}}}
+meta {
+    ctx: {"hubspot.token": {required: true}},
+    doc: """
+    Low-level HubSpot client: authenticated requests, response unwrapping,
+    date-versioned CRM path building, query strings, and cursor pagination
+    over `paging.next.after`.
+    """
+}
 
 ::ctx ::hot::ctx
 ::uri ::hot::uri
 
-http-request ::hot::http/request
 is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
 HttpResponse ::hot::http/HttpResponse
 
-HttpError type {
+// HubSpot's latest date-based API version as of Nov 2026, the one it
+// recommends for new integrations. Paths look like
+// /crm/objects/2026-09/contacts. Override with `hubspot.api.version`.
+DEFAULT_API_VERSION "2026-09"
+
+HttpError
+meta {
+    doc: """A non-2xx HubSpot response. HubSpot's error body carries `status`, `message`, `category`, `correlationId`, and sometimes `errors`/`context`."""
+}
+type {
     status: Int,
     headers: Map,
     body: Any
@@ -18,9 +33,40 @@ HttpError type {
 HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   HttpError({
     status: response.status,
-    headers: response.headers,
+    headers: or(response.headers, {}),
     body: response.body
   })
+}
+
+api-version
+meta {
+    ctx: {"hubspot.api.version": {required: false}},
+    doc: """The date-based API version used in CRM paths: the `hubspot.api.version` context variable when set (e.g. `"2026-03"`), otherwise `DEFAULT_API_VERSION`."""
+}
+fn (): Str {
+  configured or(::ctx/get("hubspot.api.version"), "")
+  if(is-blank(configured), DEFAULT_API_VERSION, trim(configured))
+}
+
+crm-path
+meta {
+    doc: """
+    A date-versioned CRM path: `crm-path("objects", "/contacts/123")` gives
+    `/crm/objects/2026-09/contacts/123`. `api` is the API family:
+    `objects`, `associations`, `pipelines`, `properties`, `owners`, or
+    `lists`.
+    """
+}
+fn (api: Str, rest: Str): Str {
+  `/crm/${api}/${api-version()}${rest}`
+}
+
+segment
+meta {
+    doc: """Percent-encode one path segment (an id, object type, or name). Exposed for testing."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
 }
 
 query-string
@@ -34,7 +80,7 @@ fn (params: Map): Str {
 
 request
 meta {
-    doc: """Make an authenticated HubSpot request. `path` is relative to api.hubapi.com (e.g. `/crm/v3/objects/contacts`)."""
+    doc: """Make an authenticated HubSpot request and return the raw `HttpResponse`. `path` is relative to api.hubapi.com (e.g. `/crm/objects/2026-09/contacts`). A `""` body sends no body; anything else is sent as JSON."""
 }
 fn
 (method: Str, path: Str): HttpResponse {
@@ -61,9 +107,20 @@ fn
   }))
 }
 
+handle-response
+meta {
+    doc: """Unwrap a response: the decoded body on 2xx (null for an empty 204), an Err carrying `HttpError` otherwise. Exposed for testing."""
+}
+fn (response: HttpResponse): Any {
+  cond {
+    is-ok-response(response) => { if(eq(response.body, ""), null, response.body) }
+    => { err(HttpError(response)) }
+  }
+}
+
 json
 meta {
-    doc: """Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err carrying `HttpError` (HubSpot's `category`/`message` in `body`)."""
+    doc: """Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err carrying `HttpError` (HubSpot's `category`/`message` in `body`). Transport failures pass through as Errs."""
 }
 fn
 (method: Str, path: Str): Any {
@@ -73,8 +130,7 @@ fn
   response request(method, path, additional-headers, body)
   cond {
     is-err(response) => { response }
-    is-ok-response(response) => { response.body }
-    => { err(HttpError(response)) }
+    => { handle-response(response) }
   }
 },
 // 5-arity: explicit token override
@@ -82,7 +138,77 @@ fn
   response request(method, path, additional-headers, body, token)
   cond {
     is-err(response) => { response }
-    is-ok-response(response) => { response.body }
-    => { err(HttpError(response)) }
+    => { handle-response(response) }
   }
+}
+
+error-message
+meta {
+    doc: """The message from a failed call's error value: HubSpot's `body.message` when present, otherwise the stringified body."""
+}
+fn (error: Any): Str? {
+  body if(is-map(error), get(error, "body"), null)
+  cond {
+    and(is-map(body), is-some(get(body, "message"))) => { Str(body.message) }
+    is-some(body) => { Str(body) }
+    is-some(error) => { Str(error) }
+    => { null }
+  }
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+next-after
+meta {
+    doc: """The cursor for the next page (`paging.next.after`) of a HubSpot list or search response, or null on the last page."""
+}
+fn (page: Any): Str? {
+  after if(is-map(page), get-in(page, ["paging", "next", "after"]), null)
+  if(is-some(after), Str(after), null)
+}
+
+collect-pages fn (fetch: Fn, after: Str?, acc: Vec, pages-left: Int): Vec {
+  page fetch(after)
+  cond {
+    is-err(page) => { page }
+    => {
+      results concat(acc, or(get(page, "results"), []))
+      next next-after(page)
+      cond {
+        is-null(next) => { results }
+        lte(pages-left, 1) => { results }
+        => { collect-pages(fetch, next, results, sub(pages-left, 1)) }
+      }
+    }
+  }
+}
+
+paginate
+meta {
+    doc: """
+    Follow `paging.next.after` cursors and concatenate every page's
+    `results`. `fetch` receives the cursor (null for the first page) and
+    returns one page. Stops after `max-pages` pages (default 10) so a
+    runaway listing cannot loop forever; returns the first Err.
+
+    **Example**
+
+    ```hot
+    ::objects ::hubspot::objects
+
+    contacts ::hubspot::api/paginate((after) {
+      ::objects/list-objects("contacts", {limit: 100, after: after, properties: ["email"]})
+    }, 5)
+    length(contacts)
+    ```
+    """
+}
+fn
+(fetch: Fn): Vec {
+  collect-pages(fetch, null, [], 10)
+},
+(fetch: Fn, max-pages: Int): Vec {
+  collect-pages(fetch, null, [], max-pages)
 }

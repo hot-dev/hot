@@ -3,12 +3,12 @@
 hot.pkg.sentry {
   name: "hot.dev/sentry",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
-  description: "Sentry bindings for Hot. Issues, latest events, and projects — enough for agents to triage production errors.",
+  hot-min-version: "3.0.0",
+  description: "Sentry API bindings for Hot. Issue search and triage (bulk updates, events, comments), releases, commits and deploys for CI, projects and teams, and webhook verification, with cursor pagination and self-hosted support.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["observability", "sentry"],
+  tags: ["sentry", "observability", "error-tracking", "monitoring", "devops"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

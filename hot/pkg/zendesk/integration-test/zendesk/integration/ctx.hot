@@ -4,9 +4,11 @@
 
 // Placeholder credentials for the zendesk integration suite. Unset
 // environment variables are skipped entirely, so absent credentials
-// behave exactly as if never configured.
+// behave exactly as if never configured. Use either ZENDESK_EMAIL +
+// ZENDESK_API_TOKEN or ZENDESK_OAUTH_TOKEN.
 ::hot::ctx/set(filter-vals({
     "zendesk.subdomain": ::env/get("ZENDESK_SUBDOMAIN", ""),
     "zendesk.email": ::env/get("ZENDESK_EMAIL", ""),
     "zendesk.api.token": ::env/get("ZENDESK_API_TOKEN", ""),
+    "zendesk.oauth.token": ::env/get("ZENDESK_OAUTH_TOKEN", ""),
 }, (v) { not(is-empty(v)) }))

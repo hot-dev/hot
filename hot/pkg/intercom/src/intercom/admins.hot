@@ -1,0 +1,62 @@
+::intercom::admins ns
+meta {
+    ctx: {"intercom.token": {required: true}},
+    doc: """Admins (teammates): find the id to set as `intercom.admin.id`, and the ids to assign conversations to."""
+}
+
+::api ::intercom::api
+
+me
+meta {
+    doc: """
+    GET /me - The admin the access token acts as, with its workspace
+    (`app`, including `region`). Its `id` is the usual value for
+    `intercom.admin.id`, and the cheapest token check.
+
+    **Example**
+
+    ```hot
+    admin ::intercom::admins/me()
+    admin.id
+    ```
+    """
+}
+fn (): Any {
+  ::api/request("GET", "/me", "")
+}
+
+list-admins
+meta {
+    doc: """GET /admins - Every admin in the workspace: `{type: "admin.list", admins: [...]}`."""
+}
+fn (): Any {
+  ::api/request("GET", "/admins", "")
+}
+
+get-admin
+meta {
+    doc: """GET /admins/{id} - One admin."""
+}
+fn (id: Any): Any {
+  ::api/request("GET", `/admins/${::api/path-segment(id)}`, "")
+}
+
+find-admin-by-email
+meta {
+    doc: """The admin whose `email` matches (case-insensitive), from `list-admins`, or null."""
+}
+fn (email: Str): Any {
+  out list-admins()
+  cond {
+    is-err(out) => { out }
+    => { find-first(or(get(out, "admins"), []), (a) { eq(lowercase(or(a.email, "")), lowercase(email)) }) }
+  }
+}
+
+list-teams
+meta {
+    doc: """GET /teams - The workspace's teams (assignment targets for `assign-conversation` with `type: "team"`)."""
+}
+fn (): Any {
+  ::api/request("GET", "/teams", "")
+}

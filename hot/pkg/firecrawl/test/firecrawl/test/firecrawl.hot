@@ -1,7 +1,185 @@
 ::firecrawl::test ns
 meta ["test"]
 
+::api ::firecrawl::api
+::webhooks ::firecrawl::webhooks
+
 test-base-url
 meta ["test"] fn () {
     assert-eq("https://api.firecrawl.dev/v2", ::firecrawl/BASE_URL)
+}
+
+// ============================================================================
+// Request building
+// ============================================================================
+
+test-body-with-omits-nulls-and-keeps-required
+meta ["test"] fn () {
+    body ::api/body-with({url: "https://example.com"}, {formats: ["markdown"], waitFor: null, url: "https://evil.example"})
+    assert-eq("https://example.com", body.url, "required fields win over options")
+    assert-eq(["markdown"], body.formats)
+    assert(not(in("waitFor", keys(body))), "unset options are omitted, not null")
+}
+
+test-body-with-empty-options
+meta ["test"] fn () {
+    assert-eq({urls: ["https://a.example"]}, ::api/body-with({urls: ["https://a.example"]}, {}))
+}
+
+test-job-path-encodes-id
+meta ["test"] fn () {
+    assert-eq("/crawl/abc-123", ::api/job-path("crawl", "abc-123"))
+    assert-eq("/batch/scrape/abc-123/errors", ::api/job-path("batch/scrape", "abc-123", "/errors"))
+    assert-eq("/extract/a%2Fb%3Fc", ::api/job-path("extract", "a/b?c"), "ids cannot escape the path")
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-error-message-uses-firecrawl-error
+meta ["test"] fn () {
+    assert-eq("Firecrawl API error 402: Payment required",
+        ::api/error-message(402, {success: false, error: "Payment required"}))
+    assert-eq("Firecrawl API error 500: boom", ::api/error-message(500, {message: "boom"}))
+    assert-eq("Firecrawl API error 502: Bad Gateway", ::api/error-message(502, "Bad Gateway"))
+    assert-eq("Firecrawl API error 429", ::api/error-message(429, {success: false}))
+    assert-eq("Firecrawl API error 503", ::api/error-message(503, null))
+}
+
+test-http-error-from-response
+meta ["test"] fn () {
+    e ::api/http-error(::hot::http/HttpResponse({status: 401, body: {success: false, error: "Unauthorized: Invalid token"}}))
+    assert-eq(401, e.status)
+    assert-eq("Firecrawl API error 401: Unauthorized: Invalid token", e.message)
+    assert-eq({}, e.headers, "missing headers become an empty map")
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-next-path
+meta ["test"] fn () {
+    assert-eq("/crawl/abc?skip=10", ::api/next-path("https://api.firecrawl.dev/v2/crawl/abc?skip=10"))
+    assert(is-null(::api/next-path(null)), "no next page")
+    assert(is-null(::api/next-path("")), "empty next")
+    assert(is-null(::api/next-path("https://attacker.example/v2/crawl/abc")), "never follows other hosts")
+    assert(is-null(::api/next-path("https://api.firecrawl.dev.attacker.example/v2/crawl/abc")), "prefix must include the path separator")
+    assert(is-null(::api/next-path("http://api.firecrawl.dev/v2/crawl/abc")), "never downgrades to http")
+}
+
+test-collect-pages-follows-next
+meta ["test"] fn () {
+    first-page {status: "completed", total: 3, data: [{markdown: "a"}], next: "https://api.firecrawl.dev/v2/crawl/j?skip=1"}
+    pages {
+        "/crawl/j?skip=1": {status: "completed", total: 3, data: [{markdown: "b"}], next: "https://api.firecrawl.dev/v2/crawl/j?skip=2"},
+        "/crawl/j?skip=2": {status: "completed", total: 3, data: [{markdown: "c"}]}
+    }
+
+    out ::api/collect-pages(first-page, (path) { get(pages, path) })
+    assert-eq(["a", "b", "c"], map(out.data, (d) { d.markdown }))
+    assert-eq("completed", out.status)
+    assert(is-null(get(out, "next")), "fully collected: no next left")
+}
+
+test-collect-pages-single-page
+meta ["test"] fn () {
+    out ::api/collect-pages({status: "completed", data: [{markdown: "only"}]}, (path) { fail("must not fetch") })
+    assert-eq(1, length(out.data))
+}
+
+test-collect-pages-stops-on-repeated-empty-cursor
+meta ["test"] fn () {
+    cursor "https://api.firecrawl.dev/v2/crawl/j?skip=1"
+    first-page {status: "scraping", data: [{markdown: "a"}], next: cursor}
+    out ::api/collect-pages(first-page, (path) { {status: "scraping", data: [], next: cursor} })
+    assert-eq(1, length(out.data), "keeps what it has")
+    assert-eq(cursor, out.next, "leaves next so the caller can resume")
+}
+
+test-collect-pages-returns-fetch-error
+meta ["test"] fn () {
+    first-page {status: "completed", data: [], next: "https://api.firecrawl.dev/v2/crawl/j?skip=1"}
+    out ::api/collect-pages(first-page, (path) { err({status: 500}) })
+    assert(is-err(out), "a failed page fetch is an Err, not a silently short result")
+}
+
+// ============================================================================
+// Job status
+// ============================================================================
+
+test-is-terminal
+meta ["test"] fn () {
+    assert(::api/is-terminal("completed"))
+    assert(::api/is-terminal("failed"))
+    assert(::api/is-terminal("cancelled"))
+    assert(not(::api/is-terminal("scraping")))
+    assert(not(::api/is-terminal("processing")))
+    assert(not(::api/is-terminal(null)))
+}
+
+test-is-done
+meta ["test"] fn () {
+    assert(::firecrawl/is-done({status: "completed", data: []}))
+    assert(::firecrawl/is-done({status: "failed"}), "a failed job is done; check status for the outcome")
+    assert(::firecrawl/is-done({status: "cancelled"}))
+    assert(not(::firecrawl/is-done({status: "scraping"})), "crawl still running")
+    assert(not(::firecrawl/is-done({status: "processing"})), "extract still running")
+    assert(not(::firecrawl/is-done({})), "no status is not done")
+}
+
+// ============================================================================
+// Webhook verification (vector computed independently with Python's hmac)
+// ============================================================================
+
+SECRET "fc_whsec_test"
+BODY """{"success":true,"type":"crawl.page","id":"550e8400-e29b-41d4-a716-446655440000","data":[],"metadata":{}}"""
+SIG "sha256=9652b16958debbb5a02861de70a6b34bb9f3ee46a2c4c8aadac0b556b6560c92"
+
+signed fn (body: Str): Map {
+    {headers: {x-firecrawl-signature: `sha256=${::hot::hmac/hmac-sha256(SECRET, body)}`}, body-raw: body}
+}
+
+test-webhook-accepts-valid-signature
+meta ["test"] fn () {
+    assert(::webhooks/verify-request(signed(BODY), SECRET))
+}
+
+test-webhook-accepts-python-vector
+meta ["test"] fn () {
+    assert(::webhooks/verify-request({headers: {x-firecrawl-signature: SIG}, body-raw: BODY}, SECRET))
+}
+
+test-webhook-rejects-tampered-body
+meta ["test"] fn () {
+    request {...signed(BODY), body-raw: replace(BODY, "crawl.page", "crawl.completed")}
+    assert(not(::webhooks/verify-request(request, SECRET)))
+}
+
+test-webhook-rejects-wrong-secret
+meta ["test"] fn () {
+    assert(not(::webhooks/verify-request(signed(BODY), "other-secret")))
+}
+
+test-webhook-rejects-missing-or-malformed-header
+meta ["test"] fn () {
+    assert(not(::webhooks/verify-request({headers: {}, body-raw: BODY}, SECRET)), "missing header")
+    assert(not(::webhooks/verify-request({body-raw: BODY}, SECRET)), "missing headers map")
+    bare ::hot::hmac/hmac-sha256(SECRET, BODY)
+    assert(not(::webhooks/verify-request({headers: {x-firecrawl-signature: bare}, body-raw: BODY}, SECRET)), "digest without the sha256= prefix")
+    assert(not(::webhooks/verify-request({headers: {x-firecrawl-signature: "sha256="}, body-raw: BODY}, SECRET)), "empty digest")
+}
+
+test-webhook-empty-secret-fails-closed
+meta ["test"] fn () {
+    request {headers: {x-firecrawl-signature: `sha256=${::hot::hmac/hmac-sha256("", BODY)}`}, body-raw: BODY}
+    assert(not(::webhooks/verify-request(request, "")), "empty secret never verifies")
+}
+
+test-webhook-signature-hex
+meta ["test"] fn () {
+    assert-eq("abc", ::webhooks/signature-hex("sha256=abc"))
+    assert-eq("", ::webhooks/signature-hex("abc"))
+    assert-eq("", ::webhooks/signature-hex(null))
 }

@@ -1,0 +1,162 @@
+::shopify::fulfillments ns
+meta {
+    doc: """
+    Fulfillment through fulfillment orders, Shopify's current model: list
+    an order's fulfillment orders, fulfil them (all items or chosen
+    quantities) with tracking, and update tracking afterwards. Needs one
+    of the `write_merchant_managed_fulfillment_orders`,
+    `write_assigned_fulfillment_orders` or
+    `write_third_party_fulfillment_orders` scopes.
+    """
+}
+
+::api ::shopify::api
+
+list-fulfillment-orders
+meta {
+    doc: """
+    One page of an order's fulfillment orders: id, status, assigned
+    location, supported actions and line items with `remainingQuantity`.
+    Options: `first`, `after`, `query` (e.g. `"status:open"`). Returns a
+    connection `{nodes, pageInfo}`.
+    """
+}
+fn
+(order-id: Str): Map {
+  list-fulfillment-orders(order-id, {})
+},
+(order-id: Str, options: Map): Map {
+  query """
+  query FulfillmentOrders($id: ID!, $first: Int!, $after: String, $query: String) {
+    order(id: $id) {
+      fulfillmentOrders(first: $first, after: $after, query: $query) {
+        nodes {
+          id status requestStatus fulfillAt
+          assignedLocation { name location { id } }
+          supportedActions { action }
+          lineItems(first: 100) {
+            nodes { id remainingQuantity totalQuantity sku productTitle lineItem { id } }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+  """
+  vars ::api/connection-variables(options)
+  data ::api/graphql(query, {...vars, id: order-id})
+  cond {
+    is-null(data.order) => { err(`shopify: order ${order-id} not found`) }
+    => { data.order.fulfillmentOrders }
+  }
+}
+
+build-tracking-input
+meta {
+    doc: """`FulfillmentTrackingInput` from `{company, number, url}` or `{company, numbers, urls}` (multi-package). Unset fields are omitted; returns null when nothing is set. Exposed for testing."""
+}
+fn (tracking: Map?): Map? {
+  t or(tracking, {})
+  input filter-vals({
+    company: get(t, "company"),
+    number: get(t, "number"),
+    url: get(t, "url"),
+    numbers: get(t, "numbers"),
+    urls: get(t, "urls")
+  }, is-some)
+  if(is-empty(input), null, input)
+}
+
+build-fulfillment-input
+meta {
+    doc: """
+    `FulfillmentInput` for `fulfillmentCreate`. `line-items` is a Vec of
+    `{fulfillmentOrderId, fulfillmentOrderLineItems?: [{id, quantity}]}`
+    (omit the line items to fulfil everything remaining), or a single
+    fulfillment order id Str. Options: `notifyCustomer`, `originAddress`.
+    Exposed for testing.
+    """
+}
+fn (line-items: Any, tracking: Map?, options: Map): Map {
+  by-order cond {
+    is-str(line-items) => { [{fulfillmentOrderId: line-items}] }
+    => { line-items }
+  }
+
+  filter-vals({
+    lineItemsByFulfillmentOrder: by-order,
+    trackingInfo: build-tracking-input(tracking),
+    notifyCustomer: get(options, "notifyCustomer"),
+    originAddress: get(options, "originAddress")
+  }, is-some)
+}
+
+create-fulfillment
+meta {
+    doc: """
+    Fulfil one or more fulfillment orders (`fulfillmentCreate`) with
+    optional tracking. Pass a fulfillment order id to fulfil all of its
+    remaining items, or a Vec of `{fulfillmentOrderId,
+    fulfillmentOrderLineItems: [{id, quantity}]}` for partial quantities.
+    Options: `notifyCustomer`, `originAddress`, `message`. Returns the
+    fulfillment (id, status, trackingInfo).
+
+    **Example**
+
+    ```hot
+    fos ::shopify::fulfillments/list-fulfillment-orders(order.id, {query: "status:open"})
+    ::shopify::fulfillments/create-fulfillment(first(fos.nodes).id, {
+      company: "UPS",
+      number: "1Z001985YW99744790"
+    }, {notifyCustomer: true})
+    ```
+    """
+}
+fn
+(line-items: Any, tracking: Map?): Map {
+  create-fulfillment(line-items, tracking, {})
+},
+(line-items: Any, tracking: Map?, options: Map): Map {
+  mutation """
+  mutation FulfillmentCreate($fulfillment: FulfillmentInput!, $message: String) {
+    fulfillmentCreate(fulfillment: $fulfillment, message: $message) {
+      fulfillment {
+        id status createdAt
+        trackingInfo { company number url }
+      }
+      userErrors { field message }
+    }
+  }
+  """
+  vars filter-vals({
+    fulfillment: build-fulfillment-input(line-items, tracking, options),
+    message: get(options, "message")
+  }, is-some)
+  payload ::api/mutate(mutation, vars, "fulfillmentCreate")
+  payload.fulfillment
+}
+
+update-tracking
+meta {
+    doc: """Replace a fulfillment's tracking (`fulfillmentTrackingInfoUpdate`). `tracking` as in `create-fulfillment`; `notify-customer` emails the customer about this and later updates."""
+}
+fn
+(fulfillment-id: Str, tracking: Map): Map {
+  update-tracking(fulfillment-id, tracking, false)
+},
+(fulfillment-id: Str, tracking: Map, notify-customer: Bool): Map {
+  mutation """
+  mutation FulfillmentTrackingInfoUpdate($fulfillmentId: ID!, $trackingInfoInput: FulfillmentTrackingInput!, $notifyCustomer: Boolean) {
+    fulfillmentTrackingInfoUpdate(fulfillmentId: $fulfillmentId, trackingInfoInput: $trackingInfoInput, notifyCustomer: $notifyCustomer) {
+      fulfillment { id status trackingInfo { company number url } }
+      userErrors { field message }
+    }
+  }
+  """
+  payload ::api/mutate(mutation, {
+    fulfillmentId: fulfillment-id,
+    trackingInfoInput: or(build-tracking-input(tracking), {}),
+    notifyCustomer: notify-customer
+  }, "fulfillmentTrackingInfoUpdate")
+  payload.fulfillment
+}

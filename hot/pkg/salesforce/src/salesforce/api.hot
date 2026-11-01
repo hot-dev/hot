@@ -1,74 +1,319 @@
 ::salesforce::api ns
+meta {
+    doc: """
+    Authenticated requests against the org's `instance_url`. Every
+    module in this package goes through `json` (or `send` for CSV); use
+    them directly for any REST resource without a wrapper.
+
+    Non-2xx responses come back as an Err carrying `HttpError`, whose
+    `message` flattens Salesforce's `[{message, errorCode, fields}]`
+    error array (or an OAuth `{error, error_description}` body) into one
+    readable line, with `error-code` set to the first code.
+    """
+}
 
 ::auth ::salesforce::auth
+::ctx ::hot::ctx
+::uri ::hot::uri
 
 http-request ::hot::http/request
 is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
 HttpResponse ::hot::http/HttpResponse
 
-HttpError type {
+HttpError
+meta {
+    doc: """A non-2xx Salesforce response: `status`, `headers`, the decoded `body`, a readable `message` (see `error-message`), and the first `error-code` (e.g. `INVALID_FIELD`, `INVALID_SESSION_ID`)."""
+}
+type {
     status: Int,
     headers: Map,
-    body: Any
+    body: Any,
+    message: Str,
+    error-code: Str?
 }
 
 HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  to-http-error(response)
+}
+
+to-http-error
+meta {
+    doc: """Build an `HttpError` from a response Map (`status`, `headers`, `body`), deriving `message` and `error-code`. Exposed for testing."""
+}
+fn (response: Map): HttpError {
+  body get(response, "body")
   HttpError({
-    status: response.status,
-    headers: response.headers,
-    body: response.body
+    status: get(response, "status"),
+    headers: or(get(response, "headers"), {}),
+    body: body,
+    message: error-message(response.status, body),
+    error-code: error-code(body)
   })
+}
+
+// ---------------------------------------------------------------------------
+// Error parsing (pure, exposed for testing)
+// ---------------------------------------------------------------------------
+
+format-error-entry fn (entry: Any): Str {
+  cond {
+    not(is-map(entry)) => { Str(entry) }
+    => {
+      code get(entry, "errorCode", get(entry, "statusCode"))
+      message Str(get(entry, "message", ""))
+      fields get(entry, "fields", [])
+      with-code if(is-blank-value(code), message, `${code}: ${message}`)
+      cond {
+        and(is-vec(fields), not(is-empty(fields))) => { `${with-code} (fields: ${join(map(fields, (f) { Str(f) }), ", ")})` }
+        => { with-code }
+      }
+    }
+  }
+}
+
+is-blank-value fn (value: Any): Bool {
+  or(is-null(value), and(is-str(value), is-blank(value)))
+}
+
+error-code
+meta {
+    doc: """The first Salesforce error code in an error body (`errorCode` of the first array entry, or the OAuth `error`), or null. Exposed for testing."""
+}
+fn (body: Any): Any {
+  cond {
+    and(is-vec(body), not(is-empty(body)), is-map(first(body))) => { get(first(body), "errorCode", get(first(body), "statusCode")) }
+    is-map(body) => { get(body, "errorCode", get(body, "error")) }
+    => { null }
+  }
+}
+
+error-message
+meta {
+    doc: """
+    Flatten a Salesforce error body into one line, prefixed with the
+    HTTP status: `salesforce 400: INVALID_FIELD: No such column 'Foo'
+    (fields: Foo)`. Handles the REST error array, OAuth
+    `{error, error_description}` bodies, and plain text. Exposed for
+    testing.
+    """
+}
+fn (status: Int, body: Any): Str {
+  detail cond {
+    is-null(body) => { "" }
+    and(is-vec(body), is-empty(body)) => { "" }
+    is-vec(body) => { join(map(body, format-error-entry), "; ") }
+    and(is-map(body), is-some(get(body, "error"))) => {
+      description get(body, "error_description")
+      if(is-blank-value(description), Str(body.error), `${body.error}: ${description}`)
+    }
+
+    is-map(body) => { format-error-entry(body) }
+    => { trim(Str(body)) }
+  }
+
+  if(is-empty(detail), `salesforce ${status}`, `salesforce ${status}: ${detail}`)
+}
+
+is-invalid-session
+meta {
+    doc: """True for a 401 response, which Salesforce returns with `INVALID_SESSION_ID` when a session has expired or been revoked. Exposed for testing."""
+}
+fn (response: Any): Bool {
+  and(is-map(response), eq(get(response, "status"), 401))
+}
+
+// ---------------------------------------------------------------------------
+// URL building (pure, exposed for testing)
+// ---------------------------------------------------------------------------
+
+api-version
+meta {
+    ctx: {"salesforce.api.version": {required: false, secret: false}},
+    doc: """The REST API version: `salesforce.api.version` when set ("66.0" and "v66.0" both work), else `::salesforce/DEFAULT_API_VERSION`."""
+}
+fn (): Str {
+  normalize-version(::ctx/get("salesforce.api.version"))
+}
+
+normalize-version
+meta {
+    doc: """`"66.0"`/`"v66.0"`/`66` → `"v66.0"`; null or blank → the default version. Exposed for testing."""
+}
+fn (version: Any): Str {
+  cond {
+    is-blank-value(version) => { ::salesforce/DEFAULT_API_VERSION }
+    => {
+      raw trim(Str(version))
+      bare if(starts-with(raw, "v"), slice(raw, 1), raw)
+      if(contains(bare, "."), `v${bare}`, `v${bare}.0`)
+    }
+  }
 }
 
 data-path
 meta {
-    doc: """Prefix a REST resource with the pinned data API root: `/sobjects/Lead` → `/services/data/v62.0/sobjects/Lead`. Exposed for testing."""
+    doc: """Prefix a REST resource with the data API root: `/sobjects/Lead` → `/services/data/v68.0/sobjects/Lead`. Paths that already start with `/services/` (e.g. a `nextRecordsUrl`) pass through unchanged. The 2-arity form takes the version explicitly. Exposed for testing."""
 }
-fn (path: Str): Str {
-  `/services/data/${::salesforce/API_VERSION}${path}`
+fn
+(path: Str): Str {
+  data-path(path, api-version())
+},
+(path: Str, version: Str): Str {
+  cond {
+    starts-with(path, "/services/") => { path }
+    => { `/services/data/${normalize-version(version)}${path}` }
+  }
+}
+
+build-url
+meta {
+    doc: """The absolute URL for a resource on an instance: `build-url("https://acme.my.salesforce.com/", "/limits")`. Exposed for testing."""
+}
+fn
+(instance-url: Str, path: Str): Str {
+  `${::auth/normalize-url(instance-url)}${data-path(path)}`
+},
+(instance-url: Str, path: Str, version: Str): Str {
+  `${::auth/normalize-url(instance-url)}${data-path(path, version)}`
+}
+
+query-string
+meta {
+    doc: """Build `?a=1&b=2` from a Map, dropping null values; Vec values are joined with commas. Returns "" when nothing is left. Exposed for testing."""
+}
+fn (params: Map): Str {
+  flattened map-vals(filter-vals(params, is-some), (v) { if(is-vec(v), join(map(v, (x) { Str(x) }), ","), v) })
+  cond {
+    is-empty(flattened) => { "" }
+    => { ::uri/query-string(flattened) }
+  }
+}
+
+segment
+meta {
+    doc: """URL-encode one path segment (a record id, an external id value). Exposed for testing."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+build-headers
+meta {
+    doc: """
+    Request headers for a session. `options`: `content-type` (defaults
+    to JSON when a body is sent), `accept` (defaults to JSON), `headers`
+    (extra headers, e.g. `Sforce-Query-Options`). Exposed for testing.
+    """
+}
+fn (token: Str, has-body: Bool, options: Map): Map {
+  base {
+    Authorization: `Bearer ${token}`,
+    Accept: or(get(options, "accept"), "application/json")
+  }
+
+  with-type if(has-body, {...base, Content-Type: or(get(options, "content-type"), "application/json")}, base)
+  {...with-type, ...or(get(options, "headers"), {})}
+}
+
+encode-body fn (body: Any): Str {
+  cond {
+    is-null(body) => { "" }
+    is-str(body) => { body }
+    => { to-json(untype(body)) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+send-once fn (method: Str, path: Str, body: Any, options: Map, session: Map): HttpResponse {
+  has-body and(is-some(body), not(eq(body, "")))
+  http-request(HttpRequest({
+    method,
+    url: build-url(session.instance-url, path),
+    headers: build-headers(session.token, has-body, options),
+    body: if(has-body, encode-body(body), "")
+  }))
+}
+
+send
+meta {
+    doc: """
+    Make an authenticated request and return the raw `HttpResponse`
+    (any status). `body` is JSON-encoded unless it is already a Str (CSV
+    for Bulk uploads); pass null or "" for none. `options`:
+    `content-type`, `accept`, `headers`. On a 401 from a minted session,
+    drops the cached session, mints a new one, and retries once.
+    """
+}
+fn
+(method: Str, path: Str, body: Any, options: Map): HttpResponse {
+  session ::auth/session()
+  match session {
+    Result.Err => { err(session) }
+
+    _ => {
+      response send-once(method, path, body, options, session)
+      cond {
+        is-err(response) => { response }
+        and(is-invalid-session(response), ne(session.flow, "access-token")) => {
+          ::auth/invalidate()
+          retry-session ::auth/session()
+          match retry-session {
+            Result.Err => { err(retry-session) }
+
+            _ => { send-once(method, path, body, options, retry-session) }
+          }
+        }
+        => { response }
+      }
+    }
+  }
+},
+// 5-arity: explicit session (no cache, no retry)
+(method: Str, path: Str, body: Any, options: Map, session: Map): HttpResponse {
+  send-once(method, path, body, options, session)
+}
+
+unwrap
+meta {
+    doc: """The decoded body of a 2xx response (null for 204), or an Err carrying `HttpError`. Exposed for testing."""
+}
+fn (response: Any): Any {
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { if(eq(response.status, 204), null, response.body) }
+    => { err(to-http-error(response)) }
+  }
 }
 
 json
 meta {
     doc: """
-    Make an authenticated request against the org's `instance_url` and
-    unwrap the response. `path` is relative to the data API root (e.g.
-    `/sobjects/Lead`). Salesforce returns 204 for updates/deletes — those
-    yield null.
+    Make an authenticated JSON request and unwrap the response. `path`
+    is relative to the data API root (e.g. `/sobjects/Lead`), or a full
+    `/services/...` path. Salesforce returns 204 for updates and deletes:
+    those yield null. The 4-arity form takes an explicit session
+    (`{token, instance-url}`, e.g. from `::salesforce::auth/session()`
+    or managed by the caller) and skips the cache and retry.
+
+    **Example**
+
+    ```hot
+    limits ::salesforce::api/json("GET", "/limits")
+    limits.DailyApiRequests.Remaining
+    ```
     """
 }
 fn
 (method: Str, path: Str): Any {
-  json(method, path, "")
+  json(method, path, null)
 },
 (method: Str, path: Str, body: Any): Any {
-  session ::auth/session()
-  match session {
-    Result.Err => { err(session) }
-
-    _ => { json(method, path, body, session) }
-  }
+  unwrap(send(method, path, body, {}))
 },
-// 4-arity: explicit session override — a `{token, instance-url}` map, e.g.
-// from `::salesforce::auth/session()` or tokens managed by the caller
 (method: Str, path: Str, body: Any, session: Map): Any {
-  headers cond {
-    eq(body, "") => { {Authorization: `Bearer ${session.token}`} }
-    => { {Authorization: `Bearer ${session.token}`, Content-Type: "application/json"} }
-  }
-
-  encoded-body if(eq(body, ""), "", to-json(untype(body)))
-
-  response ::hot::http/request(HttpRequest({
-    method,
-    url: `${session.instance-url}${data-path(path)}`,
-    headers: headers,
-    body: encoded-body
-  }))
-  cond {
-    is-err(response) => { response }
-    is-ok-response(response) => { response.body }
-    => { err(HttpError(response)) }
-  }
+  unwrap(send(method, path, body, {}, session))
 }

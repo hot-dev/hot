@@ -1,8 +1,6 @@
 # qwen
 
-Qwen API bindings for Hot.
-
-Qwen models are served by [Alibaba Cloud Model Studio](https://www.alibabacloud.com/en/product/modelstudio) (DashScope). This package talks to the OpenAI-compatible endpoint at `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` (Singapore). If you'd rather target the mainland China endpoint, override `::qwen/BASE_URL` with `::qwen/BASE_URL_CN` in your own code.
+Qwen bindings for Hot. Qwen models are served by [Alibaba Cloud Model Studio](https://www.alibabacloud.com/en/product/modelstudio) (DashScope), and this package uses its OpenAI-compatible endpoint. It covers Chat Completions with thinking mode, web search and streaming, plus Models and Embeddings. It picks the base URL for your region or workspace, and provides a `hot.dev/hot-ai` provider so `::ai::chat/run-loop` agents can use Qwen with tools. Requests go through [`hot.dev/openai`](https://hot.dev/pkg/openai)'s endpoint and chat-tools adapter.
 
 ## Installation
 
@@ -12,122 +10,144 @@ Add this to the `deps` in your `hot.hot` file:
 "hot.dev/qwen": "1.0.3"
 ```
 
-## Configuration
+It pulls in `hot.dev/openai` 1.3.0 and `hot.dev/hot-ai` 1.8.1.
 
-Set your DashScope API key in your context. Qwen docs refer to this as `DASHSCOPE_API_KEY`:
+## Setup
+
+| Context Variable | Description |
+|---|---|
+| `qwen.api.key` | Model Studio (DashScope) API key, `DASHSCOPE_API_KEY` in Alibaba's docs. Keys are bound to the region they were created in. |
+| `qwen.region` | Optional. `intl` (Singapore, default), `us` (Virginia), `cn` (Beijing), `hk` (Hong Kong), `eu` (Frankfurt) or `jp` (Tokyo). Region ids such as `us-east-1` and names such as `singapore` also work. |
+| `qwen.workspace.id` | Optional. Use the workspace domain `https://{id}.{region-id}.maas.aliyuncs.com/compatible-mode/v1`. Required for `eu` and `jp`, which have no shared domain. |
+| `qwen.base.url` | Optional. Overrides everything above, for example to use a proxy. |
+
+Base URLs without a workspace id:
+
+| Region | Base URL |
+|---|---|
+| `intl` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| `us` | `https://dashscope-us.aliyuncs.com/compatible-mode/v1` |
+| `cn` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| `hk` | `https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1` |
+
+A ctx file:
 
 ```hot
-ctx: {
-  "qwen.api.key": env("DASHSCOPE_API_KEY")
-}
+::myapp::ctx ns
+
+::hot::ctx/set(filter-vals({
+    "qwen.api.key": ::hot::env/get("DASHSCOPE_API_KEY", ""),
+    "qwen.region": ::hot::env/get("QWEN_REGION", "")
+}, (v) { not(is-empty(v)) }))
 ```
 
-## Usage
-
-### Simple chat
+## Quick start
 
 ```hot
-import ::qwen::chat
+::chat ::qwen::chat
 
-answer chat/chat("qwen3.6-plus", "What is the capital of France?")
-println(answer)
-```
+answer ::chat/chat("qwen3.7-plus", "What is the capital of France?")
+digits ::chat/chat("qwen3.8-flash", "What is 2+2?", "Respond with just the number.")
 
-### With system instructions
-
-```hot
-answer chat/chat(
-    "qwen3.6-plus",
-    "What is 2+2?",
-    "You are a math tutor. Respond with just the number."
-)
-println(answer) // => "4"
-```
-
-### Full request control
-
-```hot
-import ::qwen::chat
-
-request chat/ChatCompletionRequest({
-    model: "qwen3.6-plus",
+response ::chat/complete(::chat/ChatCompletionRequest({
+    model: "qwen3.7-plus",
     messages: [
-        chat/system-message("You are a helpful assistant."),
-        chat/user-message("Hello!"),
-        chat/assistant-message("Hi there! How can I help you?"),
-        chat/user-message("Tell me a joke.")
+        ::chat/system-message("You are a helpful assistant."),
+        ::chat/user-message("Hello!"),
+        ::chat/assistant-message("Hi there! How can I help you?"),
+        ::chat/user-message("Tell me a joke.")
     ],
     max_tokens: 1024,
     temperature: 0.8
-})
-
-response chat/complete(request)
-println(chat/extract-response-text(response))
+}))
+println(::chat/extract-response-text(response))
 ```
 
-### Streaming responses
+### Agent loop with tools (hot-ai)
+
+`::qwen::ai/provider()` registers Qwen for models whose id starts with `qwen`. Use `qwen/<model>` for other models Model Studio hosts, such as `qwen/deepseek-v4.1-flash`; the `qwen/` part is stripped before the request.
 
 ```hot
-import ::qwen::chat
+add-numbers
+meta {doc: "Add two integers."}
+fn (x: Int, y: Int): Int { add(x, y) }
 
-response chat/complete-stream(chat/ChatCompletionRequest({
-    model: "qwen3.6-plus",
-    messages: [{role: "user", content: "Write a short story about a robot."}]
+ask fn (question: Str): Str {
+    opts ::ai::chat/ChatOptions({
+        model: "qwen3.8-flash",
+        providers: ::ai::chat/with-providers([
+            ::qwen::ai/provider(::qwen::ai/QwenOptions({enable-thinking: false}))
+        ]),
+        tools: [::ai::tool/from-fn(add-numbers)]
+    })
+    ::ai::chat/run-loop(opts, question)
+}
+```
+
+`QwenOptions` sets the Qwen-specific fields on every request: `max-tokens` (default 4096, sent as `max_tokens`), `enable-thinking`, `thinking-budget`, `preserve-thinking`, `enable-search`, `search-options`, `enable-code-interpreter`, `top-k`, `repetition-penalty`, `reasoning-effort`, and `extra` for anything else. Unset fields are not sent, so model defaults apply. `::qwen::ai/chat-fn(opts)` and `chat-stream-fn(opts)` return the bound functions for `ChatOptions.chat-fn` / `chat-stream-fn`. `provider-for(endpoint, opts)` takes an explicit endpoint, such as `::qwen::api/endpoint-for("us", null, key)`, and reads no ctx.
+
+Build the registry inside a function, as above: `provider()` reads ctx, which is set when the run starts.
+
+### Streaming
+
+```hot
+::chat ::qwen::chat
+
+response ::chat/complete-stream(::chat/ChatCompletionRequest({
+    model: "qwen3.7-plus",
+    messages: [::chat/user-message("Write a short story about a robot.")]
 }))
 
 for-each(response.body, (event) {
-    text chat/extract-chunk-text(event)
+    text ::chat/extract-chunk-text(event)
     cond {
         gt(length(text), 0) => { print(text) }
-    }
-
-    cond {
-        chat/is-stream-done(event) => { println("\n---Done!---") }
+        ::chat/is-stream-done(event) => { println("\n---Done!---") }
+        => { null }
     }
 })
 ```
 
-### Thinking mode (Qwen3 / Qwen3.5 / Qwen3.6)
+### Thinking mode
 
-Qwen3+ hybrid models can emit their reasoning separately from the final answer. Enable it with `enable_thinking` and optionally cap it with `thinking_budget`. Qwen requires streaming for thinking-mode responses on most models.
+Hybrid models (Qwen3 and later) return their reasoning separately from the answer. Several current models think by default. `enable_thinking` turns it on or off, and `thinking_budget` caps it. Streaming delivers reasoning in `delta.reasoning_content`; non-streaming responses carry it in `message.reasoning_content`. Some open-weight models only allow thinking when streaming.
 
 ```hot
-response chat/complete-stream(chat/ChatCompletionRequest({
-    model: "qwen3.6-plus",
-    messages: [{role: "user", content: "Is 89 prime? Show your work."}],
+::chat ::qwen::chat
+
+response ::chat/complete-stream(::chat/ChatCompletionRequest({
+    model: "qwen3.7-plus",
+    messages: [::chat/user-message("Is 89 prime? Show your work.")],
     enable_thinking: true,
     thinking_budget: 2048
 }))
 
 for-each(response.body, (event) {
-    thought chat/extract-chunk-reasoning(event)
-    answer  chat/extract-chunk-text(event)
+    thought ::chat/extract-chunk-reasoning(event)
+    answer ::chat/extract-chunk-text(event)
     cond {
         gt(length(thought), 0) => { print(`[thinking] ${thought}`) }
-        gt(length(answer), 0)  => { print(answer) }
+        gt(length(answer), 0) => { print(answer) }
+        => { null }
     }
 })
 ```
 
-### Web search (Qwen-native feature)
-
-Qwen exposes web search as request fields rather than as an OpenAI-style tool. They are wired through directly:
+### Web search, function calling, structured output
 
 ```hot
-response chat/complete(chat/ChatCompletionRequest({
-    model: "qwen3.6-plus",
-    messages: [{role: "user", content: "What's the latest news about AI?"}],
+::chat ::qwen::chat
+
+searched ::chat/complete(::chat/ChatCompletionRequest({
+    model: "qwen3.7-plus",
+    messages: [::chat/user-message("What's the latest news about AI?")],
     enable_search: true,
-    search_options: {forced_search: true, search_strategy: "turbo"}
+    search_options: {forced_search: true, search_strategy: "max"}
 }))
-```
 
-### Function calling
-
-```hot
-response chat/complete(chat/ChatCompletionRequest({
-    model: "qwen3.6-plus",
-    messages: [{role: "user", content: "What's the weather in San Francisco?"}],
+tooled ::chat/complete(::chat/ChatCompletionRequest({
+    model: "qwen3.7-plus",
+    messages: [::chat/user-message("What's the weather in San Francisco?")],
     tools: [{
         type: "function",
         function: {
@@ -135,100 +155,73 @@ response chat/complete(chat/ChatCompletionRequest({
             description: "Get the current weather for a location",
             parameters: {
                 type: "object",
-                properties: {
-                    location: {type: "string", description: "City and state"}
-                },
+                properties: {location: {type: "string", description: "City and state"}},
                 required: ["location"]
             }
         }
     }],
     tool_choice: "auto"
 }))
-```
 
-### Structured output
-
-```hot
-response chat/complete(chat/ChatCompletionRequest({
-    model: "qwen3.6-plus",
+structured ::chat/complete(::chat/ChatCompletionRequest({
+    model: "qwen3.7-plus",
     messages: [
-        {role: "system", content: "Always respond in JSON."},
-        {role: "user", content: "Return {\"answer\": <number>} for 2+2."}
+        ::chat/system-message("Always respond in JSON."),
+        ::chat/user-message("Return {\"answer\": <number>} for 2+2.")
     ],
     response_format: {type: "json_object"}
 }))
 ```
 
-## Embeddings
+`search_strategy` is `turbo` (default), `max` or `agent`; `enable_search_extension: true` adds vertical search.
+
+### Embeddings and models
 
 ```hot
-import ::qwen::embeddings
+::embeddings ::qwen::embeddings
 
-// Simple embedding (defaults to text-embedding-v4)
-vector embeddings/embed("Hello world")
+vector ::embeddings/embed("Hello world")
+vectors ::embeddings/embed-batch(["Hello", "World", "Test"])
 
-// Batch embeddings
-vectors embeddings/embed-batch(["Hello", "World", "Test"])
-
-// Full control (custom dimensions)
-response embeddings/create(embeddings/EmbeddingRequest({
+response ::embeddings/create(::embeddings/EmbeddingRequest({
     input: "Test text",
     model: "text-embedding-v4",
     dimensions: 256
 }))
-length(response.data[0].embedding) // => 256
+length(response.data[0].embedding)
+
+for-each(::qwen::models/list().data, (model) { println(model.id) })
 ```
 
-`text-embedding-v4` accepts `dimensions` values of 2048, 1536, 1024 (default), 768, 512, 256, 128, or 64.
+`text-embedding-v4` accepts `dimensions` of 2048, 1536, 1024 (default), 768, 512, 256, 128 or 64. `embed` and `embed-batch` return an Err on API errors instead of an empty vector.
 
-## List available models
+## Function overview
 
-```hot
-import ::qwen::models
+| Module | Functions |
+|---|---|
+| `::qwen` | `base-url`, `resolve-base-url`, `region-info`, `REGIONS`, `BASE_URL`, `BASE_URL_US`, `BASE_URL_CN`, `BASE_URL_HK` |
+| `::qwen::chat` | `complete`, `complete-stream`, `chat`, `request-body`, message helpers, `extract-response-text`, `extract-chunk-text`, `extract-chunk-reasoning`, `is-stream-done` |
+| `::qwen::ai` | `provider`, `provider-for`, `chat-fn`, `chat-stream-fn`, `QwenOptions`, `extra-body`, `request-options`, `compatible`, `is-qwen-model` |
+| `::qwen::embeddings` | `create`, `embed`, `embed-batch`, `request-body` |
+| `::qwen::models` | `list`, `get`, `model-path`, model id constants |
+| `::qwen::api` | `endpoint`, `endpoint-for`, `request`, `request-stream` |
 
-all-models models/list()
-for-each(all-models.data, (model) {
-    println(model.id)
-})
-```
+## Models
 
-## API base URL
+As of November 2026 Model Studio lists `qwen3.8-max` (flagship), `qwen3.7-plus` (balanced, multimodal input) and `qwen3.8-flash` (fast, low cost). Earlier generations are still served: `qwen3.6-plus`, `qwen3.5-plus`, `qwen3.5-flash`, `qwen3-max`, the `qwen-max` / `qwen-plus` / `qwen-flash` aliases, `qwen-long`, and `qwen-vl-plus` / `qwen-vl-max`. All of these are proprietary, hosted-only models. Embeddings: `text-embedding-v4` (default), `qwen3.7-text-embedding`, `text-embedding-v3`. Availability differs by region; check the Model Studio model list for yours.
 
-International (default): `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`
-Mainland China:          `https://dashscope.aliyuncs.com/compatible-mode/v1`
+## Notes and limits
 
-## Available models
-
-### Chat models
-
-- `qwen3.6-plus` — latest flagship, 1M context, full tool support
-- `qwen3.5-flash` — fast & cost-effective, 1M context
-- `qwen3.5-plus` — balanced Qwen3.5
-- `qwen3-max` — 256k context, strong reasoning and coding
-- `qwen-plus`, `qwen-flash`, `qwen-turbo`, `qwen-max` — legacy commercial
-- `qwen-long` — long-document analysis
-- `qwen-vl-plus`, `qwen-vl-max` — vision-language
-
-### Embedding models
-
-- `text-embedding-v4` — latest (default)
-- `text-embedding-v3` — previous generation
-
-## Modules
-
-| Module                | Description                                 |
-|-----------------------|---------------------------------------------|
-| `::qwen::chat`        | Chat Completions API (main chat interface) |
-| `::qwen::embeddings`  | Text embeddings                            |
-| `::qwen::models`      | Model listing and info                     |
-| `::qwen::api`         | Low-level authenticated requests           |
+- A key works only in the region it was created in. A mismatch returns 401 `invalid_api_key`.
+- Non-2xx responses return an Err carrying `::openai::api/HttpError` (`status`, `headers`, `body`).
+- The hot-ai adapter ignores `reasoning_content` and does not send it back on later turns.
+- These bindings follow Alibaba's published OpenAI-compatibility docs (November 2026) and were not tested live.
 
 ## Documentation
 
-- [Qwen Cloud API documentation](https://docs.qwencloud.com/)
-- [OpenAI compatibility guide](https://docs.qwencloud.com/api-reference/toolkitframework/openai-compatible/overview)
-- [Chat Completions reference](https://docs.qwencloud.com/api-reference/chat/openai-chat)
-- [Alibaba Cloud Model Studio](https://www.alibabacloud.com/en/product/modelstudio)
+- [OpenAI-compatible Chat Completions reference](https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions)
+- [OpenAI compatibility overview](https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope)
+- [Model list](https://www.alibabacloud.com/help/en/model-studio/models)
 - [Hot package documentation](https://hot.dev/pkg/qwen)
 
 ## License

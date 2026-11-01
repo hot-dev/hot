@@ -1,32 +1,50 @@
 ::openai-compatible::models ns
 
-api-request ::openai-compatible::api/request
-HttpError ::openai-compatible::api/HttpError
-is-ok-response ::hot::http/is-ok-response
+::compat ::openai::compatible
+::api    ::openai::api
+
+CompatibleProvider ::compat/CompatibleProvider
 
 list-models
 meta {
     doc: """
-    GET /models - List the models the provider (or router) exposes.
+    GET /models: the models the provider exposes, as the decoded body
+    (`{data: [{id, ...}]}`), or an Err carrying `HttpError`.
 
     **Example**
 
     ```hot
-    page ::openai-compatible::models/list-models()
+    page ::openai-compatible::models/list-models(::openai-compatible/ollama())
     map(page.data, (m) { m.id })
     ```
     """
 }
-fn (): Map {
-  response api-request("GET", "/models")
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn (p: CompatibleProvider): Map {
+    ::compat/list-models(p)
+}
+
+model-path
+meta {
+    doc: """
+    The `/models/{id}` path with the routing prefix stripped and the id
+    URL-encoded (OpenRouter-style ids contain `/`).
+
+    **Example**
+
+    ```hot
+    p ::openai-compatible/configure(::openai-compatible/OPENROUTER, "k")
+    ::openai-compatible::models/model-path(p, "openrouter/openai/gpt-5.2")  // => "/models/openai%2Fgpt-5.2"
+    ```
+    """
+}
+fn (p: CompatibleProvider, model: Str): Str {
+    `/models/${::hot::uri/encode(::compat/strip-model-prefix(model, p.model-prefix))}`
 }
 
 get-model
 meta {
-    doc: """GET /models/{model} - Retrieve one model's metadata."""
+    doc: """GET /models/{model}: one model's metadata, or an Err carrying `HttpError`. Not every provider implements it."""
 }
-fn (model: Str): Map {
-  response api-request("GET", `/models/${model}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn (p: CompatibleProvider, model: Str): Map {
+    ::api/endpoint-response(::api/endpoint-request(p.endpoint, "GET", model-path(p, model)))
 }

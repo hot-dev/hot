@@ -1,0 +1,76 @@
+::cal-com::event-types ns
+meta {
+    ctx: {"cal-com.api.key": {required: true}},
+    doc: """Event types (`cal-api-version: 2024-06-14`): the bookable meeting kinds. List, get, create, update and delete."""
+}
+
+::api ::cal-com::api
+
+v fn (): Str { ::cal-com/VERSION_EVENT_TYPES }
+
+list-event-types
+meta {
+    doc: """GET /event-types - The API key owner's event types (Vec). `options`: `username` with `eventSlug`, `usernames` (dynamic group events), `orgSlug`/`orgId`, `sortCreatedAt` ("asc"/"desc")."""
+}
+fn
+(): Any {
+  list-event-types({})
+},
+(options: Map): Any {
+  ::api/request("GET", `/event-types${::api/query-string(options)}`, "", v())
+}
+
+get-event-type
+meta {
+    doc: """GET /event-types/{id} - One event type."""
+}
+fn (id: Any): Any {
+  ::api/request("GET", `/event-types/${::api/path-segment(id)}`, "", v())
+}
+
+build-create-body
+meta {
+    doc: """Build the create body from the required `title`, `slug` and `lengthInMinutes` plus `options` (any other field the API accepts: `description`, `scheduleId`, `minimumBookingNotice`, `beforeEventBuffer`, `afterEventBuffer`, `slotInterval`, `locations`, `bookingFields`, `confirmationPolicy`, `hidden`, ...). Unset options are omitted. Exposed for testing."""
+}
+fn (title: Str, slug: Str, length-in-minutes: Int, options: Map): Map {
+  ::api/compact({...options, title: title, slug: slug, lengthInMinutes: length-in-minutes})
+}
+
+create-event-type
+meta {
+    doc: """
+    POST /event-types - Create an event type.
+
+    **Example**
+
+    ```hot
+    ::cal-com::event-types/create-event-type("Intro call", "intro-call", 30, {
+      description: "A quick first conversation.",
+      minimumBookingNotice: 120
+    })
+    ```
+    """
+}
+fn
+(title: Str, slug: Str, length-in-minutes: Int): Any {
+  create-event-type(title, slug, length-in-minutes, {})
+},
+(title: Str, slug: Str, length-in-minutes: Int, options: Map): Any {
+  ::api/request("POST", "/event-types", build-create-body(title, slug, length-in-minutes, options), v())
+}
+
+update-event-type
+meta {
+    doc: """PATCH /event-types/{id} - Update an event type; `changes` takes the same fields as create. Unset fields are omitted (and left unchanged)."""
+}
+fn (id: Any, changes: Map): Any {
+  ::api/request("PATCH", `/event-types/${::api/path-segment(id)}`, ::api/compact(changes), v())
+}
+
+delete-event-type
+meta {
+    doc: """DELETE /event-types/{id} - Delete an event type. Returns the deleted event type's summary."""
+}
+fn (id: Any): Any {
+  ::api/request("DELETE", `/event-types/${::api/path-segment(id)}`, "", v())
+}

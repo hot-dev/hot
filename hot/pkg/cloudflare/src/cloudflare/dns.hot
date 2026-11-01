@@ -1,0 +1,129 @@
+::cloudflare::dns ns
+meta {
+    doc: """Cloudflare DNS records: list with filters (paged or all), find by name and type, create, update, overwrite, delete.""",
+    ctx: {"cloudflare.token": {required: true}}
+}
+
+::api ::cloudflare::api
+
+ListPage ::cloudflare::api/ListPage
+
+records-path fn (zone-id: Str): Str {
+  `/zones/${::api/seg(zone-id)}/dns_records`
+}
+
+record-path fn (zone-id: Str, record-id: Str): Str {
+  `${records-path(zone-id)}/${::api/seg(record-id)}`
+}
+
+list-dns-records
+meta {
+    doc: """
+    GET /zones/{zone_id}/dns_records - One page of a zone's records.
+    `params` are the API's filters: `type` (`"A"`, `"CNAME"`, `"TXT"`, …),
+    `name` and `content` as an exact string or an operator map
+    (`{name: {contains: "api"}}`, `{content: {startswith: "v=spf1"}}`),
+    `proxied`, `comment`, `tag`, `match` (`all`/`any`), `order`,
+    `direction`, `page`, `per_page`. Returns a `ListPage`.
+
+    **Example**
+
+    ```hot
+    page ::cloudflare::dns/list-dns-records(zone-id, {type: "TXT", content: {contains: "verification"}})
+    page.result
+    ```
+    """
+}
+fn
+(zone-id: Str): ListPage {
+  list-dns-records(zone-id, {})
+},
+(zone-id: Str, params: Map): ListPage {
+  ::api/json-page(`${records-path(zone-id)}${::api/query(params)}`)
+}
+
+list-all-dns-records
+meta {
+    doc: """Every record matching `params`, following pages (500 per request) up to `max` items (default 10000)."""
+}
+fn
+(zone-id: Str): Vec {
+  list-all-dns-records(zone-id, {})
+},
+(zone-id: Str, params: Map): Vec {
+  list-all-dns-records(zone-id, params, ::api/DEFAULT_MAX_ITEMS)
+},
+(zone-id: Str, params: Map, max: Int): Vec {
+  ::api/collect-pages((p) { list-dns-records(zone-id, p) }, {per_page: 500, ...params}, max)
+}
+
+find-dns-records
+meta {
+    doc: """
+    The records whose full name is exactly `name` (e.g. `"api.example.com"`),
+    optionally of one `type`. Returns a Vec (empty when none match).
+
+    **Example**
+
+    ```hot
+    existing ::cloudflare::dns/find-dns-records(zone-id, "api.example.com", "A")
+    ```
+    """
+}
+fn
+(zone-id: Str, name: Str): Vec {
+  list-all-dns-records(zone-id, {name: {exact: name}})
+},
+(zone-id: Str, name: Str, record-type: Str): Vec {
+  list-all-dns-records(zone-id, {name: {exact: name}, type: record-type})
+}
+
+get-dns-record
+meta {
+    doc: """GET /zones/{zone_id}/dns_records/{id} - One record."""
+}
+fn (zone-id: Str, record-id: Str): Map {
+  ::api/json("GET", record-path(zone-id, record-id))
+}
+
+create-dns-record
+meta {
+    doc: """
+    POST /zones/{zone_id}/dns_records - Create a record:
+    `{type, name, content, ttl?, proxied?, priority?, comment?, tags?}`.
+    `ttl` 1 means automatic. Returns the created record.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::dns/create-dns-record(zone-id, {type: "CNAME", name: "docs", content: "example.pages.dev", proxied: true})
+    ```
+    """
+}
+fn (zone-id: Str, record: Map): Map {
+  ::api/json("POST", records-path(zone-id), filter-vals(untype(record), is-some))
+}
+
+update-dns-record
+meta {
+    doc: """PATCH /zones/{zone_id}/dns_records/{id} - Change only the given fields (e.g. `{content: "203.0.113.8"}`)."""
+}
+fn (zone-id: Str, record-id: Str, changes: Map): Map {
+  ::api/json("PATCH", record-path(zone-id, record-id), filter-vals(untype(changes), is-some))
+}
+
+overwrite-dns-record
+meta {
+    doc: """PUT /zones/{zone_id}/dns_records/{id} - Replace a record entirely (`type`, `name`, `content` required; unset fields reset to defaults)."""
+}
+fn (zone-id: Str, record-id: Str, record: Map): Map {
+  ::api/json("PUT", record-path(zone-id, record-id), filter-vals(untype(record), is-some))
+}
+
+delete-dns-record
+meta {
+    doc: """DELETE /zones/{zone_id}/dns_records/{id} - Delete a record. Returns `{id}`."""
+}
+fn (zone-id: Str, record-id: Str): Map {
+  ::api/json("DELETE", record-path(zone-id, record-id))
+}

@@ -96,10 +96,12 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/playwright/test",
     "./hot/pkg/postmark/test",
     "./hot/pkg/qdrant/test",
+    "./hot/pkg/qwen/test",
     "./hot/pkg/redis/test",
     "./hot/pkg/salesforce/test",
     "./hot/pkg/sentry/test",
     "./hot/pkg/shopify/test",
+    "./hot/pkg/slack-admin/test",
     "./hot/pkg/slack/test",
     "./hot/pkg/sox/test",
     "./hot/pkg/sql-mysql/test",
@@ -108,6 +110,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/stripe/test",
     "./hot/pkg/supabase-admin/test",
     "./hot/pkg/supabase/test",
+    "./hot/pkg/telegram/test",
     "./hot/pkg/tesseract/test",
     "./hot/pkg/twilio/test",
     "./hot/pkg/web-search/test",
@@ -390,6 +393,15 @@ hot.project.pkg-test-openai.deps {
     "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
 }
 
+// qwen unit tests (base-URL selection, request building, hot-ai adapter)
+hot.project.pkg-test-qwen.src.paths ["./hot/pkg/qwen/src"]
+hot.project.pkg-test-qwen.test.paths ["./hot/pkg/qwen/test"]
+hot.project.pkg-test-qwen.test.capture true
+hot.project.pkg-test-qwen.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/openai": { "local": "./hot/pkg/openai" }
+}
+
 // supabase unit tests (pure-Hot filter/query builders, no network required)
 hot.project.pkg-test-supabase.src.paths ["./hot/pkg/supabase/src"]
 hot.project.pkg-test-supabase.test.paths ["./hot/pkg/supabase/test"]
@@ -454,7 +466,9 @@ hot.project.pkg-test-intercom.deps {}
 hot.project.pkg-test-plaid.src.paths ["./hot/pkg/plaid/src"]
 hot.project.pkg-test-plaid.test.paths ["./hot/pkg/plaid/test"]
 hot.project.pkg-test-plaid.test.capture true
-hot.project.pkg-test-plaid.deps {}
+hot.project.pkg-test-plaid.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" }
+}
 
 // qdrant unit tests (hermetic)
 hot.project.pkg-test-qdrant.src.paths ["./hot/pkg/qdrant/src"]
@@ -566,11 +580,14 @@ hot.project.pkg-test-google.deps {
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
 }
 
-// openai-compatible unit tests (url joining + types, hermetic)
+// openai-compatible unit tests (presets built on openai, hermetic)
 hot.project.pkg-test-openai-compatible.src.paths ["./hot/pkg/openai-compatible/src"]
 hot.project.pkg-test-openai-compatible.test.paths ["./hot/pkg/openai-compatible/test"]
 hot.project.pkg-test-openai-compatible.test.capture true
-hot.project.pkg-test-openai-compatible.deps {}
+hot.project.pkg-test-openai-compatible.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/openai": { "local": "./hot/pkg/openai" }
+}
 
 // elevenlabs unit tests (path building + types, hermetic)
 hot.project.pkg-test-elevenlabs.src.paths ["./hot/pkg/elevenlabs/src"]
@@ -595,6 +612,14 @@ hot.project.pkg-test-slack.src.paths ["./hot/pkg/slack/src"]
 hot.project.pkg-test-slack.test.paths ["./hot/pkg/slack/test"]
 hot.project.pkg-test-slack.test.capture true
 hot.project.pkg-test-slack.deps {}
+
+// slack-admin unit tests (request building and ok:false handling)
+hot.project.pkg-test-slack-admin.src.paths ["./hot/pkg/slack-admin/src"]
+hot.project.pkg-test-slack-admin.test.paths ["./hot/pkg/slack-admin/test"]
+hot.project.pkg-test-slack-admin.test.capture true
+hot.project.pkg-test-slack-admin.deps {
+    "hot.dev/slack": { "local": "./hot/pkg/slack" }
+}
 
 // sql unit tests (placeholder compilation + runtime over fake drivers)
 hot.project.pkg-test-sql.src.paths ["./hot/pkg/sql/src"]
@@ -639,6 +664,12 @@ hot.project.pkg-test-whatsapp.src.paths ["./hot/pkg/whatsapp/src"]
 hot.project.pkg-test-whatsapp.test.paths ["./hot/pkg/whatsapp/test"]
 hot.project.pkg-test-whatsapp.test.capture true
 hot.project.pkg-test-whatsapp.deps {}
+
+// telegram unit tests (secret-token verification and response envelopes)
+hot.project.pkg-test-telegram.src.paths ["./hot/pkg/telegram/src"]
+hot.project.pkg-test-telegram.test.paths ["./hot/pkg/telegram/test"]
+hot.project.pkg-test-telegram.test.capture true
+hot.project.pkg-test-telegram.deps {}
 
 // discord unit tests (Ed25519 interaction webhook verification)
 hot.project.pkg-test-discord.src.paths ["./hot/pkg/discord/src"]
@@ -871,7 +902,9 @@ hot.project.pkg-integration-shopify.deps {}
 hot.project.pkg-integration-plaid.src.paths ["./hot/pkg/plaid/src"]
 hot.project.pkg-integration-plaid.test.paths ["./hot/pkg/plaid/integration-test"]
 hot.project.pkg-integration-plaid.test.capture true
-hot.project.pkg-integration-plaid.deps {}
+hot.project.pkg-integration-plaid.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" }
+}
 
 // sentry integration tests (requires credentials; read-only or self-cleaning)
 hot.project.pkg-integration-sentry.src.paths ["./hot/pkg/sentry/src"]
@@ -976,7 +1009,10 @@ hot.project.pkg-integration-linear.deps {}
 hot.project.pkg-integration-openai-compatible.src.paths ["./hot/pkg/openai-compatible/src"]
 hot.project.pkg-integration-openai-compatible.test.paths ["./hot/pkg/openai-compatible/integration-test"]
 hot.project.pkg-integration-openai-compatible.test.capture true
-hot.project.pkg-integration-openai-compatible.deps {}
+hot.project.pkg-integration-openai-compatible.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/openai": { "local": "./hot/pkg/openai" }
+}
 
 // ElevenLabs integration tests (requires elevenlabs.api.key; uses quota)
 hot.project.pkg-integration-elevenlabs.src.paths ["./hot/pkg/elevenlabs/src"]
@@ -1066,7 +1102,8 @@ hot.project.pkg-integration-qwen.src.paths ["./hot/pkg/qwen/src"]
 hot.project.pkg-integration-qwen.test.paths ["./hot/pkg/qwen/integration-test"]
 hot.project.pkg-integration-qwen.test.capture true
 hot.project.pkg-integration-qwen.deps {
-    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/openai": { "local": "./hot/pkg/openai" }
 }
 
 // JSON-RPC integration tests
