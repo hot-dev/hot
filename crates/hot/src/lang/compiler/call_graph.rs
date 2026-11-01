@@ -9,7 +9,7 @@
 // so imported variables are already resolved from Ref::Var to Ref::Ns.
 // Namespace aliases are resolved using each namespace's `aliases` map.
 
-use crate::lang::ast::{Meta, NsPath, Program, Ref, TemplatePart, Value};
+use crate::lang::ast::{AstNode, FnCall, Meta, NsPath, Program, Ref, TemplatePart, Value};
 use crate::lang::compiler::box_checker::{
     BoxRequirement, FnBoxRequirement, ProgramBoxRequirements,
 };
@@ -388,16 +388,7 @@ pub(super) fn collect_callees_from_value(
 ) {
     match value {
         Value::FnCall(fn_call) => {
-            // Extract the callee's FQN from the function reference
-            if let Some(fqn) = resolve_callee_fqn(&fn_call.function, current_ns, aliases) {
-                callees.insert(fqn);
-            }
-            // Also walk the function expression itself (could be a complex expression)
-            collect_callees_from_value(&fn_call.function, current_ns, aliases, callees);
-            // Walk arguments (may contain function references or nested calls)
-            for arg in &fn_call.args {
-                collect_callees_from_value(&arg.value, current_ns, aliases, callees);
-            }
+            collect_callees_from_fn_call(fn_call, current_ns, aliases, callees)
         }
 
         Value::Flow(flow) => {
@@ -467,19 +458,75 @@ pub(super) fn collect_callees_from_value(
             }
         }
 
-        Value::MapWithSpread { spread_entries, .. } => {
+        Value::MapWithSpread {
+            base_entries,
+            spread_entries,
+        } => {
+            for entry in base_entries.values() {
+                collect_callees_from_val(entry, current_ns, aliases, callees);
+            }
             for (_, spread_val) in spread_entries {
                 collect_callees_from_value(spread_val, current_ns, aliases, callees);
             }
         }
 
+        // A Map or Vec literal holds its non-literal entries as boxed
+        // expressions (`{name: ::other/get-name()}`).
+        Value::Val(val, _) => collect_callees_from_val(val, current_ns, aliases, callees),
+
         // Leaf nodes: no function calls to extract
-        Value::Val(_, _)
-        | Value::TypeDef(_)
+        Value::TypeDef(_)
         | Value::TypeImplementation(_)
         | Value::Unbound(_)
         | Value::VariadicExpansion(_)
         | Value::Placeholder(_) => {}
+    }
+}
+
+fn collect_callees_from_fn_call(
+    fn_call: &FnCall,
+    current_ns: &str,
+    aliases: &indexmap::IndexMap<NsPath, NsPath>,
+    callees: &mut AHashSet<String>,
+) {
+    // Extract the callee's FQN from the function reference
+    if let Some(fqn) = resolve_callee_fqn(&fn_call.function, current_ns, aliases) {
+        callees.insert(fqn);
+    }
+    // Also walk the function expression itself (could be a complex expression)
+    collect_callees_from_value(&fn_call.function, current_ns, aliases, callees);
+    // Walk arguments (may contain function references or nested calls)
+    for arg in &fn_call.args {
+        collect_callees_from_value(&arg.value, current_ns, aliases, callees);
+    }
+}
+
+/// Walk the boxed expressions inside a literal Map or Vec.
+fn collect_callees_from_val(
+    val: &Val,
+    current_ns: &str,
+    aliases: &indexmap::IndexMap<NsPath, NsPath>,
+    callees: &mut AHashSet<String>,
+) {
+    match val {
+        Val::Box(boxed) => {
+            if let Some(AstNode(node)) = boxed.as_any().downcast_ref::<AstNode>() {
+                collect_callees_from_value(node, current_ns, aliases, callees);
+            } else if let Some(fn_call) = boxed.as_any().downcast_ref::<FnCall>() {
+                collect_callees_from_fn_call(fn_call, current_ns, aliases, callees);
+            }
+        }
+        Val::Map(entries) => {
+            for entry in entries.values() {
+                collect_callees_from_val(entry, current_ns, aliases, callees);
+            }
+        }
+        Val::Vec(items) => {
+            for item in items {
+                collect_callees_from_val(item, current_ns, aliases, callees);
+            }
+        }
+        _ => {}
     }
 }
 

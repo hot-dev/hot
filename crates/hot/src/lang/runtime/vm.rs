@@ -4335,44 +4335,8 @@ impl VirtualMachine {
                 // construct_typed_recursive sees the Vec wants `Geom`, the
                 // element is a tagged Triangle, and rather than failing variant
                 // inference we look up the arrow and call it.
-                let src_short = existing.rsplit('/').next().unwrap_or(existing);
-                let tgt_short = type_name.rsplit('/').next().unwrap_or(&type_name);
-                // Prefer keys whose source is the value's qualified $type;
-                // fall back to short-form comparison for legacy registry
-                // entries. The single-candidate guard keeps ambiguous
-                // matches from silently picking an arrow.
-                let collect_candidates = |exact: bool| -> Vec<(String, String)> {
-                    self.type_implementations
-                        .keys()
-                        .filter_map(|(s, t)| {
-                            let source_matches = if exact {
-                                s == existing
-                            } else {
-                                s.rsplit('/').next().unwrap_or(s) == src_short
-                            };
-                            if !source_matches {
-                                return None;
-                            }
-                            if t == tgt_short || t.starts_with(&format!("{}.", tgt_short)) {
-                                Some((s.clone(), t.clone()))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                };
-                let mut candidates = collect_candidates(true);
-                if candidates.is_empty() {
-                    candidates = collect_candidates(false);
-                }
-                if candidates.len() == 1
-                    && let Some(impl_name) =
-                        self.resolve_type_implementation(&candidates[0].0, &candidates[0].1)
-                {
-                    return self.execute_function_call_by_qualified_name(
-                        &impl_name,
-                        std::slice::from_ref(data),
-                    );
+                if let Some(coerced) = self.coerce_tagged_via_arrow(data, existing, &type_name)? {
+                    return Ok(coerced);
                 }
             }
 
@@ -4519,6 +4483,18 @@ impl VirtualMachine {
             );
             return self
                 .execute_function_call_by_qualified_name(&type_name, std::slice::from_ref(data));
+        }
+
+        // `T(value)` where `value` carries another type's tag runs a
+        // declared `Source -> T` arrow instead of copying fields across:
+        // the arrow is the author's statement of how to build a T from it.
+        if let Val::Map(m) = data
+            && let Some(existing) = crate::val::tagged_type_name(m)
+            && existing != type_name
+            && !existing.starts_with(&format!("{}.", type_name))
+            && let Some(coerced) = self.coerce_tagged_via_arrow(data, existing, &type_name)?
+        {
+            return Ok(coerced);
         }
 
         // Get all_fields list to check for newtypes
@@ -5507,11 +5483,41 @@ impl VirtualMachine {
             .map(|(index, arg)| {
                 if keeps.get(index).copied().unwrap_or(false) {
                     self.resolve_variable_references_in_val(&arg)
+                } else if let CallTarget::Function(function_id) = target
+                    && arg.is_err()
+                {
+                    Err(self.consume_err_arg(function_id, index, &arg))
                 } else {
                     self.prepare_call_arg(arg)
                 }
             })
             .collect()
+    }
+
+    /// Halt on an Err passed to a user function parameter that is not
+    /// declared `Result`. The message names the parameter and function, so
+    /// a halt far from where the Err was made says why it happened.
+    fn consume_err_arg(&mut self, function_id: FunctionId, index: usize, arg: &Val) -> VmError {
+        let err_val = arg.unwrap_err().cloned().unwrap_or(Val::Null);
+        let mut msg = Self::result_err_message(&err_val);
+        if let Some(function) = self.program.functions.get(function_id as usize) {
+            let param = function
+                .param_names
+                .get(index)
+                .or_else(|| function.param_names.last().filter(|_| function.is_variadic))
+                .map(|name| format!("`{name}`"))
+                .unwrap_or_else(|| format!("{}", index + 1));
+            let name = if function.name.starts_with("::") {
+                function.name.clone()
+            } else {
+                format!("{}/{}", function.namespace, function.name)
+            };
+            msg = format!(
+                "{msg} (an Err passed to parameter {param} of {name}; declare the parameter `Result` to receive Errs)"
+            );
+        }
+        self.set_consumed_failure(msg.clone(), err_val);
+        VmError::runtime(format!("Result error: {}", msg))
     }
 
     /// Keep a halt that a native saw while running Hot code (a callback, a
@@ -7382,6 +7388,31 @@ impl VirtualMachine {
             }
             _ => false,
         })
+    }
+
+    /// Run the registered `Source -> Target` arrow for a value tagged
+    /// `existing`, when exactly one arrow from that source reaches
+    /// `target` (or a variant of it). Prefers registry keys whose source is
+    /// the value's qualified `$type`, falling back to short names for
+    /// legacy entries; ambiguous matches return `None` rather than picking
+    /// an arrow.
+    fn coerce_tagged_via_arrow(
+        &mut self,
+        data: &Val,
+        existing: &str,
+        target: &str,
+    ) -> VmResult<Option<Val>> {
+        let src_short = existing.rsplit('/').next().unwrap_or(existing);
+        let tgt_short = target.rsplit('/').next().unwrap_or(target);
+        let Some((source, target)) = self.find_coercion_target(existing, src_short, tgt_short)
+        else {
+            return Ok(None);
+        };
+        let Some(impl_name) = self.resolve_type_implementation(&source, &target) else {
+            return Ok(None);
+        };
+        self.execute_function_call_by_qualified_name(&impl_name, std::slice::from_ref(data))
+            .map(Some)
     }
 
     /// Look up a coercion arrow whose source type matches `src` and whose

@@ -194,3 +194,16 @@ fn () {
     // Should parse without error
     assert-eq("soap:Envelope", xml.tag, "should preserve namespace prefix in tag")
 }
+
+// Entity and character references decode in text, and the spaces around
+// them survive
+test-text-decodes-entity-references
+meta ["test"]
+fn () {
+    xml ::xml/from-xml("<r><a>Tom &amp; Jerry</a><b>&lt;&gt;&quot;&apos;</b><c>&#65;&#x42;</c><d>&nbsp;</d></r>")
+    texts map(xml.content, ::xml/text)
+    assert-eq("Tom & Jerry", texts[0], "&amp; decodes and keeps the spaces around it")
+    assert-eq("<>\"'", texts[1], "every predefined entity decodes")
+    assert-eq("AB", texts[2], "decimal and hex character references decode")
+    assert-eq("&nbsp;", texts[3], "an entity XML does not predefine is kept as written")
+}

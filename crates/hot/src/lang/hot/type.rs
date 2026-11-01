@@ -568,7 +568,12 @@ fn format_map_for_string(map: &IndexMap<Val, Val>) -> String {
             return (*text).to_owned();
         }
     }
-    format!("{}({})", type_name, format_map_contents(map))
+    // The fields live under `$val`; the wrapper's own keys are metadata.
+    let contents = match map.get(&Val::from("$val")) {
+        Some(val) => format_val_for_string(val),
+        None => format_map_contents(map),
+    };
+    format!("{}({})", type_name, contents)
 }
 
 /// The text of a vector: `[1, "a", [2]]`.
@@ -1675,6 +1680,40 @@ mod constructor_tests {
         assert_eq!(
             text(Val::Vec(vec![Val::Byte(7), Val::Bytes(vec![1, 2])])),
             "[Byte(7), Bytes([1, 2])]"
+        );
+    }
+
+    // A typed value shows its fields, which live under `$val`.
+    #[test]
+    fn test_str_formats_typed_value_contents() {
+        let text = |value: Val| match str_internal(&[value]) {
+            HotResult::Ok(Val::Str(s)) => (*s).to_owned(),
+            other => panic!("Expected a Str, got {:?}", other),
+        };
+        let typed = |name: &str, val: Val| {
+            Val::map_from_iter(vec![
+                (Val::from("$type"), Val::from(name)),
+                (Val::from("$val"), val),
+            ])
+        };
+        let fields = Val::map_from_iter(vec![
+            (Val::from("status"), Val::Int(404)),
+            (Val::from("body"), Val::from("nope")),
+        ]);
+        assert_eq!(
+            text(typed("::app/HttpError", fields.clone())),
+            r#"::app/HttpError({status: 404, body: "nope"})"#
+        );
+        assert_eq!(
+            text(Val::Vec(vec![typed(
+                "::app/Wrapper",
+                typed("::app/Inner", fields)
+            )])),
+            r#"[::app/Wrapper(::app/Inner({status: 404, body: "nope"}))]"#
+        );
+        assert_eq!(
+            text(typed("::app/Email", Val::from("a@b.c"))),
+            r#"::app/Email("a@b.c")"#
         );
     }
 }

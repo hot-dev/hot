@@ -256,3 +256,52 @@ meta ["test"] fn () {
     expected "John Doe at 123 Main St, Anytown, USA"
     assert-eq(expected, person_str, "Recursive type implementations should work")
 }
+
+// ============================================================================
+// Struct construction from another type runs its declared arrow
+// ============================================================================
+
+Reading type {
+    low: Int,
+    high: Int
+}
+
+Span type {
+    low: Int,
+    width: Int
+}
+
+Reading -> Span fn (r: Reading): Span {
+    Span({low: r.low, width: ::hot::math/sub(r.high, r.low)})
+}
+
+HttpResponse ::hot::http/HttpResponse
+
+ApiError type {
+    status: Int,
+    message: Str
+}
+
+HttpResponse -> ApiError fn (response: HttpResponse): ApiError {
+    ApiError({status: response.status, message: `HTTP ${response.status}`})
+}
+
+test-struct-constructor-runs-arrow-from-tagged-value
+meta ["test"] fn () {
+    span Span(Reading({low: 3, high: 10}))
+    assert-eq(7, span.width, "Span(reading) computes width through the Reading -> Span arrow")
+    assert-eq(3, span.low, "fields the arrow copies are kept")
+    assert(is-type(span, Span), "the arrow result is a Span")
+
+    response HttpResponse({status: 404, headers: {}, body: "missing"})
+    error ApiError(response)
+    assert-eq(404, error.status, "ApiError(response) reads the status through the arrow")
+    assert-eq("HTTP 404", error.message, "fields only the arrow computes are filled in")
+}
+
+test-struct-constructor-from-map-copies-fields
+meta ["test"] fn () {
+    error ApiError({status: 500, message: "boom"})
+    assert-eq(500, error.status, "a Map literal still builds the struct field by field")
+    assert-eq("::hot::test::type-dispatch/ApiError({status: 500, message: \"boom\"})", Str(error), "Str shows the fields")
+}
