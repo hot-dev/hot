@@ -15,9 +15,11 @@
 # Authentication:
 #   CI should configure AWS credentials via OIDC before running this script.
 #   Local runs may use an AWS profile or standard AWS_* environment variables.
-#   The role needs s3:GetObject, s3:PutObject and s3:ListBucket on the bucket.
-#   Without s3:ListBucket, S3 answers 403 instead of 404 for a missing key,
-#   and the script stops rather than guess.
+#   The role needs s3:GetObject, s3:PutObject and s3:ListBucket on the bucket,
+#   and cloudfront:CreateInvalidation on the distribution (plus
+#   cloudfront:GetInvalidation with WAIT_FOR_INVALIDATION=true). HeadObject
+#   needs s3:GetObject, and without s3:ListBucket S3 answers 403 instead of
+#   404 for a missing key: either way the script stops rather than guess.
 #
 # Usage:
 #   ./hot-pkg-cdn-upload.sh [cdn-output-dir]
@@ -63,7 +65,7 @@ s3_key_exists() {
     fi
     echo "Error: could not read s3://$S3_BUCKET/$key: $error" >&2
     if [[ "$error" == *"(403)"* ]]; then
-        echo "S3 answers 403 for a missing key when the role lacks s3:ListBucket." >&2
+        echo "S3 answers 403 when the role lacks s3:GetObject, or for a missing key when it lacks s3:ListBucket." >&2
     fi
     exit 1
 }

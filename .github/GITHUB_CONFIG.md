@@ -26,7 +26,7 @@ These are needed only when `release.yml` publishes artifacts to S3/CDN or update
 | `RELEASE_S3_BUCKET` | Variable | Publishing installers to S3/CDN | S3 bucket for installer packages and install scripts. |
 | `RELEASE_AWS_REGION` | Variable | Optional | AWS region for installer uploads. Defaults to `us-east-2`. |
 | `RELEASE_CLOUDFRONT_DIST_ID` | Variable | Optional | CloudFront distribution to invalidate after installer uploads. |
-| `PKG_AWS_ROLE_ARN` | Secret | Publishing package CDN | AWS OIDC role for package CDN uploads. It needs `s3:GetObject`, `s3:PutObject` and `s3:ListBucket` on the bucket: without `s3:ListBucket`, S3 answers 403 for a missing key and the upload stops. |
+| `PKG_AWS_ROLE_ARN` | Secret | Publishing package CDN | AWS OIDC role for package CDN uploads. It needs `s3:GetObject`, `s3:PutObject` and `s3:ListBucket` on the bucket, and `cloudfront:CreateInvalidation` on the distribution. Without `s3:GetObject`, or without `s3:ListBucket` for a missing key, S3 answers 403 and the upload stops. |
 | `PKG_S3_BUCKET` | Variable | Publishing package CDN | S3 bucket for package tarballs and package docs. |
 | `PKG_AWS_REGION` | Variable | Optional | AWS region for package CDN uploads. Defaults to `us-east-2`. |
 | `PKG_CLOUDFRONT_DIST_ID` | Variable | Optional | CloudFront distribution to invalidate for package metadata. |
