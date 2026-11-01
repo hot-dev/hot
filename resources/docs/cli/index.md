@@ -617,6 +617,15 @@ hot update --version 1.4.0 --force
 
 This downloads and installs the requested version of Hot. If you're already on the selected version, it will let you know unless `--force` is set.
 
+`hot update` updates the install it runs from, the way it was installed:
+
+- A user install from the installer script (`~/.local` by default) is replaced in place, without sudo.
+- A macOS or Debian package install runs the new package with sudo.
+- A Homebrew install runs `brew upgrade hot`.
+- On Windows, a user install (`%LOCALAPPDATA%\Programs\Hot Dev`) runs the per-user installer without administrator rights; a Program Files install runs the machine installer as an administrator.
+
+To move from a package install to a user install, run the installer script with `--user` (on Windows, set `HOT_INSTALL_SCOPE=user`), then remove the package install.
+
 ### hot help
 
 Display help information:

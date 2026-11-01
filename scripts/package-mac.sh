@@ -331,6 +331,107 @@ EOF
     # Clean up component package (keep only final package)
     rm "$COMPONENT_PKG"
 
+    # The per-user package: the same (signed) files under ~/.local, installed
+    # with "Install for me only" and no administrator password. Its layout and
+    # receipt match install.sh's user install, so `hot update` updates it in
+    # place without sudo.
+    USER_STAGING_DIR="$STAGING_DIR/user"
+    mkdir -p "$USER_STAGING_DIR/payload/.local" "$USER_STAGING_DIR/scripts"
+    cp -R "$STAGING_DIR/payload/usr/local/bin" "$STAGING_DIR/payload/usr/local/share" "$USER_STAGING_DIR/payload/.local/"
+    rm -rf "$USER_STAGING_DIR/payload/.local/share/hot/scripts"
+    printf '{"method": "user-pkg"}\n' > "$USER_STAGING_DIR/payload/.local/share/hot/install-receipt.json"
+
+    # Installer runs a home install's scripts as that user, with $2 their home.
+    cat > "$USER_STAGING_DIR/scripts/preinstall" << 'EOF'
+#!/bin/bash
+
+# Start from an empty resources folder, so files a release drops don't linger
+rm -rf "${2:-$HOME}/.local/share/hot"
+exit 0
+EOF
+    cat > "$USER_STAGING_DIR/scripts/postinstall" << 'EOF'
+#!/bin/bash
+
+# Add ~/.local/bin to PATH in the user's shell startup file, as install.sh does
+# (the line keeps $HOME for the shell to expand)
+# shellcheck disable=SC2016
+HOME_DIR="${2:-$HOME}"
+LINE='export PATH="$HOME/.local/bin:$PATH"'
+SHELL_PATH="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk '{print $2}')"
+case "$(basename "${SHELL_PATH:-${SHELL:-zsh}}")" in
+    zsh) RC="${ZDOTDIR:-$HOME_DIR}/.zshrc" ;;
+    bash)
+        # Login shells read the first of these that exists. Creating
+        # .bash_profile would hide .profile.
+        RC="$HOME_DIR/.bash_profile"
+        for f in .bash_profile .bash_login .profile; do
+            if [ -f "$HOME_DIR/$f" ]; then RC="$HOME_DIR/$f"; break; fi
+        done
+        ;;
+    fish) RC="$HOME_DIR/.config/fish/conf.d/hot.fish"; LINE='fish_add_path "$HOME/.local/bin"' ;;
+    *) RC="$HOME_DIR/.profile" ;;
+esac
+if [ ! -f "$RC" ] || ! grep -qF "$LINE" "$RC"; then
+    mkdir -p "$(dirname "$RC")"
+    printf '\n# Added by the Hot installer\n%s\n' "$LINE" >> "$RC"
+fi
+exit 0
+EOF
+    chmod +x "$USER_STAGING_DIR/scripts/preinstall" "$USER_STAGING_DIR/scripts/postinstall"
+
+    USER_COMPONENT_PKG="$PACKAGES_DIR/hot-user-component-$TARGET.pkg"
+    pkgbuild \
+        --root "$USER_STAGING_DIR/payload" \
+        --scripts "$USER_STAGING_DIR/scripts" \
+        --identifier "dev.hot.hot.user.pkg" \
+        --version "$VERSION" \
+        --install-location "/" \
+        "$USER_COMPONENT_PKG"
+
+    # Same pages as the system package; the domains allow only a home install
+    cat > "$USER_STAGING_DIR/distribution.xml" << EOF
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Hot Dev $VERSION</title>
+
+    <!-- Branding -->
+    <background file="background.png" alignment="center" scaling="proportional"/>
+    <background-darkAqua file="background-darkAqua.png" alignment="center" scaling="proportional"/>
+
+    <!-- Installer pages -->
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <license file="LICENSE.txt" mime-type="text/plain"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+
+    <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="false"/>
+
+    <pkg-ref id="dev.hot.hot.user.pkg"/>
+
+    <options customize="never" require-scripts="false" hostArchitectures="$HOST_ARCH"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="dev.hot.hot.user.pkg"/>
+        </line>
+    </choices-outline>
+
+    <choice id="default"/>
+    <choice id="dev.hot.hot.user.pkg" visible="false">
+        <pkg-ref id="dev.hot.hot.user.pkg"/>
+    </choice>
+
+    <pkg-ref id="dev.hot.hot.user.pkg" version="$VERSION" onConclusion="none">hot-user-component-$TARGET.pkg</pkg-ref>
+</installer-gui-script>
+EOF
+
+    USER_PKG="$PACKAGES_DIR/hot_${VERSION}_${TARGET}_user.pkg"
+    productbuild \
+        --distribution "$USER_STAGING_DIR/distribution.xml" \
+        --resources "$STAGING_DIR/installer-resources" \
+        --package-path "$PACKAGES_DIR" \
+        --version "$VERSION" \
+        "$USER_PKG"
+    rm "$USER_COMPONENT_PKG"
+
     # ===========================================
     # Code Signing and Notarization (Optional)
     # ===========================================
@@ -348,67 +449,70 @@ EOF
     #   export APPLE_APP_PASSWORD="xxxx-xxxx-xxxx-xxxx"
     #   export APPLE_TEAM_ID="TEAMID"
 
-    if [ -n "$APPLE_DEVELOPER_ID_INST" ]; then
-        echo "Signing package with Developer ID Installer..."
-        SIGNED_PKG="${FINAL_PKG%.pkg}_signed.pkg"
-        productsign --sign "$APPLE_DEVELOPER_ID_INST" "$FINAL_PKG" "$SIGNED_PKG"
-        mv "$SIGNED_PKG" "$FINAL_PKG"
-        echo "Package signed successfully."
+    # Sign and notarize the system package and the per-user one
+    for FINAL_PKG in "$FINAL_PKG" "$USER_PKG"; do
+        if [ -n "$APPLE_DEVELOPER_ID_INST" ]; then
+            echo "Signing package with Developer ID Installer..."
+            SIGNED_PKG="${FINAL_PKG%.pkg}_signed.pkg"
+            productsign --sign "$APPLE_DEVELOPER_ID_INST" "$FINAL_PKG" "$SIGNED_PKG"
+            mv "$SIGNED_PKG" "$FINAL_PKG"
+            echo "Package signed successfully."
 
-        # Notarize if credentials are available
-        if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
-            echo "Submitting for notarization..."
+            # Notarize if credentials are available
+            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+                echo "Submitting for notarization..."
 
-            # Stream output live via tee so we still see it on hang/timeout/crash,
-            # while also capturing it for submission-id extraction. Disable set -e
-            # locally so a non-zero exit doesn't skip our error-handling block
-            # (which fetches the detailed notarization log from Apple).
-            NOTARIZE_LOG=$(mktemp)
-            set +e
-            xcrun notarytool submit "$FINAL_PKG" \
-                --apple-id "$APPLE_ID" \
-                --password "$APPLE_APP_PASSWORD" \
-                --team-id "$APPLE_TEAM_ID" \
-                --verbose \
-                --wait 2>&1 | tee "$NOTARIZE_LOG"
-            NOTARIZE_STATUS=${PIPESTATUS[0]}
-            set -e
-            NOTARIZE_OUTPUT=$(cat "$NOTARIZE_LOG")
-            rm -f "$NOTARIZE_LOG"
+                # Stream output live via tee so we still see it on hang/timeout/crash,
+                # while also capturing it for submission-id extraction. Disable set -e
+                # locally so a non-zero exit doesn't skip our error-handling block
+                # (which fetches the detailed notarization log from Apple).
+                NOTARIZE_LOG=$(mktemp)
+                set +e
+                xcrun notarytool submit "$FINAL_PKG" \
+                    --apple-id "$APPLE_ID" \
+                    --password "$APPLE_APP_PASSWORD" \
+                    --team-id "$APPLE_TEAM_ID" \
+                    --verbose \
+                    --wait 2>&1 | tee "$NOTARIZE_LOG"
+                NOTARIZE_STATUS=${PIPESTATUS[0]}
+                set -e
+                NOTARIZE_OUTPUT=$(cat "$NOTARIZE_LOG")
+                rm -f "$NOTARIZE_LOG"
 
-            # Extract submission ID from output
-            SUBMISSION_ID=$(echo "$NOTARIZE_OUTPUT" | grep -E "^\s*id:" | head -1 | awk '{print $2}')
+                # Extract submission ID from output
+                SUBMISSION_ID=$(echo "$NOTARIZE_OUTPUT" | grep -E "^\s*id:" | head -1 | awk '{print $2}')
 
-            if [ "$NOTARIZE_STATUS" -ne 0 ] || echo "$NOTARIZE_OUTPUT" | grep -q "status: Invalid"; then
-                echo ""
-                echo "Notarization failed (exit status: $NOTARIZE_STATUS, submission id: ${SUBMISSION_ID:-<none>})."
-                if [ -n "$SUBMISSION_ID" ]; then
-                    echo "Fetching detailed notarization log from Apple..."
-                    xcrun notarytool log "$SUBMISSION_ID" \
-                        --apple-id "$APPLE_ID" \
-                        --password "$APPLE_APP_PASSWORD" \
-                        --team-id "$APPLE_TEAM_ID" || \
-                        echo "(failed to fetch notarytool log for $SUBMISSION_ID)"
-                else
-                    echo "No submission id was returned by notarytool — this usually indicates a"
-                    echo "transport-level failure (network/upload error or Apple service outage)"
-                    echo "rather than a problem with the package itself. Check Apple System Status:"
-                    echo "  https://www.apple.com/support/systemstatus/"
+                if [ "$NOTARIZE_STATUS" -ne 0 ] || echo "$NOTARIZE_OUTPUT" | grep -q "status: Invalid"; then
+                    echo ""
+                    echo "Notarization failed (exit status: $NOTARIZE_STATUS, submission id: ${SUBMISSION_ID:-<none>})."
+                    if [ -n "$SUBMISSION_ID" ]; then
+                        echo "Fetching detailed notarization log from Apple..."
+                        xcrun notarytool log "$SUBMISSION_ID" \
+                            --apple-id "$APPLE_ID" \
+                            --password "$APPLE_APP_PASSWORD" \
+                            --team-id "$APPLE_TEAM_ID" || \
+                            echo "(failed to fetch notarytool log for $SUBMISSION_ID)"
+                    else
+                        echo "No submission id was returned by notarytool — this usually indicates a"
+                        echo "transport-level failure (network/upload error or Apple service outage)"
+                        echo "rather than a problem with the package itself. Check Apple System Status:"
+                        echo "  https://www.apple.com/support/systemstatus/"
+                    fi
+                    exit 1
                 fi
-                exit 1
+
+                echo "Stapling notarization ticket..."
+                xcrun stapler staple "$FINAL_PKG"
+                echo "Notarization complete."
+            else
+                echo "Skipping notarization (APPLE_ID, APPLE_APP_PASSWORD, or APPLE_TEAM_ID not set)"
             fi
-
-            echo "Stapling notarization ticket..."
-            xcrun stapler staple "$FINAL_PKG"
-            echo "Notarization complete."
         else
-            echo "Skipping notarization (APPLE_ID, APPLE_APP_PASSWORD, or APPLE_TEAM_ID not set)"
+            echo "Skipping code signing (APPLE_DEVELOPER_ID_APP or APPLE_DEVELOPER_ID_INST not set)"
         fi
-    else
-        echo "Skipping code signing (APPLE_DEVELOPER_ID_APP or APPLE_DEVELOPER_ID_INST not set)"
-    fi
 
-    echo "Created: $FINAL_PKG"
+        echo "Created: $FINAL_PKG"
+    done
 done
 
 echo ""
