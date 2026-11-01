@@ -1,0 +1,40 @@
+::dropbox::test::sync ns
+meta ["test"]
+
+::sync ::dropbox::sync
+
+DELTA [
+    {".tag": "file", id: "id:1", name: "a.txt", path_lower: "/docs/a.txt", path_display: "/Docs/a.txt", rev: "r1", size: 3},
+    {".tag": "folder", id: "id:2", name: "Old", path_lower: "/docs/old", path_display: "/Docs/Old"},
+    {".tag": "deleted", name: "b.txt", path_lower: "/docs/b.txt", path_display: "/Docs/b.txt"},
+    {".tag": "file", id: "id:1", name: "a.txt", path_lower: "/docs/a.txt", path_display: "/Docs/a.txt", rev: "r2", size: 4},
+    {".tag": "deleted", name: "Old", path_lower: "/docs/old", path_display: "/Docs/Old"},
+    {".tag": "deleted", name: "c.txt", path_lower: "/docs/c.txt", path_display: "/Docs/c.txt"},
+    {".tag": "file", id: "id:3", name: "c.txt", path_lower: "/docs/c.txt", path_display: "/Docs/c.txt", rev: "r3", size: 1}
+]
+
+test-changed-files
+meta ["test"] fn () {
+    files ::sync/changed-files({entries: DELTA, cursor: "c", pages: 1, reset: false})
+    by-path reduce(files, (acc, f) { assoc(acc, f.path, f) }, {})
+    assert-eq(2, length(files), "a.txt and the re-created c.txt; the deleted folder is gone")
+    assert-eq("r2", get(by-path, "/Docs/a.txt").version, "the latest entry per path wins")
+    assert-eq("id:3", get(by-path, "/Docs/c.txt").id)
+}
+
+test-deleted-paths
+meta ["test"] fn () {
+    deleted sort(::sync/deleted-paths(DELTA))
+    assert-eq(["/docs/b.txt", "/docs/old"], deleted, "c.txt came back, so it is not deleted")
+    assert(::sync/is-under("/Docs/Old/x.txt", "/docs/old"))
+    assert(::sync/is-under("/docs/old", "/docs/old"))
+    assert(not(::sync/is-under("/docs/older/x", "/docs/old")))
+}
+
+test-longpoll-timeout
+meta ["test"] fn () {
+    assert-eq(30, ::sync/longpoll-timeout(null))
+    assert-eq(30, ::sync/longpoll-timeout(5))
+    assert-eq(120, ::sync/longpoll-timeout(120))
+    assert-eq(480, ::sync/longpoll-timeout(9999))
+}

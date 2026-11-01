@@ -1,0 +1,72 @@
+::microsoft::onedrive::test::paths ns
+meta ["test"]
+
+// Hermetic: microsoft.onedrive.drive-id is never set, so the default drive is /me/drive.
+
+::od ::microsoft::onedrive
+
+test-drive-refs
+meta ["test"] fn () {
+    assert-eq("/me/drive", ::od/drive-base({}))
+    assert-eq("/me/drive", ::od/drive-base({drive: "me"}))
+    assert-eq("/drives/b%21abc", ::od/drive-base({drive: "b!abc"}), "a drive id is encoded")
+    assert-eq("/users/alex%40contoso.com/drive", ::od/drive-base({drive: ::od/user-drive("alex@contoso.com")}))
+    assert-eq("/sites/contoso.sharepoint.com%2C11%2C22/drive", ::od/drive-base({drive: ::od/site-drive("contoso.sharepoint.com,11,22")}))
+    assert-eq("/groups/g1/drive", ::od/drive-base({drive: {group: "g1"}}))
+    assert-eq("/drives/d1", ::od/drive-base({drive: {drive-id: "d1"}}))
+    assert-eq("/drives/ctx-drive", ::od/drive-base-from(null, "ctx-drive"), "a context default drive id")
+    assert-eq("/me/drive", ::od/drive-base-from("", ""))
+}
+
+test-encode-path
+meta ["test"] fn () {
+    assert-eq("/Shared%20Docs/Q3%20%231.docx", ::od/encode-path("/Shared Docs/Q3 #1.docx"))
+    assert-eq("/a/b", ::od/encode-path("a//b/"), "empty segments dropped")
+    assert-eq("/100%25%20sure%3F%20%26%20it%27s.txt", ::od/encode-path("/100% sure? & it's.txt"))
+    assert-eq("/%C3%A9t%C3%A9.md", ::od/encode-path("/été.md"))
+}
+
+test-item-path
+meta ["test"] fn () {
+    assert-eq("/me/drive/root", ::od/item-path("root", {}))
+    assert-eq("/me/drive/root", ::od/item-path("/", {}))
+    assert-eq("/me/drive/root:/Reports/Q3%20Plan.xlsx:", ::od/item-path("/Reports/Q3 Plan.xlsx", {}))
+    assert-eq("/me/drive/root:/Reports/Q3.xlsx:/content", `${::od/item-path("/Reports/Q3.xlsx", {})}/content`)
+    assert-eq("/drives/d1/items/01ABC", ::od/item-path("01ABC", {drive: "d1"}))
+    assert-eq("/me/drive/items/ABC%21104", ::od/item-path("ABC!104", {}), "personal ids with ! are encoded")
+    assert-eq("/drives/other/items/i9", ::od/item-path({id: "i9", parentReference: {driveId: "other", id: "p"}}, {drive: "d1"}), "a driveItem's own drive wins")
+    assert-eq("/drives/doc-drive/items/i9", ::od/item-path({id: "i9", drive-id: "doc-drive"}, {}), "a DocFile's drive-id")
+    assert-eq("/drives/d1/items/i9", ::od/item-path({id: "i9"}, {drive: "d1"}), "falls back to opts.drive")
+}
+
+test-child-path
+meta ["test"] fn () {
+    assert-eq("/me/drive/root:/notes.txt:", ::od/child-path("root", "notes.txt", {}))
+    assert-eq("/me/drive/root:/Reports/2026/q3%20final.csv:", ::od/child-path("/Reports/2026", "q3 final.csv", {}))
+    assert-eq("/drives/d1/items/P1:/a%23b.txt:", ::od/child-path("P1", "a#b.txt", {drive: "d1"}))
+    assert-eq("/drives/d2/items/P1:/x.bin:", ::od/child-path({id: "P1", parentReference: {driveId: "d2"}}, "x.bin", {}))
+}
+
+test-remote-target
+meta ["test"] fn () {
+    shared {id: "local", name: "Plan.docx", remoteItem: {id: "remote-1", parentReference: {driveId: "owner-drive"}}}
+    assert-eq("/drives/owner-drive/items/remote-1", ::od/item-path(::od/remote-target(shared), {}))
+    plain {id: "x"}
+    assert-eq(plain, ::od/remote-target(plain))
+}
+
+test-conflict-behavior
+meta ["test"] fn () {
+    assert-eq("replace", ::od/conflict-behavior(null, "replace"))
+    assert-eq("rename", ::od/conflict-behavior("Rename", "fail"))
+    assert(is-null(::od/conflict-behavior(null, null)))
+    assert(is-err(::od/conflict-behavior("overwrite", "fail")))
+}
+
+test-query-opts
+meta ["test"] fn () {
+    q ::od/query-opts({select: "id"}, {select: "id,name", drive: "d1", conflict: "fail", token: "secret", top: 5, expand: null})
+    assert-eq({select: "id,name", top: 5}, q, "drive, local keys, credentials and nulls are dropped")
+    assert-eq({}, ::od/query-opts({select: "id"}, {select: null}), "null in opts drops a default")
+    assert-eq({}, ::od/query-opts({}, {folder: "x"}, ["folder"]))
+}

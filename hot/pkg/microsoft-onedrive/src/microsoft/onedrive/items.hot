@@ -1,0 +1,527 @@
+::microsoft::onedrive::items ns
+meta {
+    doc: """
+    driveItems: get by id or path, list children, search, recent and
+    shared-with-me, create folders, update, rename, move, copy (async,
+    with a monitor URL), delete to the recycle bin, permanently delete,
+    and restore.
+
+    Every function takes `opts`: `drive` (see `::microsoft::onedrive`),
+    OData options (`select`, `expand`, `top`, `orderby`, `filter`) and
+    microsoft-graph credentials.
+
+    **Permissions.** Reads: `Files.Read` (own drive) or `Files.Read.All`
+    (shared and other users' files); SharePoint libraries also accept
+    `Sites.Read.All`, or `Sites.Selected` / `Files.SelectedOperations.Selected`
+    for app-only access granted per site or file. Writes: the
+    `ReadWrite` variants.
+    """
+}
+
+::od ::microsoft::onedrive
+::api ::microsoft::graph::api
+::auth ::microsoft::graph::auth
+::http ::hot::http
+DocFile ::microsoft::onedrive/DocFile
+
+DEFAULT_PAGE_SIZE 200
+RUNTIME_REDIRECT_MESSAGE "redirect missing valid Location"
+
+json fn (method: Str, path: Str, headers: Map, body: Any, opts: Map): Any {
+  ::api/json(method, path, headers, body, ::od/creds(opts))
+}
+
+with-query fn (path: Str, opts: Map): Str {
+  ::api/with-query(path, ::od/query-opts({}, opts))
+}
+
+// ---------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------
+
+get-item
+meta {
+    doc: """
+    GET an item by id, `/path`, `"root"` or Map. `opts` takes `select`,
+    `expand` (e.g. `"thumbnails"`, `"permissions"`) and `drive`.
+
+    ```hot
+    item ::microsoft::onedrive::items/get-item("/Reports/Q3.xlsx")
+    item.id
+    item.file.hashes.quickXorHash
+    ```
+    """
+}
+fn
+(item: Any): Map {
+  get-item(item, {})
+},
+(item: Any, opts: Map): Map {
+  json("GET", with-query(::od/item-path(item, opts), opts), {}, "", opts)
+}
+
+get-doc-file
+meta {doc: """`get-item` normalised to a `::microsoft::onedrive/DocFile`."""}
+fn
+(item: Any): DocFile {
+  get-doc-file(item, {})
+},
+(item: Any, opts: Map): DocFile {
+  found get-item(item, opts)
+  if(is-err(found), found, ::od/to-doc-file(found))
+}
+
+resolve-remote
+meta {
+    doc: """For a shared item (`remoteItem`), fetch the target item from its own drive; otherwise return `item`. One hop."""
+}
+fn
+(item: Map): Map {
+  resolve-remote(item, {})
+},
+(item: Map, opts: Map): Map {
+  cond {
+    not(is-map(get(item, "remoteItem"))) => { item }
+    => { get-item(::od/remote-target(item), {...::od/creds(opts), select: get(opts, "select")}) }
+  }
+}
+
+list-children
+meta {
+    doc: """
+    GET {folder}/children - one page of a folder's children: Graph's
+    `{value, @odata.nextLink?}`. Follow `@odata.nextLink` with
+    `::microsoft::graph::api/fetch-page` or use `list-all-children`.
+    `opts` takes `select`, `expand`, `top` (page size), `orderby` (e.g.
+    `"name"`, `"lastModifiedDateTime desc"`; not on every drive type) and
+    `drive`.
+    """
+}
+fn
+(folder: Any): Map {
+  list-children(folder, {})
+},
+(folder: Any, opts: Map): Map {
+  json("GET", with-query(`${::od/item-path(folder, opts)}/children`, opts), {}, "", opts)
+}
+
+list-all-children
+meta {
+    doc: """
+    Follow `@odata.nextLink` and return every child of `folder` (a Vec of
+    driveItems), or at most `limit`. Uses `top: 200` unless set.
+
+    ```hot
+    files filter(::microsoft::onedrive::items/list-all-children("root", {}, 1000), (i) { is-map(i.file) })
+    ```
+    """
+}
+fn
+(folder: Any): Vec {
+  list-all-children(folder, {}, null)
+},
+(folder: Any, opts: Map): Vec {
+  list-all-children(folder, opts, null)
+},
+(folder: Any, opts: Map, limit: Int?): Vec {
+  sized if(is-some(get(opts, "top")), opts, {...opts, top: DEFAULT_PAGE_SIZE})
+  path `${::od/item-path(folder, opts)}/children`
+  params ::od/query-opts({}, sized)
+  ::api/collect-pages(path, {...params, ...::od/creds(opts)}, limit)
+}
+
+search-function
+meta {
+    doc: """The OData function segment for a search (pure): `search(q='...')` with `'` doubled and the text percent-encoded."""
+}
+fn (query: Str): Str {
+  `search(q='${::api/encode-segment(replace(query, "'", "''"))}')`
+}
+
+search
+meta {
+    doc: """
+    Search a drive for `query` (file names, metadata and content), all
+    pages or at most `limit`. Defaults to `{drive}/root/search(...)`;
+    `opts.folder` searches under one folder, and `opts.scope: "drive"`
+    uses `{drive}/search(...)`, which on `/me/drive` also includes items
+    shared with the user. `opts` also takes `select`, `top`.
+
+    ```hot
+    hits ::microsoft::onedrive::items/search("quarterly report", {}, 25)
+    ```
+    """
+}
+fn
+(query: Str): Vec {
+  search(query, {}, null)
+},
+(query: Str, opts: Map): Vec {
+  search(query, opts, null)
+},
+(query: Str, opts: Map, limit: Int?): Vec {
+  folder get(opts, "folder")
+  base cond {
+    is-some(folder) => { ::od/item-path(folder, opts) }
+    eq(get(opts, "scope"), "drive") => { ::od/drive-base(opts) }
+    => { `${::od/drive-base(opts)}/root` }
+  }
+
+  params ::od/query-opts({}, opts, ["folder", "scope"])
+  ::api/collect-pages(`${base}/${search-function(query)}`, {...params, ...::od/creds(opts)}, limit)
+}
+
+recent
+meta {
+    doc: """
+    GET /me/drive/recent - items the signed-in user used recently
+    (delegated only; entries from other drives carry `remoteItem`).
+    **Deprecated by Microsoft:** degraded until November 2026, after
+    which it returns no data. Prefer delta sync or `search`.
+    """
+}
+fn
+(): Vec {
+  recent({})
+},
+(opts: Map): Vec {
+  page json("GET", "/me/drive/recent", {}, "", opts)
+  if(is-err(page), page, or(page.value, []))
+}
+
+shared-with-me
+meta {
+    doc: """
+    GET /me/drive/sharedWithMe - items shared with the signed-in user
+    (delegated only; each has a `remoteItem` pointing at the owner's
+    drive). `opts.allow-external: true` includes other tenants' items.
+    **Deprecated by Microsoft:** degraded until November 2026, after
+    which it returns no data.
+    """
+}
+fn
+(): Vec {
+  shared-with-me({})
+},
+(opts: Map): Vec {
+  external if(eq(get(opts, "allow-external"), true), {allowexternal: "true"}, {})
+  path ::api/with-query("/me/drive/sharedWithMe", {...external, ...::od/query-opts({}, opts, ["allow-external"])})
+  ::api/collect-pages(path, ::od/creds(opts), null)
+}
+
+// ---------------------------------------------------------------------------
+// Creating and updating
+// ---------------------------------------------------------------------------
+
+build-folder
+meta {
+    doc: """The body for creating a folder (pure): `{name, folder: {}, @microsoft.graph.conflictBehavior}`, plus `opts.description`."""
+}
+fn (name: Str, conflict: Str): Map {
+  {name: name, folder: {}, "@microsoft.graph.conflictBehavior": conflict}
+}
+
+create-folder
+meta {
+    doc: """
+    POST {parent}/children - create a folder. `opts.conflict` is
+    `"fail"` (default), `"rename"` or `"replace"`. Returns the folder.
+
+    ```hot
+    folder ::microsoft::onedrive::items/create-folder("root", "Reports", {conflict: "rename"})
+    ```
+    """
+}
+fn
+(parent: Any, name: Str): Map {
+  create-folder(parent, name, {})
+},
+(parent: Any, name: Str, opts: Map): Map {
+  conflict ::od/conflict-behavior(get(opts, "conflict"), "fail")
+  cond {
+    is-err(conflict) => { conflict }
+    => { json("POST", `${::od/item-path(parent, opts)}/children`, {}, build-folder(name, conflict), opts) }
+  }
+}
+
+ensure-folder
+meta {
+    doc: """Return the folder at `/path` (from the drive root), creating it and any missing parents. Returns the folder driveItem."""
+}
+fn
+(path: Str): Map {
+  ensure-folder(path, {})
+},
+(path: Str, opts: Map): Map {
+  segments filter(split(path, "/"), (s) { not(is-empty(s)) })
+  walked reduce(segments, (acc, seg) {
+    cond {
+      is-err(acc) => { acc }
+      => {
+        here if(eq(acc.path, ""), `/${seg}`, `${acc.path}/${seg}`)
+        found get-item(here, {...::od/creds(opts), drive: get(opts, "drive"), select: "id,name,folder,parentReference"})
+        made cond {
+          not(is-err(found)) => { found }
+          ::api/has-code(found, "itemNotFound") => {
+            create-folder(if(eq(acc.path, ""), "root", acc.path), seg, {...::od/creds(opts), drive: get(opts, "drive"), conflict: "fail"})
+          }
+          => { found }
+        }
+
+        if(is-err(made), made, {path: here, item: made})
+      }
+    }
+  }, {path: "", item: null})
+  cond {
+    is-err(walked) => { walked }
+    is-null(walked.item) => { get-item("root", opts) }
+    => { walked.item }
+  }
+}
+
+update-item
+meta {
+    doc: """PATCH an item's metadata (`name`, `description`, `parentReference`, `fileSystemInfo`, ...). `opts.if-match` (an eTag) makes it conditional (412 when changed). Returns the item."""
+}
+fn
+(item: Any, fields: Map): Map {
+  update-item(item, fields, {})
+},
+(item: Any, fields: Map, opts: Map): Map {
+  json("PATCH", ::od/item-path(item, opts), ::od/if-match-headers(opts), ::auth/compact(fields), opts)
+}
+
+rename-item
+meta {doc: """Rename an item. Returns the item."""}
+fn
+(item: Any, new-name: Str): Map {
+  rename-item(item, new-name, {})
+},
+(item: Any, new-name: Str, opts: Map): Map {
+  update-item(item, {name: new-name}, opts)
+}
+
+build-move
+meta {
+    doc: """The PATCH body for a move (pure): `{parentReference: {id, driveId?}, name?}`."""
+}
+fn (new-parent-id: Str, opts: Map): Map {
+  ::auth/compact({
+    parentReference: ::auth/compact({id: new-parent-id, driveId: get(opts, "drive-id")}),
+    name: get(opts, "name")
+  })
+}
+
+move-item
+meta {
+    doc: """
+    Move an item to another folder (by id) in the same drive, optionally
+    renaming it (`opts.name`). Moving across drives is not supported by
+    PATCH: use `copy-item` then `delete-item`. Returns the item.
+    """
+}
+fn
+(item: Any, new-parent-id: Str): Map {
+  move-item(item, new-parent-id, {})
+},
+(item: Any, new-parent-id: Str, opts: Map): Map {
+  update-item(item, build-move(new-parent-id, opts), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Copy (asynchronous)
+// ---------------------------------------------------------------------------
+
+build-copy
+meta {
+    doc: """The copy body (pure): `parentReference` `{driveId?, id}`, `name`, `childrenOnly`, `includeAllVersionHistory`; unset options are omitted."""
+}
+fn (dest-parent-id: Str, opts: Map): Map {
+  ::auth/compact({
+    parentReference: ::auth/compact({driveId: get(opts, "drive-id"), id: dest-parent-id}),
+    name: get(opts, "name"),
+    childrenOnly: get(opts, "children-only"),
+    includeAllVersionHistory: get(opts, "include-all-versions")
+  })
+}
+
+copy-item
+meta {
+    doc: """
+    POST {item}/copy - start an asynchronous copy into the folder
+    `dest-parent-id` (`opts.drive-id` for another drive, `name`,
+    `conflict` (`fail` default, `replace`, `rename`; not on personal
+    OneDrive), `children-only`, `include-all-versions`). Returns
+    `{monitor-url, status: "accepted"}` at once: check progress later with
+    `copy-status(monitor-url)` from a schedule or a follow-up event, never
+    in a loop.
+
+    ```hot
+    job ::microsoft::onedrive::items/copy-item(file-id, archive-folder-id, {name: "Q3 (archive).xlsx"})
+    send("copy:started", {monitor-url: job.monitor-url})
+    ```
+    """
+}
+fn
+(item: Any, dest-parent-id: Str): Map {
+  copy-item(item, dest-parent-id, {})
+},
+(item: Any, dest-parent-id: Str, opts: Map): Map {
+  conflict ::od/conflict-behavior(get(opts, "conflict"), null)
+  cond {
+    is-err(conflict) => { conflict }
+    => {
+      qs if(is-null(conflict), "", `?@microsoft.graph.conflictBehavior=${conflict}`)
+      response ::api/request("POST", `${::od/item-path(item, opts)}/copy${qs}`, {}, build-copy(dest-parent-id, opts), ::od/creds(opts))
+      cond {
+        is-err(response) => { response }
+        not(::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+        => {
+          monitor ::api/header-value(response.headers, "location")
+          if(is-null(monitor), err("microsoft-onedrive: the copy was accepted without a monitor URL"), {monitor-url: monitor, status: "accepted"})
+        }
+      }
+    }
+  }
+}
+
+CopyStatus
+meta {
+    doc: """
+    A copy job's status from its monitor URL.
+
+    - `status` - `notStarted`, `inProgress`, `completed`, `failed`,
+      `waiting`, `deletePending`, `cancelPending`, `cancelled`, or
+      `unknown`
+    - `percent` - `percentageComplete` (0..100), when reported
+    - `resource-id` - the new item's id once completed (null when Graph
+      redirected to it instead; then list the destination folder)
+    - `error` - Graph's error object for `failed`
+    - `done` - true for `completed` and `failed`
+    """
+}
+type {
+    status: Str,
+    percent: Any?,
+    resource-id: Str?,
+    error: Map?,
+    done: Bool
+}
+
+classify-copy-status
+meta {
+    doc: """
+    Interpret a monitor-URL response (pure). 200 and 202 carry an
+    AsyncOperationStatus body. Personal OneDrive answers a finished copy
+    with `303 See Other`; Hot follows the redirect to the new item, whose
+    API URL needs a token, so a 401/403 there also means completed.
+    """
+}
+fn (response: Result): CopyStatus {
+  cond {
+    is-err(response) => {
+      cond {
+        // WORKAROUND(hot-bug-2): a 303 without Location comes back as an Err; on a copy monitor that means the job finished.
+        contains(err-message(response), RUNTIME_REDIRECT_MESSAGE) => {
+          CopyStatus({status: "completed", percent: 100, resource-id: null, error: null, done: true})
+        }
+        => { response }
+      }
+    }
+
+    in(response.status, [200, 202]) => {
+      b if(is-map(response.body), response.body, {})
+      s or(get(b, "status"), "unknown")
+      pct get(b, "percentageComplete")
+      CopyStatus({
+        status: s,
+        percent: pct,
+        resource-id: get(b, "resourceId"),
+        error: if(is-map(get(b, "error")), b.error, null),
+        done: in(s, ["completed", "failed"])
+      })
+    }
+
+    in(response.status, [303, 401, 403]) => {
+      CopyStatus({status: "completed", percent: 100, resource-id: null, error: null, done: true})
+    }
+    => { err(::api/http-error(response)) }
+  }
+}
+
+copy-status
+meta {
+    doc: """
+    GET a copy's monitor URL (no Authorization header: the URL is
+    pre-authenticated) and return a `CopyStatus`. Call it from a
+    schedule or event, not in a loop; the monitor URL is short-lived.
+
+    ```hot
+    status ::microsoft::onedrive::items/copy-status(job.monitor-url)
+    cond {
+      not(status.done) => { send("copy:pending", {monitor-url: job.monitor-url}) }
+      eq(status.status, "failed") => { println(`copy failed: ${to-json(status.error)}`) }
+      => { println(`copied: ${status.resource-id}`) }
+    }
+    ```
+    """
+}
+fn
+(monitor-url: Str): CopyStatus {
+  copy-status(monitor-url, {})
+},
+(monitor-url: Str, opts: Map): CopyStatus {
+  // The monitor URL is pre-authenticated: opts credentials are not sent; `headers` are.
+  headers {Accept: "application/json", ...or(get(opts, "headers"), {})}
+  classify-copy-status(::http/request(::http/HttpRequest({method: "GET", url: monitor-url, headers: headers, body: ""})))
+}
+
+is-copy-done
+meta {doc: """True when a `CopyStatus` is `completed` or `failed`."""}
+fn (status: Map): Bool {
+  eq(status.done, true)
+}
+
+// ---------------------------------------------------------------------------
+// Deleting and restoring
+// ---------------------------------------------------------------------------
+
+delete-item
+meta {
+    doc: """DELETE an item: it moves to the recycle bin (restorable for 93 days on work/school, 30 days on personal). `opts.if-match` (eTag) makes it conditional. Returns true."""
+}
+fn
+(item: Any): Bool {
+  delete-item(item, {})
+},
+(item: Any, opts: Map): Bool {
+  result json("DELETE", ::od/item-path(item, opts), ::od/if-match-headers(opts), "", opts)
+  if(is-err(result), result, true)
+}
+
+permanent-delete
+meta {
+    doc: """POST {item}/permanentDelete - delete without the recycle bin (OneDrive for work or school and SharePoint only). Cannot be undone. Returns true."""
+}
+fn
+(item: Any): Bool {
+  permanent-delete(item, {})
+},
+(item: Any, opts: Map): Bool {
+  result json("POST", `${::od/item-path(item, opts)}/permanentDelete`, {}, "", opts)
+  if(is-err(result), result, true)
+}
+
+restore-item
+meta {
+    doc: """POST {item}/restore - restore a deleted item from the recycle bin (personal OneDrive only). `opts.parent-id` restores into another folder and `opts.name` renames. Returns the restored item."""
+}
+fn
+(item: Any): Map {
+  restore-item(item, {})
+},
+(item: Any, opts: Map): Map {
+  parent get(opts, "parent-id")
+  body ::auth/compact({parentReference: if(is-null(parent), null, {id: parent}), name: get(opts, "name")})
+  json("POST", `${::od/item-path(item, opts)}/restore`, {}, body, opts)
+}

@@ -1,0 +1,307 @@
+::box::webhooks ns
+meta {
+    ctx: {
+        "box.webhook.primary-key": {required: false},
+        "box.webhook.secondary-key": {required: false}
+    },
+    doc: """
+    Box webhooks (v2): create, list, get, update and delete webhooks on a
+    file or folder, and verify the deliveries Box signs.
+
+    **Verification.** Box signs each delivery with both of the app's
+    webhook signature keys (Developer Console → your app → Webhooks →
+    Manage signature keys): `BOX-SIGNATURE-PRIMARY` and
+    `BOX-SIGNATURE-SECONDARY` are the base64 HMAC-SHA256 of the raw body
+    followed by the `BOX-DELIVERY-TIMESTAMP` value. A delivery verifies
+    when either signature matches its key (so keys can be rotated one at
+    a time), the version is `1` and the algorithm `HmacSHA256`, and the
+    timestamp is at most 10 minutes old (and not more than a minute in
+    the future). Comparisons are constant time; a missing key, header or
+    timestamp fails closed. Set `box.webhook.primary-key` and
+    `box.webhook.secondary-key` in Context Variables.
+
+    Box retries a delivery that does not get a 2xx within 30 seconds, up
+    to 10 times over about a day, so make handlers idempotent (the
+    payload `id` identifies a delivery). An app can have 1,000 webhooks
+    per user per app, and one webhook per item per trigger set.
+
+    ```hot
+    box-webhook
+    meta {webhook: {service: "box", path: "/box/webhook"}}
+    fn (request) {
+      cond {
+        not(::box::webhooks/verify-request(request)) => {
+          ::hot::http/HttpResponse({status: 401, body: "invalid signature"})
+        }
+        => {
+          event ::box::webhooks/parse-delivery(request)
+          handle-box-event(event.trigger, event.source)
+          ::hot::http/HttpResponse({status: 200, body: "ok"})
+        }
+      }
+    }
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::time ::hot::time
+::re ::hot::regex
+::api ::box::api
+
+DEFAULT_MAX_AGE_SECONDS 600
+MAX_FUTURE_SKEW_SECONDS 60
+SIGNATURE_VERSION "1"
+SIGNATURE_ALGORITHM "HmacSHA256"
+TARGET_TYPES ["file", "folder"]
+
+// ---------------------------------------------------------------------------
+// CRUD
+// ---------------------------------------------------------------------------
+
+webhook-body
+meta {
+    doc: """The webhook body (pure): `target: {type, id}`, `address` (HTTPS), `triggers` (e.g. `["FILE.UPLOADED", "FILE.TRASHED"]`). Null parts are dropped (for updates)."""
+}
+fn (target-type: Str?, target-id: Str?, address: Str?, triggers: Vec?): Map {
+  target if(or(is-null(target-type), is-null(target-id)), null, {type: target-type, id: target-id})
+  ::box/compact({target: target, address: address, triggers: triggers})
+}
+
+create-webhook
+meta {
+    doc: """
+    POST /webhooks - notify `address` (an HTTPS URL that answers within
+    30 seconds) when `triggers` fire on a file or folder (`target-type`
+    `"file"` or `"folder"`). Folder webhooks cover everything inside the
+    folder. Returns the webhook (`id`, `target`, `address`, `triggers`).
+
+    ```hot
+    hook ::box::webhooks/create-webhook("folder", "12345", "https://example.hot.dev/box/webhook", ["FILE.UPLOADED", "FILE.TRASHED"])
+    hook.id
+    ```
+    """
+}
+fn
+(target-type: Str, target-id: Str, address: Str, triggers: Vec): Map {
+  create-webhook(target-type, target-id, address, triggers, {})
+},
+(target-type: Str, target-id: Str, address: Str, triggers: Vec, opts: Map): Map {
+  cond {
+    not(in(target-type, TARGET_TYPES)) => { err(`box: webhook target-type must be "file" or "folder", not "${target-type}"`) }
+    not(starts-with(address, "https://")) => { err("box: webhook addresses must be https:// URLs") }
+    is-empty(triggers) => { err("box: a webhook needs at least one trigger") }
+    => { ::box/json("POST", ::box/url("/webhooks"), webhook-body(target-type, target-id, address, triggers), opts) }
+  }
+}
+
+list-webhooks
+meta {
+    doc: """GET /webhooks - one page of the app's webhooks for the current user (marker paging: `{entries, next_marker, limit}`; `limit` up to 1000)."""
+}
+fn
+(): Map {
+  list-webhooks({})
+},
+(opts: Map): Map {
+  ::box/json("GET", ::box/url("/webhooks", ::box/query-params({limit: 1000}, opts)), "", opts)
+}
+
+list-all-webhooks
+meta {doc: """Every webhook the app has for the current user (all marker pages)."""}
+fn
+(): Vec {
+  list-all-webhooks({})
+},
+(opts: Map): Vec {
+  ::api/collect-marker((marker) { list-webhooks({...opts, marker: marker}) })
+}
+
+get-webhook
+meta {doc: """GET /webhooks/{id} - one webhook."""}
+fn
+(webhook-id: Str): Map {
+  get-webhook(webhook-id, {})
+},
+(webhook-id: Str, opts: Map): Map {
+  ::box/json("GET", ::box/url(`/webhooks/${::box/encode-id(webhook-id)}`), "", opts)
+}
+
+update-webhook
+meta {
+    doc: """PUT /webhooks/{id} - change `address`, `triggers` or `target` (`{type, id}`). Null values in `changes` are dropped."""
+}
+fn
+(webhook-id: Str, changes: Map): Map {
+  update-webhook(webhook-id, changes, {})
+},
+(webhook-id: Str, changes: Map, opts: Map): Map {
+  ::box/json("PUT", ::box/url(`/webhooks/${::box/encode-id(webhook-id)}`), ::box/compact(changes), opts)
+}
+
+delete-webhook
+meta {doc: """DELETE /webhooks/{id} - delete a webhook. Returns true."""}
+fn
+(webhook-id: Str): Bool {
+  delete-webhook(webhook-id, {})
+},
+(webhook-id: Str, opts: Map): Bool {
+  result ::box/json("DELETE", ::box/url(`/webhooks/${::box/encode-id(webhook-id)}`), "", opts)
+  if(is-err(result), result, true)
+}
+
+// ---------------------------------------------------------------------------
+// Signature verification
+// ---------------------------------------------------------------------------
+
+parse-timestamp
+meta {
+    doc: """
+    Parse a `BOX-DELIVERY-TIMESTAMP` (RFC 3339 with an offset, e.g.
+    `2026-11-01T12:00:00-07:00`, `Z`, optional fractional seconds) to Unix
+    seconds, or null for anything else. Exposed for testing.
+    """
+}
+fn (value: Str): Int? {
+  text trim(value)
+  m ::re/capture(text, "^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$")
+  cond {
+    not(is-map(m)) => { null }
+    => {
+      parts m.groups
+      parsed ::time/parse(first(parts))
+      match parsed {
+        Result.Err => { null }
+        _ => {
+          local Int(div(::time/epoch-millis(::time/Instant(parsed)), 1000))
+          zone last(parts)
+          cond {
+            eq(zone, "Z") => { local }
+            => {
+              sign if(starts-with(zone, "-"), -1, 1)
+              hours ::api/parse-int(slice(zone, 1, 3))
+              minutes ::api/parse-int(slice(zone, 4, 6))
+              offset mul(sign, add(mul(or(hours, 0), 3600), mul(or(minutes, 0), 60)))
+              sub(local, offset)
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+to-bytes fn (value: Any): Bytes {
+  if(is-bytes(value), value, Bytes(Str(or(value, ""))))
+}
+
+signed-payload
+meta {
+    doc: """The bytes Box signs (pure): the raw body followed by the delivery timestamp. Exposed for testing."""
+}
+fn (body: Any, timestamp: Str): Bytes {
+  concat(to-bytes(body), Bytes(timestamp))
+}
+
+signature-matches fn (key: Str, payload: Bytes, signature: Str): Bool {
+  and(not(is-empty(key)), not(is-empty(signature)), ::hmac/hmac-verify-base64(key, payload, signature, "sha256"))
+}
+
+timestamp-ok fn (seconds: Int, max-age-seconds: Int): Bool {
+  age sub(::time/epoch-seconds(), seconds)
+  and(lte(age, max-age-seconds), gte(age, sub(0, MAX_FUTURE_SKEW_SECONDS)))
+}
+
+verification-failure
+meta {
+    doc: """
+    Why a delivery fails verification, or null when it verifies. Reasons:
+    `"no-key"`, `"missing-timestamp"`, `"missing-signature"`,
+    `"unsupported-version"`, `"unsupported-algorithm"`,
+    `"bad-signature"`, `"bad-timestamp"`, `"stale"`. The timestamp is
+    only trusted after a signature matched. A `max-age-seconds` of 0 or
+    less skips the age check (for replaying stored test deliveries only).
+    """
+}
+fn (request: Map, primary-key: Str?, secondary-key: Str?, max-age-seconds: Int): Str? {
+  headers or(request.headers, {})
+  h (name) { trim(Str(or(get(headers, name), ""))) }
+  primary trim(or(primary-key, ""))
+  secondary trim(or(secondary-key, ""))
+  timestamp h("box-delivery-timestamp")
+  sig-primary h("box-signature-primary")
+  sig-secondary h("box-signature-secondary")
+  version h("box-signature-version")
+  algorithm h("box-signature-algorithm")
+  cond {
+    and(is-empty(primary), is-empty(secondary)) => { "no-key" }
+    is-empty(timestamp) => { "missing-timestamp" }
+    and(is-empty(sig-primary), is-empty(sig-secondary)) => { "missing-signature" }
+    ne(version, SIGNATURE_VERSION) => { "unsupported-version" }
+    ne(algorithm, SIGNATURE_ALGORITHM) => { "unsupported-algorithm" }
+    => {
+      payload signed-payload(::hot::http/raw-body(request), timestamp)
+      matched or(signature-matches(primary, payload, sig-primary), signature-matches(secondary, payload, sig-secondary))
+      seconds parse-timestamp(timestamp)
+      cond {
+        not(matched) => { "bad-signature" }
+        is-null(seconds) => { "bad-timestamp" }
+        lte(max-age-seconds, 0) => { null }
+        not(timestamp-ok(or(seconds, 0), max-age-seconds)) => { "stale" }
+        => { null }
+      }
+    }
+  }
+}
+
+verify-request
+meta {
+    doc: """
+    Verify a Box webhook delivery (see the namespace doc). The 1-arity
+    form uses the `box.webhook.primary-key` / `box.webhook.secondary-key`
+    context variables and fails the run when neither is set; the other
+    forms take the keys (either may be null or `""`, but not both) and an
+    optional `max-age-seconds` (default 600). Returns a Bool.
+    """
+}
+fn
+(request: Map): Bool {
+  primary or(::ctx/get("box.webhook.primary-key"), "")
+  secondary or(::ctx/get("box.webhook.secondary-key"), "")
+  if(and(is-empty(trim(primary)), is-empty(trim(secondary))),
+    fail("box.webhook.primary-key / box.webhook.secondary-key are not set. Add the app's webhook signature keys in Context Variables to verify Box webhooks.")
+  )
+  verify-request(request, primary, secondary)
+},
+(request: Map, primary-key: Str?, secondary-key: Str?): Bool {
+  verify-request(request, primary-key, secondary-key, DEFAULT_MAX_AGE_SECONDS)
+},
+(request: Map, primary-key: Str?, secondary-key: Str?, max-age-seconds: Int): Bool {
+  is-null(verification-failure(request, primary-key, secondary-key, max-age-seconds))
+}
+
+parse-delivery
+meta {
+    doc: """
+    The webhook payload of a delivery (verify it first): `{type:
+    "webhook_event", id, created_at, trigger, webhook: {id}, created_by,
+    source}`. `source` is the file or folder (mini form) the trigger fired
+    on. Accepts a request (its parsed `body`, or `body-raw` as JSON) or
+    an already decoded Map.
+    """
+}
+fn (request: Map): Map {
+  body cond {
+    is-map(request.body) => { request.body }
+    is-str(get(request, "body-raw")) => { from-json(get(request, "body-raw")) }
+    and(is-str(request.trigger), is-some(request.source)) => { request }
+    => { err("box: the webhook request has no JSON body") }
+  }
+
+  cond {
+    is-err(body) => { err("box: the webhook body is not valid JSON") }
+    not(is-map(body)) => { err("box: the webhook body is not a JSON object") }
+    => { body }
+  }
+}

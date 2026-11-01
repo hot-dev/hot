@@ -1,0 +1,77 @@
+::microsoft::onedrive::test::delta ns
+meta ["test"]
+
+::delta ::microsoft::onedrive::delta
+
+test-delta-path
+meta ["test"] fn () {
+    assert-eq("/me/drive/root/delta", ::delta/delta-path({}))
+    assert-eq("/me/drive/root/delta?token=latest", ::delta/delta-path({delta-token: "latest"}))
+    assert-eq("/drives/d1/root/delta?token=2026-10-29T20%3A00%3A00Z&$select=id%2Cname%2Cdeleted", ::delta/delta-path({drive: "d1", delta-token: "2026-10-29T20:00:00Z", select: "id,name,deleted"}))
+    assert-eq("/me/drive/root/delta?$top=500", ::delta/delta-path({top: 500, prefer: "hierarchicalsharing", token: "access-token"}), "prefer and credentials stay out of the URL")
+}
+
+test-classify-delta-response
+meta ["test"] fn () {
+    p ::delta/classify-delta-response({status: 200, headers: {}, body: {value: [{id: "a"}], "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=n1"}})
+    assert(not(p.gone))
+    assert-eq([{id: "a"}], p.items)
+    assert-eq("https://graph.microsoft.com/v1.0/me/drive/root/delta?token=n1", p.next-link)
+    last ::delta/classify-delta-response({status: 200, headers: {}, body: {value: [], "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=d1"}})
+    assert-eq("https://graph.microsoft.com/v1.0/me/drive/root/delta?token=d1", last.delta-link)
+    gone ::delta/classify-delta-response({status: 410, headers: {Location: "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=fresh"}, body: {error: {code: "resyncChangesApplyDifferences", message: "Resync required"}}})
+    assert(gone.gone)
+    assert-eq("resyncChangesApplyDifferences", gone.resync-code)
+    assert-eq("https://graph.microsoft.com/v1.0/me/drive/root/delta?token=fresh", gone.restart-link)
+    bare ::delta/classify-delta-response({status: 410, headers: {}, body: ""})
+    assert-eq("resyncRequired", bare.resync-code)
+    assert(is-null(bare.restart-link))
+    assert(is-err(::delta/classify-delta-response({status: 403, headers: {}, body: {error: {code: "accessDenied", message: "no"}}})))
+}
+
+FEED [
+    {id: "a", name: "a.txt", file: {}},
+    {id: "b", name: "b.txt", file: {}},
+    {id: "a", name: "a-renamed.txt", file: {}},
+    {id: "c", deleted: {state: "deleted"}},
+    {id: "d", name: "d.txt", deleted: {}},
+    {id: "d", name: "d.txt", file: {}},
+    {id: "f", name: "Folder", folder: {}},
+    {name: "no id"}
+]
+
+test-latest-by-id
+meta ["test"] fn () {
+    latest ::delta/latest-by-id(FEED)
+    assert-eq(["b", "a", "c", "d", "f"], map(latest, (i) { i.id }), "last occurrence wins, in order of last appearance")
+    assert-eq("a-renamed.txt", get(latest, 1).name)
+}
+
+test-build-delta-set
+meta ["test"] fn () {
+    set ::delta/build-delta-set(FEED, "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=next", 3, null)
+    assert-eq(["c"], set.deleted-ids, "d came back alive")
+    assert-eq("https://graph.microsoft.com/v1.0/me/drive/root/delta?token=next", set.delta-link)
+    assert-eq(3, set.pages)
+    assert(not(set.resync))
+    assert-eq(["b", "a", "d", "f"], map(::delta/changed-items(set), (f) { f.id }))
+    assert-eq(["b", "a", "d"], map(::delta/changed-files(set), (f) { f.id }), "folders excluded")
+    assert-eq(["c"], ::delta/deleted-ids(set))
+    assert-eq(["c"], ::delta/deleted-ids(FEED), "works on a raw Vec too")
+    assert-eq([], ::delta/stale-ids(["x", "a"], set), "only resync sets have stale ids")
+}
+
+test-resync-stale-ids
+meta ["test"] fn () {
+    set ::delta/build-delta-set(FEED, "link", 1, "resyncChangesApplyDifferences")
+    assert(set.resync)
+    assert-eq("resyncChangesApplyDifferences", set.resync-mode)
+    assert-eq(["x", "c"], ::delta/stale-ids(["a", "x", "c", "f"], set), "local ids missing from (or deleted in) the full enumeration")
+}
+
+test-subscription-resource
+meta ["test"] fn () {
+    assert-eq("me/drive/root", ::delta/subscription-resource({}))
+    assert-eq("drives/b%21x/root", ::delta/subscription-resource({drive: "b!x"}))
+    assert-eq("users/u1/drive/root", ::delta/subscription-resource({drive: ::microsoft::onedrive/user-drive("u1")}))
+}

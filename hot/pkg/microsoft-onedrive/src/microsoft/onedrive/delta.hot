@@ -1,0 +1,357 @@
+::microsoft::onedrive::delta ns
+meta {
+    doc: """
+    Keep a mirror or index in sync with a drive: delta queries
+    (`root/delta`), a `sync-changes` loop that walks every page to the
+    new delta link, `410 Gone` resync handling, and change-notification
+    subscriptions for the drive root.
+
+    **Sync loop**
+
+    1. Once: `link ::delta/latest-delta-link()` ("changes from now on"),
+       or `sync-changes(null)` to enumerate everything first.
+    2. Each run (a schedule, or when a notification arrives):
+       `set ::delta/sync-changes(link)`; upsert `changed-items(set)`,
+       drop `deleted-ids(set)`, store `set.delta-link`.
+    3. When `set.resync` is true, Graph threw the old link away (410) and
+       `set` is a full enumeration: with `resync-mode`
+       `"resyncChangesApplyDifferences"` replace local state with it
+       (delete local ids not in the set: `stale-ids`); with
+       `"resyncChangesUploadDifferences"` keep local-only items and
+       reconcile them yourself.
+
+    **Rules from Graph.** Track items by `id` (delta omits paths, and an
+    item can appear more than once: the last one wins). Deleted items
+    carry a `deleted` facet and may have no name. On OneDrive for work
+    or school and SharePoint, delta works only from the drive root.
+
+    **Push.** `subscribe` asks Graph to POST to your HTTPS endpoint when
+    anything in the drive changes (`updated` on the root is the only
+    option for drives). Notifications carry no item data: treat one as
+    "run `sync-changes` now". Subscriptions last at most 42,300 minutes
+    (under 30 days); renew from a schedule with `renew-subscription`.
+
+    **Permissions.** `Files.Read` / `Files.Read.All` (delegated),
+    `Files.Read.All` or `Sites.Read.All` (app-only). `Prefer` headers
+    such as `hierarchicalsharing` or `deltashowsharingchanges` go in
+    `opts.prefer`.
+    """
+}
+
+::od ::microsoft::onedrive
+::api ::microsoft::graph::api
+::auth ::microsoft::graph::auth
+::subs ::microsoft::graph::subscriptions
+::http ::hot::http
+
+DELTA_LOCAL_KEYS ["delta-token", "prefer", "max-pages"]
+RESYNC_CODES ["resyncChangesApplyDifferences", "resyncChangesUploadDifferences", "resyncRequired"]
+DEFAULT_MAX_PAGES 5000
+
+delta-path
+meta {
+    doc: """The first delta URL for a drive (pure): `{drive}/root/delta`, with `token=latest` / a token / a timestamp from `opts.delta-token`, and OData options (`select`, `top`, `expand`)."""
+}
+fn (opts: Map): Str {
+  token get(opts, "delta-token")
+  base `${::od/drive-base(opts)}/root/delta`
+  params ::od/query-opts({}, opts, DELTA_LOCAL_KEYS)
+  qs ::api/query-string(params)
+  token-qs if(::auth/is-blank-value(token), "", `token=${::api/encode-segment(Str(token))}`)
+  parts filter([token-qs, qs], (p) { not(is-empty(p)) })
+  if(is-empty(parts), base, `${base}?${join(parts, "&")}`)
+}
+
+delta-headers fn (opts: Map): Map {
+  p get(opts, "prefer")
+  cond {
+    ::auth/is-blank-value(p) => { {} }
+    is-vec(p) => { {Prefer: join(p, ", ")} }
+    => { {Prefer: Str(p)} }
+  }
+}
+
+DeltaPage
+meta {
+    doc: """
+    One delta response: `items` (`value`), `next-link`, `delta-link`, or
+    for a `410 Gone`: `gone: true`, `resync-code` (Graph's error code)
+    and `restart-link` (the `Location` header to enumerate from scratch,
+    null when Graph sent none).
+    """
+}
+type {
+    items: Vec,
+    next-link: Str?,
+    delta-link: Str?,
+    gone: Bool,
+    resync-code: Str?,
+    restart-link: Str?
+}
+
+classify-delta-response
+meta {
+    doc: """Interpret a delta HTTP response (pure): a `DeltaPage`, with `gone` for 410; an Err for other failures."""
+}
+fn (response: Result): DeltaPage {
+  cond {
+    is-err(response) => { response }
+    eq(response.status, 410) => {
+      e ::api/http-error(response)
+      DeltaPage({
+        items: [],
+        next-link: null,
+        delta-link: null,
+        gone: true,
+        resync-code: or(e.code, "resyncRequired"),
+        restart-link: ::api/header-value(response.headers, "location")
+      })
+    }
+
+    ::http/is-ok-response(response) => {
+      page ::api/to-page(if(is-map(response.body), response.body, {}))
+      DeltaPage({items: page.items, next-link: page.next-link, delta-link: page.delta-link, gone: false, resync-code: null, restart-link: null})
+    }
+    => { err(::api/http-error(response)) }
+  }
+}
+
+delta-page
+meta {
+    doc: """
+    Fetch one delta page: GET `link` (a nextLink or deltaLink) when given,
+    else the drive's first delta URL (`delta-path`). Returns a
+    `DeltaPage`; a 410 is returned as `gone: true` rather than an Err.
+    """
+}
+fn
+(link: Str?): DeltaPage {
+  delta-page(link, {})
+},
+(link: Str?, opts: Map): DeltaPage {
+  target if(::auth/is-blank-value(link), delta-path(opts), link)
+  classify-delta-response(::api/request("GET", target, delta-headers(opts), "", ::od/creds(opts)))
+}
+
+latest-delta-link
+meta {
+    doc: """GET {drive}/root/delta?token=latest - a delta link for "changes from now on", without enumerating the drive. Store it and pass it to `sync-changes`."""
+}
+fn
+(): Str {
+  latest-delta-link({})
+},
+(opts: Map): Str {
+  page delta-page(null, {...opts, delta-token: "latest"})
+  cond {
+    is-err(page) => { page }
+    is-null(page.delta-link) => { err("microsoft-onedrive: Graph returned no @odata.deltaLink for token=latest") }
+    => { page.delta-link }
+  }
+}
+
+DeltaSet
+meta {
+    doc: """
+    Everything that changed since a delta link.
+
+    - `items` - driveItems in feed order, latest occurrence per id
+    - `deleted-ids` - ids of items with a `deleted` facet (not seen alive later)
+    - `delta-link` - store it and pass it to the next `sync-changes`
+    - `pages` - how many pages were read
+    - `resync` - true when Graph answered 410 and this is a full enumeration
+    - `resync-mode` - Graph's code (`resyncChangesApplyDifferences`,
+      `resyncChangesUploadDifferences`), when `resync`
+    """
+}
+type {
+    items: Vec,
+    deleted-ids: Vec,
+    delta-link: Str,
+    pages: Int,
+    resync: Bool,
+    resync-mode: Str?
+}
+
+is-deleted
+meta {doc: """True when a delta item carries a `deleted` facet (pure)."""}
+fn (item: Map): Bool {
+  is-map(get(item, "deleted"))
+}
+
+latest-by-id
+meta {
+    doc: """Keep the last occurrence of each item id, in order of last appearance (pure). Items without an id are dropped."""
+}
+fn (items: Vec): Vec {
+  with-id filter(items, (i) { is-some(get(i, "id")) })
+  last-index reduce(map-indexed(with-id, (n, i) { [n, i] }), (acc, pair) { assoc(acc, Str(get(last(pair), "id")), first(pair)) }, {})
+  map(filter(map-indexed(with-id, (n, i) { [n, i] }), (pair) { eq(get(last-index, Str(get(last(pair), "id"))), first(pair)) }), last)
+}
+
+build-delta-set
+meta {doc: """Assemble a `DeltaSet` from collected items (pure)."""}
+fn (items: Vec, delta-link: Str, pages: Int, resync-mode: Str?): DeltaSet {
+  latest latest-by-id(items)
+  DeltaSet({
+    items: latest,
+    deleted-ids: map(filter(latest, is-deleted), (i) { Str(i.id) }),
+    delta-link: delta-link,
+    pages: pages,
+    resync: is-some(resync-mode),
+    resync-mode: resync-mode
+  })
+}
+
+sync-loop fn (link: Str?, opts: Map, acc: Vec, pages: Int, resync-mode: Str?, max-pages: Int): DeltaSet {
+  page delta-page(link, opts)
+  cond {
+    is-err(page) => { page }
+    page.gone => {
+      cond {
+        is-some(resync-mode) => { err("microsoft-onedrive: delta returned 410 Gone again while resyncing; try again later") }
+        // Start over from the Location Graph gave, or from the first delta URL.
+        => { sync-loop(page.restart-link, opts, [], add(pages, 1), page.resync-code, max-pages) }
+      }
+    }
+    => {
+      all concat(acc, page.items)
+      cond {
+        is-some(page.delta-link) => { build-delta-set(all, page.delta-link, add(pages, 1), resync-mode) }
+        gte(add(pages, 1), max-pages) => { err(`microsoft-onedrive: delta did not finish within ${max-pages} pages; raise opts.max-pages`) }
+        is-some(page.next-link) => { sync-loop(page.next-link, opts, all, add(pages, 1), resync-mode, max-pages) }
+        => { err("microsoft-onedrive: a delta page had neither @odata.nextLink nor @odata.deltaLink") }
+      }
+    }
+  }
+}
+
+sync-changes
+meta {
+    doc: """
+    Read every delta page since `delta-link` (null: enumerate the whole
+    drive) and return a `DeltaSet` with the link to use next time. A
+    `410 Gone` restarts the enumeration from Graph's `Location` and
+    marks the set `resync` (see the namespace doc). `opts` takes `drive`,
+    `select`, `top`, `prefer`, `max-pages` (default 5000) and credentials.
+
+    ```hot
+    ::delta ::microsoft::onedrive::delta
+
+    set ::delta/sync-changes(saved-link)
+    upserts ::delta/changed-items(set)    // DocFiles to (re)index
+    deletes ::delta/deleted-ids(set)      // ids to drop
+    saved-link set.delta-link
+    ```
+    """
+}
+fn
+(delta-link: Str?): DeltaSet {
+  sync-changes(delta-link, {})
+},
+(delta-link: Str?, opts: Map): DeltaSet {
+  sync-loop(delta-link, opts, [], 0, null, or(get(opts, "max-pages"), DEFAULT_MAX_PAGES))
+}
+
+changed-items
+meta {
+    doc: """The live (not deleted) items of a `DeltaSet` (or a Vec of driveItems) as `DocFile`s, folders included; filter on `is-folder` for files only (pure)."""
+}
+fn (set: Any): Vec {
+  items if(is-vec(set), latest-by-id(set), set.items)
+  map(filter(items, (i) { not(is-deleted(i)) }), ::od/to-doc-file)
+}
+
+changed-files
+meta {doc: """`changed-items` without folders and packages (pure)."""}
+fn (set: Any): Vec {
+  filter(changed-items(set), (f) { not(f.is-folder) })
+}
+
+deleted-ids
+meta {
+    doc: """The ids a `DeltaSet` (or a Vec of driveItems) deleted (pure). Delete a folder locally only once it is empty after applying the set."""
+}
+fn (set: Any): Vec {
+  if(is-vec(set), map(filter(latest-by-id(set), is-deleted), (i) { Str(i.id) }), set.deleted-ids)
+}
+
+stale-ids
+meta {
+    doc: """
+    For a resync set (`resync-mode` `resyncChangesApplyDifferences`): the
+    `local-ids` that the full enumeration no longer contains, which you
+    should delete locally (pure). Empty for a normal incremental set.
+    """
+}
+fn (local-ids: Vec, set: Map): Vec {
+  cond {
+    not(eq(set.resync, true)) => { [] }
+    => {
+      seen reduce(filter(set.items, (i) { not(is-deleted(i)) }), (acc, i) { assoc(acc, Str(i.id), true) }, {})
+      filter(local-ids, (id) { is-null(get(seen, Str(id))) })
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Change notifications
+// ---------------------------------------------------------------------------
+
+subscription-resource
+meta {
+    doc: """The subscription resource for a drive's root (pure): `me/drive/root`, `drives/{id}/root`, `users/{id}/drive/root`, ..."""
+}
+fn (opts: Map): Str {
+  ::subs/strip-slashes(`${::od/drive-base(opts)}/root`)
+}
+
+subscribe
+meta {
+    doc: """
+    Subscribe `notification-url` to changes anywhere in a drive
+    (`updated` on its root; the only change type drives support). `opts`
+    takes `drive`, `client-state` (recommended; at most 128 characters),
+    `lifecycle-url`, `expires-in-minutes` (default the 42,300-minute cap
+    minus an hour) and credentials. Returns the subscription; keep its
+    `id`.
+
+    ```hot
+    sub ::microsoft::onedrive::delta/subscribe("https://api.example.com/onedrive/hook", {
+      client-state: ::hot::ctx/get("microsoft.graph.client-state")
+    })
+    ```
+    """
+}
+fn
+(notification-url: Str): Map {
+  subscribe(notification-url, {})
+},
+(notification-url: Str, opts: Map): Map {
+  ::subs/create-subscription(subscription-resource(opts), "updated", notification-url, filter-keys(opts, (k) { ne(k, "drive") }))
+}
+
+renew-subscription
+meta {
+    doc: """
+    Extend a drive subscription to the maximum lifetime (minus an hour),
+    or `opts.expires-in-minutes`. Run it from a schedule well inside the
+    lifetime, e.g. weekly.
+
+    ```hot
+    renew-onedrive-subscription
+    meta {schedule: "0 5 * * 1"}
+    fn (event) {
+      sub-id ::hot::store/get(::hot::store/Map({name: "onedrive-sync"}), "subscription-id")
+      ::microsoft::onedrive::delta/renew-subscription(sub-id)
+    }
+    ```
+    """
+}
+fn
+(subscription-id: Str): Map {
+  renew-subscription(subscription-id, {})
+},
+(subscription-id: Str, opts: Map): Map {
+  ::subs/renew-subscription(subscription-id, subscription-resource(opts), filter-keys(opts, (k) { ne(k, "drive") }))
+}

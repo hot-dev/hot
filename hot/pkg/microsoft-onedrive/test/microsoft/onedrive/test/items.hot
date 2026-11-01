@@ -1,0 +1,71 @@
+::microsoft::onedrive::test::items ns
+meta ["test"]
+
+::items ::microsoft::onedrive::items
+::sharing ::microsoft::onedrive::sharing
+
+test-search-function
+meta ["test"] fn () {
+    assert-eq("search(q='quarterly%20report')", ::items/search-function("quarterly report"))
+    assert-eq("search(q='it%27%27s%20%2F%20%23%26')", ::items/search-function("it's / #&"), "quotes doubled, then encoded")
+}
+
+test-folder-move-copy-bodies
+meta ["test"] fn () {
+    assert-eq({name: "Reports", folder: {}, "@microsoft.graph.conflictBehavior": "fail"}, ::items/build-folder("Reports", "fail"))
+    assert-eq({parentReference: {id: "P2"}}, ::items/build-move("P2", {}))
+    assert-eq({parentReference: {id: "P2", driveId: "d9"}, name: "new.txt"}, ::items/build-move("P2", {drive-id: "d9", name: "new.txt"}))
+    assert-eq({parentReference: {id: "P3"}}, ::items/build-copy("P3", {}), "unset copy options omitted")
+    assert-eq({parentReference: {driveId: "d2", id: "P3"}, name: "c.txt", childrenOnly: true, includeAllVersionHistory: true},
+        ::items/build-copy("P3", {drive-id: "d2", name: "c.txt", children-only: true, include-all-versions: true}))
+}
+
+test-classify-copy-status
+meta ["test"] fn () {
+    running ::items/classify-copy-status({status: 202, headers: {}, body: {operation: "ItemCopy", percentageComplete: 27.8, status: "inProgress"}})
+    assert-eq("inProgress", running.status)
+    assert(not(running.done))
+    assert-eq(27.8, running.percent)
+    done ::items/classify-copy-status({status: 200, headers: {}, body: {percentageComplete: 100.0, resourceId: "01MOWKYVJML57KN2ANMBA3JZJS2MBGC7KM", status: "completed"}})
+    assert(done.done)
+    assert-eq("01MOWKYVJML57KN2ANMBA3JZJS2MBGC7KM", done.resource-id)
+    failed ::items/classify-copy-status({status: 200, headers: {}, body: {status: "failed", error: {code: "nameAlreadyExists", message: "exists"}}})
+    assert(failed.done)
+    assert-eq("nameAlreadyExists", failed.error.code)
+    hidden ::items/classify-copy-status(err("::hot::http/request: redirect missing valid Location"))
+    assert-eq("completed", hidden.status, "a 303 the runtime could not follow means done")
+    redirected ::items/classify-copy-status({status: 401, headers: {}, body: ""})
+    assert(redirected.done, "a followed 303 lands on the item API without a token")
+    assert(is-null(redirected.resource-id))
+    assert(is-err(::items/classify-copy-status({status: 404, headers: {}, body: ""})))
+    assert(is-err(::items/classify-copy-status(err("request failed: dns"))))
+}
+
+test-build-link
+meta ["test"] fn () {
+    assert-eq({type: "view"}, ::sharing/build-link("view", {}), "unset optionals omitted")
+    assert-eq({type: "edit", scope: "users", expirationDateTime: "2026-12-01T00:00:00Z", retainInheritedPermissions: false, recipients: [{email: "a@contoso.com"}, {objectId: "o1"}]},
+        ::sharing/build-link("edit", {scope: "users", expiration: "2026-12-01T00:00:00Z", retain-inherited: false, recipients: ["a@contoso.com", {objectId: "o1"}]}))
+    assert(is-err(::sharing/build-link("download", {})))
+    assert(is-err(::sharing/build-link("view", {scope: "everyone"})))
+}
+
+test-build-invite
+meta ["test"] fn () {
+    b ::sharing/build-invite(["alex@contoso.com"], [], {})
+    assert-eq({recipients: [{email: "alex@contoso.com"}], roles: ["read"], requireSignIn: true, sendInvitation: false}, b, "safe defaults: sign-in, no email")
+    m ::sharing/build-invite([{objectId: "u1"}], ["write"], {message: "hi", send-invitation: true, require-sign-in: false})
+    assert-eq(true, m.sendInvitation)
+    assert-eq(false, m.requireSignIn)
+    assert-eq("hi", m.message)
+    assert(is-err(::sharing/build-invite([], ["read"], {})))
+    assert(is-err(::sharing/build-invite(["a@b.c"], ["admin"], {})))
+}
+
+test-build-app-grant
+meta ["test"] fn () {
+    assert-eq({roles: ["read"], grantedToV2: {application: {id: "app-1", displayName: "Indexer"}}}, ::sharing/build-app-grant("app-1", "Indexer", ["read"]))
+    assert-eq({roles: ["write"], grantedToV2: {application: {id: "app-1"}}}, ::sharing/build-app-grant("app-1", null, ["write"]))
+    assert(is-err(::sharing/build-app-grant("app-1", "x", [])))
+    assert(is-err(::sharing/build-app-grant("app-1", "x", ["admin"])))
+}

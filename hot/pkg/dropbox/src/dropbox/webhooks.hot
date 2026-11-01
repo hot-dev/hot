@@ -1,0 +1,176 @@
+::dropbox::webhooks ns
+meta {
+    ctx: {"dropbox.app.secret": {required: false}},
+    doc: """
+    Dropbox webhooks (App Console → your app → Webhooks).
+
+    - **Verification.** When you add the URI, Dropbox sends
+      `GET ?challenge=...`; echo the value as `text/plain` with
+      `X-Content-Type-Options: nosniff` (`challenge-response`). It is not
+      retried.
+    - **Notifications.** `POST` with a JSON body naming the accounts that
+      changed: `{list_folder: {accounts: ["dbid:..."]}, delta: {users:
+      [12345]}}` (`delta.users` are numeric user ids, also used by team
+      apps). There is no file data: for each account, run your cursor
+      sync (`::dropbox::sync/sync-changes`).
+    - **Signature.** `X-Dropbox-Signature` is the hex HMAC-SHA256 of the
+      raw body keyed with the app secret. `verify-signature` checks it in
+      constant time over `::hot::http/raw-body` and fails closed. Dropbox
+      signs no timestamp, so there is no replay window; a replayed
+      notification only triggers a harmless extra sync.
+    - **Timing.** Respond within 10 seconds or Dropbox retries with
+      backoff for about ten minutes and may disable the webhook. Verify,
+      `send` an event per account, return 200, and do the sync in the
+      event handler. Several notifications for one account can arrive
+      close together, so keep the sync idempotent.
+
+    Register two handlers on the same path: `method: "GET"` for the
+    challenge and the default `POST` for notifications.
+    """
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::http ::hot::http
+HttpResponse ::hot::http/HttpResponse
+
+SIGNATURE_HEADER "x-dropbox-signature"
+
+challenge-response
+meta {
+    doc: """
+    The response to Dropbox's verification request (pure): 200 with the
+    `challenge` query value as a `text/plain` body and
+    `X-Content-Type-Options: nosniff`, or 400 when there is no challenge.
+
+    ```hot
+    dropbox-verify
+    meta {webhook: {service: "dropbox", path: "/dropbox/hook", method: "GET"}}
+    fn (request) {
+      ::dropbox::webhooks/challenge-response(request)
+    }
+    ```
+    """
+}
+fn (request: Map): HttpResponse {
+  query or(get(request, "query"), {})
+  challenge get(query, "challenge")
+  cond {
+    ::dropbox/is-blank(challenge) => {
+      HttpResponse({status: 400, headers: {Content-Type: "text/plain", X-Content-Type-Options: "nosniff"}, body: "missing challenge"})
+    }
+    => {
+      HttpResponse({status: 200, headers: {Content-Type: "text/plain", X-Content-Type-Options: "nosniff"}, body: Str(challenge)})
+    }
+  }
+}
+
+header fn (request: Map, name: Str): Str? {
+  headers map-keys(or(get(request, "headers"), {}), lowercase)
+  value get(headers, name)
+  if(::dropbox/is-blank(value), null, trim(Str(value)))
+}
+
+verify-signature
+meta {
+    doc: """
+    True when the request's `X-Dropbox-Signature` is the hex HMAC-SHA256
+    of the raw body (`::hot::http/raw-body`) keyed with `app-secret`,
+    compared in constant time. Fails closed: an empty or null secret, a
+    missing or malformed header, or a body that was re-serialised all
+    give false.
+    """
+}
+fn (request: Map, app-secret: Str?): Bool {
+  signature header(request, SIGNATURE_HEADER)
+  cond {
+    ::dropbox/is-blank(app-secret) => { false }
+    is-null(signature) => { false }
+    => {
+      ok ::hmac/hmac-verify-hex(app-secret, ::http/raw-body(request), signature, "sha256")
+      and(not(is-err(ok)), eq(ok, true))
+    }
+  }
+}
+
+Notification
+meta {
+    doc: """
+    A parsed Dropbox webhook notification.
+
+    - `accounts` - account ids (`dbid:...`) from `list_folder.accounts`
+    - `users` - numeric user ids from `delta.users`
+    - `raw` - the decoded body
+    """
+}
+type {
+    accounts: Vec,
+    users: Vec,
+    raw: Any
+}
+
+parse-notification
+meta {
+    doc: """Parse a notification body (pure; a webhook `request` or its decoded body Map). Unknown shapes give empty lists. Does not check the signature: use `verify-notification`."""
+}
+fn (request: Map): Notification {
+  body cond {
+    is-map(get(request, "list_folder")) => { request }
+    is-map(get(request, "delta")) => { request }
+    is-map(get(request, "body")) => { request.body }
+    is-str(get(request, "body-raw")) => {
+      parsed from-json(request.body-raw)
+      if(is-err(parsed), {}, parsed)
+    }
+    => { {} }
+  }
+
+  lf if(is-map(body), get(body, "list_folder"), null)
+  delta if(is-map(body), get(body, "delta"), null)
+  accounts if(is-map(lf), get(lf, "accounts"), null)
+  users if(is-map(delta), get(delta, "users"), null)
+  Notification({
+    accounts: if(is-vec(accounts), accounts, []),
+    users: if(is-vec(users), users, []),
+    raw: body
+  })
+}
+
+verify-notification
+meta {
+    doc: """
+    Verify and parse a Dropbox webhook POST: the `Notification`, or an Err
+    when the signature is missing or wrong. The 1-arity form uses the
+    `dropbox.app.secret` context variable and fails (halts) when it is
+    unset, so an unconfigured endpoint never accepts traffic.
+
+    ```hot
+    dropbox-hook
+    meta {webhook: {service: "dropbox", path: "/dropbox/hook"}, secret-headers: ["x-dropbox-signature"]}
+    fn (request) {
+      note ::dropbox::webhooks/verify-notification(request)
+      cond {
+        is-err(note) => { ::hot::http/HttpResponse({status: 403, body: "bad signature"}) }
+        => {
+          map(note.accounts, (account) { send("dropbox:changed", {account: account}) })
+          ::hot::http/HttpResponse({status: 200, body: ""})
+        }
+      }
+    }
+    ```
+    """
+}
+fn
+(request: Map): Notification {
+  secret or(::ctx/get("dropbox.app.secret"), "")
+  if(::dropbox/is-blank(secret),
+    fail("dropbox.app.secret is not set. Add your app secret in Context Variables to verify Dropbox webhooks.")
+  )
+  verify-notification(request, Str(secret))
+},
+(request: Map, app-secret: Str): Notification {
+  cond {
+    not(verify-signature(request, app-secret)) => { err("dropbox: invalid or missing X-Dropbox-Signature") }
+    => { parse-notification(request) }
+  }
+}

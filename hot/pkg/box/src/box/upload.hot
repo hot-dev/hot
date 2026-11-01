@@ -1,0 +1,601 @@
+::box::upload ns
+meta {
+    doc: """
+    Uploads: binary-safe multipart uploads, new versions of existing
+    files, and chunked upload sessions for large files. `upload-file` and
+    `upload-version` switch to a chunked session at 20 MB (Box's minimum
+    for sessions; simple uploads are limited to 50 MB).
+
+    Content may be Bytes (sent verbatim), a Str (its UTF-8 bytes), or a
+    Map/Vec (sent as JSON). Bodies are assembled as Bytes, so binary data
+    (0x00, 0xFF, invalid UTF-8) arrives intact. Every upload sends the
+    content's SHA-1 so Box rejects a corrupted transfer.
+
+    **Chunked sessions.** `create-upload-session` returns Box's
+    `part_size`; each part (exactly `part_size` bytes, except the last)
+    is PUT with `Digest: sha=<base64 SHA-1>` and `Content-Range`, then
+    `commit-upload-session` sends every part plus the whole file's SHA-1.
+    Box can answer the commit with 202 while it assembles the file:
+    `upload-chunked` then returns `state: "processing"`, and
+    `finish-upload` commits again later (a schedule or a later step;
+    nothing here waits). A failed part aborts the session unless
+    `opts.keep-session` is true. Sessions expire after 7 days. The whole
+    file is held in memory.
+
+    **Preflight.** `preflight-check` (`OPTIONS /files/content`) checks
+    name conflicts, quota and size limits without sending content. The
+    Hot 3.0.x HTTP client does not send OPTIONS requests, so it currently
+    returns an explanatory Err; the upload itself still fails cleanly with
+    409 `item_name_in_use` or 403 `storage_limit_exceeded`.
+    """
+}
+
+::api ::box::api
+::hash ::hot::hash
+::hex ::hot::hex
+::b64 ::hot::base64
+is-ok-response ::hot::http/is-ok-response
+
+// Box: simple uploads up to 50 MB; sessions from 20 MB.
+CHUNKED_THRESHOLD 20000000
+SIMPLE_UPLOAD_LIMIT 50000000
+MAX_PARTS_PAGE 1000
+LOCAL_KEYS ["parent-id", "content-created-at", "content-modified-at", "description", "attributes", "chunked", "keep-session", "if-match", "if-none-match", "boxapi", "name"]
+RUNTIME_OPTIONS_MESSAGE "unsupported method"
+
+// ---------------------------------------------------------------------------
+// Body building (pure)
+// ---------------------------------------------------------------------------
+
+to-bytes
+meta {
+    doc: """Upload content as Bytes: Bytes pass through, a Str becomes its UTF-8 bytes, null is empty, and anything else is JSON-encoded."""
+}
+fn (content: Any): Bytes {
+  cond {
+    is-bytes(content) => { content }
+    is-str(content) => { Bytes(content) }
+    is-null(content) => { Bytes([]) }
+    => { Bytes(to-json(untype(content))) }
+  }
+}
+
+sha1-hex
+meta {
+    doc: """The SHA-1 of `content` as lowercase hex (Box's `sha1` field and the `Content-MD5` upload header, which Box uses for SHA-1)."""
+}
+fn (content: Any): Str {
+  ::hash/sha1(to-bytes(content))
+}
+
+sha1-base64
+meta {
+    doc: """The SHA-1 of `content` as base64 of the raw digest, the form `Digest: sha=` takes."""
+}
+fn (content: Any): Str {
+  ::b64/encode(::hex/decode(sha1-hex(content)))
+}
+
+digest-header
+meta {
+    doc: """The `Digest` header value for a part or a whole file (pure): `sha=<base64 SHA-1>`."""
+}
+fn (content: Any): Str {
+  `sha=${sha1-base64(content)}`
+}
+
+new-boundary
+meta {doc: """A random multipart boundary, so file content cannot collide with it."""}
+fn (): Str {
+  `hot-box-${::hot::random/random-string(32)}`
+}
+
+safe-filename
+meta {
+    doc: """A `filename` for the multipart header (pure): quotes, backslashes, CR and LF replaced with `_`. Box names the file from `attributes.name`, so this only labels the part."""
+}
+fn (name: Str): Str {
+  cleaned ::hot::regex/replace-all(name, "[\"\\\\\\r\\n]", "_")
+  if(is-empty(cleaned), "file", cleaned)
+}
+
+upload-attributes
+meta {
+    doc: """
+    The `attributes` part of an upload (pure): `name`, `parent: {id}`
+    (null for a new version), `content_created_at` /
+    `content_modified_at` (RFC 3339) from `opts.content-created-at` /
+    `content-modified-at`, `description`, then any extra fields in
+    `opts.attributes`. Nulls are dropped.
+    """
+}
+fn (name: Str?, parent-id: Str?, opts: Map): Map {
+  ::box/compact({
+    name: name,
+    parent: ::box/parent-ref(parent-id),
+    content_created_at: get(opts, "content-created-at"),
+    content_modified_at: get(opts, "content-modified-at"),
+    description: get(opts, "description"),
+    ...or(get(opts, "attributes"), {})
+  })
+}
+
+build-multipart
+meta {
+    doc: """
+    Build the `multipart/form-data` upload body as Bytes (pure): the
+    `attributes` JSON part first (Box requires it before the file), then
+    the `file` part. Content is concatenated as bytes, never interpolated
+    into a string, so binary payloads survive.
+    """
+}
+fn (attributes: Map, content: Any, filename: Str, boundary: Str): Bytes {
+  head `--${boundary}\r\nContent-Disposition: form-data; name="attributes"\r\n\r\n${to-json(::box/compact(attributes))}\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safe-filename(filename)}"\r\nContent-Type: application/octet-stream\r\n\r\n`
+  tail `\r\n--${boundary}--\r\n`
+  concat(Bytes(head), to-bytes(content), Bytes(tail))
+}
+
+first-entry
+meta {
+    doc: """The file in an upload response (`{total_count, entries: [file]}`), or the response itself (pure)."""
+}
+fn (response: Any): Any {
+  cond {
+    and(is-map(response), is-vec(response.entries), not(is-empty(response.entries))) => { first(response.entries) }
+    => { response }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Simple uploads
+// ---------------------------------------------------------------------------
+
+send-multipart fn (path: Str, attributes: Map, bytes: Bytes, filename: Str, opts: Map): Map {
+  boundary new-boundary()
+  params ::box/query-params({fields: ::box/FILE_FIELDS}, opts, LOCAL_KEYS)
+  headers {
+    ...::box/condition-headers(opts),
+    Content-Type: `multipart/form-data; boundary=${boundary}`,
+    Content-MD5: sha1-hex(bytes)
+  }
+
+  result ::api/json("POST", ::box/upload-url(path, params), headers, build-multipart(attributes, bytes, filename, boundary), ::box/creds(opts))
+  if(is-err(result), result, first-entry(result))
+}
+
+wants-chunked fn (bytes: Bytes, opts: Map): Bool {
+  c get(opts, "chunked")
+  cond {
+    eq(c, true) => { true }
+    eq(c, false) => { false }
+    => { gte(length(bytes), CHUNKED_THRESHOLD) }
+  }
+}
+
+processing-error fn (upload: Map): Any {
+  err(`box: Box is still assembling the upload (session ${upload.session-id}); call ::box::upload/finish-upload("${upload.session-id}", content) after ${or(upload.retry-after, 5)} seconds`)
+}
+
+upload-file
+meta {
+    doc: """
+    Upload a new file into `parent-id` (default the root, `"0"`). Returns
+    the file. Options: `content-created-at` / `content-modified-at`
+    (RFC 3339), `description`, `attributes` (extra fields), `chunked`
+    (`true` / `false` to force; default chunked from 20 MB), `fields`,
+    plus credentials. A name already used in the folder fails with 409
+    `item_name_in_use`; `::box::folders/conflict-item` reads the existing
+    file from that error, and `upload-version` replaces its content.
+
+    ```hot
+    file ::box::upload/upload-file("report.csv", csv-text, "12345")
+    file.id
+    ```
+    """
+}
+fn
+(name: Str, content: Any): Map {
+  upload-file(name, content, ::box/ROOT_FOLDER_ID, {})
+},
+(name: Str, content: Any, parent-id: Str): Map {
+  upload-file(name, content, parent-id, {})
+},
+(name: Str, content: Any, parent-id: Str, opts: Map): Map {
+  bytes to-bytes(content)
+  cond {
+    wants-chunked(bytes, opts) => {
+      done upload-chunked(parent-id, name, bytes, opts)
+      cond {
+        is-err(done) => { done }
+        eq(done.state, "committed") => { done.file }
+        => { processing-error(done) }
+      }
+    }
+    => { send-multipart("/files/content", upload-attributes(name, parent-id, opts), bytes, name, opts) }
+  }
+}
+
+upload-version
+meta {
+    doc: """
+    POST /files/{id}/content - upload new content for an existing file (a
+    new version). `opts.name` renames it at the same time;
+    `opts.if-match` (the file's etag) fails with 412 when someone changed
+    it first. Chunked from 20 MB. Returns the file.
+    """
+}
+fn
+(file-id: Str, content: Any): Map {
+  upload-version(file-id, content, {})
+},
+(file-id: Str, content: Any, opts: Map): Map {
+  bytes to-bytes(content)
+  name get(opts, "name")
+  cond {
+    wants-chunked(bytes, opts) => {
+      session create-version-session(file-id, length(bytes), opts)
+      cond {
+        is-err(session) => { session }
+        => {
+          done upload-to-session(session, bytes, opts)
+          cond {
+            is-err(done) => { done }
+            eq(done.state, "committed") => { done.file }
+            => { processing-error(done) }
+          }
+        }
+      }
+    }
+    => {
+      send-multipart(`/files/${::box/encode-id(file-id)}/content`, upload-attributes(name, null, opts), bytes, or(name, "file"), opts)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Preflight
+// ---------------------------------------------------------------------------
+
+preflight-body
+meta {
+    doc: """The preflight body (pure): `name`, `parent: {id}` (null for a new version) and `size` in bytes."""
+}
+fn (name: Str?, parent-id: Str?, size: Int?): Map {
+  ::box/compact({name: name, parent: ::box/parent-ref(parent-id), size: size})
+}
+
+preflight-result fn (response: Result): Map {
+  cond {
+    // RUNTIME-LIMIT(http-options): ::hot::http/request in Hot 3.0.x refuses the OPTIONS method.
+    and(is-err(response), contains(err-message(response), RUNTIME_OPTIONS_MESSAGE)) => {
+      err("box: preflight-check needs an OPTIONS request, which this Hot runtime cannot send; upload directly and handle 409 item_name_in_use / 403 storage_limit_exceeded")
+    }
+
+    is-err(response) => { response }
+    is-ok-response(response) => { if(is-map(response.body), response.body, {}) }
+    => { err(::api/http-error(response)) }
+  }
+}
+
+preflight-check
+meta {
+    doc: """
+    OPTIONS /files/content - ask Box whether `name` (`size` bytes) can be
+    uploaded into `parent-id`: returns `{upload_url, upload_token}` when
+    it can, or an `HttpError` (409 `item_name_in_use` with the conflict in
+    `context-info`, 403 `storage_limit_exceeded`, `file_size_limit_exceeded`).
+    See the namespace note: Hot 3.0.x cannot send OPTIONS, so this returns
+    an explanatory Err for now.
+    """
+}
+fn
+(name: Str, parent-id: Str, size: Int): Map {
+  preflight-check(name, parent-id, size, {})
+},
+(name: Str, parent-id: Str, size: Int, opts: Map): Map {
+  preflight-result(::api/request("OPTIONS", ::box/url("/files/content"), {}, preflight-body(name, parent-id, size), ::box/creds(opts)))
+}
+
+preflight-version
+meta {
+    doc: """OPTIONS /files/{id}/content - the preflight check for a new version (optionally renamed). Same runtime caveat as `preflight-check`."""
+}
+fn
+(file-id: Str, size: Int): Map {
+  preflight-version(file-id, size, {})
+},
+(file-id: Str, size: Int, opts: Map): Map {
+  body preflight-body(get(opts, "name"), null, size)
+  preflight-result(::api/request("OPTIONS", ::box/url(`/files/${::box/encode-id(file-id)}/content`), {}, body, ::box/creds(opts)))
+}
+
+// ---------------------------------------------------------------------------
+// Chunked upload sessions
+// ---------------------------------------------------------------------------
+
+session-path fn (session-id: Str): Str {
+  `/files/upload_sessions/${::box/encode-id(session-id)}`
+}
+
+create-session-body
+meta {
+    doc: """The `POST /files/upload_sessions` body (pure): `folder_id`, `file_size`, `file_name`."""
+}
+fn (folder-id: Str, name: Str, size: Int): Map {
+  {folder_id: folder-id, file_size: size, file_name: name}
+}
+
+create-upload-session
+meta {
+    doc: """
+    POST /files/upload_sessions - open a chunked upload of a new file
+    (`size` bytes, at least 20 MB). Returns Box's session: `id`,
+    `part_size`, `total_parts`, `num_parts_processed`,
+    `session_expires_at`, `session_endpoints`.
+    """
+}
+fn
+(folder-id: Str, name: Str, size: Int): Map {
+  create-upload-session(folder-id, name, size, {})
+},
+(folder-id: Str, name: Str, size: Int, opts: Map): Map {
+  ::box/json("POST", ::box/upload-url("/files/upload_sessions"), create-session-body(folder-id, name, size), opts)
+}
+
+create-version-session
+meta {
+    doc: """POST /files/{id}/upload_sessions - open a chunked upload of a new version (`opts.name` renames the file)."""
+}
+fn
+(file-id: Str, size: Int): Map {
+  create-version-session(file-id, size, {})
+},
+(file-id: Str, size: Int, opts: Map): Map {
+  body ::box/compact({file_size: size, file_name: get(opts, "name")})
+  ::box/json("POST", ::box/upload-url(`/files/${::box/encode-id(file-id)}/upload_sessions`), body, opts)
+}
+
+get-upload-session
+meta {
+    doc: """GET /files/upload_sessions/{id} - a session's state (`num_parts_processed`, `total_parts`, expiry)."""
+}
+fn
+(session-id: Str): Map {
+  get-upload-session(session-id, {})
+},
+(session-id: Str, opts: Map): Map {
+  ::box/json("GET", ::box/upload-url(session-path(session-id)), "", opts)
+}
+
+part-range
+meta {
+    doc: """The `Content-Range` for a part (pure): bytes `offset` through `offset + size - 1` of `total`, e.g. `"bytes 0-8388607/52428800"`."""
+}
+fn (offset: Int, size: Int, total: Int): Str {
+  `bytes ${offset}-${sub(add(offset, size), 1)}/${total}`
+}
+
+part-offsets
+meta {
+    doc: """The `[offset, size]` of every part of a `total`-byte file in `part-size` parts (pure): all `part-size` except a shorter last one."""
+}
+fn (total: Int, part-size: Int): Vec {
+  p max(part-size, 1)
+  count floor(div(add(total, sub(p, 1)), p))
+  map(range(0, count), (i) {
+    offset mul(i, p)
+    [offset, sub(min(total, add(offset, p)), offset)]
+  })
+}
+
+part-headers
+meta {
+    doc: """The headers for uploading one part (pure): `Digest`, `Content-Range`, `Content-Type: application/octet-stream`."""
+}
+fn (part: Bytes, offset: Int, total: Int): Map {
+  {
+    Digest: digest-header(part),
+    Content-Range: part-range(offset, length(part), total),
+    Content-Type: "application/octet-stream"
+  }
+}
+
+upload-part
+meta {
+    doc: """
+    PUT /files/upload_sessions/{id} - upload one part: `part` bytes
+    starting at `offset` of a `total`-byte file. Returns Box's part
+    record `{part_id, offset, size, sha1}`, which `commit-upload-session`
+    needs. Re-sending the same part is safe.
+    """
+}
+fn
+(session-id: Str, part: Bytes, offset: Int, total: Int): Map {
+  upload-part(session-id, part, offset, total, {})
+},
+(session-id: Str, part: Bytes, offset: Int, total: Int, opts: Map): Map {
+  result ::api/json("PUT", ::box/upload-url(session-path(session-id)), part-headers(part, offset, total), part, ::box/creds(opts))
+  cond {
+    is-err(result) => { result }
+    is-map(result.part) => { result.part }
+    => { result }
+  }
+}
+
+list-parts
+meta {
+    doc: """GET /files/upload_sessions/{id}/parts - one page of the parts Box has (`{entries, total_count, offset, limit}`; offset paging)."""
+}
+fn
+(session-id: Str): Map {
+  list-parts(session-id, {})
+},
+(session-id: Str, opts: Map): Map {
+  params ::box/query-params({limit: MAX_PARTS_PAGE}, opts, LOCAL_KEYS)
+  ::box/json("GET", ::box/upload-url(`${session-path(session-id)}/parts`, params), "", opts)
+}
+
+list-all-parts
+meta {doc: """Every part of a session (all offset pages), sorted by offset."""}
+fn
+(session-id: Str): Vec {
+  list-all-parts(session-id, {})
+},
+(session-id: Str, opts: Map): Vec {
+  parts ::api/collect-offset((offset) { list-parts(session-id, {...opts, offset: offset}) }, MAX_PARTS_PAGE)
+  if(is-err(parts), parts, sort-parts(parts))
+}
+
+sort-parts
+meta {
+    doc: """Parts sorted by `offset`, keeping only `part_id`, `offset`, `size`, `sha1` (the commit body's shape; pure)."""
+}
+fn (parts: Vec): Vec {
+  slim map(parts, (p) { filter-vals({part_id: p.part_id, offset: p.offset, size: p.size, sha1: p.sha1}, is-some) })
+  sort-by(slim, (p) { or(p.offset, 0) })
+}
+
+commit-body
+meta {
+    doc: """The commit body (pure): `parts` sorted by offset, plus optional `attributes` (e.g. `content_modified_at`, `description`)."""
+}
+fn (parts: Vec, attributes: Map?): Map {
+  ::box/compact({parts: sort-parts(parts), attributes: if(or(is-null(attributes), is-empty(or(attributes, {}))), null, attributes)})
+}
+
+ChunkedUpload
+meta {
+    doc: """
+    The outcome of a chunked upload.
+
+    - `state` - `"committed"` (the file exists) or `"processing"` (Box
+      answered the commit with 202; commit again later with `finish-upload`)
+    - `file` - the file when committed, else null
+    - `session-id`, `parts` - the session and its parts
+    - `digest` - the whole-file `Digest` header value
+    - `retry-after` - seconds Box asked to wait (when processing)
+    """
+}
+type {
+    state: Str,
+    file: Map?,
+    session-id: Str,
+    parts: Vec,
+    digest: Str,
+    retry-after: Int?
+}
+
+commit-upload-session
+meta {
+    doc: """
+    POST /files/upload_sessions/{id}/commit - assemble the file from
+    `parts` (as returned by `upload-part` / `list-all-parts`).
+    `digest` is `digest-header(whole-file-bytes)`. Returns a
+    `ChunkedUpload` (`state: "processing"` on Box's 202). Options:
+    `attributes`, `if-match` (for versions), credentials.
+    """
+}
+fn
+(session-id: Str, parts: Vec, digest: Str): ChunkedUpload {
+  commit-upload-session(session-id, parts, digest, {})
+},
+(session-id: Str, parts: Vec, digest: Str, opts: Map): ChunkedUpload {
+  headers {...::box/condition-headers(opts), Digest: digest}
+  response ::api/request("POST", ::box/upload-url(`${session-path(session-id)}/commit`), headers, commit-body(parts, get(opts, "attributes")), ::box/creds(opts))
+  base {session-id: session-id, parts: sort-parts(parts), digest: digest}
+  cond {
+    is-err(response) => { response }
+    eq(response.status, 202) => {
+      ChunkedUpload({...base, state: "processing", file: null, retry-after: ::api/retry-after-seconds(response.headers)})
+    }
+
+    is-ok-response(response) => { ChunkedUpload({...base, state: "committed", file: first-entry(response.body), retry-after: null}) }
+    => { err(::api/http-error(response)) }
+  }
+}
+
+abort-upload-session
+meta {
+    doc: """DELETE /files/upload_sessions/{id} - abort a session and discard its parts. Returns true."""
+}
+fn
+(session-id: Str): Bool {
+  abort-upload-session(session-id, {})
+},
+(session-id: Str, opts: Map): Bool {
+  result ::box/json("DELETE", ::box/upload-url(session-path(session-id)), "", opts)
+  if(is-err(result), result, true)
+}
+
+send-parts fn (session-id: Str, bytes: Bytes, offsets: Vec, index: Int, acc: Vec, opts: Map): Vec {
+  cond {
+    gte(index, length(offsets)) => { acc }
+    => {
+      o get(offsets, index)
+      offset first(o)
+      part upload-part(session-id, slice(bytes, offset, add(offset, last(o))), offset, length(bytes), opts)
+      cond {
+        is-err(part) => { err(`box: part ${add(index, 1)} of ${length(offsets)} failed: ${err-message(part)}`) }
+        => { send-parts(session-id, bytes, offsets, add(index, 1), concat(acc, [part]), opts) }
+      }
+    }
+  }
+}
+
+upload-to-session
+meta {
+    doc: """Upload `content` into an open `session` (from `create-upload-session` / `create-version-session`) part by part, then commit. Returns a `ChunkedUpload`. A failed part aborts the session unless `opts.keep-session` is true."""
+}
+fn (session: Map, content: Any, opts: Map): ChunkedUpload {
+  bytes to-bytes(content)
+  session-id Str(session.id)
+  part-size or(::box/to-int(session.part_size), 8388608)
+  parts send-parts(session-id, bytes, part-offsets(length(bytes), part-size), 0, [], opts)
+  cond {
+    is-err(parts) => {
+      if(ne(get(opts, "keep-session"), true), abort-upload-session(session-id, ::box/creds(opts)), null)
+      parts
+    }
+    => {
+      commit-opts filter-vals({...::box/creds(opts), attributes: get(opts, "attributes"), if-match: get(opts, "if-match")}, is-some)
+      commit-upload-session(session-id, parts, digest-header(bytes), commit-opts)
+    }
+  }
+}
+
+upload-chunked
+meta {
+    doc: """
+    Upload a large file (20 MB or more) through a chunked session: create
+    it, send every part, commit. Returns a `ChunkedUpload`;
+    `state: "processing"` means Box is still assembling it, so call
+    `finish-upload` later.
+
+    ```hot
+    done ::box::upload/upload-chunked("12345", "video.mp4", big-bytes, {})
+    if(eq(done.state, "committed"), done.file.id, done.session-id)
+    ```
+    """
+}
+fn
+(folder-id: Str, name: Str, content: Any): ChunkedUpload {
+  upload-chunked(folder-id, name, content, {})
+},
+(folder-id: Str, name: Str, content: Any, opts: Map): ChunkedUpload {
+  bytes to-bytes(content)
+  session create-upload-session(folder-id, name, length(bytes), ::box/creds(opts))
+  if(is-err(session), session, upload-to-session(session, bytes, opts))
+}
+
+finish-upload
+meta {
+    doc: """Commit a session again after Box answered `processing`: lists its parts, recomputes the whole-file digest from `content`, and commits. Returns a `ChunkedUpload`."""
+}
+fn
+(session-id: Str, content: Any): ChunkedUpload {
+  finish-upload(session-id, content, {})
+},
+(session-id: Str, content: Any, opts: Map): ChunkedUpload {
+  parts list-all-parts(session-id, ::box/creds(opts))
+  if(is-err(parts), parts, commit-upload-session(session-id, parts, digest-header(content), opts))
+}

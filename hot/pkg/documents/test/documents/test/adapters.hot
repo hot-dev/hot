@@ -1,0 +1,186 @@
+::documents::test::adapters ns
+meta ["test"]
+
+::fx ::documents::test::fixtures
+::a ::documents::adapters
+::source ::documents::source
+
+DOCUMENT_FIELDS ["provider", "source", "id", "name", "path", "parents", "kind", "mime-type", "is-native", "export-formats", "size", "created", "modified", "version", "hashes", "web-url", "deleted", "raw"]
+
+src fn (descriptor: Any): Map {
+  ::source/resolve(descriptor)
+}
+
+has-every-field fn (doc: Any): Bool {
+  fields keys(untype(doc))
+  and(is-empty(filter(DOCUMENT_FIELDS, (k) { not(in(k, fields)) })), eq(length(fields), length(DOCUMENT_FIELDS)))
+}
+
+test-google-blob
+meta ["test"] fn () {
+    d ::a/from-google(src({provider: "google-drive", opts: {token: "t"}}), ::google::drive/to-doc-file(::fx/DRIVE_FILE))
+    assert(has-every-field(d))
+    assert-eq("google-drive", d.provider)
+    assert-eq({provider: "google-drive"}, d.source, "no credentials in source")
+    assert-eq("1A", d.id)
+    assert-eq("file", d.kind)
+    assert-eq("application/pdf", d.mime-type)
+    assert-eq(2048, d.size)
+    assert-eq("17", d.version)
+    assert-eq({md5: "abc", sha256: "def"}, d.hashes)
+    assert-eq(["P"], d.parents)
+    assert(is-null(d.path), "Drive has no paths")
+    assert-eq("2026-10-01T00:00:00.000Z", d.created)
+    assert-eq("2026-10-30T12:00:00.000Z", d.modified)
+    assert-eq("https://drive.google.com/file/d/1A/view", d.web-url)
+    assert(not(d.is-native))
+    assert(not(d.deleted))
+    assert-eq("1A", d.raw.id, "raw is the Drive resource")
+}
+
+test-google-native-and-folder
+meta ["test"] fn () {
+    doc ::a/from-google(src({provider: "google-drive", drive-id: "0AD"}), ::google::drive/to-doc-file(::fx/DRIVE_DOC))
+    assert(doc.is-native)
+    assert-eq({provider: "google-drive", drive-id: "0AD"}, doc.source)
+    assert-eq(["application/pdf", "text/markdown"], sort(doc.export-formats))
+    assert-eq({}, doc.hashes, "native files have no hashes")
+    assert(is-null(doc.size))
+    folder ::a/from-google(src("google-drive"), ::google::drive/to-doc-file(::fx/DRIVE_FOLDER))
+    assert-eq("folder", folder.kind)
+    assert-eq("application/vnd.google-apps.folder", folder.mime-type)
+    assert(folder.deleted, "trashed becomes deleted")
+}
+
+test-onedrive-business-file
+meta ["test"] fn () {
+    d ::a/from-onedrive(src({provider: "onedrive", drive: {site: "contoso"}}), ::microsoft::onedrive/to-doc-file(::fx/ONEDRIVE_FILE))
+    assert(has-every-field(d))
+    assert-eq("onedrive", d.provider)
+    assert-eq({provider: "onedrive", drive: {site: "contoso"}, drive-id: "b!xyz"}, d.source, "the item's drive id joins the scope")
+    assert-eq("01BYE5RZ6QN3ZWBTUFOFD3GSPGOHDJD36K", d.id)
+    assert-eq("/Shared Plans/2026/Q3 Plan.DOCX", d.path, "path from parentReference.path, decoded")
+    assert-eq({quickXorHash: "Fp/t3ZEO4cSlBz5r0Wbt3zbJ4LQ="}, d.hashes)
+    assert-eq(::fx/ONEDRIVE_FILE.eTag, d.version)
+    assert-eq(["application/pdf"], d.export-formats)
+    assert-eq(35212, d.size)
+    assert-eq("file", d.kind)
+}
+
+test-onedrive-personal-hashes-and-folders
+meta ["test"] fn () {
+    d ::a/from-onedrive(src("onedrive"), ::microsoft::onedrive/to-doc-file(::fx/ONEDRIVE_PERSONAL))
+    assert-eq({sha1: "abcdef", crc32: "0a0b", sha256: "deadbeef"}, d.hashes, "Graph hash names normalised and lower-cased")
+    assert(is-null(d.path), "no parentReference.path: no path")
+    root ::a/from-onedrive(src("onedrive"), ::microsoft::onedrive/to-doc-file(::fx/ONEDRIVE_FOLDER))
+    assert-eq("folder", root.kind)
+    assert-eq("inode/directory", root.mime-type, "folders never have an empty MIME type")
+    assert-eq("/", root.path)
+    notes ::a/from-onedrive(src("onedrive"), ::microsoft::onedrive/to-doc-file(::fx/ONEDRIVE_NOTES))
+    assert-eq("/notes.md", notes.path, "a root child")
+    gone ::a/from-onedrive(src("onedrive"), ::microsoft::onedrive/to-doc-file({id: "D1", deleted: {state: "deleted"}}))
+    assert(gone.deleted)
+}
+
+test-dropbox-file
+meta ["test"] fn () {
+    d ::a/from-dropbox(src({provider: "dropbox", root: "/Reports"}), ::dropbox/to-doc-file(::fx/DROPBOX_FILE))
+    assert(has-every-field(d))
+    assert-eq("dropbox", d.provider)
+    assert-eq("id:a4ayc_80_OEAAAAAAAAAXw", d.id)
+    assert-eq("/Reports/Q3 Plan.pdf", d.path)
+    assert-eq(["/Reports"], d.parents)
+    assert-eq("a1c10ce0dd78", d.version)
+    assert-eq({dropbox-content-hash: ::fx/DROPBOX_FILE.content_hash}, d.hashes)
+    assert-eq({provider: "dropbox", root: "/Reports", namespace-id: "84528192421"}, d.source)
+    assert(is-null(d.created), "Dropbox records no creation time")
+    assert-eq("2026-10-02T09:30:00Z", d.modified)
+}
+
+test-dropbox-paper-folder-deleted
+meta ["test"] fn () {
+    paper ::a/from-dropbox(src("dropbox"), ::dropbox/to-doc-file(::fx/DROPBOX_PAPER))
+    assert(paper.is-native)
+    assert-eq(["text/html", "text/markdown"], paper.export-formats, "export names become MIME types")
+    assert-eq("application/vnd.dropbox.paper", paper.mime-type)
+    folder ::a/from-dropbox(src("dropbox"), ::dropbox/to-doc-file(::fx/DROPBOX_FOLDER))
+    assert-eq("folder", folder.kind)
+    assert-eq({}, folder.hashes)
+    gone ::a/from-dropbox(src("dropbox"), ::dropbox/to-doc-file(::fx/DROPBOX_DELETED))
+    assert(gone.deleted)
+    assert-eq("/old.txt", gone.id, "deleted entries are keyed by lower-cased path")
+}
+
+test-box-file
+meta ["test"] fn () {
+    d ::a/from-box(src({provider: "box", folder-id: "111"}), ::box/to-doc-file(::fx/BOX_FILE))
+    assert(has-every-field(d))
+    assert-eq("box", d.provider)
+    assert-eq({provider: "box", folder-id: "111"}, d.source)
+    assert-eq("12345", d.id)
+    assert-eq("/Reports/Q3 Report.pdf", d.path, "path_collection without All Files")
+    assert-eq(["111"], d.parents)
+    assert-eq("3", d.version)
+    assert-eq({sha1: "85136c79cbf9fe36bb9d05d0639c70c265c18d37"}, d.hashes)
+    assert-eq("application/pdf", d.mime-type)
+    assert-eq("https://app.box.com/file/12345", d.web-url)
+}
+
+test-box-folder-and-trash
+meta ["test"] fn () {
+    folder ::a/from-box(src("box"), ::box/to-doc-file(::fx/BOX_FOLDER))
+    assert-eq("folder", folder.kind)
+    assert(is-null(folder.path), "no path_collection: no path")
+    root ::a/from-box(src("box"), ::box/to-doc-file({type: "folder", id: "0", name: "All Files"}))
+    assert-eq("/", root.path)
+    trashed ::a/from-box(src("box"), ::box/to-doc-file(::fx/BOX_TRASHED))
+    assert(trashed.deleted)
+    assert-eq({}, trashed.hashes, "no sha1: empty hashes")
+}
+
+test-s3-object-and-prefix
+meta ["test"] fn () {
+    s src({provider: "s3", bucket: "acme", prefix: "inbox/", opts: {access-key-id: "AKIA", secret-access-key: "shh"}})
+    d ::a/from-s3(s, ::documents::s3/to-doc-file({key: "inbox/2026/Q3 report.pdf", size: 434234, last-modified: "2026-10-12T17:50:30.000Z", etag: "\"fba9dede5f27731c9771645a39863328\"", storage-class: "STANDARD"}))
+    assert(has-every-field(d))
+    assert-eq({provider: "s3", bucket: "acme", prefix: "inbox/"}, d.source, "no AWS keys in source")
+    assert-eq("inbox/2026/Q3 report.pdf", d.id)
+    assert-eq("Q3 report.pdf", d.name)
+    assert-eq("/inbox/2026/Q3 report.pdf", d.path)
+    assert-eq(["inbox/2026/"], d.parents)
+    assert-eq("fba9dede5f27731c9771645a39863328", d.version, "ETag without quotes")
+    assert-eq({}, d.hashes, "an ETag is not reported as an MD5")
+    assert-eq("application/pdf", d.mime-type, "from the extension when there is no Content-Type")
+    assert-eq(434234, d.size)
+    folder ::a/from-s3(s, ::documents::s3/to-doc-file({key: "inbox/2026/"}))
+    assert-eq("folder", folder.kind)
+    assert-eq("2026", folder.name)
+    assert-eq(["inbox/"], folder.parents)
+}
+
+test-same-shape-for-every-provider
+meta ["test"] fn () {
+    docs [
+        ::a/from-google(src("google-drive"), ::google::drive/to-doc-file(::fx/DRIVE_FILE)),
+        ::a/from-onedrive(src("onedrive"), ::microsoft::onedrive/to-doc-file(::fx/ONEDRIVE_FILE)),
+        ::a/from-dropbox(src("dropbox"), ::dropbox/to-doc-file(::fx/DROPBOX_FILE)),
+        ::a/from-box(src("box"), ::box/to-doc-file(::fx/BOX_FILE)),
+        ::a/from-s3(src({provider: "s3", bucket: "b"}), ::documents::s3/to-doc-file({key: "k.txt"}))
+    ]
+    assert(all(docs, has-every-field), "every adapter fills exactly the Document fields")
+    assert-eq(["box", "dropbox", "google-drive", "onedrive", "s3"], sort(map(docs, (d) { d.provider })))
+}
+
+test-to-content
+meta ["test"] fn () {
+    s src("dropbox")
+    c ::dropbox::content/build-content("/a.txt", Bytes("hello"), ::fx/DROPBOX_FILE, null, null, "download")
+    fc ::a/to-content(s, c, ::a/from-dropbox, null)
+    assert-eq(Bytes("hello"), fc.bytes)
+    assert-eq(5, fc.size)
+    assert-eq("download", fc.method)
+    assert-eq("id:a4ayc_80_OEAAAAAAAAAXw", fc.document.id, "the attached DocFile becomes the Document")
+    plain ::a/to-content(s, {file-id: "x", bytes: Bytes([0, 255]), source: "range"}, ::a/from-dropbox, null)
+    assert(is-null(plain.document))
+    assert-eq("range", plain.method)
+}

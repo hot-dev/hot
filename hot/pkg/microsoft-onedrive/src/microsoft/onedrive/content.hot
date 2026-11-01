@@ -1,0 +1,442 @@
+::microsoft::onedrive::content ns
+meta {
+    doc: """
+    Read file content: `read-document` for any file (as stored, PDF or
+    HTML conversion, or text), byte-exact downloads, Range and chunked
+    downloads past the response cap, format conversion, and thumbnails.
+
+    Results are `::microsoft::onedrive/FileContent`: `bytes` is always the
+    raw body (a JSON file stays bytes), and `text` is filled in when the
+    file is textual by MIME type or extension.
+
+    **How downloads work.** `GET {item}/content` answers `302 Found` with
+    a short-lived pre-authenticated URL, which Hot follows (without the
+    Authorization header). Range requests go straight to the item's
+    `@microsoft.graph.downloadUrl` (valid about an hour, no token), as
+    Graph requires.
+
+    **Limits.** Every single response is capped by the runtime's
+    `http.max-response-bytes` (16 MiB by default): `download` switches to
+    Range-chunked downloads when a file is larger. Format conversion
+    (`?format=pdf` / `html`) only accepts source files up to 2 MB.
+
+    **Permissions.** `Files.Read` / `Files.Read.All` (delegated),
+    `Files.Read.All` or `Sites.Read.All` (app-only; conversion is
+    documented as needing `Files.ReadWrite.All` app-only), or
+    `Sites.Selected` / `Files.SelectedOperations.Selected` with a grant.
+    """
+}
+
+::od ::microsoft::onedrive
+::api ::microsoft::graph::api
+::auth ::microsoft::graph::auth
+::items ::microsoft::onedrive::items
+::http ::hot::http
+FileContent ::microsoft::onedrive/FileContent
+
+DEFAULT_DOWNLOAD_CHUNK 8388608
+DOWNLOAD_URL_KEY "@microsoft.graph.downloadUrl"
+
+// ---------------------------------------------------------------------------
+// Range math (pure)
+// ---------------------------------------------------------------------------
+
+range-header
+meta {
+    doc: """An HTTP `Range` value for bytes `start`..`end` inclusive (`end` null for "to the end"): `range-header(0, 1023)` is `"bytes=0-1023"` (pure)."""
+}
+fn (start: Int, end: Int?): Str {
+  if(is-null(end), `bytes=${start}-`, `bytes=${start}-${end}`)
+}
+
+download-ranges
+meta {
+    doc: """Split `size` bytes into inclusive `[start, end]` ranges of at most `chunk-size` bytes (pure): `download-ranges(10, 4)` is `[[0, 3], [4, 7], [8, 9]]`."""
+}
+fn (size: Int, chunk-size: Int): Vec {
+  c max(chunk-size, 1)
+  count floor(div(add(size, sub(c, 1)), c))
+  map(range(0, count), (i) {
+    start mul(i, c)
+    [start, sub(min(size, add(start, c)), 1)]
+  })
+}
+
+is-size-limit-error
+meta {
+    doc: """True when a request failed because the response exceeded `http.max-response-bytes`."""
+}
+fn (result: Result): Bool {
+  and(is-err(result), contains(err-message(result), "exceeds"))
+}
+
+// ---------------------------------------------------------------------------
+// Downloads
+// ---------------------------------------------------------------------------
+
+item-and-url
+meta {
+    doc: """Fetch an item (following `remoteItem`) and its pre-authenticated `@microsoft.graph.downloadUrl`. Returns `{item, url}`; an Err for folders."""
+}
+fn (item: Any, opts: Map): Map {
+  found ::items/get-item(item, {...::od/creds(opts), drive: get(opts, "drive")})
+  target if(is-err(found), found, ::items/resolve-remote(found, ::od/creds(opts)))
+  cond {
+    is-err(target) => { target }
+    ::od/is-folder-item(target) => { err(`microsoft-onedrive: ${or(target.name, "the item")} is a folder or package and has no content`) }
+    => {
+      url get(target, DOWNLOAD_URL_KEY)
+      if(::auth/is-blank-value(url), err("microsoft-onedrive: Graph returned no @microsoft.graph.downloadUrl for this item"), {item: target, url: url})
+    }
+  }
+}
+
+fetch-ranges fn (url: Str, ranges: Vec, index: Int, acc: Bytes): Bytes {
+  cond {
+    gte(index, length(ranges)) => { acc }
+    => {
+      r get(ranges, index)
+      response ::http/request(::http/HttpRequest({method: "GET", url: url, headers: {Range: range-header(first(r), last(r))}, body: ""}))
+      cond {
+        is-err(response) => { response }
+        // A server that ignores Range answers 200 with the whole body.
+        eq(response.status, 200) => { ::od/response-bytes(response) }
+        eq(response.status, 206) => { fetch-ranges(url, ranges, add(index, 1), concat(acc, ::od/response-bytes(response))) }
+        => { err(::api/http-error(response)) }
+      }
+    }
+  }
+}
+
+download-range
+meta {
+    doc: """
+    Download bytes `start`..`end` (inclusive) of a file with a Range
+    request on its pre-authenticated download URL (Graph ignores Range on
+    `/content`). Returns a `FileContent` with `source: "range"`.
+    """
+}
+fn
+(item: Any, start: Int, end: Int?): FileContent {
+  download-range(item, start, end, {})
+},
+(item: Any, start: Int, end: Int?, opts: Map): FileContent {
+  found item-and-url(item, opts)
+  cond {
+    is-err(found) => { found }
+    => {
+      response ::http/request(::http/HttpRequest({method: "GET", url: found.url, headers: {Range: range-header(start, end)}, body: ""}))
+      cond {
+        is-err(response) => { response }
+        in(response.status, [200, 206]) => {
+          ::od/content-from-bytes(Str(found.item.id), ::od/response-bytes(response), get(or(found.item.file, {}), "mimeType"), found.item.name, "range")
+        }
+        => { err(::api/http-error(response)) }
+      }
+    }
+  }
+}
+
+download-chunked
+meta {
+    doc: """
+    Download a file in Range requests of `opts.chunk-size` bytes (default
+    8 MiB; keep it under `http.max-response-bytes`) from its download URL
+    and join them, so files larger than one response can be read. The
+    whole file is still held in memory.
+    """
+}
+fn
+(item: Any): FileContent {
+  download-chunked(item, {})
+},
+(item: Any, opts: Map): FileContent {
+  found item-and-url(item, opts)
+  cond {
+    is-err(found) => { found }
+    => {
+      size or(::auth/parse-int(found.item.size), 0)
+      chunk or(get(opts, "chunk-size"), DEFAULT_DOWNLOAD_CHUNK)
+      bytes fetch-ranges(found.url, download-ranges(size, chunk), 0, Bytes([]))
+      cond {
+        is-err(bytes) => { bytes }
+        => { ::od/content-from-bytes(Str(found.item.id), bytes, get(or(found.item.file, {}), "mimeType"), found.item.name, "chunked") }
+      }
+    }
+  }
+}
+
+content-path fn (item: Any, opts: Map): Str {
+  `${::od/item-path(if(is-map(item), ::od/remote-target(item), item), opts)}/content`
+}
+
+download
+meta {
+    doc: """
+    GET {item}/content - download a file's exact bytes as a `FileContent`
+    (Hot follows Graph's 302 to the pre-authenticated URL). When the file
+    is larger than `http.max-response-bytes`, it is fetched again in Range
+    chunks (`download-chunked`). Shared items (`remoteItem`) are read from
+    the owner's drive. `opts.range: {start, end}` downloads a slice.
+
+    ```hot
+    pdf ::microsoft::onedrive::content/download("/Contracts/MSA.pdf")
+    pdf.mime-type   // "application/pdf"
+    pdf.bytes
+    ```
+    """
+}
+fn
+(item: Any): FileContent {
+  download(item, {})
+},
+(item: Any, opts: Map): FileContent {
+  rng get(opts, "range")
+  cond {
+    is-map(rng) => { download-range(item, rng.start, or(rng.end, null), opts) }
+    => {
+      response ::od/follow-redirect(::api/request("GET", content-path(item, opts), {}, "", ::od/creds(opts)))
+      name if(is-map(item), get(::od/remote-target(item), "name"), null)
+      id if(is-map(item), Str(get(::od/remote-target(item), "id")), Str(item))
+      cond {
+        is-size-limit-error(response) => { download-chunked(item, opts) }
+        is-err(response) => { response }
+        not(::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+        => { ::od/content-from-response(id, response, name, "download") }
+      }
+    }
+  }
+}
+
+download-text
+meta {doc: """Download a file and decode it as UTF-8 text."""}
+fn
+(item: Any): Str {
+  download-text(item, {})
+},
+(item: Any, opts: Map): Str {
+  content download(item, opts)
+  if(is-err(content), content, ::od/content-text(content))
+}
+
+// ---------------------------------------------------------------------------
+// Conversion and thumbnails
+// ---------------------------------------------------------------------------
+
+CONVERT_MIME {pdf: "application/pdf", html: "text/html", jpg: "image/jpeg", glb: "model/gltf-binary"}
+
+convert-params
+meta {
+    doc: """The query parameters for a conversion (pure): `format`, plus `width` / `height` (required by Graph for `jpg`)."""
+}
+fn (format: Str, opts: Map): Map {
+  f lowercase(format)
+  cond {
+    and(eq(f, "jpg"), or(is-null(get(opts, "width")), is-null(get(opts, "height")))) => {
+      err("microsoft-onedrive: jpg conversion needs width and height")
+    }
+    => { ::auth/compact({format: f, width: get(opts, "width"), height: get(opts, "height")}) }
+  }
+}
+
+convert
+meta {
+    doc: """
+    GET {item}/content?format={format} - download a file converted by
+    Graph: `"pdf"` (Word, Excel, PowerPoint, RTF, ODF, HTML, Markdown,
+    EML/MSG, TIFF, Loop, ...), `"html"` (Loop, Fluid, Whiteboard) or
+    `"jpg"` (with `opts.width` and `opts.height`). The source must be at
+    most 2 MB. Returns a `FileContent` with `source: "convert"`.
+
+    ```hot
+    pdf ::microsoft::onedrive::content/convert("/Specs/Design.docx", "pdf")
+    ```
+    """
+}
+fn
+(item: Any, format: Str): FileContent {
+  convert(item, format, {})
+},
+(item: Any, format: Str, opts: Map): FileContent {
+  params convert-params(format, opts)
+  cond {
+    is-err(params) => { params }
+    => {
+      path ::api/with-query(content-path(item, opts), params)
+      response ::od/follow-redirect(::api/request("GET", path, {}, "", ::od/creds(opts)))
+      id if(is-map(item), Str(get(::od/remote-target(item), "id")), Str(item))
+      name if(is-map(item), get(::od/remote-target(item), "name"), null)
+      cond {
+        is-err(response) => { response }
+        not(::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+        => {
+          content ::od/content-from-response(id, response, name, "convert")
+          mime or(content.mime-type, get(CONVERT_MIME, params.format))
+          FileContent({...untype(content), mime-type: mime, text: if(::od/is-textual-mime(mime), Str(content.bytes), null)})
+        }
+      }
+    }
+  }
+}
+
+list-thumbnails
+meta {
+    doc: """GET {item}/thumbnails - thumbnail sets (`id`, `small`, `medium`, `large`, each `{url, width, height}`; the URLs are short-lived and pre-authenticated)."""
+}
+fn
+(item: Any): Vec {
+  list-thumbnails(item, {})
+},
+(item: Any, opts: Map): Vec {
+  page ::api/json("GET", `${::od/item-path(item, opts)}/thumbnails`, ::od/creds(opts))
+  if(is-err(page), page, or(page.value, []))
+}
+
+thumbnail
+meta {
+    doc: """Download one thumbnail image: `size` is `"small"`, `"medium"` (default) or `"large"`, from set `opts.set` (default `"0"`). Returns a `FileContent` with `source: "thumbnail"`."""
+}
+fn
+(item: Any): FileContent {
+  thumbnail(item, "medium", {})
+},
+(item: Any, size: Str): FileContent {
+  thumbnail(item, size, {})
+},
+(item: Any, size: Str, opts: Map): FileContent {
+  set-id Str(or(get(opts, "set"), "0"))
+  path `${::od/item-path(item, opts)}/thumbnails/${::api/encode-segment(set-id)}/${::api/encode-segment(size)}/content`
+  response ::od/follow-redirect(::api/request("GET", path, {}, "", ::od/creds(opts)))
+  cond {
+    is-err(response) => { response }
+    not(::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+    => { ::od/content-from-response(if(is-map(item), Str(item.id), Str(item)), response, null, "thumbnail") }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// read-document: one call for any file
+// ---------------------------------------------------------------------------
+
+FORMATS ["auto", "original", "pdf", "html", "text"]
+
+read-plan
+meta {
+    doc: """
+    Decide how `read-document` reads a file (pure): `{action:
+    "download" | "convert" | "error", format, reason?}`. `format` is
+    `auto`/null (as stored), `original`, `pdf`, `html` or `text`.
+
+    - `pdf`: a `.pdf` downloads; a convertible file (Office, ODF, RTF,
+      HTML, Markdown, EML/MSG, TIFF, Loop, ...) up to 2 MB converts;
+      anything else, or larger, downloads as stored (`format: "original"`)
+    - `html`: Loop / Fluid / Whiteboard up to 2 MB convert; others as stored
+    - `text`: textual files (`.txt`, `.md`, `.csv`, `.json`, `text/*`, ...)
+      download; others are an error (extract text elsewhere)
+    """
+}
+fn (item: Map, format: Str?): Map {
+  f if(::auth/is-blank-value(format), "auto", lowercase(trim(format)))
+  name or(item.name, "")
+  ext ::od/extension(name)
+  size or(::auth/parse-int(item.size), 0)
+  mime get(or(item.file, {}), "mimeType")
+  small lte(size, ::od/MAX_CONVERT_BYTES)
+  cond {
+    not(in(f, FORMATS)) => { {action: "error", format: f, reason: `unknown format "${format}"; use auto, original, pdf, html or text`} }
+    ::od/is-folder-item(item) => { {action: "error", format: f, reason: `${name} is a folder or package; list it with ::microsoft::onedrive::items/list-all-children`} }
+    in(f, ["auto", "original"]) => { {action: "download", format: "original"} }
+    eq(f, "text") => {
+      if(::od/is-textual(mime, name), {action: "download", format: "text"},
+        {action: "error", format: f, reason: `${name} is ${or(mime, "binary")}, not text; read it as original or pdf and extract text elsewhere`})
+    }
+
+    and(eq(f, "pdf"), eq(ext, "pdf")) => { {action: "download", format: "pdf"} }
+    and(eq(f, "pdf"), in(ext, ::od/PDF_SOURCE_EXTENSIONS), small) => { {action: "convert", format: "pdf"} }
+    and(eq(f, "html"), in(ext, ::od/HTML_SOURCE_EXTENSIONS), small) => { {action: "convert", format: "html"} }
+    => { {action: "download", format: "original"} }
+  }
+}
+
+with-file fn (content: Result, item: Map, format: Str): FileContent {
+  cond {
+    is-err(content) => { content }
+    => { FileContent({...untype(content), name: item.name, format: format, file: ::od/to-doc-file(item)}) }
+  }
+}
+
+read-document
+meta {
+    doc: """
+    Read any file as a `FileContent` with its `DocFile` attached, for RAG
+    ingestion and file-triggered workflows. Shared items are followed to
+    the owner's drive; folders return an Err. See `read-plan` for the
+    formats:
+
+    - `"auto"` (default) / `"original"` - the stored bytes: Office files
+      as-is for a text extractor (`hot.dev/libreoffice`, `pandoc`, ...),
+      `text` set for `.txt` / `.md` / `.csv` / `.json` and other text
+    - `"pdf"` - a PDF: converted by Graph when the file is convertible and
+      at most 2 MB, otherwise (or when conversion fails) the original
+    - `"html"` - Loop / Whiteboard as HTML, otherwise the original
+    - `"text"` - text files only; an Err for binaries
+
+    `format` on the result says what you got (`original`, `pdf`, `html`
+    or `text`); check `mime-type` too.
+
+    ```hot
+    doc ::microsoft::onedrive::content/read-document("/Specs/Design.docx", "pdf")
+    doc.format        // "pdf" (or "original" when the docx was over 2 MB)
+    doc.file.version  // eTag, for incremental re-indexing
+    ```
+    """
+}
+fn
+(item: Any): FileContent {
+  read-document(item, "auto", {})
+},
+(item: Any, format: Str?): FileContent {
+  read-document(item, format, {})
+},
+(item: Any, format: Str?, opts: Map): FileContent {
+  found ::items/get-item(item, {...::od/creds(opts), drive: get(opts, "drive")})
+  target if(is-err(found), found, ::items/resolve-remote(found, ::od/creds(opts)))
+  cond {
+    is-err(target) => { target }
+    => {
+      plan read-plan(target, format)
+      dl-opts {...::od/creds(opts), chunk-size: get(opts, "chunk-size")}
+      cond {
+        eq(plan.action, "error") => { err(`microsoft-onedrive: ${plan.reason}`) }
+        eq(plan.action, "convert") => {
+          converted convert(target, plan.format, ::od/creds(opts))
+          cond {
+            // Conversion is best effort: a refusal (size, unsupported file) falls back to the stored bytes.
+            and(is-err(converted), not(::api/is-retryable(converted))) => {
+              with-file(download(target, dl-opts), target, "original")
+            }
+            => { with-file(converted, target, plan.format) }
+          }
+        }
+        => { with-file(download(target, dl-opts), target, plan.format) }
+      }
+    }
+  }
+}
+
+read-document-text
+meta {
+    doc: """`read-document` returning just the text; an Err when the result is not textual (Office files, PDFs, images: extract text elsewhere)."""
+}
+fn
+(item: Any): Str {
+  read-document-text(item, {})
+},
+(item: Any, opts: Map): Str {
+  content read-document(item, "text", opts)
+  cond {
+    is-err(content) => { content }
+    is-null(content.text) => { err(`microsoft-onedrive: ${content.name} is ${content.mime-type}, not text`) }
+    => { content.text }
+  }
+}

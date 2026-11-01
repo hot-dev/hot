@@ -1,0 +1,316 @@
+::dropbox::auth ns
+meta {
+    doc: """
+    Dropbox credential resolution and the per-run access-token cache.
+    Usually used indirectly through `::dropbox::api`.
+
+    **Credential sources.** Per-call `opts` win over context. When `opts`
+    carries a primary credential (`token` or `refresh-token`), context
+    credentials are ignored for that call. Within one source an access
+    token wins over a refresh token.
+
+    | Credential | `opts` keys | Context variables |
+    |---|---|---|
+    | Access token | `token` | `dropbox.access.token` |
+    | Refresh token | `refresh-token`, `app-key`, `app-secret` | `dropbox.refresh.token`, `dropbox.app.key`, `dropbox.app.secret` |
+
+    The app secret is optional for refresh tokens issued through a PKCE
+    flow (public clients); confidential apps must send it.
+
+    **Token cache.** Access tokens minted from a refresh token (they last
+    about 4 hours) are cached in the run's execution context
+    (`::hot::ctx`, stored as secrets) under a key derived from the app
+    key and refresh token, until `expires_in` minus 300 seconds. The
+    cache lives for one run. Explicit access tokens are never cached.
+    """
+}
+
+::ctx ::hot::ctx
+::hash ::hot::hash
+::time ::hot::time
+::oauth2 ::oauth2
+
+CACHE_PREFIX "dropbox.token-cache."
+EXPIRY_MARGIN_SECONDS 300
+
+// Keys an `opts` Map may carry that belong to this package (credentials,
+// team headers, the immediate-retry switch) rather than to the Dropbox
+// route being called. Endpoint functions strip these before building
+// arguments.
+CREDENTIAL_KEYS ["token", "refresh-token", "app-key", "app-secret", "select-user", "select-admin", "path-root", "retry"]
+
+TokenError
+meta {
+    doc: """
+    A credential or token-endpoint failure. `message` is readable, e.g.
+    `"dropbox: token refresh failed: invalid_grant (refresh token is
+    invalid or revoked)"`; `error-code` and `error-description` carry the
+    OAuth `error` / `error_description` when the token endpoint answered.
+    Tokens are never included.
+    """
+}
+type {
+    message: Str,
+    status: Int?,
+    error-code: Str?,
+    error-description: Str?,
+    body: Any?
+}
+
+token-error
+meta {
+    doc: """Build a `TokenError`. The 1-arity form wraps a plain message; the 2-arity form prefixes the payload of a failed `::oauth2` call (`{status, body}` or a transport error)."""
+}
+fn
+(message: Str): TokenError {
+  TokenError({message: message})
+},
+(prefix: Str, payload: Any): TokenError {
+  body if(is-map(payload), payload.body, null)
+  status if(is-map(payload), payload.status, null)
+  code if(is-map(body), body.error, null)
+  desc if(is-map(body), body.error_description, null)
+  detail cond {
+    and(is-some(code), is-some(desc)) => { `${code} (${desc})` }
+    is-some(code) => { Str(code) }
+    is-str(body) => { body }
+    is-some(status) => { `HTTP ${status}` }
+    => { err-message(payload) }
+  }
+
+  TokenError({
+    message: `${prefix}: ${detail}`,
+    status: status,
+    error-code: if(is-some(code), Str(code), null),
+    error-description: if(is-some(desc), Str(desc), null),
+    body: body
+  })
+}
+
+now-ms fn (): Int {
+  ::time/epoch-millis(::time/now())
+}
+
+// ---------------------------------------------------------------------------
+// Credential resolution
+// ---------------------------------------------------------------------------
+
+has-primary-credential
+meta {
+    doc: """True when `source` carries a primary credential: `token` or `refresh-token`."""
+}
+fn (source: Map): Bool {
+  or(not(::dropbox/is-blank(source.token)), not(::dropbox/is-blank(get(source, "refresh-token"))))
+}
+
+ctx-source
+meta {
+    ctx: {
+        "dropbox.access.token": {required: false},
+        "dropbox.refresh.token": {required: false},
+        "dropbox.app.key": {required: false, secret: false},
+        "dropbox.app.secret": {required: false}
+    },
+    doc: """The credential source read from context, in the same shape as `opts`."""
+}
+fn (): Map {
+  {
+    token: ::ctx/get("dropbox.access.token"),
+    refresh-token: ::ctx/get("dropbox.refresh.token"),
+    app-key: ::ctx/get("dropbox.app.key"),
+    app-secret: ::ctx/get("dropbox.app.secret")
+  }
+}
+
+merge-sources
+meta {
+    doc: """Pick the credential source for a call: `opts` when it carries a primary credential, otherwise `ctx`. A refresh token in `opts` without an app key borrows the context app key and secret. Pure; `resolve-credentials` passes the live context."""
+}
+fn (opts: Map, ctx: Map): Map {
+  cond {
+    not(has-primary-credential(opts)) => { ctx }
+    and(not(::dropbox/is-blank(get(opts, "refresh-token"))), ::dropbox/is-blank(get(opts, "app-key"))) => {
+      {...opts, app-key: get(ctx, "app-key"), app-secret: or(get(opts, "app-secret"), get(ctx, "app-secret"))}
+    }
+    => { opts }
+  }
+}
+
+credentials-from
+meta {
+    doc: """
+    Turn a credential source Map (the `opts` shape) into resolved
+    credentials: `{kind: "token", token}` or `{kind: "refresh",
+    refresh-token, app-key, app-secret?}`. Returns a `TokenError` when
+    nothing usable is set or a refresh token lacks its app key. Pure.
+    """
+}
+fn (source: Map): Map {
+  cond {
+    not(::dropbox/is-blank(source.token)) => { {kind: "token", token: Str(source.token)} }
+
+    not(::dropbox/is-blank(get(source, "refresh-token"))) => {
+      cond {
+        ::dropbox/is-blank(get(source, "app-key")) => {
+          err(token-error("dropbox: a refresh token is set but the app key is missing. Set dropbox.app.key (and dropbox.app.secret) or pass app-key in opts."))
+        }
+        => {
+          secret get(source, "app-secret")
+          {
+            kind: "refresh",
+            refresh-token: Str(get(source, "refresh-token")),
+            app-key: Str(get(source, "app-key")),
+            app-secret: if(::dropbox/is-blank(secret), null, Str(secret))
+          }
+        }
+      }
+    }
+
+    => {
+      err(token-error("dropbox: no credentials configured. Set dropbox.access.token, or dropbox.refresh.token with dropbox.app.key and dropbox.app.secret, in Context Variables, or pass token / refresh-token in opts."))
+    }
+  }
+}
+
+resolve-credentials
+meta {
+    doc: """Resolve the credentials for a call from `opts` and context (see the namespace doc for precedence)."""
+}
+fn
+(): Map {
+  resolve-credentials({})
+},
+(opts: Map): Map {
+  credentials-from(merge-sources(opts, ctx-source()))
+}
+
+// ---------------------------------------------------------------------------
+// Token cache (per run, in the execution context)
+// ---------------------------------------------------------------------------
+
+token-cache-key
+meta {
+    doc: """The context key a minted token is cached under (a SHA-256 of the app key and refresh token, so neither appears in the key), or null for explicit access tokens."""
+}
+fn (creds: Map): Str? {
+  cond {
+    eq(creds.kind, "refresh") => {
+      identity join(["refresh", get(creds, "app-key"), get(creds, "refresh-token")], "|")
+      concat(CACHE_PREFIX, ::hash/sha256(identity))
+    }
+    => { null }
+  }
+}
+
+cache-entry
+meta {
+    doc: """The cached form of a token response: `{access-token, expires-at}` (epoch ms), expiring `EXPIRY_MARGIN_SECONDS` early. Dropbox's `expires_in` is 14400 (4 hours) today."""
+}
+fn (tokens: Map, now: Int): Map {
+  raw or(tokens.expires_in, 14400)
+  expires-in if(is-int(raw), raw, 14400)
+  {
+    access-token: tokens.access_token,
+    expires-at: add(now, mul(max(sub(expires-in, EXPIRY_MARGIN_SECONDS), 0), 1000))
+  }
+}
+
+is-fresh
+meta {
+    doc: """True when a cache entry exists and has not reached its (margin-adjusted) expiry."""
+}
+fn (entry: Any, now: Int): Bool {
+  and(is-map(entry), is-some(get(entry, "access-token")), lt(now, or(get(entry, "expires-at"), 0)))
+}
+
+evict-token
+meta {doc: """Drop a cached token (e.g. after a 401). No-op for a null key."""}
+fn (cache-key: Str?): Bool {
+  cond {
+    is-null(cache-key) => { false }
+    => {
+      ::ctx/set-secret(cache-key, null)
+      true
+    }
+  }
+}
+
+refresh-token-grant
+meta {
+    doc: """Exchange a refresh token for an access token at `https://api.dropboxapi.com/oauth2/token` (no cache). Returns the token response (`access_token`, `expires_in`, `token_type`) or a `TokenError`."""
+}
+fn (app-key: Str, app-secret: Str?, refresh-token: Str): Map {
+  tokens ::oauth2/refresh(::dropbox/TOKEN_URL, filter-vals({
+    client-id: app-key,
+    client-secret: app-secret,
+    refresh-token: refresh-token
+  }, is-some))
+  if(is-err(tokens), err(token-error("dropbox: token refresh failed", err-value(tokens))), tokens)
+}
+
+bearer
+meta {
+    doc: """
+    Resolve a bearer token for resolved credentials, using the per-run
+    cache. Returns `{token, cache-key, cached}` (`cached` is true when the
+    token came from the cache, so a 401 should evict and retry), or a
+    `TokenError`.
+    """
+}
+fn (creds: Map): Map {
+  cond {
+    eq(creds.kind, "token") => { {token: creds.token, cache-key: null, cached: false} }
+    => {
+      key token-cache-key(creds)
+      now now-ms()
+      hit ::ctx/get(key)
+      cond {
+        is-fresh(hit, now) => { {token: hit.access-token, cache-key: key, cached: true} }
+        => {
+          tokens refresh-token-grant(get(creds, "app-key"), get(creds, "app-secret"), get(creds, "refresh-token"))
+          cond {
+            is-err(tokens) => { tokens }
+            => {
+              ::ctx/set-secret(key, cache-entry(tokens, now))
+              {token: tokens.access_token, cache-key: key, cached: false}
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+access-token
+meta {
+    doc: """
+    Resolve an access token from `opts` and context: the explicit token,
+    or one minted from the refresh token (cached for the run). Returns
+    the token string or a `TokenError`.
+
+    ```hot
+    token ::dropbox::auth/access-token()
+
+    // Per call: one tenant's stored refresh token
+    token2 ::dropbox::auth/access-token({
+      refresh-token: "tenant-refresh-token",
+      app-key: "abc123appkey",
+      app-secret: "app-secret"
+    })
+    ```
+    """
+}
+fn
+(): Str {
+  access-token({})
+},
+(opts: Map): Str {
+  creds resolve-credentials(opts)
+  cond {
+    is-err(creds) => { creds }
+    => {
+      auth bearer(creds)
+      if(is-err(auth), auth, auth.token)
+    }
+  }
+}

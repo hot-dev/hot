@@ -1,0 +1,319 @@
+::box::events ns
+meta {
+    doc: """
+    The Box Events API: the user event stream (`all`, `changes`, `sync`),
+    the enterprise admin logs (`admin_logs`, `admin_logs_streaming`), and
+    long-polling.
+
+    **Sync loop (user stream)**
+
+    1. Once: `pos ::events/current-position()` (the `now` position) and
+       store it.
+    2. Each run (a schedule, or a webhook saying "something changed"):
+       `set ::events/sync-events(pos)`, apply `set.events`, store
+       `set.next-stream-position`.
+
+    Box can deliver an event more than once and out of order: events are
+    de-duplicated by `event_id` within a sync (pass `{seen: ids}` to drop
+    ids from earlier runs), and handlers should be idempotent. User
+    stream positions stay valid for a few weeks; events are kept for
+    about two weeks.
+
+    **Admin logs** (`admin-events`) need an admin or co-admin token with
+    the "Manage enterprise properties" scope and a paid enterprise.
+    `admin_logs` reads a time window (`created_after`, `created_before`,
+    up to a year back); `admin_logs_streaming` is a low-latency stream of
+    the last two weeks, read with stream positions like the user stream.
+
+    **Long-poll.** `long-poll-url` asks Box (`OPTIONS /events`) for a
+    realtime server URL and `long-poll` waits on it until Box says
+    `new_change` or `reconnect`. That is a blocking HTTP call: it holds
+    the run for up to the request timeout (120 s in Hot) and returns
+    `{message: "timeout"}` when nothing happened. A Hot schedule calling
+    `sync-events` every few minutes is usually the better fit. Hot 3.0.x
+    cannot send OPTIONS requests, so `long-poll-url` currently returns an
+    explanatory Err; `long-poll` works with a URL obtained elsewhere.
+    """
+}
+
+::api ::box::api
+
+MAX_LIMIT 500
+DEFAULT_MAX_PAGES 20
+STREAM_TYPES ["all", "changes", "sync", "admin_logs", "admin_logs_streaming"]
+LOCAL_KEYS ["seen", "max-pages"]
+RUNTIME_OPTIONS_MESSAGE "unsupported method"
+
+as-position
+meta {
+    doc: """A stream position as a Str (Box returns it as a number or a string), or null."""
+}
+fn (value: Any): Str? {
+  cond {
+    is-null(value) => { null }
+    is-str(value) => { if(is-empty(trim(value)), null, value) }
+    is-int(value) => { Str(value) }
+    => { Str(value) }
+  }
+}
+
+event-params
+meta {
+    doc: """The query parameters for `GET /events` (pure): `stream_type` (default `all`), `limit` 500, then your parameters (`stream_position`, `stream_type`, `limit`, `event_type` (a Vec or comma Str), `created_after`, `created_before`). Nulls are dropped."""
+}
+fn (opts: Map): Map {
+  ::box/query-params({stream_type: "all", limit: MAX_LIMIT}, opts, LOCAL_KEYS)
+}
+
+get-events
+meta {
+    doc: """
+    GET /events - one chunk of events: `{chunk_size, next_stream_position,
+    entries}`. Options: `stream_type` (`all`, `changes`, `sync`,
+    `admin_logs`, `admin_logs_streaming`), `stream_position` (`"now"` for
+    the current position, `"0"` for the oldest retained), `limit` (max
+    500), `event_type`, `created_after`, `created_before`.
+    """
+}
+fn
+(): Map {
+  get-events({})
+},
+(opts: Map): Map {
+  st get(opts, "stream_type")
+  cond {
+    and(is-some(st), not(in(st, STREAM_TYPES))) => { err(`box: unknown stream_type "${st}"; use ${join(STREAM_TYPES, ", ")}`) }
+    => { ::box/json("GET", ::box/url("/events", event-params(opts)), "", opts) }
+  }
+}
+
+current-position
+meta {
+    doc: """The stream position for "from now on" (`stream_position=now`), as a Str. Store it before the first `sync-events`."""
+}
+fn
+(): Str {
+  current-position({})
+},
+(opts: Map): Str {
+  page get-events({...opts, stream_position: "now"})
+  if(is-err(page), page, as-position(page.next_stream_position))
+}
+
+dedupe-events
+meta {
+    doc: """Drop repeated events (pure): keep the first event per `event_id`, and drop ids in `seen`. Events without an `event_id` are kept."""
+}
+fn
+(events: Vec): Vec {
+  dedupe-events(events, [])
+},
+(events: Vec, seen: Vec): Vec {
+  result reduce(events, (acc, e) {
+    id if(is-map(e), e.event_id, null)
+    cond {
+      is-null(id) => { {...acc, out: concat(acc.out, [e])} }
+      is-some(get(acc.ids, id)) => { acc }
+      => { {ids: assoc(acc.ids, id, true), out: concat(acc.out, [e])} }
+    }
+  }, {ids: reduce(seen, (m, id) { assoc(m, Str(id), true) }, {}), out: []})
+  result.out
+}
+
+event-ids
+meta {
+    doc: """The `event_id`s of a Vec of events (pure), e.g. to pass as `seen` next time."""
+}
+fn (events: Vec): Vec {
+  filter(map(events, (e) { if(is-map(e), e.event_id, null) }), is-some)
+}
+
+EventSet
+meta {
+    doc: """
+    The events read by `sync-events` / `admin-events-all`.
+
+    - `events` - de-duplicated events in stream order
+    - `next-stream-position` - store it and pass it to the next sync
+    - `pages` - how many chunks were read
+    - `complete` - true when the stream was read to its end; false when
+      `max-pages` stopped it (call again with `next-stream-position`)
+    """
+}
+type {
+    events: Vec,
+    next-stream-position: Str?,
+    pages: Int,
+    complete: Bool
+}
+
+is-caught-up
+meta {
+    doc: """True when a chunk means the stream is read to its end (pure): no entries, or the position did not move."""
+}
+fn (page: Map, position: Str?): Bool {
+  next as-position(page.next_stream_position)
+  or(is-empty(or(page.entries, [])), is-null(next), eq(next, position))
+}
+
+sync-loop fn (position: Str?, opts: Map, acc: Vec, pages: Int, max-pages: Int): EventSet {
+  page get-events({...opts, stream_position: position})
+  cond {
+    is-err(page) => { page }
+    => {
+      all concat(acc, or(page.entries, []))
+      next or(as-position(page.next_stream_position), position)
+      done is-caught-up(page, position)
+      cond {
+        or(done, gte(add(pages, 1), max-pages)) => {
+          EventSet({
+            events: dedupe-events(all, or(get(opts, "seen"), [])),
+            next-stream-position: next,
+            pages: add(pages, 1),
+            complete: done
+          })
+        }
+        => { sync-loop(next, opts, all, add(pages, 1), max-pages) }
+      }
+    }
+  }
+}
+
+sync-events
+meta {
+    doc: """
+    Read the user event stream from `stream-position` to its end (at
+    most `opts.max-pages` chunks of 500, default 20) and return an
+    `EventSet` with the position to use next time. Options:
+    `stream_type` (`all` by default; `changes` skips non-content events;
+    `sync` only covers synced folders), `seen` (event ids to drop),
+    `max-pages`, credentials.
+
+    ```hot
+    ::events ::box::events
+
+    set ::events/sync-events(saved-position, {stream_type: "changes"})
+    map(set.events, (e) { println(`${e.event_type} ${e.source.id}`) })
+    saved-position set.next-stream-position
+    ```
+    """
+}
+fn
+(stream-position: Str): EventSet {
+  sync-events(stream-position, {})
+},
+(stream-position: Str, opts: Map): EventSet {
+  max-pages or(::box/to-int(get(opts, "max-pages")), DEFAULT_MAX_PAGES)
+  sync-loop(stream-position, opts, [], 0, max(max-pages, 1))
+}
+
+admin-events
+meta {
+    doc: """
+    One chunk of the enterprise event stream: `stream_type`
+    `admin_logs` by default (or `admin_logs_streaming`), with
+    `created_after` / `created_before` (RFC 3339), `event_type` (a Vec
+    such as `["LOGIN", "DOWNLOAD"]`), `stream_position` and `limit` (max
+    500). Needs an enterprise admin token.
+
+    ```hot
+    page ::box::events/admin-events({created_after: "2026-10-01T00:00:00Z", created_before: "2026-10-02T00:00:00Z", event_type: ["UPLOAD", "DOWNLOAD"]})
+    page.entries
+    ```
+    """
+}
+fn
+(): Map {
+  admin-events({})
+},
+(opts: Map): Map {
+  get-events({stream_type: "admin_logs", ...opts})
+}
+
+admin-events-all
+meta {
+    doc: """Read the enterprise stream for a window until it is exhausted (at most `max-pages` chunks, default 20), returning an `EventSet`. Takes the same `opts` as `admin-events`; continue an incomplete read with `{stream_position: set.next-stream-position}`."""
+}
+fn (opts: Map): EventSet {
+  max-pages or(::box/to-int(get(opts, "max-pages")), DEFAULT_MAX_PAGES)
+  sync-loop(as-position(get(opts, "stream_position")), {stream_type: "admin_logs", ...filter-keys(opts, (k) { ne(k, "stream_position") })}, [], 0, max(max-pages, 1))
+}
+
+// ---------------------------------------------------------------------------
+// Long-poll
+// ---------------------------------------------------------------------------
+
+realtime-server
+meta {
+    doc: """The `realtime_server` entry of an `OPTIONS /events` response (pure): `{type, url, ttl, max_retries, retry_timeout}`, or null."""
+}
+fn (response: Map): Map? {
+  found filter(or(response.entries, []), (e) { and(is-map(e), eq(e.type, "realtime_server")) })
+  if(is-empty(found), null, first(found))
+}
+
+long-poll-url
+meta {
+    doc: """
+    OPTIONS /events - the realtime server to long-poll: `{url, ttl,
+    max_retries, retry_timeout}`. Ask again after `max_retries` polls or
+    a `reconnect` message. Hot 3.0.x cannot send OPTIONS, so this
+    currently returns an explanatory Err (see the namespace doc).
+    """
+}
+fn
+(): Map {
+  long-poll-url({})
+},
+(opts: Map): Map {
+  response ::api/request("OPTIONS", ::box/url("/events"), {}, "", {...::box/creds(opts), retry: false})
+  cond {
+    // RUNTIME-LIMIT(http-options): ::hot::http/request in Hot 3.0.x refuses the OPTIONS method.
+    and(is-err(response), contains(err-message(response), RUNTIME_OPTIONS_MESSAGE)) => {
+      err("box: long-poll-url needs an OPTIONS request, which this Hot runtime cannot send; poll sync-events from a schedule instead")
+    }
+
+    is-err(response) => { response }
+    not(::hot::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+    => {
+      server realtime-server(or(response.body, {}))
+      if(is-null(server), err("box: OPTIONS /events returned no realtime_server"), server)
+    }
+  }
+}
+
+long-poll-request-url
+meta {doc: """The long-poll URL with `stream_position` appended (pure)."""}
+fn (url: Str, stream-position: Str): Str {
+  ::api/with-query(url, {stream_position: stream-position})
+}
+
+is-timeout fn (message: Str): Bool {
+  m lowercase(message)
+  or(contains(m, "timed out"), contains(m, "timeout"))
+}
+
+long-poll
+meta {
+    doc: """
+    Wait on a realtime server `url` for changes after `stream-position`.
+    **Blocks the run** until Box answers or the request times out (120 s).
+    Returns `{message}`: `"new_change"` (call `sync-events` now),
+    `"reconnect"` (get a new `long-poll-url`), or `"timeout"` (nothing
+    yet; poll again). Never retried automatically.
+    """
+}
+fn
+(url: Str, stream-position: Str): Map {
+  long-poll(url, stream-position, {})
+},
+(url: Str, stream-position: Str, opts: Map): Map {
+  response ::api/request("GET", long-poll-request-url(url, stream-position), {}, "", {...::box/creds(opts), retry: false})
+  cond {
+    and(is-err(response), is-timeout(err-message(response))) => { {message: "timeout"} }
+    is-err(response) => { response }
+    not(::hot::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+    is-map(response.body) => { {message: or(response.body.message, "unknown")} }
+    => { {message: "unknown"} }
+  }
+}

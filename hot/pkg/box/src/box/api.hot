@@ -1,0 +1,708 @@
+::box::api ns
+meta {
+    doc: """
+    The authenticated Box request helper, Box-shaped errors, retry
+    classification, and marker / offset pagination.
+
+    **Errors.** A non-2xx response becomes `err(HttpError)` with a readable
+    `message` built from Box's `{type: "error", status, code, message,
+    request_id, help_url, context_info}` body, e.g.
+    `"box: HTTP 404 not_found: Could not find the specified resource (request_id 7a1b2c)"`.
+
+    **Retry.** box never waits between attempts (Hot has no in-run
+    sleep). A connection failure on an idempotent method (GET, HEAD, PUT,
+    DELETE) is retried once, immediately (`opts.retry: false` turns that
+    off). Everything else, including 429 and 5xx, comes back as
+    `err(HttpError)` with `retry-after` set from the `Retry-After` header.
+    Check it with `is-retryable` and let Hot back off: give the handler,
+    schedule or task a `retry` policy and fail the run
+    (see https://hot.dev/docs/retries).
+
+    **401 handling.** When a cached token is rejected with 401, it is
+    evicted and the call is retried once with a fresh token.
+
+    **Credential safety.** The bearer token is only sent to `https` hosts
+    under `box.com`, `boxcloud.com` and `box.net` (the long-poll realtime
+    servers), and to the `box.api-root` / `box.upload-root` overrides;
+    any other URL is refused.
+    """
+}
+
+::auth ::box::auth
+::uri ::hot::uri
+::re ::hot::regex
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+MAX_IMMEDIATE_RETRIES 1
+// 202 is how Box says "not ready yet, come back after Retry-After" for
+// downloads and upload commits; it is surfaced as an HttpError.
+RETRY_STATUSES [202, 408, 429, 500, 502, 503, 504]
+IDEMPOTENT_METHODS ["GET", "HEAD", "PUT", "DELETE"]
+BOX_HOST_SUFFIXES [".box.com", ".boxcloud.com", ".box.net"]
+BOX_HOSTS ["box.com", "boxcloud.com", "box.net"]
+
+// Safety stop for the collect helpers when no limit is given.
+MAX_PAGES 10000
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx (or "not ready" 202) response from Box.
+
+    **Fields**
+    - `status` - HTTP status code
+    - `headers`, `body` - the raw response (body is decoded JSON when JSON)
+    - `message` - readable summary, e.g.
+      `"box: HTTP 409 item_name_in_use: Item with the same name already exists (request_id 9f1)"`
+    - `code` - Box's `code` (e.g. `"not_found"`, `"item_name_in_use"`,
+      `"rate_limit_exceeded"`), or the OAuth `error` (e.g. `"invalid_grant"`)
+    - `error-message` - Box's `message` (or OAuth `error_description`)
+    - `request-id` - Box's `request_id`, for support tickets
+    - `help-url` - Box's `help_url`
+    - `context-info` - Box's `context_info` (e.g. the conflicting item on a 409)
+    - `retry-after` - seconds from a numeric `Retry-After` header, else null
+    """
+}
+type {
+    status: Int,
+    headers: Map?,
+    body: Any,
+    message: Str?,
+    code: Str?,
+    error-message: Str?,
+    request-id: Str?,
+    help-url: Str?,
+    context-info: Any,
+    retry-after: Int?
+}
+
+decode-error-body fn (body: Any): Any {
+  cond {
+    is-bytes(body) => {
+      text Str(body)
+      parsed from-json(text)
+      if(is-err(parsed), text, parsed)
+    }
+
+    is-str(body) => {
+      t trim(body)
+      cond {
+        or(starts-with(t, "{"), starts-with(t, "[")) => {
+          parsed from-json(t)
+          if(is-err(parsed), body, parsed)
+        }
+        => { body }
+      }
+    }
+    => { body }
+  }
+}
+
+box-error-details
+meta {
+    doc: """
+    Extract Box's error fields from a response body (pure): `{code,
+    message, request-id, help-url, context-info}`. Handles the API shape
+    `{type: "error", status, code, message, request_id, help_url,
+    context_info}` and the OAuth shape `{error, error_description}`.
+    Fields are null when absent.
+    """
+}
+fn (body: Any): Map {
+  b decode-error-body(body)
+  cond {
+    not(is-map(b)) => { {code: null, message: null, request-id: null, help-url: null, context-info: null} }
+    is-str(b.error) => {
+      {code: b.error, message: b.error_description, request-id: null, help-url: null, context-info: null}
+    }
+    => {
+      {
+        code: if(is-some(b.code), Str(b.code), null),
+        message: if(is-some(b.message), Str(b.message), null),
+        request-id: if(is-some(b.request_id), Str(b.request_id), null),
+        help-url: b.help_url,
+        context-info: b.context_info
+      }
+    }
+  }
+}
+
+body-excerpt
+meta {
+    doc: """A short (at most 300 characters) printable form of a response body, for error messages."""
+}
+fn (body: Any): Str {
+  text cond {
+    is-null(body) => { "" }
+    is-str(body) => { body }
+    is-bytes(body) => { Str(body) }
+    => { to-json(untype(body)) }
+  }
+
+  if(gt(length(text), 300), `${slice(text, 0, 300)}...`, text)
+}
+
+error-message-for
+meta {
+    doc: """The readable `message` for an error response (pure): `box: HTTP <status> <code>: <message> (request_id <id>)`."""
+}
+fn (status: Int, details: Map, body: Any): Str {
+  code-part if(is-some(details.code), ` ${details.code}`, "")
+  detail cond {
+    is-some(details.message) => { details.message }
+    eq(status, 202) => { "not ready yet; retry after the Retry-After delay" }
+    => { body-excerpt(body) }
+  }
+
+  rid if(is-some(get(details, "request-id")), ` (request_id ${get(details, "request-id")})`, "")
+  `box: HTTP ${status}${code-part}: ${detail}${rid}`
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` (with a readable `message`) from a non-2xx `HttpResponse`. Pure; every request uses it, and it is exposed for testing."""
+}
+fn (response: Map): HttpError {
+  headers or(response.headers, {})
+  details box-error-details(response.body)
+  // WORKAROUND(hot-bug-1): build the error with an explicit function, never HttpError(response).
+  HttpError({
+    status: response.status,
+    headers: headers,
+    body: response.body,
+    message: error-message-for(response.status, details, response.body),
+    code: details.code,
+    error-message: details.message,
+    request-id: get(details, "request-id"),
+    help-url: get(details, "help-url"),
+    context-info: get(details, "context-info"),
+    retry-after: retry-after-seconds(headers)
+  })
+}
+
+plain-payload
+meta {
+    doc: """The payload of a `Result.Err` (or the value itself), with type tags removed so an `HttpError` / `TokenError` reads like a Map."""
+}
+fn (value: Result): Any {
+  payload if(is-err(value), err-value(value), value)
+  if(or(is-null(payload), is-str(payload)), payload, untype(payload))
+}
+
+error-code
+meta {doc: """The Box `code` (or OAuth `error-code`) carried by an error, or null."""}
+fn (error: Result): Str? {
+  payload plain-payload(error)
+  cond {
+    not(is-map(payload)) => { null }
+    is-some(get(payload, "code")) => { get(payload, "code") }
+    => { get(payload, "error-code") }
+  }
+}
+
+has-code
+meta {
+    doc: """True when `error` (an `HttpError`, a `Result.Err` holding one, or a `TokenError`) carries the given Box `code`, e.g. `"item_name_in_use"`."""
+}
+fn (error: Result, code: Str): Bool {
+  eq(error-code(error), code)
+}
+
+// ---------------------------------------------------------------------------
+// Retry classification (pure) and the one immediate retry
+// ---------------------------------------------------------------------------
+
+parse-int
+meta {
+    doc: """Parse an Int from an Int or a decimal-digit Str (surrounding whitespace allowed); null for anything else. Guards the parse so bad input never halts a run."""
+}
+fn (value: Any): Int? {
+  cond {
+    is-int(value) => { value }
+    not(is-str(value)) => { null }
+    => {
+      s trim(value)
+      // WORKAROUND(hot-bug-6): check the digits before Int() so a bad value never produces a consumed Err.
+      if(::re/is-match(s, "^-?[0-9]{1,15}$"), Int(s), null)
+    }
+  }
+}
+
+retry-after-seconds
+meta {
+    doc: """The `Retry-After` header of a response's `headers` as whole seconds (Int), or null when absent or given as an HTTP date."""
+}
+fn (headers: Map?): Int? {
+  seconds parse-int(get(or(headers, {}), "retry-after"))
+  if(is-some(seconds), max(or(seconds, 0), 0), null)
+}
+
+retry-policy
+meta {
+    doc: """The immediate-retry policy for a call (pure): `{max-retries: 1}`, or `{max-retries: 0}` when `opts.retry` is `false` or `0`. Clamped to 0..1: box never waits, so it never retries more than once."""
+}
+fn (opts: Map): Map {
+  r opts.retry
+  n cond {
+    eq(r, false) => { 0 }
+    is-int(r) => { r }
+    => { MAX_IMMEDIATE_RETRIES }
+  }
+  {max-retries: min(max(n, 0), MAX_IMMEDIATE_RETRIES)}
+}
+
+is-retryable-status
+meta {
+    doc: """True for statuses Box asks clients to retry later: 202 (not ready), 408, 429, 500, 502, 503, 504."""
+}
+fn (status: Int): Bool {
+  in(status, RETRY_STATUSES)
+}
+
+is-connection-failure
+meta {
+    doc: """True when a transport error message is a connection or read failure (worth trying again), not a size-limit or URL error."""
+}
+fn (message: Str): Bool {
+  and(
+    or(contains(message, "request failed"), contains(message, "failed to read body")),
+    not(contains(message, "exceeds"))
+  )
+}
+
+is-retryable-transport
+meta {
+    doc: """True when a transport failure may be retried immediately: an idempotent method (GET, HEAD, PUT, DELETE) and a connection failure."""
+}
+fn (method: Str, message: Str): Bool {
+  and(in(uppercase(method), IDEMPOTENT_METHODS), is-connection-failure(message))
+}
+
+is-retryable
+meta {
+    doc: """
+    True when a failed call is worth retrying later: an `HttpError` (or a
+    `Result.Err` holding one, or a raw response) with status 202, 408,
+    429 or 5xx; a `TokenError` from the token endpoint with one of those
+    statuses, or with `error-code: "refresh_in_progress"` (another run is
+    refreshing the same account's single-use refresh token); or a
+    connection failure. False for successes and permanent errors (400,
+    401, 403, 404, 409, `invalid_grant`, ...).
+
+    box does not wait and retry for you. Give the handler, schedule or
+    task a `retry` policy (see https://hot.dev/docs/retries) and fail the
+    run when this returns true; `retry-after` on the `HttpError` says how
+    long Box asked you to wait.
+
+    ```hot
+    sync-box
+    meta {
+      schedule: "every 15 minutes",
+      retry: {attempts: 5, delay: 2000, backoff: "exponential", max_delay: 60000, jitter: true}
+    }
+    fn (event) {
+      page ::box::folders/list-items("0")
+      cond {
+        ::box::api/is-retryable(page) => { fail(`box: retrying later: ${err-message(page)}`) }
+        is-err(page) => { println(`box: giving up: ${err-message(page)}`) }
+        => { length(page.entries) }
+      }
+    }
+    ```
+
+    A connection failure on a non-idempotent call (an upload, a commit,
+    creating a collaboration) may still have reached Box; retrying it can
+    duplicate the write.
+    """
+}
+fn (error: Result): Bool {
+  payload plain-payload(error)
+  cond {
+    is-str(payload) => { is-connection-failure(payload) }
+    not(is-map(payload)) => { false }
+    eq(get(payload, "error-code"), "refresh_in_progress") => { true }
+    is-int(get(payload, "status")) => { is-retryable-status(payload.status) }
+    is-str(get(payload, "message")) => { is-connection-failure(payload.message) }
+    => { false }
+  }
+}
+
+send-with-retry
+meta {
+    doc: """Send an `HttpRequest`; on a connection failure of an idempotent method, send it once more straight away (per `policy`). Never waits."""
+}
+fn
+(req: HttpRequest, policy: Map): HttpResponse {
+  send-with-retry(req, policy, 0)
+},
+(req: HttpRequest, policy: Map, attempt: Int): HttpResponse {
+  response http-request(req)
+  cond {
+    and(is-err(response), lt(attempt, policy.max-retries), is-retryable-transport(req.method, err-message(response))) => {
+      send-with-retry(req, policy, add(attempt, 1))
+    }
+    => { response }
+  }
+}
+
+// The package's one credential resolver: opts first, then context.
+resolve ::box::auth/resolve-credentials
+
+// ---------------------------------------------------------------------------
+// Request building
+// ---------------------------------------------------------------------------
+
+api-params
+meta {
+    doc: """Strip box's own keys (`::box::auth/CREDENTIAL_KEYS`: credentials, `as-user`, `retry`, ...) from an `opts` Map, leaving only API parameters."""
+}
+fn (opts: Map): Map {
+  filter-keys(opts, (k) { not(in(k, ::auth/CREDENTIAL_KEYS)) })
+}
+
+credential-opts
+meta {
+    doc: """Keep only box's own keys (credentials, `as-user`, `retry`) from an `opts` Map, e.g. to pass them on to a follow-up call."""
+}
+fn (opts: Map): Map {
+  filter-keys(opts, (k) { in(k, ::auth/CREDENTIAL_KEYS) })
+}
+
+query-value
+meta {
+    doc: """Encode one query value the way Box expects (pure): Vecs are comma-joined (`fields`, `ancestor_folder_ids`, ...), Bools are `true`/`false`, Maps are JSON (`mdfilters` takes a JSON array), everything else is `Str`."""
+}
+fn (value: Any): Str {
+  cond {
+    is-vec(value) => { join(map(filter(value, is-some), (v) { query-value(v) }), ",") }
+    is-bool(value) => { if(value, "true", "false") }
+    is-map(value) => { to-json(untype(value)) }
+    => { Str(value) }
+  }
+}
+
+with-query
+meta {
+    doc: """
+    Append query parameters to a URL, dropping null values and empty
+    Vecs. Vecs are comma-joined (Box's style for `fields`,
+    `file_extensions`, `ancestor_folder_ids`, `event_type`, ...), Bools
+    encode as `true`/`false`. Works whether or not the URL already has a
+    query.
+    """
+}
+fn (url: Str, params: Map): Str {
+  present filter-vals(params, (v) { and(is-some(v), not(and(is-vec(v), is-empty(v)))) })
+  encoded reduce(keys(present), (acc, k) { assoc(acc, k, query-value(get(present, k))) }, {})
+  qs if(is-empty(encoded), "", ::uri/encode-query(encoded))
+  cond {
+    eq(qs, "") => { url }
+    contains(url, "?") => { `${url}&${qs}` }
+    => { `${url}?${qs}` }
+  }
+}
+
+url-host
+meta {
+    doc: """The lowercased host of an absolute URL, or null when it does not parse."""
+}
+fn (url: Str): Str? {
+  m ::re/capture(url, "^[A-Za-z][A-Za-z0-9+.-]*://(?:[^/?#@]*@)?([^/?#:]+)")
+  cond {
+    not(is-map(m)) => { null }
+    => { lowercase(first(m.groups)) }
+  }
+}
+
+is-box-url
+meta {
+    doc: """
+    True when `url` may receive Box credentials (pure apart from the
+    root overrides): `https://` on `box.com`, `boxcloud.com`, `box.net` or a
+    subdomain, or the host of the `box.api-root` / `box.upload-root`
+    override (which may be `http://` for a local test server).
+    """
+}
+fn (url: Str): Bool {
+  host url-host(url)
+  roots filter([::box/api-root(), ::box/upload-root()], (r) { not(in(r, [::box/API_ROOT, ::box/UPLOAD_ROOT])) })
+  override-hosts filter(map(roots, url-host), is-some)
+  cond {
+    is-null(host) => { false }
+    in(host, override-hosts) => { true }
+    not(starts-with(lowercase(url), "https://")) => { false }
+    in(host, BOX_HOSTS) => { true }
+    => { gt(length(filter(BOX_HOST_SUFFIXES, (s) { ends-with(host, s) })), 0) }
+  }
+}
+
+build-http-request
+meta {
+    doc: """
+    Build the outgoing `HttpRequest` (pure). `token` (nullable) becomes the
+    Bearer header and `as-user` (nullable) the `As-User` header. Map/Vec
+    bodies are JSON-encoded with a JSON Content-Type; Str/Bytes bodies are
+    sent verbatim (set Content-Type in `headers`); `""` or null sends no
+    body. Caller headers win.
+    """
+}
+fn (method: Str, url: Str, headers: Map, body: Any, token: Str?, as-user: Str?): HttpRequest {
+  auth-headers if(is-null(token), {}, {Authorization: `Bearer ${token}`})
+  user-headers if(::box/is-blank(as-user), {}, {As-User: Str(as-user)})
+  no-body or(is-null(body), and(is-str(body), is-empty(body)))
+  is-raw or(is-str(body), is-bytes(body))
+  encoded-body cond {
+    no-body => { "" }
+    is-raw => { body }
+    => { to-json(untype(body)) }
+  }
+
+  type-headers if(or(no-body, is-raw), {}, {Content-Type: "application/json"})
+  HttpRequest({
+    method: method,
+    url: url,
+    headers: {...auth-headers, ...user-headers, ...type-headers, ...headers},
+    body: encoded-body
+  })
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated request to Box and return the raw `HttpResponse`
+    (non-2xx included), or an Err for credential and transport failures.
+
+    - `headers` - extra headers (they win over the defaults)
+    - `body` - a Map/Vec (sent as JSON), Str/Bytes (sent verbatim), or `""`
+    - `opts` - per-call credentials (`token`, `account`, `refresh-token` +
+      `on-refresh`, `jwt-config`, `client-id` + `client-secret` +
+      `enterprise-id` / `user-id`, ...), `as-user`, and `retry` (`false`
+      disables the one immediate retry of a failed connection). A Str is
+      an explicit access token.
+
+    ```hot
+    response ::box::api/request("GET", "https://api.box.com/2.0/users/me", {}, "", {})
+
+    // As one tenant's user, without touching context
+    response2 ::box::api/request("GET", "https://api.box.com/2.0/users/me", {}, "",
+      {account: "tenant-42"})
+    ```
+    """
+}
+fn
+(method: Str, url: Str): HttpResponse {
+  request(method, url, {}, "", {})
+},
+(method: Str, url: Str, headers: Map, body: Any): HttpResponse {
+  request(method, url, headers, body, {})
+},
+(method: Str, url: Str, headers: Map, body: Any, token: Str): HttpResponse {
+  request(method, url, headers, body, {token: token})
+},
+(method: Str, url: Str, headers: Map, body: Any, opts: Map): HttpResponse {
+  cond {
+    not(is-box-url(url)) => {
+      err(::auth/token-error(`box: refusing to send Box credentials to ${or(url-host(url), "an invalid URL")}; only box.com, boxcloud.com and box.net hosts (or the box.api-root override) receive tokens`))
+    }
+    => {
+      creds ::auth/resolve-credentials(opts)
+      policy retry-policy(opts)
+      as-user ::auth/as-user(opts)
+      cond {
+        is-err(creds) => { creds }
+        => {
+          auth ::auth/bearer(creds, opts)
+          cond {
+            is-err(auth) => { auth }
+            => {
+              response send-with-retry(build-http-request(method, url, headers, body, auth.token, as-user), policy)
+              cond {
+                and(auth.cached, not(is-err(response)), eq(response.status, 401)) => {
+                  ::auth/evict-token(auth.cache-key)
+                  fresh ::auth/bearer(creds, {...opts, force-refresh: true})
+                  if(is-err(fresh), fresh,
+                    send-with-retry(build-http-request(method, url, headers, body, fresh.token, as-user), policy))
+                }
+                => { response }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+unwrap
+meta {
+    doc: """The decoded body of a 2xx response (an empty Map for 204), the Err of a failed request, or `err(HttpError)` for a non-2xx response."""
+}
+fn (response: Result): Any {
+  cond {
+    is-err(response) => { response }
+    eq(response.status, 204) => { {} }
+    is-ok-response(response) => { if(is-null(response.body), {}, response.body) }
+    => { err(http-error(response)) }
+  }
+}
+
+json
+meta {
+    doc: """Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err carrying `HttpError` (credential failures carry `::box::auth/TokenError`). The shape used by every box endpoint function."""
+}
+fn
+(method: Str, url: Str): Any {
+  unwrap(request(method, url, {}, "", {}))
+},
+(method: Str, url: Str, headers: Map, body: Any): Any {
+  unwrap(request(method, url, headers, body, {}))
+},
+(method: Str, url: Str, headers: Map, body: Any, token: Str): Any {
+  unwrap(request(method, url, headers, body, {token: token}))
+},
+(method: Str, url: Str, headers: Map, body: Any, opts: Map): Any {
+  unwrap(request(method, url, headers, body, opts))
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+Page
+meta {
+    doc: """
+    One page of a list call: `items` (the `entries`), `next-marker` (marker
+    paging; null on the last page), `next-offset` (offset paging; null on
+    the last page), `total-count` when Box reports it, and the full decoded
+    `response`.
+    """
+}
+type {
+    items: Vec,
+    next-marker: Str?,
+    next-offset: Int?,
+    total-count: Int?,
+    response: Map
+}
+
+next-offset-for
+meta {
+    doc: """
+    The offset of the next page after `response` (pure), or null on the
+    last page: null when the page was empty, when `offset + entries`
+    reached `total_count`, or (with no `total_count`) when the page was
+    shorter than `page-size`.
+    """
+}
+fn (response: Map, offset: Int, page-size: Int): Int? {
+  entries or(response.entries, [])
+  n length(entries)
+  next add(offset, n)
+  total parse-int(response.total_count)
+  cond {
+    eq(n, 0) => { null }
+    is-some(total) => { if(lt(next, or(total, 0)), next, null) }
+    lt(n, page-size) => { null }
+    => { next }
+  }
+}
+
+marker-page
+meta {
+    doc: """Turn a marker-paged response into a `Page` (pure). A blank `next_marker` means the last page."""
+}
+fn (response: Map): Page {
+  marker response.next_marker
+  Page({
+    items: or(response.entries, []),
+    next-marker: if(::box/is-blank(marker), null, Str(marker)),
+    next-offset: null,
+    total-count: parse-int(response.total_count),
+    response: response
+  })
+}
+
+collect-marker-loop fn (fetch: Fn, limit: Int?, marker: Str?, acc: Vec, pages: Int): Vec {
+  response fetch(marker)
+  cond {
+    is-err(response) => { response }
+    => {
+      page marker-page(response)
+      all concat(acc, page.items)
+      cond {
+        and(is-some(limit), gte(length(all), or(limit, 0))) => { slice(all, 0, limit) }
+        is-null(page.next-marker) => { all }
+        gte(pages, MAX_PAGES) => { all }
+        => { collect-marker-loop(fetch, limit, page.next-marker, all, add(pages, 1)) }
+      }
+    }
+  }
+}
+
+collect-marker
+meta {
+    doc: """
+    Follow `next_marker` and collect every entry, or at most `limit` (null
+    for no limit). `fetch` is `(marker: Str?) -> Map` (null for the first
+    page) returning the decoded list response. The first failing page's
+    Err is returned.
+
+    ```hot
+    hooks ::box::api/collect-marker((m) { ::box::webhooks/list-webhooks({marker: m, limit: 200}) }, null)
+    ```
+    """
+}
+fn
+(fetch: Fn): Vec {
+  collect-marker-loop(fetch, null, null, [], 1)
+},
+(fetch: Fn, limit: Int?): Vec {
+  collect-marker-loop(fetch, limit, null, [], 1)
+}
+
+collect-offset-loop fn (fetch: Fn, page-size: Int, limit: Int?, max-offset: Int?, offset: Int, acc: Vec, pages: Int): Vec {
+  response fetch(offset)
+  cond {
+    is-err(response) => { response }
+    => {
+      all concat(acc, or(response.entries, []))
+      next next-offset-for(response, offset, page-size)
+      cond {
+        and(is-some(limit), gte(length(all), or(limit, 0))) => { slice(all, 0, limit) }
+        is-null(next) => { all }
+        and(is-some(max-offset), gt(or(next, 0), or(max-offset, 0))) => { all }
+        gte(pages, MAX_PAGES) => { all }
+        => { collect-offset-loop(fetch, page-size, limit, max-offset, or(next, 0), all, add(pages, 1)) }
+      }
+    }
+  }
+}
+
+collect-offset
+meta {
+    doc: """
+    Follow offset paging and collect every entry, or at most `limit`.
+    `fetch` is `(offset: Int) -> Map` returning a response with `entries`
+    (and usually `total_count`); `page-size` is the `limit` each call
+    sends. `max-offset` stops before an offset Box would reject (search
+    rejects offsets above 10000).
+    """
+}
+fn
+(fetch: Fn, page-size: Int): Vec {
+  collect-offset-loop(fetch, page-size, null, null, 0, [], 1)
+},
+(fetch: Fn, page-size: Int, limit: Int?): Vec {
+  collect-offset-loop(fetch, page-size, limit, null, 0, [], 1)
+},
+(fetch: Fn, page-size: Int, limit: Int?, max-offset: Int?): Vec {
+  collect-offset-loop(fetch, page-size, limit, max-offset, 0, [], 1)
+}

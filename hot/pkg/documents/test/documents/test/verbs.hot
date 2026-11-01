@@ -1,0 +1,43 @@
+::documents::test::verbs ns
+meta ["test"]
+
+// The verbs' argument checks, which fail before any request is made.
+
+::docs ::documents
+::cursor ::documents::cursor
+
+test-bad-sources-fail-early
+meta ["test"] fn () {
+    assert(is-err(::docs/list({provider: "ftp"})))
+    assert(is-err(::docs/get({provider: "s3"}, "a.txt")), "s3 needs a bucket")
+    assert(is-err(::docs/search({provider: "s3", bucket: "b"}, "q")), "S3 has no search")
+    assert(contains(err-message(::docs/search({provider: "s3", bucket: "b"}, "q")), "list a key prefix"))
+}
+
+test-bad-formats-fail-early
+meta ["test"] fn () {
+    r ::docs/read-text({provider: "box"}, "123", "docx")
+    assert(is-err(r))
+    assert(contains(err-message(r), "unknown read-text format"))
+}
+
+test-cursors-are-checked-before-calling
+meta ["test"] fn () {
+    dbx ::cursor/encode("dropbox", "list", "AAF", "/x")
+    wrong ::docs/list({provider: "box"}, null, {cursor: dbx})
+    assert(is-err(wrong))
+    assert(contains(err-message(wrong), "belongs to dropbox"))
+    page-cursor ::cursor/encode("google-drive", "list", "tok", "root")
+    kind ::docs/changes({provider: "google-drive"}, page-cursor)
+    assert(is-err(kind), "a list cursor is not a change cursor")
+    assert(is-err(::docs/changes({provider: "onedrive"}, "garbage")))
+    assert(is-err(::docs/changes({provider: "s3", bucket: "b", opts: {access-key-id: "AKID", secret-access-key: "x"}}, ::cursor/encode("s3", "changes", "not-a-map"))), "a corrupt S3 watermark")
+}
+
+test-s3-start-cursor-needs-no-request
+meta ["test"] fn () {
+    c ::docs/start-cursor({provider: "s3", bucket: "b"})
+    v ::cursor/decode-for(c, "s3", "changes").v
+    assert(is-str(v.w))
+    assert-eq([], v.k)
+}

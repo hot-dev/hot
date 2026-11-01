@@ -1,0 +1,646 @@
+::documents::s3 ns
+meta {
+    doc: """
+    The Amazon S3 implementation of the `::documents` verbs. Source:
+    `{provider: "s3", bucket, prefix?, opts}`.
+
+    `hot.dev/aws-s3` has no per-call credentials, no folder listing
+    (delimiter), no key or token encoding and no `DocFile`, so this
+    namespace builds its few S3 requests (ListObjectsV2, HEAD, GET, PUT)
+    itself and signs them with `hot.dev/aws-core`'s Signature V4.
+
+    **Options** (in the source's `opts` or per call): `access-key-id` +
+    `secret-access-key` (+ `session-token`) override the `aws.*` context
+    credentials for the call; `region` overrides `aws.region`; `endpoint`
+    (e.g. `https://<account>.r2.cloudflarestorage.com` or
+    `http://localhost:9000`) sends path-style requests to an
+    S3-compatible service.
+
+    **Folders** are key prefixes ending in `/` (`list` uses the `/`
+    delimiter). **Changes**: S3 has no change feed, so `changes` lists
+    the prefix and returns objects modified after the cursor's watermark;
+    deletions are not seen. S3 Event Notifications (to SQS, SNS or
+    EventBridge) are the better route for both.
+    """
+}
+
+::source ::documents::source
+::cursor ::documents::cursor
+::adapters ::documents::adapters
+::text ::documents::text
+::core ::aws::core
+::xml ::hot::xml
+::uri ::hot::uri
+::re ::hot::regex
+::time ::hot::time
+Page ::documents/Page
+ChangeSet ::documents/ChangeSet
+FileContent ::documents/FileContent
+
+PROVIDER "s3"
+MAX_PAGE_SIZE 1000
+DEFAULT_CHANGE_PAGES 100
+START_SKEW_MS 300000
+MAX_WATERMARK_KEYS 1000
+CREDENTIAL_KEYS ["access-key-id", "secret-access-key", "session-token", "region", "endpoint"]
+
+MONTHS {Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06", Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12"}
+
+// ---------------------------------------------------------------------------
+// DocFile (aws-s3 has none)
+// ---------------------------------------------------------------------------
+
+DocFile
+meta {
+    doc: """
+    S3 object or common-prefix metadata, the input of
+    `::documents::adapters/from-s3`.
+
+    - `key` - the object key, or the prefix (ending in `/`) for a folder
+    - `name` - the last path segment; `parent` - the parent prefix (`""` at the bucket root)
+    - `mime-type` - `Content-Type` (HEAD/GET only), else null
+    - `size`, `modified` (RFC 3339), `etag` (without quotes), `storage-class`
+    - `is-folder` - a common prefix
+    - `raw` - the parsed listing entry or response headers
+    """
+}
+type {
+    key: Str,
+    name: Str,
+    parent: Str?,
+    mime-type: Str?,
+    size: Int?,
+    modified: Str?,
+    etag: Str?,
+    storage-class: Str?,
+    is-folder: Bool,
+    raw: Map
+}
+
+name-of
+meta {
+    doc: """The last segment of a key or prefix (pure): `"a/b/c.pdf"` is `"c.pdf"`, `"a/b/"` is `"b"`."""
+}
+fn (key: Str): Str {
+  segments filter(split(key, "/"), (s) { not(is-empty(s)) })
+  if(is-empty(segments), key, last(segments))
+}
+
+parent-of
+meta {
+    doc: """The parent prefix of a key or prefix (pure): `"a/b/c.pdf"` is `"a/b/"`, `"a/b/"` is `"a/"`, `"c.pdf"` is `""`."""
+}
+fn (key: Str): Str {
+  trimmed if(ends-with(key, "/"), slice(key, 0, sub(length(key), 1)), key)
+  segments split(trimmed, "/")
+  if(lt(length(segments), 2), "", `${join(slice(segments, 0, sub(length(segments), 1)), "/")}/`)
+}
+
+unquote
+meta {doc: """An ETag without its surrounding double quotes (pure), or null."""}
+fn (etag: Any): Str? {
+  cond {
+    not(is-str(etag)) => { null }
+    is-empty(trim(etag)) => { null }
+    => { replace(trim(etag), "\"", "") }
+  }
+}
+
+parse-size fn (value: Any): Int? {
+  cond {
+    is-int(value) => { value }
+    // WORKAROUND(hot-bug-6): Int() on a non-numeric Str halts the run, so check the digits first.
+    and(is-str(value), ::re/is-match(trim(value), "^[0-9]+$")) => { Int(trim(value)) }
+    => { null }
+  }
+}
+
+to-doc-file
+meta {
+    doc: """
+    An S3 DocFile from a parsed object Map (pure): `{key, size?,
+    last-modified?, etag?, storage-class?, content-type?}` as built by
+    `parse-list` (Contents) or `head-object` (headers). A key ending in
+    `/` is a folder.
+    """
+}
+fn (object: Map): DocFile {
+  key Str(or(get(object, "key"), ""))
+  DocFile({
+    key: key,
+    name: name-of(key),
+    parent: parent-of(key),
+    mime-type: ::text/base-mime(get(object, "content-type")),
+    size: parse-size(get(object, "size")),
+    modified: get(object, "last-modified"),
+    etag: unquote(get(object, "etag")),
+    storage-class: get(object, "storage-class"),
+    is-folder: ends-with(key, "/"),
+    raw: object
+  })
+}
+
+to-document fn (source: Map, object: Map): Any {
+  ::adapters/from-s3(source, to-doc-file(object))
+}
+
+// ---------------------------------------------------------------------------
+// Request building (pure)
+// ---------------------------------------------------------------------------
+
+encode-key
+meta {
+    doc: """Percent-encode an object key for a URL path (pure): each `/`-separated segment RFC 3986-encoded, the slashes kept."""
+}
+fn (key: Str): Str {
+  join(map(split(key, "/"), ::uri/encode), "/")
+}
+
+bucket-url
+meta {
+    doc: """The base URL for a bucket (pure): virtual-hosted style from aws-core's `s3-endpoint` (`https://{bucket}.s3.{region}.amazonaws.com`), or path style `{endpoint}/{bucket}` when `endpoint` is set."""
+}
+fn (bucket: Str, region: Str, endpoint: Any): Str {
+  cond {
+    ::source/is-blank(endpoint) => { ::core/s3-endpoint(bucket, region) }
+    => {
+      e trim(Str(endpoint))
+      base if(ends-with(e, "/"), slice(e, 0, sub(length(e), 1)), e)
+      `${base}/${::uri/encode(bucket)}`
+    }
+  }
+}
+
+query-string
+meta {
+    doc: """A canonical query string (pure): non-null params sorted by key, keys and values RFC 3986-encoded (`/` as `%2F`), as Signature V4 wants them."""
+}
+fn (params: Map): Str {
+  present filter-vals(params, is-some)
+  join(map(sort(keys(present)), (k) { `${::uri/encode(Str(k))}=${::uri/encode(Str(get(present, k)))}` }), "&")
+}
+
+list-url
+meta {
+    doc: """
+    A ListObjectsV2 URL (pure): `list-type=2`, `encoding-type=url`,
+    `prefix`, `delimiter` (`/` for one folder level, null for
+    everything below), `max-keys` and `continuation-token`.
+    """
+}
+fn (base: Str, prefix: Str, delimiter: Str?, max-keys: Int, token: Any): Str {
+  // WORKAROUND(hot-bug-5): ::hot::xml/text drops entity-decoded characters (&amp;), so keys are asked for URL-encoded and decoded here.
+  qs query-string({
+    "list-type": "2",
+    "encoding-type": "url",
+    prefix: prefix,
+    delimiter: delimiter,
+    "max-keys": Str(max-keys),
+    "continuation-token": token
+  })
+  `${base}/?${qs}`
+}
+
+object-url
+meta {doc: """The URL of an object (pure): `{bucket-url}/{encoded key}`."""}
+fn (base: Str, key: Str): Str {
+  `${base}/${encode-key(key)}`
+}
+
+prefix-key
+meta {
+    doc: """A key for `name` under `parent` (pure): `parent` gets a trailing `/` unless it is empty."""
+}
+fn (parent: Any, name: Str): Str {
+  p Str(or(parent, ""))
+  if(or(eq(p, ""), ends-with(p, "/")), `${p}${name}`, `${p}/${name}`)
+}
+
+// ---------------------------------------------------------------------------
+// Response parsing (pure)
+// ---------------------------------------------------------------------------
+
+decode-key
+meta {
+    doc: """Decode a key from an `encoding-type=url` listing (pure): S3 form-encodes it, so `+` is a space before percent-decoding (a literal `+` arrives as `%2B`)."""
+}
+fn (value: Any): Str? {
+  cond {
+    not(is-str(value)) => { null }
+    => { ::uri/decode(replace(value, "+", " ")) }
+  }
+}
+
+child-text fn (node: Any, tag: Str): Str? {
+  c if(is-null(node), null, ::xml/child(node, tag))
+  if(is-null(c), null, ::xml/text(c))
+}
+
+parse-list
+meta {
+    doc: """
+    Parse a ListObjectsV2 XML body (pure) into `{objects, prefixes,
+    truncated, next-token}`: objects as `{key, size, last-modified, etag,
+    storage-class}` Maps and prefixes as Strs, keys URL-decoded.
+    """
+}
+fn (body: Str): Map {
+  root ::xml/from-xml(body)
+  cond {
+    is-err(root) => { err("documents: S3 returned a listing that is not XML") }
+    => {
+      objects map(::xml/children(root, "Contents"), (c) {
+        filter-vals({
+          key: decode-key(child-text(c, "Key")),
+          size: parse-size(child-text(c, "Size")),
+          last-modified: child-text(c, "LastModified"),
+          etag: unquote(child-text(c, "ETag")),
+          storage-class: child-text(c, "StorageClass")
+        }, is-some)
+      })
+      prefixes filter(map(::xml/children(root, "CommonPrefixes"), (p) { decode-key(child-text(p, "Prefix")) }), is-some)
+      {
+        objects: filter(objects, (o) { is-some(get(o, "key")) }),
+        prefixes: prefixes,
+        truncated: eq(child-text(root, "IsTruncated"), "true"),
+        next-token: child-text(root, "NextContinuationToken")
+      }
+    }
+  }
+}
+
+http-date-to-iso
+meta {
+    doc: """An HTTP date (`Wed, 30 Oct 2026 12:00:00 GMT`, as in `Last-Modified`) as RFC 3339 (`2026-10-30T12:00:00Z`) (pure); null when it does not parse."""
+}
+fn (value: Any): Str? {
+  parts if(is-str(value), filter(split(trim(value), " "), (p) { not(is-empty(p)) }), [])
+  cond {
+    lt(length(parts), 5) => { null }
+    => {
+      day get(parts, 1)
+      month get(MONTHS, get(parts, 2))
+      year get(parts, 3)
+      clock get(parts, 4)
+      cond {
+        or(is-null(month), not(::re/is-match(day, "^[0-9]{1,2}$")), not(::re/is-match(year, "^[0-9]{4}$")), not(::re/is-match(clock, "^[0-9]{2}:[0-9]{2}:[0-9]{2}$"))) => { null }
+        => {
+          dd if(eq(length(day), 1), `0${day}`, day)
+          `${year}-${month}-${dd}T${clock}Z`
+        }
+      }
+    }
+  }
+}
+
+lower-headers fn (response: Map): Map {
+  map-keys(or(get(response, "headers"), {}), (k) { lowercase(Str(k)) })
+}
+
+head-object-map
+meta {
+    doc: """The object Map for `to-doc-file` from a HEAD (or GET) response's headers (pure)."""
+}
+fn (key: Str, response: Map): Map {
+  h lower-headers(response)
+  filter-vals({
+    key: key,
+    size: parse-size(get(h, "content-length")),
+    last-modified: http-date-to-iso(get(h, "last-modified")),
+    etag: unquote(get(h, "etag")),
+    content-type: get(h, "content-type"),
+    storage-class: get(h, "x-amz-storage-class")
+  }, is-some)
+}
+
+response-bytes fn (response: Map): Bytes {
+  raw get(response, "body-bytes")
+  cond {
+    is-bytes(raw) => { raw }
+    is-str(get(response, "body")) => { Bytes(response.body) }
+    => { Bytes([]) }
+  }
+}
+
+s3-error
+meta {
+    doc: """
+    The error for a non-2xx S3 response (pure): `{status, code, message,
+    request-id}` with a readable `message` such as `"documents: s3 HTTP
+    404 NoSuchKey: The specified key does not exist."`. HEAD responses
+    have no body, so their code comes from the status.
+    """
+}
+fn (response: Map): Map {
+  status or(get(response, "status"), 0)
+  text Str(response-bytes(response))
+  root if(starts-with(trim(text), "<"), ::xml/from-xml(text), null)
+  parsed if(or(is-null(root), is-err(root)), null, root)
+  fallback cond {
+    eq(status, 403) => { "AccessDenied" }
+    eq(status, 404) => { "NotFound" }
+    => { null }
+  }
+
+  code or(child-text(parsed, "Code"), fallback)
+  detail child-text(parsed, "Message")
+  code-part if(is-null(code), "", ` ${code}`)
+  detail-part if(is-null(detail), "", `: ${detail}`)
+  {
+    status: status,
+    code: code,
+    message: `documents: s3 HTTP ${status}${code-part}${detail-part}`,
+    request-id: or(child-text(parsed, "RequestId"), get(lower-headers(response), "x-amz-request-id"))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Change watermark (pure)
+// ---------------------------------------------------------------------------
+
+ts-key
+meta {
+    doc: """A sortable key for an RFC 3339 UTC timestamp (pure): `YYYY-MM-DDTHH:MM:SS.mmm`, so `2026-10-30T12:00:00Z` and `2026-10-30T12:00:00.000Z` compare equal. Null when it does not parse."""
+}
+fn (ts: Any): Str? {
+  cond {
+    not(is-str(ts)) => { null }
+    not(::re/is-match(ts, "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}")) => { null }
+    => {
+      rest slice(ts, 19, length(ts))
+      digits if(starts-with(rest, "."), ::re/replace-all(slice(rest, 1, length(rest)), "[^0-9].*$", ""), "")
+      millis slice(`${digits}000`, 0, 3)
+      `${slice(ts, 0, 19)}.${millis}`
+    }
+  }
+}
+
+is-after
+meta {
+    doc: """True when sortable key `a` is later than `b` (pure); a null `b` means "the beginning"."""
+}
+fn (a: Any, b: Any): Bool {
+  cond {
+    is-null(a) => { false }
+    is-null(b) => { true }
+    eq(a, b) => { false }
+    => { eq(last(sort([a, b])), a) }
+  }
+}
+
+start-watermark
+meta {
+    doc: """The watermark for a new change cursor (pure): `now-ms` minus five minutes, as RFC 3339, so uploads in flight when the cursor is made are not missed."""
+}
+fn (now-ms: Int): Map {
+  {w: Str(::time/Instant(::time/Millisecond(sub(now-ms, START_SKEW_MS)))), k: []}
+}
+
+apply-watermark
+meta {
+    doc: """
+    Pick the objects that changed after a watermark (pure). `state` is
+    `{w, k}`: `w` the latest `last-modified` already delivered, `k` the
+    keys delivered at exactly `w` (S3 timestamps have one-second
+    resolution, so several objects can share one). Returns `{objects,
+    state}` with the new watermark. Folder placeholder keys (ending in
+    `/`) are skipped.
+    """
+}
+fn (objects: Vec, state: Map): Map {
+  wk ts-key(get(state, "w"))
+  seen or(get(state, "k"), [])
+  fresh filter(objects, (o) {
+    key Str(or(get(o, "key"), ""))
+    mk ts-key(get(o, "last-modified"))
+    and(
+      not(ends-with(key, "/")),
+      is-some(mk),
+      or(is-after(mk, wk), and(eq(mk, wk), not(in(key, seen))))
+    )
+  })
+  newest reduce(fresh, (acc, o) {
+    mk ts-key(o.last-modified)
+    if(is-after(mk, acc.key), {key: mk, ts: o.last-modified}, acc)
+  }, {key: wk, ts: get(state, "w")})
+  at-newest map(filter(fresh, (o) { eq(ts-key(o.last-modified), newest.key) }), (o) { o.key })
+  keys-at if(eq(newest.key, wk), concat(seen, at-newest), at-newest)
+  {
+    objects: fresh,
+    state: {w: newest.ts, k: slice(keys-at, 0, min(length(keys-at), MAX_WATERMARK_KEYS))}
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+Target
+meta {
+    doc: """A resolved S3 call target: credentials, region and the bucket base URL."""
+}
+type {
+    credentials: Map,
+    region: Str,
+    base: Str
+}
+
+resolve
+meta {
+    doc: """
+    Resolve the credentials, region and endpoint for a call: the
+    `access-key-id` / `secret-access-key` / `session-token` / `region` /
+    `endpoint` keys of `popts` first, else aws-core's context lookup
+    (`aws.access-key-id`, `aws.secret-access-key`, `aws.session-token`,
+    `aws.region`). Never writes context. A missing key id or secret is an Err.
+    """
+}
+fn (source: Map, popts: Map): Target {
+  given get(popts, "access-key-id")
+  creds if(::source/is-blank(given), ::core/get-credentials(), ::core/Credentials({
+    access_key_id: given,
+    secret_access_key: get(popts, "secret-access-key"),
+    session_token: get(popts, "session-token")
+  }))
+  region or(get(popts, "region"), ::core/get-region())
+  cond {
+    or(::source/is-blank(creds.access_key_id), ::source/is-blank(creds.secret_access_key)) => {
+      err("documents: S3 needs credentials: pass access-key-id and secret-access-key in opts, or set aws.access-key-id and aws.secret-access-key")
+    }
+    => { Target({credentials: untype(creds), region: Str(region), base: bucket-url(source.bucket, Str(region), get(popts, "endpoint"))}) }
+  }
+}
+
+s3-request fn (target: Target, method: Str, url: Str, headers: Map, body: Any): Any {
+  creds ::core/Credentials(target.credentials)
+  signed ::core/sign-request(method, url, target.region, "s3", creds, headers, body)
+  response ::hot::http/request(method, url, signed, body)
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { response }
+    => { err(s3-error(response)) }
+  }
+}
+
+list-page fn (target: Target, prefix: Str, delimiter: Str?, size: Int, token: Any): Map {
+  response s3-request(target, "GET", list-url(target.base, prefix, delimiter, size, token), {}, "")
+  if(is-err(response), response, parse-list(Str(response-bytes(response))))
+}
+
+head-object fn (target: Target, key: Str): Map {
+  response s3-request(target, "HEAD", object-url(target.base, key), {}, "")
+  if(is-err(response), response, head-object-map(key, response))
+}
+
+folder-of fn (source: Map, folder: Str?): Str {
+  Str(or(folder, get(source, "prefix"), ""))
+}
+
+// ---------------------------------------------------------------------------
+// Verbs
+// ---------------------------------------------------------------------------
+
+to-page
+meta {
+    doc: """A parsed listing as a `::documents/Page` (pure): common prefixes as folders, then objects, without the folder's own placeholder object."""
+}
+fn (source: Map, prefix: Str, parsed: Map): Page {
+  folders map(parsed.prefixes, (p) { to-document(source, {key: p}) })
+  files map(filter(parsed.objects, (o) { ne(o.key, prefix) }), (o) { to-document(source, o) })
+  c if(parsed.truncated, ::cursor/list-cursor(PROVIDER, parsed.next-token, prefix), null)
+  Page({documents: concat(folders, files), cursor: c, has-more: is-some(c)})
+}
+
+list fn (source: Map, folder: Str?, opts: Map): Page {
+  popts ::source/provider-opts(source, opts)
+  given get(opts, "cursor")
+  c if(is-null(given), null, ::cursor/decode-for(given, PROVIDER, "list"))
+  target resolve(source, popts)
+  cond {
+    is-err(c) => { c }
+    is-err(target) => { target }
+    => {
+      prefix if(is-map(c), Str(or(c.f, "")), folder-of(source, folder))
+      token if(is-map(c), c.v, null)
+      parsed list-page(target, prefix, "/", ::source/page-size(opts, ::documents/DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE), token)
+      if(is-err(parsed), parsed, to-page(source, prefix, parsed))
+    }
+  }
+}
+
+get-doc fn (source: Map, id: Str, opts: Map): Any {
+  target resolve(source, ::source/provider-opts(source, opts))
+  cond {
+    is-err(target) => { target }
+    // A prefix has no object of its own.
+    ends-with(id, "/") => { to-document(source, {key: id}) }
+    => {
+      object head-object(target, id)
+      if(is-err(object), object, to-document(source, object))
+    }
+  }
+}
+
+download fn (source: Map, id: Str, opts: Map): Any {
+  target resolve(source, ::source/provider-opts(source, opts))
+  response if(is-err(target), target, s3-request(target, "GET", object-url(target.base, id), {}, ""))
+  cond {
+    is-err(response) => { response }
+    => {
+      bytes response-bytes(response)
+      doc to-document(source, head-object-map(id, response))
+      textual ::text/is-textual(doc.mime-type, doc.name)
+      FileContent({
+        document-id: id,
+        name: doc.name,
+        mime-type: doc.mime-type,
+        size: length(bytes),
+        bytes: bytes,
+        text: if(textual, Str(bytes), null),
+        method: "download",
+        document: doc
+      })
+    }
+  }
+}
+
+read-text fn (source: Map, id: Str, format: Str, opts: Map): Any {
+  doc get-doc(source, id, opts)
+  cond {
+    is-err(doc) => { doc }
+    => {
+      plan ::text/plan(doc, format)
+      cond {
+        eq(plan.action, "error") => { ::text/plan-error(plan) }
+        eq(plan.action, "unsupported") => { ::text/not-ok-result(doc, "unsupported", plan.reason) }
+        => {
+          content download(source, id, opts)
+          if(is-err(content), content, ::text/ok-result(doc, content.bytes, plan.format, or(content.mime-type, doc.mime-type), "download"))
+        }
+      }
+    }
+  }
+}
+
+upload fn (source: Map, parent: Str?, name: Str, bytes: Bytes, mime-type: Str, opts: Map): Any {
+  target resolve(source, ::source/provider-opts(source, opts))
+  key prefix-key(or(parent, get(source, "prefix")), name)
+  put if(is-err(target), target, s3-request(target, "PUT", object-url(target.base, key), {Content-Type: mime-type}, bytes))
+  cond {
+    is-err(put) => { put }
+    => {
+      object head-object(target, key)
+      if(is-err(object), object, to-document(source, object))
+    }
+  }
+}
+
+start-cursor fn (source: Map, opts: Map): Any {
+  ::cursor/change-cursor(PROVIDER, start-watermark(::time/epoch-millis(::time/now())))
+}
+
+collect-loop fn (target: Target, prefix: Str, token: Any, acc: Vec, pages: Int, max-pages: Int): Map {
+  parsed list-page(target, prefix, null, MAX_PAGE_SIZE, token)
+  cond {
+    is-err(parsed) => { parsed }
+    => {
+      all concat(acc, parsed.objects)
+      cond {
+        and(parsed.truncated, is-some(parsed.next-token), lt(pages, max-pages)) => {
+          collect-loop(target, prefix, parsed.next-token, all, add(pages, 1), max-pages)
+        }
+        => { {objects: all, complete: not(parsed.truncated)} }
+      }
+    }
+  }
+}
+
+changes fn (source: Map, cursor: Str, opts: Map): Any {
+  c ::cursor/decode-for(cursor, PROVIDER, "changes")
+  target resolve(source, ::source/provider-opts(source, opts))
+  cond {
+    is-err(c) => { c }
+    is-err(target) => { target }
+    not(is-map(c.v)) => { err("documents: this S3 change cursor is corrupt") }
+    => {
+      listed collect-loop(target, folder-of(source, null), null, [], 1, or(get(opts, "max-pages"), DEFAULT_CHANGE_PAGES))
+      cond {
+        is-err(listed) => { listed }
+        not(listed.complete) => {
+          err("documents: the S3 prefix has more objects than max-pages lets changes list; raise opts.max-pages or use S3 Event Notifications")
+        }
+        => {
+          picked apply-watermark(listed.objects, c.v)
+          ChangeSet({
+            documents: map(picked.objects, (o) { to-document(source, o) }),
+            deleted-ids: [],
+            deleted-paths: [],
+            next-cursor: ::cursor/change-cursor(PROVIDER, picked.state),
+            reset-required: false,
+            has-more: false
+          })
+        }
+      }
+    }
+  }
+}

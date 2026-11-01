@@ -1,0 +1,164 @@
+::documents::test::s3 ns
+meta ["test"]
+
+::s3 ::documents::s3
+::source ::documents::source
+::cursor ::documents::cursor
+
+LISTING """<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>acme</Name>
+  <Prefix>inbox%2F</Prefix>
+  <KeyCount>3</KeyCount>
+  <MaxKeys>2</MaxKeys>
+  <Delimiter>%2F</Delimiter>
+  <EncodingType>url</EncodingType>
+  <IsTruncated>true</IsTruncated>
+  <Contents>
+    <Key>inbox%2F</Key>
+    <LastModified>2026-10-12T17:50:30.000Z</LastModified>
+    <ETag>&quot;d41d8cd98f00b204e9800998ecf8427e&quot;</ETag>
+    <Size>0</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+  <Contents>
+    <Key>inbox%2FQ3+report+%26+notes%2B1.pdf</Key>
+    <LastModified>2026-10-12T17:50:31.000Z</LastModified>
+    <ETag>&quot;fba9dede5f27731c9771645a39863328&quot;</ETag>
+    <Size>434234</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+  <CommonPrefixes>
+    <Prefix>inbox%2F2026%2F</Prefix>
+  </CommonPrefixes>
+  <NextContinuationToken>1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=</NextContinuationToken>
+</ListBucketResult>"""
+
+ERROR_BODY """<?xml version="1.0" encoding="UTF-8"?>
+<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Key>a.txt</Key><RequestId>4442587FB7D0A2F9</RequestId></Error>"""
+
+test-key-and-url-encoding
+meta ["test"] fn () {
+    assert-eq("inbox/Q3%20report%20%26%20notes%2B1.pdf", ::s3/encode-key("inbox/Q3 report & notes+1.pdf"), "segments encoded, slashes kept")
+    assert-eq("a/%C3%A9t%C3%A9.txt", ::s3/encode-key("a/été.txt"))
+    assert-eq("https://acme.s3.amazonaws.com", ::s3/bucket-url("acme", "us-east-1", null))
+    assert-eq("https://acme.s3.eu-west-1.amazonaws.com", ::s3/bucket-url("acme", "eu-west-1", ""))
+    assert-eq("http://localhost:9000/acme", ::s3/bucket-url("acme", "us-east-1", "http://localhost:9000/"), "an endpoint means path style")
+    assert-eq("https://acme.s3.amazonaws.com/inbox/a%20b.txt", ::s3/object-url("https://acme.s3.amazonaws.com", "inbox/a b.txt"))
+    assert-eq("inbox/a.txt", ::s3/prefix-key("inbox", "a.txt"))
+    assert-eq("inbox/a.txt", ::s3/prefix-key("inbox/", "a.txt"))
+    assert-eq("a.txt", ::s3/prefix-key(null, "a.txt"))
+}
+
+test-list-url-is-canonical
+meta ["test"] fn () {
+    url ::s3/list-url("https://acme.s3.amazonaws.com", "inbox/Q3 &", "/", 500, "1ueG/XY+=")
+    assert-eq("https://acme.s3.amazonaws.com/?continuation-token=1ueG%2FXY%2B%3D&delimiter=%2F&encoding-type=url&list-type=2&max-keys=500&prefix=inbox%2FQ3%20%26", url, "sorted keys, every value RFC 3986-encoded")
+    first-page ::s3/list-url("https://acme.s3.amazonaws.com", "", null, 1000, null)
+    assert(not(contains(first-page, "continuation-token")), "unset optionals are omitted")
+    assert(not(contains(first-page, "delimiter")))
+    assert(contains(first-page, "prefix="), "an empty prefix is still sent")
+}
+
+test-parse-list
+meta ["test"] fn () {
+    p ::s3/parse-list(LISTING)
+    assert-eq(2, length(p.objects))
+    second get(p.objects, 1)
+    assert-eq("inbox/Q3 report & notes+1.pdf", second.key, "URL-encoded keys decoded: + is a space, %2B a plus, & survives")
+    assert-eq(434234, second.size)
+    assert-eq("2026-10-12T17:50:31.000Z", second.last-modified)
+    assert-eq("fba9dede5f27731c9771645a39863328", second.etag)
+    assert-eq(["inbox/2026/"], p.prefixes)
+    assert(p.truncated)
+    assert-eq("1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=", p.next-token)
+    s ::source/resolve({provider: "s3", bucket: "acme", prefix: "inbox/"})
+    page ::s3/to-page(s, "inbox/", p)
+    assert-eq(["inbox/2026/", "inbox/Q3 report & notes+1.pdf"], map(page.documents, (d) { d.id }), "folders first; the folder's own placeholder is skipped")
+    assert-eq("folder", first(page.documents).kind)
+    c ::cursor/decode-for(page.cursor, "s3", "list")
+    assert-eq("inbox/", c.f)
+    assert-eq(p.next-token, c.v)
+}
+
+test-head-and-errors
+meta ["test"] fn () {
+    obj ::s3/head-object-map("a/b.md", {status: 200, headers: {"Content-Length": "12", "Last-Modified": "Wed, 7 Oct 2026 12:00:05 GMT", "ETag": "\"abc\"", "Content-Type": "text/markdown; charset=utf-8"}})
+    assert-eq({key: "a/b.md", size: 12, last-modified: "2026-10-07T12:00:05Z", etag: "abc", content-type: "text/markdown; charset=utf-8"}, obj)
+    d ::s3/to-doc-file(obj)
+    assert-eq("text/markdown", d.mime-type)
+    assert-eq("b.md", d.name)
+    assert(is-null(::s3/http-date-to-iso("yesterday")))
+    assert(is-null(::s3/http-date-to-iso(null)))
+    assert(is-null(::s3/parse-size("12a")), "never Int() a non-number")
+    e ::s3/s3-error({status: 404, headers: {}, body-bytes: Bytes(ERROR_BODY)})
+    assert-eq("NoSuchKey", e.code)
+    assert-eq("4442587FB7D0A2F9", e.request-id)
+    assert-eq("documents: s3 HTTP 404 NoSuchKey: The specified key does not exist.", e.message)
+    head ::s3/s3-error({status: 403, headers: {"x-amz-request-id": "R1"}, body-bytes: Bytes([])})
+    assert-eq("documents: s3 HTTP 403 AccessDenied", head.message, "HEAD errors have no body")
+    assert-eq("R1", head.request-id)
+}
+
+test-names-and-parents
+meta ["test"] fn () {
+    assert-eq("c.pdf", ::s3/name-of("a/b/c.pdf"))
+    assert-eq("b", ::s3/name-of("a/b/"))
+    assert-eq("a/b/", ::s3/parent-of("a/b/c.pdf"))
+    assert-eq("a/", ::s3/parent-of("a/b/"))
+    assert-eq("", ::s3/parent-of("c.pdf"))
+    assert-eq("abc", ::s3/unquote("\"abc\""))
+    assert(is-null(::s3/unquote("")))
+}
+
+test-timestamps-and-watermark
+meta ["test"] fn () {
+    assert-eq("2026-10-30T12:00:00.000", ::s3/ts-key("2026-10-30T12:00:00Z"))
+    assert-eq("2026-10-30T12:00:00.000", ::s3/ts-key("2026-10-30T12:00:00.000Z"), "same instant, same key")
+    assert-eq("2026-10-30T12:00:00.500", ::s3/ts-key("2026-10-30T12:00:00.5Z"))
+    assert(is-null(::s3/ts-key("not a time")))
+    assert(::s3/is-after("2026-10-30T12:00:01.000", "2026-10-30T12:00:00.999"))
+    assert(not(::s3/is-after("2026-10-30T12:00:00.000", "2026-10-30T12:00:00.000")))
+    assert(::s3/is-after("2026-01-01T00:00:00.000", null), "no watermark: everything is new")
+
+    objects [
+        {key: "a.txt", last-modified: "2026-10-30T12:00:00.000Z"},
+        {key: "b.txt", last-modified: "2026-10-30T12:00:05.000Z"},
+        {key: "c.txt", last-modified: "2026-10-30T12:00:05.000Z"},
+        {key: "dir/", last-modified: "2026-10-30T12:00:09.000Z"},
+        {key: "old.txt", last-modified: "2026-10-29T00:00:00.000Z"}
+    ]
+    first-run ::s3/apply-watermark(objects, {w: "2026-10-30T11:00:00Z", k: []})
+    assert-eq(["a.txt", "b.txt", "c.txt"], map(first-run.objects, (o) { o.key }), "newer than the watermark; folder markers skipped")
+    assert-eq("2026-10-30T12:00:05.000Z", first-run.state.w)
+    assert-eq(["b.txt", "c.txt"], first-run.state.k, "keys at the new watermark")
+
+    later concat(objects, [{key: "d.txt", last-modified: "2026-10-30T12:00:05.000Z"}])
+    second ::s3/apply-watermark(later, first-run.state)
+    assert-eq(["d.txt"], map(second.objects, (o) { o.key }), "same second as the watermark but not yet delivered")
+    assert-eq(["b.txt", "c.txt", "d.txt"], second.state.k)
+
+    quiet ::s3/apply-watermark(later, second.state)
+    assert-eq([], quiet.objects, "nothing new: nothing returned")
+    assert-eq(second.state, quiet.state, "and the watermark stays")
+
+    w ::s3/start-watermark(1793448000000)
+    assert-eq("2026-10-31T11:55:00Z", w.w, "five minutes before now")
+    assert-eq([], w.k)
+}
+
+test-resolve-credentials
+meta ["test"] fn () {
+    s ::source/resolve({provider: "s3", bucket: "acme"})
+    t ::s3/resolve(s, {access-key-id: "AKIDEXAMPLE", secret-access-key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", region: "eu-west-1"})
+    assert-eq("AKIDEXAMPLE", t.credentials.access_key_id, "per-call keys win")
+    assert-eq("eu-west-1", t.region)
+    assert-eq("https://acme.s3.eu-west-1.amazonaws.com", t.base)
+    missing ::s3/resolve(s, {access-key-id: "AKIDEXAMPLE"})
+    assert(is-err(missing), "a key id without a secret is refused")
+    assert(contains(err-message(missing), "secret-access-key"))
+    assert(not(contains(err-message(missing), "AKIDEXAMPLE")), "credentials never appear in errors")
+    none ::s3/resolve(s, {})
+    assert(is-err(none), "no opts and no aws.* context: a clear Err")
+    assert(is-null(::hot::ctx/get("aws.access-key-id")), "per-call keys are never written to ctx")
+}

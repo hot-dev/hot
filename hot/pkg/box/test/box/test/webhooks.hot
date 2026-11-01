@@ -1,0 +1,151 @@
+::box::test::webhooks ns
+meta ["test"]
+
+// Webhook signature verification. The fixed vectors were generated
+// independently with Python:
+//   base64(hmac.new(key, body + timestamp, sha256).digest())
+
+::hooks ::box::webhooks
+::hmac ::hot::hmac
+::b64 ::hot::base64
+
+PRIMARY_KEY "hotPrimaryKeyForTests0001"
+SECONDARY_KEY "hotSecondaryKeyForTests002"
+BODY """{"type":"webhook_event","id":"8f5e1c0e-1111-4b5f-9a2d-0e5c1b2a3f4d","created_at":"2026-10-30T09:15:02-07:00","trigger":"FILE.UPLOADED","webhook":{"id":"1234567","type":"webhook"},"source":{"id":"987654321","type":"file","name":"Q3 report.pdf"}}"""
+TIMESTAMP "2026-10-30T09:15:03-07:00"
+PRIMARY_SIG "S6UMjqOvEcHX4jgVIHTnF2kJwILfMA28ZHqZUFcCiro="
+SECONDARY_SIG "bQlR8Qu03Gr1Xz9sRXwGrHEDKChnZ7cW3RJTvP3+3U0="
+
+// UTF-8 body (é, snowman, emoji) with key "k2" at 2026-01-01T00:00:00Z.
+UNICODE_BODY "café ☃ 😀"
+UNICODE_SIG "+6ILzCyys7v2IdoS+s3zAkN7vklUnCcY9AWtOJgVry0="
+
+delivery fn (body: Str, headers: Map): Map {
+    {
+        method: "POST",
+        url: "/box/webhook",
+        headers: {
+            "box-delivery-id": "f96bb54b-ee16-4fc5-aa65-8c2d9e5b546f",
+            "box-delivery-timestamp": TIMESTAMP,
+            "box-signature-algorithm": "HmacSHA256",
+            "box-signature-primary": PRIMARY_SIG,
+            "box-signature-secondary": SECONDARY_SIG,
+            "box-signature-version": "1",
+            ...headers
+        },
+        body: from-json(body),
+        body-raw: body
+    }
+}
+
+// Sign a delivery stamped "now", the way Box does (for the replay window).
+fresh-delivery fn (body: Str, key: Str): Map {
+    ts Str(::hot::time/now())
+    sig ::b64/encode(::hmac/hmac-sha256-bytes(key, `${body}${ts}`))
+    delivery(body, {"box-delivery-timestamp": ts, "box-signature-primary": sig, "box-signature-secondary": ""})
+}
+
+test-python-vector-verifies
+meta ["test"] fn () {
+    req delivery(BODY, {})
+    // The vector is two days old: check the signature alone, then the window.
+    assert(is-null(::hooks/verification-failure(req, PRIMARY_KEY, SECONDARY_KEY, 0)), "the independently generated signature verifies")
+    assert-eq("stale", ::hooks/verification-failure(req, PRIMARY_KEY, SECONDARY_KEY, 600), "older than 10 minutes is rejected")
+    assert(not(::hooks/verify-request(req, PRIMARY_KEY, SECONDARY_KEY)), "the default window rejects it")
+}
+
+test-either-signature-verifies
+meta ["test"] fn () {
+    req delivery(BODY, {})
+    assert(is-null(::hooks/verification-failure(req, PRIMARY_KEY, null, 0)), "primary alone")
+    assert(is-null(::hooks/verification-failure(req, null, SECONDARY_KEY, 0)), "secondary alone (mid-rotation)")
+    assert(is-null(::hooks/verification-failure(req, "wrong-primary", SECONDARY_KEY, 0)), "a rotated primary still passes on the secondary")
+    swapped delivery(BODY, {"box-signature-primary": SECONDARY_SIG, "box-signature-secondary": PRIMARY_SIG})
+    assert-eq("bad-signature", ::hooks/verification-failure(swapped, PRIMARY_KEY, SECONDARY_KEY, 0), "each signature only counts with its own key")
+}
+
+test-tampered-body-or-timestamp
+meta ["test"] fn () {
+    tampered delivery(replace(BODY, "987654321", "987654322"), {})
+    assert-eq("bad-signature", ::hooks/verification-failure(tampered, PRIMARY_KEY, SECONDARY_KEY, 0))
+    restamped delivery(BODY, {"box-delivery-timestamp": "2026-10-30T09:15:04-07:00"})
+    assert-eq("bad-signature", ::hooks/verification-failure(restamped, PRIMARY_KEY, SECONDARY_KEY, 0), "the timestamp is signed")
+    bad-sig delivery(BODY, {"box-signature-primary": "not base64!!", "box-signature-secondary": ""})
+    assert-eq("bad-signature", ::hooks/verification-failure(bad-sig, PRIMARY_KEY, SECONDARY_KEY, 0))
+}
+
+test-missing-parts-fail-closed
+meta ["test"] fn () {
+    req delivery(BODY, {})
+    assert-eq("no-key", ::hooks/verification-failure(req, "", "  ", 0))
+    assert-eq("no-key", ::hooks/verification-failure(req, null, null, 0))
+    assert(not(::hooks/verify-request(req, "", "")), "an empty secret never verifies")
+    assert-eq("missing-timestamp", ::hooks/verification-failure(delivery(BODY, {"box-delivery-timestamp": ""}), PRIMARY_KEY, null, 0))
+    assert-eq("missing-signature", ::hooks/verification-failure(delivery(BODY, {"box-signature-primary": "", "box-signature-secondary": ""}), PRIMARY_KEY, SECONDARY_KEY, 0))
+    assert-eq("unsupported-version", ::hooks/verification-failure(delivery(BODY, {"box-signature-version": "2"}), PRIMARY_KEY, null, 0))
+    assert-eq("unsupported-algorithm", ::hooks/verification-failure(delivery(BODY, {"box-signature-algorithm": "HmacSHA1"}), PRIMARY_KEY, null, 0))
+    no-headers {method: "POST", url: "/", body-raw: BODY}
+    assert(not(::hooks/verify-request(no-headers, PRIMARY_KEY, SECONDARY_KEY)))
+}
+
+test-unicode-body-vector
+meta ["test"] fn () {
+    req {
+        headers: {
+            "box-delivery-timestamp": "2026-01-01T00:00:00Z",
+            "box-signature-primary": UNICODE_SIG,
+            "box-signature-version": "1",
+            "box-signature-algorithm": "HmacSHA256"
+        },
+        body-raw: UNICODE_BODY
+    }
+
+    assert(is-null(::hooks/verification-failure(req, "k2", null, 0)), "the raw UTF-8 bytes are signed")
+    as-bytes {...req, body-bytes: Bytes(UNICODE_BODY), body-raw: "lossy"}
+    assert(is-null(::hooks/verification-failure(as-bytes, "k2", null, 0)), "body-bytes wins over a lossy body-raw")
+}
+
+test-fresh-delivery-verifies
+meta ["test"] fn () {
+    req fresh-delivery(BODY, PRIMARY_KEY)
+    assert(::hooks/verify-request(req, PRIMARY_KEY, SECONDARY_KEY), "a delivery stamped now verifies within the window")
+    assert(not(::hooks/verify-request(req, "other-key", SECONDARY_KEY)))
+}
+
+test-replay-window
+meta ["test"] fn () {
+    t ::hot::time/epoch-seconds()
+    assert(::hooks/timestamp-ok(sub(t, 590), 600))
+    assert(not(::hooks/timestamp-ok(sub(t, 601), 600)), "older than 10 minutes")
+    assert(::hooks/timestamp-ok(add(t, 30), 600), "a little clock skew is tolerated")
+    assert(not(::hooks/timestamp-ok(add(t, 120), 600)), "but not a timestamp from the future")
+}
+
+test-parse-timestamp
+meta ["test"] fn () {
+    // Python: datetime.fromisoformat(...).timestamp()
+    assert-eq(1793376903, ::hooks/parse-timestamp("2026-10-30T09:15:03-07:00"))
+    assert-eq(1793376903, ::hooks/parse-timestamp("2026-10-30T16:15:03Z"))
+    assert-eq(1793376903, ::hooks/parse-timestamp("2026-10-30T21:45:03.123+05:30"))
+    assert(is-null(::hooks/parse-timestamp("1793376903")), "Unix seconds are not Box's format")
+    assert(is-null(::hooks/parse-timestamp("2026-10-30 16:15:03")))
+    assert(is-null(::hooks/parse-timestamp("")))
+    assert(is-null(::hooks/parse-timestamp("2026-13-45T99:99:99Z")), "nonsense dates never halt")
+}
+
+test-signed-payload
+meta ["test"] fn () {
+    assert-eq(Bytes("{}2026-01-01T00:00:00Z"), ::hooks/signed-payload("{}", "2026-01-01T00:00:00Z"))
+    assert-eq(Bytes([0, 255, 65]), ::hooks/signed-payload(Bytes([0, 255]), "A"))
+}
+
+test-parse-delivery
+meta ["test"] fn () {
+    event ::hooks/parse-delivery(delivery(BODY, {}))
+    assert-eq("FILE.UPLOADED", event.trigger)
+    assert-eq("987654321", event.source.id)
+    raw ::hooks/parse-delivery({body-raw: BODY})
+    assert-eq("1234567", raw.webhook.id)
+    assert(is-err(::hooks/parse-delivery({body-raw: "not json"})))
+    assert(is-err(::hooks/parse-delivery({})))
+}

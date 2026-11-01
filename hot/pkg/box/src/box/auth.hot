@@ -1,0 +1,927 @@
+::box::auth ns
+meta {
+    ctx: {
+        "box.access.token": {required: false},
+        "box.client.id": {required: false, secret: false},
+        "box.client.secret": {required: false},
+        "box.enterprise.id": {required: false, secret: false},
+        "box.user.id": {required: false, secret: false},
+        "box.jwt.config": {required: false},
+        "box.jwt.private-key": {required: false},
+        "box.oauth.refresh-token": {required: false},
+        "box.oauth.account": {required: false, secret: false},
+        "box.oauth.store": {required: false, secret: false},
+        "box.as-user": {required: false, secret: false}
+    },
+    doc: """
+    Box credential resolution, Client Credentials Grant, JWT server auth,
+    the per-run token cache, and the store-backed keeper for Box's
+    single-use OAuth refresh tokens. Usually used indirectly through
+    `::box::api/request`.
+
+    **Credential sources.** Per-call `opts` win over context. When `opts`
+    carries a primary credential (`token`, `account`, `refresh-token`,
+    `jwt-config` or `client-secret`), context credentials are ignored for
+    that call, except that `box.client.id` / `box.client.secret` (your
+    app's own keys) and `box.oauth.store` still fill in. Otherwise context
+    is used, with `opts.user-id` / `opts.enterprise-id` applied on top.
+    Within one source the order is: access token, OAuth (keeper or
+    `on-refresh`), JWT, CCG.
+
+    | Credential | `opts` keys | Context variables |
+    |---|---|---|
+    | Access token | `token` | `box.access.token` |
+    | OAuth, store keeper | `account` (+ optional seed `refresh-token`), `token-store` | `box.oauth.account`, `box.oauth.refresh-token` (seed), `box.oauth.store` |
+    | OAuth, you persist | `refresh-token` + `on-refresh` (a Fn) | - |
+    | JWT server auth | `jwt-config`, `private-key`, `user-id` / `enterprise-id` | `box.jwt.config`, `box.jwt.private-key`, `box.user.id` / `box.enterprise.id` |
+    | Client Credentials Grant | `client-id`, `client-secret`, `user-id` / `enterprise-id` | `box.client.id`, `box.client.secret`, `box.user.id` / `box.enterprise.id` |
+
+    OAuth refresh needs the app's `client-id` and `client-secret` too
+    (from `opts` or `box.client.id` / `box.client.secret`).
+
+    `as-user` (or `box.as-user`) adds the `As-User` header to every call:
+    an admin or service account acting as a managed user.
+
+    **Single-use refresh tokens.** Box access tokens last about 60
+    minutes; a refresh token lasts 60 days and works **once**. Every
+    refresh returns a new pair, and the old refresh token is dead. Losing
+    the new one means the user must consent again. Two ways to keep it:
+
+    1. The **keeper** (`account`): tokens live in a `::hot::store` Map
+       (`box-oauth-tokens` unless `token-store` / `box.oauth.store` names
+       another), one entry per account. A refresh first claims a short
+       lease on the entry with `::hot::store/put-if` (compare-and-set), so
+       two runs never spend the same refresh token, then writes the new
+       pair with `put-if` against the claimed value. The run that loses
+       the race gets the winner's access token, or, while the winner is
+       still refreshing, a `TokenError` with `error-code:
+       "refresh_in_progress"` that `::box::api/is-retryable` treats as
+       retryable. Store a pair once with `save-tokens` after
+       `::box::oauth/exchange-code`; a context `box.oauth.refresh-token`
+       only seeds an empty entry (`put-if-missing`) and is ignored after
+       that. `on-refresh` is still called after each refresh, as a
+       notification.
+    2. **You persist** (`refresh-token` + `on-refresh`): each refresh
+       calls `on-refresh(tokens)` with Box's token response
+       (`access_token`, `refresh_token`, `expires_in`); save
+       `tokens.refresh_token` before the run ends. A failing callback
+       fails the call. Within a run the rotated pair is cached, so later
+       calls never reuse the spent token. Concurrency is then yours to
+       handle. Or call `::box::oauth/refresh-tokens` yourself and pass
+       `token` per call.
+
+    A `refresh-token` in `opts` with neither `account` nor `on-refresh`
+    is refused: its replacement would be lost.
+
+    **Token cache.** Minted tokens are cached in the run's execution
+    context (`::hot::ctx`, stored as secrets) under a key derived from the
+    credential identity and subject, until `expires_in` minus 60 seconds.
+    The cache lives for one run. Explicit access tokens are never cached.
+    """
+}
+
+::ctx ::hot::ctx
+::hash ::hot::hash
+::time ::hot::time
+::store ::hot::store
+::b64 ::hot::base64
+::crypto ::hot::crypto
+::jwt ::jwt
+::oauth2 ::oauth2
+
+CACHE_PREFIX "box.token-cache."
+EXPIRY_MARGIN_SECONDS 60
+DEFAULT_EXPIRES_IN 3600
+// Box refresh tokens last 60 days and work once.
+REFRESH_TOKEN_TTL_SECONDS 5184000
+// How long a keeper refresh lease blocks other runs.
+LEASE_SECONDS 30
+// Box rejects JWT assertions that expire more than 60 seconds out.
+JWT_LIFETIME_SECONDS 45
+JWT_GRANT "urn:ietf:params:oauth:grant-type:jwt-bearer"
+DEFAULT_STORE "box-oauth-tokens"
+DEFAULT_ACCOUNT "default"
+
+// Keys an `opts` Map may carry that belong to box (credentials, the
+// As-User header, the immediate-retry switch) rather than to the API
+// being called. Endpoint functions strip these before building queries.
+CREDENTIAL_KEYS ["token", "account", "token-store", "on-refresh", "refresh-token", "client-id", "client-secret", "jwt-config", "private-key", "enterprise-id", "user-id", "as-user", "retry", "force-refresh"]
+
+TokenError
+meta {
+    doc: """
+    A credential or token-endpoint failure. `message` is readable, e.g.
+    `"box: token request failed: invalid_grant (Refresh token has expired)"`.
+    `error-code` and `error-description` carry Box's OAuth `error` /
+    `error_description` when the token endpoint answered, or one of
+    box's own codes: `"refresh_in_progress"` (retryable),
+    `"no_tokens"`, `"refresh_token_expired"`, `"encrypted_private_key"`.
+    No token or secret is ever included.
+    """
+}
+type {
+    message: Str,
+    status: Int?,
+    error-code: Str?,
+    error-description: Str?,
+    body: Any?
+}
+
+token-error
+meta {
+    doc: """Build a `TokenError`. The 1-arity form wraps a plain message; the 2-arity form prefixes the payload of a failed `::oauth2` call (`{status, body}` or a transport error)."""
+}
+fn
+(message: Str): TokenError {
+  TokenError({message: message})
+},
+(prefix: Str, payload: Any): TokenError {
+  body if(is-map(payload), payload.body, null)
+  status if(is-map(payload), payload.status, null)
+  code if(is-map(body), body.error, null)
+  desc if(is-map(body), body.error_description, null)
+  detail cond {
+    and(is-some(code), is-some(desc)) => { `${code} (${desc})` }
+    is-some(code) => { Str(code) }
+    is-some(status) => { `HTTP ${status}` }
+    is-str(payload) => { payload }
+    => { err-message(payload) }
+  }
+
+  TokenError({
+    message: `${prefix}: ${detail}`,
+    status: status,
+    error-code: if(is-some(code), Str(code), null),
+    error-description: desc,
+    body: body
+  })
+}
+
+coded-error
+meta {doc: """A `TokenError` with one of box's own `error-code`s."""}
+fn (message: Str, code: Str): TokenError {
+  TokenError({message: message, error-code: code})
+}
+
+is-blank-value
+meta {
+    doc: """True for null, `""`, and whitespace-only strings (context placeholders wire `""` for unset env vars)."""
+}
+fn (value: Any): Bool {
+  or(is-null(value), and(is-str(value), is-empty(trim(value))))
+}
+
+present
+meta {doc: """`value` as a trimmed Str, or null when blank."""}
+fn (value: Any): Str? {
+  if(is-blank-value(value), null, trim(Str(value)))
+}
+
+now-ms fn (): Int {
+  ::time/epoch-millis(::time/now())
+}
+
+token-url
+meta {
+    doc: """The OAuth token endpoint: `https://api.box.com/oauth2/token`, or under the `box.api-root` override."""
+}
+fn (): Str {
+  `${::box/api-root()}/oauth2/token`
+}
+
+// ---------------------------------------------------------------------------
+// Credential resolution
+// ---------------------------------------------------------------------------
+
+has-primary-credential
+meta {
+    doc: """True when `source` carries a primary credential: `token`, `account`, `refresh-token`, `jwt-config` or `client-secret`."""
+}
+fn (source: Map): Bool {
+  or(
+    not(is-blank-value(source.token)),
+    not(is-blank-value(source.account)),
+    not(is-blank-value(get(source, "refresh-token"))),
+    not(is-blank-value(get(source, "jwt-config"))),
+    not(is-blank-value(get(source, "client-secret")))
+  )
+}
+
+ctx-source
+meta {
+    doc: """The credential source read from context, in the same shape as `opts`. A context refresh token without `box.oauth.account` belongs to the keeper account `"default"`."""
+}
+fn (): Map {
+  refresh ::ctx/get("box.oauth.refresh-token")
+  account or(present(::ctx/get("box.oauth.account")), if(is-blank-value(refresh), null, DEFAULT_ACCOUNT))
+  {
+    token: ::ctx/get("box.access.token"),
+    account: account,
+    refresh-token: refresh,
+    token-store: ::ctx/get("box.oauth.store"),
+    client-id: ::ctx/get("box.client.id"),
+    client-secret: ::ctx/get("box.client.secret"),
+    jwt-config: ::ctx/get("box.jwt.config"),
+    private-key: ::ctx/get("box.jwt.private-key"),
+    enterprise-id: ::ctx/get("box.enterprise.id"),
+    user-id: ::ctx/get("box.user.id")
+  }
+}
+
+with-subject
+meta {
+    doc: """Apply `opts.user-id` / `opts.enterprise-id` to a source (pure). An enterprise subject clears the user subject, so the call runs as the enterprise's service account."""
+}
+fn (source: Map, opts: Map): Map {
+  cond {
+    not(is-blank-value(get(opts, "user-id"))) => { {...source, user-id: get(opts, "user-id")} }
+    not(is-blank-value(get(opts, "enterprise-id"))) => { {...source, enterprise-id: get(opts, "enterprise-id"), user-id: null} }
+    => { source }
+  }
+}
+
+merge-sources
+meta {
+    doc: """Pick the credential source for a call (pure): `opts` (over the app's `client-id` / `client-secret` / `token-store` from context) when it carries a primary credential, otherwise context with the `opts` subject applied. `resolve-credentials` passes the live context."""
+}
+fn (opts: Map, ctx: Map): Map {
+  cond {
+    has-primary-credential(opts) => {
+      app filter-vals({
+        client-id: get(ctx, "client-id"),
+        client-secret: if(is-blank-value(get(opts, "client-id")), get(ctx, "client-secret"), null),
+        token-store: get(ctx, "token-store")
+      }, (v) { not(is-blank-value(v)) })
+      {...app, ...filter-vals(opts, is-some)}
+    }
+    => { with-subject(ctx, opts) }
+  }
+}
+
+subject-of
+meta {
+    doc: """The `{type, id}` subject for CCG or JWT (pure): `user-id` gives `user`, else `enterprise-id` (or `default-enterprise`) gives `enterprise`; null when neither is set."""
+}
+fn (source: Map, default-enterprise: Any): Map? {
+  user present(get(source, "user-id"))
+  enterprise or(present(get(source, "enterprise-id")), present(default-enterprise))
+  cond {
+    is-some(user) => { {type: "user", id: user} }
+    is-some(enterprise) => { {type: "enterprise", id: enterprise} }
+    => { null }
+  }
+}
+
+normalize-pem
+meta {
+    doc: """Undo the `\\n` escaping a PEM picks up in env vars and JSON-in-JSON (pure); real newlines pass through."""
+}
+fn (pem: Str): Str {
+  trim(replace(replace(pem, "\\r\\n", "\n"), "\\n", "\n"))
+}
+
+pem-problem
+meta {
+    doc: """Why a PEM cannot sign Box JWT assertions (pure), or null when it looks usable. Encrypted keys (the `privateKey` in a Box-generated config) cannot be decrypted in Hot."""
+}
+fn (pem: Str?): Str? {
+  p or(pem, "")
+  cond {
+    is-empty(trim(p)) => { "no private key: set box.jwt.private-key (or opts.private-key) to an unencrypted PKCS#8 PEM" }
+    contains(p, "ENCRYPTED PRIVATE KEY") => {
+      "the private key is encrypted, and Hot cannot decrypt it. Decrypt it once with `openssl pkcs8 -in encrypted.pem -out box-key.pem` (it asks for the config's passphrase) and set box.jwt.private-key to the BEGIN PRIVATE KEY output"
+    }
+
+    contains(p, "Proc-Type: 4,ENCRYPTED") => {
+      "the private key is an encrypted PKCS#1 PEM; decrypt it with `openssl pkcs8 -topk8 -nocrypt -in key.pem -out box-key.pem`"
+    }
+
+    or(contains(p, "BEGIN PRIVATE KEY"), contains(p, "BEGIN RSA PRIVATE KEY")) => { null }
+    => { "the private key is not a PEM (expected a BEGIN PRIVATE KEY block)" }
+  }
+}
+
+parse-jwt-config
+meta {
+    doc: """
+    Parse a Box app config (the JSON the Developer Console downloads, as a
+    Str or Map) into JWT credentials (pure): `{kind: "jwt", client-id,
+    client-secret, key-id, private-key, subject}`. `private-key`
+    (nullable) overrides the config's key; it must be an unencrypted
+    PKCS#8 (or PKCS#1) PEM. Returns a `TokenError` when something is
+    missing or the key is encrypted.
+    """
+}
+fn (config: Any, private-key: Any, source: Map): Map {
+  parsed if(is-str(config), from-json(config), config)
+  cond {
+    is-err(parsed) => { err(token-error("box: box.jwt.config is not valid JSON")) }
+    not(is-map(parsed)) => { err(token-error("box: box.jwt.config must be a JSON object")) }
+    => {
+      settings or(parsed.boxAppSettings, {})
+      app-auth or(settings.appAuth, {})
+      key normalize-pem(Str(or(present(private-key), or(app-auth.privateKey, ""))))
+      problem pem-problem(key)
+      subject subject-of(source, parsed.enterpriseID)
+      cond {
+        or(is-blank-value(settings.clientID), is-blank-value(settings.clientSecret)) => {
+          err(token-error("box: box.jwt.config has no boxAppSettings.clientID / clientSecret"))
+        }
+
+        is-some(problem) => { err(coded-error(`box: ${problem}`, if(contains(key, "ENCRYPTED"), "encrypted_private_key", "invalid_private_key"))) }
+        is-null(subject) => { err(token-error("box: JWT auth needs a subject: set box.enterprise.id or box.user.id (or enterpriseID in the config)")) }
+        => {
+          {
+            kind: "jwt",
+            client-id: Str(settings.clientID),
+            client-secret: Str(settings.clientSecret),
+            key-id: present(app-auth.publicKeyID),
+            private-key: key,
+            subject: subject
+          }
+        }
+      }
+    }
+  }
+}
+
+app-keys-error fn (what: Str): TokenError {
+  token-error(`box: ${what} needs the app's client-id and client-secret: set box.client.id and box.client.secret or pass them in opts`)
+}
+
+credentials-from
+meta {
+    doc: """
+    Turn a credential source Map (the `opts` shape) into resolved
+    credentials (pure): `{kind: "token" | "keeper" | "refresh" | "jwt" |
+    "ccg", ...}`. Returns a `TokenError` when nothing usable is set or a
+    piece is missing.
+    """
+}
+fn (source: Map): Map {
+  client-id present(get(source, "client-id"))
+  client-secret present(get(source, "client-secret"))
+  refresh present(get(source, "refresh-token"))
+  account present(source.account)
+  on-refresh get(source, "on-refresh")
+  has-app and(is-some(client-id), is-some(client-secret))
+  cond {
+    not(is-blank-value(source.token)) => { {kind: "token", token: trim(Str(source.token))} }
+
+    is-some(account) => {
+      cond {
+        not(has-app) => { err(app-keys-error("the OAuth token keeper")) }
+        => {
+          {
+            kind: "keeper",
+            account: account,
+            store: get(source, "token-store"),
+            seed-refresh-token: refresh,
+            client-id: client-id,
+            client-secret: client-secret,
+            on-refresh: if(is-fn(on-refresh), on-refresh, null)
+          }
+        }
+      }
+    }
+
+    is-some(refresh) => {
+      cond {
+        not(is-fn(on-refresh)) => {
+          err(token-error("box: Box refresh tokens are single-use, so a refresh-token needs somewhere to keep its replacement: pass account (the store-backed keeper) or on-refresh (a Fn that saves tokens.refresh_token)"))
+        }
+
+        not(has-app) => { err(app-keys-error("an OAuth refresh")) }
+        => { {kind: "refresh", refresh-token: refresh, client-id: client-id, client-secret: client-secret, on-refresh: on-refresh} }
+      }
+    }
+
+    not(is-blank-value(get(source, "jwt-config"))) => {
+      parse-jwt-config(get(source, "jwt-config"), get(source, "private-key"), source)
+    }
+
+    has-app => {
+      subject subject-of(source, null)
+      cond {
+        is-null(subject) => {
+          err(token-error("box: Client Credentials Grant needs a subject: set box.enterprise.id (the service account) or box.user.id"))
+        }
+        => { {kind: "ccg", client-id: client-id, client-secret: client-secret, subject: subject} }
+      }
+    }
+
+    => {
+      err(token-error("box: no credentials configured. Set box.access.token, box.client.id + box.client.secret with box.enterprise.id or box.user.id (CCG), box.jwt.config (JWT), or box.oauth.account (OAuth) in Context Variables, or pass credentials in opts."))
+    }
+  }
+}
+
+resolve-credentials
+meta {
+    doc: """Resolve the credentials for a call from `opts` and context (see the namespace doc for precedence)."""
+}
+fn
+(): Map {
+  resolve-credentials({})
+},
+(opts: Map): Map {
+  credentials-from(merge-sources(opts, ctx-source()))
+}
+
+app-keys
+meta {
+    doc: """The app's `{client-id, client-secret}` for a call (the same resolver as credentials): `opts.client-id` / `client-secret` first, else `box.client.id` / `box.client.secret`. A `TokenError` when either is missing."""
+}
+fn (opts: Map): Map {
+  own-id present(get(opts, "client-id"))
+  id or(own-id, present(::ctx/get("box.client.id")))
+  // Another app's id never pairs with this app's context secret.
+  secret or(present(get(opts, "client-secret")), if(is-some(own-id), null, present(::ctx/get("box.client.secret"))))
+  if(and(is-some(id), is-some(secret)), {client-id: id, client-secret: secret}, err(app-keys-error("this OAuth call")))
+}
+
+as-user
+meta {
+    doc: """The `As-User` user id for a call: `opts.as-user`, else the `box.as-user` context variable, else null."""
+}
+fn (opts: Map): Str? {
+  or(present(get(opts, "as-user")), present(::ctx/get("box.as-user")))
+}
+
+// ---------------------------------------------------------------------------
+// Token requests (pure body builders + the token endpoint)
+// ---------------------------------------------------------------------------
+
+ccg-body
+meta {
+    doc: """The Client Credentials Grant form body (pure): `grant_type=client_credentials`, `client_id`, `client_secret`, `box_subject_type` (`enterprise` or `user`), `box_subject_id`."""
+}
+fn (client-id: Str, client-secret: Str, subject: Map): Map {
+  {
+    ...::oauth2/build-client-credentials-body({client-id: client-id, client-secret: client-secret}),
+    box_subject_type: subject.type,
+    box_subject_id: subject.id
+  }
+}
+
+jwt-claims
+meta {
+    doc: """The Box JWT assertion claims (pure): `iss` (client id), `sub` (enterprise or user id), `box_sub_type`, `aud` (the token URL), `jti` (16-128 chars, unique), `exp` (`now` + 45 s; Box allows at most 60)."""
+}
+fn (client-id: Str, subject: Map, jti: Str, now: Int): Map {
+  {
+    iss: client-id,
+    sub: subject.id,
+    box_sub_type: subject.type,
+    aud: ::box/TOKEN_URL,
+    jti: jti,
+    exp: add(now, JWT_LIFETIME_SECONDS)
+  }
+}
+
+jwt-header
+meta {
+    doc: """The JWT header (pure): `{alg: "RS256", typ: "JWT", kid}`, `kid` being the app's public key id (omitted when null)."""
+}
+fn (key-id: Str?): Map {
+  filter-vals({alg: "RS256", typ: "JWT", kid: key-id}, is-some)
+}
+
+encode-segment fn (value: Map): Str {
+  ::b64/encode-url(to-json(untype(value)))
+}
+
+sign-assertion
+meta {
+    doc: """
+    Sign Box JWT claims with RS256 and the app's `kid` header. Returns the
+    compact JWT, or an Err when the key cannot sign. (`::jwt/sign` has no
+    header option, so the kid-bearing header is built here; the signature
+    is the same RSASSA-PKCS1-v1_5 / SHA-256 that `::jwt` uses.)
+    """
+}
+fn (claims: Map, key-id: Str?, private-key: Str): Str {
+  signing-input `${encode-segment(jwt-header(key-id))}.${encode-segment(claims)}`
+  raw ::crypto/rsa-sha256-sign(private-key, signing-input)
+  cond {
+    is-err(raw) => { err(token-error("box: could not sign the JWT assertion (check box.jwt.private-key)")) }
+    => { `${signing-input}.${::b64/encode-url(raw)}` }
+  }
+}
+
+jwt-body
+meta {
+    doc: """The JWT-bearer grant form body (pure): `grant_type`, `assertion`, `client_id`, `client_secret`."""
+}
+fn (assertion: Str, client-id: Str, client-secret: Str): Map {
+  {
+    ...::oauth2/build-jwt-bearer-body(assertion),
+    client_id: client-id,
+    client_secret: client-secret
+  }
+}
+
+request-token
+meta {
+    doc: """POST a grant body to the Box token endpoint. Returns Box's token response or a `TokenError` (the error never echoes the body you sent)."""
+}
+fn (body: Map): Map {
+  tokens ::oauth2/token-request(token-url(), body)
+  if(is-err(tokens), err(token-error("box: token request failed", err-value(tokens))), tokens)
+}
+
+refresh-token-grant
+meta {
+    doc: """Spend a refresh token: returns Box's token response with the **new** `refresh_token` (the old one is now dead), or a `TokenError` (`error-code: "invalid_grant"` when it was already used, revoked or older than 60 days)."""
+}
+fn (client-id: Str, client-secret: Str, refresh-token: Str): Map {
+  request-token(::oauth2/build-refresh-body({client-id: client-id, client-secret: client-secret, refresh-token: refresh-token}))
+}
+
+mint-token
+meta {doc: """Mint a fresh token response for CCG or JWT credentials (no cache)."""}
+fn (creds: Map): Map {
+  cond {
+    eq(creds.kind, "ccg") => { request-token(ccg-body(creds.client-id, creds.client-secret, creds.subject)) }
+    eq(creds.kind, "jwt") => {
+      claims jwt-claims(creds.client-id, creds.subject, Str(Uuid()), ::jwt/now-seconds())
+      assertion sign-assertion(claims, get(creds, "key-id"), get(creds, "private-key"))
+      if(is-err(assertion), assertion, request-token(jwt-body(assertion, creds.client-id, creds.client-secret)))
+    }
+    => { err(token-error(`box: cannot mint a token for ${creds.kind} credentials`)) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Token cache (per run, in the execution context)
+// ---------------------------------------------------------------------------
+
+store-name
+meta {
+    doc: """The keeper store's name for a `token-store` value (a Str, a `::hot::store/Map`, or null for `box-oauth-tokens`)."""
+}
+fn (value: Any): Str {
+  cond {
+    is-blank-value(value) => { DEFAULT_STORE }
+    is-str(value) => { trim(value) }
+    // A ::hot::store/Map is a typed record (is-map is false for it).
+    is-str(get(value, "name")) => { get(value, "name") }
+    => { DEFAULT_STORE }
+  }
+}
+
+token-cache-key
+meta {
+    doc: """The context key a minted token is cached under, or null for explicit access tokens. Keyed by a hash of the credential identity and subject; no secret appears in the key."""
+}
+fn (creds: Map): Str? {
+  identity cond {
+    eq(creds.kind, "ccg") => { join(["ccg", creds.client-id, creds.subject.type, creds.subject.id], "|") }
+    eq(creds.kind, "jwt") => { join(["jwt", creds.client-id, or(get(creds, "key-id"), ""), creds.subject.type, creds.subject.id], "|") }
+    eq(creds.kind, "refresh") => { join(["refresh", creds.client-id, get(creds, "refresh-token")], "|") }
+    eq(creds.kind, "keeper") => { join(["keeper", store-name(creds.store), creds.account], "|") }
+    => { null }
+  }
+
+  if(is-null(identity), null, concat(CACHE_PREFIX, ::hash/sha256(identity)))
+}
+
+expires-in-seconds fn (tokens: Map): Int {
+  n ::box::api/parse-int(tokens.expires_in)
+  if(is-null(n), DEFAULT_EXPIRES_IN, or(n, DEFAULT_EXPIRES_IN))
+}
+
+cache-entry
+meta {
+    doc: """The cached form of a token response (pure): `{access-token, expires-at}` (epoch ms, `EXPIRY_MARGIN_SECONDS` early), plus the rotated `refresh-token` when the response carries one."""
+}
+fn (tokens: Map, now: Int): Map {
+  filter-vals({
+    access-token: tokens.access_token,
+    expires-at: add(now, mul(sub(expires-in-seconds(tokens), EXPIRY_MARGIN_SECONDS), 1000)),
+    refresh-token: tokens.refresh_token
+  }, is-some)
+}
+
+is-fresh
+meta {
+    doc: """True when an entry (cache or keeper record) has an access token that has not reached its margin-adjusted expiry."""
+}
+fn (entry: Any, now: Int): Bool {
+  and(is-map(entry), is-some(get(entry, "access-token")), lt(now, or(get(entry, "expires-at"), 0)))
+}
+
+evict-token
+meta {doc: """Drop a cached token (e.g. after a 401). No-op for a null key."""}
+fn (cache-key: Str?): Bool {
+  cond {
+    is-null(cache-key) => { false }
+    => {
+      hit ::ctx/get(cache-key)
+      // Keep a rotated refresh token: it is the only live one.
+      kept if(and(is-map(hit), is-some(get(hit, "refresh-token"))), {refresh-token: get(hit, "refresh-token")}, null)
+      ::ctx/set-secret(cache-key, kept)
+      true
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The store-backed refresh-token keeper
+// ---------------------------------------------------------------------------
+
+token-store
+meta {
+    doc: """The `::hot::store/Map` the keeper uses for a `token-store` value (Str name, store Map, or null for `box-oauth-tokens`)."""
+}
+fn (value: Any): Map {
+  ::store/Map({name: store-name(value)})
+}
+
+keeper-record
+meta {
+    doc: """
+    The keeper's stored form of a Box token response (pure):
+    `{access-token, expires-at, refresh-token, refresh-expires-at,
+    updated-at}` (epoch ms). `refresh-expires-at` is 60 days out, Box's
+    refresh-token lifetime.
+    """
+}
+fn (tokens: Map, now: Int): Map {
+  filter-vals({
+    access-token: tokens.access_token,
+    expires-at: if(is-some(tokens.access_token), add(now, mul(sub(expires-in-seconds(tokens), EXPIRY_MARGIN_SECONDS), 1000)), 0),
+    refresh-token: tokens.refresh_token,
+    refresh-expires-at: if(is-some(tokens.refresh_token), add(now, mul(REFRESH_TOKEN_TTL_SECONDS, 1000)), null),
+    updated-at: now
+  }, is-some)
+}
+
+seed-record
+meta {
+    doc: """A keeper record holding only a refresh token (pure), for seeding an empty account. Its refresh expiry is unknown."""
+}
+fn (refresh-token: Str, now: Int): Map {
+  {access-token: null, expires-at: 0, refresh-token: refresh-token, updated-at: now}
+}
+
+keeper-plan
+meta {
+    doc: """
+    Decide what the keeper does with a stored record (pure): `"use"` its
+    fresh access token, `"refresh"`, wait for another run (`"busy"`: a
+    refresh lease is live), or give up (`"missing"`: no record or no
+    refresh token; `"expired"`: past the 60-day refresh lifetime).
+    `force` skips a fresh access token (after a 401).
+    """
+}
+fn (record: Any, now: Int, force: Bool): Str {
+  lease or(if(is-map(record), get(record, "lease-until"), null), 0)
+  refresh-expiry if(is-map(record), get(record, "refresh-expires-at"), null)
+  cond {
+    not(is-map(record)) => { "missing" }
+    and(not(force), is-fresh(record, now)) => { "use" }
+    gt(lease, now) => { "busy" }
+    is-blank-value(get(record, "refresh-token")) => { "missing" }
+    and(is-int(refresh-expiry), lte(or(refresh-expiry, 0), now)) => { "expired" }
+    => { "refresh" }
+  }
+}
+
+claim-record
+meta {
+    doc: """A record with a refresh lease (pure): `lease-until` (now + 30 s) and a unique `lease-id`."""
+}
+fn (record: Map, now: Int, lease-id: Str): Map {
+  {...record, lease-until: add(now, mul(LEASE_SECONDS, 1000)), lease-id: lease-id}
+}
+
+save-tokens
+meta {
+    doc: """
+    Store a token response for `account` in the keeper, replacing what was
+    there. Call it after `::box::oauth/exchange-code` (and after any
+    re-consent). Returns true.
+
+    ```hot
+    tokens ::box::oauth/exchange-code(client-id, client-secret, request.query.code, redirect-uri)
+    ::box::auth/save-tokens(`tenant:${tenant-id}`, tokens)
+
+    // later, in any run
+    me ::box::api/json("GET", "https://api.box.com/2.0/users/me", {}, "", {account: `tenant:${tenant-id}`})
+    ```
+    """
+}
+fn
+(account: Str, tokens: Map): Bool {
+  save-tokens(account, tokens, {})
+},
+(account: Str, tokens: Map, opts: Map): Bool {
+  cond {
+    is-blank-value(tokens.refresh_token) => { err(token-error("box: the token response has no refresh_token to keep")) }
+    => {
+      ::store/put(token-store(or(get(opts, "token-store"), ::ctx/get("box.oauth.store"))), account, keeper-record(tokens, now-ms()))
+      true
+    }
+  }
+}
+
+load-tokens
+meta {
+    doc: """The keeper record for `account` (`{access-token, expires-at, refresh-token, refresh-expires-at, updated-at}`), or null. It holds live secrets: never log it."""
+}
+fn
+(account: Str): Map? {
+  load-tokens(account, {})
+},
+(account: Str, opts: Map): Map? {
+  ::store/get(token-store(or(get(opts, "token-store"), ::ctx/get("box.oauth.store"))), account)
+}
+
+forget-tokens
+meta {
+    doc: """Delete the keeper record for `account` (e.g. on disconnect, after `::box::oauth/revoke-token`). Returns true when one existed."""
+}
+fn
+(account: Str): Bool {
+  forget-tokens(account, {})
+},
+(account: Str, opts: Map): Bool {
+  ::store/delete(token-store(or(get(opts, "token-store"), ::ctx/get("box.oauth.store"))), account)
+}
+
+busy-error fn (account: Str): TokenError {
+  coded-error(`box: another run is refreshing the Box tokens for account ${account}; retry shortly`, "refresh_in_progress")
+}
+
+notify-refresh fn (creds: Map, tokens: Map): Any {
+  cb get(creds, "on-refresh")
+  if(is-fn(cb), cb({...untype(tokens), account: creds.account}), null)
+}
+
+keeper-refresh fn (creds: Map, store: Map, record: Map, now: Int): Map {
+  claimed claim-record(record, now, Str(Uuid()))
+  won ::store/put-if(store, creds.account, record, claimed)
+  cond {
+    not(won) => {
+      // Another run changed the entry between our read and our claim.
+      latest ::store/get(store, creds.account)
+      if(is-fresh(latest, now), {access-token: latest.access-token, expires-at: latest.expires-at, refreshed: false}, err(busy-error(creds.account)))
+    }
+    => {
+      tokens refresh-token-grant(creds.client-id, creds.client-secret, get(record, "refresh-token"))
+      cond {
+        is-err(tokens) => {
+          // Release the lease; the record is unchanged (Box rejected or never saw the token).
+          ::store/put-if(store, creds.account, claimed, record)
+          tokens
+        }
+        => {
+          fresh keeper-record(tokens, now)
+          // A false put-if means someone replaced the entry while we held the
+          // lease (save-tokens after a re-consent): keep theirs.
+          ::store/put-if(store, creds.account, claimed, fresh)
+          notify-refresh(creds, tokens)
+          {access-token: fresh.access-token, expires-at: fresh.expires-at, refreshed: true}
+        }
+      }
+    }
+  }
+}
+
+keeper-access-token
+meta {
+    doc: """
+    The keeper's access token for resolved `keeper` credentials: the
+    stored one while fresh, else a refresh under a compare-and-set lease
+    (see the namespace doc). Returns `{access-token, expires-at,
+    refreshed}` or a `TokenError` (`refresh_in_progress` is retryable;
+    `no_tokens`, `refresh_token_expired` and `invalid_grant` need the
+    user to consent again).
+    """
+}
+fn (creds: Map, force: Bool): Map {
+  store token-store(creds.store)
+  now now-ms()
+  existing ::store/get(store, creds.account)
+  seed get(creds, "seed-refresh-token")
+  record cond {
+    and(is-null(existing), is-some(seed)) => {
+      ::store/put-if-missing(store, creds.account, seed-record(or(seed, ""), now))
+      ::store/get(store, creds.account)
+    }
+    => { existing }
+  }
+
+  plan keeper-plan(record, now, force)
+  cond {
+    eq(plan, "use") => { {access-token: record.access-token, expires-at: record.expires-at, refreshed: false} }
+    eq(plan, "busy") => { err(busy-error(creds.account)) }
+    eq(plan, "missing") => {
+      err(coded-error(`box: no stored Box tokens for account ${creds.account}; run the OAuth flow and call ::box::auth/save-tokens`, "no_tokens"))
+    }
+
+    eq(plan, "expired") => {
+      err(coded-error(`box: the stored refresh token for account ${creds.account} is past Box's 60-day lifetime; the user must authorize again`, "refresh_token_expired"))
+    }
+    => { keeper-refresh(creds, store, record, now) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bearer resolution
+// ---------------------------------------------------------------------------
+
+refresh-bearer fn (creds: Map, key: Str, hit: Any, now: Int): Map {
+  // Within a run, the rotated refresh token in the cache is the live one.
+  live or(if(is-map(hit), get(hit, "refresh-token"), null), get(creds, "refresh-token"))
+  tokens refresh-token-grant(creds.client-id, creds.client-secret, live)
+  cond {
+    is-err(tokens) => { tokens }
+    => {
+      ::ctx/set-secret(key, cache-entry(tokens, now))
+      save get(creds, "on-refresh")
+      saved save(tokens)
+      cond {
+        is-err(saved) => { err(token-error("box: on-refresh failed to save the rotated Box tokens", err-message(saved))) }
+        => { {token: tokens.access_token, cache-key: key, cached: false} }
+      }
+    }
+  }
+}
+
+bearer
+meta {
+    doc: """
+    Resolve a bearer token for resolved credentials, using the per-run
+    cache. Returns `{token, cache-key, cached}` (`cached` is true when the
+    token was not minted by this call, so a 401 should evict and retry),
+    or a `TokenError`. `opts.force-refresh` skips cached and stored tokens.
+    """
+}
+fn (creds: Map, opts: Map): Map {
+  force eq(get(opts, "force-refresh"), true)
+  cond {
+    eq(creds.kind, "token") => { {token: creds.token, cache-key: null, cached: false} }
+    => {
+      key token-cache-key(creds)
+      now now-ms()
+      hit ::ctx/get(key)
+      cond {
+        and(not(force), is-fresh(hit, now)) => { {token: hit.access-token, cache-key: key, cached: true} }
+        eq(creds.kind, "refresh") => { refresh-bearer(creds, key, hit, now) }
+        eq(creds.kind, "keeper") => {
+          kept keeper-access-token(creds, force)
+          cond {
+            is-err(kept) => { kept }
+            => {
+              ::ctx/set-secret(key, {access-token: kept.access-token, expires-at: kept.expires-at})
+              {token: kept.access-token, cache-key: key, cached: not(kept.refreshed)}
+            }
+          }
+        }
+        => {
+          tokens mint-token(creds)
+          cond {
+            is-err(tokens) => { tokens }
+            => {
+              ::ctx/set-secret(key, cache-entry(tokens, now))
+              {token: tokens.access_token, cache-key: key, cached: false}
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+access-token
+meta {
+    doc: """
+    Resolve an access token from `opts` and context. Returns the bearer
+    token Str, or a `TokenError` when no credentials are configured or
+    the token request fails. CCG, JWT and refreshed tokens are cached for
+    the run.
+
+    ```hot
+    token ::box::auth/access-token()
+
+    // As one managed user, through the CCG app in context
+    token2 ::box::auth/access-token({user-id: "12345"})
+    ```
+    """
+}
+fn
+(): Str {
+  access-token({})
+},
+(opts: Map): Str {
+  creds resolve-credentials(opts)
+  cond {
+    is-err(creds) => { creds }
+    => {
+      auth bearer(creds, opts)
+      if(is-err(auth), auth, auth.token)
+    }
+  }
+}

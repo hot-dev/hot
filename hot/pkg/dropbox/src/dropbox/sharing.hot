@@ -1,0 +1,149 @@
+::dropbox::sharing ns
+meta {
+    doc: """
+    Shared links: create one with settings (audience, access, expiry,
+    password), reuse an existing one, list, and revoke.
+
+    Anyone who has a `public` link can open the file, so treat links as
+    sensitive. Team and shared-folder policies can narrow what you ask
+    for: check `link_permissions.effective_audience` /
+    `resolved_visibility` on the result.
+
+    **Scopes.** `sharing.write` to create and revoke, `sharing.read` to list.
+    """
+}
+
+::api ::dropbox::api
+
+SETTING_KEYS ["audience", "access", "allow_download", "expires", "link_password", "require_password", "requested_visibility"]
+
+link-settings
+meta {
+    doc: """
+    `SharedLinkSettings` from `opts` (pure), or null when none are set:
+    `audience` (`"public"`, `"team"`, `"no_one"`), `access` (`"viewer"`,
+    `"editor"`, `"max"`, `"default"`), `allow_download`, `expires`
+    (`"2026-12-31T23:59:59Z"`), `link_password` with `require_password:
+    true`. A `settings` Map in `opts` is merged too. Some settings need a
+    paid plan.
+    """
+}
+fn (opts: Map): Map? {
+  given if(is-map(get(opts, "settings")), get(opts, "settings"), {})
+  flat filter-keys(::api/api-params(opts), (k) { in(k, SETTING_KEYS) })
+  settings filter-vals({...given, ...flat}, is-some)
+  if(is-empty(settings), null, settings)
+}
+
+create-shared-link
+meta {
+    doc: """
+    POST sharing/create_shared_link_with_settings - create a shared link
+    for a file or folder. Returns the link metadata (`url`, `name`,
+    `link_permissions`, `expires`, ...). Fails with 409
+    `shared_link_already_exists` when the path already has a link: use
+    `get-or-create-shared-link` to reuse it.
+
+    ```hot
+    link ::dropbox::sharing/create-shared-link("/Reports/Q3.pdf", {audience: "team", expires: "2026-12-31T23:59:59Z"})
+    link.url
+    ```
+    """
+}
+fn
+(path: Str): Map {
+  create-shared-link(path, {})
+},
+(path: Str, opts: Map): Map {
+  arg ::dropbox/compact({path: ::dropbox/normalize-path(path), settings: link-settings(opts)})
+  ::api/rpc("sharing/create_shared_link_with_settings", arg, ::api/credential-opts(opts))
+}
+
+existing-link
+meta {
+    doc: """The link metadata Dropbox returns inside a `shared_link_already_exists` error (pure), or null."""
+}
+fn (error: Result): Map? {
+  payload ::api/plain-payload(error)
+  e if(is-map(payload), get(payload, "error"), null)
+  node ::api/error-node(e, "metadata")
+  if(is-map(node), get(node, "metadata"), null)
+}
+
+get-or-create-shared-link
+meta {
+    doc: """Return the path's existing shared link, or create one with `opts` settings. When a link exists, its current settings are kept (they are not changed to match `opts`)."""
+}
+fn
+(path: Str): Map {
+  get-or-create-shared-link(path, {})
+},
+(path: Str, opts: Map): Map {
+  created create-shared-link(path, opts)
+  cond {
+    not(::api/has-error-tag(created, "shared_link_already_exists")) => { created }
+    is-some(existing-link(created)) => { existing-link(created) }
+    => {
+      page list-shared-links({...::api/credential-opts(opts), path: path, direct_only: true})
+      links if(is-err(page), [], or(page.links, []))
+      if(is-empty(links), created, first(links))
+    }
+  }
+}
+
+list-shared-links
+meta {
+    doc: """
+    POST sharing/list_shared_links - one page of the user's shared links:
+    `{links, has_more, cursor?}`. Options: `path` (links that give access
+    to it, including links to parent folders unless `direct_only: true`),
+    `cursor` (from the previous page; only returned when no path is given).
+    """
+}
+fn
+(): Map {
+  list-shared-links({})
+},
+(opts: Map): Map {
+  params ::api/api-params(opts)
+  path get(params, "path")
+  arg ::dropbox/compact({...params, path: if(is-null(path), null, ::dropbox/normalize-path(path))})
+  ::api/rpc("sharing/list_shared_links", arg, ::api/credential-opts(opts))
+}
+
+list-all-shared-links
+meta {
+    doc: """Every shared link (all pages), or at most `limit`. Options as for `list-shared-links`."""
+}
+fn
+(opts: Map): Vec {
+  list-all-shared-links(opts, null)
+},
+(opts: Map, limit: Int?): Vec {
+  ::api/collect-cursor(list-shared-links(opts), (c) { list-shared-links({...opts, cursor: c}) }, "links", limit)
+}
+
+revoke-shared-link
+meta {
+    doc: """POST sharing/revoke_shared_link - revoke a shared link by `url`. The file may stay reachable through links to its parent folders (find them with `list-shared-links({path})`). Returns true."""
+}
+fn
+(url: Str): Bool {
+  revoke-shared-link(url, {})
+},
+(url: Str, opts: Map): Bool {
+  result ::api/rpc("sharing/revoke_shared_link", {url: url}, opts)
+  if(is-err(result), result, true)
+}
+
+get-shared-link-metadata
+meta {
+    doc: """POST sharing/get_shared_link_metadata - the metadata of a shared link `url` (`path` and `link_password` in `opts` for a file inside a shared folder link or a protected link)."""
+}
+fn
+(url: Str): Map {
+  get-shared-link-metadata(url, {})
+},
+(url: Str, opts: Map): Map {
+  ::api/rpc("sharing/get_shared_link_metadata", ::api/build-arg({url: url}, opts), opts)
+}

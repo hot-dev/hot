@@ -1,0 +1,117 @@
+::dropbox::test::files ns
+meta ["test"]
+
+::files ::dropbox::files
+::sharing ::dropbox::sharing
+::users ::dropbox::users
+
+test-normalize-path
+meta ["test"] fn () {
+    assert-eq("", ::dropbox/normalize-path(null))
+    assert-eq("", ::dropbox/normalize-path("/"))
+    assert-eq("", ::dropbox/normalize-path(" "))
+    assert-eq("/Reports/Q3", ::dropbox/normalize-path("Reports/Q3/"))
+    assert-eq("/a.txt", ::dropbox/normalize-path("/a.txt"))
+    assert-eq("id:a4ayc_80_OEAAAAAAAAAYa", ::dropbox/normalize-path("id:a4ayc_80_OEAAAAAAAAAYa"))
+    assert-eq("rev:a1c10ce0dd78", ::dropbox/normalize-path("rev:a1c10ce0dd78"))
+    assert-eq("ns:123/Docs", ::dropbox/normalize-path("ns:123/Docs"))
+}
+
+test-path-helpers
+meta ["test"] fn () {
+    assert-eq("/a/b", ::dropbox/parent-path("/a/b/c.txt"))
+    assert-eq("", ::dropbox/parent-path("/c.txt"), "a top-level item's parent is the root")
+    assert(is-null(::dropbox/parent-path("id:abc")))
+    assert-eq("pdf", ::dropbox/file-extension("Q3.Plan.PDF"))
+    assert(is-null(::dropbox/file-extension("README")))
+    assert(is-null(::dropbox/file-extension(".bashrc")), "a dotfile has no extension")
+}
+
+test-list-folder-arg
+meta ["test"] fn () {
+    arg ::files/list-folder-arg("Reports/", {recursive: true, limit: 500, include_deleted: null, token: "sl.secret"})
+    assert-eq({path: "/Reports", recursive: true, limit: 500}, arg, "unset options and credentials are omitted")
+    assert-eq({path: ""}, ::files/list-folder-arg("/", {}), "the root is the empty path")
+}
+
+test-search-arg
+meta ["test"] fn () {
+    arg ::files/search-arg("plan", {path: "Reports", max_results: 50, file_extensions: ["pdf"], include_highlights: true, filename_only: null})
+    assert-eq("plan", arg.query)
+    assert-eq({path: "/Reports", max_results: 50, file_extensions: ["pdf"]}, arg.options)
+    assert-eq({include_highlights: true}, arg.match_field_options)
+    bare ::files/search-arg("plan", {})
+    assert-eq({query: "plan"}, bare, "no empty options or match_field_options")
+    merged ::files/search-arg("x", {options: {order_by: "last_modified_time"}, file_status: "deleted"})
+    assert-eq({order_by: "last_modified_time", file_status: "deleted"}, merged.options)
+}
+
+test-match-metadata
+meta ["test"] fn () {
+    m {match_type: {".tag": "filename"}, metadata: {".tag": "metadata", metadata: {".tag": "file", name: "plan.pdf"}}}
+    assert-eq("plan.pdf", ::files/match-metadata(m).name)
+    assert(is-null(::files/match-metadata({})))
+}
+
+test-relocation
+meta ["test"] fn () {
+    assert-eq({from_path: "/a", to_path: "/b/a", autorename: true}, ::files/relocation-arg("a", "/b/a", {autorename: true, allow_ownership_transfer: null}))
+    entries ::files/relocation-entries([["a", "/b"], {from_path: "/c/", to_path: "d"}])
+    assert-eq([{from_path: "/a", to_path: "/b"}, {from_path: "/c", to_path: "/d"}], entries)
+}
+
+test-batch-jobs
+meta ["test"] fn () {
+    launched ::files/to-batch-job({".tag": "async_job_id", async_job_id: "34g93hh34h04y384084"})
+    assert-eq("async", launched.state)
+    assert-eq("34g93hh34h04y384084", launched.job-id)
+    assert(not(::files/is-done(launched)))
+
+    running ::files/to-batch-job({".tag": "in_progress"})
+    assert-eq("in_progress", running.state)
+    assert(not(::files/is-done(running)))
+
+    done ::files/to-batch-job({".tag": "complete", entries: [
+        {".tag": "success", metadata: {".tag": "file", name: "a.txt"}},
+        {".tag": "success", success: {".tag": "file", name: "b.txt"}},
+        {".tag": "failure", failure: {".tag": "from_lookup", from_lookup: {".tag": "not_found"}}}
+    ]})
+    assert(::files/is-done(done))
+    assert-eq(3, length(done.entries))
+    assert-eq("a.txt", ::files/entry-metadata(first(done.entries)).name)
+    assert-eq("b.txt", ::files/entry-metadata(get(done.entries, 1)).name)
+    assert(is-null(::files/entry-metadata(last(done.entries))))
+    assert-eq(1, length(::files/batch-failures(done)))
+
+    failed ::files/to-batch-job({".tag": "failed", failed: {".tag": "too_many_write_operations"}})
+    assert(::files/is-done(failed))
+    assert-eq({".tag": "too_many_write_operations"}, failed.error)
+    assert(::files/is-done({".tag": "complete"}), "raw check results work too")
+}
+
+test-link-settings
+meta ["test"] fn () {
+    assert(is-null(::sharing/link-settings({})), "no settings: the field is omitted")
+    s ::sharing/link-settings({audience: "team", access: "viewer", expires: null, settings: {allow_download: false}, token: "x"})
+    assert-eq({allow_download: false, audience: "team", access: "viewer"}, s)
+}
+
+test-existing-link
+meta ["test"] fn () {
+    e ::dropbox::api/http-error({status: 409, headers: {}, body: {
+        error_summary: "shared_link_already_exists/metadata/..",
+        error: {".tag": "shared_link_already_exists", shared_link_already_exists: {".tag": "metadata", metadata: {url: "https://www.dropbox.com/scl/fi/abc/a.pdf?dl=0", name: "a.pdf"}}}
+    }})
+    assert(::dropbox::api/has-error-tag(err(e), "shared_link_already_exists"))
+    assert-eq("a.pdf", ::sharing/existing-link(err(e)).name)
+    assert(is-null(::sharing/existing-link(err("other"))))
+}
+
+test-team-path-root
+meta ["test"] fn () {
+    member {root_info: {".tag": "team", root_namespace_id: "3235641", home_namespace_id: "3235642", home_path: "/Jane"}}
+    assert-eq({".tag": "root", root: "3235641"}, ::users/team-path-root(member))
+    solo {root_info: {".tag": "user", root_namespace_id: "3235641", home_namespace_id: "3235641"}}
+    assert(is-null(::users/team-path-root(solo)), "no team space: no header")
+    assert(is-null(::users/team-path-root({})))
+}

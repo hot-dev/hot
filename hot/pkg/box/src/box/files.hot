@@ -1,0 +1,240 @@
+::box::files ns
+meta {
+    doc: """
+    Box files: get file info (with `fields` and representation hints),
+    update, rename, move, copy, trash, restore, and versions (list,
+    promote). Content lives in `::box::content` and `::box::upload`.
+
+    Every function has an options arity taking an `opts` Map: Box query
+    parameters by their Box names (`fields`, `limit`, `offset`, ...),
+    `if-match` (an etag) for safe writes, and the credential keys handled
+    by `::box::auth`.
+    """
+}
+
+::api ::box::api
+DocFile ::box/DocFile
+
+MAX_LIMIT 1000
+LOCAL_KEYS ["if-match", "if-none-match", "boxapi", "rep-hints", "name", "parent-id", "version"]
+
+file-path fn (file-id: Str): Str {
+  `/files/${::box/encode-id(file-id)}`
+}
+
+// ---------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------
+
+file-headers
+meta {
+    doc: """The headers `get-file` sends (pure): `if-match` / `if-none-match` / `boxapi` from `opts`, plus `x-rep-hints` from `opts.rep-hints` (e.g. `"[extracted_text]"`, `"[jpg?dimensions=320x320]"`)."""
+}
+fn (opts: Map): Map {
+  hints get(opts, "rep-hints")
+  base ::box/condition-headers(opts)
+  if(::box/is-blank(hints), base, {...base, x-rep-hints: Str(hints)})
+}
+
+get-file
+meta {
+    doc: """
+    GET /files/{id} - file information. `fields` defaults to
+    `::box/FILE_FIELDS` (a Str or Vec; Box returns only a mini
+    representation for fields you do not name). `opts.rep-hints` with a
+    `representations` field asks for representations.
+
+    ```hot
+    file ::box::files/get-file("12345")
+    file.sha1
+    file.file_version.id
+    ```
+    """
+}
+fn
+(file-id: Str): Map {
+  get-file(file-id, {})
+},
+(file-id: Str, opts: Map): Map {
+  params ::box/query-params({fields: ::box/FILE_FIELDS}, opts, LOCAL_KEYS)
+  ::box/json-with("GET", ::box/url(file-path(file-id), params), file-headers(opts), "", opts)
+}
+
+get-doc-file
+meta {doc: """`get-file` normalised to a `::box/DocFile`."""}
+fn
+(file-id: Str): DocFile {
+  get-doc-file(file-id, {})
+},
+(file-id: Str, opts: Map): DocFile {
+  file get-file(file-id, opts)
+  if(is-err(file), file, ::box/to-doc-file(file))
+}
+
+// ---------------------------------------------------------------------------
+// Updating
+// ---------------------------------------------------------------------------
+
+update-file
+meta {
+    doc: """
+    PUT /files/{id} - update file information: `name`, `description`,
+    `parent` (`{id}`, to move), `tags`, `lock`, `shared_link`,
+    `disposition_at`, ... Null values in `changes` are dropped.
+    `opts.if-match` (an etag) makes the write fail with 412 when the file
+    changed. Content updates go through `::box::upload/upload-version`.
+    """
+}
+fn
+(file-id: Str, changes: Map): Map {
+  update-file(file-id, changes, {})
+},
+(file-id: Str, changes: Map, opts: Map): Map {
+  params ::box/query-params({fields: ::box/FILE_FIELDS}, opts, LOCAL_KEYS)
+  ::box/json-with("PUT", ::box/url(file-path(file-id), params), ::box/condition-headers(opts), ::box/compact(changes), opts)
+}
+
+rename-file
+meta {
+    doc: """Rename a file. Box fails with 409 `item_name_in_use` when the folder already has that name."""
+}
+fn
+(file-id: Str, name: Str): Map {
+  rename-file(file-id, name, {})
+},
+(file-id: Str, name: Str, opts: Map): Map {
+  update-file(file-id, {name: name}, opts)
+}
+
+move-file
+meta {doc: """Move a file into `parent-id` (a Box item has exactly one parent)."""}
+fn
+(file-id: Str, parent-id: Str): Map {
+  move-file(file-id, parent-id, {})
+},
+(file-id: Str, parent-id: Str, opts: Map): Map {
+  update-file(file-id, {parent: ::box/parent-ref(parent-id)}, opts)
+}
+
+copy-body
+meta {
+    doc: """The copy body (pure): `parent: {id}`, an optional new `name`, and an optional `version` (a file version id to copy)."""
+}
+fn (parent-id: Str, opts: Map): Map {
+  ::box/compact({parent: ::box/parent-ref(parent-id), name: get(opts, "name"), version: get(opts, "version")})
+}
+
+copy-file
+meta {
+    doc: """POST /files/{id}/copy - copy a file into `parent-id`. `opts.name` renames the copy; `opts.version` copies an older version."""
+}
+fn
+(file-id: Str, parent-id: Str): Map {
+  copy-file(file-id, parent-id, {})
+},
+(file-id: Str, parent-id: Str, opts: Map): Map {
+  params ::box/query-params({fields: ::box/FILE_FIELDS}, opts, LOCAL_KEYS)
+  ::box/json("POST", ::box/url(`${file-path(file-id)}/copy`, params), copy-body(parent-id, opts), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Trash
+// ---------------------------------------------------------------------------
+
+trash-file
+meta {
+    doc: """DELETE /files/{id} - move a file to the trash (recoverable until the enterprise's trash retention, 30 days by default). `opts.if-match` guards against concurrent changes. Returns true."""
+}
+fn
+(file-id: Str): Bool {
+  trash-file(file-id, {})
+},
+(file-id: Str, opts: Map): Bool {
+  result ::box/json-with("DELETE", ::box/url(file-path(file-id)), ::box/condition-headers(opts), "", opts)
+  if(is-err(result), result, true)
+}
+
+restore-body
+meta {doc: """The restore body (pure): an optional new `name` and `parent: {id}`."""}
+fn (opts: Map): Map {
+  ::box/compact({name: get(opts, "name"), parent: ::box/parent-ref(get(opts, "parent-id"))})
+}
+
+restore-file
+meta {
+    doc: """POST /files/{id} - restore a trashed file. `opts.name` / `opts.parent-id` restore it under a new name or into another folder when the original is taken or gone."""
+}
+fn
+(file-id: Str): Map {
+  restore-file(file-id, {})
+},
+(file-id: Str, opts: Map): Map {
+  params ::box/query-params({fields: ::box/FILE_FIELDS}, opts, LOCAL_KEYS)
+  ::box/json("POST", ::box/url(file-path(file-id), params), restore-body(opts), opts)
+}
+
+get-trashed-file
+meta {
+    doc: """GET /files/{id}/trash - a trashed file's information (404 when it is not in the trash)."""
+}
+fn
+(file-id: Str): Map {
+  get-trashed-file(file-id, {})
+},
+(file-id: Str, opts: Map): Map {
+  params ::box/query-params({}, opts, LOCAL_KEYS)
+  ::box/json("GET", ::box/url(`${file-path(file-id)}/trash`, params), "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Versions
+// ---------------------------------------------------------------------------
+
+list-versions
+meta {
+    doc: """
+    GET /files/{id}/versions - one page of a file's **previous** versions
+    (`{entries, total_count, offset, limit}`; the current version is the
+    file's `file_version`). Offset paging (`offset`, `limit` up to 1000).
+    Version history needs a paid plan with versioning; the free developer
+    plan keeps one version.
+    """
+}
+fn
+(file-id: Str): Map {
+  list-versions(file-id, {})
+},
+(file-id: Str, opts: Map): Map {
+  params ::box/query-params({limit: MAX_LIMIT}, opts, LOCAL_KEYS)
+  ::box/json("GET", ::box/url(`${file-path(file-id)}/versions`, params), "", opts)
+}
+
+list-all-versions
+meta {doc: """Every previous version of a file (all offset pages)."""}
+fn
+(file-id: Str): Vec {
+  list-all-versions(file-id, {})
+},
+(file-id: Str, opts: Map): Vec {
+  page-size or(::box/to-int(get(opts, "limit")), MAX_LIMIT)
+  ::api/collect-offset((offset) { list-versions(file-id, {...opts, limit: page-size, offset: offset}) }, page-size)
+}
+
+promote-body
+meta {doc: """The promote body (pure): `{type: "file_version", id}`."""}
+fn (version-id: Str): Map {
+  {type: "file_version", id: version-id}
+}
+
+promote-version
+meta {
+    doc: """POST /files/{id}/versions/current - make an older version current (Box copies it to a new version; history is kept). Returns the new current `file_version`."""
+}
+fn
+(file-id: Str, version-id: Str): Map {
+  promote-version(file-id, version-id, {})
+},
+(file-id: Str, version-id: Str, opts: Map): Map {
+  params ::box/query-params({}, opts, LOCAL_KEYS)
+  ::box/json("POST", ::box/url(`${file-path(file-id)}/versions/current`, params), promote-body(version-id), opts)
+}

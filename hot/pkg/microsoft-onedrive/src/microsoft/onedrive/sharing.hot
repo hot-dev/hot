@@ -1,0 +1,205 @@
+::microsoft::onedrive::sharing ns
+meta {
+    doc: """
+    Sharing: links (`createLink`), invitations (`invite`), item
+    permissions (list, get, update, delete), and app grants for
+    `Files.SelectedOperations.Selected`.
+
+    **Permissions.** `Files.ReadWrite` / `Files.ReadWrite.All` or
+    `Sites.ReadWrite.All` to share; `Sites.FullControl.All` (or a
+    `fullcontrol` / `owner` selected grant) to grant apps.
+    """
+}
+
+::od ::microsoft::onedrive
+::api ::microsoft::graph::api
+::auth ::microsoft::graph::auth
+
+LINK_TYPES ["view", "edit", "embed"]
+LINK_SCOPES ["anonymous", "organization", "users"]
+INVITE_ROLES ["read", "write", "owner"]
+APP_ROLES ["read", "write", "owner", "fullcontrol"]
+
+json fn (method: Str, path: Str, body: Any, opts: Map): Any {
+  ::api/json(method, path, {}, body, ::od/creds(opts))
+}
+
+build-link
+meta {
+    doc: """
+    The `createLink` body (pure): `type` (`view`, `edit`, `embed`), and
+    from `opts` `scope` (`anonymous`, `organization`, `users`),
+    `expiration` (RFC 3339), `password` (personal OneDrive only),
+    `retain-inherited` (`retainInheritedPermissions`), `recipients`
+    (emails, for `users` links). An Err for an unknown type or scope.
+    """
+}
+fn (link-type: Str, opts: Map): Map {
+  scope get(opts, "scope")
+  recipients get(opts, "recipients")
+  cond {
+    not(in(link-type, LINK_TYPES)) => { err(`microsoft-onedrive: link type must be view, edit or embed (got "${link-type}")`) }
+    and(is-some(scope), not(in(scope, LINK_SCOPES))) => { err(`microsoft-onedrive: link scope must be anonymous, organization or users (got "${scope}")`) }
+    => {
+      ::auth/compact({
+        type: link-type,
+        scope: scope,
+        expirationDateTime: get(opts, "expiration"),
+        password: get(opts, "password"),
+        retainInheritedPermissions: get(opts, "retain-inherited"),
+        recipients: if(is-null(recipients), null, map(recipients, (r) { if(is-map(r), r, {email: r}) }))
+      })
+    }
+  }
+}
+
+create-link
+meta {
+    doc: """
+    POST {item}/createLink - create (or return the existing) sharing
+    link. Returns the permission; the URL is `link.webUrl`. Anonymous
+    links may be disabled by the tenant admin.
+
+    ```hot
+    perm ::microsoft::onedrive::sharing/create-link("/Reports/Q3.pdf", "view", {scope: "organization"})
+    perm.link.webUrl
+    ```
+    """
+}
+fn
+(item: Any, link-type: Str): Map {
+  create-link(item, link-type, {})
+},
+(item: Any, link-type: Str, opts: Map): Map {
+  body build-link(link-type, opts)
+  if(is-err(body), body, json("POST", `${::od/item-path(item, opts)}/createLink`, body, opts))
+}
+
+build-invite
+meta {
+    doc: """
+    The `invite` body (pure): `recipients` (emails or `{email}` /
+    `{objectId}` Maps), `roles` (`read`, `write`; default `["read"]`),
+    and from `opts` `message`, `require-sign-in` (default true),
+    `send-invitation` (default false: grant silently), `expiration`.
+    """
+}
+fn (recipients: Vec, roles: Vec, opts: Map): Map {
+  bad filter(roles, (r) { not(in(r, INVITE_ROLES)) })
+  cond {
+    is-empty(recipients) => { err("microsoft-onedrive: invite needs at least one recipient") }
+    not(is-empty(bad)) => { err(`microsoft-onedrive: invite roles are read or write (got ${join(bad, ", ")})`) }
+    => {
+      ::auth/compact({
+        recipients: map(recipients, (r) { if(is-map(r), r, {email: r}) }),
+        roles: if(is-empty(roles), ["read"], roles),
+        message: get(opts, "message"),
+        requireSignIn: if(is-some(get(opts, "require-sign-in")), get(opts, "require-sign-in"), true),
+        sendInvitation: if(is-some(get(opts, "send-invitation")), get(opts, "send-invitation"), false),
+        expirationDateTime: get(opts, "expiration")
+      })
+    }
+  }
+}
+
+invite
+meta {
+    doc: """
+    POST {item}/invite - share an item with people. Returns the created
+    permissions (`value`). No email is sent unless
+    `send-invitation: true`.
+
+    ```hot
+    ::microsoft::onedrive::sharing/invite("/Reports/Q3.pdf", ["alex@contoso.com"], ["read"], {send-invitation: true, message: "Q3 numbers"})
+    ```
+    """
+}
+fn
+(item: Any, recipients: Vec, roles: Vec): Vec {
+  invite(item, recipients, roles, {})
+},
+(item: Any, recipients: Vec, roles: Vec, opts: Map): Vec {
+  body build-invite(recipients, roles, opts)
+  result if(is-err(body), body, json("POST", `${::od/item-path(item, opts)}/invite`, body, opts))
+  if(is-err(result), result, or(result.value, []))
+}
+
+list-permissions
+meta {
+    doc: """GET {item}/permissions - the item's permissions (links, people, inherited). Returns a Vec."""
+}
+fn
+(item: Any): Vec {
+  list-permissions(item, {})
+},
+(item: Any, opts: Map): Vec {
+  ::api/collect-pages(`${::od/item-path(item, opts)}/permissions`, {...::od/query-opts({}, opts), ...::od/creds(opts)}, null)
+}
+
+get-permission
+meta {doc: """GET {item}/permissions/{id}."""}
+fn
+(item: Any, permission-id: Str): Map {
+  get-permission(item, permission-id, {})
+},
+(item: Any, permission-id: Str, opts: Map): Map {
+  json("GET", `${::od/item-path(item, opts)}/permissions/${::api/encode-segment(permission-id)}`, "", opts)
+}
+
+update-permission
+meta {
+    doc: """PATCH {item}/permissions/{id} - change `roles` (e.g. `["write"]`). Returns the permission."""
+}
+fn
+(item: Any, permission-id: Str, roles: Vec): Map {
+  update-permission(item, permission-id, roles, {})
+},
+(item: Any, permission-id: Str, roles: Vec, opts: Map): Map {
+  json("PATCH", `${::od/item-path(item, opts)}/permissions/${::api/encode-segment(permission-id)}`, {roles: roles}, opts)
+}
+
+delete-permission
+meta {
+    doc: """DELETE {item}/permissions/{id} - remove a link or a person's access (inherited permissions cannot be removed here). Returns true."""
+}
+fn
+(item: Any, permission-id: Str): Bool {
+  delete-permission(item, permission-id, {})
+},
+(item: Any, permission-id: Str, opts: Map): Bool {
+  result json("DELETE", `${::od/item-path(item, opts)}/permissions/${::api/encode-segment(permission-id)}`, "", opts)
+  if(is-err(result), result, true)
+}
+
+build-app-grant
+meta {
+    doc: """The body granting an app a role on a resource (pure): `{roles, grantedToV2: {application: {id, displayName}}}`. Roles are `read`, `write`, `owner`, `fullcontrol`."""
+}
+fn (app-id: Str, display-name: Str?, roles: Vec): Map {
+  bad filter(roles, (r) { not(in(r, APP_ROLES)) })
+  cond {
+    is-empty(roles) => { err("microsoft-onedrive: an app grant needs at least one role") }
+    not(is-empty(bad)) => { err(`microsoft-onedrive: app roles are read, write, owner or fullcontrol (got ${join(bad, ", ")})`) }
+    => { {roles: roles, grantedToV2: {application: ::auth/compact({id: app-id, displayName: display-name})}} }
+  }
+}
+
+grant-app
+meta {
+    doc: """
+    POST {item}/permissions - grant an app (by client id) a role on one
+    file or folder, for apps consented `Files.SelectedOperations.Selected`
+    (or `ListItems.SelectedOperations.Selected`). An admin step: the
+    caller needs `Sites.FullControl.All` or an owner/fullcontrol grant.
+    Breaks permission inheritance on the item. Returns the permission;
+    delete it with `delete-permission` to revoke.
+    """
+}
+fn
+(item: Any, app-id: Str, display-name: Str?, roles: Vec): Map {
+  grant-app(item, app-id, display-name, roles, {})
+},
+(item: Any, app-id: Str, display-name: Str?, roles: Vec, opts: Map): Map {
+  body build-app-grant(app-id, display-name, roles)
+  if(is-err(body), body, json("POST", `${::od/item-path(item, opts)}/permissions`, body, opts))
+}

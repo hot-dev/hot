@@ -1,0 +1,224 @@
+::microsoft::sharepoint::lists ns
+meta {
+    doc: """
+    SharePoint lists and list items: list a site's lists, read items
+    with the columns you choose, create, update and delete items, and
+    subscribe to list changes.
+
+    A list is addressed by id or display name. Item columns live under
+    `fields`; pick them with `opts.fields` (a Vec or comma-separated
+    Str of internal column names such as `"Title"`, `"Status"`,
+    `"AssignedTo"`), which becomes `$expand=fields($select=...)`.
+
+    **Filtering** on `fields/...` needs an indexed column; otherwise pass
+    `allow-non-indexed: true` to send
+    `Prefer: HonorNonIndexedQueriesWarningMayFailRandomly` (works on
+    lists under 5,000 items, may fail on larger ones).
+
+    **Permissions.** `Sites.Read.All` / `Sites.ReadWrite.All`, or
+    `Sites.Selected` (site grant) / `Lists.SelectedOperations.Selected`
+    (list grant) for app-only least privilege.
+    """
+}
+
+::sp ::microsoft::sharepoint
+::api ::microsoft::graph::api
+::auth ::microsoft::graph::auth
+::od ::microsoft::onedrive
+::subs ::microsoft::graph::subscriptions
+
+LIST_LOCAL_KEYS ["fields", "allow-non-indexed"]
+NON_INDEXED_PREFER "HonorNonIndexedQueriesWarningMayFailRandomly"
+
+field-list fn (fields: Any): Str? {
+  cond {
+    ::auth/is-blank-value(fields) => { null }
+    is-vec(fields) => { if(is-empty(fields), null, join(map(fields, (f) { trim(Str(f)) }), ",")) }
+    => { join(map(split(Str(fields), ","), trim), ",") }
+  }
+}
+
+items-query
+meta {
+    doc: """
+    The query parameters for reading list items (pure): `expand` is
+    `fields($select=...)` from `opts.fields` (or `fields` for all
+    columns), merged with an `expand` you pass; other OData options
+    (`filter`, `orderby`, `top`, `select`) pass through.
+
+    ```hot
+    ::microsoft::sharepoint::lists/items-query({fields: ["Title", "Status"], top: 100})
+    // {expand: "fields($select=Title,Status)", top: 100}
+    ```
+    """
+}
+fn (opts: Map): Map {
+  cols field-list(get(opts, "fields"))
+  fields-expand if(is-null(cols), "fields", `fields($select=${cols})`)
+  extra get(opts, "expand")
+  expand if(::auth/is-blank-value(extra), fields-expand, `${fields-expand},${extra}`)
+  {...::od/query-opts({}, opts, LIST_LOCAL_KEYS), expand: expand}
+}
+
+items-headers
+meta {
+    doc: """The extra headers for an items query (pure): `Prefer: HonorNonIndexedQueriesWarningMayFailRandomly` when `opts.allow-non-indexed` is true."""
+}
+fn (opts: Map): Map {
+  if(eq(get(opts, "allow-non-indexed"), true), {Prefer: NON_INDEXED_PREFER}, {})
+}
+
+with-headers fn (opts: Map): Map {
+  {...::api/credential-opts(opts), headers: {...or(get(opts, "headers"), {}), ...items-headers(opts)}}
+}
+
+list-lists
+meta {
+    doc: """GET /sites/{site}/lists - the site's lists and libraries (`id`, `displayName`, `list.template`), all pages. `opts.filter` e.g. `"list/hidden eq false"`."""
+}
+fn
+(site-id: Str): Vec {
+  list-lists(site-id, {})
+},
+(site-id: Str, opts: Map): Vec {
+  ::api/collect-pages(`${::sp/site-path(site-id)}/lists`, {...::od/query-opts({}, opts), ...::api/credential-opts(opts)}, null)
+}
+
+get-list
+meta {
+    doc: """GET /sites/{site}/lists/{list-id or display name}. `opts.expand: "columns"` includes the column definitions."""
+}
+fn
+(site-id: Str, list: Str): Map {
+  get-list(site-id, list, {})
+},
+(site-id: Str, list: Str, opts: Map): Map {
+  ::api/json("GET", ::api/with-query(::sp/list-path(site-id, list), ::od/query-opts({}, opts)), ::api/credential-opts(opts))
+}
+
+list-items
+meta {
+    doc: """
+    GET /sites/{site}/lists/{list}/items - one page of items with their
+    `fields`: Graph's `{value, @odata.nextLink?}`. See `items-query`.
+
+    ```hot
+    page ::microsoft::sharepoint::lists/list-items(site-id, "Tickets", {
+      fields: ["Title", "Status", "Priority"],
+      filter: "fields/Status eq 'Open'",
+      allow-non-indexed: true,
+      top: 50
+    })
+    map(page.value, (i) { i.fields.Title })
+    ```
+    """
+}
+fn
+(site-id: Str, list: Str): Map {
+  list-items(site-id, list, {})
+},
+(site-id: Str, list: Str, opts: Map): Map {
+  path ::api/with-query(`${::sp/list-path(site-id, list)}/items`, items-query(opts))
+  ::api/json("GET", path, items-headers(opts), "", ::api/credential-opts(opts))
+}
+
+list-all-items
+meta {
+    doc: """Every item of a list (all pages), or at most `limit`. Takes the same `opts` as `list-items`; uses `top: 200` unless set."""
+}
+fn
+(site-id: Str, list: Str): Vec {
+  list-all-items(site-id, list, {}, null)
+},
+(site-id: Str, list: Str, opts: Map): Vec {
+  list-all-items(site-id, list, opts, null)
+},
+(site-id: Str, list: Str, opts: Map, limit: Int?): Vec {
+  sized if(is-some(get(opts, "top")), opts, {...opts, top: 200})
+  ::api/collect-pages(`${::sp/list-path(site-id, list)}/items`, {...items-query(sized), ...with-headers(opts)}, limit)
+}
+
+get-item
+meta {
+    doc: """GET /sites/{site}/lists/{list}/items/{id} with its `fields` (`opts.fields` to choose columns)."""
+}
+fn
+(site-id: Str, list: Str, item-id: Str): Map {
+  get-item(site-id, list, item-id, {})
+},
+(site-id: Str, list: Str, item-id: Str, opts: Map): Map {
+  path ::api/with-query(`${::sp/list-path(site-id, list)}/items/${::api/encode-segment(item-id)}`, items-query(opts))
+  ::api/json("GET", path, ::api/credential-opts(opts))
+}
+
+create-item
+meta {
+    doc: """
+    POST /sites/{site}/lists/{list}/items - create an item from column
+    values (internal names; nulls are dropped). Returns the item with
+    its `fields`.
+
+    ```hot
+    item ::microsoft::sharepoint::lists/create-item(site-id, "Tickets", {Title: "Printer jam", Status: "Open"})
+    item.id
+    ```
+    """
+}
+fn
+(site-id: Str, list: Str, fields: Map): Map {
+  create-item(site-id, list, fields, {})
+},
+(site-id: Str, list: Str, fields: Map, opts: Map): Map {
+  ::api/json("POST", `${::sp/list-path(site-id, list)}/items`, {}, {fields: ::auth/compact(fields)}, ::api/credential-opts(opts))
+}
+
+update-item
+meta {
+    doc: """PATCH /sites/{site}/lists/{list}/items/{id}/fields - change column values (only the ones you pass). Returns the updated field values. To clear a column, pass `""` rather than null."""
+}
+fn
+(site-id: Str, list: Str, item-id: Str, fields: Map): Map {
+  update-item(site-id, list, item-id, fields, {})
+},
+(site-id: Str, list: Str, item-id: Str, fields: Map, opts: Map): Map {
+  ::api/json("PATCH", `${::sp/list-path(site-id, list)}/items/${::api/encode-segment(item-id)}/fields`, {}, filter-vals(fields, is-some), ::api/credential-opts(opts))
+}
+
+delete-item
+meta {
+    doc: """DELETE /sites/{site}/lists/{list}/items/{id} - move an item to the site recycle bin. Returns true."""
+}
+fn
+(site-id: Str, list: Str, item-id: Str): Bool {
+  delete-item(site-id, list, item-id, {})
+},
+(site-id: Str, list: Str, item-id: Str, opts: Map): Bool {
+  result ::api/json("DELETE", `${::sp/list-path(site-id, list)}/items/${::api/encode-segment(item-id)}`, ::api/credential-opts(opts))
+  if(is-err(result), result, true)
+}
+
+list-resource
+meta {
+    doc: """The subscription resource for a list (pure): `sites/{site}/lists/{list}`."""
+}
+fn (site-id: Str, list: Str): Str {
+  ::subs/strip-slashes(::sp/list-path(site-id, list))
+}
+
+subscribe-list
+meta {
+    doc: """
+    Subscribe `notification-url` to changes in a list (`updated` is the
+    only change type lists support; notifications carry no item data,
+    so read the changes with a delta query or by `Modified`). `opts` as
+    for `::microsoft::graph::subscriptions/create-subscription`
+    (`client-state`, `lifecycle-url`, `expires-in-minutes`, up to 42,300).
+    """
+}
+fn
+(site-id: Str, list: Str, notification-url: Str): Map {
+  subscribe-list(site-id, list, notification-url, {})
+},
+(site-id: Str, list: Str, notification-url: Str, opts: Map): Map {
+  ::subs/create-subscription(list-resource(site-id, list), "updated", notification-url, opts)
+}

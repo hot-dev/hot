@@ -1,0 +1,279 @@
+::box::sharing ns
+meta {
+    doc: """
+    Sharing: shared links on files and folders (`PUT ... {shared_link}`),
+    resolving a shared link to its item, and collaborations (invite a
+    user or group to a file or folder, list, update, remove).
+
+    `item-type` is `"file"` or `"folder"` throughout.
+
+    **Plans.** `company` shared-link access and some roles need a paid
+    plan; enterprises can restrict shared links and external
+    collaboration, in which case Box answers 403.
+    """
+}
+
+::api ::box::api
+
+ITEM_TYPES ["file", "folder"]
+ROLES ["editor", "viewer", "previewer", "uploader", "previewer uploader", "viewer uploader", "co-owner", "owner"]
+
+item-path
+meta {
+    doc: """`/files/{id}` or `/folders/{id}` for an item type (pure), or an Err for any other type."""
+}
+fn (item-type: Str, item-id: Str): Str {
+  cond {
+    eq(item-type, "file") => { `/files/${::box/encode-id(item-id)}` }
+    eq(item-type, "folder") => { `/folders/${::box/encode-id(item-id)}` }
+    => { err(`box: item-type must be "file" or "folder", not "${item-type}"`) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared links
+// ---------------------------------------------------------------------------
+
+shared-link-settings
+meta {
+    doc: """
+    The `shared_link` object for `set-shared-link` (pure), from Hot-style
+    keys: `access` (`"open"`, `"company"`, `"collaborators"`; omitted for
+    the enterprise default), `password` (`open` links only; at least 8
+    characters with a number, capital or symbol), `vanity-name`,
+    `unshared-at` (RFC 3339 expiry), `can-download`, `can-preview`,
+    `can-edit` (Bools). Unset keys are omitted.
+    """
+}
+fn (opts: Map): Map {
+  permissions filter-vals({
+    can_download: get(opts, "can-download"),
+    can_preview: get(opts, "can-preview"),
+    can_edit: get(opts, "can-edit")
+  }, is-some)
+  filter-vals({
+    access: get(opts, "access"),
+    password: get(opts, "password"),
+    vanity_name: get(opts, "vanity-name"),
+    unshared_at: get(opts, "unshared-at"),
+    permissions: if(is-empty(permissions), null, permissions)
+  }, is-some)
+}
+
+SETTING_KEYS ["access", "password", "vanity-name", "unshared-at", "can-download", "can-preview", "can-edit"]
+
+set-shared-link
+meta {
+    doc: """
+    PUT /files/{id} (or /folders/{id}) with `shared_link` - create or
+    update an item's shared link. Returns the item with its
+    `shared_link` (`url`, `download_url`, `access`, `effective_access`,
+    `permissions`, ...).
+
+    ```hot
+    item ::box::sharing/set-shared-link("file", "12345", {access: "open", can-download: true, unshared-at: "2026-12-31T00:00:00Z"})
+    item.shared_link.url
+    ```
+    """
+}
+fn
+(item-type: Str, item-id: Str): Map {
+  set-shared-link(item-type, item-id, {})
+},
+(item-type: Str, item-id: Str, opts: Map): Map {
+  path item-path(item-type, item-id)
+  cond {
+    is-err(path) => { path }
+    => {
+      params ::box/query-params({fields: "id,type,name,shared_link"}, opts, SETTING_KEYS)
+      ::box/json("PUT", ::box/url(path, params), {shared_link: shared-link-settings(opts)}, opts)
+    }
+  }
+}
+
+get-shared-link
+meta {doc: """The item's `shared_link` (null when it has none)."""}
+fn
+(item-type: Str, item-id: Str): Map? {
+  get-shared-link(item-type, item-id, {})
+},
+(item-type: Str, item-id: Str, opts: Map): Map? {
+  path item-path(item-type, item-id)
+  cond {
+    is-err(path) => { path }
+    => {
+      item ::box/json("GET", ::box/url(path, {fields: "shared_link"}), "", opts)
+      if(is-err(item), item, item.shared_link)
+    }
+  }
+}
+
+remove-shared-link
+meta {
+    doc: """Remove an item's shared link. This is the one place box sends a JSON null on purpose: Box removes a link with `{"shared_link": null}`. Returns the item."""
+}
+fn
+(item-type: Str, item-id: Str): Map {
+  remove-shared-link(item-type, item-id, {})
+},
+(item-type: Str, item-id: Str, opts: Map): Map {
+  path item-path(item-type, item-id)
+  cond {
+    is-err(path) => { path }
+    => {
+      // Sent as a JSON string so the deliberate null is not dropped.
+      ::api/json("PUT", ::box/url(path, {fields: "id,type,name,shared_link"}), {Content-Type: "application/json"}, """{"shared_link":null}""", ::box/creds(opts))
+    }
+  }
+}
+
+boxapi-header
+meta {
+    doc: """The `BoxApi` header value for shared-link access (pure): `shared_link=<url>` plus `&shared_link_password=<pw>` when a password is given, in the raw form Box documents (no URL encoding)."""
+}
+fn (shared-link: Str, password: Str?): Str {
+  base `shared_link=${trim(shared-link)}`
+  if(::box/is-blank(password), base, `${base}&shared_link_password=${or(password, "")}`)
+}
+
+get-shared-item
+meta {
+    doc: """GET /shared_items - the file or folder behind a shared link (any Box user's link, not only your own). Pass the password for protected links. The returned id works with the other functions when you add `{boxapi: ::box::sharing/boxapi-header(link, password)}` to their opts."""
+}
+fn
+(shared-link: Str): Map {
+  get-shared-item(shared-link, null, {})
+},
+(shared-link: Str, password: Str?): Map {
+  get-shared-item(shared-link, password, {})
+},
+(shared-link: Str, password: Str?, opts: Map): Map {
+  params ::box/query-params({}, opts)
+  ::box/json-with("GET", ::box/url("/shared_items", params), {boxapi: boxapi-header(shared-link, password)}, "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Collaborations
+// ---------------------------------------------------------------------------
+
+user-by-email
+meta {
+    doc: """An `accessible_by` for a user by email (pure). Box invites addresses that have no Box account yet."""
+}
+fn (email: Str): Map {
+  {type: "user", login: email}
+}
+
+user-by-id
+meta {doc: """An `accessible_by` for a Box user id (pure)."""}
+fn (user-id: Str): Map {
+  {type: "user", id: user-id}
+}
+
+group-by-id
+meta {doc: """An `accessible_by` for a Box group id (pure)."""}
+fn (group-id: Str): Map {
+  {type: "group", id: group-id}
+}
+
+collaboration-body
+meta {
+    doc: """
+    The `POST /collaborations` body (pure): `item: {type, id}`,
+    `accessible_by` (see `user-by-email` / `user-by-id` / `group-by-id`),
+    `role` (`editor`, `viewer`, `previewer`, `uploader`, `previewer
+    uploader`, `viewer uploader`, `co-owner`), plus optional
+    `is-access-only`, `can-view-path` (folders), `expires-at` (RFC 3339).
+    """
+}
+fn (item-type: Str, item-id: Str, accessible-by: Map, role: Str, opts: Map): Map {
+  ::box/compact({
+    item: {type: item-type, id: item-id},
+    accessible_by: accessible-by,
+    role: role,
+    is_access_only: get(opts, "is-access-only"),
+    can_view_path: get(opts, "can-view-path"),
+    expires_at: get(opts, "expires-at")
+  })
+}
+
+COLLAB_LOCAL_KEYS ["is-access-only", "can-view-path", "expires-at"]
+
+add-collaboration
+meta {
+    doc: """
+    POST /collaborations - give a user or group a role on a file or
+    folder. `opts.notify: true` emails the invitee. Returns the
+    collaboration (`id`, `status` `accepted` or `pending`, `role`, ...).
+
+    ```hot
+    collab ::box::sharing/add-collaboration("folder", "12345", ::box::sharing/user-by-email("ana@example.com"), "viewer", {notify: false})
+    collab.id
+    ```
+    """
+}
+fn
+(item-type: Str, item-id: Str, accessible-by: Map, role: Str): Map {
+  add-collaboration(item-type, item-id, accessible-by, role, {})
+},
+(item-type: Str, item-id: Str, accessible-by: Map, role: Str, opts: Map): Map {
+  cond {
+    not(in(item-type, ITEM_TYPES)) => { err(`box: item-type must be "file" or "folder", not "${item-type}"`) }
+    => {
+      params ::box/query-params({}, opts, COLLAB_LOCAL_KEYS)
+      ::box/json("POST", ::box/url("/collaborations", params), collaboration-body(item-type, item-id, accessible-by, role, opts), opts)
+    }
+  }
+}
+
+list-collaborations
+meta {
+    doc: """GET /files/{id}/collaborations (or /folders/{id}/collaborations) - one page of an item's collaborations (marker paging: `{entries, next_marker}`; `limit` up to 1000). Pending invites are included."""
+}
+fn
+(item-type: Str, item-id: Str): Map {
+  list-collaborations(item-type, item-id, {})
+},
+(item-type: Str, item-id: Str, opts: Map): Map {
+  path item-path(item-type, item-id)
+  cond {
+    is-err(path) => { path }
+    => {
+      params ::box/query-params({limit: 1000}, opts)
+      ::box/json("GET", ::box/url(`${path}/collaborations`, params), "", opts)
+    }
+  }
+}
+
+list-all-collaborations
+meta {doc: """Every collaboration on an item (all marker pages)."""}
+fn
+(item-type: Str, item-id: Str): Vec {
+  list-all-collaborations(item-type, item-id, {})
+},
+(item-type: Str, item-id: Str, opts: Map): Vec {
+  ::api/collect-marker((marker) { list-collaborations(item-type, item-id, {...opts, marker: marker}) })
+}
+
+update-collaboration
+meta {
+    doc: """PUT /collaborations/{id} - change `role`, `status` (`accepted` / `rejected` for pending invites), `expires_at` or `can_view_path`. Null values are dropped."""
+}
+fn
+(collaboration-id: Str, changes: Map): Map {
+  update-collaboration(collaboration-id, changes, {})
+},
+(collaboration-id: Str, changes: Map, opts: Map): Map {
+  ::box/json("PUT", ::box/url(`/collaborations/${::box/encode-id(collaboration-id)}`), ::box/compact(changes), opts)
+}
+
+remove-collaboration
+meta {doc: """DELETE /collaborations/{id} - remove a collaboration. Returns true."""}
+fn
+(collaboration-id: Str): Bool {
+  remove-collaboration(collaboration-id, {})
+},
+(collaboration-id: Str, opts: Map): Bool {
+  result ::box/json("DELETE", ::box/url(`/collaborations/${::box/encode-id(collaboration-id)}`), "", opts)
+  if(is-err(result), result, true)
+}

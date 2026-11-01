@@ -1,0 +1,53 @@
+::box::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests (live Box, read-only)
+// =============================================================================
+// Requires BOX_ACCESS_TOKEN, or BOX_CLIENT_ID + BOX_CLIENT_SECRET with
+// BOX_ENTERPRISE_ID or BOX_USER_ID; optional BOX_TEST_FOLDER_ID. Every
+// test only reads. Without credentials each test records a skip and passes.
+// Run with: hot test --project pkg-integration-box
+
+::ctx ::box::integration::ctx
+
+test-token-and-current-user
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            me ::box::api/json("GET", ::box/url("/users/me", {fields: "id,name,login"}))
+            assert(not(is-err(me)), `users/me: ${if-err(me, (e) { err-message(e) })}`)
+            assert(is-some(me.id), "the credentials resolve to a Box user")
+        }
+    }
+}
+
+test-list-folder-items
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            page ::box::folders/list-items(::ctx/test-folder-id(), {limit: 5})
+            assert(not(is-err(page)), `list-items: ${if-err(page, (e) { err-message(e) })}`)
+            assert(is-vec(page.entries), "a folder listing has entries")
+            docs ::box/to-doc-files(page.entries)
+            assert(all(docs, (d) { eq(d.provider, "box") }), "items normalise to DocFiles")
+        }
+    }
+}
+
+test-folder-info-and-events-position
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            folder ::box::folders/get-doc-file(::ctx/test-folder-id())
+            assert(not(is-err(folder)), `get-folder: ${if-err(folder, (e) { err-message(e) })}`)
+            assert(folder.is-folder)
+            pos ::box::events/current-position()
+            assert(not(is-err(pos)), `events: ${if-err(pos, (e) { err-message(e) })}`)
+            assert(gt(length(pos), 0), "the user event stream has a position")
+        }
+    }
+}

@@ -1,0 +1,961 @@
+::microsoft::graph::api ns
+meta {
+    doc: """
+    The authenticated request helper shared by the microsoft-* packages,
+    plus Graph-shaped errors, retry classification, OData query
+    building, `@odata.nextLink` paging, and JSON batching.
+
+    **Paths.** `path` is either a Graph path (`"/me/drive"`, sent to
+    `{graph}/v1.0/me/drive` for the call's cloud; `opts.api-version:
+    "beta"` switches version) or a full `https://` URL such as an
+    `@odata.nextLink`.
+
+    **Retry.** microsoft-graph never waits between attempts. A connection
+    failure on an idempotent method (GET, HEAD, PUT, DELETE, OPTIONS) is
+    retried once, immediately (`opts.retry: false` turns that off).
+    Everything else, including 429 and 503 throttling, comes back as
+    `err(HttpError)` with `retry-after` set from the `Retry-After`
+    header. Check it with `is-retryable` and let Hot back off: give the
+    handler, schedule or task a `retry` policy and fail the run (see
+    https://hot.dev/docs/retries).
+
+    **401 handling.** When a cached token is rejected with 401, it is
+    evicted and the call is retried once with a freshly minted token.
+
+    **Request ids.** Every call sends a fresh `client-request-id` (or
+    `opts.client-request-id`; `false` sends none) and asks Graph to echo
+    it. `HttpError` carries it with Graph's `request-id`, which is what
+    Microsoft support asks for.
+    """
+}
+
+::graph ::microsoft::graph
+::auth ::microsoft::graph::auth
+::uri ::hot::uri
+::b64 ::hot::base64
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+MAX_IMMEDIATE_RETRIES 1
+RETRY_STATUSES [408, 429, 500, 502, 503, 504]
+IDEMPOTENT_METHODS ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"]
+MAX_BATCH_SIZE 20
+
+// Safety stop for collect-pages when no limit is given.
+MAX_PAGES 10000
+
+// OData system query options: short option names to their `$` keys.
+ODATA_OPTIONS {
+    select: "$select",
+    expand: "$expand",
+    filter: "$filter",
+    orderby: "$orderby",
+    order-by: "$orderby",
+    top: "$top",
+    skip: "$skip",
+    search: "$search",
+    count: "$count",
+    skiptoken: "$skiptoken"
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx response from Microsoft Graph.
+
+    **Fields**
+    - `status` - HTTP status code
+    - `headers`, `body` - the raw response (body is decoded JSON when JSON)
+    - `message` - readable summary, e.g.
+      `"microsoft-graph: HTTP 404 itemNotFound: The resource could not be found."`
+    - `code` - Graph's `error.code` (e.g. `"itemNotFound"`,
+      `"accessDenied"`, `"activityLimitReached"`, `"resyncRequired"`)
+    - `inner-code` - the innermost `innerError.code`, when present
+    - `error-message` - Graph's `error.message`
+    - `request-id`, `client-request-id` - from `innerError` or the
+      response headers, for Microsoft support
+    - `retry-after` - seconds from a numeric `Retry-After` header, else null
+    """
+}
+type {
+    status: Int,
+    headers: Map?,
+    body: Any,
+    message: Str?,
+    code: Str?,
+    inner-code: Str?,
+    error-message: Str?,
+    request-id: Str?,
+    client-request-id: Str?,
+    retry-after: Int?
+}
+
+decode-error-body fn (body: Any): Any {
+  cond {
+    is-bytes(body) => {
+      parsed from-json(Str(body))
+      if(is-err(parsed), Str(body), parsed)
+    }
+
+    is-str(body) => {
+      t trim(body)
+      cond {
+        or(starts-with(t, "{"), starts-with(t, "[")) => {
+          parsed from-json(t)
+          if(is-err(parsed), body, parsed)
+        }
+        => { body }
+      }
+    }
+    => { body }
+  }
+}
+
+innermost-code fn (inner: Any, found: Str?): Str? {
+  cond {
+    not(is-map(inner)) => { found }
+    => {
+      code get(inner, "code")
+      next or(get(inner, "innerError"), get(inner, "innererror"))
+      innermost-code(next, if(is-str(code), code, found))
+    }
+  }
+}
+
+graph-error-details
+meta {
+    doc: """
+    Extract Graph's error fields from a response body (pure): `{code,
+    message, inner-code, request-id, client-request-id}`. Handles the
+    standard `{error: {code, message, innerError: {request-id,
+    client-request-id, code?}}}` shape (also `innererror`), and the
+    OAuth-style `{error: "invalid_token", error_description}` shape.
+    Fields are null when absent.
+    """
+}
+fn (body: Any): Map {
+  decoded decode-error-body(body)
+  e if(is-map(decoded), decoded.error, null)
+  cond {
+    is-map(e) => {
+      inner or(get(e, "innerError"), get(e, "innererror"))
+      {
+        code: e.code,
+        message: e.message,
+        inner-code: innermost-code(inner, null),
+        request-id: if(is-map(inner), get(inner, "request-id"), null),
+        client-request-id: if(is-map(inner), get(inner, "client-request-id"), null)
+      }
+    }
+
+    is-str(e) => {
+      {code: e, message: or(::auth/first-line(decoded.error_description), e), inner-code: null, request-id: null, client-request-id: null}
+    }
+    => { {code: null, message: null, inner-code: null, request-id: null, client-request-id: null} }
+  }
+}
+
+body-excerpt
+meta {
+    doc: """A short (at most 300 characters) printable form of a response body, for error messages."""
+}
+fn (body: Any): Str {
+  text cond {
+    is-null(body) => { "" }
+    is-str(body) => { body }
+    is-bytes(body) => { Str(body) }
+    => { to-json(untype(body)) }
+  }
+
+  if(gt(length(text), 300), `${slice(text, 0, 300)}...`, text)
+}
+
+header-value
+meta {doc: """A response header by lower-case name, or null when absent or empty."""}
+fn (headers: Any, name: Str): Str? {
+  h if(is-map(headers), map-keys(headers, lowercase), {})
+  v get(h, name)
+  if(or(is-null(v), eq(v, "")), null, Str(v))
+}
+
+// WORKAROUND(hot-bug-1): T(response) ignores a declared `HttpResponse -> HttpError` arrow, so errors are built only through this explicit function.
+http-error
+meta {
+    doc: """Build an `HttpError` (with a readable `message`) from a non-2xx `HttpResponse` (pure). Exposed for testing and for packages that read responses themselves."""
+}
+fn (response: Map): HttpError {
+  details graph-error-details(response.body)
+  code details.code
+  code-part if(is-some(code), ` ${code}`, "")
+  detail if(is-some(details.message), details.message, body-excerpt(response.body))
+  headers or(response.headers, {})
+  HttpError({
+    status: response.status,
+    headers: headers,
+    body: response.body,
+    message: `microsoft-graph: HTTP ${response.status}${code-part}: ${detail}`,
+    code: code,
+    inner-code: details.inner-code,
+    error-message: details.message,
+    request-id: or(details.request-id, header-value(headers, "request-id")),
+    client-request-id: or(details.client-request-id, header-value(headers, "client-request-id")),
+    retry-after: retry-after-seconds(headers)
+  })
+}
+
+plain-payload
+meta {
+    doc: """The payload of a `Result.Err` (or the value itself), with type tags removed so an `HttpError` / `TokenError` reads like a Map."""
+}
+fn (value: Result): Any {
+  payload if(is-err(value), err-value(value), value)
+  if(or(is-null(payload), is-str(payload)), payload, untype(payload))
+}
+
+has-code
+meta {
+    doc: """True when `error` (an `HttpError`, a `Result.Err` holding one, or any error payload) carries the Graph error `code` (or inner code)."""
+}
+fn (error: Result, code: Str): Bool {
+  payload plain-payload(error)
+  and(is-map(payload), or(eq(get(payload, "code"), code), eq(get(payload, "inner-code"), code)))
+}
+
+// ---------------------------------------------------------------------------
+// Retry classification (pure) and the one immediate retry
+// ---------------------------------------------------------------------------
+
+parse-int ::microsoft::graph::auth/parse-int
+
+retry-after-seconds
+meta {
+    doc: """The `Retry-After` header of a response's `headers` as whole seconds (Int), or null when absent or given as an HTTP date."""
+}
+fn (headers: Map?): Int? {
+  seconds parse-int(header-value(headers, "retry-after"))
+  if(is-some(seconds), max(or(seconds, 0), 0), null)
+}
+
+retry-policy
+meta {
+    doc: """
+    The immediate-retry policy for a call (pure): `{max-retries: 1}`, or
+    `{max-retries: 0}` when `opts.retry` is `false` or `0`. Values are
+    clamped to 0..1: microsoft-graph never waits between attempts, so it
+    never retries more than once.
+    """
+}
+fn (opts: Map): Map {
+  r get(opts, "retry")
+  n cond {
+    eq(r, false) => { 0 }
+    is-int(r) => { r }
+    and(is-map(r), is-int(get(or(r, {}), "max-retries"))) => { r.max-retries }
+    => { MAX_IMMEDIATE_RETRIES }
+  }
+  {max-retries: min(max(n, 0), MAX_IMMEDIATE_RETRIES)}
+}
+
+is-retryable-status
+meta {
+    doc: """True for statuses Graph asks clients to retry later: 408, 429 (throttled), 500, 502, 503 (service unavailable, often with `Retry-After`) and 504."""
+}
+fn (status: Int): Bool {
+  in(status, RETRY_STATUSES)
+}
+
+is-connection-failure
+meta {
+    doc: """True when a transport error message is a connection or read failure (worth trying again), not a size-limit or URL error."""
+}
+fn (message: Str): Bool {
+  and(
+    or(contains(message, "request failed"), contains(message, "failed to read body")),
+    not(contains(message, "exceeds"))
+  )
+}
+
+is-retryable-transport
+meta {
+    doc: """True when a transport failure may be retried immediately: an idempotent method (GET, HEAD, PUT, DELETE, OPTIONS) and a connection failure."""
+}
+fn (method: Str, message: Str): Bool {
+  and(in(uppercase(method), IDEMPOTENT_METHODS), is-connection-failure(message))
+}
+
+is-retryable
+meta {
+    doc: """
+    True when a failed call is worth retrying later: an `HttpError` (or a
+    `Result.Err` holding one, or a raw `HttpResponse`) with status 408,
+    429, 500, 502, 503 or 504; a `TokenError` from the token endpoint
+    with one of those statuses; or a connection failure. False for
+    successes and for permanent errors (400, 401, 403, 404, 409, 410, ...).
+
+    microsoft-graph does not wait and retry for you: Hot has no in-run
+    sleep. Give the handler, schedule or task a `retry` policy (see
+    https://hot.dev/docs/retries) and fail the run when this returns
+    true; `retry-after` on the `HttpError` says how long Graph asked you
+    to wait.
+
+    ```hot
+    sync-files
+    meta {
+      schedule: "every 15 minutes",
+      retry: {attempts: 5, delay: 5000, backoff: "exponential", max_delay: 120000, jitter: true}
+    }
+    fn (event) {
+      me ::microsoft::graph::api/json("GET", "/me/drive", {})
+      cond {
+        ::microsoft::graph::api/is-retryable(me) => { fail(`graph: retrying later: ${err-message(me)}`) }
+        is-err(me) => { println(`graph: giving up: ${err-message(me)}`) }
+        => { me.id }
+      }
+    }
+    ```
+    """
+}
+fn (error: Result): Bool {
+  payload plain-payload(error)
+  cond {
+    is-str(payload) => { is-connection-failure(payload) }
+    not(is-map(payload)) => { false }
+    is-int(get(payload, "status")) => { is-retryable-status(payload.status) }
+    is-str(get(payload, "message")) => { is-connection-failure(payload.message) }
+    => { false }
+  }
+}
+
+send-with-retry
+meta {
+    doc: """Send an `HttpRequest`; on a connection failure of an idempotent method, send it once more straight away (per `policy`). Never waits. Returns the final response or transport Err."""
+}
+fn
+(req: HttpRequest, policy: Map): HttpResponse {
+  send-with-retry(req, policy, 0)
+},
+(req: HttpRequest, policy: Map, attempt: Int): HttpResponse {
+  response http-request(req)
+  cond {
+    and(is-err(response), lt(attempt, policy.max-retries), is-retryable-transport(req.method, err-message(response))) => {
+      send-with-retry(req, policy, add(attempt, 1))
+    }
+    => { response }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Query building (pure)
+// ---------------------------------------------------------------------------
+
+api-params
+meta {
+    doc: """Strip microsoft-graph's own keys (`::microsoft::graph::auth/CREDENTIAL_KEYS`: credentials, cloud, `scopes`, `retry`, `headers`, ...) from an `opts` Map, leaving only API parameters."""
+}
+fn (opts: Map): Map {
+  filter-keys(opts, (k) { not(in(k, ::auth/CREDENTIAL_KEYS)) })
+}
+
+credential-opts
+meta {
+    doc: """Keep only microsoft-graph's own keys (credentials, cloud, `scopes`, `retry`, `headers`, ...) from an `opts` Map, e.g. to pass them on to a follow-up call."""
+}
+fn (opts: Map): Map {
+  filter-keys(opts, (k) { in(k, ::auth/CREDENTIAL_KEYS) })
+}
+
+quote-search
+meta {
+    doc: """Wrap a `$search` value in double quotes unless it already is (Graph requires `$search="..."` for directory objects and messages). Embedded `"` are escaped as `\\"`."""
+}
+fn (value: Str): Str {
+  v trim(value)
+  cond {
+    and(starts-with(v, "\""), ends-with(v, "\""), gt(length(v), 1)) => { v }
+    => {
+      escaped replace(v, "\"", "\\\"")
+      concat("\"", escaped, "\"")
+    }
+  }
+}
+
+odata-value fn (key: Str, value: Any): Str {
+  cond {
+    is-vec(value) => { join(map(filter(value, is-some), (v) { Str(v) }), ",") }
+    is-bool(value) => { if(value, "true", "false") }
+    eq(key, "$search") => { quote-search(Str(value)) }
+    => { Str(value) }
+  }
+}
+
+odata-key
+meta {
+    doc: """The query key for an option name: `select` becomes `$select` (see `ODATA_OPTIONS`); keys already starting with `$` and any other names pass through."""
+}
+fn (key: Str): Str {
+  cond {
+    starts-with(key, "$") => { key }
+    is-some(get(ODATA_OPTIONS, key)) => { get(ODATA_OPTIONS, key) }
+    => { key }
+  }
+}
+
+odata-params
+meta {
+    doc: """
+    Normalise query parameters (pure): microsoft-graph keys are removed,
+    nulls dropped, OData short names (`select`, `expand`, `filter`,
+    `orderby`, `top`, `skip`, `search`, `count`) become their `$` keys,
+    Vec values are comma-joined (`select: ["id", "name"]`), Bools become
+    `true`/`false`, and a `$search` value is double-quoted.
+
+    ```hot
+    ::microsoft::graph::api/odata-params({select: ["id", "displayName"], top: 50, filter: null})
+    // {"$select": "id,displayName", "$top": "50"}
+    ```
+    """
+}
+fn (params: Map): Map {
+  present filter-vals(api-params(params), is-some)
+  reduce(keys(present), (acc, k) {
+    key odata-key(Str(k))
+    assoc(acc, key, odata-value(key, get(present, k)))
+  }, {})
+}
+
+encode-query-key fn (key: Str): Str {
+  if(starts-with(key, "$"), `$${::uri/encode(slice(key, 1, length(key)))}`, ::uri/encode(key))
+}
+
+query-string
+meta {
+    doc: """
+    Encode normalised parameters as a query string (pure). Values are
+    percent-encoded per RFC 3986 (spaces as `%20`, never `+`, which some
+    Graph services read literally); the `$` of OData keys stays literal.
+    Keys are sorted, so output is stable.
+    """
+}
+fn (params: Map): Str {
+  normalized odata-params(params)
+  join(map(sort(keys(normalized)), (k) { `${encode-query-key(Str(k))}=${::uri/encode(get(normalized, k))}` }), "&")
+}
+
+with-query
+meta {
+    doc: """
+    Append query parameters to a URL or path (see `odata-params` and
+    `query-string`), dropping nulls. Works whether or not the URL already
+    has a query.
+
+    ```hot
+    ::microsoft::graph::api/with-query("/users", {select: "id,mail", filter: "startswith(displayName,'A')", top: 10})
+    // "/users?$filter=startswith%28displayName%2C%27A%27%29&$select=id%2Cmail&$top=10"
+    ```
+    """
+}
+fn (url: Str, params: Map): Str {
+  qs query-string(params)
+  cond {
+    eq(qs, "") => { url }
+    contains(url, "?") => { `${url}&${qs}` }
+    => { `${url}?${qs}` }
+  }
+}
+
+needs-eventual-consistency
+meta {
+    doc: """True when query parameters use `$search` or `$count`, which Graph's advanced directory queries only accept with `ConsistencyLevel: eventual` (pure)."""
+}
+fn (params: Map): Bool {
+  normalized odata-params(params)
+  or(is-some(get(normalized, "$search")), is-some(get(normalized, "$count")))
+}
+
+query-headers
+meta {
+    doc: """The extra headers a query needs (pure): `{ConsistencyLevel: "eventual"}` when `needs-eventual-consistency`, else `{}`. Send them on every page of a paged query."""
+}
+fn (params: Map): Map {
+  if(needs-eventual-consistency(params), {ConsistencyLevel: "eventual"}, {})
+}
+
+encode-segment
+meta {
+    doc: """URL-encode one path segment (an id, a user principal name, a site id with commas, ...)."""
+}
+fn (value: Str): Str {
+  ::uri/encode(value)
+}
+
+// ---------------------------------------------------------------------------
+// Request building
+// ---------------------------------------------------------------------------
+
+resolve
+meta {
+    doc: """
+    The package's one credential and settings resolver: per-call `opts`
+    first, then context, then defaults (see `::microsoft::graph::auth`).
+    Returns resolved credentials `{kind, cloud, ...}` or a `TokenError`.
+    Pure apart from reading context; it never writes per-call
+    credentials to context.
+    """
+}
+fn
+(): Map {
+  ::auth/resolve-credentials({})
+},
+(opts: Map): Map {
+  ::auth/resolve-credentials(opts)
+}
+
+resolve-url
+meta {
+    doc: """
+    The absolute URL for `path` (pure): full `http(s)://` URLs pass
+    through; a Graph path is joined to `{graph}/{version}` (`v1.0`
+    unless `opts.api-version` is set). A missing leading `/` is added.
+    """
+}
+fn (path: Str, graph: Str, opts: Map): Str {
+  version or(get(opts, "api-version"), ::graph/API_VERSION)
+  cond {
+    or(starts-with(path, "https://"), starts-with(path, "http://")) => { path }
+    starts-with(path, "/") => { `${graph}/${version}${path}` }
+    => { `${graph}/${version}/${path}` }
+  }
+}
+
+client-request-id
+meta {
+    doc: """The `client-request-id` to send (pure apart from the UUID): `opts.client-request-id` when a Str, none when it is `false`, else a fresh UUID."""
+}
+fn (opts: Map): Str? {
+  v get(opts, "client-request-id")
+  cond {
+    eq(v, false) => { null }
+    and(is-str(v), not(::auth/is-blank-value(v))) => { v }
+    => { Str(Uuid()) }
+  }
+}
+
+build-http-request
+meta {
+    doc: """
+    Build the outgoing `HttpRequest` (pure). `token` (nullable) becomes
+    the Bearer header; `request-id` the `client-request-id` header with
+    `return-client-request-id: true`. Map/Vec bodies are JSON-encoded
+    with a JSON Content-Type; Str/Bytes bodies are sent verbatim (set
+    Content-Type in `headers`); `""` or null sends no body. Caller
+    headers win.
+    """
+}
+fn (method: Str, url: Str, headers: Map, body: Any, token: Str?, request-id: Str?): HttpRequest {
+  auth-headers if(is-null(token), {}, {Authorization: `Bearer ${token}`})
+  id-headers if(is-null(request-id), {}, {client-request-id: request-id, return-client-request-id: "true"})
+  no-body or(is-null(body), and(is-str(body), is-empty(body)))
+  is-raw or(is-str(body), is-bytes(body))
+  encoded-body cond {
+    no-body => { "" }
+    is-raw => { body }
+    => { to-json(untype(body)) }
+  }
+
+  type-headers if(or(no-body, is-raw), {}, {Content-Type: "application/json"})
+  HttpRequest({
+    method: method,
+    url: url,
+    headers: {...auth-headers, ...id-headers, ...type-headers, ...headers},
+    body: encoded-body
+  })
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated request to Microsoft Graph and return the raw
+    `HttpResponse` (non-2xx included), or an Err for credential and
+    transport failures.
+
+    - `method` - `"GET"`, `"POST"`, `"PATCH"`, `"PUT"`, `"DELETE"`
+    - `path` - a Graph path (`"/me/drive/root/children"`) or full URL
+    - `headers` - extra headers (they win over the defaults and `opts.headers`)
+    - `body` - a Map/Vec (sent as JSON), Str/Bytes (sent verbatim), or `""`
+    - `opts` - per-call credentials (see `::microsoft::graph::auth`),
+      `headers`, `api-version`, `client-request-id`, and `retry`
+      (`false` disables the one immediate retry of a failed connection)
+
+    ```hot
+    response ::microsoft::graph::api/request("GET", "/me", {})
+
+    // As one tenant user, without touching context
+    response2 ::microsoft::graph::api/request("GET", "/me/drive", {}, "", {token: "eyJ0eXAi..."})
+    ```
+    """
+}
+fn
+(method: Str, path: Str): HttpResponse {
+  request(method, path, {}, "", {})
+},
+(method: Str, path: Str, opts: Map): HttpResponse {
+  request(method, path, {}, "", opts)
+},
+(method: Str, path: Str, headers: Map, body: Any, opts: Map): HttpResponse {
+  creds resolve(opts)
+  policy retry-policy(opts)
+  cond {
+    is-err(creds) => { creds }
+    => {
+      url resolve-url(path, creds.cloud.graph, opts)
+      all-headers {...or(get(opts, "headers"), {}), ...headers}
+      request-id client-request-id(opts)
+      scopes ::auth/token-scopes(creds, opts)
+      auth ::auth/bearer(creds, scopes)
+      cond {
+        is-err(auth) => { auth }
+        => {
+          response send-with-retry(build-http-request(method, url, all-headers, body, auth.token, request-id), policy)
+          cond {
+            and(auth.cached, not(is-err(response)), eq(response.status, 401)) => {
+              ::auth/evict-token(auth.cache-key)
+              fresh ::auth/bearer(creds, scopes)
+              if(is-err(fresh), fresh,
+                send-with-retry(build-http-request(method, url, all-headers, body, fresh.token, request-id), policy))
+            }
+            => { response }
+          }
+        }
+      }
+    }
+  }
+}
+
+unwrap
+meta {
+    doc: """The decoded body of a 2xx response (`{}` for an empty 204), the Err of a failed request, or `err(HttpError)` for a non-2xx response."""
+}
+fn (response: Result): Any {
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => {
+      b response.body
+      if(or(is-null(b), and(is-str(b), eq(b, ""))), {}, b)
+    }
+    => { err(http-error(response)) }
+  }
+}
+
+json
+meta {
+    doc: """Like `request`, but unwraps: the decoded JSON body on 2xx (`{}` for 204 No Content), or an Err carrying `HttpError` (credential failures carry `::microsoft::graph::auth/TokenError`). Takes the same arities as `request`."""
+}
+fn
+(method: Str, path: Str): Any {
+  unwrap(request(method, path, {}, "", {}))
+},
+(method: Str, path: Str, opts: Map): Any {
+  unwrap(request(method, path, {}, "", opts))
+},
+(method: Str, path: Str, headers: Map, body: Any, opts: Map): Any {
+  unwrap(request(method, path, headers, body, opts))
+}
+
+get-json
+meta {
+    doc: """
+    GET a Graph path with OData query parameters taken from `opts` (see
+    `odata-params`; credential keys are left for auth), sending
+    `ConsistencyLevel: eventual` when `$search` / `$count` need it.
+
+    ```hot
+    users ::microsoft::graph::api/get-json("/users", {select: ["id", "displayName"], search: "displayName:alex", count: true})
+    ```
+    """
+}
+fn (path: Str, opts: Map): Any {
+  json("GET", with-query(path, opts), query-headers(opts), "", credential-opts(opts))
+}
+
+// ---------------------------------------------------------------------------
+// Pagination over @odata.nextLink
+// ---------------------------------------------------------------------------
+
+Page
+meta {
+    doc: """
+    One page of a collection: `items` (`value`), `next-link`
+    (`@odata.nextLink`, null on the last page), `delta-link`
+    (`@odata.deltaLink`, set on the last page of a delta query), `count`
+    (`@odata.count` when requested), and the decoded `response`.
+    """
+}
+type {
+    items: Vec,
+    next-link: Str?,
+    delta-link: Str?,
+    count: Int?,
+    response: Map
+}
+
+to-page
+meta {doc: """Read a decoded collection response into a `Page` (pure)."""}
+fn (response: Map): Page {
+  next get(response, "@odata.nextLink")
+  delta get(response, "@odata.deltaLink")
+  Page({
+    items: or(get(response, "value"), []),
+    next-link: if(::auth/is-blank-value(next), null, next),
+    delta-link: if(::auth/is-blank-value(delta), null, delta),
+    count: parse-int(get(response, "@odata.count")),
+    response: response
+  })
+}
+
+fetch-page
+meta {
+    doc: """
+    Fetch one page: GET `next-link` when given, else `path` with the
+    OData parameters in `opts`. The query's `ConsistencyLevel` header is
+    sent on every page (Graph does not carry it over).
+
+    ```hot
+    page ::microsoft::graph::api/fetch-page("/users", {select: "id,displayName", top: 100}, null)
+    page.items
+    next ::microsoft::graph::api/fetch-page("/users", {select: "id,displayName", top: 100}, page.next-link)
+    ```
+    """
+}
+fn (path: Str, opts: Map, next-link: Str?): Page {
+  target if(is-null(next-link), with-query(path, opts), next-link)
+  response json("GET", target, query-headers(opts), "", credential-opts(opts))
+  if(is-err(response), response, to-page(response))
+}
+
+collect-loop fn (fetch: Fn, limit: Int?, next-link: Str?, acc: Vec, pages: Int): Vec {
+  page fetch(next-link)
+  cond {
+    is-err(page) => { page }
+    => {
+      all concat(acc, page.items)
+      cond {
+        and(is-some(limit), gte(length(all), or(limit, 0))) => { slice(all, 0, limit) }
+        is-null(page.next-link) => { all }
+        gte(pages, MAX_PAGES) => { all }
+        => { collect-loop(fetch, limit, page.next-link, all, add(pages, 1)) }
+      }
+    }
+  }
+}
+
+collect-pages
+meta {
+    doc: """
+    Follow `@odata.nextLink` and collect every item of `path`, or at most
+    `limit` items (null for no limit). `opts` holds OData parameters and
+    credentials as for `fetch-page`. The first failing page's Err is
+    returned.
+
+    ```hot
+    users ::microsoft::graph::api/collect-pages("/users", {select: ["id", "mail"], top: 999}, 5000)
+    ```
+    """
+}
+fn
+(path: Str, opts: Map): Vec {
+  collect-pages(path, opts, null)
+},
+(path: Str, opts: Map, limit: Int?): Vec {
+  collect-loop((link) { fetch-page(path, opts, link) }, limit, null, [], 1)
+}
+
+collect-with
+meta {
+    doc: """Collect items with your own page function: `fetch` is `(next-link: Str?) -> Page` (null for the first page). Stops at `limit` items (null for all)."""
+}
+fn (fetch: Fn, limit: Int?): Vec {
+  collect-loop(fetch, limit, null, [], 1)
+}
+
+// ---------------------------------------------------------------------------
+// JSON batching ($batch, at most 20 requests)
+// ---------------------------------------------------------------------------
+
+relative-url
+meta {
+    doc: """The batch form of a URL (pure): the path after `/v1.0` (or `/beta`) for a full Graph URL, with a leading `/`; relative paths pass through."""
+}
+fn (url: Str): Str {
+  cond {
+    contains(url, "://") => {
+      parts split(last(split(url, "://")), "/")
+      after-host `/${join(rest(parts), "/")}`
+      cond {
+        starts-with(after-host, "/v1.0/") => { slice(after-host, 5, length(after-host)) }
+        starts-with(after-host, "/beta/") => { slice(after-host, 5, length(after-host)) }
+        => { after-host }
+      }
+    }
+
+    starts-with(url, "/") => { url }
+    => { `/${url}` }
+  }
+}
+
+batch-body fn (body: Any): Any {
+  cond {
+    or(is-null(body), and(is-str(body), eq(body, ""))) => { null }
+    is-bytes(body) => { ::b64/encode(body) }
+    is-str(body) => { body }
+    => { untype(body) }
+  }
+}
+
+build-batch-request
+meta {
+    doc: """
+    Normalise one batch entry (pure): `{id?, method, url, headers?,
+    body?, depends-on?}`. `id` defaults to the 1-based position; `url`
+    is made relative; a Map/Vec body gets `Content-Type:
+    application/json`; a Bytes body is base64-encoded (Graph's form for
+    binary bodies); `depends-on` (Vec of ids) becomes `dependsOn`.
+    """
+}
+fn (entry: Map, index: Int): Map {
+  body get(entry, "body")
+  headers or(get(entry, "headers"), {})
+  has-body not(or(is-null(body), and(is-str(body), eq(body, ""))))
+  content-type if(and(has-body, not(is-str(body)), not(is-bytes(body)), is-null(get(map-keys(headers, lowercase), "content-type"))), {Content-Type: "application/json"}, {})
+  all-headers {...content-type, ...headers}
+  depends get(entry, "depends-on")
+  ::auth/compact({
+    id: Str(or(get(entry, "id"), add(index, 1))),
+    method: uppercase(or(get(entry, "method"), "GET")),
+    url: relative-url(Str(get(entry, "url"))),
+    headers: if(is-empty(all-headers), null, all-headers),
+    body: batch-body(body),
+    dependsOn: if(is-null(depends), null, map(depends, (d) { Str(d) }))
+  })
+}
+
+build-batch
+meta {
+    doc: """Build a `$batch` body `{requests: [...]}` from entries (pure); an Err for zero or more than 20 entries or duplicate ids."""
+}
+fn (entries: Vec): Map {
+  requests map-indexed(entries, (i, e) { build-batch-request(e, i) })
+  ids map(requests, (r) { r.id })
+  cond {
+    is-empty(entries) => { err("microsoft-graph: a batch needs at least one request") }
+    gt(length(entries), MAX_BATCH_SIZE) => {
+      err(`microsoft-graph: a batch holds at most ${MAX_BATCH_SIZE} requests (got ${length(entries)}); split it with batch-chunks`)
+    }
+
+    ne(length(distinct(map(ids, lowercase))), length(ids)) => { err("microsoft-graph: batch request ids must be unique (case-insensitive)") }
+    => { {requests: requests} }
+  }
+}
+
+batch-chunks
+meta {doc: """Split entries into groups of at most 20 for `batch` (pure)."""}
+fn (entries: Vec): Vec {
+  partition(entries, MAX_BATCH_SIZE)
+}
+
+BatchResponse
+meta {
+    doc: """
+    One response inside a `$batch` reply.
+
+    - `id`, `status`, `headers`, `body` (decoded JSON, or the raw value)
+    - `ok` - true for 2xx
+    - `error` - an `HttpError` for non-2xx, else null
+    - `retry-after` - from the individual response's `Retry-After`
+    """
+}
+type {
+    id: Str,
+    status: Int,
+    headers: Map,
+    body: Any,
+    ok: Bool,
+    error: HttpError?,
+    retry-after: Int?
+}
+
+parse-batch-response
+meta {
+    doc: """Read one entry of a `$batch` reply's `responses` into a `BatchResponse` (pure)."""
+}
+fn (r: Map): BatchResponse {
+  status or(parse-int(r.status), 0)
+  headers or(r.headers, {})
+  ok and(gte(status, 200), lt(status, 300))
+  BatchResponse({
+    id: Str(r.id),
+    status: status,
+    headers: headers,
+    body: r.body,
+    ok: ok,
+    error: if(ok, null, http-error({status: status, headers: headers, body: r.body})),
+    retry-after: retry-after-seconds(headers)
+  })
+}
+
+order-responses
+meta {
+    doc: """Parse a `$batch` reply (pure): `{responses: Vec<BatchResponse>}` in the order of `requests` (Graph answers in any order), plus `by-id`, the ids that `failed`, and those that are `retryable`."""
+}
+fn (requests: Vec, reply: Map): Map {
+  parsed map(or(reply.responses, []), parse-batch-response)
+  by-id reduce(parsed, (acc, r) { assoc(acc, lowercase(r.id), r) }, {})
+  ordered filter(map(requests, (q) { get(by-id, lowercase(q.id)) }), is-some)
+  {
+    responses: ordered,
+    by-id: reduce(ordered, (acc, r) { assoc(acc, r.id, r) }, {}),
+    failed: map(filter(ordered, (r) { not(r.ok) }), (r) { r.id }),
+    retryable: map(filter(ordered, (r) { is-retryable-status(r.status) }), (r) { r.id })
+  }
+}
+
+batch
+meta {
+    doc: """
+    POST /$batch - send up to 20 requests in one call. Each entry is
+    `{id?, method, url, headers?, body?, depends-on?}` with `url` a Graph
+    path (`"/me/drive/root/children"`). Returns `{responses, by-id,
+    failed, retryable}` (see `order-responses`); the batch itself fails
+    only when the whole request does. Individual 429s are listed in
+    `retryable`: resend just those later. Use `batch-chunks` for more
+    than 20.
+
+    ```hot
+    out ::microsoft::graph::api/batch([
+      {id: "me", method: "GET", url: "/me?$select=id,displayName"},
+      {id: "drive", method: "GET", url: "/me/drive?$select=id,quota"}
+    ])
+    get(out.by-id, "drive").body.quota
+    ```
+    """
+}
+fn
+(entries: Vec): Map {
+  batch(entries, {})
+},
+(entries: Vec, opts: Map): Map {
+  body build-batch(entries)
+  cond {
+    is-err(body) => { body }
+    => {
+      reply json("POST", "/$batch", {}, body, credential-opts(opts))
+      if(is-err(reply), reply, order-responses(body.requests, reply))
+    }
+  }
+}

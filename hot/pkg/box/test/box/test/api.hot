@@ -1,0 +1,236 @@
+::box::test::api ns
+meta ["test"]
+
+::api ::box::api
+::auth ::box::auth
+
+NOT_FOUND {
+    type: "error",
+    status: 404,
+    code: "not_found",
+    message: "Could not find the specified resource",
+    request_id: "7a1b2c3d",
+    help_url: "http://developers.box.com/docs/#errors",
+    context_info: {errors: [{reason: "invalid_parameter", name: "file_id"}]}
+}
+
+test-http-error-from-box-body
+meta ["test"] fn () {
+    e ::api/http-error({status: 404, headers: {"content-type": "application/json"}, body: NOT_FOUND})
+    assert-eq(404, e.status)
+    assert-eq("not_found", e.code)
+    assert-eq("Could not find the specified resource", e.error-message)
+    assert-eq("7a1b2c3d", e.request-id)
+    assert-eq("http://developers.box.com/docs/#errors", e.help-url)
+    assert-eq("invalid_parameter", first(e.context-info.errors).reason)
+    assert-eq("box: HTTP 404 not_found: Could not find the specified resource (request_id 7a1b2c3d)", e.message)
+    assert(is-null(e.retry-after))
+}
+
+test-http-error-fields-survive-construction
+meta ["test"] fn () {
+    // Guards hot-bug-1: the record must not come out empty.
+    e ::api/http-error({status: 409, headers: null, body: {type: "error", status: 409, code: "item_name_in_use", message: "Item with the same name already exists"}})
+    plain untype(e)
+    assert-eq(409, plain.status)
+    assert-eq("item_name_in_use", plain.code)
+    assert-eq({}, plain.headers, "null headers become an empty Map")
+}
+
+test-http-error-rate-limit
+meta ["test"] fn () {
+    body {type: "error", status: 429, code: "rate_limit_exceeded", message: "Request rate limit exceeded, please try again later", request_id: "abc"}
+    e ::api/http-error({status: 429, headers: {"retry-after": "7"}, body: body})
+    assert-eq(7, e.retry-after)
+    assert(::api/is-retryable(err(e)))
+    assert(::api/has-code(err(e), "rate_limit_exceeded"))
+}
+
+test-http-error-oauth-shape-and-raw-bodies
+meta ["test"] fn () {
+    oauth ::api/http-error({status: 400, headers: {}, body: {error: "invalid_grant", error_description: "Refresh token has expired"}})
+    assert-eq("invalid_grant", oauth.code)
+    assert-eq("box: HTTP 400 invalid_grant: Refresh token has expired", oauth.message)
+    bytes ::api/http-error({status: 500, headers: {}, body: Bytes(to-json(NOT_FOUND))})
+    assert-eq("not_found", bytes.code, "a JSON body delivered as Bytes is decoded")
+    text ::api/http-error({status: 502, headers: {}, body: "<html>Bad Gateway</html>"})
+    assert-eq("box: HTTP 502: <html>Bad Gateway</html>", text.message)
+    not-ready ::api/http-error({status: 202, headers: {"retry-after": "3"}, body: ""})
+    assert(contains(not-ready.message, "not ready yet"))
+    assert(::api/is-retryable(err(not-ready)), "202 not-ready is retryable")
+}
+
+test-body-excerpt-is-short
+meta ["test"] fn () {
+    long join(map(range(0, 400), (i) { "x" }), "")
+    assert-eq(303, length(::api/body-excerpt(long)))
+}
+
+test-retry-after-seconds
+meta ["test"] fn () {
+    assert-eq(30, ::api/retry-after-seconds({"retry-after": " 30 "}))
+    assert(is-null(::api/retry-after-seconds({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"})), "HTTP dates are ignored")
+    assert(is-null(::api/retry-after-seconds(null)))
+    assert-eq(0, ::api/retry-after-seconds({"retry-after": "-5"}))
+}
+
+test-parse-int-never-halts
+meta ["test"] fn () {
+    assert-eq(12, ::api/parse-int("12"))
+    assert-eq(12, ::api/parse-int(12))
+    assert(is-null(::api/parse-int("abc")))
+    assert(is-null(::api/parse-int("")))
+    assert(is-null(::api/parse-int(null)))
+    assert(is-null(::api/parse-int("1.5")))
+}
+
+test-is-retryable
+meta ["test"] fn () {
+    mk (status) { err(::api/http-error({status: status, headers: {}, body: ""})) }
+    assert(::api/is-retryable(mk(429)))
+    assert(::api/is-retryable(mk(503)))
+    assert(::api/is-retryable(mk(500)))
+    assert(not(::api/is-retryable(mk(404))))
+    assert(not(::api/is-retryable(mk(401))))
+    assert(not(::api/is-retryable(mk(409))))
+    assert(::api/is-retryable(err("::hot::http/request: request failed: connection reset")))
+    assert(not(::api/is-retryable(err("response exceeds http.max-response-bytes"))))
+    assert(not(::api/is-retryable({entries: []})), "a success is not retryable")
+    busy err(::auth/coded-error("busy", "refresh_in_progress"))
+    assert(::api/is-retryable(busy))
+    token-500 err(::auth/token-error("box: token request failed", {status: 503, body: "down"}))
+    assert(::api/is-retryable(token-500))
+    grant err(::auth/token-error("box: token request failed", {status: 400, body: {error: "invalid_grant"}}))
+    assert(not(::api/is-retryable(grant)))
+}
+
+test-retry-policy
+meta ["test"] fn () {
+    assert-eq({max-retries: 1}, ::api/retry-policy({}))
+    assert-eq({max-retries: 0}, ::api/retry-policy({retry: false}))
+    assert-eq({max-retries: 1}, ::api/retry-policy({retry: 5}), "never more than one immediate retry")
+    assert(::api/is-retryable-transport("GET", "request failed: reset"))
+    assert(::api/is-retryable-transport("put", "request failed: reset"))
+    assert(not(::api/is-retryable-transport("POST", "request failed: reset")), "uploads and commits are not replayed")
+}
+
+test-with-query
+meta ["test"] fn () {
+    assert-eq("https://x/y", ::api/with-query("https://x/y", {}))
+    assert-eq("https://x/y", ::api/with-query("https://x/y", {a: null, b: []}), "nulls and empty Vecs are dropped")
+    url ::api/with-query("https://x/y", {fields: ["id", "name"], usemarker: true, limit: 100})
+    assert(contains(url, "fields=id%2Cname"), "Vecs are comma-joined")
+    assert(contains(url, "usemarker=true"))
+    assert(contains(url, "limit=100"))
+    assert-eq("https://x/y?a=1&b=2", ::api/with-query("https://x/y?a=1", {b: 2}))
+    assert-eq("https://x/y?q=a+b%26c", ::api/with-query("https://x/y", {q: "a b&c"}), "values are URL-encoded")
+}
+
+test-query-value
+meta ["test"] fn () {
+    assert-eq("pdf,docx", ::api/query-value(["pdf", null, "docx"]))
+    assert-eq("false", ::api/query-value(false))
+    assert-eq("7", ::api/query-value(7))
+}
+
+test-url-host
+meta ["test"] fn () {
+    assert-eq("api.box.com", ::api/url-host("https://api.box.com/2.0/files/1"))
+    assert-eq("dl.boxcloud.com", ::api/url-host("https://user:pw@DL.BoxCloud.com:443/x?y"))
+    assert(is-null(::api/url-host("not a url")))
+}
+
+test-is-box-url
+meta ["test"] fn () {
+    assert(::api/is-box-url("https://api.box.com/2.0/files/1"))
+    assert(::api/is-box-url("https://upload.box.com/api/2.0/files/content"))
+    assert(::api/is-box-url("https://dl.boxcloud.com/api/2.0/internal_files/1/versions/2/representations/extracted_text/content/"))
+    assert(::api/is-box-url("https://2.realtime.services.box.net/subscribe?channel=abc"))
+    assert(not(::api/is-box-url("http://api.box.com/2.0/files/1")), "plain http never gets a token")
+    assert(not(::api/is-box-url("https://evilbox.com/2.0")), "lookalike hosts are refused")
+    assert(not(::api/is-box-url("https://api.box.com.evil.example/2.0")))
+    assert(not(::api/is-box-url("https://box.com@evil.example/")), "userinfo tricks are refused")
+}
+
+test-request-refuses-foreign-hosts
+meta ["test"] fn () {
+    result ::api/request("GET", "https://example.com/steal", {}, "", {token: "secret-token"})
+    assert(is-err(result))
+    assert(contains(err-message(result), "refusing to send Box credentials to example.com"))
+    assert(not(contains(err-message(result), "secret-token")), "the token never appears in the error")
+}
+
+test-build-http-request
+meta ["test"] fn () {
+    req ::api/build-http-request("POST", "https://api.box.com/2.0/folders", {}, {name: "x", parent: {id: "0"}}, "tok", "42")
+    assert-eq("Bearer tok", req.headers.Authorization)
+    assert-eq("42", get(req.headers, "As-User"))
+    assert-eq("application/json", get(req.headers, "Content-Type"))
+    assert-eq({name: "x", parent: {id: "0"}}, from-json(req.body))
+    get-req ::api/build-http-request("GET", "https://api.box.com/2.0/users/me", {}, "", "tok", null)
+    assert-eq("", get-req.body)
+    assert(not(in("As-User", keys(get-req.headers))), "no As-User header unless asked")
+    assert(not(in("Content-Type", keys(get-req.headers))), "no body, no Content-Type")
+    raw ::api/build-http-request("PUT", "https://upload.box.com/x", {Content-Type: "application/octet-stream"}, Bytes([0, 255]), "tok", null)
+    assert-eq(Bytes([0, 255]), raw.body, "Bytes bodies pass through untouched")
+}
+
+test-api-params-strip-credentials
+meta ["test"] fn () {
+    stripped ::api/api-params({fields: "id", token: "t", as-user: "1", account: "a", retry: false, on-refresh: (t) { t }})
+    assert-eq({fields: "id"}, stripped)
+    kept ::api/credential-opts({fields: "id", token: "t", user-id: "5"})
+    assert-eq({token: "t", user-id: "5"}, kept)
+}
+
+test-unwrap
+meta ["test"] fn () {
+    assert-eq({}, ::api/unwrap({status: 204, headers: {}, body: null}))
+    assert-eq({id: "1"}, ::api/unwrap({status: 200, headers: {}, body: {id: "1"}}))
+    failed ::api/unwrap({status: 403, headers: {}, body: {type: "error", status: 403, code: "access_denied_insufficient_permissions", message: "Access denied"}})
+    assert(is-err(failed))
+    assert(contains(err-message(failed), "access_denied_insufficient_permissions"))
+}
+
+// ---------------------------------------------------------------------------
+// Pagination with in-memory pages
+// ---------------------------------------------------------------------------
+
+marker-pages fn (marker: Str?): Map {
+    cond {
+        is-null(marker) => { {entries: [1, 2], next_marker: "m2", limit: 2} }
+        eq(marker, "m2") => { {entries: [3, 4], next_marker: "m3", limit: 2} }
+        => { {entries: [5], next_marker: "", limit: 2} }
+    }
+}
+
+test-collect-marker
+meta ["test"] fn () {
+    assert-eq([1, 2, 3, 4, 5], ::api/collect-marker(marker-pages))
+    assert-eq([1, 2, 3], ::api/collect-marker(marker-pages, 3), "stops at the limit")
+    page ::api/marker-page({entries: [1], next_marker: null})
+    assert(is-null(page.next-marker))
+    failing ::api/collect-marker((m) { if(is-null(m), {entries: [1], next_marker: "x"}, err("boom")) })
+    assert(is-err(failing), "the first failing page's Err is returned")
+}
+
+offset-pages fn (offset: Int): Map {
+    all [1, 2, 3, 4, 5]
+    {entries: slice(all, offset, min(5, add(offset, 2))), total_count: 5, offset: offset, limit: 2}
+}
+
+test-collect-offset
+meta ["test"] fn () {
+    assert-eq([1, 2, 3, 4, 5], ::api/collect-offset(offset-pages, 2))
+    assert-eq([1, 2, 3], ::api/collect-offset(offset-pages, 2, 3))
+    assert-eq([1, 2, 3, 4], ::api/collect-offset(offset-pages, 2, null, 2), "max-offset stops before a rejected offset")
+}
+
+test-next-offset-for
+meta ["test"] fn () {
+    assert-eq(2, ::api/next-offset-for({entries: [1, 2], total_count: 5}, 0, 2))
+    assert(is-null(::api/next-offset-for({entries: [5], total_count: 5}, 4, 2)))
+    assert(is-null(::api/next-offset-for({entries: []}, 0, 2)), "an empty page ends")
+    assert-eq(2, ::api/next-offset-for({entries: [1, 2]}, 0, 2), "no total_count: a full page continues")
+    assert(is-null(::api/next-offset-for({entries: [1]}, 0, 2)), "no total_count: a short page ends")
+}
