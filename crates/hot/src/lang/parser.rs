@@ -421,7 +421,20 @@ impl Parser {
         // a Var ref `Shape` with deep_path `["Tri"]`, mirroring how
         // `Shape.Tri(...)` would be parsed in user code. For plain
         // targets, we just reference the type by name.
-        let function_value: Value = if let Some((base, variant)) = target_type.split_once('.') {
+        let function_value: Value = if let Some((ns, name)) = target_type
+            .starts_with("::")
+            .then(|| target_type.rsplit_once('/'))
+            .flatten()
+        {
+            // A qualified target (`::ai-chat/Provider.Compat`) is the
+            // reference `::ai-chat/Provider.Compat(...)` would parse to, so
+            // the namespace goes through alias resolution like user code.
+            Value::Ref(Ref::Ns(NsRef {
+                ns: NsPath::from(ns),
+                src: None,
+                function_name: Some(name.to_string()),
+            }))
+        } else if let Some((base, variant)) = target_type.split_once('.') {
             Value::Ref(Ref::Var(VarRef {
                 var: Var {
                     sym: Sym::String(base.to_string()),

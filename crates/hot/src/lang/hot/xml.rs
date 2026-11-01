@@ -223,19 +223,36 @@ fn get_tag(val: &Val) -> Option<String> {
 
 fn parse_xml(xml_str: &str) -> Result<Val, String> {
     let mut reader = Reader::from_str(xml_str);
-    reader.config_mut().trim_text(true);
+    // quick-xml reports each `&...;` reference as its own `GeneralRef`
+    // event, splitting the surrounding text. Trimming per event would eat
+    // the spaces in `a &amp; b`, so text runs are gathered in `pending`
+    // and trimmed as a whole when an element boundary or CDATA ends them.
+    reader.config_mut().trim_text(false);
 
     let mut stack: Vec<(String, IndexMap<Val, Val>, Vec<Val>)> = Vec::new();
     let mut root: Option<Val> = None;
+    let mut pending = String::new();
+
+    fn flush_text(pending: &mut String, stack: &mut [(String, IndexMap<Val, Val>, Vec<Val>)]) {
+        let text = pending.trim();
+        if !text.is_empty()
+            && let Some((_, _, content)) = stack.last_mut()
+        {
+            content.push(Val::from(text.to_string()));
+        }
+        pending.clear();
+    }
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
+                flush_text(&mut pending, &mut stack);
                 let tag_name = e.name().as_ref().to_string();
                 let attrs = parse_attributes(&e)?;
                 stack.push((tag_name, attrs, Vec::new()));
             }
             Ok(Event::Empty(e)) => {
+                flush_text(&mut pending, &mut stack);
                 let tag_name = e.name().as_ref().to_string();
                 let attrs = parse_attributes(&e)?;
                 let element = build_xml_val(&tag_name, attrs, Vec::new());
@@ -247,6 +264,7 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
                 }
             }
             Ok(Event::End(_)) => {
+                flush_text(&mut pending, &mut stack);
                 if let Some((tag_name, attrs, content)) = stack.pop() {
                     let element = build_xml_val(&tag_name, attrs, content);
 
@@ -258,16 +276,24 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
                 }
             }
             Ok(Event::Text(e)) => {
-                let text = quick_xml::escape::unescape(&e)
-                    .map_err(|e| e.to_string())?
-                    .to_string();
-                if !text.is_empty()
-                    && let Some((_, _, content)) = stack.last_mut()
-                {
-                    content.push(Val::from(text));
+                let text = quick_xml::escape::unescape(&e).map_err(|e| e.to_string())?;
+                pending.push_str(&text);
+            }
+            Ok(Event::GeneralRef(e)) => {
+                if let Some(ch) = e.resolve_char_ref().map_err(|e| e.to_string())? {
+                    pending.push(ch);
+                } else if let Some(resolved) = quick_xml::escape::resolve_predefined_entity(&e) {
+                    pending.push_str(resolved);
+                } else {
+                    // An entity declared in a DTD (Hot does not read DTDs) or
+                    // an HTML name such as `&nbsp;`: keep it as written.
+                    pending.push('&');
+                    pending.push_str(&e);
+                    pending.push(';');
                 }
             }
             Ok(Event::CData(e)) => {
+                flush_text(&mut pending, &mut stack);
                 let text = e.as_ref().to_string();
                 if !text.is_empty()
                     && let Some((_, _, content)) = stack.last_mut()
@@ -426,6 +452,34 @@ mod tests {
         assert_eq!(
             get_tag(&get_content(&parsed).unwrap()[0]).as_deref(),
             Some("child")
+        );
+    }
+
+    #[test]
+    fn xml_text_decodes_entity_and_character_references() {
+        let parsed = parse_xml(
+            "<root><a>a &amp; b</a><b>&lt;&gt;&quot;&apos;</b><c>&#65;&#x42;&#x1F600;</c>\
+             <d>  x &amp;&amp; y  </d><e>&nbsp;</e><f>one<![CDATA[ & ]]>two</f></root>",
+        )
+        .expect("parse XML");
+        let texts: Vec<Val> = get_content(&parsed)
+            .unwrap()
+            .iter()
+            .map(|child| match text(std::slice::from_ref(child)) {
+                HotResult::Ok(v) => v,
+                HotResult::Err(e) => panic!("text failed: {e:?}"),
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                Val::from("a & b"),
+                Val::from("<>\"'"),
+                Val::from("AB\u{1F600}"),
+                Val::from("x && y"),
+                Val::from("&nbsp;"),
+                Val::from("one & two"),
+            ]
         );
     }
 

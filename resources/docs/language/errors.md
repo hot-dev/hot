@@ -112,7 +112,8 @@ label match find-status(id) {
 
 A parameter declared `Result` receives its argument as it is, an `Err`
 included. Any other parameter consumes its argument: an `Ok` unwraps, and an
-`Err` halts before the function body runs. This holds however the function is
+`Err` halts before the function body runs, and the halt names the parameter
+and function that consumed it. This holds however the function is
 called: directly, through a higher-order function such as `map`, or with
 `call`. The exception is a `fn match` with `Result` arms: its first parameter
 receives an `Err` intact, so the `Result.Err` arm can handle it (see
@@ -124,7 +125,9 @@ describe fn (r: Any): Str {
   if(is-err(r), "failed", "succeeded")   // never reached for Err values
 }
 
-describe(err("boom"))   // Runtime error: Result error: boom
+describe(err("boom"))
+// Runtime error: Result error: boom (an Err passed to parameter `r` of
+// ::app/describe; declare the parameter `Result` to receive Errs)
 
 // ✅ A `Result` parameter receives the Result as it is
 describe fn (r: Result): Str {

@@ -280,7 +280,12 @@ async fn send_with_redirect_validation(
             .send()
             .await
             .map_err(|e| err_val(format!("::hot::http/request: request failed: {e}")))?;
-        if !response.status().is_redirection() {
+        // A 3xx without a `Location` is a final response, not a redirect:
+        // `304 Not Modified`, or `308 Resume Incomplete` from resumable
+        // upload APIs (Google Drive), which carries `Range` instead.
+        if !response.status().is_redirection()
+            || !response.headers().contains_key(reqwest::header::LOCATION)
+        {
             return Ok(response);
         }
         if redirect_count == MAX_REDIRECTS {
@@ -1119,6 +1124,64 @@ mod tests {
         )
         .await;
         assert!(matches!(result, HotResult::Err(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn redirect_status_without_location_is_returned_as_response() {
+        // Google Drive resumable uploads answer `308 Resume Incomplete`
+        // with a `Range` header and no `Location`.
+        let app = Router::new().route(
+            "/upload",
+            axum::routing::put(|| async {
+                (
+                    StatusCode::PERMANENT_REDIRECT,
+                    [(header::RANGE, "bytes=0-524287")],
+                    "partial",
+                )
+            }),
+        );
+        let url = format!("{}/upload", start_mock_server(app).await);
+        let response = unwrap_result(
+            make_http_request(
+                "PUT",
+                &url,
+                &IndexMap::new(),
+                &Val::from("chunk"),
+                DestinationPolicy::AllowPrivate,
+                DEFAULT_MAX_RESPONSE_BYTES,
+            )
+            .await,
+        );
+        assert_eq!(response.get("status"), Some(Val::Int(308)));
+        let headers = response.get("headers").unwrap();
+        assert_eq!(headers.get("range"), Some(Val::from("bytes=0-524287")));
+        assert_eq!(response.get("body"), Some(Val::from("partial")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn redirect_with_location_is_followed() {
+        let app = Router::new()
+            .route(
+                "/old",
+                axum::routing::get(|| async {
+                    (StatusCode::PERMANENT_REDIRECT, [(header::LOCATION, "/new")])
+                }),
+            )
+            .route("/new", axum::routing::get(|| async { "moved here" }));
+        let url = format!("{}/old", start_mock_server(app).await);
+        let response = unwrap_result(
+            make_http_request(
+                "GET",
+                &url,
+                &IndexMap::new(),
+                &Val::Null,
+                DestinationPolicy::AllowPrivate,
+                DEFAULT_MAX_RESPONSE_BYTES,
+            )
+            .await,
+        );
+        assert_eq!(response.get("status"), Some(Val::Int(200)));
+        assert_eq!(response.get("body"), Some(Val::from("moved here")));
     }
 
     #[tokio::test]

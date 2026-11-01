@@ -293,6 +293,57 @@ probe()"#;
         );
     }
 
+    /// A value whose Map or Vec literal calls into another namespace waits
+    /// for that namespace to run, so the callee finds its own constants.
+    /// Calls held inside a literal were invisible to the ordering, and the
+    /// importer (first in source order) ran before `CONST` was stored.
+    #[test]
+    fn value_calling_another_namespace_inside_a_literal_runs_after_it() {
+        let src = r#"::rdoc::a ns
+VALUE {name: ::zz::b/get-name().name}
+NAMES [::zz::b/get-name().name, "y"]
+SPREAD {...::zz::b/get-name(), extra: ::zz::b/get-name().name}
+
+::zz::b ns
+CONST "x"
+get-name fn (): Map { {name: CONST} }
+
+::main ns
+names ::rdoc::a/NAMES
+[::rdoc::a/VALUE.name, names[0], ::rdoc::a/SPREAD.extra]"#;
+        assert_same_with_and_without_jit(src, &strs(&["x", "x", "x"]));
+    }
+
+    /// An Err passed to a parameter not declared `Result` halts by design
+    /// (the Result-boundary rule); the halt names that parameter and
+    /// function, since the Err may have been made far from the call.
+    #[test]
+    fn consumed_err_argument_halt_names_parameter_and_function() {
+        let src = r#"::t ns
+takes fn (x: Int): Int { add(x, 1) }
+probe fn (s: Str): Int {
+    n Int(s)
+    takes(n)
+}
+probe("1")
+probe("2")
+probe("3")
+probe("abc")"#;
+        for (mode, conf) in [
+            ("jit", crate::val!({"jit": {"threshold": 1}})),
+            ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+        ] {
+            let error = compile_and_run_with_std_conf(src, Some(conf))
+                .expect_err("an Err passed to an Int parameter halts");
+            assert!(
+                error.contains(
+                    "Result error: Cannot convert 'abc' to Int (an Err passed to parameter `x` of ::t/takes; declare the parameter `Result` to receive Errs)"
+                ),
+                "{mode}: {error}"
+            );
+        }
+    }
+
     /// `Name({...})` inside a custom constructor of a field-less `Name type fn`
     /// type reaches the default Map constructor. These types had no default
     /// constructor, so the inner call resolved back to a custom overload and
