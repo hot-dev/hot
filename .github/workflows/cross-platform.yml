@@ -87,6 +87,11 @@ jobs:
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
+      - name: Windows installer scope and directory tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-install-windows.ps1
+
       - name: Setup toolchain, cache, sccache, tailwind
         uses: ./.github/actions/rust-setup
         with:

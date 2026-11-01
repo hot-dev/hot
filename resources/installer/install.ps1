@@ -181,6 +181,12 @@ function Install-Hot {
         $pathScope = "Machine"
     }
 
+    # hot update passes the directory of its running executable, including a
+    # directory chosen in the GUI installer.
+    if (-not [string]::IsNullOrWhiteSpace($env:HOT_INSTALL_DIR)) {
+        $installDir = $env:HOT_INSTALL_DIR
+    }
+
     # A folder of our own, so nothing else can swap the installer before it runs
     $tempDir = Join-Path $env:TEMP ("hot-install-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $tempDir | Out-Null
@@ -196,7 +202,8 @@ function Install-Hot {
             Write-Host "Installing Hot for all users (needs administrator rights)..."
         }
         try {
-            $process = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
+            # NSIS requires /D to be last, without quotes around its value.
+            $process = Start-Process -FilePath $installer -ArgumentList "/S /D=$installDir" -Wait -PassThru
             if ($process.ExitCode -ne 0) {
                 Write-Host "Error: Installation failed with exit code: $($process.ExitCode)"
                 exit 1
