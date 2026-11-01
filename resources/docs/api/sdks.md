@@ -218,7 +218,7 @@ try (StreamEvents events = client.streams().subscribeWithEvent(Map.of(
 
 Every SDK exposes the [org API](/docs/api/management) on its normal client:
 `orgs`, `apiKeys`, and `orgs.env(org, env)` for projects, context and builds
-in a child environment. Call it with an org API key. Calling a runtime route
+in a sub-organization's environment. Call it with an org API key. Calling a runtime route
 with an org key, or an org route with an environment key, returns
 `403 key_scope_mismatch`; each SDK raises a typed error that names the key the
 call needs. Slugs must be 32 characters or fewer.
@@ -230,13 +230,13 @@ call needs. Slugs must be 32 characters or fewer.
 import { HotClient } from "@hot-dev/sdk";
 
 const org = new HotClient({ token: process.env.HOT_ORG_KEY });
-const child = await org.orgs.create({
+const subOrg = await org.orgs.create({
   name: "Customer", slug: "customer-123", idempotency_key: "customer-123-v1",
 });
-const key = await org.orgs.createEnvApiKey(child.org.org_id, child.env_id, {
+const key = await org.orgs.createEnvApiKey(subOrg.org.org_id, subOrg.env_id, {
   description: "Customer backend", permissions: { "event:support:*": ["create"] },
 });
-await org.orgs.env(child.org.org_id, child.env_id).projects.list();
+await org.orgs.env(subOrg.org.org_id, subOrg.env_id).projects.list();
 const customer = new HotClient({ token: key.token });
 ```
 
@@ -248,10 +248,10 @@ import os
 from hot import HotClient
 
 with HotClient(token=os.environ["HOT_ORG_KEY"]) as org:
-    child = org.orgs.create(
+    sub_org = org.orgs.create(
         {"name": "Customer", "slug": "customer-123", "idempotency_key": "customer-123-v1"}
     )
-    org_id, env_id = child["org"]["org_id"], child["env_id"]
+    org_id, env_id = sub_org["org"]["org_id"], sub_org["env_id"]
     key = org.orgs.create_env_api_key(
         org_id,
         env_id,
@@ -269,14 +269,14 @@ orgs, err := hot.NewClient(hot.Config{Token: os.Getenv("HOT_ORG_KEY")})
 if err != nil {
 	log.Fatal(err)
 }
-child, err := orgs.Orgs.Create(ctx, map[string]any{
+subOrg, err := orgs.Orgs.Create(ctx, map[string]any{
 	"name": "Customer", "slug": "customer-123", "idempotency_key": "customer-123-v1",
 })
 if err != nil {
 	log.Fatal(err)
 }
-orgID := child["org"].(map[string]any)["org_id"].(string)
-envID := child["env_id"].(string)
+orgID := subOrg["org"].(map[string]any)["org_id"].(string)
+envID := subOrg["env_id"].(string)
 key, err := orgs.Orgs.CreateEnvAPIKey(ctx, orgID, envID, map[string]any{
 	"description": "Customer backend",
 	"permissions": map[string]any{"event:support:*": []string{"create"}},
@@ -301,10 +301,10 @@ if _, err := customer.Events.Publish(ctx, map[string]any{"event_type": "support:
 
 ```rust
 let org = HotClient::new(std::env::var("HOT_ORG_KEY")?);
-let child = org.orgs().create(json!({
+let sub_org = org.orgs().create(json!({
     "name": "Customer", "slug": "customer-123", "idempotency_key": "customer-123-v1",
 })).await?;
-let (org_id, env_id) = (child["org"]["org_id"].as_str().unwrap(), child["env_id"].as_str().unwrap());
+let (org_id, env_id) = (sub_org["org"]["org_id"].as_str().unwrap(), sub_org["env_id"].as_str().unwrap());
 let key = org.orgs().create_env_api_key(org_id, env_id, json!({
     "description": "Customer backend",
     "permissions": {"event:support:*": ["create"]},
@@ -317,10 +317,10 @@ let customer = HotClient::new(key["token"].as_str().unwrap());
 
 ```java
 HotClient org = HotClient.builder(System.getenv("HOT_ORG_KEY")).build();
-Map<String, Object> child = org.orgs().create(Map.of(
+Map<String, Object> subOrg = org.orgs().create(Map.of(
     "name", "Customer", "slug", "customer-123", "idempotency_key", "customer-123-v1"));
-String orgId = (String) ((Map<?, ?>) child.get("org")).get("org_id");
-Map<String, Object> key = org.orgs().createEnvApiKey(orgId, (String) child.get("env_id"), Map.of(
+String orgId = (String) ((Map<?, ?>) subOrg.get("org")).get("org_id");
+Map<String, Object> key = org.orgs().createEnvApiKey(orgId, (String) subOrg.get("env_id"), Map.of(
     "description", "Customer backend",
     "permissions", Map.of("event:support:*", List.of("create"))));
 HotClient customer = HotClient.builder((String) key.get("token")).build();
@@ -328,17 +328,17 @@ HotClient customer = HotClient.builder((String) key.get("token")).build();
 <!-- tabs:end -->
 
 Each SDK also has `apiKeys.get`, `update`, `revoke` and `rotate` (`rotate`
-takes `overlap_seconds`), `orgs.usage(rootOrgId)`, and `purgeCalls` on env,
+takes `overlap_seconds`), `orgs.usage(parentOrgId)`, and `purgeCalls` on env,
 runs, streams and orgs. Each SDK's README documents these in its own idiom.
 
 Over plain HTTP, the same calls look like this:
 
 ```bash
-child=$(curl -s https://api.hot.dev/v1/orgs \
+sub_org=$(curl -s https://api.hot.dev/v1/orgs \
   -H "Authorization: Bearer $HOT_ORG_KEY" -H "Content-Type: application/json" \
   -d '{"name":"Customer","slug":"customer-123","idempotency_key":"customer-123-v1"}')
-org_id=$(echo "$child" | jq -r .data.org.org_id)
-env_id=$(echo "$child" | jq -r .data.env_id)
+org_id=$(echo "$sub_org" | jq -r .data.org.org_id)
+env_id=$(echo "$sub_org" | jq -r .data.env_id)
 curl -s "https://api.hot.dev/v1/orgs/$org_id/envs/$env_id/api-keys" \
   -H "Authorization: Bearer $HOT_ORG_KEY" -H "Content-Type: application/json" \
   -d '{"description":"Customer backend","permissions":{"event:support:*":["create"]}}'

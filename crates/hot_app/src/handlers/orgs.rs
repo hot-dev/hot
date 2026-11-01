@@ -144,6 +144,15 @@ pub async fn orgs_detail_handler(
                 templates::BreadcrumbItem::current(org.name.clone()),
             ];
 
+            // A sub-organization names its parent only to members who can see it.
+            let parent_name = org.parent_org_id.and_then(|parent_id| {
+                session
+                    .user_orgs
+                    .iter()
+                    .find(|candidate| candidate.org_id == parent_id)
+                    .map(|parent| parent.name.clone())
+            });
+
             let template = templates::OrgsDetail {
                 title: &format!("{} - Organization", org.name),
                 page_context: templates::PrivatePageContext::for_org_page(
@@ -152,6 +161,7 @@ pub async fn orgs_detail_handler(
                     breadcrumbs,
                 ),
                 org,
+                parent_name,
                 active_page: "organization",
             };
 

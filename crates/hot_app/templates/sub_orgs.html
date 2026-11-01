@@ -3,8 +3,8 @@
 {% block content %}
 <div class="max-w-7xl mx-auto py-6 space-y-6">
     <div>
-        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Child organizations</h1>
-        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ root.name }} manages billing and account members. Each child has its own environments, deployments, credentials, and data.</p>
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Sub-organizations</h1>
+        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ root.name }} manages billing and account members. Each sub-organization has its own environments, deployments, credentials, and data.</p>
         {% include "org_tabs.html" %}
     </div>
     {% match form.error %}{% when Some with (error) %}
@@ -12,13 +12,13 @@
     {% when None %}{% endmatch %}
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4" aria-label="Account workspace overview">
         <h2 class="text-lg font-semibold">Account overview</h2>
-        <p class="text-sm text-gray-500 dark:text-gray-400">Read-only activity across this account and its children. Runs this month use the UTC calendar month and retained history; file storage is current active file bytes. Open an environment to work in its explicit scope.</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Read-only activity across this account and its sub-organizations. Runs this month use the UTC calendar month and retained history; file storage is current active file bytes. Open an environment to work in its explicit scope.</p>
         <div class="overflow-x-auto">
             <table class="w-full text-sm text-left">
                 <thead class="table-head"><tr class="border-b border-gray-200 dark:border-gray-700"><th class="p-2">Workspace</th><th class="p-2">Status</th><th class="p-2">Running</th><th class="p-2">Failed · 24h</th><th class="p-2">Runs · month</th><th class="p-2">File storage</th><th class="p-2">Last run</th><th class="p-2">Environments</th></tr></thead>
                 <tbody>{% for row in overview %}
                     <tr class="border-b border-gray-200 dark:border-gray-700" data-overview-org="{{ row.org_id }}">
-                        <td class="p-2"><a class="link" href="/@{{ row.slug }}">{{ row.name }}</a><div class="text-xs text-gray-500 dark:text-gray-400">@{{ row.slug }}{% if row.root %} · Account root{% endif %}</div></td>
+                        <td class="p-2"><a class="link" href="/@{{ row.slug }}">{{ row.name }}</a><div class="text-xs text-gray-500 dark:text-gray-400">@{{ row.slug }}{% if row.root %} · Parent organization{% endif %}</div></td>
                         <td class="p-2"><span class="badge {{ row.lifecycle_badge }}">{{ row.lifecycle }}</span></td><td class="p-2">{{ row.running|commafy }}</td><td class="p-2">{{ row.failed_24h|commafy }}</td><td class="p-2">{{ row.month_runs|commafy }}</td><td class="p-2 whitespace-nowrap">{{ row.file_bytes }}</td><td class="p-2 whitespace-nowrap">{{ row.last_run }}</td>
                         <td class="p-2">{% for env in row.envs %}<a class="link block" href="/runs?org_id={{ row.org_id }}&amp;env_id={{ env.env_id }}">{{ env.name }}{% if !env.active %} (inactive){% endif %}</a>{% endfor %}{% if row.envs.is_empty() %}<span class="text-gray-500 dark:text-gray-400">No environments</span>{% endif %}</td>
                     </tr>
@@ -28,21 +28,21 @@
     </section>
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4">
         <h2 class="text-lg font-semibold">Account status: {{ root.lifecycle_state }}</h2>
-        <p class="text-sm text-gray-500 dark:text-gray-400">Suspending the account holds new work in every child. Root administrators retain recovery and billing access.</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Suspending the account holds new work in every sub-organization. {{ root.name }} administrators keep recovery and billing access.</p>
         <form method="post" action="/@{{ root.slug }}/lifecycle" class="flex flex-wrap gap-2">
             <select class="form-select" name="state" aria-label="Account status"><option value="active" {% if root.lifecycle_state == "active" %}selected{% endif %}>Active</option><option value="suspended" {% if root.lifecycle_state == "suspended" %}selected{% endif %}>Suspended</option><option value="archived" {% if root.lifecycle_state == "archived" %}selected{% endif %}>Archived</option></select>
             <button class="btn btn-secondary" type="submit">Update account status</button>
         </form>
     </section>
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4">
-        <h2 class="text-lg font-semibold">Create child organization</h2>
+        <h2 class="text-lg font-semibold">Create sub-organization</h2>
         <form method="post" action="/@{{ root.slug }}/children" class="space-y-3 max-w-xl">
             <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
             <label class="form-label">Name <input class="form-input block w-full mt-1" name="name" value="{{ form.child_name }}" required maxlength="200"></label>
             <label class="form-label">Handle <input class="form-input block w-full mt-1" name="slug" value="{{ form.child_slug }}" required minlength="2" maxlength="32" pattern="[a-z0-9][a-z0-9-]*" aria-describedby="child-handle-help"></label>
             <p id="child-handle-help" class="text-xs text-gray-500 dark:text-gray-400">2–32 lowercase letters, numbers and hyphens. The workspace URL is /@handle.</p>
             <label class="form-label">Customer reference (optional) <input class="form-input block w-full mt-1" name="external_id" value="{{ form.child_external_id }}" maxlength="200"></label>
-            <button class="btn btn-primary" type="submit">Create child organization</button>
+            <button class="btn btn-primary" type="submit">Create sub-organization</button>
         </form>
     </section>
     {% match issued_token %}{% when Some with (token) %}
@@ -50,7 +50,7 @@
     {% when None %}{% endmatch %}
     <details class="rounded-lg border border-gray-200 dark:border-gray-700 p-4" {% if form.key_permissions.is_some() %}open{% endif %}>
         <summary class="font-semibold cursor-pointer">Org API keys</summary>
-        <p class="my-3 text-sm text-gray-500 dark:text-gray-400">An org API key manages child organizations, their environments and API keys through <code>/v1/orgs</code> and <code>/v1/api-keys</code>. It cannot call runtime routes: environment API keys and service keys stay bound to one environment. <code>org:*</code> means this organization's children, never this organization itself; grant <code>org:{{ root.org_id }}/…</code> explicitly for that.</p>
+        <p class="my-3 text-sm text-gray-500 dark:text-gray-400">An org API key manages sub-organizations, their environments and API keys through <code>/v1/orgs</code> and <code>/v1/api-keys</code>. It cannot call runtime routes: environment API keys and service keys stay bound to one environment. <code>org:*</code> means this organization's sub-organizations, never this organization itself; grant <code>org:{{ root.org_id }}/…</code> explicitly for that.</p>
         <form method="post" action="/@{{ root.slug }}/org-api-keys" class="space-y-3 max-w-3xl">
             <label class="form-label">Description <input class="form-input block w-full mt-1" name="description" value="{{ form.key_description }}" required maxlength="200"></label>
             <label class="form-label">Permissions (JSON) <textarea class="form-input block w-full mt-1 font-mono" name="permissions" rows="8" required>{{ org_key_example }}</textarea></label>
@@ -82,21 +82,21 @@
             </label>
             <button class="btn btn-secondary" type="submit">Update status</button>
         </form>
-        <p class="text-sm text-gray-500 dark:text-gray-400">Root administrators have inherited access. Assign other account members below. Restore an archived child to suspended before activating it.</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400">{{ root.name }} administrators have inherited access. Assign other account members below. Restore an archived sub-organization to suspended before activating it.</p>
         <form method="post" action="/@{{ root.slug }}/children/{{ child.org_id }}/access" class="flex flex-wrap items-end gap-2">
             <label class="form-label">Member
                 <select class="form-select block mt-1 max-w-full" name="user_id" required>
                     {% for member in members %}<option value="{{ member.user_id }}">{{ member.email }}</option>{% endfor %}
                 </select>
             </label>
-            <label class="form-label">Child access
+            <label class="form-label">Access
                 <select class="form-select block mt-1" name="role_id"><option value="1">Member</option><option value="2">Administrator</option><option value="0">Remove explicit access</option></select>
             </label>
             <button class="btn btn-secondary" type="submit">Save access</button>
         </form>
-        <a class="link text-sm" href="/@{{ child.slug }}/users">View explicit child access</a>
+        <a class="link text-sm" href="/@{{ child.slug }}/users">View explicit access</a>
     </section>
     {% endfor %}
-    {% if children.is_empty() %}<p class="text-sm text-gray-500 dark:text-gray-400">No child organizations yet.</p>{% endif %}
+    {% if children.is_empty() %}<p class="text-sm text-gray-500 dark:text-gray-400">No sub-organizations yet.</p>{% endif %}
 </div>
 {% endblock %}

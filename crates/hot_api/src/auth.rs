@@ -869,7 +869,7 @@ pub(crate) fn retired_management_credential() -> AuthRejection {
         StatusCode::UNAUTHORIZED,
         Json(ApiErrorResponse::new(
             "management_credential_retired",
-            "hm_ management credentials were replaced by org API keys in Hot 3.0.1. A root administrator creates an org API key on the organization's Children tab; it calls /v1/orgs and /v1/api-keys. See /docs/api/management.",
+            "hm_ management credentials were replaced by org API keys in Hot 3.0.1. An administrator of the parent organization creates an org API key on its Sub-orgs tab; it calls /v1/orgs and /v1/api-keys. See /docs/api/management.",
         )),
     )
 }

@@ -2373,6 +2373,8 @@ pub struct OrgsDetail<'a> {
     pub title: &'a str,
     pub page_context: PrivatePageContext,
     pub org: hot::db::org::Org,
+    /// The parent organization's name, when the viewer belongs to it.
+    pub parent_name: Option<String>,
     pub active_page: &'a str,
 }
 

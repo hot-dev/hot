@@ -389,7 +389,7 @@ impl Org {
                         .bind(env_id).bind(org_id).bind(actor_id).execute(&mut *tx).await?;
                     sqlx::query("INSERT INTO org_child_provisioning (root_org_id,idempotency_key,child_org_id,env_id,request_fingerprint) VALUES ($1,$2,$3,$4,$5)")
                         .bind(root_id).bind(&request.idempotency_key).bind(org_id).bind(env_id).bind(&fingerprint).execute(&mut *tx).await?;
-                    sqlx::query("INSERT INTO org_note (note_id,org_id,category,note_type,message,metadata,created_by) VALUES ($1,$2,'security','child_created','Child organization created',$3,$4)")
+                    sqlx::query("INSERT INTO org_note (note_id,org_id,category,note_type,message,metadata,created_by) VALUES ($1,$2,'security','child_created','Sub-organization created',$3,$4)")
                         .bind(note_id).bind(root_id).bind(serde_json::json!({"child_org_id":org_id,"env_id":env_id})).bind(actor_id).execute(&mut *tx).await?;
                     tx.commit().await?;
                     (org_id, env_id, true)
@@ -444,7 +444,7 @@ impl Org {
                         .bind(env_id).bind(org_id).bind(actor_id).execute(&mut *tx).await?;
                     sqlx::query("INSERT INTO org_child_provisioning (root_org_id,idempotency_key,child_org_id,env_id,request_fingerprint) VALUES (?,?,?,?,?)")
                         .bind(root_id).bind(&request.idempotency_key).bind(org_id).bind(env_id).bind(&fingerprint).execute(&mut *tx).await?;
-                    sqlx::query("INSERT INTO org_note (note_id,org_id,category,note_type,message,metadata,created_by) VALUES (?,?,'security','child_created','Child organization created',?,?)")
+                    sqlx::query("INSERT INTO org_note (note_id,org_id,category,note_type,message,metadata,created_by) VALUES (?,?,'security','child_created','Sub-organization created',?,?)")
                         .bind(note_id).bind(root_id).bind(serde_json::json!({"child_org_id":org_id,"env_id":env_id}).to_string()).bind(actor_id).execute(&mut *tx).await?;
                     tx.commit().await?;
                     (org_id, env_id, true)
@@ -731,7 +731,7 @@ impl Org {
                 sqlx::query("INSERT INTO org_user (org_user_id,org_id,user_id,org_user_role_id,active,created_by_user_id) VALUES ($1,$2,$3,$4,$5,$6)
                     ON CONFLICT (org_id,user_id) DO UPDATE SET org_user_role_id=EXCLUDED.org_user_role_id,active=EXCLUDED.active,updated_at=now(),updated_by_user_id=EXCLUDED.created_by_user_id")
                     .bind(grant_id).bind(child_id).bind(user_id).bind(role.unwrap_or(1)).bind(role.is_some()).bind(actor_id).execute(&mut *tx).await?;
-                sqlx::query("INSERT INTO org_note (note_id,org_id,category,note_type,message,metadata,created_by) VALUES ($1,$2,'security','child_grant','Child membership grant changed',$3,$4)")
+                sqlx::query("INSERT INTO org_note (note_id,org_id,category,note_type,message,metadata,created_by) VALUES ($1,$2,'security','child_grant','Sub-organization membership grant changed',$3,$4)")
                     .bind(Uuid::now_v7()).bind(access.root_org_id).bind(serde_json::json!({"child_org_id":child_id,"user_id":user_id,"role":role})).bind(actor_id).execute(&mut *tx).await?;
                 tx.commit().await?;
             }
@@ -749,7 +749,7 @@ impl Org {
                 sqlx::query("INSERT INTO org_user (org_user_id,org_id,user_id,org_user_role_id,active,created_by_user_id) VALUES (?,?,?,?,?,?)
                     ON CONFLICT (org_id,user_id) DO UPDATE SET org_user_role_id=excluded.org_user_role_id,active=excluded.active,updated_at=current_timestamp,updated_by_user_id=excluded.created_by_user_id")
                     .bind(grant_id).bind(child_id).bind(user_id).bind(role.unwrap_or(1)).bind(role.is_some()).bind(actor_id).execute(&mut *tx).await?;
-                sqlx::query("INSERT INTO org_note (note_id,org_id,category,note_type,message,metadata,created_by) VALUES (?,?,'security','child_grant','Child membership grant changed',?,?)")
+                sqlx::query("INSERT INTO org_note (note_id,org_id,category,note_type,message,metadata,created_by) VALUES (?,?,'security','child_grant','Sub-organization membership grant changed',?,?)")
                     .bind(Uuid::now_v7()).bind(access.root_org_id).bind(serde_json::json!({"child_org_id":child_id,"user_id":user_id,"role":role}).to_string()).bind(actor_id).execute(&mut *tx).await?;
                 tx.commit().await?;
             }

@@ -366,6 +366,8 @@ compiled code fails the run instead of aborting the worker. Functions over
 - **Front-end libraries:** htmx 2.0.11 and Alpine 3.17.5.
 - **Look and feel:** higher-contrast text, unified status badges, a visible
   focus ring, and scrolling tab bars on phones.
+- **Sub-organizations:** the organization's Children tab is now Sub-orgs, and
+  the App and docs call child organizations sub-organizations.
 
 ### Dependencies and security {#3-0-1-dependencies}
 
@@ -570,8 +572,8 @@ reject real API values on Hot 3.0, so upgrade them:
   environment and adds `env_id`, `usage_scope`, and `limits_scope`.
   `team_members` is `0`. A request whose `org_id` or `env_id` doesn't match
   the credential returns 403.
-- **Org API keys replace management credentials.** Root administrators can
-  create child organizations and manage them with org-scoped API keys. See
+- **Org API keys replace management credentials.** Parent organization
+  administrators create sub-organizations and manage them with org API keys. See
   [Sub-organizations](/docs/api/management). Hot 3.0.0 shipped this as `hm_`
   management credentials and `/v1/management/*`. Hot 3.0.1 removes both:
   `/v1/management/*` returns 410 Gone, and an `hm_` credential is refused.

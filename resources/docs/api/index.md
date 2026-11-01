@@ -31,7 +31,7 @@ curl https://api.hot.dev/v1/projects \
   -H "Authorization: Bearer <token>"
 ```
 
-Runtime endpoints support **API keys**, **service keys**, and **sessions**. These credentials are scoped to one environment, and resources are filtered to that environment's context. An **org API key** is scoped to an organization instead: it calls only `/v1/orgs` and `/v1/api-keys`, to create child organizations, environments, and API keys, and to manage projects, context, and builds in them. See [Sub-organizations](/docs/api/management).
+Runtime endpoints support **API keys**, **service keys**, and **sessions**. These credentials are scoped to one environment, and resources are filtered to that environment's context. An **org API key** is scoped to an organization instead: it calls only `/v1/orgs` and `/v1/api-keys`, to create sub-organizations, environments, and API keys, and to manage projects, context, and builds in them. See [Sub-organizations](/docs/api/management).
 
 Org API keys replaced Hot 3.0.0's `/v1/management` API and its `hm_` management credentials in Hot 3.0.1. Every `/v1/management` route answers `410 Gone`, and an `hm_` token gets `401` with the code `management_credential_retired`.
 
@@ -1375,7 +1375,7 @@ for line in response.iter_lines():
 GET /v1/org/usage
 ```
 
-Returns the usage of the credential's **environment** in the current monthly window, with the limits and plan of the account that owns it. Consumption never includes sibling environments or child organizations, so `usage_percent` compares this environment's usage against limits the whole account shares: it is not account-wide consumption or remaining quota. Account-wide usage needs an org key; see [Runtime usage visibility](/docs/api/management#runtime-usage-visibility).
+Returns the usage of the credential's **environment** in the current monthly window, with the limits and plan of the account that owns it. Consumption never includes sibling environments or sub-organizations, so `usage_percent` compares this environment's usage against limits the whole account shares: it is not account-wide consumption or remaining quota. Account-wide usage needs an org key; see [Runtime usage visibility](/docs/api/management#runtime-usage-visibility).
 
 **Response:**
 
@@ -1433,7 +1433,7 @@ Returns the usage of the credential's **environment** in the current monthly win
 |-------|-------------|
 | `env_id` | The credential's environment, the only one `usage` covers |
 | `usage_scope` | Always `environment` |
-| `limits_scope` | Always `billing_account`: limits come from the account root's plan and overrides |
+| `limits_scope` | Always `billing_account`: limits come from the parent organization's plan and overrides |
 | `usage` | This environment's usage. Runs and compute units count from `plan.period_start`; storage is current |
 | `usage.team_members` | Always `0`: team seats belong to the account, not an environment |
 | `limits` | Account plan limits (-1 = unlimited). `limits.compute_units_used` is this environment's compute units this window |
@@ -1998,8 +1998,8 @@ Removes a custom domain. The domain must belong to the authenticated environment
 | `forbidden` | 403 | Credential lacks required permissions, or its environment or organization is not active |
 | `key_scope_mismatch` | 403 | The route needs the other kind of key: org API keys call `/v1/orgs` and `/v1/api-keys`, environment credentials call everything else |
 | `account_suspended` | 403 | The org key's account is suspended or archived; the key works again when it is reactivated |
-| `org_suspended` | 403 | The child organization is suspended or archived |
-| `org_limit_reached` | 403 | The account's child organization or environment limit is reached |
+| `org_suspended` | 403 | The sub-organization is suspended or archived |
+| `org_limit_reached` | 403 | The account's sub-organization or environment limit is reached |
 | `permission_escalation` | 403 | Requested permissions exceed parent credential permissions |
 | `plan_required` | 403 | Feature requires a higher subscription plan |
 | `not_found` | 404 | Resource not found |
@@ -2007,7 +2007,7 @@ Removes a custom domain. The domain must belong to the authenticated environment
 | `method_not_allowed` | 405 | The route does not accept this HTTP method |
 | `domain_exists` | 409 | Custom domain is already registered |
 | `slug_taken` | 409 | Organization slug is already taken; slugs are unique across all accounts |
-| `external_id_taken` | 409 | Another child organization of the account has this `external_id` |
+| `external_id_taken` | 409 | Another sub-organization of the account has this `external_id` |
 | `gone` | 410 | The route was removed, such as Hot 3.0.0's `/v1/management` |
 | `payload_too_large` | 413 | Request body or file exceeds a size limit |
 | `unsupported_media_type` | 415 | The request body needs a different `Content-Type`, usually `application/json` |

@@ -209,7 +209,7 @@ fn org_error(error: hot::db::org::OrgError) -> ApiError {
         ),
         OrgError::ExternalIdTaken => conflict(
             "external_id_taken",
-            "A child organization with this external_id already exists",
+            "A sub-organization with this external_id already exists",
         ),
         OrgError::LimitReached => forbidden(
             "org_limit_reached",
@@ -334,6 +334,7 @@ pub async fn org_key_auth_middleware(
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct OrgResponse {
     pub org_id: Uuid,
+    /// The parent organization's ID, or null for an organization that isn't a sub-organization.
     pub parent_org_id: Option<Uuid>,
     pub name: String,
     pub slug: String,
@@ -479,7 +480,7 @@ pub async fn update_org(
         .map_err(|e| key_error(e, "Organization"))?;
     if org.parent_org_id != Some(principal.key.org_id) {
         return Err(bad_request(
-            "only a child organization's state can be changed",
+            "only a sub-organization's state can be changed",
         ));
     }
     let state = match body.state.as_str() {
@@ -510,7 +511,7 @@ pub async fn get_usage(
     principal.require(&org_urn::usage(&org_id), actions::READ)?;
     if org_id != principal.key.org_id {
         return Err(bad_request(
-            "usage is reported for the account; use the root organization's ID",
+            "usage is reported for the account; use the parent organization's ID",
         ));
     }
     let usage_db = db.with_scope(DatabaseScope::Maintenance {

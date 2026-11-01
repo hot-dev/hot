@@ -33,7 +33,7 @@ async fn root_for_admin(db: &DatabasePool, session: &Session, slug: &str) -> Res
             session,
             (
                 StatusCode::FORBIDDEN,
-                "Personal accounts can't have child organizations. Create an organization to manage children.",
+                "Personal accounts can't have sub-organizations. Create an organization to manage them.",
             ),
         ));
     }
@@ -42,7 +42,7 @@ async fn root_for_admin(db: &DatabasePool, session: &Session, slug: &str) -> Res
             session,
             (
                 StatusCode::FORBIDDEN,
-                "Root administrator access is required",
+                "Administrator access to the parent organization is required",
             ),
         ));
     }
@@ -88,7 +88,7 @@ fn org_error_message(error: &hot::db::org::OrgError, fallback: &str) -> String {
         OrgError::NotFound => "That organization no longer exists.".to_string(),
         OrgError::SlugTaken => "That handle is already in use.".to_string(),
         OrgError::ExternalIdTaken => {
-            "A child organization already uses that customer reference.".to_string()
+            "A sub-organization already uses that customer reference.".to_string()
         }
         OrgError::Database(error)
             if error
@@ -363,7 +363,7 @@ async fn render_page_inner(
     let children = Org::list_children(db, &root.org_id).await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to load child organizations",
+            "Unable to load sub-organizations",
         )
     })?;
     let overview = account_overview(db, session, &root, &children).await?;
@@ -380,7 +380,7 @@ async fn render_page_inner(
         .collect();
     let breadcrumbs = vec![
         templates::BreadcrumbItem::clickable(root.name.clone(), format!("/@{}", root.slug)),
-        templates::BreadcrumbItem::current("Child organizations".to_string()),
+        templates::BreadcrumbItem::current("Sub-organizations".to_string()),
     ];
     let status = if form.error.is_some() {
         StatusCode::BAD_REQUEST
@@ -388,7 +388,7 @@ async fn render_page_inner(
         StatusCode::OK
     };
     let template = SubOrgsPage {
-        title: "Child organizations",
+        title: "Sub-organizations",
         page_context: PrivatePageContext::for_org_page("children", session, breadcrumbs),
         root,
         children,
@@ -403,7 +403,7 @@ async fn render_page_inner(
     let html = template.render().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to render child organizations",
+            "Unable to render sub-organizations",
         )
     })?;
     Ok((
@@ -460,7 +460,7 @@ pub async fn create(
         Org::create_child(&db, &root.org_id, &session.current_user_id(), &child).await
     {
         tracing::warn!(root_org_id = %root.org_id, %error, "Child provisioning rejected");
-        let message = org_error_message(&error, "Unable to create the child organization.");
+        let message = org_error_message(&error, "Unable to create the sub-organization.");
         let page = render_page(&db, &session, root, None, submitted(message));
         return Err(page.await.unwrap_or_else(|page| page));
     }
@@ -499,7 +499,7 @@ pub async fn lifecycle(
     if child.is_none_or(|child| child.parent_org_id != Some(root.org_id)) {
         return Err(page_error(
             &session,
-            (StatusCode::NOT_FOUND, "Child organization not found"),
+            (StatusCode::NOT_FOUND, "Sub-organization not found"),
         ));
     }
     let error = Org::set_lifecycle(&db, &child_id, &session.current_user_id(), form.state)
@@ -508,7 +508,7 @@ pub async fn lifecycle(
         .map(|error| {
             org_error_message(
                 &error,
-                "That status change isn't allowed. Restore an archived child to suspended before activating it.",
+                "That status change isn't allowed. Restore an archived sub-organization to suspended before activating it.",
             )
         });
     back_to_page(&db, &session, root, error).await
@@ -531,7 +531,7 @@ pub async fn grant(
         0 => None,
         1 | 2 => Some(form.role_id),
         _ => {
-            return back_to_page(&db, &session, root, Some("Choose a child role.".into())).await;
+            return back_to_page(&db, &session, root, Some("Choose a role.".into())).await;
         }
     };
     let error = Org::set_child_user_grant(
@@ -544,7 +544,7 @@ pub async fn grant(
     )
     .await
     .err()
-    .map(|error| org_error_message(&error, "Unable to change child access."));
+    .map(|error| org_error_message(&error, "Unable to change access."));
     back_to_page(&db, &session, root, error).await
 }
 
