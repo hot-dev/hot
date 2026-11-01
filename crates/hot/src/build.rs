@@ -1106,6 +1106,56 @@ pub async fn build_create(
     Ok(BuildResult { build, zip_path })
 }
 
+/// Compile a build and write its bundle zip under `build_dir`, with the same
+/// size check as [`build_create`], but record nothing: no build row, no
+/// storage, no handlers or schedules. A dry run checks the zip it returns.
+pub async fn write_unrecorded_build_zip(
+    db: &DatabasePool,
+    build_dir: &Path,
+    build_context: BuildContext,
+    conf: Option<&crate::val::Val>,
+) -> Result<PathBuf, String> {
+    let (
+        files,
+        resources,
+        build_hash,
+        event_handlers,
+        scheduled_functions,
+        mcp_tools,
+        webhooks,
+        agents,
+        workflows,
+        build_docs,
+        ctx_requirements,
+        box_requirements,
+        send_targets,
+    ) = create_build(db, build_context.clone(), conf).await?;
+    let build_id = Uuid::now_v7();
+    let zip_path = write_build_zip(
+        &build_id,
+        &build_context.project_name,
+        &build_hash,
+        &files,
+        &resources,
+        build_dir,
+        &event_handlers,
+        &scheduled_functions,
+        &mcp_tools,
+        &webhooks,
+        &agents,
+        &workflows,
+        &send_targets,
+        &format!("{}.hot.zip", build_id.simple()),
+        &build_docs,
+        Some(&ctx_requirements),
+        Some(&box_requirements),
+    )?;
+    if let Some(c) = conf {
+        check_bundle_size(c, &zip_path, &files, &resources)?;
+    }
+    Ok(zip_path)
+}
+
 /// Create a live build from source and package files (in-memory compilation only)
 pub async fn create_live_build(
     db: &DatabasePool,
@@ -2444,7 +2494,20 @@ pub async fn validate_schedule_requirements_for_deploy(
         .retrieve_build(build_id, org_id, env_id)
         .await
         .map_err(|e| format!("Failed to read build file: {}", e))?;
-    let scheduled_functions = extract_scheduled_functions_from_build(&build_data)?;
+    check_schedule_requirements(db, &build_data, org_id, &build.project_id, conf).await
+}
+
+/// Check a bundle's schedules against its organization's schedule policy:
+/// each recurring interval, and the active schedule count once this project's
+/// schedules replace its current ones.
+pub async fn check_schedule_requirements(
+    db: &DatabasePool,
+    build_data: &[u8],
+    org_id: &uuid::Uuid,
+    project_id: &uuid::Uuid,
+    conf: &crate::val::Val,
+) -> Result<(), String> {
+    let scheduled_functions = extract_scheduled_functions_from_build(build_data)?;
     let features = crate::db::Features::resolve_for_org(db, org_id).await;
     let policy = crate::db::SchedulePolicy::from_conf(conf).with_features(&features);
 
@@ -2461,11 +2524,7 @@ pub async fn validate_schedule_requirements_for_deploy(
 
     let new_count: i64 = scheduled_functions.values().map(|v| v.len() as i64).sum();
     crate::db::Schedule::enforce_active_count_for_org_replacing_project(
-        db,
-        org_id,
-        &build.project_id,
-        new_count,
-        policy,
+        db, org_id, project_id, new_count, policy,
     )
     .await
     .map_err(|e| format!("Deploy blocked: {}", e))?;
@@ -2500,8 +2559,16 @@ pub async fn validate_box_requirements_for_deploy(
         .retrieve_build(build_id, org_id, env_id)
         .await
         .map_err(|e| format!("Failed to read build file: {}", e))?;
+    check_box_requirements(db, &build_data, org_id).await
+}
 
-    let box_reqs = extract_box_requirements_from_build(&build_data)?;
+/// Check a bundle's Box requirements against its organization's plan.
+pub async fn check_box_requirements(
+    db: &DatabasePool,
+    build_data: &[u8],
+    org_id: &uuid::Uuid,
+) -> Result<(), String> {
+    let box_reqs = extract_box_requirements_from_build(build_data)?;
 
     let Some((min_size, requires_network)) = box_reqs else {
         tracing::debug!("No box_requirements in manifest, skipping validation");
@@ -2630,14 +2697,22 @@ pub async fn validate_ctx_requirements_for_deploy(
         .retrieve_build(build_id, org_id, env_id)
         .await
         .map_err(|e| format!("Failed to read build file: {}", e))?;
+    check_ctx_requirements(db, &build_data, project_id, org_id, strict).await
+}
 
+/// Check a bundle's required context variables against the ones set for its
+/// project, under the policy [`validate_ctx_requirements_for_deploy`]
+/// describes.
+pub async fn check_ctx_requirements(
+    db: &DatabasePool,
+    build_data: &[u8],
+    project_id: &uuid::Uuid,
+    org_id: &uuid::Uuid,
+    strict: bool,
+) -> Result<(), String> {
     // Extract ctx_requirements (with declaring-namespace info when available)
-    let ctx_requirements = extract_ctx_requirements_detailed_from_build(&build_data)?;
-    tracing::info!(
-        "Build {} has {} ctx_requirements",
-        build_id,
-        ctx_requirements.len()
-    );
+    let ctx_requirements = extract_ctx_requirements_detailed_from_build(build_data)?;
+    tracing::info!("Build has {} ctx_requirements", ctx_requirements.len());
 
     if ctx_requirements.is_empty() {
         tracing::debug!("No ctx_requirements in manifest, skipping validation");
@@ -2689,6 +2764,21 @@ pub async fn validate_ctx_requirements_for_deploy(
         eprintln!("{}", message);
         Ok(())
     }
+}
+
+/// The checks a bundle passes before it deploys, in the order `hot deploy`
+/// runs them: context variables, Box requirements, then schedules.
+pub async fn check_deploy_requirements(
+    db: &DatabasePool,
+    build_data: &[u8],
+    project_id: &uuid::Uuid,
+    org_id: &uuid::Uuid,
+    conf: &crate::val::Val,
+    strict: bool,
+) -> Result<(), String> {
+    check_ctx_requirements(db, build_data, project_id, org_id, strict).await?;
+    check_box_requirements(db, build_data, org_id).await?;
+    check_schedule_requirements(db, build_data, org_id, project_id, conf).await
 }
 
 /// Load the set of available ctx variable keys for a project, drawing from
