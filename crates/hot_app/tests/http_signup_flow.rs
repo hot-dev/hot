@@ -1258,3 +1258,157 @@ async fn org_checkout_form_returns_404_when_slug_does_not_exist() {
         "must NOT have auto-created an unrelated slug"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Sign-up policy (`app.signup`) and self-hosted installs without email
+// ---------------------------------------------------------------------------
+
+fn self_host_conf(extra: hot::val::Val) -> hot::val::Val {
+    val!({"product": {"experience": "self-host"}}).merge(&extra)
+}
+
+async fn assert_signup_needs_invitation(client: &mut TestClient, email: &str) {
+    let form = submit_signup(email, client.prime_csrf());
+    let resp = client.post_form("/signup", &as_form_slice(&form)).await;
+    assert!(
+        resp.body.contains("requires an invitation"),
+        "uninvited signup must be refused, body = {}",
+        resp.body.chars().take(400).collect::<String>()
+    );
+    let pending = EmailVerification::get_pending_by_email(client.db(), email)
+        .await
+        .expect("query");
+    assert!(pending.is_none(), "no verification email can be sent");
+}
+
+#[tokio::test]
+async fn self_hosted_signup_without_email_requires_an_invitation() {
+    let mut client = TestClient::new_with_conf(self_host_conf(val!({}))).await;
+    assert_signup_needs_invitation(&mut client, "alice@example.com").await;
+}
+
+#[tokio::test]
+async fn self_hosted_signup_with_email_delivery_is_open() {
+    let mut client =
+        TestClient::new_with_conf(self_host_conf(val!({"email": {"provider": "smtp"}}))).await;
+    let form = submit_signup("alice@example.com", client.prime_csrf());
+    let resp = client.post_form("/signup", &as_form_slice(&form)).await;
+    resp.assert_status(axum::http::StatusCode::OK);
+    let pending = EmailVerification::get_pending_by_email(client.db(), "alice@example.com")
+        .await
+        .expect("query");
+    assert!(pending.is_some(), "open signup sends a verification email");
+}
+
+#[tokio::test]
+async fn invite_only_signup_admits_only_the_invited_email() {
+    let mut client = TestClient::new_with_conf(val!({"app": {"signup": "invite"}})).await;
+    assert_signup_needs_invitation(&mut client, "mallory@example.com").await;
+
+    let admin_id = Uuid::now_v7();
+    hot::db::User::insert_user(
+        client.db(),
+        &admin_id,
+        "admin@example.com",
+        Some("Admin"),
+        Some(&admin_id),
+    )
+    .await
+    .expect("insert admin");
+    let org_id =
+        hot_app::handlers::create_org(client.db(), &admin_id, "Acme", "acme", "organization")
+            .await
+            .expect("create org");
+    hot::db::Invite::insert_invite(
+        client.db(),
+        &Uuid::now_v7(),
+        "invite-only-code",
+        "bob@example.com",
+        &org_id,
+        1,
+        &admin_id,
+        Utc::now() + Duration::days(7),
+    )
+    .await
+    .expect("insert invite");
+
+    // An invitation for someone else does not open sign-up to this email.
+    let form = submit_signup("mallory@example.com", client.prime_csrf());
+    let resp = client
+        .post_form(
+            "/signup?invite_code=invite-only-code",
+            &as_form_slice(&form),
+        )
+        .await;
+    assert!(
+        resp.body.contains("requires an invitation"),
+        "{}",
+        resp.body
+    );
+
+    let form = submit_signup("bob@example.com", client.prime_csrf());
+    let resp = client
+        .post_form(
+            "/signup?invite_code=invite-only-code",
+            &as_form_slice(&form),
+        )
+        .await;
+    assert!(
+        resp.status.is_redirection(),
+        "the invited email signs up, got {}: {}",
+        resp.status,
+        resp.body.chars().take(300).collect::<String>()
+    );
+    hot::db::User::get_user_by_email(client.db(), "bob@example.com")
+        .await
+        .expect("bob has an account");
+}
+
+async fn invite_as_admin(
+    client: &mut TestClient,
+    email: &str,
+) -> hot_app::test_support::TestResponse {
+    let td = hot::db::insert_test_data(client.db()).await.unwrap();
+    let org = hot::db::Org::get_org_uncached(client.db(), &td.org_id)
+        .await
+        .unwrap();
+    client.login_as(&td.user_id);
+    client
+        .post_form(
+            &format!("/@{}/users/invite", org.slug),
+            &[("email", email), ("role_id", "1")],
+        )
+        .await
+}
+
+#[tokio::test]
+async fn admins_share_invitation_links_when_email_is_unavailable() {
+    let mut client = TestClient::new_with_conf(self_host_conf(val!({}))).await;
+    let resp = invite_as_admin(&mut client, "carol@example.com").await;
+    resp.assert_status(axum::http::StatusCode::OK);
+    let invite = hot::db::Invite::get_invites_by_email(client.db(), "carol@example.com")
+        .await
+        .unwrap()
+        .pop()
+        .expect("the invitation is stored");
+    assert!(
+        resp.body
+            .contains(&format!("/invite?code={}", invite.invite_code)),
+        "the admin sees the invitation link, body = {}",
+        resp.body.chars().take(400).collect::<String>()
+    );
+}
+
+#[tokio::test]
+async fn invitations_are_emailed_when_email_is_configured() {
+    let mut client =
+        TestClient::new_with_conf(self_host_conf(val!({"email": {"provider": "smtp"}}))).await;
+    let resp = invite_as_admin(&mut client, "dave@example.com").await;
+    assert!(
+        resp.status.is_redirection(),
+        "{}: {}",
+        resp.status,
+        resp.body
+    );
+    assert!(!resp.body.contains("/invite?code="));
+}

@@ -381,6 +381,10 @@ pub trait StreamSubscriber: Send {
     ///
     /// Returns `Idle` when no event is currently available but the subscription
     /// is still healthy, and `Closed` when the subscription cannot continue.
+    ///
+    /// Cancel-safe: dropping the future (e.g. in `tokio::select!`) loses no
+    /// event. A subscription delivers every event published after
+    /// `subscribe` returns, from any process.
     async fn next(&mut self) -> StreamNext;
 }
 
@@ -416,6 +420,7 @@ pub trait EnvSubscriber: Send {
     /// Receive the next event from the subscription
     ///
     /// Returns `None` if the subscription is closed or an error occurred.
+    /// Cancel-safe, with the same delivery guarantee as `StreamSubscriber`.
     async fn next(&mut self) -> Option<EnvEvent>;
 }
 
@@ -516,7 +521,7 @@ impl StreamPubSub {
                     ))
                 } else {
                     tracing::debug!("Creating Redis Streams standalone pub/sub");
-                    let client = ::redis::Client::open(url.as_str())?;
+                    let client = crate::redis::client(url.as_str())?;
                     Ok(StreamPubSub::Redis(streams::RedisStreamsPubSub::new(
                         client,
                     )))

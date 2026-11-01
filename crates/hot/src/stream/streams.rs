@@ -842,8 +842,13 @@ mod tests {
     /// `HOT_REDIS_URI`) picks the server and logical database.
     async fn try_client() -> Option<redis::Client> {
         let uri = std::env::var("REDIS_URL")
-            .or_else(|_| std::env::var("HOT_REDIS_URI"))
-            .unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
+            .ok()
+            .or_else(|| {
+                crate::environment::read_optional("HOT_REDIS_URI")
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or_else(|| "redis://127.0.0.1/".to_string());
         let client = redis::Client::open(uri.as_str()).ok()?;
         // Fail fast if Redis isn't actually running.
         client.get_multiplexed_async_connection().await.ok()?;

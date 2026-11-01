@@ -26,3 +26,4 @@ hot = { workspace = true }
 
 [dev-dependencies]
 hot = { workspace = true, features = ["test-utils"] }
+tempfile = { workspace = true }

@@ -104,15 +104,31 @@ impl EmailProvider for NoopEmailProvider {
     }
 }
 
-struct NoopEmailProviderFactory;
+/// The public composition's factory: SMTP when selected, otherwise a provider
+/// that reports why email is unavailable. Other compositions install their
+/// own factory with [`set_email_provider_factory`].
+struct DefaultEmailProviderFactory;
 
-impl EmailProviderFactory for NoopEmailProviderFactory {
+impl EmailProviderFactory for DefaultEmailProviderFactory {
     fn provider_from_conf(
         &self,
         conf: &crate::val::Val,
         purpose: EmailPurpose,
     ) -> Box<dyn EmailProvider> {
         let provider = configured_email_provider(conf, purpose);
+        if provider == "smtp" {
+            return match crate::email_smtp::SmtpSettings::from_conf(conf)
+                .and_then(|settings| crate::email_smtp::SmtpEmailProvider::new(&settings))
+            {
+                Ok(smtp) => Box::new(smtp),
+                Err(error) => {
+                    tracing::error!("SMTP email is misconfigured: {error}");
+                    Box::new(NoopEmailProvider::new(format!(
+                        "SMTP email is misconfigured: {error}"
+                    )))
+                }
+            };
+        }
         let reason = if provider.is_empty() || provider == "none" {
             "email.provider is not configured".to_string()
         } else {
@@ -132,8 +148,16 @@ pub fn set_email_provider_factory(
 
 pub fn email_provider_factory() -> Arc<dyn EmailProviderFactory> {
     EMAIL_PROVIDER_FACTORY
-        .get_or_init(|| Arc::new(NoopEmailProviderFactory))
+        .get_or_init(|| Arc::new(DefaultEmailProviderFactory))
         .clone()
+}
+
+/// Whether the installation names an email provider for `purpose`. Processes
+/// that only queue email can rely on this without holding the provider's
+/// credentials.
+pub fn email_delivery_configured(conf: &crate::val::Val, purpose: EmailPurpose) -> bool {
+    let provider = configured_email_provider(conf, purpose);
+    !provider.is_empty() && provider != "none"
 }
 
 pub fn configured_email_provider(conf: &crate::val::Val, purpose: EmailPurpose) -> String {

@@ -484,6 +484,7 @@ hot db migrate                   # Apply pending migrations
 hot db provision-store-indexes   # Create PostgreSQL vector indexes for stores
 hot db port-v1-to-v2             # Port a Hot 1.x SQLite database to Hot 2
 hot db redeploy                  # Redeploy the deployments another major version built
+hot db move-storage              # Move builds or files to another storage backend
 ```
 
 On PostgreSQL, `hot db migrate` and `hot db provision-store-indexes` connect
@@ -500,6 +501,10 @@ After an upgrade to a new major version, `hot db redeploy` builds every
 deployment from the earlier version again, checks it, and deploys the ones that
 pass. `--dry-run` changes nothing, `--notify` emails the admins of each account
 whose project fails, and `--org <slug>` limits the run to one organization.
+
+`hot db move-storage` moves builds, or files and internal blobs, to another
+storage backend while Hot is stopped; see
+[Switching Backends](/docs/configuration/storage#switching-backends).
 
 See [Self-Hosted PostgreSQL](/docs/configuration/postgres) for the setup, and
 [Migrations and Upgrades](/docs/migrations) for `port-v1-to-v2` and

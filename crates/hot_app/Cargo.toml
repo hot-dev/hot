@@ -54,6 +54,7 @@ test-utils = ["dep:http-body-util"]
 [dev-dependencies]
 hot = { workspace = true, features = ["test-utils"] }
 hot_app = { workspace = true, features = ["test-utils"] }
+redis = { workspace = true }
 tempfile = { workspace = true }
 
 [build-dependencies]

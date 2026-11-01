@@ -114,6 +114,10 @@ pub(crate) async fn run_scheduler(env: Env, conf: Val) {
     };
 
     let schedule_policy = hot::db::SchedulePolicy::from_conf(&conf);
+    // Rewritten while the scheduler dispatches, for a supervisor's health check.
+    let heartbeat_file = Some(conf.get_str_or_default("scheduler.heartbeat-path", ""))
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from);
 
     // `hot dev` and integration `hot test` restart a scheduler that lost its
     // lock, so a brief database stall doesn't end scheduling for the session.
@@ -133,6 +137,7 @@ pub(crate) async fn run_scheduler(env: Env, conf: Val) {
                 schedule_policy,
                 singleton,
                 selected_env,
+                heartbeat_file.clone(),
             )
         };
         let result = if restart {

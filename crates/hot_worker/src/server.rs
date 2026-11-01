@@ -9625,6 +9625,8 @@ pub async fn run_with_components_shared_context_and_db(
                                                                     }
                                                                 }
                                                             } else {
+                                                                // Organizations without a plan (self-hosted) follow db.retention.call.days.
+                                                                let no_plan_days = hot::db::get_call_retention_days(&worker_conf_ref);
                                                                 let mut org_ids = hot::db::subscription::OrgPlan::get_all_root_org_ids(db).await.unwrap_or_default();
                                                                 for root_id in org_ids.clone() {
                                                                     if let Ok(children) = hot::db::Org::list_children(db, &root_id).await {
@@ -9634,7 +9636,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 org_ids.sort_unstable();
                                                                 org_ids.dedup();
                                                                 for org_id in &org_ids {
-                                                                    let days = hot::db::subscription::call_deletion_days_for_org(db, org_id).await;
+                                                                    let days = hot::db::subscription::call_deletion_days_for_org_or(db, org_id, no_plan_days).await;
                                                                     if days < 0 { continue; }
 
                                                                     let env_ids = hot::db::Env::get_ids_for_org(db, org_id)

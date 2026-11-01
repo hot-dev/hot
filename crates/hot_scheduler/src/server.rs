@@ -11,7 +11,9 @@ use hot::lang::event::{Event, EventMessage, EventMessageBody, ExecutionContext};
 use hot::queue::{Queue, QueueType, mem::MemQueue, sqlite::SqliteQueue, streams::RedisStreamQueue};
 use hot::val;
 use hot::val::Val;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::time::{Duration, interval};
 use tracing::{debug, error, info, warn};
@@ -338,8 +340,37 @@ pub async fn run(
         schedule_policy,
         singleton,
         None,
+        None,
     )
     .await
+}
+
+/// How often the heartbeat job rewrites `scheduler.heartbeat-path`.
+pub const HEARTBEAT_CRON: &str = "*/30 * * * * *";
+
+/// A job on the same scheduler as the schedules that writes the current
+/// time, in seconds since the epoch, to `path`. It runs only while the
+/// scheduler dispatches, so a supervisor's health check can tell a stalled
+/// scheduler from a running process.
+pub fn heartbeat_job(path: PathBuf) -> Result<Job, Box<dyn std::error::Error + Send + Sync>> {
+    Job::new_async(HEARTBEAT_CRON, move |_uuid, _lock| {
+        let path = path.clone();
+        async move { write_heartbeat(&path) }
+    })
+}
+
+/// Writes whole: a temporary file renamed over the heartbeat file.
+pub fn write_heartbeat(path: &Path) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let temporary = path.with_extension("tmp");
+    if let Err(error) =
+        std::fs::write(&temporary, now.to_string()).and_then(|_| std::fs::rename(&temporary, path))
+    {
+        warn!(%error, path = %path.display(), "hot.dev: SCHEDULER could not write its heartbeat");
+    }
 }
 
 /// Local development binds scheduler discovery to its selected profile.
@@ -357,6 +388,7 @@ pub async fn run_for_environment(
     schedule_policy: SchedulePolicy,
     singleton: bool,
     env_id: Option<Uuid>,
+    heartbeat_file: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("hot.dev: SCHEDULER starting");
     debug!(
@@ -398,7 +430,7 @@ pub async fn run_for_environment(
                 Arc::new(queue)
             } else {
                 debug!("hot.dev: SCHEDULER using Redis Streams standalone mode");
-                let client = redis::Client::open(redis_uri.as_str())?;
+                let client = hot::redis::client(redis_uri.as_str())?;
                 let queue = RedisStreamQueue::<Message>::new(client, "hot:event".to_string())
                     .with_serialization(serialization);
                 Arc::new(queue)
@@ -775,6 +807,10 @@ pub async fn run_for_environment(
             }
         })
     });
+
+    if let Some(path) = heartbeat_file {
+        scheduler.add(heartbeat_job(path)?).await?;
+    }
 
     // Start the scheduler
     scheduler.start().await?;
@@ -1931,6 +1967,32 @@ async fn process_due_at_schedules(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
+
+    #[tokio::test]
+    async fn the_heartbeat_job_writes_the_time_whole() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("heartbeat");
+        let job = heartbeat_job(path.clone()).unwrap();
+        assert!(
+            job.cron
+                .is_time_matching(&Utc::now().with_second(30).unwrap())
+                .unwrap()
+        );
+        assert!(
+            !job.cron
+                .is_time_matching(&Utc::now().with_second(31).unwrap())
+                .unwrap()
+        );
+        (job.task)(job.id, Arc::new(tokio::sync::Mutex::new(()))).await;
+        let written: u64 = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(now - written < 5, "{written} is not now ({now})");
+        assert!(!path.with_extension("tmp").exists());
+    }
 
     #[tokio::test]
     async fn singleton_check_fails_closed() {

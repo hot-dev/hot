@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -33,6 +34,19 @@ def manifest():
     return {"schema_version": 1, "release": "development-fixture",
             "images": {name: f"registry.example.com/{name}@sha256:" + "a" * 64
                        for name in renderer.IMAGES}}
+
+
+def contract_output(tfvars):
+    """The installation as the stacks hand it to the host: the contract fills
+    in every optional field, so the renderer sees the full shape."""
+    tofu = shutil.which("tofu")
+    if not tofu:
+        raise unittest.SkipTest("tofu is not installed")
+    result = subprocess.run(
+        [tofu, "-chdir=" + str(ROOT / "opentofu/modules/single-machine-contract"), "console",
+         "-var-file=" + str(tfvars)],
+        input="jsonencode(var.installation)\n", capture_output=True, text=True, check=True)
+    return json.loads(json.loads(result.stdout.strip().splitlines()[-1]))
 
 
 class RuntimeContract(unittest.TestCase):
@@ -80,7 +94,7 @@ class RuntimeContract(unittest.TestCase):
     def test_invalid_settings_fail_before_rendering(self):
         cases = [
             lambda c: c.update(password="do-not-print"),
-            lambda c: c.update(app_exposure="public"),
+            lambda c: c.update(app_exposure="internet"),
             lambda c: c["storage"]["file"].update(backend="gcs"),
             lambda c: c["storage"]["file"].update(backend="s3"),
             lambda c: c.update(network={"client_cidrs": ["0.0.0.0/0"]}),
@@ -96,6 +110,301 @@ class RuntimeContract(unittest.TestCase):
         unpinned["images"]["hot"] = "registry.example.com/hot:latest"
         with self.assertRaises(ValueError):
             renderer.render(example(), unpinned, "/data", "/run/hot/secrets")
+
+    def test_user_code_is_denied_the_installation_itself(self):
+        bundle = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")
+        subnet = bundle["networks"]["default"]["ipam"]["config"][0]["subnet"]
+        for role in ("worker", "task-worker"):
+            deny = bundle["services"][role]["environment"]["HOT_NETWORK_DENY_CIDRS"].split(",")
+            self.assertIn(subnet, deny)
+            self.assertIn("10.68.0.0/16", deny)
+        self.assertNotIn("HOT_NETWORK_DENY_CIDRS", bundle["services"]["app"]["environment"])
+
+    def test_the_example_operator_installation_is_valid(self):
+        tfvars = json.loads((ROOT / "github/example-operator-repo/installation/installation.tfvars.json").read_text())
+        config = dict(tfvars["installation"], data_volume_id="vol-0abc",
+                      release_pointer="arn:aws:ssm:us-east-1:123456789012:parameter/hot/hot-example/release",
+                      secret_references={"generated": "arn:aws:secretsmanager:us-east-1:123456789012:secret:g",
+                                         "operator": "arn:aws:secretsmanager:us-east-1:123456789012:secret:o"})
+        bundle = renderer.render(config, manifest(), "/data", "/run/hot/secrets")
+        self.assertEqual(bundle["services"]["worker"]["environment"]["HOT_EMAIL_PROVIDER"], "smtp")
+        self.assertIn("bootstrap-admin", bundle["services"])
+        with self.assertRaisesRegex(ValueError, "looks like a secret"):
+            renderer.validate(dict(config, settings={"HOT_EMAIL_SMTP_PASSWORD": "x"}))
+        with self.assertRaisesRegex(ValueError, "set by the runtime bundle"):
+            renderer.render(dict(config, settings={"HOT_ENGINE_ISOLATION": "false"}), manifest(), "/data", "/run/hot/secrets")
+
+    def test_the_contract_output_renders(self):
+        sources = [*(ROOT / "examples" / f"{name}.json" for name in ("aws-local", "aws-existing-s3", "gcp-local", "gcp-existing-s3")),
+                   ROOT / "github/example-operator-repo/installation/installation.tfvars.json"]
+        for source in sources:
+            with self.subTest(source=source.name):
+                config = contract_output(source)
+                stack = {"aws": {"data_volume_id": "vol-0abc",
+                                 "release_pointer": "arn:aws:ssm:us-east-1:123456789012:parameter/hot/x/release",
+                                 "secret_references": {"generated": "arn:aws:secretsmanager:us-east-1:123456789012:secret:g",
+                                                       "operator": "arn:aws:secretsmanager:us-east-1:123456789012:secret:o"}},
+                         "gcp": {"data_volume_id": "projects/p/zones/z/disks/d", "release_pointer": "projects/p/secrets/r",
+                                 "command_subscription": "projects/p/subscriptions/c",
+                                 "secret_references": {"generated": "projects/p/secrets/g", "operator": "projects/p/secrets/o"}}}
+                config.update(stack[config["cloud"]], status_reference="status")
+                renderer.render(config, manifest(), "/data", "/run/hot/secrets")
+
+    def test_allocations_grow_with_size_and_fit_the_vm(self):
+        previous = None
+        for size in ("small", "medium", "large"):
+            config = dict(renderer.validate(example()), size=size)
+            bundle = renderer.render(config, manifest(), "/data", "/run/hot/secrets")
+            total = sum(int(s["mem_limit"].rstrip("m")) for s in bundle["services"].values() if "mem_limit" in s)
+            self.assertLessEqual(total, renderer.VM_MEMORY_MB[size] - 1024, size)
+            task = int(bundle["services"]["task-worker"]["environment"]["HOT_TASK_WORKER_MEMORY_MB"])
+            self.assertEqual(f"{task}m", bundle["services"]["task-worker"]["mem_limit"])
+            if previous:
+                self.assertGreater(total, previous)
+            previous = total
+            maxmemory = int(renderer.valkey_conf(size).split("maxmemory ")[1].split("mb")[0])
+            self.assertLess(maxmemory, int(bundle["services"]["valkey"]["mem_limit"].rstrip("m")))
+
+    def test_existing_data_services_leave_out_their_containers(self):
+        config = dict(renderer.validate(example()), data={"postgres": {"mode": "existing", "runtime_role": "hot_app"},
+                                                          "valkey": {"mode": "existing"}})
+        bundle = renderer.render(config, manifest(), "/data", "/run/hot/secrets", extra_deny=["10.9.8.7/32"])
+        services = bundle["services"]
+        self.assertNotIn("postgres", services)
+        self.assertNotIn("valkey", services)
+        self.assertEqual(services["app"]["depends_on"], {})
+        self.assertIn("check-postgres", services)
+        # Connection strings stay in files: never an argument or environment value.
+        for name in ("provision", "check-postgres"):
+            self.assertIn("$(cat /run/secrets/HOT_DB_MIGRATION_URI)", services[name]["entrypoint"][2])
+            self.assertNotIn("environment", services[name])
+        self.assertIn("--set=runtime_role=hot_app", services["provision"]["command"])
+        self.assertIn("app-POSTGRES_CA_CERT", [s["source"] for s in services["app"]["secrets"]])
+        self.assertNotIn("POSTGRES_CA_CERT_FILE", services["app"]["environment"])
+        self.assertIn("10.9.8.7/32", services["worker"]["environment"]["HOT_NETWORK_DENY_CIDRS"])
+        with self.assertRaises(ValueError):
+            renderer.validate(dict(config, data={"postgres": {"mode": "managed"}}))
+        for role in ("x; drop", "hot_owner"):
+            with self.assertRaises(ValueError):
+                renderer.validate(dict(config, data={"postgres": {"runtime_role": role}}))
+
+    def test_managed_postgres_is_prepared_by_its_administrator(self):
+        endpoint = {"host": "hot-example.c0123.us-east-1.rds.amazonaws.com", "port": 5432, "admin_user": "hot_admin",
+                    "admin_secret": "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-0123"}
+        config = dict(renderer.validate(example()), data={"postgres": {"mode": "managed", "endpoint": endpoint}})
+        services = renderer.render(config, manifest(), "/data", "/run/hot/secrets")["services"]
+        self.assertNotIn("postgres", services)
+        self.assertIn("valkey", services)
+        prepare = services["prepare-postgres"]
+        self.assertIn("$(cat /run/secrets/POSTGRES_ADMIN_URI)", prepare["entrypoint"][2])
+        self.assertNotIn("environment", prepare)
+        self.assertEqual({s["target"] for s in prepare["secrets"]},
+                         {"POSTGRES_ADMIN_URI", "POSTGRES_ADMIN_HOT_URI", "POSTGRES_PASSWORD",
+                          "POSTGRES_RUNTIME_PASSWORD", "POSTGRES_CA_CERT"})
+        # Only the prepare job holds the administrator login.
+        for name, service in services.items():
+            if name != "prepare-postgres":
+                self.assertNotIn("POSTGRES_ADMIN_URI", {s["target"] for s in service.get("secrets", [])})
+        self.assertIn("check-postgres", services)
+        self.assertIn("app-POSTGRES_CA_CERT", [s["source"] for s in services["app"]["secrets"]])
+        # A Cloud SQL endpoint also carries its instance CA.
+        gcp = dict(renderer.validate(example("gcp")), data={"postgres": {"mode": "managed", "endpoint": dict(
+            endpoint, admin_secret="projects/p/secrets/s")}})
+        with self.assertRaisesRegex(ValueError, "ca_certificate"):
+            renderer.validate(gcp)
+        with self.assertRaisesRegex(ValueError, "Managed Valkey needs the endpoint"):
+            renderer.validate(dict(config, data={"valkey": {"mode": "managed"}}))
+        # Memorystore needs its CA and IAM tokens, not an AUTH secret.
+        cache = {"mode": "managed", "endpoint": {"host": "cache.example", "port": 6379, "auth_secret": "projects/p/secrets/v"}}
+        with self.assertRaisesRegex(ValueError, "auth, ca_certificate, host, port"):
+            renderer.validate(dict(renderer.validate(example("gcp")), data={"valkey": cache}))
+
+    def test_memorystore_uses_iam_tokens_and_its_ca(self):
+        endpoint = {"host": "10.68.0.40", "port": 6379, "auth": "gcp-iam",
+                    "ca_certificate": "-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----\n"}
+        config = dict(renderer.validate(example("gcp")), data={"valkey": {"mode": "managed", "endpoint": endpoint}})
+        services = renderer.render(config, manifest(), "/data", "/run/hot/secrets")["services"]
+        self.assertNotIn("valkey", services)
+        for role in ("app", "api", "worker", "task-worker", "scheduler"):
+            env = services[role]["environment"]
+            self.assertEqual(env["HOT_REDIS_AUTH"], "gcp-iam", role)
+            self.assertEqual(env["HOT_REDIS_CA_CERT_FILE"], "/run/secrets/HOT_REDIS_CA_CERT", role)
+            self.assertIn(f"{role}-HOT_REDIS_CA_CERT", [s["source"] for s in services[role]["secrets"]])
+        with self.assertRaisesRegex(ValueError, "gcp-iam"):
+            renderer.validate(dict(config, data={"valkey": {"mode": "managed", "endpoint": dict(endpoint, auth="password")}}))
+
+    @unittest.skipUnless(shutil.which("docker"), "Docker CLI is not installed")
+    def test_compose_accepts_existing_and_managed_data_bundles(self):
+        managed = {"mode": "managed", "endpoint": {"host": "db.example", "port": 5432, "admin_user": "hot_admin",
+                                                   "admin_secret": "arn:aws:secretsmanager:us-east-1:123456789012:secret:a"}}
+        for data in ({"postgres": {"mode": "existing"}, "valkey": {"mode": "existing"}}, {"postgres": managed}):
+            config = dict(renderer.validate(example()), data=data)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "compose.json"
+                path.write_text(json.dumps(renderer.render(config, manifest(), "/data", "/run/hot/secrets")))
+                result = subprocess.run(["docker", "compose", "-f", str(path), "--profile", "admin", "config", "--quiet"],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_gcs_storage_uses_the_vm_identity_on_gcp(self):
+        config = renderer.validate(example("gcp"))
+        config["storage"] = {"build": {"backend": "gcs", "bucket": "acme-hot", "prefix": "builds"},
+                             "file": {"backend": "local"}}
+        env = renderer.render(config, manifest(), "/data", "/run/hot/secrets")["services"]["worker"]["environment"]
+        self.assertEqual(env["HOT_BUILD_STORAGE_TYPE"], "gcs")
+        self.assertEqual((env["HOT_BUILD_GCS_BUCKET"], env["HOT_BUILD_GCS_PREFIX"]), ("acme-hot", "builds"))
+        self.assertFalse(any("GCS" in key and key.endswith("_FILE") for key in env))
+        with self.assertRaisesRegex(ValueError, "needs cloud=gcp"):
+            renderer.validate(dict(renderer.validate(example("aws")), storage=config["storage"]))
+
+    def test_public_endpoints_get_a_load_balancer_listener(self):
+        private = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")
+        self.assertEqual(private["services"]["ingress"]["ports"], ["443:8443"])
+        self.assertEqual(private["services"]["api"]["environment"]["HOT_NETWORK_CLIENT_IP_TRUSTED_PROXIES"],
+                         renderer.RUNTIME_SUBNET)
+        config = dict(renderer.validate(example("gcp")), api_exposure="public")
+        bundle = renderer.render(config, manifest(), "/data", "/run/hot/secrets")
+        self.assertIn("9443:9443", bundle["services"]["ingress"]["ports"])
+        self.assertIn("130.211.0.0/22", bundle["services"]["api"]["environment"]["HOT_NETWORK_CLIENT_IP_TRUSTED_PROXIES"])
+        text = renderer.nginx_config(config)
+        lb = text.split("listen 9443 ssl;")
+        self.assertEqual(len(lb), 2, "only the public endpoint is served to the load balancer")
+        self.assertIn(config["api_hostname"], lb[1].split("}")[0])
+        self.assertIn("return 444", text)
+        with self.assertRaises(ValueError):
+            renderer.validate(dict(config, app_exposure="internet"))
+        with self.assertRaisesRegex(ValueError, "set by the runtime bundle"):
+            renderer.render(dict(config, settings={"HOT_NETWORK_CLIENT_IP_TRUSTED_PROXIES": "0.0.0.0/0"}),
+                            manifest(), "/data", "/run/hot/secrets")
+
+    def test_postgres_data_uses_the_postgres_18_layout(self):
+        postgres = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")["services"]["postgres"]
+        self.assertEqual(postgres["volumes"][0]["target"], "/var/lib/postgresql")
+        upstream = json.loads((ROOT / "release/upstream-images.json").read_text())
+        self.assertIn("-pg18@", upstream["postgres"])
+
+    def test_services_run_in_the_foreground(self):
+        # daemon = true makes the CLI start a background copy and exit, which
+        # a container's supervisor sees as the service stopping.
+        bundle = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")
+        for role in renderer.SERVICES:
+            self.assertNotIn("HOT_DAEMON", bundle["services"][role]["environment"], role)
+
+    def test_services_know_the_installation_hostnames(self):
+        config = example("aws", "local")
+        bundle = renderer.render(config, manifest(), "/data", "/run/hot/secrets")
+        for role in renderer.SERVICES:
+            env = bundle["services"][role]["environment"]
+            self.assertEqual(env["HOT_APP_URL"], "https://" + config["installation"]["app_hostname"])
+            self.assertEqual(env["HOT_API_URL"], "https://" + config["installation"]["api_hostname"])
+            self.assertEqual(env["HOT_OAUTH_REDIRECT_BASE_URL"], env["HOT_APP_URL"])
+            self.assertEqual(env["HOT_COOKIE_DOMAIN"], config["installation"]["app_hostname"])
+        with self.assertRaisesRegex(ValueError, "set by the runtime bundle"):
+            renderer.render(dict(config["installation"], settings={"HOT_APP_URL": "https://elsewhere.example"}),
+                            manifest(), "/data", "/run/hot/secrets")
+
+    def test_the_task_worker_writes_its_slots_where_the_agent_reads_them(self):
+        services = renderer.render(example("aws", "local"), manifest(), "/data", "/run/hot/secrets")["services"]
+        self.assertEqual(services["task-worker"]["environment"]["HOT_TASK_STATUS_PATH"], renderer.TASK_STATUS)
+        self.assertTrue(renderer.TASK_STATUS.startswith("/tmp/"), "the worker's own writable /tmp")
+
+    def test_a_stalled_scheduler_is_unhealthy(self):
+        services = renderer.render(example("aws", "local"), manifest(), "/data", "/run/hot/secrets")["services"]
+        scheduler = services["scheduler"]
+        self.assertEqual(scheduler["environment"]["HOT_SCHEDULER_HEARTBEAT_PATH"], "/tmp/hot-scheduler-heartbeat")
+        self.assertIn("/tmp:", scheduler["tmpfs"][0])
+        check = scheduler["healthcheck"]["test"][1]
+        self.assertIn("$$(cat /tmp/hot-scheduler-heartbeat", check)
+        self.assertNotRegex(check.replace("$$", ""), r"\$", "every $ is escaped for Compose")
+        self.assertNotIn("healthcheck", services["worker"])
+        # The check itself: fresh passes, stale and missing fail.
+        shell = check.replace("$$", "$")
+        with tempfile.TemporaryDirectory() as tmp:
+            beat = Path(tmp) / "beat"
+            run = lambda: subprocess.run(["sh", "-c", shell.replace("/tmp/hot-scheduler-heartbeat", str(beat))]).returncode
+            self.assertNotEqual(run(), 0)
+            beat.write_text(str(int(time.time()) - 300))
+            self.assertNotEqual(run(), 0)
+            beat.write_text(str(int(time.time())))
+            self.assertEqual(run(), 0)
+
+    def scalable(self, roles, migrations=False):
+        config = dict(renderer.validate(example("aws")), preset="scalable", roles=roles, migrations=migrations,
+                      storage={"build": {"backend": "s3", "bucket": "acme", "region": "us-east-1", "prefix": "builds"},
+                               "file": {"backend": "s3", "bucket": "acme", "region": "us-east-1", "prefix": "files"}},
+                      data={"postgres": {"mode": "managed", "endpoint": {"host": "db.example", "port": 5432,
+                                         "admin_user": "hot_admin", "admin_secret": "arn:aws:secretsmanager:us-east-1:1:secret:a"}},
+                            "valkey": {"mode": "managed", "endpoint": {"host": "cache.example", "port": 6379,
+                                       "auth_secret": "arn:aws:secretsmanager:us-east-1:1:secret:v"}}})
+        return config, renderer.render(config, manifest(), "/data", "/run/hot/secrets")
+
+    def test_a_scalable_host_runs_only_its_roles(self):
+        config, bundle = self.scalable(["app"])
+        self.assertEqual(set(bundle["services"]), {"app", "ingress"})
+        self.assertEqual(bundle["services"]["ingress"]["ports"], [f"443:{renderer.LOAD_BALANCER_PORT}"])
+        self.assertEqual(bundle["services"]["app"]["environment"]["HOT_WORKER_DB_MAX_CONNECTIONS"], "20")
+        self.assertEqual(bundle["services"]["ingress"]["depends_on"], ["app"])
+        self.assertTrue(all(name.startswith(("app-", "ingress-")) for name in bundle["secrets"]), bundle["secrets"])
+        nginx = renderer.nginx_config(config)
+        self.assertIn("proxy_pass http://app:4680/signin;", nginx)
+        self.assertNotIn("http://api:4681", nginx)
+        self.assertNotIn("listen 8443 ssl;", nginx)
+
+    def test_only_the_migration_host_carries_admin_jobs(self):
+        _, scheduler = self.scalable(["scheduler"], migrations=True)
+        self.assertEqual(set(scheduler["services"]) - {"migrate", "provision", "check-postgres", "prepare-postgres",
+                                                      "restore-postgres", "bootstrap-admin"}, {"scheduler"})
+        self.assertIn("healthcheck", scheduler["services"]["scheduler"])
+        _, worker = self.scalable(["worker", "task-worker"])
+        self.assertEqual(set(worker["services"]), {"worker", "task-worker"})
+        self.assertTrue(worker["services"]["task-worker"]["privileged"])
+
+    def test_scalable_installations_need_shared_data_and_storage(self):
+        config, _ = self.scalable(["app"])
+        with self.assertRaisesRegex(ValueError, "managed or existing"):
+            renderer.validate(dict(config, data={}))
+        with self.assertRaisesRegex(ValueError, "S3 or GCS"):
+            renderer.validate(dict(config, storage={"build": {"backend": "local"}, "file": {"backend": "local"}}))
+        with self.assertRaisesRegex(ValueError, "roles must name"):
+            renderer.validate(dict(config, roles=["ingress"]))
+
+    def test_sign_up_is_by_invitation_until_the_operator_opens_it(self):
+        config = example("aws", "local")
+        app = renderer.render(config, manifest(), "/data", "/run/hot/secrets")["services"]["app"]
+        self.assertEqual(app["environment"]["HOT_APP_SIGNUP"], "invite")
+        opened = renderer.render(dict(config["installation"], settings={"HOT_APP_SIGNUP": "open"}),
+                                 manifest(), "/data", "/run/hot/secrets")["services"]["app"]
+        self.assertEqual(opened["environment"]["HOT_APP_SIGNUP"], "open")
+
+    def test_logs_ship_to_the_cloud_without_blocking(self):
+        aws = renderer.render(example("aws"), manifest(), "/data", "/run/hot/secrets")["services"]
+        gcp = renderer.render(example("gcp"), manifest(), "/data", "/run/hot/secrets")["services"]
+        for services in (aws, gcp):
+            for name, service in services.items():
+                options = service["logging"]["options"]
+                self.assertEqual(options["mode"], "non-blocking", name)
+                self.assertEqual((options["cache-max-size"], options["cache-max-file"]), ("10m", "3"), name)
+        self.assertEqual(aws["worker"]["logging"]["driver"], "awslogs")
+        self.assertEqual(aws["worker"]["logging"]["options"]["awslogs-group"], "/hot/hot-example")
+        self.assertEqual(gcp["migrate"]["logging"]["driver"], "gcplogs")
+        local = dict(renderer.validate(example("aws")), logging={"destination": "local"})
+        services = renderer.render(local, manifest(), "/data", "/run/hot/secrets")["services"]
+        self.assertEqual({s["logging"]["driver"] for s in services.values()}, {"local"})
+        with self.assertRaisesRegex(ValueError, "logging.destination"):
+            renderer.validate(dict(local, logging={"destination": "syslog"}))
+
+    def test_log_lines_name_their_host_role_and_release(self):
+        aws = renderer.render(example("aws"), manifest(), "/data", "/run/hot/secrets", instance="i-0abc")["services"]
+        gcp = renderer.render(example("gcp"), manifest(), "/data", "/run/hot/secrets", instance="hot-example-x1")["services"]
+        self.assertEqual(aws["worker"]["logging"]["options"]["tag"], "i-0abc/{{.Name}}")
+        self.assertEqual(gcp["worker"]["logging"]["options"]["labels"], "hot.installation,hot.role,hot.release")
+        self.assertEqual(aws["worker"]["labels"], {"hot.installation": "hot-example", "hot.role": "worker", "hot.release": manifest()["release"]})
+
+    def test_a_mirror_keeps_each_images_digest(self):
+        config = dict(renderer.validate(example()), image_registry="123456789012.dkr.ecr.us-east-1.amazonaws.com/hot-mirror/")
+        services = renderer.render(config, manifest(), "/data", "/run/hot/secrets")["services"]
+        for role, service in (("hot", "worker"), ("postgres", "postgres"), ("ingress", "ingress")):
+            self.assertEqual(services[service]["image"], f"123456789012.dkr.ecr.us-east-1.amazonaws.com/hot-mirror/{role}@sha256:" + "a" * 64)
 
     def test_nginx_config_has_safe_defaults_and_streaming(self):
         text = renderer.nginx_config(renderer.validate(example()))
@@ -116,16 +425,6 @@ class RuntimeContract(unittest.TestCase):
         test = bundle["services"]["valkey"]["healthcheck"]["test"]
         self.assertEqual(test[0], "CMD-SHELL")
         self.assertIn("--askpass PING <", test[1])
-
-    def test_services_run_in_the_foreground_and_name_their_hosts(self):
-        bundle = renderer.render(example(), manifest(), "/data", "/run/hot/secrets")
-        config = renderer.validate(example())
-        for role in renderer.SERVICES:
-            env = bundle["services"][role]["environment"]
-            # HOT_DAEMON re-spawns the process and exits, so the container stops.
-            self.assertNotIn("HOT_DAEMON", env)
-            self.assertEqual(env["HOT_APP_URL"], "https://" + config["app_hostname"])
-            self.assertEqual(env["HOT_API_URL"], "https://" + config["api_hostname"])
 
     @unittest.skipUnless(shutil.which("docker") and VALKEY_IMAGE, "set HOT_INFRA_TEST_VALKEY_IMAGE to run Valkey")
     def test_valkey_healthcheck_passes_in_a_container(self):
@@ -201,6 +500,58 @@ class RuntimeContract(unittest.TestCase):
             self.assertEqual(len(parsed["services"]), 10)
             self.assertEqual(parsed["services"]["task-worker"]["pid"], "host")
             self.assertEqual(parsed["services"]["scheduler"]["environment"]["HOT_LOG_FORMAT"], "json")
+
+
+release_spec = importlib.util.spec_from_file_location("release_manifest", ROOT / "release/release_manifest.py")
+releaser = importlib.util.module_from_spec(release_spec)
+release_spec.loader.exec_module(releaser)
+
+
+def fake_cosign(directory, exit_code):
+    """A cosign stand-in that records its arguments."""
+    script = Path(directory) / "cosign"
+    script.write_text(f"#!/bin/sh\necho \"$@\" > {directory}/args\necho 'none of the expected identities matched' >&2\nexit {exit_code}\n")
+    script.chmod(0o755)
+    return str(script)
+
+
+class ReleaseManifest(unittest.TestCase):
+    def test_release_manifests_pin_every_image_and_render(self):
+        upstream = json.loads((ROOT / "release/upstream-images.json").read_text())
+        hot = "ghcr.io/hot-dev/hot-runtime@sha256:" + "b" * 64
+        built = releaser.build("3.0.1", hot, upstream)
+        self.assertEqual(built["images"]["hot"], hot)
+        self.assertEqual(built["module_tag"], "v3.0.1")
+        self.assertGreater(built["migrations"]["latest"], 0)
+        self.assertEqual(built["upgrade"], json.loads((ROOT / "release/upgrade-policy.json").read_text()))
+        renderer.render(example(), built, "/data", "/run/hot/secrets")
+        with self.assertRaisesRegex(ValueError, "no newer than 3.0.1"):
+            releaser.build("3.0.1", hot, upstream, policy={"minimum_source": "3.1.0"})
+        with self.assertRaises(ValueError):
+            releaser.build("3.0.1", "ghcr.io/hot-dev/hot-runtime:latest", upstream)
+        with self.assertRaises(ValueError):
+            releaser.build("latest", hot, upstream)
+
+    def test_unknown_manifest_fields_are_rejected(self):
+        extra = manifest()
+        extra["unsigned_override"] = True
+        with self.assertRaises(ValueError):
+            renderer.render(example(), extra, "/data", "/run/hot/secrets")
+
+    def test_signatures_must_name_the_release_workflow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            renderer.verify_manifest_signature("m.json", "m.sigstore.json", cosign=fake_cosign(tmp, 0))
+            args = (Path(tmp) / "args").read_text()
+            self.assertIn("verify-blob --bundle m.sigstore.json", args)
+            self.assertIn(renderer.RELEASE_SIGNER, args)
+            self.assertIn(renderer.RELEASE_ISSUER, args)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "did not verify: none of the expected"):
+                renderer.verify_manifest_signature("m.json", "m.sigstore.json", cosign=fake_cosign(tmp, 1))
+        signer = re.compile(renderer.RELEASE_SIGNER)
+        self.assertTrue(signer.match("https://github.com/hot-dev/hot/.github/workflows/release.yml@refs/tags/v3.0.1"))
+        self.assertFalse(signer.match("https://github.com/hot-dev/hot/.github/workflows/release.yml@refs/heads/main"))
+        self.assertFalse(signer.match("https://github.com/fork/hot/.github/workflows/release.yml@refs/tags/v3.0.1"))
 
 
 if __name__ == "__main__":

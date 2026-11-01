@@ -450,6 +450,17 @@ pub fn get_local_call_retention_days(conf: &Val) -> i32 {
     conf.get_int_or_default("db.local.retention.call.days", 7) as i32
 }
 
+/// Call data retention in days for organizations without a plan, as on a
+/// self-hosted installation. Reads `db.retention.call.days`, overridable via
+/// `HOT_DB_RETENTION_CALL_DAYS`. The default, and anything below one day,
+/// keeps calls forever (-1): zero would delete every call.
+pub fn get_call_retention_days(conf: &Val) -> i32 {
+    match conf.get_int_or_default("db.retention.call.days", -1) {
+        days @ 1..=36500 => days as i32,
+        _ => -1,
+    }
+}
+
 /// Get database URI from configuration
 pub fn get_db_uri_from_conf(conf: &Val) -> String {
     // First try to get from the full config path (db.uri)

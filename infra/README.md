@@ -22,17 +22,1309 @@ Implemented:
 - File-backed secret consumption and provenance-based configuration redaction
   in Hot; strict backend selection; S3 temporary session-token support; JSON
   runtime logging.
+- The single runtime image recipe
+  ([`images/containers/runtime.Dockerfile`](images/containers/runtime.Dockerfile)),
+  built by [`images/build-runtime.sh`](images/build-runtime.sh) and by the
+  release workflow, which pushes it to `ghcr.io/hot-dev/hot-runtime` and signs
+  it with Sigstore.
+- Signed release manifests: [`release/release_manifest.py`](release/release_manifest.py)
+  pins the runtime image and the upstream images in
+  [`release/upstream-images.json`](release/upstream-images.json). The release
+  workflow signs the manifest keylessly; the renderer verifies it with
+  `cosign verify-blob` against the release workflow's tag identity.
+- The host image recipe ([`images/host/setup-host.sh`](images/host/setup-host.sh),
+  [`images/packer`](images/packer), built by
+  [`images/build-host.sh`](images/build-host.sh)): Ubuntu 24.04 with Docker,
+  Kata on QEMU, a dedicated containerd, CNI, `cosign`, and a guest image with
+  the release's `hotbox`. SSH is masked, and Packer builds without SSH. Kata
+  state lives on the data disk and stays off until it is mounted; box storage
+  is capped by `HOT_BOX_POOL_GB`; a mangle-table baseline keeps guests off
+  metadata, the host, other guests, and private ranges outside the allowlist.
+- The host deploy agent ([`agent/hot_agent.py`](agent/hot_agent.py)): it
+  follows the release pointer, verifies the signed manifest, writes each
+  service's secrets to tmpfs, migrates, and restarts services with the
+  scheduler stopped first and started last. Generated secrets (database and
+  cache passwords, the session secret, the encryption key, the first admin's
+  password) are created once in the cloud secret store; the operator puts the
+  TLS certificate and key, and any SMTP, OAuth, or S3 credentials, in the
+  operator secret the stack creates. Commands are a fixed list run through an
+  SSM command document (AWS) or Pub/Sub (GCP).
+- Buckets: each storage role (`storage.build`, `storage.file`) uses local
+  disk, S3, or GCS. A bucket is used as it exists unless `provision` is
+  true. Then the stack creates it in the installation's own cloud and region,
+  with these settings:
+  - private, encrypted, and TLS-only on S3;
+  - versioned, with old versions kept for `noncurrent_days` (default 30);
+  - abandoned multipart uploads deleted after a week;
+  - never emptied or deleted by `tofu destroy`.
+
+  Both roles may share one bucket under different prefixes, and the host
+  may use only its roles' prefixes.
+- Existing data services: set `data.postgres.mode` or `data.valkey.mode` to
+  `existing` and put the connection settings in the operator secret
+  (`HOT_DB_URI` for the runtime login, `HOT_DB_MIGRATION_URI` for the schema
+  owner, `POSTGRES_CA_CERT`, and `HOT_REDIS_URI`). Prepare the database as
+  [Self-Hosted PostgreSQL](../resources/docs/configuration/postgres.md)
+  describes; the bundle checks it, migrates, and grants the runtime login,
+  and never creates or drops anything the operator owns.
+- Managed PostgreSQL: set `data.postgres.mode` to `managed` and the stack
+  provisions PostgreSQL 18 on RDS or Cloud SQL, reachable only from the host
+  and only over TLS. It is sized from the installation size unless you set
+  `tier` or `storage_gb`; `high_availability` selects Multi-AZ or a regional
+  instance; backups are kept for `backup_retention_days` (default 7) with
+  point-in-time recovery. On each deploy the agent signs in as the database
+  administrator to create the `hot_owner` and runtime logins, the `hot`
+  database and schema, and the `vector` and `pg_trgm` extensions, then checks,
+  migrates, and grants as for an existing database.
+  - The administrator password never enters OpenTofu state. RDS keeps it in
+    its own secret. On GCP it is generated during apply and written only to
+    write-only attributes on Cloud SQL and on a Secret Manager secret. If an
+    apply stops between the two, raise `data.postgres.admin_password_version`
+    and apply again to set a new one in both.
+  - RDS connections verify the endpoint's hostname against the RDS CA bundle,
+    which the agent downloads from AWS. Cloud SQL connections verify the
+    instance's own CA, which signs only that instance's certificates.
+  - `deletion_protection` (default on) keeps OpenTofu and the cloud from
+    deleting the database, including when `data.postgres.mode` changes. Turn
+    it off in a reviewed apply first. RDS also keeps a final snapshot.
+  - New networks get the subnets (AWS) or private services access (GCP) the
+    database needs. On an existing AWS network, give `network.data_subnet_ids`
+    in two zones; an existing GCP network must already have private services
+    access.
+- Managed Valkey: set `data.valkey.mode` to `managed`. It is sized from the
+  installation size unless you set `node_type`, never evicts queue entries,
+  and requires TLS. With `high_availability`, a replica runs in another zone.
+  - AWS: an ElastiCache Valkey 8.1 replication group with automatic failover.
+    It requires an AUTH token, which, like the GCP database password, is
+    generated during apply and written only to write-only attributes, on
+    ElastiCache and on a Secrets Manager secret. Raise
+    `data.valkey.auth_token_version` to set a new one.
+  - GCP: a Memorystore for Valkey 8.0 instance with cluster mode disabled,
+    with append-only persistence, reached through Private Service Connect.
+    It uses IAM authentication, so there is no password at all: Hot services
+    run with `redis.auth = gcp-iam`. They present the VM's short-lived access
+    tokens, refreshed before they expire, and trust the instance's CA
+    (`redis.ca-cert`). The host may connect to this instance only
+    (`roles/memorystore.dbConnectionUser` with a condition). On a new
+    network the stack adds the service connection policy Memorystore needs.
+    An existing network must already have one for `gcp-memorystore` in the
+    region; preflight checks for it.
+- Public endpoints: set `app_exposure` or `api_exposure` to `public`. AWS
+  needs `public_certificate_arn` (an ACM certificate you DNS-validate); GCP
+  issues a managed certificate once your DNS points at the `public_endpoint`
+  output. The VM keeps no public address, and private endpoints are never
+  served to the load balancer.
+- Backups, logs, and alerts: see [Backups, logs, and alerts](#backups-logs-and-alerts).
+- Preflight: [`preflight/preflight.py`](preflight/preflight.py) checks an
+  installation's account or project before provisioning, and the plan
+  workflow runs it first. See [Preflight](#preflight).
+- In Hot: SMTP email delivery, `hot admin bootstrap`/`reset-password` and the
+  `app.signup` policy for operator-managed accounts, and outbound allowlists
+  (`network.allow-cidrs`, `allow-hosts`, `deny-cidrs`) behind a fixed deny set.
 - Scheduler lock liveness: the scheduler confirms its PostgreSQL singleton lock
   every two seconds and exits non-zero when it loses the lock, so its
   supervisor restarts it.
 
 The roots intentionally require `acknowledge_unqualified = true`. The bootstrap
-also refuses to start if the supplied image lacks `hot-agent.service`. The baked
-host image, deploy/secret agent, signed release delivery, onboarding/SMTP,
-full outbound-policy controls, existing-DB integration, cloud monitoring/alerts, and the real-cloud release gates remain
-to be implemented and qualified. Do not apply these development examples to
+also refuses to start if the supplied image lacks `hot-agent.service`. Real
+image builds and deployments on each cloud and the real-cloud release gates
+remain to be implemented and qualified. Do not apply these development examples to
 production. No usable host image or published runtime digest is implied by the
 placeholder references in the fixtures.
+
+## Running OpenTofu yourself
+
+The GitHub workflows are optional: you can plan and apply from a terminal
+with a deploy identity you assume, and so can a CI system other than GitHub.
+The stacks and the state bootstrap configure no credentials of their own,
+so OpenTofu, `gcloud`, the `aws` CLI, `preflight.py`, and `selfhost.py` all
+use the identity you give them.
+
+**GCP: impersonate a service account**, such as an `infra-provisioner` you
+already use, or the bootstrap's apply identity:
+
+```sh
+export GOOGLE_IMPERSONATE_SERVICE_ACCOUNT=infra-provisioner@PROJECT.iam.gserviceaccount.com
+export CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=$GOOGLE_IMPERSONATE_SERVICE_ACCOUNT
+```
+
+The first variable covers the Google provider and the `gcs` state backend;
+the second covers `gcloud`. You need `roles/iam.serviceAccountTokenCreator`
+on the service account.
+
+**AWS: assume a role** with a CLI profile:
+
+```ini
+[profile hot-apply]
+role_arn = arn:aws:iam::123456789012:role/infra-provisioner
+source_profile = default
+```
+
+Run `export AWS_PROFILE=hot-apply`. The S3 state backend, the provider, and
+the `aws` CLI all use it.
+
+**Let the bootstrap create the identity,** or let people use the one GitHub
+uses. Name the people who may assume each deploy identity, and optionally
+rename it:
+
+```hcl
+# GCP bootstrap
+operators   = { apply = ["user:ada@example.com", "group:platform@example.com"] }
+names       = { apply = "infra-provisioner" }
+apply_roles = ["roles/compute.admin", "..."]
+
+# AWS bootstrap
+operators         = { apply = ["arn:aws:iam::123456789012:role/platform-admins"] }
+names             = { apply = "infra-provisioner" }
+apply_policy_arns = ["arn:aws:iam::aws:policy/..."]
+```
+
+An identity is created when GitHub uses it, when operators are named for it,
+or both:
+- **GCP:** each operator gets `roles/iam.serviceAccountTokenCreator` on that
+  service account.
+- **AWS:** each operator is added to the role's trust policy for
+  `sts:AssumeRole`.
+
+The plan and apply identities can read and lock state; the release
+identity's permissions come from each installation's `release_principal`.
+
+**Bring your own identity** instead: give it the apply permissions, plus
+read, write, and delete on the state objects (`roles/storage.objectUser` on
+the bucket, or `s3:GetObject`, `PutObject`, `DeleteObject`, and
+`ListBucket`). For release and host commands, set it as the installation's
+`release_principal`.
+
+In every case, provide the state passphrase as
+`TF_VAR_state_encryption_passphrase` and use the installation's
+`backend_override.tf`.
+
+## Preflight
+
+```sh
+python3 infra/preflight/preflight.py installation/installation.tfvars.json
+```
+
+Preflight runs read-only `aws` or `gcloud` commands with your identity; the
+plan role or service account is enough. It reads no secret values. It checks:
+
+- the zone, machine types, vCPU quota, and host image. For a scalable
+  installation it counts every role at its `scaling` maximum, plus the
+  scheduler;
+- on GCP, the APIs and the nested-virtualization organization policy;
+- that network ranges avoid the host's container network (`172.30.0.0/24`)
+  and box guest network (`10.88.0.0/16`);
+- existing networks and their subnets;
+- that the hosts' subnets on an existing network can reach the internet.
+  On AWS that means a default route through a NAT or other gateway, not an
+  internet gateway, since hosts get no public address. On GCP it means Cloud
+  NAT, plus Private Google Access (a warning if it is off). Hosts need this
+  for images, release manifests, and cloud APIs;
+- with `image_registry`, that the mirror has a repository for each image (ECR)
+  or is a Docker repository (Artifact Registry);
+- the public certificate on AWS;
+- existing buckets, and that buckets to provision are still free;
+- managed PostgreSQL and Valkey offerings in the region.
+
+It warns when hostnames don't resolve from where it runs. It lists the checks
+only the installation's host can make, such as an existing database's TLS and
+logins, which the agent runs before migrating. It exits 1 when a required
+check fails, and the plan workflow stops there.
+
+## Backups, logs, and alerts
+
+The retained data disk is snapshotted daily at `backup.time_utc` (default
+`03:00`) and each snapshot is kept for `backup.retention_days` (default 7).
+AWS uses Data Lifecycle Manager and GCP a snapshot schedule. The host cannot
+delete snapshots.
+
+The disk holds local PostgreSQL, Valkey's append-only file, and local builds
+and files. Snapshots are crash-consistent: PostgreSQL recovers from its WAL
+on restore, and Valkey loses at most the last second of queue writes
+(`appendfsync everysec`). The recovery point is the last snapshot, so at most
+a day. Managed databases keep their own point-in-time backups. The `backup`
+command adds an on-demand `pg_dump` of a local database.
+
+Container logs (every Hot service, the ingress, the data services, and the
+migration and admin jobs) go to CloudWatch Logs in `/hot/<installation>`, kept
+for `logging.retention_days` (default 30), or to Cloud Logging, with the VM's
+identity. Docker ships them without blocking: if the destination is slow or
+down, lines beyond a 4 MB buffer are dropped rather than stalling Hot. A
+bounded local copy (3 files of 10 MB per container) remains for
+`docker logs`. Set `logging.destination` to `local` to keep logs on the host
+only. Logs are lost with the host then.
+
+Every line names the host and release that wrote it, which matters once a
+scalable installation runs many hosts. On AWS each container's stream is
+`<instance ID>/<container>`. Cloud Logging records the instance and the
+container's `hot.installation`, `hot.role`, and `hot.release` labels.
+
+Hot's services log one JSON object per line. Every line the app or API logs
+while handling a request carries that request's `request_id` in its span, and
+the response returns it as `x-request-id`. A caller's own `x-request-id` is
+kept when it is a short token (letters, digits, `-`, `_`, `.`), so an ID set
+by a load balancer or client can be followed through the logs. Request spans
+record the method and path, never the query string or headers, and webhook
+paths hide their token. Workers and task workers name the `run_id` or
+`task_id` in the lines about one run or task.
+
+The agent also ships the host journal. That is every agent line, plus
+warnings and errors from the rest of the host, such as the kernel's OOM
+kills, Docker, and failed units. They go to the `host-journal` stream of the
+same log group, or to the `hot-<installation>-host` log in Cloud Logging. It
+reads from a saved journal cursor, so entries are not lost or sent twice
+across restarts. Each source sends at most 500 entries per cycle, redacted
+like diagnostics. With `logging.destination = local`, the journal stays on
+the host too.
+
+Every 30 seconds the host agent publishes these metrics, to CloudWatch
+(namespace `Hot/SelfHost`, dimension `Installation`) or Cloud Monitoring
+(`custom.googleapis.com/hot/<installation>/...`):
+
+| Metric | Meaning |
+| --- | --- |
+| `AgentHeartbeat` | 1 while the agent runs |
+| `UnhealthyServices` | Hot services, ingress, and local data services not running and healthy |
+| `SchedulerRunning` | 1 while the scheduler runs and dispatches: it rewrites a heartbeat file every 30 seconds, and its health check fails after 2 minutes without one |
+| `DependenciesReachable` | 1 when local data services are healthy and managed or existing ones accept connections |
+| `Ready` | 1 when the app and API answer through the ingress |
+| `DataDiskUsedPercent` | The larger of space and inodes used on the data disk |
+| `BackupAgeHours` | Hours since the newest completed snapshot |
+| `CertificateDaysLeft` | Days until the ingress TLS certificate expires (0 if unreadable) |
+| `QueueBacklog` | Jobs and tasks waiting or running in Hot's queue |
+| `QueueDeadLetters` | Jobs dead-lettered after failing every attempt |
+| `NewDeadLetters` | Jobs dead-lettered since the previous measurement |
+| `JobsWaiting`, `JobWaitSeconds` | Jobs no worker has taken yet, and how long the oldest has waited |
+| `TasksWaiting`, `TaskWaitSeconds` | The same for tasks, which task workers take |
+| `MemoryUsedPercent` | Host memory in use: all of it except what the kernel reports as available |
+| `SyntheticOk`, `SyntheticSeconds` | With `monitoring.synthetic_event`: whether the latest synthetic run succeeded, and how long it took |
+| `TaskSlotsUsedPercent` | On task-worker hosts: the busiest of the task worker's code slots, container slots, and container memory, in use |
+
+The host that runs the scheduler measures the queue every minute with
+`hot queue status --json`, inside the scheduler: one measurement for the
+installation. On GCP these queue metrics are written for the `global`
+resource (the project), not for an instance, so a group can scale on them.
+The task worker rewrites its slots in use every 15 seconds
+(`task.status-path`), and the agent publishes them with the other metrics.
+
+The stacks alert on them. Set `monitoring.alert_emails`; AWS sends each address
+an SNS confirmation email first. Alerts reach those addresses independently of
+Hot's own email, and both firing and resolving are sent.
+
+| Alert | Fires when | First steps |
+| --- | --- | --- |
+| `host-down` | No heartbeat for 5 minutes (also EC2 `instance-impaired` on AWS) | Check the VM in the console; `diagnostics` once it answers. The agent restarts with the VM. |
+| `services-unhealthy` | A service unhealthy for 15 minutes | `diagnostics` names it; `restart-service`, then read its logs. |
+| `scheduler-stopped` | No dispatching scheduler for 10 minutes | Schedules are not firing. `restart-service scheduler`; it exits if it loses its database lock, so check database connectivity too, and read its `logs`. |
+| `dependencies-unreachable` | PostgreSQL or Valkey unreachable for 10 minutes | Check the data service, its security group or firewall, and its status page. |
+| `not-ready` | App or API not answering for 15 minutes | Check `services-unhealthy` and the ingress certificate. |
+| `disk-pressure` | Data disk over 85% for 15 minutes | Grow the disk, or move builds and files to object storage. |
+| `backup-stale` | No snapshot for 30 hours, or no backup status | Check the snapshot policy or schedule in the console. |
+| `certificate-expiring` | The ingress certificate expires within 14 days | Put the renewed chain and key in the operator secret, then `restart-service ingress`. |
+| `queue-backlog` | More than `monitoring.queue_backlog_alert` jobs (default 1000) queued for 15 minutes | Workers are not keeping up. Check `services-unhealthy` and the worker's `logs`; then move to a larger size, or on a scalable installation raise `scaling.worker.max` or `scaling.task_worker.max`. |
+| `job-wait` | A job has waited more than `monitoring.queue_wait_alert` seconds (default 900) for 10 minutes | As for `queue-backlog`; a scalable installation at `scaling.worker.max` needs a higher maximum. |
+| `task-wait` | A task has waited more than `monitoring.queue_wait_alert` seconds for 10 minutes | Task capacity is short: check the task-worker's `logs` and `TaskSlotsUsedPercent`, then raise `scaling.task_worker.max` or the size. |
+| `new-dead-letters` | Jobs were dead-lettered since the last measurement | Read the worker's `logs` for the failing jobs' errors. |
+| `memory-pressure` | A host over 90% memory for 15 minutes | Read `diagnostics` and the host journal for OOM kills; move to a larger size. |
+| `database-connections` | Managed PostgreSQL over 80% of the size's planned connections (400, 800, or 1,600) for 15 minutes | Look for connection leaks in the services' `logs`; lower the scaling maximums or choose a larger size. |
+| `synthetic-failed` | The synthetic event's run has not succeeded for 10 minutes (only with `monitoring.synthetic_event`) | Something fails end to end. Check `services-unhealthy`, `dependencies-unreachable`, and the queue alerts, then the API's and worker's `logs` for the synthetic event. |
+| `alert-test` | The `test-alert` command was sent | Nothing is wrong: it checks the path to your inbox, and resolves by itself within about 15 minutes. |
+
+Liveness, dependency reachability, and end-to-end readiness are separate
+signals, and a missing heartbeat or backup status alerts rather than passing.
+
+Each stack also creates a dashboard named `hot-<installation>`, in
+CloudWatch or Cloud Monitoring. It plots these metrics: health, the queue and
+its waits, task slots, disk, certificate, and backup age.
+
+**A synthetic check** runs Hot end to end from inside the installation's
+network: a request through the API, a queued event, a worker run, and the
+database. To turn it on:
+1. Deploy a Hot project with a handler for an event type of your own, such
+   as `ops:ping`, that succeeds quickly.
+2. Put an API key that may publish and read that event in the operator
+   secret as `HOT_SYNTHETIC_API_KEY`.
+3. Set `monitoring.synthetic_event` to the event type.
+
+Every 5 minutes, each host serving the API publishes the event through its
+own ingress and waits up to a minute for the run to succeed. It reports
+`SyntheticOk` and `SyntheticSeconds`; nothing is exposed publicly.
+
+**Test the alert path** after installing and whenever the recipients change:
+run the `test-alert` command (below). The agent publishes a test metric, and
+the `alert-test` alert fires within a few minutes and then resolves. Both
+messages reach `monitoring.alert_emails` the same way a real alert would.
+
+**Silence alerts during planned work**, such as a resize or a restore:
+
+```sh
+python3 infra/operator/selfhost.py installation.tfvars.json maintenance start --minutes 90
+python3 infra/operator/selfhost.py installation.tfvars.json maintenance end
+```
+
+- On AWS this disables the installation's alarm actions until
+  `maintenance end`. The alarms still change state, and the plan workflow's
+  drift check reports the disabled actions until then.
+- On GCP it snoozes the installation's alert policies. The snooze ends after
+  `--minutes`, or at `maintenance end`.
+- Nobody is notified while alerts are silenced, so end maintenance when the
+  work is done.
+- The release role is allowed to do both.
+
+## Operating an installation
+
+[`operator/selfhost.py`](operator/selfhost.py) sends one host agent command
+and waits for the agent's report. It uses the `aws` or `gcloud` CLI with your
+identity (or the release role), never SSH or network access to the host:
+
+```sh
+python3 infra/operator/selfhost.py installation.tfvars.json command status
+python3 infra/operator/selfhost.py installation.tfvars.json command diagnostics
+python3 infra/operator/selfhost.py installation.tfvars.json logs worker
+python3 infra/operator/selfhost.py installation.tfvars.json command restart-service --service scheduler
+python3 infra/operator/selfhost.py installation.tfvars.json release 3.0.2
+```
+
+Commands reach the agent through the SSM command document (AWS) or the
+command topic (GCP). Each report carries the command's request ID and goes to
+the installation's log: the `hot-agent-status` stream of `/hot/<installation>`
+in CloudWatch Logs, or the `hot-<installation>-status` log in Cloud Logging.
+AWS also keeps a summary of the latest report in the `/hot/<installation>/status`
+parameter. The release and command workflows run the same script, so a
+workflow run and a manual run behave the same.
+
+| Command | Does |
+| --- | --- |
+| `status` | The deployed release, previous release, and migration level |
+| `diagnostics` | Versions (release, migrations, host image, Kata), effective configuration, each service's state, health, and image digest, the Hot services' environment, data-service modes and reachability, and the current health metrics |
+| `logs SERVICE` | The newest 200 lines (at most 48,000 characters) of a Hot service, the ingress, or a local data service |
+| `backup` | An on-demand `pg_dump` of a local database to the data disk |
+| `restart-service SERVICE` | Delivers secrets again and recreates one service; the scheduler stops before it starts |
+| `drain-and-stop` | Stops the scheduler, then workers (2-minute grace), then the app, API, and ingress. Hot stays stopped, across reboots too, until the next deploy or `deploy-now` |
+| `deploy-now` | Deploys the release pointer now (the `release` action sets the pointer first). After `drain-and-stop`, it starts the installed release again if neither the pointer nor the configuration changed |
+| `roll-back` | After a failed upgrade: restores a local database from the pre-upgrade dump if the migrations started, then restarts the installed release |
+| `test-alert` | Fires the `alert-test` alert, which resolves by itself: checks that alerts reach `monitoring.alert_emails` |
+
+Diagnostics and logs are redacted on the host before they are reported:
+- every value in the host's secret files, and passwords inside connection URIs;
+- URI credentials, bearer and basic credentials, JWTs, Hot API keys, AWS
+  access key IDs, private keys, and `password=`/`token=`-style settings;
+- the local part of email addresses, and all but the last four digits of AWS
+  account IDs;
+- secret references (ARNs and secret names) and CA certificates in the
+  configuration, which is shown as set or unset.
+
+Logs can still contain other user data, such as event payloads a service
+logs. Treat a diagnostics bundle like the logs themselves. The command
+workflow writes reports to its job summary, which anyone who can read the
+operator repository's Actions runs can see.
+
+## Versions and upgrades
+
+Each release's signed manifest pins the Hot runtime image and the upstream
+images by digest, and names its configuration schema, latest database
+migration, and oldest supported source release. The rest is pinned in this
+repository; a test keeps this table in step with those pins.
+
+| Component | Version | Pinned in |
+| --- | --- | --- |
+| Hot runtime image | One digest per release | Release manifest |
+| Runtime image base | Debian 13 (trixie) | `images/containers/runtime.Dockerfile` |
+| Local PostgreSQL | 18 with pgvector 0.8.1 | `release/upstream-images.json` |
+| Local Valkey | 8.1 | `release/upstream-images.json` |
+| Ingress | nginx 1.30 | `release/upstream-images.json` |
+| Managed PostgreSQL | 18 (RDS, Cloud SQL) | `opentofu/modules/single-machine-contract` |
+| Managed Valkey | 8.1 (ElastiCache), 8.0 (Memorystore) | `opentofu/stacks/*/single-machine/valkey.tf` |
+| Host OS | Ubuntu 24.04 LTS | `images/packer/hot-host.pkr.hcl` |
+| Kata Containers | 3.28.0 | `images/host/setup-host.sh` |
+| containerd (box tasks) | 1.7.30 | `images/host/setup-host.sh` |
+| CNI plugins | 1.9.1 | `images/host/setup-host.sh` |
+| OpenTofu | 1.13.1 | `selfhost-plan.yml` |
+| AWS provider | 6.69.1 | Stack lockfiles |
+| Google provider | 8.7.0 | Stack lockfiles |
+| Random provider | 3.9.1 | Stack lockfiles |
+| Configuration schema | 1 | `release/release_manifest.py` |
+
+Upgrades follow these rules, and the deploy agent enforces them:
+
+- **Supported jumps.** A release upgrades from its manifest's
+  `upgrade.minimum_source` (set in
+  [`release/upgrade-policy.json`](release/upgrade-policy.json)) or any later
+  release. The agent refuses a larger jump; deploy a release in between first.
+- **Order and downtime.** The agent stops the scheduler, readies the data
+  services, takes a restore point if the schema changes, migrates and grants,
+  then replaces the app, API, workers, and ingress, checks readiness, and
+  starts the new scheduler. Schedules pause for the whole deploy. The
+  previous release keeps serving requests and work until its containers are
+  replaced, so it runs briefly against the migrated schema. For a full
+  maintenance window, run `drain-and-stop` first. A single machine never runs
+  two releases of the same service at once.
+- **Restore points.** Hot never migrates a database down. Before a release
+  adds migrations, the agent records where to recover from:
+  - a local database gets a `pg_dump` in `/var/lib/hot/backups/pre-<release>-*`,
+    and the last 3 are kept;
+  - a managed database gets the time to restore to with RDS or Cloud SQL
+    point-in-time recovery;
+  - an existing database gets the time, for its operator's backups.
+
+  A retried deploy keeps the first attempt's restore point.
+- **Rollback.** Pointing back to a release with the same migration level is a
+  normal deploy. A release with fewer migrations is refused. Recovery is a
+  forward fix (a newer release) or a restore from the restore point, then the
+  earlier release.
+- **Failures.** A failed deploy reports the steps it finished and what
+  recovery means:
+  - If it failed before migrating, the database is unchanged, and the
+    previous release's scheduler starts again.
+  - If it failed during or after migrating, a forward fix or a restore is
+    needed.
+
+  The agent does not retry a failed release on its own; run `deploy-now`
+  after fixing the cause, or point at another release. If the host stopped
+  mid-deploy, the agent resumes when it starts again.
+- **Records.** `/var/lib/hot/releases/history.json` keeps the last 20 deploys:
+  - release and previous release;
+  - image digests and host image versions;
+  - configuration schema;
+  - migration levels before and after;
+  - steps, restore point, and any error.
+
+  `diagnostics` shows the last 5.
+
+**Managed PostgreSQL and Valkey.**
+- *Minor versions* are applied by the cloud. RDS and ElastiCache apply them
+  in the instance's maintenance window (`auto_minor_version_upgrade`), and
+  the stacks set `apply_immediately = false`, so other changes wait for the
+  window too. Cloud SQL and Memorystore apply them during Google's
+  maintenance. Each causes a short restart or, with `high_availability`, a
+  failover. Hot reconnects; `dependencies-unreachable` alerts only after 10
+  minutes. The scheduler exits if it loses its database lock and starts
+  again.
+- *Major versions* are fixed. The contract accepts PostgreSQL 18 only, and
+  RDS is created with `allow_major_version_upgrade = false`. A new major
+  version arrives with a Hot release and its own procedure.
+- *Restores* use the provider's point-in-time recovery; see
+  [Recovery](#recovery).
+
+**Choices that cannot change in place.** Changing these replaces the
+resource, and the plan workflow's durable-resource guard refuses that
+unless `allow_data_deletion` is set:
+
+| Choice | Instead |
+| --- | --- |
+| `name`, `cloud`, `region` | A new installation, then move data with backups |
+| `zone` (single machine) | Restore a snapshot into a new installation in that zone |
+| Bucket name or location | A new bucket and `hot db move-storage` ([Moving builds and files to a bucket](#moving-builds-and-files-to-a-bucket)) |
+| Local to managed data | A data move ([Moving data off the host](#moving-data-off-the-host)) |
+
+## Upgrading
+
+1. **Check.**
+   - Read the release notes and the manifest's `upgrade.minimum_source` and
+     `migrations.latest`; the release workflow verifies the manifest and
+     prints it in its summary. Compare them with `command status`.
+   - `command diagnostics` shows every service healthy and every dependency
+     reachable. If the last deploy failed, follow its `recovery` first.
+   - A local database is dumped to the data disk before migrations, so check
+     `DataDiskUsedPercent`. A managed database's restore point is a time
+     inside its backup window; Cloud SQL keeps at most 7 days of transaction
+     logs, whatever `backup_retention_days` says. Back up an existing
+     database yourself.
+   - With `image_registry`, copy the release's images first
+     ([Security updates](#security-updates)).
+   - Scalable: every group has its instances in service and no rolling
+     update running. The release waits only for the instances a group has
+     when its turn starts.
+2. **Silence alerts** with `maintenance start`
+   ([Backups, logs, and alerts](#backups-logs-and-alerts)). A single
+   machine's scheduler is stopped for the whole deploy, and
+   `scheduler-stopped` fires after 10 minutes. For a full window on a single
+   machine, run `drain-and-stop` too; the deploy starts everything again.
+   Not on a scalable installation: on AWS it stops every host.
+3. **Release** with the release workflow or
+   `selfhost.py installation.tfvars.json release VERSION`. The helper waits
+   up to 30 minutes (`--timeout`, in seconds; on scalable, for each step). If
+   it times out, the deploy may still be running: check `status` later, and
+   the agent's lines in the host journal.
+4. **Verify.** The report says `deployed`; on scalable, `rolled` lists each
+   role's instances. `status` shows the new release and the manifest's
+   migration level. `diagnostics` shows `Ready` and `SchedulerRunning` at 1,
+   and the new deploy record with its restore point. Sign in and run
+   something a schedule or an event starts. On scalable, check every host on
+   the dashboard. Then `maintenance end`.
+
+**When it fails,** the helper exits 1, and the report gives the finished
+steps, the error, and `recovery`. On a single machine, follow **Failures**
+above and [Roll back a failed upgrade](#recovery). On a scalable
+installation:
+- **`migration-failed`.** Every role still runs the old release. Running
+  `release` again does not retry: it finds the failed report. Fix the cause,
+  then let the scheduler's host retry. On AWS, run `command deploy-now`; it
+  reaches every host, and only the scheduler's has a migration to retry. On
+  GCP a command reaches one host, so recreate the scheduler's instance, which
+  migrates from the pointer:
+
+  ```sh
+  gcloud compute instance-groups managed list-instances hot-NAME-scheduler --zone ZONE
+  gcloud compute instance-groups managed recreate-instances hot-NAME-scheduler --instances INSTANCE --zone ZONE
+  ```
+
+  Then run `release` again.
+- **A role failed.** Its pointer already names the release, and its hosts
+  do not retry on their own. Fix the cause, then run `command deploy-now`
+  (AWS) or replace the group's instances (GCP; see
+  [Rotating secrets and certificates](#rotating-secrets-and-certificates)).
+  Running `release` again checks each role that is already pointed: it
+  goes on only when every instance's latest report is `deployed`, and
+  reports the failed role again otherwise. Then it moves the remaining roles.
+- **Going back.** Scalable hosts have no `roll-back`, so recovery is a
+  forward fix or a point-in-time restore. Each host remembers the migration
+  level it last deployed and refuses a lower one, so replace every host
+  before releasing the earlier version.
+
+## Scalable installations
+
+Set `preset` to `scalable` to run each Hot role on its own group of VMs.
+Use the `stacks/<cloud>/scalable` root, with the plan workflow's `preset`
+input set to `scalable`. Every host runs the same host image and agent as a
+single machine, with its own role:
+
+| Role | Group | Scaling (`scaling.<role>`) |
+| --- | --- | --- |
+| App, API | Spread across zones, behind their own load balancer | `min` 2, `max` 4 by default; scale on CPU |
+| Worker | Spread across zones | Fixed at `min` (default 2) unless `max` is higher; then scale on CPU and on the jobs waiting per host (`waiting_per_host`, default 50) |
+| Task-worker | Spread across zones, on the size's nested-virtualization family | Fixed at `min` (default 1) unless `max` is higher; then scale out on CPU and on the slots in use (`slots_target`, default 70%), and idle hosts leave (`retire_idle_minutes`, default 30) |
+| Scheduler | One instance, replaced stop-before-start | Always one |
+
+- **Data and storage.** A scalable installation needs managed or existing
+  PostgreSQL and Valkey, and S3 or GCS for builds and files; the contract
+  refuses local ones.
+- **Database connections.** Each instance's PostgreSQL pool is limited to 20
+  connections. The contract refuses scaling maximums whose total connections,
+  plus administration, would exceed the database's limit for the size (400,
+  800, or 1,600).
+- **Endpoints.**
+  - The app and API each get a passthrough TCP load balancer: internal by
+    default, external when that endpoint's exposure is public.
+  - TLS ends on the hosts' ingress with the operator's certificate, as on a
+    single machine, so no key enters OpenTofu state, and long streams see no
+    proxy timeout.
+  - Point the hostnames at the `endpoints` output.
+  - A private endpoint admits only `network.client_cidrs` and health checks.
+- **Releases.** Each role follows its own release pointer, and the scheduler's
+  host also follows a migration pointer. The release workflow (or
+  `selfhost.py release`) works in order:
+  1. It sets the migration pointer and waits for the migration report.
+  2. It moves each role in turn (task-workers, workers, API, app, then the
+     scheduler) and waits for every instance in that role's group.
+
+  A failure stops the release and says which roles already moved. Host
+  image or machine changes replace instances through each group's rolling
+  update; the scheduler's group recreates its instance, so two schedulers
+  never run.
+- **Queue-driven scaling.** With `max` above `min`:
+  - Workers add hosts when more than `waiting_per_host` jobs wait per worker
+    host, and remove them when the queue empties. The scheduler's host
+    measures the queue every minute.
+  - Task-workers add hosts when their average share of slots in use passes
+    `slots_target`. A group cannot tell which task hosts are running tasks,
+    so it never removes them. Instead, a task host that has run nothing for
+    `retire_idle_minutes` stops its task worker and leaves its group, which
+    shrinks by one. Each host waits up to five minutes longer than the
+    others, so idle hosts leave one at a time, and the group keeps `min`.
+    A task claimed while its host stops goes back to the queue.
+    `retire_idle_minutes = 0` keeps every task host.
+  - On AWS the task-worker role may terminate instances in its own group
+    only. On GCP its service account may read and shrink its own group only.
+- **Hosts** keep only scratch disks; nothing on them outlives the instance.
+  On GCP a command reaches one instance of the installation; on AWS it
+  reaches every instance.
+- **Clouds.**
+  - GCP: managed instance groups (zonal for the scheduler) and passthrough
+    load balancers.
+  - AWS: Auto Scaling groups across two zones, a NAT gateway per zone, and
+    Network Load Balancers. App and API groups replace hosts that fail the
+    load balancer's health check, and task-workers are protected from the
+    group's scale-in (idle ones leave on their own).
+  - An existing AWS network needs `network.private_subnet_ids` for the hosts
+    and `data_subnet_ids` for the database and cache, each in two or more
+    zones, plus `public_subnet_ids` for a public endpoint.
+- **Alerts** fire when any host breaches a signal, when the scheduler stops
+  or disappears, and when every host goes silent.
+
+## Moving a single machine to the scalable preset
+
+A single machine whose data is already managed or existing can move to the
+scalable preset and keep its database and Valkey. This has not been
+exercised on a real account.
+
+**Before you start.**
+- Both data services are `managed` or `existing`, and both storage roles
+  are on S3 or GCS, each already moved
+  ([Moving data off the host](#moving-data-off-the-host),
+  [Moving builds and files to a bucket](#moving-builds-and-files-to-a-bucket)).
+- The scaling maximums fit the size's connection budget.
+- TLS will end on the hosts with the operator secret's certificate, for
+  public endpoints too; the single machine's ACM or Google-managed
+  certificate is no longer used. Clients must trust the operator's.
+- A network the stack created is reused, and on AWS the scalable root adds
+  the second zone's subnets and NAT gateway. On an existing AWS network, add
+  the subnet IDs listed above.
+
+**One state, two roots.** Plan `stacks/<cloud>/scalable` with the same
+installation directory, so the same `backend_override.tf` and state. The
+roots give the shared resources the same addresses: the generated and
+operator secrets, the log group, the network, the managed database and
+Valkey with their subnet, parameter, and security groups, and the buckets.
+The scalable root adopts them as they are, without imports. The generated
+secret matters most: a new one would mean a new encryption key, and
+`prepare-postgres` would reset the database logins. The scalable plan
+destroys what only the single machine has: the VM, its identity, the
+snapshot policy, its alarms, its public load balancer, and its release
+pointer. A separate state would need every shared resource removed from
+the old state and adopted with `import` blocks in `installation/imports.tf`.
+
+1. Run `status` and `diagnostics`, then `maintenance start`.
+2. Run `drain-and-stop`. Queued work stays in Valkey for the new workers.
+   Work cut off after the workers' 2 minutes is taken again later and runs
+   again.
+3. From a terminal with the installation's backend and state passphrase,
+   take out of state what the plan must keep:
+
+   ```sh
+   # AWS. The host security group's description differs between the roots,
+   # so the plan would replace it while the database and cache groups refer to it.
+   tofu state rm aws_ebs_volume.data aws_security_group.host
+   # Only with a public endpoint on a network the stack created (same range and zone):
+   tofu state mv 'aws_subnet.public_second[0]' 'aws_subnet.public[1]'
+   tofu state mv 'aws_route_table_association.public_second[0]' 'aws_route_table_association.public[1]'
+
+   # GCP. The release pointer is a secret, which the durable-resource guard protects.
+   tofu state rm google_compute_disk.data google_secret_manager_secret.release
+   gcloud compute instances update hot-NAME --zone ZONE --no-deletion-protection
+   ```
+
+4. Set `preset` to `scalable`, and add `scaling` and any network fields.
+   Set `preset: scalable` on the infrastructure, release, and command
+   workflow callers, and `gcp_zone` for a GCP release.
+5. Plan with the scalable root, review the deletions, and apply. The apply
+   terminates the VM. New hosts wait for their pointers; on AWS each first
+   reports a failed deploy of `none`, the pointers' initial value.
+6. Release the version the VM ran:
+   `selfhost.py installation.tfvars.json release VERSION`.
+7. Check each endpoint through its load balancer (`tofu output endpoints`)
+   before changing DNS, from a network in `client_cidrs` for a private one:
+
+   ```sh
+   curl -sS -o /dev/null -w '%{http_code}\n' --connect-to app.example.com:443:APP_LB:443 https://app.example.com/signin
+   ```
+
+8. Point the hostnames at the `endpoints` output, then `maintenance end`.
+9. Once satisfied, delete what you took out of state: the old data disk, the
+   old host security group (AWS), and the `hot-NAME-release` secret (GCP),
+   and the old disk's snapshots when you no longer need them.
+
+Hot is down from step 2 until DNS points at the load balancers. Going back
+is not automated: it means planning the single-machine root again with the
+kept disk adopted through an `import` block.
+
+## Moving data off the host
+
+To move a single machine's database or queue to a managed service (or an
+existing one), change `data.postgres.mode` or `data.valkey.mode` and apply,
+then deploy a release (the same one is fine) with the release workflow. The
+agent notices the change and moves the data as part of that deploy. Plan a
+maintenance window: Hot is unavailable from the first step until the new
+services are ready.
+
+1. It stops admissions: the scheduler, app, API, and ingress.
+2. If the queue is moving, it lets the workers finish queued work, for up to
+   15 minutes, and checks with `hot queue status`. Dead-lettered items stay
+   in the old Valkey on the data disk, and the deploy record counts them.
+3. It stops the workers.
+4. It dumps the local database to `/var/lib/hot/backups/move-<release>-*`.
+   This dump is also the recovery point.
+5. It prepares the new database. Then it restores the dump in one
+   transaction, which is refused if the database already holds Hot's
+   tables.
+6. It migrates, grants, and starts Hot on the new services.
+
+Until the restore succeeds, any failure restarts the installed release on the
+untouched local data. After the restore, the move is complete: the local copy
+is no longer used, a failure is fixed forward with `deploy-now`, and
+`roll-back` refuses. The old data directories stay on the data disk until you
+remove them.
+
+Moving a database back onto the host, or between managed and existing
+databases, is not automated. The agent refuses that change before stopping
+anything. Copy the database with `pg_dump` and `pg_restore` yourself.
+
+## Moving builds and files to a bucket
+
+To move a single machine's builds or files from its disk to S3 or GCS,
+set that role's `storage` to the bucket and apply, then deploy the release
+the installation already runs. The agent sees that the deployed storage
+differs from the configured storage:
+
+1. It stops Hot.
+2. It runs `hot db move-storage` in the installed release's worker, which
+   still has the old settings. Each object is copied under the same key, read
+   back and checked, and only then is its record rewritten.
+3. It keeps one JSON line per object in
+   `/var/lib/hot/backups/storage-move-<role>-*.jsonl`.
+4. It starts Hot on the bucket.
+
+The objects stay on the data disk as a recovery copy. If the move fails,
+Hot stays stopped, because some records may already point at the bucket.
+Fix the cause and run `deploy-now`: objects that already moved are skipped.
+
+These cases are refused before anything stops; run `hot db move-storage`
+yourself for them:
+- changing storage and the release in the same deploy;
+- moving data services and storage together;
+- moving back onto the host;
+- moving between buckets of one backend.
+
+## Recovery
+
+The host's boot disk holds nothing recovery needs. The installation's
+configuration is in OpenTofu state and the instance's boot data. Its secrets,
+including the encryption key in the generated secret, are in the cloud secret
+store. Release pointer and status are in SSM or Secret Manager. Its data is on
+the retained data disk and in its daily snapshots, or in the managed database.
+A restore must use the same installation's generated secret: the local
+database's logins and Hot's encrypted values depend on it.
+
+These are design targets for the single machine. They have not been measured
+yet; the restore drills in the plan measure them on each cloud.
+
+| Failure | Data lost (recovery point) | Target time to recover | Procedure |
+| --- | --- | --- | --- |
+| Host VM lost or broken | None: the data disk is retained | 30 minutes | Replace the instance |
+| Data disk lost or corrupted | Up to a day: since the last daily snapshot | 1 hour | Restore the data disk from a snapshot |
+| Failed upgrade, local database | Writes since the upgrade began | 15 minutes | `roll-back` |
+| Failed upgrade or data loss, managed database | Point-in-time recovery, within `backup_retention_days` | Provider restore time plus a deploy | Provider point-in-time recovery |
+| Region loss | Not covered by the single machine | — | — |
+
+**Replace the instance.** The data disk survives instance replacement, and
+the new VM mounts it, delivers secrets, and deploys the release pointer:
+
+```sh
+tofu apply -replace=aws_instance.host
+```
+
+On GCP the instance has deletion protection; lift it, then replace it:
+
+```sh
+gcloud compute instances update hot-NAME --zone ZONE --no-deletion-protection
+tofu apply -replace=google_compute_instance.host
+```
+
+**Restore the data disk from a snapshot.** Snapshots are named or tagged with
+the installation (`HotDataVolume` on AWS, label `hot-installation` on GCP).
+Stop managing the current disk without deleting it, set
+`backup.restore_snapshot` to the snapshot, and apply with a new instance:
+
+```sh
+tofu state rm aws_ebs_volume.data          # GCP: google_compute_disk.data
+tofu apply -replace=aws_instance.host      # with backup.restore_snapshot set
+```
+
+On GCP, lift the instance's deletion protection first, as above. The restored
+GCP disk is named after its snapshot, so it does not collide with the kept
+one. The old disk is left as it was; delete it in the console once the
+restore is verified. `restore_snapshot` is read only when a disk is created,
+so leaving it set changes nothing later.
+
+**Roll back a failed upgrade.** When a deploy fails after its migrations
+started, run `roll-back`, then point the installation back at the installed
+release (the `release` action with that version):
+- A local database is restored from the dump the agent took before the
+  migrations, and the installed release is checked and restarted.
+- For a managed or existing database, `roll-back` refuses and names the
+  restore time. Run `drain-and-stop`, and restore the database to that time
+  with the provider's point-in-time recovery (see **A managed database**
+  below) or the operator's own backups. Then `release` the installed
+  version: it points back and, since Hot is stopped, starts that release
+  again.
+
+If the deploy failed before migrating, the database is unchanged and
+`roll-back` only makes sure the installed release is running.
+
+**Restore over a later release.** The data disk carries the agent's record
+of the release it ran. If the pointer now names a later release, the new VM
+upgrades the restored data again. To stay on the restored release, set the
+pointer before the VM boots:
+
+```sh
+aws ssm put-parameter --name /hot/NAME/release --value 3.0.1 --type String --overwrite
+printf '{"release": "3.0.1"}' | gcloud secrets versions add hot-NAME-release --data-file=-
+```
+
+**A managed database.** Point-in-time recovery restores into a new instance.
+The stacks have no input to adopt it, as `backup.restore_snapshot` does for
+the data disk, and the agent takes the endpoint, CA, and administrator
+secret from the instance in state. A single machine cannot use it as
+`existing` either ([Hand off a managed database](#state-drift-and-teardown)).
+What remains is copying the restored data into the installation's database
+with `pg_dump` and `pg_restore`, from a machine that reaches both, with Hot
+stopped. This has not been exercised. Objects Hot deleted after the restore
+point are gone from the buckets too (retired files go after 15 minutes);
+provisioned buckets keep old versions for `noncurrent_days`.
+
+**Scalable installations.** Hosts hold nothing: terminate a broken one, and
+its group starts another, which deploys its role's pointer. Recovery is the
+managed database, the buckets, and the secrets; for releases after a
+database restore, see [Upgrading](#upgrading).
+
+**After any restore,** run `diagnostics` and check the `Ready`, scheduler,
+and dependency signals. Then expect:
+- **Schedules.** Cron occurrences missed while the scheduler was down are
+  skipped, unless `settings.HOT_SCHEDULER_BACKFILL` is `"true"`. Then each is
+  queued, at most 100 per schedule, counting from the restored database's
+  last run and last sync. One-time `@at` schedules and retries that came due
+  run either way.
+- **Queued work.** Work queued in a local Valkey is restored with the data
+  disk; work queued after the snapshot is lost. A starting worker skips
+  entries never delivered that are older than 5 minutes (requests and
+  responses), 1 hour (alerts and email), 4 hours (events), or 24 hours
+  (tasks). Entries a worker had taken but not finished run again once idle;
+  after more than 3 deliveries they are dead-lettered and their runs marked
+  failed.
+- **Duplicates.** Hot runs work at least once. Anything queued or running at
+  the recovery point runs again, even if it finished after that point, and
+  its calls outside Hot happen again. Backfill queues occurrences that ran
+  after that point, and `@at` schedules that ran after it run again.
+  Requests Hot accepted after the recovery point are lost, though their
+  senders were told they succeeded.
+
+**What one recovery point covers.**
+
+| Part | Captured by | How far back |
+| --- | --- | --- |
+| Local PostgreSQL, Valkey, builds, and files | The data disk's daily snapshot, one crash-consistent instant for all of them. The agent's dumps (`pre-*`, `move-*`, `backup`) are on the same disk, and no command copies them elsewhere | Up to a day |
+| Managed PostgreSQL | The provider's backups and point-in-time recovery | RDS: `backup_retention_days`. Cloud SQL: a point in time within 7 days, daily backups for `backup_retention_days` |
+| Existing PostgreSQL | Your backups; the agent records only times | Yours |
+| Builds, files, and internal blobs in S3 or GCS | Provisioned buckets keep replaced and deleted objects for `noncurrent_days`; no point in time | Per object |
+| Queued work in ElastiCache | One daily automatic snapshot, which no input restores | A day |
+| Queued work in Memorystore | Append-only persistence, no backups | None |
+| Configuration | OpenTofu state (versioned bucket) and `installation.tfvars.json` (Git) | Their history |
+| Application secrets | Secrets Manager keeps `AWSPREVIOUS` and waits 30 days before deleting a secret. Secret Manager keeps versions until destroyed, and deleting a secret deletes them | |
+| Cloud keys | Provider-managed keys on disks, databases, caches, and buckets: nothing to back up. The state passphrase is yours to keep | |
+
+Only the data disk's snapshot covers the database, the queue, and stored
+bytes at one instant, and only when all three are local. With managed data,
+a point-in-time restore rolls back the database alone: Valkey keeps entries
+added since, whose rows are gone, and the database can show runs in progress
+whose entries are gone. Nothing in the agent reconciles them.
+
+The agent's own points: daily snapshots pause nothing; the pre-upgrade
+point is taken with the scheduler stopped and the other services running;
+only a data move's dump is taken with Hot drained and stopped. To take a
+quiesced point on a single machine, run `drain-and-stop` (queued work stays
+queued), then `backup`, a disk snapshot
+(`aws ec2 create-snapshot --volume-id VOLUME`,
+`gcloud compute snapshots create NAME --source-disk DISK --source-disk-zone ZONE`),
+or note the time for a managed database, then `deploy-now` to start Hot
+again.
+
+Restore in this order:
+1. The configuration: the state object's version and the state passphrase.
+2. The original generated secret, before any host boots. The agent
+   generates values only when the secret has none, and new ones cannot read
+   the old data.
+3. The release pointer.
+4. The data.
+5. Let the agent deploy; it starts the scheduler last.
+
+## State, drift, and teardown
+
+**State.** Each installation's state is in the bucket named in its
+`backend_override.tf`. That bucket is versioned and kept outside the
+installation's stack, and the state is encrypted with the state passphrase.
+GitHub's concurrency group and OpenTofu's lock serialize applies.
+
+- **Stale lock.** If a run died holding the lock, the next plan reports the
+  lock's ID, holder, and time. Confirm in the Actions tab that the run has
+  ended, then run `tofu force-unlock ID`. Never unlock while an apply may
+  still be running.
+- **Lost or damaged state.** Restore an earlier version of the state object
+  from the bucket's version history (`aws s3api list-object-versions`, or
+  `gcloud storage ls --all-versions`). Never plan from empty state: it would
+  try to create resources that already exist. If no version survives, adopt
+  the resources with `import` blocks in `installation/imports.tf`, which the
+  workflow copies into the stack. Start with the durable resources below,
+  and repeat until the plan creates none of them.
+- **Interrupted apply.** State keeps whatever finished; run the plan again
+  and review it.
+
+**Drift.** The example operator repository plans every morning with
+`drift_check`, and any change fails the run with the changes in its summary.
+A change can be:
+- a console edit;
+- a resource changed by AWS or Google;
+- a merge that was never applied.
+
+Apply the configuration, or change the configuration to keep what you want.
+Nothing in the single-machine stacks is changed by a controller, such as an
+autoscaler, that OpenTofu would fight.
+
+**Durable resources.** Deleting these loses data, or the keys to read it:
+
+| | AWS | GCP |
+| --- | --- | --- |
+| Data disk | `aws_ebs_volume.data` | `google_compute_disk.data` |
+| Generated secrets (encryption key, passwords) | `aws_secretsmanager_secret.generated` | `google_secret_manager_secret.generated` |
+| Operator secrets | `aws_secretsmanager_secret.operator` | `google_secret_manager_secret.operator` |
+| Managed PostgreSQL | `aws_db_instance.postgres[0]` | `google_sql_database_instance.postgres[0]` |
+| Managed Valkey | `aws_elasticache_replication_group.valkey[0]` | `google_memorystore_instance.valkey[0]` |
+| Container logs | `aws_cloudwatch_log_group.host` | |
+| Provisioned buckets | `aws_s3_bucket.storage` | `google_storage_bucket.storage` |
+
+They are protected in several ways:
+- The data disk and generated secret have `prevent_destroy`, so no plan that
+  destroys them can be made.
+- Managed databases have deletion protection (`data.postgres.deletion_protection`,
+  on by default), and RDS keeps a final snapshot.
+- Secrets Manager waits 30 days before it deletes a secret.
+- Snapshots outlive their disk.
+- The plan workflow fails any plan that deletes or replaces a durable
+  resource, unless the caller sets `allow_data_deletion: true` for a
+  reviewed purge.
+- Existing databases, caches, and buckets are never managed by the stacks.
+
+**Hand off a managed database.** To stop managing a database the stack
+created without deleting it, remove it from state before changing the mode.
+Run `tofu` locally with the installation's backend, state passphrase, and
+apply credentials:
+
+```sh
+# AWS (data subnets only exist on a network the stack created)
+tofu state rm 'aws_db_instance.postgres[0]' 'aws_db_parameter_group.postgres[0]' \
+  'aws_db_subnet_group.postgres[0]' 'aws_security_group.postgres[0]' 'aws_subnet.data'
+# GCP (the address and peering only exist on a network the stack created)
+tofu state rm 'google_sql_database_instance.postgres[0]' 'google_secret_manager_secret.postgres_admin[0]' \
+  'google_secret_manager_secret_version.postgres_admin[0]' 'google_secret_manager_secret_iam_member.postgres_admin[0]' \
+  'google_compute_global_address.services[0]' 'google_service_networking_connection.services[0]'
+```
+
+The stack then neither changes nor deletes it. Using it as `existing`
+afterwards works only in some cases:
+- A single machine's agent refuses to change PostgreSQL from `managed` to
+  `existing`, before stopping anything; it moves only a local database.
+- An `existing` database is verified with `sslmode=verify-full`, which a
+  Cloud SQL certificate fails: it names no address.
+- That leaves RDS behind a scalable installation, whose hosts start fresh.
+  Set the mode to `existing` and put the connection settings in the operator
+  secret. The logins the agent created stay as they are.
+
+A database on a network the stack created still needs that network, so keep
+the stack until the database moves. ElastiCache hands off the same way, with
+the `valkey` resources in `valkey.tf`, on either preset; a single machine
+drains the queue first. Memorystore cannot: an `existing` Valkey is reached
+with the password in `HOT_REDIS_URI`, and Memorystore uses IAM
+authentication.
+
+**Retire an installation.**
+1. Run `drain-and-stop`.
+2. Remove the durable resources you want to keep from state with
+   `tofu state rm`.
+3. Destroy the rest with `tofu destroy`; on GCP, lift the instance's deletion
+   protection first.
+
+Retained resources keep costing money until you delete them yourself:
+- disks and snapshots, per GB-month;
+- a database instance. RDS restarts a stopped instance after 7 days, so take a
+  final snapshot and delete the instance instead;
+- secrets;
+- stored logs.
+
+Purging is always a manual, separate step.
+
+## Trust and identities
+
+**Trust model.**
+- Administrators are trusted: they hold the cloud roles below and Hot's
+  administrator accounts.
+- Code authors are not trusted with the installation: their code runs with
+  mandatory isolation, and box tasks run in Kata VMs. User code has no cloud
+  identity and no secret files. It cannot reach metadata, the host, the data
+  services, or private ranges outside the allowlist; see
+  [Outbound access for user code](../docs/plans/opentofu-cloud-self-hosting.md#outbound-access-for-user-code).
+- Organizations are separated by PostgreSQL row-level security: the runtime
+  login has neither `BYPASSRLS` nor schema rights. Storage keys are scoped
+  per organization and environment.
+- Accounts are by invitation: the bundle sets `HOT_APP_SIGNUP=invite`, and
+  the first administrator is bootstrapped explicitly. To let anyone who can
+  reach the app sign up, set `settings.HOT_APP_SIGNUP` to `open`. Open sign-up
+  also needs SMTP, which verifies addresses.
+
+**Identities.** Each identity can do only what is listed:
+
+| Identity | Used by | Can | Cannot |
+| --- | --- | --- | --- |
+| Plan role | Plan job (OIDC, this repository) | Read the account or project, and read and lock state | Change resources |
+| Apply role | Apply job (OIDC, approved environment only) | Create and change the stack's resources, and write state | Run anything on the host |
+| Release role | Release and command workflows (OIDC, approved environment only) | Write the release pointer, send the Hot command to this host, and read the agent's status and reports | Read secrets, open a shell or Session Manager session, or use SSH |
+| Host identity | The agent, Docker's log drivers, and Hot services | Read the release pointer and this installation's secrets, and create the generated secret once. Write status, logs, and metrics. Read snapshot times, and use objects under its storage prefixes | Delete snapshots, read other secrets, or change infrastructure |
+| `hot_owner` login | `migrate` and `provision` jobs only | Own and migrate the schema, and grant the runtime login | Serve requests |
+| Runtime login | Hot services | Read and write rows, filtered by row-level security | Change the schema or bypass row-level security |
+| Managed database administrator | `prepare-postgres` job only | Create the logins, database, schema, and extensions | Serve requests |
+
+The plan role uses AWS's `ReadOnlyAccess` or GCP's `roles/viewer`; a
+narrower custom policy also works. The apply role's policies are yours to
+choose (`apply_policy_arns`). OIDC trust is limited to the operator
+repository, and for apply and release to the approved environment.
+
+**Shared identity on one machine.** The Hot services share the VM's
+identity: S3 or GCS access and log shipping need it, so AWS allows a
+metadata hop limit of 2. A compromised Hot service container, as opposed to
+isolated user code, could therefore read this installation's secrets. User
+code cannot: its outbound traffic never reaches metadata, and it has no
+secret files. Separate identities per service arrive with the scalable
+preset.
+
+## Rotating secrets and certificates
+
+Hot services read secrets from files the agent writes to tmpfs from the
+secret store's latest version. A new version takes effect when the agent
+delivers secrets again:
+- **Single machine:** `restart-service SERVICE` delivers every secret and
+  recreates that one service. To restart them all, restart `app`, `api`,
+  `worker`, `task-worker`, and `ingress`, then `scheduler`.
+- **Scalable, AWS:** the command reaches every host. Hosts running the
+  service restart it, and the others reject it as unknown. The helper prints
+  the first report it reads, so check every host's in the `hot-agent-status`
+  stream.
+- **Scalable, GCP:** a command reaches one host, so replace the role's
+  instances. Each new host delivers the current secrets as it deploys:
+
+  ```sh
+  gcloud compute instance-groups managed rolling-action replace hot-NAME-app \
+    --region REGION --max-surge 3 --max-unavailable 0
+  # The scheduler's group is zonal; never surge it.
+  gcloud compute instance-groups managed rolling-action replace hot-NAME-scheduler \
+    --zone ZONE --max-surge 0 --max-unavailable 1 --replacement-method recreate
+  ```
+
+Each secret is one JSON object. Change only the keys you mean to, with an
+identity that may read and write the secret (the release role may not):
+
+```sh
+aws secretsmanager get-secret-value --secret-id hot/NAME/operator --query SecretString --output text \
+  | jq --rawfile c fullchain.pem --rawfile k key.pem '.TLS_CERTIFICATE = $c | .TLS_PRIVATE_KEY = $k' \
+  | aws secretsmanager put-secret-value --secret-id hot/NAME/operator --secret-string file:///dev/stdin
+gcloud secrets versions access latest --secret hot-NAME-operator \
+  | jq --rawfile c fullchain.pem --rawfile k key.pem '.TLS_CERTIFICATE = $c | .TLS_PRIVATE_KEY = $k' \
+  | gcloud secrets versions add hot-NAME-operator --data-file=-
+```
+
+The previous version stays (`AWSPREVIOUS`, or Secret Manager's older
+versions), so you can put it back. The agent refuses an operator secret with
+an unknown key and delivers nothing. The generated secret holds every
+generated value, the encryption key included, and every later delivery uses
+its latest version, so change it only as the table says.
+
+**Generated secret** (`hot/NAME/generated`, `hot-NAME-generated`):
+
+| Value | Protects | Rotation | Effect |
+| --- | --- | --- | --- |
+| `HOT_ENCRYPTION_KEY` | Context variables, service key metadata, and registry credentials in queued box tasks | Unsupported. Hot reads one key, stores no key identifier with its ciphertext, and re-encrypts nothing, so a new key makes stored values unreadable | |
+| `HOT_APP_SESSION_SECRET` | Session tokens, API key handoffs, and pending GitHub email choices | Put a new value (`openssl rand -hex 32`) as above, then restart `app`. Not exercised | Everyone is signed out; sign-ins in progress fail |
+| `POSTGRES_PASSWORD` (`hot_owner`) | The schema owner, used only by deploy jobs | Local database: unsupported; it is set when the database is created, and migrations fail with a new value. Managed: `prepare-postgres` sets it before migrating, on every deploy (scalable: every migration), so change it, then deploy a newer release. Not exercised | None on running services |
+| `POSTGRES_RUNTIME_PASSWORD` | The runtime login | Unsupported. Local: created only on a fresh volume. Managed: the next deploy's `prepare-postgres` changes it while running services still use the old value | |
+| `VALKEY_PASSWORD` | Local Valkey | Unsupported: Valkey reads it only at start, no command restarts Valkey, and Valkey and every Hot service must change together | |
+| `ADMIN_PASSWORD` | The first administrator's first password | Changing it does nothing: `hot admin bootstrap` never changes an existing user. `hot admin reset-password` needs database access, and no agent command runs it | |
+
+**Operator secret** (`hot/NAME/operator`, `hot-NAME-operator`):
+
+| Value | Protects | Rotation | Effect |
+| --- | --- | --- | --- |
+| `TLS_CERTIFICATE`, `TLS_PRIVATE_KEY` | HTTPS at the ingress, for both hostnames | Update, then restart `ingress` (scalable: on app and API hosts) | Connections through the ingress drop |
+| `HOT_EMAIL_*` | SMTP | Update, then restart `worker` | The worker's running work gets 2 minutes |
+| `HOT_GOOGLE_CLIENT_*`, `HOT_GITHUB_CLIENT_*` | OAuth sign-in | Update, then restart `app` | Sign-ins in progress fail |
+| `HOT_BUILD_AWS_*`, `HOT_FILE_AWS_*` | S3 access keys | Update, then restart every Hot service. Adding the first keys or removing the last switches between keys and the VM's identity, which takes a deploy. Session tokens are never renewed | Each service restarts |
+| `HOT_SYNTHETIC_API_KEY` | The synthetic check | Update; the agent reads it for each check | None |
+| `HOT_DB_URI`, `HOT_REDIS_URI` (existing) | The runtime login and the Valkey login | Change the password at the service, update the URI, then restart every Hot service | Until a service restarts, its new connections fail |
+| `HOT_DB_MIGRATION_URI` (existing) | The schema owner, for deploy jobs | Update; the next deploy uses it | None |
+| `POSTGRES_CA_CERT` (existing) | Verifying the database | Update, then restart every Hot service | Each service restarts |
+
+**Other secrets:**
+
+| Secret | Protects | Rotation | Effect |
+| --- | --- | --- | --- |
+| Managed database administrator | The RDS `hot_admin` or Cloud SQL `postgres` login, used only by `prepare-postgres` on the host that migrates | AWS: RDS keeps it in its own secret; `aws secretsmanager rotate-secret --secret-id ARN` rotates it now. GCP: raise `data.postgres.admin_password_version` and apply. The agent reads the current value whenever it delivers secrets | None beyond what any input change does ([Resizing](#resizing)) |
+| ElastiCache AUTH token | Every Hot service's Valkey connection | Raise `data.valkey.auth_token_version` and apply: the cache gets a new token, then the secret does. The input change replaces the AWS VM or refreshes every scalable group, which delivers it. Not exercised: the stack sets no `auth_token_update_strategy` and `apply_immediately = false`, so whether the old token works until every host has the new one is not established | As for [Resizing](#resizing) |
+| Memorystore | Valkey connections on GCP | Nothing to rotate: hosts use short-lived IAM tokens | |
+| State passphrase | OpenTofu state and plans | Not provided: `encryption.tf` has one key and no `fallback` | |
+
+## Security updates
+
+**Supported releases and advisories.** As in
+[SECURITY.md](../SECURITY.md), security fixes ship in the latest release
+only. Watch the repository's releases and security advisories, and report
+vulnerabilities privately as SECURITY.md describes.
+
+**What a release pins:**
+- the runtime image (Debian packages, Hot, and its Rust dependencies), signed
+  with cosign, with build provenance and an SBOM attached by the build;
+- the PostgreSQL, Valkey, and ingress images by digest;
+- a signed manifest naming all of these, which the agent verifies before it
+  deploys.
+
+Each release also attaches `hot-runtime-vulnerabilities.json`, a Trivy scan
+of the runtime image, for triage. The scan never blocks a release.
+
+**Applying a security release.**
+1. Deploy it with the release workflow: the agent verifies the manifest,
+   takes a restore point if the schema changes, migrates, replaces the
+   services, and checks readiness.
+2. If the release notes say the host image changed, rebuild it with
+   `images/build-host.sh` and set `host_image`. The apply replaces the
+   instance and keeps the data disk. On GCP, lift the instance's deletion
+   protection first, as in [Recovery](#recovery).
+
+Between host image rebuilds, Ubuntu's unattended security updates (on by
+default) patch the host's packages. Kernel updates take effect when the
+instance is replaced. Rollback follows [Versions and upgrades](#versions-and-upgrades).
+
+**Image mirrors.** Set `image_registry` to pull every image from a
+registry you control instead of `ghcr.io` and Docker Hub. Each image keeps
+the manifest's digest, so the agent's signature check and the pinned content
+are unchanged. Copy each release's images to `<image_registry>/hot`,
+`/postgres`, `/valkey`, and `/ingress` before you deploy it. A tool that keeps
+digests works, such as `crane copy <manifest image> <image_registry>/hot`.
+- On AWS, an ECR mirror (`<account>.dkr.ecr.<region>.amazonaws.com/<path>`):
+  the host role may read repositories under `<path>/` and nothing else.
+- On GCP, an Artifact Registry mirror (`<location>-docker.pkg.dev/<project>/<repository>`):
+  each host account gets `roles/artifactregistry.reader` on that
+  repository, which may be in another project. The apply identity needs to
+  set that repository's IAM policy.
+- Any other registry is pulled from anonymously. The contract refuses the
+  other cloud's registry, since the hosts have no identity there.
+
+The agent signs in with the host's own identity before each pull; there is
+no registry password to store.
+
+## Capacity, retention, and cost
+
+**Sizes.** One VM runs everything. These numbers are the configuration's
+limits; they have not been benchmarked:
+
+| Size | VM | Data disk | Concurrent tasks (code, container) | Box storage |
+| --- | --- | --- | --- | --- |
+| `small` | 2 vCPU, 8 GB (`m8i.large`, `n2-standard-2`) | 100 GB | 2 code, 1 container | 40 GB |
+| `medium` | 4 vCPU, 16 GB (`m8i.xlarge`, `n2-standard-4`) | 200 GB | 4 code, 2 container | 100 GB |
+| `large` | 8 vCPU, 32 GB (`m8i.2xlarge`, `n2-standard-8`) | 500 GB | 8 code, 4 container | 200 GB |
+
+A size is not an availability or throughput promise. The single machine is
+one failure domain.
+
+**At capacity.**
+- Tasks beyond the concurrent limit wait in the queue, and the work queue
+  grows in Valkey, which never evicts (`noeviction`). When Valkey's memory
+  is full, new work is refused with errors rather than dropped.
+- Box tasks cannot exceed their storage pool.
+- Services have memory limits: one that exceeds its limit is restarted
+  without taking the others down.
+- `disk-pressure` alerts at 85% of the data disk.
+
+Move to a larger size ([Resizing](#resizing)), or move builds and files to
+object storage.
+
+**Retention.**
+
+| What | Kept for | Set by |
+| --- | --- | --- |
+| Data-disk snapshots | 7 days | `backup.retention_days` |
+| Container logs in CloudWatch | 30 days | `logging.retention_days` |
+| Container logs in Cloud Logging | The log bucket's retention (30 days by default) | Cloud Logging |
+| Local container logs | 3 files of 10 MB per container | Fixed |
+| Pre-upgrade database dumps | The last 3 | Fixed |
+| On-demand `backup` dumps | Until you delete them | You |
+| Deploy history | The last 20 deploys | Fixed |
+| Managed database backups | 7 days, with point-in-time recovery | `data.postgres.backup_retention_days` |
+| Execution history (calls, and their argument and result blobs) | Forever | `settings.HOT_DB_RETENTION_CALL_DAYS` (days, at least 1) |
+
+The worker's daily maintenance deletes calls older than
+`HOT_DB_RETENTION_CALL_DAYS` for every organization, unless the organization
+has its own `call_retention_days` override. The blobs those calls referenced
+are then collected once nothing else references them, after a day's grace.
+Builds and files stay until users delete them.
+
+**Cost drivers.** The VM runs all the time and dominates the cost. Then come:
+- the data disk and its snapshots;
+- NAT for outbound traffic (AWS NAT gateway, GCP Cloud NAT) and, when
+  enabled, the load balancers for public endpoints;
+- managed PostgreSQL and Valkey instances (high availability doubles them);
+- log ingestion and storage, metrics, and alarms;
+- Secrets Manager secrets on AWS.
+
+**Budgets.** Set `monitoring.monthly_budget` to create a monthly cost
+budget. It emails `monitoring.alert_emails` at 80% of actual spend and when
+forecast spend reaches 100%. Budgets alert; they never cap spending.
+- AWS: the amount is in USD. The budget counts resources tagged
+  `HotInstallation=<name>`, which the stacks tag. Activate `HotInstallation`
+  as a cost allocation tag in the Billing console, once per account;
+  until then the budget counts nothing. The apply role needs Budgets
+  permissions.
+- GCP: the amount is in the billing account's currency, and the budget counts
+  the installation's project, including anything else in it. Set
+  `monitoring.billing_account`. The apply identity needs
+  `roles/billing.costsManager` on that billing account, and the plan identity
+  `roles/billing.viewer`. The stack enables the Billing Budget API.
+
+## Resizing
+
+**A single machine** takes a larger `size` only.
+1. Run [Preflight](#preflight) with the new size; it checks the machine
+   type and quota.
+2. Run `maintenance start`, then `drain-and-stop`.
+3. Change `size` and apply. The data disk grows in place, and its
+   filesystem grows the next time the agent mounts it.
+   - Each cloud stops the VM, changes its machine type, and starts it again;
+     the data disk stays attached.
+   - The agent rereads the configuration from the installation's SSM
+     parameter (AWS) or the instance's metadata (GCP), and redeploys.
+4. The deploy starts Hot with the size's memory limits, task concurrency,
+   and Valkey `maxmemory`. Check `status` and `diagnostics`, then
+   `maintenance end`.
+
+Hot is down from `drain-and-stop` until the deploy reports `deployed`.
+- **Box storage does not grow.** Its pool files are created once, so the
+  pool keeps its first size although `HOT_BOX_POOL_GB` changes.
+- **Managed data follows the size** when `data.postgres.tier`,
+  `storage_gb`, or `data.valkey.node_type` are unset. RDS and ElastiCache
+  apply the change in their maintenance window; Cloud SQL applies a new tier
+  during the apply, which restarts it.
+- **A smaller size is refused.** EBS cannot shrink, so the AWS apply fails;
+  on GCP a smaller disk would be a new disk, which `prevent_destroy`
+  refuses. Managed storage that follows the size cannot shrink either; set
+  `storage_gb` to keep it.
+- **Other input changes apply in place.** The agent rereads the
+  configuration every cycle, and a new one redeploys the installed release
+  on the same VM. That covers settings, alerts, and data and storage moves.
+  Only a new `host_image` replaces the VM, which then boots with the current
+  configuration.
+
+**A scalable installation**'s `size` sets each role's machine type, the
+task-workers' scratch disk, the connection budget, and managed data that
+follows the size. Every input, `scaling` included, is part of each host's
+boot configuration, so any change replaces every instance of every role
+through its group's rolling update:
+- AWS refreshes each group: other groups stay at 100% healthy with up to
+  200% during it (600-second warm-up), and the scheduler's instance is
+  terminated before its replacement starts.
+- GCP updates each group with up to 3 extra instances and none unavailable,
+  and recreates the scheduler's instance.
+
+New hosts deploy their role's pointer, and schedules pause while the
+scheduler's instance is replaced, so silence alerts first. New `scaling`
+bounds must keep 1 ≤ `min` ≤ `max` ≤ 20 and fit the connection budget.
+AWS moves each group's desired capacity into the new bounds, and GCP's
+autoscalers take them, for a fixed count (`min` equal to `max`) too. A
+smaller size works for the hosts if the maximums fit its budget, but managed
+storage that follows the size cannot shrink.
 
 ## Local validation
 
@@ -85,14 +1377,26 @@ docker compose -f infra/.generated/gcp-example/compose.json \
 ```
 
 The development manifest contains deliberately unusable image references for
-configuration validation only. Rendering requires an explicit unsigned-manifest
-acknowledgment until release-signature verification is implemented.
+configuration validation only, so rendering it requires the explicit
+unsigned-manifest acknowledgment. A published release manifest renders with its
+signature instead:
+
+```sh
+python3 infra/runtime/render.py config.json \
+  --manifest hot-selfhost-manifest.json \
+  --signature-bundle hot-selfhost-manifest.sigstore.json \
+  --output /etc/hot/bundle
+```
+
+Verification needs `cosign` on `PATH` (or `--cosign`) and accepts only
+signatures from the `hot-dev/hot` release workflow on a `v*` tag; a fork that
+publishes its own releases passes `--signer-identity`.
 
 The resulting bundle has these prerequisites for future host-agent integration:
 
 - A qualified amd64 runtime image with S3 and Kata, runtime resources and
-  `hotbox`, plus pinned PostgreSQL/pgvector (currently PostgreSQL 17 layout),
-  Valkey, and unprivileged Nginx images. All Hot commands use one image digest.
+  `hotbox`, plus pinned PostgreSQL/pgvector, Valkey, and unprivileged Nginx
+  images. All Hot commands use one image digest.
 - A mounted encrypted data disk and precreated `postgres`, `valkey`, `build`,
   and `file` directories. Bind mounts disable automatic host-path creation to
   avoid silently initializing storage on the boot filesystem.
@@ -128,7 +1432,6 @@ data ports are published; remote dependency TLS qualification is separate work.
 
 Hostnames and supplied TLS material define private ingress. Internet access is
 provided through outbound NAT. Source ranges/IAP access are explicit, and no
-cloud stack publishes PostgreSQL/Valkey or port 22. Public/mixed ingress, GCS
-(Hot itself supports it; the renderer does not select it yet),
-managed data, customer-managed keys, and cross-provider bucket provisioning are
-rejected or outside this slice; their implementation remains in the plan.
+cloud stack publishes PostgreSQL/Valkey or port 22. Customer-managed keys and
+provisioning a bucket in the other cloud are outside this slice; their
+implementation remains in the plan.

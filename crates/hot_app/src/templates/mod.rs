@@ -1491,6 +1491,8 @@ pub struct PublicPageContext {
     pub support_email: String,
     pub web_url: String,
     pub is_production: bool,
+    /// Whether the sign-up form admits people without an invitation.
+    pub open_signup: bool,
 }
 
 impl PublicPageContext {
@@ -1521,6 +1523,7 @@ impl PublicPageContext {
             support_email: hot::product::support_email(conf),
             web_url: hot::product::web_url(conf),
             is_production: hot::env::get_env() == "production",
+            open_signup: crate::signup::open_signup_available(conf),
         }
     }
 
@@ -2505,6 +2508,8 @@ pub struct OrgUsersInvite<'a> {
     pub org: hot::db::org::Org,
     pub error_message: &'a str,
     pub success_message: &'a str,
+    /// Shown when the installation cannot email the invitation itself.
+    pub invite_link: &'a str,
     pub email: &'a str,
     pub role_id: i16,
     pub active_page: &'a str,

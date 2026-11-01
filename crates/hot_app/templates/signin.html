@@ -99,7 +99,11 @@
 
         <div class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700 text-center">
             <p class="text-sm text-gray-600 dark:text-gray-400">
+                {% if page_context.open_signup || invite_code != "" %}
                 Don't have an account? <a href="/signup?{% if invite_code != "" %}invite_code={{ invite_code }}&{% endif %}{% if plan != "" %}plan={{ plan }}&{% endif %}{% if billing != "" %}billing={{ billing }}{% endif %}" class="link">Sign up</a>
+                {% else %}
+                Don't have an account? Ask an administrator to invite you.
+                {% endif %}
             </p>
         </div>
     </div>

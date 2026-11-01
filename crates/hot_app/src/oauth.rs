@@ -28,52 +28,48 @@ pub struct GitHubConfig {
 type ConfiguredOAuthClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
-/// An OAuth setting from the environment, or from `<NAME>_FILE`.
-fn setting(name: &str) -> Result<String, String> {
-    hot::environment::read_optional(name)?.ok_or_else(|| format!("{name} is not set"))
-}
-
 impl OAuthConfig {
-    /// Load OAuth configuration from environment variables
-    pub fn from_env() -> Self {
-        let google = if let (Ok(client_id), Ok(client_secret)) = (
-            setting("HOT_GOOGLE_CLIENT_ID"),
-            setting("HOT_GOOGLE_CLIENT_SECRET"),
-        ) {
-            Some(GoogleConfig {
+    /// Load OAuth configuration from environment variables. Client IDs and
+    /// secrets may be supplied as `<NAME>_FILE`; a conflicting or unreadable
+    /// setting is an error rather than a silently disabled provider.
+    pub fn from_env() -> Result<Self, String> {
+        let google = client_credentials("HOT_GOOGLE_CLIENT_ID", "HOT_GOOGLE_CLIENT_SECRET")?.map(
+            |(client_id, client_secret)| GoogleConfig {
                 client_id,
                 client_secret,
-            })
-        } else {
-            None
-        };
-
-        let github = if let (Ok(client_id), Ok(client_secret)) = (
-            setting("HOT_GITHUB_CLIENT_ID"),
-            setting("HOT_GITHUB_CLIENT_SECRET"),
-        ) {
-            Some(GitHubConfig {
+            },
+        );
+        let github = client_credentials("HOT_GITHUB_CLIENT_ID", "HOT_GITHUB_CLIENT_SECRET")?.map(
+            |(client_id, client_secret)| GitHubConfig {
                 client_id,
                 client_secret,
-            })
-        } else {
-            None
-        };
+            },
+        );
 
         let redirect_base_url = env::var("HOT_OAUTH_REDIRECT_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:4680".to_string());
 
-        Self {
+        Ok(Self {
             google,
             github,
             redirect_base_url,
-        }
+        })
     }
 
     /// Check if any OAuth provider is configured
     pub fn is_any_configured(&self) -> bool {
         self.google.is_some() || self.github.is_some()
     }
+}
+
+/// A provider is configured only when both its client ID and secret are set.
+fn client_credentials(
+    id_name: &str,
+    secret_name: &str,
+) -> Result<Option<(String, String)>, String> {
+    let client_id = hot::environment::read_optional(id_name)?;
+    let client_secret = hot::environment::read_optional(secret_name)?;
+    Ok(client_id.zip(client_secret))
 }
 
 /// Create a Google OAuth client

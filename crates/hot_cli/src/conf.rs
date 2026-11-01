@@ -93,6 +93,22 @@ pub(crate) fn get_blob_resolved_conf(conf: Val, in_project: bool, managed_runtim
     conf.set_str("mode", Some(resolved_mode.to_string()), "")
 }
 
+/// Settings Hot reads that have no default in `create_default_conf`, so the
+/// overlay can't tell them from a script's own `HOT_*` names. Together with
+/// `HYPHENATED_ENV_KEYS`, a broken `<NAME>_FILE` for one of them stops the
+/// command.
+const SETTINGS_WITHOUT_DEFAULTS: &[&str] = &[
+    "HOT_APP_SIGNUP",
+    "HOT_DB_RETENTION_CALL_DAYS",
+    "HOT_EMAIL_PROVIDER",
+    "HOT_EMAIL_SMTP_HOST",
+    "HOT_EMAIL_SMTP_PASSWORD",
+    "HOT_EMAIL_SMTP_PORT",
+    "HOT_EMAIL_SMTP_SECURITY",
+    "HOT_EMAIL_SMTP_USERNAME",
+    "HOT_REDIS_AUTH",
+];
+
 /// Hyphenated keys that deployments commonly set from the environment;
 /// underscores alone cannot spell them.
 const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
@@ -109,7 +125,29 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
         "file.aws.secret-access-key",
     ),
     ("HOT_FILE_AWS_SESSION_TOKEN", "file.aws.session-token"),
+    (
+        "HOT_EMAIL_SMTP_TIMEOUT_SECONDS",
+        "email.smtp.timeout-seconds",
+    ),
     ("HOT_NETWORK_ALLOW_PRIVATE", "network.allow-private"),
+    ("HOT_NETWORK_ALLOW_CIDRS", "network.allow-cidrs"),
+    ("HOT_NETWORK_ALLOW_HOSTS", "network.allow-hosts"),
+    ("HOT_NETWORK_DENY_CIDRS", "network.deny-cidrs"),
+    ("HOT_NETWORK_EGRESS_PROXY", "network.egress-proxy"),
+    (
+        "HOT_NETWORK_CLIENT_IP_TRUSTED_PROXY",
+        "network.client-ip.trusted-proxy",
+    ),
+    (
+        "HOT_NETWORK_CLIENT_IP_TRUSTED_PROXIES",
+        "network.client-ip.trusted-proxies",
+    ),
+    ("HOT_NETWORK_CLIENT_IP_HEADER", "network.client-ip.header"),
+    ("HOT_BOX_GUEST_DNS", "box.guest-dns"),
+    ("HOT_SCHEDULER_HEARTBEAT_PATH", "scheduler.heartbeat-path"),
+    ("HOT_TASK_STATUS_PATH", "task.status-path"),
+    ("HOT_REDIS_CA_CERT", "redis.ca-cert"),
+    ("HOT_WORKER_DB_MAX_CONNECTIONS", "worker.db-max-connections"),
     ("HOT_TASK_MAX_CONCURRENT", "task.max-concurrent"),
     ("HOT_TASK_CODE_MAX_CONCURRENT", "task.code-max-concurrent"),
     (
@@ -410,7 +448,9 @@ fn apply_env_bindings(
             // setting; scripts may export other HOT_*_FILE names of their own.
             Err(error)
                 if conf.get(&env_var_to_conf_key_in(&conf, &name)).is_some()
-                    || hot::environment::DIRECT_SETTINGS.contains(&name.as_str()) =>
+                    || hot::environment::DIRECT_SETTINGS.contains(&name.as_str())
+                    || HYPHENATED_ENV_KEYS.iter().any(|(known, _)| *known == name)
+                    || SETTINGS_WITHOUT_DEFAULTS.contains(&name.as_str()) =>
             {
                 return Err(error);
             }
@@ -668,6 +708,9 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             Some(show_conf.clone()),
         ),
         Command::Key {
+            global, show_conf, ..
+        }
+        | Command::Admin {
             global, show_conf, ..
         } => (
             global.clone(),
@@ -1558,8 +1601,8 @@ pub(crate) fn show_command_config(command: &Option<Command>, conf: &Val) {
             let config_keys = vec!["db.uri", "db.schema"];
             filter_config(conf, &config_keys)
         }
-        Some(Command::Key { .. }) => {
-            // Key command writes the local environment database directly
+        Some(Command::Key { .. }) | Some(Command::Admin { .. }) => {
+            // Key and admin commands write the configured database directly
             let config_keys = vec!["db.uri", "db.schema"];
             filter_config(conf, &config_keys)
         }
@@ -1914,6 +1957,56 @@ mod tests {
             "db.migration-uri"
         );
         assert_eq!(env_var_to_conf_key("HOT_DB_URI"), "db.uri");
+        assert_eq!(
+            env_var_to_conf_key("HOT_SCHEDULER_HEARTBEAT_PATH"),
+            "scheduler.heartbeat-path"
+        );
+        assert_eq!(
+            env_var_to_conf_key("HOT_TASK_STATUS_PATH"),
+            "task.status-path"
+        );
+        assert_eq!(env_var_to_conf_key("HOT_REDIS_CA_CERT"), "redis.ca-cert");
+        assert_eq!(
+            env_var_to_conf_key("HOT_WORKER_DB_MAX_CONNECTIONS"),
+            "worker.db-max-connections"
+        );
+    }
+
+    /// A `HOT_*_FILE` name always names a file holding a setting's value, so
+    /// a setting spelled that way could never be set from the environment.
+    #[test]
+    fn no_environment_setting_name_ends_in_file() {
+        for (name, _) in HYPHENATED_ENV_KEYS {
+            assert!(
+                !name.ends_with("_FILE"),
+                "{name} reads as a file-backed setting"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_status_paths_come_from_the_environment() {
+        // Neither file exists until the service writes it.
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                (
+                    "HOT_SCHEDULER_HEARTBEAT_PATH".into(),
+                    "/nonexistent/heartbeat".into(),
+                ),
+                (
+                    "HOT_TASK_STATUS_PATH".into(),
+                    "/nonexistent/status.json".into(),
+                ),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            conf.get_str("scheduler.heartbeat-path"),
+            "/nonexistent/heartbeat"
+        );
+        assert_eq!(conf.get_str("task.status-path"), "/nonexistent/status.json");
     }
 
     #[test]
@@ -2072,6 +2165,24 @@ mod tests {
     }
 
     #[test]
+    fn smtp_settings_map_to_the_keys_the_provider_reads() {
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                ("HOT_EMAIL_PROVIDER".into(), "smtp".into()),
+                ("HOT_EMAIL_SMTP_HOST".into(), "smtp.example.com".into()),
+                ("HOT_EMAIL_SMTP_TIMEOUT_SECONDS".into(), "10".into()),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(conf.get_str("email.provider"), "smtp");
+        let settings = hot::email_smtp::SmtpSettings::from_conf(&conf).unwrap();
+        assert_eq!(settings.host, "smtp.example.com");
+        assert_eq!(settings.timeout, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
     fn runtime_resource_limits_map_to_existing_hyphenated_keys() {
         let conf = apply_env_bindings(
             create_default_conf(),
@@ -2087,6 +2198,29 @@ mod tests {
         assert_eq!(conf.get_int("task.worker-memory-mb"), 1536);
         assert!(!conf.get_bool("network.allow-private"));
         assert!(conf.get("task.code.max.concurrent").is_none());
+    }
+
+    #[test]
+    fn outbound_rules_come_from_comma_separated_variables() {
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                ("HOT_NETWORK_ALLOW_CIDRS".into(), "10.20.0.0/16".into()),
+                ("HOT_NETWORK_ALLOW_HOSTS".into(), "api.corp.example".into()),
+                (
+                    "HOT_NETWORK_DENY_CIDRS".into(),
+                    "10.20.0.5/32, 10.20.0.6".into(),
+                ),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert!(
+            hot::outbound::OutboundRules::from_conf(&conf)
+                .unwrap()
+                .is_some()
+        );
+        assert!(conf.get("network.allow.cidrs").is_none());
     }
 
     #[test]
@@ -2181,9 +2315,22 @@ mod tests {
         assert!(known.unwrap_err().contains("HOT_DB_URI_FILE"));
         let direct = apply_env_bindings(
             create_default_conf(),
-            [("HOT_ENCRYPTION_KEY_FILE".to_string(), missing)].into(),
+            [("HOT_ENCRYPTION_KEY_FILE".to_string(), missing.clone())].into(),
         );
         assert!(direct.is_err());
+        // Settings with no default: a broken proxy, SMTP password, or CA
+        // file must not leave Hot running without them.
+        for name in [
+            "HOT_NETWORK_EGRESS_PROXY_FILE",
+            "HOT_EMAIL_SMTP_PASSWORD_FILE",
+            "HOT_REDIS_CA_CERT_FILE",
+        ] {
+            let undefaulted = apply_env_bindings(
+                create_default_conf(),
+                [(name.to_string(), missing.clone())].into(),
+            );
+            assert!(undefaulted.unwrap_err().contains(name), "{name}");
+        }
     }
 
     #[test]

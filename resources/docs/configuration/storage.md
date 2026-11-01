@@ -279,11 +279,29 @@ keys contain organization and environment IDs and appear only at debug level.
 Changing `storage.type` does **not** move data. Existing file records, blob
 objects, in-flight uploads, and builds keep pointing at the backend that wrote
 them, and Hot refuses to read, overwrite, or clean them up through a different
-backend instead of guessing. Switching an existing installation requires a
-separate migration that copies the bytes and rewrites persisted references
-(`file.storage_backend`/`storage_path`, `blob_object.storage_backend`, and
-`build.storage_backend`/`storage_path`). Abandon or finish pending multipart
-uploads before switching.
+backend instead of guessing. To switch an existing installation, stop Hot and
+move the data with `hot db move-storage`, then change the configuration:
+
+```bash
+hot db move-storage --role file --to s3 --bucket acme-hot --prefix files --region us-east-1 \
+  --manifest file-move.jsonl
+hot db move-storage --role build --to gcs --bucket acme-hot --prefix builds
+```
+
+It runs with the installation's current configuration, which names the
+source, and moves one role at a time: `build`, or `file` together with
+internal blobs. For each object it does three things:
+- copies the bytes under the same key below the organization and environment
+  (so a file version keeps its unique name);
+- reads the copy back and checks it against the source (SHA-256, or the blob's
+  BLAKE3 hash);
+- then rewrites that one record.
+
+An interrupted or partly failed move can run again: moved records are
+skipped. `--dry-run` lists what would move, and `--manifest` writes one JSON
+line per object. The source keeps every object, as a recovery copy.
+Abandoned multipart uploads on the source are marked aborted by the worker's
+upload cleanup once the new backend is configured.
 
 Internal blobs are content-addressed, so storing a blob whose content was
 already stored by the previous backend writes it to the new backend and moves

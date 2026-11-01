@@ -61,6 +61,10 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     crate::auth::get_session_secret().unwrap_or_else(|error| {
         panic!("hot.dev: APP session secret configuration failed: {error}")
     });
+    crate::oauth::OAuthConfig::from_env()
+        .unwrap_or_else(|error| panic!("hot.dev: APP OAuth configuration failed: {error}"));
+    crate::signup::SignupPolicy::from_conf(&conf)
+        .unwrap_or_else(|error| panic!("hot.dev: APP sign-up configuration failed: {error}"));
 
     let port = resolved_conf.get_int_or_default("port", DEFAULT_APP_PORT as i64) as u16;
     let log_level_str = resolved_conf.get_str_or_default("log.level", "info");
@@ -288,32 +292,39 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
                             "http_request",
                             method = %request.method(),
                             path = %request.uri().path(),
+                            request_id = %hot::request_id::of(request),
                         ),
                         tracing::Level::WARN => tracing::warn_span!(
                             "http_request",
                             method = %request.method(),
                             path = %request.uri().path(),
+                            request_id = %hot::request_id::of(request),
                         ),
                         tracing::Level::INFO => tracing::info_span!(
                             "http_request",
                             method = %request.method(),
                             path = %request.uri().path(),
+                            request_id = %hot::request_id::of(request),
                         ),
                         tracing::Level::DEBUG => tracing::debug_span!(
                             "http_request",
                             method = %request.method(),
                             path = %request.uri().path(),
+                            request_id = %hot::request_id::of(request),
                         ),
                         tracing::Level::TRACE => tracing::trace_span!(
                             "http_request",
                             method = %request.method(),
                             path = %request.uri().path(),
+                            request_id = %hot::request_id::of(request),
                         ),
                     }
                 })
                 .on_request(trace::DefaultOnRequest::new().level(tracing::Level::DEBUG))
                 .on_response(trace::DefaultOnResponse::new().level(tracing::Level::DEBUG)),
-        );
+        )
+        // Outside the trace layer, so each request's span carries its ID.
+        .layer(axum::middleware::from_fn(hot::request_id::middleware));
 
     // Bind every address the configured host resolves to: "localhost" can
     // resolve to 127.0.0.1 and ::1, and single-address clients (the JDK,
