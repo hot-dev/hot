@@ -216,6 +216,7 @@ async fn send_with_redirect_validation(
             | reqwest::Method::DELETE
             | reqwest::Method::PATCH
             | reqwest::Method::HEAD
+            | reqwest::Method::OPTIONS
     ) {
         return Err(err_val(format!(
             "::hot::http/request: unsupported method: {method}"
@@ -1182,6 +1183,78 @@ mod tests {
         );
         assert_eq!(response.get("status"), Some(Val::Int(200)));
         assert_eq!(response.get("body"), Some(Val::from("moved here")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn options_request_is_sent_and_follows_validated_redirects() {
+        // Box's upload preflight and events long-poll use OPTIONS. A 308
+        // keeps the method, so the redirected hop is OPTIONS too.
+        let app = Router::new()
+            .route(
+                "/files/content",
+                axum::routing::options(|| async {
+                    (
+                        StatusCode::PERMANENT_REDIRECT,
+                        [(header::LOCATION, "/preflight")],
+                    )
+                }),
+            )
+            .route(
+                "/preflight",
+                axum::routing::options(|| async { ([(header::ALLOW, "OPTIONS, POST")], "ok") }),
+            );
+        let url = format!("{}/files/content", start_mock_server(app).await);
+        let response = unwrap_result(
+            make_http_request(
+                "options",
+                &url,
+                &IndexMap::new(),
+                &Val::Null,
+                DestinationPolicy::AllowPrivate,
+                DEFAULT_MAX_RESPONSE_BYTES,
+            )
+            .await,
+        );
+        assert_eq!(response.get("status"), Some(Val::Int(200)));
+        let headers = response.get("headers").unwrap();
+        assert_eq!(headers.get("allow"), Some(Val::from("OPTIONS, POST")));
+    }
+
+    #[tokio::test]
+    async fn public_only_policy_rejects_local_options_destination() {
+        let app = Router::new().route("/", axum::routing::options(|| async { "nope" }));
+        let url = start_mock_server(app).await;
+        let result = make_http_request(
+            "OPTIONS",
+            &url,
+            &IndexMap::new(),
+            &Val::Null,
+            DestinationPolicy::PublicOnly,
+            DEFAULT_MAX_RESPONSE_BYTES,
+        )
+        .await;
+        let HotResult::Err(error) = result else {
+            panic!("a private OPTIONS destination must be refused: {result:?}");
+        };
+        assert!(!error.to_string().contains("unsupported method"), "{error}");
+    }
+
+    #[test]
+    fn unsupported_method_is_still_refused() {
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(make_http_request(
+                "TRACE",
+                "http://127.0.0.1:1/",
+                &IndexMap::new(),
+                &Val::Null,
+                DestinationPolicy::AllowPrivate,
+                DEFAULT_MAX_RESPONSE_BYTES,
+            ));
+        let HotResult::Err(error) = result else {
+            panic!("TRACE must be refused: {result:?}");
+        };
+        assert!(error.to_string().contains("unsupported method"), "{error}");
     }
 
     #[tokio::test]
