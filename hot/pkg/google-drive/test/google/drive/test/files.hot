@@ -1,0 +1,68 @@
+::google::drive::test::files ns
+meta ["test"]
+
+::drive ::google::drive
+::changes ::google::drive::changes
+
+test-to-doc-file-blob
+meta ["test"] fn () {
+    f ::drive/to-doc-file({
+        id: "1A", name: "report.pdf", mimeType: "application/pdf", size: "2048",
+        modifiedTime: "2026-10-30T12:00:00.000Z", createdTime: "2026-10-01T00:00:00.000Z",
+        parents: ["P"], md5Checksum: "abc", sha256Checksum: "def", webViewLink: "https://drive.google.com/file/d/1A/view",
+        version: "17", headRevisionId: "rev9", trashed: false
+    })
+    assert-eq("google-drive", f.provider)
+    assert-eq(2048, f.size, "int64 strings become Ints")
+    assert-eq("17", f.version)
+    assert-eq("rev9", f.revision-id)
+    assert-eq(["P"], f.parents)
+    assert-eq("https://drive.google.com/file/d/1A/view", f.web-url)
+    assert-eq("abc", f.md5)
+    assert-eq("def", f.sha256)
+    assert(not(f.is-folder))
+    assert(not(f.is-google-native))
+    assert(not(f.trashed))
+    assert-eq("1A", f.raw.id)
+}
+
+test-to-doc-file-native-folder-shortcut
+meta ["test"] fn () {
+    doc ::drive/to-doc-file({id: "D", name: "Plan", mimeType: ::drive/DOCUMENT_MIME, exportLinks: {"application/pdf": "https://x", "text/markdown": "https://y"}})
+    assert(doc.is-google-native)
+    assert(is-null(doc.size), "Google-native files have no size")
+    assert-eq(2, length(doc.export-formats))
+    assert-eq([], doc.parents, "missing parents become an empty Vec")
+
+    folder ::drive/to-doc-file({id: "F", name: "Team", mimeType: ::drive/FOLDER_MIME})
+    assert(folder.is-folder)
+    assert(not(folder.is-google-native), "folders are not exportable documents")
+
+    link ::drive/to-doc-file({id: "S", name: "Plan (link)", mimeType: ::drive/SHORTCUT_MIME, shortcutDetails: {targetId: "D", targetMimeType: ::drive/DOCUMENT_MIME}})
+    assert(link.is-shortcut)
+    assert-eq("D", link.shortcut-target-id)
+
+    sparse ::drive/to-doc-file({id: "X"})
+    assert-eq("", sparse.name)
+    assert(is-null(sparse.size))
+    assert-eq(false, sparse.trashed)
+}
+
+CHANGES [
+    {changeType: "file", fileId: "a", removed: false, file: {id: "a", name: "A v1", mimeType: "text/plain"}},
+    {changeType: "file", fileId: "b", removed: true},
+    {changeType: "file", fileId: "a", removed: false, file: {id: "a", name: "A v2", mimeType: "text/plain"}},
+    {changeType: "file", fileId: "c", removed: false, file: {id: "c", name: "C", mimeType: "text/plain", trashed: true}},
+    {changeType: "drive", driveId: "0AD", removed: false, drive: {id: "0AD", name: "Eng"}},
+    {changeType: "file", fileId: "d", removed: true},
+    {changeType: "file", fileId: "d", removed: false, file: {id: "d", name: "D restored", mimeType: "text/plain"}}
+]
+
+test-changed-and-removed
+meta ["test"] fn () {
+    changed ::changes/changed-files({changes: CHANGES, new-start-page-token: "9", pages: 1})
+    names sort(map(changed, %.name))
+    assert-eq(["A v2", "D restored"], names, "latest version per file; trashed and removed excluded")
+    removed sort(::changes/removed-file-ids(CHANGES))
+    assert-eq(["b", "c"], removed, "removed and trashed ids; a file restored later is not removed")
+}

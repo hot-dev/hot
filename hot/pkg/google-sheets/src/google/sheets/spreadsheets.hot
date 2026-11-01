@@ -1,0 +1,263 @@
+::google::sheets::spreadsheets ns
+meta {
+    doc: """
+    Spreadsheets: metadata (with ranges, grid data and field masks),
+    creation with a title and tabs, `batchUpdate`, and helpers for the
+    common tab operations (list, find, add, rename, delete, duplicate,
+    freeze, auto-resize, header formatting).
+
+    **Scopes.** `get-spreadsheet`, `list-sheets` and `sheet-id` use
+    `spreadsheets.readonly`; everything else `spreadsheets`. `drive.file`
+    works for spreadsheets the app created or the user opened with it.
+    Deleting a whole spreadsheet is a Drive call (`google-drive`'s
+    `trash-file` / `delete-file`).
+    """
+}
+
+::sheets ::google::sheets
+::req ::google::sheets::requests
+
+SHEET_FIELDS "sheets.properties"
+
+// ---------------------------------------------------------------------------
+// Spreadsheets
+// ---------------------------------------------------------------------------
+
+get-params
+meta {
+    doc: """The query parameters `get-spreadsheet` sends (pure): `ranges` (a Vec, sent repeated), `includeGridData`, `fields` (e.g. `"properties.title,sheets.properties"`), `excludeTablesInBandedRanges`; only the ones you set."""
+}
+fn (opts: Map): Map {
+  ::sheets/query-params({}, opts)
+}
+
+get-spreadsheet
+meta {
+    doc: """
+    GET /{id} - spreadsheet metadata: `properties` (title, locale,
+    timeZone), `sheets` (each with `properties`: `sheetId`, `title`,
+    `index`, `gridProperties`), `namedRanges`, `spreadsheetUrl`. Pass
+    `{ranges: ["Sheet1!A1:C5"], includeGridData: true}` for cell data
+    and formatting, and `fields` to trim the response. Scope:
+    `spreadsheets.readonly`.
+    """
+}
+fn
+(spreadsheet-id: Str): Map {
+  get-spreadsheet(spreadsheet-id, {})
+},
+(spreadsheet-id: Str, opts: Map): Map {
+  ::sheets/json(::sheets/READ_SCOPE, "GET", ::sheets/url(`/${::sheets/encode-id(spreadsheet-id)}`, get-params(opts)), "", opts)
+}
+
+sheet-properties fn (sheet: Any): Map {
+  props if(is-map(sheet), get(sheet, "properties"), null)
+  if(is-map(props), props, {title: Str(sheet)})
+}
+
+build-spreadsheet
+meta {
+    doc: """
+    The `spreadsheets.create` body (pure): `{properties: {title, locale?,
+    timeZone?}, sheets?}`. `opts.sheets` is a Vec of tab titles or
+    SheetProperties Maps; `opts.locale` (e.g. `"en_US"`) and
+    `opts.timeZone` (e.g. `"America/Chicago"`) set the spreadsheet's
+    defaults.
+    """
+}
+fn (title: Str, opts: Map): Map {
+  tabs get(opts, "sheets")
+  ::sheets/compact({
+    properties: ::sheets/compact({title: title, locale: get(opts, "locale"), timeZone: get(opts, "timeZone")}),
+    sheets: if(is-null(tabs), null, map(tabs, (t) { {properties: if(is-map(t), t, {title: Str(t)})} }))
+  })
+}
+
+create-spreadsheet
+meta {
+    doc: """
+    POST /v4/spreadsheets - create a spreadsheet. Returns the resource
+    with `spreadsheetId` and `spreadsheetUrl`. It lands in the
+    authenticated user's My Drive root (move it with google-drive's
+    `move-file`); a service account without domain-wide delegation owns
+    it alone, so share it before anyone else can open it. Scope:
+    `spreadsheets` (or `drive.file`).
+
+    ```hot
+    book ::google::sheets::spreadsheets/create-spreadsheet("Q3 pipeline", {sheets: ["Leads", "Summary"], timeZone: "America/New_York"})
+    book.spreadsheetId
+    ```
+    """
+}
+fn
+(title: Str): Map {
+  create-spreadsheet(title, {})
+},
+(title: Str, opts: Map): Map {
+  ::sheets/json(::sheets/SCOPE, "POST", ::sheets/url(""), build-spreadsheet(title, opts), opts)
+}
+
+batch-update-body
+meta {
+    doc: """The `batchUpdate` body (pure): `{requests}` plus `includeSpreadsheetInResponse`, `responseRanges` and `responseIncludeGridData` from `opts` when set."""
+}
+fn (requests: Vec, opts: Map): Map {
+  ::sheets/compact({
+    requests: requests,
+    includeSpreadsheetInResponse: get(opts, "includeSpreadsheetInResponse"),
+    responseRanges: get(opts, "responseRanges"),
+    responseIncludeGridData: get(opts, "responseIncludeGridData")
+  })
+}
+
+batch-update
+meta {
+    doc: """
+    POST /{id}:batchUpdate - apply structural and formatting requests
+    atomically, in order (build them with `::google::sheets::requests`).
+    Returns `{spreadsheetId, replies}`, one reply per request (empty for
+    most; `addSheet` replies carry the new sheet's properties). If any
+    request fails, none is applied. Scope: `spreadsheets`.
+    """
+}
+fn
+(spreadsheet-id: Str, requests: Vec): Map {
+  batch-update(spreadsheet-id, requests, {})
+},
+(spreadsheet-id: Str, requests: Vec, opts: Map): Map {
+  ::sheets/json(::sheets/SCOPE, "POST", ::sheets/url(`/${::sheets/encode-id(spreadsheet-id)}:batchUpdate`), batch-update-body(requests, opts), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Tabs
+// ---------------------------------------------------------------------------
+
+list-sheets
+meta {
+    doc: """Every tab's properties (`sheetId`, `title`, `index`, `sheetType`, `gridProperties`), in order. Scope: `spreadsheets.readonly`."""
+}
+fn
+(spreadsheet-id: Str): Vec {
+  list-sheets(spreadsheet-id, {})
+},
+(spreadsheet-id: Str, opts: Map): Vec {
+  book get-spreadsheet(spreadsheet-id, {...opts, fields: SHEET_FIELDS})
+  if(is-err(book), book, map(or(book.sheets, []), sheet-properties))
+}
+
+find-sheet
+meta {
+    doc: """The properties of the tab titled `title` (exact match), or null. Scope: `spreadsheets.readonly`."""
+}
+fn
+(spreadsheet-id: Str, title: Str): Map? {
+  find-sheet(spreadsheet-id, title, {})
+},
+(spreadsheet-id: Str, title: Str, opts: Map): Map? {
+  tabs list-sheets(spreadsheet-id, opts)
+  if(is-err(tabs), tabs, find-first(tabs, (t) { eq(t.title, title) }))
+}
+
+sheet-id
+meta {
+    doc: """The numeric `sheetId` of the tab titled `title` (what `::google::sheets::requests` builders take), or an Err when there is no such tab. Scope: `spreadsheets.readonly`."""
+}
+fn
+(spreadsheet-id: Str, title: Str): Int {
+  sheet-id(spreadsheet-id, title, {})
+},
+(spreadsheet-id: Str, title: Str, opts: Map): Int {
+  tab find-sheet(spreadsheet-id, title, opts)
+  cond {
+    is-err(tab) => { tab }
+    is-null(tab) => { err(`google-sheets: no sheet titled ${to-json(title)}`) }
+    => { tab.sheetId }
+  }
+}
+
+add-sheet
+meta {
+    doc: """Add a tab and return its properties (with the new `sheetId`). Options as for `::google::sheets::requests/add-sheet`. Scope: `spreadsheets`."""
+}
+fn
+(spreadsheet-id: Str, title: Str): Map {
+  add-sheet(spreadsheet-id, title, {})
+},
+(spreadsheet-id: Str, title: Str, opts: Map): Map {
+  result batch-update(spreadsheet-id, [::req/add-sheet(title, ::google::api/api-params(opts))], opts)
+  if(is-err(result), result, first(result.replies).addSheet.properties)
+}
+
+rename-sheet
+meta {doc: """Rename the tab `sheet-id`. Scope: `spreadsheets`."""}
+fn
+(spreadsheet-id: Str, sheet-id: Int, title: Str): Map {
+  rename-sheet(spreadsheet-id, sheet-id, title, {})
+},
+(spreadsheet-id: Str, sheet-id: Int, title: Str, opts: Map): Map {
+  batch-update(spreadsheet-id, [::req/rename-sheet(sheet-id, title)], opts)
+}
+
+delete-sheet
+meta {
+    doc: """Delete the tab `sheet-id` and its data (a spreadsheet must keep at least one tab). Scope: `spreadsheets`."""
+}
+fn
+(spreadsheet-id: Str, sheet-id: Int): Map {
+  delete-sheet(spreadsheet-id, sheet-id, {})
+},
+(spreadsheet-id: Str, sheet-id: Int, opts: Map): Map {
+  batch-update(spreadsheet-id, [::req/delete-sheet(sheet-id)], opts)
+}
+
+duplicate-sheet
+meta {
+    doc: """Copy the tab `sheet-id` as `new-title` and return the copy's properties. Scope: `spreadsheets`."""
+}
+fn
+(spreadsheet-id: Str, sheet-id: Int, new-title: Str): Map {
+  duplicate-sheet(spreadsheet-id, sheet-id, new-title, {})
+},
+(spreadsheet-id: Str, sheet-id: Int, new-title: Str, opts: Map): Map {
+  result batch-update(spreadsheet-id, [::req/duplicate-sheet(sheet-id, new-title, ::google::api/api-params(opts))], opts)
+  if(is-err(result), result, first(result.replies).duplicateSheet.properties)
+}
+
+freeze-rows
+meta {
+    doc: """Freeze the first `rows` rows of a tab (0 unfreezes). Scope: `spreadsheets`."""
+}
+fn
+(spreadsheet-id: Str, sheet-id: Int, rows: Int): Map {
+  freeze-rows(spreadsheet-id, sheet-id, rows, {})
+},
+(spreadsheet-id: Str, sheet-id: Int, rows: Int, opts: Map): Map {
+  batch-update(spreadsheet-id, [::req/freeze(sheet-id, rows)], opts)
+}
+
+auto-resize-columns
+meta {
+    doc: """Fit every column of a tab (or `start` to `end`, 0-based exclusive) to its content. Scope: `spreadsheets`."""
+}
+fn
+(spreadsheet-id: Str, sheet-id: Int): Map {
+  auto-resize-columns(spreadsheet-id, sheet-id, null, null, {})
+},
+(spreadsheet-id: Str, sheet-id: Int, start: Int?, end: Int?): Map {
+  auto-resize-columns(spreadsheet-id, sheet-id, start, end, {})
+},
+(spreadsheet-id: Str, sheet-id: Int, start: Int?, end: Int?, opts: Map): Map {
+  batch-update(spreadsheet-id, [::req/auto-resize(sheet-id, "COLUMNS", start, end)], opts)
+}
+
+format-header
+meta {
+    doc: """Freeze and bold the first row of a tab, then fit its columns. Scope: `spreadsheets`."""
+}
+fn
+(spreadsheet-id: Str, sheet-id: Int): Map {
+  format-header(spreadsheet-id, sheet-id, {})
+},
+(spreadsheet-id: Str, sheet-id: Int, opts: Map): Map {
+  batch-update(spreadsheet-id, concat(::req/header-row(sheet-id), [::req/auto-resize(sheet-id, "COLUMNS")]), opts)
+}

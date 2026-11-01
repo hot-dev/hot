@@ -1,25 +1,142 @@
-::google::gmail::test ns
+::google::gmail::test::mime ns
 meta ["test"]
 
-::gmail ::google::gmail
+::mime ::google::gmail::mime
 
-test-build-mime-basic
-meta ["test"] fn () {
-    mime ::gmail/build-mime("alice@example.com", "Hi there", "Hello!")
-    assert(starts-with(mime, "To: alice@example.com\r\n"))
-    assert(contains(mime, "Subject: Hi there\r\n"))
-    assert(contains(mime, "Content-Type: text/plain"))
-    assert(ends-with(mime, "\r\n\r\nHello!"), "blank line separates headers from body")
+B "BOUND"
+
+text-of fn (message: Map): Str {
+  Str(::mime/build-message(message, B))
 }
 
-test-build-mime-extra-headers
+test-plain-text-message
 meta ["test"] fn () {
-    mime ::gmail/build-mime("a@b.c", "S", "body", {From: "me@example.com", Cc: "x@y.z"})
-    assert(contains(mime, "From: me@example.com\r\n"))
-    assert(contains(mime, "Cc: x@y.z\r\n"))
+    raw ::mime/build-message({to: "alice@example.com", subject: "Hi there", text: "Hello!\nBye."}, B)
+    assert(is-bytes(raw), "messages are Bytes")
+    s Str(raw)
+    assert(starts-with(s, "To: alice@example.com\r\nSubject: Hi there\r\nMIME-Version: 1.0\r\n"))
+    assert(contains(s, "Content-Type: text/plain; charset=\"UTF-8\"\r\nContent-Transfer-Encoding: 7bit\r\n\r\nHello!\r\nBye."), "LF becomes CRLF, ASCII stays 7bit")
+    assert(not(contains(s, "Cc:")), "unset fields are omitted")
+    assert(not(contains(s, "From:")))
 }
 
-test-scopes
+test-crlf-in-subject-cannot-inject-headers
 meta ["test"] fn () {
-    assert-eq("https://www.googleapis.com/auth/gmail.send", ::gmail/SEND_SCOPE)
+    s text-of({to: "a@example.com", subject: "Invoice\r\nBcc: attacker@evil.com", text: "x"})
+    assert(contains(s, "Subject: Invoice Bcc: attacker@evil.com\r\n"), "line breaks fold to a space")
+    assert(not(contains(s, "\r\nBcc:")), "no injected Bcc header")
+    lf text-of({to: "a@example.com", subject: "a\nb\rc", text: "x", headers: {X-Tag: "v1\r\nBcc: e@evil.com"}})
+    assert(contains(lf, "Subject: a b c\r\n"))
+    assert(contains(lf, "X-Tag: v1 Bcc: e@evil.com\r\n"))
+}
+
+test-crlf-in-addresses-is-rejected
+meta ["test"] fn () {
+    bad ::mime/build-message({to: "a@example.com\r\nBcc: e@evil.com", subject: "s", text: "x"}, B)
+    assert(is-err(bad))
+    assert(contains(err-message(bad), "line breaks"))
+    name ::mime/build-message({to: {name: "Ada\r\nBcc: e@evil.com", email: "a@example.com"}, text: "x"}, B)
+    assert(is-err(name), "a line break in a display name is rejected")
+    invalid ::mime/build-message({to: "not-an-address", text: "x"}, B)
+    assert(is-err(invalid))
+    assert(contains(err-message(invalid), "invalid email address"))
+}
+
+test-header-names-are-validated
+meta ["test"] fn () {
+    assert(is-err(::mime/build-message({to: "a@example.com", text: "x", headers: {"Bad Name": "v"}}, B)), "spaces are not allowed in names")
+    assert(is-err(::mime/build-message({to: "a@example.com", text: "x", headers: {"X-A\r\nBcc": "v"}}, B)))
+    reserved ::mime/build-message({to: "a@example.com", text: "x", headers: {Content-Type: "text/html"}}, B)
+    assert(is-err(reserved), "structural headers cannot be overridden")
+    assert(contains(err-message(reserved), "Content-Type"))
+}
+
+test-address-lists
+meta ["test"] fn () {
+    parsed ::mime/parse-addresses("\"Doe, Jane\" <jane@example.com>, bob@example.com")
+    assert-eq([{name: "Doe, Jane", email: "jane@example.com"}, {name: null, email: "bob@example.com"}], parsed)
+    assert-eq("\"Doe, Jane\" <jane@example.com>, bob@example.com", ::mime/format-addresses(parsed), "specials are quoted")
+    v ::mime/parse-addresses(["Ada Lovelace <ada@example.com>", {name: "Bob", email: "bob@example.com"}])
+    assert-eq("Ada Lovelace <ada@example.com>, Bob <bob@example.com>", ::mime/format-addresses(v))
+    assert-eq([], ::mime/parse-addresses(null))
+    assert-eq(["ada@example.com", "bob@example.com"], ::mime/emails("Ada <ADA@example.com>, junk, bob@example.com"), "emails lowercases and skips invalid entries")
+}
+
+test-rfc2047-subject-and-names
+meta ["test"] fn () {
+    assert-eq("=?UTF-8?B?Wm/Dqw==?=", ::mime/encode-words("Zoë"))
+    s text-of({to: {name: "Zoë", email: "zoe@example.com"}, subject: "Résumé", text: "x"})
+    assert(contains(s, "To: =?UTF-8?B?Wm/Dqw==?= <zoe@example.com>\r\n"))
+    assert(contains(s, "Subject: =?UTF-8?B?UsOpc3Vtw6k=?=\r\n"))
+    long ::mime/encode-words(join(map(range(0, 40), (i) { "é" }), ""))
+    words split(long, "\r\n ")
+    assert(gt(length(words), 1), "long text is split into several encoded words")
+    assert(all(words, (w) { lte(length(w), 75) }), "each encoded word fits in 75 characters")
+    assert-eq("ASCII stays", ::mime/encode-header-text("ASCII stays"))
+}
+
+test-non-ascii-body-is-base64
+meta ["test"] fn () {
+    s text-of({to: "a@example.com", text: "Grüße"})
+    assert(contains(s, "Content-Transfer-Encoding: base64\r\n\r\nR3LDvMOfZQ=="))
+    long-line join(map(range(0, 1100), (i) { "a" }), "")
+    l text-of({to: "a@example.com", text: long-line})
+    assert(contains(l, "Content-Transfer-Encoding: base64"), "lines over 998 characters force base64")
+}
+
+test-html-and-text-alternative
+meta ["test"] fn () {
+    s text-of({to: "a@example.com", subject: "S", text: "plain", html: "<p>rich</p>"})
+    assert(contains(s, "Content-Type: multipart/alternative; boundary=\"a_BOUND\"\r\n\r\n--a_BOUND\r\nContent-Type: text/plain"))
+    assert(contains(s, "--a_BOUND\r\nContent-Type: text/html; charset=\"UTF-8\"\r\nContent-Transfer-Encoding: 7bit\r\n\r\n<p>rich</p>\r\n--a_BOUND--\r\n"))
+    html-only text-of({to: "a@example.com", html: "<p>x</p>"})
+    assert(contains(html-only, "Content-Type: text/html"))
+    assert(not(contains(html-only, "multipart")))
+}
+
+// 0x00, 0xFF and an invalid UTF-8 sequence
+BINARY Bytes([0, 255, 195, 40, 10, 13])
+
+test-attachments-are-base64-and-binary-safe
+meta ["test"] fn () {
+    raw ::mime/build-message({to: "a@example.com", text: "see file", attachments: [{filename: "blob.bin", content: BINARY}]}, B)
+    s Str(raw)
+    assert(contains(s, "Content-Type: multipart/mixed; boundary=\"m_BOUND\""))
+    assert(contains(s, "Content-Type: application/octet-stream; name=\"blob.bin\"\r\nContent-Disposition: attachment; filename=\"blob.bin\"\r\nContent-Transfer-Encoding: base64\r\n\r\nAP/DKAoN\r\n--m_BOUND--"))
+    pdf Str(::mime/attachment-part({filename: "report.pdf", content: "x"}))
+    assert(starts-with(pdf, "Content-Type: application/pdf;"), "the type is guessed from the filename")
+    big Str(::mime/attachment-part({filename: "a.txt", content: join(map(range(0, 100), (i) { "abc" }), ""), mime-type: "text/plain"}))
+    lines filter(split(last(split(big, "\r\n\r\n")), "\r\n"), (l) { not(eq(l, "")) })
+    assert(all(lines, (l) { lte(length(l), 76) }), "base64 lines are at most 76 characters")
+    assert(gt(length(lines), 1))
+}
+
+test-attachment-names-and-errors
+meta ["test"] fn () {
+    p ::mime/filename-params("résumé.pdf")
+    assert-eq("; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf", p.filename)
+    assert(starts-with(p.name, "; name=\"=?UTF-8?B?"))
+    inline Str(::mime/attachment-part({filename: "logo.png", content: BINARY, content-id: "<logo@x>"}))
+    assert(contains(inline, "Content-Disposition: inline; filename=\"logo.png\""))
+    assert(contains(inline, "Content-ID: <logo@x>\r\n"))
+    assert(is-err(::mime/build-message({to: "a@example.com", text: "x", attachments: [{content: "x"}]}, B)), "a filename is required")
+    assert(is-err(::mime/build-message({to: "a@example.com", text: "x", attachments: [{filename: "a", content: "x", mime-type: "text/plain\r\nX: y"}]}, B)), "bad MIME types are rejected")
+    eml Str(::mime/attachment-part({filename: "f.eml", content: "Subject: x\r\n\r\nbody", mime-type: "message/rfc822"}))
+    assert(contains(eml, "Content-Transfer-Encoding: 8bit\r\n\r\nSubject: x\r\n\r\nbody"), "forwarded messages are embedded as is")
+}
+
+test-reply-threading-headers
+meta ["test"] fn () {
+    s text-of({to: "a@example.com", subject: "Re: x", text: "y", in-reply-to: "<m1@mail.example>", references: ["<m0@mail.example>", "m1@mail.example"]})
+    assert(contains(s, "In-Reply-To: <m1@mail.example>\r\n"))
+    assert(contains(s, "References: <m0@mail.example>\r\n <m1@mail.example>\r\n"))
+}
+
+test-raw-and-related-bodies
+meta ["test"] fn () {
+    assert-eq("SGk", ::mime/to-raw("Hi"), "base64url without padding")
+    body ::mime/build-related({threadId: "t1", labelIds: null}, BINARY, "R")
+    expected concat(Bytes("--R\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{\"threadId\":\"t1\"}\r\n--R\r\nContent-Type: message/rfc822\r\n\r\n"), BINARY, Bytes("\r\n--R--\r\n"))
+    assert-eq(expected, body)
+    assert(contains(::mime/new-boundary(), "=_"))
 }

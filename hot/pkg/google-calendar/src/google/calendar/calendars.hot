@@ -1,0 +1,159 @@
+::google::calendar::calendars ns
+meta {
+    doc: """
+    Calendars: the user's calendar list (the calendars they see, with
+    their colors and access roles), calendar metadata, creating
+    secondary calendars, the color palette, and free/busy queries.
+
+    **Scopes.** Reads use `calendar.readonly`; `create-calendar` uses
+    `calendar`; `query-free-busy` uses `calendar.freebusy`
+    (`calendar.readonly` works too).
+    """
+}
+
+::cal ::google::calendar
+::api ::google::api
+
+// ---------------------------------------------------------------------------
+// Calendar list
+// ---------------------------------------------------------------------------
+
+list-calendars
+meta {
+    doc: """GET /users/me/calendarList - one page of the user's calendars: `{items: [{id, summary, timeZone, accessRole, primary?, ...}], nextPageToken?, nextSyncToken?}`. Options: `minAccessRole` (`freeBusyReader`, `reader`, `writer`, `owner`), `showHidden`, `showDeleted`, `maxResults` (max 250), `pageToken`, `syncToken`. Scope: `calendar.readonly`."""
+}
+fn
+(): Map {
+  list-calendars({})
+},
+(opts: Map): Map {
+  ::cal/json(::cal/READ_SCOPE, "GET", ::cal/url("/users/me/calendarList", ::cal/query-params({}, opts)), "", opts)
+}
+
+list-all-calendars
+meta {
+    doc: """Every calendar on the user's list (all pages). Same options as `list-calendars`. Scope: `calendar.readonly`."""
+}
+fn
+(): Vec {
+  list-all-calendars({})
+},
+(opts: Map): Vec {
+  sized if(is-some(get(opts, "maxResults")), opts, {...opts, maxResults: 250})
+  ::api/collect-pages((token) { list-calendars({...sized, pageToken: token}) }, "items")
+}
+
+get-calendar-list-entry
+meta {
+    doc: """GET /users/me/calendarList/{calendarId} - the user's entry for one calendar (summary, color, `accessRole`, notification settings). Scope: `calendar.readonly`."""
+}
+fn
+(calendar-id: Str): Map {
+  get-calendar-list-entry(calendar-id, {})
+},
+(calendar-id: Str, opts: Map): Map {
+  ::cal/json(::cal/READ_SCOPE, "GET", ::cal/url(`/users/me/calendarList/${::cal/encode-id(calendar-id)}`), "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Calendars
+// ---------------------------------------------------------------------------
+
+get-calendar
+meta {
+    doc: """GET /calendars/{calendarId} - calendar metadata: `id`, `summary`, `description`, `timeZone`, `location`. `"primary"` is the user's main calendar. Scope: `calendar.readonly`."""
+}
+fn
+(calendar-id: Str): Map {
+  get-calendar(calendar-id, {})
+},
+(calendar-id: Str, opts: Map): Map {
+  ::cal/json(::cal/READ_SCOPE, "GET", ::cal/url(::cal/calendar-path(calendar-id)), "", opts)
+}
+
+build-calendar
+meta {
+    doc: """The `calendars.insert` body (pure): `{summary}` plus `timeZone` (IANA), `description` and `location` from `opts` when set."""
+}
+fn (summary: Str, opts: Map): Map {
+  ::cal/compact({summary: summary, timeZone: get(opts, "timeZone"), description: get(opts, "description"), location: get(opts, "location")})
+}
+
+create-calendar
+meta {
+    doc: """POST /calendars - create a secondary calendar owned by the user. Options: `timeZone`, `description`, `location`. Returns the calendar with its new `id`. Scope: `calendar`."""
+}
+fn
+(summary: Str): Map {
+  create-calendar(summary, {})
+},
+(summary: Str, opts: Map): Map {
+  ::cal/json(::cal/SCOPE, "POST", ::cal/url("/calendars"), build-calendar(summary, opts), opts)
+}
+
+get-colors
+meta {
+    doc: """GET /colors - the color palette: `{calendar: {id: {background, foreground}}, event: {...}}`. Use the ids as `colorId` on events and calendar-list entries. Scope: `calendar.readonly`."""
+}
+fn
+(): Map {
+  get-colors({})
+},
+(opts: Map): Map {
+  ::cal/json(::cal/READ_SCOPE, "GET", ::cal/url("/colors"), "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Free/busy
+// ---------------------------------------------------------------------------
+
+build-free-busy
+meta {
+    doc: """The `freeBusy` body (pure): `{timeMin, timeMax, items: [{id}]}` plus `timeZone`, `groupExpansionMax` and `calendarExpansionMax` from `opts` when set. `calendar-ids` may name users' primary calendars by email, or groups."""
+}
+fn (time-min: Str, time-max: Str, calendar-ids: Vec, opts: Map): Map {
+  ::cal/compact({
+    timeMin: time-min,
+    timeMax: time-max,
+    timeZone: get(opts, "timeZone"),
+    groupExpansionMax: get(opts, "groupExpansionMax"),
+    calendarExpansionMax: get(opts, "calendarExpansionMax"),
+    items: map(calendar-ids, (id) { {id: id} })
+  })
+}
+
+query-free-busy
+meta {
+    doc: """
+    POST /freeBusy - busy periods for calendars between `time-min` and
+    `time-max` (RFC 3339). Returns `{calendars: {id: {busy: [{start,
+    end}], errors?}}, groups?, timeMin, timeMax}`; a calendar you cannot
+    see has `errors` instead of `busy`. Scope: `calendar.freebusy`.
+
+    ```hot
+    fb ::google::calendar::calendars/query-free-busy("2026-11-03T13:00:00Z", "2026-11-03T22:00:00Z", ["ada@example.com", "bob@example.com"])
+    ::google::calendar::calendars/busy-periods(fb, "ada@example.com")
+    ```
+    """
+}
+fn
+(time-min: Str, time-max: Str, calendar-ids: Vec): Map {
+  query-free-busy(time-min, time-max, calendar-ids, {})
+},
+(time-min: Str, time-max: Str, calendar-ids: Vec, opts: Map): Map {
+  ::cal/json(::cal/FREEBUSY_SCOPE, "POST", ::cal/url("/freeBusy"), build-free-busy(time-min, time-max, calendar-ids, opts), opts)
+}
+
+busy-periods
+meta {
+    doc: """The `busy` periods (`[{start, end}]`) for one calendar in a `query-free-busy` response (pure), or an Err carrying Google's error reasons when that calendar could not be read."""
+}
+fn (response: Map, calendar-id: Str): Vec {
+  entry get(or(get(response, "calendars"), {}), calendar-id)
+  errors if(is-map(entry), or(get(entry, "errors"), []), [])
+  cond {
+    is-null(entry) => { err(`google-calendar: ${calendar-id} is not in the free/busy response`) }
+    not(is-empty(errors)) => { err(`google-calendar: free/busy for ${calendar-id} failed: ${join(map(errors, (e) { Str(get(e, "reason")) }), ", ")}`) }
+    => { or(get(entry, "busy"), []) }
+  }
+}

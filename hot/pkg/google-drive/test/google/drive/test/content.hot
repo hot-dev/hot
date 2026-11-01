@@ -1,0 +1,87 @@
+::google::drive::test::content ns
+meta ["test"]
+
+::drive ::google::drive
+::content ::google::drive::content
+
+test-export-mime-type-defaults
+meta ["test"] fn () {
+    assert-eq("text/markdown", ::content/export-mime-type(::drive/DOCUMENT_MIME, "auto"))
+    assert-eq("text/markdown", ::content/export-mime-type(::drive/DOCUMENT_MIME, null))
+    assert-eq("text/csv", ::content/export-mime-type(::drive/SPREADSHEET_MIME, "auto"))
+    assert-eq("text/plain", ::content/export-mime-type(::drive/PRESENTATION_MIME, "auto"))
+    assert-eq("image/svg+xml", ::content/export-mime-type(::drive/DRAWING_MIME, "auto"))
+    assert-eq("application/vnd.google-apps.script+json", ::content/export-mime-type(::drive/SCRIPT_MIME, ""))
+}
+
+test-export-mime-type-names
+meta ["test"] fn () {
+    assert-eq("text/plain", ::content/export-mime-type(::drive/DOCUMENT_MIME, "text"))
+    assert-eq("application/pdf", ::content/export-mime-type(::drive/DOCUMENT_MIME, "PDF"))
+    assert-eq("application/vnd.openxmlformats-officedocument.wordprocessingml.document", ::content/export-mime-type(::drive/DOCUMENT_MIME, "docx"))
+    assert-eq("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ::content/export-mime-type(::drive/SPREADSHEET_MIME, "xlsx"))
+    assert-eq("application/vnd.openxmlformats-officedocument.presentationml.presentation", ::content/export-mime-type(::drive/PRESENTATION_MIME, "pptx"))
+    assert-eq("image/png", ::content/export-mime-type(::drive/DRAWING_MIME, "png"))
+    assert-eq("application/epub+zip", ::content/export-mime-type(::drive/DOCUMENT_MIME, "application/epub+zip"), "a full MIME type passes through")
+}
+
+test-export-mime-type-errors
+meta ["test"] fn () {
+    no-md ::content/export-mime-type(::drive/SPREADSHEET_MIME, "markdown")
+    assert(is-err(no-md))
+    assert(contains(err-message(no-md), "Google Sheets"))
+    assert(contains(err-message(no-md), "csv"), "the error lists the supported formats")
+    form ::content/export-mime-type(::drive/FORM_MIME, "auto")
+    assert(is-err(form))
+    assert(contains(err-message(form), "cannot be exported"))
+    assert(contains(err-message(::content/export-mime-type(::drive/VID_MIME, "auto")), "files.download"))
+}
+
+test-range-math
+meta ["test"] fn () {
+    assert-eq("bytes=0-1023", ::content/range-header(0, 1023))
+    assert-eq("bytes=500-", ::content/range-header(500, null))
+    assert-eq([[0, 3], [4, 7], [8, 9]], ::content/download-ranges(10, 4))
+    assert-eq([[0, 9]], ::content/download-ranges(10, 16))
+    assert-eq([], ::content/download-ranges(0, 16))
+}
+
+test-error-classifiers
+meta ["test"] fn () {
+    assert(::content/is-size-limit-error(err("::hot::http/request: response Content-Length exceeds 16777216 bytes")))
+    assert(not(::content/is-size-limit-error(err("::hot::http/request: request failed"))))
+    too-big err(::google::api/error-from-response({status: 403, headers: {}, body: {error: {code: 403, message: "This file is too large to be exported.", errors: [{reason: "exportSizeLimitExceeded"}]}}}))
+    assert(::content/is-export-too-large(too-big))
+    assert(not(::content/is-export-too-large(err("google: HTTP 404 (notFound): File not found"))))
+}
+
+test-content-from-response-keeps-bytes
+meta ["test"] fn () {
+    // The runtime decodes a JSON body into a Map; content must come from body-bytes.
+    json ::drive/content-from-response("f1", {status: 200, headers: {"content-type": "application/json; charset=UTF-8"}, body: {a: 1}, body-bytes: Bytes("{\"a\": 1}")}, "download")
+    assert(is-bytes(json.bytes))
+    assert-eq("{\"a\": 1}", json.text, "a JSON file is returned verbatim, not as a Map")
+    assert-eq("application/json", json.mime-type)
+    assert-eq(8, json.size)
+
+    number ::drive/content-from-response("f2", {status: 200, headers: {"content-type": "text/plain"}, body: 123, body-bytes: Bytes("123")}, "download")
+    assert-eq("123", number.text, "a file containing 123 stays text, not an Int")
+
+    binary ::drive/content-from-response("f3", {status: 200, headers: {"content-type": "application/octet-stream"}, body: Bytes([0, 255]), body-bytes: Bytes([0, 255])}, "download")
+    assert-eq(Bytes([0, 255]), binary.bytes)
+    assert(is-null(binary.text), "binary content has no text")
+    assert-eq("f3", binary.file-id)
+    assert-eq("download", binary.source)
+}
+
+test-textual-mime
+meta ["test"] fn () {
+    assert(::drive/is-textual-mime("text/markdown"))
+    assert(::drive/is-textual-mime("text/csv; charset=utf-8"))
+    assert(::drive/is-textual-mime("application/vnd.google-apps.script+json"))
+    assert(::drive/is-textual-mime("image/svg+xml"))
+    assert(not(::drive/is-textual-mime("application/pdf")))
+    assert(not(::drive/is-textual-mime(null)))
+    assert-eq("text/plain", ::drive/base-mime("Text/Plain; charset=UTF-8"))
+    assert-eq("café", ::drive/content-text({text: null, bytes: Bytes("café")}))
+}

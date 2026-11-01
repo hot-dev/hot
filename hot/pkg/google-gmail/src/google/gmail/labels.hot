@@ -1,0 +1,116 @@
+::google::gmail::labels ns
+meta {
+    doc: """
+    Labels: list, get, create, update, delete, find by name, and
+    `ensure-label`. System labels (`INBOX`, `UNREAD`, `STARRED`,
+    `IMPORTANT`, `SPAM`, `TRASH`, `SENT`, `DRAFT`, `CATEGORY_*`) have ids
+    equal to their names; user labels have generated ids (`Label_12`).
+    Nested labels use `/` in the name (`"Clients/Acme"`).
+
+    **Scopes.** Reads use `gmail.readonly`; create, update and delete
+    `gmail.labels` (`gmail.modify` also works).
+    """
+}
+
+::gmail ::google::gmail
+
+LABEL_FIELDS ["labelListVisibility", "messageListVisibility", "color"]
+
+list-labels
+meta {
+    doc: """GET /users/me/labels - every label in the mailbox: `{labels: [{id, name, type, ...}]}` (not paginated). Scope: `gmail.readonly`."""
+}
+fn
+(): Map {
+  list-labels({})
+},
+(opts: Map): Map {
+  ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url("/labels"), "", opts)
+}
+
+get-label
+meta {
+    doc: """GET /users/me/labels/{id} - one label with its message and thread counts. Scope: `gmail.readonly`."""
+}
+fn
+(id: Str): Map {
+  get-label(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url(`/labels/${::gmail/encode-id(id)}`), "", opts)
+}
+
+find-label
+meta {
+    doc: """The label whose name equals `name` (case-insensitive), or null. Scope: `gmail.readonly`."""
+}
+fn
+(name: Str): Map? {
+  find-label(name, {})
+},
+(name: Str, opts: Map): Map? {
+  all list-labels(opts)
+  n lowercase(name)
+  if(is-err(all), all, find-first(or(all.labels, []), (l) { eq(lowercase(or(l.name, "")), n) }))
+}
+
+build-label
+meta {
+    doc: """The label body for `create-label` (pure): `{name}` plus any of `labelListVisibility` (`labelShow`, `labelShowIfUnread`, `labelHide`), `messageListVisibility` (`show`, `hide`) and `color` (`{textColor, backgroundColor}` from Gmail's palette) found in `opts`."""
+}
+fn (name: Str, opts: Map): Map {
+  ::gmail/compact({...filter-keys(opts, (k) { in(k, LABEL_FIELDS) }), name: name})
+}
+
+create-label
+meta {
+    doc: """POST /users/me/labels - create a user label. Options: see `build-label`. Gmail rejects a duplicate name with 409; use `ensure-label` to reuse an existing one. Scope: `gmail.labels`."""
+}
+fn
+(name: Str): Map {
+  create-label(name, {})
+},
+(name: Str, opts: Map): Map {
+  ::gmail/json(::gmail/LABELS_SCOPE, "POST", ::gmail/url("/labels"), build-label(name, opts), opts)
+}
+
+ensure-label
+meta {
+    doc: """The label named `name`, created when missing. Scopes: `gmail.readonly` and `gmail.labels`."""
+}
+fn
+(name: Str): Map {
+  ensure-label(name, {})
+},
+(name: Str, opts: Map): Map {
+  existing find-label(name, opts)
+  cond {
+    is-err(existing) => { existing }
+    is-some(existing) => { existing }
+    => { create-label(name, opts) }
+  }
+}
+
+update-label
+meta {
+    doc: """PATCH /users/me/labels/{id} - change the given fields of a user label (`name`, `labelListVisibility`, `messageListVisibility`, `color`). Scope: `gmail.labels`."""
+}
+fn
+(id: Str, changes: Map): Map {
+  update-label(id, changes, {})
+},
+(id: Str, changes: Map, opts: Map): Map {
+  ::gmail/json(::gmail/LABELS_SCOPE, "PATCH", ::gmail/url(`/labels/${::gmail/encode-id(id)}`), ::gmail/compact(changes), opts)
+}
+
+delete-label
+meta {
+    doc: """DELETE /users/me/labels/{id} - delete a user label (it is removed from every message; the messages stay). Returns true. Scope: `gmail.labels`."""
+}
+fn
+(id: Str): Bool {
+  delete-label(id, {})
+},
+(id: Str, opts: Map): Bool {
+  ::gmail/done(::gmail/json(::gmail/LABELS_SCOPE, "DELETE", ::gmail/url(`/labels/${::gmail/encode-id(id)}`), "", opts))
+}

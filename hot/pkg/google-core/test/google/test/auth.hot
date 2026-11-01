@@ -1,7 +1,12 @@
 ::google::test::auth ns
 meta ["test"]
 
+// Hermetic: these tests never set google.* context (other suites in the
+// pkg-test-google project rely on "no credentials" being the default).
+
 ::auth ::google::auth
+
+SA_JSON """{"type": "service_account", "client_email": "svc@proj.iam.gserviceaccount.com", "private_key_id": "kid-1", "private_key": "fake-pem"}"""
 
 test-service-account-claims
 meta ["test"] fn () {
@@ -11,10 +16,158 @@ meta ["test"] fn () {
     assert-eq("https://www.googleapis.com/auth/drive", claims.scope)
     assert-eq(3600, sub(claims.exp, claims.iat))
     assert(not(in("sub", keys(claims))), "no sub without impersonation")
+    blank ::auth/build-service-account-claims("svc@p.iam", "scope", "  ")
+    assert(not(in("sub", keys(blank))), "a blank subject is treated as absent")
 }
 
 test-service-account-claims-with-impersonation
 meta ["test"] fn () {
     claims ::auth/build-service-account-claims("svc@p.iam", "scope", "user@example.com")
     assert-eq("user@example.com", claims.sub)
+}
+
+test-expand-scope
+meta ["test"] fn () {
+    assert-eq("https://www.googleapis.com/auth/drive.file", ::auth/expand-scope("drive.file"))
+    assert-eq("https://www.googleapis.com/auth/drive", ::auth/expand-scope("https://www.googleapis.com/auth/drive"))
+    assert-eq("openid", ::auth/expand-scope("openid"))
+    assert-eq("email", ::auth/expand-scope(" email "))
+}
+
+test-normalize-scopes
+meta ["test"] fn () {
+    scopes ::auth/normalize-scopes("drive.readonly, gmail.readonly  drive.readonly")
+    assert-eq(["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/gmail.readonly"], scopes)
+    assert-eq([], ::auth/normalize-scopes(null))
+    assert-eq([], ::auth/normalize-scopes(""))
+    assert-eq(["https://www.googleapis.com/auth/drive"], ::auth/normalize-scopes(["drive", ""]))
+}
+
+test-effective-scopes-prefers-opts
+meta ["test"] fn () {
+    from-default ::auth/effective-scopes("https://www.googleapis.com/auth/drive", {})
+    assert-eq(["https://www.googleapis.com/auth/drive"], from-default)
+    from-opts ::auth/effective-scopes("https://www.googleapis.com/auth/drive", {scopes: "drive.file"})
+    assert-eq(["https://www.googleapis.com/auth/drive.file"], from-opts)
+}
+
+test-merge-sources-precedence
+meta ["test"] fn () {
+    ctx {token: "ctx-token", subject: "ctx-user@example.com"}
+    // A primary credential in opts replaces context entirely
+    picked ::auth/merge-sources({token: "opt-token"}, ctx)
+    assert-eq("opt-token", picked.token)
+    assert(is-null(picked.subject), "context subject does not leak into per-call credentials")
+    // Only a subject in opts: context credentials, per-call subject
+    sub-only ::auth/merge-sources({subject: "alice@example.com"}, ctx)
+    assert-eq("ctx-token", sub-only.token)
+    assert-eq("alice@example.com", sub-only.subject)
+    // Nothing in opts: context as-is
+    assert-eq(ctx, ::auth/merge-sources({}, ctx))
+}
+
+test-credentials-from-token
+meta ["test"] fn () {
+    creds ::auth/credentials-from({token: "ya29.abc", refresh-token: "ignored"})
+    assert-eq("token", creds.kind)
+    assert-eq("ya29.abc", creds.token)
+}
+
+test-credentials-from-refresh-requires-client-id
+meta ["test"] fn () {
+    missing ::auth/credentials-from({refresh-token: "1//r"})
+    assert(is-err(missing), "a refresh token without client-id is rejected up front")
+    assert(contains(err-message(missing), "client-id is missing"))
+
+    ok ::auth/credentials-from({refresh-token: "1//r", client-id: "cid", client-secret: ""})
+    assert-eq("refresh", ok.kind)
+    assert-eq("cid", ok.client-id)
+    assert(is-null(ok.client-secret), "a blank secret is omitted, not sent empty")
+}
+
+test-credentials-from-service-account
+meta ["test"] fn () {
+    creds ::auth/credentials-from({service-account: SA_JSON, subject: "user@example.com"})
+    assert-eq("service-account", creds.kind)
+    assert-eq("svc@proj.iam.gserviceaccount.com", get(creds, "service-account").client_email)
+    assert-eq("user@example.com", creds.subject)
+
+    as-map ::auth/credentials-from({service-account: {client_email: "a@b", private_key: "k"}})
+    assert-eq("service-account", as-map.kind)
+    assert(is-null(as-map.subject))
+
+    bad ::auth/credentials-from({service-account: "{not json"})
+    assert(is-err(bad))
+    assert(contains(err-message(bad), "not valid JSON"))
+
+    incomplete ::auth/credentials-from({service-account: """{"client_email": "a@b"}"""})
+    assert(is-err(incomplete))
+    assert(contains(err-message(incomplete), "private_key"))
+}
+
+test-credentials-from-authorized-user-key
+meta ["test"] fn () {
+    adc """{"type": "authorized_user", "client_id": "cid", "client_secret": "sec", "refresh_token": "1//r"}"""
+    creds ::auth/credentials-from({service-account: adc})
+    assert-eq("refresh", creds.kind, "gcloud ADC user files act as refresh credentials")
+    assert-eq("cid", creds.client-id)
+    assert-eq("1//r", get(creds, "refresh-token"))
+}
+
+test-credentials-from-api-key-and-none
+meta ["test"] fn () {
+    creds ::auth/credentials-from({api-key: "AIza-test"})
+    assert-eq("api-key", creds.kind)
+
+    none ::auth/credentials-from({token: "", service-account: ""})
+    assert(is-err(none))
+    assert(contains(err-message(none), "no credentials"))
+}
+
+test-token-cache-key
+meta ["test"] fn () {
+    sa ::auth/credentials-from({service-account: SA_JSON})
+    drive ["https://www.googleapis.com/auth/drive"]
+    both ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/drive"]
+    both-reordered ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/gmail.readonly"]
+    k1 ::auth/token-cache-key(sa, drive)
+    assert(starts-with(k1, "google.token-cache."))
+    assert-eq(k1, ::auth/token-cache-key(sa, drive), "stable")
+    assert(ne(k1, ::auth/token-cache-key(sa, both)), "scope set is part of the key")
+    assert-eq(::auth/token-cache-key(sa, both), ::auth/token-cache-key(sa, both-reordered), "scope order does not matter")
+    impersonating ::auth/credentials-from({service-account: SA_JSON, subject: "u@example.com"})
+    assert(ne(k1, ::auth/token-cache-key(impersonating, drive)), "subject is part of the key")
+
+    refresh ::auth/credentials-from({refresh-token: "1//r", client-id: "cid"})
+    assert-eq(::auth/token-cache-key(refresh, drive), ::auth/token-cache-key(refresh, both), "refresh tokens ignore scopes")
+    other-user ::auth/credentials-from({refresh-token: "1//other", client-id: "cid"})
+    assert(ne(::auth/token-cache-key(refresh, drive), ::auth/token-cache-key(other-user, drive)))
+    assert(not(contains(::auth/token-cache-key(refresh, drive), "1//r")), "the key never embeds the secret")
+
+    assert(is-null(::auth/token-cache-key({kind: "token", token: "t"}, drive)), "explicit tokens are not cached")
+}
+
+test-cache-entry-expiry-margin
+meta ["test"] fn () {
+    entry ::auth/cache-entry({access_token: "ya29.x", expires_in: 3599}, 1000000)
+    assert-eq("ya29.x", entry.access-token)
+    assert-eq(add(1000000, mul(3539, 1000)), entry.expires-at, "expires 60s early")
+    assert(::auth/is-fresh(entry, 1000000))
+    assert(not(::auth/is-fresh(entry, entry.expires-at)), "stale at the margin-adjusted expiry")
+    assert(not(::auth/is-fresh(null, 0)), "a missing entry is not fresh")
+}
+
+test-token-error-messages
+meta ["test"] fn () {
+    e ::auth/token-error("google: token exchange failed", {
+        status: 400,
+        body: {error: "invalid_grant", error_description: "Token has been expired or revoked."}
+    })
+    assert-eq("google: token exchange failed: invalid_grant (Token has been expired or revoked.)", e.message)
+    assert-eq("invalid_grant", e.error-code)
+    assert-eq(400, e.status)
+
+    transport ::auth/token-error("google: token exchange failed", "::hot::http/request: request failed: dns")
+    assert(contains(transport.message, "request failed: dns"))
+    assert-eq("google: token exchange failed: invalid_grant (Token has been expired or revoked.)", err-message(err(e)))
 }

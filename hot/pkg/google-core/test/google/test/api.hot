@@ -1,0 +1,193 @@
+::google::test::api ns
+meta ["test"]
+
+::api ::google::api
+
+DRIVE_404 {
+    error: {
+        code: 404,
+        message: "File not found: 1AbC.",
+        status: "NOT_FOUND",
+        errors: [{domain: "global", reason: "notFound", message: "File not found: 1AbC.", location: "fileId", locationType: "parameter"}]
+    }
+}
+
+test-error-from-response-google-shape
+meta ["test"] fn () {
+    e ::api/error-from-response({status: 404, headers: {}, body: DRIVE_404})
+    assert-eq(404, e.status)
+    assert-eq("notFound", e.reason)
+    assert-eq(["notFound"], e.reasons)
+    assert-eq("NOT_FOUND", e.error-status)
+    assert-eq("File not found: 1AbC.", e.error-message)
+    assert-eq("google: HTTP 404 NOT_FOUND (notFound): File not found: 1AbC.", e.message)
+    assert-eq(e.message, err-message(err(e)), "err-message reads the readable message")
+}
+
+test-error-from-response-oauth-and-raw-shapes
+meta ["test"] fn () {
+    oauth ::api/error-from-response({status: 400, headers: {}, body: {error: "invalid_grant", error_description: "Bad Request"}})
+    assert-eq("invalid_grant", oauth.reason)
+    assert-eq("google: HTTP 400 (invalid_grant): Bad Request", oauth.message)
+
+    html ::api/error-from-response({status: 502, headers: {}, body: "<html>Bad Gateway</html>"})
+    assert(is-null(html.reason))
+    assert-eq("google: HTTP 502: <html>Bad Gateway</html>", html.message)
+
+    bytes ::api/error-from-response({status: 403, headers: {}, body: Bytes(to-json(DRIVE_404))})
+    assert-eq("notFound", bytes.reason, "a JSON error delivered as Bytes is still decoded")
+}
+
+test-error-message-excerpt-is-bounded
+meta ["test"] fn () {
+    long join(map(range(0, 100), (i) { "abcdefgh" }), "")
+    e ::api/error-from-response({status: 500, headers: {}, body: long})
+    assert(lt(length(e.message), 340), "long bodies are truncated")
+    assert(ends-with(e.message, "..."))
+}
+
+test-has-reason
+meta ["test"] fn () {
+    e err(::api/error-from-response({status: 404, headers: {}, body: DRIVE_404}))
+    assert(::api/has-reason(e, "notFound"))
+    assert(not(::api/has-reason(e, "rateLimitExceeded")))
+    assert(not(::api/has-reason(err("plain"), "notFound")))
+    assert(::api/has-reason(::api/error-from-response({status: 404, headers: {}, body: DRIVE_404}), "notFound"), "a bare HttpError")
+}
+
+test-retryable-statuses
+meta ["test"] fn () {
+    assert(::api/is-retryable-status(429, null))
+    assert(::api/is-retryable-status(503, ""))
+    assert(::api/is-retryable-status(500, {}))
+    assert(not(::api/is-retryable-status(404, DRIVE_404)))
+    assert(not(::api/is-retryable-status(400, {})))
+    rate {error: {code: 403, message: "User Rate Limit Exceeded", errors: [{reason: "userRateLimitExceeded"}]}}
+    assert(::api/is-retryable-status(403, rate), "403 userRateLimitExceeded is retried")
+    forbidden {error: {code: 403, message: "nope", errors: [{reason: "insufficientFilePermissions"}]}}
+    assert(not(::api/is-retryable-status(403, forbidden)), "a permission 403 is not retried")
+}
+
+test-retryable-transport
+meta ["test"] fn () {
+    assert(::api/is-retryable-transport("GET", "::hot::http/request: request failed: connection reset"))
+    assert(not(::api/is-retryable-transport("POST", "::hot::http/request: request failed: connection reset")), "POST is not idempotent")
+    assert(not(::api/is-retryable-transport("GET", "::hot::http/request: response body exceeds 16777216 bytes")), "size limits are final")
+}
+
+test-retry-after-on-http-error
+meta ["test"] fn () {
+    e ::api/error-from-response({status: 429, headers: {"retry-after": "30"}, body: {error: {code: 429, message: "slow down", status: "RESOURCE_EXHAUSTED"}}})
+    assert-eq(30, e.retry-after, "numeric Retry-After is surfaced in seconds")
+    dated ::api/error-from-response({status: 503, headers: {"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, body: ""})
+    assert(is-null(dated.retry-after), "an HTTP-date Retry-After is left null")
+    none ::api/error-from-response({status: 503, headers: {}, body: ""})
+    assert(is-null(none.retry-after))
+    assert-eq(0, ::api/retry-after-seconds({"retry-after": "-5"}), "negative values clamp to 0")
+    assert(is-null(::api/retry-after-seconds(null)))
+}
+
+test-is-retryable
+meta ["test"] fn () {
+    rate err(::api/error-from-response({status: 429, headers: {}, body: ""}))
+    assert(::api/is-retryable(rate), "429 Err")
+    assert(::api/is-retryable(err(::api/error-from-response({status: 503, headers: {}, body: ""}))), "503 Err")
+    user-rate {error: {code: 403, message: "User Rate Limit Exceeded", errors: [{reason: "userRateLimitExceeded"}]}}
+    assert(::api/is-retryable(err(::api/error-from-response({status: 403, headers: {}, body: user-rate}))), "rate-limit 403")
+    assert(::api/is-retryable(::api/error-from-response({status: 500, headers: {}, body: ""})), "a bare HttpError")
+    assert(::api/is-retryable({status: 502, headers: {}, body: ""}), "a raw HttpResponse")
+    assert(not(::api/is-retryable(err(::api/error-from-response({status: 404, headers: {}, body: DRIVE_404})))), "404 is permanent")
+    assert(not(::api/is-retryable(err(::api/error-from-response({status: 400, headers: {}, body: {}})))), "400 is permanent")
+    assert(::api/is-retryable(err("::hot::http/request: request failed: connection reset")), "connection failure")
+    assert(not(::api/is-retryable(err("google: no credentials configured"))), "credential errors are permanent")
+    assert(not(::api/is-retryable(err(::google::auth/token-error("google: token exchange failed: invalid_grant")))), "a TokenError without a status")
+    assert(::api/is-retryable(err(::google::auth/TokenError({message: "google: token endpoint", status: 503}))), "a 503 from the token endpoint")
+    assert(not(::api/is-retryable({id: "1"})), "a success is not retryable")
+}
+
+test-retry-policy-is-at-most-one-immediate-retry
+meta ["test"] fn () {
+    assert-eq({max-retries: 1}, ::api/retry-policy({}))
+    assert-eq({max-retries: 0}, ::api/retry-policy({retry: false}))
+    assert-eq({max-retries: 0}, ::api/retry-policy({retry: 0}))
+    assert-eq({max-retries: 1}, ::api/retry-policy({retry: 5}), "clamped to one")
+    assert-eq({max-retries: 1}, ::api/retry-policy({retry: {max-retries: 3}}))
+    assert-eq({max-retries: 0}, ::api/retry-policy({retry: -2}))
+}
+
+test-api-params-strips-core-keys
+meta ["test"] fn () {
+    params ::api/api-params({q: "x", pageSize: 10, token: "t", refresh-token: "r", scopes: "drive", retry: false, subject: "u"})
+    assert-eq({q: "x", pageSize: 10}, params)
+    creds ::api/credential-opts({q: "x", token: "t", retry: false})
+    assert-eq({token: "t", retry: false}, creds)
+}
+
+test-with-query
+meta ["test"] fn () {
+    assert-eq("https://x/y", ::api/with-query("https://x/y", {}))
+    assert-eq("https://x/y?a=1&b=true", ::api/with-query("https://x/y", {a: 1, b: true, c: null}))
+    assert-eq("https://x/y?alt=media&key=k", ::api/with-query("https://x/y?alt=media", {key: "k"}))
+    assert-eq("https://x/y?q=a+b&labelIds=INBOX&labelIds=UNREAD", ::api/with-query("https://x/y", {q: "a b", labelIds: ["INBOX", "UNREAD"]}), "a Vec repeats the key")
+    assert-eq("https://x/y?r=Sheet1%21A1", ::api/with-query("https://x/y", {r: ["Sheet1!A1"], e: []}), "repeated values are percent-encoded; an empty Vec adds nothing")
+}
+
+test-build-http-request-bodies
+meta ["test"] fn () {
+    json-req ::api/build-http-request("POST", "https://x", {}, {name: "a", parents: null}, "tok")
+    assert-eq("Bearer tok", json-req.headers.Authorization)
+    assert(starts-with(get(json-req.headers, "Content-Type"), "application/json"))
+    assert-eq("""{"name":"a","parents":null}""", json-req.body)
+
+    raw ::api/build-http-request("PUT", "https://x", {Content-Type: "text/plain"}, Bytes([0, 255]), null)
+    assert(is-bytes(raw.body), "Bytes bodies are passed through")
+    assert(not(in("Authorization", keys(raw.headers))), "no token, no Authorization header")
+    assert-eq("text/plain", get(raw.headers, "Content-Type"))
+
+    empty ::api/build-http-request("GET", "https://x", {}, "", "tok")
+    assert-eq("", empty.body)
+    assert(not(in("Content-Type", keys(empty.headers))))
+}
+
+test-unwrap
+meta ["test"] fn () {
+    assert-eq({id: "1"}, ::api/unwrap({status: 200, headers: {}, body: {id: "1"}}))
+    failed ::api/unwrap({status: 404, headers: {}, body: DRIVE_404})
+    assert(is-err(failed))
+    assert-eq("notFound", err-value(failed).reason)
+    passthrough ::api/unwrap(err("google: no credentials configured"))
+    assert(is-err(passthrough))
+}
+
+PAGES {
+    "": {files: [1, 2], nextPageToken: "p2"},
+    "p2": {files: [3], nextPageToken: "p3"},
+    "p3": {files: [4, 5], nextPageToken: ""}
+}
+
+test-fetch-page
+meta ["test"] fn () {
+    page ::api/fetch-page((t) { get(PAGES, or(t, "")) }, "files", null)
+    assert-eq([1, 2], page.items)
+    assert-eq("p2", page.next-page-token)
+    last ::api/fetch-page((t) { get(PAGES, or(t, "")) }, "files", "p3")
+    assert(is-null(last.next-page-token), "an empty nextPageToken ends pagination")
+    missing ::api/fetch-page((t) { {kind: "drive#fileList"} }, "files", null)
+    assert-eq([], missing.items, "a page without the items key is empty")
+}
+
+test-collect-pages
+meta ["test"] fn () {
+    fetch (t) { get(PAGES, or(t, "")) }
+    assert-eq([1, 2, 3, 4, 5], ::api/collect-pages(fetch, "files"))
+    assert-eq([1, 2, 3], ::api/collect-pages(fetch, "files", 3), "limit stops early and trims")
+    assert-eq([1], ::api/collect-pages(fetch, "files", 1))
+}
+
+test-collect-pages-propagates-errors
+meta ["test"] fn () {
+    failing (t) { if(is-null(t), {files: [1], nextPageToken: "boom"}, err("google: HTTP 500: backend")) }
+    result ::api/collect-pages(failing, "files")
+    assert(is-err(result), "a failing page fails the collection")
+    assert(contains(err-message(result), "backend"))
+}

@@ -1,8 +1,17 @@
 ::google::integration::sheets ns
 meta ["test"]
 
-// Live Sheets roundtrip (self-cleaning via Drive delete). Requires
-// GOOGLE_SERVICE_ACCOUNT.
+// Live Sheets roundtrip. Requires GOOGLE_SERVICE_ACCOUNT (set
+// GOOGLE_IMPERSONATE too for domain-wide delegation). Self-cleaning: the
+// spreadsheet it creates is deleted with a direct Drive REST call through
+// google-core, so this suite needs no google-drive dependency.
+
+::values ::google::sheets::values
+::books ::google::sheets::spreadsheets
+
+delete-spreadsheet fn (id: Str): Any {
+  ::google::api/json("drive.file", "DELETE", `https://www.googleapis.com/drive/v3/files/${::hot::uri/encode(id)}?supportsAllDrives=true`, {}, "")
+}
 
 test-spreadsheet-roundtrip
 meta ["test"] fn () {
@@ -10,21 +19,24 @@ meta ["test"] fn () {
         fail("Set GOOGLE_SERVICE_ACCOUNT in .env")
     )
 
-    sheet ::google::sheets/create-spreadsheet(`hot-it-${Uuid()}`)
-    assert(not(is-err(sheet)), `create-spreadsheet: ${if-err(sheet, (e) { Str(e) })}`)
-    id sheet.spreadsheetId
+    book ::books/create-spreadsheet(`hot-it-${Uuid()}`, {sheets: ["Data"]})
+    assert(not(is-err(book)), `create-spreadsheet: ${if-err(book, (e) { err-message(e) })}`)
+    id book.spreadsheetId
 
-    written ::google::sheets/update-values(id, "Sheet1!A1:B2", [["alpha", "beta"], ["gamma", "delta"]])
-    assert(not(is-err(written)), `update-values: ${if-err(written, (e) { Str(e) })}`)
+    written ::values/write-records(id, "Data!A1", [{name: "alpha", n: 1}, {name: "beta", n: 2}], ["name", "n"])
+    assert(not(is-err(written)), `write-records: ${if-err(written, (e) { err-message(e) })}`)
 
-    values ::google::sheets/get-values(id, "Sheet1!A1:B2")
-    assert-eq([["alpha", "beta"], ["gamma", "delta"]], values.values, "written values read back")
+    records ::values/read-records(id, "Data!A:B")
+    assert-eq([{name: "alpha", n: 1}, {name: "beta", n: 2}], records, "records read back")
 
-    appended ::google::sheets/append-values(id, "Sheet1!A:B", [["epsilon", "zeta"]])
-    assert(not(is-err(appended)), `append-values: ${if-err(appended, (e) { Str(e) })}`)
-    after ::google::sheets/get-values(id, "Sheet1!A1:B3")
-    assert-eq(3, length(after.values), "append adds a row")
+    appended ::values/append-records(id, "Data!A:B", [{name: "gamma", n: 3}], ["name", "n"])
+    assert(not(is-err(appended)), `append-records: ${if-err(appended, (e) { err-message(e) })}`)
+    assert-eq(3, length(::values/read-records(id, "Data!A:B")), "append adds a row")
 
-    cleaned ::google::drive/delete-file(id)
+    sheet-id ::books/sheet-id(id, "Data")
+    formatted ::books/format-header(id, sheet-id)
+    assert(not(is-err(formatted)), `format-header: ${if-err(formatted, (e) { err-message(e) })}`)
+
+    cleaned delete-spreadsheet(id)
     assert(not(is-err(cleaned)), "cleanup should succeed")
 }

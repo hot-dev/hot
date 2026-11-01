@@ -1,0 +1,515 @@
+::google::gmail::mime ns
+meta {
+    doc: """
+    Build RFC 5322 / MIME messages as Bytes, safe for LLM-supplied input.
+
+    - **No header injection.** CR, LF and other control characters in
+      the subject and extra header values are folded to a single space;
+      addresses containing them, malformed addresses and malformed header
+      names are rejected with an Err. Structural headers (`Content-Type`,
+      `MIME-Version`, ...) cannot be overridden through `headers`.
+    - **Non-ASCII** subjects, header values and display names are
+      RFC 2047 encoded (`=?UTF-8?B?...?=`, folded at 75 characters);
+      non-ASCII attachment names use RFC 2231 `filename*`.
+    - **Bodies.** Plain text, HTML, or both (`multipart/alternative`),
+      plus attachments (`multipart/mixed`). ASCII text with short lines is
+      sent `7bit`; anything else is base64 with 76-character lines.
+      Attachments are base64 (a forwarded `message/rfc822` is `8bit`).
+      Everything is concatenated as Bytes, so binary attachments arrive
+      intact.
+
+    **Message fields** (all optional except a body for sending): `from`,
+    `to`, `cc`, `bcc`, `reply-to` (a Str such as
+    `"Ada <ada@example.com>, bob@example.com"`, a Vec of such Strs, or
+    `{name, email}` Maps), `subject`, `text`, `html`, `attachments` (a
+    Vec of `{filename, content, mime-type?, content-id?, inline?}`,
+    `content` being Bytes or a Str), `in-reply-to`, `references` (a
+    Message-ID Str or Vec), and `headers` (extra headers as a Map).
+    Gmail adds `Date` and `Message-ID` and strips `Bcc` from delivered
+    copies.
+
+    ```hot
+    ::mime ::google::gmail::mime
+
+    raw ::mime/build-message({
+      to: ["Zoë Example <zoe@example.com>"],
+      subject: "Résumé attached",
+      text: "Hi Zoë, see attached.",
+      html: "<p>Hi Zoë, see attached.</p>",
+      attachments: [{filename: "résumé.pdf", content: Bytes([37, 80, 68, 70]), mime-type: "application/pdf"}]
+    })
+    ```
+    """
+}
+
+::b64 ::hot::base64
+::re ::hot::regex
+::str ::hot::str
+::uri ::hot::uri
+
+// Headers that the builder owns and `headers` may not set.
+RESERVED_HEADERS ["from", "to", "cc", "bcc", "reply-to", "subject", "in-reply-to", "references", "mime-version", "content-type", "content-transfer-encoding", "content-disposition"]
+
+EMAIL_PATTERN "^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
+HEADER_NAME_PATTERN "^[!-9;-~]+$"
+MIME_TYPE_PATTERN "^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$"
+ATOM_PHRASE_PATTERN "^[A-Za-z0-9!#$%&'*+/=?^_`{|}~ -]+$"
+CONTROL_PATTERN "[\\x00-\\x08\\x0A-\\x1F\\x7F]+"
+LINE_BREAK_PATTERN "[\\r\\n]"
+
+// Bytes of UTF-8 per RFC 2047 encoded word: 45 bytes is 60 base64
+// characters, which keeps `=?UTF-8?B?...?=` within 75.
+WORD_BYTES 45
+// ASCII header text longer than this is encoded (and so folded).
+MAX_PLAIN_HEADER 900
+
+// ---------------------------------------------------------------------------
+// Text helpers (pure)
+// ---------------------------------------------------------------------------
+
+is-ascii
+meta {doc: """True when `s` has only 7-bit ASCII characters."""}
+fn (s: Str): Bool {
+  not(::re/is-match(s, "[^\\x00-\\x7F]"))
+}
+
+has-line-break
+meta {doc: """True when `s` contains a CR or LF."""}
+fn (s: Str): Bool {
+  ::re/is-match(s, LINE_BREAK_PATTERN)
+}
+
+clean-header-value
+meta {
+    doc: """Fold every run of CR, LF and other control characters (tab excepted) to one space and trim, so a value can never start a new header line."""
+}
+fn (value: Any): Str {
+  trim(::re/replace-all(Str(value), CONTROL_PATTERN, " "))
+}
+
+utf8-chunks fn (text: Str, max-bytes: Int): Vec {
+  chars filter(split(text, ""), (c) { not(eq(c, "")) })
+  reduce(chars, (acc, ch) {
+    current last(acc)
+    candidate `${current}${ch}`
+    if(and(gt(length(Bytes(candidate)), max-bytes), not(eq(current, ""))),
+      concat(acc, [ch]),
+      concat(butlast(acc), [candidate]))
+  }, [""])
+}
+
+encode-words
+meta {
+    doc: """
+    RFC 2047 encode `text` as UTF-8 B encoded words, split on character
+    boundaries so each word stays within 75 characters, joined with a
+    folding `CRLF SP`: `encode-words("Zoë")` is `"=?UTF-8?B?Wm/Dqw==?="`.
+    """
+}
+fn (text: Str): Str {
+  join(map(utf8-chunks(text, WORD_BYTES), (c) { `=?UTF-8?B?${::b64/encode(c)}?=` }), "\r\n ")
+}
+
+encode-header-text
+meta {
+    doc: """A header value safe to emit: control characters folded (`clean-header-value`), then RFC 2047 encoded when it is not ASCII or is very long."""
+}
+fn (value: Any): Str {
+  v clean-header-value(value)
+  if(and(is-ascii(v), lte(length(v), MAX_PLAIN_HEADER)), v, encode-words(v))
+}
+
+encode-phrase
+meta {
+    doc: """A display name for an address header: as is when it is plain ASCII words, a quoted string when it has specials (`"Doe, Jane"`), or RFC 2047 encoded when it is not ASCII."""
+}
+fn (name: Str): Str {
+  n clean-header-value(name)
+  cond {
+    not(is-ascii(n)) => { encode-words(n) }
+    ::re/is-match(n, ATOM_PHRASE_PATTERN) => { n }
+    => {
+      escaped ::str/replace(::str/replace(n, "\\", "\\\\"), "\"", "\\\"")
+      `"${escaped}"`
+    }
+  }
+}
+
+normalize-newlines
+meta {doc: """Convert LF, CR and CRLF line endings to CRLF (what SMTP requires)."""}
+fn (text: Str): Str {
+  ::str/replace(::str/replace(::str/replace(text, "\r\n", "\n"), "\r", "\n"), "\n", "\r\n")
+}
+
+wrap-base64
+meta {
+    doc: """Break a base64 Str into CRLF-separated lines of at most 76 characters (RFC 2045)."""
+}
+fn (encoded: Str): Str {
+  trim-end(::re/replace-all(encoded, "(.{76})", "${1}\r\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Addresses (pure)
+// ---------------------------------------------------------------------------
+
+is-email
+meta {
+    doc: """True when `email` is a plain `local@domain.tld` address (ASCII; no display name, spaces or line breaks)."""
+}
+fn (email: Any): Bool {
+  and(is-str(email), ::re/is-match(email, EMAIL_PATTERN))
+}
+
+unquote fn (s: Str): Str {
+  t trim(s)
+  m ::re/capture(t, "^\"(.*)\"$")
+  if(is-null(m), t, ::str/replace(::str/replace(first(m.groups), "\\\"", "\""), "\\\\", "\\"))
+}
+
+read-address
+meta {
+    doc: """Parse one address (`"ada@example.com"`, `"Ada Lovelace <ada@example.com>"`, or `{name, email}`) into `{name, email, error}` (pure); `error` is null when the address is valid."""
+}
+fn (value: Any): Map {
+  parsed cond {
+    is-map(value) => { {name: get(value, "name"), email: trim(Str(or(get(value, "email"), "")))} }
+    => {
+      s trim(Str(value))
+      m ::re/capture(s, "^(.*)<([^<>]*)>$")
+      if(is-null(m),
+        {name: null, email: s},
+        {name: unquote(first(m.groups)), email: trim(last(m.groups))})
+    }
+  }
+
+  raw if(is-map(value), `${or(get(value, "name"), "")}${or(get(value, "email"), "")}`, Str(value))
+  error cond {
+    has-line-break(raw) => { `google-gmail: line breaks are not allowed in an address: ${to-json(raw)}` }
+    not(is-email(parsed.email)) => { `google-gmail: invalid email address ${to-json(parsed.email)}` }
+    => { null }
+  }
+
+  name parsed.name
+  {name: if(or(is-null(name), eq(trim(or(name, "")), "")), null, name), email: parsed.email, error: error}
+}
+
+split-address-list
+meta {
+    doc: """Split an address-list Str on commas outside double quotes: `"\"Doe, Jane\" <j@x.io>, bob@x.io"` gives two entries."""
+}
+fn (value: Str): Vec {
+  pieces map(::re/find-all(value, "(?:\"[^\"]*\"|[^,\"])+"), (m) { trim(m.match) })
+  filter(pieces, (p) { not(eq(p, "")) })
+}
+
+address-items fn (value: Any): Vec {
+  cond {
+    is-null(value) => { [] }
+    is-vec(value) => { mapcat(value, (v) { if(is-str(v), split-address-list(v), [v]) }) }
+    is-map(value) => { [value] }
+    => { split-address-list(Str(value)) }
+  }
+}
+
+parse-addresses
+meta {
+    doc: """Parse an address field (Str list, Vec, or `{name, email}` Map) into a Vec of `{name, email}`, or an Err naming the first invalid address."""
+}
+fn (value: Any): Vec {
+  parsed map(address-items(value), read-address)
+  bad find-first(parsed, (a) { is-some(a.error) })
+  cond {
+    is-some(bad) => { err(bad.error) }
+    => { map(parsed, (a) { {name: a.name, email: a.email} }) }
+  }
+}
+
+format-address
+meta {
+    doc: """Render `{name, email}` for a header: `Ada <ada@example.com>`, with the name quoted or RFC 2047 encoded as needed."""
+}
+fn (address: Map): Str {
+  if(is-null(address.name), address.email, `${encode-phrase(address.name)} <${address.email}>`)
+}
+
+format-addresses
+meta {
+    doc: """Render a Vec of `{name, email}` as one header value, comma separated (folded when long)."""
+}
+fn (addresses: Vec): Str {
+  parts map(addresses, format-address)
+  joined join(parts, ", ")
+  if(gt(length(joined), MAX_PLAIN_HEADER), join(parts, ",\r\n "), joined)
+}
+
+emails
+meta {
+    doc: """Just the email addresses of an address field, lowercased; invalid entries are skipped (pure). Handy for comparing senders."""
+}
+fn (value: Any): Vec {
+  parsed map(address-items(value), read-address)
+  map(filter(parsed, (a) { is-null(a.error) }), (a) { lowercase(a.email) })
+}
+
+// ---------------------------------------------------------------------------
+// Headers (pure)
+// ---------------------------------------------------------------------------
+
+message-ids fn (value: Any): Vec {
+  items cond {
+    is-null(value) => { [] }
+    is-vec(value) => { value }
+    => { split(clean-header-value(value), " ") }
+  }
+
+  cleaned map(items, (v) { clean-header-value(v) })
+  map(filter(cleaned, (v) { not(eq(v, "")) }), (v) { if(starts-with(v, "<"), v, `<${v}>`) })
+}
+
+header-error fn (name: Any): Str? {
+  n Str(name)
+  cond {
+    not(::re/is-match(n, HEADER_NAME_PATTERN)) => { `google-gmail: invalid header name ${to-json(n)}` }
+    in(lowercase(n), RESERVED_HEADERS) => { `google-gmail: header ${n} is set by the message fields, not headers` }
+    => { null }
+  }
+}
+
+address-header fn (name: Str, value: Any): Any {
+  cond {
+    is-null(value) => { "" }
+    => {
+      parsed parse-addresses(value)
+      cond {
+        is-err(parsed) => { parsed }
+        is-empty(parsed) => { "" }
+        => { `${name}: ${format-addresses(parsed)}\r\n` }
+      }
+    }
+  }
+}
+
+build-headers
+meta {
+    doc: """
+    The top-level header block of a message (pure), each line ending in
+    CRLF, ending with `MIME-Version: 1.0`: From, To, Cc, Bcc, Reply-To,
+    Subject, In-Reply-To, References, then `message.headers`. Returns an
+    Err for an invalid address or header name.
+    """
+}
+fn (message: Map): Str {
+  extra or(get(message, "headers"), {})
+  bad-name find-first(map(keys(extra), header-error), is-some)
+  from address-header("From", get(message, "from"))
+  to address-header("To", get(message, "to"))
+  cc address-header("Cc", get(message, "cc"))
+  bcc address-header("Bcc", get(message, "bcc"))
+  reply-to address-header("Reply-To", get(message, "reply-to"))
+  failed cond {
+    is-err(from) => { from }
+    is-err(to) => { to }
+    is-err(cc) => { cc }
+    is-err(bcc) => { bcc }
+    is-err(reply-to) => { reply-to }
+    => { null }
+  }
+
+  subject get(message, "subject")
+  in-reply-to message-ids(get(message, "in-reply-to"))
+  references message-ids(get(message, "references"))
+  cond {
+    is-some(bad-name) => { err(bad-name) }
+    is-err(failed) => { failed }
+    => {
+      lines [
+        from, to, cc, bcc, reply-to,
+        if(is-null(subject), "", `Subject: ${encode-header-text(subject)}\r\n`),
+        if(is-empty(in-reply-to), "", `In-Reply-To: ${first(in-reply-to)}\r\n`),
+        if(is-empty(references), "", `References: ${join(references, "\r\n ")}\r\n`),
+        join(map(keys(extra), (k) { `${k}: ${encode-header-text(get(extra, k))}\r\n` }), ""),
+        "MIME-Version: 1.0\r\n"
+      ]
+      join(lines, "")
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Body parts (pure)
+// ---------------------------------------------------------------------------
+
+to-bytes
+meta {
+    doc: """Content as Bytes: Bytes pass through, a Str becomes its UTF-8 bytes, null is empty, anything else is JSON-encoded."""
+}
+fn (content: Any): Bytes {
+  cond {
+    is-bytes(content) => { content }
+    is-str(content) => { Bytes(content) }
+    is-null(content) => { Bytes([]) }
+    => { Bytes(to-json(untype(content))) }
+  }
+}
+
+new-boundary
+meta {
+    doc: """A random MIME boundary. It contains `=_`, which never occurs in base64 content."""
+}
+fn (): Str {
+  `=_hot_${::hot::random/random-string(28)}`
+}
+
+text-part
+meta {
+    doc: """A `text/<subtype>; charset="UTF-8"` part (headers, blank line, body) as Bytes: `7bit` when the text is ASCII with lines under 999 characters, else base64. Line endings become CRLF."""
+}
+fn (text: Str, subtype: Str): Bytes {
+  body normalize-newlines(text)
+  seven-bit and(is-ascii(body), not(::re/is-match(body, "[^\\r\\n]{999}")))
+  encoding if(seven-bit, "7bit", "base64")
+  content if(seven-bit, body, wrap-base64(::b64/encode(body)))
+  Bytes(`Content-Type: text/${subtype}; charset="UTF-8"\r\nContent-Transfer-Encoding: ${encoding}\r\n\r\n${content}`)
+}
+
+attachment-error
+meta {
+    doc: """Why an attachment Map is unusable (missing filename or content, a bad MIME type), or null (pure)."""
+}
+fn (attachment: Any): Str? {
+  cond {
+    not(is-map(attachment)) => { "google-gmail: each attachment must be a Map of {filename, content, mime-type?}" }
+    eq(clean-header-value(or(get(attachment, "filename"), "")), "") => { "google-gmail: an attachment needs a filename" }
+    is-null(get(attachment, "content")) => { `google-gmail: attachment ${get(attachment, "filename")} has no content` }
+    and(is-some(get(attachment, "mime-type")), not(::re/is-match(Str(or(get(attachment, "mime-type"), "")), MIME_TYPE_PATTERN))) => {
+      `google-gmail: invalid MIME type ${to-json(get(attachment, "mime-type"))} for ${get(attachment, "filename")}`
+    }
+    => { null }
+  }
+}
+
+attachment-mime-type
+meta {
+    doc: """The MIME type for an attachment: its `mime-type`, else guessed from the filename, else `application/octet-stream`."""
+}
+fn (attachment: Map): Str {
+  or(get(attachment, "mime-type"), ::hot::mime/from-path(Str(attachment.filename)), "application/octet-stream")
+}
+
+filename-params
+meta {
+    doc: """The `name` (Content-Type) and `filename` (Content-Disposition) parameters for a file name: quoted ASCII, or RFC 2047 / RFC 2231 encoded when not ASCII."""
+}
+fn (filename: Str): Map {
+  f clean-header-value(::str/replace(::str/replace(filename, "\"", "'"), "\\", "_"))
+  cond {
+    is-ascii(f) => { {name: `; name="${f}"`, filename: `; filename="${f}"`} }
+    => { {name: `; name="${::str/replace(encode-words(f), "\r\n ", " ")}"`, filename: `; filename*=UTF-8''${::uri/encode(f)}`} }
+  }
+}
+
+attachment-part
+meta {
+    doc: """An attachment part as Bytes: Content-Type with name, Content-Disposition (`attachment`, or `inline` with a `content-id`), and the content base64 encoded in 76-character lines. A `message/rfc822` attachment (a forwarded email) is embedded as is, `8bit`."""
+}
+fn (attachment: Map): Bytes {
+  mime attachment-mime-type(attachment)
+  params filename-params(Str(attachment.filename))
+  cid get(attachment, "content-id")
+  inline or(eq(get(attachment, "inline"), true), is-some(cid))
+  rfc822 eq(lowercase(mime), "message/rfc822")
+  content to-bytes(attachment.content)
+  cid-line if(is-some(cid), `Content-ID: <${::re/replace-all(clean-header-value(cid), "[<>\\s]", "")}>\r\n`, "")
+  head `Content-Type: ${mime}${params.name}\r\nContent-Disposition: ${if(inline, "inline", "attachment")}${params.filename}\r\nContent-Transfer-Encoding: ${if(rfc822, "8bit", "base64")}\r\n${cid-line}\r\n`
+  body if(rfc822, content, Bytes(wrap-base64(::b64/encode(content))))
+  concat(Bytes(head), body)
+}
+
+multipart
+meta {
+    doc: """A `multipart/<subtype>` entity as Bytes: its Content-Type header, then each part (Bytes, already carrying its own headers) between `boundary` delimiters."""
+}
+fn (subtype: Str, parts: Vec, boundary: Str): Bytes {
+  head Bytes(`Content-Type: multipart/${subtype}; boundary="${boundary}"\r\n\r\n`)
+  body reduce(parts, (acc, p) { concat(acc, Bytes(`--${boundary}\r\n`), p, Bytes("\r\n")) }, Bytes([]))
+  concat(head, body, Bytes(`--${boundary}--\r\n`))
+}
+
+build-body
+meta {
+    doc: """
+    The body entity (its Content-Type headers and content) as Bytes:
+    `text`, `html`, or both as `multipart/alternative`; wrapped in
+    `multipart/mixed` with the attachments when there are any. Nested
+    boundaries derive from `boundary` (`a_` / `m_` prefixes).
+    """
+}
+fn (message: Map, boundary: Str): Bytes {
+  text get(message, "text")
+  html get(message, "html")
+  attachments or(get(message, "attachments"), [])
+  bad find-first(map(attachments, attachment-error), is-some)
+  cond {
+    is-some(bad) => { err(bad) }
+    => {
+      body cond {
+        and(is-some(text), is-some(html)) => {
+          multipart("alternative", [text-part(Str(text), "plain"), text-part(Str(html), "html")], `a_${boundary}`)
+        }
+
+        is-some(html) => { text-part(Str(html), "html") }
+        => { text-part(Str(or(text, "")), "plain") }
+      }
+
+      if(is-empty(attachments), body, multipart("mixed", concat([body], map(attachments, attachment-part)), `m_${boundary}`))
+    }
+  }
+}
+
+build-message
+meta {
+    doc: """
+    Build a complete RFC 5322 message as Bytes from a message Map (see
+    the namespace doc for the fields). Returns an Err for invalid
+    addresses, header names or attachments. Pass `boundary` for
+    reproducible output in tests.
+
+    ```hot
+    raw ::google::gmail::mime/build-message({to: "ada@example.com", subject: "Hi", text: "Hello!"})
+    ```
+    """
+}
+fn
+(message: Map): Bytes {
+  build-message(message, new-boundary())
+},
+(message: Map, boundary: Str): Bytes {
+  headers build-headers(message)
+  body if(is-err(headers), headers, build-body(message, boundary))
+  cond {
+    is-err(headers) => { headers }
+    is-err(body) => { body }
+    => { concat(Bytes(headers), body) }
+  }
+}
+
+to-raw
+meta {doc: """Base64url-encode a message (Bytes or Str) for the Gmail `raw` field."""}
+fn (message: Any): Str {
+  ::b64/encode-url(to-bytes(message))
+}
+
+build-related
+meta {
+    doc: """
+    A Gmail media-upload body as Bytes (`multipart/related`): a JSON
+    metadata part (nulls dropped) and the raw message as
+    `message/rfc822`, concatenated as bytes. Send it with
+    `Content-Type: multipart/related; boundary=<boundary>`.
+    """
+}
+fn (metadata: Map, message: Bytes, boundary: Str): Bytes {
+  head `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${to-json(filter-vals(untype(metadata), is-some))}\r\n--${boundary}\r\nContent-Type: message/rfc822\r\n\r\n`
+  concat(Bytes(head), message, Bytes(`\r\n--${boundary}--\r\n`))
+}

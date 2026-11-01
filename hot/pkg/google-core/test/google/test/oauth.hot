@@ -1,0 +1,55 @@
+::google::test::oauth ns
+meta ["test"]
+
+::oauth ::google::oauth
+::uri ::hot::uri
+
+query-of fn (url: Str): Map {
+  ::uri/decode-query(last(split(url, "?")))
+}
+
+test-authorize-url-defaults
+meta ["test"] fn () {
+    url ::oauth/authorize-url("cid.apps.googleusercontent.com", "https://app.example.com/cb", "drive.file openid", "csrf-1")
+    assert(starts-with(url, "https://accounts.google.com/o/oauth2/v2/auth?"))
+    q query-of(url)
+    assert-eq("code", q.response_type)
+    assert-eq("cid.apps.googleusercontent.com", q.client_id)
+    assert-eq("https://app.example.com/cb", q.redirect_uri)
+    assert-eq("https://www.googleapis.com/auth/drive.file openid", q.scope)
+    assert-eq("csrf-1", q.state)
+    assert-eq("offline", q.access_type, "offline access returns a refresh token")
+    assert-eq("consent", q.prompt)
+    assert-eq("true", q.include_granted_scopes)
+    assert(not(in("code_challenge", keys(q))), "no PKCE unless asked")
+    assert(not(in("login_hint", keys(q))), "unset options are omitted")
+}
+
+test-authorize-url-pkce-and-options
+meta ["test"] fn () {
+    verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    url ::oauth/authorize-url("cid", "https://app/cb", ["drive.readonly"], "s", {
+        code-verifier: verifier,
+        login-hint: "ada@example.com",
+        hd: "example.com",
+        prompt: null,
+        include-granted-scopes: false,
+        access-type: "online"
+    })
+    q query-of(url)
+    assert-eq("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", q.code_challenge, "RFC 7636 vector")
+    assert-eq("S256", q.code_challenge_method)
+    assert-eq("ada@example.com", q.login_hint)
+    assert-eq("example.com", q.hd)
+    assert(not(in("prompt", keys(q))), "prompt: null omits the parameter")
+    assert-eq("false", q.include_granted_scopes)
+    assert-eq("online", q.access_type)
+}
+
+test-missing-scopes
+meta ["test"] fn () {
+    tokens {scope: "https://www.googleapis.com/auth/drive.file openid"}
+    assert-eq([], ::oauth/missing-scopes(tokens, "drive.file"))
+    assert-eq(["https://www.googleapis.com/auth/drive.readonly"], ::oauth/missing-scopes(tokens, ["drive.file", "drive.readonly"]))
+    assert-eq(2, length(::oauth/granted-scopes(tokens)))
+}

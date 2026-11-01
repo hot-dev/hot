@@ -1,0 +1,37 @@
+::google::drive::test::query ns
+meta ["test"]
+
+::q ::google::drive::query
+
+test-quote-escaping
+meta ["test"] fn () {
+    assert-eq("'plain'", ::q/quote("plain"))
+    assert-eq("'Valentine\\'s Day'", ::q/quote("Valentine's Day"), "single quotes are backslash-escaped")
+    assert-eq("'C:\\\\temp'", ::q/quote("C:\\temp"), "backslashes are escaped first")
+    assert-eq("'\\\\\\''", ::q/quote("\\'"), "a backslash then a quote")
+    assert-eq(9, length(::q/quote("a'b\\c")), "'a\\'b\\\\c' is 9 characters")
+}
+
+test-terms
+meta ["test"] fn () {
+    assert-eq("name contains 'report'", ::q/name-contains("report"))
+    assert-eq("name = 'Q3 plan.docx'", ::q/name-is("Q3 plan.docx"))
+    assert-eq("mimeType = 'application/pdf'", ::q/mime-type-is("application/pdf"))
+    assert-eq("'1AbC' in parents", ::q/in-folder("1AbC"))
+    assert-eq("modifiedTime > '2026-10-01T00:00:00Z'", ::q/modified-after("2026-10-01T00:00:00Z"))
+    assert-eq("trashed = false", ::q/not-trashed())
+    assert-eq("fullText contains '\"exact phrase\"'", ::q/full-text-contains("\"exact phrase\""))
+    assert-eq("mimeType = 'application/vnd.google-apps.folder'", ::q/is-folder())
+    assert-eq("shortcutDetails.targetId = 'x'", ::q/shortcut-to("x"))
+    assert-eq("appProperties has { key='src' and value='crm' }", ::q/app-property("src", "crm"))
+}
+
+test-combinators
+meta ["test"] fn () {
+    q ::q/all-of(::q/in-folder("F"), ::q/any-of(::q/mime-type-is("a/b"), ::q/mime-type-is("c/d")), ::q/not-trashed())
+    assert-eq("'F' in parents and (mimeType = 'a/b' or mimeType = 'c/d') and trashed = false", q)
+    assert-eq("trashed = false", ::q/all-of(null, "", ::q/not-trashed()), "empty and null terms are skipped")
+    assert-eq("", ::q/all-of())
+    assert-eq("not (starred = true)", ::q/negate(::q/starred()))
+    assert-eq("name contains 'it\\'s' or starred = true", ::q/any-of(::q/name-contains("it's"), ::q/starred()))
+}

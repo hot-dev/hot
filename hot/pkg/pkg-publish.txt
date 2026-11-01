@@ -96,11 +96,11 @@ sentry
 openai-compatible
 
 # Google Workspace
-#google-core
-#google-gmail
-#google-drive
-#google-sheets
-#google-calendar
+google-core
+google-gmail
+google-drive
+google-sheets
+google-calendar
 
 # Communication (SMS/Voice)
 twilio

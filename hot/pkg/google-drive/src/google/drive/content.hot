@@ -1,0 +1,468 @@
+::google::drive::content ns
+meta {
+    doc: """
+    Read file content: `read-document` for any file (Google-native files
+    are exported, everything else downloaded), byte-exact downloads,
+    Range and chunked downloads past the response cap, exports, and the
+    export-format map.
+
+    Results are `::google::drive/FileContent`: `bytes` is always the raw
+    body (a JSON file stays bytes, a file containing `123` stays text),
+    and `text` is filled in when the MIME type is textual.
+
+    **Limits.** `files.export` returns at most 10 MB; larger exports fall
+    back to the file's `exportLinks` automatically. Every single response
+    is capped by the runtime's `http.max-response-bytes` (16 MiB by
+    default, 120 s timeout): `download-file` switches to Range-chunked
+    downloads when a blob is larger, and exports cannot be chunked (Drive
+    does not support Range on exports).
+
+    **Scopes.** `drive.readonly` by default; `drive.file` for files the
+    app created or opened. `drive.metadata.readonly` cannot read content.
+    """
+}
+
+::drive ::google::drive
+::api ::google::api
+::files ::google::drive::files
+FileContent ::google::drive/FileContent
+is-ok-response ::hot::http/is-ok-response
+
+DEFAULT_DOWNLOAD_CHUNK 8388608
+
+// Google Workspace export formats, from
+// https://developers.google.com/workspace/drive/api/guides/ref-export-formats
+// (cross-check per account with ::google::drive::drives/about's exportFormats).
+EXPORT_FORMATS {
+    "application/vnd.google-apps.document": {
+        markdown: "text/markdown",
+        md: "text/markdown",
+        text: "text/plain",
+        txt: "text/plain",
+        html: "text/html",
+        zip: "application/zip",
+        pdf: "application/pdf",
+        docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        odt: "application/vnd.oasis.opendocument.text",
+        rtf: "application/rtf",
+        epub: "application/epub+zip"
+    },
+    "application/vnd.google-apps.spreadsheet": {
+        csv: "text/csv",
+        tsv: "text/tab-separated-values",
+        xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ods: "application/vnd.oasis.opendocument.spreadsheet",
+        pdf: "application/pdf",
+        zip: "application/zip"
+    },
+    "application/vnd.google-apps.presentation": {
+        text: "text/plain",
+        txt: "text/plain",
+        pdf: "application/pdf",
+        pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        odp: "application/vnd.oasis.opendocument.presentation"
+    },
+    "application/vnd.google-apps.drawing": {
+        svg: "image/svg+xml",
+        png: "image/png",
+        jpeg: "image/jpeg",
+        jpg: "image/jpeg",
+        pdf: "application/pdf"
+    },
+    "application/vnd.google-apps.script": {
+        json: "application/vnd.google-apps.script+json"
+    }
+}
+
+// What "auto" means per type: the most useful textual form for pipelines.
+DEFAULT_FORMATS {
+    "application/vnd.google-apps.document": "markdown",
+    "application/vnd.google-apps.spreadsheet": "csv",
+    "application/vnd.google-apps.presentation": "text",
+    "application/vnd.google-apps.drawing": "svg",
+    "application/vnd.google-apps.script": "json"
+}
+
+TYPE_LABELS {
+    "application/vnd.google-apps.document": "Google Docs",
+    "application/vnd.google-apps.spreadsheet": "Google Sheets",
+    "application/vnd.google-apps.presentation": "Google Slides",
+    "application/vnd.google-apps.drawing": "Google Drawings",
+    "application/vnd.google-apps.script": "Apps Script"
+}
+
+// ---------------------------------------------------------------------------
+// Export format choice (pure)
+// ---------------------------------------------------------------------------
+
+export-formats
+meta {
+    doc: """The `{format-name: mime-type}` exports for a Google-native MIME type (`{}` for types that cannot be exported, e.g. Forms, Sites, Vids)."""
+}
+fn (native-mime: Str): Map {
+  or(get(EXPORT_FORMATS, native-mime), {})
+}
+
+export-mime-type
+meta {
+    doc: """
+    Pick the export MIME type for a Google-native file (pure). `format` is
+    a short name (`"markdown"`, `"text"`, `"pdf"`, `"docx"`, `"csv"`,
+    `"xlsx"`, `"pptx"`, `"png"`, `"svg"`, ...), a full MIME type (passed
+    through), or `"auto"`/null for the type's default: Docs `markdown`,
+    Sheets `csv` (first sheet only), Slides `text`, Drawings `svg`, Apps
+    Script `json`. Unsupported pairs return an Err listing the options.
+
+    ```hot
+    ::google::drive::content/export-mime-type(::google::drive/SPREADSHEET_MIME, "xlsx")
+    // "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    ```
+    """
+}
+fn (native-mime: Str, format: Str?): Str {
+  formats get(EXPORT_FORMATS, native-mime)
+  f if(or(is-null(format), eq(trim(or(format, "")), "")), "auto", lowercase(trim(format)))
+  label or(get(TYPE_LABELS, native-mime), native-mime)
+  cond {
+    is-null(formats) => {
+      hint if(eq(native-mime, ::drive/VID_MIME), " (Google Vids only download via files.download)", "")
+      err(`google-drive: ${native-mime} files cannot be exported${hint}`)
+    }
+
+    eq(f, "auto") => { get(formats, get(DEFAULT_FORMATS, native-mime)) }
+    contains(f, "/") => { trim(format) }
+    is-some(get(formats, f)) => { get(formats, f) }
+    => { err(`google-drive: no "${format}" export for ${label}; supported: ${join(keys(formats), ", ")}`) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Range math (pure)
+// ---------------------------------------------------------------------------
+
+range-header
+meta {
+    doc: """An HTTP `Range` value for bytes `start`..`end` inclusive (`end` null for "to the end"): `range-header(0, 1023)` is `"bytes=0-1023"`."""
+}
+fn (start: Int, end: Int?): Str {
+  if(is-null(end), `bytes=${start}-`, `bytes=${start}-${end}`)
+}
+
+download-ranges
+meta {
+    doc: """Split `size` bytes into inclusive `[start, end]` ranges of at most `chunk-size` bytes (pure). `download-ranges(10, 4)` is `[[0, 3], [4, 7], [8, 9]]`."""
+}
+fn (size: Int, chunk-size: Int): Vec {
+  c max(chunk-size, 1)
+  count floor(div(add(size, sub(c, 1)), c))
+  map(range(0, count), (i) {
+    start mul(i, c)
+    [start, sub(min(size, add(start, c)), 1)]
+  })
+}
+
+is-size-limit-error
+meta {
+    doc: """True when a request failed because the response exceeded `http.max-response-bytes`."""
+}
+fn (result: Result): Bool {
+  and(is-err(result), contains(err-message(result), "exceeds"))
+}
+
+is-export-too-large
+meta {
+    doc: """True when an export failed on Drive's 10 MB export limit (`exportSizeLimitExceeded`)."""
+}
+fn (result: Result): Bool {
+  and(
+    is-err(result),
+    or(::api/has-reason(result, "exportSizeLimitExceeded"), contains(lowercase(err-message(result)), "too large to be exported"))
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Downloads
+// ---------------------------------------------------------------------------
+
+DOWNLOAD_LOCAL_KEYS ["range", "chunk-size"]
+
+download-params
+meta {
+    doc: """Query parameters for a blob download (pure): `alt=media`, `supportsAllDrives=true`, plus Drive parameters from `opts` such as `acknowledgeAbuse`."""
+}
+fn (opts: Map): Map {
+  ::drive/query-params({alt: "media", supportsAllDrives: true}, opts, DOWNLOAD_LOCAL_KEYS)
+}
+
+download-file
+meta {
+    doc: """
+    GET /files/{id}?alt=media - download a blob file's bytes as a
+    `FileContent` (Google Docs/Sheets/Slides have no bytes: use
+    `read-document` or `export-file`). When the file is larger than
+    `http.max-response-bytes`, it is fetched again in Range chunks
+    (`download-file-chunked`).
+
+    Options: `range: {start, end}` (inclusive; `end` null for the rest)
+    for a partial download, `chunk-size` for the chunked fallback,
+    `acknowledgeAbuse: true` to download a file flagged as abusive
+    (owner-only otherwise), plus credentials.
+
+    ```hot
+    pdf ::google::drive::content/download-file("1AbCfile")
+    pdf.mime-type   // "application/pdf"
+    pdf.bytes       // exact bytes
+    ```
+    """
+}
+fn
+(id: Str): FileContent {
+  download-file(id, {})
+},
+(id: Str, opts: Map): FileContent {
+  rng get(opts, "range")
+  headers if(is-map(rng), {Range: range-header(rng.start, rng.end)}, {})
+  full-url ::drive/url(`/files/${::drive/encode-id(id)}`, download-params(opts))
+  response ::api/request(::drive/READ_SCOPE, "GET", full-url, headers, "", ::drive/creds(opts))
+  cond {
+    and(is-size-limit-error(response), not(is-map(rng))) => { download-file-chunked(id, opts) }
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err(::api/error-from-response(response)) }
+    => { ::drive/content-from-response(id, response, if(is-map(rng), "range", "download")) }
+  }
+}
+
+download-range
+meta {doc: """Download bytes `start`..`end` (inclusive) of a blob file."""}
+fn
+(id: Str, start: Int, end: Int): FileContent {
+  download-range(id, start, end, {})
+},
+(id: Str, start: Int, end: Int, opts: Map): FileContent {
+  download-file(id, {...opts, range: {start: start, end: end}})
+}
+
+fetch-ranges fn (full-url: Str, ranges: Vec, index: Int, acc: Bytes, opts: Map): Bytes {
+  cond {
+    gte(index, length(ranges)) => { acc }
+    => {
+      r get(ranges, index)
+      response ::api/request(::drive/READ_SCOPE, "GET", full-url, {Range: range-header(first(r), last(r))}, "", ::drive/creds(opts))
+      cond {
+        is-err(response) => { response }
+        // A server that ignores Range answers 200 with the whole body.
+        eq(response.status, 200) => { response.body-bytes }
+        eq(response.status, 206) => {
+          fetch-ranges(full-url, ranges, add(index, 1), concat(acc, response.body-bytes), opts)
+        }
+        => { err(::api/error-from-response(response)) }
+      }
+    }
+  }
+}
+
+download-file-chunked
+meta {
+    doc: """
+    Download a blob file in Range requests of `opts.chunk-size` bytes
+    (default 8 MiB, keep it under `http.max-response-bytes`) and join
+    them, so files larger than one response can be read. The whole file
+    is still held in memory.
+    """
+}
+fn
+(id: Str): FileContent {
+  download-file-chunked(id, {})
+},
+(id: Str, opts: Map): FileContent {
+  chunk or(get(opts, "chunk-size"), DEFAULT_DOWNLOAD_CHUNK)
+  meta-data ::files/get-file(id, {...::drive/creds(opts), fields: "id,name,mimeType,size"})
+  cond {
+    is-err(meta-data) => { meta-data }
+    ::drive/is-google-native(meta-data.mimeType) => {
+      err(`google-drive: ${meta-data.name} is a Google-native file with no bytes; use export-file or read-document`)
+    }
+    => {
+      size or(::drive/to-int(meta-data.size), 0)
+      full-url ::drive/url(`/files/${::drive/encode-id(id)}`, download-params(opts))
+      bytes fetch-ranges(full-url, download-ranges(size, chunk), 0, Bytes([]), opts)
+      cond {
+        is-err(bytes) => { bytes }
+        => {
+          content ::drive/content-from-bytes(id, bytes, meta-data.mimeType, "chunked")
+          FileContent({...untype(content), name: meta-data.name})
+        }
+      }
+    }
+  }
+}
+
+download-text
+meta {doc: """Download a blob file and decode it as UTF-8 text."""}
+fn
+(id: Str): Str {
+  download-text(id, {})
+},
+(id: Str, opts: Map): Str {
+  content download-file(id, opts)
+  if(is-err(content), content, ::drive/content-text(content))
+}
+
+// ---------------------------------------------------------------------------
+// Exports
+// ---------------------------------------------------------------------------
+
+export-via-link
+meta {
+    doc: """Fetch an `exportLinks` URL with the call's credentials (the fallback for exports over 10 MB)."""
+}
+fn (file-id: Str, link: Str, opts: Map): FileContent {
+  response ::api/request(::drive/READ_SCOPE, "GET", link, {}, "", ::drive/creds(opts))
+  cond {
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err(::api/error-from-response(response)) }
+    => { ::drive/content-from-response(file-id, response, "export-link") }
+  }
+}
+
+export-direct fn (id: Str, mime-type: Str, opts: Map): FileContent {
+  full-url ::drive/url(`/files/${::drive/encode-id(id)}/export`, {mimeType: mime-type})
+  response ::api/request(::drive/READ_SCOPE, "GET", full-url, {}, "", ::drive/creds(opts))
+  cond {
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err(::api/error-from-response(response)) }
+    => { ::drive/content-from-response(id, response, "export") }
+  }
+}
+
+export-with-links fn (id: Str, mime-type: Str, export-links: Any, opts: Map): FileContent {
+  direct export-direct(id, mime-type, opts)
+  cond {
+    not(is-export-too-large(direct)) => { direct }
+    => {
+      fetched if(is-map(export-links), {exportLinks: export-links}, ::files/get-file(id, {...::drive/creds(opts), fields: "exportLinks"}))
+      links if(is-err(fetched), null, fetched.exportLinks)
+      link if(is-map(links), get(links, mime-type), null)
+      if(is-null(link), direct, export-via-link(id, link, opts))
+    }
+  }
+}
+
+export-file
+meta {
+    doc: """
+    GET /files/{id}/export - export a Google-native file to `mime-type`
+    (see `EXPORT_FORMATS` / `export-mime-type`), as a `FileContent`. When
+    Drive refuses with its 10 MB export limit, the file's `exportLinks`
+    URL for the same type is used instead.
+
+    ```hot
+    csv ::google::drive::content/export-file(sheet-id, "text/csv")
+    csv.text
+    ```
+    """
+}
+fn
+(id: Str, mime-type: Str): FileContent {
+  export-file(id, mime-type, {})
+},
+(id: Str, mime-type: Str, opts: Map): FileContent {
+  export-with-links(id, mime-type, null, opts)
+}
+
+export-text
+meta {
+    doc: """Export a Google-native file to a textual MIME type (`text/markdown`, `text/plain`, `text/csv`, ...) and return the text."""
+}
+fn
+(id: Str, mime-type: Str): Str {
+  export-text(id, mime-type, {})
+},
+(id: Str, mime-type: Str, opts: Map): Str {
+  content export-file(id, mime-type, opts)
+  if(is-err(content), content, ::drive/content-text(content))
+}
+
+// ---------------------------------------------------------------------------
+// read-document: one call for any file
+// ---------------------------------------------------------------------------
+
+READ_LOCAL_KEYS ["range", "chunk-size", "fields"]
+
+with-file fn (content: Result, file: Map, format: Str?): FileContent {
+  cond {
+    is-err(content) => { content }
+    => { FileContent({...untype(content), name: file.name, format: format, file: ::drive/to-doc-file(file)}) }
+  }
+}
+
+read-document
+meta {
+    doc: """
+    Read any file as a `FileContent` with its `DocFile` attached.
+
+    - Shortcuts are followed to their target.
+    - Google-native files (Docs, Sheets, Slides, Drawings, Apps Script)
+      are exported in `format` (`"auto"` by default: Docs `markdown`,
+      Sheets `csv` of the first sheet, Slides `text`, Drawings `svg`); see
+      `export-mime-type` for the names. Over 10 MB, `exportLinks` is used.
+    - Other files are downloaded as stored and `format` is ignored
+      (check `mime-type`; `text` is set for textual types).
+    - Folders return an Err.
+
+    ```hot
+    doc ::google::drive::content/read-document("1AbCdoc", "markdown")
+    doc.text            // Markdown, ready for chunking and embedding
+    doc.file.modified   // for incremental re-indexing
+    ```
+    """
+}
+fn
+(id: Str): FileContent {
+  read-document(id, "auto", {})
+},
+(id: Str, format: Str?): FileContent {
+  read-document(id, format, {})
+},
+(id: Str, format: Str?, opts: Map): FileContent {
+  meta-data ::files/get-file(id, {...::drive/creds(opts), fields: ::drive/FILE_FIELDS})
+  file if(is-err(meta-data), meta-data, ::files/resolve-shortcut(meta-data, {...::drive/creds(opts), fields: ::drive/FILE_FIELDS}))
+  cond {
+    is-err(file) => { file }
+    ::drive/is-folder(file.mimeType) => {
+      err(`google-drive: ${file.name} is a folder; list it with ::google::drive::files/list-folder`)
+    }
+
+    ::drive/is-google-native(file.mimeType) => {
+      mime export-mime-type(file.mimeType, format)
+      cond {
+        is-err(mime) => { mime }
+        => { with-file(export-with-links(file.id, mime, file.exportLinks, opts), file, if(is-null(format), "auto", format)) }
+      }
+    }
+    => {
+      download-opts filter-keys(opts, (k) { ne(k, "fields") })
+      with-file(download-file(file.id, download-opts), file, null)
+    }
+  }
+}
+
+read-document-text
+meta {
+    doc: """`read-document`, returning just the text; an Err when the result is not textual (e.g. a PDF or image blob, or a `"pdf"` export)."""
+}
+fn
+(id: Str): Str {
+  read-document-text(id, "auto", {})
+},
+(id: Str, format: Str?): Str {
+  read-document-text(id, format, {})
+},
+(id: Str, format: Str?, opts: Map): Str {
+  content read-document(id, format, opts)
+  cond {
+    is-err(content) => { content }
+    is-null(content.text) => { err(`google-drive: ${content.name} is ${content.mime-type}, not text`) }
+    => { content.text }
+  }
+}

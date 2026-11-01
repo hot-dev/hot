@@ -1,0 +1,91 @@
+::google::drive::test::upload ns
+meta ["test"]
+
+::up ::google::drive::upload
+
+// 0x00, 0xFF, and 0xC3 0x28 (an invalid UTF-8 sequence)
+BINARY Bytes([0, 1, 255, 254, 195, 40, 0, 10, 13])
+
+test-build-multipart-is-binary-safe
+meta ["test"] fn () {
+    body ::up/build-multipart({name: "blob.bin", parents: null}, BINARY, "application/octet-stream", "BOUND")
+    assert(is-bytes(body), "the body is Bytes, not Str")
+    head "--BOUND\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{\"name\":\"blob.bin\"}\r\n--BOUND\r\nContent-Type: application/octet-stream\r\n\r\n"
+    tail "\r\n--BOUND--\r\n"
+    expected concat(Bytes(head), BINARY, Bytes(tail))
+    assert-eq(expected, body, "metadata part, exact payload bytes, closing boundary")
+    start length(Bytes(head))
+    assert-eq(BINARY, slice(body, start, add(start, length(BINARY))), "payload bytes are untouched")
+    assert-eq(add(add(length(Bytes(head)), 9), length(Bytes(tail))), length(body))
+}
+
+test-build-multipart-text-and-json-content
+meta ["test"] fn () {
+    text ::up/build-multipart({name: "n.txt"}, "héllo", "text/plain", "B")
+    assert-eq(Bytes("héllo"), slice(text, sub(length(text), add(length(Bytes("héllo")), length(Bytes("\r\n--B--\r\n")))), sub(length(text), length(Bytes("\r\n--B--\r\n")))))
+    assert-eq(Bytes("{\"a\":1}"), ::up/to-bytes({a: 1}), "Map content is JSON-encoded")
+    assert-eq(Bytes([]), ::up/to-bytes(null))
+}
+
+test-boundaries-are-random
+meta ["test"] fn () {
+    a ::up/new-boundary()
+    assert(starts-with(a, "hot-drive-"))
+    assert(ne(a, ::up/new-boundary()))
+}
+
+test-convert-target
+meta ["test"] fn () {
+    assert-eq("application/vnd.google-apps.document", ::up/convert-target("document"))
+    assert-eq("application/vnd.google-apps.spreadsheet", ::up/convert-target("Sheet"))
+    assert-eq("application/x-custom", ::up/convert-target("application/x-custom"))
+    assert(is-null(::up/convert-target(null)))
+    assert(is-err(::up/convert-target("movie")))
+}
+
+test-chunk-math
+meta ["test"] fn () {
+    assert-eq(262144, ::up/align-chunk-size(1), "at least 256 KiB")
+    assert-eq(524288, ::up/align-chunk-size(600000), "rounded down to a 256 KiB multiple")
+    assert-eq(8388608, ::up/align-chunk-size(8388608))
+    assert-eq("bytes 0-524287/2000000", ::up/content-range(0, 524288, 2000000))
+    assert-eq("bytes 1572864-1999999/2000000", ::up/content-range(1572864, 2000000, 2000000))
+    assert-eq("bytes */2000000", ::up/content-range(5, 5, 2000000), "empty range is the status form")
+    assert-eq([0, 262144], ::up/chunk-bounds(0, 262144, 1000000))
+    assert-eq([786432, 1000000], ::up/chunk-bounds(786432, 262144, 1000000), "last chunk is short")
+}
+
+test-next-offset-from-range
+meta ["test"] fn () {
+    assert-eq(43, ::up/next-offset-from-range("bytes=0-42"))
+    assert-eq(524288, ::up/next-offset-from-range("bytes=0-524287"))
+    assert-eq(0, ::up/next-offset-from-range(null), "no Range header: nothing stored")
+    assert-eq(0, ::up/next-offset-from-range(""))
+}
+
+test-classify-upload-response
+meta ["test"] fn () {
+    done ::up/classify-upload-response({status: 200, headers: {}, body: {id: "f1"}}, 10)
+    assert-eq("complete", done.state)
+    assert-eq("f1", done.file.id)
+    assert-eq("complete", ::up/classify-upload-response({status: 201, headers: {}, body: {id: "f1"}}, 10).state)
+
+    more ::up/classify-upload-response({status: 308, headers: {range: "bytes=0-262143"}, body: ""}, 999)
+    assert-eq("incomplete", more.state)
+    assert-eq(262144, more.next-offset, "the Range header wins over the assumed offset")
+    assert(more.range-known)
+
+    hidden ::up/classify-upload-response(err("::hot::http/request: redirect missing valid Location"), 524288)
+    assert-eq("incomplete", hidden.state, "the runtime's hidden 308 counts as progress")
+    assert-eq(524288, hidden.next-offset)
+    assert(not(hidden.range-known))
+
+    retry ::up/classify-upload-response({status: 503, headers: {}, body: ""}, 0)
+    assert-eq("retry", retry.state)
+    assert-eq("retry", ::up/classify-upload-response(err("::hot::http/request: request failed: reset"), 0).state)
+
+    expired ::up/classify-upload-response({status: 404, headers: {}, body: ""}, 0)
+    assert(is-err(expired))
+    assert(contains(err-message(expired), "expired"))
+    assert(is-err(::up/classify-upload-response({status: 400, headers: {}, body: {error: {code: 400, message: "bad"}}}, 0)))
+}

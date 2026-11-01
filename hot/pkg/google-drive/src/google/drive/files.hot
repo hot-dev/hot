@@ -1,0 +1,361 @@
+::google::drive::files ns
+meta {
+    doc: """
+    Drive files and folders: list/search, get, create folders and
+    shortcuts, update metadata, rename, move, copy, trash/untrash, delete.
+
+    Shared drives work everywhere: `supportsAllDrives=true` is sent by
+    default and listings include shared-drive items
+    (`includeItemsFromAllDrives=true`). Pass `driveId` to search one shared
+    drive (`corpora` then defaults to `"drive"`), or `corpora: "allDrives"`
+    to search everything the user can reach.
+
+    **Scopes.** Reads use `drive.readonly` and writes `drive` by default;
+    `drive.file` works for files your app created or the user opened with
+    it, and `drive.metadata.readonly` is enough for listing and `get-file`.
+    The default only matters for service accounts (see `google-core`).
+    """
+}
+
+::drive ::google::drive
+::api ::google::api
+::q ::google::drive::query
+DocFile ::google::drive/DocFile
+
+DEFAULT_PAGE_SIZE 1000
+
+// ---------------------------------------------------------------------------
+// Listing
+// ---------------------------------------------------------------------------
+
+list-params
+meta {
+    doc: """
+    The query parameters `list-files` sends for `opts` (pure): shared-drive
+    flags on, `fields` = `::google::drive/LIST_FIELDS`, `corpora: "drive"`
+    when `driveId` is given, then your Drive parameters (`q`, `pageSize`,
+    `pageToken`, `orderBy`, `spaces`, `corpora`, `driveId`, `fields`,
+    `includeItemsFromAllDrives`, ...). Nulls are dropped.
+    """
+}
+fn (opts: Map): Map {
+  drive-id get(opts, "driveId")
+  ::drive/query-params({
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: if(is-some(drive-id), "drive", null),
+    fields: ::drive/LIST_FIELDS
+  }, opts)
+}
+
+list-files
+meta {
+    doc: """
+    GET /files - one page of files. Returns Drive's `{files, nextPageToken?,
+    incompleteSearch}`; follow `nextPageToken` with `{pageToken: ...}` or
+    use `list-all-files`. A Str argument is a `q` query. Drive includes
+    trashed files unless `q` says `trashed = false`.
+
+    Options: `q`, `pageSize` (max 1000), `pageToken`, `orderBy` (e.g.
+    `"modifiedTime desc"`, `"folder,name"`), `fields`, `spaces`
+    (`"drive"`, `"appDataFolder"`), `corpora` (`"user"`, `"drive"`,
+    `"domain"`, `"allDrives"`), `driveId`, `includeItemsFromAllDrives`,
+    plus google-core credential keys.
+
+    ```hot
+    page ::google::drive::files/list-files({
+      q: ::google::drive::query/all-of(::google::drive::query/name-contains("Q3"), ::google::drive::query/not-trashed()),
+      orderBy: "modifiedTime desc",
+      pageSize: 50
+    })
+    page.files
+    ```
+    """
+}
+fn
+(): Map {
+  list-files({})
+},
+(query: Str): Map {
+  list-files({q: query})
+},
+(opts: Map): Map {
+  ::drive/json(::drive/READ_SCOPE, "GET", ::drive/url("/files", list-params(opts)), "", opts)
+}
+
+list-all-files
+meta {
+    doc: """
+    Follow `nextPageToken` and return every matching file (a Vec of Drive
+    file resources), or at most `limit`. Uses `pageSize: 1000` (or
+    `limit` when smaller) unless `opts` sets one. Takes the same `opts` as `list-files`.
+
+    ```hot
+    pdfs ::google::drive::files/list-all-files({q: "mimeType = 'application/pdf' and trashed = false"}, 500)
+    ```
+    """
+}
+fn
+(opts: Map): Vec {
+  list-all-files(opts, null)
+},
+(opts: Map, limit: Int?): Vec {
+  page-size if(is-some(limit), min(DEFAULT_PAGE_SIZE, max(or(limit, 1), 1)), DEFAULT_PAGE_SIZE)
+  sized if(is-some(get(opts, "pageSize")), opts, {...opts, pageSize: page-size})
+  ::api/collect-pages((token) { list-files({...sized, pageToken: token}) }, "files", limit)
+}
+
+list-folder
+meta {
+    doc: """List the non-trashed direct children of a folder (all pages, or at most `limit`). `opts.q` is AND-ed with the folder filter. Use `"root"` for the My Drive root, or a shared drive id for its top level."""
+}
+fn
+(folder-id: Str): Vec {
+  list-folder(folder-id, {}, null)
+},
+(folder-id: Str, opts: Map): Vec {
+  list-folder(folder-id, opts, null)
+},
+(folder-id: Str, opts: Map, limit: Int?): Vec {
+  q ::q/all-of(::q/in-folder(folder-id), ::q/not-trashed(), get(opts, "q"))
+  list-all-files({...opts, q: q}, limit)
+}
+
+// ---------------------------------------------------------------------------
+// Reading metadata
+// ---------------------------------------------------------------------------
+
+get-file
+meta {
+    doc: """GET /files/{id} - file metadata. `fields` defaults to `::google::drive/FILE_FIELDS`; pass `{fields: "*"}` for everything. Scope: `drive.readonly` (or `drive.metadata.readonly` / `drive.file`)."""
+}
+fn
+(id: Str): Map {
+  get-file(id, {})
+},
+(id: Str, opts: Map): Map {
+  params ::drive/query-params({supportsAllDrives: true, fields: ::drive/FILE_FIELDS}, opts)
+  ::drive/json(::drive/READ_SCOPE, "GET", ::drive/url(`/files/${::drive/encode-id(id)}`, params), "", opts)
+}
+
+get-doc-file
+meta {doc: """`get-file` normalised to a `::google::drive/DocFile`."""}
+fn
+(id: Str): DocFile {
+  get-doc-file(id, {})
+},
+(id: Str, opts: Map): DocFile {
+  file get-file(id, opts)
+  if(is-err(file), file, ::drive/to-doc-file(file))
+}
+
+resolve-shortcut
+meta {
+    doc: """Return the target's metadata when `file` is a shortcut (one hop; Drive does not allow shortcuts to shortcuts), else `file` itself. `file` needs `mimeType` and `shortcutDetails`."""
+}
+fn
+(file: Map): Map {
+  resolve-shortcut(file, {})
+},
+(file: Map, opts: Map): Map {
+  target if(is-map(file.shortcutDetails), file.shortcutDetails.targetId, null)
+  cond {
+    ne(file.mimeType, ::drive/SHORTCUT_MIME) => { file }
+    is-null(target) => { err("google-drive: shortcut has no shortcutDetails.targetId (request that field)") }
+    => { get-file(target, opts) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Creating
+// ---------------------------------------------------------------------------
+
+METADATA_KEYS ["parent", "parents", "description", "metadata"]
+
+build-metadata
+meta {
+    doc: """Build a file metadata body (pure): `name` and `mimeType` (either may be null), `parents` from `opts.parents` (Vec or Str) or `opts.parent`, `description`, then any extra fields in `opts.metadata` (e.g. `appProperties`, `properties`, `starred`). Nulls are dropped."""
+}
+fn (name: Str?, mime-type: Str?, opts: Map): Map {
+  parents ::drive/as-vec(or(get(opts, "parents"), get(opts, "parent")))
+  ::drive/compact({
+    name: name,
+    mimeType: mime-type,
+    parents: if(is-empty(parents), null, parents),
+    description: get(opts, "description"),
+    ...or(get(opts, "metadata"), {})
+  })
+}
+
+create-folder
+meta {
+    doc: """
+    POST /files - create a folder. A Str second argument is the parent
+    folder id; an opts Map takes `parent`/`parents`, `description`,
+    `metadata`, Drive parameters and credentials. Scope: `drive` (or `drive.file`).
+
+    ```hot
+    folder ::google::drive::files/create-folder("Reports", "1AbCparent")
+    folder.id
+    ```
+    """
+}
+fn
+(name: Str): Map {
+  create-folder(name, {})
+},
+(name: Str, parent: Str): Map {
+  create-folder(name, {parent: parent})
+},
+(name: Str, opts: Map): Map {
+  params ::drive/query-params({supportsAllDrives: true, fields: ::drive/FILE_FIELDS}, opts, METADATA_KEYS)
+  ::drive/json(::drive/SCOPE, "POST", ::drive/url("/files", params), build-metadata(name, ::drive/FOLDER_MIME, opts), opts)
+}
+
+ensure-folder
+meta {
+    doc: """Return the first non-trashed folder named `name` under `parent-id`, creating it when missing. Handy for idempotent workflow output folders."""
+}
+fn
+(name: Str, parent-id: Str): Map {
+  ensure-folder(name, parent-id, {})
+},
+(name: Str, parent-id: Str, opts: Map): Map {
+  found list-files({...::drive/creds(opts), q: ::q/all-of(::q/in-folder(parent-id), ::q/name-is(name), ::q/is-folder(), ::q/not-trashed()), pageSize: 1})
+  cond {
+    is-err(found) => { found }
+    not(is-empty(or(found.files, []))) => { first(found.files) }
+    => { create-folder(name, {...opts, parent: parent-id}) }
+  }
+}
+
+create-shortcut
+meta {
+    doc: """POST /files - create a shortcut to `target-id` (named `name`), optionally in `opts.parent`. Shortcuts are how one item appears in several folders, since shared-drive items have exactly one parent."""
+}
+fn
+(target-id: Str, name: Str): Map {
+  create-shortcut(target-id, name, {})
+},
+(target-id: Str, name: Str, opts: Map): Map {
+  body {...build-metadata(name, ::drive/SHORTCUT_MIME, opts), shortcutDetails: {targetId: target-id}}
+  params ::drive/query-params({supportsAllDrives: true, fields: ::drive/FILE_FIELDS}, opts, METADATA_KEYS)
+  ::drive/json(::drive/SCOPE, "POST", ::drive/url("/files", params), body, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Updating
+// ---------------------------------------------------------------------------
+
+update-file
+meta {
+    doc: """
+    PATCH /files/{id} - update metadata (`name`, `description`,
+    `starred`, `appProperties`, `trashed`, `mimeType`, ...). Null values
+    in `changes` are dropped. Options: `addParents`, `removeParents`
+    (comma-separated ids), `keepRevisionForever`, `fields`, credentials.
+    Use `::google::drive::upload/update-file-content` to replace content.
+    """
+}
+fn
+(id: Str, changes: Map): Map {
+  update-file(id, changes, {})
+},
+(id: Str, changes: Map, opts: Map): Map {
+  params ::drive/query-params({supportsAllDrives: true, fields: ::drive/FILE_FIELDS}, opts)
+  ::drive/json(::drive/SCOPE, "PATCH", ::drive/url(`/files/${::drive/encode-id(id)}`, params), ::drive/compact(changes), opts)
+}
+
+rename-file
+meta {doc: """Rename a file or folder."""}
+fn
+(id: Str, name: Str): Map {
+  rename-file(id, name, {})
+},
+(id: Str, name: Str, opts: Map): Map {
+  update-file(id, {name: name}, opts)
+}
+
+move-params
+meta {
+    doc: """The `addParents`/`removeParents` parameters for moving to `new-parent` from `current-parents` (pure). The new parent is never removed."""
+}
+fn (new-parent: Str, current-parents: Vec): Map {
+  remove filter(current-parents, (p) { ne(p, new-parent) })
+  filter-vals({
+    addParents: new-parent,
+    removeParents: if(is-empty(remove), null, join(remove, ","))
+  }, is-some)
+}
+
+move-file
+meta {
+    doc: """Move a file or folder into `new-parent`, removing its current parents (read first unless `opts.removeParents` is given). In shared drives an item has exactly one parent; moving between shared drives needs organizer rights."""
+}
+fn
+(id: Str, new-parent: Str): Map {
+  move-file(id, new-parent, {})
+},
+(id: Str, new-parent: Str, opts: Map): Map {
+  current cond {
+    is-some(get(opts, "removeParents")) => { {parents: []} }
+    => { get-file(id, {...::drive/creds(opts), fields: "id,parents"}) }
+  }
+
+  cond {
+    is-err(current) => { current }
+    => { update-file(id, {}, {...move-params(new-parent, or(current.parents, [])), ...opts}) }
+  }
+}
+
+copy-file
+meta {
+    doc: """POST /files/{id}/copy - copy a file (not folders). `changes` sets the copy's metadata (`name`, `parents`, ...). Google Docs copies stay Google Docs."""
+}
+fn
+(id: Str): Map {
+  copy-file(id, {}, {})
+},
+(id: Str, changes: Map): Map {
+  copy-file(id, changes, {})
+},
+(id: Str, changes: Map, opts: Map): Map {
+  params ::drive/query-params({supportsAllDrives: true, fields: ::drive/FILE_FIELDS}, opts)
+  ::drive/json(::drive/SCOPE, "POST", ::drive/url(`/files/${::drive/encode-id(id)}/copy`, params), ::drive/compact(changes), opts)
+}
+
+trash-file
+meta {
+    doc: """Move a file or folder to the trash (recoverable for 30 days). Prefer this to `delete-file`."""
+}
+fn
+(id: Str): Map {
+  trash-file(id, {})
+},
+(id: Str, opts: Map): Map {
+  update-file(id, {trashed: true}, opts)
+}
+
+untrash-file
+meta {doc: """Restore a file or folder from the trash."""}
+fn
+(id: Str): Map {
+  untrash-file(id, {})
+},
+(id: Str, opts: Map): Map {
+  update-file(id, {trashed: false}, opts)
+}
+
+delete-file
+meta {
+    doc: """DELETE /files/{id} - **permanently** delete a file or folder, skipping the trash (a folder's descendants owned by the user go too). Irreversible; prefer `trash-file`. Shared-drive items need the organizer role. Returns true."""
+}
+fn
+(id: Str): Bool {
+  delete-file(id, {})
+},
+(id: Str, opts: Map): Bool {
+  params ::drive/query-params({supportsAllDrives: true}, opts)
+  result ::drive/json(::drive/SCOPE, "DELETE", ::drive/url(`/files/${::drive/encode-id(id)}`, params), "", opts)
+  if(is-err(result), result, true)
+}

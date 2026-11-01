@@ -1,0 +1,370 @@
+::google::gmail::sync ns
+meta {
+    doc: """
+    Keep up with a mailbox: the profile (current `historyId`), the
+    history feed for incremental sync, and push notifications through
+    Google Cloud Pub/Sub (`watch`, `stop-watch`, and parsing/verifying the
+    push request).
+
+    **Sync loop**
+
+    1. Once: store `get-profile().historyId` (or the `historyId` from
+       `watch`).
+    2. Each run (schedule or push): `set ::sync/sync-history(saved)`,
+       handle `set.added-message-ids` / `set.deleted-message-ids` /
+       `set.history`, then store `set.history-id`.
+    3. If the stored id is too old Gmail answers 404
+       (`is-history-expired`): do a full sync with
+       `::google::gmail::messages/list-all-messages` and store a fresh
+       `historyId`.
+
+    **Push setup** (one time, in Google Cloud)
+
+    1. Create a Pub/Sub topic, e.g. `projects/my-project/topics/gmail`.
+    2. Grant `gmail-api-push@system.gserviceaccount.com` the Pub/Sub
+       Publisher role on it.
+    3. Create a push subscription on the topic whose endpoint is your Hot
+       webhook URL with `?token=<secret>` appended; set the same secret as
+       the `google.gmail.push.token` context variable.
+    4. Call `watch("projects/my-project/topics/gmail")` for each mailbox,
+       and again at least every 7 days (Google recommends daily) from a
+       Hot schedule: a watch expires after 7 days.
+
+    Pushes say only "the mailbox changed up to historyId N": run
+    `sync-history` from the stored id. They can arrive late, twice, or
+    out of order.
+
+    **Scopes.** `gmail.readonly` for everything here (`gmail.metadata`
+    also works).
+    """
+}
+
+::gmail ::google::gmail
+::api ::google::api
+::ctx ::hot::ctx
+::b64 ::hot::base64
+
+MAX_HISTORY_PAGE 500
+
+// ---------------------------------------------------------------------------
+// Profile and history
+// ---------------------------------------------------------------------------
+
+get-profile
+meta {
+    doc: """GET /users/me/profile - `{emailAddress, messagesTotal, threadsTotal, historyId}` for the authenticated user. Scope: `gmail.readonly`."""
+}
+fn
+(): Map {
+  get-profile({})
+},
+(opts: Map): Map {
+  ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url("/profile"), "", opts)
+}
+
+history-params
+meta {
+    doc: """The query parameters `list-history` sends (pure): `startHistoryId`, then your options: `historyTypes` (a Vec of `messageAdded`, `messageDeleted`, `labelAdded`, `labelRemoved`; sent repeated), `labelId`, `maxResults` (max 500), `pageToken`."""
+}
+fn (start-history-id: Any, opts: Map): Map {
+  ::gmail/query-params({startHistoryId: Str(start-history-id)}, opts)
+}
+
+list-history
+meta {
+    doc: """
+    GET /users/me/history - one page of mailbox changes after
+    `start-history-id`: `{history: [...], historyId, nextPageToken?}`.
+    Each history record has `id`, `messages`, and `messagesAdded`,
+    `messagesDeleted`, `labelsAdded`, `labelsRemoved`. A 404 means the
+    id is too old (`is-history-expired`). Scope: `gmail.readonly`.
+    """
+}
+fn
+(start-history-id: Any): Map {
+  list-history(start-history-id, {})
+},
+(start-history-id: Any, opts: Map): Map {
+  ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url("/history", history-params(start-history-id, opts)), "", opts)
+}
+
+is-history-expired
+meta {
+    doc: """True when a `list-history` / `sync-history` result is Gmail's 404 for a start id that is too old (typically older than about a week): do a full sync."""
+}
+fn (result: Result): Bool {
+  payload if(is-err(result), err-value(result), null)
+  data if(or(is-null(payload), is-str(payload)), null, untype(payload))
+  and(is-map(data), eq(get(data, "status"), 404))
+}
+
+HistorySet
+meta {
+    doc: """
+    Everything that changed since a history id.
+
+    - `history` - the history records, in order
+    - `history-id` - the mailbox's current history id: store it for the
+      next sync
+    - `added-message-ids` - messages added (new mail, sent mail, drafts),
+      de-duplicated, excluding ones deleted later in the same set
+    - `deleted-message-ids` - messages deleted permanently (trashing is a
+      `labelAdded` of `TRASH`)
+    - `label-changed-message-ids` - messages whose labels changed
+    - `pages` - how many pages were read
+    """
+}
+type {
+    history: Vec,
+    history-id: Str,
+    added-message-ids: Vec,
+    deleted-message-ids: Vec,
+    label-changed-message-ids: Vec,
+    pages: Int
+}
+
+record-ids fn (records: Vec, key: Str): Vec {
+  distinct(mapcat(records, (r) {
+    map(or(get(r, key), []), (entry) { get(or(get(entry, "message"), {}), "id") })
+  }))
+}
+
+summarize-history
+meta {
+    doc: """Build a `HistorySet` from history records and the latest history id (pure)."""
+}
+fn (records: Vec, history-id: Str, pages: Int): HistorySet {
+  deleted filter(record-ids(records, "messagesDeleted"), is-some)
+  added filter(record-ids(records, "messagesAdded"), (id) { and(is-some(id), not(in(id, deleted))) })
+  labelled filter(distinct(concat(record-ids(records, "labelsAdded"), record-ids(records, "labelsRemoved"))), is-some)
+  HistorySet({
+    history: records,
+    history-id: history-id,
+    added-message-ids: added,
+    deleted-message-ids: deleted,
+    label-changed-message-ids: labelled,
+    pages: pages
+  })
+}
+
+history-loop fn (start: Str, opts: Map, page-token: Str?, acc: Vec, pages: Int): HistorySet {
+  page list-history(start, {...opts, pageToken: page-token})
+  cond {
+    is-err(page) => { page }
+    => {
+      all concat(acc, or(page.history, []))
+      next page.nextPageToken
+      cond {
+        and(is-some(next), not(eq(next, ""))) => { history-loop(start, opts, next, all, add(pages, 1)) }
+        => { summarize-history(all, Str(or(page.historyId, start)), add(pages, 1)) }
+      }
+    }
+  }
+}
+
+sync-history
+meta {
+    doc: """
+    Read every page of history after `start-history-id` and return a
+    `HistorySet` with the id to store next. Uses `maxResults: 500`
+    unless set. On an expired id this returns the 404 Err (check
+    `is-history-expired`).
+
+    ```hot
+    ::sync ::google::gmail::sync
+    ::messages ::google::gmail::messages
+
+    set ::sync/sync-history(saved-history-id)
+    cond {
+      ::sync/is-history-expired(set) => { full-resync() }
+      => {
+        new-mail map(set.added-message-ids, (id) { ::messages/get-email(id) })
+        set.history-id
+      }
+    }
+    ```
+    """
+}
+fn
+(start-history-id: Any): HistorySet {
+  sync-history(start-history-id, {})
+},
+(start-history-id: Any, opts: Map): HistorySet {
+  sized if(is-some(get(opts, "maxResults")), opts, {...opts, maxResults: MAX_HISTORY_PAGE})
+  history-loop(Str(start-history-id), sized, null, [], 0)
+}
+
+// ---------------------------------------------------------------------------
+// Watch (Pub/Sub push)
+// ---------------------------------------------------------------------------
+
+build-watch
+meta {
+    doc: """The `users.watch` body (pure): `{topicName}` plus `labelIds` (e.g. `["INBOX"]`) and `labelFilterBehavior` (`"include"` or `"exclude"`) from `opts` (`label-ids` / `label-filter-behavior`, or Gmail's own names)."""
+}
+fn (topic-name: Str, opts: Map): Map {
+  ::gmail/compact({
+    topicName: topic-name,
+    labelIds: or(get(opts, "label-ids"), get(opts, "labelIds")),
+    labelFilterBehavior: or(get(opts, "label-filter-behavior"), get(opts, "labelFilterBehavior"))
+  })
+}
+
+watch
+meta {
+    doc: """
+    POST /users/me/watch - publish this mailbox's changes to a Pub/Sub
+    topic (`projects/<project>/topics/<topic>`; see the namespace doc for
+    setup). Returns `{historyId, expiration}` (epoch ms, 7 days out):
+    store `historyId` as the sync start and renew before `expiration`.
+    Options: `label-ids`, `label-filter-behavior`. Scope:
+    `gmail.readonly`.
+
+    ```hot
+    renew-gmail-watch
+    meta {schedule: "0 3 * * *"}
+    fn (event) {
+      ::google::gmail::sync/watch("projects/my-project/topics/gmail", {label-ids: ["INBOX"], label-filter-behavior: "include"})
+    }
+    ```
+    """
+}
+fn
+(topic-name: Str): Map {
+  watch(topic-name, {})
+},
+(topic-name: Str, opts: Map): Map {
+  ::gmail/json(::gmail/READ_SCOPE, "POST", ::gmail/url("/watch"), build-watch(topic-name, opts), opts)
+}
+
+stop-watch
+meta {
+    doc: """POST /users/me/stop - stop push notifications for this mailbox. Returns true. Scope: `gmail.readonly`."""
+}
+fn
+(): Bool {
+  stop-watch({})
+},
+(opts: Map): Bool {
+  ::gmail/done(::gmail/json(::gmail/READ_SCOPE, "POST", ::gmail/url("/stop"), "", opts))
+}
+
+// ---------------------------------------------------------------------------
+// Push requests
+// ---------------------------------------------------------------------------
+
+PushNotification
+meta {
+    doc: """
+    A Gmail change notification delivered by a Pub/Sub push
+    subscription.
+
+    - `email-address` - the mailbox that changed
+    - `history-id` - its history id after the change (a Str); sync from
+      your stored id, not from this one
+    - `message-id`, `publish-time`, `subscription`, `attributes` - Pub/Sub
+      envelope fields
+    """
+}
+type {
+    email-address: Str?,
+    history-id: Str?,
+    message-id: Str?,
+    publish-time: Str?,
+    subscription: Str?,
+    attributes: Map
+}
+
+request-json fn (request: Map): Any {
+  body get(request, "body")
+  cond {
+    is-map(body) => { body }
+    => {
+      raw ::hot::http/raw-body(request)
+      if(or(is-null(raw), eq(raw, "")), null, from-json(Str(raw)))
+    }
+  }
+}
+
+parse-push
+meta {
+    doc: """Parse a Pub/Sub push request into a `PushNotification` (pure): the envelope `{message: {data, messageId, publishTime, attributes}, subscription}` with `data` the base64 JSON `{emailAddress, historyId}`. Returns an Err for a body that is not a push envelope. Does not authenticate: use `verify-push`."""
+}
+fn (request: Map): PushNotification {
+  envelope request-json(request)
+  message if(is-map(envelope), get(envelope, "message"), null)
+  data if(is-map(message), get(message, "data"), null)
+  decoded if(and(is-str(data), ::b64/is-valid(Str(or(data, "")))), from-json(Str(::b64/decode(data))), err("bad data"))
+  cond {
+    not(is-map(message)) => { err("google-gmail: the request is not a Pub/Sub push (no message)") }
+    is-err(decoded) => { err("google-gmail: the push data is not base64 JSON") }
+    => {
+      info if(is-map(decoded), decoded, {})
+      history get(info, "historyId")
+      PushNotification({
+        email-address: get(info, "emailAddress"),
+        history-id: if(is-null(history), null, Str(history)),
+        message-id: or(get(message, "messageId"), get(message, "message_id")),
+        publish-time: or(get(message, "publishTime"), get(message, "publish_time")),
+        subscription: get(envelope, "subscription"),
+        attributes: or(get(message, "attributes"), {})
+      })
+    }
+  }
+}
+
+verify-push-token
+meta {
+    doc: """True when the request's `token` query parameter equals `expected` (constant-time compare). Fails closed: an empty `expected` or a missing parameter is false."""
+}
+fn (request: Map, expected: Str?): Bool {
+  query or(get(request, "query"), {})
+  got get(query, "token")
+  cond {
+    or(is-null(expected), eq(trim(or(expected, "")), "")) => { false }
+    or(is-null(got), eq(got, "")) => { false }
+    => { ::hot::random/secure-compare(Str(got), expected) }
+  }
+}
+
+verify-push
+meta {
+    ctx: {"google.gmail.push.token": {required: false}},
+    doc: """
+    Verify and parse a Gmail push: returns the `PushNotification`, or an
+    Err when the `?token=` secret on the push endpoint is missing or
+    wrong. The 1-arity form checks against the `google.gmail.push.token`
+    context variable and fails (halts) when it is unset, so an
+    unconfigured endpoint never accepts traffic. Answer 2xx quickly:
+    Pub/Sub retries anything else.
+
+    ```hot
+    gmail-push
+    meta {webhook: {service: "gmail", path: "/push"}}
+    fn (request) {
+      note ::google::gmail::sync/verify-push(request)
+      cond {
+        is-err(note) => { ::hot::http/HttpResponse({status: 401, body: "bad token"}) }
+        => {
+          send("gmail:changed", {email: note.email-address, history-id: note.history-id})
+          ::hot::http/HttpResponse({status: 204})
+        }
+      }
+    }
+    ```
+    """
+}
+fn
+(request: Map): PushNotification {
+  expected or(::ctx/get("google.gmail.push.token"), "")
+  if(eq(trim(Str(expected)), ""),
+    fail("google.gmail.push.token is not set. Add it in Context Variables (and append ?token=<it> to the Pub/Sub push endpoint) to verify Gmail pushes.")
+  )
+  verify-push(request, Str(expected))
+},
+(request: Map, expected: Str): PushNotification {
+  cond {
+    not(verify-push-token(request, expected)) => { err("google-gmail: invalid or missing push token") }
+    => { parse-push(request) }
+  }
+}
