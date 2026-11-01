@@ -1057,6 +1057,12 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             HotLibFn::LibFn(crypto::rsa_sha256_verify),
         );
 
+        // ECDSA P-256 signatures (JWT ES256: Plaid webhooks, Apple, WebAuthn)
+        map.insert(
+            "::hot::crypto/ecdsa-p256-sha256-verify".to_string(),
+            HotLibFn::LibFn(crypto::ecdsa_p256_sha256_verify),
+        );
+
         // Secure random functions
         map.insert(
             "::hot::random/random-bytes".to_string(),
