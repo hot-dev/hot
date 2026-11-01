@@ -93,6 +93,22 @@ pub(crate) fn get_blob_resolved_conf(conf: Val, in_project: bool, managed_runtim
     conf.set_str("mode", Some(resolved_mode.to_string()), "")
 }
 
+/// Settings Hot reads that have no default in `create_default_conf`, so the
+/// overlay can't tell them from a script's own `HOT_*` names. Together with
+/// `HYPHENATED_ENV_KEYS`, a broken `<NAME>_FILE` for one of them stops the
+/// command.
+const SETTINGS_WITHOUT_DEFAULTS: &[&str] = &[
+    "HOT_APP_SIGNUP",
+    "HOT_DB_RETENTION_CALL_DAYS",
+    "HOT_EMAIL_PROVIDER",
+    "HOT_EMAIL_SMTP_HOST",
+    "HOT_EMAIL_SMTP_PASSWORD",
+    "HOT_EMAIL_SMTP_PORT",
+    "HOT_EMAIL_SMTP_SECURITY",
+    "HOT_EMAIL_SMTP_USERNAME",
+    "HOT_REDIS_AUTH",
+];
+
 /// Hyphenated keys that deployments commonly set from the environment;
 /// underscores alone cannot spell them.
 const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
@@ -432,7 +448,9 @@ fn apply_env_bindings(
             // setting; scripts may export other HOT_*_FILE names of their own.
             Err(error)
                 if conf.get(&env_var_to_conf_key_in(&conf, &name)).is_some()
-                    || hot::environment::DIRECT_SETTINGS.contains(&name.as_str()) =>
+                    || hot::environment::DIRECT_SETTINGS.contains(&name.as_str())
+                    || HYPHENATED_ENV_KEYS.iter().any(|(known, _)| *known == name)
+                    || SETTINGS_WITHOUT_DEFAULTS.contains(&name.as_str()) =>
             {
                 return Err(error);
             }
@@ -2297,9 +2315,22 @@ mod tests {
         assert!(known.unwrap_err().contains("HOT_DB_URI_FILE"));
         let direct = apply_env_bindings(
             create_default_conf(),
-            [("HOT_ENCRYPTION_KEY_FILE".to_string(), missing)].into(),
+            [("HOT_ENCRYPTION_KEY_FILE".to_string(), missing.clone())].into(),
         );
         assert!(direct.is_err());
+        // Settings with no default: a broken proxy, SMTP password, or CA
+        // file must not leave Hot running without them.
+        for name in [
+            "HOT_NETWORK_EGRESS_PROXY_FILE",
+            "HOT_EMAIL_SMTP_PASSWORD_FILE",
+            "HOT_REDIS_CA_CERT_FILE",
+        ] {
+            let undefaulted = apply_env_bindings(
+                create_default_conf(),
+                [(name.to_string(), missing.clone())].into(),
+            );
+            assert!(undefaulted.unwrap_err().contains(name), "{name}");
+        }
     }
 
     #[test]
