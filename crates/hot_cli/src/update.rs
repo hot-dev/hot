@@ -5,7 +5,9 @@
 
 use crate::build_info;
 use futures::StreamExt;
-use std::io::Write;
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Default base URL for official release downloads.
@@ -13,6 +15,14 @@ const DEFAULT_RELEASE_BASE_URL: &str = "https://get.hot.dev/releases/latest";
 
 /// Default Windows installer URL for official package installs.
 const DEFAULT_WINDOWS_INSTALLER_URL: &str = "https://get.hot.dev/install.ps1";
+
+/// The macOS and Linux installer script.
+const INSTALL_SCRIPT_URL: &str = "https://get.hot.dev/install.sh";
+
+/// The file `install.sh` (from the release archive) and the per-user macOS
+/// package leave in `<prefix>/share/hot`, so `hot update` can update that
+/// install in place.
+const ARCHIVE_RECEIPT: &str = "install-receipt.json";
 
 fn release_base_url(target_version: Option<&str>) -> Option<String> {
     if std::env::var("HOT_UPDATE_DISABLED")
@@ -88,6 +98,8 @@ impl PlatformInfo {
         };
 
         let extension = match os {
+            // An install made from the release archive updates from it
+            _ if matches!(detect_install_method(), InstallMethod::Archive { .. }) => "tar.gz",
             "macos" => "pkg",   // hot_macos_{arch}.pkg
             "linux" => "deb",   // hot_linux_{arch}.deb
             "windows" => "exe", // hot_windows_{arch}.exe
@@ -379,8 +391,44 @@ async fn fetch_latest_version(
 pub enum InstallMethod {
     /// Installed via Homebrew
     Homebrew,
+    /// Installed by `install.sh` from the release archive, as
+    /// `<prefix>/bin/hot` and `<prefix>/share/hot` (a user install by default)
+    Archive { prefix: PathBuf },
     /// Installed via package installer or other method
     Package,
+}
+
+/// The prefix of an install that `install.sh` made from the release archive:
+/// the binary is `<prefix>/bin/hot` and its receipt is in `<prefix>/share/hot`.
+fn archive_install_prefix(exe: &Path) -> Option<PathBuf> {
+    let exe = exe.canonicalize().ok()?;
+    let bin_dir = exe.parent()?;
+    if bin_dir.file_name()? != "bin" {
+        return None;
+    }
+    let prefix = bin_dir.parent()?;
+    prefix
+        .join("share")
+        .join("hot")
+        .join(ARCHIVE_RECEIPT)
+        .is_file()
+        .then(|| prefix.to_path_buf())
+}
+
+/// Whether `exe` is a Windows user install: the per-user installer puts it
+/// under `%LOCALAPPDATA%\Programs`, the machine installer in Program Files.
+fn is_windows_user_install(exe: &Path, local_app_data: Option<&Path>) -> bool {
+    let Some(local_app_data) = local_app_data else {
+        return false;
+    };
+    // Windows paths ignore case
+    let exe = exe.to_string_lossy().to_lowercase();
+    let base = local_app_data.to_string_lossy().to_lowercase();
+    let base = base.trim_end_matches(['\\', '/']);
+    !base.is_empty()
+        && exe
+            .strip_prefix(base)
+            .is_some_and(|rest| rest.starts_with(['\\', '/']))
 }
 
 /// Detect how Hot was installed by checking the binary path
@@ -390,6 +438,10 @@ pub fn detect_install_method() -> InstallMethod {
         Ok(path) => path,
         Err(_) => return InstallMethod::Package,
     };
+
+    if let Some(prefix) = archive_install_prefix(&exe_path) {
+        return InstallMethod::Archive { prefix };
+    }
 
     let path_str = exe_path.to_string_lossy();
 
@@ -445,19 +497,27 @@ pub async fn run_installer(
         println!("This process will now exit to allow the update to proceed.");
         println!();
 
-        // Spawn PowerShell to run the install script
-        let ps_command = if let Some(version) = target_version {
-            format!(
-                "Start-Process powershell -ArgumentList @('-ExecutionPolicy','Bypass','-Command','$env:HOT_VERSION=''{}''; irm {} | iex') -Verb RunAs",
-                version,
-                windows_installer_url()
+        // Spawn PowerShell to run the install script, for the install that's
+        // running: a user install updates without administrator rights.
+        let user_install = std::env::current_exe().is_ok_and(|exe| {
+            is_windows_user_install(
+                &exe,
+                std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
             )
-        } else {
-            format!(
-                "Start-Process powershell -ArgumentList @('-ExecutionPolicy','Bypass','-Command','irm {} | iex') -Verb RunAs",
-                windows_installer_url()
-            )
-        };
+        });
+        let mut env = format!(
+            "$env:HOT_INSTALL_SCOPE=''{}''; ",
+            if user_install { "user" } else { "system" }
+        );
+        if let Some(version) = target_version {
+            env.push_str(&format!("$env:HOT_VERSION=''{}''; ", version));
+        }
+        let ps_command = format!(
+            "Start-Process powershell -ArgumentList @('-ExecutionPolicy','Bypass','-Command','{}irm {} | iex'){}",
+            env,
+            windows_installer_url(),
+            if user_install { "" } else { " -Verb RunAs" }
+        );
         Command::new("powershell")
             .args(["-ExecutionPolicy", "Bypass", "-Command", &ps_command])
             .spawn()?;
@@ -466,49 +526,33 @@ pub async fn run_installer(
         std::process::exit(0);
     }
 
-    // Download the package using reqwest
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join(&platform.package_name);
+    let client = download_client()?;
 
-    println!("Downloading {}...", platform.package_name);
-
-    let user_agent = format!("hot/{}", crate::build_info::VERSION);
-    let client = hot::outbound::client_builder()
-        .timeout(std::time::Duration::from_secs(300)) // 5 min timeout for large downloads
-        .user_agent(&user_agent)
-        .build()?;
-
-    let response = client.get(&platform.download_url).send().await?;
-
-    if !response.status().is_success() {
-        return Err(format!("Download failed: server returned {}", response.status()).into());
+    if let InstallMethod::Archive { prefix } = &install_method {
+        return install_archive(&client, platform, prefix).await;
     }
 
-    let total_size = response.content_length();
-    let mut downloaded: u64 = 0;
-    let mut file = std::fs::File::create(&temp_file)?;
+    // Download the package into a directory only this user can write, since
+    // root runs whatever is there
+    let temp_dir = tempfile::Builder::new().prefix("hot-update-").tempdir()?;
+    let temp_file = temp_dir.path().join(&platform.package_name);
 
-    let mut stream = response.bytes_stream();
-
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result?;
-        file.write_all(&chunk)?;
-        downloaded += chunk.len() as u64;
-
-        // Show progress
-        if let Some(total) = total_size {
-            let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
-            print!("\rDownloading... {}%  ", percent);
-            std::io::stdout().flush().ok();
-        }
+    let expected = fetch_sha256(&client, &platform.download_url).await?;
+    download(&client, &platform.download_url, &temp_file).await?;
+    match expected {
+        Some(expected) => check_sha256(&platform.download_url, &temp_file, &expected)?,
+        // Releases before checksums were published still install
+        None => eprintln!(
+            "Warning: this release publishes no checksum for {}; not verified.",
+            platform.package_name
+        ),
     }
-    println!("\rDownload complete.    ");
 
     // Run the appropriate installer
     println!("Installing (requires sudo)...");
     println!();
 
-    let install_result = match platform.os {
+    match platform.os {
         "macos" => {
             let status = Command::new("sudo")
                 .args(["installer", "-pkg"])
@@ -540,12 +584,234 @@ pub async fn run_installer(
         }
         // Windows is handled earlier via PowerShell script (exits before reaching here)
         _ => Err(format!("Unsupported OS for automatic install: {}", platform.os).into()),
+    }
+}
+
+fn download_client() -> Result<reqwest::Client, Box<dyn std::error::Error + Send + Sync>> {
+    let user_agent = format!("hot/{}", crate::build_info::VERSION);
+    Ok(hot::outbound::client_builder()
+        .timeout(std::time::Duration::from_secs(300)) // 5 min timeout for large downloads
+        .user_agent(&user_agent)
+        .build()?)
+}
+
+/// Download `url` to `dest`, showing progress
+async fn download(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let name = url.rsplit('/').next().unwrap_or(url);
+    println!("Downloading {}...", name);
+
+    let response = client.get(url).send().await?;
+
+    if !response.status().is_success() {
+        return Err(format!("Download failed: server returned {}", response.status()).into());
+    }
+
+    let total_size = response.content_length();
+    let mut downloaded: u64 = 0;
+    let mut file = std::fs::File::create(dest)?;
+
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result?;
+        file.write_all(&chunk)?;
+        downloaded += chunk.len() as u64;
+
+        // Show progress
+        if let Some(total) = total_size {
+            let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
+            print!("\rDownloading... {}%  ", percent);
+            std::io::stdout().flush().ok();
+        }
+    }
+    println!("\rDownload complete.    ");
+    Ok(())
+}
+
+/// The SHA-256 the release publishes for `url`, as `<url>.sha256`, or `None`
+/// when it publishes none (releases before user installs).
+async fn fetch_sha256(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let response = client.get(format!("{url}.sha256")).send().await?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let sums = response.text().await?;
+    let expected = sums
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| format!("The checksum file at {url}.sha256 is empty"))?;
+    Ok(Some(expected.to_ascii_lowercase()))
+}
+
+/// Check `file`, downloaded from `url`, against its published SHA-256
+fn check_sha256(
+    url: &str,
+    file: &Path,
+    expected: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let name = url.rsplit('/').next().unwrap_or(url);
+    let mut hasher = Sha256::new();
+    let mut reader = std::fs::File::open(file)?;
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let actual = hex::encode(hasher.finalize());
+    if actual != expected {
+        return Err(
+            format!("Checksum mismatch for {name}: expected {expected}, got {actual}").into(),
+        );
+    }
+    Ok(())
+}
+
+/// Update an install made from the release archive in place, as its owner and
+/// without sudo: `<prefix>/bin/hot` and `<prefix>/share/hot`. Everything is
+/// staged inside the prefix, so each replacement is a rename, and a failure
+/// leaves the old install working.
+async fn install_archive(
+    client: &reqwest::Client,
+    platform: &PlatformInfo,
+    prefix: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let bin_dir = prefix.join("bin");
+    let share_hot = prefix.join("share").join("hot");
+
+    let stage = match tempfile::Builder::new()
+        .prefix(".hot-update-")
+        .tempdir_in(prefix.join("share"))
+    {
+        Ok(stage) => stage,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(format!(
+                "You can't write to {}. To update it, run the installer as its owner, or with sudo:\n  \
+                 curl -fsSL {INSTALL_SCRIPT_URL} | sh -s -- --system --prefix {}",
+                prefix.display(),
+                prefix.display()
+            )
+            .into());
+        }
+        Err(e) => return Err(e.into()),
     };
 
-    // Clean up temp file
-    let _ = std::fs::remove_file(&temp_file);
+    // Only releases whose hot runs from any folder publish the archive's
+    // checksum, so an older one can't replace this install.
+    let Some(expected) = fetch_sha256(client, &platform.download_url).await? else {
+        return Err(format!(
+            "This Hot release predates user installs, so it can't run from {}. \
+             Install it for the whole machine instead:\n  \
+             curl -fsSL {INSTALL_SCRIPT_URL} | sh -s -- --system",
+            prefix.display()
+        )
+        .into());
+    };
+    let archive = stage.path().join(&platform.package_name);
+    download(client, &platform.download_url, &archive).await?;
+    check_sha256(&platform.download_url, &archive, &expected)?;
 
-    install_result
+    println!("Installing into {}...", prefix.display());
+    let unpacked = stage.path().join("hot");
+    let gz = flate2::read::GzDecoder::new(std::fs::File::open(&archive)?);
+    tar::Archive::new(gz)
+        .unpack(&unpacked)
+        .map_err(|e| format!("Could not unpack {}: {}", platform.package_name, e))?;
+    if !unpacked.join("hot").is_file() || !unpacked.join("pkg").join("hot-std").is_dir() {
+        return Err(format!(
+            "{} is missing the hot binary or its standard library",
+            platform.package_name
+        )
+        .into());
+    }
+    std::fs::write(
+        unpacked.join(ARCHIVE_RECEIPT),
+        "{\"method\": \"archive\"}\n",
+    )?;
+
+    // The new binary waits beside the old one
+    let new_exe = bin_dir.join(format!(".hot.new.{}", std::process::id()));
+    std::fs::copy(unpacked.join("hot"), &new_exe)?;
+    std::fs::remove_file(unpacked.join("hot"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&new_exe, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    // Swap the resources, then the binary. The old resources go into the
+    // stage, which is removed when it drops.
+    let old_resources = stage.path().join("old");
+    let swapped = std::fs::rename(&share_hot, &old_resources)
+        .and_then(|()| match std::fs::rename(&unpacked, &share_hot) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::rename(&old_resources, &share_hot);
+                Err(e)
+            }
+        })
+        .and_then(|()| match std::fs::rename(&new_exe, bin_dir.join("hot")) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::rename(&share_hot, &unpacked);
+                let _ = std::fs::rename(&old_resources, &share_hot);
+                Err(e)
+            }
+        });
+    if let Err(e) = swapped {
+        let _ = std::fs::remove_file(&new_exe);
+        return Err(format!(
+            "Could not replace the install in {}: {}",
+            prefix.display(),
+            e
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// What to suggest after `hot update` fails to install. `brew_command` is
+/// the Homebrew command for this update, when Homebrew can do it.
+pub fn print_install_failure_help(
+    platform: &PlatformInfo,
+    target_version: Option<&str>,
+    brew_command: Option<&str>,
+) {
+    let version_arg = match target_version {
+        Some(version) => format!(" --version {version}"),
+        None => String::new(),
+    };
+    match (detect_install_method(), brew_command) {
+        (InstallMethod::Homebrew, Some(command)) => {
+            eprintln!("You can update manually with:");
+            eprintln!("  {command}");
+        }
+        (InstallMethod::Archive { prefix }, _) => {
+            eprintln!("You can reinstall with:");
+            eprintln!(
+                "  curl -fsSL {INSTALL_SCRIPT_URL} | sh -s -- --prefix {}{version_arg}",
+                prefix.display()
+            );
+        }
+        _ => {
+            eprintln!("You can download manually from:");
+            eprintln!("  {}", platform.download_url);
+            if platform.os != "windows" {
+                eprintln!();
+                eprintln!("Or install Hot just for you, without sudo:");
+                eprintln!("  curl -fsSL {INSTALL_SCRIPT_URL} | sh -s -- --user{version_arg}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -576,6 +842,56 @@ mod tests {
         assert!(!is_newer_version("0.5.0", "0.4.0"));
         assert!(!is_newer_version("0.4.0", "0.4.0"));
         assert!(!is_newer_version("0.4.0", "0.4.0-beta.1"));
+    }
+
+    #[test]
+    fn only_an_install_with_a_receipt_is_an_archive_install() {
+        let root = tempfile::tempdir().unwrap();
+        let prefix = root.path().join(".local");
+        let exe = prefix.join("bin").join("hot");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(prefix.join("share").join("hot")).unwrap();
+        std::fs::write(&exe, "").unwrap();
+
+        // A package or hand-made install has no receipt.
+        assert_eq!(archive_install_prefix(&exe), None);
+
+        std::fs::write(
+            prefix.join("share").join("hot").join(ARCHIVE_RECEIPT),
+            "{\"method\": \"archive\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            archive_install_prefix(&exe),
+            Some(prefix.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn a_windows_user_install_lives_under_local_app_data() {
+        let local = Some(Path::new(r"C:\Users\Ada\AppData\Local"));
+        assert!(is_windows_user_install(
+            Path::new(r"C:\Users\Ada\AppData\Local\Programs\Hot Dev\hot.exe"),
+            local
+        ));
+        // Paths ignore case on Windows
+        assert!(is_windows_user_install(
+            Path::new(r"c:\users\ada\appdata\local\Programs\Hot Dev\hot.exe"),
+            Some(Path::new(r"C:\Users\Ada\AppData\Local\"))
+        ));
+        assert!(!is_windows_user_install(
+            Path::new(r"C:\Program Files\Hot Dev\hot.exe"),
+            local
+        ));
+        // A sibling folder that only shares the prefix
+        assert!(!is_windows_user_install(
+            Path::new(r"C:\Users\Ada\AppData\LocalLow\Hot Dev\hot.exe"),
+            local
+        ));
+        assert!(!is_windows_user_install(
+            Path::new(r"C:\Users\Ada\AppData\Local\Programs\Hot Dev\hot.exe"),
+            None
+        ));
     }
 
     #[test]

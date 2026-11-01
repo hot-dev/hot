@@ -105,8 +105,8 @@ hot.project.my-app.deps {
 Resolution order:
 1. `$HOT_HOME/pkg/<package-name>`
 2. `./hot/pkg/<package-name>` (development)
-3. Executable-relative `resources/pkg/<package-name>`
-4. System install paths (`/usr/local/share/hot/pkg/` on macOS)
+3. The running `hot`'s own install: `<prefix>/share/hot/pkg/<package-name>` for a `hot` at `<prefix>/bin/hot` (such as `~/.local` or `/opt/homebrew`), or `resources/pkg/<package-name>` beside it
+4. System install paths (`/usr/local/share/hot/pkg/` on macOS, `/usr/share/hot/pkg/` on Linux)
 
 ## Transitive Dependencies
 
