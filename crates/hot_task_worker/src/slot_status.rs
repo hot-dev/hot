@@ -1,4 +1,4 @@
-//! `task.status-file`: how much of this worker's capacity is in use. The
+//! `task.status-path`: how much of this worker's capacity is in use. The
 //! self-host agent reads it to scale task hosts and to retire idle ones.
 
 use std::path::Path;

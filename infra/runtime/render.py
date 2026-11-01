@@ -400,14 +400,14 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
     # its process runs. ($$ escapes Compose interpolation.)
     if "scheduler" in services:
         scheduler = services["scheduler"]
-        scheduler["environment"]["HOT_SCHEDULER_HEARTBEAT_FILE"] = SCHEDULER_HEARTBEAT
+        scheduler["environment"]["HOT_SCHEDULER_HEARTBEAT_PATH"] = SCHEDULER_HEARTBEAT
         scheduler["healthcheck"] = {
             "test": ["CMD-SHELL", f"test $$(( $$(date +%s) - $$(cat {SCHEDULER_HEARTBEAT} 2>/dev/null || echo 0) )) -lt 120"],
             "interval": "30s", "timeout": "5s", "retries": 3, "start_period": "90s"}
     if "task-worker" in services:
         task = services["task-worker"]
         task.update(user="0:2000", privileged=True, pid="host", read_only=False)
-        task["environment"]["HOT_TASK_STATUS_FILE"] = TASK_STATUS
+        task["environment"]["HOT_TASK_STATUS_PATH"] = TASK_STATUS
         task.pop("cap_drop")
         task.pop("security_opt")
         for path, readonly in (("/run/kata-containerd", False), ("/run/vc", False), ("/var/run/netns", False), ("/opt/cni/bin", True), ("/var/lib/cni", False), ("/tmp/hot-box-io", False)):

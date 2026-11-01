@@ -305,13 +305,13 @@ class RuntimeContract(unittest.TestCase):
 
     def test_the_task_worker_writes_its_slots_where_the_agent_reads_them(self):
         services = renderer.render(example("aws", "local"), manifest(), "/data", "/run/hot/secrets")["services"]
-        self.assertEqual(services["task-worker"]["environment"]["HOT_TASK_STATUS_FILE"], renderer.TASK_STATUS)
+        self.assertEqual(services["task-worker"]["environment"]["HOT_TASK_STATUS_PATH"], renderer.TASK_STATUS)
         self.assertTrue(renderer.TASK_STATUS.startswith("/tmp/"), "the worker's own writable /tmp")
 
     def test_a_stalled_scheduler_is_unhealthy(self):
         services = renderer.render(example("aws", "local"), manifest(), "/data", "/run/hot/secrets")["services"]
         scheduler = services["scheduler"]
-        self.assertEqual(scheduler["environment"]["HOT_SCHEDULER_HEARTBEAT_FILE"], "/tmp/hot-scheduler-heartbeat")
+        self.assertEqual(scheduler["environment"]["HOT_SCHEDULER_HEARTBEAT_PATH"], "/tmp/hot-scheduler-heartbeat")
         self.assertIn("/tmp:", scheduler["tmpfs"][0])
         check = scheduler["healthcheck"]["test"][1]
         self.assertIn("$$(cat /tmp/hot-scheduler-heartbeat", check)

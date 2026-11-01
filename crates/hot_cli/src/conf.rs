@@ -128,8 +128,8 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
     ),
     ("HOT_NETWORK_CLIENT_IP_HEADER", "network.client-ip.header"),
     ("HOT_BOX_GUEST_DNS", "box.guest-dns"),
-    ("HOT_SCHEDULER_HEARTBEAT_FILE", "scheduler.heartbeat-file"),
-    ("HOT_TASK_STATUS_FILE", "task.status-file"),
+    ("HOT_SCHEDULER_HEARTBEAT_PATH", "scheduler.heartbeat-path"),
+    ("HOT_TASK_STATUS_PATH", "task.status-path"),
     ("HOT_REDIS_CA_CERT", "redis.ca-cert"),
     ("HOT_WORKER_DB_MAX_CONNECTIONS", "worker.db-max-connections"),
     ("HOT_TASK_MAX_CONCURRENT", "task.max-concurrent"),
@@ -1940,18 +1940,55 @@ mod tests {
         );
         assert_eq!(env_var_to_conf_key("HOT_DB_URI"), "db.uri");
         assert_eq!(
-            env_var_to_conf_key("HOT_SCHEDULER_HEARTBEAT_FILE"),
-            "scheduler.heartbeat-file"
+            env_var_to_conf_key("HOT_SCHEDULER_HEARTBEAT_PATH"),
+            "scheduler.heartbeat-path"
         );
         assert_eq!(
-            env_var_to_conf_key("HOT_TASK_STATUS_FILE"),
-            "task.status-file"
+            env_var_to_conf_key("HOT_TASK_STATUS_PATH"),
+            "task.status-path"
         );
         assert_eq!(env_var_to_conf_key("HOT_REDIS_CA_CERT"), "redis.ca-cert");
         assert_eq!(
             env_var_to_conf_key("HOT_WORKER_DB_MAX_CONNECTIONS"),
             "worker.db-max-connections"
         );
+    }
+
+    /// A `HOT_*_FILE` name always names a file holding a setting's value, so
+    /// a setting spelled that way could never be set from the environment.
+    #[test]
+    fn no_environment_setting_name_ends_in_file() {
+        for (name, _) in HYPHENATED_ENV_KEYS {
+            assert!(
+                !name.ends_with("_FILE"),
+                "{name} reads as a file-backed setting"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_status_paths_come_from_the_environment() {
+        // Neither file exists until the service writes it.
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                (
+                    "HOT_SCHEDULER_HEARTBEAT_PATH".into(),
+                    "/nonexistent/heartbeat".into(),
+                ),
+                (
+                    "HOT_TASK_STATUS_PATH".into(),
+                    "/nonexistent/status.json".into(),
+                ),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            conf.get_str("scheduler.heartbeat-path"),
+            "/nonexistent/heartbeat"
+        );
+        assert_eq!(conf.get_str("task.status-path"), "/nonexistent/status.json");
     }
 
     #[test]

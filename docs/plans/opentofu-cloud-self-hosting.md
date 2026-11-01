@@ -1886,7 +1886,7 @@ release of the three presets.
       `hot queue status --json` reports each queue's waiting and running
       items and its oldest item's wait. It counts from the consumer group:
       acknowledged entries stay in a stream until it is trimmed, so the
-      stream's length overcounts. With `task.status-file`, the task worker
+      stream's length overcounts. With `task.status-path`, the task worker
       writes its code and container slots in use, and its container memory.
       The scheduler's host publishes the queue backlog, dead letters, and
       jobs and tasks waiting, with the oldest one's wait, every minute.
@@ -2065,7 +2065,7 @@ or an existing operator destination without coupling telemetry to S3.
       health. This adds detection/recovery guidance without adding scheduler HA.
       The heartbeat and backup-status alerts fire on missing data. The
       scheduler alarm runs in the cloud, and its signal is dispatch-level:
-      the scheduler rewrites `scheduler.heartbeat-file` from a job on its
+      the scheduler rewrites `scheduler.heartbeat-path` from a job on its
       own dispatch loop. Its container's health check fails when the file
       is 2 minutes old, which the agent reports as not running.
 - [ ] Route infrastructure alerts through cloud monitoring or an existing

@@ -305,7 +305,7 @@ The host that runs the scheduler measures the queue every minute with
 installation. On GCP these queue metrics are written for the `global`
 resource (the project), not for an instance, so a group can scale on them.
 The task worker rewrites its slots in use every 15 seconds
-(`task.status-file`), and the agent publishes them with the other metrics.
+(`task.status-path`), and the agent publishes them with the other metrics.
 
 The stacks alert on them. Set `monitoring.alert_emails`; AWS sends each address
 an SNS confirmation email first. Alerts reach those addresses independently of

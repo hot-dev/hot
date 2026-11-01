@@ -1274,11 +1274,11 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         }
     });
 
-    // `task.status-file`: this worker's slots in use, for the self-host
+    // `task.status-path`: this worker's slots in use, for the self-host
     // agent, which scales task hosts on them and retires idle ones.
     let status_file = config
         .worker_conf
-        .get_str_or_default("task.status-file", "");
+        .get_str_or_default("task.status-path", "");
     if !status_file.is_empty() {
         let path = std::path::PathBuf::from(status_file);
         let code = Arc::clone(&code_semaphore);

@@ -115,7 +115,7 @@ pub(crate) async fn run_scheduler(env: Env, conf: Val) {
 
     let schedule_policy = hot::db::SchedulePolicy::from_conf(&conf);
     // Rewritten while the scheduler dispatches, for a supervisor's health check.
-    let heartbeat_file = Some(conf.get_str_or_default("scheduler.heartbeat-file", ""))
+    let heartbeat_file = Some(conf.get_str_or_default("scheduler.heartbeat-path", ""))
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from);
 

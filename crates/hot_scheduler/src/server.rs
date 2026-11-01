@@ -345,7 +345,7 @@ pub async fn run(
     .await
 }
 
-/// How often the heartbeat job rewrites `scheduler.heartbeat-file`.
+/// How often the heartbeat job rewrites `scheduler.heartbeat-path`.
 pub const HEARTBEAT_CRON: &str = "*/30 * * * * *";
 
 /// A job on the same scheduler as the schedules that writes the current
