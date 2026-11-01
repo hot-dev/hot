@@ -83,7 +83,7 @@ meta {
     """
 }
 fn (request: EmbeddingRequest): EmbeddingResponse {
-    response api-request("POST", `${::openai/BASE_URL}/embeddings`, {}, request)
+    response api-request("POST", `${::openai::api/base-url()}/embeddings`, {}, request)
     if(is-ok-response(response), EmbeddingResponse(response.body), err(HttpError(response)))
 }
 

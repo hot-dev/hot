@@ -169,7 +169,7 @@ RetrieveBatchResponse type {
 retrieve-batch
 meta {doc: """GET /batches/{batch_id} - Retrieve the status and details of a batch."""}
 fn (request: RetrieveBatchRequest): RetrieveBatchResponse {
-  response api-request("GET", `${::openai/BASE_URL}/batches/${request.batch-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/batches/${request.batch-id}`)
   if(is-ok-response(response), RetrieveBatchResponse(response.body), err(HttpError(response)))
 }
 
@@ -193,7 +193,7 @@ RetrieveFileResponse type {
 retrieve-file
 meta {doc: """GET /files/{file_id} - Retrieve metadata about an uploaded file."""}
 fn (request: RetrieveFileRequest): RetrieveFileResponse {
-  response api-request("GET", `${::openai/BASE_URL}/files/${request.file-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/files/${request.file-id}`)
   if(is-ok-response(response), RetrieveFileResponse(response.body), err(HttpError(response)))
 }
 
@@ -229,7 +229,7 @@ meta {
     doc: """GET /fine_tuning/jobs/{fine_tuning_job_id} - Retrieve the status and details of a fine-tuning job."""
 }
 fn (request: RetrieveFineTuningJobRequest): RetrieveFineTuningJobResponse {
-  response api-request("GET", `${::openai/BASE_URL}/fine_tuning/jobs/${request.fine-tuning-job-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/fine_tuning/jobs/${request.fine-tuning-job-id}`)
   if(is-ok-response(response), RetrieveFineTuningJobResponse(response.body), err(HttpError(response)))
 }
 
@@ -262,7 +262,7 @@ meta {
     """
 }
 fn (request: RetrieveModelRequest): RetrieveModelResponse {
-  response api-request("GET", `${::openai/BASE_URL}/models/${request.model}`)
+  response api-request("GET", `${::openai::api/base-url()}/models/${request.model}`)
   if(is-ok-response(response), RetrieveModelResponse(response.body), err(HttpError(response)))
 }
 
@@ -284,6 +284,6 @@ meta {
     doc: """GET /vector_stores/{vector_store_id}/files/{file_id}/content - Retrieve vector store file content"""
 }
 fn (request: RetrieveVectorStoreFileContentRequest): RetrieveVectorStoreFileContentResponse {
-  response api-request("GET", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}/files/${request.file-id}/content`)
+  response api-request("GET", `${::openai::api/base-url()}/vector_stores/${request.vector-store-id}/files/${request.file-id}/content`)
   if(is-ok-response(response), RetrieveVectorStoreFileContentResponse(response.body), err(HttpError(response)))
 }

@@ -110,6 +110,6 @@ meta {
     doc: """POST /fine_tuning/jobs/{fine_tuning_job_id}/pause - Pause a running fine-tuning job."""
 }
 fn (request: PauseFineTuningJobRequest): PauseFineTuningJobResponse {
-  response api-request("POST", `${::openai/BASE_URL}/fine_tuning/jobs/${request.fine-tuning-job-id}/pause`)
+  response api-request("POST", `${::openai::api/base-url()}/fine_tuning/jobs/${request.fine-tuning-job-id}/pause`)
   if(is-ok-response(response), PauseFineTuningJobResponse(response.body), err(HttpError(response)))
 }

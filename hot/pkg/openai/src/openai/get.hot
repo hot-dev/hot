@@ -309,7 +309,7 @@ GetAssistantResponse type {
 retrieve-assistant
 meta {doc: """GET /assistants/{assistant_id} - Retrieve an assistant by its ID."""}
 fn (request: GetAssistantRequest): GetAssistantResponse {
-  response api-request("GET", `${::openai/BASE_URL}/assistants/${request.assistant-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/assistants/${request.assistant-id}`)
   if(is-ok-response(response), GetAssistantResponse(response.body), err(HttpError(response)))
 }
 
@@ -334,7 +334,7 @@ meta {
     doc: """GET /chat/completions/{completion_id} - Retrieve a stored chat completion by ID."""
 }
 fn (request: GetChatCompletionRequest): GetChatCompletionResponse {
-  response api-request("GET", `${::openai/BASE_URL}/chat/completions/${request.completion-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/chat/completions/${request.completion-id}`)
   if(is-ok-response(response), GetChatCompletionResponse(response.body), err(HttpError(response)))
 }
 
@@ -359,7 +359,7 @@ meta {
     doc: """GET /chat/completions/{completion_id}/messages - Retrieve messages from a stored chat completion."""
 }
 fn (request: GetChatCompletionMessagesRequest): GetChatCompletionMessagesResponse {
-  response api-request("GET", `${::openai/BASE_URL}/chat/completions/${request.completion-id}/messages?after=${request.after}&limit=${request.limit}&order=${request.order}`)
+  response api-request("GET", `${::openai::api/base-url()}/chat/completions/${request.completion-id}/messages?after=${request.after}&limit=${request.limit}&order=${request.order}`)
   if(is-ok-response(response), GetChatCompletionMessagesResponse(response.body), err(HttpError(response)))
 }
 
@@ -381,7 +381,7 @@ GetEvalResponse type {
 get-eval
 meta {doc: """GET /evals/{eval_id} - Retrieve an evaluation by its ID."""}
 fn (request: GetEvalRequest): GetEvalResponse {
-  response api-request("GET", `${::openai/BASE_URL}/evals/${request.eval-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/evals/${request.eval-id}`)
   if(is-ok-response(response), GetEvalResponse(response.body), err(HttpError(response)))
 }
 
@@ -405,7 +405,7 @@ GetEvalRunsResponse type {
 get-eval-runs
 meta {doc: """GET /evals/{eval_id}/runs - List all runs for an evaluation."""}
 fn (request: GetEvalRunsRequest): GetEvalRunsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/evals/${request.eval-id}/runs?after=${request.after}&limit=${request.limit}&order=${request.order}&status=${request.status}`)
+  response api-request("GET", `${::openai::api/base-url()}/evals/${request.eval-id}/runs?after=${request.after}&limit=${request.limit}&order=${request.order}&status=${request.status}`)
   if(is-ok-response(response), GetEvalRunsResponse(response.body), err(HttpError(response)))
 }
 
@@ -437,7 +437,7 @@ meta {
     doc: """GET /evals/{eval_id}/runs/{run_id} - Retrieve a specific evaluation run."""
 }
 fn (request: GetEvalRunRequest): GetEvalRunResponse {
-  response api-request("GET", `${::openai/BASE_URL}/evals/${request.eval-id}/runs/${request.run-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/evals/${request.eval-id}/runs/${request.run-id}`)
   if(is-ok-response(response), GetEvalRunResponse(response.body), err(HttpError(response)))
 }
 
@@ -464,7 +464,7 @@ meta {
     doc: """GET /evals/{eval_id}/runs/{run_id}/output_items - Get eval run output items"""
 }
 fn (request: GetEvalRunOutputItemsRequest): GetEvalRunOutputItemsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/evals/${request.eval-id}/runs/${request.run-id}/output_items?after=${request.after}&limit=${request.limit}&status=${request.status}&order=${request.order}`)
+  response api-request("GET", `${::openai::api/base-url()}/evals/${request.eval-id}/runs/${request.run-id}/output_items?after=${request.after}&limit=${request.limit}&status=${request.status}&order=${request.order}`)
   if(is-ok-response(response), GetEvalRunOutputItemsResponse(response.body), err(HttpError(response)))
 }
 
@@ -493,7 +493,7 @@ meta {
     doc: """GET /evals/{eval_id}/runs/{run_id}/output_items/{output_item_id} - Get an output item of an eval run"""
 }
 fn (request: GetEvalRunOutputItemRequest): GetEvalRunOutputItemResponse {
-  response api-request("GET", `${::openai/BASE_URL}/evals/${request.eval-id}/runs/${request.run-id}/output_items/${request.output-item-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/evals/${request.eval-id}/runs/${request.run-id}/output_items/${request.output-item-id}`)
   if(is-ok-response(response), GetEvalRunOutputItemResponse(response.body), err(HttpError(response)))
 }
 
@@ -517,7 +517,7 @@ meta {
     doc: """GET /organization/certificates/{certificate_id} - Retrieve an organization certificate."""
 }
 fn (request: GetCertificateRequest): GetCertificateResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/certificates/${request.certificate-id}?include=${request.include}`)
+  response api-request("GET", `${::openai::api/base-url()}/organization/certificates/${request.certificate-id}?include=${request.include}`)
   if(is-ok-response(response), GetCertificateResponse(response.body), err(HttpError(response)))
 }
 
@@ -536,7 +536,7 @@ GetResponseResponse type Map
 get-model-response
 meta {doc: """GET /responses/{response_id} - Retrieve a model response by ID."""}
 fn (request: GetResponseRequest): GetResponseResponse {
-  response api-request("GET", `${::openai/BASE_URL}/responses/${request.response-id}?include=${request.include}&stream=${request.stream}&starting_after=${request.starting-after}&include_obfuscation=${request.include-obfuscation}`)
+  response api-request("GET", `${::openai::api/base-url()}/responses/${request.response-id}?include=${request.include}&stream=${request.stream}&starting_after=${request.starting-after}&include_obfuscation=${request.include-obfuscation}`)
   if(is-ok-response(response), GetResponseResponse(response.body), err(HttpError(response)))
 }
 
@@ -556,7 +556,7 @@ GetThreadResponse type {
 retrieve-thread
 meta {doc: """GET /threads/{thread_id} - Retrieve a thread by its ID."""}
 fn (request: GetThreadRequest): GetThreadResponse {
-  response api-request("GET", `${::openai/BASE_URL}/threads/${request.thread-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/threads/${request.thread-id}`)
   if(is-ok-response(response), GetThreadResponse(response.body), err(HttpError(response)))
 }
 
@@ -588,7 +588,7 @@ meta {
     doc: """GET /threads/{thread_id}/messages/{message_id} - Retrieve a specific message from a thread."""
 }
 fn (request: GetMessageRequest): GetMessageResponse {
-  response api-request("GET", `${::openai/BASE_URL}/threads/${request.thread-id}/messages/${request.message-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/threads/${request.thread-id}/messages/${request.message-id}`)
   if(is-ok-response(response), GetMessageResponse(response.body), err(HttpError(response)))
 }
 
@@ -633,7 +633,7 @@ meta {
     doc: """GET /threads/{thread_id}/runs/{run_id} - Retrieve the status and details of a run."""
 }
 fn (request: GetRunRequest): GetRunResponse {
-  response api-request("GET", `${::openai/BASE_URL}/threads/${request.thread-id}/runs/${request.run-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/threads/${request.thread-id}/runs/${request.run-id}`)
   if(is-ok-response(response), GetRunResponse(response.body), err(HttpError(response)))
 }
 
@@ -669,7 +669,7 @@ meta {
     doc: """GET /threads/{thread_id}/runs/{run_id}/steps/{step_id} - Retrieve run step"""
 }
 fn (request: GetRunStepRequest): GetRunStepResponse {
-  response api-request("GET", `${::openai/BASE_URL}/threads/${request.thread-id}/runs/${request.run-id}/steps/${request.step-id}?include[]=${request.include}`)
+  response api-request("GET", `${::openai::api/base-url()}/threads/${request.thread-id}/runs/${request.run-id}/steps/${request.step-id}?include[]=${request.include}`)
   if(is-ok-response(response), GetRunStepResponse(response.body), err(HttpError(response)))
 }
 
@@ -697,7 +697,7 @@ meta {
     doc: """GET /vector_stores/{vector_store_id} - Retrieve a vector store by its ID."""
 }
 fn (request: GetVectorStoreRequest): GetVectorStoreResponse {
-  response api-request("GET", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/vector_stores/${request.vector-store-id}`)
   if(is-ok-response(response), GetVectorStoreResponse(response.body), err(HttpError(response)))
 }
 
@@ -721,7 +721,7 @@ meta {
     doc: """GET /vector_stores/{vector_store_id}/file_batches/{batch_id} - Retrieve vector store file batch"""
 }
 fn (request: GetVectorStoreFileBatchRequest): GetVectorStoreFileBatchResponse {
-  response api-request("GET", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}/file_batches/${request.batch-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/vector_stores/${request.vector-store-id}/file_batches/${request.batch-id}`)
   if(is-ok-response(response), GetVectorStoreFileBatchResponse(response.body), err(HttpError(response)))
 }
 
@@ -748,6 +748,6 @@ meta {
     doc: """GET /vector_stores/{vector_store_id}/files/{file_id} - Retrieve vector store file"""
 }
 fn (request: GetVectorStoreFileRequest): GetVectorStoreFileResponse {
-  response api-request("GET", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}/files/${request.file-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/vector_stores/${request.vector-store-id}/files/${request.file-id}`)
   if(is-ok-response(response), GetVectorStoreFileResponse(response.body), err(HttpError(response)))
 }

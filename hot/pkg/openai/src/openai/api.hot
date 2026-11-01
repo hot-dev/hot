@@ -108,3 +108,280 @@ fn
     body: to-json(untype(body))
   }), format)
 }
+
+// ============================================================================
+// Base URL and endpoints (OpenAI-compatible servers)
+// ============================================================================
+
+base-url
+meta {
+    doc: """
+    The base URL every `::openai::*` function calls. Reads the
+    `openai.base.url` ctx variable and falls back to
+    `https://api.openai.com/v1` (`::openai/BASE_URL`). A trailing slash is
+    dropped, so `https://gateway.example.com/v1/` works too.
+
+    Set it to route the whole package through a gateway or proxy that
+    speaks the OpenAI API. To call several OpenAI-compatible servers from
+    one program, build an `Endpoint` per server instead.
+
+    **Example**
+
+    ```hot
+    ::openai::api/base-url()  // => "https://api.openai.com/v1"
+    ```
+    """,
+    ctx: {"openai.base.url": {required: false, default: "https://api.openai.com/v1", secret: false}}
+}
+fn (): Str {
+  normalize-base-url(::ctx/get("openai.base.url", ::openai/BASE_URL))
+}
+
+normalize-base-url
+meta {
+    doc: """
+    Normalize a base URL: trims whitespace, drops trailing slashes, and
+    falls back to `::openai/BASE_URL` when the value is null or empty.
+
+    **Example**
+
+    ```hot
+    ::openai::api/normalize-base-url("http://localhost:11434/v1/")  // => "http://localhost:11434/v1"
+    ::openai::api/normalize-base-url(null)                          // => "https://api.openai.com/v1"
+    ```
+    """
+}
+fn (url: Str?): Str {
+  trimmed trim(or(url, ""))
+  cond {
+    is-empty(trimmed) => { ::openai/BASE_URL }
+    ends-with(trimmed, "/") => { normalize-base-url(slice(trimmed, 0, sub(length(trimmed), 1))) }
+    => { trimmed }
+  }
+}
+
+join-url
+meta {
+    doc: """
+    Join an API path onto a base URL without doubling or dropping the
+    slash. A `path` that is already an absolute `http://` or `https://`
+    URL is returned unchanged.
+
+    **Example**
+
+    ```hot
+    ::openai::api/join-url("https://api.groq.com/openai/v1/", "/chat/completions")
+    // => "https://api.groq.com/openai/v1/chat/completions"
+    ::openai::api/join-url("http://localhost:11434/v1", "models")
+    // => "http://localhost:11434/v1/models"
+    ```
+    """
+}
+fn (base: Str, path: Str): Str {
+  cond {
+    or(starts-with(path, "https://"), starts-with(path, "http://")) => { path }
+    => {
+      suffix if(starts-with(path, "/"), path, `/${path}`)
+      `${normalize-base-url(base)}${suffix}`
+    }
+  }
+}
+
+Endpoint
+meta {
+    doc: """
+    Where and how to reach an OpenAI-compatible API: a base URL, an
+    optional bearer key, and optional extra headers sent with every
+    request.
+
+    - `base-url`: e.g. `https://api.openai.com/v1`,
+      `http://localhost:11434/v1` (Ollama), `https://openrouter.ai/api/v1`.
+    - `api-key`: sent as `Authorization: Bearer <key>`. Leave it null or
+      empty for keyless local servers; no Authorization header is sent.
+    - `headers`: merged into every request, e.g. OpenRouter's
+      `HTTP-Referer` and `X-OpenRouter-Title`, or a gateway's routing header.
+
+    An `Endpoint` is explicit: functions that take one never read the
+    `openai.api.key` or `openai.base.url` ctx variables. Build one with
+    `endpoint(...)`, or `default-endpoint()` for the ctx-configured OpenAI.
+    """
+}
+type {
+    base-url: Str,
+    api-key: Str?,
+    headers: Map?
+}
+
+endpoint
+meta {
+    doc: """
+    Build an explicit `Endpoint` from a base URL, an optional API key and
+    optional extra headers. Reads no ctx.
+
+    **Example**
+
+    ```hot
+    local ::openai::api/endpoint("http://localhost:11434/v1")
+    groq ::openai::api/endpoint("https://api.groq.com/openai/v1", ::hot::ctx/get("groq.api.key"))
+    router ::openai::api/endpoint("https://openrouter.ai/api/v1", ::hot::ctx/get("openrouter.api.key"), {
+        "HTTP-Referer": "https://example.com",
+        "X-OpenRouter-Title": "Example App"
+    })
+    ```
+    """
+}
+fn
+(base-url: Str): Endpoint {
+  endpoint(base-url, null, null)
+},
+(base-url: Str, api-key: Str?): Endpoint {
+  endpoint(base-url, api-key, null)
+},
+(base-url: Str, api-key: Str?, headers: Map?): Endpoint {
+  Endpoint({
+    base-url: normalize-base-url(base-url),
+    api-key: api-key,
+    headers: headers
+  })
+}
+
+default-endpoint
+meta {
+    doc: """
+    The ctx-configured OpenAI endpoint: `openai.base.url` (default
+    `https://api.openai.com/v1`) with the `openai.api.key` key.
+
+    **Example**
+
+    ```hot
+    ep ::openai::api/default-endpoint()
+    ep.base-url  // => "https://api.openai.com/v1"
+    ```
+    """,
+    ctx: {"openai.api.key": {}}
+}
+fn (): Endpoint {
+  endpoint(base-url(), ::ctx/get("openai.api.key"), null)
+}
+
+endpoint-headers
+meta {
+    doc: """
+    The headers an `Endpoint` request sends: `Authorization: Bearer <key>`
+    when the endpoint has a non-empty key, `Content-Type: application/json`
+    when `json-body` is true, then the endpoint's own headers, then
+    `additional-headers` (later entries win).
+    """
+}
+fn (ep: Endpoint, additional-headers: Map?, json-body: Bool): Map {
+  key or(ep.api-key, "")
+  auth if(is-empty(key), {}, {Authorization: `Bearer ${key}`})
+  content-type if(json-body, {Content-Type: "application/json"}, {})
+  {...auth, ...content-type, ...or(ep.headers, {}), ...or(additional-headers, {})}
+}
+
+build-endpoint-request
+meta {
+    doc: """
+    Build (without sending) the `HttpRequest` for an `Endpoint` call.
+    `path` is joined onto the endpoint's base URL. A Map or typed record
+    `body` is sent as JSON; `Bytes` as-is; `""` or null sends no body.
+    Exposed for testing; `endpoint-request` sends it.
+
+    **Example**
+
+    ```hot
+    req ::openai::api/build-endpoint-request(
+        ::openai::api/endpoint("http://localhost:11434/v1"),
+        "POST", "/chat/completions", {}, {model: "llama3.2", messages: []}
+    )
+    req.url  // => "http://localhost:11434/v1/chat/completions"
+    ```
+    """
+}
+fn (ep: Endpoint, method: Str, path: Str, additional-headers: Map?, body: Any): HttpRequest {
+  url join-url(ep.base-url, path)
+  match body {
+    "" | Null => {
+      HttpRequest({method, url, headers: endpoint-headers(ep, additional-headers, false)})
+    }
+
+    Bytes => {
+      HttpRequest({method, url, headers: endpoint-headers(ep, additional-headers, false), body: body})
+    }
+
+    _ => {
+      HttpRequest({
+        method,
+        url,
+        headers: endpoint-headers(ep, additional-headers, true),
+        body: to-json(untype(body))
+      })
+    }
+  }
+}
+
+endpoint-request
+meta {
+    doc: """
+    Send a request to an explicit `Endpoint`. `path` is relative to the
+    endpoint's base URL (e.g. `/chat/completions`). Reads no ctx, so it
+    works against keyless local servers and any number of providers.
+
+    **Example**
+
+    ```hot
+    ep ::openai::api/endpoint("http://localhost:11434/v1")
+    response ::openai::api/endpoint-request(ep, "GET", "/models")
+    response.status  // => 200
+    ```
+    """
+}
+fn
+(ep: Endpoint, method: Str, path: Str): HttpResponse {
+  endpoint-request(ep, method, path, {}, "")
+},
+(ep: Endpoint, method: Str, path: Str, additional-headers: Map): HttpResponse {
+  endpoint-request(ep, method, path, additional-headers, "")
+},
+(ep: Endpoint, method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
+  ::hot::http/request(build-endpoint-request(ep, method, path, additional-headers, body))
+}
+
+endpoint-request-stream
+meta {
+    doc: """
+    Send a streaming request (SSE by default) to an explicit `Endpoint`.
+    Returns a `StreamingHttpResponse` whose body iterates events.
+
+    **Example**
+
+    ```hot
+    ep ::openai::api/endpoint("http://localhost:11434/v1")
+    response ::openai::api/endpoint-request-stream(ep, "POST", "/chat/completions", {}, {
+        model: "llama3.2",
+        stream: true,
+        messages: [{role: "user", content: "Hi"}]
+    })
+    ```
+    """
+}
+fn
+(ep: Endpoint, method: Str, path: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
+  endpoint-request-stream(ep, method, path, additional-headers, body, "sse")
+},
+(ep: Endpoint, method: Str, path: Str, additional-headers: Map, body: Any, format: Str): StreamingHttpResponse {
+  ::hot::http/request-stream(build-endpoint-request(ep, method, path, additional-headers, body), format)
+}
+
+endpoint-response
+meta {
+    doc: """
+    Unwrap an `Endpoint` response: the decoded body on 2xx, otherwise an
+    Err carrying `HttpError`. The body is returned as a plain Map so
+    servers that omit OpenAI-only fields still parse.
+    """
+}
+fn (response: HttpResponse): Any {
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

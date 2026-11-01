@@ -1,0 +1,274 @@
+::openai::compatible ns
+meta {
+    doc: """
+    Point the OpenAI chat-tools adapter at any OpenAI-compatible server
+    and register it with the hot-ai run loop.
+
+    A `CompatibleProvider` is a name, an `::openai::api/Endpoint` (base
+    URL, optional key, optional headers), an optional model prefix used
+    for routing (e.g. `"groq/"`), and `ChatRequestOptions` for the
+    server's quirks. `provider(...)` turns it into an
+    `::ai::chat/ProviderRegistration` whose `chat-fn` and
+    `chat-stream-fn` call `::openai::chat-tools/chat-with-tools-at`, so
+    `::ai::chat/run-loop` and `run-loop-stream` can target it.
+
+    Nothing here reads ctx. Look the key up yourself (or use the presets
+    in `hot.dev/openai-compatible`), so a keyless local server never needs
+    `openai.api.key`.
+
+    **Example**
+
+    ```hot
+    ::compat ::openai::compatible
+
+    groq ::compat/provider("Groq", "https://api.groq.com/openai/v1", ::hot::ctx/get("groq.api.key"), "groq/")
+    opts ::ai::chat/ChatOptions({
+        model: "groq/llama-3.3-70b-versatile",
+        providers: ::ai::chat/with-providers([groq])
+    })
+    answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
+    ```
+    """
+}
+
+::ai-chat ::ai::chat
+::ai-tool ::ai::tool
+::api     ::openai::api
+::tools   ::openai::chat-tools
+
+Endpoint           ::api/Endpoint
+ChatRequestOptions ::tools/ChatRequestOptions
+
+DEFAULT_CAPABILITIES ["tools", "streaming"]
+
+CompatibleProvider
+meta {
+    doc: """
+    An OpenAI-compatible chat provider.
+
+    - `name`: display name used in logs and `ProviderRegistration.display-name`.
+    - `endpoint`: where to send requests (`::openai::api/endpoint(...)`).
+    - `model-prefix`: routing prefix such as `"groq/"`. The registration
+      handles models that start with it (case-insensitive), and the prefix
+      is stripped before the request, so `"groq/llama-3.3-70b-versatile"`
+      is sent as `"llama-3.3-70b-versatile"`. Null or empty means the
+      registration never matches by name; use `chat-fn` directly.
+    - `options`: `ChatRequestOptions` (output ceiling, `max-tokens-param`,
+      `stream-usage`, `extra-body`). Null uses
+      `::openai::chat-tools/DEFAULT_REQUEST_OPTIONS`.
+    - `capabilities`: advertised in the registration's `meta`
+      (default `["tools", "streaming"]`).
+    """
+}
+type {
+    name: Str,
+    endpoint: Endpoint,
+    model-prefix: Str?,
+    options: ChatRequestOptions?,
+    capabilities: Vec<Str>?
+}
+
+config
+meta {
+    doc: """
+    Build a `CompatibleProvider`.
+
+    **Example**
+
+    ```hot
+    ::compat ::openai::compatible
+
+    local ::compat/config("Ollama", ::openai::api/endpoint("http://localhost:11434/v1"), "ollama/")
+    deepseek ::compat/config(
+        "DeepSeek",
+        ::openai::api/endpoint("https://api.deepseek.com", ::hot::ctx/get("deepseek.api.key")),
+        "deepseek/",
+        ::openai::chat-tools/ChatRequestOptions({max-completion-tokens: 4096, max-tokens-param: "max_tokens"})
+    )
+    ```
+    """
+}
+fn
+(name: Str, endpoint: Endpoint, model-prefix: Str?): CompatibleProvider {
+    config(name, endpoint, model-prefix, null)
+},
+(name: Str, endpoint: Endpoint, model-prefix: Str?, options: ChatRequestOptions?): CompatibleProvider {
+    CompatibleProvider({
+        name: name,
+        endpoint: endpoint,
+        model-prefix: model-prefix,
+        options: options,
+        capabilities: null
+    })
+}
+
+request-options
+meta {
+    doc: """The provider's `ChatRequestOptions`, or `::openai::chat-tools/DEFAULT_REQUEST_OPTIONS` when unset."""
+}
+fn (p: CompatibleProvider): ChatRequestOptions {
+    or(p.options, ::tools/DEFAULT_REQUEST_OPTIONS)
+}
+
+matches-model
+meta {
+    doc: """
+    True when `model` starts with `prefix` (case-insensitive). An empty or
+    null prefix matches nothing.
+
+    **Example**
+
+    ```hot
+    ::openai::compatible/matches-model("Groq/llama-3.3-70b", "groq/")  // => true
+    ::openai::compatible/matches-model("gpt-4o", "groq/")              // => false
+    ```
+    """
+}
+fn (model: Str, prefix: Str?): Bool {
+    p lowercase(or(prefix, ""))
+    and(not(is-empty(p)), starts-with(lowercase(model), p))
+}
+
+strip-model-prefix
+meta {
+    doc: """
+    Remove the routing prefix from a model id before it is sent. Models
+    without the prefix are returned unchanged.
+
+    **Example**
+
+    ```hot
+    ::openai::compatible/strip-model-prefix("openrouter/anthropic/claude-sonnet-4.5", "openrouter/")
+    // => "anthropic/claude-sonnet-4.5"
+    ::openai::compatible/strip-model-prefix("llama3.2", "ollama/")
+    // => "llama3.2"
+    ```
+    """
+}
+fn (model: Str, prefix: Str?): Str {
+    cond {
+        matches-model(model, prefix) => { slice(model, length(prefix), length(model)) }
+        => { model }
+    }
+}
+
+chat-fn
+meta {
+    doc: """
+    A `::ai::chat/run-loop` chat function, `(model, messages, system,
+    tools) -> ChatReply`, bound to this provider. Use it as
+    `ChatOptions.chat-fn` when you don't need registry routing.
+
+    **Example**
+
+    ```hot
+    local ::openai::compatible/config("Ollama", ::openai::api/endpoint("http://localhost:11434/v1"), null)
+    opts ::ai::chat/ChatOptions({chat-fn: ::openai::compatible/chat-fn(local), model: "llama3.2"})
+    ```
+    """
+}
+fn (p: CompatibleProvider): Fn {
+    ep p.endpoint
+    prefix p.model-prefix
+    options request-options(p)
+    (model, messages, system, tools) {
+        ::tools/chat-with-tools-at(ep, strip-model-prefix(model, prefix), messages, system, tools, options)
+    }
+}
+
+chat-stream-fn
+meta {
+    doc: """
+    A `::ai::chat/run-loop-stream` chat function, `(model, messages,
+    system, tools, on-delta) -> ChatReply`, bound to this provider.
+    """
+}
+fn (p: CompatibleProvider): Fn {
+    ep p.endpoint
+    prefix p.model-prefix
+    options request-options(p)
+    (model, messages, system, tools, on-delta) {
+        ::tools/chat-with-tools-stream-at(ep, strip-model-prefix(model, prefix), messages, system, tools, on-delta, options)
+    }
+}
+
+detect-fn
+meta {
+    doc: """A `ProviderRegistration.detect` function matching models that start with `prefix` (case-insensitive)."""
+}
+fn (prefix: Str?): Fn {
+    p prefix
+    (model) { matches-model(model, p) }
+}
+
+provider
+meta {
+    doc: """
+    Build an `::ai::chat/ProviderRegistration` for an OpenAI-compatible
+    server, reusing the OpenAI chat-tools adapter for both `chat-fn` and
+    `chat-stream-fn`. Pass a `CompatibleProvider`, or a name, base URL,
+    key (null for keyless servers) and model prefix.
+
+    `variant` is `Provider.OpenAi` (the wire format); `display-name` is
+    the provider's name. `meta` carries `{compatible: true, base-url,
+    model-prefix, capabilities}`; the key is never copied into it.
+
+    **Example**
+
+    ```hot
+    ::compat ::openai::compatible
+
+    registry ::ai::chat/with-providers([
+        ::compat/provider("Ollama", "http://localhost:11434/v1", null, "ollama/"),
+        ::compat/provider("Groq", "https://api.groq.com/openai/v1", ::hot::ctx/get("groq.api.key"), "groq/")
+    ])
+    opts ::ai::chat/ChatOptions({model: "ollama/llama3.2", providers: registry})
+    ::ai::chat/run-loop(opts, "Hello")
+    ```
+    """
+}
+fn
+(p: CompatibleProvider): ::ai-chat/ProviderRegistration {
+    ::ai-chat/ProviderRegistration({
+        variant: ::ai-chat/Provider.OpenAi,
+        detect: detect-fn(p.model-prefix),
+        display-name: p.name,
+        chat-fn: chat-fn(p),
+        chat-stream-fn: chat-stream-fn(p),
+        embed-fn: null,
+        meta: {
+            compatible: true,
+            base-url: p.endpoint.base-url,
+            model-prefix: p.model-prefix,
+            capabilities: or(p.capabilities, DEFAULT_CAPABILITIES)
+        }
+    })
+},
+(name: Str, base-url: Str, api-key: Str?, model-prefix: Str?): ::ai-chat/ProviderRegistration {
+    provider(config(name, ::api/endpoint(base-url, api-key), model-prefix))
+}
+
+list-models
+meta {
+    doc: """
+    GET /models on the provider's endpoint. Returns the decoded body
+    (`{data: [{id, ...}]}` on most servers) as a Map, or an Err carrying
+    `HttpError`.
+    """
+}
+fn (p: CompatibleProvider): Map {
+    ::api/endpoint-response(::api/endpoint-request(p.endpoint, "GET", "/models"))
+}
+
+create-embeddings
+meta {
+    doc: """
+    POST /embeddings on the provider's endpoint. `request` is the OpenAI
+    embeddings body (`{model, input, dimensions?, encoding_format?}`).
+    Returns the decoded body as a Map, or an Err carrying `HttpError`.
+    """
+}
+fn (p: CompatibleProvider, request: Map): Map {
+    body assoc(request, "model", strip-model-prefix(request.model, p.model-prefix))
+    ::api/endpoint-response(::api/endpoint-request(p.endpoint, "POST", "/embeddings", {}, body))
+}

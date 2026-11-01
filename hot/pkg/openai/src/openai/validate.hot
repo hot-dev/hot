@@ -26,6 +26,6 @@ meta {
     doc: """POST /fine_tuning/alpha/graders/validate - Validate a grader configuration before using it in fine-tuning."""
 }
 fn (request: ValidateGraderRequest): ValidateGraderResponse {
-  response api-request("POST", `${::openai/BASE_URL}/fine_tuning/alpha/graders/validate`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/fine_tuning/alpha/graders/validate`, {}, request)
   if(is-ok-response(response), ValidateGraderResponse(response.body), err(HttpError(response)))
 }

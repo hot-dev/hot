@@ -128,7 +128,7 @@ fn (request: CreateImageRequest): CreateImageResponse | HttpError {
         => { request }
     }
 
-    response api-request("POST", `${::openai/BASE_URL}/images/generations`, {}, final-request)
+    response api-request("POST", `${::openai::api/base-url()}/images/generations`, {}, final-request)
     if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
 }
 
@@ -148,7 +148,7 @@ meta {
     """
 }
 fn (request: EditImageRequest): CreateImageResponse | HttpError {
-    response api-request("POST", `${::openai/BASE_URL}/images/edits`, {}, request)
+    response api-request("POST", `${::openai::api/base-url()}/images/edits`, {}, request)
     if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
 }
 
@@ -167,7 +167,7 @@ meta {
     """
 }
 fn (request: VariationImageRequest): CreateImageResponse | HttpError {
-    response api-request("POST", `${::openai/BASE_URL}/images/variations`, {}, request)
+    response api-request("POST", `${::openai::api/base-url()}/images/variations`, {}, request)
     if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
 }
 

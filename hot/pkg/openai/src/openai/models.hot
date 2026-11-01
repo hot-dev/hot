@@ -43,7 +43,7 @@ meta {
     """
 }
 fn (): ModelsListResponse {
-    response api-request("GET", `${::openai/BASE_URL}/models`)
+    response api-request("GET", `${::openai::api/base-url()}/models`)
     if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
 }
 
@@ -65,6 +65,6 @@ meta {
     """
 }
 fn (model_id: Str): Model {
-    response api-request("GET", `${::openai/BASE_URL}/models/${model_id}`)
+    response api-request("GET", `${::openai::api/base-url()}/models/${model_id}`)
     if(is-ok-response(response), Model(response.body), err(HttpError(response)))
 }

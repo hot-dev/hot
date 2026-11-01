@@ -49,6 +49,6 @@ meta {
     doc: """POST /organization/invites - Invite a user to the organization by email."""
 }
 fn (request: InviteUserRequest): InviteUserResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/invites`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/organization/invites`, {}, request)
   if(is-ok-response(response), InviteUserResponse(response.body), err(HttpError(response)))
 }

@@ -753,7 +753,7 @@ meta {
     """
 }
 fn (request: CreateAssistantRequest): CreateAssistantResponse {
-  response api-request("POST", `${::openai/BASE_URL}/assistants`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/assistants`, {}, request)
   if(is-ok-response(response), CreateAssistantResponse(response.body), err(HttpError(response)))
 }
 
@@ -791,7 +791,7 @@ meta {
     """
 }
 fn (request: CreateSpeechRequest): CreateSpeechResponse {
-  response api-request("POST", `${::openai/BASE_URL}/audio/speech`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/audio/speech`, {}, request)
   if(is-ok-response(response), CreateSpeechResponse(response.body), err(HttpError(response)))
 }
 
@@ -906,7 +906,7 @@ meta {
 }
 fn (request: CreateTranscriptionRequest): CreateTranscriptionResponse {
   boundary `hot-openai-${Uuid()}`
-  response api-request("POST", `${::openai/BASE_URL}/audio/transcriptions`, {
+  response api-request("POST", `${::openai::api/base-url()}/audio/transcriptions`, {
     "Content-Type": `multipart/form-data; boundary=${boundary}`
   }, transcription-multipart-body(request, boundary))
   if(is-ok-response(response), CreateTranscriptionResponse({value: response.body}), err(HttpError(response)))
@@ -941,7 +941,7 @@ meta {
     """
 }
 fn (request: CreateTranslationRequest): CreateTranslationResponse {
-  response api-request("POST", `${::openai/BASE_URL}/audio/translations`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/audio/translations`, {}, request)
   if(is-ok-response(response), CreateTranslationResponse(response.body), err(HttpError(response)))
 }
 
@@ -998,7 +998,7 @@ meta {
     """
 }
 fn (request: CreateBatchRequest): CreateBatchResponse {
-  response api-request("POST", `${::openai/BASE_URL}/batches`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/batches`, {}, request)
   if(is-ok-response(response), CreateBatchResponse(response.body), err(HttpError(response)))
 }
 
@@ -1038,7 +1038,7 @@ meta {
     """
 }
 fn (request: CreateChatCompletionRequest): CreateChatCompletionResponse {
-  response api-request("POST", `${::openai/BASE_URL}/chat/completions`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/chat/completions`, {}, request)
   if(is-ok-response(response), CreateChatCompletionResponse(response.body), err(HttpError(response)))
 }
 
@@ -1083,7 +1083,7 @@ meta {
     """
 }
 fn (request: CreateCompletionRequest): CreateCompletionResponse {
-  response api-request("POST", `${::openai/BASE_URL}/completions`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/completions`, {}, request)
   if(is-ok-response(response), CreateCompletionResponse(response.body), err(HttpError(response)))
 }
 
@@ -1123,7 +1123,7 @@ meta {
     """
 }
 fn (request: CreateEmbeddingRequest): CreateEmbeddingResponse {
-  response api-request("POST", `${::openai/BASE_URL}/embeddings`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/embeddings`, {}, request)
   if(is-ok-response(response), CreateEmbeddingResponse(response.body), err(HttpError(response)))
 }
 
@@ -1150,7 +1150,7 @@ meta {
     doc: """POST /evals - Create an evaluation to test model outputs against criteria."""
 }
 fn (request: CreateEvalRequest): CreateEvalResponse {
-  response api-request("POST", `${::openai/BASE_URL}/evals`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/evals`, {}, request)
   if(is-ok-response(response), CreateEvalResponse(response.body), err(HttpError(response)))
 }
 
@@ -1181,7 +1181,7 @@ CreateEvalRunResponse type {
 create-eval-run
 meta {doc: """POST /evals/{eval_id}/runs - Run an evaluation against a data source."""}
 fn (eval-id: Str, request: CreateEvalRunRequest): CreateEvalRunResponse {
-  response api-request("POST", `${::openai/BASE_URL}/evals/${eval-id}/runs`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/evals/${eval-id}/runs`, {}, request)
   if(is-ok-response(response), CreateEvalRunResponse(response.body), err(HttpError(response)))
 }
 
@@ -1223,7 +1223,7 @@ meta {
     """
 }
 fn (request: CreateFileRequest): CreateFileResponse {
-  response api-request("POST", `${::openai/BASE_URL}/files`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/files`, {}, request)
   if(is-ok-response(response), CreateFileResponse(response.body), err(HttpError(response)))
 }
 
@@ -1245,7 +1245,7 @@ meta {
     doc: """POST /fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions - Create checkpoint permissions"""
 }
 fn (fine-tuned-model-checkpoint: Str, request: CreateFineTuningCheckpointPermissionRequest): CreateFineTuningCheckpointPermissionResponse {
-  response api-request("POST", `${::openai/BASE_URL}/fine_tuning/checkpoints/${fine-tuned-model-checkpoint}/permissions`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/fine_tuning/checkpoints/${fine-tuned-model-checkpoint}/permissions`, {}, request)
   if(is-ok-response(response), CreateFineTuningCheckpointPermissionResponse(response.body), err(HttpError(response)))
 }
 
@@ -1303,7 +1303,7 @@ meta {
     """
 }
 fn (request: CreateFineTuningJobRequest): CreateFineTuningJobResponse {
-  response api-request("POST", `${::openai/BASE_URL}/fine_tuning/jobs`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/fine_tuning/jobs`, {}, request)
   if(is-ok-response(response), CreateFineTuningJobResponse(response.body), err(HttpError(response)))
 }
 
@@ -1345,7 +1345,7 @@ meta {
     """
 }
 fn (request: CreateImageEditRequest): CreateImageEditResponse {
-  response api-request("POST", `${::openai/BASE_URL}/images/edits`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/images/edits`, {}, request)
   if(is-ok-response(response), CreateImageEditResponse(response.body), err(HttpError(response)))
 }
 
@@ -1399,7 +1399,7 @@ meta {
     """
 }
 fn (request: CreateImageRequest): CreateImageResponse {
-  response api-request("POST", `${::openai/BASE_URL}/images/generations`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/images/generations`, {}, request)
   if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
 }
 
@@ -1432,7 +1432,7 @@ meta {
     """
 }
 fn (request: CreateImageVariationRequest): CreateImageVariationResponse {
-  response api-request("POST", `${::openai/BASE_URL}/images/variations`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/images/variations`, {}, request)
   if(is-ok-response(response), CreateImageVariationResponse(response.body), err(HttpError(response)))
 }
 
@@ -1467,7 +1467,7 @@ meta {
     """
 }
 fn (request: CreateModerationRequest): CreateModerationResponse {
-  response api-request("POST", `${::openai/BASE_URL}/moderations`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/moderations`, {}, request)
   if(is-ok-response(response), CreateModerationResponse(response.body), err(HttpError(response)))
 }
 
@@ -1481,7 +1481,7 @@ CreateResponseResponse type Map
 create-model-response
 meta {doc: """POST /responses - Create a model response using the Responses API."""}
 fn (request: CreateResponseRequest): CreateResponseResponse {
-  response api-request("POST", `${::openai/BASE_URL}/responses`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/responses`, {}, request)
   if(is-ok-response(response), CreateResponseResponse(response.body), err(HttpError(response)))
 }
 
@@ -1503,7 +1503,7 @@ CreateThreadResponse type {
 create-thread
 meta {doc: """POST /threads - Create a new thread for the Assistants API."""}
 fn (request: CreateThreadRequest): CreateThreadResponse {
-  response api-request("POST", `${::openai/BASE_URL}/threads`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/threads`, {}, request)
   if(is-ok-response(response), CreateThreadResponse(response.body), err(HttpError(response)))
 }
 
@@ -1562,7 +1562,7 @@ meta {
     doc: """POST /threads/runs - Create a thread and immediately run an assistant on it."""
 }
 fn (request: CreateThreadAndRunRequest): CreateThreadAndRunResponse {
-  response api-request("POST", `${::openai/BASE_URL}/threads/runs`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/threads/runs`, {}, request)
   if(is-ok-response(response), CreateThreadAndRunResponse(response.body), err(HttpError(response)))
 }
 
@@ -1594,7 +1594,7 @@ CreateMessageResponse type {
 create-message
 meta {doc: """POST /threads/{thread_id}/messages - Create a message in a thread."""}
 fn (thread-id: Str, request: CreateMessageRequest): CreateMessageResponse {
-  response api-request("POST", `${::openai/BASE_URL}/threads/${thread-id}/messages`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/threads/${thread-id}/messages`, {}, request)
   if(is-ok-response(response), CreateMessageResponse(response.body), err(HttpError(response)))
 }
 
@@ -1654,7 +1654,7 @@ meta {
     doc: """POST /threads/{thread_id}/runs - Create a run to execute an assistant on a thread."""
 }
 fn (thread-id: Str, include: Str, request: CreateRunRequest): CreateRunResponse {
-  response api-request("POST", `${::openai/BASE_URL}/threads/${thread-id}/runs?include[]=${include}`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/threads/${thread-id}/runs?include[]=${include}`, {}, request)
   if(is-ok-response(response), CreateRunResponse(response.body), err(HttpError(response)))
 }
 
@@ -1681,7 +1681,7 @@ CreateUploadResponse type {
 create-upload
 meta {doc: """POST /uploads - Create a multi-part upload for large files."""}
 fn (request: CreateUploadRequest): CreateUploadResponse {
-  response api-request("POST", `${::openai/BASE_URL}/uploads`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/uploads`, {}, request)
   if(is-ok-response(response), CreateUploadResponse(response.body), err(HttpError(response)))
 }
 
@@ -1711,7 +1711,7 @@ CreateVectorStoreResponse type {
 create-vector-store
 meta {doc: """POST /vector_stores - Create a vector store for file search."""}
 fn (request: CreateVectorStoreRequest): CreateVectorStoreResponse {
-  response api-request("POST", `${::openai/BASE_URL}/vector_stores`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/vector_stores`, {}, request)
   if(is-ok-response(response), CreateVectorStoreResponse(response.body), err(HttpError(response)))
 }
 
@@ -1736,7 +1736,7 @@ meta {
     doc: """POST /vector_stores/{vector_store_id}/file_batches - Add a batch of files to a vector store."""
 }
 fn (vector-store-id: Str, request: CreateVectorStoreFileBatchRequest): CreateVectorStoreFileBatchResponse {
-  response api-request("POST", `${::openai/BASE_URL}/vector_stores/${vector-store-id}/file_batches`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/vector_stores/${vector-store-id}/file_batches`, {}, request)
   if(is-ok-response(response), CreateVectorStoreFileBatchResponse(response.body), err(HttpError(response)))
 }
 
@@ -1764,6 +1764,6 @@ meta {
     doc: """POST /vector_stores/{vector_store_id}/files - Add a file to a vector store."""
 }
 fn (vector-store-id: Str, request: CreateVectorStoreFileRequest): CreateVectorStoreFileResponse {
-  response api-request("POST", `${::openai/BASE_URL}/vector_stores/${vector-store-id}/files`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/vector_stores/${vector-store-id}/files`, {}, request)
   if(is-ok-response(response), CreateVectorStoreFileResponse(response.body), err(HttpError(response)))
 }

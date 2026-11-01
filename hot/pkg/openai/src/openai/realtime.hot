@@ -103,7 +103,7 @@ meta {
     doc: """POST /realtime/sessions - Create a realtime session for audio/text conversations with GPT-4o models."""
 }
 fn (request: CreateRealtimeSessionRequest): CreateRealtimeSessionResponse {
-  response api-request("POST", `${::openai/BASE_URL}/realtime/sessions`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/realtime/sessions`, {}, request)
   if(is-ok-response(response), CreateRealtimeSessionResponse(response.body), err(HttpError(response)))
 }
 
@@ -131,6 +131,6 @@ meta {
     doc: """POST /realtime/transcription_sessions - Create a realtime transcription session for live audio-to-text."""
 }
 fn (request: CreateRealtimeTranscriptionSessionRequest): CreateRealtimeTranscriptionSessionResponse {
-  response api-request("POST", `${::openai/BASE_URL}/realtime/transcription_sessions`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/realtime/transcription_sessions`, {}, request)
   if(is-ok-response(response), CreateRealtimeTranscriptionSessionResponse(response.body), err(HttpError(response)))
 }

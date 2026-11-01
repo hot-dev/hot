@@ -513,7 +513,7 @@ meta {
     doc: """GET /assistants - List all assistants. Supports pagination with limit, order, after, and before parameters."""
 }
 fn (request: ListAssistantsRequest): ListAssistantsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/assistants?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}`)
+  response api-request("GET", `${::openai::api/base-url()}/assistants?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}`)
   if(is-ok-response(response), ListAssistantsResponse(response.body), err(HttpError(response)))
 }
 
@@ -536,7 +536,7 @@ meta {
     doc: """GET /batches - List all batches. Supports pagination with after and limit parameters."""
 }
 fn (request: ListBatchesRequest): ListBatchesResponse {
-  response api-request("GET", `${::openai/BASE_URL}/batches?after=${request.after}&limit=${request.limit}`)
+  response api-request("GET", `${::openai::api/base-url()}/batches?after=${request.after}&limit=${request.limit}`)
   if(is-ok-response(response), ListBatchesResponse(response.body), err(HttpError(response)))
 }
 
@@ -562,7 +562,7 @@ meta {
     doc: """GET /chat/completions - List stored chat completions. Supports filtering by model and metadata."""
 }
 fn (request: ListChatCompletionsRequest): ListChatCompletionsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/chat/completions?model=${request.model}&metadata=${request.metadata}&after=${request.after}&limit=${request.limit}&order=${request.order}`)
+  response api-request("GET", `${::openai::api/base-url()}/chat/completions?model=${request.model}&metadata=${request.metadata}&after=${request.after}&limit=${request.limit}&order=${request.order}`)
   if(is-ok-response(response), ListChatCompletionsResponse(response.body), err(HttpError(response)))
 }
 
@@ -585,7 +585,7 @@ ListEvalsResponse type {
 list-evals
 meta {doc: """GET /evals - List all evaluations. Supports pagination and ordering."""}
 fn (request: ListEvalsRequest): ListEvalsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/evals?after=${request.after}&limit=${request.limit}&order=${request.order}&order_by=${request.order-by}`)
+  response api-request("GET", `${::openai::api/base-url()}/evals?after=${request.after}&limit=${request.limit}&order=${request.order}&order_by=${request.order-by}`)
   if(is-ok-response(response), ListEvalsResponse(response.body), err(HttpError(response)))
 }
 
@@ -608,7 +608,7 @@ ListFilesResponse type {
 list-files
 meta {doc: """GET /files - List uploaded files. Supports filtering by purpose."""}
 fn (request: ListFilesRequest): ListFilesResponse {
-  response api-request("GET", `${::openai/BASE_URL}/files?purpose=${request.purpose}&limit=${request.limit}&order=${request.order}&after=${request.after}`)
+  response api-request("GET", `${::openai::api/base-url()}/files?purpose=${request.purpose}&limit=${request.limit}&order=${request.order}&after=${request.after}`)
   if(is-ok-response(response), ListFilesResponse(response.body), err(HttpError(response)))
 }
 
@@ -634,7 +634,7 @@ meta {
     doc: """GET /fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions - List checkpoint permissions"""
 }
 fn (request: ListFineTuningCheckpointPermissionsRequest): ListFineTuningCheckpointPermissionsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/fine_tuning/checkpoints/${request.fine-tuned-model-checkpoint}/permissions?project_id=${request.project-id}&after=${request.after}&limit=${request.limit}&order=${request.order}`)
+  response api-request("GET", `${::openai::api/base-url()}/fine_tuning/checkpoints/${request.fine-tuned-model-checkpoint}/permissions?project_id=${request.project-id}&after=${request.after}&limit=${request.limit}&order=${request.order}`)
   if(is-ok-response(response), ListFineTuningCheckpointPermissionsResponse(response.body), err(HttpError(response)))
 }
 
@@ -656,7 +656,7 @@ meta {
     doc: """GET /fine_tuning/jobs - List all fine-tuning jobs. Supports pagination and metadata filtering."""
 }
 fn (request: ListPaginatedFineTuningJobsRequest): ListPaginatedFineTuningJobsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/fine_tuning/jobs?after=${request.after}&limit=${request.limit}&metadata=${request.metadata}`)
+  response api-request("GET", `${::openai::api/base-url()}/fine_tuning/jobs?after=${request.after}&limit=${request.limit}&metadata=${request.metadata}`)
   if(is-ok-response(response), ListPaginatedFineTuningJobsResponse(response.body), err(HttpError(response)))
 }
 
@@ -680,7 +680,7 @@ meta {
     doc: """GET /fine_tuning/jobs/{fine_tuning_job_id}/checkpoints - List fine-tuning checkpoints"""
 }
 fn (request: ListFineTuningJobCheckpointsRequest): ListFineTuningJobCheckpointsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/fine_tuning/jobs/${request.fine-tuning-job-id}/checkpoints?after=${request.after}&limit=${request.limit}`)
+  response api-request("GET", `${::openai::api/base-url()}/fine_tuning/jobs/${request.fine-tuning-job-id}/checkpoints?after=${request.after}&limit=${request.limit}`)
   if(is-ok-response(response), ListFineTuningJobCheckpointsResponse(response.body), err(HttpError(response)))
 }
 
@@ -702,7 +702,7 @@ meta {
     doc: """GET /fine_tuning/jobs/{fine_tuning_job_id}/events - List fine-tuning events"""
 }
 fn (request: ListFineTuningEventsRequest): ListFineTuningEventsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/fine_tuning/jobs/${request.fine-tuning-job-id}/events?after=${request.after}&limit=${request.limit}`)
+  response api-request("GET", `${::openai::api/base-url()}/fine_tuning/jobs/${request.fine-tuning-job-id}/events?after=${request.after}&limit=${request.limit}`)
   if(is-ok-response(response), ListFineTuningEventsResponse(response.body), err(HttpError(response)))
 }
 
@@ -732,7 +732,7 @@ meta {
     """
 }
 fn (request: ListModelsRequest): ListModelsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/models`)
+  response api-request("GET", `${::openai::api/base-url()}/models`)
   if(is-ok-response(response), ListModelsResponse(response.body), err(HttpError(response)))
 }
 
@@ -754,7 +754,7 @@ ListOrganizationCertificatesResponse type {
 list-organization-certificates
 meta {doc: """GET /organization/certificates - List organization certificates"""}
 fn (request: ListOrganizationCertificatesRequest): ListOrganizationCertificatesResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/certificates?limit=${request.limit}&after=${request.after}&order=${request.order}`)
+  response api-request("GET", `${::openai::api/base-url()}/organization/certificates?limit=${request.limit}&after=${request.after}&order=${request.order}`)
   if(is-ok-response(response), ListOrganizationCertificatesResponse(response.body), err(HttpError(response)))
 }
 
@@ -779,7 +779,7 @@ meta {
     doc: """GET /organization/projects/{project_id}/certificates - List project certificates"""
 }
 fn (request: ListProjectCertificatesRequest): ListProjectCertificatesResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/certificates?limit=${request.limit}&after=${request.after}&order=${request.order}`)
+  response api-request("GET", `${::openai::api/base-url()}/organization/projects/${request.project-id}/certificates?limit=${request.limit}&after=${request.after}&order=${request.order}`)
   if(is-ok-response(response), ListProjectCertificatesResponse(response.body), err(HttpError(response)))
 }
 
@@ -806,7 +806,7 @@ meta {
     doc: """GET /responses/{response_id}/input_items - List input items for a response."""
 }
 fn (request: ListInputItemsRequest): ListInputItemsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/responses/${request.response-id}/input_items?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&include=${request.include}`)
+  response api-request("GET", `${::openai::api/base-url()}/responses/${request.response-id}/input_items?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&include=${request.include}`)
   if(is-ok-response(response), ListInputItemsResponse(response.body), err(HttpError(response)))
 }
 
@@ -831,7 +831,7 @@ ListMessagesResponse type {
 list-messages
 meta {doc: """GET /threads/{thread_id}/messages - List all messages in a thread."""}
 fn (request: ListMessagesRequest): ListMessagesResponse {
-  response api-request("GET", `${::openai/BASE_URL}/threads/${request.thread-id}/messages?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&run_id=${request.run-id}`)
+  response api-request("GET", `${::openai::api/base-url()}/threads/${request.thread-id}/messages?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&run_id=${request.run-id}`)
   if(is-ok-response(response), ListMessagesResponse(response.body), err(HttpError(response)))
 }
 
@@ -855,7 +855,7 @@ ListRunsResponse type {
 list-runs
 meta {doc: """GET /threads/{thread_id}/runs - List all runs in a thread."""}
 fn (request: ListRunsRequest): ListRunsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/threads/${request.thread-id}/runs?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}`)
+  response api-request("GET", `${::openai::api/base-url()}/threads/${request.thread-id}/runs?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}`)
   if(is-ok-response(response), ListRunsResponse(response.body), err(HttpError(response)))
 }
 
@@ -883,7 +883,7 @@ meta {
     doc: """GET /threads/{thread_id}/runs/{run_id}/steps - List all steps in a run."""
 }
 fn (request: ListRunStepsRequest): ListRunStepsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/threads/${request.thread-id}/runs/${request.run-id}/steps?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&include[]=${request.include}`)
+  response api-request("GET", `${::openai::api/base-url()}/threads/${request.thread-id}/runs/${request.run-id}/steps?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&include[]=${request.include}`)
   if(is-ok-response(response), ListRunStepsResponse(response.body), err(HttpError(response)))
 }
 
@@ -906,7 +906,7 @@ ListVectorStoresResponse type {
 list-vector-stores
 meta {doc: """GET /vector_stores - List all vector stores. Supports pagination."""}
 fn (request: ListVectorStoresRequest): ListVectorStoresResponse {
-  response api-request("GET", `${::openai/BASE_URL}/vector_stores?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}`)
+  response api-request("GET", `${::openai::api/base-url()}/vector_stores?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}`)
   if(is-ok-response(response), ListVectorStoresResponse(response.body), err(HttpError(response)))
 }
 
@@ -934,7 +934,7 @@ meta {
     doc: """GET /vector_stores/{vector_store_id}/file_batches/{batch_id}/files - List vector store files in a batch"""
 }
 fn (request: ListFilesInVectorStoreBatchRequest): ListFilesInVectorStoreBatchResponse {
-  response api-request("GET", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}/file_batches/${request.batch-id}/files?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&filter=${request.filter}`)
+  response api-request("GET", `${::openai::api/base-url()}/vector_stores/${request.vector-store-id}/file_batches/${request.batch-id}/files?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&filter=${request.filter}`)
   if(is-ok-response(response), ListFilesInVectorStoreBatchResponse(response.body), err(HttpError(response)))
 }
 
@@ -961,6 +961,6 @@ meta {
     doc: """GET /vector_stores/{vector_store_id}/files - List all files in a vector store."""
 }
 fn (request: ListVectorStoreFilesRequest): ListVectorStoreFilesResponse {
-  response api-request("GET", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}/files?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&filter=${request.filter}`)
+  response api-request("GET", `${::openai::api/base-url()}/vector_stores/${request.vector-store-id}/files?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&filter=${request.filter}`)
   if(is-ok-response(response), ListVectorStoreFilesResponse(response.body), err(HttpError(response)))
 }

@@ -90,7 +90,7 @@ meta {
     """
 }
 fn (request: ModerationRequest): ModerationResponse {
-    response api-request("POST", `${::openai/BASE_URL}/moderations`, {}, request)
+    response api-request("POST", `${::openai::api/base-url()}/moderations`, {}, request)
     if(is-ok-response(response), ModerationResponse(response.body), err(HttpError(response)))
 }
 

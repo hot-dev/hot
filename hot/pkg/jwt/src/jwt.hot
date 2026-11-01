@@ -4,9 +4,11 @@ meta {
     JSON Web Tokens (RFC 7519) for Hot.
 
     Supports `HS256` (HMAC-SHA256, shared secret) and `RS256`
-    (RSASSA-PKCS1-v1_5, RSA key pair) — the two algorithms that cover
-    almost every real integration: session tokens, OIDC providers, GitHub
-    App tokens, and Google service accounts.
+    (RSASSA-PKCS1-v1_5, RSA key pair) for signing and verification — the
+    two algorithms that cover almost every real integration: session
+    tokens, OIDC providers, GitHub App tokens, and Google service accounts.
+    `ES256` (ECDSA P-256) is supported for verification, as used by Plaid
+    webhooks and Apple.
 
     **Quick start**
 
@@ -25,6 +27,9 @@ meta {
 
     // RS256 verification from JWKS components
     claims ::jwt/verify-rs256(token, jwk.n, jwk.e)
+
+    // ES256 verification from an EC JWK
+    claims ::jwt/verify-es256(token, jwk.x, jwk.y, {max-age: 300})
     ```
 
     Verification returns the payload claims on success and an Err
@@ -160,6 +165,8 @@ validate-claims fn (payload: Map, options: Map): Any {
   nbf get(payload, "nbf")
   expected-iss get(options, "issuer")
   expected-aud get(options, "audience")
+  max-age get(options, "max-age")
+  iat get(payload, "iat")
 
   // Each check is guarded before arithmetic: absent claims skip the check.
   expired cond {
@@ -170,6 +177,13 @@ validate-claims fn (payload: Map, options: Map): Any {
   premature cond {
     is-null(nbf) => { false }
     => { lt(now, sub(nbf, leeway)) }
+  }
+
+  // max-age bounds the token's age from `iat`, so it requires the claim.
+  missing-iat and(is-some(max-age), is-null(iat))
+  too-old cond {
+    or(is-null(max-age), is-null(iat)) => { false }
+    => { gt(now, add(add(iat, max-age), leeway)) }
   }
 
   wrong-iss cond {
@@ -188,6 +202,8 @@ validate-claims fn (payload: Map, options: Map): Any {
   cond {
     expired => { err("jwt: token is expired") }
     premature => { err("jwt: token is not yet valid (nbf)") }
+    missing-iat => { err("jwt: max-age requires an iat claim") }
+    too-old => { err(`jwt: token is older than max-age (${max-age}s)`) }
     wrong-iss => {
       err(`jwt: issuer mismatch: expected '${expected-iss}', got '${get(payload, "iss")}'`)
     }
@@ -210,8 +226,9 @@ meta {
     claims, or an Err describing the failure.
 
     Options (3-arity): `leeway` (seconds of clock skew tolerance, default
-    60), `issuer` (expected `iss`), `audience` (expected `aud`), `now`
-    (override the clock, mainly for tests).
+    60), `issuer` (expected `iss`), `audience` (expected `aud`), `max-age`
+    (reject tokens whose `iat` is more than this many seconds old; the
+    token must carry `iat`), `now` (override the clock, mainly for tests).
 
     **Example**
 
@@ -280,6 +297,56 @@ fn
         is-err(signature) => { err("jwt: signature is not valid base64url") }
         => {
           valid ::crypto/rsa-sha256-verify(n-bytes, e-bytes, decoded.signing-input, signature)
+          cond {
+            is-err(valid) => { valid }
+            not(valid) => { err("jwt: invalid signature") }
+            => { validate-claims(decoded.payload, options) }
+          }
+        }
+      }
+    }
+  }
+}
+
+verify-es256
+meta {
+    doc: """
+    Verify an `ES256` (ECDSA P-256 / SHA-256) token against an EC public
+    key and validate its claims. `x` and `y` are the base64url-encoded JWK
+    coordinate fields (strings) or raw Bytes. Options as in `verify`.
+    Requires Hot 3.0.2 or later (`::hot::crypto/ecdsa-p256-sha256-verify`).
+
+    **Example**
+
+    ```hot
+    // Plaid webhooks: fetch the JWK for the token's kid, then verify
+    decoded ::jwt/decode(token)
+    key get-verification-key(get(decoded.header, "kid"))
+    claims ::jwt/verify-es256(token, key.x, key.y, {max-age: 300})
+    ```
+    """
+}
+fn
+(token: Str, x: Any, y: Any): Any {
+  verify-es256(token, x, y, {})
+},
+(token: Str, x: Any, y: Any, options: Map): Any {
+  decoded decode(token)
+  cond {
+    is-err(decoded) => { decoded }
+    ne(get(decoded.header, "alg"), "ES256") => {
+      err(`jwt: expected alg ES256, got '${get(decoded.header, "alg")}'`)
+    }
+    => {
+      x-bytes if(is-bytes(x), x, ::b64/decode-url(x))
+      y-bytes if(is-bytes(y), y, ::b64/decode-url(y))
+      signature ::b64/decode-url(decoded.signature)
+      cond {
+        is-err(x-bytes) => { err("jwt: EC x coordinate is not valid base64url") }
+        is-err(y-bytes) => { err("jwt: EC y coordinate is not valid base64url") }
+        is-err(signature) => { err("jwt: signature is not valid base64url") }
+        => {
+          valid ::crypto/ecdsa-p256-sha256-verify(x-bytes, y-bytes, decoded.signing-input, signature)
           cond {
             is-err(valid) => { valid }
             not(valid) => { err("jwt: invalid signature") }

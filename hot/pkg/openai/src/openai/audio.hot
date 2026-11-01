@@ -84,7 +84,7 @@ meta {
     """
 }
 fn (request: SpeechRequest): Bytes | HttpError {
-    response api-request("POST", `${::openai/BASE_URL}/audio/speech`, {}, request)
+    response api-request("POST", `${::openai::api/base-url()}/audio/speech`, {}, request)
     if(is-ok-response(response), response.body-bytes, err(HttpError(response)))
 }
 

@@ -40,11 +40,27 @@ meta {
     `reasoning-effort` is passed as `reasoning_effort`. When using GPT-5.6
     with function tools through Chat Completions, set it to `"none"`; use the
     Responses API for reasoning-enabled tool loops.
+
+    The optional fields below exist for OpenAI-compatible servers and are
+    all no-ops when unset:
+
+    - `max-tokens-param`: the body field that carries
+      `max-completion-tokens`. Default `"max_completion_tokens"`; set
+      `"max_tokens"` for servers that only accept the older name
+      (DeepSeek, Mistral, Ollama, DashScope, most gateways).
+    - `stream-usage`: when `false`, streaming requests omit
+      `stream_options: {include_usage: true}` for servers that reject it.
+    - `extra-body`: provider-specific fields merged into every request
+      body (e.g. Qwen's `enable_thinking`, OpenRouter's `provider`
+      routing). They are merged last, so they can override defaults.
     """
 }
 type {
     max-completion-tokens: Int,
     reasoning-effort: Str?,
+    max-tokens-param: Str?,
+    stream-usage: Bool?,
+    extra-body: Map?,
 }
 
 DEFAULT_REQUEST_OPTIONS ChatRequestOptions({
@@ -53,17 +69,28 @@ DEFAULT_REQUEST_OPTIONS ChatRequestOptions({
 })
 
 apply-request-options
-meta { doc: "Apply output and reasoning controls to an OpenAI request map." }
+meta {
+    doc: """
+    Apply output and reasoning controls to an OpenAI request map: the
+    output ceiling (as `max_completion_tokens`, or `max-tokens-param`),
+    `reasoning_effort` when set, `stream_options` removal when
+    `stream-usage` is `false`, and `extra-body` merged last.
+    """
+}
 fn (request: Map, options: ChatRequestOptions): Map {
-    with-output assoc(
-        request,
-        "max_completion_tokens",
-        options.max-completion-tokens
-    )
-    match options.reasoning-effort {
+    param or(options.max-tokens-param, "max_completion_tokens")
+    without-ceiling if(eq(param, "max_completion_tokens"), request, delete(request, "max_completion_tokens"))
+    with-output assoc(without-ceiling, param, options.max-completion-tokens)
+    with-reasoning match options.reasoning-effort {
         Null => { with-output }
         Str => { assoc(with-output, "reasoning_effort", options.reasoning-effort) }
     }
+
+    with-stream cond {
+        eq(options.stream-usage, false) => { delete(with-reasoning, "stream_options") }
+        => { with-reasoning }
+    }
+    {...with-stream, ...or(options.extra-body, {})}
 }
 
 // ============================================================================
@@ -192,6 +219,75 @@ fn (u: Any): Map? {
 }
 
 // ============================================================================
+// Request building and reply parsing (shared by every entry point)
+// ============================================================================
+
+build-chat-body
+meta {
+    doc: """
+    Build the Chat Completions request body for the normalized adapter:
+    an optional system message, the translated messages, tools when
+    the list is non-empty (servers reject `tools: []`), and `options` applied by `apply-request-options`. With
+    `stream: true` it also sets `stream: true` and
+    `stream_options: {include_usage: true}` (unless `stream-usage` is
+    `false`). Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    body ::openai::chat-tools/build-chat-body(
+        "gpt-4o-mini",
+        [::ai::chat/user-message("Hi")],
+        "Be terse.",
+        null,
+        ::openai::chat-tools/DEFAULT_REQUEST_OPTIONS,
+        false
+    )
+    body.messages[0].role  // => "system"
+    ```
+    """
+}
+fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions, stream: Bool): Map {
+    sys-prefix if(is-null(system), [], [{role: "system", content: system}])
+    body-msgs map(messages, to-openai-message)
+    oai-messages concat(sys-prefix, body-msgs)
+
+    base {
+        model: model,
+        messages: oai-messages,
+        max_completion_tokens: options.max-completion-tokens
+    }
+
+    with-tools if(or(is-null(tools), is-empty(tools)), base, assoc(base, "tools", map(tools, to-openai-tool)))
+    with-stream if(stream, {...with-tools, stream: true, stream_options: {include_usage: true}}, with-tools)
+    apply-request-options(with-stream, options)
+}
+
+parse-chat-reply
+meta {
+    doc: """
+    Normalize a (decoded) Chat Completions response body into a
+    `::ai::chat/ChatReply`: first-choice text and tool calls, the finish
+    reason (default `"stop"`), and usage. Tolerates missing fields.
+    """
+}
+fn (response: Map): ::ai-chat/ChatReply {
+    choices or(response.choices, [])
+    first-msg if(is-empty(choices), {}, or(choices[0].message, {}))
+    text response-text(first-msg)
+    calls response-tool-calls(first-msg)
+    finish if(is-empty(choices), "stop", or(choices[0].finish_reason, "stop"))
+
+    ::ai-chat/ChatReply({
+        text: if(is-empty(text), null, text),
+        tool-calls: if(is-empty(calls), null, calls),
+        stop-reason: finish,
+        usage: response-usage(response.usage),
+        raw: response
+    })
+}
+
+// ============================================================================
 // Public entry point
 // ============================================================================
 
@@ -250,39 +346,50 @@ meta {
     """
 }
 fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions): ::ai-chat/ChatReply {
-    sys-prefix if(is-null(system), [], [{role: "system", content: system}])
-    body-msgs map(messages, to-openai-message)
-    oai-messages concat(sys-prefix, body-msgs)
-    oai-tools if(is-null(tools), null, map(tools, to-openai-tool))
-
-    base {
-        model: model,
-        messages: oai-messages,
-        max_completion_tokens: options.max-completion-tokens
-    }
-
-    with-reasoning apply-request-options(base, options)
-    with-tools if(is-null(oai-tools), with-reasoning, assoc(with-reasoning, "tools", oai-tools))
-
-    response ::oai-chat/complete(::oai-chat/ChatCompletionRequest(with-tools))
+    body build-chat-body(model, messages, system, tools, options, false)
+    response ::oai-chat/complete(::oai-chat/ChatCompletionRequest(body))
 
     match response {
         Result.Err => { err(response) }
-        Result.Ok => {
-            choices or(response.choices, [])
-            first-msg if(is-empty(choices), {}, or(choices[0].message, {}))
-            text response-text(first-msg)
-            calls response-tool-calls(first-msg)
-            finish if(is-empty(choices), "stop", or(choices[0].finish_reason, "stop"))
+        Result.Ok => { parse-chat-reply(response) }
+    }
+}
 
-            ::ai-chat/ChatReply({
-                text: if(is-empty(text), null, text),
-                tool-calls: if(is-empty(calls), null, calls),
-                stop-reason: finish,
-                usage: response-usage(response.usage),
-                raw: response
-            })
-        }
+chat-with-tools-at
+meta {
+    doc: """
+    `chat-with-tools-options` against an explicit `::openai::api/Endpoint`
+    (any OpenAI-compatible server). Reads no ctx, so keyless local servers
+    work. The request body is sent as a plain Map, so `options.extra-body`
+    can carry provider-specific fields, and the response is parsed
+    leniently.
+
+    Bind it in a closure to get a `::ai::chat/run-loop` chat function, or
+    use `::openai::compatible/provider` to get a ready-made
+    `ProviderRegistration`.
+
+    **Example**
+
+    ```hot
+    ep ::openai::api/endpoint("http://localhost:11434/v1")
+    opts ::openai::chat-tools/ChatRequestOptions({
+        max-completion-tokens: 512,
+        max-tokens-param: "max_tokens"
+    })
+    reply ::openai::chat-tools/chat-with-tools-at(
+        ep, "llama3.2", [::ai::chat/user-message("Hi")], null, null, opts
+    )
+    reply.text
+    ```
+    """
+}
+fn (ep: ::openai::api/Endpoint, model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions): ::ai-chat/ChatReply {
+    body build-chat-body(model, messages, system, tools, options, false)
+    response ::oai-chat/complete-with(ep, body)
+
+    match response {
+        Result.Err => { err(response) }
+        Result.Ok => { parse-chat-reply(response) }
     }
 }
 
@@ -570,23 +677,35 @@ meta {
     doc: "Streaming `chat-with-tools` with explicit output and reasoning controls."
 }
 fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions): ::ai-chat/ChatReply {
-    sys-prefix if(is-null(system), [], [{role: "system", content: system}])
-    body-msgs map(messages, to-openai-message)
-    oai-messages concat(sys-prefix, body-msgs)
-    oai-tools if(is-null(tools), null, map(tools, to-openai-tool))
+    body build-chat-body(model, messages, system, tools, options, true)
+    response ::oai-chat/complete-stream(::oai-chat/ChatCompletionRequest(body))
+    consume-stream(response, on-delta)
+}
 
-    base {
-        model: model,
-        messages: oai-messages,
-        max_completion_tokens: options.max-completion-tokens,
-        stream_options: {include_usage: true}
-    }
+chat-with-tools-stream-at
+meta {
+    doc: """
+    Streaming `chat-with-tools-at`: the `run-loop-stream` adapter against
+    an explicit `::openai::api/Endpoint`. Emits `::ai::chat/ReplyDelta`
+    events through `on-delta` and returns the aggregated `ChatReply`.
+    Set `options.stream-usage` to `false` for servers that reject
+    `stream_options`.
+    """
+}
+fn (ep: ::openai::api/Endpoint, model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions): ::ai-chat/ChatReply {
+    body build-chat-body(model, messages, system, tools, options, true)
+    response ::oai-chat/complete-stream-with(ep, body)
+    consume-stream(response, on-delta)
+}
 
-    with-reasoning apply-request-options(base, options)
-    with-tools if(is-null(oai-tools), with-reasoning, assoc(with-reasoning, "tools", oai-tools))
-
-    response ::oai-chat/complete-stream(::oai-chat/ChatCompletionRequest(with-tools))
-
+consume-stream
+meta {
+    doc: """
+    Internal: drain a streaming chat response into `ReplyDelta` events
+    and the aggregated `ChatReply`, then emit the final `Stop` delta.
+    """
+}
+fn (response: Any, on-delta: Fn): ::ai-chat/ChatReply {
     final-state drain-openai-stream(response.body, on-delta, EMPTY_STREAM_STATE)
     emit-tool-use-ends(final-state, on-delta)
     reply finalize-stream-state(final-state)

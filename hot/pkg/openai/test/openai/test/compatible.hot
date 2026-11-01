@@ -1,0 +1,287 @@
+::openai::test::compatible ns
+meta ["test"]
+
+// Hermetic tests for base-URL resolution, explicit endpoints, request
+// building for OpenAI-compatible servers, and hot-ai provider construction.
+
+::api     ::openai::api
+::ct      ::openai::chat-tools
+::compat  ::openai::compatible
+::ai-chat ::ai::chat
+
+// ============================================================================
+// Base URL resolution
+// ============================================================================
+
+test-base-url-defaults-to-openai
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"openai.base.url": null})
+    assert-eq("https://api.openai.com/v1", ::api/base-url())
+}
+
+test-base-url-reads-ctx-and-trims-slash
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"openai.base.url": "https://gateway.example.com/v1/"})
+    assert-eq("https://gateway.example.com/v1", ::api/base-url())
+    ::hot::ctx/set({"openai.base.url": null})
+}
+
+test-normalize-base-url
+meta ["test"]
+fn () {
+    assert-eq("http://localhost:11434/v1", ::api/normalize-base-url("http://localhost:11434/v1/"))
+    assert-eq("http://localhost:11434/v1", ::api/normalize-base-url("  http://localhost:11434/v1//  "))
+    assert-eq("https://api.openai.com/v1", ::api/normalize-base-url(null))
+    assert-eq("https://api.openai.com/v1", ::api/normalize-base-url(""))
+}
+
+test-join-url
+meta ["test"]
+fn () {
+    assert-eq("https://api.groq.com/openai/v1/chat/completions", ::api/join-url("https://api.groq.com/openai/v1/", "/chat/completions"))
+    assert-eq("http://localhost:11434/v1/models", ::api/join-url("http://localhost:11434/v1", "models"))
+    assert-eq("https://other.example.com/x", ::api/join-url("http://localhost:11434/v1", "https://other.example.com/x"))
+}
+
+// ============================================================================
+// Explicit endpoints: key, URL and headers are honoured, ctx is not read
+// ============================================================================
+
+test-endpoint-normalizes-base-url
+meta ["test"]
+fn () {
+    ep ::api/endpoint("https://openrouter.ai/api/v1/", "sk-or-test")
+    assert-eq("https://openrouter.ai/api/v1", ep.base-url)
+    assert-eq("sk-or-test", ep.api-key)
+    assert(is-null(ep.headers), "no extra headers by default")
+}
+
+test-endpoint-headers-with-key
+meta ["test"]
+fn () {
+    ep ::api/endpoint("https://api.groq.com/openai/v1", "gsk_test")
+    h ::api/endpoint-headers(ep, {}, true)
+    assert-eq("Bearer gsk_test", h.Authorization)
+    assert-eq("application/json", get(h, "Content-Type"))
+}
+
+test-endpoint-headers-keyless-omit-authorization
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"openai.api.key": "sk-from-ctx"})
+    ep ::api/endpoint("http://localhost:11434/v1")
+    h ::api/endpoint-headers(ep, {}, false)
+    assert(is-null(get(h, "Authorization")), "keyless endpoint must not send Authorization (and never the ctx key)")
+    assert(is-null(get(h, "Content-Type")), "no Content-Type without a body")
+
+    empty-key ::api/endpoint("http://localhost:8000/v1", "")
+    assert(is-null(get(::api/endpoint-headers(empty-key, {}, false), "Authorization")), "empty key is keyless")
+}
+
+test-endpoint-extra-headers-merge
+meta ["test"]
+fn () {
+    ep ::api/endpoint("https://openrouter.ai/api/v1", "k", {"HTTP-Referer": "https://example.com", "X-OpenRouter-Title": "Example"})
+    h ::api/endpoint-headers(ep, {"X-OpenRouter-Title": "Override"}, true)
+    assert-eq("https://example.com", get(h, "HTTP-Referer"))
+    assert-eq("Override", get(h, "X-OpenRouter-Title"))
+    assert-eq("Bearer k", h.Authorization)
+}
+
+test-build-endpoint-request-json-body
+meta ["test"]
+fn () {
+    ep ::api/endpoint("http://localhost:11434/v1/")
+    req ::api/build-endpoint-request(ep, "POST", "/chat/completions", {}, {model: "llama3.2", messages: []})
+    assert-eq("POST", req.method)
+    assert-eq("http://localhost:11434/v1/chat/completions", req.url)
+    body from-json(req.body)
+    assert-eq("llama3.2", body.model)
+    assert-eq("application/json", get(req.headers, "Content-Type"))
+}
+
+test-build-endpoint-request-no-body
+meta ["test"]
+fn () {
+    ep ::api/endpoint("https://api.together.ai/v1", "tk")
+    req ::api/build-endpoint-request(ep, "GET", "/models", {}, "")
+    assert-eq("https://api.together.ai/v1/models", req.url)
+    assert(is-null(req.body), "GET has no body")
+    assert-eq("Bearer tk", req.headers.Authorization)
+}
+
+test-default-endpoint-uses-ctx
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"openai.api.key": "sk-ctx", "openai.base.url": "https://proxy.example.com/v1"})
+    ep ::api/default-endpoint()
+    assert-eq("https://proxy.example.com/v1", ep.base-url)
+    assert-eq("sk-ctx", ep.api-key)
+    ::hot::ctx/set({"openai.base.url": null, "openai.api.key": "PLACEHOLDER"})
+}
+
+// ============================================================================
+// Request options for compatible servers
+// ============================================================================
+
+test-apply-options-defaults-unchanged
+meta ["test"]
+fn () {
+    out ::ct/apply-request-options({model: "gpt-4o-mini", stream_options: {include_usage: true}}, ::ct/DEFAULT_REQUEST_OPTIONS)
+    assert-eq(1024, out.max_completion_tokens)
+    assert(is-null(get(out, "max_tokens")), "default keeps max_completion_tokens only")
+    assert(is-null(get(out, "reasoning_effort")), "unset reasoning effort is omitted")
+    assert-eq(true, out.stream_options.include_usage)
+}
+
+test-apply-options-max-tokens-param
+meta ["test"]
+fn () {
+    opts ::ct/ChatRequestOptions({max-completion-tokens: 300, max-tokens-param: "max_tokens"})
+    out ::ct/apply-request-options({model: "deepseek-chat", max_completion_tokens: 1024}, opts)
+    assert-eq(300, out.max_tokens)
+    assert(is-null(get(out, "max_completion_tokens")), "max_completion_tokens replaced")
+}
+
+test-apply-options-stream-usage-off-and-extra-body
+meta ["test"]
+fn () {
+    opts ::ct/ChatRequestOptions({
+        max-completion-tokens: 64,
+        stream-usage: false,
+        extra-body: {enable_thinking: false, top_k: 20}
+    })
+    out ::ct/apply-request-options({model: "m", stream: true, stream_options: {include_usage: true}}, opts)
+    assert(is-null(get(out, "stream_options")), "stream_options dropped")
+    assert-eq(false, out.enable_thinking)
+    assert-eq(20, out.top_k)
+}
+
+test-build-chat-body-non-stream
+meta ["test"]
+fn () {
+    body ::ct/build-chat-body("gpt-4o-mini", [::ai-chat/user-message("Hi")], "Be terse.", null, ::ct/DEFAULT_REQUEST_OPTIONS, false)
+    assert-eq("gpt-4o-mini", body.model)
+    assert-eq(2, length(body.messages))
+    assert-eq("system", body.messages[0].role)
+    assert-eq("Hi", body.messages[1].content)
+    assert(is-null(get(body, "tools")), "no tools key when tools are null")
+    no-tools ::ct/build-chat-body("m", [], null, [], ::ct/DEFAULT_REQUEST_OPTIONS, false)
+    assert(is-null(get(no-tools, "tools")), "no tools key when tools are empty")
+    assert(is-null(get(body, "stream")), "no stream key for non-streaming")
+    assert(is-null(get(body, "stream_options")), "no stream_options for non-streaming")
+}
+
+add-ints
+meta {doc: "Add two integers."}
+fn (x: Int, y: Int): Int { add(x, y) }
+
+test-build-chat-body-stream-with-tools
+meta ["test"]
+fn () {
+    tool ::ai::tool/from-fn(add-ints)
+    body ::ct/build-chat-body("m", [::ai-chat/user-message("1+1")], null, [tool], ::ct/DEFAULT_REQUEST_OPTIONS, true)
+    assert-eq(1, length(body.messages))
+    assert-eq("function", body.tools[0].type)
+    assert-eq(true, body.stream)
+    assert-eq(true, body.stream_options.include_usage)
+}
+
+test-parse-chat-reply-lenient
+meta ["test"]
+fn () {
+    reply ::ct/parse-chat-reply({
+        choices: [{message: {role: "assistant", content: "42"}, finish_reason: "stop"}]
+    })
+    assert-eq("42", reply.text)
+    assert(is-null(reply.tool-calls), "no tool calls")
+    assert-eq("stop", reply.stop-reason)
+    assert(is-null(reply.usage), "missing usage stays null")
+
+    empty ::ct/parse-chat-reply({})
+    assert(is-null(empty.text), "empty response has no text")
+    assert-eq("stop", empty.stop-reason)
+}
+
+test-parse-chat-reply-tool-calls
+meta ["test"]
+fn () {
+    reply ::ct/parse-chat-reply({
+        choices: [{
+            message: {role: "assistant", content: null, tool_calls: [
+                {id: "call_1", type: "function", function: {name: "add", arguments: "{\"x\": 1}"}}
+            ]},
+            finish_reason: "tool_calls"
+        }],
+        usage: {prompt_tokens: 10, completion_tokens: 3}
+    })
+    assert-eq("tool_calls", reply.stop-reason)
+    assert-eq("add", reply.tool-calls[0].name)
+    assert-eq(1, reply.tool-calls[0].input.x)
+    assert-eq(10, reply.usage.input-tokens)
+}
+
+// ============================================================================
+// Compatible providers
+// ============================================================================
+
+test-matches-and-strips-model-prefix
+meta ["test"]
+fn () {
+    assert(::compat/matches-model("Groq/llama-3.3-70b-versatile", "groq/"), "case-insensitive match")
+    assert(not(::compat/matches-model("gpt-4o", "groq/")), "other models don't match")
+    assert(not(::compat/matches-model("anything", null)), "null prefix matches nothing")
+    assert(not(::compat/matches-model("anything", "")), "empty prefix matches nothing")
+    assert-eq("anthropic/claude-sonnet-4.5", ::compat/strip-model-prefix("openrouter/anthropic/claude-sonnet-4.5", "openrouter/"))
+    assert-eq("llama3.2", ::compat/strip-model-prefix("llama3.2", "ollama/"))
+    assert-eq("llama3.2", ::compat/strip-model-prefix("llama3.2", null))
+}
+
+test-provider-registration-shape
+meta ["test"]
+fn () {
+    reg ::compat/provider("Groq", "https://api.groq.com/openai/v1/", "gsk_secret", "groq/")
+    assert-eq("Groq", reg.display-name)
+    assert-eq(::ai-chat/Provider.OpenAi, reg.variant)
+    assert-eq(true, reg.meta.compatible)
+    assert(reg.detect("groq/llama-3.3-70b-versatile"), "detects prefixed models")
+    assert(not(reg.detect("gpt-4o")), "ignores other models")
+    assert(not(is-null(reg.chat-fn)), "chat-fn wired")
+    assert(not(is-null(reg.chat-stream-fn)), "chat-stream-fn wired")
+    assert-eq("https://api.groq.com/openai/v1", reg.meta.base-url)
+    assert-eq("groq/", reg.meta.model-prefix)
+    assert(in("tools", reg.meta.capabilities), "default capabilities advertised")
+    assert(not(contains(to-json(reg.meta), "gsk_secret")), "the key is never copied into meta")
+}
+
+test-provider-resolves-in-registry
+meta ["test"]
+fn () {
+    local ::compat/provider(::compat/config("Ollama", ::api/endpoint("http://localhost:11434/v1"), "ollama/"))
+    groq ::compat/provider("Groq", "https://api.groq.com/openai/v1", "k", "groq/")
+    registry ::ai-chat/with-providers([local, groq])
+
+    opts ::ai-chat/ChatOptions({model: "ollama/llama3.2", providers: registry})
+    reg ::ai-chat/resolve-registration(opts)
+    assert-eq("Ollama", reg.display-name)
+
+    builtin ::ai-chat/detect-provider-from(registry, "claude-sonnet-4-5")
+    assert-eq("Anthropic", builtin.display-name)
+}
+
+test-provider-capabilities-override
+meta ["test"]
+fn () {
+    cfg ::compat/CompatibleProvider({
+        name: "Perplexity",
+        endpoint: ::api/endpoint("https://api.perplexity.ai", "pplx"),
+        model-prefix: "perplexity/",
+        options: null,
+        capabilities: ["streaming"]
+    })
+    reg ::compat/provider(cfg)
+    assert-eq(["streaming"], reg.meta.capabilities)
+    assert-eq(1024, ::compat/request-options(cfg).max-completion-tokens)
+}

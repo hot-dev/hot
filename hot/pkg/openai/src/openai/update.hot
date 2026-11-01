@@ -89,7 +89,7 @@ meta {
     doc: """POST /chat/completions/{completion_id} - Update metadata on a stored chat completion."""
 }
 fn (completion-id: Str, request: UpdateChatCompletionRequest): UpdateChatCompletionResponse {
-  response api-request("POST", `${::openai/BASE_URL}/chat/completions/${completion-id}`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/chat/completions/${completion-id}`, {}, request)
   if(is-ok-response(response), UpdateChatCompletionResponse(response.body), err(HttpError(response)))
 }
 
@@ -112,7 +112,7 @@ UpdateEvalResponse type {
 update-eval
 meta {doc: """POST /evals/{eval_id} - Update the name or metadata of an evaluation."""}
 fn (eval-id: Str, request: UpdateEvalRequest): UpdateEvalResponse {
-  response api-request("POST", `${::openai/BASE_URL}/evals/${eval-id}`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/evals/${eval-id}`, {}, request)
   if(is-ok-response(response), UpdateEvalResponse(response.body), err(HttpError(response)))
 }
 
@@ -138,6 +138,6 @@ meta {
     doc: """POST /vector_stores/{vector_store_id}/files/{file_id} - Update vector store file attributes"""
 }
 fn (vector-store-id: Str, file-id: Str, request: UpdateVectorStoreFileAttributesRequest): UpdateVectorStoreFileAttributesResponse {
-  response api-request("POST", `${::openai/BASE_URL}/vector_stores/${vector-store-id}/files/${file-id}`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/vector_stores/${vector-store-id}/files/${file-id}`, {}, request)
   if(is-ok-response(response), UpdateVectorStoreFileAttributesResponse(response.body), err(HttpError(response)))
 }

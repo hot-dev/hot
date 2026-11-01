@@ -45,7 +45,7 @@ meta {
     doc: """POST /organization/certificates/deactivate - Deactivate certificates for organization"""
 }
 fn (request: DeactivateOrganizationCertificatesRequest): DeactivateOrganizationCertificatesResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/certificates/deactivate`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/organization/certificates/deactivate`, {}, request)
   if(is-ok-response(response), DeactivateOrganizationCertificatesResponse(response.body), err(HttpError(response)))
 }
 
@@ -67,6 +67,6 @@ meta {
     doc: """POST /organization/projects/{project_id}/certificates/deactivate - Deactivate certificates for project"""
 }
 fn (project-id: Str, request: DeactivateProjectCertificatesRequest): DeactivateProjectCertificatesResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}/certificates/deactivate`, {}, request)
+  response api-request("POST", `${::openai::api/base-url()}/organization/projects/${project-id}/certificates/deactivate`, {}, request)
   if(is-ok-response(response), DeactivateProjectCertificatesResponse(response.body), err(HttpError(response)))
 }
