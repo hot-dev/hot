@@ -126,8 +126,9 @@ meta ["test"] fn () {
 }
 // @result: named-refinements
 // Port(8080)      → 8080
-// Port(70000)     → Err(ConstraintError.Violation)
-// Username("al")  → Err(ConstraintError.Violation)
+// Port(n)         → Err(ConstraintError.Violation), for n = 70000
+// Username(name)  → Err(ConstraintError.Violation), for name = "al"
+// Written as literals, Port(70000) and Username("al") fail hot check instead.
 // @end: named-refinements
 
 test-refinement-values
@@ -171,8 +172,9 @@ meta ["test"] fn () {
 }
 // @result: parameters-and-returns
 // retry-delay(3) → 9000
-// retry-delay(0) → Err(ConstraintError.Violation), boundary "parameter"
+// retry-delay(n) → Err(ConstraintError.Violation), boundary "parameter", for n = 0
 // retry-delay(6) → Err(ConstraintError.Violation), boundary "return"
+// A literal retry-delay(0) fails hot check instead.
 // @end: parameters-and-returns
 
 test-preconditions
@@ -236,8 +238,9 @@ meta ["test"] fn () {
   assert-eq("HtmlOnly", TrackLinks(body.tracking), "an open union accepts them")
 }
 // @result: literal-unions
-// Currency("JPY")         → Err(ConstraintError.Violation)
+// Currency(body.currency) → Err(ConstraintError.Violation), for "JPY"
 // TrackLinks("HtmlOnly")  → "HtmlOnly"
+// A literal Currency("JPY") fails hot check instead.
 // @end: literal-unions
 
 test-updates

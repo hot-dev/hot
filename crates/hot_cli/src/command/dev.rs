@@ -348,7 +348,10 @@ pub(crate) async fn run_dev(
             // `hot init` can't help when the database is unreachable or refuses
             // the configured credentials.
             if !e.starts_with("Cannot connect to the database") {
-                error!("Please run 'hot init' manually to set up your environment");
+                error!(
+                    "Please run 'hot init' manually to set up your environment; on PostgreSQL, \
+                     pass the schema owner's --db.migration-uri"
+                );
             }
             std::process::exit(1);
         }
@@ -710,7 +713,7 @@ pub(crate) async fn run_dev(
 
     // Start task worker for processing ::hot::task/start and ::hot::box/start tasks
     info!("hot.dev: Starting task worker...");
-    let task_worker_handle = tokio::spawn(run_task_worker(conf.clone()));
+    let task_worker_handle = tokio::spawn(run_task_worker(Env::Development, conf.clone()));
 
     // Worker is started last to ensure everything else is ready
     // Add a small delay to let scheduler perform initial sync

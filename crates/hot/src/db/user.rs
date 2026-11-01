@@ -208,7 +208,7 @@ impl User {
             SELECT u.user_id, u.email, u.name, u.settings, u.active, u.created_at, u.created_by_user_id, u.updated_at, u.updated_by_user_id, u.active_toggle_at, u.active_toggle_by_user_id
             FROM "user" u
             JOIN org o ON o.org_id = $1
-            JOIN org_user ru ON ru.org_id = COALESCE(o.parent_org_id, o.org_id)
+            JOIN org_user ru ON ru.org_id = CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END
                 AND ru.user_id = u.user_id AND ru.active = true
             WHERE u.active = true
               AND (ru.org_user_role_id = 2 OR o.parent_org_id IS NULL OR EXISTS (

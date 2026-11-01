@@ -372,6 +372,8 @@ pub(super) struct ParsedFile {
     pub(super) path: String,
     /// File content
     pub(super) content: String,
+    /// Hash of `content`, the bytes the namespaces were parsed from
+    pub(super) content_hash: String,
     /// Parsed namespaces
     pub(super) namespaces: IndexMap<crate::lang::ast::NsPath, crate::lang::ast::Namespace>,
 }
@@ -567,6 +569,30 @@ pub(super) fn discover_compilation_units(
     Ok(units)
 }
 
+/// Cache key for a discovered unit's files as they are on disk now.
+fn disk_unit_key(
+    unit_cache: &crate::lang::cache::unit_cache::UnitCache,
+    discovered: &DiscoveredUnit,
+) -> Result<String, String> {
+    let hashes = crate::hasher::hash_files(&discovered.files)?;
+    unit_cache.compute_cache_key(&discovered.unit, &hashes)
+}
+
+/// Cache key for a unit from the bytes its files were parsed from. A file
+/// edited after it was read keeps the old content's key, so the entry can
+/// never be served for the new content.
+fn parsed_unit_key(
+    unit_cache: &crate::lang::cache::unit_cache::UnitCache,
+    unit: &crate::lang::cache::unit_cache::CompilationUnit,
+    parsed_files: &[ParsedFile],
+) -> Result<String, String> {
+    let hashes: Vec<(String, String)> = parsed_files
+        .iter()
+        .map(|parsed| (parsed.path.clone(), parsed.content_hash.clone()))
+        .collect();
+    unit_cache.compute_cache_key(unit, &hashes)
+}
+
 /// Parse compilation units with caching
 /// Returns merged namespaces from all units
 ///
@@ -605,33 +631,37 @@ pub(super) fn parse_units_with_cache(
 
     let cache_results: Vec<(&DiscoveredUnit, CacheResult)> = units
         .par_iter()
-        .map(|discovered| match unit_cache.load(&discovered.unit) {
-            Ok(Some(cached)) => {
-                cache_hits.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(
-                    "Cache hit for {} ({} namespaces)",
-                    discovered.unit.id(),
-                    cached.namespaces.len()
-                );
-                (discovered, Some(cached.namespaces))
-            }
-            Ok(None) => {
-                cache_misses.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(
-                    "Cache miss for {} ({} files to parse)",
-                    discovered.unit.id(),
-                    discovered.files.len()
-                );
-                (discovered, None)
-            }
-            Err(e) => {
-                cache_misses.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(
-                    "Cache error for {}: {}, will parse",
-                    discovered.unit.id(),
-                    e
-                );
-                (discovered, None)
+        .map(|discovered| {
+            match disk_unit_key(&unit_cache, discovered)
+                .and_then(|key| unit_cache.load(&discovered.unit, &key))
+            {
+                Ok(Some(cached)) => {
+                    cache_hits.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(
+                        "Cache hit for {} ({} namespaces)",
+                        discovered.unit.id(),
+                        cached.namespaces.len()
+                    );
+                    (discovered, Some(cached.namespaces))
+                }
+                Ok(None) => {
+                    cache_misses.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(
+                        "Cache miss for {} ({} files to parse)",
+                        discovered.unit.id(),
+                        discovered.files.len()
+                    );
+                    (discovered, None)
+                }
+                Err(e) => {
+                    cache_misses.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(
+                        "Cache error for {}: {}, will parse",
+                        discovered.unit.id(),
+                        e
+                    );
+                    (discovered, None)
+                }
             }
         })
         .collect();
@@ -692,19 +722,17 @@ pub(super) fn parse_units_with_cache(
         }
     }
 
-    // Phase 3: Save all new cache entries in parallel (non-blocking)
-    // We collect the units to save and spawn parallel saves
-    let units_to_save: Vec<_> = parsed_units
-        .iter()
-        .map(|(unit, namespaces, _)| (unit.clone(), namespaces.clone()))
-        .collect();
-
-    // Save caches in parallel
-    units_to_save.par_iter().for_each(|(unit, namespaces)| {
-        if let Err(e) = unit_cache.save(unit, namespaces) {
-            tracing::warn!("Failed to save cache for {}: {}", unit.id(), e);
-        }
-    });
+    // Phase 3: Save all new cache entries in parallel, each keyed by the
+    // bytes it was parsed from rather than the files as they are now
+    parsed_units
+        .par_iter()
+        .for_each(|(unit, namespaces, parsed_files)| {
+            let saved = parsed_unit_key(&unit_cache, unit, parsed_files)
+                .and_then(|key| unit_cache.save(unit, &key, namespaces));
+            if let Err(e) = saved {
+                tracing::warn!("Failed to save cache for {}: {}", unit.id(), e);
+            }
+        });
 
     // Merge all namespaces in discovery order — the same order whether a unit
     // came from cache or was freshly parsed, so the merged program is
@@ -860,6 +888,7 @@ pub(super) fn parse_files_parallel(
                         return Ok(ParsedFile {
                             path: file_path.clone(),
                             content,
+                            content_hash,
                             namespaces: cached.namespaces.clone(),
                         });
                     }
@@ -883,6 +912,7 @@ pub(super) fn parse_files_parallel(
                     return Ok(ParsedFile {
                         path: file_path.clone(),
                         content,
+                        content_hash,
                         namespaces,
                     });
                 }
@@ -908,6 +938,7 @@ pub(super) fn parse_files_parallel(
                         Ok(ParsedFile {
                             path: file_path.clone(),
                             content,
+                            content_hash,
                             namespaces: program.namespaces,
                         })
                     }
@@ -982,10 +1013,11 @@ impl Engine {
     /// files from those directories. This prevents test files from being included
     /// in production builds.
     ///
-    /// A package that contributes no `.hot` files is an error naming the
-    /// package and the folders searched. Otherwise its namespaces would just
-    /// be missing, and the first error would be an unresolved reference in
-    /// the code that uses it.
+    /// A package may contribute no `.hot` files (one that only bundles
+    /// dependencies or resources). A `src-paths` folder it declares that
+    /// doesn't exist is an error naming the package and the folder:
+    /// otherwise its namespaces would just be missing, and the first error
+    /// would be an unresolved reference in the code that uses it.
     pub fn discover_dependency_source_files(
         pkg_root: &std::path::Path,
     ) -> Result<Vec<String>, String> {
@@ -1011,13 +1043,18 @@ impl Engine {
             src_paths
         );
 
-        // Discover files from each src_path
+        // Discover files from each src_path. The default `src/` may be
+        // absent; a folder the package names must exist.
+        let declared = !meta.src_paths.is_empty();
         let mut all_files = Vec::new();
+        let mut missing = Vec::new();
         for src_path in &src_paths {
             let full_path = pkg_root.join(src_path);
             if full_path.exists() {
                 let files = Self::discover_hot_files(&full_path.to_string_lossy())?;
                 all_files.extend(files);
+            } else if declared {
+                missing.push(src_path.clone());
             } else {
                 tracing::debug!(
                     "src_path {} does not exist in {}",
@@ -1027,21 +1064,19 @@ impl Engine {
             }
         }
 
-        if all_files.is_empty() {
-            let name = if meta.name.is_empty() {
-                pkg_root.display().to_string()
-            } else {
-                meta.name
-            };
+        if !missing.is_empty() {
             return Err(format!(
-                "Package '{}' has no source files: no .hot files in its src-paths {:?} under {}. \
+                "Package '{}' declares src-paths {:?} that don't exist under {}. \
                  Set src-paths in its pkg.hot to the folders that hold its .hot files.",
-                name,
-                src_paths,
+                package_label(&meta, pkg_root),
+                missing,
                 pkg_root.display()
             ));
         }
 
+        // Overlapping src-paths (`src/` and `src/lib/`) load each file once
+        let mut seen = AHashSet::new();
+        all_files.retain(|file| seen.insert(file.clone()));
         Ok(all_files)
     }
 
@@ -1064,6 +1099,12 @@ impl Engine {
 
     /// Read a package's pkg.hot and the `src-paths` it declares, or `src/`
     /// when it declares none. `None` when the package has no pkg.hot.
+    ///
+    /// A src-path must be a relative folder inside the package. One that
+    /// leaves it (`../shared`, `/abs`) is an error: caches, `hot dev`'s
+    /// watcher and the bundle all treat the package folder as holding its
+    /// sources, so edits there would go unseen and `hot build` would write
+    /// paths the bundle extractor refuses.
     fn read_dependency_src_paths(
         pkg_root: &std::path::Path,
     ) -> Result<Option<(crate::lang::project::PackageMetadata, Vec<String>)>, String> {
@@ -1080,8 +1121,53 @@ impl Engine {
         } else {
             meta.src_paths.clone()
         };
+        let outside: Vec<&String> = src_paths
+            .iter()
+            .filter(|path| !is_inside_package(path))
+            .collect();
+        if !outside.is_empty() {
+            return Err(format!(
+                "Package '{}' declares src-paths {:?} outside its folder {}. \
+                 src-paths must be relative folders inside the package: move those \
+                 sources into it, or make them a package of their own and depend on it.",
+                package_label(&meta, pkg_root),
+                outside,
+                pkg_root.display()
+            ));
+        }
         Ok(Some((meta, src_paths)))
     }
+}
+
+/// The package's name from its pkg.hot, or its folder when it has none.
+fn package_label(
+    meta: &crate::lang::project::PackageMetadata,
+    pkg_root: &std::path::Path,
+) -> String {
+    if meta.name.is_empty() {
+        pkg_root.display().to_string()
+    } else {
+        meta.name.clone()
+    }
+}
+
+/// Whether `path` is a relative path that stays inside the folder it is
+/// relative to: no root or drive, and no `..` that climbs above it.
+fn is_inside_package(path: &str) -> bool {
+    use std::path::Component;
+    let mut depth = 0usize;
+    for component in std::path::Path::new(path).components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => return false,
+            Component::CurDir => {}
+            Component::ParentDir => match depth.checked_sub(1) {
+                Some(up) => depth = up,
+                None => return false,
+            },
+            Component::Normal(_) => depth += 1,
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -1465,7 +1551,7 @@ mod ns_merge_tests {
 
 #[cfg(test)]
 mod pkg_hot_tests {
-    use super::Engine;
+    use super::*;
 
     /// `pkg.hot` files are read as literal data (`crate::lang::data`), not
     /// run on the VM. Every package in the repo must read the same both ways.
@@ -1515,5 +1601,100 @@ mod pkg_hot_tests {
         );
         let dirs = Engine::discover_dependency_source_dirs(root).unwrap();
         assert_eq!(dirs, vec![root.join("hot/src/").display().to_string()]);
+    }
+
+    /// Write a package at `root` whose pkg.hot declares `src_paths`.
+    fn write_package(root: &std::path::Path, src_paths: &str, files: &[&str]) {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(
+            root.join("pkg.hot"),
+            format!(
+                "::hot::pkg ns\n\nhot.pkg.lib {{\n  name: \"example.com/lib\",\n  version: \"1.0.0\",\n  deps: {{}},\n  src-paths: {src_paths},\n}}\n"
+            ),
+        )
+        .unwrap();
+        for file in files {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "::lib ns\n").unwrap();
+        }
+    }
+
+    /// src-paths that leave the package are refused by name: loading them
+    /// would leave the unit cache, `hot dev`'s watcher and the bundle keyed
+    /// to the package folder, which doesn't hold them. Reading pkg.hot
+    /// refuses them first.
+    #[test]
+    fn dependency_src_paths_must_stay_inside_the_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        write_package(&root, "[\"src/\", \"../shared/\"]", &["src/lib.hot"]);
+        std::fs::create_dir_all(dir.path().join("shared")).unwrap();
+        std::fs::write(dir.path().join("shared/shared.hot"), "::shared ns\n").unwrap();
+
+        for error in [
+            Engine::discover_dependency_source_files(&root).unwrap_err(),
+            Engine::discover_dependency_source_dirs(&root).unwrap_err(),
+        ] {
+            assert!(
+                error.contains("src-paths entry '../shared/' leaves the package directory"),
+                "{error}"
+            );
+        }
+
+        for inside in ["src/", "./src", "src/../lib", "a/b/../../c"] {
+            assert!(is_inside_package(inside), "{inside}");
+        }
+        for outside in ["../shared", "src/../../x", "/abs/src", "./.."] {
+            assert!(!is_inside_package(outside), "{outside}");
+        }
+    }
+
+    /// Overlapping src-paths load each file once.
+    #[test]
+    fn overlapping_dependency_src_paths_load_each_file_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        write_package(
+            &root,
+            "[\"src/\", \"src/lib/sub/\", \"./src/\"]",
+            &["src/lib/top.hot", "src/lib/sub/inner.hot"],
+        );
+
+        let files = Engine::discover_dependency_source_files(&root).unwrap();
+        assert_eq!(files.len(), 2, "{files:?}");
+    }
+
+    /// A unit's cache entry is saved under the key of the bytes that were
+    /// parsed. A file edited after it was read keys differently on the next
+    /// load, so its old AST is never served for the new content.
+    #[test]
+    fn unit_cache_saves_under_the_key_of_the_parsed_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.hot");
+        std::fs::write(&file, "::app ns\n\nok fn (): Int { 1 }\n").unwrap();
+        let discovered = DiscoveredUnit {
+            unit: crate::lang::cache::unit_cache::CompilationUnit::SourcePath {
+                name: "src".to_string(),
+                path: src.clone(),
+            },
+            files: Engine::discover_hot_files(&src.to_string_lossy()).unwrap(),
+        };
+        let cache = crate::lang::cache::unit_cache::UnitCache::new(dir.path().join("cache"));
+
+        let (parsed, errors) = parse_files_parallel(&discovered.files, false);
+        assert!(errors.is_empty(), "{errors:?}");
+        let parsed_key = parsed_unit_key(&cache, &discovered.unit, &parsed).unwrap();
+        assert_eq!(parsed_key, disk_unit_key(&cache, &discovered).unwrap());
+
+        // The file changes after the parse read it, before the save.
+        std::fs::write(&file, "::app ns\n\nok fn (): Int { 2 }\n").unwrap();
+        assert_eq!(
+            parsed_key,
+            parsed_unit_key(&cache, &discovered.unit, &parsed).unwrap()
+        );
+        assert_ne!(parsed_key, disk_unit_key(&cache, &discovered).unwrap());
     }
 }

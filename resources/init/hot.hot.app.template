@@ -1,6 +1,9 @@
 // Hot Configuration File - App Server
 // Configuration for running the App server (dashboard) component.
 // Run `hot conf generate all` to see all available options.
+// Deployments set HOT_ENV=production and HOT_APP_SESSION_SECRET. With HOT_ENV
+// unset the App runs in local development mode, and on a network address it
+// then refuses to start without a session secret.
 
 ::hot::conf ns
 
@@ -81,5 +84,3 @@ hot.queue.infra-retry-backoff-ms Int(::env/get("HOT_QUEUE_INFRA_RETRY_BACKOFF_MS
 hot.queue.wait-target-p99-ms Int(::env/get("HOT_QUEUE_WAIT_TARGET_P99_MS", "1000"))
 hot.queue.metrics-enabled Bool(::env/get("HOT_QUEUE_METRICS_ENABLED", "true"))
 
-// Daemon Mode
-hot.daemon true

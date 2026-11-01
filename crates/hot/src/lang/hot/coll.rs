@@ -904,18 +904,24 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
 pub fn length(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::coll/length", args, 1);
 
-    let len = match crate::val::as_fields(&args[0]) {
-        Val::Vec(v) => v.len(),
-        Val::Map(m) => m.len(),
-        Val::Str(s) => s.len(),
-        Val::Bytes(b) => b.len(),
-        _ => {
-            return HotResult::Err(Val::from(
-                "length expects collection (Vec, Map, Str, or Bytes)".to_string(),
-            ));
-        }
-    };
-    HotResult::Ok(Val::Int(len as i64))
+    match collection_length(&args[0]) {
+        Some(len) => HotResult::Ok(Val::Int(len as i64)),
+        None => HotResult::Err(Val::from(
+            "length expects collection (Vec, Map, Str, or Bytes)".to_string(),
+        )),
+    }
+}
+
+/// What `length` gives `val`: its element count, or `None` when it isn't a
+/// collection. Compiled code counts with it too.
+pub fn collection_length(val: &Val) -> Option<usize> {
+    match crate::val::as_fields(val) {
+        Val::Vec(v) => Some(v.len()),
+        Val::Map(m) => Some(m.len()),
+        Val::Str(s) => Some(s.len()),
+        Val::Bytes(b) => Some(b.len()),
+        _ => None,
+    }
 }
 
 /// Get a value from a collection by key/index
@@ -2620,6 +2626,183 @@ pub fn partition_by(
     }
 }
 
+// Map-building functions. Each builds its map in one pass; written in Hot as
+// `reduce` with `assoc`, each step copied the whole map, so they took time
+// quadratic in the number of entries.
+
+/// Call `function` on `arg` as a callback whose Err halts the caller: Ok
+/// unwraps, an Err or halt becomes `"{what} failed: ..."`.
+fn call_forced(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    function: &PreparedFunction<'_>,
+    arg: &Val,
+    what: &str,
+) -> Result<Val, Val> {
+    call_prepared_with_vm(vm, function, arg)
+        .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+        .map_err(|err| Val::from(format!("{what} failed: {err}")))
+}
+
+/// The elements a `coll: Vec` function reads; null reads as no elements.
+fn vec_items<'a>(name: &str, coll: &'a Val) -> Result<&'a [Val], Val> {
+    match crate::val::as_fields(coll) {
+        Val::Vec(items) => Ok(items),
+        Val::Null => Ok(&[]),
+        _ => Err(Val::from(format!("{name} requires a vector"))),
+    }
+}
+
+/// The entries an `m: Map` function reads.
+fn map_entries<'a>(name: &str, map: &'a Val) -> Result<&'a IndexMap<Val, Val>, Val> {
+    match crate::val::as_fields(map) {
+        Val::Map(map) => Ok(map),
+        _ => Err(Val::from(format!("{name} requires a map"))),
+    }
+}
+
+fn into_hot_result(result: Result<IndexMap<Val, Val>, Val>) -> HotResult<Val> {
+    match result {
+        Ok(map) => HotResult::Ok(Val::Map(Box::new(map))),
+        Err(err) => HotResult::Err(err),
+    }
+}
+
+/// Group a vector's elements by `func(element)`: each key maps to the
+/// elements that produced it, in order. Keys are in first-seen order.
+pub fn group_by(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::coll/group-by", args, 2);
+    into_hot_result(groups_by(vm, &args[0], &args[1]))
+}
+
+fn groups_by(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    coll: &Val,
+    func: &Val,
+) -> Result<IndexMap<Val, Val>, Val> {
+    let function = prepare_function(func);
+    let mut groups: IndexMap<Val, Vec<Val>> = IndexMap::new();
+    for item in vec_items("group-by", coll)? {
+        let key = call_forced(vm, &function, item, "Group-by function call")?;
+        groups.entry(key).or_default().push(item.clone());
+    }
+    Ok(groups
+        .into_iter()
+        .map(|(key, items)| (key, Val::Vec(items)))
+        .collect())
+}
+
+/// Index a vector's elements by `func(element)`; the last element with a key
+/// wins, in the position its key was first seen.
+pub fn index_by(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::coll/index-by", args, 2);
+    into_hot_result(indexed_by(vm, &args[0], &args[1]))
+}
+
+fn indexed_by(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    coll: &Val,
+    func: &Val,
+) -> Result<IndexMap<Val, Val>, Val> {
+    let function = prepare_function(func);
+    let mut index = IndexMap::new();
+    for item in vec_items("index-by", coll)? {
+        let key = call_forced(vm, &function, item, "Index-by function call")?;
+        index.insert(key, item.clone());
+    }
+    Ok(index)
+}
+
+/// How many times each element occurs in a vector, in first-seen order.
+pub fn frequencies(args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::coll/frequencies", args, 1);
+    into_hot_result(vec_items("frequencies", &args[0]).map(|items| {
+        let mut counts: IndexMap<Val, i64> = IndexMap::new();
+        for item in items {
+            *counts.entry(item.clone()).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .map(|(item, count)| (item, Val::Int(count)))
+            .collect()
+    }))
+}
+
+/// A map with `func(key)` for each key; a later entry wins a key collision.
+pub fn map_keys(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::coll/map-keys", args, 2);
+    into_hot_result(mapped_entries(vm, args, "map-keys", true))
+}
+
+/// A map with `func(value)` for each value.
+pub fn map_vals(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::coll/map-vals", args, 2);
+    into_hot_result(mapped_entries(vm, args, "map-vals", false))
+}
+
+/// The entries of a map with `func` applied to each key or value (`keys`).
+fn mapped_entries(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+    name: &str,
+    keys: bool,
+) -> Result<IndexMap<Val, Val>, Val> {
+    let function = prepare_function(&args[1]);
+    let what = format!(
+        "{} function call",
+        if keys { "Map-keys" } else { "Map-vals" }
+    );
+    let entries = map_entries(name, &args[0])?;
+    let mut out = IndexMap::with_capacity(entries.len());
+    for (key, value) in entries {
+        if keys {
+            out.insert(call_forced(vm, &function, key, &what)?, value.clone());
+        } else {
+            out.insert(key.clone(), call_forced(vm, &function, value, &what)?);
+        }
+    }
+    Ok(out)
+}
+
+/// The entries of a map whose key or value (`by_key`) satisfies `predicate`.
+fn filter_entries(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+    name: &str,
+    by_key: bool,
+) -> Result<IndexMap<Val, Val>, Val> {
+    let predicate = prepare_function(&args[1]);
+    let what = format!(
+        "{} predicate call",
+        if by_key { "Filter-keys" } else { "Filter-vals" }
+    );
+    let mut out = IndexMap::new();
+    for (key, value) in map_entries(name, &args[0])? {
+        let tested = if by_key { key } else { value };
+        if call_forced(vm, &predicate, tested, &what)?.is_truthy() {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// The entries of a map whose key satisfies `predicate`.
+pub fn filter_keys(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    validate_args!("::hot::coll/filter-keys", args, 2);
+    into_hot_result(filter_entries(vm, args, "filter-keys", true))
+}
+
+/// The entries of a map whose value satisfies `predicate`.
+pub fn filter_vals(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    validate_args!("::hot::coll/filter-vals", args, 2);
+    into_hot_result(filter_entries(vm, args, "filter-vals", false))
+}
+
 /// Helper function to compare two Val instances for equality
 fn vals_equal(a: &Val, b: &Val) -> bool {
     match (a, b) {
@@ -2899,7 +3082,8 @@ pub fn interpose(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Flatten nested collections by one level
+/// Flatten nested vectors into one vector, at every depth. Other elements,
+/// strings and maps included, are kept whole.
 pub fn flatten(args: &[Val]) -> HotResult<Val> {
     if args.len() != 1 {
         return HotResult::Err(Val::from(format!(
@@ -2915,11 +3099,6 @@ pub fn flatten(args: &[Val]) -> HotResult<Val> {
                     Val::Vec(nested) => {
                         for elem in nested {
                             flatten_recursive(elem, out);
-                        }
-                    }
-                    Val::Str(s) => {
-                        for ch in s.chars() {
-                            out.push(Val::from(ch.to_string()));
                         }
                     }
                     other => out.push(other.clone()),

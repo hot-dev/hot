@@ -140,7 +140,49 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
     ),
     ("HOT_TASK_WORKER_MEMORY_MB", "task.worker-memory-mb"),
     ("HOT_TASK_WORKER_DISK_MB", "task.worker-disk-mb"),
+    ("HOT_WORKER_RUN_TIMEOUT", "worker.run-timeout"),
+    ("HOT_WORKER_MAX_RUN_TIMEOUT", "worker.max-run-timeout"),
+    ("HOT_WORKER_CANCEL_ON_TIMEOUT", "worker.cancel-on-timeout"),
+    (
+        "HOT_QUEUE_EVENT_ORPHAN_IDLE_MS",
+        "queue.event-orphan-idle-ms",
+    ),
 ];
+
+/// The configuration key an environment variable sets, given the
+/// configuration it overlays: the known hyphenated names first, then a key
+/// the configuration already has (so `HOT_WORKER_RUN_TIMEOUT` finds a
+/// `worker.run-timeout` that hot.hot sets), then the dotted spelling.
+fn env_var_to_conf_key_in(conf: &Val, env_var: &str) -> String {
+    let dotted = env_var_to_conf_key(env_var);
+    if HYPHENATED_ENV_KEYS.iter().any(|(name, _)| *name == env_var) || conf.get(&dotted).is_some() {
+        return dotted;
+    }
+    let segments: Vec<&str> = dotted.split('.').collect();
+    existing_conf_path(conf, "", &segments).unwrap_or(dotted)
+}
+
+/// A path in `conf` that spells `segments`, joining neighbours with `-` or
+/// `.`; neighbours joined by `.` are tried first.
+fn existing_conf_path(conf: &Val, prefix: &str, segments: &[&str]) -> Option<String> {
+    for take in 1..=segments.len() {
+        let key = segments[..take].join("-");
+        let path = if prefix.is_empty() {
+            key
+        } else {
+            format!("{}.{}", prefix, key)
+        };
+        if conf.get(&path).is_some() {
+            if take == segments.len() {
+                return Some(path);
+            }
+            if let Some(found) = existing_conf_path(conf, &path, &segments[take..]) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
 
 // Helper function to convert environment variable name to dot notation conf key
 fn env_var_to_conf_key(env_var: &str) -> String {
@@ -383,11 +425,32 @@ fn apply_env_bindings(
     let mut conf = conf;
     let mut secret_files = Val::map_empty();
 
-    for setting in hot::environment::resolve_hot(bindings)? {
+    for (name, resolved) in hot::environment::resolve_hot(bindings) {
+        let setting = match resolved {
+            Ok(setting) => setting,
+            // A broken `<NAME>_FILE` stops a command only when Hot reads that
+            // setting; scripts may export other HOT_*_FILE names of their own.
+            Err(error)
+                if conf.get(&env_var_to_conf_key_in(&conf, &name)).is_some()
+                    || hot::environment::DIRECT_SETTINGS.contains(&name.as_str()) =>
+            {
+                return Err(error);
+            }
+            Err(error) => {
+                // The overlay runs before and after hot.hot loads; warn once.
+                static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+                let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+                if !warned.contains(&name) {
+                    eprintln!("warning: ignoring {name}: {error}");
+                    warned.push(name);
+                }
+                continue;
+            }
+        };
         let key = setting.name;
         let value = setting.value;
         if key.starts_with("HOT_") {
-            let conf_key = env_var_to_conf_key(&key);
+            let conf_key = env_var_to_conf_key_in(&conf, &key);
             if let Some(path) = setting.source_file {
                 // Retain provenance independently of key naming. Do not put
                 // the resolved secret back in the process environment.
@@ -515,11 +578,12 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
         ),
         Command::TaskWorker {
             global,
+            server,
             queue,
             show_conf,
         } => (
             global.clone(),
-            None,
+            Some(server.clone()),
             None,
             Some(queue.clone()),
             None,
@@ -2102,6 +2166,103 @@ mod tests {
                 .is_some()
         );
         assert!(conf.get("network.allow.cidrs").is_none());
+    }
+
+    #[test]
+    fn worker_timeouts_and_existing_hyphenated_keys_map_from_the_environment() {
+        let conf = apply_env_bindings(
+            val!({"custom": {"bar-baz": 1}}),
+            [
+                ("HOT_WORKER_RUN_TIMEOUT".into(), "17".into()),
+                ("HOT_WORKER_MAX_RUN_TIMEOUT".into(), "7200".into()),
+                ("HOT_WORKER_CANCEL_ON_TIMEOUT".into(), "false".into()),
+                ("HOT_QUEUE_EVENT_ORPHAN_IDLE_MS".into(), "9000".into()),
+                ("HOT_CUSTOM_BAR_BAZ".into(), "2".into()),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(conf.get_str("worker.run-timeout"), "17");
+        assert_eq!(conf.get_str("worker.max-run-timeout"), "7200");
+        assert_eq!(conf.get_str("worker.cancel-on-timeout"), "false");
+        assert_eq!(conf.get_str("queue.event-orphan-idle-ms"), "9000");
+        assert_eq!(conf.get_int("custom.bar-baz"), 2);
+        assert!(conf.get("worker.run.timeout").is_none());
+        assert!(conf.get("custom.bar.baz").is_none());
+    }
+
+    /// Every `| \`setting\` | \`HOT_NAME\` |` row in the docs names the key
+    /// the environment variable really sets.
+    #[test]
+    fn documented_environment_variables_set_their_documented_keys() {
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/docs");
+        // The setting and variable of a `| `hot.a.b-c` | `HOT_A_B_C` | ...` row.
+        let row = |line: &str| -> Option<(String, String)> {
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            let code = |cell: &str| {
+                cell.strip_prefix('`')?
+                    .strip_suffix('`')
+                    .map(str::to_string)
+            };
+            let key = code(cells.get(1)?)?;
+            let name = code(cells.get(2)?)?;
+            let key = key.strip_prefix("hot.").unwrap_or(&key).to_string();
+            (name.starts_with("HOT_")
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'))
+            .then_some((key, name))
+        };
+        let mut checked = 0;
+        let mut stack = vec![docs];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for (key, name) in text.lines().filter_map(row) {
+                    let conf = apply_env_bindings(
+                        create_default_conf(),
+                        [(name.clone(), "1".to_string())].into(),
+                    )
+                    .unwrap();
+                    assert!(
+                        conf.get(&key).is_some(),
+                        "{} documents {name} for {key}, but it sets {}",
+                        path.display(),
+                        env_var_to_conf_key_in(&create_default_conf(), &name)
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 10, "found only {checked} documented variables");
+    }
+
+    #[test]
+    fn broken_file_settings_fail_closed_only_for_settings_hot_reads() {
+        let missing = "/nonexistent/hot-secret".to_string();
+        let unrelated = apply_env_bindings(
+            create_default_conf(),
+            [("HOT_PUBLIC_REF_FILE".to_string(), missing.clone())].into(),
+        );
+        assert!(unrelated.is_ok());
+        let known = apply_env_bindings(
+            create_default_conf(),
+            [("HOT_DB_URI_FILE".to_string(), missing.clone())].into(),
+        );
+        assert!(known.unwrap_err().contains("HOT_DB_URI_FILE"));
+        let direct = apply_env_bindings(
+            create_default_conf(),
+            [("HOT_ENCRYPTION_KEY_FILE".to_string(), missing)].into(),
+        );
+        assert!(direct.is_err());
     }
 
     #[test]

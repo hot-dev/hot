@@ -140,10 +140,7 @@ pub async fn file_detail_handler(
 
             Html(template.render().unwrap()).into_response()
         }
-        Err(_) => {
-            // File not found, redirect to files list
-            Redirect::to("/files").into_response()
-        }
+        Err(_) => super::not_found_page(&session, "File", "/files", "Back to files"),
     }
 }
 

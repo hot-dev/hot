@@ -139,7 +139,7 @@ impl ApiKey {
         Ok(row)
     }
 
-    /// Get API keys by environment
+    /// API keys of an environment, newest first. `None` limit returns every key.
     pub async fn get_api_keys_by_env(
         db: &crate::db::DatabasePool,
         env_id: &Uuid,
@@ -162,7 +162,8 @@ impl ApiKey {
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<ApiKey>, ApiKeyError> {
-        let limit = limit.unwrap_or(10);
+        // SQLite treats a negative LIMIT as no limit.
+        let limit = limit.unwrap_or(-1);
         let offset = offset.unwrap_or(0);
 
         let rows = sqlx::query_as::<_, ApiKey>(
@@ -172,7 +173,7 @@ impl ApiKey {
                    active_toggle_at, active_toggle_by_user_id, permissions
             FROM api_key
             WHERE env_id = ?
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, api_key_id DESC
             LIMIT ? OFFSET ?
             "#,
         )
@@ -191,7 +192,7 @@ impl ApiKey {
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<ApiKey>, ApiKeyError> {
-        let limit = limit.unwrap_or(10);
+        // PostgreSQL treats LIMIT NULL as no limit.
         let offset = offset.unwrap_or(0);
 
         let rows = sqlx::query_as::<_, ApiKey>(
@@ -201,7 +202,7 @@ impl ApiKey {
                    active_toggle_at, active_toggle_by_user_id, permissions
             FROM api_key
             WHERE env_id = $1
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, api_key_id DESC
             LIMIT $2 OFFSET $3
             "#,
         )
@@ -212,6 +213,22 @@ impl ApiKey {
         .await?;
 
         Ok(rows)
+    }
+
+    /// Number of API keys in an environment.
+    pub async fn count_api_keys_by_env(
+        db: &crate::db::DatabasePool,
+        env_id: &Uuid,
+    ) -> Result<i64, ApiKeyError> {
+        let sql = "SELECT COUNT(*) FROM api_key WHERE env_id = $1";
+        Ok(match db {
+            crate::db::DatabasePool::Sqlite(pool) => {
+                sqlx::query_scalar(sql).bind(env_id).fetch_one(pool).await?
+            }
+            crate::db::DatabasePool::Postgres(pool) => {
+                sqlx::query_scalar(sql).bind(env_id).fetch_one(pool).await?
+            }
+        })
     }
 
     /// Get the most recently created active API key for an environment that
@@ -253,7 +270,8 @@ impl ApiKey {
         }
     }
 
-    /// Get API keys by organization (via environments)
+    /// API keys of an organization's environments, newest first. `None` limit
+    /// returns every key.
     pub async fn get_api_keys_by_org(
         db: &crate::db::DatabasePool,
         org_id: &Uuid,
@@ -276,7 +294,7 @@ impl ApiKey {
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<ApiKey>, ApiKeyError> {
-        let limit = limit.unwrap_or(10);
+        let limit = limit.unwrap_or(-1);
         let offset = offset.unwrap_or(0);
 
         let rows = sqlx::query_as::<_, ApiKey>(
@@ -287,7 +305,7 @@ impl ApiKey {
             FROM api_key ak
             JOIN env e ON ak.env_id = e.env_id
             WHERE e.org_id = ?
-            ORDER BY ak.created_at DESC
+            ORDER BY ak.created_at DESC, ak.api_key_id DESC
             LIMIT ? OFFSET ?
             "#,
         )
@@ -306,7 +324,6 @@ impl ApiKey {
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<ApiKey>, ApiKeyError> {
-        let limit = limit.unwrap_or(10);
         let offset = offset.unwrap_or(0);
 
         let rows = sqlx::query_as::<_, ApiKey>(
@@ -317,7 +334,7 @@ impl ApiKey {
             FROM api_key ak
             JOIN env e ON ak.env_id = e.env_id
             WHERE e.org_id = $1
-            ORDER BY ak.created_at DESC
+            ORDER BY ak.created_at DESC, ak.api_key_id DESC
             LIMIT $2 OFFSET $3
             "#,
         )
@@ -872,6 +889,51 @@ mod tests {
             .await
             .unwrap();
         assert!(chosen.is_none_or(|key| key.api_key_id != issued));
+    }
+
+    #[tokio::test]
+    async fn environment_key_listing_has_no_default_cap() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let before = ApiKey::count_api_keys_by_env(&db, &data.env_id)
+            .await
+            .unwrap();
+        for n in 0..12 {
+            ApiKey::insert_api_key(
+                &db,
+                &Uuid::now_v7(),
+                &data.env_id,
+                &format!("key {n}"),
+                &serde_json::json!({}),
+                &data.user_id,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        }
+        let total = ApiKey::count_api_keys_by_env(&db, &data.env_id)
+            .await
+            .unwrap();
+        assert_eq!(total, before + 12);
+        let all = ApiKey::get_api_keys_by_env(&db, &data.env_id, None, None)
+            .await
+            .unwrap();
+        assert_eq!(all.len() as i64, total);
+        // Pages follow one stable order, even for keys created in the same instant.
+        let mut paged = Vec::new();
+        for offset in (0..total).step_by(5) {
+            paged.extend(
+                ApiKey::get_api_keys_by_env(&db, &data.env_id, Some(5), Some(offset))
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|key| key.api_key_id),
+            );
+        }
+        assert_eq!(
+            paged,
+            all.iter().map(|key| key.api_key_id).collect::<Vec<_>>()
+        );
     }
 
     #[test]

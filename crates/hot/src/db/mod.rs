@@ -162,7 +162,7 @@ pub use agent::{
     AgentWithProject,
 };
 pub use build::{Build, BuildError};
-pub use call::{Call, CallHeader};
+pub use call::{CALL_BLOB_REF_KINDS, Call, CallHeader, CallPurge, CallPurgeScope};
 pub use context::{Context, ContextError};
 pub use domain::{Domain, DomainError};
 pub use email_verification::{EmailVerification, EmailVerificationError, VerificationStatus};
@@ -388,9 +388,17 @@ impl DatabaseType {
         } else if uri.starts_with("postgres:") || uri.starts_with("postgresql:") {
             Ok(DatabaseType::Postgres)
         } else {
+            // Only the scheme: the rest of a URI can hold its password.
+            let scheme: String = uri
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(32)
+                .flat_map(char::escape_debug)
+                .collect();
             Err(DatabaseError::UnsupportedType(format!(
-                "Unsupported database URI scheme: {}",
-                uri
+                "Unsupported database URI scheme \"{scheme}\": use sqlite:, postgres: or postgresql:"
             )))
         }
     }
@@ -479,16 +487,24 @@ pub fn rls_enforcement_required(conf: &Val) -> bool {
     )
 }
 
-/// Redact password from database URI for safe display
+/// Redact password from database URI for safe display. A URI that doesn't
+/// parse as one with a host, such as a mistyped `postgres:user:pass@host`,
+/// still loses everything before its last `@`, where credentials go.
 pub fn redact_password(uri: &str) -> String {
     match Url::parse(uri) {
-        Ok(mut url) => {
+        Ok(mut url) if !url.cannot_be_a_base() => {
             if url.password().is_some() {
                 let _ = url.set_password(Some("***"));
             }
             url.to_string()
         }
-        Err(_) => uri.to_string(), // Return as-is if can't parse
+        _ => match uri.rfind('@') {
+            Some(at) => {
+                let start = uri.find("://").map(|i| i + 3).unwrap_or(0).min(at);
+                format!("{}***{}", &uri[..start], &uri[at..])
+            }
+            None => uri.to_string(),
+        },
     }
 }
 
@@ -593,6 +609,7 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
                 )
                 .clamp(0, i64::from(i32::MAX));
 
+            let jit = conf.get_bool_or_default("db.jit", conf.get_bool_or_default("jit", false));
             let max_connections = crate::runtime_budget::derive_postgres_pool_connections(conf);
             tracing::debug!(
                 "Postgres pool max_connections={} from derived local execution budget",
@@ -623,6 +640,12 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
                             lock_timeout_ms
                         )))
                         .await?;
+                        // Hot's statements are short lookups. Under RLS their
+                        // cost estimates can still cross PostgreSQL's JIT
+                        // thresholds, and compiling then dwarfs running them.
+                        if !jit {
+                            conn.execute("set jit = off").await?;
+                        }
                         Ok(())
                     })
                 })
@@ -705,9 +728,90 @@ pub fn bootstrap_conf(conf: &Val) -> Val {
         .set_bool("db.rls.enforce", Some(false), false)
 }
 
-/// The migrations this release has that a SQLite database hasn't applied,
-/// by version. A database with no migration table has applied none.
-pub async fn pending_sqlite_migrations(uri: &str) -> Result<Vec<i64>, DatabaseError> {
+/// A database's migration ledger compared with this release's migrations.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MigrationState {
+    /// Versions applied with the checksum this release has.
+    pub applied: Vec<i64>,
+    /// This release's migrations the database hasn't applied.
+    pub pending: Vec<i64>,
+    /// Versions applied from a file whose contents differ from this release's.
+    pub modified: Vec<i64>,
+    /// Versions applied that this release doesn't have: a newer Hot ran them.
+    pub unknown: Vec<i64>,
+}
+
+impl MigrationState {
+    fn compare(migrator: &sqlx::migrate::Migrator, ledger: &[(i64, Vec<u8>)]) -> Self {
+        let mut state = MigrationState::default();
+        for migration in migrator.iter() {
+            match ledger
+                .iter()
+                .find(|(version, _)| *version == migration.version)
+            {
+                None => state.pending.push(migration.version),
+                Some((_, checksum)) if *checksum == *migration.checksum => {
+                    state.applied.push(migration.version)
+                }
+                Some(_) => state.modified.push(migration.version),
+            }
+        }
+        state.unknown = ledger
+            .iter()
+            .map(|(version, _)| *version)
+            .filter(|version| migrator.iter().all(|m| m.version != *version))
+            .collect();
+        state
+    }
+
+    /// The database can't be used by this release as it is: another Hot
+    /// migrated it, and only that release, or a restore, can continue.
+    pub fn conflict(&self) -> Option<String> {
+        let versions = |list: &[i64]| {
+            list.iter()
+                .map(|v| format!("{v:03}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if !self.unknown.is_empty() {
+            Some(format!(
+                "this database was migrated by a newer Hot release (migration {}, which this Hot \
+                 doesn't have). Downgrading isn't supported: upgrade Hot, or restore a backup \
+                 taken before the upgrade. Don't delete the database",
+                versions(&self.unknown)
+            ))
+        } else if !self.modified.is_empty() {
+            Some(format!(
+                "migration {} was applied from a file that differs from this Hot release's. \
+                 Don't delete the database; see \
+                 https://hot.dev/docs/migrations#a-migration-was-applied-from-a-different-file",
+                versions(&self.modified)
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+const LEDGER_QUERY: &str =
+    "SELECT version, checksum FROM _sqlx_migrations WHERE success ORDER BY version";
+
+/// A database no migration ran against has no ledger yet.
+fn no_ledger_yet(
+    result: Result<Vec<(i64, Vec<u8>)>, sqlx::Error>,
+) -> Result<Vec<(i64, Vec<u8>)>, sqlx::Error> {
+    match result {
+        Err(sqlx::Error::Database(e))
+            if e.message().contains("no such table") || e.code().as_deref() == Some("42P01") =>
+        {
+            Ok(Vec::new())
+        }
+        result => result,
+    }
+}
+
+/// A SQLite database's migration state, read without changing the file.
+pub async fn sqlite_migration_state(uri: &str) -> Result<MigrationState, DatabaseError> {
     use sqlx::ConnectOptions;
     use std::str::FromStr;
     let migrator = sqlx::migrate::Migrator::new(DatabaseType::Sqlite.migration_dir()?)
@@ -717,20 +821,62 @@ pub async fn pending_sqlite_migrations(uri: &str) -> Result<Vec<i64>, DatabaseEr
         .read_only(true)
         .connect()
         .await?;
-    let applied: Vec<i64> =
-        match sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = 1")
-            .fetch_all(&mut conn)
-            .await
-        {
-            Ok(applied) => applied,
-            Err(sqlx::Error::Database(e)) if e.message().contains("no such table") => Vec::new(),
-            Err(e) => return Err(e.into()),
-        };
-    Ok(migrator
-        .iter()
-        .map(|m| m.version)
-        .filter(|version| !applied.contains(version))
-        .collect())
+    let ledger = no_ledger_yet(sqlx::query_as(LEDGER_QUERY).fetch_all(&mut conn).await)?;
+    Ok(MigrationState::compare(&migrator, &ledger))
+}
+
+/// The database's migration state, when this process can read the ledger: a
+/// SQLite database, or PostgreSQL with `db.migration-uri`, since the runtime
+/// login has no access to the ledger.
+pub async fn migration_state(conf: &Val) -> Result<Option<MigrationState>, DatabaseError> {
+    let uri = get_db_uri_from_conf(conf);
+    match DatabaseType::from_uri(&uri)? {
+        DatabaseType::Sqlite => sqlite_migration_state(&uri).await.map(Some),
+        DatabaseType::Postgres => {
+            let migration_uri = get_migration_uri_from_conf(conf);
+            if migration_uri.is_empty() {
+                return Ok(None);
+            }
+            let schema = conf.get_str_or_default(
+                "db.schema",
+                &conf.get_str_or_default("schema", DEFAULT_DB_SCHEMA),
+            );
+            let migrator = sqlx::migrate::Migrator::new(DatabaseType::Postgres.migration_dir()?)
+                .await
+                .map_err(|e| DatabaseError::Migration(e.to_string()))?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .after_connect(move |conn, _meta| {
+                    let schema = schema.clone();
+                    Box::pin(async move {
+                        conn.execute(sqlx::AssertSqlSafe(format!(
+                            "set search_path = '{}', 'public'",
+                            schema
+                        )))
+                        .await?;
+                        Ok(())
+                    })
+                })
+                .connect(&migration_uri)
+                .await
+                .map_err(DatabaseError::Connection)?;
+            let ledger = no_ledger_yet(sqlx::query_as(LEDGER_QUERY).fetch_all(&pool).await);
+            pool.close().await;
+            Ok(Some(MigrationState::compare(&migrator, &ledger?)))
+        }
+    }
+}
+
+/// The migrations this release has that a SQLite database hasn't applied,
+/// by version. A database with no migration table has applied none. A
+/// database another Hot migrated is an error: using it as it is would run
+/// this release against a schema it doesn't know.
+pub async fn pending_sqlite_migrations(uri: &str) -> Result<Vec<i64>, DatabaseError> {
+    let state = sqlite_migration_state(uri).await?;
+    match state.conflict() {
+        Some(conflict) => Err(DatabaseError::Migration(conflict)),
+        None => Ok(state.pending),
+    }
 }
 
 /// `db.migration-uri` changes the schema the runtime login reads, so it must
@@ -756,6 +902,62 @@ fn check_migration_target(runtime_uri: &str, migration_uri: &str) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+/// Copy a local database that already holds data before migrations change
+/// it, so a failed or unwanted upgrade can be undone by restoring the copy.
+/// Only the latest copy is kept. A copy that fails doesn't stop the upgrade.
+async fn backup_sqlite_before_migrating(
+    db: &Pool<Sqlite>,
+    migrator: &sqlx::migrate::Migrator,
+    path: &str,
+) {
+    if path.contains(":memory:") || !std::path::Path::new(path).is_file() {
+        return;
+    }
+    let Ok(ledger) = no_ledger_yet(sqlx::query_as(LEDGER_QUERY).fetch_all(db).await) else {
+        return;
+    };
+    let state = MigrationState::compare(migrator, &ledger);
+    if state.applied.is_empty() || state.pending.is_empty() || state.conflict().is_some() {
+        return;
+    }
+    let backup = format!("{path}.pre-migrate.bak");
+    let _ = std::fs::remove_file(&backup);
+    match sqlx::query("VACUUM INTO ?").bind(&backup).execute(db).await {
+        Ok(_) => tracing::info!("Backed up the database to {backup} before migrating"),
+        Err(e) => tracing::warn!("Could not back up the database before migrating: {e}"),
+    }
+}
+
+/// How long a PostgreSQL migration statement waits for a lock, and how often a
+/// migration that gave up waiting is retried. Deploys migrate while the
+/// previous release still serves, so an exclusive lock queued behind a long
+/// transaction would otherwise stall every reader of that table until it is
+/// granted.
+const MIGRATION_LOCK_TIMEOUT_MS: i64 = 5_000;
+const MIGRATION_LOCK_RETRIES: u32 = 5;
+
+/// A lock timeout or deadlock: running traffic, not the migration, is at fault.
+fn is_lock_contention(err: &sqlx::migrate::MigrateError) -> bool {
+    use sqlx::migrate::MigrateError;
+    match err {
+        MigrateError::Execute(sqlx::Error::Database(e))
+        | MigrateError::ExecuteMigration(sqlx::Error::Database(e), _) => {
+            matches!(e.code().as_deref(), Some("55P03" | "40P01"))
+        }
+        _ => false,
+    }
+}
+
+/// Every Hot 2+ ledger starts with Hot 2's baseline; a Hot 1.x ledger doesn't.
+const HOT2_LEDGER_QUERY: &str = "SELECT description FROM _sqlx_migrations WHERE version = 1";
+
+fn is_hot2_ledger(baseline: Result<Option<String>, sqlx::Error>) -> Option<bool> {
+    match baseline {
+        Ok(description) => Some(description.as_deref() == Some("hot 2 initial schema")),
+        Err(_) => None,
+    }
 }
 
 /// Run database migrations
@@ -851,10 +1053,22 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
 
             tracing::debug!("Executing SQLite migrations");
             let latest = migrator.iter().map(|m| m.version).max();
-            migrator.run(&db).await.map_err(|e| {
+            backup_sqlite_before_migrating(&db, &migrator, path_part).await;
+            if let Err(e) = migrator.run(&db).await {
                 tracing::error!("SQLite migration failed: {:?}", e);
-                translate_migrate_error(&DatabaseType::Sqlite, e, latest)
-            })?;
+                let hot2 = is_hot2_ledger(
+                    sqlx::query_scalar(HOT2_LEDGER_QUERY)
+                        .fetch_optional(&db)
+                        .await,
+                );
+                db.close().await;
+                return Err(translate_migrate_error(
+                    &DatabaseType::Sqlite,
+                    e,
+                    latest,
+                    hot2,
+                ));
+            }
 
             // Explicitly close the pool to ensure all connections are released
             // and SQLite WAL is properly checkpointed before other connections open
@@ -873,12 +1087,24 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
                 }
             };
             tracing::debug!("Using Postgres migration schema: {}", schema);
+            let marker_schema = schema.clone();
 
+            let lock_timeout_ms = conf
+                .get_int_or_default(
+                    "db.migration-lock-timeout-ms",
+                    conf.get_int_or_default("migration-lock-timeout-ms", MIGRATION_LOCK_TIMEOUT_MS),
+                )
+                .clamp(0, i64::from(i32::MAX));
             let db = PgPoolOptions::new()
                 .max_connections(1)
                 .after_connect(move |conn, _meta| {
                     let schema = schema.clone();
                     Box::pin(async move {
+                        conn.execute(sqlx::AssertSqlSafe(format!(
+                            "set lock_timeout = {}",
+                            lock_timeout_ms
+                        )))
+                        .await?;
                         tracing::debug!("Creating schema if not exists: {}", schema);
                         conn.execute(sqlx::AssertSqlSafe(format!(
                             "create schema if not exists {}",
@@ -911,10 +1137,61 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
 
             tracing::debug!("Executing Postgres migrations");
             let latest = migrator.iter().map(|m| m.version).max();
-            migrator.run(&db).await.map_err(|e| {
+            let mut attempt = 0;
+            loop {
+                let Err(e) = migrator.run(&db).await else {
+                    break;
+                };
+                // Each migration commits on its own, so a retry resumes at
+                // the one that gave up waiting for a lock.
+                if attempt < MIGRATION_LOCK_RETRIES && is_lock_contention(&e) {
+                    attempt += 1;
+                    let delay = std::time::Duration::from_secs(1 << attempt.min(4));
+                    tracing::warn!(
+                        "A migration timed out waiting for a lock held by running traffic; \
+                         retrying in {}s ({attempt}/{MIGRATION_LOCK_RETRIES}): {e}",
+                        delay.as_secs()
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
                 tracing::error!("Postgres migration failed: {:?}", e);
-                translate_migrate_error(&DatabaseType::Postgres, e, latest)
-            })?;
+                let hot2 = is_hot2_ledger(
+                    sqlx::query_scalar(HOT2_LEDGER_QUERY)
+                        .fetch_optional(&db)
+                        .await,
+                );
+                db.close().await;
+                return Err(translate_migrate_error(
+                    &DatabaseType::Postgres,
+                    e,
+                    latest,
+                    hot2,
+                ));
+            }
+
+            if let Some(latest) = latest {
+                let marker = format!("{}{latest}", rls::SCHEMA_MARKER);
+                let current: Option<String> = sqlx::query_scalar(
+                    "SELECT obj_description(oid, 'pg_namespace') FROM pg_namespace WHERE nspname = $1",
+                )
+                .bind(&marker_schema)
+                .fetch_optional(&db)
+                .await
+                .ok()
+                .flatten();
+                // Processes that migrate together would otherwise race to
+                // rewrite the same catalog row.
+                if current.as_deref() != Some(marker.as_str()) {
+                    let comment = format!(
+                        "COMMENT ON SCHEMA \"{}\" IS '{marker}'",
+                        marker_schema.replace('"', "\"\"")
+                    );
+                    if let Err(e) = db.execute(sqlx::AssertSqlSafe(comment)).await {
+                        tracing::warn!("Cannot record the schema version for runtime checks: {e}");
+                    }
+                }
+            }
 
             // Explicitly close the pool to ensure all connections are released
             tracing::debug!("Closing Postgres migration pool");
@@ -927,16 +1204,18 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
 }
 
 /// Translate a sqlx migrator error into a `DatabaseError::Migration` with a user-facing
-/// hint when the error is the kind that fires when Hot 2 is pointed at a Hot 1.x ledger.
+/// hint for the ledger mismatches whose raw sqlx wording (for example "migration 2 was
+/// previously applied but is missing in the resolved migrations") tells users nothing.
 ///
-/// The raw sqlx wording (for example "migration 2 was previously applied but is missing in
-/// the resolved migrations") tells users nothing about what to do next. Hot 2 ships a
-/// clean v1 baseline and does not auto-adopt a Hot 1.x schema; the recovery path is
-/// `hot db port-v1-to-v2` for SQLite and a fresh v2 database for Postgres.
+/// `hot2_ledger` says whether the database's ledger starts with Hot 2's baseline, when
+/// it could be read. Only a Hot 1.x ledger gets the 1.x recovery path (`hot db
+/// port-v1-to-v2` for SQLite, a fresh database for Postgres). A Hot 2+ ledger that
+/// differs was migrated by another build of Hot 2+, and deleting it would lose data.
 fn translate_migrate_error(
     db_type: &DatabaseType,
     err: sqlx::migrate::MigrateError,
     latest_known: Option<i64>,
+    hot2_ledger: Option<bool>,
 ) -> DatabaseError {
     use sqlx::migrate::MigrateError;
     // A migration newer than any this release knows means a newer Hot
@@ -960,9 +1239,17 @@ fn translate_migrate_error(
             | MigrateError::VersionTooNew(_, _)
             | MigrateError::Dirty(_)
     );
-    let base = err.to_string();
+    let base = migrate_error_text(&err);
     if !needs_hint {
         return DatabaseError::Migration(base);
+    }
+    if hot2_ledger == Some(true) {
+        return DatabaseError::Migration(format!(
+            "{base}\n\nThis database's migration history doesn't match this Hot release's. A Hot \
+             build whose migrations differ, such as an unreleased development build, migrated \
+             it. Don't delete the database: restore the backup taken before that build ran, or \
+             see https://hot.dev/docs/migrations#a-migration-was-applied-from-a-different-file"
+        ));
     }
     let hint = match db_type {
         DatabaseType::Sqlite => {
@@ -979,6 +1266,25 @@ fn translate_migrate_error(
         }
     };
     DatabaseError::Migration(format!("{base}\n\n{hint}"))
+}
+
+/// sqlx shows only a database error's message. A failed migration's detail
+/// and hint name what to repair (the duplicated key, the missing reference).
+fn migrate_error_text(err: &sqlx::migrate::MigrateError) -> String {
+    use sqlx::migrate::MigrateError;
+    let mut text = err.to_string();
+    if let MigrateError::Execute(sqlx::Error::Database(e))
+    | MigrateError::ExecuteMigration(sqlx::Error::Database(e), _) = err
+        && let Some(pg) = e.try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+    {
+        if let Some(detail) = pg.detail().filter(|detail| !text.contains(*detail)) {
+            text.push_str(&format!("\n{detail}"));
+        }
+        if let Some(hint) = pg.hint() {
+            text.push_str(&format!("\n{hint}"));
+        }
+    }
+    text
 }
 
 /// Check if there are any existing organizations and users in the database
@@ -1003,7 +1309,6 @@ pub async fn insert_default_data(
     let org_id = Uuid::now_v7();
     let user_id = Uuid::now_v7();
     let org_user_id = Uuid::now_v7();
-    let user_auth_id = Uuid::now_v7();
     let env_id = Uuid::now_v7();
 
     // Begin transaction by using the entity functions
@@ -1017,31 +1322,8 @@ pub async fn insert_default_data(
     )
     .await?;
 
-    // Insert user authentication for email/password
-    let password_hash = crate::auth::hash_password_with_random_salt("hotdev").map_err(|e| {
-        DatabaseError::User(UserError::Database(sqlx::Error::Protocol(format!(
-            "Password hashing failed: {}",
-            e
-        ))))
-    })?;
-
-    let auth_data: serde_json::Value = serde_json::from_str(&password_hash).map_err(|e| {
-        DatabaseError::User(UserError::Database(sqlx::Error::Protocol(format!(
-            "JSON parsing failed: {}",
-            e
-        ))))
-    })?;
-
-    UserAuth::insert_user_auth(
-        db,
-        &user_auth_id,
-        &user_id,
-        "email_password",
-        "local@hot.dev",
-        Some(&auth_data),
-        &user_id,
-    )
-    .await?;
+    // The local identity has no password. The App signs it in automatically
+    // in local development; every other account signs up.
 
     // Insert org (individual type for local dev)
     Org::insert_org(db, &org_id, "Local", "local", "individual", &user_id).await?;
@@ -1284,6 +1566,35 @@ mod tests {
         assert!(check_migration_target(runtime, "sqlite:.hot/db/hot.sqlite.db").is_err());
     }
 
+    #[tokio::test]
+    async fn sqlite_local_identity_has_no_password() {
+        let db = test_db().await;
+        insert_default_data(&db).await.unwrap();
+        assert!(matches!(
+            UserAuth::get_user_auth(&db, "email_password", "local@hot.dev").await,
+            Err(UserError::Database(sqlx::Error::RowNotFound))
+        ));
+    }
+
+    #[tokio::test]
+    async fn postgres_local_identity_has_no_password() {
+        let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
+            return;
+        };
+        let conf = crate::val!({"uri": uri, "schema": "hot", "rls": {"enforce": false}});
+        run_migrations(&conf).await.unwrap();
+        let pool = create_db_pool(&conf).await.unwrap();
+        let db = pool.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Onboarding));
+        if User::get_user_by_email(&db, "local@hot.dev").await.is_err() {
+            insert_default_data(&db).await.unwrap();
+        }
+        assert!(matches!(
+            UserAuth::get_user_auth(&db, "email_password", "local@hot.dev").await,
+            Err(UserError::Database(sqlx::Error::RowNotFound))
+        ));
+    }
+
     // ========================================================================
     // merge_sends_into_meta tests
     // ========================================================================
@@ -1404,6 +1715,107 @@ mod tests {
         assert_eq!(sends[0].as_str().unwrap(), "keep-me");
     }
 
+    #[tokio::test]
+    async fn sqlite_migration_state_refuses_a_database_another_hot_migrated() {
+        let directory = tempfile::tempdir().unwrap();
+        let uri = format!("sqlite:{}", directory.path().join("hot.db").display());
+        run_migrations(&crate::val!({"uri": uri.clone()}))
+            .await
+            .unwrap();
+        let state = sqlite_migration_state(&uri).await.unwrap();
+        assert!(
+            state.pending.is_empty() && state.conflict().is_none(),
+            "{state:?}"
+        );
+        assert!(pending_sqlite_migrations(&uri).await.unwrap().is_empty());
+
+        let pool = sqlx::SqlitePool::connect(&uri).await.unwrap();
+        sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(999,'future',1,x'00',0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let newer = pending_sqlite_migrations(&uri)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            newer.contains("newer Hot release") && newer.contains("999"),
+            "{newer}"
+        );
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version=999")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE _sqlx_migrations SET checksum=x'00' WHERE version=2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let state = sqlite_migration_state(&uri).await.unwrap();
+        assert_eq!(state.modified, vec![2]);
+        let modified = pending_sqlite_migrations(&uri)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(modified.contains("Don't delete"), "{modified}");
+    }
+
+    #[tokio::test]
+    async fn sqlite_upgrades_keep_a_copy_of_the_database_from_before() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hot.db");
+        let uri = format!("sqlite:{}", path.display());
+        let mut migrator =
+            sqlx::migrate::Migrator::new(DatabaseType::Sqlite.migration_dir().unwrap())
+                .await
+                .unwrap();
+        let latest = migrator.iter().map(|m| m.version).max().unwrap();
+        migrator.migrations.to_mut().retain(|m| m.version < latest);
+        let pool = sqlx::SqlitePool::connect(&format!("{uri}?mode=rwc"))
+            .await
+            .unwrap();
+        migrator.run(&pool).await.unwrap();
+        pool.close().await;
+
+        run_migrations(&crate::val!({"uri": uri.clone()}))
+            .await
+            .unwrap();
+        let backup = format!("sqlite:{}.pre-migrate.bak", path.display());
+        assert_eq!(
+            sqlite_migration_state(&backup).await.unwrap().pending,
+            vec![latest]
+        );
+        assert!(
+            sqlite_migration_state(&uri)
+                .await
+                .unwrap()
+                .pending
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_unparseable_uris_never_show_a_password() {
+        let bom = "\u{feff}postgres://hot:s3cret@db.internal:5432/hot";
+        assert_eq!(
+            redact_password(bom),
+            "\u{feff}postgres://***@db.internal:5432/hot"
+        );
+        assert!(!redact_password("postgress://hot:s3cret@db/hot").contains("s3cret"));
+        assert!(!redact_password("hot:s3cret@db/hot").contains("s3cret"));
+        for uri in [bom, "postgress://hot:s3cret@db/hot"] {
+            let error = DatabaseType::from_uri(uri).unwrap_err().to_string();
+            assert!(!error.contains("s3cret"), "{error}");
+        }
+        assert!(
+            DatabaseType::from_uri(bom)
+                .unwrap_err()
+                .to_string()
+                .contains("\\u{feff}postgres"),
+            "an invisible character in the scheme is shown escaped"
+        );
+    }
+
     #[test]
     fn test_redact_password() {
         assert_eq!(
@@ -1492,7 +1904,7 @@ mod tests {
     #[test]
     fn test_translate_migrate_error_adds_sqlite_hint() {
         let err = sqlx::migrate::MigrateError::VersionMissing(2);
-        let translated = translate_migrate_error(&DatabaseType::Sqlite, err, None);
+        let translated = translate_migrate_error(&DatabaseType::Sqlite, err, None, None);
         let msg = translated.to_string();
         assert!(msg.contains("migration 2"), "preserves original wording");
         assert!(msg.contains("hot db port-v1-to-v2"), "got: {msg}");
@@ -1503,7 +1915,7 @@ mod tests {
     #[test]
     fn test_translate_migrate_error_adds_postgres_hint() {
         let err = sqlx::migrate::MigrateError::VersionMismatch(5);
-        let translated = translate_migrate_error(&DatabaseType::Postgres, err, None);
+        let translated = translate_migrate_error(&DatabaseType::Postgres, err, None, None);
         let msg = translated.to_string();
         assert!(msg.contains("fresh Postgres"), "got: {msg}");
         assert!(
@@ -1519,17 +1931,30 @@ mod tests {
     #[test]
     fn test_translate_migrate_error_names_a_newer_database() {
         let err = sqlx::migrate::MigrateError::VersionMissing(15);
-        let msg = translate_migrate_error(&DatabaseType::Sqlite, err, Some(14)).to_string();
+        let msg = translate_migrate_error(&DatabaseType::Sqlite, err, Some(14), None).to_string();
         assert!(msg.contains("newer Hot release"), "got: {msg}");
         assert!(msg.contains("Don't delete"), "got: {msg}");
         assert!(!msg.contains("port-v1-to-v2"), "not a 1.x database: {msg}");
     }
 
     #[test]
+    fn test_translate_migrate_error_spares_a_hot2_database() {
+        let err = sqlx::migrate::MigrateError::VersionMismatch(19);
+        let msg =
+            translate_migrate_error(&DatabaseType::Postgres, err, Some(22), Some(true)).to_string();
+        assert!(msg.contains("Don't delete"), "got: {msg}");
+        assert!(
+            !msg.contains("Hot 1.x"),
+            "a Hot 2+ ledger is not a 1.x database: {msg}"
+        );
+        assert!(!msg.contains("fresh Postgres"), "got: {msg}");
+    }
+
+    #[test]
     fn test_translate_migrate_error_passes_through_unrelated() {
         let inner = sqlx::Error::RowNotFound;
         let err = sqlx::migrate::MigrateError::Execute(inner);
-        let translated = translate_migrate_error(&DatabaseType::Sqlite, err, None);
+        let translated = translate_migrate_error(&DatabaseType::Sqlite, err, None, None);
         let msg = translated.to_string();
         assert!(
             !msg.contains("hot.dev/docs/migrations"),

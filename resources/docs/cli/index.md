@@ -91,6 +91,15 @@ Run just the job scheduler:
 hot scheduler
 ```
 
+With PostgreSQL, only one scheduler runs at a time. It holds a session
+advisory lock and confirms it every two seconds. If its database session ends
+(a failover, a terminated backend, a network partition) or a check takes longer
+than a second, it stops and exits non-zero, and its supervisor restarts it.
+A second scheduler started while one is running exits immediately, so replace a
+scheduler by stopping the old one first. Connect the scheduler to PostgreSQL
+directly or through a session-mode pooler; it refuses to start through a
+transaction- or statement-mode pooler that loses its lock.
+
 ## Running Code
 
 ### hot run
@@ -136,9 +145,12 @@ Run tests:
 
 ```bash
 hot test                    # Run all tests
-hot test user               # Run tests matching "user"
-hot test "user signup"      # Run tests matching pattern
+hot test signup             # Run tests whose name contains "signup"
+hot test ::app::user-test   # Run the tests of one namespace
 ```
+
+The pattern matches part of a test's full name, such as
+`::app::user-test/should-sign-up`.
 
 Tests are functions with `meta ["test"]` (or the equivalent `meta {test: true}`):
 
@@ -160,7 +172,7 @@ Each test starts on the real clock. A test can fix it:
 - `::hot::test/set-now(time)` fixes the clock at an RFC 3339 string, an
   `Instant` or a `ZonedDateTime`.
 - `::hot::test/advance(duration)` moves it by a `Duration` of weeks, days or
-  smaller units.
+  smaller units. A zero duration is an error.
 - `::hot::test/clear-now()` returns it to the real time.
 
 {{snippet:testing#testing-clock}}
@@ -168,8 +180,9 @@ Each test starts on the real clock. A test can fix it:
 `::hot::time/now`, `now-zoned`, `epoch-seconds` and the other "now" functions
 read the fixed time, in the test, in its `parallel` branches and `pmap`
 workers, and in the handlers it delivers events to. After each test the runner
-returns the clock to the real time. Outside `hot test` these functions return
-an error, so no other run reads a fixed clock.
+returns the clock to the real time. Outside `hot test` the `::hot::test` clock
+functions return an error and "now" is the real time, so no other run reads a
+fixed clock.
 
 #### Events and schedules
 
@@ -181,16 +194,18 @@ runs on its own. The test delivers events itself:
   send, until none is left. `deliver()` delivers what was sent so far. It
   returns one `{type, fn, result}` for each handler run.
 - A delivered `hot:schedule:new` arms a schedule in the test, with relative
-  times counted from the test's clock; `hot:schedule:cancel` disarms it.
+  times counted from the test's clock when the event was sent;
+  `hot:schedule:cancel` disarms it.
   `::hot::test/schedules()` lists what is armed.
 - `::hot::test/run-due()` calls each schedule due by the test's clock,
-  soonest first. Each call runs with the clock at its due time, as the
-  scheduler would have run it, and its events are delivered. Afterwards the
-  clock is back where the test left it.
+  soonest first, with its `args`. Each call runs with the clock at its due
+  time, as the scheduler would have run it, and its events are delivered.
+  Afterwards the clock is back where the test left it.
 
-A handler or scheduled call that fails counts as a failed assertion; the
-others still run. Handlers run as plain calls: retries and run records don't
-apply.
+A handler or scheduled call that fails counts as a failed assertion; one that
+calls `cancel()` doesn't, and the others still run. As in a worker, `exit(0)`
+returns and `exit(code)` fails the test or handler; neither ends `hot test`.
+Handlers run as plain calls: retries and run records don't apply.
 
 {{snippet:testing#testing-scenario}}
 
@@ -209,8 +224,25 @@ hot check --check.format json-min  # Minified JSON, ideal for CI / editor toolin
 The `json` and `json-min` formats emit an array of LSP `Diagnostic` objects
 (`range`, `severity`, `code`, `source`, `message`, optional `file`). Diagnostic
 messages embed the same ariadne snippets shown in pretty mode when source is
-available. Exit code is `0` when no diagnostics are produced and `1` otherwise,
-so JSON mode is safe to drive from CI:
+available. The `simple` format prints one line per diagnostic:
+`file:line:column: severity [code] message`. Pretty output uses color only on
+a terminal, and never when `NO_COLOR` is set.
+
+`hot check` also runs the build's secret-shape scan over the project's
+sources, dependencies and resources, with the same
+`hot.build.allow-secret-shape` allowlist as `hot build`. A match is reported
+next to the other diagnostics, with code `secret-shape`.
+`--allow-secret-shape` skips the scan.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0` | No errors (warnings alone pass) |
+| `1` | The check reported errors, or warnings with `--check.deny-warnings` |
+| `2` | The check could not run: an unknown format, a path that doesn't exist, src paths with no `.hot` files, or a configuration error (printed on stderr) |
+
+JSON mode is safe to drive from CI:
 
 ```bash
 hot check --check.format json-min > diagnostics.json || cat diagnostics.json
@@ -224,6 +256,9 @@ fail the check by default. Pass `--check.deny-warnings` (or set
 hot check --check.deny-warnings
 ```
 
+In a package directory (a `pkg.hot` and no `hot.hot`), pass the package's
+source directory: `hot check src`.
+
 ### hot watch
 
 Watch for changes and continuously re-analyze. Supports the same `--check.format`
@@ -234,15 +269,41 @@ hot watch                          # Pretty output, re-run on save
 hot watch --check.format json-min  # Stream JSON diagnostics on every change
 ```
 
+`hot watch` runs until you stop it. Each run prints its report; a run that
+can't start prints the reason on stderr and watching continues.
+
 ### hot fmt
 
 Format Hot source files:
 
 ```bash
-hot fmt                     # Format all files
-hot fmt path/to/file.hot    # Format specific file
-hot fmt --check             # Check without writing (CI mode)
+hot fmt                       # Format the project's .hot files
+hot fmt path/to/file.hot src  # Format specific files and directories
+hot fmt --check               # Check without writing (CI mode)
 ```
+
+With no paths, `hot fmt` formats the `.hot` files under the current directory
+and the project's source paths. It honors `.gitignore` and `.hotignore`, and
+skips the skill snapshots in `.skills/` (pass a path inside `.skills/` to
+format them anyway). It does not load `hot.hot`, so it also works when the
+project configuration has an error.
+
+`hot fmt` only changes whitespace: it puts a declaration's name, `meta` and
+value on separate lines, expands long or multi-key `meta` blocks and one-line
+`type { … }` records to one entry per line, normalizes blank lines between
+declarations, trims trailing whitespace, and ends the file with one newline.
+It never edits inside string literals or comments, and it keeps the file's
+line endings (LF or CRLF).
+
+Before writing, it checks that the result parses to the same program as the
+original and that every string literal is unchanged. A file that does not
+parse, or whose formatting would change the program, is reported with a line
+and column and left untouched.
+
+`hot fmt --check` writes nothing: it lists the files that need formatting and
+exits with status 1 if there are any. In both modes, a file that cannot be
+read, parsed, formatted safely or written is an error and the exit status is
+1, so `hot fmt --check` is a reliable CI gate.
 
 ## Build & Deploy
 
@@ -259,11 +320,11 @@ hot build --build.dir ./dist
 
 List available builds.
 
-> **Note:** This command connects to Hot Cloud by default. To list builds from your local API, pass `--local` (requires `hot dev` or `hot api` to be running).
+> **Note:** This command connects to Hot Cloud by default. To list builds from your local database, pass `--local`. It reads the database in `hot.db.uri` directly, so no server needs to be running.
 
 ```bash
 hot builds              # List builds on Hot Cloud
-hot builds --local      # List builds from local API
+hot builds --local      # List builds from the local database
 ```
 
 ### hot compile
@@ -271,21 +332,25 @@ hot builds --local      # List builds from local API
 Compile project source and create/update the live build:
 
 ```bash
-hot compile
-hot compile my-project
+hot compile             # The default project
+hot compile my-project  # Another project hot.hot defines (same as -p my-project)
 ```
 
 ### hot deploy
 
 Deploy a build to make it live.
 
-> **Note:** This command connects to Hot Cloud by default. To deploy locally, pass `--local` (requires `hot dev` or `hot api` to be running).
+> **Note:** This command connects to Hot Cloud by default. To deploy locally, pass `--local`. It writes to the database in `hot.db.uri` directly, so no server needs to be running.
 
 ```bash
 hot deploy              # Build and deploy to Hot Cloud
+hot deploy -p beta      # Build and deploy project beta to Hot Cloud's beta project
 hot deploy <build-id>   # Deploy a specific build to Hot Cloud
-hot deploy --local      # Deploy via local API (for local dev or self-hosted)
+hot deploy --local      # Deploy through the local database (local dev or self-hosted)
 ```
+
+`hot build`, `hot compile` and `hot deploy` stop with an error when `-p` names
+a project `hot.hot` doesn't define.
 
 ### hot cache
 
@@ -308,10 +373,15 @@ hot init my-app       # Create my-app/ if needed, init there
 hot init path/to/app  # Create nested path if needed, init there
 ```
 
-The project name is taken from the directory name. Creates three things alongside your existing files:
+The project name is taken from the directory name, made into a Hot
+identifier: lowercase letters, digits and `-`, starting with a letter (`My App`
+becomes `my-app`, `2024-app` becomes `app-2024-app`). Pass `--name` to choose
+it. Creates these alongside your existing files:
 - `hot.hot` — Project configuration (project root)
 - `hot/src/<project>/hi.hot` — Starter file with tutorial
-- `.hot/` — Local data: cache, database, logs (gitignored)
+- `.hot/` — Local data: cache, database, logs
+- `.gitignore` entries for `.hot/`, `hot/ctx.hot`, `hot/dev.key` (the key that
+  encrypts local context values) and `.env`
 
 In a project, the first command that needs the local SQLite database (`hot run`, `hot eval`, `hot repl`, `hot compile`, `hot build`, `hot test`, or `hot deploy`) prepares it:
 
@@ -326,10 +396,11 @@ A profile other than the local identity must already exist in the database. See 
 Manage projects:
 
 ```bash
-hot project list
 hot project activate my-app
 hot project deactivate my-app
 ```
+
+To list projects, use `hot projects`.
 
 ### hot projects
 
@@ -346,24 +417,33 @@ Manage dependencies:
 ```bash
 hot deps list           # List all dependencies
 hot deps show           # Show detailed dependency info
-hot deps add openai     # Add a package
-hot deps remove openai  # Remove a package
-hot deps update         # Resolve and cache dependencies
+hot deps update         # Resolve dependencies again (fetches branch dependencies)
+```
+
+`hot deps add` and `hot deps remove` are not implemented yet; they exit with
+an error. Add or remove dependencies in `hot.hot`:
+
+```hot
+hot.project.my-app.deps {
+  "hot.dev/openai": {"local": "./packages/openai"}
+}
 ```
 
 ### hot context
 
 Manage encrypted context variables (secrets).
 
-> **Note:** This command connects to Hot Cloud by default. To manage local context variables, pass `--local` (requires `hot dev` or `hot api` to be running).
+> **Note:** Managing Hot Cloud context variables from the CLI is not implemented yet; use the dashboard. Pass `--local` to manage them in the database in `hot.db.uri` directly (no server needs to be running).
 
 ```bash
-hot context list                        # List all variables
-hot context get OPENAI_API_KEY          # Get a variable
-hot context set OPENAI_API_KEY sk-xxx   # Set a variable
-hot context delete OPENAI_API_KEY       # Delete a variable
-hot context list --local                # List from local API
+hot context list --local                            # List all variables
+hot context get OPENAI_API_KEY --local              # Get a variable
+hot context set OPENAI_API_KEY '"sk-xxx"' --local   # Set a variable
+hot context delete OPENAI_API_KEY --local           # Delete a variable
 ```
+
+A value is a Hot expression, so a string needs its own quotes inside the
+shell's: `'"sk-xxx"'`.
 
 ### hot conf
 
@@ -376,17 +456,23 @@ hot conf generate all          # Generate full config with all options
 hot conf generate api          # Generate API server config
 hot conf generate app          # Generate App server config
 hot conf generate worker       # Generate Worker config
+hot conf generate task-worker  # Generate Task worker config
 hot conf generate scheduler    # Generate Scheduler config
 hot conf generate -o hot.hot   # Write template to file
 ```
 
 Available templates:
 - **(default)** — Minimal configuration for local development (~25 lines)
-- **all** — Full configuration with all available options (~180 lines)
+- **all** — Full configuration with all available options (~390 lines)
 - **api** — API server configuration (for self-hosting)
 - **app** — App server configuration (for self-hosting)
 - **worker** — Worker configuration (for self-hosting)
+- **task-worker** — Task worker configuration (for self-hosting)
 - **scheduler** — Scheduler configuration (for self-hosting)
+
+The service templates no longer set `hot.daemon`: only `hot dev`, `hot api`,
+`hot app`, `hot worker`, `hot task-worker` and `hot scheduler` run in the
+background, and only with `-d`.
 
 ### hot db
 
@@ -558,7 +644,12 @@ These options work with most commands:
 | `--profile <NAME>` | User, organization, and environment profile to use (see [Profiles](/docs/configuration#profiles)) |
 | `-s, --src.path <DIR>` | Source directory |
 | `-t, --test.path <DIR>` | Test directory |
+| `-r, --resource.path <DIR>` | Resource directory bundled with builds |
+| `--no-gitignore` | Don't apply `.gitignore` when collecting files |
 | `--engine.threads <N>` | Engine threads (default: 4) |
+| `--jit.mode <MODE>` | JIT compilation: enabled, disabled (default: enabled on supported platforms) |
+| `--jit.threshold <N>` | Calls before a function is JIT-compiled |
+| `--jit.hof.fusion <BOOL>` | JIT higher-order-function pipeline fusion (default: true) |
 | `--db.uri <URI>` | Database connection URI |
 | `--db.migration-uri <URI>` | Schema-owner URI for migrations on PostgreSQL (see [Self-Hosted PostgreSQL](/docs/configuration/postgres)) |
 | `--log.level <LEVEL>` | Log level: off, trace, debug, error, warn, info |
@@ -566,6 +657,7 @@ These options work with most commands:
 | `--log.dir <DIR>` | Directory for log files |
 | `--log.rotation <ROTATION>` | Log rotation: hourly, daily, none (default: daily) |
 | `--log.retention <COUNT>` | Number of log files to keep, 0 = keep all (default: 7) |
+| `--log.format <FORMAT>` | Log format: full, simple, json (an unknown value warns and falls back) |
 | `--deploy.auto <BOOL>` | Auto-deploy on CLI commands (default: true) |
 | `--emitter.type <TYPE>` | Emitter: none, console, db (default: db in project, none otherwise) |
 | `--with-tests <BOOL>` | Include test files in compile/check/watch (default: true for check, false for watch) |

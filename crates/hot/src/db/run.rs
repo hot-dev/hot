@@ -120,6 +120,22 @@ impl EarlierDelivery {
     }
 }
 
+/// The row of an event handler run the worker writes itself, before or in
+/// place of the run's own `run:start` (see [`Run::record_unstarted_run`] and
+/// [`Run::open_event_run`]).
+#[derive(Debug, Clone)]
+pub struct UnstartedRun {
+    pub run_id: Uuid,
+    pub env_id: Uuid,
+    pub stream_id: Uuid,
+    pub build_id: Uuid,
+    pub run_type_id: i16,
+    pub origin_run_id: Option<Uuid>,
+    pub event_id: Uuid,
+    pub by_user_id: Uuid,
+    pub retry_attempt: i16,
+}
+
 #[derive(Debug, FromRow)]
 pub struct RunStatusRecord {
     pub status_id: i16,
@@ -2003,9 +2019,155 @@ impl Run {
         Ok(())
     }
 
-    /// Fail held runs that their redelivered event will not execute, such as
-    /// runs of a handler a redeploy removed meanwhile.
-    pub async fn fail_held_runs(
+    /// Record an event handler run that never started: its setup failed
+    /// before any of its code ran, so no `run:start` wrote its row. `held`
+    /// keeps it for the event's redelivery, which reopens it like a run crash
+    /// recovery held ([`Run::hold_orphaned_runs_for_redelivery`]); otherwise
+    /// the failure is the run's outcome. A run an earlier delivery finished is
+    /// left as it is.
+    pub async fn record_unstarted_run(
+        db: &crate::db::DatabasePool,
+        run: &UnstartedRun,
+        error_message: &str,
+        held: bool,
+    ) -> Result<(), RunError> {
+        let now = Utc::now();
+        let result_val = serde_json::json!({
+            "$type": "::hot::run/Failure",
+            "$val": {
+                "msg": error_message,
+                "err": serde_json::Value::Null
+            }
+        });
+        let (status, stop_time) = if held {
+            (RunStatus::PendingRetry, None)
+        } else {
+            (RunStatus::Failed, Some(now))
+        };
+
+        crate::db::stream::Stream::create_or_get_stream(db, run.stream_id, run.env_id)
+            .await
+            .map_err(|e| {
+                RunError::Database(sqlx::Error::Protocol(format!(
+                    "Failed to create stream: {}",
+                    e
+                )))
+            })?;
+
+        let sql = "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, by_user_id, retry_attempt, result) \
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
+                   ON CONFLICT (run_id) DO UPDATE SET status_id = excluded.status_id, stop_time = excluded.stop_time, result = excluded.result, next_retry_at = NULL \
+                   WHERE run.status_id = 1 OR (run.status_id = 5 AND run.next_retry_at IS NULL)";
+        match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                sqlx::query(sql)
+                    .bind(run.run_id)
+                    .bind(run.env_id)
+                    .bind(run.stream_id)
+                    .bind(run.build_id)
+                    .bind(run.run_type_id)
+                    .bind(run.origin_run_id)
+                    .bind(run.event_id)
+                    .bind(now)
+                    .bind(stop_time)
+                    .bind(status.as_id())
+                    .bind(run.by_user_id)
+                    .bind(run.retry_attempt)
+                    .bind(&result_val)
+                    .execute(pool)
+                    .await?;
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                sqlx::query(sql)
+                    .bind(run.run_id)
+                    .bind(run.env_id)
+                    .bind(run.stream_id)
+                    .bind(run.build_id)
+                    .bind(run.run_type_id)
+                    .bind(run.origin_run_id)
+                    .bind(run.event_id)
+                    .bind(now)
+                    .bind(stop_time)
+                    .bind(status.as_id())
+                    .bind(run.by_user_id)
+                    .bind(run.retry_attempt)
+                    .bind(result_val.to_string())
+                    .execute(pool)
+                    .await?;
+            }
+        }
+
+        crate::db::stream::Stream::update_metrics(db, &run.stream_id)
+            .await
+            .map_err(|e| {
+                RunError::Database(sqlx::Error::Protocol(format!(
+                    "Failed to update stream metrics: {}",
+                    e
+                )))
+            })?;
+        Ok(())
+    }
+
+    /// Write an event handler run's row before its handler executes, for a
+    /// delivery that may stop its worker: a run the worker never got to
+    /// record still has a row that dead-letter settlement can fail. The
+    /// run's own `run:start` fills in the rest.
+    pub async fn open_event_run(
+        db: &crate::db::DatabasePool,
+        run: &UnstartedRun,
+    ) -> Result<(), RunError> {
+        crate::db::stream::Stream::create_or_get_stream(db, run.stream_id, run.env_id)
+            .await
+            .map_err(|e| {
+                RunError::Database(sqlx::Error::Protocol(format!(
+                    "Failed to create stream: {}",
+                    e
+                )))
+            })?;
+        let sql = "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt) \
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+                   ON CONFLICT (run_id) DO NOTHING";
+        match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                sqlx::query(sql)
+                    .bind(run.run_id)
+                    .bind(run.env_id)
+                    .bind(run.stream_id)
+                    .bind(run.build_id)
+                    .bind(run.run_type_id)
+                    .bind(run.origin_run_id)
+                    .bind(run.event_id)
+                    .bind(Utc::now())
+                    .bind(RunStatus::Running.as_id())
+                    .bind(run.by_user_id)
+                    .bind(run.retry_attempt)
+                    .execute(pool)
+                    .await?;
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                sqlx::query(sql)
+                    .bind(run.run_id)
+                    .bind(run.env_id)
+                    .bind(run.stream_id)
+                    .bind(run.build_id)
+                    .bind(run.run_type_id)
+                    .bind(run.origin_run_id)
+                    .bind(run.event_id)
+                    .bind(Utc::now())
+                    .bind(RunStatus::Running.as_id())
+                    .bind(run.by_user_id)
+                    .bind(run.retry_attempt)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fail runs an earlier delivery of an event left running or held that
+    /// its redelivery will not execute, such as runs of a handler a redeploy
+    /// removed meanwhile.
+    pub async fn fail_unrun_earlier_deliveries(
         db: &crate::db::DatabasePool,
         run_ids: &[Uuid],
         error_message: &str,
@@ -2018,7 +2180,7 @@ impl Run {
             }
         });
         let stop_time = Utc::now();
-        let sql = "UPDATE run SET stop_time = $1, status_id = 3, result = $2 WHERE run_id = $3 AND status_id = 5 AND next_retry_at IS NULL";
+        let sql = "UPDATE run SET stop_time = $1, status_id = 3, result = $2 WHERE run_id = $3 AND (status_id = 1 OR (status_id = 5 AND next_retry_at IS NULL))";
         for run_id in run_ids {
             match db {
                 crate::db::DatabasePool::Postgres(pool) => {
@@ -3693,6 +3855,74 @@ impl Run {
         }
         Ok(())
     }
+
+    /// Mark a pending retry whose retry is queued as failed, and record the
+    /// retry's run in `info.retry_run_id`, in one statement, so the attempt
+    /// names its retry from the moment it reads as failed.
+    pub async fn mark_retry_queued(
+        db: &crate::db::DatabasePool,
+        run_id: &Uuid,
+        retry_run_id: &Uuid,
+    ) -> Result<(), RunError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    "UPDATE run SET status_id = 3, next_retry_at = NULL, \
+                     info = COALESCE(info, '{}'::jsonb) || jsonb_build_object('retry_run_id', $2::text) \
+                     WHERE run_id = $1",
+                )
+                .bind(run_id)
+                .bind(retry_run_id.to_string())
+                .execute(pg_pool)
+                .await?;
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "UPDATE run SET status_id = 3, next_retry_at = NULL, \
+                     info = json_set(COALESCE(info, '{}'), '$.retry_run_id', ?) \
+                     WHERE run_id = ?",
+                )
+                .bind(retry_run_id.to_string())
+                .bind(run_id)
+                .execute(sqlite_pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Mark a pending retry that cannot run (its event is gone) as failed for
+    /// good. The worker raised `retry_attempt` when it scheduled the retry;
+    /// lowering it back to the attempt that ran keeps the failure from reading
+    /// as a retried attempt.
+    pub async fn mark_retry_abandoned(
+        db: &crate::db::DatabasePool,
+        run_id: &Uuid,
+    ) -> Result<(), RunError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    "UPDATE run SET status_id = 3, next_retry_at = NULL, \
+                     retry_attempt = GREATEST(retry_attempt - 1, 0) \
+                     WHERE run_id = $1 AND status_id = 5",
+                )
+                .bind(run_id)
+                .execute(pg_pool)
+                .await?;
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "UPDATE run SET status_id = 3, next_retry_at = NULL, \
+                     retry_attempt = MAX(retry_attempt - 1, 0) \
+                     WHERE run_id = ? AND status_id = 5",
+                )
+                .bind(run_id)
+                .execute(sqlite_pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn retry_deferral(failed_at: DateTime<Utc>, now: DateTime<Utc>) -> DateTime<Utc> {
@@ -3828,7 +4058,7 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        Run::fail_held_runs(&db, &[data.run_id], "dropped")
+        Run::fail_unrun_earlier_deliveries(&db, &[data.run_id], "dropped")
             .await
             .unwrap();
         assert_eq!(status().await, RunStatus::PendingRetry.as_id());
@@ -3837,7 +4067,7 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        Run::fail_held_runs(&db, &[data.run_id], "dropped")
+        Run::fail_unrun_earlier_deliveries(&db, &[data.run_id], "dropped")
             .await
             .unwrap();
         assert_eq!(status().await, RunStatus::Failed.as_id());

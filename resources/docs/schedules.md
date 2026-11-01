@@ -110,6 +110,13 @@ Supported English patterns:
 
 Natural language schedules are converted to cron expressions internally. Both formats are fully supported and can be mixed within the same project.
 
+A metadata `schedule` must repeat. A schedule that names a single run, such as
+`"2026-11-01"`, `"in 10 minutes"`, `"2h"` or `"tomorrow at 9am"`, is an
+`invalid-schedule` error in `hot check`, builds and deploys. Hot 3.0.0
+accepted some of these and ran them repeatedly. Write `every …` for an
+interval (`"every 2 hours"`), or send a `hot:schedule:new` event to run a
+function once (see [Dynamic Schedules](#dynamic-schedules)).
+
 ## Dynamic Schedules
 
 In addition to metadata-driven schedules (defined at build time), you can create schedules dynamically at runtime using events. This is useful for:
@@ -157,7 +164,7 @@ The `hot:schedule:new` event payload uses:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `fn` | `Str` or function reference | Yes | Target function (for example `::myapp::jobs/process`) |
-| `args` | `Vec` | No | Function arguments. Defaults to `[]` when omitted/null. |
+| `args` | `Vec` | No | Arguments the function is called with. Defaults to `[]` when omitted/null. |
 | `schedule` | `Str` or `DateTime` | Yes | When to run (one-time or recurring expression) |
 
 ### Schedule Formats
@@ -209,6 +216,7 @@ Cancelling schedules is useful for:
 | Defined in | Hot code (`meta {schedule: ...}`) | Runtime via `hot:schedule:new` |
 | Lifecycle | Tied to build/deployment | Can be created/cancelled anytime |
 | One-time support | No | Yes |
+| Function called with | One argument describing the schedule that fired | The schedule's `args` |
 | Visible in UI | Always | When active |
 | Use case | Regular jobs (daily reports, cleanup) | User-triggered, conditional scheduling |
 
@@ -271,7 +279,12 @@ For full retry configuration (attempts, delay, backoff, jitter, limits, and `pen
 
 When a scheduled function's time arrives, the scheduler sends a `hot:schedule` event with the function details. A worker picks up the event and executes the function.
 
-The function is called with a single argument describing the schedule that fired:
+A [dynamic schedule](#dynamic-schedules) calls its function with the `args` it
+was created with: `args: ["s-1"]` calls `fn (id: Str)` with `"s-1"`, and
+`args: []` calls a function that takes no arguments.
+
+A metadata schedule calls its function with a single argument describing the
+schedule that fired:
 
 ```hot
 nightly-sync meta {schedule: "0 2 * * *"}

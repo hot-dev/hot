@@ -419,8 +419,20 @@ impl DependencyResolver {
             return Ok(self.get_hot_std_dependency());
         }
 
-        // Extract package name from coordinate (e.g., "hot.dev/aws-core" -> "aws-core")
-        let pkg_name = name.rsplit('/').next().unwrap_or(name);
+        // The default locations hold hot.dev's packages, by package name
+        // (e.g., "hot.dev/aws-core" -> "aws-core"). Another org's package of
+        // the same name is a different package.
+        let pkg_name = match name.split_once('/') {
+            None => name,
+            Some(("hot.dev", pkg_name)) => pkg_name,
+            Some(_) => {
+                return Err(format!(
+                    "Could not resolve dependency '{}': it gives no local, git or pkg \
+                     source, and only hot.dev packages resolve from the default locations",
+                    name
+                ));
+            }
+        };
 
         // Check HOT_HOME
         if let Ok(home) = std::env::var("HOT_HOME") {
@@ -1170,10 +1182,14 @@ impl PackageMetadata {
                 "email" => meta.email = Self::val_to_string(val),
                 "license" => meta.license = Self::val_to_string(val),
                 "url" => meta.url = Self::val_to_string(val),
-                "src-paths" | "src_paths" => meta.src_paths = Self::val_to_string_vec(val),
-                "test-paths" | "test_paths" => meta.test_paths = Self::val_to_string_vec(val),
+                "src-paths" | "src_paths" => {
+                    meta.src_paths = Self::enclosed_paths("src-paths", val)?
+                }
+                "test-paths" | "test_paths" => {
+                    meta.test_paths = Self::enclosed_paths("test-paths", val)?
+                }
                 "resource-paths" | "resource_paths" | "resources-paths" | "resources_paths" => {
-                    meta.resource_paths = Self::val_to_string_vec(val)
+                    meta.resource_paths = Self::enclosed_paths("resource-paths", val)?
                 }
                 "resources" => {
                     if let Val::Map(resources) = val
@@ -1181,7 +1197,7 @@ impl PackageMetadata {
                             .get(&Val::from("paths"))
                             .or_else(|| resources.get(&Val::from("path")))
                     {
-                        meta.resource_paths = Self::val_to_string_vec(paths);
+                        meta.resource_paths = Self::enclosed_paths("resources.paths", paths)?;
                     }
                 }
                 "deps" => meta.deps = Self::parse_deps_from_val(val)?,
@@ -1195,6 +1211,32 @@ impl PackageMetadata {
             }
         }
         Ok(())
+    }
+
+    /// Package paths must stay inside the package root: caches, the dev
+    /// watcher and bundles only cover files under it.
+    fn enclosed_paths(field: &str, val: &Val) -> Result<Vec<String>, String> {
+        let paths = Self::val_to_string_vec(val);
+        for path in &paths {
+            let mut depth: i32 = 0;
+            for component in Path::new(path).components() {
+                match component {
+                    std::path::Component::Normal(_) => depth += 1,
+                    std::path::Component::ParentDir => depth -= 1,
+                    std::path::Component::CurDir => {}
+                    std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                        depth = -1;
+                    }
+                }
+                if depth < 0 {
+                    return Err(format!(
+                        "pkg.hot {field} entry '{path}' leaves the package directory; \
+                         package paths must be relative paths inside it"
+                    ));
+                }
+            }
+        }
+        Ok(paths)
     }
 
     /// Convert a Val to a string
@@ -1268,7 +1310,7 @@ impl DependencyResolver {
             seen.insert(dep_key.clone());
 
             // Apply project override if available
-            let effective_dep = if let Some(override_spec) = project_overrides.get(&dep.name) {
+            let effective_dep = if let Some(override_spec) = project_overrides.get(&dep_key) {
                 tracing::debug!("Applying project override for dependency '{}'", dep.name);
                 ProjectDependency {
                     name: dep.name.clone(),
@@ -1284,7 +1326,7 @@ impl DependencyResolver {
 
             // Parse pkg.hot for transitive dependencies
             let pkg_hot_path = resolved_path.join("pkg.hot");
-            let transitive_deps = if pkg_hot_path.exists() {
+            let mut transitive_deps = if pkg_hot_path.exists() {
                 match PackageMetadata::parse_from_file(&pkg_hot_path) {
                     Ok(pkg_meta) => {
                         tracing::debug!(
@@ -1319,6 +1361,13 @@ impl DependencyResolver {
                 vec![]
             };
 
+            // A package's local paths are relative to the package, not to
+            // the directory hot runs in, so `local: "../sibling"` works
+            // wherever the package is used from
+            for trans_dep in &mut transitive_deps {
+                Self::rebase_local_path(&mut trans_dep.spec, &resolved_path);
+            }
+
             // Record transitive deps in graph
             let transitive_keys: Vec<String> = transitive_deps
                 .iter()
@@ -1337,6 +1386,8 @@ impl DependencyResolver {
             resolved.insert(dep_key, resolved_dep);
         }
 
+        Self::check_package_name_collisions(resolved.keys())?;
+
         // Topological sort: dependencies before dependents
         let sorted = Self::topological_sort(&dep_graph)?;
 
@@ -1351,10 +1402,66 @@ impl DependencyResolver {
         Ok(result)
     }
 
-    /// Normalize dependency name for comparison
-    /// "hot.dev/aws-core" and "aws-core" should be treated as the same
+    /// The identity of a dependency: its full coordinate, so
+    /// `acme.com/utils` and `other.com/utils` are two packages. Only the
+    /// standard library has two names, `hot-std` and `hot.dev/hot-std`.
     fn normalize_dep_name(name: &str) -> String {
-        name.rsplit('/').next().unwrap_or(name).to_string()
+        if name == "hot.dev/hot-std" {
+            "hot-std".to_string()
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// The package part of a coordinate: `utils` for `acme.com/utils`.
+    fn package_short_name(name: &str) -> &str {
+        name.rsplit('/').next().unwrap_or(name)
+    }
+
+    /// Fail when a dependency named without an org (`utils`) is declared
+    /// next to one with that package name and an org (`acme.com/utils`).
+    /// Those used to be merged into one package; now that a dependency is
+    /// identified by its full coordinate, the bare name would load a second
+    /// copy, so ask for the coordinate instead of guessing.
+    fn check_package_name_collisions<'a>(
+        keys: impl Iterator<Item = &'a String>,
+    ) -> Result<(), String> {
+        let keys: AHashSet<&str> = keys.map(String::as_str).collect();
+        let mut bare: Vec<&str> = keys
+            .iter()
+            .copied()
+            .filter(|key| *key != "hot-std" && !key.contains('/'))
+            .collect();
+        bare.sort_unstable();
+        for short_name in bare {
+            let mut qualified: Vec<&str> = keys
+                .iter()
+                .copied()
+                .filter(|key| key.contains('/') && Self::package_short_name(key) == short_name)
+                .collect();
+            if qualified.is_empty() {
+                continue;
+            }
+            qualified.sort_unstable();
+            let quoted: Vec<String> = qualified.iter().map(|key| format!("'{key}'")).collect();
+            return Err(format!(
+                "Dependency '{short_name}' is declared without an org next to {}. \
+                 Dependencies are identified by their full coordinate: write the \
+                 coordinate of the package you mean wherever '{short_name}' is declared.",
+                quoted.join(" and ")
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolve a relative `local` path declared in a package's pkg.hot
+    /// against that package's folder.
+    fn rebase_local_path(spec: &mut DependencySpec, package_root: &Path) {
+        if let Some(local) = &spec.local
+            && Path::new(local).is_relative()
+        {
+            spec.local = Some(package_root.join(local).to_string_lossy().to_string());
+        }
     }
 
     /// Topological sort of dependency graph
@@ -1414,19 +1521,227 @@ impl DependencyResolver {
         Ok(result)
     }
 
-    /// Build project overrides map from project dependencies
+    /// Build project overrides map from project dependencies, keyed by
+    /// full coordinate
     pub fn build_project_overrides(
         project_deps: &[ProjectDependency],
     ) -> AHashMap<String, DependencySpec> {
-        let mut overrides = AHashMap::new();
-        for dep in project_deps {
-            overrides.insert(dep.name.clone(), dep.spec.clone());
-            // Also add normalized name for matching
-            let normalized = Self::normalize_dep_name(&dep.name);
-            if normalized != dep.name {
-                overrides.insert(normalized, dep.spec.clone());
-            }
+        project_deps
+            .iter()
+            .map(|dep| (Self::normalize_dep_name(&dep.name), dep.spec.clone()))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a package at `root` named `name` whose pkg.hot declares `deps`
+    /// (a Hot map literal).
+    fn write_package(root: &Path, name: &str, deps: &str) {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("pkg.hot"),
+            format!(
+                "::hot::pkg ns\n\nhot.pkg.p {{\n  name: \"{name}\",\n  version: \"0.1.0\",\n  deps: {deps},\n  src-paths: [\"src/\"],\n}}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn local(name: &str, path: &Path) -> ProjectDependency {
+        ProjectDependency {
+            name: name.to_string(),
+            spec: DependencySpec::local(&path.to_string_lossy()),
         }
-        overrides
+    }
+
+    /// Resolve `deps` as a project's deps, with no other hot-std.
+    fn resolve(root: &Path, deps: &[ProjectDependency]) -> Result<Vec<ResolvedDependency>, String> {
+        let resolver = DependencyResolver::new(root.join("hot-std"));
+        let overrides = DependencyResolver::build_project_overrides(deps);
+        resolver.resolve_all_dependencies_recursive(deps, &overrides)
+    }
+
+    fn names(resolved: &[ResolvedDependency]) -> Vec<String> {
+        let mut names: Vec<String> = resolved.iter().map(|dep| dep.name.clone()).collect();
+        names.sort();
+        names
+    }
+
+    /// Two packages with the same name in different orgs are two
+    /// dependencies, at their own paths.
+    #[test]
+    fn same_package_name_in_two_orgs_resolves_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let acme = dir.path().join("acme/utils");
+        let other = dir.path().join("other/utils");
+        write_package(&acme, "acme.com/utils", "{}");
+        write_package(&other, "other.com/utils", "{}");
+
+        let resolved = resolve(
+            dir.path(),
+            &[
+                local("acme.com/utils", &acme),
+                local("other.com/utils", &other),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            names(&resolved),
+            ["acme.com/utils", "hot-std", "other.com/utils"]
+        );
+        let path_of = |name: &str| {
+            resolved
+                .iter()
+                .find(|dep| dep.name == name)
+                .map(|dep| dep.resolved_path.clone())
+                .unwrap()
+        };
+        assert_eq!(path_of("acme.com/utils"), acme);
+        assert_eq!(path_of("other.com/utils"), other);
+    }
+
+    /// A project's spec overrides a package's dependency with the same full
+    /// coordinate, not one that only shares its package name.
+    #[test]
+    fn project_overrides_match_the_full_coordinate() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_lib = dir.path().join("lib");
+        let acme = dir.path().join("acme/utils");
+        let other = dir.path().join("other/utils");
+        write_package(&acme, "acme.com/utils", "{}");
+        write_package(&other, "other.com/utils", "{}");
+        write_package(
+            &app_lib,
+            "example.com/lib",
+            &format!("{{\"other.com/utils\": {{local: {:?}}}}}", "/nowhere/utils"),
+        );
+
+        // other.com/utils from the project wins over lib's broken local path;
+        // acme.com/utils is a different package and doesn't stand in for it.
+        let resolved = resolve(
+            dir.path(),
+            &[
+                local("example.com/lib", &app_lib),
+                local("acme.com/utils", &acme),
+                local("other.com/utils", &other),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            names(&resolved),
+            [
+                "acme.com/utils",
+                "example.com/lib",
+                "hot-std",
+                "other.com/utils"
+            ]
+        );
+
+        // Without the project's spec, lib's own (missing) path is used.
+        let error = resolve(
+            dir.path(),
+            &[
+                local("example.com/lib", &app_lib),
+                local("acme.com/utils", &acme),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.contains("/nowhere/utils"), "{error}");
+    }
+
+    /// A relative `local` path in a package's pkg.hot is relative to that
+    /// package, as the sibling-package pattern in the docs expects, wherever
+    /// hot runs from.
+    #[test]
+    fn package_local_paths_resolve_from_the_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages = dir.path().join("packages");
+        let pkg_a = packages.join("pkg-a");
+        let pkg_core = packages.join("pkg-core");
+        write_package(
+            &pkg_a,
+            "example.com/pkg-a",
+            "{\"example.com/pkg-core\": {local: \"../pkg-core\"}}",
+        );
+        write_package(&pkg_core, "example.com/pkg-core", "{}");
+
+        let resolved = resolve(dir.path(), &[local("example.com/pkg-a", &pkg_a)]).unwrap();
+        let core = resolved
+            .iter()
+            .find(|dep| dep.name == "example.com/pkg-core")
+            .expect("pkg-core resolves from pkg-a's folder");
+        assert_eq!(
+            core.resolved_path.canonicalize().unwrap(),
+            pkg_core.canonicalize().unwrap()
+        );
+    }
+
+    /// A dependency named without an org next to one with that package name
+    /// and an org is ambiguous, and says which coordinate to write.
+    #[test]
+    fn bare_name_next_to_a_coordinate_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let acme = dir.path().join("acme/utils");
+        let bare = dir.path().join("utils");
+        write_package(&acme, "acme.com/utils", "{}");
+        write_package(&bare, "utils", "{}");
+
+        let error = resolve(
+            dir.path(),
+            &[local("acme.com/utils", &acme), local("utils", &bare)],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .contains("Dependency 'utils' is declared without an org next to 'acme.com/utils'"),
+            "{error}"
+        );
+    }
+
+    /// Only hot.dev packages resolve from the default locations, by package
+    /// name; another org's package of that name doesn't pick them up.
+    #[test]
+    fn default_locations_hold_only_hot_dev_packages() {
+        let resolver = DependencyResolver::new(PathBuf::from("/nowhere/hot-std"));
+        let error = resolver
+            .resolve_from_defaults("acme.com/hot-ai")
+            .unwrap_err();
+        assert!(
+            error.contains("only hot.dev packages resolve from the default locations"),
+            "{error}"
+        );
+        let hot_std = resolver.resolve_from_defaults("hot.dev/hot-std").unwrap();
+        assert_eq!(hot_std.name, "hot-std");
+    }
+}
+
+#[cfg(test)]
+mod enclosed_path_tests {
+    use super::*;
+
+    fn parse(pkg_hot: &str) -> Result<PackageMetadata, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pkg.hot");
+        std::fs::write(&path, pkg_hot).unwrap();
+        PackageMetadata::parse_from_file(&path)
+    }
+
+    #[test]
+    fn package_paths_must_stay_inside_the_package() {
+        let ok = parse(
+            "hot.pkg.lib {name: \"example.com/lib\", src-paths: [\"src\", \"./more/../lib\"]}\n",
+        )
+        .unwrap();
+        assert_eq!(ok.src_paths, vec!["src", "./more/../lib"]);
+        for bad in ["../shared", "src/../../shared", "/abs/src"] {
+            let err = parse(&format!(
+                "hot.pkg.lib {{name: \"example.com/lib\", src-paths: [\"{bad}\"]}}\n"
+            ))
+            .unwrap_err();
+            assert!(err.contains("leaves the package directory"), "{bad}: {err}");
+        }
     }
 }

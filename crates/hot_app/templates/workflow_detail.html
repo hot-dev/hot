@@ -36,7 +36,7 @@
                 {% for tag in workflow.tags %}
                 <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300">{{ tag }}</span>
                 {% endfor %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">{{ workflow.project_name }}</span>
+                <span class="badge badge-neutral">{{ workflow.project_name }}</span>
             </div>
         </div>
     </div>
@@ -76,7 +76,7 @@
                 <a href="?tab=handlers"
                    class="inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "handlers" %}border-hot-red-500 text-hot-red-700 dark:text-hot-red-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
                     <span class="relative inline-flex w-4 h-4 flex-shrink-0" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z"/></svg><svg viewBox="0 0 24 24" fill="currentColor" class="w-[0.55rem] h-[0.55rem] absolute -bottom-0.5 -right-0.5 bg-white dark:bg-gray-800"><path fill-rule="evenodd" d="M4.5 5.653c0-1.427 1.529-2.33 2.779-1.643l11.54 6.347c1.295.712 1.295 2.573 0 3.286L7.28 19.99c-1.25.687-2.779-.217-2.779-1.643V5.653Z" clip-rule="evenodd"/></svg></span>
-                    Handlers <span class="ml-1 rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-xs">{{ handlers.len() }}</span>
+                    Handlers <span class="badge badge-neutral ml-1">{{ handlers.len() }}</span>
                 </a>
             </nav>
             {% if active_tab == "graph" %}
@@ -105,7 +105,7 @@
                  class="w-80 flex-shrink-0 border-l border-gray-200 dark:border-gray-700 overflow-y-auto" style="min-width: 20rem;">
                 <template x-if="!inspectorData">
                     <div class="flex flex-col items-center justify-center h-full py-12 px-4 text-center">
-                        <p class="text-sm text-gray-400 dark:text-gray-500">Select a node for details</p>
+                        <p class="text-sm text-gray-500 dark:text-gray-400">Select a node for details</p>
                     </div>
                 </template>
                 <template x-if="inspectorData">
@@ -135,7 +135,7 @@
         {% else if active_tab == "handlers" %}
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                <thead class="bg-gray-100 dark:bg-gray-800">
+                <thead class="table-head">
                     <tr>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Type</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Trigger</th>
@@ -164,15 +164,15 @@
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
                             {% if h.retry == "-" %}
-                            <span class="text-gray-400 dark:text-gray-500">-</span>
+                            <span class="text-gray-500 dark:text-gray-400">-</span>
                             {% else %}
-                            <code class="bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded text-xs">{{ h.retry }}</code>
+                            <code class="badge badge-neutral">{{ h.retry }}</code>
                             {% endif %}
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
                             {% if let Some(file) = h.source_file %}
                             <button type="button"
-                                    class="font-mono text-hot-red-600 dark:text-hot-red-400 hover:underline truncate max-w-[220px] text-left"
+                                    class="font-mono text-hot-red-700 dark:text-hot-red-400 hover:underline truncate max-w-[220px] text-left"
                                     title="{{ h.source }}"
                                     data-source-build-id="{{ h.source_build_id }}"
                                     data-source-file="{{ file }}"
@@ -182,7 +182,7 @@
                                 {{ h.source }}
                             </button>
                             {% else %}
-                            <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                            <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                             {% endif %}
                         </td>
                     </tr>

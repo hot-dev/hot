@@ -280,15 +280,19 @@ meta ["test"] fn () {
   assert-eq("10% member discount", result1.member, "member discount")
   assert-eq("Free shipping", result1.shipping, "free shipping")
   assert-eq("Coupon applied", result1.coupon, "coupon applied")
+  // A cond-all default always runs, whatever else matched
+  assert-eq({member: "10% member discount", shipping: "Free shipping",
+             coupon: "Coupon applied", standard: "Standard pricing"},
+            result1, "every matching branch and the default")
 
   // Non-member with $50 order - just standard pricing
   order2 {is-member: false, total: 50, has-coupon: false}
   result2 apply-discounts(order2)
-  assert-eq("Standard pricing", result2.standard, "standard pricing")
+  assert-eq({standard: "Standard pricing"}, result2, "only the default")
 }
 // @result: cond-all-discounts
 // apply-discounts({is-member: true, total: 150, has-coupon: true})
-// → {member: "10% member discount", shipping: "Free shipping", coupon: "Coupon applied"}
+// → {member: "10% member discount", shipping: "Free shipping", coupon: "Coupon applied", standard: "Standard pricing"}
 // @end: cond-all-discounts
 
 test-pipe-basic

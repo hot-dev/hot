@@ -42,6 +42,20 @@ pub async fn run(conf: Val) {
 pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<StreamPubSub>>) {
     tracing::info!("Hot environment: {}", hot::env::get_env());
 
+    // Get resolved config with app defaults merged in
+    let resolved_conf = get_resolved_conf(conf.clone());
+
+    // Extract values from resolved config
+    let host = resolved_conf.get_str_or_default("host", DEFAULT_APP_HOST);
+    crate::auth::set_listen_host(&host);
+    if hot::env::is_local_dev() && !crate::auth::local_dev_conveniences() {
+        warn!(
+            "hot.dev: HOT_ENV is unset and the App listens on {host}, so local development's \
+             automatic sign-in, built-in session secret and local password are off. Set \
+             HOT_ENV=production for a deployment, or HOT_ENV=development to keep them."
+        );
+    }
+
     // Use the same resolver as JWT signing/verification, including _FILE and
     // its conflict/error checks. Malformed file settings never use a dev fallback.
     crate::auth::get_session_secret().unwrap_or_else(|error| {
@@ -52,11 +66,6 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     crate::signup::SignupPolicy::from_conf(&conf)
         .unwrap_or_else(|error| panic!("hot.dev: APP sign-up configuration failed: {error}"));
 
-    // Get resolved config with app defaults merged in
-    let resolved_conf = get_resolved_conf(conf.clone());
-
-    // Extract values from resolved config
-    let host = resolved_conf.get_str_or_default("host", DEFAULT_APP_HOST);
     let port = resolved_conf.get_int_or_default("port", DEFAULT_APP_PORT as i64) as u16;
     let log_level_str = resolved_conf.get_str_or_default("log.level", "info");
     let log_level = log::string_to_level(&log_level_str);
@@ -134,7 +143,7 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
 
     // Check and insert default data if needed (local dev only)
     // In production, users must sign up through the normal flow
-    if hot::env::is_local_dev() {
+    if crate::auth::local_dev_conveniences() {
         match check_default_data_exists(&db).await {
             Ok((org_count, user_count)) => {
                 if org_count == 0 || user_count == 0 {
@@ -185,6 +194,18 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
 
         match StreamPubSub::new(pubsub_type, redis_uri, redis_cluster) {
             Ok(pubsub) => {
+                // Creating the pub/sub only parses the URI: confirm Redis
+                // answers before reporting healthy.
+                if matches!(pubsub_type, StreamPubSubType::Redis)
+                    && let Err(e) = pubsub
+                        .wait_until_reachable(
+                            hot::stream::STARTUP_PING_ATTEMPTS,
+                            hot::stream::STARTUP_PING_DELAY,
+                        )
+                        .await
+                {
+                    panic!("Redis stream pub/sub is not reachable: {}", e);
+                }
                 debug!(
                     "hot.dev: APP created stream pub/sub (type: {:?})",
                     pubsub_type

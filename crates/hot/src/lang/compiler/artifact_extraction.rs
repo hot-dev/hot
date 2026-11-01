@@ -206,6 +206,45 @@ fn merge_alias_meta(target_meta: Option<&Val>, alias_meta: &Val) -> Val {
     }
 }
 
+/// Why a `meta {schedule: ...}` string is not a recurring schedule, when it
+/// names one run instead: a date or datetime (`2026-11-01`,
+/// `2026-11-01T10:00:00Z`), a delay (`10 minutes`, `in 2h`, `1 day from now`)
+/// or a relative day (`tomorrow at 9am`). English-to-cron conversion drops
+/// those parts, so `2026-11-01` would deploy as a job that runs every minute.
+fn one_time_schedule_error(expr: &str) -> Option<String> {
+    static CALENDAR_DATE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\b\d{4}-\d{1,2}-\d{1,2}|\b\d{1,2}/\d{1,2}/\d{2,4}\b")
+            .expect("calendar date pattern")
+    });
+    let expr = expr.trim();
+    if crate::db::parse_cron(expr).is_ok() {
+        return None;
+    }
+    let lower = expr.to_ascii_lowercase();
+    let delay = lower
+        .trim_start_matches("in ")
+        .trim_end_matches(" from now")
+        .trim_start_matches("after ")
+        .trim();
+    let one_time = chrono::DateTime::parse_from_rfc3339(expr).is_ok()
+        || CALENDAR_DATE.is_match(expr)
+        || humantime::parse_duration(delay).is_ok()
+        || lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| {
+                matches!(
+                    word,
+                    "today" | "tonight" | "tomorrow" | "yesterday" | "now" | "next"
+                )
+            });
+    one_time.then(|| {
+        format!(
+            "'{expr}' is a one-time schedule (a date, time or delay), but a `schedule` in meta \
+             repeats. To run the function once, send a `hot:schedule:new` event"
+        )
+    })
+}
+
 /// The meta key that sets how long a run of a function may take, in seconds.
 pub const RUN_TIMEOUT_META_KEY: &str = "timeout";
 
@@ -1907,9 +1946,12 @@ impl Compiler {
                         length: var_name.len(),
                         file: src.file.as_ref().map(std::path::PathBuf::from),
                     });
-                if let Err(message) =
-                    crate::db::normalize_recurring_schedule_expression(&cron_expression)
-                {
+                let invalid = match one_time_schedule_error(&cron_expression) {
+                    Some(message) => Err(message),
+                    None => crate::db::normalize_recurring_schedule_expression(&cron_expression)
+                        .map(|_| ()),
+                };
+                if let Err(message) = invalid {
                     self.validation_errors.push(
                         crate::lang::errors::CompilerError::InvalidSchedule {
                             func_name: format!("{}/{}", ns_name, var_name),
@@ -2584,5 +2626,97 @@ aliased ::ls/emit
         // The rewritten target should report the alias's coordinates.
         assert_eq!(alias_targets[0].namespace, "::user::agent");
         assert_eq!(alias_targets[0].var_name, "aliased");
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    //! Tests for the `schedule` meta of scheduled functions.
+
+    use super::*;
+    use crate::lang::parser::parse_hot;
+
+    #[test]
+    fn one_time_schedule_strings_are_recognized() {
+        for expr in [
+            "2026-11-01",
+            "2026-11-01T10:00:00Z",
+            "2026-11-01 10:00",
+            "11/01/2026",
+            "in 10 minutes",
+            "10 minutes",
+            "2h",
+            "2 hours from now",
+            "after 1 day",
+            "tomorrow at 9am",
+            "today at 5pm",
+            "next monday at 9am",
+        ] {
+            let message = super::one_time_schedule_error(expr)
+                .unwrap_or_else(|| panic!("'{expr}' should be a one-time schedule"));
+            assert!(message.contains("hot:schedule:new"), "{message}");
+        }
+        for expr in [
+            "every 10 minutes",
+            "every day at 9am",
+            "at 10:00 am",
+            "on Sunday at 12:00",
+            "run at midnight on the 1st and 15th of the month",
+            "7pm every Thursday",
+            "midnight on Tuesdays",
+            "@daily",
+            "0 0/5 * * * ? *",
+            "0 2 * * *",
+        ] {
+            assert_eq!(super::one_time_schedule_error(expr), None, "'{expr}'");
+        }
+    }
+
+    /// A static schedule repeats, so a one-time date or delay is an
+    /// `InvalidSchedule` error rather than a cron that runs every minute.
+    #[test]
+    fn static_schedule_rejects_one_time_strings() {
+        let src = r#"
+::test::once ns
+
+on-date
+meta { schedule: "2026-11-01" }
+fn (event) { 1 }
+
+in-ten
+meta { schedule: "in 10 minutes" }
+fn (event) { 2 }
+
+daily
+meta { schedule: "every day at 9am" }
+fn (event) { 3 }
+"#;
+        let mut program = parse_hot(src).expect("parse");
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_program_unchecked(&mut program)
+            .expect("compile");
+        let errors = compiler
+            .extract_scheduled_functions(&program)
+            .expect_err("one-time schedules are invalid");
+        let invalid: Vec<(String, String)> = errors
+            .errors
+            .iter()
+            .filter_map(|e| match e {
+                crate::lang::errors::CompilerError::InvalidSchedule {
+                    schedule, message, ..
+                } => Some((schedule.clone(), message.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(invalid.len(), 2, "{invalid:?}");
+        for (schedule, message) in &invalid {
+            assert!(
+                ["2026-11-01", "in 10 minutes"].contains(&schedule.as_str()),
+                "{schedule}"
+            );
+            assert!(message.contains("one-time"), "{message}");
+            assert!(message.contains("hot:schedule:new"), "{message}");
+        }
     }
 }

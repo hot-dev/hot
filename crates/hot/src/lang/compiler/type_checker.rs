@@ -571,6 +571,17 @@ struct DeferredVariable {
     value: Value,
 }
 
+/// The implicit subject of a `fn match` / `fn match-all` body: the
+/// function's first parameter.
+struct FnMatchSubject {
+    /// The parameter's name, which each arm narrows as a standalone
+    /// `match` narrows its subject variable.
+    name: Option<String>,
+    /// The parameter's declared type, which exhaustiveness is checked
+    /// against. `None` when the function has no parameters.
+    ty: Option<TypeExpr>,
+}
+
 pub struct TypeChecker {
     context: TypeContext,
     errors: CompilerErrors,
@@ -591,6 +602,11 @@ pub struct TypeChecker {
     /// types — they're variables holding `Value::TypeDef`, looked up by
     /// fully-qualified name.
     qualified_types: AHashMap<String, TypeExpr>,
+    /// Var imports of a type (`::c/Port` for `Port ::a/Port` in `::c`) →
+    /// what the type they name resolves to. Kept apart from
+    /// `qualified_types`, which holds only the types declared in each
+    /// namespace.
+    type_imports: AHashMap<String, TypeExpr>,
     /// Short name → fully-qualified name for any type declared with `core: true`
     /// metadata. Lets unqualified references like `Account` resolve when the
     /// declaration lives in another namespace, the same way the compiler
@@ -664,15 +680,15 @@ pub struct TypeChecker {
     /// of walking bodies. Top-level expressions still get the full check,
     /// so nothing existing is lost.
     in_fn_body: u32,
-    /// Stack of inferred match-subject types. Pushed when we descend into
-    /// the body of a `fn match (s: T) { ... }` (the subject is the first
-    /// parameter); popped on exit. Match arms inside the body consult the
-    /// top of the stack to enforce exhaustiveness against `T`'s enum
-    /// definition. A `None` entry means we're inside a match flow whose
-    /// subject type couldn't be inferred (function with no annotation,
-    /// untyped REPL expression, etc.) — exhaustiveness is then skipped
-    /// rather than raising spurious errors.
-    match_subject_stack: Vec<Option<TypeExpr>>,
+    /// Stack of `fn match` subjects. Pushed when we descend into the body
+    /// of a `fn match (s: T) { ... }` or `fn match-all` (the subject is
+    /// the first parameter); popped on exit. The arms inside the body
+    /// consult the top of the stack: their bodies are walked with the
+    /// subject's name narrowed per arm, and a `fn match` enforces
+    /// exhaustiveness against `T`'s enum definition. An entry without a
+    /// type means the subject type couldn't be determined — exhaustiveness
+    /// is then skipped rather than raising spurious errors.
+    match_subject_stack: Vec<FnMatchSubject>,
     /// Fully-qualified name (`::ns/name`) → optional custom note for every
     /// definition declared with `meta { deprecated: true }` or
     /// `meta { deprecated: "note" }`. Populated during the qualified-variable
@@ -708,6 +724,7 @@ impl TypeChecker {
             in_pipe_flow: false,
             known_types: AHashSet::new(),
             qualified_types: AHashMap::new(),
+            type_imports: AHashMap::new(),
             core_types: AHashMap::new(),
             impl_registry: AHashSet::new(),
             impl_locations: AHashMap::new(),
@@ -1116,12 +1133,56 @@ impl TypeChecker {
                 });
             }
         }
+        self.register_type_imports(program);
         tracing::debug!(
             "TypeChecker: Discovered {} type definitions ({} core), {} implementations",
             self.qualified_types.len(),
             self.core_types.len(),
             self.impl_registry.len(),
         );
+    }
+
+    /// Record each var import of a type (`Port ::a/Port`) in `type_imports`,
+    /// so an annotation naming the import resolves as the full path does.
+    /// An import of an import resolves on a later round.
+    fn register_type_imports(&mut self, program: &Program) {
+        let mut imports = Vec::new();
+        for (ns_path, namespace) in &program.namespaces {
+            let ns_str = ns_path.to_string();
+            let alias_map: AHashMap<String, String> = namespace
+                .aliases
+                .iter()
+                .map(|(alias, target)| (alias.to_string(), target.to_string()))
+                .collect();
+            for (var, value) in &namespace.scope.vars {
+                if var.deep_set.is_some() || var.deep_path.is_some() {
+                    continue;
+                }
+                if let Some(target) = Self::imported_function(value, &alias_map) {
+                    imports.push((format!("{}/{}", ns_str, var.sym.name()), target));
+                }
+            }
+        }
+        loop {
+            let before = imports.len();
+            imports.retain(|(name, target)| {
+                let resolved = self
+                    .qualified_types
+                    .get(target)
+                    .or_else(|| self.type_imports.get(target))
+                    .cloned();
+                match resolved {
+                    Some(resolved) => {
+                        self.type_imports.insert(name.clone(), resolved);
+                        false
+                    }
+                    None => true,
+                }
+            });
+            if imports.len() == before {
+                break;
+            }
+        }
     }
 
     /// Walk every namespace and register the inferred type of each top-level
@@ -1404,7 +1465,7 @@ impl TypeChecker {
         }
     }
 
-    /// The qualified function a var import (`local ::ns/fn`) names.
+    /// The qualified function or type a var import (`local ::ns/fn`) names.
     fn imported_function(value: &Value, alias_map: &AHashMap<String, String>) -> Option<String> {
         match value {
             Value::Ref(Ref::Ns(ns_ref)) => Self::qualified_ns_ref_name(ns_ref, alias_map),
@@ -1531,22 +1592,182 @@ impl TypeChecker {
     /// literals, on `Any`, on a call whose callee declares no return
     /// type), no error is emitted.
     fn check_match_exhaustiveness(&mut self, flow: &Flow) {
-        let Some(subject_type) = self.match_subject_stack.last().cloned().flatten() else {
+        let Some(subject_type) = self.match_subject_stack.last().and_then(|s| s.ty.clone()) else {
             return;
         };
-        let arms: Vec<&MatchArm> = flow
-            .expressions
-            .iter()
-            .filter_map(|e| match e {
-                Value::MatchArm(arm) => Some(&**arm),
-                _ => None,
-            })
-            .collect();
+        let arms: Vec<&MatchArm> = Self::flow_arms(flow).collect();
+        // A `fn match` body has no source of its own: point at the
+        // function, or failing that its first arm.
         let location = flow
             .src
-            .as_ref()
-            .map(|src| self.source_to_error_location(src));
+            .clone()
+            .or_else(|| self.current_def_src.clone())
+            .or_else(|| arms.first().and_then(|arm| arm.src.clone()))
+            .map(|src| self.source_to_error_location(&src));
         self.check_match_exhaustiveness_for(&subject_type, &arms, location);
+    }
+
+    /// The arms of a `match` flow (a `fn match` body).
+    fn flow_arms(flow: &Flow) -> impl Iterator<Item = &MatchArm> {
+        flow.expressions.iter().filter_map(|e| match e {
+            Value::MatchArm(arm) => Some(&**arm),
+            _ => None,
+        })
+    }
+
+    /// The top-level enum declaration a type name written in the current
+    /// namespace names (`Dir`, `::alias/Dir`, a var import or a core
+    /// type), with its qualified name. `None` for a local binding, a type
+    /// declared inside a body, and anything that isn't an enum.
+    fn enum_declaration(&self, type_name: &str) -> Option<(String, &TypeDefinition)> {
+        let resolved = if type_name.starts_with("::") {
+            self.try_resolve_namespaced_type(type_name)?
+        } else {
+            if !type_name.starts_with(char::is_uppercase)
+                || self.context.is_shadowing_local(type_name)
+            {
+                return None;
+            }
+            self.try_resolve_local_type(type_name)
+                .or_else(|| self.try_resolve_core_type(type_name))?
+        };
+        let TypeExpr::Named(qualified) = resolved else {
+            return None;
+        };
+        let declaration = self.context.types.get(&qualified)?;
+        (qualified.contains('/') && declaration.is_enum).then_some((qualified, declaration))
+    }
+
+    /// The enum and variant a `Type.Variant` reference (`Dir.Up`,
+    /// `::alias/Dir.Up`) names, as written.
+    fn variant_reference_parts(&self, value: &Value) -> Option<(String, String, Option<Source>)> {
+        use crate::lang::ast::DeepPath;
+        match value {
+            Value::Ref(Ref::Var(var_ref)) => {
+                let variant = match var_ref.var.deep_path.as_ref()? {
+                    DeepPath::Key(key) => key,
+                    DeepPath::Chain(head, _) => match &**head {
+                        DeepPath::Key(key) => key,
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                let src = var_ref.src.clone().or_else(|| var_ref.var.src.clone());
+                Some((var_ref.var.sym.name().to_string(), variant.clone(), src))
+            }
+            Value::Ref(Ref::Ns(ns_ref)) => {
+                let qualified =
+                    Self::qualified_ns_ref_name(ns_ref, self.context.current_aliases_ref())?;
+                let (namespace, member) = qualified.rsplit_once('/')?;
+                let (type_name, variant) = member.split_once('.')?;
+                Some((
+                    format!("{namespace}/{type_name}"),
+                    variant.to_string(),
+                    ns_ref.src.clone(),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// `unknown-variant` warning: `Type.Variant` naming a variant its enum
+    /// doesn't declare, such as a misspelled `Dir.Upp`. Evaluating it fails
+    /// at run time, but 3.0.0 accepted it, and a program that never
+    /// evaluates it runs.
+    fn check_variant_reference(&mut self, value: &Value) {
+        let Some((type_name, variant, src)) = self.variant_reference_parts(value) else {
+            return;
+        };
+        let Some((qualified, declaration)) = self.enum_declaration(&type_name) else {
+            return;
+        };
+        if self.declares_variant(&qualified, declaration, &variant) {
+            return;
+        }
+        let message = self.unknown_variant_message(&type_name, &variant, declaration);
+        let location = src.map(|s| self.source_to_error_location(&s));
+        self.warn_unknown_variant(message, location);
+    }
+
+    /// Whether the enum declared as `qualified` has `variant`, declared or
+    /// enrolled by an arrow.
+    fn declares_variant(
+        &self,
+        qualified: &str,
+        declaration: &TypeDefinition,
+        variant: &str,
+    ) -> bool {
+        // Arrows written through a namespace alias enroll their variant
+        // under the enum's short name only.
+        declaration.variants.contains(variant)
+            || (declaration.enum_is_open
+                && self
+                    .context
+                    .types
+                    .get(&Self::short_type_name(qualified))
+                    .is_some_and(|td| td.variants.contains(variant)))
+    }
+
+    /// `unknown-variant` warning for a match arm naming a variant its enum
+    /// doesn't declare (`Dir.Dwn =>`). The arm never matches, so the value
+    /// falls through to a later arm.
+    fn check_arm_variants<'a>(&mut self, arms: impl Iterator<Item = &'a MatchArm>) {
+        for arm in arms {
+            for (type_name, variant, _) in Self::arm_atoms(arm) {
+                let (Some(type_name), Some(variant)) = (type_name, variant) else {
+                    continue;
+                };
+                if self.atom_names_result(&Some(type_name.clone()), &Some(variant.clone())) {
+                    continue;
+                }
+                let Some((qualified, declaration)) = self.enum_declaration(type_name) else {
+                    continue;
+                };
+                if self.declares_variant(&qualified, declaration, variant) {
+                    continue;
+                }
+                let message = format!(
+                    "{}, so this arm never matches",
+                    self.unknown_variant_message(type_name, variant, declaration)
+                );
+                let location = arm.src.as_ref().map(|s| self.source_to_error_location(s));
+                self.warn_unknown_variant(message, location);
+            }
+        }
+    }
+
+    fn unknown_variant_message(
+        &self,
+        type_name: &str,
+        variant: &str,
+        declaration: &TypeDefinition,
+    ) -> String {
+        let mut known: Vec<&str> = declaration.variants.iter().map(String::as_str).collect();
+        known.sort_unstable();
+        let shown = Self::short_type_name(type_name);
+        if known.is_empty() {
+            format!("`{shown}` has no variant `{variant}`")
+        } else {
+            format!(
+                "`{shown}` has no variant `{variant}` (its variants: {})",
+                known.join(", ")
+            )
+        }
+    }
+
+    fn warn_unknown_variant(&mut self, message: String, location: Option<ErrorLocation>) {
+        if self.errors.warnings.iter().any(|e| {
+            matches!(e, CompilerError::Constraint { code: "unknown-variant", location: l, .. } if *l == location)
+        }) {
+            return;
+        }
+        self.errors.add_warning(CompilerError::Constraint {
+            code: "unknown-variant",
+            message,
+            help: Some("check the spelling".to_string()),
+            warning: true,
+            location,
+        });
     }
 
     /// Same exhaustiveness logic as `check_match_exhaustiveness` but driven
@@ -1576,7 +1797,13 @@ impl TypeChecker {
             return;
         };
 
-        let (is_enum, is_open, declared_variants) = match self.context.types.get(&short_name) {
+        // A qualified subject type names its own declaration. The short-name
+        // entry merges every namespace's type of that name, so one module's
+        // open `Shape` would open another's closed one.
+        let declared = Self::type_expr_name(subject_type)
+            .and_then(|name| self.context.types.get(name))
+            .or_else(|| self.context.types.get(&short_name));
+        let (is_enum, is_open, declared_variants) = match declared {
             Some(td) if td.is_enum => (true, td.enum_is_open, td.variants.clone()),
             _ => return,
         };
@@ -1689,11 +1916,12 @@ impl TypeChecker {
         self.atom_names_result(type_name, variant) && variant.as_deref() != Some("Err")
     }
 
-    /// The return type declared by the function a `match` subject calls
-    /// (`f(x)`, `::alias/f(x)`, `x |> f()`, or a var import of one),
-    /// resolved in the callee's own namespace. `None` when the callee or
-    /// the called arity is unknown, or that arity declares no return type,
-    /// and when the subject reads a path off the result (`f(x).field`).
+    /// The return type declared by the function a `match` subject or a
+    /// bound value calls (`f(x)`, `::alias/f(x)`, `x |> f()`, or a var
+    /// import of one), resolved in the callee's own namespace. `None` when
+    /// the callee or the called arity is unknown, or that arity declares no
+    /// return type, and when the subject reads a path off the result
+    /// (`f(x).field`).
     fn declared_call_return_type(&mut self, subject: &Value) -> Option<TypeExpr> {
         let (fn_call, piped) = match subject {
             Value::FnCall(fn_call) => (fn_call, 0),
@@ -1709,6 +1937,52 @@ impl TypeChecker {
             return None;
         }
         self.declared_return_type(fn_call, piped)
+    }
+
+    /// The type an untyped binding of `value` records. User function calls
+    /// infer as `Any`, so a binding of one takes the type the callee
+    /// declares it returns, as an annotation would give it. A declared
+    /// `Result` stays `Any`: the binding holds the Result, and consuming it
+    /// gives a value the declaration does not name. So does a union with a
+    /// built-in member (`Str | Vec | Map`, `Int | Dec`): core functions
+    /// declare those for every input they take, so the binding would fail
+    /// checks the value it holds passes.
+    fn untyped_binding_type(&mut self, value: &Value, inferred: TypeExpr) -> TypeExpr {
+        let TypeExpr::Any = inferred else {
+            return inferred;
+        };
+        match self.declared_call_return_type(value) {
+            Some(TypeExpr::Union(members))
+                if members
+                    .iter()
+                    .any(|m| Self::names_result(m) || Self::is_builtin_type(m)) =>
+            {
+                TypeExpr::Any
+            }
+            Some(declared) if !Self::names_result(&declared) => declared,
+            _ => TypeExpr::Any,
+        }
+    }
+
+    /// Whether `ty` is a built-in value type rather than a declared one
+    /// (a named type, a record shape or a literal).
+    fn is_builtin_type(ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Int
+            | TypeExpr::Dec
+            | TypeExpr::Str
+            | TypeExpr::Bool
+            | TypeExpr::Vec(_)
+            | TypeExpr::Map(_, _)
+            | TypeExpr::Bytes
+            | TypeExpr::Byte
+            | TypeExpr::Any
+            | TypeExpr::Function(_, _) => true,
+            TypeExpr::Optional(inner) | TypeExpr::Constrained(inner, _) => {
+                Self::is_builtin_type(inner)
+            }
+            _ => false,
+        }
     }
 
     /// The return type the callee of `fn_call` declares for the called
@@ -1748,14 +2022,22 @@ impl TypeChecker {
             }
         };
         let arg_count = fn_call.args.len() + piped;
-        let arity = arities
+        // Overloads of one arity dispatch on argument types at run time, so
+        // their declared return types only count when they agree.
+        let mut same_arity = arities
             .iter()
-            .find(|a| !a.variadic && a.params == arg_count)
-            .or_else(|| {
-                arities
-                    .iter()
-                    .find(|a| a.variadic && arg_count + 1 >= a.params)
-            })?;
+            .filter(|a| !a.variadic && a.params == arg_count);
+        let arity = match same_arity.next() {
+            Some(first) => {
+                if same_arity.any(|a| a.return_type != first.return_type) {
+                    return None;
+                }
+                first
+            }
+            None => arities
+                .iter()
+                .find(|a| a.variadic && arg_count + 1 >= a.params)?,
+        };
         let return_type = arity.return_type.clone()?;
         let namespace = namespace.clone();
         Some(self.parse_type_annotation_in(&return_type, &namespace))
@@ -1957,7 +2239,20 @@ impl TypeChecker {
                 if short == "Any" {
                     return;
                 }
+                // A type arm naming another literal union (a sub-union, a
+                // union of them, or a homonym with the same members) covers
+                // the members it shares with the subject.
+                let namespace = self.context.current_namespace.clone();
+                let arm_type = self.parse_type_annotation_in(type_name, &namespace);
+                let mut arm_members = Vec::new();
+                let mut arm_open = false;
+                if !self.collect_literal_members(&arm_type, &mut arm_members, &mut arm_open) {
+                    arm_members.clear();
+                }
                 for (i, member) in subject.members.iter().enumerate() {
+                    if arm_members.contains(member) {
+                        covered[i] = true;
+                    }
                     let kind = match member {
                         LiteralType::Str(_) => "Str",
                         LiteralType::Int(_) => "Int",
@@ -2645,7 +2940,7 @@ impl TypeChecker {
         }
 
         // First registration — remember its source for future diagnostics.
-        self.impl_locations.insert(key.clone(), new_loc);
+        self.impl_locations.insert(key.clone(), new_loc.clone());
 
         // If the target is a dotted variant (`Enum.Variant`), enroll the
         // variant in the enum's known-variant set. For open enums this is
@@ -2657,6 +2952,37 @@ impl TypeChecker {
         // The enum part of the FQN target needs to come back to the short
         // name to look the type up in `context.types` (which is keyed by
         // short name).
+        // The qualified entry is the target's own declaration; the short-name
+        // entry merges every namespace's enum of that name, so one module's
+        // open `Media` would let arrows extend another's closed one.
+        if let Some((enum_fqn, variant_name)) = key.1.split_once('.')
+            && let Some(td) = self.context.types.get(enum_fqn)
+            && td.is_enum
+            && !td.enum_is_open
+            && !td.variants.contains(variant_name)
+        {
+            self.errors.add(CompilerError::UnresolvedType {
+                type_name: format!("{}.{}", Self::short_type_name(enum_fqn), variant_name),
+                namespace: ns_str.to_string(),
+                message: format!(
+                    "`{}` is a closed enum, so an arrow can't add `{}`: declare the variant in \
+                     it, or declare it `enum open`",
+                    Self::short_type_name(enum_fqn),
+                    variant_name
+                ),
+                location: new_loc,
+            });
+            return;
+        }
+        if let Some((enum_fqn, variant_name)) = key.1.split_once('.')
+            && let Some(td) = self.context.types.get_mut(enum_fqn)
+            && td.enum_is_open
+        {
+            td.variants.insert(variant_name.to_string());
+            td.variant_payloads
+                .entry(variant_name.to_string())
+                .or_insert_with(|| key.0.clone());
+        }
         if let Some((enum_fqn, variant_name)) = key.1.split_once('.')
             && let enum_short = Self::short_type_name(enum_fqn)
             && let Some(td) = self.context.types.get_mut(&enum_short)
@@ -2675,6 +3001,20 @@ impl TypeChecker {
     /// Best-effort short name for a `TypeExpr`, used for implementation lookup.
     /// Returns `None` for shapes (Vec, Map, Function, Union, ...) where a
     /// coercion check doesn't apply.
+    /// The name a type expression's declaration is known by, as it was
+    /// resolved (qualified, or short); `None` for unnamed shapes.
+    fn type_expr_name(expr: &TypeExpr) -> Option<&str> {
+        match expr {
+            TypeExpr::Named(name)
+            | TypeExpr::Record {
+                type_name: Some(name),
+                ..
+            } => Some(name),
+            TypeExpr::Optional(inner) => Self::type_expr_name(inner),
+            _ => None,
+        }
+    }
+
     fn type_expr_short_name(expr: &TypeExpr) -> Option<String> {
         let name = match expr {
             TypeExpr::Named(n) => n.as_str(),
@@ -2952,7 +3292,7 @@ impl TypeChecker {
                 );
                 self.apply_annotation_constraint(inferred_type, &constraint)
             } else {
-                inferred_type
+                self.untyped_binding_type(value, inferred_type)
             };
             self.current_def = None;
             self.current_def_src = None;
@@ -2985,6 +3325,7 @@ impl TypeChecker {
 
             Value::Ref(hot_ref) => match hot_ref {
                 Ref::Var(var_ref) => {
+                    self.check_variant_reference(value);
                     let var_name = &var_ref.var.sym.name();
                     let base = self
                         .context
@@ -3019,6 +3360,7 @@ impl TypeChecker {
                     }
                 }
                 Ref::Ns(ns_ref) => {
+                    self.check_variant_reference(value);
                     // Resolve `::alias/name` against the current namespace
                     // alias map, then look up the qualified variable type
                     // populated during `collect_qualified_variables`.
@@ -3057,7 +3399,16 @@ impl TypeChecker {
                 self.infer_function_definition_type(fn_defs)
             }
 
-            Value::TemplateLiteral(_) => TypeExpr::Str,
+            Value::TemplateLiteral(template) => {
+                // Check each `${...}` the way a call argument is checked,
+                // so a wrong-arity call inside a template is reported.
+                for part in &template.parts {
+                    if let crate::lang::ast::TemplatePart::Expression(expr) = part {
+                        let _ = self.infer_argument_type(expr);
+                    }
+                }
+                TypeExpr::Str
+            }
 
             Value::TypeDef(type_def) => {
                 // Process type definition and validate generic parameters
@@ -3124,10 +3475,14 @@ impl TypeChecker {
                     }
                     _ => None,
                 };
-                let mut last_type = TypeExpr::Any;
-                for arm in &match_expr.arms {
-                    last_type = self.infer_match_arm_body(arm, subject_name.as_deref());
-                }
+                self.check_arm_variants(match_expr.arms.iter());
+                // Walk each arm once; a nested match walked again per
+                // level would cost exponential time in the nesting depth.
+                let mut arm_types: Vec<TypeExpr> = match_expr
+                    .arms
+                    .iter()
+                    .map(|arm| self.infer_match_arm_body(arm, subject_name.as_deref()))
+                    .collect();
                 if !match_expr.match_all {
                     let arm_refs: Vec<&MatchArm> = match_expr.arms.iter().collect();
                     let location = match_expr
@@ -3137,11 +3492,6 @@ impl TypeChecker {
                     self.check_match_exhaustiveness_for(&subject_type, &arm_refs, location);
                 }
                 if match_expr.match_all {
-                    let arm_types: Vec<TypeExpr> = match_expr
-                        .arms
-                        .iter()
-                        .map(|arm| self.infer_match_arm_body(arm, subject_name.as_deref()))
-                        .collect();
                     self.flow_result_type(
                         match_expr.result_modifier.as_ref(),
                         arm_types,
@@ -3149,11 +3499,6 @@ impl TypeChecker {
                         false,
                     )
                 } else if match_expr.result_modifier.is_some() {
-                    let arm_types: Vec<TypeExpr> = match_expr
-                        .arms
-                        .iter()
-                        .map(|arm| self.infer_match_arm_body(arm, subject_name.as_deref()))
-                        .collect();
                     self.flow_result_type(
                         match_expr.result_modifier.as_ref(),
                         arm_types,
@@ -3161,7 +3506,7 @@ impl TypeChecker {
                         false,
                     )
                 } else {
-                    last_type
+                    arm_types.pop().unwrap_or(TypeExpr::Any)
                 }
             }
 
@@ -3191,7 +3536,7 @@ impl TypeChecker {
                         );
                         self.apply_annotation_constraint(inferred, &constraint)
                     } else {
-                        inferred
+                        self.untyped_binding_type(&values[1], inferred)
                     };
                     let name = var_ref.var.sym.name().to_string();
                     self.context.add_variable(name, assigned.clone());
@@ -3491,10 +3836,29 @@ impl TypeChecker {
                 {
                     return TypeExpr::Any;
                 }
+                // A field read off a union warns only when no member can
+                // have the field: packages declare `Response | HttpError`
+                // for calls whose error comes back as an Err, so the read
+                // only ever sees the member that declares it.
+                let warnings_before = self.errors.warnings.len();
+                let mut some_member_has_field = false;
                 let resolved: Vec<_> = variants
                     .iter()
-                    .map(|v| self.value_type(v, key, location))
+                    .map(|v| {
+                        let before = self.errors.warnings.len();
+                        let field_type = self.value_type(v, key, location);
+                        some_member_has_field |= self.errors.warnings.len() == before;
+                        field_type
+                    })
                     .collect();
+                if some_member_has_field {
+                    self.errors.warnings.truncate(warnings_before);
+                } else {
+                    // One read, one warning.
+                    self.errors
+                        .warnings
+                        .truncate(warnings_before.saturating_add(1));
+                }
                 TypeExpr::Union(resolved)
             }
             _ => TypeExpr::Any,
@@ -3514,27 +3878,86 @@ impl TypeChecker {
         });
     }
 
-    /// Walk a match arm's body. Inside an `Enum.Variant` arm the matched name
-    /// and the arm's binding hold that variant's payload, so both are bound
-    /// to the payload type for the arm.
+    /// Walk a match arm's body. Inside an `Enum.Variant` arm the arm's
+    /// binding holds that variant's payload. The matched name keeps the
+    /// variant, whose fields read through to a record payload, so it is
+    /// bound to the payload type only for a record payload. A binding
+    /// whose type the pattern doesn't tell is bound as `Any`, so it still
+    /// shadows an outer name or a function of the same name.
     fn infer_match_arm_body(&mut self, arm: &MatchArm, subject: Option<&str>) -> TypeExpr {
-        let payload = match (&arm.type_name, &arm.variant) {
+        let (payload, subject) = match (&arm.type_name, &arm.variant) {
             (Some(type_name), Some(variant)) if arm.alternatives.is_empty() => {
-                self.variant_payload_type(type_name, variant)
+                let payload = self.variant_payload_type(type_name, variant);
+                let reads_through = payload.as_ref().is_some_and(|p| self.is_record_type(p));
+                (payload, subject.filter(|_| reads_through))
             }
-            _ => None,
+            (Some(type_name), None) if arm.alternatives.is_empty() => {
+                (self.union_member_named(subject, type_name), subject)
+            }
+            _ => (None, subject),
         };
-        let names: Vec<&str> = subject.into_iter().chain(arm.binding.as_deref()).collect();
-        let Some(payload) = payload.filter(|_| !names.is_empty()) else {
+        let bindings: Vec<(&str, TypeExpr)> = match payload {
+            Some(payload) => subject
+                .into_iter()
+                .chain(arm.binding.as_deref())
+                .map(|name| (name, payload.clone()))
+                .collect(),
+            None => arm
+                .binding
+                .as_deref()
+                .map(|name| (name, TypeExpr::Any))
+                .into_iter()
+                .collect(),
+        };
+        if bindings.is_empty() {
             return self.infer_value_type(&arm.body);
-        };
+        }
         self.context.push_scope();
-        for name in names {
-            self.context.add_variable(name.to_string(), payload.clone());
+        for (name, ty) in bindings {
+            self.context.add_variable(name.to_string(), ty);
         }
         let body_type = self.infer_value_type(&arm.body);
         self.context.pop_scope();
         body_type
+    }
+
+    /// Whether `ty` is a record: a record shape or a named struct.
+    fn is_record_type(&self, ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Record { .. } => true,
+            TypeExpr::Named(name) => self
+                .context
+                .types
+                .get(name)
+                .or_else(|| self.context.types.get(&Self::short_type_name(name)))
+                .is_some_and(|td| td.is_struct),
+            _ => false,
+        }
+    }
+
+    /// The member of a union-typed `match` subject that a type arm names
+    /// (`HttpError =>` on `Response | HttpError`), which the subject holds
+    /// inside that arm. Members are matched by short name, as exhaustiveness
+    /// matches them, so an imported or qualified arm name finds its type.
+    /// `None` when the subject is not a variable typed as a union, or not
+    /// exactly one member has that name.
+    fn union_member_named(&self, subject: Option<&str>, type_name: &str) -> Option<TypeExpr> {
+        let TypeExpr::Union(members) = self.context.get_variable_type(subject?)? else {
+            return None;
+        };
+        let short = Self::short_type_name(type_name);
+        let mut named = members.iter().filter(|member| match member {
+            TypeExpr::Named(name)
+            | TypeExpr::Record {
+                type_name: Some(name),
+                ..
+            } => Self::short_type_name(name) == short,
+            _ => false,
+        });
+        match (named.next(), named.next()) {
+            (Some(member), None) => Some(member.clone()),
+            _ => None,
+        }
     }
 
     /// The declared payload type of `enum_name.variant`, resolved in the
@@ -3871,13 +4294,98 @@ impl TypeChecker {
         }
     }
 
+    /// `impossible-comparison`: `eq` or `ne` between a value of a closed
+    /// literal union and a literal outside it, such as a misspelled
+    /// `eq(caused-by, "compnay")`, is always false (`ne`: always true).
+    /// `null` is left out, as a defensive null check is common.
+    fn check_literal_comparison(&mut self, name: &str, fn_call: &FnCall, arg_types: &[TypeExpr]) {
+        let short = name.strip_prefix("::hot::cmp/").unwrap_or(name);
+        if !matches!(short, "eq" | "ne") || self.in_pipe_flow {
+            return;
+        }
+        if name == short && self.context.current_namespace != "::hot::cmp" {
+            let local = format!("{}/{}", self.context.current_namespace, short);
+            if self.context.get_function_signature(&local).is_some() {
+                return;
+            }
+        }
+        let ([a, b], [a_type, b_type]) = (fn_call.args.as_slice(), arg_types) else {
+            return;
+        };
+        let (literal, literal_arg, other_type) = match (
+            Self::literal_type_of_value(&a.value),
+            Self::literal_type_of_value(&b.value),
+        ) {
+            (Some(TypeExpr::Literal(lit)), None) => (lit, a, b_type),
+            (None, Some(TypeExpr::Literal(lit))) => (lit, b, a_type),
+            _ => return,
+        };
+        if literal == LiteralType::Null {
+            return;
+        }
+        let Some(subject) = self.literal_union_subject(other_type) else {
+            return;
+        };
+        // An Int and a Dec member can be numerically equal.
+        let numeric_mix = matches!(literal, LiteralType::Int(_))
+            && subject
+                .members
+                .iter()
+                .any(|m| matches!(m, LiteralType::Dec(_)));
+        if subject.is_open || subject.members.contains(&literal) || numeric_mix {
+            return;
+        }
+        let location = literal_arg
+            .src
+            .as_ref()
+            .or(fn_call.src.as_ref())
+            .map(|s| self.source_to_error_location(s));
+        // Argument types are inferred more than once for some calls.
+        if self.errors.warnings.iter().any(|w| {
+            matches!(w, CompilerError::Constraint { code: "impossible-comparison", location: l, .. } if *l == location)
+        }) {
+            return;
+        }
+        // A named union lists its values; an inline one already shows them.
+        let shown = if subject.name.starts_with(char::is_uppercase) {
+            let known = subject
+                .members
+                .iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("`{}` ({known})", subject.name)
+        } else {
+            format!("`{}`", subject.name)
+        };
+        let outcome = if short == "eq" {
+            "always false"
+        } else {
+            "always true"
+        };
+        self.errors.add_warning(CompilerError::Constraint {
+            code: "impossible-comparison",
+            message: format!(
+                "{literal} isn't one of the values of {shown}, so this `{short}` is {outcome}"
+            ),
+            help: Some("check the spelling".to_string()),
+            warning: true,
+            location,
+        });
+    }
+
     /// Infer the return type of a function call
     /// Precise result types for `and`, `or`, `if` and `not`. `and` and `or`
     /// return one of their arguments and `if` one of its branches, so the
     /// result is the union of those types: `Bool` when every one is a
     /// `Bool`. `not` always returns a `Bool`. `None` for any other call, or
     /// when a local definition shadows the core one.
-    fn logic_result_type(&mut self, name: &str, fn_call: &FnCall) -> Option<TypeExpr> {
+    fn logic_result_type(
+        &self,
+        name: &str,
+        fn_call: &FnCall,
+        arg_types: &[TypeExpr],
+    ) -> Option<TypeExpr> {
         let short = name.strip_prefix("::hot::bool/").unwrap_or(name);
         if !matches!(short, "and" | "or" | "if" | "not") {
             return None;
@@ -3892,26 +4400,25 @@ impl TypeChecker {
             return Some(TypeExpr::Bool);
         }
         let skip = usize::from(short == "if");
-        let mut types: Vec<TypeExpr> = fn_call
-            .args
-            .iter()
-            .skip(skip)
-            .map(|arg| arg.value.clone())
-            .collect::<Vec<_>>()
-            .iter()
-            .map(|value| self.infer_value_type(value))
-            .collect();
+        let mut types: Vec<TypeExpr> = arg_types.iter().skip(skip).cloned().collect();
         if short == "if" && fn_call.args.len() == 2 {
             types.push(TypeExpr::Null);
         }
         let mut members: Vec<TypeExpr> = Vec::new();
         for t in types {
             let parts = match t {
-                TypeExpr::Any => return Some(TypeExpr::Any),
                 TypeExpr::Union(parts) => parts,
                 other => vec![other],
             };
             for part in parts {
+                // `Any?` (and a union with `Any` in it) can be any value,
+                // so the result can be too: `or(req.body, {})` is not
+                // known to be the `{}` record.
+                if matches!(&part, TypeExpr::Any)
+                    || matches!(&part, TypeExpr::Optional(inner) if **inner == TypeExpr::Any)
+                {
+                    return Some(TypeExpr::Any);
+                }
                 if !members.contains(&part) {
                     members.push(part);
                 }
@@ -3925,6 +4432,8 @@ impl TypeChecker {
     }
 
     fn infer_function_call_type(&mut self, fn_call: &FnCall) -> TypeExpr {
+        // A variant constructor, `Shape.Circle(...)`.
+        self.check_variant_reference(&fn_call.function);
         // Check for type conversion calls like `::hot::type/Str(value)`. These
         // are constructor calls that double as coercion functions; if the
         // source type doesn't have a registered `SourceType -> TargetType`
@@ -4116,13 +4625,25 @@ impl TypeChecker {
                 });
 
             if let Some(signatures) = signatures {
+                // Infer each argument once. Every check below reuses these
+                // types: inferring an argument again for each overload, or
+                // for the result type of `if`/`and`/`or`, doubles the work
+                // at every level of nesting.
+                let arg_types: Vec<TypeExpr> = fn_call
+                    .args
+                    .iter()
+                    .map(|arg| self.infer_argument_type(&arg.value))
+                    .collect();
+
                 // Validate argument types against parameter types for all arities
                 // Find the first matching arity signature
-                let matching_sig = self.find_matching_signature(fn_call, lookup_name, &signatures);
+                let matching_sig = self.find_matching_signature(fn_call, &arg_types, &signatures);
 
                 if let Some(sig) = matching_sig {
                     let declared = sig.return_type.clone();
-                    if let Some(precise) = self.logic_result_type(lookup_name, fn_call) {
+                    self.check_literal_comparison(lookup_name, fn_call, &arg_types);
+                    if let Some(precise) = self.logic_result_type(lookup_name, fn_call, &arg_types)
+                    {
                         return precise;
                     }
                     return declared;
@@ -4130,7 +4651,12 @@ impl TypeChecker {
 
                 // No matching signature found - report error
                 // This will be handled by validate_function_call_arguments
-                self.validate_function_call_arguments(fn_call, lookup_name, &signatures);
+                self.validate_function_call_arguments(
+                    fn_call,
+                    &arg_types,
+                    lookup_name,
+                    &signatures,
+                );
 
                 // Return first signature's return type as fallback
                 if let Some(first_sig) = signatures.first() {
@@ -4211,6 +4737,12 @@ impl TypeChecker {
                 self.context.add_variable(name, param_type);
             }
 
+            // The return annotation is read below from inside the body,
+            // where unresolved names aren't reported.
+            if let Some(ret_ann) = &fn_def.return_type {
+                self.warn_unresolved_type_names(ret_ann);
+            }
+
             // Walk the body for type-checking side effects (arity, alias resolution,
             // nested call validation). The body's inferred type would be the return
             // type, but we don't propagate it: the inference plumbing for return
@@ -4224,25 +4756,7 @@ impl TypeChecker {
             let saved_pipe = self.in_pipe_flow;
             self.in_pipe_flow = false;
 
-            // If the body is a `match` flow, the implicit match subject is
-            // the function's first parameter. Push its type so the arm
-            // walk can enforce exhaustiveness against the corresponding
-            // enum. We push `None` for non-match bodies and for match
-            // bodies whose first parameter type we can't determine, so
-            // exhaustiveness checking is naturally skipped in those cases.
-            let pushed_subject = matches!(
-                &fn_def.body,
-                Value::Flow(f) if matches!(
-                    f.flow_type,
-                    FlowType::Match | FlowType::MatchShort
-                )
-            );
-            if pushed_subject {
-                let subject_type = parameter_types.first().cloned();
-                self.match_subject_stack.push(subject_type);
-            }
-
-            let body_type = self.infer_value_type(&fn_def.body);
+            let body_type = self.infer_fn_body(fn_def, &parameter_types);
 
             // Declared return types get the same definite-mismatch warning
             // as binding annotations. Body inference is weak for anything
@@ -4269,9 +4783,6 @@ impl TypeChecker {
                 );
             }
 
-            if pushed_subject {
-                self.match_subject_stack.pop();
-            }
             self.in_pipe_flow = saved_pipe;
             self.in_fn_body -= 1;
 
@@ -4289,6 +4800,39 @@ impl TypeChecker {
             first_param_types.unwrap_or_default(),
             Box::new(first_return_type.unwrap_or(TypeExpr::Any)),
         )
+    }
+
+    /// Walk a function body whose parameters are already bound.
+    ///
+    /// A `fn match` / `fn match-all` body matches the function's first
+    /// parameter. Its name and type are pushed as the match subject, so the
+    /// arm walk narrows the name per arm (`infer_flow_arm_bodies`) and a
+    /// `fn match` enforces exhaustiveness against its enum or literal union.
+    fn infer_fn_body(&mut self, fn_def: &FnDef, parameter_types: &[TypeExpr]) -> TypeExpr {
+        let is_match_body = matches!(
+            &fn_def.body,
+            Value::Flow(f) if matches!(
+                f.flow_type,
+                FlowType::Match
+                    | FlowType::MatchShort
+                    | FlowType::MatchAll
+                    | FlowType::MatchAllShort
+            )
+        );
+        if !is_match_body {
+            return self.infer_value_type(&fn_def.body);
+        }
+        self.match_subject_stack.push(FnMatchSubject {
+            name: fn_def
+                .args
+                .args
+                .first()
+                .map(|a| a.var.sym.name().to_string()),
+            ty: parameter_types.first().cloned(),
+        });
+        let body_type = self.infer_value_type(&fn_def.body);
+        self.match_subject_stack.pop();
+        body_type
     }
 
     /// Process a type implementation and validate it
@@ -4382,7 +4926,7 @@ impl TypeChecker {
             };
 
             // Type-check the function body and verify it matches the expected return type
-            let body_type = self.infer_value_type(&fn_def.body);
+            let body_type = self.infer_fn_body(fn_def, &parameter_types);
             if !self.types_are_compatible(&declared_return_type, &body_type) {
                 self.errors
                     .errors
@@ -4429,8 +4973,18 @@ impl TypeChecker {
                         actual: 1,
                         location: self.create_error_location_for_type(&type_name),
                     });
+                } else {
+                    self.warn_unresolved_type_names(&field.type_annotation);
                 }
             }
+        }
+        for payload in type_def
+            .variants
+            .iter()
+            .flatten()
+            .filter_map(|variant| variant.type_ref.as_ref())
+        {
+            self.warn_unresolved_type_names(payload);
         }
 
         // Validate constructor function signatures (e.g. `Foo type fn (x: T) {...}`).
@@ -4462,6 +5016,61 @@ impl TypeChecker {
         self.register_enum_metadata(&type_name, &ns_for_enum, type_def, None);
 
         TypeExpr::Named(type_name)
+    }
+
+    /// `unresolved-type` warning for each type name in a declaration's
+    /// annotation that nothing declares: a record field, a variant payload
+    /// or a return type. The same name in a parameter annotation is an
+    /// error, but code like this ran on 3.0.0: a constructor tags the
+    /// field's value with the unknown name, and a return annotation isn't
+    /// checked at run time.
+    fn warn_unresolved_type_names(&mut self, annotation: &str) {
+        let errors = self.errors.errors.len();
+        let _ = self.parse_type_annotation(annotation, None);
+        let found: Vec<CompilerError> = self.errors.errors.drain(errors..).collect();
+        for error in found {
+            let CompilerError::UnresolvedType { type_name, .. } = error else {
+                self.errors.errors.push(error);
+                continue;
+            };
+            let message = format!("Unresolved type '{type_name}'");
+            let location = self.definition_location_of(&type_name);
+            let duplicate = self.errors.warnings.iter().any(|w| {
+                matches!(w, CompilerError::Constraint { code: "unresolved-type", location: l, message: m, .. }
+                    if *l == location && *m == message)
+            });
+            if !duplicate {
+                self.errors.add_warning(CompilerError::Constraint {
+                    code: "unresolved-type",
+                    message,
+                    help: Some("check the spelling, or declare or import the type".to_string()),
+                    warning: true,
+                    location,
+                });
+            }
+        }
+    }
+
+    /// Where `name` first appears in the definition being checked, from
+    /// the definition's start; the definition itself when it doesn't.
+    fn definition_location_of(&self, name: &str) -> Option<ErrorLocation> {
+        let src = self.current_def_src.as_ref()?;
+        let file = src.file.as_ref();
+        let content = file.and_then(|file| self.errors.source_cache.get(file));
+        if let Some(content) = content
+            && let Some(offset) = content.get(src.position..).and_then(|rest| rest.find(name))
+        {
+            let position = src.position + offset;
+            let (line, column) = self.calculate_line_column(content, position);
+            return Some(ErrorLocation {
+                line,
+                column,
+                position,
+                length: name.len(),
+                file: file.map(PathBuf::from),
+            });
+        }
+        Some(self.source_to_error_location(src))
     }
 
     /// Check if a type annotation references an undeclared generic parameter
@@ -4654,6 +5263,9 @@ impl TypeChecker {
             return None;
         }
         let qualified = format!("{}/{}", self.context.current_namespace, type_name);
+        if let Some(imported) = self.type_imports.get(&qualified) {
+            return Some(imported.clone());
+        }
         self.qualified_types.get(&qualified).cloned().or_else(|| {
             // Fall back to the in-pass types registered by `process_type_definition`
             // (e.g. types defined later in the same file that haven't been
@@ -4744,19 +5356,18 @@ impl TypeChecker {
         self.known_types.contains(type_name)
     }
 
-    /// Find matching signature for a function call from available arities
+    /// Find matching signature for a function call from available arities.
+    /// `arg_types` are the call's written arguments, inferred once by the
+    /// caller.
     fn find_matching_signature<'a>(
-        &mut self,
+        &self,
         fn_call: &FnCall,
-        _func_name: &str,
+        arg_types: &[TypeExpr],
         signatures: &'a [FunctionSignature],
     ) -> Option<&'a FunctionSignature> {
-        // The pipe context only applies to THIS call (whose first arg is the
-        // piped value) — not to nested calls inside its argument expressions.
-        // Capture the flag for our own arity math, then clear it so recursive
-        // `infer_value_type` walks don't inflate nested call arities.
+        // The pipe context only applies to THIS call, whose first arg is the
+        // piped value.
         let in_pipe_flow = self.in_pipe_flow;
-        self.in_pipe_flow = false;
         let explicit_args = fn_call.args.len();
         let call_arity = if in_pipe_flow {
             explicit_args + 1 // Add 1 for the piped value
@@ -4765,66 +5376,56 @@ impl TypeChecker {
         };
 
         // Try to find a signature that matches the arity
-        let result = (|| {
-            for sig in signatures {
-                let sig_arity = sig.parameter_types.len();
+        for sig in signatures {
+            let sig_arity = sig.parameter_types.len();
 
-                // Check if arity matches
-                // For variadic functions, the minimum arity is (params - 1) since the variadic param can be empty
-                let arity_matches = if sig.variadic {
-                    let min_arity = if sig_arity > 0 { sig_arity - 1 } else { 0 };
-                    call_arity >= min_arity
-                } else {
-                    call_arity == sig_arity
-                };
+            // Check if arity matches
+            // For variadic functions, the minimum arity is (params - 1) since the variadic param can be empty
+            let arity_matches = if sig.variadic {
+                let min_arity = if sig_arity > 0 { sig_arity - 1 } else { 0 };
+                call_arity >= min_arity
+            } else {
+                call_arity == sig_arity
+            };
 
-                if arity_matches {
-                    // Check if argument types are compatible.
-                    // When in pipe flow, we skip the first parameter (the piped value)
-                    // and check the explicit arguments against remaining parameters.
-                    //
-                    // Note the canonical argument order is
-                    // `types_are_compatible(expected, actual)`.
-                    let mut all_args_compatible = true;
-                    let param_offset = if in_pipe_flow { 1 } else { 0 };
+            if arity_matches {
+                // Check if argument types are compatible.
+                // When in pipe flow, we skip the first parameter (the piped value)
+                // and check the explicit arguments against remaining parameters.
+                //
+                // Note the canonical argument order is
+                // `types_are_compatible(expected, actual)`.
+                let param_offset = if in_pipe_flow { 1 } else { 0 };
+                let all_args_compatible = arg_types.iter().enumerate().all(|(i, actual_type)| {
+                    sig.parameter_types
+                        .get(i + param_offset)
+                        .is_none_or(|expected_type| {
+                            self.types_are_compatible(expected_type, actual_type)
+                                || self.coercion_available(actual_type, expected_type)
+                        })
+                });
 
-                    for (i, arg) in fn_call.args.iter().enumerate() {
-                        if let Some(expected_type) = sig.parameter_types.get(i + param_offset) {
-                            let actual_type = self.infer_value_type(&arg.value);
-                            if !self.types_are_compatible(expected_type, &actual_type)
-                                && !self.coercion_available(&actual_type, expected_type)
-                            {
-                                all_args_compatible = false;
-                                break;
-                            }
-                        }
-                    }
-
-                    if all_args_compatible {
-                        return Some(sig);
-                    }
+                if all_args_compatible {
+                    return Some(sig);
                 }
             }
-            None
-        })();
-
-        self.in_pipe_flow = in_pipe_flow;
-        result
+        }
+        None
     }
 
-    /// Validate function call arguments against parameter types (for multiple arities)
+    /// Validate function call arguments against parameter types (for multiple arities).
+    /// `arg_types` are the call's written arguments, inferred once by the
+    /// caller.
     fn validate_function_call_arguments(
         &mut self,
         fn_call: &FnCall,
+        arg_types: &[TypeExpr],
         func_name: &str,
         signatures: &[FunctionSignature],
     ) {
-        // The pipe context only applies to THIS call (whose first arg is the
-        // piped value) — not to nested calls inside its argument expressions.
-        // Capture the flag for our own arity math, then clear it so recursive
-        // `infer_value_type` walks don't inflate nested call arities.
+        // The pipe context only applies to THIS call, whose first arg is the
+        // piped value.
         let in_pipe_flow = self.in_pipe_flow;
-        self.in_pipe_flow = false;
         let explicit_args = fn_call.args.len();
         let call_arity = if in_pipe_flow {
             explicit_args + 1 // Add 1 for the piped value
@@ -4852,7 +5453,7 @@ impl TypeChecker {
 
         if matching_arity_sigs.is_empty() {
             // No signature with matching arity found
-            let available_arities: Vec<String> = signatures
+            let mut available_arities: Vec<String> = signatures
                 .iter()
                 .map(|sig| {
                     if sig.variadic {
@@ -4868,8 +5469,11 @@ impl TypeChecker {
                     }
                 })
                 .collect();
+            // A core function in two namespaces has two signatures of one arity.
+            let mut seen = std::collections::HashSet::new();
+            available_arities.retain(|arity| seen.insert(arity.clone()));
 
-            let message = if signatures.len() == 1 {
+            let message = if available_arities.len() == 1 {
                 let sig = &signatures[0];
                 let expected = if sig.variadic && !sig.parameter_types.is_empty() {
                     sig.parameter_types.len() - 1
@@ -4908,7 +5512,6 @@ impl TypeChecker {
                     .map(|s| self.source_to_error_location(s))
                     .or_else(|| self.create_error_location_for_function_call(func_name)),
             });
-            self.in_pipe_flow = in_pipe_flow;
             return;
         }
 
@@ -4931,11 +5534,10 @@ impl TypeChecker {
         for sig in matching_arity_sigs {
             let mut type_errors = Vec::new();
 
-            for (i, arg) in fn_call.args.iter().enumerate() {
+            for (i, (arg, actual_type)) in fn_call.args.iter().zip(arg_types).enumerate() {
                 if let Some(expected_type) = sig.parameter_types.get(i + param_offset) {
-                    let actual_type = self.infer_value_type(&arg.value);
                     // Check if actual type is compatible with expected (e.g., Int is compatible with Int | Str | Bool)
-                    let mut compatible = self.types_are_compatible(expected_type, &actual_type);
+                    let mut compatible = self.types_are_compatible(expected_type, actual_type);
 
                     // For literal arguments (e.g. `pick-fruit("apple")`), also
                     // check the precise literal type. This lets a `Str` literal
@@ -4948,19 +5550,18 @@ impl TypeChecker {
 
                     // Last-resort: implicit coercion via a directly-registered
                     // `actual -> expected` arrow.
-                    if !compatible && self.coercion_available(&actual_type, expected_type) {
+                    if !compatible && self.coercion_available(actual_type, expected_type) {
                         compatible = true;
                     }
 
                     if !compatible {
-                        type_errors.push((i, expected_type.clone(), actual_type));
+                        type_errors.push((i, expected_type.clone(), actual_type.clone()));
                     }
                 }
             }
 
             if type_errors.is_empty() {
                 // Found a matching signature with compatible types
-                self.in_pipe_flow = in_pipe_flow;
                 return;
             }
 
@@ -5019,8 +5620,6 @@ impl TypeChecker {
                 });
             }
         }
-
-        self.in_pipe_flow = in_pipe_flow;
     }
 
     /// Walk flow expressions that may use the `var_name expr` pairing
@@ -5102,7 +5701,10 @@ impl TypeChecker {
                         && v.var.deep_set.is_none()
                 )
             {
-                let inferred = self.infer_value_type(value);
+                let mut inferred = self.infer_value_type(value);
+                if var_ref.var.type_annotation.is_none() {
+                    inferred = self.untyped_binding_type(value, inferred);
+                }
                 let name = var_ref.var.sym.name().to_string();
                 self.context.add_variable(name, inferred.clone());
                 result_types.push(inferred);
@@ -5134,12 +5736,12 @@ impl TypeChecker {
                     );
                 }
                 // Walk every expression so calls earlier in the body are type-checked,
-                // not just whichever happens to be the return value.
-                let mut last_type = TypeExpr::Null;
-                for expr in &flow.expressions {
-                    last_type = self.infer_value_type(expr);
-                }
-                last_type
+                // not just whichever happens to be the return value. A binding
+                // the parser leaves unfolded (`a m |> f()`) arrives as a bare
+                // `Var` and its value, which the runtime binds as a pair.
+                self.walk_paired_bindings(&flow.expressions)
+                    .pop()
+                    .unwrap_or(TypeExpr::Null)
             }
             FlowType::Parallel => {
                 // Parallel flow bodies pair consecutive expressions as
@@ -5150,11 +5752,11 @@ impl TypeChecker {
                 self.flow_result_type(flow.result_modifier.as_ref(), result_types, true, true)
             }
             FlowType::Cond => {
-                // Conditional flow returns a union of possible result types
+                // Conditional flow returns a union of its arms' result
+                // types. Each expression is an arm (`pred => body`).
                 let result_types: Vec<TypeExpr> = flow
                     .expressions
                     .iter()
-                    .skip(1) // Skip the condition
                     .map(|expr| self.infer_value_type(expr))
                     .collect();
 
@@ -5166,12 +5768,17 @@ impl TypeChecker {
                         false,
                     );
                 }
-                if result_types.is_empty() {
-                    TypeExpr::Null
-                } else if result_types.len() == 1 {
-                    TypeExpr::Optional(Box::new(result_types[0].clone()))
-                } else {
-                    TypeExpr::Union(result_types)
+                // A default arm (`=> body`) always runs when no earlier arm
+                // does, so the flow is never null on its account.
+                let has_default = flow.expressions.iter().any(|expr| {
+                    matches!(expr, Value::Cond(_, predicate, _)
+                        if matches!(**predicate, Value::Val(Val::Bool(true), None)))
+                });
+                match result_types.len() {
+                    0 => TypeExpr::Null,
+                    1 if has_default => result_types[0].clone(),
+                    1 => TypeExpr::Optional(Box::new(result_types[0].clone())),
+                    _ => TypeExpr::Union(result_types),
                 }
             }
             FlowType::CondAll => {
@@ -5267,11 +5874,8 @@ impl TypeChecker {
             }
             // Match flows are similar to Cond flows for typing
             FlowType::Match | FlowType::MatchShort => {
-                let result_types: Vec<TypeExpr> = flow
-                    .expressions
-                    .iter()
-                    .map(|expr| self.infer_value_type(expr))
-                    .collect();
+                self.check_arm_variants(Self::flow_arms(flow));
+                let result_types = self.infer_flow_arm_bodies(flow);
                 self.check_match_exhaustiveness(flow);
                 if flow.result_modifier.is_some() {
                     return self.flow_result_type(
@@ -5290,14 +5894,21 @@ impl TypeChecker {
                 }
             }
             FlowType::MatchAll | FlowType::MatchAllShort => {
-                let result_types: Vec<TypeExpr> = flow
-                    .expressions
-                    .iter()
-                    .map(|expr| self.infer_value_type(expr))
-                    .collect();
+                self.check_arm_variants(Self::flow_arms(flow));
+                let result_types = self.infer_flow_arm_bodies(flow);
                 self.flow_result_type(flow.result_modifier.as_ref(), result_types, true, false)
             }
         }
+    }
+
+    /// Walk the arm bodies of a `fn match` / `fn match-all` body as a
+    /// standalone `match` walks its arms, with the function's first
+    /// parameter (the top of `match_subject_stack`) as the matched name.
+    fn infer_flow_arm_bodies(&mut self, flow: &Flow) -> Vec<TypeExpr> {
+        let subject = self.match_subject_stack.last().and_then(|s| s.name.clone());
+        Self::flow_arms(flow)
+            .map(|arm| self.infer_match_arm_body(arm, subject.as_deref()))
+            .collect()
     }
 }
 
@@ -6056,6 +6667,101 @@ mod tests {
             !has_nonexh,
             "closed-enum match with `_` arm should not error: {:?}",
             checker.errors.errors
+        );
+    }
+
+    #[test]
+    fn test_fn_match_arm_body_errors_are_reported_with_location() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        // A `fn match` / `fn match-all` arm body is checked as any fn body
+        // is: a literal argument no overload accepts and a wrong-arity call
+        // are errors, located at the call inside the arm.
+        let source = r#"
+        ::t ns
+        takes-int fn (n: Int): Int { n }
+        Shape enum { Circle, Square }
+        describe fn match (s: Shape): Int {
+            Shape.Circle => { add("a", 1) }
+            Shape.Square => { 2 }
+        }
+        tally fn match-all (n: Int): All<Vec> {
+            Int => { takes-int(n, 2) }
+        }
+        "#;
+        let line_of = |needle: &str| {
+            source
+                .lines()
+                .position(|l| l.contains(needle))
+                .map(|i| i + 1)
+                .expect("needle in source")
+        };
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+
+        let located = |pred: &dyn Fn(&CompilerError) -> bool| {
+            checker
+                .errors
+                .errors
+                .iter()
+                .filter(|e| pred(e))
+                .map(|e| e.location().map(|l| l.line))
+                .collect::<Vec<_>>()
+        };
+        let mismatches = located(&|e| matches!(e, CompilerError::TypeMismatch { .. }));
+        assert_eq!(
+            mismatches,
+            vec![Some(line_of("add(\"a\", 1)"))],
+            "got: {:?}",
+            checker.errors.errors
+        );
+        let arity = located(&|e| matches!(e, CompilerError::ArityMismatch { .. }));
+        assert_eq!(
+            arity,
+            vec![Some(line_of("takes-int(n, 2)"))],
+            "got: {:?}",
+            checker.errors.errors
+        );
+    }
+
+    #[test]
+    fn test_fn_match_arm_bindings_check_clean() {
+        use crate::lang::parser::parse_hot;
+
+        // Each arm sees the function's parameters and its own bindings: a
+        // payload binding, a record payload read through the matched
+        // parameter, and a binding whose type the pattern doesn't tell,
+        // which shadows the function of the same name.
+        let source = r#"
+        ::t ns
+        takes-one fn (x: Int): Int { x }
+        Circle type { radius: Dec }
+        Shape enum { Round(Circle), Dot }
+        Reply enum { Steps(Vec), Declined(Str), Pending }
+        area fn match (s: Shape): Dec {
+            Shape.Round => { mul(s.radius, s.radius) }
+            Shape.Dot => { 0.0 }
+        }
+        summarize fn match (r: Reply, prefix: Str): Str {
+            Reply.Steps (steps) => { `${prefix}${steps}` }
+            Reply.Declined (why) => { `${prefix}${why}` }
+            Reply.Pending => { prefix }
+        }
+        call-it fn match (v: Any, n: Int): Any {
+            Int (i) => { add(i, n) }
+            Any (takes-one) => { takes-one(n, n) }
+        }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let result = checker.check_program(&program);
+        assert!(result.is_ok(), "no errors expected: {:?}", result);
+        assert!(
+            checker.errors.warnings.is_empty(),
+            "no warnings expected: {:?}",
+            checker.errors.warnings
         );
     }
 

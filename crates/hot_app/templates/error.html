@@ -1,0 +1,16 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto">
+    <div class="min-h-96 flex items-center justify-center">
+        <div class="empty-state max-w-lg">
+            <p class="text-sm font-semibold text-hot-red-700 dark:text-hot-red-400">{{ status }}</p>
+            <h1 class="mt-2 empty-state-title text-2xl">{{ heading }}</h1>
+            <p class="empty-state-message">{{ message }}</p>
+            <div class="mt-6">
+                <a href="{{ back_href }}" class="btn btn-secondary">{{ back_label }}</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -22,13 +22,28 @@ static REGEX_CACHE: std::sync::LazyLock<
     parking_lot::Mutex<std::collections::HashMap<String, regex::Regex>>,
 > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
+/// Compile a channel pattern within the length and memory limits Hot's own
+/// regex functions use. Patterns come from org settings writers.
+fn compile_pattern(pattern: &str) -> Result<regex::Regex, String> {
+    let cap = crate::lang::runtime::limits::max_regex_pattern_bytes();
+    if pattern.len() > cap {
+        return Err(format!("pattern is {} bytes (limit {cap})", pattern.len()));
+    }
+    let compile_bytes = crate::lang::runtime::limits::max_regex_compile_bytes();
+    regex::RegexBuilder::new(pattern)
+        .size_limit(compile_bytes)
+        .dfa_size_limit(compile_bytes)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 /// Get a compiled regex from cache, or compile and cache it
-fn get_or_compile_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+fn get_or_compile_regex(pattern: &str) -> Result<regex::Regex, String> {
     let mut cache = REGEX_CACHE.lock();
     if let Some(re) = cache.get(pattern) {
         return Ok(re.clone());
     }
-    let re = regex::Regex::new(pattern)?;
+    let re = compile_pattern(pattern)?;
     cache.insert(pattern.to_string(), re.clone());
     Ok(re)
 }
@@ -677,9 +692,9 @@ impl AlertChannel {
 
     /// Validate a regex pattern
     pub fn validate_pattern(pattern: &str) -> Result<(), AlertError> {
-        regex::Regex::new(pattern)
+        compile_pattern(pattern)
             .map(|_| ())
-            .map_err(|e| AlertError::InvalidPattern(e.to_string()))
+            .map_err(AlertError::InvalidPattern)
     }
 
     /// Create a new custom channel
@@ -3028,6 +3043,20 @@ mod tests {
 
     fn test_user_id() -> Uuid {
         Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()
+    }
+
+    #[test]
+    fn channel_patterns_compile_within_the_regex_limits() {
+        assert!(AlertChannel::validate_pattern("^run:(failed|error)$").is_ok());
+        assert!(matches!(
+            AlertChannel::validate_pattern("(unclosed"),
+            Err(AlertError::InvalidPattern(_))
+        ));
+        let long = "a".repeat(crate::lang::runtime::limits::max_regex_pattern_bytes() + 1);
+        let Err(AlertError::InvalidPattern(message)) = AlertChannel::validate_pattern(&long) else {
+            panic!("an over-long pattern was accepted");
+        };
+        assert!(message.contains("limit"), "{message}");
     }
 
     async fn delivery_targets(

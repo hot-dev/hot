@@ -1336,6 +1336,11 @@ where
 
     for item in items {
         let mut cur = PureValue::from_val(item);
+        // Calling a stage's lambda consumes an Err element, which halts,
+        // even when the lambda never reads its parameter.
+        if value_is_err(&cur) {
+            return FusedRun::Deopt;
+        }
 
         let mut keep = true;
         for t in transforms {
@@ -2137,6 +2142,36 @@ f fn (n: Int): Int {
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Int(220))
         );
+    }
+
+    // Calling a stage's lambda with an Err element halts, even when the
+    // lambda ignores its parameter, so fusion leaves such a source to the
+    // interpreter.
+    #[test]
+    fn run_pipeline_deopts_on_an_err_element() {
+        let prog = compile(
+            r#"::t ns
+f fn (xs: Vec): Int {
+    xs
+    |> filter((x) { true })
+    |> length()
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plan = &detect_pipelines(&func.instructions, &prog)[0];
+        let plain = Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
+        assert_eq!(run_pipeline(plan, &plain), FusedRun::Produced(Val::Int(3)));
+        let with_err = Val::Vec(vec![
+            Val::Int(1),
+            Val::err(Val::from("Division by zero")),
+            Val::Int(3),
+        ]);
+        assert_eq!(run_pipeline(plan, &with_err), FusedRun::Deopt);
     }
 
     #[test]

@@ -47,18 +47,15 @@ pub async fn dashboard_handler(
         .filter(|p| p.active)
         .collect();
 
-    let projects_json = templates::script_safe_json(
-        &projects
-            .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "project_id": p.project_id.to_string(),
-                    "name": p.name.clone(),
-                })
+    let projects_json = projects
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "project_id": p.project_id.to_string(),
+                "name": p.name.clone(),
             })
-            .collect::<Vec<_>>(),
-        "[]",
-    );
+        })
+        .collect();
 
     let template = templates::Dashboard {
         title: "Dashboard",
@@ -83,7 +80,7 @@ fn empty_dashboard(session: &Session) -> templates::Dashboard<'static> {
         chart_data_json: "{}",
         status_chart_data_json: "{}",
         projects: Vec::new(),
-        projects_json: "[]".to_string(),
+        projects_json: serde_json::Value::Array(Vec::new()),
     }
 }
 

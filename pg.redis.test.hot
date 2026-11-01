@@ -4,17 +4,16 @@
 
 // Postgres + Redis-backed queue/task smoke-test configuration.
 //
-// Intended for local runs with disposable Postgres 18.3 + pgvector and Valkey containers:
+// Intended for local runs with disposable Postgres 18.6 + pgvector and Valkey
+// containers (the images CI's hot.yml uses):
 //
 //   docker run --rm -p 55432:5432 \
 //     -e POSTGRES_USER=hot \
 //     -e POSTGRES_PASSWORD=hot \
 //     -e POSTGRES_DB=hot \
 //     --name hot-queue-test-postgres \
-//     postgres:18.3
-//   docker exec hot-queue-test-postgres \
-//     bash -lc 'apt-get update && apt-get install -y postgresql-18-pgvector'
-//   docker run --rm -p 6379:6379 valkey/valkey:latest
+//     pgvector/pgvector:0.8.7-pg18-trixie
+//   docker run --rm -p 6379:6379 valkey/valkey:9.1.3-trixie
 //
 // Then run:
 //

@@ -144,6 +144,15 @@ pub async fn orgs_detail_handler(
                 templates::BreadcrumbItem::current(org.name.clone()),
             ];
 
+            // A sub-organization names its parent only to members who can see it.
+            let parent_name = org.parent_org_id.and_then(|parent_id| {
+                session
+                    .user_orgs
+                    .iter()
+                    .find(|candidate| candidate.org_id == parent_id)
+                    .map(|parent| parent.name.clone())
+            });
+
             let template = templates::OrgsDetail {
                 title: &format!("{} - Organization", org.name),
                 page_context: templates::PrivatePageContext::for_org_page(
@@ -152,6 +161,7 @@ pub async fn orgs_detail_handler(
                     breadcrumbs,
                 ),
                 org,
+                parent_name,
                 active_page: "organization",
             };
 
@@ -406,28 +416,18 @@ pub async fn orgs_create_handler(
             .await;
 
             // Set the current org cookie so user is on this org after checkout
-            let org_cookie = axum_extra::extract::cookie::Cookie::build((
+            let org_cookie = crate::auth::build_cookie(
                 crate::auth::current_org_cookie_name(),
                 org_id.to_string(),
-            ))
-            .path("/")
-            .max_age(time::Duration::days(30))
-            .http_only(true)
-            .same_site(axum_extra::extract::cookie::SameSite::Lax)
-            .secure(!hot::env::is_local_dev())
-            .build();
+                time::Duration::days(30),
+            );
 
             // Set the environment cookie to the new development env
-            let env_cookie = axum_extra::extract::cookie::Cookie::build((
+            let env_cookie = crate::auth::build_cookie(
                 crate::auth::current_env_cookie_name(),
                 env_id.to_string(),
-            ))
-            .path("/")
-            .max_age(time::Duration::days(30))
-            .http_only(true)
-            .same_site(axum_extra::extract::cookie::SameSite::Lax)
-            .secure(!hot::env::is_local_dev())
-            .build();
+                time::Duration::days(30),
+            );
 
             let jar = jar.add(org_cookie).add(env_cookie);
 
@@ -1062,12 +1062,12 @@ pub async fn org_users_edit_handler(
         "Users".to_string(),
         format!("/@{}/users", org_slug),
     ));
-    breadcrumbs.push(templates::BreadcrumbItem::clickable(
+    // There is no user detail page.
+    breadcrumbs.push(templates::BreadcrumbItem::current(
         org_user_display
             .name
             .clone()
             .unwrap_or_else(|| "User".to_string()),
-        format!("/@{}/users/{}", org_slug, user_id),
     ));
     breadcrumbs.push(templates::BreadcrumbItem::current("Edit".to_string()));
 
@@ -1318,9 +1318,9 @@ fn render_org_users_edit_with_error(
         "Users".to_string(),
         format!("/@{}/users", org.slug),
     ));
-    breadcrumbs.push(templates::BreadcrumbItem::clickable(
+    // There is no user detail page.
+    breadcrumbs.push(templates::BreadcrumbItem::current(
         org_user.name.clone().unwrap_or_else(|| "User".to_string()),
-        format!("/@{}/users/{}", org.slug, org_user.user_id),
     ));
     breadcrumbs.push(templates::BreadcrumbItem::current("Edit".to_string()));
 

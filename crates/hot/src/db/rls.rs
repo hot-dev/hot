@@ -123,6 +123,88 @@ pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sq
             "RLS migrations must be applied before starting runtime services".into(),
         ));
     }
+    validate_release_schema(pool, schema).await
+}
+
+/// The comment `hot db migrate` leaves on the schema, then the version it
+/// migrated to: the runtime login can read it, though not the ledger.
+pub(crate) const SCHEMA_MARKER: &str = "Hot schema migration ";
+
+/// This release's latest PostgreSQL migration and the tables its migrations
+/// create, read from the migration files it ships.
+fn release_schema() -> Option<(i64, Vec<String>)> {
+    let dir = super::DatabaseType::Postgres.migration_dir().ok()?;
+    let table =
+        regex::Regex::new(r#"(?i)CREATE TABLE (?:IF NOT EXISTS )?hot\."?([a-z0-9_]+)"?"#).ok()?;
+    let mut latest = None;
+    let mut tables = Vec::new();
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(version) = name
+            .strip_suffix(".sql")
+            .and_then(|stem| stem.split('_').next())
+            .and_then(|number| number.parse::<i64>().ok())
+        else {
+            continue;
+        };
+        latest = latest.max(Some(version));
+        let sql = std::fs::read_to_string(entry.path()).ok()?;
+        tables.extend(table.captures_iter(&sql).map(|c| c[1].to_string()));
+    }
+    tables.sort();
+    tables.dedup();
+    Some((latest?, tables))
+}
+
+/// A runtime that starts on a schema behind its release, or without grants on
+/// tables added since provisioning last ran, passes every health check and
+/// then fails each request that touches them. Refuse to start instead.
+async fn validate_release_schema(pool: &PgPool, schema: &str) -> Result<(), sqlx::Error> {
+    let Some((latest, tables)) = release_schema() else {
+        tracing::warn!("Cannot read this release's migrations; skipping the schema version check");
+        return Ok(());
+    };
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT obj_description(n.oid, 'pg_namespace') FROM pg_namespace n WHERE n.nspname = $1",
+    )
+    .bind(schema)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    // A schema migrated before releases left this marker can't be checked.
+    let migrated = marker.as_deref().and_then(|marker| {
+        marker
+            .strip_prefix(SCHEMA_MARKER)
+            .and_then(|version| version.parse::<i64>().ok())
+    });
+    if let Some(migrated) = migrated.filter(|migrated| *migrated < latest) {
+        return Err(sqlx::Error::Protocol(format!(
+            "The database schema is at migration {migrated}, and this Hot release needs \
+             migration {latest}. Run `hot db migrate` with the schema owner's db.migration-uri, \
+             then rerun provision_runtime.sql, before starting services"
+        )));
+    }
+    let ungranted: Vec<String> = sqlx::query_scalar(
+        "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND c.relname = ANY($2)
+           AND c.relrowsecurity AND c.relforcerowsecurity
+           AND NOT (has_table_privilege(current_user, c.oid, 'SELECT')
+                AND has_table_privilege(current_user, c.oid, 'INSERT')
+                AND has_table_privilege(current_user, c.oid, 'UPDATE')
+                AND has_table_privilege(current_user, c.oid, 'DELETE'))
+         ORDER BY c.relname",
+    )
+    .bind(schema)
+    .bind(&tables)
+    .fetch_all(pool)
+    .await?;
+    if !ungranted.is_empty() {
+        return Err(sqlx::Error::Protocol(format!(
+            "The runtime login cannot use {}: rerun resources/db/postgres/provision_runtime.sql \
+             for it after every migration (https://hot.dev/docs/configuration/postgres)",
+            ungranted.join(", ")
+        )));
+    }
     Ok(())
 }
 

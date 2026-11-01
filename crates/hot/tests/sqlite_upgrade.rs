@@ -231,12 +231,25 @@ impl ExistingRows {
                 !retired
             )
         );
-        let retired_tables: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM sqlite_master WHERE name IN ('management_key','api_key_management_issuer','management_key_scope_immutable','api_key_management_issuer_no_delete')",
+        // The management tables stay for 3.0.0 readers, emptied of authority:
+        // no issuer rows, every credential revoked, and no new rows.
+        let retired: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM api_key_management_issuer), \
+             (SELECT count(*) FROM management_key WHERE revoked_at IS NULL)",
         )
         .fetch_one(pool)
         .await?;
-        assert_eq!(retired_tables, 0);
+        assert_eq!(retired, (0, 0));
+        assert!(
+            sqlx::query(
+                "INSERT INTO api_key_management_issuer(api_key_id,management_key_id) VALUES(?,?)"
+            )
+            .bind(self.key)
+            .bind(self.issuer)
+            .execute(pool)
+            .await
+            .is_err()
+        );
         let result: String = sqlx::query_scalar("SELECT result FROM run WHERE run_id=?")
             .bind(self.run)
             .fetch_one(pool)
@@ -291,7 +304,8 @@ impl ExistingRows {
 
 #[tokio::test]
 async fn sqlite_upgrades_preserve_populated_data_and_retire_management_credentials() -> TestResult {
-    for baseline in [9, 13] {
+    // 14 is the Hot 3.0.0 schema.
+    for baseline in [9, 13, 14] {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("existing.db");
         let pool = existing_database(&path, baseline).await?;
@@ -326,22 +340,24 @@ async fn sqlite_upgrades_preserve_populated_data_and_retire_management_credentia
             upgraded.len(),
             migrations_through(i64::MAX).await?.migrations.len()
         );
-        // Both baselines precede 014, which backfills admissions from runs.
-        let admission: (Uuid, Uuid, Uuid, String) = sqlx::query_as(
-            "SELECT root_org_id,org_id,env_id,admitted_at FROM run_admission WHERE run_id=?",
-        )
-        .bind(rows.run)
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(
-            admission,
-            (
-                rows.org,
-                rows.org,
-                rows.env,
-                "2026-09-01 12:00:00".to_string()
+        // 014 backfills admissions from the runs before it.
+        if baseline < 14 {
+            let admission: (Uuid, Uuid, Uuid, String) = sqlx::query_as(
+                "SELECT root_org_id,org_id,env_id,admitted_at FROM run_admission WHERE run_id=?",
             )
-        );
+            .bind(rows.run)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(
+                admission,
+                (
+                    rows.org,
+                    rows.org,
+                    rows.env,
+                    "2026-09-01 12:00:00".to_string()
+                )
+            );
+        }
         rows.add_org_key_issuer(&pool).await?;
         rows.assert_preserved_and_protected(&pool, true).await?;
         pool.close().await;

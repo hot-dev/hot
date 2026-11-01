@@ -31,27 +31,47 @@ pub(crate) async fn run_db(
                     return Ok(());
                 }
             }
-            let uri = get_db_uri_from_conf(conf);
-            if matches!(DatabaseType::from_uri(&uri), Ok(DatabaseType::Sqlite)) {
-                match hot::db::pending_sqlite_migrations(&uri).await {
-                    Ok(pending) if pending.is_empty() => println!("  Migrations: up to date"),
-                    Ok(pending) => {
+            match hot::db::migration_state(conf).await {
+                Ok(Some(state)) => match state.conflict() {
+                    Some(conflict) => println!("  Migrations: {conflict}"),
+                    None if state.pending.is_empty() => {
+                        println!("  Migrations: up to date ({} applied)", state.applied.len())
+                    }
+                    None => {
                         let versions: Vec<String> =
-                            pending.iter().map(|v| format!("{v:03}")).collect();
+                            state.pending.iter().map(|v| format!("{v:03}")).collect();
                         println!(
                             "  Migrations: {} pending ({}). Run `hot db migrate`.",
-                            pending.len(),
+                            state.pending.len(),
                             versions.join(", ")
                         );
                     }
-                    Err(e) => println!("  Migrations: unknown - {}", e),
-                }
+                },
+                // PostgreSQL keeps the ledger from the runtime login.
+                Ok(None) => println!(
+                    "  Migrations: not shown; pass --db.migration-uri (the schema owner) to read the ledger"
+                ),
+                Err(e) => println!("  Migrations: unknown - {}", e),
             }
         }
         "migrate" => {
             info!("Running database migrations...");
             match crate::run_migrations_with_bootstrap(conf, providers).await {
-                Ok(_) => println!("Migrations completed successfully"),
+                Ok(_) => {
+                    println!("Migrations completed successfully");
+                    if matches!(
+                        DatabaseType::from_uri(&get_db_uri_from_conf(conf)),
+                        Ok(DatabaseType::Postgres)
+                    ) {
+                        // New tables have no runtime grants until provisioning
+                        // runs again, and services fail every request without them.
+                        println!(
+                            "Rerun resources/db/postgres/provision_runtime.sql for the runtime \
+                             login before starting services: \
+                             https://hot.dev/docs/configuration/postgres"
+                        );
+                    }
+                }
                 Err(e) => {
                     crate::report_migration_failure("Migration failed", &e);
                     return Err("Migration failed".to_string());

@@ -13,7 +13,11 @@
             Organization overview and settings
         </p>
         {% if org.is_child() %}
-        <p class="mt-2 text-sm text-gray-500">Child organization · Billing and account membership are managed by the parent organization.</p>
+        {% match parent_name %}{% when Some with (parent) %}
+        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">Sub-organization of {{ parent }} · {{ parent }} manages its billing and account members.</p>
+        {% when None %}
+        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">Sub-organization · Its parent organization manages its billing and account members.</p>
+        {% endmatch %}
         {% endif %}
 
         {% include "org_tabs.html" %}

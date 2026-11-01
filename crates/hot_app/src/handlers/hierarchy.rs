@@ -13,11 +13,14 @@ use uuid::Uuid;
 /// - `collecting`   — run is still in progress, calls may still arrive
 /// - `expired`      — run is older than the org's call retention window
 /// - `not_included` — org's plan does not include call data (retention = 0)
+/// - `disabled`     — the run recorded no calls because its org turned call
+///   tracing off (`call_tracing: false` in the run's info)
 /// - `empty`        — run completed within retention but recorded no calls
 const CALL_STATUS_AVAILABLE: &str = "available";
 const CALL_STATUS_COLLECTING: &str = "collecting";
 const CALL_STATUS_EXPIRED: &str = "expired";
 const CALL_STATUS_NOT_INCLUDED: &str = "not_included";
+const CALL_STATUS_DISABLED: &str = "disabled";
 const CALL_STATUS_EMPTY: &str = "empty";
 
 /// GET /data/runs/{run_id}/hierarchy
@@ -125,8 +128,16 @@ pub async fn get_hierarchy_handler(
     match build_hierarchy(&db, &run_id).await {
         Ok(hierarchy) => {
             // Determine fine-grained status based on call count and run state
+            let tracing_off = run
+                .info
+                .as_ref()
+                .and_then(|info| info.get("call_tracing"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(false);
             let call_data_status = if hierarchy.total_calls > 0 {
                 CALL_STATUS_AVAILABLE
+            } else if tracing_off {
+                CALL_STATUS_DISABLED
             } else {
                 // No calls — check if the run is still in progress
                 if run.status == "running" {

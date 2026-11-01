@@ -48,7 +48,7 @@
             </div>
 
             {% if is_current %}
-            <span class="block w-full text-center py-3 px-4 rounded-md font-medium bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-default">
+            <span class="block w-full text-center py-3 px-4 rounded-md font-medium bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-default">
                 Current Plan
             </span>
             {% else %}
@@ -118,7 +118,7 @@ function setBilling(period) {
     // Update links
     document.querySelectorAll('.plan-link').forEach(link => {
         const planId = link.dataset.planId;
-        link.href = `/@{{ org.slug }}/billing/checkout?plan=${planId}&billing=${period}`;
+        link.href = '/@' + {{ org.slug|js|safe }} + `/billing/checkout?plan=${planId}&billing=${period}`;
     });
 }
 </script>

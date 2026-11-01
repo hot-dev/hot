@@ -10,36 +10,86 @@ use thiserror::Error;
 use super::DatabasePool;
 
 /// Start of the monthly window that allowances such as runs per month count
-/// from. Billing advances `current_period_start` each month only for monthly
-/// plans; annual plans, and free plans that never renew, keep their first
-/// start. So the window is the latest monthly anniversary of the subscription
-/// start, computed from the original anchor so month-end dates clamp (Jan 31,
-/// Feb 29, Mar 31) without drifting. Accounts without a plan, and a start in
-/// the future, use the calendar month: a window that moved with every request
-/// would reset its counter each time.
+/// from. See [`monthly_usage_window`].
 pub fn monthly_usage_start(
     now: DateTime<Utc>,
-    subscription_start: Option<DateTime<Utc>>,
+    period_start: Option<DateTime<Utc>>,
+    period_end: Option<DateTime<Utc>>,
 ) -> DateTime<Utc> {
-    let Some(start) = subscription_start.filter(|start| *start <= now) else {
-        return Utc
+    monthly_usage_window(now, period_start, period_end).0
+}
+
+/// The `[start, end)` monthly window that allowances such as runs per month
+/// count in, from the subscription's stored billing period.
+///
+/// Billing advances the stored period every month for monthly plans, so while
+/// `now` is inside a period of at most a month that period is the window. The
+/// provider keeps a 29th-31st anchor across short months (Jan 31, Feb 28,
+/// Mar 31), which anniversaries of a clamped Feb 28 start would lose.
+///
+/// Annual plans, free plans that never renew and periods the provider has not
+/// advanced yet reset monthly on anniversaries of the period start's day. A
+/// start on the last day of a short month may be a clamped later anchor; the
+/// period end, which comes from the same anchor, recovers it. Each anniversary
+/// is computed from the anchor, so month-end dates clamp without drifting.
+///
+/// Accounts without a plan, and a start in the future, use the calendar month:
+/// a window that moved with every request would reset its counter each time.
+pub fn monthly_usage_window(
+    now: DateTime<Utc>,
+    period_start: Option<DateTime<Utc>>,
+    period_end: Option<DateTime<Utc>>,
+) -> (DateTime<Utc>, DateTime<Utc>) {
+    let Some(start) = period_start.filter(|start| *start <= now) else {
+        let month = Utc
             .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
             .single()
             .expect("valid month");
+        return (month, add_months(month, 1));
     };
-    let months = ((now.year() - start.year()) * 12 + now.month() as i32 - start.month() as i32)
-        .max(0) as u32;
-    let anniversary = |months: u32| {
-        start
-            .checked_add_months(chrono::Months::new(months))
-            .unwrap_or(start)
-    };
-    let candidate = anniversary(months);
-    if candidate > now {
-        anniversary(months.saturating_sub(1))
-    } else {
-        candidate
+    let end = period_end.filter(|end| *end > start);
+    if let Some(end) = end
+        && now < end
+        && end - start <= chrono::Duration::days(31)
+    {
+        return (start, end);
     }
+    let start_day = start.day();
+    let anchor_day = match end {
+        Some(end) if start_day == days_in_month(start) && end.day() > start_day => end.day(),
+        _ => start_day,
+    };
+    let anniversary = |months: u32| {
+        let month = add_months(start.with_day(1).expect("valid day"), months);
+        month
+            .with_day(anchor_day.min(days_in_month(month)))
+            .expect("valid day")
+    };
+    let mut months = ((now.year() - start.year()) * 12 + now.month() as i32 - start.month() as i32)
+        .max(0) as u32;
+    if anniversary(months) > now {
+        months = months.saturating_sub(1);
+    }
+    let window_end = anniversary(months + 1);
+    // An annual period's last window ends with the period.
+    let window_end = match end {
+        Some(end) if now < end => window_end.min(end),
+        _ => window_end,
+    };
+    (anniversary(months), window_end)
+}
+
+fn add_months(date: DateTime<Utc>, months: u32) -> DateTime<Utc> {
+    date.checked_add_months(chrono::Months::new(months))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
+}
+
+fn days_in_month(date: DateTime<Utc>) -> u32 {
+    let first = date.date_naive().with_day(1).expect("valid day");
+    let next = first
+        .checked_add_months(chrono::Months::new(1))
+        .unwrap_or(chrono::NaiveDate::MAX);
+    (next - first).num_days() as u32
 }
 
 #[derive(Error, Debug)]
@@ -362,7 +412,7 @@ impl OrgPlan {
             != *org_id
         {
             return Err(PlanError::InvalidOrganization(
-                "child subscriptions are managed by the root".into(),
+                "sub-organization subscriptions are managed by the parent organization".into(),
             ));
         }
         let org_plan_id = Uuid::now_v7();
@@ -1225,6 +1275,12 @@ impl OrgUsageStats {
         .bind(org_id)
         .fetch_one(pool);
 
+        let store_fut = sqlx::query_as::<_, (i64,)>(
+            "SELECT COALESCE(SUM(size), 0) FROM store_map_entry WHERE org_id = ?",
+        )
+        .bind(org_id)
+        .fetch_one(pool);
+
         let blob_fut = sqlx::query_as::<_, (i64,)>(
             "SELECT COALESCE(SUM(size), 0) FROM blob_object
              WHERE org_id = ? AND status = 'available'",
@@ -1232,15 +1288,17 @@ impl OrgUsageStats {
         .bind(org_id)
         .fetch_one(pool);
 
-        let (runs_row, file_row, team_row, call_row, blob_row, task_row, schedule_row) = tokio::try_join!(
-            runs_fut,
-            file_fut,
-            team_fut,
-            call_fut,
-            blob_fut,
-            task_fut,
-            schedule_fut
-        )?;
+        let (runs_row, file_row, team_row, call_row, store_row, blob_row, task_row, schedule_row) =
+            tokio::try_join!(
+                runs_fut,
+                file_fut,
+                team_fut,
+                call_fut,
+                store_fut,
+                blob_fut,
+                task_fut,
+                schedule_fut
+            )?;
 
         Ok(Self {
             runs_this_period: runs_row.0,
@@ -1249,7 +1307,7 @@ impl OrgUsageStats {
             call_storage_bytes: call_row.0,
             call_count: call_row.1,
             oldest_call_time: call_row.2,
-            store_storage_bytes: 0,
+            store_storage_bytes: store_row.0,
             blob_storage_bytes: blob_row.0,
             tasks_this_period: task_row.0,
             task_duration_ms: task_row.1.unwrap_or(0),

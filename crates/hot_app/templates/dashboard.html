@@ -16,7 +16,7 @@ document.addEventListener('alpine:init', () => {
         timeRange: 'P1D',
         timeUnit: 'hour',  // Auto-selected based on timeRange
 {% endraw %}
-        projects: {{ projects_json|safe }},
+        projects: {{ projects_json|js|safe }},
 {% raw %}
 
         // Auto-select appropriate time unit based on time range
@@ -351,7 +351,7 @@ function formatPartialTooltip(params, totalPoints) {
         const displayName = param.seriesName.replace(/^__partial__/, '');
         if (!seen.has(displayName) && param.value != null) {
             seen.add(displayName);
-            result += `${param.marker} ${displayName}: ${param.value}<br/>`;
+            result += `${param.marker} ${echarts.format.encodeHTML(displayName)}: ${param.value}<br/>`;
         }
     });
     return result;
@@ -597,7 +597,10 @@ function updateActivityTimelineChart(data) {
                         return formatPartialTooltip(params, data.dates.length);
                     }
                 },
+                // A scrolling legend stays on one row on phones; the grid starts below it in
+                // pixels, and the left margin leaves room for the first rotated date label.
                 legend: {
+                    type: 'scroll',
                     data: data.series.map(s => s.name),
                     top: 0,
                     textStyle: {
@@ -605,10 +608,10 @@ function updateActivityTimelineChart(data) {
                     }
                 },
                 grid: {
-                    left: '3%',
+                    left: 24,
                     right: '4%',
                     bottom: '15%',
-                    top: '10%',
+                    top: 40,
                     containLabel: true
                 },
                 xAxis: {
@@ -751,17 +754,18 @@ function updateRunTypeTimelineChart(data) {
                     }
                 },
                 legend: {
+                    type: 'scroll',
                     data: data.series.map(s => s.name),
                     textStyle: {
                         color: getTextColor()
                     },
-                    top: 10
+                    top: 0
                 },
                 grid: {
-                    left: '3%',
+                    left: 24,
                     right: '4%',
                     bottom: '15%',
-                    top: '15%',
+                    top: 40,
                     containLabel: true
                 },
                 xAxis: {
@@ -1422,7 +1426,8 @@ function updateEventTypeTimelineChart(data) {
                         }
                         result += '<br/>';
                         params.forEach(param => {
-                            result += `${param.marker} ${param.seriesName}: ${param.value}<br/>`;
+                            // Series are deployed event types; echarts renders tooltips as HTML.
+                            result += `${param.marker} ${echarts.format.encodeHTML(param.seriesName)}: ${param.value}<br/>`;
                         });
                         return result;
                     }
@@ -1879,7 +1884,7 @@ function updateLatencyTimelineChart(kind, data) {
                     const name = param.seriesName.replace(/^__partial__/, '');
                     if (!seen.has(name) && param.value != null) {
                         seen.add(name);
-                        result += `${param.marker} ${name} ${percentile}: ${formatLatencyMs(param.value)}<br/>`;
+                        result += `${param.marker} ${echarts.format.encodeHTML(name)} ${percentile}: ${formatLatencyMs(param.value)}<br/>`;
                     }
                 });
                 const count = (data.sample_counts || [])[index] || 0;
@@ -1981,7 +1986,7 @@ function updateTaskCusTimelineChart(data) {
                         if (isLastPoint) result += ' <span style="color: ' + getSecondaryTextColor() + '">(partial)</span>';
                         result += '<br/>';
                         params.forEach(p => {
-                            if (p.value != null) result += `${p.marker} ${p.seriesName}: ${formatNumber(p.value)}<br/>`;
+                            if (p.value != null) result += `${p.marker} ${echarts.format.encodeHTML(p.seriesName)}: ${formatNumber(p.value)}<br/>`;
                         });
                         return result;
                     }
@@ -2171,6 +2176,8 @@ function hideChartSkeleton(chartId) {
 // skeleton overlay once the task completes so each chart fades from
 // pulsing-placeholder → real chart in order, giving a clear progress cue.
 async function refreshDashboardData() {
+    // A held workspace serves no data; the page's notice explains why.
+    if (document.getElementById('main-content')?.dataset.workspaceHeld === 'true') return;
     const context = createDashboardRefreshContext();
     const tasks = [
         // Top-of-page KPIs + issues banner data (highest priority).

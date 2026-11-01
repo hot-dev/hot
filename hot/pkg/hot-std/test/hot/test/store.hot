@@ -230,14 +230,21 @@ meta ["test"] fn () {
     assert-eq(3, ::store/get(s, "z"), "put-many entries are accessible")
 }
 
-// Add one entry to the map stored at `key`, retrying until no other writer
-// changed it between the read and the write.
+// Add one entry to the map stored at `key`, retrying while another writer
+// changed it between the read and the write. Each retry means another
+// writer won, so the budget only stops a put-if that never matches.
 add-entry fn (s: ::store/Map, key: Str, entry-key: Str, entry: Any): Map {
+    add-entry-within(s, key, entry-key, entry, 100)
+}
+
+add-entry-within fn (s: ::store/Map, key: Str, entry-key: Str, entry: Any, attempts: Int): Map {
     current ::store/get(s, key)
     next assoc(if(is-null(current), {}, current), entry-key, entry)
+    wrote ::store/put-if(s, key, current, next)
     cond {
-        ::store/put-if(s, key, current, next) => { next }
-        => { add-entry(s, key, entry-key, entry) }
+        wrote => { next }
+        lte(attempts, 1) => { fail(`put-if never matched ${key}`) }
+        => { add-entry-within(s, key, entry-key, entry, sub(attempts, 1)) }
     }
 }
 
@@ -264,6 +271,54 @@ meta ["test"] fn () {
     assert(::store/put-if(s, "case", current, next), "a value read with get matches the stored value")
     assert(not(::store/put-if(s, "case", current, {})), "the earlier read no longer matches")
     assert-eq(next, ::store/get(s, "case"), "the matching write is the stored value")
+}
+
+// Decs read back as the Decs written, so put-if matches what get returned:
+// an integral Dec used to read back as a Dec that never matched, and a Dec
+// with trailing zeros as a Str
+test-put-if-matches-decs-read-back
+meta ["test"] fn () {
+    s ::store/Map({name: "test-put-if-decs"})
+    ::store/clear(s)
+    values [Dec(100), Dec(0), 100.0, 2.0, 19.90, mul(2.5, 2), div(Dec(1000), 100), Dec(10000000000000000), {total: Dec(100)}, [Dec(7), 2.50]]
+    for-each(range(0, length(values)), (i) {
+        key `dec-${i}`
+        value values[i]
+        ::store/put(s, key, value)
+        current ::store/get(s, key)
+        assert-eq(value, current, `${key} reads back as written`)
+        assert(not(is-str(current)), `${key} does not read back as a Str`)
+        assert(::store/put-if(s, key, current, "next"), `put-if matches ${key} as get returned it`)
+    })
+    total add-entry(s, "budget", "spent", Dec(100))
+    assert-eq(Dec(100), total.spent, "a put-if loop over a Dec finishes")
+}
+
+test-store-decs-keep-their-type-and-digits
+meta ["test"] fn () {
+    s ::store/Map({name: "test-store-decs"})
+    ::store/clear(s)
+    ::store/put(s, "order", {total: 19.90, tax: 2.0, count: 3})
+    order ::store/get(s, "order")
+    assert(is-dec(order.total), "a Dec with a trailing zero reads back as a Dec")
+    assert-eq("19.90", Str(order.total), "its digits are kept")
+    assert-eq(20.00, add(order.total, 0.10), "it takes part in arithmetic")
+    assert(is-dec(order.tax), "an integral Dec reads back as a Dec")
+    assert(is-int(order.count), "an Int reads back as an Int")
+    assert(is-dec(first(::store/vals(s)).total), "vals returns Decs too")
+    assert(is-dec(first(::store/list(s)).value.tax), "list returns Decs too")
+}
+
+test-list-and-keys-refuse-counts-that-are-not-ints
+meta ["test"] fn () {
+    s ::store/Map({name: "test-list-count-types"})
+    ::store/clear(s)
+    ::store/put(s, "a:1", 1)
+    ::store/put(s, "a:2", 2)
+    assert(is-err(::store/keys(s, {prefix: "a:", limit: 1.0})), "keys refuses a Dec limit")
+    assert(is-err(::store/keys(s, {offset: "1"})), "keys refuses a Str offset")
+    assert(is-err(::store/list(s, {limit: div(3, 2)})), "list refuses a Dec limit")
+    assert-eq(["a:1"], ::store/keys(s, {prefix: "a:", limit: 1}), "an Int limit still applies")
 }
 
 test-put-if-keeps-every-concurrent-entry

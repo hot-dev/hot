@@ -73,6 +73,109 @@ pub fn is_image_allowed(image: &str) -> bool {
     true
 }
 
+/// Give an image reference without a tag or digest the `latest` tag, as
+/// `docker run` does: pulling a bare repository name asks the runtime for
+/// every tag in it. Only the last path component can carry a tag, so a
+/// registry port (`registry:5000/tool`) is not mistaken for one.
+pub(crate) fn with_default_tag(image: &str) -> std::borrow::Cow<'_, str> {
+    let name = image.rsplit('/').next().unwrap_or(image);
+    if image.is_empty() || image.contains('@') || name.contains(':') {
+        std::borrow::Cow::Borrowed(image)
+    } else {
+        std::borrow::Cow::Owned(format!("{image}:latest"))
+    }
+}
+
+/// What a container task's result says about a failed image pull.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PullFailure {
+    pub message: String,
+    /// The worker, its network or its runtime failed, rather than the image
+    /// reference or its credential.
+    pub infra: bool,
+}
+
+/// Turn a runtime's pull error, already stripped of any credential, into a
+/// reason the user can act on. The raw text stays in the worker log: it can
+/// name worker hosts, mirrors and runtime internals. `registry_auth` is the
+/// name of the task's registry-auth secret, if it has one.
+pub(crate) fn describe_pull_failure(
+    detail: &str,
+    image: &str,
+    registry_auth: Option<&str>,
+) -> PullFailure {
+    // Match on the runtime's words, not on the image name inside them.
+    let mut text = detail.to_lowercase();
+    for name in [with_default_tag(image).into_owned(), image.to_string()] {
+        if !name.is_empty() {
+            text = text.replace(&name.to_lowercase(), "");
+        }
+    }
+    let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
+    let user = |message: String| PullFailure {
+        message,
+        infra: false,
+    };
+
+    if has(&["manifest.v1+prettyjws", "schema 1", "schema1"]) {
+        return user(format!(
+            "Image '{image}' uses the Docker schema 1 image format, which this worker can no \
+             longer pull. Rebuild it, or push it again as a Docker v2 or OCI image"
+        ));
+    }
+    if has(&["no matching manifest"]) {
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        return user(format!(
+            "Image '{image}' has no variant for this worker's platform (linux/{arch})"
+        ));
+    }
+    if has(&["toomanyrequests", "rate limit"]) {
+        return PullFailure {
+            message: format!(
+                "The registry rate-limited this worker's pull of '{image}'. Try again later"
+            ),
+            infra: true,
+        };
+    }
+    if has(&["invalid reference format"]) {
+        return user(format!("Image reference '{image}' is not valid"));
+    }
+    if has(&[
+        "unauthorized",
+        "authentication required",
+        "incorrect username or password",
+        "access denied",
+        "insufficient_scope",
+        "forbidden",
+        ": denied",
+        "may require 'docker login'",
+    ]) {
+        return user(match registry_auth {
+            Some(entry) => format!(
+                "The registry refused to pull '{image}' with registry-auth secret '{entry}'. \
+                 Check that its username and token are current and can read this image"
+            ),
+            None => format!(
+                "The registry refused to pull '{image}': the image does not exist, or it is \
+                 private and needs registry-auth"
+            ),
+        });
+    }
+    if has(&[": not found", "manifest unknown", "not found:"]) {
+        return user(format!(
+            "Image '{image}' was not found. Check the image name and tag"
+        ));
+    }
+    PullFailure {
+        message: "Failed to pull container image".to_string(),
+        infra: true,
+    }
+}
+
 /// Execution output from a container or microVM.
 #[derive(Debug)]
 pub struct ContainerOutput {
@@ -412,6 +515,17 @@ impl BoxExecutor {
         }
     }
 
+    /// Resolves when the runtime reports the container stopped, or can no
+    /// longer wait for it; the caller confirms with `inspect_status`. Never
+    /// resolves for Kata, which runs its workload in `execute_with_extras`.
+    pub async fn wait_not_running(&self, container_id: &str) {
+        match self {
+            Self::Docker(e) => e.wait_not_running(container_id).await,
+            #[cfg(all(target_os = "linux", feature = "kata"))]
+            Self::Kata(_) => std::future::pending::<()>().await,
+        }
+    }
+
     /// Collect logs from a container (running or stopped).
     pub async fn collect_logs(&self, container_id: &str) -> ExecutorResult<(String, String)> {
         match self {
@@ -580,6 +694,7 @@ mod docker {
             if !is_image_allowed(image) {
                 return Err(ExecutorError::ImageNotAllowed(image.to_string()));
             }
+            let image = &*with_default_tag(image);
 
             let slot_start = Instant::now();
             timings.slot_wait_started_at = Some(slot_start);
@@ -646,6 +761,7 @@ mod docker {
             if !is_image_allowed(image) {
                 return Err(ExecutorError::ImageNotAllowed(image.to_string()));
             }
+            let image = &*with_default_tag(image);
 
             // No slot-wait phase here: phased Docker execution has no
             // executor-internal semaphore — the container-task path's only
@@ -834,6 +950,17 @@ mod docker {
             } else {
                 Ok(Some(state.exit_code.unwrap_or(-1)))
             }
+        }
+
+        pub async fn wait_not_running(&self, container_id: &str) {
+            let options = WaitContainerOptionsBuilder::default()
+                .condition("not-running")
+                .build();
+            // The stream ends once the container stops; bollard reports a
+            // non-zero exit as an error item, so the items themselves are
+            // not the status.
+            let mut wait = self.docker.wait_container(container_id, Some(options));
+            while wait.next().await.is_some() {}
         }
 
         /// Collect stdout and stderr from a container.
@@ -1101,21 +1228,23 @@ mod docker {
 /// Normalize a short image name to a fully qualified reference.
 ///
 /// containerd/ctr (unlike Docker) doesn't auto-resolve short names.
-/// `alpine:latest` must become `docker.io/library/alpine:latest`.
+/// `alpine:latest` must become `docker.io/library/alpine:latest`, and
+/// `alpine` becomes `docker.io/library/alpine:latest` (see
+/// [`with_default_tag`]).
 #[cfg(feature = "kata")]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn normalize_image_ref(image: &str) -> String {
     if image.contains("://") {
         return image.to_string();
     }
-    if let Some(slash_pos) = image.find('/') {
-        let prefix = &image[..slash_pos];
-        if prefix.contains('.') || prefix.contains(':') {
-            return image.to_string();
+    let qualified = match image.find('/') {
+        Some(slash_pos) if image[..slash_pos].contains('.') || image[..slash_pos].contains(':') => {
+            image.to_string()
         }
-        return format!("docker.io/{image}");
-    }
-    format!("docker.io/library/{image}")
+        Some(_) => format!("docker.io/{image}"),
+        None => format!("docker.io/library/{image}"),
+    };
+    with_default_tag(&qualified).into_owned()
 }
 
 /// Derive the base container ID for a task from its trace/task ID: the
@@ -3046,6 +3175,108 @@ mod tests {
     }
 
     #[test]
+    fn untagged_images_default_to_latest() {
+        assert_eq!(with_default_tag("alpine"), "alpine:latest");
+        assert_eq!(with_default_tag("my-org/tool"), "my-org/tool:latest");
+        assert_eq!(
+            with_default_tag("ghcr.io/my-org/tool"),
+            "ghcr.io/my-org/tool:latest"
+        );
+        // A registry port is not a tag.
+        assert_eq!(
+            with_default_tag("registry:5000/tool"),
+            "registry:5000/tool:latest"
+        );
+        for unchanged in [
+            "alpine:3.21",
+            "registry:5000/tool:1.2",
+            "alpine@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1",
+            "alpine:3.21@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1",
+            "",
+        ] {
+            assert_eq!(with_default_tag(unchanged), unchanged);
+        }
+    }
+
+    #[test]
+    fn pull_failures_name_the_users_fix_and_only_worker_causes_are_infra() {
+        let image = "ghcr.io/acme/tool:1";
+        let cases = [
+            // Docker 29 (containerd image store) for a missing tag.
+            (
+                "Failed to pull image 'alpine:nope': Docker responded with status code 404: \
+                 failed to resolve reference \"docker.io/library/alpine:nope\": \
+                 docker.io/library/alpine:nope: not found",
+                "alpine:nope",
+                None,
+                "was not found",
+            ),
+            (
+                "Docker responded with status code 404: pull access denied for acme/private, \
+                 repository does not exist or may require 'docker login'",
+                "acme/private",
+                None,
+                "private and needs registry-auth",
+            ),
+            (
+                "Docker responded with status code 500: error from registry: denied",
+                image,
+                Some("ghcr-pull"),
+                "registry-auth secret 'ghcr-pull'",
+            ),
+            (
+                "Docker responded with status code 500: authentication required - incorrect \
+                 username or password",
+                "acme/private:2",
+                Some("hub"),
+                "registry-auth secret 'hub'",
+            ),
+            (
+                "Docker responded with status code 501: not implemented: media type \
+                 \"application/vnd.docker.distribution.manifest.v1+prettyjws\" is no longer \
+                 supported since containerd v2.1",
+                "alpine:2.6",
+                None,
+                "schema 1",
+            ),
+            (
+                "no matching manifest for linux/arm64/v8 in the manifest list entries",
+                image,
+                None,
+                "no variant for this worker's platform",
+            ),
+        ];
+        // The third field names the ctx entry registry-auth reads, never its value.
+        for (detail, image, auth_entry, expected) in cases {
+            let failure = describe_pull_failure(detail, image, auth_entry);
+            assert!(
+                failure.message.contains(expected),
+                "{detail} -> {}",
+                failure.message
+            );
+            assert!(!failure.infra, "{detail} is the user's to fix");
+        }
+
+        for detail in [
+            "Docker responded with status code 500: Get \"https://ghcr.io/v2/\": dial tcp: \
+             i/o timeout",
+            "this worker's containerd has no Transfer service, which pulling with \
+             registry-auth needs (containerd 1.7 or later)",
+            "toomanyrequests: You have reached your pull rate limit",
+        ] {
+            assert!(describe_pull_failure(detail, image, None).infra, "{detail}");
+        }
+
+        // An image whose name holds a keyword is judged by the runtime's words.
+        let failure = describe_pull_failure(
+            "Failed to pull image 'acme/unauthorized-tool': dial tcp: i/o timeout",
+            "acme/unauthorized-tool",
+            None,
+        );
+        assert!(failure.infra);
+    }
+
+    #[test]
     fn test_kata_cleanup_step_budget_fits_outer_envelope() {
         // `MAX_SETUP_ATTEMPTS` per-id sweeps of `KATA_CLEANUP_STEPS_PER_SWEEP`
         // bounded steps each, plus the final CNI teardown for network tasks.
@@ -3141,7 +3372,10 @@ mod kata_tests {
             normalize_image_ref("alpine:latest"),
             "docker.io/library/alpine:latest"
         );
-        assert_eq!(normalize_image_ref("alpine"), "docker.io/library/alpine");
+        assert_eq!(
+            normalize_image_ref("alpine"),
+            "docker.io/library/alpine:latest"
+        );
         assert_eq!(
             normalize_image_ref("ubuntu:22.04"),
             "docker.io/library/ubuntu:22.04"
@@ -3156,7 +3390,11 @@ mod kata_tests {
         );
         assert_eq!(
             normalize_image_ref("myorg/myimage"),
-            "docker.io/myorg/myimage"
+            "docker.io/myorg/myimage:latest"
+        );
+        assert_eq!(
+            normalize_image_ref("localhost:5000/image"),
+            "localhost:5000/image:latest"
         );
         // Already fully qualified -- unchanged
         assert_eq!(

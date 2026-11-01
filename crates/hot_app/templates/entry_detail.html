@@ -37,7 +37,7 @@
                 <dd class="mt-1 text-gray-900 dark:text-white">
                     {% if entry.has_embedding %}
                         {% match entry.embedding_dimensions %}
-                        {% when Some with (d) %}<span class="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ d }} dims</span>{% when None %}<span class="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">present</span>{% endmatch %}
+                        {% when Some with (d) %}<span class="badge badge-running">{{ d }} dims</span>{% when None %}<span class="badge badge-running">present</span>{% endmatch %}
                     {% else %}
                         <span class="text-gray-500 dark:text-gray-400 italic">none</span>
                     {% endif %}

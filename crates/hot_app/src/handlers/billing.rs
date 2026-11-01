@@ -48,32 +48,22 @@ async fn checkout_success_redirect(
     org_id: uuid::Uuid,
     org_slug: &str,
 ) -> (axum_extra::extract::CookieJar, Redirect) {
-    let org_cookie = axum_extra::extract::cookie::Cookie::build((
+    let org_cookie = crate::auth::build_cookie(
         crate::auth::current_org_cookie_name(),
         org_id.to_string(),
-    ))
-    .path("/")
-    .max_age(time::Duration::days(30))
-    .http_only(true)
-    .same_site(axum_extra::extract::cookie::SameSite::Lax)
-    .secure(!hot::env::is_local_dev())
-    .build();
+        time::Duration::days(30),
+    );
 
     let mut jar = jar.add(org_cookie);
 
     if let Ok(envs) = hot::db::env::Env::get_envs_by_org(db, &org_id).await
         && let Some(first_env) = envs.first()
     {
-        let env_cookie = axum_extra::extract::cookie::Cookie::build((
+        let env_cookie = crate::auth::build_cookie(
             crate::auth::current_env_cookie_name(),
             first_env.env_id.to_string(),
-        ))
-        .path("/")
-        .max_age(time::Duration::days(30))
-        .http_only(true)
-        .same_site(axum_extra::extract::cookie::SameSite::Lax)
-        .secure(!hot::env::is_local_dev())
-        .build();
+            time::Duration::days(30),
+        );
         jar = jar.add(env_cookie);
     }
 
@@ -399,6 +389,9 @@ pub async fn view_usage_handler(
         subscription
             .as_ref()
             .and_then(|subscription| subscription.current_period_start),
+        subscription
+            .as_ref()
+            .and_then(|subscription| subscription.current_period_end),
     );
 
     // The stats partial covers the whole account only for a root
@@ -475,6 +468,9 @@ pub async fn usage_stats_handler(
         subscription
             .as_ref()
             .and_then(|subscription| subscription.current_period_start),
+        subscription
+            .as_ref()
+            .and_then(|subscription| subscription.current_period_end),
     );
 
     // Get call retention days from features

@@ -121,6 +121,9 @@ Implemented:
 - In Hot: SMTP email delivery, `hot admin bootstrap`/`reset-password` and the
   `app.signup` policy for operator-managed accounts, and outbound allowlists
   (`network.allow-cidrs`, `allow-hosts`, `deny-cidrs`) behind a fixed deny set.
+- Scheduler lock liveness: the scheduler confirms its PostgreSQL singleton lock
+  every two seconds and exits non-zero when it loses the lock, so its
+  supervisor restarts it.
 
 The roots intentionally require `acknowledge_unqualified = true`. The bootstrap
 also refuses to start if the supplied image lacks `hot-agent.service`. Real

@@ -10,15 +10,20 @@ The [Hot runtime API](/docs/api) supports three credential types for authenticat
 |-----------|-------------|----------|---------|
 | **API Key** | `hot_<uuid>_<secret>` | Long-lived | Full environment access for you and your team |
 | **Service Key** | `<uuid>_<secret>` | Long-lived (optional expiry) | Permission-scoped access for your customers and integrations |
-| **Session** | `s_<uuid>_<secret>` | Short-lived (1h default, 24h max) | Ephemeral, permission-scoped access for browser clients |
-| **Org API Key** | `hot_<uuid>_<secret>` | Long-lived (optional expiry) | Creating and managing child organizations, their environments and API keys |
+| **Session** | `s_<uuid>_<secret>` | Short-lived (1h default, 24h max) | Ephemeral, permission-scoped access, such as a backend acting for a browser visitor |
+| **Org API Key** | `hot_<uuid>_<secret>` | Long-lived (optional expiry) | Creating and managing sub-organizations, their environments and API keys |
 
-Children own independent environments and deployments. Use a child's environment
-credential to access its resources. A parent's runtime key does not inherit child
-access, and service-key metadata cannot change scope. Root administrators can
-create [org API keys](/docs/api/management) for child provisioning and for
-minting child environment keys; org keys cannot execute workflows or call
-runtime endpoints.
+Sub-organizations own independent environments and deployments. Use a
+sub-organization's environment credential to access its resources. A parent
+organization's runtime key does not reach its sub-organizations, and
+service-key metadata cannot change scope. Administrators of the parent
+organization can create [org API keys](/docs/api/management) to provision
+sub-organizations and mint their environment keys; org keys cannot execute
+workflows or call runtime endpoints. Org keys replaced the `hm_` management
+credentials of Hot 3.0.0, which no longer authenticate.
+
+The API sends no CORS headers: call it from your backend, not from browser
+code. See [Browser Clients and CORS](/docs/api#browser-clients-and-cors).
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" https://api.hot.dev/v1/projects
@@ -51,7 +56,7 @@ From the [Hot App](/docs/app), click **New Service Key**. You'll specify:
 
 - **Name** — A human-readable label (e.g., "Acme Corp Production")
 - **Description** — What the key is for
-- **Metadata** — Optional JSON attached to the key (e.g., `{"customer_id": "acme-123"}`). Encrypted at rest and available to your Hot functions at runtime via `req.auth.service-key.meta`. Use this to pass customer context into your functions without requiring extra parameters. See [Caller Identity](/docs/mcp#caller-identity-hotrequest) for details.
+- **Metadata** — Optional JSON attached to the key (e.g., `{"customer_id": "acme-123"}`). Encrypted at rest and available to your Hot functions at runtime via `req.auth.service-key.meta`. Use this to pass customer context into your functions without requiring extra parameters. See [Caller Identity](/docs/mcp#caller-identity) for details.
 - **Permissions** — A granular permission map using the [permissions model](#permissions-model) below.
 - **Expiration** — Optional. Leave empty for a key that never expires.
 
@@ -83,7 +88,7 @@ API keys, service keys, and sessions all share the same permissions model. Permi
 
 ```json
 {
-  "mcp:weather": ["execute"],
+  "mcp:weather/*": ["execute"],
   "event:*": ["create"]
 }
 ```
@@ -92,17 +97,21 @@ API keys, service keys, and sessions all share the same permissions model. Permi
 |------------|--------|-------------|
 | **Full Access** | `{"*:*": ["*"]}` | Unrestricted access to all API endpoints |
 | **MCP** | `{"mcp:*": ["execute"]}` | Invoke MCP tools across all services |
-| **MCP (specific)** | `{"mcp:weather": ["execute"]}` | Invoke MCP tools in a specific service only |
+| **MCP (specific)** | `{"mcp:weather/*": ["execute"]}` | Invoke MCP tools in a specific service only |
 | **Events** | `{"event:*": ["create", "read"]}` | Publish and read events |
 | **Builds** | `{"build:*": ["create", "read", "execute"]}` | Upload, read, and deploy builds |
 | **Context Variables** | `{"context:*": ["create", "read", "update", "delete"]}` | Manage context variables |
 | **Webhooks** | `{"webhook:*": ["execute"]}` | Access webhook endpoints that require API key authentication |
-| **Webhooks (specific)** | `{"webhook:internal": ["execute"]}` | Webhook access for a specific service only |
+| **Webhooks (specific)** | `{"webhook:internal/*": ["execute"]}` | Webhook access for a specific service only |
+
+A service-specific grant names the service's tools or paths with `/*`, as in
+`mcp:weather/*` or `webhook:internal/*`. A bare service name such as
+`mcp:weather` matches no tool or endpoint, so it grants nothing.
 
 This allows you to create credentials narrowly scoped to just the capabilities needed—useful for giving an AI agent access to specific MCP tools, or restricting a webhook caller to a single service.
 
 Private API routes enforce these permissions too: being an API key does not
-bypass its grants. See the [API permission matrix](/docs/api/management) for
+bypass its grants. See the [API permission matrix](/docs/api/management#environment-api-keys) for
 administrative resources, collection requirements, file/domain/blob permissions,
 and the separate permissions required to issue sessions or service keys.
 
@@ -126,8 +135,8 @@ Presets add rules to the builder — they don't replace existing rules.
 
 **Rule Builder** — Each rule has three parts:
 
-1. **Resource Type** — Select a type from the dropdown (`mcp`, `webhook`, `stream`, `event`, `run`, `project`, `build`, `context`, `key`, `session`, `env`), or `All (*)` for a wildcard that covers every type.
-2. **Path** — The resource path, usually `*` (all resources of that type) or a specific service name (e.g., `weather`). When the resource type is `All (*)`, the path is locked to `*`.
+1. **Resource Type** — Select a type from the dropdown (`mcp`, `webhook`, `stream`, `event`, `run`, `call`, `project`, `build`, `context`, `key`, `session`, `env`, `file`, `blob`, `domain`), or `All (*)` for a wildcard that covers every type.
+2. **Path** — The resource path, usually `*` (all resources of that type) or one service's tools or endpoints (e.g., `weather/*`; a bare `weather` grants nothing). When the resource type is `All (*)`, the path is locked to `*`.
 3. **Actions** — Check one or more actions: `create`, `read`, `update`, `delete`, `execute`, or `*` (all actions). The available actions depend on the resource type.
 
 Click **Add Rule** to add additional rules. Rules with no actions checked are silently excluded from the saved permissions.

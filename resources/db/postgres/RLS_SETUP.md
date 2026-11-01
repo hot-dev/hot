@@ -48,9 +48,9 @@ transaction-local settings, connection proxies that multiplex between
 transactions (such as RDS Proxy, which pins sessions on `SET` and direct
 `set_config` statements) can keep multiplexing. The scheduler is the exception:
 its singleton is a session advisory lock held on a dedicated connection, so
-connect it directly or with a pinned session. It checks the lock every 30
-seconds and exits if the lock is lost, so a replacement never runs alongside
-it. Set the runtime login's `search_path`, `statement_timeout` and
+connect it directly or with a pinned session. It checks the lock every 2
+seconds, counts a check that fails or takes over 1 second as a lost lock, and
+then stops dispatching and exits, so a replacement never runs alongside it. Set the runtime login's `search_path`, `statement_timeout` and
 `lock_timeout` as role defaults (`ALTER ROLE ... SET`) or in the proxy's
 initialization query, so every server connection starts with them. The
 connection setup also issues session-level `SET` statements for the same

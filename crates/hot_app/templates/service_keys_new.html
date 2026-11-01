@@ -16,7 +16,7 @@
             <div class="mb-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-3">
                 <div class="flex">
                     <div class="flex-shrink-0">
-                        <svg class="h-5 w-5 text-amber-600 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
+                        <svg class="h-5 w-5 text-amber-700 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
                             <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
                         </svg>
                     </div>
@@ -32,7 +32,7 @@
                 <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Service Key</label>
                 <div class="flex items-center" x-data="{ copied: false }">
                     <code class="flex-1 block w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded-l-md text-sm font-mono text-gray-900 dark:text-white break-all select-all">{{ token }}</code>
-                    <button @click="navigator.clipboard.writeText('{{ token }}'); copied = true; setTimeout(() => copied = false, 2000)" class="px-3 py-2 bg-gray-100 dark:bg-gray-700 border border-l-0 border-gray-300 dark:border-gray-600 rounded-r-md hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors" title="Copy">
+                    <button @click="navigator.clipboard.writeText({{ token|js }}); copied = true; setTimeout(() => copied = false, 2000)" class="px-3 py-2 bg-gray-100 dark:bg-gray-700 border border-l-0 border-gray-300 dark:border-gray-600 rounded-r-md hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors" title="Copy">
                         <span x-show="!copied">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
@@ -112,7 +112,7 @@
                     <div class="mb-3">
                         <div class="flex items-center justify-between mb-1.5">
                             <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Quick Presets</label>
-                            <button type="button" @click="rules = []" x-show="rules.length > 0" class="text-xs font-medium text-gray-400 dark:text-gray-500 hover:text-red-500 dark:hover:text-red-400 transition-colors">Clear</button>
+                            <button type="button" @click="rules = []" x-show="rules.length > 0" class="text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors">Clear</button>
                         </div>
                         <div class="flex flex-wrap gap-1.5">
                             <button type="button" @click="applyPreset('mcp')" class="chip">MCP Tools</button>
@@ -126,7 +126,7 @@
                     <!-- Rule Builder -->
                     <div class="flex items-center justify-between mb-1">
                         <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Permission Rules</label>
-                        <button type="button" @click="addRule()" class="inline-flex items-center gap-1 text-xs font-medium text-hot-red-600 dark:text-hot-red-400 hover:text-hot-red-700 dark:hover:text-hot-red-300 transition-colors">
+                        <button type="button" @click="addRule()" class="inline-flex items-center gap-1 text-xs font-medium text-hot-red-700 dark:text-hot-red-400 hover:text-hot-red-800 dark:hover:text-hot-red-300 transition-colors">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
                             </svg>
@@ -180,12 +180,12 @@
                                         <label x-show="idx === 0" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Actions</label>
                                         <div class="flex flex-wrap items-center gap-x-3 gap-y-1 pt-0.5">
                                             <label class="inline-flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
-                                                <input type="checkbox" :checked="rule.actions.includes('*')" @change="toggleAllActions(rule, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-600 focus:ring-hot-red-500 h-3.5 w-3.5">
+                                                <input type="checkbox" :checked="rule.actions.includes('*')" @change="toggleAllActions(rule, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-700 focus:ring-hot-red-500 h-3.5 w-3.5">
                                                 <span class="text-xs font-medium">All</span>
                                             </label>
                                             <template x-for="action in validActions(rule.type)" :key="action">
                                                 <label class="inline-flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
-                                                    <input type="checkbox" :checked="rule.actions.includes(action) || rule.actions.includes('*')" :disabled="rule.actions.includes('*')" @change="toggleAction(rule, action, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-600 focus:ring-hot-red-500 h-3.5 w-3.5">
+                                                    <input type="checkbox" :checked="rule.actions.includes(action) || rule.actions.includes('*')" :disabled="rule.actions.includes('*')" @change="toggleAction(rule, action, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-700 focus:ring-hot-red-500 h-3.5 w-3.5">
                                                     <span class="text-xs" x-text="action"></span>
                                                 </label>
                                             </template>
@@ -235,8 +235,8 @@
                     };
 
                     const PATH_OPTIONS = {
-                        'mcp': {{ mcp_tools_json|safe }},
-                        'webhook': {{ webhooks_json|safe }},
+                        'mcp': {{ mcp_tool_options|js|safe }},
+                        'webhook': {{ webhook_options|js|safe }},
                     };
 
                     return {

@@ -206,11 +206,19 @@ describe-direction(Direction.Down)  // "going down"
 Reply enum { Steps(Vec), Declined(Str), Sized(Circle), Pending }
 
 summarize fn match (r: Reply): Str {
-    Reply.Steps => { `${length(r)} steps` }       // r is the Vec
-    Reply.Declined (why) => { `declined: ${why}` } // why is the Str
-    Reply.Sized => { `radius ${r.radius}` }       // r is the variant; fields read through
+    Reply.Steps (steps) => { `${length(steps)} steps` } // steps is the Vec
+    Reply.Declined (why) => { `declined: ${why}` }     // why is the Str
+    Reply.Sized => { `radius ${r.radius}` }           // r is the variant; fields read through
     Reply.Pending => { "pending" }
 }
+
+// Without a binding, the matched name is the variant, so it passes on as the enum
+keep-replies fn match (r: Reply): Reply {
+    Reply.Declined => { r }
+    _ => { Reply.Pending }
+}
+
+keep-replies(Reply.Declined("no budget"))  // Reply.Declined("no budget")
 
 summarize(Reply.Steps(["a", "b"]))       // "2 steps"
 summarize(Reply.Declined("no budget"))   // "declined: no budget"
@@ -384,6 +392,7 @@ meta ["test"] fn () {
   assert-eq("declined: no budget", summarize(Reply.Declined("no budget")), "Str payload")
   assert-eq("radius 2.0", summarize(Reply.Sized({radius: 2.0})), "record payload")
   assert-eq("pending", summarize(Reply.Pending), "unit variant")
+  assert(is-type(keep-replies(Reply.Declined("no budget")), Reply.Declined), "the matched name is the variant")
   sized match Reply.Sized({radius: 2.0}) {
     Reply.Sized (c) => { c }
     _ => { null }

@@ -1,7 +1,7 @@
 use crate::lang::hot::time;
 use crate::lang::hot::r#type::{HotResult, untype_recursive};
 use crate::val::Val;
-use crate::validate_args;
+use crate::{validate_args, validate_args_range};
 use parking_lot::Mutex;
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -69,10 +69,15 @@ const NANOS_PER_SECOND: i128 = 1_000_000_000;
 pub struct TestHarness {
     /// Fixed time in nanoseconds since the Unix epoch; `None` reads the system clock.
     now: Mutex<Option<i128>>,
-    /// Events sent since the last `take-sent`, as `{type, data}` maps.
+    /// Events sent since the last `take-sent`, as `{type, data, sent-at}`
+    /// maps; `sent-at` is the test clock when `send` ran.
     sent: Mutex<Vec<Val>>,
     /// Schedules armed by `hot:schedule:new`, in the order they were armed.
     schedules: Mutex<Vec<ArmedSchedule>>,
+    /// The handler and scheduled-call runs of the delivery in progress,
+    /// taken once when it ends. Collecting them in Hot copied every earlier
+    /// run each round, which made long deliveries quadratic.
+    runs: Mutex<Vec<Val>>,
 }
 
 struct ArmedSchedule {
@@ -142,15 +147,18 @@ pub fn fixed_now() -> Option<i128> {
     })
 }
 
-/// Keep an event a test run sent, for `::hot::test/deliver`. Returns false
-/// outside a test run, where `send` publishes instead.
+/// Keep an event a test run sent, for `::hot::test/deliver`, stamped with
+/// the test clock: a relative schedule it arms counts from the send, as the
+/// scheduler's would. Returns false outside a test run, where `send`
+/// publishes instead.
 pub fn record_sent(event_type: &str, data: &Val) -> bool {
     match current_harness() {
         Some(harness) => {
-            harness
-                .sent
-                .lock()
-                .push(crate::val!({"type": event_type, "data": data.clone()}));
+            let mut event = crate::val!({"type": event_type, "data": data.clone()});
+            if let (Val::Map(fields), Ok(now)) = (&mut event, harness_now(&harness)) {
+                fields.insert(Val::from("sent-at"), time::instant_val(now));
+            }
+            harness.sent.lock().push(event);
             true
         }
         None => false,
@@ -235,16 +243,24 @@ pub fn set_now(args: &[Val]) -> HotResult<Val> {
 }
 
 /// Move the test clock by a Duration, fixing it first at the system time if
-/// no test fixed it.
+/// no test fixed it. A zero Duration is refused: it is almost always a unit
+/// the Duration did not carry, and a test that advanced by it would pass
+/// without the time passing.
 pub fn advance(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::test/advance", args, 1);
-    let harness = match harness_for("::hot::test/advance") {
+    let prefix = "::hot::test/advance";
+    let harness = match harness_for(prefix) {
         Ok(harness) => harness,
         Err(e) => return HotResult::Err(e),
     };
     let step = match duration_nanos(&args[0]) {
+        Ok(0) => {
+            return HotResult::Err(Val::from(format!(
+                "{prefix}: the duration is zero, so the clock would not move"
+            )));
+        }
         Ok(step) => step,
-        Err(e) => return HotResult::Err(Val::from(format!("::hot::test/advance: {e}"))),
+        Err(e) => return HotResult::Err(Val::from(format!("{prefix}: {e}"))),
     };
     let mut now = harness.now.lock();
     let from = match *now {
@@ -254,8 +270,17 @@ pub fn advance(args: &[Val]) -> HotResult<Val> {
             Err(e) => return HotResult::Err(Val::from(e)),
         },
     };
-    *now = Some(from + step);
-    HotResult::Ok(time::instant_val(from + step))
+    // An Instant holds its nanoseconds in an Int.
+    let Some(to) = from
+        .checked_add(step)
+        .filter(|to| i64::try_from(*to).is_ok())
+    else {
+        return HotResult::Err(Val::from(format!(
+            "{prefix}: the clock would move past the range of an Instant"
+        )));
+    };
+    *now = Some(to);
+    HotResult::Ok(time::instant_val(to))
 }
 
 /// Return the test clock to the system clock.
@@ -282,7 +307,8 @@ pub fn fixed_now_fn(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Clear the clock, the sent events and the armed schedules between tests.
+/// Clear the clock, the sent events, the armed schedules and the run log
+/// between tests.
 pub fn reset(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::test/reset", args, 0);
     match harness_for("::hot::test/reset") {
@@ -290,10 +316,96 @@ pub fn reset(args: &[Val]) -> HotResult<Val> {
             *harness.now.lock() = None;
             harness.sent.lock().clear();
             harness.schedules.lock().clear();
+            harness.runs.lock().clear();
             HotResult::Ok(Val::Null)
         }
         Err(e) => HotResult::Err(e),
     }
+}
+
+/// Whether this is a `hot test` run, which has a harness.
+pub fn in_test_run(args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::test/in-test-run", args, 0);
+    HotResult::Ok(Val::Bool(current_harness().is_some()))
+}
+
+/// Append runs (a Vec of `{type, fn, result}` maps) to the run log.
+pub fn record_runs(args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::test/record-runs", args, 1);
+    let harness = match harness_for("::hot::test/record-runs") {
+        Ok(harness) => harness,
+        Err(e) => return HotResult::Err(e),
+    };
+    match &args[0] {
+        Val::Vec(runs) => {
+            harness.runs.lock().extend(runs.iter().cloned());
+            HotResult::Ok(Val::Null)
+        }
+        other => HotResult::Err(Val::from(format!(
+            "::hot::test/record-runs expects a Vec of runs, got {other}"
+        ))),
+    }
+}
+
+/// The runs logged since the last call, oldest first.
+pub fn take_runs(args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::test/take-runs", args, 0);
+    match harness_for("::hot::test/take-runs") {
+        Ok(harness) => HotResult::Ok(Val::Vec(std::mem::take(&mut *harness.runs.lock()))),
+        Err(e) => HotResult::Err(e),
+    }
+}
+
+/// The event type a definition handles: its meta's `on-event`, read as the
+/// compiler reads it when it registers handlers for the worker.
+fn on_event_type(meta: Option<&crate::lang::ast::Meta>) -> Option<String> {
+    match &meta?.val {
+        Val::Map(meta) => match meta.get(&Val::from("on-event")) {
+            Some(Val::Str(event_type)) => Some(event_type.to_string()),
+            _ => None,
+        },
+        Val::Str(json) => serde_json::from_str::<serde_json::Value>(json)
+            .ok()?
+            .get("on-event")?
+            .as_str()
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+/// Each `on-event` handler's name by event type, as the worker registers
+/// them: every definition whose own meta has `on-event`, under its own name.
+/// That includes an alias of a function (`h meta {on-event: ...} target`),
+/// which the worker calls by the alias's name.
+pub fn event_handlers(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    validate_args!("::hot::test/event-handlers", args, 0);
+    let Some(ast) = vm.get_hot_ast() else {
+        return HotResult::Err(Val::from(
+            "::hot::test/event-handlers needs the program's definitions",
+        ));
+    };
+    let mut handlers: indexmap::IndexMap<String, Vec<Val>> = indexmap::IndexMap::new();
+    for (ns_path, namespace) in &ast.program.namespaces {
+        for var in namespace.scope.vars.keys() {
+            let Some(event_type) = on_event_type(var.meta.as_ref()) else {
+                continue;
+            };
+            let name = Val::from(format!("{}/{}", ns_path, var.sym));
+            let names = handlers.entry(event_type).or_default();
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    HotResult::Ok(Val::Map(Box::new(
+        handlers
+            .into_iter()
+            .map(|(event_type, names)| (Val::from(event_type), Val::Vec(names)))
+            .collect(),
+    )))
 }
 
 /// The events sent since the last call, oldest first.
@@ -354,15 +466,20 @@ fn armed_schedule(data: &Val, now: i128) -> Result<ArmedSchedule, String> {
 }
 
 /// Arm a schedule from a `hot:schedule:new` event's data, as the scheduler
-/// would, with relative and recurring times measured from the test clock.
+/// would, with relative and recurring times measured from `sent-at` (the
+/// time the event was sent), or from the test clock without it.
 pub fn arm_schedule(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::test/arm-schedule", args, 1);
+    validate_args_range!("::hot::test/arm-schedule", args, 1, 2);
     let prefix = "::hot::test/arm-schedule";
     let harness = match harness_for(prefix) {
         Ok(harness) => harness,
         Err(e) => return HotResult::Err(e),
     };
-    let armed = harness_now(&harness).and_then(|now| armed_schedule(&args[0], now));
+    let from = match args.get(1) {
+        None | Some(Val::Null) => harness_now(&harness),
+        Some(sent_at) => epoch_nanos_of(sent_at),
+    };
+    let armed = from.and_then(|from| armed_schedule(&args[0], from));
     match armed {
         Ok(armed) => {
             let id = Val::from(armed.id.clone());
@@ -557,5 +674,82 @@ mod harness_tests {
         assert!(ok(cancel_schedule(&[crate::val!({"fn": "::app/daily"})])) == Val::Bool(true));
         ok(reset(&[]));
         assert_eq!(fixed_now(), None);
+    }
+
+    #[test]
+    fn advance_moves_by_weeks_and_sub_second_units_and_refuses_zero() {
+        let _harness = ThreadHarnessGuard::install(Arc::new(TestHarness::default()));
+        ok(set_now(&[Val::from("2026-10-14T09:00:00Z")]));
+        let step = ok(time::duration(&[
+            crate::val!({"weeks": 1, "milliseconds": 500}),
+        ]));
+        ok(advance(&[step]));
+        assert_eq!(
+            instant_nanos(&ok(time::now(&[]))),
+            instant_nanos(&Val::from("2026-10-21T09:00:00.5Z"))
+        );
+        let zero = ok(time::duration(&[crate::val!({})]));
+        assert!(matches!(advance(&[zero]), HotResult::Err(_)));
+        let far = crate::val!({"days": 1_000_000});
+        assert!(
+            matches!(advance(&[far]), HotResult::Err(_)),
+            "an Instant cannot hold the time"
+        );
+    }
+
+    #[test]
+    fn a_relative_schedule_counts_from_its_send() {
+        let _harness = ThreadHarnessGuard::install(Arc::new(TestHarness::default()));
+        ok(set_now(&[Val::from("2026-10-14T09:00:00Z")]));
+        let schedule = crate::val!({"fn": "::app/check", "args": ["s-1"], "schedule": "in 1 day"});
+        assert!(record_sent("hot:schedule:new", &schedule));
+        ok(advance(&[crate::val!({"days": 2})]));
+
+        let Val::Vec(sent) = ok(take_sent(&[])) else {
+            panic!("take-sent returns a Vec")
+        };
+        let (data, sent_at) = (
+            sent[0].get("data").unwrap(),
+            sent[0].get("sent-at").unwrap(),
+        );
+        assert_eq!(
+            instant_nanos(&sent_at),
+            instant_nanos(&Val::from("2026-10-14T09:00:00Z"))
+        );
+        ok(arm_schedule(&[data, sent_at]));
+        let due = ok(take_due(&[ok(time::now(&[]))]));
+        assert_eq!(
+            instant_nanos(&due.get("at").unwrap()),
+            instant_nanos(&Val::from("2026-10-15T09:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn the_run_log_is_taken_once_and_cleared_by_reset() {
+        let _harness = ThreadHarnessGuard::install(Arc::new(TestHarness::default()));
+        ok(record_runs(&[Val::Vec(vec![
+            Val::from("a"),
+            Val::from("b"),
+        ])]));
+        ok(record_runs(&[Val::Vec(vec![Val::from("c")])]));
+        assert_eq!(
+            ok(take_runs(&[])),
+            Val::Vec(vec![Val::from("a"), Val::from("b"), Val::from("c")])
+        );
+        assert_eq!(ok(take_runs(&[])), Val::Vec(Vec::new()));
+        ok(record_runs(&[Val::Vec(vec![Val::from("d")])]));
+        ok(reset(&[]));
+        assert_eq!(ok(take_runs(&[])), Val::Vec(Vec::new()));
+        assert_eq!(ok(in_test_run(&[])), Val::Bool(true));
+    }
+
+    #[test]
+    fn outside_a_test_run_the_harness_functions_refuse() {
+        assert_eq!(ok(in_test_run(&[])), Val::Bool(false));
+        assert!(matches!(take_runs(&[]), HotResult::Err(_)));
+        assert!(matches!(
+            record_runs(&[Val::Vec(Vec::new())]),
+            HotResult::Err(_)
+        ));
     }
 }

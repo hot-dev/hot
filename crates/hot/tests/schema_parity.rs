@@ -29,6 +29,11 @@ const NULLABILITY_ENFORCED_BY_TRIGGER: &[&str] = &["org.active"];
 const POSTGRES_ONLY_INDEXES: &[&str] =
     &["idx_store_map_entry_text", "idx_store_map_entry_key_prefix"];
 
+/// Columns PostgreSQL has and SQLite need not: the text of string store keys,
+/// kept by a trigger, that the prefix index orders (SQLite compares the JSON
+/// key text itself).
+const POSTGRES_ONLY_COLUMNS: &[&str] = &["store_map_entry.key_text"];
+
 /// Indexes both have whose definitions only differ in engine syntax:
 /// PostgreSQL's UNIQUE NULLS NOT DISTINCT is SQLite's zero-sentinel COALESCE.
 const DIALECT_INDEXES: &[&str] = &["usage_file_org_id_env_id_slot_key"];
@@ -100,6 +105,52 @@ fn migration_chains_share_numbers_and_names() {
         "each migration needs a file of the same name for both backends; a change \
          one engine does not need still gets a no-op file in the other"
     );
+}
+
+/// A version number names one migration: two files with the same number would
+/// apply in an arbitrary order, and a ledger records only one of them.
+#[test]
+fn migration_versions_are_unique() {
+    for backend in ["sqlite", "postgres"] {
+        let mut versions = BTreeMap::new();
+        for file in migration_files(backend) {
+            let version = file.split('_').next().unwrap_or_default().to_string();
+            if let Some(other) = versions.insert(version.clone(), file.clone()) {
+                panic!("{backend} migrations {other} and {file} share version {version}");
+            }
+        }
+    }
+}
+
+/// A database that applied a released migration recorded its checksum, and
+/// refuses to upgrade once the file changes. Released files are append-only;
+/// `resources/db/RELEASED_MIGRATIONS` lists them.
+#[test]
+fn released_migrations_are_unchanged() {
+    use sha2::{Digest, Sha384};
+    let db = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/db");
+    let released = std::fs::read_to_string(db.join("RELEASED_MIGRATIONS"))
+        .expect("RELEASED_MIGRATIONS should be readable");
+    let mut checked = 0;
+    for line in released
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+    {
+        let (file, checksum) = line
+            .split_once(' ')
+            .expect("each line names a file and its checksum");
+        let (backend, name) = file.split_once('/').expect("files are named backend/name");
+        let path = migrations(backend).join(name);
+        let contents = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("released migration {file} is gone ({e}); restore it"));
+        assert_eq!(
+            hex::encode(Sha384::digest(&contents)),
+            checksum,
+            "released migration {file} was edited; add a new migration instead"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0);
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -207,6 +258,9 @@ async fn postgres_schema(pool: &PgPool) -> TestResult<Schema> {
         }
         let required: bool = row.get(2);
         let qualified = format!("{table}.{column}");
+        if POSTGRES_ONLY_COLUMNS.contains(&qualified.as_str()) {
+            continue;
+        }
         let required = required && !NULLABILITY_ENFORCED_BY_TRIGGER.contains(&qualified.as_str());
         schema.columns.insert(format!("{qualified} not_null={required}"));
         // Generated identifiers come from the application on SQLite.

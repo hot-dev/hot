@@ -110,6 +110,7 @@ impl DatabaseWriterPressureStats {
                 | DatabaseWrite::RunStop { .. }
                 | DatabaseWrite::RunFail { .. }
                 | DatabaseWrite::RunCancel { .. }
+                | DatabaseWrite::RunInfo { .. }
         ) {
             self.enqueued_run.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -244,6 +245,11 @@ pub enum DatabaseWrite {
         event_time: chrono::DateTime<chrono::Utc>,
         cancellation: Val,
     },
+    /// Merge keys into a run's info
+    RunInfo {
+        run_id: Uuid,
+        info: serde_json::Value,
+    },
     /// Insert or update a call record
     Call {
         execution_context: Box<ExecutionContext>,
@@ -278,7 +284,8 @@ impl DatabaseWrite {
             } => execution_context.run_id,
             DatabaseWrite::RunStop { run_id, .. }
             | DatabaseWrite::RunFail { run_id, .. }
-            | DatabaseWrite::RunCancel { run_id, .. } => *run_id,
+            | DatabaseWrite::RunCancel { run_id, .. }
+            | DatabaseWrite::RunInfo { run_id, .. } => *run_id,
         }
     }
 }
@@ -403,7 +410,7 @@ impl DatabaseWriter {
                                     // shard affinity. They still flush promptly, but only this
                                     // shard is blocked; sibling runs drain on sibling shards.
                                     let has_run_write = pending_writes.iter().any(|w| {
-                                        matches!(w.write, DatabaseWrite::RunStart { .. } | DatabaseWrite::RunStop { .. } | DatabaseWrite::RunFail { .. } | DatabaseWrite::RunCancel { .. })
+                                        matches!(w.write, DatabaseWrite::RunStart { .. } | DatabaseWrite::RunStop { .. } | DatabaseWrite::RunFail { .. } | DatabaseWrite::RunCancel { .. } | DatabaseWrite::RunInfo { .. })
                                     });
 
                                     let should_flush = has_run_write
@@ -872,6 +879,7 @@ impl DatabaseWriter {
                     | DatabaseWrite::RunStop { .. }
                     | DatabaseWrite::RunFail { .. }
                     | DatabaseWrite::RunCancel { .. }
+                    | DatabaseWrite::RunInfo { .. }
             )
         });
         let run_write_count = run_writes.len();
@@ -955,6 +963,24 @@ impl DatabaseWriter {
                     {
                         batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
+                    }
+                }
+                DatabaseWrite::RunInfo { run_id, info } => {
+                    if let Some((execution_context, start_time)) = pending_starts.remove(&run_id)
+                        && let Err(e) =
+                            Self::write_run_start(pool, &execution_context, start_time).await
+                    {
+                        batch_failed = true;
+                        tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
+                    }
+                    if let Err(e) =
+                        crate::db::run::Run::update_info(pool, &run_id, Some(&info)).await
+                    {
+                        tracing::warn!(
+                            "DatabaseWriter: Run info write failed for {}: {}",
+                            run_id,
+                            e
+                        );
                     }
                 }
                 DatabaseWrite::Call { .. } => unreachable!("call writes were partitioned out"),
@@ -1464,6 +1490,20 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         }))
     }
 
+    /// The `info` a run starts with: its queue timing, and `call_tracing:
+    /// false` when the run doesn't record calls, so a run with no calls can
+    /// say why.
+    fn run_start_info(
+        ctx: &ExecutionContext,
+        start_time: chrono::DateTime<chrono::Utc>,
+    ) -> Option<serde_json::Value> {
+        let mut info = Self::queue_timing_info(ctx, start_time);
+        if !ctx.trace_calls {
+            info.get_or_insert_with(|| serde_json::json!({}))["call_tracing"] = false.into();
+        }
+        info
+    }
+
     /// Write a run:start record.
     ///
     /// `start_time` is the EngineEvent timestamp captured when execution
@@ -1477,7 +1517,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         // Use event_time which is captured when EngineEvent::run_start() is created
         // (the actual moment the run starts executing), not when this DB write happens
         let start_time = event_time;
-        let timing_info = Self::queue_timing_info(ctx, start_time);
+        let timing_info = Self::run_start_info(ctx, start_time);
         tracing::debug!(
             "DatabaseWriter: Writing run:start for run_id={}, event_id={:?}, origin_run_id={:?}",
             ctx.run_id,
@@ -1653,7 +1693,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         ctx: &ExecutionContext,
         start_time: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), sqlx::Error> {
-        let timing_info = Self::queue_timing_info(ctx, start_time);
+        let timing_info = Self::run_start_info(ctx, start_time);
         match pool {
             DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
@@ -1739,7 +1779,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         result: &Val,
     ) -> Result<(), sqlx::Error> {
         let result_json = val_to_jsonb_string(result);
-        let timing_info = Self::queue_timing_info(ctx, start_time);
+        let timing_info = Self::run_start_info(ctx, start_time);
 
         crate::db::stream::Stream::create_or_get_stream(
             pool,
@@ -2807,6 +2847,31 @@ mod tests {
             serde_json::json!(20_000_000)
         );
         assert_eq!(info["queue_timing"]["redelivered"], true);
+    }
+
+    #[test]
+    fn run_start_info_records_that_calls_are_untraced() {
+        let now = chrono::Utc::now();
+        let mut context = ExecutionContext::minimal(Uuid::now_v7(), Uuid::now_v7(), 4);
+        assert_eq!(DatabaseWriter::run_start_info(&context, now), None);
+
+        context.trace_calls = false;
+        assert_eq!(
+            DatabaseWriter::run_start_info(&context, now),
+            Some(serde_json::json!({"call_tracing": false}))
+        );
+
+        context.queue_timing = Some(crate::lang::event::QueueExecutionTiming {
+            backend: "redis".to_string(),
+            enqueued_at: None,
+            claimed_at: now,
+            queue_wait_us: 1,
+            redelivered: false,
+            handler_dispatched_at: None,
+        });
+        let info = DatabaseWriter::run_start_info(&context, now).unwrap();
+        assert_eq!(info["call_tracing"], false);
+        assert_eq!(info["queue_timing"]["backend"], "redis");
     }
 
     #[tokio::test]

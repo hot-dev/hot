@@ -300,6 +300,14 @@
   font-size: 0.875rem;
 }
 
+/* Wide tables scroll inside the content column on phones instead of widening the page. */
+@media (max-width: 639px) {
+  .docs-content table {
+    display: block;
+    overflow-x: auto;
+  }
+}
+
 .docs-content th {
   background-color: rgb(243 244 246);
   padding: 0.75rem 1rem;

@@ -109,7 +109,7 @@ case "$(uname -s)" in
         fi
 
         echo "Building Hot Dev release binary for native Linux ($(uname -m))..."
-        cargo build --release
+        cargo build --release --locked
 
         BIN="$REPO_ROOT/target/release/hot"
         echo ""

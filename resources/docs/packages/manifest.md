@@ -37,7 +37,7 @@ hot.pkg.<package-name> {
 | `version` | String | Semantic version (e.g., "1.0.0") |
 | `description` | String | Brief description of the package |
 | `deps` | Map | Package dependencies |
-| `src-paths` | Vec | Directories containing source files |
+| `src-paths` | Vec | Directories containing source files, relative to the package folder and inside it |
 
 ### Optional Fields
 

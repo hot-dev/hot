@@ -107,6 +107,9 @@ pub struct Session {
     pub product_pricing_url: String,
     /// Product support contact email.
     pub product_support_email: String,
+    /// Why the selected workspace is held (suspended or archived itself, or its account), if it is.
+    /// Pages show it as a notice; only recovery paths stay open while it is set.
+    pub current_org_hold: Option<String>,
 }
 
 /// Why a signed session could not be loaded.
@@ -333,6 +336,7 @@ impl Session {
         let value_format = user.get_value_format();
 
         Ok(Session {
+            current_org_hold: None,
             user,
             user_initials,
             user_name,
@@ -515,6 +519,8 @@ impl Session {
                     .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                     .ok_or(StatusCode::NOT_FOUND)?;
+                self.current_org_hold =
+                    (!access.runtime_allowed).then(|| hold_reason(org, &self.user_orgs));
                 if !access.runtime_allowed
                     && !(access.can_manage_account && is_recovery_path(path, &method))
                 {
@@ -732,6 +738,35 @@ pub fn build_removal_cookie(name: &'static str) -> axum_extra::extract::cookie::
     build_cookie(name, String::new(), time::Duration::seconds(0))
 }
 
+/// Whether the App listens only on a loopback address. Set once at startup.
+static LISTENS_ON_LOOPBACK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether `host` names only this machine: `localhost` or a loopback address.
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Record the host the App listens on, before it signs or checks a session.
+pub(crate) fn set_listen_host(host: &str) {
+    let _ = LISTENS_ON_LOOPBACK.set(is_loopback_host(host));
+}
+
+/// Whether local development's conveniences apply: signing visitors in, the
+/// built-in session secret and the seeded local password. An unset `HOT_ENV`
+/// means local development, so on a network address they also need
+/// `HOT_ENV=development` set: a deployment that forgot `HOT_ENV` must not
+/// sign in everyone who can reach it.
+pub fn local_dev_conveniences() -> bool {
+    hot::env::is_local_dev()
+        && (std::env::var_os("HOT_ENV").is_some()
+            || LISTENS_ON_LOOPBACK.get().copied().unwrap_or(true))
+}
+
 /// Get session secret from environment variable
 /// In development mode, falls back to a default secret for convenience
 pub(crate) fn get_session_secret() -> Result<String, String> {
@@ -739,8 +774,16 @@ pub(crate) fn get_session_secret() -> Result<String, String> {
         Some(secret) if !secret.is_empty() => Ok(secret),
         _ => {
             // In local development, use a fallback secret for convenience
-            if hot::env::is_local_dev() {
+            if local_dev_conveniences() {
                 Ok("hotdev-session-secret-key-change-in-production".to_string())
+            } else if hot::env::is_local_dev() {
+                Err(
+                    "HOT_APP_SESSION_SECRET is required: HOT_ENV is unset and the App \
+                     listens on a network address. Set HOT_ENV=production and \
+                     HOT_APP_SESSION_SECRET for a deployment, or HOT_ENV=development to \
+                     keep local development's built-in secret"
+                        .to_string(),
+                )
             } else {
                 Err(
                     "HOT_APP_SESSION_SECRET environment variable is required in production"
@@ -900,6 +943,72 @@ fn onboarding_redirect(session: &Session, path: &str) -> Option<String> {
         None if session.user_orgs.is_empty() => Some("/claim-handle".to_string()),
         _ => None,
     }
+}
+
+/// Explain a held workspace: its own lifecycle state, or its account's.
+fn hold_reason(org: &hot::db::org::Org, user_orgs: &[hot::db::org::Org]) -> String {
+    if org.lifecycle_state != "active" {
+        return format!("This workspace is {}.", org.lifecycle_state);
+    }
+    let root_id = org.billing_owner_id();
+    match user_orgs
+        .iter()
+        .find(|candidate| candidate.org_id == root_id)
+    {
+        Some(root) if root.org_id != org.org_id => {
+            format!(
+                "This workspace's account, {}, is {}.",
+                root.name, root.lifecycle_state
+            )
+        }
+        _ => "This workspace's account is not active.".to_string(),
+    }
+}
+
+/// The response for a request whose explicit scope was refused: the shared error page, or a
+/// short fragment for HTMX widgets, instead of an empty body.
+fn scope_error_response(session: &Session, status: StatusCode, is_htmx: bool) -> Response {
+    let message = match (status, &session.current_org_hold) {
+        (StatusCode::FORBIDDEN, Some(hold)) => {
+            // Name the parent only to members who can see it.
+            let admins = match session.billing_org() {
+                Some(parent) => format!("an administrator of {}", parent.name),
+                None => "an administrator of its parent organization".to_string(),
+            };
+            format!("{hold} Runs, deploys and data are unavailable until {admins} restores it.")
+        }
+        (StatusCode::FORBIDDEN, None) if session.current_env.as_ref().is_some_and(|env| !env.active) => {
+            "This environment is inactive. Choose another environment or reactivate it.".to_string()
+        }
+        (StatusCode::NOT_FOUND, _) => {
+            "That organization or environment doesn't exist, or you aren't a member of it.".to_string()
+        }
+        (StatusCode::BAD_REQUEST, _) => {
+            "This request names a different workspace than the page it came from. Reload the page and try again.".to_string()
+        }
+        _ => "You don't have access to this page.".to_string(),
+    };
+    if is_htmx {
+        // The reason names the organization, so it is escaped like any other text.
+        let escaped = message
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        let fragment = format!("<div class=\"error-box\" role=\"alert\">{escaped}</div>");
+        return (status, axum::response::Html(fragment)).into_response();
+    }
+    if status == StatusCode::FORBIDDEN && session.current_org_hold.is_some() {
+        return crate::handlers::error_page_with(
+            session,
+            status,
+            "Workspace unavailable",
+            message,
+            "/account",
+            "Go to your account",
+        );
+    }
+    crate::handlers::error_page(session, status, message)
 }
 
 fn is_scope_selection_path(path: &str) -> bool {
@@ -1085,7 +1194,9 @@ pub async fn session_middleware(
         // Create session from user_id and cookies
         match Session::from_user_id(&db, &conf, &user_id, &cookies).await {
             Ok(mut session) => {
-                session.select_request_scope(&db, &request).await?;
+                if let Err(status) = session.select_request_scope(&db, &request).await {
+                    return Ok((cookies, scope_error_response(&session, status, is_htmx)));
+                }
                 // Check if we need to update cookies due to fallback
                 let mut updated_cookies = cookies.clone();
                 let mut cookies_changed = false;
@@ -1164,7 +1275,7 @@ pub async fn session_middleware(
 
     // If not authenticated and in ordinary local development mode, auto-login
     // with the first user. Hot Cloud test configs should keep production auth behavior.
-    if hot::env::is_local_dev() && !hot::product::billing_enabled(&conf) {
+    if local_dev_conveniences() && !hot::product::billing_enabled(&conf) {
         // Try to get the first user from database
         match User::get_first_user(&db).await {
             Ok(user) => {
@@ -1216,7 +1327,12 @@ pub async fn session_middleware(
                         .await
                         {
                             Ok(mut session) => {
-                                session.select_request_scope(&db, &request).await?;
+                                if let Err(status) =
+                                    session.select_request_scope(&db, &request).await
+                                {
+                                    let response = scope_error_response(&session, status, is_htmx);
+                                    return Ok((cookies_with_defaults, response));
+                                }
                                 if let Some(path) =
                                     onboarding_redirect(&session, request.uri().path())
                                 {
@@ -1316,6 +1432,24 @@ pub async fn guest_only_middleware(
 
 #[cfg(test)]
 mod scope_contract_tests {
+    #[test]
+    fn only_loopback_hosts_keep_local_dev_conveniences_without_hot_env() {
+        use super::is_loopback_host;
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "127.1.2.3",
+            "::1",
+            "[::1]",
+        ] {
+            assert!(is_loopback_host(host), "{host}");
+        }
+        for host in ["0.0.0.0", "::", "[::]", "10.0.0.5", "app.example.com", ""] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
+    }
+
     #[test]
     fn session_cookies_take_the_host_prefix_outside_local_dev() {
         use super::{build_cookie, cookie_name, jwt_cookie_name};

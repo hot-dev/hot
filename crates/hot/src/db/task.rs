@@ -1086,7 +1086,7 @@ impl Task {
                 let q = format!(
                     "SELECT t.*, ts.name as status, {TASK_ORIGIN_FN_PG} \
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
-                     JOIN env qe ON qe.env_id=t.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id) \
+                     JOIN env qe ON qe.env_id=t.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=CASE WHEN qo.parent_org_id IS NULL THEN qo.org_id ELSE qo.parent_org_id END \
                      JOIN build qb ON qb.build_id=t.build_id JOIN project qp ON qp.project_id=qb.project_id \
                      {TASK_ORIGIN_JOIN} \
                      WHERE t.task_status_id = $1 \
@@ -1108,7 +1108,7 @@ impl Task {
                 let q = format!(
                     "SELECT t.*, ts.name as status, {TASK_ORIGIN_FN_SQLITE} \
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
-                     JOIN env qe ON qe.env_id=t.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id) \
+                     JOIN env qe ON qe.env_id=t.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=CASE WHEN qo.parent_org_id IS NULL THEN qo.org_id ELSE qo.parent_org_id END \
                      JOIN build qb ON qb.build_id=t.build_id JOIN project qp ON qp.project_id=qb.project_id \
                      {TASK_ORIGIN_JOIN} \
                      WHERE t.task_status_id = ? \

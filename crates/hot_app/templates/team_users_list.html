@@ -46,7 +46,7 @@
             <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
                 <div class="overflow-x-auto">
                     <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                        <thead class="bg-gray-50 dark:bg-gray-900">
+                        <thead class="table-head">
                             <tr>
                                 <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                                     User
@@ -101,7 +101,7 @@
                                     <button type="button" data-local-dev-restricted class="text-gray-500 hover:text-red-600 dark:text-gray-400 dark:hover:text-red-400 cursor-pointer">Remove</button>
                                     {% else %}
                                     <form id="remove-user-{{ team_user.user_id }}" action="/@{{ org.slug }}/teams/{{ team.team_id }}/users/{{ team_user.user_id }}/remove" method="POST" class="inline">
-                                        <button type="button" onclick="confirmRemoveUser('{{ team_user.user_id }}')" class="text-gray-500 hover:text-red-600 dark:text-gray-400 dark:hover:text-red-400">Remove</button>
+                                        <button type="button" onclick="confirmRemoveUser({{ team_user.user_id|js }})" class="text-gray-500 hover:text-red-600 dark:text-gray-400 dark:hover:text-red-400">Remove</button>
                                     </form>
                                     {% endif %}
                                     {% when None %}

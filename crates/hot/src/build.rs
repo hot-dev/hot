@@ -591,6 +591,8 @@ pub async fn create_build(
     String,
 > {
     let (all_files, resources) = collect_build_inputs(&build_context, conf)?;
+    // Fail before compiling when two files would share a bundle path
+    crate::bundle::check_unique_bundle_paths(&all_files)?;
 
     // Create a temporary empty file for validation (same approach as CLI compile command)
     let temp_file = std::env::temp_dir().join("build_create_validation.hot");
@@ -720,6 +722,9 @@ pub fn write_build_zip(
         Err(e) => return Err(format!("Failed to create zip file: {}", e)),
     };
 
+    // A write that fails part way removes the partial zip
+    let partial_zip = PartialZip::new(zip_path.clone());
+
     let mut zip = ZipWriter::new(zip_file);
 
     // Set up file options with zstd compression
@@ -832,8 +837,34 @@ pub fn write_build_zip(
     if let Err(e) = zip.finish() {
         return Err(format!("Failed to finish zip file: {}", e));
     }
+    partial_zip.keep();
 
     Ok(zip_path)
+}
+
+/// Removes a zip file on drop unless [`PartialZip::keep`] is called, so an
+/// early return from a failed write leaves no partial zip behind.
+struct PartialZip {
+    path: Option<PathBuf>,
+}
+
+impl PartialZip {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    /// The zip is complete: keep it.
+    fn keep(mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for PartialZip {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 /// Main build creation function with database integration
@@ -1658,6 +1689,45 @@ pub async fn load_build_manifest_data_from_path(
         .into_inner();
 
     load_build_manifest_data(db, build_id, env_id, &manifest_zip).await
+}
+
+/// Why this runtime can't run the build in `build_data` when a newer runtime
+/// of the same major version could, such as a worker a rolling deploy is
+/// starting. None when this runtime can run it, or when no runtime of its
+/// major version can.
+pub fn newer_runtime_requirement(build_data: &[u8]) -> Result<Option<String>, String> {
+    use std::io::Cursor;
+    use zip::ZipArchive;
+
+    let mut archive = ZipArchive::new(Cursor::new(build_data))
+        .map_err(|e| format!("Failed to read build zip: {}", e))?;
+    let manifest_file = archive
+        .by_name("manifest.hot")
+        .map_err(|_| "Build does not contain manifest.hot".to_string())?;
+    let crate::val::Val::Map(map) = crate::bundle::read_manifest_data(manifest_file)? else {
+        return Ok(None);
+    };
+    for (key, bundle_val) in map.iter() {
+        if let crate::val::Val::Str(key_str) = key
+            && key_str.starts_with("hot.bundle.")
+            && let crate::val::Val::Map(bundle_map) = bundle_val
+        {
+            let check = validate_build_version(bundle_map);
+            if !check.compatible
+                && crate::version::needs_newer_runtime(
+                    check.build_engine_version.as_deref(),
+                    check.build_hot_std_version.as_deref(),
+                    &check.server_version,
+                )
+            {
+                return Ok(Some(format!(
+                    "Build needs a newer Hot runtime: {}",
+                    check.warnings.join("; ")
+                )));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Load event handlers and schedules from an in-memory build zip.
@@ -2964,6 +3034,117 @@ hot.pkg.demo {
         assert_eq!(resource_paths, vec!["prompts/system.md"]);
     }
 
+    /// A dependency whose src-paths overlap (`src/` and `src/olib/sub/`, or
+    /// `src/` twice) bundles each file once, at its path in the package.
+    #[test]
+    fn test_collect_build_inputs_bundles_overlapping_dependency_src_paths_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("olib");
+        fs::create_dir_all(pkg_dir.join("src/olib/sub")).unwrap();
+        fs::write(
+            pkg_dir.join("pkg.hot"),
+            "::hot::pkg ns\n\nhot.pkg.olib {\n  name: \"example.com/olib\",\n  version: \"1.0.0\",\n  deps: {},\n  src-paths: [\"src/\", \"src/olib/sub/\", \"./src/\"],\n}\n",
+        )
+        .unwrap();
+        fs::write(pkg_dir.join("src/olib/top.hot"), "::olib::top ns\nv 1\n").unwrap();
+        fs::write(
+            pkg_dir.join("src/olib/sub/inner.hot"),
+            "::olib::sub::inner ns\nv 2\n",
+        )
+        .unwrap();
+        let conf = crate::lang::data::eval_data(&format!(
+            "hot.project.app.deps {{\"example.com/olib\": {{local: {:?}}}}}\n",
+            pkg_dir.display().to_string()
+        ))
+        .unwrap();
+        let ctx = BuildContext::new(None, None, None, None, "app".to_string(), vec![], vec![]);
+
+        let (files, _) = collect_build_inputs(&ctx, Some(&conf)).unwrap();
+        let file_paths: Vec<_> = files.iter().map(|f| f.relative_path.as_str()).collect();
+        assert_eq!(
+            file_paths,
+            vec![
+                "hot/pkg/example.com/olib/src/olib/sub/inner.hot",
+                "hot/pkg/example.com/olib/src/olib/top.hot",
+            ]
+        );
+        crate::bundle::check_unique_bundle_paths(&files).unwrap();
+    }
+
+    /// A zip write that fails part way leaves no partial zip behind.
+    #[test]
+    fn test_failed_zip_write_removes_the_partial_zip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = |source: &str| BundleFile {
+            path: tmp.path().join(source),
+            relative_path: "hot/src/main.hot".to_string(),
+            content: b"::x ns\n".to_vec(),
+            hash: HotHasher::hash_content(b"::x ns\n"),
+            size: 7,
+        };
+        // Two entries at one path make the zip writer fail mid-write.
+        let files = vec![file("a/main.hot"), file("b/main.hot")];
+        let error = write_build_zip(
+            &Uuid::now_v7(),
+            "app",
+            "hash",
+            &files,
+            &[],
+            tmp.path(),
+            &EventHandlers::default(),
+            &ScheduledFunctions::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            "org/env/build.hot.zip",
+            &Default::default(),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("hot/src/main.hot"), "{error}");
+        assert!(!tmp.path().join("org/env/build.hot.zip").exists());
+    }
+
+    /// Two project src paths holding the same relative file would share a
+    /// bundle path; that is an error naming both files, not a zip failure.
+    #[test]
+    fn test_colliding_project_src_paths_are_named_before_zipping() {
+        let tmp = tempfile::tempdir().unwrap();
+        for root in ["hot/src", "lib"] {
+            fs::create_dir_all(tmp.path().join(root)).unwrap();
+            fs::write(tmp.path().join(root).join("main.hot"), "::x ns\nv 1\n").unwrap();
+        }
+        let src_paths: Vec<String> = ["hot/src", "lib"]
+            .iter()
+            .map(|root| tmp.path().join(root).display().to_string())
+            .collect();
+        let ctx = BuildContext::new(
+            None,
+            None,
+            None,
+            None,
+            "multi".to_string(),
+            src_paths,
+            vec![],
+        );
+
+        // Collection still succeeds: `hot run` and `hot dev` load both.
+        let (files, _) = collect_build_inputs(&ctx, None).unwrap();
+        let error = crate::bundle::check_unique_bundle_paths(&files).unwrap_err();
+        assert!(error.contains("hot/src/main.hot <- "), "{error}");
+        assert!(
+            error.contains(&format!(
+                "hot{}src{}main.hot",
+                std::path::MAIN_SEPARATOR,
+                std::path::MAIN_SEPARATOR
+            )) && error.contains(&format!("lib{}main.hot", std::path::MAIN_SEPARATOR)),
+            "{error}"
+        );
+    }
+
     #[test]
     fn test_format_missing_ctx_message_warn_includes_set_command_and_source() {
         let a = make_entry("slack.api.key", Some("::slack::api/request"));
@@ -3213,6 +3394,35 @@ hot.pkg.demo {
         )
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn only_builds_of_a_newer_same_major_runtime_wait_for_one() {
+        let runtime = crate::version::current_runtime_version();
+        let core = runtime.split(['-', '+']).next().unwrap();
+        let mut parts = core.split('.').map(|part| part.parse::<u64>().unwrap());
+        let (major, minor, patch) = (
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+        );
+        let manifest = |engine: &str| {
+            build_manifest_zip(&format!(
+                r#"{{"hot.bundle.demo": {{"engine_version": "{engine}", "hot_std_version": "{engine}"}}}}"#
+            ))
+        };
+
+        let newer = manifest(&format!("{major}.{minor}.{}", patch + 1));
+        let reason = newer_runtime_requirement(&newer).unwrap().unwrap();
+        assert!(
+            reason.starts_with("Build needs a newer Hot runtime"),
+            "{reason}"
+        );
+        assert_eq!(newer_runtime_requirement(&manifest(core)).unwrap(), None);
+        assert_eq!(
+            newer_runtime_requirement(&manifest(&format!("{}.0.0", major + 1))).unwrap(),
+            None
+        );
     }
 
     #[test]

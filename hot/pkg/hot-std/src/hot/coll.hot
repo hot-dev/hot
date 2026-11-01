@@ -477,7 +477,7 @@ meta {
     """
 }
 fn (m: Map, func: Fn): Map {
-    reduce(keys(m), (acc, k) { assoc(acc, func(k), get(m, k)) }, {})
+    call-lib(::hot::coll/map-keys, [m, func])
 }
 
 
@@ -503,7 +503,7 @@ meta {
     """
 }
 fn (m: Map, func: Fn): Map {
-    reduce(keys(m), (acc, k) { assoc(acc, k, func(get(m, k))) }, {})
+    call-lib(::hot::coll/map-vals, [m, func])
 }
 
 
@@ -527,7 +527,7 @@ meta {
     """
 }
 fn (m: Map, predicate: Fn): Map {
-    reduce(keys(m), (acc, k) { if(predicate(k), assoc(acc, k, get(m, k)), acc) }, {})
+    call-lib(::hot::coll/filter-keys, [m, predicate])
 }
 
 
@@ -553,7 +553,7 @@ meta {
     """
 }
 fn (m: Map, predicate: Fn): Map {
-    reduce(keys(m), (acc, k) { if(predicate(get(m, k)), assoc(acc, k, get(m, k)), acc) }, {})
+    call-lib(::hot::coll/filter-vals, [m, predicate])
 }
 
 
@@ -845,17 +845,21 @@ flatten
 meta {
     core: true,
     doc: """
-    Flatten nested collections by one level.
+    Flatten nested vectors into one vector, at every depth. Strings, maps
+    and other elements are kept whole.
 
     **Example**
 
     ```hot
     flatten([[1, 2], [3, [4, 5]], 6])
     // [1, 2, 3, 4, 5, 6]
+
+    flatten([["ab", "cd"], ["ef"]])
+    // ["ab", "cd", "ef"]
     ```
     """
 }
-fn (coll: Str | Vec | Map): Str | Vec | Map {
+fn (coll: Vec): Vec {
     call-lib(::hot::coll/flatten, [coll])
 }
 
@@ -909,7 +913,7 @@ meta {
     """
 }
 fn (coll: Vec, func: Fn): Map {
-    reduce(coll, (acc, x) { assoc(acc, func(x), x) }, {})
+    call-lib(::hot::coll/index-by, [coll, func])
 }
 
 
@@ -945,11 +949,7 @@ meta {
     """
 }
 fn (coll: Vec, func: Fn): Map {
-    reduce(coll, (acc, x) {
-        k func(x)
-        existing get(acc, k, [])
-        assoc(acc, k, concat(existing, [x]))
-    }, {})
+    call-lib(::hot::coll/group-by, [coll, func])
 }
 
 
@@ -977,9 +977,7 @@ meta {
     """
 }
 fn (coll: Vec): Map {
-    reduce(coll, (acc, x) {
-        assoc(acc, x, add(get(acc, x, 0), 1))
-    }, {})
+    call-lib(::hot::coll/frequencies, [coll])
 }
 
 

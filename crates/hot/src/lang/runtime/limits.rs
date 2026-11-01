@@ -282,24 +282,107 @@ pub fn range_element_count(start: i64, end: i64, step: i64) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// Interpreter stack guard
+// Native stack guards
 // ---------------------------------------------------------------------------
 
 thread_local! {
     static VM_STACK_LIMIT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// Native-stack budget the interpreter may consume below the first-seen stack
-/// pointer on a VM thread before user-function calls are refused with a
-/// structured error. Kept below `jit::JIT_STACK_GUARD_BUDGET` relative to
-/// `jit::VM_THREAD_STACK_SIZE` (64 MiB) so ~8 MiB of headroom remains for
-/// whatever native code (hotlib builtins, serde, formatting) runs on top of
-/// the deepest interpreter frame.
+/// Stack the interpreter leaves free below its deepest frame, for whatever
+/// native code (hotlib builtins, serde, formatting) runs on top of it: 11 MiB
+/// of a `jit::VM_THREAD_STACK_SIZE` (64 MiB) thread, at most a quarter of a
+/// smaller thread's stack. More than the JIT's reserve, so a compiled frame
+/// that calls back into the interpreter is refused there first.
+const VM_STACK_RESERVE: u64 = 11 * 1024 * 1024;
+const VM_STACK_RESERVE_DIVISOR: u64 = 4;
+
+/// Where the platform doesn't report a thread's stack bounds, the
+/// interpreter's limit is this far below the stack pointer of the thread's
+/// first guarded call.
 const VM_STACK_GUARD_BUDGET: u64 = 56_000_000;
 
+/// The current thread's stack as its lowest address and its size, when the
+/// platform reports them.
+#[cfg(target_vendor = "apple")]
+fn current_thread_stack() -> Option<(u64, u64)> {
+    // SAFETY: both calls only read the calling thread's own attributes.
+    let (top, size) = unsafe {
+        let thread = libc::pthread_self();
+        (
+            libc::pthread_get_stackaddr_np(thread) as u64,
+            libc::pthread_get_stacksize_np(thread) as u64,
+        )
+    };
+    (size > 0 && top > size).then(|| (top - size, size))
+}
+
+/// The current thread's stack as its lowest address and its size, when the
+/// platform reports them.
+#[cfg(target_os = "linux")]
+fn current_thread_stack() -> Option<(u64, u64)> {
+    // SAFETY: `attr` is initialized by `pthread_getattr_np` before it is read
+    // and destroyed exactly once after.
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+            return None;
+        }
+        let mut addr: *mut libc::c_void = std::ptr::null_mut();
+        let mut size: libc::size_t = 0;
+        let status = libc::pthread_attr_getstack(&attr, &mut addr, &mut size);
+        libc::pthread_attr_destroy(&mut attr);
+        (status == 0 && size > 0).then_some((addr as u64, size as u64))
+    }
+}
+
+/// The current thread's stack as its lowest address and its size, when the
+/// platform reports them. On Windows that is the thread's whole reservation,
+/// guard pages included, which the guards' reserves are well clear of.
+#[cfg(windows)]
+fn current_thread_stack() -> Option<(u64, u64)> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThreadStackLimits(low_limit: *mut usize, high_limit: *mut usize);
+    }
+    let mut low = 0usize;
+    let mut high = 0usize;
+    // SAFETY: the call only writes the calling thread's own stack bounds into
+    // the two locals.
+    unsafe { GetCurrentThreadStackLimits(&mut low, &mut high) };
+    (high > low).then(|| (low as u64, (high - low) as u64))
+}
+
+/// The current thread's stack as its lowest address and its size, when the
+/// platform reports them.
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))]
+fn current_thread_stack() -> Option<(u64, u64)> {
+    None
+}
+
+/// The lowest address a stack guard on the current thread lets code reach:
+/// `reserve` bytes, at most `1/divisor` of the thread's stack, above the end
+/// of that stack.
+///
+/// The limit comes from the thread's real stack bounds, not from wherever
+/// the guard first ran. A thread whose first guarded call was already deep
+/// (interpreted recursion that first reaches compiled code at its bottom, or
+/// a pooled worker thread that a run left that way) would otherwise get a
+/// limit below the end of its stack, and the next deep recursion on it would
+/// overflow the stack and abort the process. Where the platform doesn't
+/// report the bounds, the limit is `fallback_budget` below the current stack
+/// pointer.
+pub(crate) fn stack_guard_limit(reserve: u64, divisor: u64, fallback_budget: u64) -> u64 {
+    let anchor: u64 = 0;
+    let sp = std::ptr::addr_of!(anchor) as u64;
+    match current_thread_stack() {
+        Some((low, size)) if sp > low && sp - low <= size => low + reserve.min(size / divisor),
+        _ => sp.saturating_sub(fallback_budget),
+    }
+}
+
 /// Returns true when the current thread is too deep in native stack for
-/// another interpreter frame. The first call on a thread anchors the limit at
-/// `current_sp - VM_STACK_GUARD_BUDGET` (same scheme as the JIT stack guard).
+/// another interpreter frame (see [`stack_guard_limit`]).
 ///
 /// This is the backstop that turns runaway recursion the depth counter cannot
 /// see (e.g. recursion woven through lazy-parameter thunks or JIT fallback
@@ -309,14 +392,24 @@ pub fn vm_stack_exhausted() -> bool {
     let anchor: u64 = 0;
     let sp = std::ptr::addr_of!(anchor) as u64;
     VM_STACK_LIMIT.with(|cell| {
-        let limit = cell.get();
+        let mut limit = cell.get();
         if limit == 0 {
-            cell.set(sp.saturating_sub(VM_STACK_GUARD_BUDGET));
-            false
-        } else {
-            sp < limit
+            limit = stack_guard_limit(
+                VM_STACK_RESERVE,
+                VM_STACK_RESERVE_DIVISOR,
+                VM_STACK_GUARD_BUDGET,
+            );
+            cell.set(limit);
         }
+        sp < limit
     })
+}
+
+/// The error for a call refused by a native stack guard.
+pub(crate) fn stack_budget_exhausted_message() -> String {
+    "Native stack budget exhausted by deep recursion. \
+     Use tail recursion (TCO-eligible position) or an iterative form."
+        .to_string()
 }
 
 #[cfg(test)]
@@ -350,5 +443,73 @@ mod tests {
     #[test]
     fn collection_guard_accepts_within_limit() {
         assert!(check_collection_size("range", 1024).is_ok());
+    }
+
+    /// The stack pointer and the interpreter's stack limit, computed
+    /// `frames` 4 KiB frames further down the stack.
+    fn limit_at_depth(frames: usize) -> (u64, u64) {
+        let pad = [0u8; 4096];
+        std::hint::black_box(&pad);
+        let found = if frames == 0 {
+            let anchor = 0u64;
+            (
+                std::ptr::addr_of!(anchor) as u64,
+                stack_guard_limit(
+                    VM_STACK_RESERVE,
+                    VM_STACK_RESERVE_DIVISOR,
+                    VM_STACK_GUARD_BUDGET,
+                ),
+            )
+        } else {
+            limit_at_depth(frames - 1)
+        };
+        std::hint::black_box(&pad);
+        found
+    }
+
+    // A guard anchored at its thread's first guarded call put the limit past
+    // the end of the stack when that call was already deep (as on a pooled
+    // worker thread), and deep recursion then overflowed the stack.
+    #[test]
+    fn stack_guard_limit_is_inside_the_stack_however_deep_the_first_call() {
+        let size = 64 * 1024 * 1024;
+        std::thread::Builder::new()
+            .stack_size(size)
+            .spawn(move || {
+                let Some((low, len)) = current_thread_stack() else {
+                    // No stack bounds here: the limit is the old anchor's.
+                    return;
+                };
+                let (top_sp, shallow) = limit_at_depth(0);
+                // 30 MB down: an anchor's 56 MB budget would end past the
+                // stack.
+                let (deep_sp, deep) = limit_at_depth(30_000_000 / 4096);
+                assert!(top_sp - deep_sp > 25_000_000);
+                assert!(len >= size as u64);
+                assert_eq!(shallow, deep);
+                assert_eq!(deep, low + VM_STACK_RESERVE);
+                assert!(deep < deep_sp);
+            })
+            .expect("the thread starts")
+            .join()
+            .expect("the checks pass");
+    }
+
+    // A smaller thread keeps a quarter of its stack in reserve.
+    #[test]
+    fn stack_guard_reserve_scales_down_with_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(4 * 1024 * 1024)
+            .spawn(|| {
+                let Some((low, len)) = current_thread_stack() else {
+                    return;
+                };
+                let (sp, limit) = limit_at_depth(0);
+                assert_eq!(limit, low + len / VM_STACK_RESERVE_DIVISOR);
+                assert!(limit < sp);
+            })
+            .expect("the thread starts")
+            .join()
+            .expect("the checks pass");
     }
 }

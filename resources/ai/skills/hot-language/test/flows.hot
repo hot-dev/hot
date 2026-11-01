@@ -441,6 +441,40 @@ meta ["test"] fn () {
     assert-eq("can fly", get(result, "Trait.Flying"), "flying trait")
 }
 
+Reply enum { Steps(Vec), Declined(Str), Pending }
+
+summarize-reply fn match (r: Reply): Str {
+    Reply.Steps (steps) => { `${length(steps)} steps` }
+    Reply.Declined (why) => { `declined: ${why}` }
+    Reply.Pending => { "pending" }
+}
+
+keep-declined fn match (r: Reply): Reply {
+    Reply.Declined => { r }
+    _ => { Reply.Pending }
+}
+
+test-variant-payload-arms
+meta ["test"] fn () {
+    assert-eq("2 steps", summarize-reply(Reply.Steps(["a", "b"])), "a named binding is the payload")
+    assert-eq("declined: no", summarize-reply(Reply.Declined("no")), "a Str payload binds as the Str")
+    assert-eq(Reply.Declined("no"), keep-declined(Reply.Declined("no")), "the matched name keeps the variant")
+}
+
+test-match-all-value-arm-keys
+meta ["test"] fn () {
+    results check-int(200)
+    assert-eq(["200", "Int"], keys(results), "keys are the patterns as written")
+    assert-eq("is 200", get(results, "200"), "value arm key is its source text")
+    assert-eq(null, get(results, 200), "value arm key is not the value")
+    greeting match-all "hello" {
+        "hello" => { "hi" }
+        Str => { "a string" }
+    }
+
+    assert-eq("hi", get(greeting, `"hello"`), "string arm key keeps its quotes")
+}
+
 test-move-point
 meta ["test"] fn () {
     origin Point({x: 0, y: 0})

@@ -5,11 +5,13 @@
 //! - Dependency documentation
 //! - hot-std documentation (shared across all projects)
 
+use crate::templates::filters;
 use ahash::AHashMap;
 use askama::Template;
 use axum::{
     extract::{Path, Query, State},
-    response::{Html, IntoResponse},
+    http::StatusCode,
+    response::{Html, IntoResponse, Response},
 };
 use hot::db::{Build, DatabasePool, Project};
 use serde::Deserialize;
@@ -62,10 +64,11 @@ pub async fn docs_index_handler(
     let env_id = match session.current_env_id() {
         Some(id) => id,
         None => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "No Environment Selected",
                 "Please select an environment to view documentation.",
-            ));
+            );
         }
     };
 
@@ -74,10 +77,11 @@ pub async fn docs_index_handler(
         match Project::get_projects_by_env(&db, &env_id, Some(100), Some(0)).await {
             Ok(projects) => projects.into_iter().filter(|p| p.active).collect(),
             Err(e) => {
-                return Html(render_docs_error(
+                return render_docs_error(
+                    &session,
                     "Error",
                     &format!("Failed to load projects: {}", e),
-                ));
+                );
             }
         };
 
@@ -242,10 +246,13 @@ pub async fn docs_index_handler(
         dependencies,
     };
 
-    Html(template.render().unwrap_or_else(|e| {
-        tracing::error!("Template render error: {}", e);
-        render_docs_error("Render Error", &e.to_string())
-    }))
+    match template.render() {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            tracing::error!("Template render error: {}", e);
+            render_docs_error(&session, "Render Error", &e.to_string())
+        }
+    }
 }
 
 /// Docs index for a specific project
@@ -258,10 +265,11 @@ pub async fn project_docs_index_handler(
     let env_id = match session.current_env_id() {
         Some(id) => id,
         None => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "No Environment Selected",
                 "Please select an environment to view project documentation.",
-            ));
+            );
         }
     };
 
@@ -269,14 +277,15 @@ pub async fn project_docs_index_handler(
     let project = match Project::get_project_by_env_and_name(&db, &env_id, &project_name).await {
         Ok(Some(p)) => p,
         Ok(None) => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "Project Not Found",
                 &format!("Project '{}' was not found.", project_name),
-            ));
+            );
         }
         Err(e) => {
             tracing::error!("Error fetching project {}: {}", project_name, e);
-            return Html(render_docs_error("Error", "Failed to load project."));
+            return render_docs_error(&session, "Error", "Failed to load project.");
         }
     };
 
@@ -419,54 +428,35 @@ pub async fn project_docs_index_handler(
         has_sends,
     };
 
-    Html(template.render().unwrap_or_else(|e| {
-        tracing::error!("Template render error: {}", e);
-        render_docs_error("Render Error", &e.to_string())
-    }))
+    match template.render() {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            tracing::error!("Template render error: {}", e);
+            render_docs_error(&session, "Render Error", &e.to_string())
+        }
+    }
 }
 
-/// Render a docs error page
-fn render_docs_error(title: &str, message: &str) -> String {
-    render_docs_error_with_back(title, message, "/docs", "Back to Docs")
+/// Render a docs error inside the app layout with the status its title implies.
+fn render_docs_error(session: &Session, title: &str, message: &str) -> Response {
+    render_docs_error_with_back(session, title, message, "/docs", "Back to Docs")
 }
 
 fn render_docs_error_with_back(
+    session: &Session,
     title: &str,
     message: &str,
     back_url: &str,
     back_text: &str,
-) -> String {
-    let escape = |value: &str| {
-        value
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-            .replace('\'', "&#39;")
+) -> Response {
+    let status = if title.contains("Not Found") || title.starts_with("Invalid") {
+        StatusCode::NOT_FOUND
+    } else if title.starts_with("No ") || title.contains("Not Available") {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
     };
-    format!(
-        r#"<!DOCTYPE html>
-<html>
-<head>
-    <title>{} - Hot Documentation</title>
-    <style>
-        body {{ font-family: system-ui, sans-serif; max-width: 600px; margin: 4rem auto; padding: 2rem; }}
-        h1 {{ color: #c01f1f; }}
-        a {{ color: #c01f1f; }}
-    </style>
-</head>
-<body>
-    <h1>{}</h1>
-    <p>{}</p>
-    <p><a href="{}">← {}</a></p>
-</body>
-</html>"#,
-        escape(title),
-        escape(title),
-        escape(message),
-        escape(back_url),
-        escape(back_text),
-    )
+    super::error_page_with(session, status, title, message, back_url, back_text)
 }
 
 /// Namespace info for display in docs index
@@ -585,15 +575,16 @@ pub async fn pkg_route_handler(
     Path((project_name, pkg_path)): Path<(String, String)>,
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
-) -> Html<String> {
+) -> Response {
     // Parse the path: {org}/{pkg_name}/{module}
     let segments: Vec<&str> = pkg_path.split('/').collect();
 
     if segments.len() < 2 {
-        return Html(render_docs_error(
+        return render_docs_error(
+            &session,
             "Invalid Package URL",
             "Package URL must be in format: /docs/{project}/pkg/{org}/{pkg_name}",
-        ));
+        );
     }
 
     let org = segments[0];
@@ -631,14 +622,15 @@ async fn pkg_index_handler_internal(
     pkg_id: String,
     db: Arc<DatabasePool>,
     session: Session,
-) -> Html<String> {
+) -> Response {
     let env_id = match session.current_env_id() {
         Some(id) => id,
         None => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "No Environment Selected",
                 "Please select an environment to view documentation.",
-            ));
+            );
         }
     };
 
@@ -646,14 +638,15 @@ async fn pkg_index_handler_internal(
     let project = match Project::get_project_by_env_and_name(&db, &env_id, &project_name).await {
         Ok(Some(p)) => p,
         Ok(None) => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "Project Not Found",
                 &format!("Project '{}' was not found.", project_name),
-            ));
+            );
         }
         Err(e) => {
             tracing::error!("Error fetching project {}: {}", project_name, e);
-            return Html(render_docs_error("Error", "Failed to load project."));
+            return render_docs_error(&session, "Error", "Failed to load project.");
         }
     };
 
@@ -661,14 +654,15 @@ async fn pkg_index_handler_internal(
     let build = match get_build_for_docs(&db, &project.project_id).await {
         Ok(Some(b)) => b,
         Ok(None) => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "No Active Build",
                 "This project does not have an active build.",
-            ));
+            );
         }
         Err(e) => {
             tracing::error!("Error fetching build for {}: {}", project_name, e);
-            return Html(render_docs_error("Error", "Failed to load build."));
+            return render_docs_error(&session, "Error", "Failed to load build.");
         }
     };
 
@@ -678,14 +672,15 @@ async fn pkg_index_handler_internal(
             Ok(docs) => docs,
             Err(e) => {
                 tracing::error!("Error loading docs from cache: {}", e);
-                return Html(render_docs_error("Error", "Failed to load documentation."));
+                return render_docs_error(&session, "Error", "Failed to load documentation.");
             }
         },
         None => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "Cache Not Available",
                 "Build docs cache is not initialized.",
-            ));
+            );
         }
     };
 
@@ -693,10 +688,11 @@ async fn pkg_index_handler_internal(
     let pkg_docs = match cached_docs.dependency_docs.get(&pkg_id) {
         Some(docs) => docs,
         None => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "Package Not Found",
                 &format!("Package '{}' not found.", pkg_id),
-            ));
+            );
         }
     };
 
@@ -754,10 +750,13 @@ async fn pkg_index_handler_internal(
         dep_name: pkg_id,
     };
 
-    Html(template.render().unwrap_or_else(|e| {
-        tracing::error!("Template render error: {}", e);
-        render_docs_error("Render Error", &e.to_string())
-    }))
+    match template.render() {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            tracing::error!("Template render error: {}", e);
+            render_docs_error(&session, "Render Error", &e.to_string())
+        }
+    }
 }
 
 /// Internal handler for dependency README page
@@ -766,7 +765,7 @@ async fn pkg_readme_handler_internal(
     pkg_id: String,
     db: Arc<DatabasePool>,
     session: Session,
-) -> Html<String> {
+) -> Response {
     dependency_file_handler_internal(project_name, pkg_id, "readme", db, session).await
 }
 
@@ -776,7 +775,7 @@ async fn pkg_license_handler_internal(
     pkg_id: String,
     db: Arc<DatabasePool>,
     session: Session,
-) -> Html<String> {
+) -> Response {
     dependency_file_handler_internal(project_name, pkg_id, "license", db, session).await
 }
 
@@ -788,28 +787,30 @@ async fn dependency_file_handler_internal(
     file_type: &str, // "readme" or "license"
     db: Arc<DatabasePool>,
     session: Session,
-) -> Html<String> {
+) -> Response {
     let env_id = match session.current_env_id() {
         Some(id) => id,
         None => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "No Environment Selected",
                 "Please select an environment to view documentation.",
-            ));
+            );
         }
     };
 
     let project = match Project::get_project_by_env_and_name(&db, &env_id, &project_name).await {
         Ok(Some(p)) => p,
         Ok(None) => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "Project Not Found",
                 &format!("Project '{}' was not found.", project_name),
-            ));
+            );
         }
         Err(e) => {
             tracing::error!("Error fetching project {}: {}", project_name, e);
-            return Html(render_docs_error("Error", "Failed to load project."));
+            return render_docs_error(&session, "Error", "Failed to load project.");
         }
     };
 
@@ -817,14 +818,15 @@ async fn dependency_file_handler_internal(
     let build = match get_build_for_docs(&db, &project.project_id).await {
         Ok(Some(b)) => b,
         Ok(None) => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "No Active Build",
                 "This project does not have an active build.",
-            ));
+            );
         }
         Err(e) => {
             tracing::error!("Error fetching build for {}: {}", project_name, e);
-            return Html(render_docs_error("Error", "Failed to load build."));
+            return render_docs_error(&session, "Error", "Failed to load build.");
         }
     };
 
@@ -833,14 +835,15 @@ async fn dependency_file_handler_internal(
             Ok(docs) => docs,
             Err(e) => {
                 tracing::error!("Error loading docs from cache: {}", e);
-                return Html(render_docs_error("Error", "Failed to load documentation."));
+                return render_docs_error(&session, "Error", "Failed to load documentation.");
             }
         },
         None => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "Cache Not Available",
                 "Build docs cache is not initialized.",
-            ));
+            );
         }
     };
 
@@ -848,10 +851,11 @@ async fn dependency_file_handler_internal(
     let pkg_docs = match cached_docs.dependency_docs.get(&pkg_id) {
         Some(docs) => docs,
         None => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "Package Not Found",
                 &format!("Package '{}' not found.", pkg_id),
-            ));
+            );
         }
     };
 
@@ -879,7 +883,7 @@ async fn dependency_file_handler_internal(
             (format!("LICENSE - {}", pkg_id), license_content)
         }
         _ => {
-            return Html(render_docs_error("Not Found", "File not found."));
+            return render_docs_error(&session, "Not Found", "File not found.");
         }
     };
 
@@ -926,10 +930,13 @@ async fn dependency_file_handler_internal(
         dep_name: pkg_id,
     };
 
-    Html(template.render().unwrap_or_else(|e| {
-        tracing::error!("Template render error: {}", e);
-        render_docs_error("Render Error", &e.to_string())
-    }))
+    match template.render() {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            tracing::error!("Template render error: {}", e);
+            render_docs_error(&session, "Render Error", &e.to_string())
+        }
+    }
 }
 
 /// Common handler for namespace detail pages
@@ -940,14 +947,15 @@ async fn namespace_detail_handler_internal(
     pkg_id: Option<String>,
     db: Arc<DatabasePool>,
     session: Session,
-) -> Html<String> {
+) -> Response {
     let env_id = match session.current_env_id() {
         Some(id) => id,
         None => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "No Environment Selected",
                 "Please select an environment to view documentation.",
-            ));
+            );
         }
     };
 
@@ -955,14 +963,15 @@ async fn namespace_detail_handler_internal(
     let project = match Project::get_project_by_env_and_name(&db, &env_id, &project_name).await {
         Ok(Some(p)) => p,
         Ok(None) => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "Project Not Found",
                 &format!("Project '{}' was not found.", project_name),
-            ));
+            );
         }
         Err(e) => {
             tracing::error!("Error fetching project {}: {}", project_name, e);
-            return Html(render_docs_error("Error", "Failed to load project."));
+            return render_docs_error(&session, "Error", "Failed to load project.");
         }
     };
 
@@ -970,14 +979,15 @@ async fn namespace_detail_handler_internal(
     let build = match get_build_for_docs(&db, &project.project_id).await {
         Ok(Some(b)) => b,
         Ok(None) => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "No Active Build",
                 "This project does not have an active build with documentation.",
-            ));
+            );
         }
         Err(e) => {
             tracing::error!("Error fetching build for {}: {}", project_name, e);
-            return Html(render_docs_error("Error", "Failed to load build."));
+            return render_docs_error(&session, "Error", "Failed to load build.");
         }
     };
 
@@ -987,14 +997,15 @@ async fn namespace_detail_handler_internal(
             Ok(docs) => docs,
             Err(e) => {
                 tracing::error!("Error loading docs from cache: {}", e);
-                return Html(render_docs_error("Error", "Failed to load documentation."));
+                return render_docs_error(&session, "Error", "Failed to load documentation.");
             }
         },
         None => {
-            return Html(render_docs_error(
+            return render_docs_error(
+                &session,
                 "Cache Not Available",
                 "Build docs cache is not initialized.",
-            ));
+            );
         }
     };
 
@@ -1007,17 +1018,19 @@ async fn namespace_detail_handler_internal(
             Some(pkg_docs) => match pkg_docs.namespaces.iter().find(|ns| ns.name == ns_path) {
                 Some(ns) => ns,
                 None => {
-                    return Html(render_docs_error(
+                    return render_docs_error(
+                        &session,
                         "Namespace Not Found",
                         &format!("Namespace '{}' not found in package '{}'.", ns_path, id),
-                    ));
+                    );
                 }
             },
             None => {
-                return Html(render_docs_error(
+                return render_docs_error(
+                    &session,
                     "Package Not Found",
                     &format!("Package '{}' not found.", id),
-                ));
+                );
             }
         }
     } else {
@@ -1030,10 +1043,11 @@ async fn namespace_detail_handler_internal(
         {
             Some(ns) => ns,
             None => {
-                return Html(render_docs_error(
+                return render_docs_error(
+                    &session,
                     "Namespace Not Found",
                     &format!("Namespace '{}' not found in project.", ns_path),
-                ));
+                );
             }
         }
     };
@@ -1081,14 +1095,23 @@ async fn namespace_detail_handler_internal(
             .unwrap_or_default()
     };
 
+    // A project's own namespaces have no package index page: the breadcrumb root is the
+    // project's docs index.
+    let root_href = if is_project_ns {
+        format!("/docs?project={}", urlencoding::encode(&project_name))
+    } else {
+        format!("{}/{}", base_url, render_pkg_name)
+    };
+
     // Generate HTML content using the shared module with correct base_url
-    let content = docs_html::generate_namespace_html_with_registry_and_aliases(
+    let content = docs_html::generate_namespace_html_with_root(
         namespace,
         &render_pkg_name,
         &AHashMap::new(), // type_index - not used in hot_app currently
         None,             // cross_pkg_registry - not used in hot_app currently
         &base_url,
         &alias_target_index,
+        &root_href,
     );
 
     // Build navigation and TOC using shared module
@@ -1135,10 +1158,13 @@ async fn namespace_detail_handler_internal(
         dep_name: pkg_id.unwrap_or_default(),
     };
 
-    Html(template.render().unwrap_or_else(|e| {
-        tracing::error!("Template render error: {}", e);
-        render_docs_error("Render Error", &e.to_string())
-    }))
+    match template.render() {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            tracing::error!("Template render error: {}", e);
+            render_docs_error(&session, "Render Error", &e.to_string())
+        }
+    }
 }
 
 /// Build navigation items for project namespaces

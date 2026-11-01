@@ -433,13 +433,13 @@ function renderNodeRow(node, lineInfo, inspectorCallbackName) {
     // FN display
     const fnDisplay = fnValue !== '-'
         ? `<code class="language-hot">${escapeHtml(fnValue)}</code>`
-        : '<span class="text-gray-400 dark:text-gray-500 italic">-</span>';
+        : '<span class="text-gray-500 dark:text-gray-400 italic">-</span>';
 
     // Queue wait line (only for runs with queue wait time) - always on second line
     let queueWaitLine = '';
     if (nodeType === 'run' && node.queue_wait_us && node.queue_wait_us > 0) {
         const formattedWait = formatQueueWait(node.queue_wait_us);
-        queueWaitLine = `<div class="text-[9px] text-yellow-600 dark:text-yellow-400 whitespace-nowrap" title="Queue wait time">⏱ ${formattedWait}</div>`;
+        queueWaitLine = `<div class="text-[9px] text-yellow-700 dark:text-yellow-400 whitespace-nowrap" title="Queue wait time">⏱ ${formattedWait}</div>`;
     }
 
     // Status pill
@@ -475,7 +475,7 @@ function renderNodeRow(node, lineInfo, inspectorCallbackName) {
     return `
         <tr class="group hover:bg-gray-100 dark:hover:bg-[#222] cursor-pointer border-b border-gray-100 dark:border-neutral-800 transition-colors"
             style="height: 40px;"
-            onclick="${navNodeType === 'task' ? `window.location.href=window.hotScopeUrl('${detailUrl}')` : `window.${inspectorCallbackName}('${node.id}', '${navNodeType}', ${JSON.stringify(details).replace(/"/g, '&quot;')})`}">
+            onclick="${navNodeType === 'task' ? `window.location.href=window.hotScopeUrl('${detailUrl}')` : `window.${inspectorCallbackName}('${node.id}', '${navNodeType}', ${escapeAttribute(JSON.stringify(details))})`}">
             <td class="p-0 pl-2 align-middle" style="line-height: 0;">${graphCell}</td>
             <td class="pl-2 pr-0 align-middle" style="width: 24px;">${nodeTypeIcon(navNodeType, typeColor)}</td>
             <td class="px-2 align-middle">
@@ -514,6 +514,13 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// Escape for a double-quoted attribute value, including handler code: `&` first, so text
+// that already looks like an entity cannot decode back into a quote.
+function escapeAttribute(text) {
+    return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // Expose as global functions

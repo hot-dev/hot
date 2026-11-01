@@ -33,7 +33,7 @@ use hot::stream::{
 use hot::val::Val;
 
 use crate::access_log::OptionalAccessId;
-use crate::auth::{AuthContext, authenticate_token};
+use crate::auth::{AuthContext, authenticate_or_reject};
 use crate::client_ip::ClientIp;
 use crate::domain_resolver::ResolvedDomain;
 use crate::rate_limit::{self, PublicRateLimitMode};
@@ -1166,16 +1166,64 @@ fn input_required_result(
 // Argument Conversion
 // ============================================================================
 
+/// The order in which a tool's function takes its parameters.
+///
+/// Tools stored by this version record it (`McpTool::param_order`). For a
+/// tool stored earlier only the schema remains, and on PostgreSQL its
+/// `properties` come back in `jsonb` key order (shorter names first), not
+/// declaration order. The `required` array keeps its order, so the required
+/// parameters are put back in that order within the slots they occupy: that
+/// repairs every tool whose parameters are all required, and optional ones
+/// stay where they are until the project is redeployed.
+fn tool_param_order(
+    input_schema: Option<&JsonValue>,
+    recorded: Option<Vec<String>>,
+) -> Vec<String> {
+    if let Some(recorded) = recorded.filter(|names| !names.is_empty()) {
+        return recorded;
+    }
+    let Some(properties) = input_schema
+        .and_then(|schema| schema.get("properties"))
+        .and_then(|props| props.as_object())
+    else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = properties.keys().cloned().collect();
+    let required: Vec<&str> = input_schema
+        .and_then(|schema| schema.get("required"))
+        .and_then(|required| required.as_array())
+        .map(|required| {
+            required
+                .iter()
+                .filter_map(|name| name.as_str())
+                .filter(|name| properties.contains_key(*name))
+                .collect()
+        })
+        .unwrap_or_default();
+    let slots: Vec<usize> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| required.contains(&name.as_str()))
+        .map(|(slot, _)| slot)
+        .collect();
+    // A repeated name in `required` leaves the order as stored.
+    if slots.len() == required.len() {
+        for (slot, name) in slots.into_iter().zip(required) {
+            names[slot] = name.to_string();
+        }
+    }
+    names
+}
+
 /// Convert MCP named arguments (JSON object) to a positional Vec for Hot's `call()`.
 ///
 /// MCP tools send arguments as a JSON object: `{"name": "Alice", "mood": "happy"}`
 /// Hot's `call-event-handler` expects `event.data.args` to be a Vec: `["Alice", "happy"]`
 ///
-/// The parameter order is determined by the tool's `input_schema.properties` key order,
-/// which is preserved from the function's original parameter list.
+/// `param_names` gives the positions (see `tool_param_order`).
 fn convert_named_args_to_positional(
     args_json: &JsonValue,
-    input_schema: Option<&JsonValue>,
+    param_names: &[String],
 ) -> Result<Val, String> {
     let args_map: serde_json::Map<String, JsonValue> = match args_json {
         JsonValue::Object(m) => m.clone(),
@@ -1192,16 +1240,9 @@ fn convert_named_args_to_positional(
         return Ok(Val::Vec(vec![]));
     }
 
-    // Get parameter order from the tool's input_schema properties
-    let param_names: Vec<String> = input_schema
-        .and_then(|schema| schema.get("properties"))
-        .and_then(|props| props.as_object())
-        .map(|props| props.keys().cloned().collect())
-        .unwrap_or_default();
-
     // Convert named args to positional Vec in parameter order
     let mut positional_args: Vec<Val> = Vec::with_capacity(param_names.len());
-    for param_name in &param_names {
+    for param_name in param_names {
         let val: Val = if let Some(arg_value) = args_map.get(param_name) {
             serde_json::from_value(arg_value.clone()).unwrap_or(Val::Null)
         } else {
@@ -1313,12 +1354,7 @@ async fn try_authenticate(
         _ => return Ok(None),
     };
 
-    let authenticated = authenticate_token(db, token).await.map_err(|status| {
-        (
-            status,
-            Json(ApiErrorResponse::new("unauthorized", "Invalid credentials")),
-        )
-    })?;
+    let authenticated = authenticate_or_reject(db, token).await?;
 
     Ok(Some((authenticated.auth_ctx, authenticated.api_key)))
 }
@@ -2281,13 +2317,15 @@ async fn handle_tools_call_streaming(
         queue_timing: None,
         // Enqueue-only producer context; the worker stamps deadline_at at admission
         deadline_at: None,
+        trace_calls: true,
     };
 
     // Convert MCP named arguments (JSON object) to positional Vec for Hot's call() function.
     // MCP sends: {"name": "Cursor"} but Hot expects: ["Cursor"] (positional args).
     let args_val: Val = match call_params.arguments.as_ref() {
         Some(args_json) => {
-            match convert_named_args_to_positional(args_json, tool.input_schema.as_ref()) {
+            let param_names = tool_param_order(tool.input_schema.as_ref(), tool.param_order());
+            match convert_named_args_to_positional(args_json, &param_names) {
                 Ok(val) => val,
                 Err(msg) => {
                     return Err((
@@ -4349,7 +4387,9 @@ mod tests {
             }
         });
 
-        let result = convert_named_args_to_positional(&args, Some(&schema)).unwrap();
+        let result =
+            convert_named_args_to_positional(&args, &tool_param_order(Some(&schema), None))
+                .unwrap();
         match result {
             Val::Vec(v) => {
                 assert_eq!(v.len(), 1);
@@ -4372,7 +4412,9 @@ mod tests {
             }
         });
 
-        let result = convert_named_args_to_positional(&args, Some(&schema)).unwrap();
+        let result =
+            convert_named_args_to_positional(&args, &tool_param_order(Some(&schema), None))
+                .unwrap();
         match result {
             Val::Vec(v) => {
                 assert_eq!(v.len(), 2);
@@ -4396,7 +4438,9 @@ mod tests {
             }
         });
 
-        let result = convert_named_args_to_positional(&args, Some(&schema)).unwrap();
+        let result =
+            convert_named_args_to_positional(&args, &tool_param_order(Some(&schema), None))
+                .unwrap();
         match result {
             Val::Vec(v) => {
                 assert_eq!(v.len(), 2);
@@ -4415,7 +4459,9 @@ mod tests {
             "properties": {}
         });
 
-        let result = convert_named_args_to_positional(&args, Some(&schema)).unwrap();
+        let result =
+            convert_named_args_to_positional(&args, &tool_param_order(Some(&schema), None))
+                .unwrap();
         match result {
             Val::Vec(v) => assert!(v.is_empty()),
             other => panic!("Expected empty Vec, got {:?}", other),
@@ -4430,7 +4476,9 @@ mod tests {
             "properties": {"x": {"type": "string"}}
         });
 
-        let result = convert_named_args_to_positional(&args, Some(&schema)).unwrap();
+        let result =
+            convert_named_args_to_positional(&args, &tool_param_order(Some(&schema), None))
+                .unwrap();
         match result {
             Val::Vec(v) => assert!(v.is_empty()),
             other => panic!("Expected empty Vec, got {:?}", other),
@@ -4440,7 +4488,7 @@ mod tests {
     #[test]
     fn test_convert_named_args_rejects_non_object() {
         let args = json!([1, 2, 3]);
-        let result = convert_named_args_to_positional(&args, None);
+        let result = convert_named_args_to_positional(&args, &[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("must be a JSON object"));
     }
@@ -4449,7 +4497,7 @@ mod tests {
     fn test_convert_named_args_no_schema_returns_empty() {
         // If schema is None or has no properties, we can't determine order
         let args = json!({"name": "Alice"});
-        let result = convert_named_args_to_positional(&args, None).unwrap();
+        let result = convert_named_args_to_positional(&args, &[]).unwrap();
         match result {
             Val::Vec(v) => {
                 // No schema means no properties to iterate, so empty Vec
@@ -4471,7 +4519,9 @@ mod tests {
             }
         });
 
-        let result = convert_named_args_to_positional(&args, Some(&schema)).unwrap();
+        let result =
+            convert_named_args_to_positional(&args, &tool_param_order(Some(&schema), None))
+                .unwrap();
         match result {
             Val::Vec(v) => {
                 assert_eq!(v.len(), 3);
@@ -4481,6 +4531,135 @@ mod tests {
             }
             other => panic!("Expected Vec, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn tool_param_order_prefers_the_recorded_order() {
+        // As PostgreSQL returns farewell(name, mood)'s schema.
+        let schema = json!({
+            "type": "object",
+            "required": ["name", "mood"],
+            "properties": {"mood": {"type": "string"}, "name": {"type": "string"}}
+        });
+        let recorded = vec!["name".to_string(), "mood".to_string()];
+        assert_eq!(
+            tool_param_order(Some(&schema), Some(recorded.clone())),
+            recorded
+        );
+        let args = json!({"name": "Alice", "mood": "formal"});
+        let bound = convert_named_args_to_positional(&args, &recorded).unwrap();
+        assert_eq!(
+            bound,
+            Val::Vec(vec![Val::from("Alice"), Val::from("formal")])
+        );
+    }
+
+    #[test]
+    fn tool_param_order_restores_required_order_for_tools_stored_earlier() {
+        // farewell(name, mood) stored before the order was recorded.
+        let schema = json!({
+            "type": "object",
+            "required": ["name", "mood"],
+            "properties": {"mood": {"type": "string"}, "name": {"type": "string"}}
+        });
+        assert_eq!(tool_param_order(Some(&schema), None), ["name", "mood"]);
+
+        // f(zz, b: Str?, a): optional `b` keeps its slot between them.
+        let schema = json!({
+            "type": "object",
+            "required": ["zz", "a"],
+            "properties": {"a": {}, "b": {}, "zz": {}}
+        });
+        assert_eq!(tool_param_order(Some(&schema), None), ["zz", "b", "a"]);
+
+        // An empty recorded order is no order.
+        assert_eq!(
+            tool_param_order(Some(&schema), Some(Vec::new())),
+            ["zz", "b", "a"]
+        );
+        assert!(tool_param_order(None, None).is_empty());
+    }
+
+    /// PostgreSQL stores the input schema as `jsonb`, which returns
+    /// `properties` shortest key first. slow(delay, label?, n) came back as
+    /// {n, delay, label}, and `n` received the delay. The order recorded at
+    /// insert survives the round trip.
+    #[tokio::test]
+    async fn named_args_bind_in_declared_order_on_postgres() {
+        use sqlx::Executor;
+
+        let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping MCP argument order test: HOT_TEST_POSTGRES_URI not set");
+            return;
+        };
+        let database = format!("hot_mcp_args_{}", Uuid::new_v4().simple());
+        let cluster = sqlx::PgPool::connect(&admin_uri).await.unwrap();
+        cluster
+            .execute(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
+            .await
+            .unwrap();
+        let mut url = url::Url::parse(&admin_uri).unwrap();
+        url.set_path(&format!("/{database}"));
+        let conf = hot::val!({
+            "uri": url.to_string(),
+            "schema": "hot",
+            "rls": {"enforce": false},
+        });
+        hot::db::run_migrations(&conf).await.unwrap();
+        let db = hot::db::create_db_pool(&conf).await.unwrap().with_scope(
+            hot::db::DatabaseScope::Bootstrap(hot::db::BootstrapOperation::Onboarding),
+        );
+        let test_data = hot::db::insert_test_data(&db).await.unwrap();
+
+        let tool = hot::val!({
+            "fn": "::app::tools/slow",
+            "name": "slow",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "delay": {"type": "integer"},
+                    "label": {"type": "string"},
+                    "n": {"type": "integer"},
+                },
+                "required": ["delay", "n"],
+            },
+            "meta": {"mcp": {"service": "svc"}},
+        });
+        McpTool::insert_mcp_tool_from_val(&db, &test_data.build_id, "svc", &tool)
+            .await
+            .unwrap();
+        let stored = McpTool::get_mcp_tools_by_build(&db, &test_data.build_id, None, None)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let properties: Vec<&String> = stored.input_schema.as_ref().unwrap()["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert_eq!(properties, ["n", "delay", "label"], "jsonb key order");
+        let param_names = tool_param_order(stored.input_schema.as_ref(), stored.param_order());
+        let bound = convert_named_args_to_positional(
+            &json!({"n": 2, "delay": 5, "label": "x"}),
+            &param_names,
+        )
+        .unwrap();
+        assert_eq!(
+            bound,
+            Val::Vec(vec![Val::Int(5), Val::from("x"), Val::Int(2)])
+        );
+
+        if let hot::db::DatabasePool::Postgres(pool) = &db {
+            pool.close().await;
+        }
+        cluster
+            .execute(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE {database} WITH (FORCE)"
+            )))
+            .await
+            .unwrap();
     }
 
     // ========================================================================

@@ -436,24 +436,73 @@ pub fn collect_hot_files_with_prefix(
                 continue;
             }
 
-            let content = fs::read(&found.abs_path)
-                .map_err(|e| format!("Failed to read file {}: {}", found.abs_path.display(), e))?;
-            let size = content.len() as u64;
-            let hash = HotHasher::hash_content(&content);
             let bundle_path = format!("{}/{}", bundle_prefix, found.rel_path);
-
-            files.push(BundleFile {
-                path: found.abs_path,
-                relative_path: bundle_path,
-                content,
-                hash,
-                size,
-            });
+            files.push(read_bundle_file(found.abs_path, bundle_path)?);
         }
     }
 
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     Ok(files)
+}
+
+/// Read a source file into a [`BundleFile`] stored at `bundle_path`.
+fn read_bundle_file(abs_path: PathBuf, bundle_path: String) -> Result<BundleFile, String> {
+    let content = fs::read(&abs_path)
+        .map_err(|e| format!("Failed to read file {}: {}", abs_path.display(), e))?;
+    let size = content.len() as u64;
+    let hash = HotHasher::hash_content(&content);
+    Ok(BundleFile {
+        path: abs_path,
+        relative_path: bundle_path,
+        content,
+        hash,
+        size,
+    })
+}
+
+/// Fail when two bundle files would be stored at the same path.
+///
+/// Every project src path is bundled under `hot/src/` by its path within
+/// that folder, so `./hot/src/main.hot` and `./lib/main.hot` would both be
+/// `hot/src/main.hot`. `hot check` and `hot run` load both, but a zip holds
+/// one entry per path; this names the files instead of failing mid-write.
+pub fn check_unique_bundle_paths(files: &[BundleFile]) -> Result<(), String> {
+    let mut sources: IndexMap<&str, Vec<&Path>> = IndexMap::new();
+    for file in files {
+        sources
+            .entry(file.relative_path.as_str())
+            .or_default()
+            .push(&file.path);
+    }
+    let collisions: Vec<String> = sources
+        .iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .map(|(bundle_path, paths)| {
+            let shown: Vec<String> = paths.iter().map(|path| display_path(path)).collect();
+            format!("  {} <- {}", bundle_path, shown.join(", "))
+        })
+        .collect();
+    if collisions.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "These source files would have the same path in the bundle:\n{}\n\
+         A bundle stores every project file under hot/src/ by its path within \
+         its src path, so files in different src paths can collide. Rename or \
+         move files so that each has its own path.",
+        collisions.join("\n")
+    ))
+}
+
+/// `path` relative to the current directory when it is under it.
+fn display_path(path: &Path) -> String {
+    std::env::current_dir()
+        .and_then(|cwd| cwd.canonicalize())
+        .ok()
+        .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf))
+        .unwrap_or_else(|| path.to_path_buf())
+        .display()
+        .to_string()
 }
 
 /// Collect all .hot files from the given paths (legacy function for backward compatibility)
@@ -502,19 +551,45 @@ pub fn collect_resource_files(
 
 /// Collect package source files from a single package root, honoring that
 /// package's declared `src-paths` from `pkg.hot`.
+///
+/// Each file is bundled at `{bundle_prefix}/{path within the package}`, and
+/// collected once even when src-paths overlap (`src/` and `src/lib/`).
 pub fn collect_package_source_files_from_root(
     package_root: &Path,
     bundle_prefix: &str,
 ) -> Result<Vec<BundleFile>, String> {
     let mut files = Vec::new();
+    let mut seen_canonical: AHashSet<PathBuf> = AHashSet::new();
+    let opts = DiscoveryOpts::for_extension("hot");
+    let canonical_root = package_root
+        .canonicalize()
+        .unwrap_or_else(|_| package_root.to_path_buf());
     let src_dirs = crate::lang::engine::Engine::discover_dependency_source_dirs(package_root)?;
 
     for src_dir in &src_dirs {
         let src_path = Path::new(src_dir);
-        let src_relative = src_path.strip_prefix(package_root).unwrap_or(src_path);
-        let prefix = format!("{}/{}", bundle_prefix, src_relative.to_string_lossy());
-        let collected = collect_hot_files_with_prefix(std::slice::from_ref(src_dir), &prefix)?;
-        files.extend(collected);
+        // The src path within the package, used for a file whose real path
+        // is outside it (a symlinked folder); src-paths must stay inside
+        let src_relative = src_path
+            .strip_prefix(package_root)
+            .unwrap_or(src_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for found in discover(&[src_path], &opts) {
+            let Ok(canonical_path) = found.abs_path.canonicalize() else {
+                continue;
+            };
+            if !seen_canonical.insert(canonical_path) {
+                continue;
+            }
+            let package_relative = match found.abs_path.strip_prefix(&canonical_root) {
+                Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
+                Err(_) if src_relative.is_empty() => found.rel_path.clone(),
+                Err(_) => format!("{}/{}", src_relative, found.rel_path),
+            };
+            let bundle_path = format!("{}/{}", bundle_prefix, package_relative);
+            files.push(read_bundle_file(found.abs_path, bundle_path)?);
+        }
     }
 
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
@@ -986,6 +1061,7 @@ pub fn create_bundle(
     }
 
     all_files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    check_unique_bundle_paths(&all_files)?;
 
     let mut all_resource_roots = resource_roots.to_vec();
     if !pkg_paths.is_empty() {

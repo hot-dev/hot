@@ -40,6 +40,8 @@ The `duration-ms` field on task results and completion events reflects billable 
 
 **Timeouts are separate from billing.** A container task's `timeout` budget is measured from when a worker claims the task, so it covers preparation phases as well as execution: a slow image pull consumes your task's time budget, but never your CUS.
 
+**Cancelling stops the clock.** `::hot::task/cancel` on a running container task stops its container, and the task is charged CUS for the time it ran until then.
+
 ## CUS Multiplier by Size
 
 | Size | Multiplier |
@@ -98,6 +100,6 @@ Example: check quota before running a container:
 q ::hot::box/quota()
 if(eq(q.tasks-remaining, 0), fail("No container tasks remaining"), "OK")
 if(or(eq(q.compute-units-remaining, -1), gt(q.compute-units-remaining, 0)),
-  ::hot::box/start(BoxConf({image: "alpine", cmd: ["echo", "hello"], size: "nano"})),
+  ::hot::box/start(BoxConf({image: "alpine:3.21", cmd: ["echo", "hello"], size: "nano"})),
   fail("CUS quota exhausted"))
 ```

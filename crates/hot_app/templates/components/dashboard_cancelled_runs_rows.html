@@ -3,7 +3,7 @@
 <!-- Desktop Table View -->
 <div class="overflow-x-auto hidden md:block">
     <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-        <thead class="bg-gray-50 dark:bg-gray-800">
+        <thead class="table-head">
             <tr>
                 <th scope="col" class="px-3 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Run ID</th>
                 <th scope="col" class="px-3 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">FN</th>
@@ -32,7 +32,7 @@
                     {% when Some with (event_fn) %}
                         <code class="language-hot">{{ event_fn }}</code>
                     {% when None %}
-                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                        <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                     {% endmatch %}
                 </td>
                 <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-600 dark:text-gray-400">
@@ -66,7 +66,7 @@
             {% else %}
             <tr>
                 <td colspan="7" class="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8 mx-auto mb-2 text-green-600 dark:text-green-400">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8 mx-auto mb-2 text-green-700 dark:text-green-400">
                         <path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm13.36-1.814a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z" clip-rule="evenodd" />
                     </svg>
                     No cancelled runs
@@ -103,7 +103,7 @@
                     {% when Some with (event_fn) %}
                         <code class="language-hot text-xs">{{ event_fn }}</code>
                     {% when None %}
-                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                        <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                     {% endmatch %}
                 </span>
             </div>
@@ -147,7 +147,7 @@
     </div>
     {% else %}
     <div class="text-center text-gray-500 dark:text-gray-400 py-8 text-sm">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8 mx-auto mb-2 text-green-600 dark:text-green-400">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8 mx-auto mb-2 text-green-700 dark:text-green-400">
             <path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm13.36-1.814a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z" clip-rule="evenodd" />
         </svg>
         No cancelled runs

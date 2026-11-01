@@ -27,6 +27,63 @@ use super::{
 use ahash::{AHashMap, AHashSet};
 use std::sync::Arc;
 
+/// Editor state for an overlay check
+/// (`Engine::check_sources_pipeline_diagnostics_with_overlays`).
+#[derive(Debug, Clone, Default)]
+pub struct SourceOverlays {
+    /// Buffer text of open files that differ from disk, keyed by canonical
+    /// path (or the absolute path, for a file not saved yet).
+    pub files: AHashMap<std::path::PathBuf, String>,
+    /// Files to check with the project although no source path includes
+    /// them, such as an open file outside the project. Their text comes from
+    /// `files`, or from disk.
+    pub extra_files: Vec<std::path::PathBuf>,
+}
+
+impl SourceOverlays {
+    /// The key a discovered or reported path has in `files`.
+    pub fn key(&self, path: &str) -> std::path::PathBuf {
+        let path = std::path::Path::new(path);
+        std::fs::canonicalize(path).unwrap_or_else(|_| {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(path))
+                    .unwrap_or_else(|_| path.to_path_buf())
+            }
+        })
+    }
+
+    /// The buffer text for `path`, when it is overlaid.
+    pub fn text(&self, path: &str) -> Option<&str> {
+        if self.files.is_empty() {
+            return None;
+        }
+        self.files
+            .get(std::path::Path::new(path))
+            .or_else(|| self.files.get(&self.key(path)))
+            .map(String::as_str)
+    }
+}
+
+/// What an overlay check found.
+#[derive(Debug)]
+pub struct OverlayCheck {
+    /// Errors and warnings, as `check_sources_pipeline_diagnostics_with_ctx`
+    /// returns them, rendered against the overlaid text.
+    pub diagnostics: crate::lang::errors::CompilerErrors,
+    /// The parsed program with references resolved, before compilation.
+    /// `None` when the check stopped before compiling.
+    pub program: Option<crate::lang::ast::Program>,
+    /// Whether the check stopped at parse errors (or conflicting
+    /// definitions), so it did not type-check anything.
+    pub parse_failed: bool,
+    /// The project's source files (source paths, test paths and the extra
+    /// files), as discovered.
+    pub project_files: Vec<String>,
+}
+
 impl Engine {
     /// Extract event handlers, scheduled functions, MCP tools, webhook endpoints, agent definitions, and context requirements from a compiled project
     pub fn extract_handlers_and_scheduled_functions(
@@ -493,6 +550,50 @@ impl Engine {
         project_name: Option<&str>,
         available_ctx_keys: Option<&AHashSet<String>>,
     ) -> crate::lang::errors::CompilerErrors {
+        Self::check_diagnostics_internal(
+            src_paths,
+            test_paths,
+            conf,
+            project_name,
+            available_ctx_keys,
+            &SourceOverlays::default(),
+            false,
+        )
+        .diagnostics
+    }
+
+    /// The diagnostics check (`check_sources_pipeline_diagnostics_with_ctx`)
+    /// for an editor: files open with unsaved changes are checked as their
+    /// buffers read, files outside every source path can join the check, and
+    /// the parsed program comes back for navigation.
+    pub fn check_sources_pipeline_diagnostics_with_overlays(
+        src_paths: &[String],
+        test_paths: &[String],
+        conf: Option<&crate::val::Val>,
+        project_name: Option<&str>,
+        available_ctx_keys: Option<&AHashSet<String>>,
+        overlays: &SourceOverlays,
+    ) -> OverlayCheck {
+        Self::check_diagnostics_internal(
+            src_paths,
+            test_paths,
+            conf,
+            project_name,
+            available_ctx_keys,
+            overlays,
+            true,
+        )
+    }
+
+    fn check_diagnostics_internal(
+        src_paths: &[String],
+        test_paths: &[String],
+        conf: Option<&crate::val::Val>,
+        project_name: Option<&str>,
+        available_ctx_keys: Option<&AHashSet<String>>,
+        overlays: &SourceOverlays,
+        keep_program: bool,
+    ) -> OverlayCheck {
         use crate::lang::errors::{CompilerError, CompilerErrors};
 
         fn synthesize(message: String) -> CompilerErrors {
@@ -504,78 +605,72 @@ impl Engine {
             });
             errs
         }
+        let failed = |diagnostics: CompilerErrors, parse_failed: bool| OverlayCheck {
+            diagnostics,
+            program: None,
+            parse_failed,
+            project_files: Vec::new(),
+        };
 
         if let Err(msg) = Self::check_selected_project(conf, project_name) {
-            return synthesize(msg);
+            return failed(synthesize(msg), false);
         }
 
         // Phase 1: Discover compilation units
-        let units = match discover_compilation_units(conf, project_name, src_paths, test_paths) {
+        let mut units = match discover_compilation_units(conf, project_name, src_paths, test_paths)
+        {
             Ok(u) => u,
-            Err(msg) => return synthesize(msg),
+            Err(msg) => return failed(synthesize(msg), false),
         };
+        // Files to check that no source path includes join as one more
+        // project unit.
+        let known: AHashSet<std::path::PathBuf> = if overlays.extra_files.is_empty() {
+            AHashSet::new()
+        } else {
+            units
+                .iter()
+                .flat_map(|u| u.files.iter())
+                .map(|f| overlays.key(f))
+                .collect()
+        };
+        let extra: Vec<String> = overlays
+            .extra_files
+            .iter()
+            .filter(|f| !known.contains(&overlays.key(&f.to_string_lossy())))
+            .map(|f| f.to_string_lossy().to_string())
+            .collect();
+        if let Some(first) = extra.first() {
+            let dir = std::path::Path::new(first)
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default();
+            units.push(DiscoveredUnit {
+                unit: crate::lang::cache::unit_cache::CompilationUnit::SourcePath {
+                    name: "open-files".to_string(),
+                    path: dir,
+                },
+                files: extra,
+            });
+        }
+        let project_files: Vec<String> = units
+            .iter()
+            .filter(|u| {
+                matches!(
+                    u.unit,
+                    crate::lang::cache::unit_cache::CompilationUnit::SourcePath { .. }
+                )
+            })
+            .flat_map(|u| u.files.iter().cloned())
+            .collect();
 
-        // Phase 2: Parse units (errors come back pre-formatted from the parser)
-        let (namespaces, parsed_files) = match parse_units_with_cache(&units, false) {
-            Ok(pair) => pair,
-            Err(_msg) => {
-                // Re-parse each file directly to recover structured per-file
-                // errors with line/column information. Slower than the cached
-                // pipeline but only runs on the failure path.
-                let mut errs = CompilerErrors::new();
-                for unit in &units {
-                    for file_path in &unit.files {
-                        let content = match std::fs::read_to_string(file_path) {
-                            Ok(c) => c,
-                            Err(_) => continue,
-                        };
-                        if let Err(parse_err) =
-                            crate::lang::parser::parse_hot_file(&content, file_path)
-                        {
-                            errs.add_source(file_path.clone(), content.clone());
-                            // Use the raw message — the outer ariadne renderer
-                            // in `to_diagnostics()` will wrap it with the
-                            // snippet using the location we attach below, so
-                            // we don't want to embed a second pre-rendered
-                            // ariadne report inside it.
-                            let location = crate::lang::errors::ErrorLocation {
-                                line: parse_err.location.line,
-                                column: parse_err.location.column,
-                                position: parse_err.location.position,
-                                length: parse_err.location.length.max(1),
-                                file: parse_err
-                                    .location
-                                    .file
-                                    .clone()
-                                    .or_else(|| Some(std::path::PathBuf::from(file_path))),
-                            };
-                            let code = parse_err.code();
-                            if code == "parse-error" {
-                                errs.add(CompilerError::InvalidFunctionCall {
-                                    func_name: "<parse>".to_string(),
-                                    message: parse_err.message.clone(),
-                                    location: Some(location),
-                                });
-                            } else {
-                                // A `where` misuse keeps its own code, as the
-                                // constraint diagnostics do.
-                                errs.add(CompilerError::Constraint {
-                                    code,
-                                    message: parse_err.message.clone(),
-                                    help: None,
-                                    warning: false,
-                                    location: Some(location),
-                                });
-                            }
-                        }
-                    }
-                }
-                if errs.is_empty() {
-                    // Couldn't pin down a specific file — fall back to the
-                    // pre-formatted aggregate string.
-                    return synthesize(_msg);
-                }
-                return errs;
+        // Phase 2: Parse units (cached), reading overlaid files from their
+        // buffers. A parse failure comes back as located errors per file.
+        let (namespaces, sources) = match Self::parse_units_for_check(&units, overlays) {
+            Ok(parsed) => parsed,
+            Err(errors) => {
+                let mut check = failed(errors, true);
+                check.project_files = project_files;
+                return check;
             }
         };
 
@@ -585,14 +680,12 @@ impl Engine {
             current_namespace: crate::lang::ast::NsPath::hot_main(),
         };
         crate::lang::compiler::resolver::resolve_all_variable_references(&mut combined_program);
+        let program = keep_program.then(|| combined_program.clone());
 
         // Phase 2: Compile + validate
         let mut compiler = crate::lang::Compiler::new();
-        for parsed in &parsed_files {
-            compiler.add_source_file(
-                std::path::PathBuf::from(&parsed.path),
-                parsed.content.clone(),
-            );
+        for (path, content) in &sources {
+            compiler.add_source_file(std::path::PathBuf::from(path), content.clone());
         }
 
         let compile_result = compiler.compile_program(&mut combined_program);
@@ -602,24 +695,46 @@ impl Engine {
             let project_files = Self::project_source_files(&units);
             Self::scope_warnings_to_project(compiler.take_diagnostics(), &project_files)
         };
-        // The same handler and schedule validations the text check runs in
-        // `validate_compiled_program`, collected as diagnostics.
+        // The same handler, schedule, schedule-policy and box-size
+        // validations the text check runs in `validate_compiled_program`,
+        // collected as located diagnostics.
+        // Unlike the text check, which stops at the first failing step,
+        // report every validation that can run.
         let compile_result = compile_result.and_then(|()| {
-            compiler
-                .extract_event_handlers(&combined_program)
-                .and_then(|()| compiler.extract_scheduled_functions(&combined_program))
+            let mut found = CompilerErrors::new();
+            let mut take = |result: Result<(), CompilerErrors>| {
+                if let Err(errors) = result {
+                    found.errors.extend(errors.errors);
+                    found.source_cache.extend(errors.source_cache);
+                }
+            };
+            take(compiler.extract_event_handlers(&combined_program));
+            take(compiler.extract_scheduled_functions(&combined_program));
+            found
+                .errors
+                .extend(Self::schedule_policy_errors(&compiler, &combined_program, conf).errors);
+            let call_graph = crate::lang::compiler::call_graph::CallGraph::build(&combined_program);
+            let box_requirements = call_graph.resolve_user_box_requirements(&combined_program);
+            found
+                .errors
+                .extend(Self::box_size_errors(&combined_program, &box_requirements).errors);
+            if found.errors.is_empty() {
+                Ok(())
+            } else {
+                Err(found)
+            }
         });
         let mut errors = match compile_result {
             Ok(()) => CompilerErrors::new(),
             Err(mut errors) => {
                 // Make sure source content is attached so diagnostics can
                 // render rich messages via ariadne in `to_diagnostics()`.
-                // `parsed_files` only contains freshly-parsed (cache-miss)
-                // files, so on subsequent runs cached source files won't be
-                // in the cache. Lazy-load any file referenced by an error
-                // location that isn't already cached.
-                for parsed in &parsed_files {
-                    errors.add_source(parsed.path.clone(), parsed.content.clone());
+                // `sources` only contains freshly-parsed (cache-miss) and
+                // overlaid files, so on subsequent runs cached source files
+                // won't be in the cache. Lazy-load any file referenced by an
+                // error location that isn't already cached.
+                for (path, content) in &sources {
+                    errors.add_source(path.clone(), content.clone());
                 }
                 let referenced_paths: AHashSet<String> = errors
                     .errors
@@ -666,8 +781,205 @@ impl Engine {
         for (path, content) in scoped_warnings.source_cache {
             errors.add_source(path, content);
         }
+        // Warnings render from the cache too; an overlaid file must render
+        // from its buffer, not from disk.
+        for (path, content) in &sources {
+            if overlays.text(path).is_some() {
+                errors.add_source(path.clone(), content.clone());
+            }
+        }
 
-        errors
+        OverlayCheck {
+            diagnostics: errors,
+            program,
+            parse_failed: false,
+            project_files,
+        }
+    }
+
+    /// Parse every unit for a check: cached units through the unit cache,
+    /// and any unit holding an overlaid file file by file, with that file's
+    /// buffer text. Returns the merged namespaces and the (path, text) of
+    /// every file parsed fresh, or the located parse errors.
+    #[allow(clippy::type_complexity)]
+    fn parse_units_for_check(
+        units: &[DiscoveredUnit],
+        overlays: &SourceOverlays,
+    ) -> Result<
+        (
+            indexmap::IndexMap<crate::lang::ast::NsPath, crate::lang::ast::Namespace>,
+            Vec<(String, String)>,
+        ),
+        crate::lang::errors::CompilerErrors,
+    > {
+        let overlaid = |unit: &DiscoveredUnit| {
+            !overlays.files.is_empty() && unit.files.iter().any(|f| overlays.text(f).is_some())
+        };
+        if !units.iter().any(overlaid) {
+            return match parse_units_with_cache(units, false) {
+                Ok((namespaces, parsed_files)) => Ok((
+                    namespaces,
+                    parsed_files
+                        .into_iter()
+                        .map(|parsed| (parsed.path, parsed.content))
+                        .collect(),
+                )),
+                Err(msg) => Err(Self::located_parse_errors(units, overlays, msg)),
+            };
+        }
+
+        let merge_failure = |msg: String| {
+            let mut errors = crate::lang::errors::CompilerErrors::new();
+            errors.add(crate::lang::errors::CompilerError::InvalidFunctionCall {
+                func_name: "<pipeline>".to_string(),
+                message: msg,
+                location: None,
+            });
+            errors
+        };
+        let mut namespaces = indexmap::IndexMap::new();
+        let mut sources = Vec::new();
+        let mut parse_errors = crate::lang::errors::CompilerErrors::new();
+        for unit in units {
+            if !overlaid(unit) {
+                match parse_units_with_cache(std::slice::from_ref(unit), false) {
+                    Ok((unit_namespaces, parsed_files)) => {
+                        for (ns_path, namespace) in unit_namespaces {
+                            merge_namespace(
+                                &mut namespaces,
+                                ns_path,
+                                namespace,
+                                NsMergePolicy::Strict,
+                            )
+                            .map_err(merge_failure)?;
+                        }
+                        sources.extend(
+                            parsed_files
+                                .into_iter()
+                                .map(|parsed| (parsed.path, parsed.content)),
+                        );
+                    }
+                    Err(msg) => {
+                        let unit_errors =
+                            Self::located_parse_errors(std::slice::from_ref(unit), overlays, msg);
+                        parse_errors.errors.extend(unit_errors.errors);
+                        parse_errors.source_cache.extend(unit_errors.source_cache);
+                    }
+                }
+                continue;
+            }
+
+            for file in &unit.files {
+                let content = match overlays.text(file) {
+                    Some(text) => text.to_string(),
+                    None => match std::fs::read_to_string(file) {
+                        Ok(content) => content,
+                        Err(_) => continue,
+                    },
+                };
+                match crate::lang::parser::parse_hot_file(&content, file) {
+                    Ok(program) => {
+                        for (ns_path, namespace) in program.namespaces {
+                            merge_namespace(
+                                &mut namespaces,
+                                ns_path,
+                                namespace,
+                                NsMergePolicy::Strict,
+                            )
+                            .map_err(merge_failure)?;
+                        }
+                    }
+                    Err(parse_err) => {
+                        parse_errors.add_source(file.clone(), content.clone());
+                        parse_errors.add(Self::parse_error_to_compiler_error(&parse_err, file));
+                    }
+                }
+                sources.push((file.clone(), content));
+            }
+        }
+        if !parse_errors.is_empty() {
+            return Err(parse_errors);
+        }
+        Ok((namespaces, sources))
+    }
+
+    /// Re-parse each file directly to recover structured per-file errors
+    /// with line/column information. Slower than the cached pipeline but
+    /// only runs on the failure path. Falls back to `fallback` (unlocated)
+    /// when no file fails to parse, as when two files define the same name.
+    fn located_parse_errors(
+        units: &[DiscoveredUnit],
+        overlays: &SourceOverlays,
+        fallback: String,
+    ) -> crate::lang::errors::CompilerErrors {
+        use crate::lang::errors::{CompilerError, CompilerErrors};
+
+        let mut errs = CompilerErrors::new();
+        for unit in units {
+            for file_path in &unit.files {
+                let content = match overlays.text(file_path) {
+                    Some(text) => text.to_string(),
+                    None => match std::fs::read_to_string(file_path) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    },
+                };
+                if let Err(parse_err) = crate::lang::parser::parse_hot_file(&content, file_path) {
+                    errs.add_source(file_path.clone(), content.clone());
+                    errs.add(Self::parse_error_to_compiler_error(&parse_err, file_path));
+                }
+            }
+        }
+        if errs.is_empty() {
+            // Couldn't pin down a specific file — fall back to the
+            // pre-formatted aggregate string.
+            errs.add(CompilerError::InvalidFunctionCall {
+                func_name: "<pipeline>".to_string(),
+                message: fallback,
+                location: None,
+            });
+        }
+        errs
+    }
+
+    /// A parse error as a located diagnostic. Uses the raw message: the
+    /// ariadne renderer in `to_diagnostics()` wraps it with the snippet at
+    /// this location, so it must not embed a second pre-rendered report.
+    fn parse_error_to_compiler_error(
+        parse_err: &crate::lang::parser::ParseError,
+        file_path: &str,
+    ) -> crate::lang::errors::CompilerError {
+        use crate::lang::errors::CompilerError;
+
+        let location = crate::lang::errors::ErrorLocation {
+            line: parse_err.location.line,
+            column: parse_err.location.column,
+            position: parse_err.location.position,
+            length: parse_err.location.length.max(1),
+            file: parse_err
+                .location
+                .file
+                .clone()
+                .or_else(|| Some(std::path::PathBuf::from(file_path))),
+        };
+        let code = parse_err.code();
+        if code == "parse-error" {
+            CompilerError::InvalidFunctionCall {
+                func_name: "<parse>".to_string(),
+                message: parse_err.message.clone(),
+                location: Some(location),
+            }
+        } else {
+            // A `where` misuse keeps its own code, as the constraint
+            // diagnostics do.
+            CompilerError::Constraint {
+                code,
+                message: parse_err.message.clone(),
+                help: None,
+                warning: false,
+                location: Some(location),
+            }
+        }
     }
 
     /// Check project sources using the unified pipeline with full dependency loading
@@ -764,6 +1076,117 @@ impl Engine {
         )
     }
 
+    /// Where a function is defined, for diagnostics about its meta (meta
+    /// values carry no spans, so they point at the function's name).
+    fn function_location(
+        program: &crate::lang::ast::Program,
+        fqn: &str,
+    ) -> Option<crate::lang::errors::ErrorLocation> {
+        let (ns, name) = fqn.rsplit_once('/')?;
+        let namespace = program
+            .namespaces
+            .iter()
+            .find(|(path, _)| path.to_string() == ns)
+            .map(|(_, namespace)| namespace)?;
+        let src = namespace
+            .scope
+            .vars
+            .keys()
+            .filter(|var| var.deep_set.is_none() && var.sym.name() == name)
+            .find_map(|var| var.src.as_ref())?;
+        Some(crate::lang::errors::ErrorLocation {
+            line: src.line,
+            column: src.column,
+            position: src.position,
+            length: name.chars().count().max(1),
+            file: src.file.as_ref().map(std::path::PathBuf::from),
+        })
+    }
+
+    /// Recurring schedules the conf's schedule policy rejects: below the
+    /// minimum interval, with no upcoming run, or not a valid cron once
+    /// normalized. Each points at the scheduled function. Expects
+    /// `extract_scheduled_functions` to have run; schedules it already
+    /// rejects are skipped. The text check and the diagnostics check both
+    /// report these.
+    fn schedule_policy_errors(
+        compiler: &crate::lang::Compiler,
+        program: &crate::lang::ast::Program,
+        conf: Option<&crate::val::Val>,
+    ) -> crate::lang::errors::CompilerErrors {
+        use crate::db::ScheduleIntervalValidation;
+        use crate::lang::errors::{CompilerError, CompilerErrors};
+
+        let mut errors = CompilerErrors::new();
+        let Some(conf) = conf else {
+            return errors;
+        };
+        let policy = crate::db::SchedulePolicy::from_conf(conf);
+        for (cron_expression, functions) in compiler.get_scheduled_functions() {
+            // Extraction already reports a schedule that doesn't normalize
+            // (`invalid-schedule`).
+            if crate::db::normalize_recurring_schedule_expression(cron_expression).is_err() {
+                continue;
+            }
+            let Err(problem) = crate::db::validate_recurring_schedule_interval(
+                cron_expression,
+                policy.min_interval_secs,
+            ) else {
+                continue;
+            };
+            let code = match problem {
+                ScheduleIntervalValidation::TooFrequent { .. } => "schedule-policy",
+                ScheduleIntervalValidation::Unparseable { .. }
+                | ScheduleIntervalValidation::NoOccurrence { .. } => "invalid-schedule",
+            };
+            let message = format!("Schedule policy error: {}", problem.message());
+            for function in functions {
+                let Some(crate::val::Val::Str(fqn)) = function.scheduled_function.get("fn") else {
+                    continue;
+                };
+                errors.add(CompilerError::Constraint {
+                    code,
+                    message: format!("{message} (on {fqn})"),
+                    help: None,
+                    warning: false,
+                    location: Self::function_location(program, &fqn),
+                });
+            }
+        }
+        errors
+    }
+
+    /// `meta {box: {min-size: ...}}` values that name no known size, each
+    /// pointing at the function that declares it.
+    fn box_size_errors(
+        program: &crate::lang::ast::Program,
+        box_requirements: &crate::lang::compiler::box_checker::ProgramBoxRequirements,
+    ) -> crate::lang::errors::CompilerErrors {
+        use crate::lang::errors::{CompilerError, CompilerErrors};
+
+        let mut errors = CompilerErrors::new();
+        for req in &box_requirements.requirements {
+            if let Some(ref size) = req.requirement.min_size
+                && crate::lang::compiler::box_checker::size_memory_mb(size).is_none()
+            {
+                errors.add(CompilerError::Constraint {
+                    code: "invalid-box-size",
+                    message: format!(
+                        "Invalid box size '{}' in meta {{box: {{min-size: \"{}\"}}}} on {}",
+                        size, size, req.fqn
+                    ),
+                    help: Some(
+                        "Valid sizes: nano, micro, small, medium, large, xlarge, 2xlarge, 4xlarge"
+                            .to_string(),
+                    ),
+                    warning: false,
+                    location: Self::function_location(program, &req.fqn),
+                });
+            }
+        }
+        errors
+    }
+
     /// Post-compile structural validations shared by build, check, and execute
     /// modes, with an explicit policy for runtime context satisfaction.
     ///
@@ -790,15 +1213,9 @@ impl Engine {
             let formatted = e.format_error(color);
             return Err(String::from("Scheduled function validation errors:\n") + &formatted);
         }
-        if let Some(conf) = conf {
-            let policy = crate::db::SchedulePolicy::from_conf(conf);
-            for cron_expression in compiler.get_scheduled_functions().keys() {
-                crate::db::validate_recurring_schedule_interval(
-                    cron_expression,
-                    policy.min_interval_secs,
-                )
-                .map_err(|e| format!("Schedule policy error: {}", e.message()))?;
-            }
+        let schedule_errors = Self::schedule_policy_errors(compiler, combined_program, conf);
+        if !schedule_errors.is_empty() {
+            return Err(schedule_errors.format_error(color));
         }
 
         // Build call graph once for both ctx and box requirement resolution
@@ -831,16 +1248,9 @@ impl Engine {
 
         if box_requirements.has_requirements() {
             // Validate all declared size names are recognized
-            for req in &box_requirements.requirements {
-                if let Some(ref size) = req.requirement.min_size
-                    && crate::lang::compiler::box_checker::size_memory_mb(size).is_none()
-                {
-                    return Err(format!(
-                        "Invalid box size '{}' in meta {{box: {{min-size: \"{}\"}}}} on {}\n\
-                         Valid sizes: nano, micro, small, medium, large, xlarge, 2xlarge, 4xlarge",
-                        size, size, req.fqn
-                    ));
-                }
+            let box_errors = Self::box_size_errors(combined_program, &box_requirements);
+            if !box_errors.is_empty() {
+                return Err(box_errors.format_error(color));
             }
 
             if let Some(min_size) = box_requirements.effective_min_size() {
@@ -946,8 +1356,12 @@ impl Engine {
         // usually also discovered as part of its source unit (run pushes the
         // file's directory onto src paths), and the same-file bindings are
         // deduplicated by merge_namespace.
+        // The run's own namespaces (the target file's, then the eval
+        // input's) run last, so the run's result is their last value.
+        let mut run_namespaces: Vec<String> = Vec::new();
         for parsed in &extra_parsed_files {
             for (ns_path, namespace) in &parsed.namespaces {
+                run_namespaces.push(ns_path.to_string());
                 tracing::debug!(
                     "  Found namespace '{}' with {} variables (from target file)",
                     ns_path,
@@ -1012,6 +1426,10 @@ impl Engine {
                     // previously an eval `::ns ns` declaration replaced the
                     // project's entire namespace.
                     for (ns_path, namespace) in eval_program.namespaces {
+                        // Eval input may declare namespaces of its own; its
+                        // result is the last one's last value.
+                        run_namespaces.retain(|ns| *ns != ns_path.to_string());
+                        run_namespaces.push(ns_path.to_string());
                         tracing::debug!(
                             "Merging eval namespace '{}' with {} variables",
                             ns_path,
@@ -1079,6 +1497,8 @@ impl Engine {
                 compiler.set_current_file(std::path::PathBuf::from(target_file), content);
             }
         }
+
+        compiler.set_run_namespaces(run_namespaces);
 
         // Try comprehensive compilation with validation first
         match compiler.compile_program(&mut combined_program) {
@@ -1507,7 +1927,9 @@ impl Engine {
             let hot_std = resolver.get_hot_std_dependency();
             let hot_std_path = hot_std.resolved_path.to_string_lossy().to_string();
 
-            match Self::discover_hot_files(&hot_std_path) {
+            // hot-std's src-paths only, as `hot check` and `hot run` load it:
+            // its test/ folder and pkg.hot are not part of the program
+            match Self::discover_dependency_source_files(&hot_std.resolved_path) {
                 Ok(files) if !files.is_empty() => {
                     tracing::debug!(
                         "Injecting hot-std from system: {} ({} files)",
@@ -2199,10 +2621,38 @@ fn (): Str { "unused" }
         assert!(errors.is_empty(), "{:?}", errors.to_diagnostics());
     }
 
-    /// A dependency whose `src-paths` hold no `.hot` files is the first
+    /// A dependency that contributes no `.hot` files (a resources-only or
+    /// deps-only package) loads, as it did in 3.0.0.
+    #[test]
+    fn check_accepts_a_dependency_with_no_source_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("prompts");
+        write_file(
+            lib.join("pkg.hot"),
+            "::hot::pkg ns\n\nhot.pkg.prompts {\n  name: \"example.com/prompts\",\n  version: \"1.0.0\",\n  deps: {},\n  resource-paths: [\"resources/\"],\n}\n",
+        );
+        write_file(lib.join("resources/greeting.txt"), "hello\n");
+        let src = dir.path().join("src");
+        write_file(src.join("app.hot"), "::app ns\n\nx 1\n");
+        let conf = crate::lang::data::eval_data(&format!(
+            "hot.project.app.deps {{\"example.com/prompts\": {{local: {:?}}}}}\n",
+            lib.display().to_string()
+        ))
+        .unwrap();
+
+        let errors = Engine::check_sources_pipeline_diagnostics(
+            &[src.display().to_string()],
+            &[],
+            Some(&conf),
+            Some("app"),
+        );
+        assert!(errors.is_empty(), "{:?}", errors.to_diagnostics());
+    }
+
+    /// A dependency whose declared `src-paths` don't exist is the first
     /// error, by name, not the unresolved references it leads to.
     #[test]
-    fn check_reports_a_dependency_with_no_source_files() {
+    fn check_reports_a_dependency_with_missing_src_paths() {
         let dir = tempfile::tempdir().unwrap();
         // The sources are in hot/src, but pkg.hot points at src/.
         let (src_paths, conf) = write_project_using_a_hot_src_package(dir.path(), "[\"src/\"]");
@@ -2212,11 +2662,11 @@ fn (): Str { "unused" }
                 .to_diagnostics();
         let first = diagnostics
             .first()
-            .expect("an empty dependency is an error");
+            .expect("a missing src-paths folder is an error");
         assert!(
             first
                 .message
-                .contains("Package 'example.com/lib' has no source files")
+                .contains("Package 'example.com/lib' declares src-paths")
                 && first.message.contains("[\"src/\"]"),
             "{diagnostics:?}"
         );
@@ -2224,6 +2674,180 @@ fn (): Str { "unused" }
             !diagnostics.iter().any(|d| d.code == "named-argument"),
             "{diagnostics:?}"
         );
+    }
+
+    /// A dependency whose src-paths leave its folder is an error naming
+    /// them. Loaded, those files would be cached and watched as if they
+    /// weren't part of it, so edits there went unseen.
+    #[test]
+    fn check_rejects_dependency_src_paths_outside_the_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src_paths, conf) =
+            write_project_using_a_hot_src_package(dir.path(), "[\"hot/src/\", \"../shared/\"]");
+        write_file(
+            dir.path().join("shared/lib/shared.hot"),
+            "::lib::shared ns\n\nv fn (): Int { 1 }\n",
+        );
+
+        let diagnostics =
+            Engine::check_sources_pipeline_diagnostics(&src_paths, &[], Some(&conf), Some("app"))
+                .to_diagnostics();
+        assert!(
+            diagnostics.iter().any(|d| d
+                .message
+                .contains("src-paths entry '../shared/' leaves the package directory")),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// Write a local package `name` at `root` with one source file, and
+    /// return the dependency entry for it.
+    fn write_local_package(root: &std::path::Path, name: &str, deps: &str, source: &str) -> String {
+        write_file(
+            root.join("pkg.hot"),
+            &format!(
+                "::hot::pkg ns\n\nhot.pkg.p {{\n  name: \"{name}\",\n  version: \"0.1.0\",\n  deps: {deps},\n  src-paths: [\"src/\"],\n}}\n"
+            ),
+        );
+        write_file(root.join("src/lib.hot"), source);
+        format!("{name:?}: {{local: {:?}}}", root.display().to_string())
+    }
+
+    /// `acme.com/utils` and `other.com/utils` are two dependencies; before,
+    /// the second was dropped because they share the package name `utils`.
+    #[test]
+    fn eval_loads_two_dependencies_with_the_same_package_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let acme = write_local_package(
+            &dir.path().join("acme/utils"),
+            "acme.com/utils",
+            "{}",
+            "::acme::utils ns\n\nwho fn (): Str { \"acme\" }\n",
+        );
+        let other = write_local_package(
+            &dir.path().join("other/utils"),
+            "other.com/utils",
+            "{}",
+            "::other::utils ns\n\nwho fn (): Str { \"other\" }\n",
+        );
+        let src = dir.path().join("src");
+        write_file(
+            src.join("app.hot"),
+            "::app ns\n\nmain fn (): Vec<Str> { [::acme::utils/who(), ::other::utils/who()] }\n",
+        );
+        let conf =
+            crate::lang::data::eval_data(&format!("hot.project.app.deps {{{acme}, {other}}}\n"))
+                .unwrap();
+
+        let result = Engine::eval_code_pipeline_with_deps(
+            "::app/main()",
+            &[src.display().to_string()],
+            &[],
+            Some(&conf),
+            Some("app"),
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            crate::val::Val::Vec(vec![
+                crate::val::Val::from("acme"),
+                crate::val::Val::from("other")
+            ])
+        );
+    }
+
+    /// A package's `local: "../sibling"` dependency resolves from the
+    /// package's folder, not the directory hot runs in.
+    #[test]
+    fn check_resolves_a_package_local_dependency_from_the_package_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages = dir.path().join("packages");
+        write_local_package(
+            &packages.join("pkg-core"),
+            "example.com/pkg-core",
+            "{}",
+            "::pkgcore ns\n\ncore-val fn (): Int { 42 }\n",
+        );
+        let pkg_a = write_local_package(
+            &packages.join("pkg-a"),
+            "example.com/pkg-a",
+            "{\"example.com/pkg-core\": {local: \"../pkg-core\"}}",
+            "::pkga ns\n\na-val fn (): Int { add(::pkgcore/core-val(), 1) }\n",
+        );
+        let src = dir.path().join("app/src");
+        write_file(
+            src.join("app.hot"),
+            "::app ns\n\nmain fn (): Int { ::pkga/a-val() }\n",
+        );
+        let conf =
+            crate::lang::data::eval_data(&format!("hot.project.app.deps {{{pkg_a}}}\n")).unwrap();
+
+        let errors = Engine::check_sources_pipeline_diagnostics(
+            &[src.display().to_string()],
+            &[],
+            Some(&conf),
+            Some("app"),
+        );
+        assert!(errors.is_empty(), "{:?}", errors.to_diagnostics());
+    }
+
+    /// The worker's compile loads hot-std from its src-paths, as `hot check`
+    /// and `hot run` do: hot-std's test namespaces and pkg.hot are not part
+    /// of a deployed program.
+    #[test]
+    fn worker_compile_leaves_out_hot_std_tests() {
+        let hot_std = crate::lang::project::DependencyResolver::default()
+            .get_hot_std_dependency()
+            .resolved_path;
+        let test_only: Vec<String> = {
+            let declared = |files: Vec<String>| -> AHashSet<String> {
+                let (parsed, errors) = parse_files_parallel(&files, false);
+                assert!(errors.is_empty(), "{errors:?}");
+                parsed
+                    .iter()
+                    .flat_map(|file| file.namespaces.keys().map(|ns| ns.to_string()))
+                    .collect()
+            };
+            let sources = declared(Engine::discover_dependency_source_files(&hot_std).unwrap());
+            let tests = declared(
+                Engine::discover_hot_files(&hot_std.join("test").to_string_lossy()).unwrap(),
+            );
+            tests.difference(&sources).cloned().collect()
+        };
+        assert!(
+            !test_only.is_empty(),
+            "hot-std at {} has no test namespaces to leave out",
+            hot_std.display()
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write_file(src.join("app.hot"), "::app ns\n\nmain fn (): Int { 1 }\n");
+        let (_, artifacts) = Engine::compile_project_for_cache(
+            &[src.display().to_string()],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let loaded: Vec<String> = artifacts
+            .ast_program
+            .namespaces
+            .keys()
+            .map(|ns| ns.to_string())
+            .collect();
+        assert!(loaded.contains(&"::app".to_string()), "{loaded:?}");
+        let leaked: Vec<&String> = test_only.iter().filter(|ns| loaded.contains(ns)).collect();
+        assert!(
+            leaked.is_empty(),
+            "hot-std test namespaces compiled: {leaked:?}"
+        );
+        assert!(!loaded.contains(&"::hot::pkg".to_string()), "{loaded:?}");
     }
 
     #[test]
@@ -2274,6 +2898,204 @@ fn (): Str { "unused" }
         assert!(
             error.contains("runs every 1 second(s), below the minimum of 300"),
             "{error}"
+        );
+    }
+
+    /// The text check and the diagnostics check reject the same schedule
+    /// policy and box-size problems, and the diagnostics point at the
+    /// function that declares them.
+    #[test]
+    fn json_check_reports_schedule_policy_like_the_text_check() {
+        let conf = crate::val::val!({"schedule": {"min-interval-seconds": 3600}});
+        let temp = tempfile::tempdir().unwrap();
+        let src_paths = write_scheduled_src(temp.path(), "* * * * *", "event");
+
+        let error = check_text(&src_paths, &conf).unwrap_err();
+        assert!(error.contains("below the minimum of 3600"), "{error}");
+        assert!(error.contains("sched.hot:3:1"), "{error}");
+
+        let diagnostics = check_json(&src_paths, &conf);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "schedule-policy");
+        assert_eq!(diagnostics[0].severity, 1);
+        assert_eq!(diagnostics[0].range.start.line, 2);
+        assert!(
+            diagnostics[0]
+                .message
+                .contains("below the minimum of 3600 second(s)"),
+            "{diagnostics:?}"
+        );
+        assert!(diagnostics[0].message.contains("::sched/job"));
+
+        // A schedule the policy allows passes both.
+        let conf = crate::val::val!({"schedule": {"min-interval-seconds": 60}});
+        check_text(&src_paths, &conf).unwrap();
+        assert!(check_json(&src_paths, &conf).is_empty());
+    }
+
+    #[test]
+    fn json_check_reports_a_schedule_with_no_upcoming_run() {
+        let conf = crate::val::Val::map_empty();
+        let temp = tempfile::tempdir().unwrap();
+        let src_paths = write_scheduled_src(temp.path(), "0 0 31 2 *", "event");
+
+        let error = check_text(&src_paths, &conf).unwrap_err();
+        assert!(error.contains("has no upcoming run"), "{error}");
+
+        let diagnostics = check_json(&src_paths, &conf);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "invalid-schedule");
+        assert_eq!(diagnostics[0].range.start.line, 2);
+        assert!(diagnostics[0].message.contains("has no upcoming run"));
+    }
+
+    #[test]
+    fn json_check_reports_an_unknown_box_size_like_the_text_check() {
+        let conf = crate::val::Val::map_empty();
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        write_file(
+            src_dir.join("jobs.hot"),
+            "::jobs ns\n\nbig-job\nmeta {box: {min-size: \"gigantic\"}}\nfn (x: Int): Int { x }\n",
+        );
+        let src_paths = vec![src_dir.to_string_lossy().to_string()];
+
+        let error = check_text(&src_paths, &conf).unwrap_err();
+        assert!(error.contains("Invalid box size 'gigantic'"), "{error}");
+        assert!(error.contains("jobs.hot:3:1"), "{error}");
+
+        let diagnostics = check_json(&src_paths, &conf);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "invalid-box-size");
+        assert_eq!(diagnostics[0].severity, 1);
+        assert_eq!(diagnostics[0].range.start.line, 2);
+        assert!(diagnostics[0].message.contains("::jobs/big-job"));
+        assert!(diagnostics[0].message.contains("Valid sizes: nano"));
+    }
+
+    /// The diagnostics check reports every validation problem at once: an
+    /// unparseable schedule doesn't hide another schedule's policy problem
+    /// or a box size.
+    #[test]
+    fn json_check_reports_every_validation_problem() {
+        let conf = crate::val::val!({"schedule": {"min-interval-seconds": 3600}});
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        write_file(
+            src_dir.join("ticker.hot"),
+            "::ticker ns\n\ntick meta {schedule: \"* * * * *\"} fn (event: Map): Int { 1 }\n\nbad meta {schedule: \"not a cron\"} fn (event: Map): Int { 2 }\n\nbig meta {box: {min-size: \"gigantic\"}} fn (x: Int): Int { x }\n",
+        );
+        let src_paths = vec![src_dir.to_string_lossy().to_string()];
+        let mut found: Vec<(String, u32)> = check_json(&src_paths, &conf)
+            .into_iter()
+            .map(|d| (d.code, d.range.start.line))
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                ("invalid-box-size".to_string(), 6),
+                ("invalid-schedule".to_string(), 4),
+                ("schedule-policy".to_string(), 2),
+            ]
+        );
+    }
+
+    /// An overlay check reads an open file from its buffer, checks an open
+    /// file no source path includes, and returns the program it parsed.
+    #[test]
+    fn overlay_check_reads_buffers_and_extra_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        let lib = src_dir.join("lib.hot");
+        write_file(lib.clone(), "::lib ns\n\nhelper fn (x: Int): Int { x }\n");
+        let src_paths = vec![src_dir.to_string_lossy().to_string()];
+        let outside = temp.path().join("scratch.hot");
+        let conf = crate::val::Val::map_empty();
+
+        // On disk the project checks.
+        let check = Engine::check_sources_pipeline_diagnostics_with_overlays(
+            &src_paths,
+            &[],
+            Some(&conf),
+            None,
+            None,
+            &SourceOverlays::default(),
+        );
+        assert!(
+            check.diagnostics.is_empty(),
+            "{:?}",
+            check.diagnostics.errors
+        );
+        assert!(!check.parse_failed);
+        let program = check.program.expect("program");
+        assert!(
+            program
+                .namespaces
+                .keys()
+                .any(|ns| ns.to_string() == "::lib")
+        );
+
+        // The buffer calls a function that doesn't exist, and a file outside
+        // the source paths calls one that does.
+        let mut overlays = SourceOverlays::default();
+        overlays.files.insert(
+            std::fs::canonicalize(&lib).unwrap(),
+            "::lib ns\n\nhelper fn (x: Int): Int { nope(x) }\n".to_string(),
+        );
+        overlays.files.insert(
+            outside.clone(),
+            "::scratch ns\n\nuse fn (): Int { ::lib/helper(1) }\n".to_string(),
+        );
+        overlays.extra_files.push(outside.clone());
+        let check = Engine::check_sources_pipeline_diagnostics_with_overlays(
+            &src_paths,
+            &[],
+            Some(&conf),
+            None,
+            None,
+            &overlays,
+        );
+        let diagnostics = check.diagnostics.to_diagnostics();
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(
+            diagnostics[0]
+                .file
+                .as_deref()
+                .is_some_and(|f| f.ends_with("lib.hot")),
+            "{diagnostics:?}"
+        );
+        assert!(diagnostics[0].message.contains("nope"), "{diagnostics:?}");
+        assert!(
+            check
+                .project_files
+                .iter()
+                .any(|f| f.ends_with("scratch.hot"))
+        );
+
+        // A parse error in a buffer is located in that buffer.
+        overlays.files.insert(
+            std::fs::canonicalize(&lib).unwrap(),
+            "::lib ns\n\nhelper fn (x: Int): Int { x\n".to_string(),
+        );
+        let check = Engine::check_sources_pipeline_diagnostics_with_overlays(
+            &src_paths,
+            &[],
+            Some(&conf),
+            None,
+            None,
+            &overlays,
+        );
+        assert!(check.parse_failed);
+        assert!(check.program.is_none());
+        let diagnostics = check.diagnostics.to_diagnostics();
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(
+            diagnostics[0]
+                .file
+                .as_deref()
+                .is_some_and(|f| f.ends_with("lib.hot")),
+            "{diagnostics:?}"
         );
     }
 

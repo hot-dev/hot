@@ -19,7 +19,7 @@ concurrency:
 
 env:
   RUST_TOOLCHAIN: 1.99.1
-  TAILWIND_VERSION: v4.3.0
+  TAILWIND_VERSION: v4.3.3
   # Disable incremental in CI: it bloats target/ (which Swatinem/rust-cache
   # strips before saving anyway) and reduces sccache hit rates. CI does clean
   # builds against a shared cache, not the inner-loop edit pattern that
@@ -37,20 +37,23 @@ jobs:
     timeout-minutes: 5
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
       - run: node --test scripts/browser-security.test.mjs
         env:
           CHROME_BIN: google-chrome
+      # Parses the SDK page's version pins; the registry lookup itself runs
+      # nightly and in the release workflow.
+      - run: node --test scripts/check-sdk-doc-pins.test.mjs
 
   clippy-and-checks:
     name: Clippy and Static Checks
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Free disk space when low
         uses: ./.github/actions/free-disk-space
@@ -63,6 +66,17 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           ci-tuning: "true"
 
+      - name: Cargo fmt
+        run: cargo fmt --all --check
+
+      - name: Versions are in sync
+        run: ./scripts/check-version-sync.sh
+
+      # Unit tests for the self-host bundle renderer. The container checks
+      # skip here; the nightly workflow runs them against real images.
+      - name: Self-host bundle tests
+        run: python3 -m unittest discover -s infra/tests
+
       # Clippy intentionally uses the workspace default feature set. Keeping it
       # aligned with the workspace test feature set avoids forcing cargo to
       # rebuild the full dependency graph between the two jobs once caches warm.
@@ -73,7 +87,7 @@ jobs:
         run: node --test scripts/test-app-scope.mjs
 
       - name: Checkout published AI skill mirror
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           repository: hot-dev/hot-skills
           # Keep the second checkout outside Cargo's disposable target tree so
@@ -103,7 +117,9 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
       postgres:
-        image: postgres:18.3
+        # PostgreSQL 18.6 with pgvector 0.8.7. The digest pins both: the
+        # pgvector tags are rebuilt for each new PostgreSQL minor.
+        image: pgvector/pgvector:0.8.7-pg18-trixie@sha256:9d9c930220cb9bf2f956d10a8f909cf9973d9672ca0278aef2c1e6facccad2e0
         env:
           POSTGRES_USER: hot
           POSTGRES_PASSWORD: hot
@@ -116,11 +132,11 @@ jobs:
           --health-timeout 5s
           --health-retries 20
       valkey:
-        image: valkey/valkey:latest
+        image: valkey/valkey:9.1.3-trixie@sha256:3add1a336a920ea54770a001ab6feb3da5fceea96a40373a3a2cd469b815f0b7
         ports:
           - 6379:6379
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Free disk space when low
         uses: ./.github/actions/free-disk-space
@@ -132,11 +148,6 @@ jobs:
           tailwind-version: ${{ env.TAILWIND_VERSION }}
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           ci-tuning: "true"
-
-      - name: Install pgvector for Postgres tests
-        run: |
-          docker exec "${{ job.services.postgres.id }}" \
-            bash -lc 'apt-get update && apt-get install -y postgresql-18-pgvector'
 
       - name: Install psql for upgrade provisioning tests
         run: |
@@ -177,7 +188,9 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
       postgres:
-        image: postgres:18.3
+        # PostgreSQL 18.6 with pgvector 0.8.7. The digest pins both: the
+        # pgvector tags are rebuilt for each new PostgreSQL minor.
+        image: pgvector/pgvector:0.8.7-pg18-trixie@sha256:9d9c930220cb9bf2f956d10a8f909cf9973d9672ca0278aef2c1e6facccad2e0
         env:
           POSTGRES_USER: hot
           POSTGRES_PASSWORD: hot
@@ -190,7 +203,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
       valkey:
-        image: valkey/valkey:latest
+        image: valkey/valkey:9.1.3-trixie@sha256:3add1a336a920ea54770a001ab6feb3da5fceea96a40373a3a2cd469b815f0b7
         ports:
           - 6379:6379
         options: >-
@@ -199,7 +212,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Free disk space when low
         uses: ./.github/actions/free-disk-space
@@ -227,11 +240,6 @@ jobs:
         env:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
         run: cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot --jit.threshold 1
-
-      - name: Install pgvector for Postgres tests
-        run: |
-          docker exec "${{ job.services.postgres.id }}" \
-            bash -lc 'apt-get update && apt-get install -y postgresql-18-pgvector'
 
       - name: Provision restricted PostgreSQL runtime
         env:
@@ -298,7 +306,7 @@ jobs:
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Free disk space when low
         uses: ./.github/actions/free-disk-space
@@ -354,7 +362,7 @@ jobs:
   #   runs-on: ubuntu-24.04
   #   if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
   #   steps:
-  #     - uses: actions/checkout@v5
+  #     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
   #     - name: Setup toolchain, cache, sccache, tailwind
   #       uses: ./.github/actions/rust-setup

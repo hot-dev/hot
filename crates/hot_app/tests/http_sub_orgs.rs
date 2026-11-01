@@ -84,9 +84,13 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
     assert!(
         stale_tab
             .body
-            .contains(&format!("const orgId = '{}'", a.org_id))
+            .contains(&format!("const orgId = \"{}\"", a.org_id))
     );
-    assert!(stale_tab.body.contains(&format!("const envId = '{env_a}'")));
+    assert!(
+        stale_tab
+            .body
+            .contains(&format!("const envId = \"{env_a}\""))
+    );
     client
         .get(&format!("/stores?org_id={}&env_id={env_b}", a.org_id))
         .await
@@ -105,10 +109,16 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
         .post_form(&lifecycle, &[("state", "suspended")])
         .await
         .assert_status(StatusCode::SEE_OTHER);
-    client
-        .get(&page_a)
-        .await
-        .assert_status(StatusCode::FORBIDDEN);
+    // A held workspace explains itself instead of answering with an empty 403.
+    let held = client.get(&page_a).await;
+    held.assert_status(StatusCode::FORBIDDEN);
+    assert!(held.body.contains("Workspace unavailable"), "{}", held.body);
+    assert!(held.body.contains("This workspace is suspended."));
+    let widget = client
+        .get_with_headers(&page_a, &[("HX-Request", "true")])
+        .await;
+    widget.assert_status(StatusCode::FORBIDDEN);
+    assert!(widget.body.starts_with("<div class=\"error-box\""));
     client.get(&path).await.assert_status(StatusCode::OK);
     client
         .post_form(&lifecycle, &[("state", "active")])
@@ -159,11 +169,14 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
         .post_form(&root_lifecycle, &[("state", "suspended")])
         .await
         .assert_status(StatusCode::SEE_OTHER);
-    client
-        .get(&page_a)
-        .await
-        .assert_status(StatusCode::FORBIDDEN);
-    client.get(&path).await.assert_status(StatusCode::OK);
+    let held = client.get(&page_a).await;
+    held.assert_status(StatusCode::FORBIDDEN);
+    assert!(held.body.contains("is suspended."), "{}", held.body);
+    // The recovery page stays open and says why work is held.
+    let recovery = client.get(&path).await;
+    recovery.assert_status(StatusCode::OK);
+    assert!(recovery.body.contains("Manage account status"));
+    assert!(recovery.body.contains("data-workspace-held=\"true\""));
     client
         .post_form(&root_lifecycle, &[("state", "active")])
         .await
@@ -608,23 +621,18 @@ async fn the_account_overview_counts_each_environments_runs() {
         let rest = page.body.split(&marker).nth(1).expect("overview row");
         rest.split("</tr>").next().unwrap().to_owned()
     };
-    // Status, running, failed in 24h and runs this month.
-    let cells = |values: [&str; 4]| {
-        values
+    // Status badge, then running, failed in 24h and runs this month.
+    let cells = |values: [&str; 3]| {
+        let counts: String = values
             .iter()
             .map(|value| format!("<td class=\"p-2\">{value}</td>"))
-            .collect::<String>()
+            .collect();
+        format!("<td class=\"p-2\"><span class=\"badge badge-success\">active</span></td>{counts}")
     };
     let root_row = row(td.org_id);
-    assert!(
-        root_row.contains(&cells(["active", "1", "1", "2"])),
-        "{root_row}"
-    );
+    assert!(root_row.contains(&cells(["1", "1", "2"])), "{root_row}");
     let child_row = row(child.org.org_id);
-    assert!(
-        child_row.contains(&cells(["active", "0", "0", "0"])),
-        "{child_row}"
-    );
+    assert!(child_row.contains(&cells(["0", "0", "0"])), "{child_row}");
     assert!(child_row.contains(&long_ago.format("%Y-%m-%d %H:%M UTC").to_string()));
 }
 
@@ -739,4 +747,54 @@ async fn a_stale_tab_switches_environments_within_its_own_org() {
         .post_form(&format!("{switch}?org_id={}", td.org_id), &[])
         .await
         .assert_redirect_to(&format!("/dashboard?org_id={}&env_id={staging}", td.org_id));
+}
+
+#[tokio::test]
+async fn org_keys_show_their_issuer_chain_status() {
+    use hot::db::org_api_key::{CreateOrgApiKey, OrgApiKey};
+    let mut client = TestClient::new().await;
+    let td = insert_test_data(client.db()).await.unwrap();
+    sqlx::query("UPDATE org SET org_type='organization' WHERE org_id=?")
+        .bind(td.org_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    let root = Org::get_org_uncached(client.db(), &td.org_id)
+        .await
+        .unwrap();
+    let (issuer, _) = OrgApiKey::create_for_user(
+        client.db(),
+        td.org_id,
+        td.user_id,
+        &CreateOrgApiKey {
+            description: "issuer".into(),
+            permissions: serde_json::json!({"org:*": ["read"]}),
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    // A key the issuer minted, as the org API records one.
+    let minted = Uuid::now_v7();
+    sqlx::query("INSERT INTO org_api_key(org_api_key_id,org_id,description,key_data,permissions,issuer_org_api_key_id,created_by_user_id) SELECT ?,org_id,'minted',key_data,permissions,org_api_key_id,created_by_user_id FROM org_api_key WHERE org_api_key_id=?")
+        .bind(minted)
+        .bind(issuer.org_api_key_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    OrgApiKey::revoke_for_user(client.db(), td.org_id, td.user_id, issuer.org_api_key_id)
+        .await
+        .unwrap();
+    client.login_as(&td.user_id);
+
+    let page = client.get(&format!("/@{}/children", root.slug)).await;
+    page.assert_status(StatusCode::OK);
+    assert!(page.body.contains(">Revoked<"), "{}", page.body);
+    // The minted key's own row is active, but it no longer authenticates.
+    assert!(page.body.contains(">Issuer inactive<"), "{}", page.body);
+    assert!(
+        !page.body.contains(&format!("org-api-keys/{minted}/revoke")),
+        "a dead key offers no revoke: {}",
+        page.body
+    );
 }

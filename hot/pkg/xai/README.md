@@ -7,7 +7,7 @@ xAI API bindings for Hot.
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/xai": "1.1.3"
+"hot.dev/xai": "1.1.4"
 ```
 
 ## Configuration

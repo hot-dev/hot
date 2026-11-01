@@ -50,34 +50,14 @@ pub(crate) fn str_internal(args: &[Val]) -> HotResult<Val> {
         Val::Bool(b) => HotResult::Ok(Val::from(b.to_string())),
         Val::Null => HotResult::Ok(Val::from("")),
         Val::Map(m) => {
-            // Typed object special-cases
-            if let Some(type_name) = crate::val::tagged_type_name(m) {
-                // For Fn and Namespace types, stringify to their $val
-                if (type_name == "::hot::type/Fn" || type_name == "::hot::type/Namespace")
-                    && m.get(&Val::from("$val")).is_some()
-                    && let Some(Val::Str(val)) = m.get(&Val::from("$val"))
-                {
-                    return HotResult::Ok(Val::from(val.clone()));
-                }
-
-                // Delegate Hot time typed objects to ::hot::time/to-string for ISO formatting
-                if type_name.starts_with("::hot::time/") {
-                    return crate::lang::hot::time::to_string(std::slice::from_ref(&args[0]));
-                }
-
-                // Generic typed object default string representation
-                return HotResult::Ok(Val::from(format!(
-                    "{}({})",
-                    type_name,
-                    format_map_contents(m)
-                )));
+            // Delegate Hot time typed objects to ::hot::time/to-string for ISO formatting
+            if crate::val::tagged_type_name(m).is_some_and(|name| name.starts_with("::hot::time/"))
+            {
+                return crate::lang::hot::time::to_string(std::slice::from_ref(&args[0]));
             }
-            HotResult::Ok(Val::from(format_map_contents(m)))
+            HotResult::Ok(Val::from(format_map_for_string(m)))
         }
-        Val::Vec(v) => {
-            let items: Vec<String> = v.iter().map(format_val_for_string).collect();
-            HotResult::Ok(Val::from(format!("[{}]", items.join(", "))))
-        }
+        Val::Vec(v) => HotResult::Ok(Val::from(format_vec_for_string(v))),
         Val::Bytes(bytes) => {
             // Convert bytes to UTF-8 string (lossy - replaces invalid UTF-8 with replacement char)
             match String::from_utf8(bytes.clone()) {
@@ -569,6 +549,34 @@ pub fn user_type_constructor(type_name: &str, args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::Map(Box::new(result_map)))
 }
 
+/// The text of a map: `{a: 1}`, or for a typed value `::ns/Type({…})`, or
+/// the name a `Fn` or `Namespace` value holds.
+fn format_map_for_string(map: &IndexMap<Val, Val>) -> String {
+    let Some(type_name) = crate::val::tagged_type_name(map) else {
+        return format_map_contents(map);
+    };
+    if (type_name == "::hot::type/Fn" || type_name == "::hot::type/Namespace")
+        && let Some(Val::Str(val)) = map.get(&Val::from("$val"))
+    {
+        return (**val).to_owned();
+    }
+    if type_name.starts_with("::hot::time/") {
+        let value = Val::Map(Box::new(map.clone()));
+        if let HotResult::Ok(Val::Str(text)) =
+            crate::lang::hot::time::to_string(std::slice::from_ref(&value))
+        {
+            return (*text).to_owned();
+        }
+    }
+    format!("{}({})", type_name, format_map_contents(map))
+}
+
+/// The text of a vector: `[1, "a", [2]]`.
+fn format_vec_for_string(items: &[Val]) -> String {
+    let items: Vec<String> = items.iter().map(format_val_for_string).collect();
+    format!("[{}]", items.join(", "))
+}
+
 /// Helper function to format map contents for string representation
 fn format_map_contents(map: &IndexMap<Val, Val>) -> String {
     let items: Vec<String> = map
@@ -589,7 +597,7 @@ fn format_map_contents(map: &IndexMap<Val, Val>) -> String {
 fn format_key_for_string(val: &Val) -> String {
     match val {
         Val::Str(s) => (**s).to_owned(), // Unquoted keys
-        _ => format!("{:?}", val),
+        _ => format_val_for_string(val),
     }
 }
 
@@ -606,7 +614,11 @@ fn format_val_for_string(val: &Val) -> String {
         Val::Dec(d) => d.to_string(),
         Val::Bool(b) => b.to_string(),
         Val::Null => String::new(),
-        _ => format!("{:?}", val),
+        // Nested containers read as they do on their own.
+        Val::Vec(items) => format_vec_for_string(items),
+        Val::Map(map) => format_map_for_string(map),
+        // `Byte(7)`, `Bytes([1, 2])`, a function by its name.
+        Val::Byte(_) | Val::Bytes(_) | Val::Box(_) => val.to_string(),
     }
 }
 
@@ -988,7 +1000,13 @@ pub fn is_type(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
 
         // Map-based type references or type descriptors
         Val::Map(map) => {
-            if let Some(Val::Str(type_str)) = map.get(&Val::from("$type")) {
+            if let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
+                && &**type_str == "::hot::type/FunctionAlias"
+                && let Some(Val::Str(target)) = map.get(&Val::from("$target"))
+            {
+                // A var import of a type, as `PlainDate ::hot::time/PlainDate`
+                (**target).to_owned()
+            } else if let Some(Val::Str(type_str)) = map.get(&Val::from("$type")) {
                 (**type_str).to_owned()
             } else if let Some(Val::Str(fnref)) = map.get(&Val::from("$fnref")) {
                 (**fnref).to_owned()
@@ -1620,5 +1638,43 @@ mod constructor_tests {
             map_constructor(&[Val::from("a"), Val::Int(1), Val::from("b")]),
             HotResult::Err(_)
         ));
+    }
+
+    // Containers inside containers read the way they do on their own, not
+    // as Rust's Debug form (`Vec([Int(1)])`, `{Int(6): 2}`).
+    #[test]
+    fn test_str_formats_nested_containers() {
+        let text = |value: Val| match str_internal(&[value]) {
+            HotResult::Ok(Val::Str(s)) => (*s).to_owned(),
+            other => panic!("Expected a Str, got {:?}", other),
+        };
+        let map = |entries: Vec<(Val, Val)>| Val::map_from_iter(entries);
+
+        assert_eq!(
+            text(map(vec![(Val::from("k"), Val::Vec(vec![Val::Int(1)]))])),
+            "{k: [1]}"
+        );
+        assert_eq!(text(map(vec![(Val::Int(6), Val::Int(2))])), "{6: 2}");
+        assert_eq!(
+            text(Val::Vec(vec![
+                map(vec![
+                    (Val::from("a"), Val::Int(10)),
+                    (Val::from("b"), Val::Null)
+                ]),
+                Val::Vec(vec![Val::from("x"), Val::Bool(true)]),
+            ])),
+            r#"[{a: 10, b: }, ["x", true]]"#
+        );
+        assert_eq!(
+            text(Val::Vec(vec![map(vec![
+                (Val::from("$type"), Val::from("::hot::type/Fn")),
+                (Val::from("$val"), Val::from("::app/handler"))
+            ])])),
+            "[::app/handler]"
+        );
+        assert_eq!(
+            text(Val::Vec(vec![Val::Byte(7), Val::Bytes(vec![1, 2])])),
+            "[Byte(7), Bytes([1, 2])]"
+        );
     }
 }

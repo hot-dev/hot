@@ -24,3 +24,21 @@ fn () {
     assert-eq(1, ::runtime/bump-counter(rt.stats-store, key, 1))
     assert-eq(3, ::runtime/bump-counter(rt.stats-store, key, 2))
 }
+
+// Concurrent turns bump one counter and register sessions in one index; a
+// read, add and put lost about half of them
+test-concurrent-bumps-and-registrations-are-all-kept
+meta ["test"]
+fn () {
+    rt ::runtime/create-runtime(`test-${Uuid()}`)
+    n 24
+    bumps pmap(range(0, n), (i) { ::runtime/bump-counter(rt.stats-store, "hits", 1) })
+    assert-eq(n, ::hot::store/get(rt.stats-store, "hits"), "no concurrent bump is lost")
+    assert-eq(range(1, add(n, 1)), sort(bumps), "each bump returns its own count")
+    pmap(range(0, n), (i) {
+        ::runtime/register-session(rt, ::session/Session({id: `demo:${i}`, meta: {i: i}}))
+    })
+    ids map(::runtime/list-registered-sessions(rt), %.id)
+    assert-eq(n, length(ids), "no concurrent registration is lost")
+    assert-eq(n, length(distinct(ids)), "each session is registered once")
+}

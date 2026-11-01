@@ -103,7 +103,7 @@ Before publishing, ensure your package:
 - [ ] Has a complete `pkg.hot` with all metadata
 - [ ] Has a README.md explaining usage
 - [ ] Has working tests (`hot test`)
-- [ ] Passes checks (`hot check`)
+- [ ] Passes checks (`hot check src` in the package directory, which has no `hot.hot`)
 - [ ] Has appropriate license
 - [ ] Has minimal, necessary dependencies
 - [ ] Uses semantic versioning

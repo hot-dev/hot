@@ -103,6 +103,7 @@ fn (event) {
         message_id: Str(or(data.message_id, Uuid())),
         user_id: sender.id,
     }
+
     ::stream/emit-reply-start(AGENT_NAME, payload)
     text answer(Str(or(data.question, "")))
     // This fixture uses the non-streaming loop, so its complete reply is one

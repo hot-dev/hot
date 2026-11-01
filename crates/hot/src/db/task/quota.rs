@@ -5,7 +5,12 @@ use uuid::Uuid;
 use super::{Task, TaskError};
 use crate::db::{DatabasePool, DatabaseScope, Features, MaintenanceOperation};
 
-type TaskAccountPlan<T> = (Option<T>, Option<String>, Option<chrono::DateTime<Utc>>);
+type TaskAccountPlan<T> = (
+    Option<T>,
+    Option<String>,
+    Option<chrono::DateTime<Utc>>,
+    Option<chrono::DateTime<Utc>>,
+);
 
 /// Backend-resolved maximum billable execution. The worker computes this from
 /// the same effective resource profile and timeout used to execute the task.
@@ -125,7 +130,7 @@ impl Task {
                         .fetch_one(pool)
                         .await?;
                 let plan: Option<TaskAccountPlan<Value>> = sqlx::query_as(
-                    "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
+                    "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
                 ).bind(root_id).fetch_optional(pool).await?;
                 let needs_usage = usage_required(
                     plan.as_ref().and_then(|p| p.0.as_ref()),
@@ -138,6 +143,7 @@ impl Task {
                     let period = crate::db::subscription::monthly_usage_start(
                         now,
                         plan.as_ref().and_then(|p| p.2),
+                        plan.as_ref().and_then(|p| p.3),
                     );
                     crate::db::usage::prepare_task_period(&billing, root_id, period).await?;
                 }
@@ -184,17 +190,18 @@ impl Task {
                 }
                 .apply_to_connection(&mut tx)
                 .await?;
-                let admitted: bool = sqlx::query_scalar("SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE e.env_id=$1")
+                let admitted: bool = sqlx::query_scalar("SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END WHERE e.env_id=$1")
                     .bind(task.env_id).fetch_one(&mut *tx).await?;
                 if !admitted {
                     return Err(TaskError::Suspended);
                 }
                 let plan: Option<TaskAccountPlan<Value>> = sqlx::query_as(
-                    "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
+                    "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
                 ).bind(root_id).fetch_optional(&mut *tx).await?;
                 let period = crate::db::subscription::monthly_usage_start(
                     now,
                     plan.as_ref().and_then(|p| p.2),
+                    plan.as_ref().and_then(|p| p.3),
                 );
                 let is_free = plan
                     .as_ref()
@@ -263,17 +270,18 @@ impl Task {
                     tx.rollback().await?;
                     return Ok(false);
                 }
-                let admitted: bool = sqlx::query_scalar("SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE e.env_id=?")
+                let admitted: bool = sqlx::query_scalar("SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END WHERE e.env_id=?")
                     .bind(task.env_id).fetch_one(&mut *tx).await?;
                 if !admitted {
                     return Err(TaskError::Suspended);
                 }
                 let plan: Option<TaskAccountPlan<String>> = sqlx::query_as(
-                    "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
+                    "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
                 ).bind(root_id).fetch_optional(&mut *tx).await?;
                 let period = crate::db::subscription::monthly_usage_start(
                     now,
                     plan.as_ref().and_then(|p| p.2),
+                    plan.as_ref().and_then(|p| p.3),
                 );
                 let overrides = parse_features(overrides)?;
                 let plan_features = parse_features(plan.as_ref().and_then(|p| p.0.clone()))?;

@@ -85,10 +85,15 @@ Install optional git hooks:
 The repository uses SQLx's runtime query APIs and does not commit `.sqlx/`
 offline-query metadata. Do not run `cargo sqlx prepare`.
 
-For schema changes, add the next numbered migration under
-`resources/db/sqlite/migrations/` and `resources/db/postgres/migrations/` when
-the change applies to both databases. Follow the public/private migration
-boundary in [`resources/db/V2_MIGRATIONS.md`](resources/db/V2_MIGRATIONS.md).
+For schema changes, add the next numbered migration to both
+`resources/db/sqlite/migrations/` and `resources/db/postgres/migrations/`,
+with the same file name. A change only one engine needs still gets a file in
+the other, containing just `SELECT 1;`: the `schema_parity` test keeps the two
+chains in lockstep. Never edit or rename a migration a release has shipped
+(listed in [`resources/db/RELEASED_MIGRATIONS`](resources/db/RELEASED_MIGRATIONS));
+add a new one instead, and append each release's migrations to that list.
+Follow the public/private migration boundary in
+[`resources/db/V2_MIGRATIONS.md`](resources/db/V2_MIGRATIONS.md).
 
 A new PostgreSQL table needs row-level security: enable and force RLS with its
 policies in the same migration, and list the table in
@@ -147,11 +152,36 @@ history is meaningful.
 
 ## Releases
 
-`main` is the stable release branch. Maintainers update
-`resources/version.txt`, run `scripts/sync-version.sh`, commit the synchronized
-version files and refreshed `Cargo.lock` to `main`, and push a `vX.Y.Z` tag at
-that commit. The tag must match `resources/version.txt`. Pushing it starts
-`.github/workflows/release.yml`.
+`main` is the stable release branch. A release goes like this:
+
+1. **Write the upgrade notes** in `resources/docs/migrations/index.md`, and the
+   curated release notes (Breaking, Upgrade, Features, Fixes) in
+   `.github/release-notes/vX.Y.Z.md`. The release body uses that file, followed
+   by the list of merged pull requests.
+2. **Bump the version.** Update `resources/version.txt`, run
+   `scripts/sync-version.sh` (it sets the workspace version in `Cargo.toml` and
+   hot-std's `version` and `hot-min-version`), and refresh `Cargo.lock` with
+   `cargo update --workspace`. Bump the version of every package in
+   `hot/pkg/pkg-publish.txt` whose files changed since its last release, and
+   raise its `hot-min-version` when it needs the new Hot: the package CDN
+   upload refuses a package whose contents changed under a published version.
+   `scripts/check-version-sync.sh` must pass.
+3. **Merge, wait for CI, then tag.** Push a `vX.Y.Z` tag at the merged commit
+   only after the `hot` workflow passed on it. The tag must match
+   `resources/version.txt`, and `.github/workflows/release.yml` refuses a tag
+   whose commit has no successful `hot` run.
+4. **After the release:** sync the `hot-skills` mirror if it lags and tag it
+   `vX.Y.Z` too; publish the SDKs if this release changed the API they use
+   (the release's SDK check warns when `resources/docs/api/sdks.md` pins an
+   unpublished version); and only then deploy the hot.dev docs that describe
+   the release.
+
+When a change touches `resources/ai/skills`, merge its `hot-skills` mirror in
+this order: open the `hot` pull request, sync the mirror into a `hot-skills`
+branch with `scripts/sync-ai-assets.sh` and open that pull request, merge the
+`hot-skills` one, then re-run the `hot` pull request's sync check and merge it.
+The `hot` check compares against `hot-skills` main, so this order keeps both
+repositories' CI green.
 
 Publishing jobs are gated to the upstream `hot-dev/hot` repository. Depending
 on repository configuration, the pipeline publishes the GitHub release,

@@ -1,10 +1,13 @@
+// Handlers answer errors with a rendered page: an axum Response, which is large by design.
+#![allow(clippy::result_large_err)]
+
 use crate::auth::Session;
 use crate::handlers::list_query;
 use crate::templates;
 use ahash::AHashMap;
 use askama::Template;
 use axum::extract::{Form, Path, Query, State};
-use axum::response::{Html, IntoResponse, Redirect};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use chrono::Utc;
 use hot::db::DatabasePool;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -144,11 +147,9 @@ pub async fn keys_list_handler(
         .await
         .unwrap_or_default();
 
-        // Get total count by fetching all keys first
-        let all_keys = hot::db::api_key::ApiKey::get_api_keys_by_env(&db, &env.env_id, None, None)
+        let total = hot::db::api_key::ApiKey::count_api_keys_by_env(&db, &env.env_id)
             .await
             .unwrap_or_default();
-        let total = all_keys.len() as i64;
 
         (keys, total)
     } else {
@@ -188,18 +189,40 @@ pub async fn keys_new_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
-    // Check if environment is selected
-    let current_env = match &session.current_env {
-        Some(env) => env,
-        None => {
-            return Html("No environment selected".to_string()).into_response();
-        }
-    };
-
     // Check if user is admin
-    if !session.is_current_org_admin {
+    if session.current_env.is_some() && !session.is_current_org_admin {
         return Html("You must be an admin to create API keys".to_string()).into_response();
     }
+
+    render_keys_new(
+        &db,
+        &session,
+        String::new(),
+        "",
+        "full",
+        &serde_json::Value::Object(Default::default()),
+    )
+    .await
+    .into_response()
+}
+
+/// Render the new-key page with a freshly generated key and handoff token.
+///
+/// Error re-renders come here too. They keep the submitted description, access level and
+/// permissions, but show a new key: the secret shown before is not recoverable from the form,
+/// and committing a key the user never saw would leave them without its secret.
+async fn render_keys_new(
+    db: &DatabasePool,
+    session: &Session,
+    error_message: String,
+    description: &str,
+    access_level: &str,
+    permissions: &serde_json::Value,
+) -> Response {
+    let current_env = match &session.current_env {
+        Some(env) => env,
+        None => return Html("No environment selected".to_string()).into_response(),
+    };
 
     // Generate a new API key ID and the actual key
     let api_key_id = uuid::Uuid::now_v7();
@@ -219,11 +242,11 @@ pub async fn keys_new_handler(
         Err(_) => return Html("Failed to generate API key".to_string()).into_response(),
     };
 
-    let (mcp_tools_json, webhooks_json) =
-        super::build_permission_path_options(&db, &current_env.env_id).await;
+    let (mcp_tool_options, webhook_options) =
+        super::build_permission_path_options(db, &current_env.env_id).await;
 
     // Build breadcrumbs: <org> (<env>) / API Keys / New
-    let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
+    let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(session);
     breadcrumbs.push(templates::BreadcrumbItem::clickable(
         "API Keys".to_string(),
         "/keys".to_string(),
@@ -232,22 +255,63 @@ pub async fn keys_new_handler(
 
     let template = templates::ApiKeysNew {
         title: "New API Key",
-        page_context: templates::PrivatePageContext::with_breadcrumbs(
-            "keys",
-            &session,
-            breadcrumbs,
-        ),
+        page_context: templates::PrivatePageContext::with_breadcrumbs("keys", session, breadcrumbs),
         generated_key,
         api_key_id,
         handoff_token,
-        error_message: "",
-        description: "",
-        access_level: "full",
-        mcp_tools_json,
-        webhooks_json,
+        error_message: &error_message,
+        description,
+        access_level,
+        permissions: permissions.clone(),
+        mcp_tool_options,
+        webhook_options,
     };
 
-    Html(template.render().unwrap()).into_response()
+    // The page shows a key secret: keep it out of caches and Referer headers.
+    (
+        [
+            ("Cache-Control", "no-store"),
+            ("Referrer-Policy", "no-referrer"),
+        ],
+        Html(template.render().unwrap()),
+    )
+        .into_response()
+}
+
+/// The access level a key form selected. Anything other than an explicit choice is rejected,
+/// so a missing or mangled field can never fall through to full access.
+fn selected_access_level(raw: &str) -> Option<&'static str> {
+    match raw {
+        "full" => Some("full"),
+        "restricted" => Some("restricted"),
+        _ => None,
+    }
+}
+
+/// The submitted permissions, for re-rendering a form after an error. Text that isn't JSON is
+/// passed through as a string, which the page's permission builder ignores.
+fn submitted_permissions(raw: &str) -> serde_json::Value {
+    if raw.trim().is_empty() {
+        serde_json::Value::Object(Default::default())
+    } else {
+        serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+    }
+}
+
+/// Parse and validate the permissions a key form submitted.
+fn permissions_from_form(access_level: &str, raw: &str) -> Result<serde_json::Value, String> {
+    if access_level != "restricted" {
+        return Ok(serde_json::json!({"*:*": ["*"]})); // full access
+    }
+    if raw.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("Invalid permissions JSON: {}", e))?;
+    // Validate the permissions structure
+    hot::permission::Permissions::from_json_validated(&parsed)
+        .map_err(|e| format!("Invalid permissions: {}", e))?;
+    Ok(parsed)
 }
 
 pub async fn keys_edit_handler(
@@ -277,42 +341,20 @@ pub async fn keys_edit_handler(
             } else {
                 "restricted"
             };
+            let permissions = api_key.permissions.clone();
+            let description = api_key.description.clone();
 
-            // Serialize current permissions for the form
-            let permissions_json =
-                serde_json::to_string(&api_key.permissions).unwrap_or_else(|_| "{}".to_string());
-
-            let (mcp_tools_json, webhooks_json) =
-                super::build_permission_path_options(&db, &current_env.env_id).await;
-
-            // Build breadcrumbs: <org> (<env>) / API Keys / <description> / Edit
-            let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
-            breadcrumbs.push(templates::BreadcrumbItem::clickable(
-                "API Keys".to_string(),
-                "/keys".to_string(),
-            ));
-            breadcrumbs.push(templates::BreadcrumbItem::clickable(
-                api_key.description.clone(),
-                format!("/keys/{}", api_key_id),
-            ));
-            breadcrumbs.push(templates::BreadcrumbItem::current("Edit".to_string()));
-
-            let template = templates::ApiKeysEdit {
-                title: &format!("Edit API Key: {}", api_key.description),
-                page_context: templates::PrivatePageContext::with_breadcrumbs(
-                    "keys",
-                    &session,
-                    breadcrumbs,
-                ),
+            render_keys_edit(
+                &db,
+                &session,
                 api_key,
-                error_message: "",
+                String::new(),
+                &description,
                 access_level,
-                permissions_json,
-                mcp_tools_json,
-                webhooks_json,
-            };
-
-            Html(template.render().unwrap()).into_response()
+                permissions,
+            )
+            .await
+            .into_response()
         }
         Err(_) => {
             // API key not found, redirect to keys list
@@ -321,34 +363,85 @@ pub async fn keys_edit_handler(
     }
 }
 
+/// Render the edit-key page. Error re-renders pass the submitted values, so a failed save
+/// shows what the user entered rather than reverting to the stored key.
+async fn render_keys_edit(
+    db: &DatabasePool,
+    session: &Session,
+    api_key: hot::db::api_key::ApiKey,
+    error_message: String,
+    description: &str,
+    access_level: &str,
+    permissions: serde_json::Value,
+) -> Response {
+    let (mcp_tool_options, webhook_options) =
+        super::build_permission_path_options(db, &api_key.env_id).await;
+
+    // Build breadcrumbs: <org> (<env>) / API Keys / <description> / Edit. There is no key
+    // detail page, so the description crumb is not a link.
+    let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(session);
+    breadcrumbs.push(templates::BreadcrumbItem::clickable(
+        "API Keys".to_string(),
+        "/keys".to_string(),
+    ));
+    breadcrumbs.push(templates::BreadcrumbItem::current(
+        api_key.description.clone(),
+    ));
+    breadcrumbs.push(templates::BreadcrumbItem::current("Edit".to_string()));
+
+    let template = templates::ApiKeysEdit {
+        title: &format!("Edit API Key: {}", api_key.description),
+        page_context: templates::PrivatePageContext::with_breadcrumbs("keys", session, breadcrumbs),
+        api_key,
+        error_message: &error_message,
+        description,
+        access_level,
+        permissions,
+        mcp_tool_options,
+        webhook_options,
+    };
+
+    Html(template.render().unwrap()).into_response()
+}
+
 pub async fn keys_create_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     Form(form): Form<ApiKeyCreateForm>,
-) -> Result<Redirect, Html<String>> {
+) -> Result<Redirect, Response> {
     let current_env = match &session.current_env {
         Some(env) => env,
         None => {
-            return Err(Html("No environment selected".to_string()));
+            return Err(Html("No environment selected".to_string()).into_response());
         }
     };
 
     // Check if user is admin
     if !session.is_current_org_admin {
-        return Err(Html("You must be an admin to create API keys".to_string()));
+        return Err(Html("You must be an admin to create API keys".to_string()).into_response());
     }
+
+    // Re-render with the submitted choices. A Restricted submission never comes back as Full.
+    let submitted_level = selected_access_level(&form.access_level).unwrap_or("restricted");
+    let submitted = submitted_permissions(&form.permissions);
+    let retry = |message: String| {
+        render_keys_new(
+            &db,
+            &session,
+            message,
+            &form.description,
+            submitted_level,
+            &submitted,
+        )
+    };
 
     // Validate form data
     if form.description.trim().is_empty() {
-        return Err(render_keys_new_with_error(
-            &session,
-            "Description is required",
-            "",
-            &form.api_key_id,
-            &form.handoff_token,
-        )
-        .await);
+        return Err(retry("Description is required".to_string()).await);
     }
+    let Some(access_level) = selected_access_level(&form.access_level) else {
+        return Err(retry("Choose Full Access or Restricted".to_string()).await);
+    };
 
     let key_hash = match verify_api_key_handoff(
         &form.handoff_token,
@@ -359,12 +452,9 @@ pub async fn keys_create_handler(
     ) {
         Some(hash) => hash,
         None => {
-            return Err(render_keys_new_with_error(
-                &session,
-                "Session expired. Please try again.",
-                &form.description,
-                &form.api_key_id,
-                &form.handoff_token,
+            // An expired form, or one rendered by another app version during a deploy.
+            return Err(retry(
+                "This form expired before it was submitted. A new key was generated below: copy it, then create the key again.".to_string(),
             )
             .await);
         }
@@ -373,51 +463,13 @@ pub async fn keys_create_handler(
     // Parse the key hash JSON
     let key_data: serde_json::Value = match serde_json::from_str(&key_hash) {
         Ok(data) => data,
-        Err(_) => {
-            return Err(render_keys_new_with_error(
-                &session,
-                "Failed to process API key",
-                &form.description,
-                &form.api_key_id,
-                &form.handoff_token,
-            )
-            .await);
-        }
+        Err(_) => return Err(retry("Failed to process API key".to_string()).await),
     };
 
     // Build and validate permissions from form data
-    let permissions_json = if form.access_level == "restricted" {
-        if form.permissions.is_empty() {
-            serde_json::json!({})
-        } else {
-            let parsed: serde_json::Value = match serde_json::from_str(&form.permissions) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Err(render_keys_new_with_error(
-                        &session,
-                        &format!("Invalid permissions JSON: {}", e),
-                        &form.description,
-                        &form.api_key_id,
-                        &form.handoff_token,
-                    )
-                    .await);
-                }
-            };
-            // Validate the permissions structure
-            if let Err(e) = hot::permission::Permissions::from_json_validated(&parsed) {
-                return Err(render_keys_new_with_error(
-                    &session,
-                    &format!("Invalid permissions: {}", e),
-                    &form.description,
-                    &form.api_key_id,
-                    &form.handoff_token,
-                )
-                .await);
-            }
-            parsed
-        }
-    } else {
-        serde_json::json!({"*:*": ["*"]}) // full access
+    let permissions_json = match permissions_from_form(access_level, &form.permissions) {
+        Ok(permissions) => permissions,
+        Err(message) => return Err(retry(message).await),
     };
 
     // Insert the API key into the database
@@ -436,14 +488,7 @@ pub async fn keys_create_handler(
             // Redirect to the keys list
             Ok(keys_list_redirect(&session))
         }
-        Err(_) => Err(render_keys_new_with_error(
-            &session,
-            "Failed to create API key",
-            &form.description,
-            &form.api_key_id,
-            &form.handoff_token,
-        )
-        .await),
+        Err(_) => Err(retry("Failed to create API key".to_string()).await),
     }
 }
 
@@ -452,17 +497,17 @@ pub async fn keys_update_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     Form(form): Form<ApiKeyEditForm>,
-) -> Result<Redirect, Html<String>> {
+) -> Result<Redirect, Response> {
     let current_env = match &session.current_env {
         Some(env) => env,
         None => {
-            return Err(Html("No environment selected".to_string()));
+            return Err(Html("No environment selected".to_string()).into_response());
         }
     };
 
     // Check if user is admin
     if !session.is_current_org_admin {
-        return Err(Html("You must be an admin to edit API keys".to_string()));
+        return Err(Html("You must be an admin to edit API keys".to_string()).into_response());
     }
 
     // Get the API key
@@ -476,12 +521,31 @@ pub async fn keys_update_handler(
         return Ok(keys_list_redirect(&session));
     }
 
-    // Validate form data
+    // Re-render with the submitted values rather than the stored ones.
+    let submitted_level = selected_access_level(&form.access_level).unwrap_or("restricted");
+    let retry = |message: String| {
+        render_keys_edit(
+            &db,
+            &session,
+            api_key.clone(),
+            message,
+            &form.description,
+            submitted_level,
+            submitted_permissions(&form.permissions),
+        )
+    };
+
+    // Validate everything before changing anything, so a rejected form saves nothing.
     if form.description.trim().is_empty() {
-        return Err(
-            render_keys_edit_with_error(&session, &api_key, "Description is required").await,
-        );
+        return Err(retry("Description is required".to_string()).await);
     }
+    let Some(access_level) = selected_access_level(&form.access_level) else {
+        return Err(retry("Choose Full Access or Restricted".to_string()).await);
+    };
+    let permissions_json = match permissions_from_form(access_level, &form.permissions) {
+        Ok(permissions) => permissions,
+        Err(message) => return Err(retry(message).await),
+    };
 
     // Update the API key description
     if hot::db::api_key::ApiKey::update_description(
@@ -493,9 +557,7 @@ pub async fn keys_update_handler(
     .await
     .is_err()
     {
-        return Err(
-            render_keys_edit_with_error(&session, &api_key, "Failed to update API key").await,
-        );
+        return Err(retry("Failed to update API key".to_string()).await);
     }
 
     // Update the active status if it changed
@@ -508,44 +570,8 @@ pub async fn keys_update_handler(
         )
         .await
     {
-        return Err(render_keys_edit_with_error(
-            &session,
-            &api_key,
-            "Failed to update API key status",
-        )
-        .await);
+        return Err(retry("Failed to update API key status".to_string()).await);
     }
-
-    // Update and validate permissions
-    let permissions_json = if form.access_level == "restricted" {
-        if form.permissions.is_empty() {
-            serde_json::json!({})
-        } else {
-            let parsed: serde_json::Value = match serde_json::from_str(&form.permissions) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Err(render_keys_edit_with_error(
-                        &session,
-                        &api_key,
-                        &format!("Invalid permissions JSON: {}", e),
-                    )
-                    .await);
-                }
-            };
-            // Validate the permissions structure
-            if let Err(e) = hot::permission::Permissions::from_json_validated(&parsed) {
-                return Err(render_keys_edit_with_error(
-                    &session,
-                    &api_key,
-                    &format!("Invalid permissions: {}", e),
-                )
-                .await);
-            }
-            parsed
-        }
-    } else {
-        serde_json::json!({"*:*": ["*"]}) // full access
-    };
 
     if hot::db::api_key::ApiKey::update_permissions(
         &db,
@@ -556,89 +582,11 @@ pub async fn keys_update_handler(
     .await
     .is_err()
     {
-        return Err(render_keys_edit_with_error(
-            &session,
-            &api_key,
-            "Failed to update API key permissions",
-        )
-        .await);
+        return Err(retry("Failed to update API key permissions".to_string()).await);
     }
 
     // Redirect to the keys list
     Ok(keys_list_redirect(&session))
-}
-
-// Helper function to render keys new page with error
-async fn render_keys_new_with_error(
-    session: &Session,
-    error_message: &str,
-    description: &str,
-    api_key_id: &Uuid,
-    handoff_token: &str,
-) -> Html<String> {
-    // Build breadcrumbs: <org> (<env>) / API Keys / New
-    let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(session);
-    breadcrumbs.push(templates::BreadcrumbItem::clickable(
-        "API Keys".to_string(),
-        "/keys".to_string(),
-    ));
-    breadcrumbs.push(templates::BreadcrumbItem::current("New".to_string()));
-
-    let template = templates::ApiKeysNew {
-        title: "New API Key",
-        page_context: templates::PrivatePageContext::with_breadcrumbs("keys", session, breadcrumbs),
-        generated_key: "".to_string(),
-        api_key_id: *api_key_id,
-        handoff_token: handoff_token.to_string(),
-        error_message,
-        description,
-        access_level: "full",
-        mcp_tools_json: "[]".into(),
-        webhooks_json: "[]".into(),
-    };
-
-    Html(template.render().unwrap())
-}
-
-// Helper function to render keys edit page with error
-async fn render_keys_edit_with_error(
-    session: &Session,
-    api_key: &hot::db::api_key::ApiKey,
-    error_message: &str,
-) -> Html<String> {
-    // Build breadcrumbs: <org> (<env>) / API Keys / <description> / Edit
-    let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(session);
-    breadcrumbs.push(templates::BreadcrumbItem::clickable(
-        "API Keys".to_string(),
-        "/keys".to_string(),
-    ));
-    breadcrumbs.push(templates::BreadcrumbItem::clickable(
-        api_key.description.clone(),
-        format!("/keys/{}", api_key.api_key_id),
-    ));
-    breadcrumbs.push(templates::BreadcrumbItem::current("Edit".to_string()));
-
-    let access_level = if api_key.has_full_permissions() {
-        "full"
-    } else {
-        "restricted"
-    };
-
-    let permissions_json =
-        serde_json::to_string(&api_key.permissions).unwrap_or_else(|_| "{}".to_string());
-
-    let template = templates::ApiKeysEdit {
-        title: &format!("Edit API Key: {}", api_key.description),
-        page_context: templates::PrivatePageContext::with_breadcrumbs("keys", session, breadcrumbs),
-        api_key: api_key.clone(),
-        error_message,
-        access_level,
-        permissions_json,
-        mcp_tools_json: "[]".into(),
-        webhooks_json: "[]".into(),
-    };
-
-    Html(template.render().unwrap())
 }
 
 #[cfg(test)]

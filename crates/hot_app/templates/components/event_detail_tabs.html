@@ -6,6 +6,13 @@
     border-bottom: 1px solid rgba(229, 231, 235, 1);
     background: white;
     padding: 0 0 0 16px;
+    overflow-x: auto;
+    scrollbar-width: thin;
+}
+
+.event-tabs > * {
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .dark .event-tabs {
@@ -183,6 +190,26 @@
     color: rgba(156, 163, 175, 1) !important;
 }
 
+.filter-help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-gray-600);
+    background: var(--color-gray-200);
+    border-radius: 50%;
+    cursor: help;
+    position: relative;
+}
+
+.dark .filter-help {
+    color: var(--color-gray-300);
+    background: var(--color-gray-700);
+}
+
 .dark .event-graph-search-controls .filter-help-tooltip {
     background: var(--color-gray-800) !important;
     border-color: rgba(64, 64, 64, 1) !important;
@@ -224,7 +251,7 @@
 
 <!-- Tab Contents -->
 <div class="flex-1 flex flex-row min-h-0">
-    <div class="flex-1 flex flex-col min-h-0">
+    <div class="flex-1 flex flex-col min-h-0 min-w-0">
     <!-- Stream Graph Tab -->
     {% if stream_graphs.len() > 0 %}
     <div class="event-tab-content active" id="stream-graph-tab">
@@ -240,7 +267,7 @@
         {% endif %}
 
         <!-- Search Controls -->
-        <div class="event-graph-search-controls" style="display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid rgba(229, 231, 235, 1);">
+        <div class="event-graph-search-controls" style="display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 16px; border-bottom: 1px solid rgba(229, 231, 235, 1);">
             <div style="position: relative; display: flex; align-items: center; gap: 4px;">
                 <div style="position: relative; display: inline-flex; align-items: center;">
                     <input type="text" id="event-detail-graph-search" class="event-graph-search-input" placeholder="Search type, function, result..." style="height: 32px; padding: 4px 28px 4px 10px; font-size: 12px; border: 1px solid rgba(209, 213, 219, 1); border-radius: 4px; min-width: 200px; background: white;" />
@@ -248,7 +275,7 @@
                         <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12"></path></svg>
                     </button>
                 </div>
-                <span class="filter-help" tabindex="0" style="display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; font-size: 10px; font-weight: 600; color: rgba(107, 114, 128, 0.8); background: rgba(229, 231, 235, 0.8); border-radius: 50%; cursor: help; position: relative;">?
+                <span class="filter-help" tabindex="0">?
                     <span class="filter-help-tooltip" style="display: none; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: 8px; padding: 10px 12px; min-width: 200px; font-size: 11px; font-weight: 400; line-height: 1.5; color: rgba(55, 65, 81, 1); background: white; border: 1px solid rgba(229, 231, 235, 1); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); z-index: 100; white-space: normal;">
                         <strong>Search</strong><br>
                         Searches type, kind, function, status, and result.<br><br>
@@ -277,7 +304,7 @@
         <!-- Desktop Table View -->
         <div class="responsive-table hidden md:block">
             <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
-                <thead class="bg-gray-100 dark:bg-gray-700 sticky top-0">
+                <thead class="table-head sticky top-0">
                     <tr>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Run ID</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">FN</th>
@@ -306,7 +333,7 @@
                             {% when Some with (event_fn) %}
                                 <code class="language-hot text-gray-700 dark:text-gray-300 event-fn-code">{{ event_fn }}</code>
                             {% when None %}
-                                <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                                <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                             {% endmatch %}
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-xs">
@@ -337,18 +364,18 @@
                             {% when Some with (result) %}
                                 <div class="flex items-center gap-2">
                                     <button class="result-btn text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 cursor-pointer font-mono text-xs truncate max-w-xs flex-1 text-left"
-                                            onclick="window.showEventStreamNodeInspector('{{ run.run_id }}', 'run', {})"
+                                            onclick="window.showEventStreamNodeInspector({{ run.run_id|js }}, 'run', {})"
                                             title="Click to inspect">
                                         <code class="language-hot truncate inline-block max-w-full">{{ result }}</code>
                                     </button>
-                                    <button onclick="openContentModalWithFormats('Result', `{{ result|escape }}`, `{% match run.result_json %}{% when Some with (json) %}{{ json|escape }}{% when None %}{{ result|escape }}{% endmatch %}`)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full result">
+                                    <button data-modal-title="Result" data-modal-hot="{{ result }}" data-modal-json="{% match run.result_json %}{% when Some with (json) %}{{ json }}{% when None %}{{ result }}{% endmatch %}" onclick="openContentModalFromData(this)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full result">
                                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
                                         </svg>
                                     </button>
                                 </div>
                             {% when None %}
-                                <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                                <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                             {% endmatch %}
                         </td>
                     </tr>
@@ -419,7 +446,7 @@
                                 {% when Some with (event_fn) %}
                                     <code class="language-hot text-xs">{{ event_fn }}</code>
                                 {% when None %}
-                                    <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                                    <span class="text-gray-500 dark:text-gray-400 italic">-</span>
                                 {% endmatch %}
                             </span>
                         </div>
@@ -429,7 +456,7 @@
                             <span class="text-gray-600 dark:text-gray-400 flex-shrink-0">Result:</span>
                             <div class="flex items-center justify-between gap-2 flex-1 min-w-0">
                                 <code class="language-hot text-gray-700 dark:text-gray-300 font-mono text-xs truncate">{{ result|truncate(length=30) }}</code>
-                                <button onclick="openContentModalWithFormats('Result', `{{ result|escape }}`, `{% match run.result_json %}{% when Some with (json) %}{{ json|escape }}{% when None %}{{ result|escape }}{% endmatch %}`)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full result">
+                                <button data-modal-title="Result" data-modal-hot="{{ result }}" data-modal-json="{% match run.result_json %}{% when Some with (json) %}{{ json }}{% when None %}{{ result }}{% endmatch %}" onclick="openContentModalFromData(this)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full result">
                                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
                                     </svg>
@@ -663,7 +690,7 @@ function displayEventInspectorContent(data) {
             html += `
                 <div>
                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Type</div>
-                    <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 text-xs">
+                    <div class="badge badge-neutral">
                         <span class="px-2 py-1 rounded-full bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200">${escapedType}</span>
                     </div>
                 </div>
@@ -681,7 +708,7 @@ function displayEventInspectorContent(data) {
             html += `
                 <div>
                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Status</div>
-                    <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 text-xs">
+                    <div class="badge badge-neutral">
                         <span class="${statusClass}">${escapedStatus}</span>
                     </div>
                 </div>

@@ -116,7 +116,7 @@ max-retries: Int 3
 // Functions (return type is the success type, not Result)
 get-user fn (id: Str): Map {
     response ::http/get(`${api-url}/users/${id}`)
-    if(is-ok(response), response.body, err("Failed"))  // no ok() needed—auto-wrapped
+    if(::http/is-ok-response(response), response.body, err("Failed"))  // 2xx only; no ok() needed—auto-wrapped
 }
 
 // Conditional flow function
@@ -242,7 +242,7 @@ values: All<Vec> parallel {
 User type { id: Str, email: Str, active: Bool }
 user User(id: "123", email: "a@b.com", active: true)
 user User({id: "123", email: "a@b.com", active: true})
-user.email  // "a@b.com"
+email user.email  // "a@b.com"
 
 // Enum (variant union) type
 Direction enum { Up, Down, Left, Right }
@@ -252,7 +252,7 @@ dir Direction.Up
 Circle type { radius: Dec }
 Shape enum { Circle(Circle), Point }
 shape Shape.Circle(radius: 5.0)
-shape.radius  // 5.0
+radius shape.radius  // 5.0
 
 // Match flow for enums (access matched value through original variable).
 // Match on a closed enum must be exhaustive — every variant covered or
@@ -411,7 +411,7 @@ length fn (coll: Str | Vec | Map | Bytes): Int
 is-empty fn (coll: Str | Vec | Map): Bool
 concat fn (a: Vec, b: Vec, ...rest: Vec): Vec
 concat fn (a: Str, b: Str, ...rest: Str): Str
-flatten fn (coll: Str | Vec | Map): Str | Vec | Map
+flatten fn (coll: Vec): Vec  // every depth; strings and maps stay whole
 merge fn (a: Map, b: Map): Map
 assoc fn (map: Map, key: Any, value: Any): Map
 assoc-some fn (map: Map, key: Any, value: Any): Map // assoc only if value is non-null
@@ -550,7 +550,8 @@ hash ::hot::hash/sha256("data")
 - `::hot::regex` — `first-match`, `find`, `find-all`, `replace`, `replace-all`, `split`, `is-match`
 - `::hot::bytes` — `to-int`, `to-uint`, `from-int`, `crc32`, `to-vec`
 - `::hot::bit` — `and`, `or`, `xor`, `not`, `shift-left`, `shift-right`
-- `::hot::run` — `fail`, `cancel`, `exit`, `info`, `is-inline-run`
+- `::hot::exec` — `fail`, `cancel`, `exit` (all core: call them without a prefix)
+- `::hot::run` — `info`, `is-inline-run`, `is-local-dev`
 - `::hot::meta` — `get(var)`
 - `::hot::task` — `start`, `cancel`, `await`, `send`, `receive`, `checkpoint`, `restore`
 - `::hot::store` — `put`, `put-if-missing`, `put-if`, `increment`, `get`, `delete`, `keys`, `vals`, `length`, `is-empty`, `list`, `search`, `filter`, `find-first`, `clear`, `destroy`
@@ -664,7 +665,9 @@ users
     |> filter(contains(%, "@company.com"))
 ```
 
-**Implicit lambda binding (the rule):** A `%` placeholder is bound by the **nearest enclosing parameter slot whose declared type contains `Fn`** (e.g. `Fn`, `Fn | Null`, `Lazy Fn`, `Vec<Fn>`). The compiler wraps the smallest expression containing `%` into a lambda at that slot. This works uniformly for built-in HOFs *and* user-defined HOFs — there is no hardcoded list of HOF names.
+**Implicit lambda binding (the rule):** A `%` placeholder is bound by the **nearest enclosing parameter slot whose declared type contains `Fn`** (e.g. `f: Fn`, `f: Fn?`, `f: Fn | Null`, or a lazy `lazy f: Fn`). The compiler wraps the whole argument at that slot into one lambda. This works uniformly for built-in HOFs *and* user-defined HOFs — there is no hardcoded list of HOF names.
+
+A `Vec<Fn>` slot wraps its whole argument too: `apply-all(3, [add(%, 1), mul(%, 10)])` passes one lambda that returns a vector, not a vector of functions, so it fails at runtime even though `hot check` passes. Write each element as an explicit lambda: `apply-all(3, [%(add(%, 1)), %(mul(%, 10))])`.
 
 ```hot
 length(filter(items, gt(%, 3)))      // wraps at filter's Fn slot
@@ -794,11 +797,11 @@ If you hit `Function call recursion limit reached`, that's the soft cap (`HOT_MA
 
 ### Event Handlers with Retry
 ```hot
-// Simple retry: 3 attempts with default 1s delay
+// Simple retry: retry a failed run up to 3 times, 1s apart
 on-payment meta {on-event: "payment:received", retry: 3}
 fn (event) { process-payment(event.data) }
 
-// Full retry: custom attempts and delay
+// Full retry: custom attempts and delay (ms); each retry is a new run
 daily-sync meta {schedule: "0 2 * * *", retry: {attempts: 5, delay: 10000}}
 fn (event) { sync-external-data() }
 ```

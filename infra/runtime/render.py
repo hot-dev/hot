@@ -10,6 +10,8 @@ import subprocess
 import sys
 
 SERVICES = ("app", "api", "worker", "scheduler", "task-worker")
+# `--askpass` reads the password from stdin; PING is the command it then sends.
+VALKEY_HEALTHCHECK = "valkey-cli --askpass PING < /run/secrets/VALKEY_PASSWORD | grep -qx PONG"
 IMAGES = {"hot", "postgres", "valkey", "ingress"}
 DIGEST = re.compile(r"^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$")
 MANIFEST_KEYS = {"schema_version", "release", "module_tag", "configuration_schema", "migrations", "upgrade", "images"}
@@ -426,7 +428,7 @@ def render(document, manifest, data_root, secrets_root, s3_auth="identity", s3_s
             "command": ["valkey-server", "/etc/valkey/valkey.conf"],
             "secrets": [secret("valkey", k) for k in ("VALKEY_ACL", "VALKEY_PASSWORD")],
             "volumes": [bind(Path(data_root) / "valkey", "/data"), {"type": "bind", "source": "./valkey.conf", "target": "/etc/valkey/valkey.conf", "read_only": True}],
-            "healthcheck": {"test": ["CMD-SHELL", "valkey-cli --askpass < /run/secrets/VALKEY_PASSWORD | grep -qx PONG"], "interval": "5s", "timeout": "3s", "retries": 12},
+            "healthcheck": {"test": ["CMD-SHELL", VALKEY_HEALTHCHECK], "interval": "5s", "timeout": "3s", "retries": 12},
         }
     services["ingress"] = {
         "image": images["ingress"], "restart": "unless-stopped", "user": "10001:10001", "read_only": True,
@@ -587,8 +589,13 @@ http {
   log_format operational escape=json '{"status":$status,"duration":$request_time,"request_id":"$request_id","method":"$request_method"}';
   access_log /dev/stdout operational;
   client_max_body_size 300m;
+  # The root filesystem is read-only, so every temp path nginx creates at
+  # startup, used or not, goes under the /tmp tmpfs.
   client_body_temp_path /tmp/client_body;
   proxy_temp_path /tmp/proxy;
+  fastcgi_temp_path /tmp/fastcgi;
+  uwsgi_temp_path /tmp/uwsgi;
+  scgi_temp_path /tmp/scgi;
   ssl_protocols TLSv1.2 TLSv1.3;
   ssl_certificate /run/secrets/TLS_CERTIFICATE;
   ssl_certificate_key /run/secrets/TLS_PRIVATE_KEY;

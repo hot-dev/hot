@@ -168,9 +168,11 @@ impl PgStore {
 
     /// The range `[low, high)` of key text that holds the string keys
     /// starting with `prefix`, in byte order (`high` is `None` when nothing
-    /// is above them). It is read from `idx_store_map_entry_key_prefix`: the
-    /// jsonb key itself orders strings by the database collation, where the
-    /// keys sharing a prefix need not be one range.
+    /// is above them). It is read from `idx_store_map_entry_key_prefix` on
+    /// `key_text`: the jsonb key itself orders strings by the database
+    /// collation, where the keys sharing a prefix need not be one range, and
+    /// a condition on a jsonb operator cannot be an index condition under
+    /// row-level security.
     fn prefix_range(prefix: Option<&str>) -> Option<(String, Option<String>)> {
         prefix.map(|prefix| (prefix.to_string(), super::prefix_upper_bound(prefix)))
     }
@@ -180,12 +182,8 @@ impl PgStore {
     fn listing_sql(columns: &str, range: &Option<(String, Option<String>)>) -> String {
         let terms = match range {
             None => "",
-            Some((_, None)) => {
-                " AND jsonb_typeof(key) = 'string' AND (key #>> '{}') COLLATE \"C\" >= $6"
-            }
-            Some((_, Some(_))) => {
-                " AND jsonb_typeof(key) = 'string' AND (key #>> '{}') COLLATE \"C\" >= $6 AND (key #>> '{}') COLLATE \"C\" < $7"
-            }
+            Some((_, None)) => " AND key_text >= $6",
+            Some((_, Some(_))) => " AND key_text >= $6 AND key_text < $7",
         };
         format!(
             "SELECT {columns}
@@ -1283,6 +1281,16 @@ mod tests {
         crate::store::contention::put_if_keeps_every_entry(Arc::new(store), &name).await
     }
 
+    #[tokio::test]
+    async fn postgres_decs_round_trip() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("dec-test-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        crate::store::contention::decs_round_trip(Arc::new(store), &name).await
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn postgres_concurrent_increments_count_exactly() -> Result<(), String> {
         let Some(store) = postgres_store().await? else {
@@ -1363,6 +1371,29 @@ mod tests {
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
+        // Plan as a runtime login would: one without BYPASSRLS, so forced
+        // row-level security applies. Only leakproof conditions can be index
+        // conditions then. The role is rolled back with the transaction.
+        let role = format!("hot_prefix_plan_{}", Uuid::now_v7().simple());
+        let schema: String = sqlx::query_scalar(
+            "SELECT n.nspname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = 'store_map_entry'::regclass",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        // Both interpolated names are identifier-safe: a generated one, and
+        // the fixture schema quoted.
+        for statement in [
+            format!("CREATE ROLE {role} NOLOGIN NOSUPERUSER NOBYPASSRLS"),
+            format!("GRANT USAGE ON SCHEMA \"{schema}\" TO {role}"),
+            format!("GRANT SELECT ON store_map_entry TO {role}"),
+            format!("SET LOCAL ROLE {role}"),
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         let plan: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
             .bind(store.org_id)
             .bind(store.env_id)
@@ -1378,6 +1409,18 @@ mod tests {
             plan.iter()
                 .any(|step| step.contains("idx_store_map_entry_key_prefix")),
             "the prefix read should use the key prefix index: {plan:?}"
+        );
+        assert!(
+            plan.iter().any(|step| step.contains("Index Cond")
+                && step.contains("key_text >=")
+                && step.contains("key_text <")),
+            "under row-level security the prefix range should be an index condition: {plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|step| step.contains("Filter") && step.contains("key_text")),
+            "the prefix range should not be a filter: {plan:?}"
         );
         Ok(())
     }

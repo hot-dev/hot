@@ -101,6 +101,11 @@ pub(crate) fn authorize(
         ("/v1/runs/{run_id}" | "/v1/runs/{run_id}/subscribe", "GET") => {
             (format!("run:{}", param("run_id")?), "read")
         }
+        ("/v1/runs/{run_id}/calls", "DELETE") => (format!("call:{}/*", param("run_id")?), "delete"),
+        // A stream's or environment's calls span runs the request does not name.
+        ("/v1/streams/{stream_id}/calls" | "/v1/env/calls", "DELETE") => {
+            ("call:*".into(), "delete")
+        }
         ("/v1/sessions", "GET") => ("session:*".into(), "read"),
         ("/v1/sessions", "POST") => ("session:*".into(), "create"),
         ("/v1/sessions", "DELETE") => ("session:*".into(), "delete"),
@@ -243,6 +248,7 @@ mod tests {
             (Method::GET, "/v1/projects"),
             (Method::PATCH, "/v1/projects/{project_id_or_slug}"),
             (Method::GET, "/v1/runs"),
+            (Method::DELETE, "/v1/runs/{run_id}/calls"),
             (Method::GET, "/v1/projects/{project_id_or_slug}/context"),
         ] {
             assert_eq!(
@@ -289,6 +295,9 @@ mod tests {
             (Method::GET, "/v1/blobs/{blob_ref_id}/download"),
             (Method::POST, "/v1/domains/{domain_id}/verify"),
             (Method::GET, "/v1/runs/{run_id}/subscribe"),
+            (Method::DELETE, "/v1/runs/{run_id}/calls"),
+            (Method::DELETE, "/v1/streams/{stream_id}/calls"),
+            (Method::DELETE, "/v1/env/calls"),
         ] {
             assert_eq!(
                 authorize(&narrow, &method, path, &params),

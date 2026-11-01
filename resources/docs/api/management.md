@@ -4,15 +4,16 @@ description: "Org API keys, sub-organization provisioning, and environment key i
 
 # Sub-organizations
 
-A child organization owns its environments and deployments. Environment API
-keys, service keys, and sessions access exactly one environment. A root's
-environment key cannot access a child environment. Missing selectors never mean
-all children, and child lookups never fall back to parent resources.
+A sub-organization owns its environments and deployments. Environment API
+keys, service keys, and sessions access exactly one environment. A parent
+organization's environment key cannot access a sub-organization's environment.
+Missing selectors never mean all sub-organizations, and lookups in a
+sub-organization never fall back to its parent's resources.
 
 ## Org API keys
 
-An **org API key** belongs to one root organization. It manages that
-organization's children, their environments, and their API keys through
+An **org API key** belongs to one parent organization. It manages that
+organization's sub-organizations, their environments, and their API keys through
 `/v1/orgs` and `/v1/api-keys`. It uses the same `hot_<id>_<secret>` format and
 `Authorization: Bearer` header as an environment key, and the same permission
 map, with qualified URNs.
@@ -23,15 +24,21 @@ webhooks, MCP, files, sessions, service keys) answer `403` with the error code
 key, service key, or session. To work inside an environment, an org key mints
 an environment key there.
 
-A root administrator creates the first org key on the organization's
-**Children** tab in the app. It belongs to the organization and keeps working
+An administrator of the parent organization creates the first org key on its
+**Sub-orgs** tab in the app. It belongs to the organization and keeps working
 if its creator leaves, until it expires or is revoked. Expiry is optional.
+
+Org keys replaced Hot 3.0.0's `/v1/management` API and its `hm_` management
+credentials in Hot 3.0.1. Every `/v1/management` route answers `410` with the
+error code `gone`, and an `hm_` token gets `401`
+`management_credential_retired` on every route. Create an org key instead; the
+[upgrade notes](/docs/migrations) list what changed.
 
 An org key can mint more keys:
 
-- **Environment keys** in its own organization or a child. Their permissions
-  must fit inside the org key's grants for that environment, and their expiry
-  inside the org key's.
+- **Environment keys** in its own organization or a sub-organization. Their
+  permissions must fit inside the org key's grants for that environment, and
+  their expiry inside the org key's.
 - **Org keys** in its own organization, with `org:{org}/api-key:*` → `create`.
   Their grants must fit inside the issuer's. A chain is at most two org keys
   deep.
@@ -48,22 +55,23 @@ for exactly one organization or environment.
 
 | URN | Actions | Meaning |
 | --- | --- | --- |
-| `org:*` | `create`, `read`, `update` | Create children; read or change any child |
+| `org:*` | `create`, `read`, `update` | Create sub-organizations; read or change any of them |
 | `org:{org}` | `read`, `update` | One organization |
 | `org:{org}/env:*` | `create`, `read` | Provision or list environments |
 | `org:{org}/env:{env}` | `read` | One environment |
 | `org:{org}/env:{env}/api-key:*` | `create`, `read`, `update`, `delete` | Mint, list, rotate, narrow, or revoke environment keys |
 | `org:{org}/api-key:*` | `create`, `read`, `update`, `delete` | The same for org keys of the key's own organization |
-| `org:{org}/usage:*` | `read` | Account usage (root organization only) |
-| `org:{org}/env:{env}/{urn}` | that URN's actions | Any [environment permission](/docs/api#permissions) inside that environment |
+| `org:{org}/usage:*` | `read` | Account usage (parent organization only) |
+| `org:{org}/env:*/call:*` | `delete` | Purge call traces in every environment of the organization |
+| `org:{org}/env:{env}/{urn}` | that URN's actions | Any [environment permission](/docs/api#permissions-model) inside that environment |
 
 Three rules keep these grants narrow:
 
-- `org:*` means the key's children, never its own organization. Grant
-  `org:{root}/…` explicitly to manage the root's own environments.
-- `org:*` covers child organizations themselves, not what is inside them.
-  `org:*` → `create` lets a key create children but not mint keys in them;
-  that needs `org:*/env:*/api-key:*` → `create`.
+- `org:*` means the key's sub-organizations, never its own organization.
+  Grant `org:{parent}/…` explicitly to manage the parent's own environments.
+- `org:*` covers the sub-organizations themselves, not what is inside them.
+  `org:*` → `create` lets a key create sub-organizations but not mint keys in
+  them; that needs `org:*/env:*/api-key:*` → `create`.
 - Grants inside an environment, such as `org:*/env:*/event:*` → `create`, set
   the ceiling for environment keys the org key mints. The org key itself still
   cannot publish events.
@@ -73,15 +81,17 @@ on them. A full-access `{"*:*": ["*"]}` environment key gains no org authority.
 
 ## Routes
 
-All routes accept only org keys. IDs are UUIDs.
+All routes accept only org keys. IDs are UUIDs. List routes accept `limit`
+(default 20, maximum 500) and `offset`, and report `pagination.total`.
 
 | Method and route | Required grant |
 | --- | --- |
-| `GET /v1/orgs` | Lists children the key may read (`org:*` or `org:{org}` → `read`) |
+| `GET /v1/orgs` | Lists the sub-organizations the key may read (`org:*` or `org:{org}` → `read`) |
 | `POST /v1/orgs` | `org:*` → `create` |
 | `GET /v1/orgs/{org}` | `org:{org}` → `read` |
 | `PATCH /v1/orgs/{org}` | `org:{org}` → `update` |
 | `GET /v1/orgs/{org}/usage` | `org:{org}/usage:*` → `read` |
+| `DELETE /v1/orgs/{org}/calls` | `org:{org}/env:*/call:*` → `delete`, for each organization purged |
 | `GET`, `POST /v1/orgs/{org}/envs` | `org:{org}/env:*` → `read`, `create` |
 | `GET /v1/orgs/{org}/envs/{env}` | `org:{org}/env:{env}` → `read` |
 | `GET`, `POST /v1/orgs/{org}/envs/{env}/api-keys` | `org:{org}/env:{env}/api-key:*` → `read`, `create` |
@@ -92,18 +102,46 @@ All routes accept only org keys. IDs are UUIDs.
 | `POST /v1/api-keys/{id}/rotate` | `update`, and the caller issued the key |
 | `/v1/orgs/{org}/envs/{env}/projects…`, `/v1/orgs/{org}/envs/{env}/builds` | Today's project, context, and build grants, qualified by `org:{org}/env:{env}/` |
 
-**Children.** `POST /v1/orgs` accepts `name`, globally unique `slug`, optional
-`external_id`, and a required `idempotency_key`. Retrying with the same key
-returns the original child and default environment with `created: false`;
-reusing the key with different values is rejected. Children do not create
-billing subscriptions. `PATCH /v1/orgs/{org}` accepts `state` equal to
-`active`, `suspended`, or `archived`, for a child only. A suspended or archived
-child can still be read and have its state changed; every other route under it
-is refused. Its environment keys, sessions and service keys get `403`; they
-are not revoked, so reactivating a suspended child restores them.
+**Sub-organizations.** `POST /v1/orgs` accepts `name`, globally unique `slug`,
+optional `external_id`, and a required `idempotency_key`. It answers `201` with
+the new sub-organization and its default environment. Retrying with the same
+key answers `200` with the original sub-organization and `created: false`;
+reusing the key with different values is rejected with `400`. A slug any
+account already uses answers `409` `slug_taken`, and an `external_id` another
+sub-organization of the account uses answers `409` `external_id_taken`.
+Reaching the account's sub-organization or environment limit answers `403`
+`org_limit_reached`. Sub-organizations do not create billing subscriptions.
+An organization's `parent_org_id` is its parent's ID, or `null` for an
+organization that isn't a sub-organization.
+
+**Suspended sub-organizations.** `PATCH /v1/orgs/{org}` accepts `state` equal
+to `active`, `suspended`, or `archived`, for a sub-organization only. While a
+sub-organization is suspended or archived, the org API still reads it, its
+environments, and its keys, changes its state, purges its call traces, and
+rotates, narrows, or revokes its keys, so a leaked key can be contained.
+Creating environments, minting keys, and the project, context, and build routes
+under it answer `403` `org_suspended`. Its environment keys, sessions and
+service keys get `403`; they are not revoked, so reactivating a suspended
+sub-organization restores them.
+
+**Suspended accounts.** While an account is suspended or archived, its
+org keys get `403` `account_suspended` and keys they minted get `403`, as
+app-created keys do. These keys are not revoked and work again when the
+account is reactivated, so clients should not discard them.
 
 **Environments.** `POST /v1/orgs/{org}/envs` accepts `name` and is idempotent
-by exact name within that organization.
+by exact name within that organization: it answers `201` when it creates the
+environment and `200` with the existing one.
+
+**Call traces.** `DELETE /v1/orgs/{org}/calls` deletes the call traces in
+every environment of the organization. Add `?include_sub_orgs=true` to purge
+its sub-organizations too. The key needs `org:{org}/env:*/call:*` → `delete`
+for every organization the purge covers, so a parent's key purging its
+sub-organizations also needs
+`org:*/env:*/call:*` → `delete`. All of them are checked before anything is
+deleted. Runs remain. The response and the 20-second limit match the
+[environment purge](/docs/api#purge-call-traces): repeat the request until
+`complete` is `true`.
 
 **API keys.** Minting accepts `description`, `permissions`, and an optional
 `expires_at`. The token is returned once. `PATCH /v1/api-keys/{id}` replaces
@@ -113,8 +151,20 @@ the key's `permissions` with grants inside the caller's own.
 ID, its lineage, and the keys it issued do not change. Rotating, narrowing, or
 revoking needs more than a grant: the caller must have issued the key, directly
 or through keys it issued. Rotation returns the new secret, so a grant alone
-would hand over another key's secret. No key rotates or revokes itself; a root
-administrator can revoke any org key in the app.
+would hand over another key's secret. No key rotates or revokes itself; an
+administrator of the parent organization can revoke any org key in the app.
+
+Revoking an org key is permanent. `DELETE /v1/api-keys/{id}` on an environment
+key deactivates it, and an administrator can re-enable it in the app. If a
+secret leaks, revoke the key rather than rotating it: the leaked secret keeps
+working for the whole overlap after a rotation, unless you pass
+`"overlap_seconds": 0`.
+
+Key responses report `active` and `status`. `status` is `active`, `revoked`,
+`expired`, `issuer_inactive` (an org key in its issuer chain is revoked or
+expired), or `suspended` (its organization or environment is suspended).
+`active` is `false` for `revoked`, `expired`, and `issuer_inactive`; a
+suspended key stays `active` because it works again on reactivation.
 
 **Projects, context, and builds.** Every `/v1/projects…` route and
 `/v1/builds` is also served under `/v1/orgs/{org}/envs/{env}`. The handler is
@@ -146,6 +196,8 @@ builds, administer files, or mint credentials. Missing policies deny access.
 | Update/delete context variable | `context:{project_id_or_slug}/{key}` with `update` / `delete` |
 | List runs or run statistics | `run:*` with `read` |
 | Read/subscribe to one run | `run:{run_id}` with `read` |
+| Purge one run's call traces | `call:{run_id}/*` with `delete` |
+| Purge a stream's or the environment's call traces | `call:*` with `delete` |
 | List/create/revoke all sessions | `session:*` with `read` / `create` / `delete` |
 | Revoke one session | `session:{session_id}` with `delete` |
 | List/create/revoke all service keys | `key:*` with `read` / `create` / `delete` |
@@ -178,15 +230,17 @@ revocation blocks new ingress and reads; already accepted work retains its
 original scope. Organization suspension separately blocks new work admission
 and retries.
 
-The SDKs do not wrap the org API yet; call it over HTTP. Runtime SDK calls need
-no new selectors: use the child environment's key.
+Every SDK also wraps the org API; see
+[Manage Sub-organizations](/docs/api/sdks#manage-sub-organizations). Runtime
+SDK calls need no new selectors: use the sub-organization environment's key.
 
 ## Monthly run admission
 
-The root account's `runs_per_month` applies across the root and every child.
-API, webhook, MCP, event, scheduled, and task execution reserve capacity before
-user code or a container starts. An event's selected handlers reserve together:
-if the account cannot admit the whole group, no handler in that group starts.
+The account's `runs_per_month` applies across the parent organization and every
+sub-organization. API, webhook, MCP, event, scheduled, and task execution
+reserve capacity before user code or a container starts. An event's selected
+handlers reserve together: if the account cannot admit the whole group, no
+handler in that group starts.
 Queued work remains pending when capacity is exhausted, and workers log the
 admission failure and retry with backoff. Webhook and MCP calls also use the
 queue: their wait can time out (HTTP 504 for webhooks, a JSON-RPC timeout for
@@ -196,11 +250,13 @@ becomes available. Direct VM execution fails before running user code.
 Reservations use durable run identities. Infrastructure redelivery of the same
 run does not consume another slot. A run that was admitted still consumes its
 slot if later setup or execution fails. Deleting retained run history, suspending
-and resuming a child, or retrying admission does not reset account usage. The
+and resuming a sub-organization, or retrying admission does not reset account usage. The
 admission ledger is separate from run history and is seeded with existing usage
 when the migration is applied. Daily maintenance prunes ledger rows older than
-400 days, longer than any billing period. The billing period start controls the monthly
-window; accounts without a subscription use the calendar month. An account
+400 days, longer than any billing period. A monthly subscription's billing period
+is the monthly window. An annual or free plan's window restarts each month on
+the day its period started (the last day of a shorter month), and accounts
+without a subscription use the calendar month. An account
 without a plan has unlimited execution. If it has feature overrides but no
 plan, any limit the overrides leave out stays unlimited.
 
@@ -210,27 +266,30 @@ plan, any limit the overrides leave out stays unlimited.
 fields, and identifies `env_id`, `usage_scope: "environment"`, and
 `limits_scope: "billing_account"`. Consumption comes only from the credential's
 environment, including admitted runs in the durable ledger. Limits and plan
-metadata come from the root account. Percentages compare that environment's
+metadata come from the account. Percentages compare that environment's
 consumption against the shared limits; they do not show account-wide consumption
 or remaining capacity. The legacy `team_members` consumption field is zero
 because directory seats do not belong to an environment. Account aggregates and
-seat consumption require an org key with `org:{root}/usage:*`. A plan lookup error
+seat consumption require an org key with `org:{parent}/usage:*`. A plan lookup error
 returns an error, never an unlimited plan.
 
-Account usage (`GET /v1/orgs/{root}/usage`) reports `period_start` and
-`period_end` from the root's subscription, with the calendar month as the fallback. Its `runs_this_period`
-counts durable admissions across root and children, including task runs and
-reservations; history retention cannot lower that count. Root billing views use
-the same ledger and subscription period.
+Account usage (`GET /v1/orgs/{parent}/usage`) reports `period_start` and
+`period_end` of the current monthly window, as described in
+[Monthly run admission](#monthly-run-admission). Its `runs_this_period`
+counts durable admissions across the parent organization and its
+sub-organizations, including task runs and reservations; history retention
+cannot lower that count. The parent's billing views use the same ledger and
+subscription period.
 
 ## Shared account capacity
 
-Children share the root's environment, domain, schedule, seat, file, store,
-trace, run, and compute limits. Sibling writes reserve capacity under the same
-account lock. Replacing stored data accounts for the size difference rather
-than charging both versions. Store and trace storage limits measure their
-recorded logical row bytes; they are not a physical database disk limit or an
-object-store bill. Blob storage remains separately attributed and retained.
+Sub-organizations share their parent's environment, domain, schedule, seat,
+file, store, trace, run, and compute limits. Sibling writes reserve capacity
+under the same account lock. Replacing stored data accounts for the size
+difference rather than charging both versions. Store and trace storage limits
+measure their recorded logical row bytes; they are not a physical database disk
+limit or an object-store bill. Blob storage remains separately attributed and
+retained.
 
 Cancelling a container does not immediately release its capacity. The worker
 first confirms termination and persists measured usage; unconfirmed cleanup

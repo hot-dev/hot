@@ -5,13 +5,13 @@ use crate::blob::{BlobScope, BlobStore, SpillSource};
 use crate::db::DatabasePool;
 use crate::lang::event::ExecutionContext;
 use crate::val::Val;
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::time::interval;
 use uuid::Uuid;
@@ -31,6 +31,31 @@ pub struct DatabaseEngineEventEmitter {
     shutdown_sender: mpsc::UnboundedSender<oneshot::Sender<Result<(), String>>>,
     /// Flag to suppress errors during shutdown (when channel is expected to be closed)
     shutdown_initiated: Arc<AtomicBool>,
+    /// How many calls a run records (see `with_max_calls_per_run`).
+    max_calls_per_run: Arc<AtomicUsize>,
+}
+
+/// Calls a run records by default. A heavily interpreted run makes hundreds
+/// of thousands of calls; recording them all takes seconds per thousand and a
+/// gigabyte of memory.
+pub const DEFAULT_MAX_CALLS_PER_RUN: usize = 10_000;
+
+/// How long a finished run's call budget stays, for calls that trail its end.
+const FINISHED_CALL_BUDGET_TTL: Duration = Duration::from_secs(300);
+/// How long an unfinished run's call budget stays without a new call: longer
+/// than the longest run, so a long call's stop still finds its start.
+const IDLE_CALL_BUDGET_TTL: Duration = Duration::from_secs(25 * 3_600);
+const CALL_BUDGET_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The calls a run has recorded, and those it no longer records.
+#[derive(Default)]
+struct RunCallBudget {
+    recorded: usize,
+    /// Calls recorded whose `call:stop` hasn't come yet.
+    open: AHashSet<Uuid>,
+    unrecorded: usize,
+    last_seen: Option<Instant>,
+    finished: bool,
 }
 
 /// Internal processor for handling database events with batching
@@ -40,6 +65,9 @@ struct DatabaseEngineEventEmitterProcessor {
     /// When present, large call/run payload leaves are spilled to blob storage
     /// (after secret masking) before JSON serialization.
     blob_store: Option<Arc<BlobStore>>,
+    max_calls_per_run: Arc<AtomicUsize>,
+    call_budgets: AHashMap<Uuid, RunCallBudget>,
+    last_budget_prune: Instant,
 }
 
 struct ProcessorFlushRequest {
@@ -100,14 +128,16 @@ impl DatabaseEngineEventEmitter {
             mpsc::unbounded_channel::<oneshot::Sender<Result<(), String>>>();
 
         let writer_for_processor = writer.clone();
+        let max_calls_per_run = Arc::new(AtomicUsize::new(DEFAULT_MAX_CALLS_PER_RUN));
+        let max_calls_for_processor = Arc::clone(&max_calls_per_run);
 
         // Start event processing task
         tokio::spawn(async move {
-            let mut processor = DatabaseEngineEventEmitterProcessor {
-                writer: writer_for_processor,
-                pending_calls: IndexMap::new(),
+            let mut processor = DatabaseEngineEventEmitterProcessor::new(
+                writer_for_processor,
                 blob_store,
-            };
+                max_calls_for_processor,
+            );
 
             let mut flush_timer = interval(BATCH_INTERVAL);
             flush_timer.tick().await; // Skip first immediate tick
@@ -175,6 +205,7 @@ impl DatabaseEngineEventEmitter {
             flush_sender,
             shutdown_sender,
             shutdown_initiated: Arc::new(AtomicBool::new(false)),
+            max_calls_per_run,
         }
     }
 
@@ -196,6 +227,8 @@ impl DatabaseEngineEventEmitter {
 
         let db_for_processor = Arc::clone(&db);
         let writer_for_processor = writer.clone();
+        let max_calls_per_run = Arc::new(AtomicUsize::new(DEFAULT_MAX_CALLS_PER_RUN));
+        let max_calls_for_processor = Arc::clone(&max_calls_per_run);
 
         // Start event processing task
         tokio::spawn(async move {
@@ -215,11 +248,11 @@ impl DatabaseEngineEventEmitter {
                 }
             }
 
-            let mut processor = DatabaseEngineEventEmitterProcessor {
-                writer: writer_for_processor,
-                pending_calls: IndexMap::new(),
-                blob_store: None,
-            };
+            let mut processor = DatabaseEngineEventEmitterProcessor::new(
+                writer_for_processor,
+                None,
+                max_calls_for_processor,
+            );
 
             let mut flush_timer = interval(BATCH_INTERVAL);
             flush_timer.tick().await; // Skip first immediate tick
@@ -289,7 +322,18 @@ impl DatabaseEngineEventEmitter {
             flush_sender,
             shutdown_sender,
             shutdown_initiated: Arc::new(AtomicBool::new(false)),
+            max_calls_per_run,
         }
+    }
+
+    /// Record at most `max` calls per run (0: all of them). A run that makes
+    /// more records its first `max`, and its info says that it stopped
+    /// recording calls (`call_tracing: "truncated"`) and, once it ends, how
+    /// many it didn't record (`untraced_calls`). The cap also bounds how many
+    /// call records a run can queue for the database.
+    pub fn with_max_calls_per_run(self, max: usize) -> Self {
+        self.max_calls_per_run.store(max, Ordering::Relaxed);
+        self
     }
 
     async fn flush_processor(&self, run_id: Option<Uuid>) -> Result<(), String> {
@@ -325,8 +369,123 @@ impl DatabaseEngineEventEmitter {
 }
 
 impl DatabaseEngineEventEmitterProcessor {
+    fn new(
+        writer: DatabaseWriter,
+        blob_store: Option<Arc<BlobStore>>,
+        max_calls_per_run: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            writer,
+            pending_calls: IndexMap::new(),
+            blob_store,
+            max_calls_per_run,
+            call_budgets: AHashMap::new(),
+            last_budget_prune: Instant::now(),
+        }
+    }
+
+    /// Whether a call event is recorded: a run records its first calls up
+    /// to the cap, and a call's stop only with its start.
+    fn records_call(&mut self, event: &EngineEvent) -> bool {
+        let max = self.max_calls_per_run.load(Ordering::Relaxed);
+        if max == 0 {
+            return true;
+        }
+        let Val::Map(data) = &event.event_data else {
+            return true;
+        };
+        let Some(Val::Str(call_id)) = data.get(&Val::from("call_id")) else {
+            return true;
+        };
+        let Ok(call_id) = Uuid::parse_str(call_id) else {
+            return true;
+        };
+        let run_id = event.execution_context.run_id;
+        if event.event_type == "call:stop" {
+            // A stop without a recorded start is recorded as before, unless
+            // the run's unrecorded starts may include its own.
+            return match self.call_budgets.get_mut(&run_id) {
+                Some(budget) => budget.open.remove(&call_id) || budget.unrecorded == 0,
+                None => true,
+            };
+        }
+        let budget = self.call_budgets.entry(run_id).or_default();
+        budget.last_seen = Some(Instant::now());
+        if budget.recorded < max {
+            budget.recorded += 1;
+            budget.open.insert(call_id);
+            return true;
+        }
+        budget.unrecorded += 1;
+        if budget.unrecorded == 1 {
+            tracing::warn!(
+                %run_id,
+                max_calls = max,
+                "Run made more calls than it records; recording no more"
+            );
+            self.writer.write(DatabaseWrite::RunInfo {
+                run_id,
+                info: serde_json::json!({
+                    "call_tracing": "truncated",
+                    "traced_calls_limit": max,
+                }),
+            });
+        }
+        false
+    }
+
+    /// Once a run ends, record how many of its calls it didn't.
+    fn finish_call_budget(&mut self, run_id: Uuid) {
+        let Some(budget) = self.call_budgets.get_mut(&run_id) else {
+            return;
+        };
+        if !budget.finished && budget.unrecorded > 0 {
+            self.writer.write(DatabaseWrite::RunInfo {
+                run_id,
+                info: serde_json::json!({ "untraced_calls": budget.unrecorded }),
+            });
+        }
+        budget.finished = true;
+        budget.open = AHashSet::new();
+        budget.last_seen = Some(Instant::now());
+    }
+
+    fn prune_call_budgets(&mut self) {
+        if self.last_budget_prune.elapsed() < CALL_BUDGET_PRUNE_INTERVAL {
+            return;
+        }
+        self.last_budget_prune = Instant::now();
+        self.call_budgets.retain(|_, budget| {
+            let ttl = if budget.finished {
+                FINISHED_CALL_BUDGET_TTL
+            } else {
+                IDLE_CALL_BUDGET_TTL
+            };
+            budget.last_seen.is_some_and(|seen| seen.elapsed() < ttl)
+        });
+    }
+
     /// Process a single event - sends critical events immediately, batches others
     async fn process_event(&mut self, event: EngineEvent) {
+        if matches!(event.event_type.as_str(), "call:start" | "call:stop")
+            && !self.records_call(&event)
+        {
+            return;
+        }
+        if matches!(
+            event.event_type.as_str(),
+            "run:stop" | "run:fail" | "run:cancel"
+        ) {
+            // After the run's own write, which the match below sends.
+            let run_id = event.execution_context.run_id;
+            self.process_run_event(event).await;
+            self.finish_call_budget(run_id);
+            return;
+        }
+        self.process_run_event(event).await;
+    }
+
+    async fn process_run_event(&mut self, event: EngineEvent) {
         match event.event_type.as_str() {
             "run:start" => {
                 // Critical - send immediately to writer
@@ -514,6 +673,7 @@ impl DatabaseEngineEventEmitterProcessor {
     /// Flush all pending batched events
     async fn flush_all(&mut self) {
         self.flush_pending_calls().await;
+        self.prune_call_budgets();
     }
 
     /// Flush all pending call events
@@ -944,6 +1104,7 @@ impl Clone for DatabaseEngineEventEmitter {
             flush_sender: self.flush_sender.clone(),
             shutdown_sender: self.shutdown_sender.clone(),
             shutdown_initiated: Arc::clone(&self.shutdown_initiated),
+            max_calls_per_run: Arc::clone(&self.max_calls_per_run),
         }
     }
 }
@@ -1166,6 +1327,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0, "scope-less traces must never be persisted");
+    }
+
+    #[tokio::test]
+    async fn a_run_records_calls_up_to_its_cap_and_says_it_stopped() {
+        let db = crate::db::test_db().await;
+        let emitter =
+            DatabaseEngineEventEmitter::new_with_pool(db.clone()).with_max_calls_per_run(3);
+        let execution_context = persisted_execution_context(&db).await;
+
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let root = Uuid::now_v7();
+        let call = |call_id: Uuid, parent: Option<Uuid>| {
+            EngineEvent::call_start(
+                &execution_context,
+                call_id,
+                parent,
+                "busy".to_string(),
+                "::demo".to_string(),
+                "::demo/busy".to_string(),
+                usize::from(parent.is_some()),
+                Vec::new(),
+                None,
+                chrono::Utc::now(),
+                None,
+            )
+        };
+        let stop = |call_id: Uuid| {
+            EngineEvent::call_stop(
+                &execution_context,
+                call_id,
+                None,
+                None,
+                chrono::Utc::now(),
+                1,
+            )
+        };
+        emitter.emit(call(root, None));
+        for _ in 0..5 {
+            let child = Uuid::now_v7();
+            emitter.emit(call(child, Some(root)));
+            emitter.emit(stop(child));
+        }
+        emitter.emit(stop(root));
+        emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
+        emitter.shutdown().await.unwrap();
+
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        // The calls it records keep their stops, and no stop comes alone.
+        let (calls, stopped): (i64, i64) =
+            sqlx::query_as("SELECT COUNT(*), COUNT(stop_time) FROM call WHERE run_id = ?")
+                .bind(execution_context.run_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((calls, stopped), (3, 3));
+        let info: String = sqlx::query_scalar("SELECT info FROM run WHERE run_id = ?")
+            .bind(execution_context.run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let info: serde_json::Value = serde_json::from_str(&info).unwrap();
+        assert_eq!(info["call_tracing"], "truncated");
+        assert_eq!(info["traced_calls_limit"], 3);
+        assert_eq!(info["untraced_calls"], 3);
     }
 
     #[tokio::test]

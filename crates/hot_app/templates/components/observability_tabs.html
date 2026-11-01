@@ -6,6 +6,13 @@
     border-bottom: 1px solid rgba(229, 231, 235, 1);
     background: white;
     padding: 0 0 0 16px;
+    overflow-x: auto;
+    scrollbar-width: thin;
+}
+
+.observability-tabs > * {
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .dark .observability-tabs {
@@ -932,6 +939,10 @@ window.ObservabilityTabs = class ObservabilityTabs {
         return div.innerHTML;
     }
 
+    escapeAttribute(text) {
+        return this.escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
     toggleSection(sectionName) {
         const content = document.getElementById(`${sectionName}-content`);
         const chevron = document.getElementById(`${sectionName}-chevron`);
@@ -979,6 +990,11 @@ window.ObservabilityTabs = class ObservabilityTabs {
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
                     <p>Collecting execution trace data&hellip;</p>
                     <p class="text-xs mt-2">Execution trace data will appear as the run executes</p>
+                </div>`;
+            case 'disabled':
+                return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
+                    <p>Call tracing is off</p>
+                    <p class="text-xs mt-2">Your organization turned off call tracing, so this run recorded no calls</p>
                 </div>`;
             case 'empty':
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
@@ -1030,7 +1046,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             console.error('Error loading hierarchy:', error);
             this.hierarchyTree.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-4">
                 <p>Failed to load hierarchy</p>
-                <p class="text-xs mt-2">${error.message}</p>
+                <p class="text-xs mt-2">${this.escapeHtml(error.message)}</p>
             </div>`;
         }
     }
@@ -1073,7 +1089,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             console.error('Error loading timeline:', error);
             this.timelineView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
                 <p>Failed to load timeline</p>
-                <p class="text-xs mt-2">${error.message}</p>
+                <p class="text-xs mt-2">${this.escapeHtml(error.message)}</p>
             </div>`;
         }
     }
@@ -1195,7 +1211,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
                      style="${indentStyle}">
                     <div class="timeline-bar-header">
                         <div class="timeline-bar-title">
-                            <span>${item.name}</span>
+                            <span>${this.escapeHtml(item.name)}</span>
                         </div>
                         <div class="timeline-bar-duration ${durationClass}">${this.formatDuration(item.duration_us)}</div>
                     </div>
@@ -1414,7 +1430,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
                      data-node-id="${node.id}"
                      data-node-type="${node.type}">
                     <span class="tree-toggle" data-node-id="${node.id}" style="width: 14px; cursor: ${hasChildren ? 'pointer' : 'default'}">${toggleIcon}</span>
-                    <span class="node-name" style="flex: 1" title="${name}">${name}</span>
+                    <span class="node-name" style="flex: 1" title="${this.escapeAttribute(name)}">${this.escapeHtml(name)}</span>
                     ${durationBadge}
                 </div>
                 ${hasChildren && isExpanded ? `

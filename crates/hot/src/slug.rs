@@ -195,9 +195,12 @@ pub fn validate_format(slug: &str) -> Result<(), SlugError> {
 
 /// Validate slug format and reserved-word rules, including a deployment-
 /// supplied extra reserved list (see [`extra_reserved_from_conf`]). Fast, no I/O.
+///
+/// The slug is checked exactly as given, never trimmed: callers store and look
+/// up the value they validated, so `"victim-co\u{a0}"` must not pass as
+/// `"victim-co"`.
 pub fn validate_format_with_extra(slug: &str, extra_reserved: &[String]) -> Result<(), SlugError> {
-    let slug = slug.trim();
-    if slug.is_empty() {
+    if slug.trim().is_empty() {
         return Err(SlugError::Empty);
     }
     if slug.len() < 2 {
@@ -349,6 +352,17 @@ mod tests {
         assert_eq!(validate_format("Alice"), Err(SlugError::InvalidFormat));
         assert_eq!(validate_format("alice_bob"), Err(SlugError::InvalidFormat));
         assert_eq!(validate_format("alice.bob"), Err(SlugError::InvalidFormat));
+    }
+
+    #[test]
+    fn rejects_surrounding_whitespace_instead_of_trimming_it() {
+        for slug in ["alice ", " alice", "alice\u{a0}", "\u{a0}alice", "alice\n"] {
+            assert_eq!(
+                validate_format(slug),
+                Err(SlugError::InvalidFormat),
+                "{slug:?}"
+            );
+        }
     }
 
     #[test]

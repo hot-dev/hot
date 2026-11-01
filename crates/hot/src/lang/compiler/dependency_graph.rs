@@ -12,8 +12,8 @@
 use super::Compiler;
 use crate::lang::ast::{Flow, FnCall, Ref, Value};
 use crate::val::Val;
-use ahash::AHashSet;
-use indexmap::IndexMap;
+use ahash::AHashMap;
+use indexmap::{IndexMap, IndexSet};
 use std::collections::VecDeque;
 
 // ============================================================================
@@ -23,22 +23,24 @@ use std::collections::VecDeque;
 // parallel execution with proper dependency resolution.
 
 /// Result type for dependency graph: (graph, var_sources)
-/// - graph: Map from variable name to set of dependencies
+/// - graph: Map from variable name to set of dependencies, in source order
+///   (both the bindings and each one's dependencies, so every order derived
+///   from it is the same on every compile)
 /// - var_sources: Map from variable name to source location (for error reporting)
-type DependencyGraphResult = (IndexMap<String, AHashSet<String>>, IndexMap<String, ()>);
+type DependencyGraphResult = (IndexMap<String, IndexSet<String>>, IndexMap<String, ()>);
 
 impl Compiler {
     /// Extract all variable dependencies from a value expression
     /// Returns a set of variable names that this value depends on
-    fn extract_dependencies(&self, value: &Value) -> AHashSet<String> {
-        let mut deps = AHashSet::new();
+    fn extract_dependencies(&self, value: &Value) -> IndexSet<String> {
+        let mut deps = IndexSet::new();
         self.extract_dependencies_recursive(value, &mut deps);
         deps
     }
 
     /// Recursively extract dependencies from a value expression
     #[allow(clippy::only_used_in_recursion)]
-    fn extract_dependencies_recursive(&self, value: &Value, deps: &mut AHashSet<String>) {
+    fn extract_dependencies_recursive(&self, value: &Value, deps: &mut IndexSet<String>) {
         match value {
             Value::Val(val, _) => {
                 // Check if Val contains boxed expressions that might have dependencies
@@ -137,7 +139,7 @@ impl Compiler {
     /// - dependency_graph maps each variable to its set of dependencies
     /// - var_sources maps each variable to its source location (for error reporting)
     pub fn build_dependency_graph(&self, flow: &Flow) -> Result<DependencyGraphResult, String> {
-        let mut graph: IndexMap<String, AHashSet<String>> = IndexMap::new();
+        let mut graph: IndexMap<String, IndexSet<String>> = IndexMap::new();
         let var_sources: IndexMap<String, ()> = IndexMap::new();
 
         // Parse flow expressions to find variable assignments
@@ -164,58 +166,52 @@ impl Compiler {
         Ok((graph, var_sources))
     }
 
-    /// Perform topological sort on a dependency graph using Kahn's algorithm
-    /// Returns the execution order or an error if a cycle is detected
+    /// Perform topological sort on a dependency graph using Kahn's algorithm.
+    /// Returns the flow's bindings in execution order (names from outside
+    /// the flow are ready from the start, so they aren't in it), or an
+    /// error if a cycle is detected. Ties keep source order.
     pub fn topological_sort(
         &self,
-        graph: &IndexMap<String, AHashSet<String>>,
+        graph: &IndexMap<String, IndexSet<String>>,
     ) -> Result<Vec<String>, String> {
-        let mut in_degree: IndexMap<String, usize> = IndexMap::new();
-        let mut adj_list: IndexMap<String, Vec<String>> = IndexMap::new();
-
-        // Initialize in-degree and adjacency list
+        let mut in_degree: IndexMap<&str, usize> =
+            graph.keys().map(|node| (node.as_str(), 0)).collect();
+        let mut adj_list: AHashMap<&str, Vec<&str>> = AHashMap::new();
         for (node, deps) in graph {
-            in_degree.entry(node.clone()).or_insert(0);
-            adj_list.entry(node.clone()).or_default();
-
-            for dep in deps {
-                in_degree.entry(dep.clone()).or_insert(0);
-                adj_list.entry(dep.clone()).or_default();
-                adj_list.get_mut(dep).unwrap().push(node.clone());
-                *in_degree.get_mut(node).unwrap() += 1;
+            for dep in deps.iter().filter(|dep| graph.contains_key(*dep)) {
+                adj_list
+                    .entry(dep.as_str())
+                    .or_default()
+                    .push(node.as_str());
+                in_degree[node.as_str()] += 1;
             }
         }
 
         // Kahn's algorithm with FIFO queue
-        let mut queue = VecDeque::new();
-        for (node, degree) in &in_degree {
-            if *degree == 0 {
-                queue.push_back(node.clone());
-            }
-        }
+        let mut queue: VecDeque<&str> = in_degree
+            .iter()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(node, _)| *node)
+            .collect();
 
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(graph.len());
         while let Some(node) = queue.pop_front() {
-            result.push(node.clone());
-
-            if let Some(neighbors) = adj_list.get(&node) {
-                for neighbor in neighbors {
-                    if let Some(degree) = in_degree.get_mut(neighbor) {
-                        *degree -= 1;
-                        if *degree == 0 {
-                            queue.push_back(neighbor.clone());
-                        }
-                    }
+            result.push(node.to_string());
+            for neighbor in adj_list.get(node).into_iter().flatten() {
+                let degree = &mut in_degree[*neighbor];
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push_back(neighbor);
                 }
             }
         }
 
         // Check for circular dependencies
         if result.len() != in_degree.len() {
-            let remaining: Vec<String> = in_degree
+            let remaining: Vec<&str> = in_degree
                 .iter()
                 .filter(|(_, degree)| **degree > 0)
-                .map(|(name, _)| name.clone())
+                .map(|(name, _)| *name)
                 .collect();
 
             return Err(format!(
@@ -227,50 +223,35 @@ impl Compiler {
         Ok(result)
     }
 
-    /// Group variables by dependency level
-    /// Variables in the same level have no dependencies on each other and can execute in parallel
+    /// Group the flow's bindings by dependency level. A binding's level is
+    /// one past the deepest binding of the flow it reads (names from outside
+    /// the flow don't count), so the bindings of a level can run in
+    /// parallel. Each level lists its bindings in source order.
     pub fn group_by_dependency_levels(
         &self,
-        graph: &IndexMap<String, AHashSet<String>>,
+        graph: &IndexMap<String, IndexSet<String>>,
         execution_order: &[String],
     ) -> Vec<Vec<String>> {
-        let mut dependency_levels: Vec<Vec<String>> = Vec::new();
-        let mut processed = AHashSet::new();
-
-        // Keep processing until all variables are grouped
-        while processed.len() < execution_order.len() {
-            let mut current_level = Vec::new();
-
-            // Find all variables whose dependencies are already processed
-            for var_name in execution_order {
-                if processed.contains(var_name) {
-                    continue;
-                }
-
-                let empty_set = AHashSet::new();
-                let dependencies = graph.get(var_name).unwrap_or(&empty_set);
-
-                // Check if all dependencies are already processed
-                let all_deps_processed = dependencies.iter().all(|dep| processed.contains(dep));
-
-                if all_deps_processed {
-                    current_level.push(var_name.clone());
-                }
-            }
-
-            // Mark all variables in this level as processed
-            for var in &current_level {
-                processed.insert(var.clone());
-            }
-
-            if !current_level.is_empty() {
-                dependency_levels.push(current_level);
-            } else {
-                // No progress made - this shouldn't happen with proper topological sort
-                break;
-            }
+        let mut level_of: AHashMap<&str, usize> = AHashMap::with_capacity(execution_order.len());
+        for var_name in execution_order {
+            let level = graph
+                .get(var_name)
+                .into_iter()
+                .flatten()
+                .filter_map(|dep| level_of.get(dep.as_str()))
+                .map(|level| level + 1)
+                .max()
+                .unwrap_or(0);
+            level_of.insert(var_name.as_str(), level);
         }
 
+        let level_count = level_of.values().max().map_or(0, |max| max + 1);
+        let mut dependency_levels: Vec<Vec<String>> = vec![Vec::new(); level_count];
+        for var_name in graph.keys() {
+            if let Some(&level) = level_of.get(var_name.as_str()) {
+                dependency_levels[level].push(var_name.clone());
+            }
+        }
         dependency_levels
     }
 }

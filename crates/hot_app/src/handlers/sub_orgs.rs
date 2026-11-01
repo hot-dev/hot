@@ -1,12 +1,15 @@
+// Handlers answer errors with a rendered page: an axum Response, which is large by design.
+#![allow(clippy::result_large_err)]
+
 use crate::auth::Session;
-use crate::templates::{self, PrivatePageContext};
+use crate::templates::{self, PrivatePageContext, filters};
 use askama::Template;
 use axum::extract::{Form, Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use hot::db::org::{CreateChild, Org, OrgLifecycle, OrgUser};
-use hot::db::org_api_key::{CreateOrgApiKey, OrgApiKey};
+use hot::db::org_api_key::{CreateOrgApiKey, KeyStatus, OrgApiKey};
 use hot::db::{BootstrapOperation, DatabasePool, DatabaseScope};
 use hot::val::Val;
 use serde::Deserialize;
@@ -16,21 +19,86 @@ use uuid::Uuid;
 
 type PageError = (StatusCode, &'static str);
 
-async fn root_for_admin(
-    db: &DatabasePool,
-    session: &Session,
-    slug: &str,
-) -> Result<Org, PageError> {
+/// Render a page error inside the app layout.
+fn page_error(session: &Session, (status, message): PageError) -> Response {
+    super::error_page(session, status, message)
+}
+
+async fn root_for_admin(db: &DatabasePool, session: &Session, slug: &str) -> Result<Org, Response> {
     let root = Org::get_org_by_slug(db, slug)
         .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "Organization not found"))?;
+        .map_err(|_| page_error(session, (StatusCode::NOT_FOUND, "Organization not found")))?;
+    if root.is_individual() {
+        return Err(page_error(
+            session,
+            (
+                StatusCode::FORBIDDEN,
+                "Personal accounts can't have sub-organizations. Create an organization to manage them.",
+            ),
+        ));
+    }
     if root.is_child() || !session.can_manage_account(db, &root.org_id).await {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Root administrator access is required",
+        return Err(page_error(
+            session,
+            (
+                StatusCode::FORBIDDEN,
+                "Administrator access to the parent organization is required",
+            ),
         ));
     }
     Ok(root)
+}
+
+/// What a failed form submitted, so the page comes back with an explanation and the values.
+#[derive(Default)]
+struct FormState {
+    error: Option<String>,
+    child_name: String,
+    child_slug: String,
+    child_external_id: String,
+    key_description: String,
+    key_permissions: Option<String>,
+    key_expires_in_days: String,
+}
+
+impl FormState {
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            error: Some(message.into()),
+            ..Self::default()
+        }
+    }
+}
+
+/// A user-facing reason for a rejected org operation. Database details stay in the log.
+fn org_error_message(error: &hot::db::org::OrgError, fallback: &str) -> String {
+    use hot::db::org::OrgError;
+    match error {
+        OrgError::Invalid(reason) => {
+            let mut chars = reason.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}.", first.to_uppercase(), chars.as_str()),
+                None => fallback.to_string(),
+            }
+        }
+        OrgError::LimitReached => {
+            "This account has reached its organization limit for its plan.".to_string()
+        }
+        OrgError::Forbidden => "You don't have permission to make that change.".to_string(),
+        OrgError::NotFound => "That organization no longer exists.".to_string(),
+        OrgError::SlugTaken => "That handle is already in use.".to_string(),
+        OrgError::ExternalIdTaken => {
+            "A sub-organization already uses that customer reference.".to_string()
+        }
+        OrgError::Database(error)
+            if error
+                .as_database_error()
+                .is_some_and(|e| e.is_unique_violation()) =>
+        {
+            "That handle or customer reference is already in use.".to_string()
+        }
+        OrgError::Database(_) => fallback.to_string(),
+    }
 }
 
 #[derive(Template)]
@@ -43,9 +111,29 @@ struct SubOrgsPage {
     overview: Vec<OrgOverview>,
     members: Vec<hot::db::org::OrgUserWithRole>,
     idempotency_key: Uuid,
-    org_api_keys: Vec<OrgApiKey>,
+    org_api_keys: Vec<OrgApiKeyRow>,
     org_key_example: String,
     issued_token: Option<String>,
+    form: FormState,
+}
+
+struct OrgApiKeyRow {
+    key: OrgApiKey,
+    expires_at: Option<String>,
+    /// Whether the key still authenticates, following its issuer chain: a
+    /// key whose issuing key was revoked is dead though its own row is not.
+    revocable: bool,
+    status_label: Option<&'static str>,
+}
+
+fn status_label(status: KeyStatus) -> Option<&'static str> {
+    match status {
+        KeyStatus::Active => None,
+        KeyStatus::Revoked => Some("Revoked"),
+        KeyStatus::Expired => Some("Expired"),
+        KeyStatus::IssuerInactive => Some("Issuer inactive"),
+        KeyStatus::Suspended => Some("Suspended"),
+    }
 }
 
 struct OrgOverview {
@@ -53,13 +141,24 @@ struct OrgOverview {
     name: String,
     slug: String,
     lifecycle: String,
+    lifecycle_badge: &'static str,
     root: bool,
     envs: Vec<OverviewEnv>,
     running: i64,
     failed_24h: i64,
     month_runs: i64,
     last_run: String,
-    file_bytes: i64,
+    file_bytes: String,
+}
+
+/// The status badge recipe for a lifecycle state.
+fn lifecycle_badge(state: &str, held: bool) -> &'static str {
+    match state {
+        _ if held => "badge-pending",
+        "active" => "badge-success",
+        "suspended" => "badge-pending",
+        _ => "badge-neutral",
+    }
 }
 struct OverviewEnv {
     env_id: Uuid,
@@ -81,6 +180,7 @@ type OverviewRows = (Vec<RunActivity>, Vec<(Uuid, i64)>);
 /// discovered ownership, never a client-supplied list of org/environment IDs.
 async fn account_overview(
     db: &DatabasePool,
+    session: &Session,
     root: &Org,
     children: &[Org],
 ) -> Result<Vec<OrgOverview>, PageError> {
@@ -156,17 +256,20 @@ async fn account_overview(
                 .iter()
                 .filter_map(|env| activity.get(&env.env_id))
                 .collect();
-            let lifecycle = if org.is_child() && org.is_admitting() && !root.is_admitting() {
+            let held = org.is_child() && org.is_admitting() && !root.is_admitting();
+            let lifecycle = if held {
                 format!("Held · account {}", root.lifecycle_state)
             } else {
                 org.lifecycle_state.clone()
             };
+            let lifecycle_badge = lifecycle_badge(&org.lifecycle_state, held);
             OrgOverview {
                 org_id: org.org_id,
                 root: org.org_id == root.org_id,
                 name: org.name,
                 slug: org.slug,
                 lifecycle,
+                lifecycle_badge,
                 running: rows.iter().map(|row| row.running).sum(),
                 failed_24h: rows.iter().map(|row| row.failed_24h).sum(),
                 month_runs: rows.iter().map(|row| row.month_runs).sum(),
@@ -174,9 +277,11 @@ async fn account_overview(
                     .iter()
                     .filter_map(|row| row.last_run)
                     .max()
-                    .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string())
+                    .map(|time| display_time(session, &time))
                     .unwrap_or_else(|| "No runs".into()),
-                file_bytes: files.get(&org.org_id).copied().unwrap_or(0),
+                file_bytes: templates::format_blob_size(
+                    files.get(&org.org_id).copied().unwrap_or(0),
+                ),
                 envs: owned
                     .into_iter()
                     .map(|env| OverviewEnv {
@@ -190,29 +295,63 @@ async fn account_overview(
         .collect())
 }
 
+/// A timestamp in the user's display timezone, like the rest of the App.
+fn display_time(session: &Session, time: &DateTime<Utc>) -> String {
+    format!(
+        "{} {}",
+        crate::timezone::format_in_timezone(time, &session.display_timezone, "%Y-%m-%d %H:%M"),
+        session.timezone_abbreviation
+    )
+}
+
 pub async fn list(
     Path(slug): Path<String>,
     State(db): State<Arc<DatabasePool>>,
     axum::Extension(session): axum::Extension<Session>,
-) -> Result<Response, PageError> {
+) -> Result<Response, Response> {
     let root = root_for_admin(&db, &session, &slug).await?;
-    render_page(&db, &session, root, None).await
+    render_page(&db, &session, root, None, FormState::default()).await
 }
 
+/// Render the page; a [`FormState`] with an error renders with status 400.
 async fn render_page(
     db: &DatabasePool,
     session: &Session,
     root: Org,
     issued_token: Option<String>,
-) -> Result<Response, PageError> {
-    let org_api_keys = OrgApiKey::list_for_user(db, root.org_id, session.current_user_id())
+    form: FormState,
+) -> Result<Response, Response> {
+    render_page_inner(db, session, root, issued_token, form)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to load org API keys",
-            )
-        })?;
+        .map_err(|error| page_error(session, error))
+}
+
+async fn render_page_inner(
+    db: &DatabasePool,
+    session: &Session,
+    root: Org,
+    issued_token: Option<String>,
+    form: FormState,
+) -> Result<Response, PageError> {
+    let load_failed = |_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to load org API keys",
+        )
+    };
+    let keys = OrgApiKey::list_for_user(db, root.org_id, session.current_user_id())
+        .await
+        .map_err(load_failed)?;
+    let mut org_api_keys = Vec::with_capacity(keys.len());
+    for key in keys {
+        let status = key.status(db).await.map_err(load_failed)?;
+        org_api_keys.push(OrgApiKeyRow {
+            expires_at: key.expires_at.map(|at| display_time(session, &at)),
+            revocable: status.is_active(),
+            status_label: status_label(status),
+            key,
+        });
+    }
     let org_key_example = serde_json::to_string_pretty(&serde_json::json!({
         "org:*": ["create", "read", "update"],
         "org:*/env:*": ["create", "read"],
@@ -224,10 +363,10 @@ async fn render_page(
     let children = Org::list_children(db, &root.org_id).await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to load child organizations",
+            "Unable to load sub-organizations",
         )
     })?;
-    let overview = account_overview(db, &root, &children).await?;
+    let overview = account_overview(db, session, &root, &children).await?;
     let members = OrgUser::get_users_with_roles_by_org(db, &root.org_id)
         .await
         .map_err(|_| {
@@ -241,27 +380,34 @@ async fn render_page(
         .collect();
     let breadcrumbs = vec![
         templates::BreadcrumbItem::clickable(root.name.clone(), format!("/@{}", root.slug)),
-        templates::BreadcrumbItem::current("Child organizations".to_string()),
+        templates::BreadcrumbItem::current("Sub-organizations".to_string()),
     ];
+    let status = if form.error.is_some() {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    };
     let template = SubOrgsPage {
-        title: "Child organizations",
+        title: "Sub-organizations",
         page_context: PrivatePageContext::for_org_page("children", session, breadcrumbs),
         root,
         children,
         overview,
         members,
         idempotency_key: Uuid::now_v7(),
+        org_key_example: form.key_permissions.clone().unwrap_or(org_key_example),
         org_api_keys,
-        org_key_example,
         issued_token,
+        form,
     };
     let html = template.render().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to render child organizations",
+            "Unable to render sub-organizations",
         )
     })?;
     Ok((
+        status,
         [
             ("Cache-Control", "no-store"),
             ("Referrer-Policy", "no-referrer"),
@@ -285,28 +431,56 @@ pub async fn create(
     axum::Extension(conf): axum::Extension<Val>,
     axum::Extension(session): axum::Extension<Session>,
     Form(form): Form<ChildForm>,
-) -> Result<Redirect, PageError> {
+) -> Result<Redirect, Response> {
     let root = root_for_admin(&db, &session, &slug).await?;
+    let slug = form.slug.trim().to_string();
+    let submitted = |error: String| FormState {
+        error: Some(error),
+        child_name: form.name.clone(),
+        child_slug: form.slug.clone(),
+        child_external_id: form.external_id.clone().unwrap_or_default(),
+        ..FormState::default()
+    };
     let reserved = crate::slug::extra_reserved_from_conf(&conf);
-    crate::slug::validate_format_with_extra(&form.slug, &reserved)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid organization handle"))?;
+    if let Err(error) = crate::slug::validate_format_with_extra(&slug, &reserved) {
+        let page = render_page(&db, &session, root, None, submitted(error.message().into()));
+        return Err(page.await.unwrap_or_else(|page| page));
+    }
     let child = CreateChild {
-        name: form.name,
-        slug: form.slug,
-        external_id: form.external_id.filter(|value| !value.trim().is_empty()),
-        idempotency_key: form.idempotency_key,
+        name: form.name.clone(),
+        slug,
+        external_id: form
+            .external_id
+            .clone()
+            .filter(|value| !value.trim().is_empty()),
+        idempotency_key: form.idempotency_key.clone(),
         hosted: hot::product::billing_enabled(&conf),
     };
-    Org::create_child(&db, &root.org_id, &session.current_user_id(), &child)
-        .await
-        .map_err(|error| {
-            tracing::warn!(root_org_id = %root.org_id, %error, "Child provisioning rejected");
-            (
-                StatusCode::BAD_REQUEST,
-                "Unable to create child organization; check its handle and account limit",
-            )
-        })?;
+    if let Err(error) =
+        Org::create_child(&db, &root.org_id, &session.current_user_id(), &child).await
+    {
+        tracing::warn!(root_org_id = %root.org_id, %error, "Child provisioning rejected");
+        let message = org_error_message(&error, "Unable to create the sub-organization.");
+        let page = render_page(&db, &session, root, None, submitted(message));
+        return Err(page.await.unwrap_or_else(|page| page));
+    }
     Ok(Redirect::to(&format!("/@{}/children", root.slug)))
+}
+
+/// Redirect back to the page, or re-render it with `error` explained above the forms.
+async fn back_to_page(
+    db: &DatabasePool,
+    session: &Session,
+    root: Org,
+    error: Option<String>,
+) -> Result<Redirect, Response> {
+    match error {
+        None => Ok(Redirect::to(&format!("/@{}/children", root.slug))),
+        Some(error) => {
+            let page = render_page(db, session, root, None, FormState::error(error));
+            Err(page.await.unwrap_or_else(|page| page))
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -319,23 +493,25 @@ pub async fn lifecycle(
     State(db): State<Arc<DatabasePool>>,
     axum::Extension(session): axum::Extension<Session>,
     Form(form): Form<LifecycleForm>,
-) -> Result<Redirect, PageError> {
+) -> Result<Redirect, Response> {
     let root = root_for_admin(&db, &session, &slug).await?;
-    let child = Org::get_org_uncached(&db, &child_id)
-        .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "Child organization not found"))?;
-    if child.parent_org_id != Some(root.org_id) {
-        return Err((StatusCode::NOT_FOUND, "Child organization not found"));
+    let child = Org::get_org_uncached(&db, &child_id).await.ok();
+    if child.is_none_or(|child| child.parent_org_id != Some(root.org_id)) {
+        return Err(page_error(
+            &session,
+            (StatusCode::NOT_FOUND, "Sub-organization not found"),
+        ));
     }
-    Org::set_lifecycle(&db, &child_id, &session.current_user_id(), form.state)
+    let error = Org::set_lifecycle(&db, &child_id, &session.current_user_id(), form.state)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Lifecycle transition is not allowed",
+        .err()
+        .map(|error| {
+            org_error_message(
+                &error,
+                "That status change isn't allowed. Restore an archived sub-organization to suspended before activating it.",
             )
-        })?;
-    Ok(Redirect::to(&format!("/@{}/children", root.slug)))
+        });
+    back_to_page(&db, &session, root, error).await
 }
 
 #[derive(Deserialize)]
@@ -349,14 +525,16 @@ pub async fn grant(
     State(db): State<Arc<DatabasePool>>,
     axum::Extension(session): axum::Extension<Session>,
     Form(form): Form<GrantForm>,
-) -> Result<Redirect, PageError> {
+) -> Result<Redirect, Response> {
     let root = root_for_admin(&db, &session, &slug).await?;
     let role = match form.role_id {
         0 => None,
         1 | 2 => Some(form.role_id),
-        _ => return Err((StatusCode::BAD_REQUEST, "Invalid child role")),
+        _ => {
+            return back_to_page(&db, &session, root, Some("Choose a role.".into())).await;
+        }
     };
-    Org::set_child_user_grant(
+    let error = Org::set_child_user_grant(
         &db,
         &root.org_id,
         &child_id,
@@ -365,8 +543,9 @@ pub async fn grant(
         role,
     )
     .await
-    .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to change child access"))?;
-    Ok(Redirect::to(&format!("/@{}/children", root.slug)))
+    .err()
+    .map(|error| org_error_message(&error, "Unable to change access."));
+    back_to_page(&db, &session, root, error).await
 }
 
 #[derive(Deserialize)]
@@ -381,46 +560,60 @@ pub async fn create_org_api_key(
     State(db): State<Arc<DatabasePool>>,
     axum::Extension(session): axum::Extension<Session>,
     Form(form): Form<OrgApiKeyForm>,
-) -> Result<Response, PageError> {
+) -> Result<Response, Response> {
     let root = root_for_admin(&db, &session, &slug).await?;
+    let submitted = |error: &str| FormState {
+        error: Some(error.to_string()),
+        key_description: form.description.clone(),
+        key_permissions: Some(form.permissions.clone()),
+        key_expires_in_days: form.expires_in_days.clone().unwrap_or_default(),
+        ..FormState::default()
+    };
     let expires_at = match form.expires_in_days.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(days) => {
-            let days: i64 = days
-                .parse()
-                .ok()
-                .filter(|days| (1..=3650).contains(days))
-                .ok_or((StatusCode::BAD_REQUEST, "Expiry must be 1–3650 days"))?;
-            Some(Utc::now() + chrono::Duration::days(days))
+        Some(days) => match days.parse().ok().filter(|days| (1..=3650).contains(days)) {
+            Some(days) => Some(Utc::now() + chrono::Duration::days(days)),
+            None => {
+                let form = submitted("Expiry must be 1–3650 days.");
+                return render_page(&db, &session, root, None, form).await;
+            }
+        },
+    };
+    let permissions = match serde_json::from_str(&form.permissions) {
+        Ok(permissions) => permissions,
+        Err(_) => {
+            let form = submitted("Permissions must be a JSON object.");
+            return render_page(&db, &session, root, None, form).await;
         }
     };
     let request = CreateOrgApiKey {
-        description: form.description,
-        permissions: serde_json::from_str(&form.permissions)
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid permissions JSON"))?,
+        description: form.description.clone(),
+        permissions,
         expires_at,
     };
-    let (_, token) = OrgApiKey::create_for_user(&db, root.org_id, session.current_user_id(), &request)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Unable to create org API key; permissions must use org: URNs such as org:* or org:{org}/env:*/project:*",
-            )
-        })?;
-    render_page(&db, &session, root, Some(token)).await
+    match OrgApiKey::create_for_user(&db, root.org_id, session.current_user_id(), &request).await {
+        Ok((_, token)) => render_page(&db, &session, root, Some(token), FormState::default()).await,
+        Err(error) => {
+            tracing::info!(root_org_id = %root.org_id, %error, "Org API key rejected");
+            let form = submitted(
+                "Unable to create the org API key. Permissions must use org: URNs such as org:* or org:{org}/env:*/project:*.",
+            );
+            render_page(&db, &session, root, None, form).await
+        }
+    }
 }
 
 pub async fn revoke_org_api_key(
     Path((slug, key_id)): Path<(String, Uuid)>,
     State(db): State<Arc<DatabasePool>>,
     axum::Extension(session): axum::Extension<Session>,
-) -> Result<Redirect, PageError> {
+) -> Result<Redirect, Response> {
     let root = root_for_admin(&db, &session, &slug).await?;
-    OrgApiKey::revoke_for_user(&db, root.org_id, session.current_user_id(), key_id)
+    let error = OrgApiKey::revoke_for_user(&db, root.org_id, session.current_user_id(), key_id)
         .await
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to revoke org API key"))?;
-    Ok(Redirect::to(&format!("/@{}/children", root.slug)))
+        .err()
+        .map(|_| "Unable to revoke the org API key.".to_string());
+    back_to_page(&db, &session, root, error).await
 }
 
 pub async fn root_lifecycle(
@@ -428,15 +621,11 @@ pub async fn root_lifecycle(
     State(db): State<Arc<DatabasePool>>,
     axum::Extension(session): axum::Extension<Session>,
     Form(form): Form<LifecycleForm>,
-) -> Result<Redirect, PageError> {
+) -> Result<Redirect, Response> {
     let root = root_for_admin(&db, &session, &slug).await?;
-    Org::set_lifecycle(&db, &root.org_id, &session.current_user_id(), form.state)
+    let error = Org::set_lifecycle(&db, &root.org_id, &session.current_user_id(), form.state)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Lifecycle transition is not allowed",
-            )
-        })?;
-    Ok(Redirect::to(&format!("/@{}/children", root.slug)))
+        .err()
+        .map(|error| org_error_message(&error, "That account status change isn't allowed."));
+    back_to_page(&db, &session, root, error).await
 }

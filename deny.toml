@@ -1,0 +1,41 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+#
+# CI (.github/workflows/dependency-audit.yml) runs
+#
+#   cargo deny --locked check advisories sources
+#
+# on pull requests, on pushes to main and weekly, so an advisory published
+# against an unchanged Cargo.lock still turns up. To run it locally, install
+# cargo-deny and run the same command from the repository root.
+
+[graph]
+# Check every optional feature (gcs-storage, kata, local-embeddings, ...) and
+# every target the release builds, not just the host's default graph.
+all-features = true
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+
+[advisories]
+# Vulnerability, unsound and notice advisories fail the check, as do
+# unmaintained crates and yanked versions in Cargo.lock. Every ignore below
+# names the advisory, the crates that pull it in, and why it can stay.
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml is unmaintained. Only askama_derive uses it, at compile time, to read askama.toml; no askama release has replaced it yet." },
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained. It is a proc-macro (no runtime code) used by tokenizers, through fastembed's local embeddings; no tokenizers release has dropped it yet." },
+]
+
+[sources]
+# Every dependency comes from crates.io: no other registries or git sources.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

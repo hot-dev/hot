@@ -397,6 +397,26 @@ impl ApiErrorResponse {
         Self::new("internal_server_error", "An internal server error occurred")
     }
 
+    /// The envelope for an error that carries only a status: the status's
+    /// reason as a snake_case code (`429` keeps `rate_limit_exceeded`).
+    pub fn for_status(status: axum::http::StatusCode) -> Self {
+        let reason = status.canonical_reason().unwrap_or("Error");
+        let code = match status {
+            axum::http::StatusCode::TOO_MANY_REQUESTS => "rate_limit_exceeded".to_string(),
+            _ => reason
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect(),
+        };
+        Self::new(code, reason)
+    }
+
     pub fn rate_limit_exceeded(retry_after: u64) -> Self {
         Self::new(
             "rate_limit_exceeded",

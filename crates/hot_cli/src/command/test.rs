@@ -342,7 +342,7 @@ async fn run_integration_test(
         info!("hot.test: Starting task worker...");
         let tw_conf = merged_conf.clone();
         service_handles.push(tokio::spawn(async move {
-            run_task_worker(tw_conf).await;
+            run_task_worker(Env::Development, tw_conf).await;
         }));
     }
 

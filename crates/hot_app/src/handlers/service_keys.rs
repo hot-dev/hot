@@ -7,7 +7,7 @@ use crate::auth::Session;
 use askama::Template;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{Html, Redirect};
+use axum::response::{Html, IntoResponse, Redirect};
 use hot::db::DatabasePool;
 use hot::db::service_key::ServiceKey;
 use std::sync::Arc;
@@ -102,7 +102,7 @@ pub async fn service_keys_new_handler(
         "No environment selected".to_string(),
     ))?;
 
-    let (mcp_tools_json, webhooks_json) =
+    let (mcp_tool_options, webhook_options) =
         super::build_permission_path_options(&db, &env.env_id).await;
 
     let template = crate::templates::ServiceKeysNew {
@@ -115,8 +115,8 @@ pub async fn service_keys_new_handler(
         error_message: "",
         generated_key: None,
         service_key_id: None,
-        mcp_tools_json,
-        webhooks_json,
+        mcp_tool_options,
+        webhook_options,
     };
 
     Ok(Html(
@@ -131,7 +131,7 @@ pub async fn service_keys_create_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     axum::extract::Form(form): axum::extract::Form<CreateServiceKeyForm>,
-) -> Result<Html<String>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
     require_current_org_admin(&session)?;
 
     // Feature gate: service keys require Pro+ plan
@@ -258,15 +258,23 @@ pub async fn service_keys_create_handler(
                 error_message: "",
                 generated_key: Some(token),
                 service_key_id: Some(service_key.service_key_id),
-                mcp_tools_json: "[]".into(),
-                webhooks_json: "[]".into(),
+                mcp_tool_options: serde_json::Value::Array(Vec::new()),
+                webhook_options: serde_json::Value::Array(Vec::new()),
             };
 
-            Ok(Html(
-                template
-                    .render()
-                    .unwrap_or_else(|_| "Template error".into()),
-            ))
+            // The page shows the key secret: keep it out of caches and Referer headers.
+            Ok((
+                [
+                    ("Cache-Control", "no-store"),
+                    ("Referrer-Policy", "no-referrer"),
+                ],
+                Html(
+                    template
+                        .render()
+                        .unwrap_or_else(|_| "Template error".into()),
+                ),
+            )
+                .into_response())
         }
         Err(e) => {
             let template = crate::templates::ServiceKeysNew {
@@ -279,15 +287,16 @@ pub async fn service_keys_create_handler(
                 error_message: &format!("Failed to create service key: {}", e),
                 generated_key: None,
                 service_key_id: None,
-                mcp_tools_json: "[]".into(),
-                webhooks_json: "[]".into(),
+                mcp_tool_options: serde_json::Value::Array(Vec::new()),
+                webhook_options: serde_json::Value::Array(Vec::new()),
             };
 
             Ok(Html(
                 template
                     .render()
                     .unwrap_or_else(|_| "Template error".into()),
-            ))
+            )
+            .into_response())
         }
     }
 }

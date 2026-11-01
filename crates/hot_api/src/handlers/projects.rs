@@ -5,10 +5,13 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use hot::db::{api_key::ApiKey, project::Project};
+use hot::db::{
+    api_key::ApiKey,
+    project::{Project, ProjectError},
+};
 use uuid::Uuid;
 
-use super::{ListQueryParams, get_and_verify_project};
+use super::{ListQueryParams, get_and_verify_project_including_inactive};
 use crate::ApiStateData;
 use crate::auth::AuthContext;
 use crate::models::*;
@@ -59,33 +62,9 @@ pub async fn get_project(
 ) -> Result<Json<ApiResponse<ProjectResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can read projects.")?;
 
-    // Try to parse as UUID first, otherwise treat as slug (project name)
-    let project = if let Ok(project_id) = Uuid::parse_str(&project_id_or_slug) {
-        Project::get_project(&db, &project_id).await
-    } else {
-        // Find by name within the env
-        Project::get_project_by_env_and_name(&db, &api_key.env_id, &project_id_or_slug)
-            .await
-            .and_then(|opt| opt.ok_or(hot::db::project::ProjectError::NotFound))
-    }
-    .map_err(|e| match e {
-        hot::db::project::ProjectError::NotFound => (
-            StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse::not_found("Project")),
-        ),
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&e.to_string())),
-        ),
-    })?;
-
-    // Verify project belongs to the API key's environment
-    if project.env_id != api_key.env_id {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse::not_found("Project")),
-        ));
-    }
+    // A name already resolves inactive projects, so an ID does too.
+    let project =
+        get_and_verify_project_including_inactive(&db, &api_key, &project_id_or_slug).await?;
 
     Ok(Json(ApiResponse::new(ProjectResponse {
         project_id: project.project_id,
@@ -145,32 +124,8 @@ pub async fn update_project(
 ) -> Result<Json<ApiResponse<ProjectResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can update projects.")?;
 
-    // Get the project first to verify ownership
-    let project = if let Ok(project_id) = Uuid::parse_str(&project_id_or_slug) {
-        Project::get_project(&db, &project_id).await
-    } else {
-        Project::get_project_by_env_and_name(&db, &api_key.env_id, &project_id_or_slug)
-            .await
-            .and_then(|opt| opt.ok_or(hot::db::project::ProjectError::NotFound))
-    }
-    .map_err(|e| match e {
-        hot::db::project::ProjectError::NotFound => (
-            StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse::not_found("Project")),
-        ),
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&e.to_string())),
-        ),
-    })?;
-
-    // Verify ownership
-    if project.env_id != api_key.env_id {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse::not_found("Project")),
-        ));
-    }
+    let project =
+        get_and_verify_project_including_inactive(&db, &api_key, &project_id_or_slug).await?;
 
     // Update the project
     Project::update_name(
@@ -188,7 +143,7 @@ pub async fn update_project(
     })?;
 
     // Get updated project
-    let updated_project = Project::get_project(&db, &project.project_id)
+    let updated_project = Project::get_project_including_inactive(&db, &project.project_id)
         .await
         .map_err(|e| {
             (
@@ -215,40 +170,20 @@ pub async fn delete_project(
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can delete projects.")?;
 
-    // Get the project first to verify ownership
-    let project = if let Ok(project_id) = Uuid::parse_str(&project_id_or_slug) {
-        Project::get_project(&db, &project_id).await
-    } else {
-        Project::get_project_by_env_and_name(&db, &api_key.env_id, &project_id_or_slug)
-            .await
-            .and_then(|opt| opt.ok_or(hot::db::project::ProjectError::NotFound))
-    }
-    .map_err(|e| match e {
-        hot::db::project::ProjectError::NotFound => (
-            StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse::not_found("Project")),
-        ),
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&e.to_string())),
-        ),
-    })?;
-
-    // Verify ownership
-    if project.env_id != api_key.env_id {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse::not_found("Project")),
-        ));
-    }
+    let project =
+        get_and_verify_project_including_inactive(&db, &api_key, &project_id_or_slug).await?;
 
     Project::delete_project(&db, &project.project_id)
         .await
-        .map_err(|e| {
-            (
+        .map_err(|e| match e {
+            ProjectError::HasBuilds => (
+                StatusCode::CONFLICT,
+                Json(ApiErrorResponse::new("project_has_builds", e.to_string())),
+            ),
+            _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiErrorResponse::internal_error(&e.to_string())),
-            )
+            ),
         })?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -283,7 +218,8 @@ async fn toggle_project_active(
     project_id_or_slug: String,
     active: bool,
 ) -> Result<Json<ApiResponse<ProjectActivateResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
-    let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
+    let project =
+        get_and_verify_project_including_inactive(&db, &api_key, &project_id_or_slug).await?;
 
     // Project::toggle_active also undeploys all builds and deactivates schedules
     // when transitioning to inactive (see crates/hot/src/db/project.rs).
@@ -349,8 +285,8 @@ async fn toggle_project_active(
         }
     }
 
-    // Re-fetch to return the post-toggle state
-    let updated = Project::get_project(&db, &project.project_id)
+    // Re-fetch to return the post-toggle state, which may be inactive.
+    let updated = Project::get_project_including_inactive(&db, &project.project_id)
         .await
         .map_err(|e| {
             (
@@ -370,4 +306,158 @@ async fn toggle_project_active(
         },
         redeployed_build_id,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        Router,
+        body::Body,
+        middleware,
+        routing::{get, post},
+    };
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    async fn app() -> (
+        Router,
+        Arc<hot::db::DatabasePool>,
+        hot::db::TestData,
+        String,
+    ) {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let hot::db::DatabasePool::Sqlite(pool) = db.as_ref() else {
+            unreachable!("SQLite fixture");
+        };
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(pool)
+            .await
+            .unwrap();
+        let key_id = Uuid::now_v7();
+        let (token, hash) = ApiKey::generate_api_key(&key_id).unwrap();
+        ApiKey::insert_api_key(
+            &db,
+            &key_id,
+            &data.env_id,
+            "projects",
+            &serde_json::from_str(&hash).unwrap(),
+            &data.user_id,
+            &json!({"*:*": ["*"]}),
+        )
+        .await
+        .unwrap();
+        let state: ApiStateData = (
+            db.clone(),
+            Arc::new(Box::new(hot::storage::LocalBuildStorage::new(
+                std::env::temp_dir(),
+            ))),
+            Arc::new(hot::val!({})),
+            None,
+        );
+        let router = Router::new()
+            .route(
+                "/v1/projects/{project_id_or_slug}",
+                get(get_project)
+                    .patch(update_project)
+                    .delete(delete_project),
+            )
+            .route(
+                "/v1/projects/{project_id_or_slug}/activate",
+                post(activate_project),
+            )
+            .route(
+                "/v1/projects/{project_id_or_slug}/deactivate",
+                post(deactivate_project),
+            )
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::auth::api_key_auth_middleware,
+            ))
+            .with_state(state);
+        (router, db, data, token)
+    }
+
+    async fn call(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        token: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn lifecycle_routes_resolve_inactive_projects_by_id() {
+        let (app, _db, data, token) = app().await;
+        let uri = format!("/v1/projects/{}", data.project_id);
+
+        let (status, body) = call(&app, "POST", &format!("{uri}/deactivate"), &token, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["project"]["active"], false);
+
+        let (status, body) = call(&app, "GET", &uri, &token, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["active"], false);
+
+        let rename = json!({"name": "renamed"});
+        let (status, body) = call(&app, "PATCH", &uri, &token, Some(rename)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["name"], "renamed");
+        assert_eq!(body["data"]["active"], false);
+
+        let (status, body) = call(&app, "POST", &format!("{uri}/activate"), &token, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["project"]["active"], true);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_project_with_builds_conflicts_and_keeps_it() {
+        let (app, db, data, token) = app().await;
+        let uri = format!("/v1/projects/{}", data.project_id);
+        let (status, body) = call(&app, "DELETE", &uri, &token, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "project_has_builds");
+        assert!(
+            Project::get_project_including_inactive(&db, &data.project_id)
+                .await
+                .is_ok()
+        );
+
+        // A project that never had a build is deleted, inactive or not.
+        let empty = Uuid::now_v7();
+        Project::insert_project(&db, &empty, &data.env_id, "empty", &data.user_id)
+            .await
+            .unwrap();
+        let uri = format!("/v1/projects/{empty}");
+        let (status, _) = call(&app, "POST", &format!("{uri}/deactivate"), &token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = call(&app, "DELETE", &uri, &token, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        let (status, _) = call(&app, "GET", &uri, &token, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
 }

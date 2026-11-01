@@ -18,7 +18,7 @@ use hot::db::{self, DatabasePool, TestData};
 use hot::stream::{EnvEvent, EnvPublisher, StreamPubSub, StreamPubSubType};
 use hot_app::test_support::{CookieJar, TestApp, TestResponse};
 use sqlx::{Executor, PgPool};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Once, OnceLock};
 use std::time::Duration;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -26,9 +26,14 @@ use uuid::Uuid;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const DELIVERY: Duration = Duration::from_secs(10);
-/// The seeded user's credentials (`hot::db::insert_default_data`).
+/// The seeded user (`hot::db::insert_test_data`).
 const EMAIL: &str = "local@hot.dev";
-const PASSWORD: &str = "hotdev";
+
+/// The password the fixture gives the seeded user, new for each run.
+fn user_password() -> &'static str {
+    static PASSWORD: OnceLock<String> = OnceLock::new();
+    PASSWORD.get_or_init(|| Uuid::new_v4().simple().to_string())
+}
 
 static PRODUCTION_MODE: Once = Once::new();
 
@@ -151,6 +156,21 @@ impl Fixture {
         )
         .await?;
         let data = db::insert_test_data(&admin_db).await?;
+        // The local identity has no password; give it one, as
+        // `hot admin bootstrap` does for an installation's administrator.
+        let hash = hot::auth::hash_password_with_random_salt(user_password())?;
+        hot::db::UserAuth::insert_user_auth(
+            &admin_db.with_scope(db::DatabaseScope::Bootstrap(
+                db::BootstrapOperation::Onboarding,
+            )),
+            &Uuid::now_v7(),
+            &data.user_id,
+            "email_password",
+            EMAIL,
+            Some(&serde_json::from_str(&hash)?),
+            &data.user_id,
+        )
+        .await?;
         if let DatabasePool::Postgres(pool) = admin_db {
             pool.close().await;
         }
@@ -307,7 +327,7 @@ impl Browser {
             "/signin",
             &[
                 ("email", EMAIL),
-                ("password", PASSWORD),
+                ("password", user_password()),
                 ("form_token", &form_token),
             ],
         )

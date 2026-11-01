@@ -121,8 +121,12 @@ pub struct TypeRef {
     /// Fully qualified type name (e.g., "::my-app/Shape")
     pub name: String,
     /// Variant definitions: name -> optional referenced type name
-    /// None for unit variants, Some(type_name) for type-reference variants
-    pub variants: IndexMap<String, Option<String>>,
+    /// None for unit variants, Some(type_name) for type-reference variants.
+    /// Shared: every value of the enum's type, and every closure that
+    /// captures one, holds the same table, so copying the type is O(1). (An
+    /// open enum with an arrow per variant cloned its whole table into each
+    /// value, which took memory quadratic in its variants.)
+    pub variants: std::sync::Arc<IndexMap<String, Option<String>>>,
 }
 
 impl std::hash::Hash for TypeRef {
@@ -130,7 +134,7 @@ impl std::hash::Hash for TypeRef {
         std::hash::Hash::hash(&self.name, state);
         // Hash variant count and each variant for deterministic hashing
         std::hash::Hash::hash(&self.variants.len(), state);
-        for (k, v) in &self.variants {
+        for (k, v) in self.variants.iter() {
             std::hash::Hash::hash(k, state);
             std::hash::Hash::hash(v, state);
         }
@@ -155,7 +159,10 @@ impl Ord for TypeRef {
 impl TypeRef {
     /// Create a new type reference with variants
     pub fn new(name: String, variants: IndexMap<String, Option<String>>) -> Self {
-        Self { name, variants }
+        Self {
+            name,
+            variants: std::sync::Arc::new(variants),
+        }
     }
 
     /// Get the type name
@@ -195,5 +202,27 @@ pub fn extract_type_ref(val: &Val) -> Option<&TypeRef> {
     match val {
         Val::Box(boxed) => boxed.as_any().downcast_ref::<TypeRef>(),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // An open enum with an arrow per variant copied its whole variant table
+    // into each value of the type, and into each closure that captured one:
+    // 2,000 arrows took 1.1 GB. A copy shares the table.
+    #[test]
+    fn type_ref_copies_share_the_variant_table() {
+        let variants: IndexMap<String, Option<String>> = (0..2000)
+            .map(|i| (format!("T{i}"), Some(format!("::t/T{i}"))))
+            .collect();
+        let type_ref = TypeRef::new("::t/A".to_string(), variants);
+        let value = Val::Box(Box::new(type_ref.clone()));
+        let copy = value.clone();
+        let copied = extract_type_ref(&copy).expect("a type reference");
+        assert!(std::sync::Arc::ptr_eq(&type_ref.variants, &copied.variants));
+        assert_eq!(copied.variant_names().count(), 2000);
+        assert_eq!(copied, &type_ref);
     }
 }

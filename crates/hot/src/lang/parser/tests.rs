@@ -1096,6 +1096,50 @@ fn test_explicit_all_still_allowed_on_ambiguous_flows() {
 }
 
 #[test]
+fn test_all_return_annotation_shapes_a_single_flow_body() {
+    let source = r#"
+        trace fn (x: Int): All<Vec> { x |> add(1) |> mul(2) }
+        bound fn (x: Int): All<Vec> {
+            a x
+            x |> add(1)
+        }
+        "#;
+
+    let program = parse_hot(source).expect("annotated bodies should parse");
+    let default_ns = &program.namespaces[&NsPath::new()];
+    let body_of = |name: &str| match default_ns
+        .scope
+        .vars
+        .iter()
+        .find(|(var, _)| var.sym.name() == name)
+    {
+        Some((_, Value::Fn(defs))) => defs[0].body.clone(),
+        other => panic!("expected fn {name}, got {other:?}"),
+    };
+
+    // One flow expression: the pipe collects, the serial body does not.
+    match body_of("trace") {
+        Value::Flow(body) => {
+            assert_eq!(body.result_modifier, None);
+            match body.expressions.as_slice() {
+                [Value::Flow(pipe)] => {
+                    assert_eq!(pipe.flow_type, FlowType::Pipe);
+                    assert_eq!(pipe.result_modifier, Some(ResultModifier::Vec));
+                }
+                other => panic!("expected one pipe, got {other:?}"),
+            }
+        }
+        other => panic!("expected flow body, got {other:?}"),
+    }
+
+    // A body with bindings stays a collecting serial flow.
+    match body_of("bound") {
+        Value::Flow(body) => assert_eq!(body.result_modifier, Some(ResultModifier::Vec)),
+        other => panic!("expected flow body, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_type_definitions_with_constructors() {
     let source = r#"
         // Simple type definitions (like time.hot)
@@ -2515,6 +2559,45 @@ fn where_helpers_precede_their_declaration() {
     }
 }
 
+/// An inline `where` in an enum payload declares a hidden refinement type,
+/// as it does for a field, in the brace and the `|` forms.
+#[test]
+fn enum_payloads_take_an_inline_where() {
+    for source in [
+        "::t ns\n\nDue enum { Hours(Int where gt(%, 0)), Done }\n",
+        "::t ns\n\nDue type\n  | Hours(Int where gt(%, 0))\n  | Done\n",
+    ] {
+        let program = parse_hot_file(source, "t.hot").unwrap_or_else(|e| panic!("{source:?}: {e}"));
+        let namespace = program
+            .namespaces
+            .values()
+            .find(|ns| ns.path.to_string() == "::t")
+            .unwrap();
+        let variants = namespace
+            .scope
+            .vars
+            .iter()
+            .find_map(|(var, value)| match value {
+                Value::TypeDef(def) if var.sym.name() == "Due" => def.variants.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{source:?}: no Due variants"));
+        let payload = variants[0].type_ref.as_deref().unwrap_or_default();
+        assert!(
+            crate::lang::ast::is_inline_refinement_type(payload),
+            "{source:?}: Hours carries {payload:?}"
+        );
+        assert!(
+            namespace
+                .scope
+                .vars
+                .keys()
+                .any(|var| var.sym.name() == payload),
+            "{source:?}: {payload} is not declared"
+        );
+    }
+}
+
 /// `name: value` in a call is a named argument. The name can be any
 /// identifier or keyword, `lazy` included, and the call prints back the way
 /// it was written.
@@ -2668,4 +2751,245 @@ fn named_arguments_come_last_and_once() {
         let err = format!("{:?}", parse_hot_expression(source).expect_err(source));
         assert!(err.contains(message), "{source:?}: {err}");
     }
+}
+
+/// At namespace level, `m.log("x")` calls the field, as it does in a
+/// function body. A value after the path deep-assigns, a space before `(`
+/// never calls, and a path alone on its line reads it without taking the
+/// next line as its value.
+#[test]
+fn top_level_dotted_path_calls_reads_and_assigns() {
+    let source = "m.log(\"call\")\nw.inner.log(\"nested\")\nhs[0].log(\"indexed\")\nm.log \"assigned\"\nm.log (\"spaced\")\nm.log  // a read\nz 9\n";
+    let program = parse_hot(source).expect("parses");
+    let vars: Vec<(&Var, &Value)> = program.namespaces[&NsPath::new()]
+        .scope
+        .vars
+        .iter()
+        .collect();
+    assert_eq!(vars.len(), 7, "{vars:#?}");
+
+    for (var, value) in &vars[..3] {
+        assert!(var.sym.name().starts_with("$var_"), "{var:?}");
+        assert!(var.deep_set.is_none(), "{var:?}");
+        assert!(matches!(value, Value::FnCall(_)), "{value:?}");
+    }
+    for (var, value) in &vars[3..5] {
+        assert_eq!(var.sym.name(), "m");
+        assert_eq!(var.deep_set, Some(DeepPath::Key("log".to_string())));
+        assert!(matches!(value, Value::Val(Val::Str(_), _)), "{value:?}");
+    }
+    let (read, value) = vars[5];
+    assert!(read.sym.name().starts_with("$var_"), "{read:?}");
+    assert!(
+        matches!(value, Value::Ref(Ref::Var(var_ref))
+            if var_ref.var.deep_path == Some(DeepPath::Key("log".to_string()))),
+        "{value:?}"
+    );
+    assert_eq!(vars[6].0.sym.name(), "z");
+
+    // Configuration-style deep paths still assign.
+    let program = parse_hot("hot.set.project \"p\"\nhot.remote.dev.url ::env/get(\"URL\", \"\")\n")
+        .expect("parses");
+    let names: Vec<_> = program.namespaces[&NsPath::new()]
+        .scope
+        .vars
+        .keys()
+        .map(|var| (var.sym.name().to_string(), var.deep_set.is_some()))
+        .collect();
+    assert_eq!(
+        names,
+        vec![("hot".to_string(), true), ("hot".to_string(), true)]
+    );
+}
+
+fn nested_calls(levels: usize) -> String {
+    format!("x {}1{}", "add(1, ".repeat(levels), ")".repeat(levels))
+}
+
+/// Nesting past `MAX_NESTING_DEPTH` fails with an error at the expression
+/// that goes too deep, rather than overflowing the stack.
+#[test]
+fn nesting_past_the_limit_is_a_located_parse_error() {
+    // The innermost `1` is one level below the last call.
+    assert!(parse_hot(&nested_calls(MAX_NESTING_DEPTH - 1)).is_ok());
+
+    let error = parse_hot(&nested_calls(MAX_NESTING_DEPTH)).expect_err("too deep");
+    assert!(error.message.contains("Nesting is too deep"), "{error}");
+    // The first argument of the last call is the level too many.
+    let column = "x ".len() + "add(1, ".len() * (MAX_NESTING_DEPTH - 1) + "add(".len() + 1;
+    assert_eq!(
+        (error.location.line, error.location.column),
+        (1, column),
+        "{error}"
+    );
+
+    // Far deeper input fails the same way instead of overflowing.
+    for source in [
+        nested_calls(5000),
+        format!("x {}1{}", "[".repeat(5000), "]".repeat(5000)),
+        format!("x {}1{}", "(".repeat(5000), ")".repeat(5000)),
+        format!(
+            "x {}1{}",
+            "cond { true => { ".repeat(5000),
+            " } }".repeat(5000)
+        ),
+        format!("x {}1{}", "(a) { ".repeat(5000), " }".repeat(5000)),
+        format!("x {}1", "!".repeat(5000)),
+        format!("x: {}Int{} 1", "Vec<".repeat(5000), ">".repeat(5000)),
+    ] {
+        let error = parse_hot(&source).expect_err("too deep");
+        assert!(error.message.contains("Nesting is too deep"), "{error}");
+    }
+}
+
+/// A template's expressions nest inside the template, so they count
+/// toward the limit too.
+#[test]
+fn nesting_continues_into_template_expressions() {
+    let half = MAX_NESTING_DEPTH / 2;
+    let source = format!(
+        "x {}`${{{}1{}}}`{}",
+        "add(1, ".repeat(half),
+        "add(1, ".repeat(half),
+        ")".repeat(half),
+        ")".repeat(half)
+    );
+    let error = parse_hot(&source).expect_err("too deep");
+    assert!(error.message.contains("Nesting is too deep"), "{error}");
+}
+
+/// `::ns/items[1]` would drop the index and `::ns/config.db.host` the last
+/// field, since a qualified reference keeps no path, so both are errors
+/// that say how to write them.
+#[test]
+fn qualified_references_take_no_index_or_deep_path() {
+    for (source, binding) in [
+        ("f fn () { ::geo/items[1] }", "`items ::geo/items`"),
+        ("f fn () { ::geo/config.db.host }", "`config ::geo/config`"),
+        ("f fn () { ::geo/Shape.Circle[0] }", "`Shape ::geo/Shape`"),
+        ("x ::geo/items[1]", "`items ::geo/items`"),
+        ("x `${::geo/items[0]}`", "`items ::geo/items`"),
+    ] {
+        let error = parse_hot(source).expect_err(source);
+        assert!(
+            error
+                .message
+                .contains("A qualified reference can't be indexed")
+                && error.message.contains(binding),
+            "{source:?}: {error}"
+        );
+    }
+
+    // A variant or one field, a call's result path, and a spaced bracket
+    // still parse.
+    for source in [
+        "f fn () { ::geo/Shape.Circle }",
+        "f fn () { ::geo/config.port }",
+        "f fn () { ::geo/Shape.Circle(radius: 1.0) }",
+        "f fn () { ::geo/items()[0] }",
+        "f fn () { x ::geo/items [1] }",
+    ] {
+        assert!(parse_hot(source).is_ok(), "{source:?}");
+    }
+}
+
+/// An error inside `${...}` points at its place in the file, not at the
+/// start of the file, for single-line, nested and block templates.
+#[test]
+fn template_expression_errors_point_into_the_file() {
+    let source = "::t ns\n\nname \"x\"\nmsg `hello ${add(1, }`\n";
+    let error = parse_hot_file(source, "t.hot").expect_err("bad expression");
+    assert_eq!(error.message, "Expected value");
+    // At the `}` that ends the expression early.
+    let position = source.find(", }").unwrap() + 2;
+    assert_eq!(
+        (
+            error.location.line,
+            error.location.column,
+            error.location.position
+        ),
+        (4, 21, position),
+        "{error}"
+    );
+    assert_eq!(
+        error.location.file.as_deref(),
+        Some(std::path::Path::new("t.hot"))
+    );
+
+    // An unescaped backtick ends the outer template, so its `${` is
+    // unterminated: the error is at that `${`.
+    let source = "::t ns\n\nmsg `outer ${`inner ${name}`} done`\n";
+    let error = parse_hot_file(source, "t.hot").expect_err("unterminated");
+    assert!(
+        error
+            .message
+            .starts_with("Unterminated template expression"),
+        "{error}"
+    );
+    assert_eq!(
+        (
+            error.location.line,
+            error.location.column,
+            error.location.position
+        ),
+        (3, 12, source.find("${").unwrap()),
+        "{error}"
+    );
+
+    // Escapes before the expression don't shift it, and a block template
+    // keeps its lines.
+    let source = "msg `a\\tb ${add(1, ]}`\n";
+    let error = parse_hot(source).expect_err("bad expression");
+    assert_eq!(
+        (error.location.line, error.location.position),
+        (1, source.find(']').unwrap()),
+        "{error}"
+    );
+    let source = "msg ```\n  one\n  two ${add(1, ]}\n  ```\n";
+    let error = parse_hot(source).expect_err("bad expression");
+    assert_eq!(
+        (
+            error.location.line,
+            error.location.column,
+            error.location.position
+        ),
+        (3, 16, source.find(']').unwrap()),
+        "{error}"
+    );
+
+    // Lexer errors in an expression are placed the same way.
+    let source = "x 1\nmsg `v ${\"open}`\n";
+    let error = parse_hot_file(source, "t.hot").expect_err("lexer error");
+    assert!(error.message.contains("Lexer error"), "{error}");
+    assert_eq!(error.location.line, 2, "{error}");
+    assert!(error.location.file.is_some(), "{error}");
+}
+
+/// The values in a template expression carry spans in the file, which
+/// later diagnostics report.
+#[test]
+fn template_expression_spans_point_into_the_file() {
+    let source = "x 1\nmsg `a ${missing-name} b`\n";
+    let program = parse_hot(source).expect("parses");
+    let value = program.namespaces[&NsPath::new()]
+        .scope
+        .vars
+        .iter()
+        .find(|(var, _)| var.sym.name() == "msg")
+        .map(|(_, value)| value)
+        .expect("msg");
+    let Value::TemplateLiteral(template) = value else {
+        panic!("{value:?}");
+    };
+    let Some(TemplatePart::Expression(expression)) = template.parts.get(1) else {
+        panic!("{template:?}");
+    };
+    let Value::Ref(Ref::Var(VarRef { src: Some(src), .. })) = expression.as_ref() else {
+        panic!("{expression:?}");
+    };
+    let position = source.find("missing-name").unwrap();
+    assert_eq!(
+        (src.line, src.column, src.position),
+        (2, position - source.find("msg").unwrap() + 1, position)
+    );
 }

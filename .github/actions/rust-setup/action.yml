@@ -5,7 +5,7 @@ inputs:
     description: "Rust toolchain version (e.g., 1.99.1)"
     required: true
   tailwind-version:
-    description: "Tailwind CLI version (e.g., v4.3.0)"
+    description: "Tailwind CLI version (e.g., v4.3.3)"
     required: true
   save-cache:
     description: >-
@@ -38,10 +38,10 @@ runs:
       uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       with:
         toolchain: ${{ inputs.rust-toolchain }}
-        components: clippy
+        components: clippy, rustfmt
 
     - name: Install sccache
-      uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       with:
         version: "v0.16.0"
         token: ${{ github.token }}
@@ -60,6 +60,10 @@ runs:
         fi
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_CACHE_SIZE=${{ inputs.sccache-size }}" >> "$GITHUB_ENV"
+        # The server stops after 600s without a new request, even while a
+        # compile is in flight. Windows builds the `hot` crate alone for
+        # about that long, so the default drops its connection mid-compile.
+        echo "SCCACHE_IDLE_TIMEOUT=0" >> "$GITHUB_ENV"
 
     # Set before the cache steps: rust-cache keys on CARGO_* variables.
     - name: Apply CI build settings
@@ -78,7 +82,7 @@ runs:
 
     - name: Cache sccache artifacts
       if: inputs.save-cache == 'true'
-      uses: actions/cache@v5
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: ~/.cache/sccache
         # Stable across source-only runs: sccache content-addresses compiler
@@ -93,7 +97,7 @@ runs:
 
     - name: Restore sccache artifacts (restore-only)
       if: inputs.save-cache != 'true'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: ~/.cache/sccache
         key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ inputs.sccache-size }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
@@ -112,41 +116,28 @@ runs:
     - name: Cache Tailwind CSS CLI
       if: inputs.save-cache == 'true'
       id: tailwind-cache
-      uses: actions/cache@v5
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: ~/.local/bin/tailwindcss*
-        key: tailwindcss-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tailwind-version }}
+        # Keyed on the install script too, so a binary cached before a digest
+        # pin changed is downloaded and verified again.
+        key: tailwindcss-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tailwind-version }}-${{ hashFiles('scripts/install-tailwind.sh') }}
 
     - name: Restore Tailwind CSS CLI (restore-only)
       if: inputs.save-cache != 'true'
       id: tailwind-restore
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: ~/.local/bin/tailwindcss*
-        key: tailwindcss-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tailwind-version }}
+        key: tailwindcss-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tailwind-version }}-${{ hashFiles('scripts/install-tailwind.sh') }}
 
     - name: Install Tailwind CSS CLI
       if: >-
         steps.tailwind-cache.outputs.cache-hit != 'true' &&
         steps.tailwind-restore.outputs.cache-hit != 'true'
       shell: bash
-      run: |
-        case "$RUNNER_OS-$RUNNER_ARCH" in
-          Linux-X64)   asset=tailwindcss-linux-x64 ;;
-          Linux-ARM64) asset=tailwindcss-linux-arm64 ;;
-          macOS-ARM64) asset=tailwindcss-macos-arm64 ;;
-          macOS-X64)   asset=tailwindcss-macos-x64 ;;
-          Windows-X64) asset=tailwindcss-windows-x64.exe ;;
-          *) echo "unsupported runner: $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
-        esac
-        mkdir -p ~/.local/bin
-        bin="$HOME/.local/bin/tailwindcss"
-        if [[ "$RUNNER_OS" == "Windows" ]]; then
-          bin="$bin.exe"
-        fi
-        curl -sSfL --retry 3 -o "$bin" \
-          "https://github.com/tailwindlabs/tailwindcss/releases/download/${{ inputs.tailwind-version }}/$asset"
-        chmod +x "$bin"
+      # Verifies the download against the SHA-256 the script pins per asset.
+      run: bash "$GITHUB_WORKSPACE/scripts/install-tailwind.sh" "${{ inputs.tailwind-version }}" "$HOME/.local/bin"
 
     - name: Add Tailwind to PATH
       shell: bash
@@ -162,6 +153,33 @@ runs:
     - name: Verify Tailwind version
       shell: bash
       run: tailwindcss --version
+
+    # fastembed's build script downloads the ONNX Runtime prebuilt into the
+    # user cache directory. Keeping it means a build doesn't depend on that
+    # download, and release builds restore it from main's caches. Keep the
+    # paths identical to the restore step in release.yml: the cache version
+    # is computed from them.
+    - name: Cache ONNX Runtime download
+      if: inputs.save-cache == 'true'
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      with:
+        path: |
+          ~/.cache/ort.pyke.io
+          ~/Library/Caches/ort.pyke.io
+          ~/AppData/Local/ort.pyke.io
+        key: ort-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: ort-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Restore ONNX Runtime download (restore-only)
+      if: inputs.save-cache != 'true'
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      with:
+        path: |
+          ~/.cache/ort.pyke.io
+          ~/Library/Caches/ort.pyke.io
+          ~/AppData/Local/ort.pyke.io
+        key: ort-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: ort-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Setup Cargo optimizations
       shell: bash

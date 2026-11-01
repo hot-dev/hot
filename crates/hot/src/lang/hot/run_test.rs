@@ -573,6 +573,41 @@ e Email({value: "a@b.com"})
         );
     }
 
+    /// A namespaced call runs the overload of its arity. It used to run the
+    /// first overload declared, whatever its arity, when the argument types
+    /// weren't known: `::hot::time/PlainDate(s)` returned today's date
+    /// through `PlainDate()`, and a predicate calling it read the clock.
+    #[test]
+    fn namespaced_calls_run_the_overload_of_their_arity() {
+        let src = r#"::lib ns
+Stamp type { label: Str }
+fn (): Stamp { Stamp({label: "none"}) },
+(label: Str): Stamp { Stamp({label: label}) }
+pick fn (flag: Bool, lazy other: Any): Any { if(flag, "skipped", do(other)) }
+
+::t ns
+::time ::hot::time
+::l ::lib
+Day type Str where is-ok(::hot::time/PlainDate(%))
+dynamic fn (x: Any): Any { x }
+date-of fn (s: Str): Any { ::time/PlainDate(s) }
+label-of fn (s): Str { ::lib/Stamp(s).label }
+probe fn (): Vec {
+    date date-of("2024-12-25")
+    [::time/year(date), ::time/month(date), ::time/day(date),
+     is-err(date-of("nope")),
+     label-of("given"), ::l/Stamp().label,
+     Day(dynamic("2024-12-25")), is-err(Day(dynamic("x"))),
+     ::l/pick(true, fail("evaluated"))]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([2024, 12, 25, true, "given", "none", "2024-12-25", true, "skipped"]),
+        );
+    }
+
     /// A parameter or local binding shadows a function of the same name, for
     /// calls and references and whatever the declaration order. The compiler
     /// used to bind the name to a function registered before the body was
@@ -706,6 +741,221 @@ ser-map fn (n: Int): Map {
                 crate::val!({"a": 1, "b": 2}),
                 Val::Vec(vec![Val::Int(4), Val::Int(6)]),
                 crate::val!({"a": 4, "b": 6}),
+            ]),
+        );
+    }
+
+    /// A collecting flow holds only its own bindings. A function or lambda
+    /// called inside it binds its checked parameters and locals in its own
+    /// frame: the interpreter added `r`, `k`, `z` and `w` to the caller's map.
+    #[test]
+    fn calls_add_nothing_to_a_callers_collected_flow() {
+        let src = r#"::t ns
+Refined type { n: Int where gt(%, 0) }
+read-refined fn (r: Refined): Int { r.n }
+read-positive fn (k: Int where gt(%, 0)): Int { k }
+read-local fn (q: Int): Int {
+    z add(q, 1)
+    z
+}
+calls-refined fn serial (x: Refined): All<Map> {
+    y read-refined(x)
+    status y
+}
+calls-positive fn serial (x: Int): All<Map> {
+    y read-positive(x)
+    status y
+}
+calls-local fn (x: Int): All<Map> {
+    y read-local(x)
+    status y
+}
+calls-lambda fn (xs: Vec): All<Map> {
+    doubled map(xs, (v) {
+        w mul(v, 2)
+        w
+    })
+    n length(doubled)
+}
+calls-positive-vec fn serial (x: Int): All<Vec> {
+    y read-positive(x)
+    status y
+}
+calls-in-parallel fn parallel (x: Int): All<Map> {
+    a read-positive(x)
+    b read-local(x)
+}
+[
+    keys(calls-refined(Refined(n: 1))),
+    keys(calls-positive(1)),
+    keys(calls-local(1)),
+    calls-lambda([1, 2]),
+    calls-positive-vec(1),
+    calls-in-parallel(1),
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &crate::val!([
+                ["y", "status"],
+                ["y", "status"],
+                ["y", "status"],
+                {"doubled": [2, 4], "n": 2},
+                [1, 1],
+                {"a": 1, "b": 2},
+            ]),
+        );
+    }
+
+    /// `cond` and `match` collect only the first matching arm under
+    /// `All<Vec>` or `All<Map>`, in compiled code too. Compiled code ran on
+    /// into the later arms, so `match 1 { 1 => ... _ => ... }` gave both.
+    #[test]
+    fn collecting_cond_and_match_stop_at_the_first_match() {
+        let src = r#"::t ns
+first-vec fn (x: Int): Vec {
+    v: All<Vec> match x {
+        1 => { `one ${x}` }
+        2 => { {two: x} }
+        _ => { "other" }
+    }
+    v
+}
+first-map fn (x: Int): Map {
+    v: All<Map> match x {
+        1 => { `one ${x}` }
+        _ => { "other" }
+    }
+    v
+}
+first-cond fn (x: Int): Vec {
+    label `n${x}`
+    v: All<Vec> cond {
+        gt(x, 10) => { concat(label, " big") }
+        gt(x, 0) => { concat(label, " positive") }
+        => { concat(label, " other") }
+    }
+    v
+}
+body-match fn (x: Int): All<Vec> {
+    match x {
+        1 => { "one" }
+        _ => { "other" }
+    }
+}
+[
+    map(range(0, 4), first-vec),
+    first-map(1),
+    first-map(5),
+    map([20, 3, -1], first-cond),
+    [body-match(1), body-match(2)],
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &crate::val!([
+                [["other"], ["one 1"], [{"two": 2}], ["other"]],
+                {"1": "one 1"},
+                {"_": "other"},
+                [["n20 big"], ["n3 positive"], ["n-1 other"]],
+                [["one"], ["other"]],
+            ]),
+        );
+    }
+
+    /// In a flow function's body, a line that pipes a name (`x |> add(1)`,
+    /// `st.a |> add(1)`) is an expression, not a binding of that name. It
+    /// was a parse error ("Expected value") after the name.
+    #[test]
+    fn flow_body_line_can_pipe_a_name() {
+        let src = r#"::t ns
+inc fn serial (x: Int): Int { x |> add(1) }
+both fn serial (x: Int): All<Vec> {
+    a x
+    a |> add(1)
+}
+field fn serial (x: Int): Int {
+    st {a: x}
+    st.a |> mul(3)
+}
+fan fn parallel (x: Int): All<Vec> {
+    x |> add(1)
+    x |> mul(3)
+}
+[inc(1), both(1), field(2), fan(2)]"#;
+        assert_same_with_and_without_jit(src, &crate::val!([2, [1, 2], 6, [3, 6]]));
+    }
+
+    /// `All<Map>` on a pipe keys each stage by position, with keys that show
+    /// when the map is printed. They were `$pipe_0`, ..., which read as type
+    /// tags and printed as `{}`, and compiled code keyed every stage
+    /// `$pipe_0`, keeping only the last.
+    #[test]
+    fn pipe_all_map_keys_every_stage() {
+        let src = r#"::t ns
+stages fn (x: Int): Map {
+    m: All<Map> x |> add(2) |> mul(3)
+    m
+}
+staged fn (x: Int): All<Map> { x |> add(1) }
+[map([5, 6], stages), Str(stages(5)), staged(1)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &crate::val!([
+                [
+                    {"pipe_0": 5, "pipe_1": 7, "pipe_2": 21},
+                    {"pipe_0": 6, "pipe_1": 8, "pipe_2": 24},
+                ],
+                "{pipe_0: 5, pipe_1: 7, pipe_2: 21}",
+                {"pipe_0": 1, "pipe_1": 2},
+            ]),
+        );
+    }
+
+    /// A plain `fn` body that is one flow takes an `All` return annotation
+    /// on that flow, as a binding of it does: a pipe collects its stages.
+    /// The annotation used to shape the implicit serial body, which binds
+    /// nothing, so these returned `[]`.
+    #[test]
+    fn single_flow_fn_body_takes_the_all_annotation() {
+        let src = r#"::t ns
+pipe-trace fn (x: Int): All<Vec> { x |> add(1) |> mul(2) |> sub(3) }
+pipe-lines fn (x: Int): All<Vec> {
+    x
+        |> add(1)
+        |> mul(2)
+}
+checks fn (x: Int): All<Vec> {
+    cond-all {
+        gt(x, 0) => a { "positive" }
+        gt(x, 10) => b { "big" }
+        => c { "any" }
+    }
+}
+both fn (x: Int): All<Vec> {
+    parallel {
+        a add(x, 1)
+        b add(x, 2)
+    }
+}
+both-named fn (x: Int): All {
+    parallel {
+        a add(x, 1)
+        b add(x, 2)
+    }
+}
+bindings fn (x: Int): All<Vec> {
+    a x
+    x |> add(1)
+}
+[pipe-trace(5), pipe-lines(1), checks(5), both(1), both-named(1), bindings(1)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &crate::val!([
+                [5, 6, 12, 9],
+                [1, 2, 4],
+                ["positive", "any"],
+                [2, 3],
+                {"a": 2, "b": 3},
+                [1],
             ]),
         );
     }
@@ -951,6 +1201,82 @@ probe()"#;
                 "s",
                 "d",
                 ["e"]
+            ]),
+        );
+    }
+
+    /// A refinement or literal union as an enum payload, named or an inline
+    /// `where`, checks the payload as a record field of that type would.
+    #[test]
+    fn enum_payloads_check_their_refinements() {
+        let src = r#"::t ns
+Positive type Int where gt(%, 0)
+Fruit type "apple" | "banana"
+Due enum { Hours(Positive), Days(Int where gt(%, 0)), Pick(Fruit), Many(Vec<Positive>) }
+dynamic fn (x: Any): Any { x }
+probe fn (): Vec {
+    [is-err(Due.Hours(dynamic(0))), untype(Due.Hours(dynamic(2))),
+     is-err(Due.Days(dynamic(-1))), untype(Due.Days(dynamic(3))),
+     is-err(Due.Pick(dynamic("pear"))), untype(Due.Pick(dynamic("apple"))),
+     is-err(Due.Many(dynamic([1, 0]))), untype(Due.Many(dynamic([1, 2])))]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([true, 2, true, 3, true, "apple", true, [1, 2]]),
+        );
+    }
+
+    /// A record field or enum payload whose type declares a constructor for
+    /// the value's type builds through it, as a call would: a time type
+    /// parses a Str, and a bad Str is an Err. A field used to tag the Str
+    /// as it was, so `found-at: "nonsense"` passed and a ZonedDateTime field
+    /// read as 1970. A constructor that doesn't convert (`Uuid(7)` makes a
+    /// new id) is not called on the value.
+    #[test]
+    fn typed_fields_build_through_the_constructor_for_their_value() {
+        let src = r#"::t ns
+::time ::hot::time
+Form type { found-at: ::time/PlainDate, seen: ::time/PlainDate?, days: Vec<::time/PlainDate> }
+Policy type { effective: ::time/ZonedDateTime }
+Found enum { At(::time/PlainDate) }
+Keyed type { id: Uuid }
+dynamic fn (x: Any): Any { x }
+probe fn (): Vec {
+    form Form({found-at: dynamic("2026-01-02"), seen: null, days: ["2026-01-03"]})
+    named Form(found-at: "2026-02-03", seen: "2026-02-04", days: [])
+    policy Policy({effective: dynamic("2027-01-01T05:00:00Z[UTC]")})
+    id Uuid(7)
+    [is-type(form.found-at, ::time/PlainDate), Str(form.found-at), is-null(form.seen),
+     map(form.days, Str(%)), Str(named.seen),
+     ::time/epoch-millis(::time/to-instant(policy.effective)),
+     is-err(Form({found-at: dynamic("nonsense"), seen: null, days: []})),
+     is-err(Form({found-at: "2026-01-02", seen: dynamic("nope"), days: []})),
+     is-err(Form({found-at: "2026-01-02", seen: null, days: dynamic(["nope"])})),
+     is-err(Policy({effective: dynamic("2027-01-01")})),
+     get(untype(Found.At(dynamic("2026-05-06"))), "day"),
+     is-err(Found.At(dynamic("nope"))),
+     eq(Str(Keyed({id: id}).id), Str(id))]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([
+                true,
+                "2026-01-02",
+                true,
+                ["2026-01-03"],
+                "2026-02-04",
+                1_798_779_600_000_i64,
+                true,
+                true,
+                true,
+                true,
+                6,
+                true,
+                true
             ]),
         );
     }

@@ -299,7 +299,7 @@ Hot has no infix operators. Use functions instead:
 | `a && b` | `and(a, b)` | `and(true, false)` → `false` |
 | `a \|\| b` | `or(a, b)` | `or(true, false)` → `true` |
 | `!a` | `not(a)` | `not(true)` → `false` |
-| `-a` | `neg(a)` | `neg(5)` → `-5` |
+| `-a` | `sub(0, a)` | `sub(0, 5)` → `-5` (there is no `neg`; a literal `-5` is fine) |
 
 ## Conditionals
 

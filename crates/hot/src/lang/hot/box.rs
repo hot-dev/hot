@@ -33,6 +33,10 @@ const BOX_START_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// write because it aggregates usage across several tables.
 const BOX_QUOTA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// The function every container task row names. `start` is the only way to
+/// create one; `::hot::task/start` refuses `type: "container"`.
+pub const START_FUNCTION: &str = "::hot::box/start";
+
 // =============================================================================
 // Image Denylist
 // =============================================================================
@@ -199,7 +203,7 @@ pub fn start(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
 
     let request = TaskRequest {
         task_id: task_id.to_string(),
-        function_name: "::hot::box/start".to_string(),
+        function_name: START_FUNCTION.to_string(),
         args: args_json.clone(),
         stream_id: stream_id.to_string(),
         env_id: env_id.to_string(),
@@ -231,9 +235,9 @@ pub fn start(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                 &stream_id,
                 Some(&build_id),
                 ctx.run_type_id,
-                None,
+                ctx.origin_run_id.as_ref(),
                 &ctx.user_id.unwrap_or(uuid::Uuid::nil()),
-                ctx.org_id.as_ref(),
+                ctx.access_id.as_ref(),
             ),
         )
         .await
@@ -267,7 +271,7 @@ pub fn start(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                 &stream_id,
                 &build_id,
                 Some(&ctx.run_id),
-                "::hot::box/start",
+                START_FUNCTION,
                 args_opt,
                 None,
                 "container",
@@ -551,13 +555,17 @@ fn validate_and_parse(args: &[Val]) -> Result<BoxConf, HotResult<Val>> {
 
 /// Parse the optional `mounts:` field of a BoxConf.
 ///
-/// Two accepted shapes for ergonomic specification:
+/// Three accepted shapes:
 ///
-/// 1. **Map of container-path → resource-subpath** (read-only by default):
+/// 1. **Vec of `BoxMount` records**, as `BoxConf` declares it (read-only):
+///    ```hot
+///    mounts: [BoxMount({resource: "node-app", dest: "/app"})]
+///    ```
+/// 2. **Map of container-path → resource-subpath** (read-only by default):
 ///    ```hot
 ///    mounts: {"/app": "node-app", "/data/seed": "seeds/v1"}
 ///    ```
-/// 2. **Map of container-path → spec map** (advanced; can opt out of RO):
+/// 3. **Map of container-path → spec map** (advanced; can opt out of RO):
 ///    ```hot
 ///    mounts: {"/app": {path: "node-app", readonly: false}}
 ///    ```
@@ -567,9 +575,12 @@ fn parse_mounts(raw: Option<&Val>) -> Result<Vec<BoxMount>, String> {
     let map = match raw {
         None | Some(Val::Null) => return Ok(Vec::new()),
         Some(Val::Map(m)) => m,
+        Some(Val::Vec(records)) => return parse_mount_records(records),
         Some(_) => {
             return Err(
-                "'mounts' field must be a Map of container-path → resource-path".to_string(),
+                "'mounts' field must be a Vec of BoxMount records or a Map of \
+                 container-path → resource-path"
+                    .to_string(),
             );
         }
     };
@@ -616,6 +627,31 @@ fn parse_mounts(raw: Option<&Val>) -> Result<Vec<BoxMount>, String> {
             }
         };
         out.push(mount);
+    }
+    Ok(out)
+}
+
+/// The `Vec<BoxMount>` form of `mounts`: `{resource, dest}` records, all
+/// read-only.
+fn parse_mount_records(records: &[Val]) -> Result<Vec<BoxMount>, String> {
+    let mut out = Vec::with_capacity(records.len());
+    for (index, record) in records.iter().enumerate() {
+        let Val::Map(record) = record else {
+            return Err(format!(
+                "'mounts[{index}]' must be a BoxMount record with `resource` and `dest`"
+            ));
+        };
+        let field = |name: &str| match record.get(&Val::from(name)) {
+            Some(Val::Str(s)) => Ok(s.to_string()),
+            _ => Err(format!("'mounts[{index}].{name}' must be a string")),
+        };
+        let container_path = field("dest")?;
+        validate_container_path(&container_path)?;
+        out.push(BoxMount {
+            container_path,
+            resource_path: validate_resource_path(&field("resource")?)?,
+            readonly: true,
+        });
     }
     Ok(out)
 }
@@ -806,6 +842,10 @@ async fn enforce_cus_quota_uncached(
             .as_ref()
             .ok()
             .and_then(|s| s.current_period_start),
+        subscription
+            .as_ref()
+            .ok()
+            .and_then(|s| s.current_period_end),
     );
 
     let usage = crate::db::subscription::OrgUsageStats::calculate_account(
@@ -1041,8 +1081,9 @@ pub fn allowed_images(_args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::Map(Box::new(result)))
 }
 
-/// Check whether box (container execution) is enabled via conf.
-fn is_box_enabled_from_conf(conf: &Val) -> bool {
+/// Check whether box (container execution) is enabled via conf. The task
+/// worker checks its own conf too before running a container.
+pub fn is_box_enabled_from_conf(conf: &Val) -> bool {
     if let Some(val) = conf.get("box.enabled") {
         match val {
             Val::Bool(b) => return b,
@@ -1143,6 +1184,10 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                     .as_ref()
                     .ok()
                     .and_then(|s| s.current_period_start),
+                subscription
+                    .as_ref()
+                    .ok()
+                    .and_then(|s| s.current_period_end),
             );
 
             let usage = crate::db::subscription::OrgUsageStats::calculate_account(
@@ -1618,6 +1663,59 @@ mod tests {
                 reserved,
                 err
             );
+        }
+    }
+
+    /// The `Vec<BoxMount>` form `BoxConf` declares and documents.
+    #[test]
+    fn test_mounts_box_mount_records_are_readonly() {
+        let input = crate::val!({
+            "$type": "::hot::box/BoxConf",
+            "$val": {
+                "image": "node:20-alpine",
+                "mounts": [
+                    {
+                        "$type": "::hot::box/BoxMount",
+                        "$val": {"resource": "fetcher/index.js", "dest": "/app/index.js"}
+                    },
+                    {"resource": "/prompts/", "dest": "/app/prompts"}
+                ]
+            }
+        });
+        let parsed = validate_and_parse(&[input]).unwrap();
+        let mounts: Vec<_> = parsed
+            .mounts
+            .iter()
+            .map(|m| {
+                (
+                    m.container_path.as_str(),
+                    m.resource_path.as_str(),
+                    m.readonly,
+                )
+            })
+            .collect();
+        assert_eq!(
+            mounts,
+            [
+                ("/app/index.js", "fetcher/index.js", true),
+                ("/app/prompts", "prompts", true)
+            ]
+        );
+
+        for (mounts, expected) in [
+            (crate::val!([{"resource": "fetcher"}]), "mounts[0].dest"),
+            (crate::val!([{"resource": "x", "dest": "app"}]), "absolute"),
+            (
+                crate::val!([{"resource": "../x", "dest": "/app"}]),
+                "not allowed",
+            ),
+            (crate::val!(["fetcher"]), "BoxMount record"),
+        ] {
+            let input = crate::val!({"image": "alpine:3.21", "mounts": mounts});
+            let Err(HotResult::Err(err)) = validate_and_parse(&[input]) else {
+                panic!("expected {expected}");
+            };
+            assert!(err.to_string().contains(expected), "{err}");
         }
     }
 

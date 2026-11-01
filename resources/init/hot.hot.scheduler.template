@@ -36,5 +36,3 @@ hot.scheduler.retry-interval-seconds Int(::env/get("HOT_SCHEDULER_RETRY_INTERVAL
 hot.scheduler.at-interval-seconds Int(::env/get("HOT_SCHEDULER_AT_INTERVAL_SECONDS", "1"))
 hot.scheduler.singleton Bool(::env/get("HOT_SCHEDULER_SINGLETON", "true"))
 
-// Daemon Mode
-hot.daemon true

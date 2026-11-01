@@ -13,6 +13,7 @@ use ariadne::{ColorGenerator, Config, Label, Report, ReportKind};
 use indexmap::IndexMap;
 use std::iter::Iterator;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Location information for parse errors.
 #[derive(Debug, Clone, PartialEq)]
@@ -127,21 +128,46 @@ pub struct Parser {
     current_namespace: NsPath,
     file_path: Option<PathBuf>,
     source_content: Option<String>, // Store source for error reporting
-    var_counter: usize,             // Counter for auto-generated variable names
+    /// The characters of `source_content`, which token positions index.
+    /// Collected when a template literal first needs them.
+    source_chars: Option<Arc<[char]>>,
+    var_counter: usize, // Counter for auto-generated variable names
     /// Hidden declarations made by `where` clauses (predicate functions and
     /// inline refinement types), added to their namespace after the
     /// statement that declared them.
     pending_hidden: Vec<(NsPath, Var, Value)>,
-    /// A `where` error. It has no other reading, so a fallback that
+    /// An error no other reading of the statement avoids: a `where`
+    /// misuse, or nesting past `MAX_NESTING_DEPTH`. A fallback that
     /// re-parses the statement another way reports it instead.
-    where_error: Option<ParseError>,
+    unavoidable_error: Option<ParseError>,
     /// Template expressions parsed so far, to name each one's `where`
     /// declarations uniquely.
     template_expressions: usize,
-    /// Mixed into `where` declaration names. A template expression's parser
-    /// counts lines and columns from the start of the expression, so its
-    /// positions alone don't tell its declarations apart.
+    /// Mixed into `where` declaration names. A template expression's
+    /// positions are mapped back into the file, approximately when escapes
+    /// precede them, so they alone don't tell its declarations apart.
     where_salt: Option<String>,
+    /// How many expressions, function definitions and types enclose the
+    /// one being parsed. See `MAX_NESTING_DEPTH`.
+    depth: usize,
+}
+
+/// How deeply expressions, function definitions and types may nest. The
+/// parser and the passes after it recurse once or more per level, so a
+/// deeper program would overflow the stack instead of failing with an error.
+/// Counted per expression, so a `cond` arm block counts twice: the arm's
+/// `{ ... }` and the expression in it. The `hot` CLI sizes its Rayon
+/// threads' stacks (`main_with_providers`) to load an AST this deep from
+/// the cache; Hot's own packages nest at most 15 levels.
+const MAX_NESTING_DEPTH: usize = 256;
+
+/// A point in the source, as a token records it: a character position,
+/// and a line and column counted from 1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SourcePoint {
+    position: usize,
+    line: u32,
+    column: u32,
 }
 
 /// A parsed `where <predicate>` clause.
@@ -237,12 +263,32 @@ impl Parser {
             current_namespace: NsPath::new(),
             file_path: None,
             source_content: None,
+            source_chars: None,
             var_counter: 0,
             pending_hidden: Vec::new(),
-            where_error: None,
+            unavoidable_error: None,
             template_expressions: 0,
             where_salt: None,
+            depth: 0,
         }
+    }
+
+    /// Parse one nesting level deeper, failing with an error at the current
+    /// token past `MAX_NESTING_DEPTH` levels.
+    fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> ParseResult<T>) -> ParseResult<T> {
+        if self.depth >= MAX_NESTING_DEPTH {
+            let error = self.error(&format!(
+                "Nesting is too deep: expressions can nest at most {MAX_NESTING_DEPTH} levels. Bind inner values to names or move them into functions"
+            ));
+            // Every other reading nests as deeply, so keep a fallback from
+            // hiding it.
+            self.unavoidable_error = Some(error.clone());
+            return Err(error);
+        }
+        self.depth += 1;
+        let result = parse(self);
+        self.depth -= 1;
+        result
     }
 
     pub fn with_file_context(mut self, file_path: String, source_content: String) -> Self {
@@ -884,9 +930,11 @@ impl Parser {
                                 };
                                 let has_whitespace =
                                     next_token.column > current_token.column + var_name_len as u32;
-                                !has_whitespace
-                                    && self.adjacent_bracket_path_is_standalone(&current_token)
+                                !has_whitespace && self.adjacent_path_is_standalone(&current_token)
                             }
+                            // `a.b value` deep-assigns. `a.b(args)` calls and
+                            // `a.b` alone reads, as in a function body.
+                            TokenType::Dot => self.adjacent_path_is_standalone(&current_token),
                             TokenType::RightBrace | TokenType::Comma => true, // End of scope or followed by comma
                             _ => false, // Likely a variable assignment
                         }
@@ -926,8 +974,8 @@ impl Parser {
                         (var, value)
                     }
                     Err(e) => {
-                        if let Some(where_error) = self.where_error.take() {
-                            return Err(where_error);
+                        if let Some(error) = self.unavoidable_error.take() {
+                            return Err(error);
                         }
                         tracing::trace!(
                             "Failed to parse as variable definition ({}), treating as bare expression",
@@ -1514,6 +1562,10 @@ impl Parser {
 
     /// Parse function definitions.
     fn parse_function(&mut self) -> ParseResult<Value> {
+        self.nested(Self::parse_function_at_depth)
+    }
+
+    fn parse_function_at_depth(&mut self) -> ParseResult<Value> {
         let mut definitions = Vec::new();
 
         // Skip newlines after 'fn' keyword
@@ -1657,6 +1709,29 @@ impl Parser {
         }
 
         Ok(value)
+    }
+
+    /// Apply a plain `fn`'s result annotation to its body. A braced body is
+    /// an implicit serial flow, which collects only bindings, so when the
+    /// body is one flow expression an `All` annotation shapes that flow
+    /// instead, as it does on a binding: `fn (x): All<Vec> { x |> add(1) }`
+    /// collects the pipe's stages like `steps: All<Vec> x |> add(1)`.
+    fn apply_all_annotation_to_fn_body(
+        &mut self,
+        mut body: Value,
+        return_type: Option<&TypeExpr>,
+    ) -> ParseResult<Value> {
+        if let (Some(annotation), Value::Flow(flow)) = (return_type, &mut body)
+            && Self::is_all_annotation(annotation)
+            && flow.flow_type == FlowType::Serial
+            && flow.result_modifier.is_none()
+            && let [only @ (Value::Flow(_) | Value::Match(_))] = flow.expressions.as_mut_slice()
+        {
+            let inner = std::mem::replace(only, Value::Val(Val::Null, None));
+            *only = self.apply_all_annotation_to_value(inner, Some(annotation))?;
+            return Ok(body);
+        }
+        self.apply_all_annotation_to_value(body, return_type)
     }
 
     fn all_annotation_modifier(
@@ -2450,6 +2525,7 @@ impl Parser {
                                             | TokenType::RightBrace
                                             | TokenType::LeftParen
                                             | TokenType::Pipe
+                                            | TokenType::PipeOp
                                             | TokenType::Arrow
                                             | TokenType::Comma
                                     )
@@ -2481,7 +2557,9 @@ impl Parser {
                                 && Some(t.position) == ident_token_end
                         });
                         let is_method_access = self.check(&TokenType::Dot);
-                        let is_pipe = self.check(&TokenType::Pipe);
+                        // `name |> f()` pipes the name's value; it binds nothing.
+                        let is_pipe =
+                            self.check(&TokenType::Pipe) || self.check(&TokenType::PipeOp);
                         let is_newline_or_end = self.check(&TokenType::Newline)
                             || self.check(&TokenType::RightBrace)
                             || self.check(&TokenType::Comma);
@@ -2793,7 +2871,7 @@ impl Parser {
             // Simple expression as function body
             self.parse_value()?
         };
-        let body = self.apply_all_annotation_to_value(body, return_type_expr.as_ref())?;
+        let body = self.apply_all_annotation_to_fn_body(body, return_type_expr.as_ref())?;
         let return_type = return_type_expr.map(|type_expr| type_expr.to_string());
 
         Ok(FnDef {
@@ -3478,9 +3556,10 @@ impl Parser {
 
     /// Parse a variant's payload type after its `(`, through the `)`: any
     /// type expression (`Type`, `::ns/Type`, `Vec<Type>`, `Type?`, `A | B`),
-    /// kept as its annotation text.
+    /// kept as its annotation text. An inline `where` (`Int where gt(%, 0)`)
+    /// declares a hidden refinement type, as it does for a field.
     fn parse_variant_payload(&mut self) -> ParseResult<String> {
-        let payload = self.parse_union_type()?;
+        let payload = self.parse_type_ref()?;
         if !self.check(&TokenType::RightParen) {
             return Err(self.error("Expected ')' after variant type reference"));
         }
@@ -3629,6 +3708,10 @@ impl Parser {
 
     /// Parse a primary value.
     fn parse_primary_value(&mut self) -> ParseResult<Value> {
+        self.nested(Self::parse_primary_value_at_depth)
+    }
+
+    fn parse_primary_value_at_depth(&mut self) -> ParseResult<Value> {
         match self.peek() {
             Some(token) => match &token.token_type {
                 // Raw (no-unwrap) prefix: !value
@@ -3668,9 +3751,10 @@ impl Parser {
                 // Template literals: `hello ${name}`
                 TokenType::TemplateString(content) => {
                     let content = content.clone();
+                    let template = token.clone();
                     self.next();
                     // Parse the template literal content to extract text and expression parts
-                    let parts = self.parse_template_literal_parts(&content)?;
+                    let parts = self.parse_template_literal_parts(&content, &template)?;
                     Ok(Value::TemplateLiteral(TemplateLiteral { parts }))
                 }
 
@@ -4627,6 +4711,8 @@ impl Parser {
     /// - `::namespace::path/Type.Variant` - enum variant reference, kept in
     ///   `function_name` as `Type.Variant`, the name its constructor is
     ///   registered under
+    ///
+    /// An index or a longer path after the reference is an error.
     fn parse_qualified_reference(&mut self) -> ParseResult<Value> {
         // Capture position of the leading :: for source tracking
         let start_token = self.peek().cloned();
@@ -4690,6 +4776,31 @@ impl Parser {
                 .collect(),
         );
 
+        // A qualified reference keeps no path past `Type.Variant` (or
+        // `config.port`, read the same way), so `::ns/items[1]` would drop
+        // its index and `::ns/config.db.host` its last field. Refuse them.
+        let path_follows = self.peek().is_some_and(|next| match next.token_type {
+            TokenType::Dot => true,
+            TokenType::LeftBracket => {
+                last_token_end.is_some_and(|(position, length)| next.position == position + length)
+            }
+            _ => false,
+        });
+        if path_follows {
+            let root = _var_name
+                .as_deref()
+                .map(|name| name.split_once('.').map_or(name, |(root, _)| root));
+            let hint = match root {
+                Some(root) => format!(
+                    "Bind it to a name first, as in `{root} {ns_path}/{root}`, then use the name: `{root}[0]`, `{root}.a.b`"
+                ),
+                None => "Bind it to a name first, then use the name".to_string(),
+            };
+            return Err(self.error(&format!(
+                "A qualified reference can't be indexed or take a path past one `.name`. {hint}"
+            )));
+        }
+
         // Build source location spanning from :: through the function name
         let src = start_token.map(|st| {
             let end = last_token_end
@@ -4723,16 +4834,32 @@ impl Parser {
         }
     }
 
-    /// Parse template literal content into text and expression parts
-    fn parse_template_literal_parts(&mut self, content: &str) -> ParseResult<Vec<TemplatePart>> {
+    /// Parse template literal content into text and expression parts.
+    /// `template` is the literal's token, which places its expressions in
+    /// the source.
+    fn parse_template_literal_parts(
+        &mut self,
+        content: &str,
+        template: &Token,
+    ) -> ParseResult<Vec<TemplatePart>> {
         let mut parts = Vec::new();
         let mut chars = content.chars().peekable();
         let mut current_text = String::new();
+        let expression_starts = self.template_expression_starts(template);
+        let mut expressions = 0;
 
         while let Some(ch) = chars.next() {
             if ch == '$' && chars.peek() == Some(&'{') {
                 // Found start of expression ${
                 chars.next(); // consume '{'
+                let start = expression_starts.as_ref().map(|starts| {
+                    starts.get(expressions).copied().unwrap_or(SourcePoint {
+                        position: template.position,
+                        line: template.line,
+                        column: template.column,
+                    })
+                });
+                expressions += 1;
 
                 // Add any accumulated text as a text part
                 if !current_text.is_empty() {
@@ -4757,22 +4884,35 @@ impl Parser {
                 }
 
                 if brace_depth > 0 {
+                    // Point at the `${`, two characters before the expression.
+                    let (line, column, position) = match start {
+                        Some(start) => (
+                            start.line as usize,
+                            start.column.saturating_sub(2).max(1) as usize,
+                            start.position.saturating_sub(2),
+                        ),
+                        None => (
+                            template.line as usize,
+                            template.column as usize,
+                            template.position,
+                        ),
+                    };
                     return Err(ParseError {
                         message: format!("Unterminated template expression: ${{{}", expr_content),
                         location: ErrorLocation {
-                            line: 0,
-                            column: 0,
-                            position: 0,
-                            length: expr_content.len(),
-                            file: None,
+                            line,
+                            column,
+                            position,
+                            length: 2,
+                            file: self.file_path.clone(),
                         },
-                        source_context: None,
+                        source_context: self.source_content.clone(),
                     });
                 }
 
                 // Parse the expression content as Hot code
                 if !expr_content.is_empty() {
-                    let expr_value = self.parse_expression_from_string(&expr_content)?;
+                    let expr_value = self.parse_expression_from_string(&expr_content, start)?;
                     parts.push(TemplatePart::Expression(Box::new(expr_value)));
                 }
             } else {
@@ -4794,59 +4934,132 @@ impl Parser {
         Ok(parts)
     }
 
-    /// Parse a Hot expression from a string
-    fn parse_expression_from_string(&mut self, expr_str: &str) -> ParseResult<Value> {
+    /// Where each `${` of the template literal `template` opens its
+    /// expression in the source: the point just past the `{`, in order.
+    /// Decoding escapes and stripping a block template's indentation change
+    /// the token's content but not its `${` delimiters or braces, so the
+    /// source text is scanned the way `parse_template_literal_parts` scans
+    /// the content. `None` when the parser has no source text.
+    fn template_expression_starts(&mut self, template: &Token) -> Option<Vec<SourcePoint>> {
+        if self.source_chars.is_none() {
+            self.source_chars = self
+                .source_content
+                .as_deref()
+                .map(|source| source.chars().collect());
+        }
+        let chars = self.source_chars.as_deref()?;
+        let end = (template.position + template.length).min(chars.len());
+        let mut starts = Vec::new();
+        let mut point = SourcePoint {
+            position: template.position,
+            line: template.line,
+            column: template.column,
+        };
+        let mut brace_depth = 0usize;
+        while point.position < end {
+            let ch = chars[point.position];
+            if brace_depth == 0 {
+                if ch == '$' && chars.get(point.position + 1) == Some(&'{') {
+                    point.position += 2;
+                    point.column += 2;
+                    starts.push(point);
+                    brace_depth = 1;
+                    continue;
+                }
+            } else if ch == '{' {
+                brace_depth += 1;
+            } else if ch == '}' {
+                brace_depth -= 1;
+            }
+            point.position += 1;
+            if ch == '\n' {
+                point.line += 1;
+                point.column = 1;
+            } else {
+                point.column += 1;
+            }
+        }
+        Some(starts)
+    }
+
+    /// Parse a Hot expression from a string: a template literal's `${...}`.
+    /// `start` is where the expression starts in the source, so its tokens,
+    /// and the errors and spans made from them, point into the file.
+    fn parse_expression_from_string(
+        &mut self,
+        expr_str: &str,
+        start: Option<SourcePoint>,
+    ) -> ParseResult<Value> {
         // Create a new lexer for the expression string
         let mut expr_lexer = crate::lang::lexer::Lexer::new(expr_str);
         let mut expr_tokens = expr_lexer.tokenize();
-        // Report lines and columns from the template's place in the file
-        // (columns on its first line only approximately). Positions stay
-        // relative to the expression, whose text the parser reads.
-        if let Some(template) = self
-            .token_index
-            .checked_sub(1)
-            .and_then(|i| self.tokens.get(i))
-        {
-            for token in &mut expr_tokens {
-                if token.line == 1 {
-                    token.column += template.column;
-                }
-                token.line += template.line.saturating_sub(1);
-            }
+        // The expression's own text has decoded escapes and loses a block
+        // template's indentation, so positions after those are approximate.
+        let place = |line: u32, column: u32, position: usize| match start {
+            Some(start) => (
+                line + start.line - 1,
+                if line == 1 {
+                    column + start.column - 1
+                } else {
+                    column
+                },
+                position + start.position,
+            ),
+            None => (line, column, position),
+        };
+        for token in &mut expr_tokens {
+            (token.line, token.column, token.position) =
+                place(token.line, token.column, token.position);
         }
 
         // Check for lexer errors
         if !expr_lexer.errors().is_empty() {
             let first_error = &expr_lexer.errors()[0];
+            let (line, column, position) = place(
+                first_error.line as u32,
+                first_error.column as u32,
+                first_error.position,
+            );
             return Err(ParseError {
                 message: format!("Lexer error in template expression: {}", first_error.kind),
                 location: ErrorLocation {
-                    line: first_error.line,
-                    column: first_error.column,
-                    position: first_error.position,
+                    line: line as usize,
+                    column: column as usize,
+                    position,
                     length: 1,
-                    file: None,
+                    file: self.file_path.clone(),
                 },
-                source_context: None,
+                source_context: self.source_content.clone(),
             });
         }
 
         // Create a new parser for the expression tokens. A `where` clause in
         // it declares hidden definitions in this namespace, like any other.
+        // Its tokens index the file's source, so it reads that source.
         self.template_expressions += 1;
         let mut expr_parser = Parser::new();
         expr_parser.tokens = expr_tokens;
         expr_parser.token_index = 0;
         expr_parser.current_namespace = self.current_namespace.clone();
         expr_parser.file_path = self.file_path.clone();
-        expr_parser.source_content = Some(expr_str.to_string());
+        if start.is_some() {
+            expr_parser.source_content = self.source_content.clone();
+            expr_parser.source_chars = self.source_chars.clone();
+        } else {
+            expr_parser.source_content = Some(expr_str.to_string());
+        }
         expr_parser.where_salt = Some(format!(
             "{}template{}",
             self.where_salt.as_deref().unwrap_or(""),
             self.template_expressions
         ));
+        // Nesting continues into the template's expressions.
+        expr_parser.depth = self.depth;
         let value = expr_parser.parse_value();
         self.pending_hidden.append(&mut expr_parser.pending_hidden);
+        if let Some(error) = expr_parser.unavoidable_error.take() {
+            self.unavoidable_error = Some(error);
+        }
         value
     }
 
@@ -5934,7 +6147,7 @@ impl Parser {
                                 // complete path.
                                 let has_whitespace =
                                     next_token.column > var_column + var_name_len as u32;
-                                has_whitespace || !self.adjacent_bracket_path_is_standalone(&token)
+                                has_whitespace || !self.adjacent_path_is_standalone(&token)
                             }
                             TokenType::String(_) => true, // identifier "string"
                             TokenType::Int(_) => true,    // identifier 42
@@ -6531,12 +6744,13 @@ impl Parser {
         self.tokens.get(self.token_index + n)
     }
 
-    /// Distinguish an indexed value expression from indexed deep assignment.
+    /// Distinguish a path value expression from deep assignment.
     ///
-    /// Both forms begin with the same adjacent path (`value[index]`). The path
-    /// is a value when it ends at a statement/expression boundary, and an
+    /// Both forms begin with the same adjacent path (`value[index]`,
+    /// `value.field`). The path is a value when it ends at a
+    /// statement/expression boundary or an adjacent `(` calls it, and an
     /// assignment target when another value follows it on the same statement.
-    fn adjacent_bracket_path_is_standalone(&self, root: &Token) -> bool {
+    fn adjacent_path_is_standalone(&self, root: &Token) -> bool {
         let mut offset = 1;
         let mut path_end = root.position + root.length;
 
@@ -6925,7 +7139,7 @@ impl Parser {
 
     /// Record a `where` error so a fallback parse can't hide it.
     fn where_err(&mut self, error: ParseError) -> ParseError {
-        self.where_error = Some(error.clone());
+        self.unavoidable_error = Some(error.clone());
         error
     }
 
@@ -7152,6 +7366,10 @@ impl Parser {
 
     /// Parse union types (Int | Str | Null)
     fn parse_union_type(&mut self) -> ParseResult<TypeExpr> {
+        self.nested(Self::parse_union_type_at_depth)
+    }
+
+    fn parse_union_type_at_depth(&mut self) -> ParseResult<TypeExpr> {
         let mut types = vec![self.parse_optional_type()?];
 
         // Parse additional union types separated by |

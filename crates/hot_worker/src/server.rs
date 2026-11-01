@@ -18,7 +18,36 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+/// Context from `hot/ctx.hot` for dev mode. Keys set there with `set-secret`
+/// are listed under [`hot::lang::hot::ctx::LOADED_SECRET_KEYS`]; runs mask
+/// their values.
 pub type DevContextStorage = Arc<RwLock<Option<AHashMap<String, hot::val::Val>>>>;
+
+/// Copy `dev_ctx` into a run's context `storage`, and record the hashes of the
+/// values `hot/ctx.hot` set with `set-secret`, so call records and logs mask
+/// them as they mask declared secrets.
+fn merge_dev_context(
+    dev_ctx: &AHashMap<String, Val>,
+    storage: &mut AHashMap<String, Val>,
+    secret_value_hashes: &mut ahash::AHashSet<u64>,
+) {
+    let secret_keys = dev_ctx.get(hot::lang::hot::ctx::LOADED_SECRET_KEYS);
+    for (key, val) in dev_ctx.iter() {
+        if key == hot::lang::hot::ctx::LOADED_SECRET_KEYS {
+            continue;
+        }
+        storage.insert(key.clone(), val.clone());
+    }
+    if let Some(Val::Vec(secret_keys)) = secret_keys {
+        for key in secret_keys.iter() {
+            if let Val::Str(key) = key
+                && let Some(value) = dev_ctx.get(&**key)
+            {
+                hot::lang::hot::ctx::hash_secret_value_recursive(value, secret_value_hashes);
+            }
+        }
+    }
+}
 type WorkerError = Box<dyn std::error::Error + Send + Sync>;
 
 enum ClaimedWorkerQueue {
@@ -973,8 +1002,51 @@ fn extract_and_precompile_event_bundle(
     extract_dir: std::path::PathBuf,
     build_id: Uuid,
     fallback_project_name: String,
+    holds_file_lock: bool,
 ) -> Result<PreparedEventBundle, String> {
-    hot::bundle::extract_bundle_from_bytes(&build_data, &extract_dir)?;
+    clear_partial_bundle_extraction(&extract_dir, holds_file_lock)?;
+    let prepared =
+        extract_and_precompile_into(&build_data, &extract_dir, build_id, fallback_project_name);
+    if prepared.is_err() && holds_file_lock {
+        // Left behind, it would make every later extraction fail.
+        let _ = std::fs::remove_dir_all(&extract_dir);
+    }
+    prepared
+}
+
+/// Remove a partial extraction of a bundle, left by a failed attempt or a
+/// worker that stopped mid-way: extracting over it fails on every file that
+/// exists. Only the holder of the build's file lock may, since another
+/// process may be extracting it.
+fn clear_partial_bundle_extraction(
+    extract_dir: &std::path::Path,
+    holds_file_lock: bool,
+) -> Result<(), String> {
+    if !extract_dir.exists() || BuildPathCache::is_extraction_complete(extract_dir) {
+        return Ok(());
+    }
+    if !holds_file_lock {
+        return Err(format!(
+            "{} is being prepared by another process",
+            extract_dir.display()
+        ));
+    }
+    std::fs::remove_dir_all(extract_dir).map_err(|error| {
+        format!(
+            "Failed to remove the partial extraction {}: {error}",
+            extract_dir.display()
+        )
+    })
+}
+
+fn extract_and_precompile_into(
+    build_data: &[u8],
+    extract_dir: &std::path::Path,
+    build_id: Uuid,
+    fallback_project_name: String,
+) -> Result<PreparedEventBundle, String> {
+    let extract_dir = extract_dir.to_path_buf();
+    hot::bundle::extract_bundle_from_bytes(build_data, &extract_dir)?;
 
     let manifest = hot::bundle::read_bundle_manifest(&extract_dir);
     let build_src_path = extract_dir.join("hot/src");
@@ -1362,6 +1434,60 @@ fn should_redeliver_event_after_handler_error(error: &str, started_any_handler: 
         && !started_any_handler
 }
 
+/// Appended to a handler error that came before its run started: no
+/// `run:start` was emitted, so none of the run's code ran and no run row
+/// records it. Only `execute_single_event_handler` appends it.
+const RUN_NOT_STARTED_TOKEN: &str = "[run-not-started]";
+
+/// A handler error from before its run started (bundle download, extraction,
+/// compilation, module initialization): the error without its token.
+fn run_never_started(error: &str) -> Option<&str> {
+    error.strip_suffix(RUN_NOT_STARTED_TOKEN).map(str::trim_end)
+}
+
+/// Redelivery backoff after a handler's setup failed: long enough for a
+/// storage or database blip to pass before the next counted attempt.
+const SETUP_FAILURE_BACKOFF_MS: u64 = 5_000;
+
+/// Backoff for work this runtime is too old for: a newer worker of a rolling
+/// deploy can take it meanwhile.
+const NEWER_BUILD_RETRY_BACKOFF_MS: u64 = 15_000;
+
+/// How long a deployment of a build only a newer runtime can run waits for a
+/// newer worker, as during a rolling deploy, before this one fails it. A
+/// fleet that is all older (a deploy from a newer CLI) fails it then.
+const NEWER_RUNTIME_DEPLOY_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// How long a deployment has waited: since its message was published (a
+/// version 7 id), else since its build last changed.
+fn deployment_wait(
+    message_id: Uuid,
+    build_updated_at: chrono::DateTime<chrono::Utc>,
+) -> std::time::Duration {
+    let published = message_id
+        .get_timestamp()
+        .and_then(|timestamp| {
+            let (seconds, nanos) = timestamp.to_unix();
+            chrono::DateTime::from_timestamp(i64::try_from(seconds).ok()?, nanos)
+        })
+        .unwrap_or(build_updated_at);
+    chrono::Utc::now()
+        .signed_duration_since(published)
+        .to_std()
+        .unwrap_or_default()
+}
+
+/// Whether a build this runtime can't run needs only a newer runtime of the
+/// same major version, which a rolling deploy may be starting.
+fn build_needs_newer_runtime(build: &Build) -> bool {
+    build.is_bundle()
+        && hot::version::needs_newer_runtime(
+            build.engine_version.as_deref(),
+            build.hot_std_version.as_deref(),
+            hot::version::current_runtime_version(),
+        )
+}
+
 /// Watchdog for event-handler preparation, split into two sequential
 /// windows so a legitimate cold-bundle download is not confused with a hung
 /// setup:
@@ -1548,12 +1674,42 @@ enum ClaimLoss {
     },
 }
 
+/// When the runs of a delivery whose claim is unconfirmed stop: at the last
+/// moment that still leaves a stopped run time to unwind and record its
+/// failure before another worker could reclaim the event, so a run that ends
+/// before then is not stopped.
+fn unconfirmed_claim_stop_at(reclaimable_at: tokio::time::Instant) -> tokio::time::Instant {
+    reclaimable_at
+        .checked_sub(RUN_TIMEOUT_HARD_GRACE + RUN_RESULT_FLUSH_TIMEOUT)
+        .unwrap_or(reclaimable_at)
+}
+
+/// Whether a delivery may still start a run, checked before each handler:
+/// not once another worker has the event, nor once an unconfirmed claim's
+/// stop time has passed (the run would be stopped as soon as it started).
+fn claim_stops_new_runs(
+    claim: Option<&tokio::sync::watch::Receiver<Option<ClaimLoss>>>,
+    now: tokio::time::Instant,
+) -> Option<ClaimLoss> {
+    let loss = (*claim?.borrow())?;
+    match loss {
+        ClaimLoss::Lost => Some(loss),
+        ClaimLoss::Unconfirmed { reclaimable_at, .. } => {
+            (unconfirmed_claim_stop_at(reclaimable_at) <= now).then_some(loss)
+        }
+    }
+}
+
 /// The claim fence: from the keepalive's touch results, decide when a worker
 /// can no longer vouch for its claim on an event delivery, and tell that
 /// delivery's runs, which stop (see `run_must_stop`). A run longer than the
 /// orphan-reclaim floor relies on the keepalive alone, so without the fence
 /// a run whose touches failed long enough would keep running while another
-/// worker started it again. The verdict is one-way.
+/// worker started it again.
+///
+/// Only `Lost` is final. An unconfirmed claim is revised by every later
+/// touch: a confirmation clears it, so a Redis outage that ends in time
+/// stops nothing, and the stop time always follows the latest confirmation.
 struct ClaimFence {
     last_confirmed: tokio::time::Instant,
     fence_after: std::time::Duration,
@@ -1564,15 +1720,17 @@ struct ClaimFence {
 }
 
 impl ClaimFence {
+    /// A fence for a delivery whose PEL idle clock started at `delivered_at`:
+    /// until a touch confirms it, that is when it was last vouched for.
     fn new(
         fence_after: std::time::Duration,
         reclaim_after: std::time::Duration,
-        now: tokio::time::Instant,
+        delivered_at: tokio::time::Instant,
     ) -> (Self, tokio::sync::watch::Receiver<Option<ClaimLoss>>) {
         let (loss, claim) = tokio::sync::watch::channel(None);
         (
             Self {
-                last_confirmed: now,
+                last_confirmed: delivered_at,
                 fence_after,
                 reclaim_after,
                 loss,
@@ -1581,27 +1739,54 @@ impl ClaimFence {
         )
     }
 
-    /// Record one touch: `Some(true)` confirmed the claim, `Some(false)`
-    /// found it gone, `None` failed to reach Redis. Returns the loss when
-    /// this touch trips the fence.
-    fn observe(&mut self, touched: Option<bool>, now: tokio::time::Instant) -> Option<ClaimLoss> {
-        let loss = match touched {
-            Some(true) => {
+    /// The current verdict.
+    fn verdict(&self) -> Option<ClaimLoss> {
+        *self.loss.borrow()
+    }
+
+    /// Record one touch: its outcome, or `None` when it failed to reach
+    /// Redis. Returns the loss when this touch trips the fence.
+    fn observe(
+        &mut self,
+        touched: Option<hot::queue::streams::PendingTouch>,
+        now: tokio::time::Instant,
+    ) -> Option<ClaimLoss> {
+        use hot::queue::streams::PendingTouch;
+        let current = self.verdict();
+        if current == Some(ClaimLoss::Lost) {
+            return None;
+        }
+        let verdict = match touched {
+            Some(PendingTouch::Touched) => {
                 self.last_confirmed = now;
                 None
             }
-            Some(false) => Some(ClaimLoss::Lost),
+            // Trimmed from the stream or acknowledged: no other worker can
+            // be handed the delivery any more, so the claim holds for good.
+            Some(PendingTouch::Trimmed | PendingTouch::Acked) => None,
+            Some(PendingTouch::Reclaimed) => Some(ClaimLoss::Lost),
             None => {
                 let unconfirmed = now.saturating_duration_since(self.last_confirmed);
-                (unconfirmed >= self.fence_after).then_some(ClaimLoss::Unconfirmed {
-                    unconfirmed,
-                    reclaimable_at: self.last_confirmed + self.reclaim_after,
-                })
+                let reclaimable_at = self.last_confirmed + self.reclaim_after;
+                match current {
+                    // Still unconfirmed since the same touch: keep the verdict.
+                    Some(
+                        loss @ ClaimLoss::Unconfirmed {
+                            reclaimable_at: at, ..
+                        },
+                    ) if at == reclaimable_at => Some(loss),
+                    _ => (unconfirmed >= self.fence_after).then_some(ClaimLoss::Unconfirmed {
+                        unconfirmed,
+                        reclaimable_at,
+                    }),
+                }
             }
+        };
+        if verdict == current {
+            return None;
         }
-        .filter(|_| self.loss.borrow().is_none())?;
-        self.loss.send_replace(Some(loss));
-        Some(loss)
+        self.loss.send_replace(verdict);
+        verdict
     }
 }
 
@@ -1670,12 +1855,15 @@ fn spawn_event_lease_keepalive(
     };
     let interval =
         std::time::Duration::from_millis(event_keepalive_interval_ms(effective_orphan_idle_ms));
+    // The delivery's PEL idle clock has run since Redis handed it over, not
+    // since this executor picked it up.
     let (mut fence, claim) = ClaimFence::new(
         event_claim_fence_after(effective_orphan_idle_ms),
         std::time::Duration::from_millis(effective_orphan_idle_ms),
-        tokio::time::Instant::now(),
+        keepalive.delivered_at(),
     );
     let touch_loop = tokio::spawn(async move {
+        use hot::queue::streams::PendingTouch;
         // First touch immediately: the delivery may have accrued idle in the
         // prefetch buffer or the claimer->executor handoff before this
         // executor picked it up, so the reclaim window is reset at execution
@@ -1685,6 +1873,7 @@ fn spawn_event_lease_keepalive(
         loop {
             tokio::time::sleep(delay).await;
             let touched = keepalive.touch().await;
+            let unconfirmed = fence.verdict().is_some();
             if let Some(loss) =
                 fence.observe(touched.as_ref().ok().copied(), tokio::time::Instant::now())
             {
@@ -1694,9 +1883,15 @@ fn spawn_event_lease_keepalive(
                     keepalive.msg_id(),
                     loss
                 );
+            } else if unconfirmed && fence.verdict().is_none() {
+                info!(
+                    "hot.dev: WORKER {} confirmed its claim on event delivery {} again; its runs continue",
+                    worker_id,
+                    keepalive.msg_id()
+                );
             }
             match touched {
-                Ok(true) => {
+                Ok(PendingTouch::Touched) => {
                     debug!(
                         "hot.dev: WORKER {} keepalive touched event delivery {}",
                         worker_id,
@@ -1704,13 +1899,31 @@ fn spawn_event_lease_keepalive(
                     );
                     delay = interval;
                 }
-                Ok(false) => {
-                    // ACKed concurrently or reclaimed by a sibling: this
-                    // consumer no longer owns the entry, so there is nothing
-                    // left to keep alive (and touching must never steal the
-                    // entry back).
+                Ok(PendingTouch::Reclaimed) => {
+                    // A sibling reclaimed the entry: there is nothing left to
+                    // keep alive (and touching must never steal it back).
                     warn!(
-                        "hot.dev: WORKER {} keepalive stopping: event delivery {} is no longer pending for this consumer",
+                        "hot.dev: WORKER {} keepalive stopping: another worker reclaimed event delivery {}",
+                        worker_id,
+                        keepalive.msg_id()
+                    );
+                    break;
+                }
+                Ok(PendingTouch::Trimmed) => {
+                    // The stream's length cap trimmed the entry. Nobody else
+                    // can be handed it, so its runs go on, but its idle clock
+                    // can't be reset, and if this worker dies the event is
+                    // not redelivered.
+                    warn!(
+                        "hot.dev: WORKER {} keepalive stopping: event delivery {} was trimmed from the stream; its runs continue",
+                        worker_id,
+                        keepalive.msg_id()
+                    );
+                    break;
+                }
+                Ok(PendingTouch::Acked) => {
+                    debug!(
+                        "hot.dev: WORKER {} keepalive stopping: event delivery {} was acknowledged",
                         worker_id,
                         keepalive.msg_id()
                     );
@@ -1784,10 +1997,17 @@ async fn create_emitter(
             tracing::debug!("create_emitter: creating db emitter");
             // Use existing database pool instead of creating a new one
             // Note: stream_data is no longer persisted to DB - delivered via Redis Streams only
+            let max_calls_per_run = emitter_conf
+                .get_int_or_default(
+                    "max-calls-per-run",
+                    hot::lang::emitter::database::DEFAULT_MAX_CALLS_PER_RUN as i64,
+                )
+                .max(0) as usize;
             let db_emitter = DatabaseEngineEventEmitter::new_with_pool_and_blob_store(
                 db_pool.clone(),
                 blob_store,
-            );
+            )
+            .with_max_calls_per_run(max_calls_per_run);
             let filtered_emitter =
                 hot::lang::emitter::FilteredEmitter::new(db_emitter, filter_conf.as_ref())?;
             Ok(Some(std::sync::Arc::new(filtered_emitter)))
@@ -1920,46 +2140,87 @@ async fn park_event(db: &DatabasePool, message: &EventMessage) -> Result<(), Wor
     Ok(())
 }
 
+/// The environments with parked events that may run again. Their parked rows
+/// can far outnumber them, and only a few environments are ever suspended, so
+/// this skips through the distinct environments on the env index instead of
+/// reading every parked row on each tick.
+const ADMITTED_PARKED_ENVS: &str = "WITH RECURSIVE parked(env_id) AS (
+        SELECT (SELECT env_id FROM parked_event ORDER BY env_id LIMIT 1)
+        UNION ALL
+        SELECT (SELECT pe.env_id FROM parked_event pe WHERE pe.env_id > parked.env_id ORDER BY pe.env_id LIMIT 1)
+        FROM parked WHERE parked.env_id IS NOT NULL
+    )
+    SELECT e.env_id FROM parked JOIN env e ON e.env_id=parked.env_id
+    JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END
+    WHERE e.active=true AND o.active=true AND r.active=true
+    AND o.lifecycle_state='active' AND r.lifecycle_state='active'";
+
+/// How long a parked event whose project is still inactive waits before its
+/// environment's next replay looks at it again, so it doesn't hold the head of
+/// that environment's due rows.
+const PARKED_PROJECT_BACKOFF_SECS: i64 = 300;
+
 async fn replay_parked_events(
     db: &DatabasePool,
     queue: &ProcessingQueue<Message>,
 ) -> Result<(), WorkerError> {
     let now = chrono::Utc::now();
     let lease = now + chrono::Duration::seconds(90);
-    let sql = "UPDATE parked_event SET leased_until=$2 WHERE message_id IN (
-        SELECT pe.message_id FROM parked_event pe JOIN env e ON e.env_id=pe.env_id
-        JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id)
-        LEFT JOIN build b ON b.build_id=pe.build_id LEFT JOIN project p ON p.project_id=b.project_id
-        WHERE pe.leased_until <= $1 AND e.active=true AND o.active=true AND r.active=true
-        AND o.lifecycle_state='active' AND r.lifecycle_state='active'
-        AND (pe.build_id IS NULL OR p.active=true) ORDER BY pe.leased_until LIMIT 100
-    ) AND leased_until <= $1 RETURNING message_id,payload";
-    let rows: Vec<(Uuid, String)> = match db {
+    let backoff = now + chrono::Duration::seconds(PARKED_PROJECT_BACKOFF_SECS);
+    let envs: Vec<Uuid> = match db {
         DatabasePool::Postgres(pool) => {
-            sqlx::query_as(sql)
-                .bind(now)
-                .bind(lease)
+            sqlx::query_scalar(ADMITTED_PARKED_ENVS)
                 .fetch_all(pool)
                 .await?
         }
         DatabasePool::Sqlite(pool) => {
-            sqlx::query_as(sql)
-                .bind(now)
-                .bind(lease)
+            sqlx::query_scalar(ADMITTED_PARKED_ENVS)
                 .fetch_all(pool)
                 .await?
         }
     };
-    for (id, payload) in rows {
-        let message: EventMessage = serde_json::from_str(&payload)?;
-        queue.enqueue(message.into()).await?;
-        let sql = "DELETE FROM parked_event WHERE message_id=$1 AND leased_until=$2";
-        match db {
+    // Lease an admitted environment's due rows: those whose project is active
+    // for replay, the others for a back-off.
+    let sql = "UPDATE parked_event SET leased_until=CASE WHEN build_id IS NULL OR EXISTS (
+            SELECT 1 FROM build b JOIN project p ON p.project_id=b.project_id
+            WHERE b.build_id=parked_event.build_id AND p.active=true
+        ) THEN $2 ELSE $3 END
+        WHERE message_id IN (
+            SELECT message_id FROM parked_event WHERE env_id=$4 AND leased_until <= $1
+            ORDER BY leased_until LIMIT 100
+        ) AND leased_until <= $1 RETURNING message_id,payload,leased_until=$2";
+    for env_id in envs {
+        let rows: Vec<(Uuid, String, bool)> = match db {
             DatabasePool::Postgres(pool) => {
-                sqlx::query(sql).bind(id).bind(lease).execute(pool).await?;
+                sqlx::query_as(sql)
+                    .bind(now)
+                    .bind(lease)
+                    .bind(backoff)
+                    .bind(env_id)
+                    .fetch_all(pool)
+                    .await?
             }
             DatabasePool::Sqlite(pool) => {
-                sqlx::query(sql).bind(id).bind(lease).execute(pool).await?;
+                sqlx::query_as(sql)
+                    .bind(now)
+                    .bind(lease)
+                    .bind(backoff)
+                    .bind(env_id)
+                    .fetch_all(pool)
+                    .await?
+            }
+        };
+        for (id, payload, _) in rows.into_iter().filter(|(_, _, replay)| *replay) {
+            let message: EventMessage = serde_json::from_str(&payload)?;
+            queue.enqueue(message.into()).await?;
+            let sql = "DELETE FROM parked_event WHERE message_id=$1 AND leased_until=$2";
+            match db {
+                DatabasePool::Postgres(pool) => {
+                    sqlx::query(sql).bind(id).bind(lease).execute(pool).await?;
+                }
+                DatabasePool::Sqlite(pool) => {
+                    sqlx::query(sql).bind(id).bind(lease).execute(pool).await?;
+                }
             }
         }
     }
@@ -2571,6 +2832,11 @@ fn extract_ids_from_orphaned_data(raw_bytes: &[u8]) -> Option<OrphanedMessageIds
     None
 }
 
+/// The failure of a run whose event its stopped worker left and queue
+/// recovery dead-lettered. The SQLite event queue dead-letters only events
+/// that stopped their worker while running alone (see `CrashQuarantine`).
+const CRASHED_EVENT_DEAD_LETTERED: &str = "The worker stopped while running this event, each time it ran alone, until the event exhausted its queue retry limit";
+
 /// What queue recovery did with orphaned event messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OrphanedEvents {
@@ -2590,6 +2856,33 @@ async fn reconcile_orphaned_event_runs(
         .iter()
         .filter_map(|message| extract_ids_from_orphaned_data(message.payload()));
     settle_orphaned_event_runs(db, orphans, reason, orphaned).await;
+}
+
+/// A dead-lettered event is never run again: fail the runs its earlier
+/// deliveries left running (a worker that died mid-run) instead of leaving
+/// them to the 25-hour reaper. Only its own runs: unlike after a crash, the
+/// run that sent it, in the same stream, may well still be running.
+async fn settle_dead_lettered_event_runs(db: &DatabasePool, payload: &[u8]) {
+    let Some(ids) = extract_ids_from_orphaned_data(payload) else {
+        return;
+    };
+    match hot::db::run::Run::fail_orphaned_runs_by_event_id(
+        db,
+        &ids.event_id,
+        "The event exhausted its delivery retries and was moved to the dead-letter queue",
+    )
+    .await
+    {
+        Ok(0) => {}
+        Ok(failed) => info!(
+            "hot.dev: WORKER marked {} run(s) of dead-lettered event {} as failed",
+            failed, ids.event_id
+        ),
+        Err(error) => warn!(
+            "hot.dev: WORKER failed to settle the runs of dead-lettered event {}: {}",
+            ids.event_id, error
+        ),
+    }
 }
 
 async fn settle_orphaned_event_runs(
@@ -2659,13 +2952,83 @@ async fn settle_orphaned_event_runs(
     }
 }
 
-/// Fail runs crash recovery held for a redelivery that doesn't run their
-/// handlers. Best-effort: the event's own handlers run either way.
-async fn fail_unselected_held_runs(db: &DatabasePool, run_ids: &[uuid::Uuid]) {
+/// The run id of an event's handler: the same for every delivery of the
+/// event, so a redelivery finds the runs earlier deliveries wrote. It derives
+/// from what a redeploy keeps (the handler's project, namespace and name),
+/// not from the deployment's `event_handler_id`, which every deploy and live
+/// build refresh replaces.
+fn event_handler_run_id(
+    event_id: Uuid,
+    project_id: Uuid,
+    event_type: &str,
+    handler: &EventHandler,
+    retry_attempt: i16,
+) -> Uuid {
+    let identity = format!(
+        "{event_id}:{project_id}:{event_type}:{}/{}:{retry_attempt}",
+        handler.ns, handler.var
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, identity.as_bytes())
+}
+
+fn event_run_type_id(event_type: &str) -> i16 {
+    match event_type {
+        "hot:call" => hot::db::run::RunType::Call.as_id(),
+        "hot:schedule" => hot::db::run::RunType::Schedule.as_id(),
+        _ => hot::db::run::RunType::Event.as_id(),
+    }
+}
+
+/// The row the worker writes for an event handler run it executes.
+fn event_handler_run_row(
+    event_message: &EventMessage,
+    build: &Build,
+    run_id: Uuid,
+) -> hot::db::run::UnstartedRun {
+    let context = &event_message.body.execution_context;
+    hot::db::run::UnstartedRun {
+        run_id,
+        env_id: event_message.body.event.env_id,
+        stream_id: event_message.body.event.stream_id,
+        build_id: build.build_id,
+        run_type_id: event_run_type_id(&event_message.body.event.event_type),
+        origin_run_id: context.origin_run_id,
+        event_id: event_message.body.event.event_id,
+        by_user_id: context.user_id.unwrap_or(build.created_by_user_id),
+        retry_attempt: context.retry_attempt,
+    }
+}
+
+/// Record a handler whose setup failed before its run started, so the
+/// event's owner sees why it waits (`held`, for a redelivery) or why it
+/// failed. Best-effort: the event's delivery goes on either way.
+async fn record_unstarted_run(
+    db: &DatabasePool,
+    event_message: &EventMessage,
+    build: &Build,
+    run_id: Uuid,
+    error: &str,
+    held: bool,
+) {
+    let run = event_handler_run_row(event_message, build, run_id);
+    if let Err(record_error) = hot::db::run::Run::record_unstarted_run(db, &run, error, held).await
+    {
+        warn!(
+            %run_id,
+            "hot.dev: WORKER could not record the setup failure of run {}: {}",
+            run_id,
+            record_error
+        );
+    }
+}
+
+/// Fail runs an earlier delivery left running or held whose handlers this
+/// delivery doesn't run. Best-effort: the event's own handlers run either way.
+async fn fail_unrun_earlier_deliveries(db: &DatabasePool, run_ids: &[uuid::Uuid]) {
     if run_ids.is_empty() {
         return;
     }
-    if let Err(error) = hot::db::run::Run::fail_held_runs(
+    if let Err(error) = hot::db::run::Run::fail_unrun_earlier_deliveries(
         db,
         run_ids,
         "Worker stopped during event processing; the redelivered event no longer runs this handler",
@@ -2673,7 +3036,7 @@ async fn fail_unselected_held_runs(db: &DatabasePool, run_ids: &[uuid::Uuid]) {
     .await
     {
         warn!(
-            "hot.dev: WORKER could not mark {} held run(s) as failed after their redelivered event dropped the handlers: {}",
+            "hot.dev: WORKER could not mark {} earlier run(s) as failed after their redelivered event dropped the handlers: {}",
             run_ids.len(),
             error
         );
@@ -3026,6 +3389,7 @@ async fn prepare_bundle_runtime(
                 existing_path = Some(extract_dir);
             } else {
                 let data = retrieve_build_data(build, project, env, worker_conf).await?;
+                clear_partial_bundle_extraction(&extract_dir, _file_lock_guard.is_some())?;
                 let prepared = async {
                     hot::bundle::extract_bundle_from_bytes(&data, &extract_dir).map_err(|e| {
                         format!(
@@ -3608,14 +3972,20 @@ fn extract_agent_type_from_handler(handler: &EventHandler) -> Option<String> {
         .and_then(|meta| agent_type_from_meta(meta, &handler.ns))
 }
 
-/// Read `schedule_id` from the synthetic schedule arg bundled into hot:schedule events.
+/// Read the `schedule_id` of a hot:schedule event. Events from schedulers
+/// before 3.0.1 carry it only in the synthetic schedule arg; a dynamic
+/// schedule's args are the user's own.
 fn extract_schedule_id_from_event_data(event_data: &Val) -> Option<Uuid> {
-    let args = event_data.get("args")?;
-    let Val::Vec(args_vec) = args else {
-        return None;
+    let schedule_id = match event_data.get("schedule_id") {
+        Some(schedule_id) => schedule_id,
+        None => {
+            let Val::Vec(args_vec) = event_data.get("args")? else {
+                return None;
+            };
+            args_vec.first()?.get("schedule_id")?
+        }
     };
-    let first = args_vec.first()?;
-    match first.get("schedule_id")? {
+    match schedule_id {
         Val::Str(s) => Uuid::parse_str(s.as_ref()).ok(),
         _ => None,
     }
@@ -3824,6 +4194,8 @@ async fn find_build_for_function(
 
     // Find ALL builds that have this function
     let mut matching_builds: Vec<(Build, String)> = Vec::new();
+    // Builds that could not be inspected; the function may be in one.
+    let mut unavailable_builds = 0usize;
 
     for build in deployed_builds {
         if !build_matches_exact_target(build.build_id, target_build_id) {
@@ -3864,6 +4236,7 @@ async fn find_build_for_function(
                                 build.build_id,
                                 e
                             );
+                            unavailable_builds += 1;
                             continue;
                         }
                     };
@@ -3903,6 +4276,7 @@ async fn find_build_for_function(
                         build.build_id,
                         project.name
                     );
+                    unavailable_builds += 1;
                     continue;
                 };
 
@@ -3989,6 +4363,7 @@ async fn find_build_for_function(
                                         "ROUTING: Bundle build {} still has cache issues after compilation attempt",
                                         build.build_id
                                     );
+                                    unavailable_builds += 1;
                                 }
                             }
                         } else {
@@ -3996,6 +4371,7 @@ async fn find_build_for_function(
                                 "ROUTING: Bundle build {} manifest has no cache_key",
                                 build.build_id
                             );
+                            unavailable_builds += 1;
                         }
                     }
                     Err(e) => {
@@ -4005,6 +4381,7 @@ async fn find_build_for_function(
                             extracted_path,
                             e
                         );
+                        unavailable_builds += 1;
                     }
                 }
             }
@@ -4060,6 +4437,7 @@ async fn find_build_for_function(
                         "ROUTING: Live build {} failed to calculate cache key",
                         build.build_id
                     );
+                    unavailable_builds += 1;
                     continue;
                 };
 
@@ -4108,6 +4486,9 @@ async fn find_build_for_function(
                     );
                     matching_builds.push((build, project.name));
                 } else {
+                    if check_result != CacheCheckResult::NotFound {
+                        unavailable_builds += 1;
+                    }
                     tracing::debug!(
                         "ROUTING: Function '{}' NOT found in live build {} (project {})",
                         function_name,
@@ -4127,6 +4508,14 @@ async fn find_build_for_function(
     }
 
     if matching_builds.is_empty() {
+        // `None` claims no deployed build has the function, which fails the
+        // call; a build that could not be inspected leaves that open.
+        if unavailable_builds > 0 {
+            return Err(format!(
+                "{} deployed build(s) could not be inspected for it",
+                unavailable_builds
+            ));
+        }
         // If not found in cache, try to infer from namespace
         if let Some((namespace, _)) = function_name.rsplit_once('/') {
             debug!(
@@ -4191,6 +4580,35 @@ async fn find_build_for_function(
     }))
 }
 
+/// A runnable `once` handler for a hot:call whose function no deployed
+/// build has, preferring the call's target project. Its run fails resolving
+/// the function, so the caller gets a run:fail instead of waiting out its
+/// timeout.
+async fn handler_for_missing_function(
+    db: &DatabasePool,
+    once_handlers: &[EventHandler],
+    target_project_id: Option<Uuid>,
+) -> Result<Option<EventHandler>, String> {
+    let mut first_runnable = None;
+    for handler in once_handlers {
+        let build = Build::get_build(db, &handler.build_id)
+            .await
+            .map_err(|e| format!("Cannot resolve handler build: {e}"))?;
+        if !build.deployed
+            || !build.active
+            || build.runtime_status != Build::RUNTIME_STATUS_READY
+            || build.runtime_version_error_message().is_some()
+        {
+            continue;
+        }
+        if target_project_id == Some(build.project_id) {
+            return Ok(Some(handler.clone()));
+        }
+        first_runnable.get_or_insert_with(|| handler.clone());
+    }
+    Ok(first_runnable)
+}
+
 /// Execute a single event handler with isolated build context
 #[allow(clippy::too_many_arguments)]
 async fn execute_single_event_handler(
@@ -4216,6 +4634,7 @@ async fn execute_single_event_handler(
 ) -> Result<(), String> {
     let (setup_complete_tx, setup_complete_rx) = tokio::sync::oneshot::channel();
     let (source_resolved_tx, source_resolved_rx) = tokio::sync::oneshot::channel();
+    let run_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let execution = execute_single_event_handler_inner(
         db,
         build,
@@ -4238,6 +4657,7 @@ async fn execute_single_event_handler(
         claim,
         source_resolved_tx,
         setup_complete_tx,
+        Arc::clone(&run_started),
     );
 
     await_event_handler_setup(
@@ -4248,6 +4668,13 @@ async fn execute_single_event_handler(
         EVENT_SETUP_TIMEOUT,
     )
     .await
+    .map_err(|error| {
+        if run_started.load(std::sync::atomic::Ordering::Acquire) {
+            error
+        } else {
+            format!("{error} {RUN_NOT_STARTED_TOKEN}")
+        }
+    })
 }
 
 async fn validate_event_origin_scope(
@@ -4289,6 +4716,8 @@ async fn execute_single_event_handler_inner(
     claim: Option<watch::Receiver<Option<ClaimLoss>>>,
     source_resolved: tokio::sync::oneshot::Sender<()>,
     setup_complete: tokio::sync::oneshot::Sender<()>,
+    // Set once the run has started (see `RunStartWatch`).
+    run_has_started: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
     // The caller already registered `run_id`; from here this guard owns
     // unregistration on every exit path (see `RunRegistration` docs).
@@ -4489,11 +4918,19 @@ async fn execute_single_event_handler_inner(
     if let Some(queue_timing) = event_message.body.execution_context.queue_timing.clone() {
         _execution_context = _execution_context.with_queue_timing(queue_timing);
     }
+    // An org can turn call tracing off (the `call_tracing` feature); the run
+    // still records its lifecycle.
+    if emitter.is_some() {
+        _execution_context = _execution_context.with_trace_calls(
+            hot::db::features::Features::call_tracing_for_org_cached(db, &org_id).await,
+        );
+    }
 
     // Set once the worker decides to stop this run (see `run_must_stop`), so
     // the failure the VM records as it unwinds names the reason.
     let stopped = Arc::new(OnceLock::new());
     let emitter_for_events = emitter.clone().map(|inner| {
+        let inner = RunStartWatch::wrap(inner, run_id, Arc::clone(&run_has_started));
         Arc::new(StoppedRunEmitter {
             inner,
             run_id,
@@ -4531,6 +4968,24 @@ async fn execute_single_event_handler_inner(
     //
     // CRITICAL: If ANY error occurs between here and VM.execute(), run:start will NEVER be emitted!
     // This means the run won't exist in the database even though the event was attempted.
+    //
+    // Stream and dashboard subscribers hear of the start from
+    // `RunStartPublisher` once the VM has recorded it.
+    let emitter_for_events = match (emitter_for_events, stream_publisher.as_ref()) {
+        (Some(inner), Some(publisher)) => Some(Arc::new(RunStartPublisher {
+            inner,
+            publisher: Arc::clone(publisher),
+            run_id,
+            env_id: event_message.body.event.env_id,
+            stream_id,
+            event_id: event_message.body.execution_context.event_id,
+            project_id: Some(build.project_id),
+            fn_name: function_name.clone(),
+            run_type: run_type_name(&event_message.body.event.event_type),
+            published: std::sync::atomic::AtomicBool::new(false),
+        }) as Arc<dyn EngineEventEmitter>),
+        (emitter_for_events, _) => emitter_for_events,
+    };
 
     // A live build may use host files and development context only after
     // matching the current profile. Deployed bundles must resolve their own bytes.
@@ -4641,6 +5096,7 @@ async fn execute_single_event_handler_inner(
                 .await?;
                 let prep_build_id = build.build_id;
                 let prep_project_name = project.name.clone();
+                let holds_file_lock = _file_lock_guard.is_some();
                 let prepared = tokio::task::spawn_blocking(move || {
                     let _prep_permit = prep_permit;
                     extract_and_precompile_event_bundle(
@@ -4648,6 +5104,7 @@ async fn execute_single_event_handler_inner(
                         extract_dir,
                         prep_build_id,
                         prep_project_name,
+                        holds_file_lock,
                     )
                 })
                 .await
@@ -4864,9 +5321,11 @@ async fn execute_single_event_handler_inner(
                             dev_ctx.len(),
                             project.name
                         );
-                        for (key, val) in dev_ctx.iter() {
-                            storage.insert(key.clone(), val.clone());
-                        }
+                        merge_dev_context(
+                            dev_ctx,
+                            &mut storage,
+                            &mut _execution_context.secret_value_hashes,
+                        );
                     }
                 }
                 Err(_) => {
@@ -5003,6 +5462,11 @@ async fn execute_single_event_handler_inner(
     // and execution runs in spawn_blocking behind its owned permit. Disarm the
     // setup watchdog immediately before starting the independent run budget.
     let _ = setup_complete.send(());
+    // Without an emitter no run:start can be seen, and none records a run:
+    // the run counts as started once its code goes to the VM.
+    if emitter.is_none() {
+        run_has_started.store(true, std::sync::atomic::Ordering::Release);
+    }
 
     // The run budget starts now. Time spent queued behind detached blocking
     // work is backpressure, not part of the newly admitted handler's budget.
@@ -5390,6 +5854,8 @@ async fn execute_single_event_handler_inner(
             joined_result
         }
         stop = must_stop => {
+            // The detached VM may still start the run: never run it again.
+            run_has_started.store(true, std::sync::atomic::Ordering::Release);
             if let Some(token) = &external_cancel {
                 token.store(true, std::sync::atomic::Ordering::Relaxed);
             }
@@ -5815,30 +6281,45 @@ async fn run_budget_reached(
 
 /// Wait for the claim fence to report a loss; never resolves without a fence
 /// (memory and SQLite queues) or once the keepalive ends without one. An
-/// unconfirmed claim resolves only at the last moment that still leaves a
-/// stopped run time to unwind and record its failure before another worker
-/// could reclaim the event, so a run that ends before then is not stopped.
+/// unconfirmed claim resolves only at its stop time (see
+/// `unconfirmed_claim_stop_at`), and not at all if a later touch confirms
+/// the claim first; a touch that fails again after a confirmation moves the
+/// stop time.
 async fn claim_lost(
     claim: Option<tokio::sync::watch::Receiver<Option<ClaimLoss>>>,
 ) -> Option<ClaimLoss> {
     let Some(mut claim) = claim else {
         return std::future::pending().await;
     };
-    let loss = claim
-        .wait_for(Option::is_some)
-        .await
-        .ok()
-        .and_then(|loss| *loss);
-    match loss {
-        Some(loss @ ClaimLoss::Unconfirmed { reclaimable_at, .. }) => {
-            let unwind = RUN_TIMEOUT_HARD_GRACE + RUN_RESULT_FLUSH_TIMEOUT;
-            if let Some(stop_at) = reclaimable_at.checked_sub(unwind) {
-                tokio::time::sleep_until(stop_at).await;
+    loop {
+        let loss = *claim.borrow_and_update();
+        let stop_at = match loss {
+            Some(ClaimLoss::Lost) => return loss,
+            Some(ClaimLoss::Unconfirmed { reclaimable_at, .. }) => {
+                Some(unconfirmed_claim_stop_at(reclaimable_at))
             }
-            Some(loss)
+            None => None,
+        };
+        let stop = async {
+            match stop_at {
+                Some(stop_at) => tokio::time::sleep_until(stop_at).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            biased;
+            changed = claim.changed() => {
+                if changed.is_err() {
+                    // The keepalive ended: the last verdict is final.
+                    let Some(stop_at) = stop_at else {
+                        return std::future::pending().await;
+                    };
+                    tokio::time::sleep_until(stop_at).await;
+                    return loss;
+                }
+            }
+            _ = stop => return loss,
         }
-        Some(loss) => Some(loss),
-        None => std::future::pending().await,
     }
 }
 
@@ -5958,6 +6439,112 @@ impl EngineEventEmitter for StoppedRunEmitter {
     }
 }
 
+/// Notes when a run's `run:start` passes its emitter: until then a failure is
+/// a setup failure, with no run row and none of the run's code executed, so
+/// the event can be delivered again (see `run_never_started`).
+struct RunStartWatch {
+    inner: Arc<dyn EngineEventEmitter>,
+    run_id: Uuid,
+    started: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl RunStartWatch {
+    fn wrap(
+        inner: Arc<dyn EngineEventEmitter>,
+        run_id: Uuid,
+        started: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Arc<dyn EngineEventEmitter> {
+        Arc::new(Self {
+            inner,
+            run_id,
+            started,
+        })
+    }
+}
+
+impl EngineEventEmitter for RunStartWatch {
+    fn emit(&self, event: hot::lang::emitter::EngineEvent) {
+        if event.event_type == "run:start" && event.execution_context.run_id == self.run_id {
+            self.started
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        self.inner.emit(event);
+    }
+
+    fn flush(&self) -> Result<(), String> {
+        self.inner.flush()
+    }
+
+    fn flush_async(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        self.inner.flush_async()
+    }
+
+    fn flush_run(
+        &self,
+        run_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        self.inner.flush_run(run_id)
+    }
+
+    fn shutdown(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        self.inner.shutdown()
+    }
+}
+
+/// Runs the deliveries a stopped worker left alone. Such a delivery may be
+/// what stopped that worker, and every delivery in flight with it was
+/// redelivered too, so each executes with no other event of this process,
+/// and the queue records that it did (see `SqliteQueue::with_crash_quarantine`).
+/// If it stops this worker as well, nothing else stops with it, and only its
+/// own retry limit counts the stop.
+#[derive(Clone, Default)]
+struct CrashQuarantine(Arc<tokio::sync::RwLock<()>>);
+
+/// Held while a delivery executes (see `CrashQuarantine::enter`).
+struct QuarantinePass {
+    _shared: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    _alone: Option<tokio::sync::OwnedRwLockWriteGuard<()>>,
+}
+
+impl CrashQuarantine {
+    /// Wait until the delivery may execute: a recovered delivery once no
+    /// other delivery executes, the others while no recovered one does.
+    async fn enter(
+        &self,
+        recovered: bool,
+        sole_delivery: Option<&hot::queue::SoleDeliveryMarker>,
+        worker_id: usize,
+    ) -> QuarantinePass {
+        if !recovered {
+            return QuarantinePass {
+                _shared: Some(Arc::clone(&self.0).read_owned().await),
+                _alone: None,
+            };
+        }
+        let alone = Arc::clone(&self.0).write_owned().await;
+        info!(
+            "hot.dev: WORKER {} runs a delivery recovered from a stopped worker alone",
+            worker_id
+        );
+        if let Some(marker) = sole_delivery
+            && let Err(error) = marker.mark().await
+        {
+            warn!(
+                "hot.dev: WORKER {} could not record that a recovered delivery runs alone: {}",
+                worker_id, error
+            );
+        }
+        QuarantinePass {
+            _shared: None,
+            _alone: Some(alone),
+        }
+    }
+}
+
 /// On the blocking thread, once a run's program has loaded: resolve the run's
 /// budget, stamp the deadline the VM caps child waits to, and hand the budget
 /// to `run_budget_expired`. A program that took longer than the default
@@ -5975,6 +6562,118 @@ fn arm_run_budget(
         .ok()
         .and_then(|timeout| run_started_at.checked_add_signed(timeout));
     let _ = budget_tx.send(budget);
+}
+
+/// How long a run start waits for its row before it is published anyway.
+const RUN_START_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The run type stream and dashboard events carry for an event type.
+fn run_type_name(event_type: &str) -> String {
+    match event_type {
+        "hot:call" => "call",
+        "hot:schedule" => "schedule",
+        _ => "event",
+    }
+    .to_string()
+}
+
+/// Wraps a run's emitter to publish `run:start` to the run's stream and its
+/// environment once the VM has recorded the run.
+///
+/// The VM emits `run:start` on its blocking thread before the run's first
+/// instruction, and that thread also publishes the run's `stream:data`
+/// synchronously, so publishing here, before returning, puts the start ahead
+/// of every chunk and of the run's end in the subscriber's stream. The run
+/// row is flushed first because SSE handlers read it to describe the run.
+struct RunStartPublisher {
+    inner: Arc<dyn EngineEventEmitter>,
+    publisher: Arc<StreamPubSub>,
+    run_id: Uuid,
+    env_id: Uuid,
+    stream_id: Uuid,
+    event_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    fn_name: String,
+    run_type: String,
+    published: std::sync::atomic::AtomicBool,
+}
+
+impl RunStartPublisher {
+    fn publish_start(&self) {
+        // The VM runs on a blocking thread, where `block_on` is the bridge
+        // (as for `stream:data`).
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.block_on(async {
+            match tokio::time::timeout(RUN_START_FLUSH_TIMEOUT, self.inner.flush_run(self.run_id))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!(run_id = %self.run_id, "Failed to flush run start before publishing it: {}", e),
+                Err(_) => warn!(run_id = %self.run_id, "Flushing run start timed out; publishing it anyway"),
+            }
+            let stream_event = StreamEvent::RunStart {
+                run_id: self.run_id,
+                env_id: self.env_id,
+                stream_id: self.stream_id,
+                event_id: self.event_id,
+            };
+            if let Err(e) = self.publisher.publish(stream_event).await {
+                warn!(run_id = %self.run_id, "Failed to publish run start: {}", e);
+            }
+            let env_event = EnvEvent::RunStart {
+                run_id: self.run_id,
+                env_id: self.env_id,
+                stream_id: self.stream_id,
+                event_id: self.event_id,
+                project_id: self.project_id,
+                fn_name: Some(self.fn_name.clone()),
+                run_type: self.run_type.clone(),
+            };
+            if let Err(e) = self.publisher.publish_env(env_event).await {
+                warn!(run_id = %self.run_id, "Failed to publish run start env event: {}", e);
+            }
+        });
+    }
+}
+
+impl EngineEventEmitter for RunStartPublisher {
+    fn emit(&self, event: hot::lang::emitter::EngineEvent) {
+        let starts_run =
+            event.event_type == "run:start" && event.execution_context.run_id == self.run_id;
+        self.inner.emit(event);
+        if starts_run
+            && !self
+                .published
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.publish_start();
+        }
+    }
+
+    fn flush(&self) -> Result<(), String> {
+        self.inner.flush()
+    }
+
+    fn flush_async(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        self.inner.flush_async()
+    }
+
+    fn flush_run(
+        &self,
+        run_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        self.inner.flush_run(run_id)
+    }
+
+    fn shutdown(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        self.inner.shutdown()
+    }
 }
 
 pub async fn run(
@@ -6085,6 +6784,10 @@ pub async fn run_with_components_shared_context_and_db(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("hot.dev: WORKER starting");
     validate_worker_semantics_conf(&worker_conf)?;
+    // Before the executors' blocking threads start allocating.
+    hot::lang::runtime::oom_logger::limit_malloc_arenas(
+        hot::lang::runtime::oom_logger::DEFAULT_MALLOC_ARENAS,
+    );
     let queue_metrics_enabled = worker_conf.get_bool_or_default("queue.metrics-enabled", true);
     let queue_wait_target_p99_ms = worker_conf
         .get_int_or_default("queue.wait-target-p99-ms", 1_000)
@@ -6389,7 +7092,9 @@ pub async fn run_with_components_shared_context_and_db(
     .with_startup_window(event_window)
     .with_orphan_idle_ms(event_orphan_idle_ms)
     .with_read_batch_size(worker_read_batch_size)
-    .with_consumer_name(admin_event_name.clone());
+    .with_consumer_name(admin_event_name.clone())
+    // Executors run recovered deliveries alone (see `CrashQuarantine`).
+    .with_crash_quarantine();
 
     // Create alert and email notification queues
     let alert_queue_name = "hot:alert".to_string();
@@ -6494,10 +7199,35 @@ pub async fn run_with_components_shared_context_and_db(
     // Add timeout to prevent hanging on slow Redis operations
     // Also respect Ctrl-C during recovery (otherwise shutdown is blocked for 30s)
     let recovery_timeout = std::time::Duration::from_secs(30);
+    // Settle the recovered events' runs before their messages can be
+    // claimed again: a redelivery that started first would have its running
+    // runs held under it.
+    let recovery_db = db.clone();
     let recovery_result = tokio::select! {
         result = tokio::time::timeout(
             recovery_timeout,
-            event_queue.recover_orphaned_items_with_data(),
+            event_queue.recover_orphaned_items_then(|recovery| {
+                let requeued = recovery.requeued_messages.clone();
+                let dead_lettered = recovery.dead_lettered_messages.clone();
+                async move {
+                    if let Some(ref db_pool) = recovery_db {
+                        reconcile_orphaned_event_runs(
+                            db_pool,
+                            &requeued,
+                            "Worker crashed during event processing - event will be retried",
+                            OrphanedEvents::Requeued,
+                        )
+                        .await;
+                        reconcile_orphaned_event_runs(
+                            db_pool,
+                            &dead_lettered,
+                            CRASHED_EVENT_DEAD_LETTERED,
+                            OrphanedEvents::DeadLettered,
+                        )
+                        .await;
+                    }
+                }
+            }),
         ) => result,
         _ = hot::signal::shutdown_signal() => {
             info!("hot.dev: WORKER received shutdown signal during orphaned item recovery");
@@ -6517,23 +7247,6 @@ pub async fn run_with_components_shared_context_and_db(
                     "hot.dev: WORKER moved {} expired orphaned item(s) to the dead-letter queue",
                     recovery.dead_lettered_messages.len()
                 );
-            }
-
-            if let Some(ref db_pool) = db {
-                reconcile_orphaned_event_runs(
-                    db_pool,
-                    &recovery.requeued_messages,
-                    "Worker crashed during event processing - event will be retried",
-                    OrphanedEvents::Requeued,
-                )
-                .await;
-                reconcile_orphaned_event_runs(
-                    db_pool,
-                    &recovery.dead_lettered_messages,
-                    "Worker crashed during event processing and the event exhausted its queue retry limit",
-                    OrphanedEvents::DeadLettered,
-                )
-                .await;
             }
         }
         Ok(Ok(_)) => {
@@ -6839,6 +7552,7 @@ pub async fn run_with_components_shared_context_and_db(
     let max_blocking_executions =
         blocking_execution_capacity(worker_count, configured_max_blocking_executions);
     let blocking_execution_slots = Arc::new(Semaphore::new(max_blocking_executions));
+    let crash_quarantine = CrashQuarantine::default();
 
     info!(
         "hot.dev: WORKER starting with {} concurrent workers (requested={}, cpu_limit={}, memory_limit={:?}, memory_limit_mb={:?}, explicit_vm_concurrency={}, shared_process={})",
@@ -7067,29 +7781,36 @@ pub async fn run_with_components_shared_context_and_db(
                         }
                     }
                     _ = tokio::time::sleep(TICK) => {
-                        match event_q.recover_orphaned_items_with_data().await {
-                            Ok(recovery) => {
-                                if recovery.total_count() > 0 {
-                                    info!(
-                                        "hot.dev: WORKER SQLite janitor handled {} orphaned message(s) on hot:event",
-                                        recovery.total_count()
-                                    );
-                                }
+                        let settle = |recovery: &hot::queue::OrphanRecovery| {
+                            let requeued = recovery.requeued_messages.clone();
+                            let dead_lettered = recovery.dead_lettered_messages.clone();
+                            let janitor_db = janitor_db.clone();
+                            async move {
                                 if let Some(ref db) = janitor_db {
                                     reconcile_orphaned_event_runs(
                                         db,
-                                        &recovery.requeued_messages,
+                                        &requeued,
                                         "Worker lease expired during event processing - event will be retried",
                                         OrphanedEvents::Requeued,
                                     )
                                     .await;
                                     reconcile_orphaned_event_runs(
                                         db,
-                                        &recovery.dead_lettered_messages,
-                                        "Worker lease expired during event processing and the event exhausted its queue retry limit",
+                                        &dead_lettered,
+                                        CRASHED_EVENT_DEAD_LETTERED,
                                         OrphanedEvents::DeadLettered,
                                     )
                                     .await;
+                                }
+                            }
+                        };
+                        match event_q.recover_orphaned_items_then(settle).await {
+                            Ok(recovery) => {
+                                if recovery.total_count() > 0 {
+                                    info!(
+                                        "hot.dev: WORKER SQLite janitor handled {} orphaned message(s) on hot:event",
+                                        recovery.total_count()
+                                    );
                                 }
                             }
                             Err(error) => debug!(
@@ -7408,6 +8129,7 @@ pub async fn run_with_components_shared_context_and_db(
         let task_queue_clone = task_queue.clone();
         let execution_services_clone = execution_services.clone();
         let blocking_execution_slots_clone = blocking_execution_slots.clone();
+        let crash_quarantine_clone = crash_quarantine.clone();
         // Per-worker captures of the admin consumer names so the daily
         // queue_cleanup handler (built inside the worker spawn) can pin its
         // queue handles to w0's identity. See comment on `admin_*_name`
@@ -7452,6 +8174,11 @@ pub async fn run_with_components_shared_context_and_db(
                         }
                         ClaimedWorkerQueue::Event(lease) => {
                             let queue_lease_timing = lease.timing();
+                            // A delivery its stopped worker left runs alone
+                            // (see `CrashQuarantine`).
+                            let recovered_delivery = lease.recovered();
+                            let sole_delivery_marker = lease.sole_delivery_marker();
+                            let last_delivery_attempt = lease.last_attempt();
                             // Keep this delivery's PEL idle clock refreshed while
                             // (possibly many) handlers execute serially, so orphan
                             // reclaim never duplicates a live multi-handler event.
@@ -7482,6 +8209,7 @@ pub async fn run_with_components_shared_context_and_db(
                                 let claim_ref = claim.clone();
                                 let execution_services_ref = execution_services_clone.clone();
                                 let blocking_execution_slots_ref = blocking_execution_slots_clone.clone();
+                                let crash_quarantine_ref = crash_quarantine_clone.clone();
                                 // Daily queue_cleanup admin handles. Each is pinned to w0's
                                 // stable consumer name so any XAUTOCLAIM done by
                                 // cleanup_stale_consumers (when draining a stale consumer that
@@ -7506,6 +8234,9 @@ pub async fn run_with_components_shared_context_and_db(
                                     .clone()
                                     .with_consumer_name(admin_email_name_for_worker.clone());
                                 async move {
+                                    let _quarantine_pass = crash_quarantine_ref
+                                        .enter(recovered_delivery, sole_delivery_marker.as_ref(), worker_id)
+                                        .await;
                                     // Check message type and process accordingly
                                     let msg_type = message.head.get_str("__type");
 
@@ -7720,8 +8451,27 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                 "Function '{}' not found in any deployed build. This may be due to cache issues - try redeploying the build.",
                                                                                 target_fn
                                                                             );
-                                                                            warn!("hot.dev: WORKER {} {}", worker_id, err_msg);
-                                                                            return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
+                                                                            let deploying = should_defer_missing_event_handlers(worker_id, db, &env_id, &event_message.body.event.event_type, infra_retry_backoff_ms).await?;
+                                                                            let call_handler = if event_message.body.event.event_type == "hot:call" && !deploying {
+                                                                                handler_for_missing_function(db, &once_handlers, target_project_id).await
+                                                                                    .map_err(|e| worker_infrastructure_retry_error(e, infra_retry_backoff_ms.max(5_000)))?
+                                                                            } else {
+                                                                                None
+                                                                            };
+                                                                            let Some(handler) = call_handler else {
+                                                                                warn!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
+                                                                            };
+                                                                            // With no deployment under way the function is gone, and
+                                                                            // retrying only makes its caller wait for nothing. The call
+                                                                            // handler's run fails resolving it, which records the
+                                                                            // failure and publishes run:fail.
+                                                                            warn!("hot.dev: WORKER {} {}; failing the call", worker_id, err_msg);
+                                                                            handlers_to_execute.push(handler);
+                                                                            routing_warning = Some(serde_json::json!({
+                                                                                "warning": "route:missing",
+                                                                                "function": target_fn
+                                                                            }));
                                                                         }
                                                                         Err(e) => {
                                                                             let err_msg = format!(
@@ -7771,8 +8521,13 @@ pub async fn run_with_components_shared_context_and_db(
                                                         // the runs of its earlier deliveries say what is left:
                                                         // handlers that finished don't run again, and runs crash
                                                         // recovery held are reopened before their handlers execute.
-                                                        let earlier_runs = hot::db::run::Run::earlier_deliveries(db, &event_message.body.event.event_id).await
-                                                            .map_err(|e| worker_infrastructure_retry_error(format!("Cannot read the event's earlier runs: {e}"), infra_retry_backoff_ms.max(5_000)))?;
+                                                        // A first delivery has no earlier runs to read.
+                                                        let earlier_runs = if queue_lease_timing.redelivered {
+                                                            hot::db::run::Run::earlier_deliveries(db, &event_message.body.event.event_id).await
+                                                                .map_err(|e| worker_infrastructure_retry_error(format!("Cannot read the event's earlier runs: {e}"), infra_retry_backoff_ms.max(5_000)))?
+                                                        } else {
+                                                            Default::default()
+                                                        };
                                                         let mut finished_earlier = 0usize;
                                                         let mut held_runs = Vec::new();
 
@@ -7789,17 +8544,40 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 continue;
                                                             }
                                                             if let Some(reason) = handler_build.runtime_version_error_message() {
-                                                                // Work bound to the build can never run here.
+                                                                // A newer worker, as a rolling deploy starts, can run
+                                                                // the build's work.
+                                                                if exact_target_build.is_some() && build_needs_newer_runtime(&handler_build) {
+                                                                    if wait_log_due(handler_build.build_id) {
+                                                                        warn!(
+                                                                            event_id = %event_message.body.event.event_id,
+                                                                            build_id = %handler_build.build_id,
+                                                                            "hot.dev: WORKER {} leaves event '{}' to a newer worker: {}",
+                                                                            worker_id,
+                                                                            event_message.body.event.event_type,
+                                                                            reason
+                                                                        );
+                                                                    }
+                                                                    return Err(worker_infrastructure_retry_error(
+                                                                        format!("{reason}; the event waits for a newer worker"),
+                                                                        infra_retry_backoff_ms.max(NEWER_BUILD_RETRY_BACKOFF_MS),
+                                                                    ));
+                                                                }
+                                                                // Other work bound to the build can never run here.
                                                                 if exact_target_build.is_some() {
                                                                     return Err(worker_error(format!(
                                                                         "{reason}. Redeploy the project, and send its work again"
                                                                     )));
                                                                 }
-                                                                awaiting_redeploy.push((handler_build.build_id, reason));
+                                                                awaiting_redeploy.push((handler_build.build_id, reason, build_needs_newer_runtime(&handler_build)));
                                                                 continue;
                                                             }
-                                                            let identity = format!("{}:{}:{}", event_message.body.event.event_id, event_handler.event_handler_id, event_message.body.execution_context.retry_attempt);
-                                                            let run_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, identity.as_bytes());
+                                                            let run_id = event_handler_run_id(
+                                                                event_message.body.event.event_id,
+                                                                handler_build.project_id,
+                                                                &event_message.body.event.event_type,
+                                                                &event_handler,
+                                                                event_message.body.execution_context.retry_attempt,
+                                                            );
                                                             match earlier_runs.get(&run_id) {
                                                                 Some(hot::db::run::EarlierDelivery::Finished) => {
                                                                     finished_earlier += 1;
@@ -7810,7 +8588,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                             }
                                                             admitted_handlers.push((event_handler, handler_build, run_id));
                                                         }
-                                                        if let Some((build_id, reason)) = awaiting_redeploy.first() {
+                                                        if let Some((build_id, reason, _)) = awaiting_redeploy.first() {
                                                             // An event only such deployments handle waits for
                                                             // their redeploy. Others run their handlers without it.
                                                             let waits = admitted_handlers.is_empty();
@@ -7827,18 +8605,27 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 );
                                                             }
                                                             if waits {
+                                                                // A newer worker may come soon; a redeploy, later.
+                                                                let backoff_ms = if awaiting_redeploy.iter().all(|(_, _, newer)| *newer) {
+                                                                    NEWER_BUILD_RETRY_BACKOFF_MS
+                                                                } else {
+                                                                    AWAITING_REDEPLOY_BACKOFF_MS
+                                                                };
                                                                 return Err(worker_infrastructure_retry_error(
                                                                     format!("{reason}; the event waits for a redeploy"),
-                                                                    infra_retry_backoff_ms.max(AWAITING_REDEPLOY_BACKOFF_MS),
+                                                                    infra_retry_backoff_ms.max(backoff_ms),
                                                                 ));
                                                             }
                                                         }
-                                                        // Held runs of handlers a delivery that settles the event
-                                                        // doesn't run, after a redeploy changed the handlers, would
-                                                        // stay pending.
-                                                        let unselected_held: Vec<Uuid> = earlier_runs
+                                                        // Runs an earlier delivery left running or held for
+                                                        // handlers a delivery that settles the event doesn't run,
+                                                        // after a redeploy removed them, would never end.
+                                                        let unrun_earlier: Vec<Uuid> = earlier_runs
                                                             .iter()
-                                                            .filter(|(run_id, state)| **state == hot::db::run::EarlierDelivery::Held && !held_runs.contains(run_id))
+                                                            .filter(|(run_id, state)| {
+                                                                **state != hot::db::run::EarlierDelivery::Finished
+                                                                    && !admitted_handlers.iter().any(|(_, _, admitted)| admitted == *run_id)
+                                                            })
                                                             .map(|(run_id, _)| *run_id)
                                                             .collect();
                                                         if admitted_handlers.is_empty() && finished_earlier > 0 {
@@ -7846,7 +8633,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 "hot.dev: WORKER {} acknowledges redelivered event {}: its {} handler run(s) finished in an earlier delivery",
                                                                 worker_id, event_message.body.event.event_id, finished_earlier
                                                             );
-                                                            fail_unselected_held_runs(db, &unselected_held).await;
+                                                            fail_unrun_earlier_deliveries(db, &unrun_earlier).await;
                                                             return Ok(());
                                                         }
                                                         let run_ids: Vec<Uuid> = admitted_handlers.iter().map(|(_, _, id)| *id).collect();
@@ -7880,7 +8667,18 @@ pub async fn run_with_components_shared_context_and_db(
                                                             .map_err(|e| worker_infrastructure_retry_error(format!("Cannot reopen the event's held runs: {e}"), infra_retry_backoff_ms.max(5_000)))?;
                                                         // With no handler to run, the event is delivered again.
                                                         if !admitted_handlers.is_empty() {
-                                                            fail_unselected_held_runs(db, &unselected_held).await;
+                                                            fail_unrun_earlier_deliveries(db, &unrun_earlier).await;
+                                                        }
+                                                        // A recovered delivery may stop this worker before its
+                                                        // runs record themselves: write their rows first, so
+                                                        // dead-letter settlement can fail them.
+                                                        if recovered_delivery {
+                                                            for (_, handler_build, run_id) in &admitted_handlers {
+                                                                let row = event_handler_run_row(&event_message, handler_build, *run_id);
+                                                                if let Err(error) = hot::db::run::Run::open_event_run(db, &row).await {
+                                                                    warn!("hot.dev: WORKER {} could not write run {} before running its recovered event: {}", worker_id, run_id, error);
+                                                                }
+                                                            }
                                                         }
 
                                                         // Step 4: Execute the selected handlers
@@ -7889,6 +8687,14 @@ pub async fn run_with_components_shared_context_and_db(
                                                             let mut started_any_handler = false;
                                                             let mut is_first_handler = true;
                                                             for (event_handler, handler_build, run_id) in admitted_handlers {
+                                                                // A delivery whose claim is gone starts no more
+                                                                // runs, and is not ACKed: the worker that has the
+                                                                // event, or this one's next delivery of it, runs
+                                                                // the rest (finished handlers are skipped).
+                                                                if let Some(loss) = claim_stops_new_runs(claim_ref.as_ref(), tokio::time::Instant::now()) {
+                                                                    warn!("hot.dev: WORKER {} starts no more handlers for event {}: {:?}", worker_id, event_message.body.event.event_id, loss);
+                                                                    return Err(worker_error(format!("Event handlers not started: {}", RunStop::ClaimLost(loss).error())));
+                                                                }
                                                                 shutdown_coord_ref.register_run(run_id);
 
                                                                 debug!("hot.dev: WORKER {} executing {}/{} (event_id={}, run_id={}, event_handler_id={}, build_id={})",
@@ -7948,6 +8754,25 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                     warn!("hot.dev: WORKER {} deferring event '{}' for redelivery: {}", worker_id, event_message.body.event.event_type, e);
                                                                                                     return Err(worker_counted_redelivery_error(e, infra_retry_backoff_ms));
                                                                                                 }
+                                                                                                Err(e) if run_never_started(&e).is_some() => {
+                                                                                                    let reason = run_never_started(&e).unwrap_or(&e);
+                                                                                                    // The handler's setup failed before its run started:
+                                                                                                    // nothing ran, and no run records it. Before any handler
+                                                                                                    // started, the event is delivered again, counted toward
+                                                                                                    // its retry limit, and the run is held with the failure
+                                                                                                    // for the redelivery to reopen. After one started, or on
+                                                                                                    // the event's last attempt, the failure is the run's.
+                                                                                                    let failure = format!("Handler setup failed before the run started: {reason}");
+                                                                                                    if !started_any_handler && !last_delivery_attempt {
+                                                                                                        warn!("hot.dev: WORKER {} deferring event '{}' for redelivery: {}", worker_id, event_message.body.event.event_type, failure);
+                                                                                                        record_unstarted_run(db, &event_message, &handler_build, run_id, &failure, true).await;
+                                                                                                        return Err(worker_counted_redelivery_error(failure, infra_retry_backoff_ms.max(SETUP_FAILURE_BACKOFF_MS)));
+                                                                                                    }
+                                                                                                    error!("hot.dev: WORKER {} failed event handler {}: {}", worker_id, event_handler.event_handler_id, failure);
+                                                                                                    record_unstarted_run(db, &event_message, &handler_build, run_id, &failure, false).await;
+                                                                                                    started_any_handler = true;
+                                                                                                    all_success = false;
+                                                                                                }
                                                                                                 Err(e) => {
                                                                                                     started_any_handler = true;
                                                                                                     error!("Failed to execute event handler {}: {}", event_handler.event_handler_id, e);
@@ -7976,6 +8801,12 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                             )
                                                                                         }
                                                                                     };
+
+                                                                                    // The ACK is group-wide: once another worker has the
+                                                                                    // event, it would settle that worker's delivery.
+                                                                                    if matches!(claim_ref.as_ref().map(|claim| *claim.borrow()), Some(Some(ClaimLoss::Lost))) {
+                                                                                        return Err(worker_error(RunStop::ClaimLost(ClaimLoss::Lost).error()));
+                                                                                    }
 
                                                                                     match execution_result {
                                                                                         (Ok(()), success) => {
@@ -8072,6 +8903,48 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                             build.build_id,
                                                                                             build_data.len());
 
+                                                                                        // A build of a newer Hot of this major version waits a
+                                                                                        // while for a newer worker of a rolling deploy instead
+                                                                                        // of failing here.
+                                                                                        if let Ok(Some(reason)) = hot::build::newer_runtime_requirement(&build_data) {
+                                                                                            let waited = deployment_wait(deployment_message.id, build.updated_at);
+                                                                                            if waited < NEWER_RUNTIME_DEPLOY_GRACE {
+                                                                                                if wait_log_due(build.build_id) {
+                                                                                                    warn!(
+                                                                                                        build_id = %build.build_id,
+                                                                                                        "hot.dev: WORKER {} leaves deployment of build {} to a newer worker: {}",
+                                                                                                        worker_id,
+                                                                                                        build.build_id,
+                                                                                                        reason
+                                                                                                    );
+                                                                                                }
+                                                                                                return Err(worker_infrastructure_retry_error(
+                                                                                                    format!("{reason}; the deployment waits for a newer worker"),
+                                                                                                    NEWER_BUILD_RETRY_BACKOFF_MS,
+                                                                                                ));
+                                                                                            }
+                                                                                            let err_msg = format!(
+                                                                                                "{reason}. No worker of a newer Hot took the deployment within {} minutes; deploy with this Hot version or upgrade the workers",
+                                                                                                NEWER_RUNTIME_DEPLOY_GRACE.as_secs() / 60
+                                                                                            );
+                                                                                            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                            if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                                warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                                    worker_id,
+                                                                                                    build.build_id,
+                                                                                                    status_err);
+                                                                                            }
+                                                                                            hot::db::alert::publish_deploy_failed_alert(
+                                                                                                db,
+                                                                                                &env.org_id,
+                                                                                                &project.env_id,
+                                                                                                &build.build_id,
+                                                                                                &project.name,
+                                                                                                &err_msg,
+                                                                                            ).await;
+                                                                                            return Err(worker_error(err_msg));
+                                                                                        }
+
                                                                                         // Extract the build with locking to prevent race conditions
                                                                                         // In-process lock (thread safety)
                                                                                         let extraction_lock = build_path_cache_ref.get_extraction_lock(&build.build_id);
@@ -8096,7 +8969,14 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                     build.build_id);
                                                                                                 build_path_cache_ref.insert(build.build_id, extract_dir);
                                                                                             } else {
-                                                                                                match hot::bundle::extract_bundle_from_bytes(&build_data, &extract_dir) {
+                                                                                                let holds_file_lock = _file_lock_guard.is_some();
+                                                                                                let extracted = clear_partial_bundle_extraction(&extract_dir, holds_file_lock)
+                                                                                                    .and_then(|()| hot::bundle::extract_bundle_from_bytes(&build_data, &extract_dir));
+                                                                                                if extracted.is_err() && holds_file_lock {
+                                                                                                    // Left behind, it would make every later extraction fail.
+                                                                                                    let _ = std::fs::remove_dir_all(&extract_dir);
+                                                                                                }
+                                                                                                match extracted {
                                                                                                     Ok(()) => {
                                                                                                         debug!("hot.dev: WORKER {} extracted build {} to {}",
                                                                                                             worker_id,
@@ -8867,6 +9747,11 @@ pub async fn run_with_components_shared_context_and_db(
                                 },
                                 Err(e) => {
                                     debug!("hot.dev: WORKER {} error processing event: {}", worker_id, e);
+                                    if let (Some(hot::queue::QueueProcessingError::DeadLettered(message)), Some(db)) =
+                                        (e.downcast_ref::<hot::queue::QueueProcessingError>(), db_clone.as_ref())
+                                    {
+                                        settle_dead_lettered_event_runs(db, message.payload()).await;
+                                    }
                                 }
                             }
                         }
@@ -9062,6 +9947,35 @@ pub async fn run_with_components_shared_context_and_db(
 mod tests {
     use super::*;
     use hot::val;
+
+    #[test]
+    fn dev_context_secrets_are_masked_in_runs() {
+        let credential = val!({"registry": "ghcr.io", "username": "bot", "token": "ghp_tok"});
+        let mut dev_ctx = AHashMap::new();
+        dev_ctx.insert("regpull".to_string(), credential.clone());
+        dev_ctx.insert("greeting".to_string(), Val::from("hello"));
+        dev_ctx.insert(
+            hot::lang::hot::ctx::LOADED_SECRET_KEYS.to_string(),
+            Val::from(vec![Val::from("regpull")]),
+        );
+
+        let mut storage = AHashMap::new();
+        let mut hashes = ahash::AHashSet::new();
+        merge_dev_context(&dev_ctx, &mut storage, &mut hashes);
+
+        assert_eq!(storage.get("regpull"), Some(&credential));
+        assert_eq!(storage.get("greeting"), Some(&Val::from("hello")));
+        assert!(!storage.contains_key(hot::lang::hot::ctx::LOADED_SECRET_KEYS));
+        let mut expected = ahash::AHashSet::new();
+        hot::lang::hot::ctx::hash_secret_value_recursive(&credential, &mut expected);
+        assert_eq!(hashes, expected, "only the secret's values are masked");
+        let mut token = ahash::AHashSet::new();
+        hot::lang::hot::ctx::hash_secret_value_recursive(&Val::from("ghp_tok"), &mut token);
+        assert!(
+            token.is_subset(&hashes),
+            "fields read from the secret are masked too"
+        );
+    }
 
     #[tokio::test]
     async fn run_result_write_timeout_bounds_a_stuck_flush() {
@@ -9320,6 +10234,92 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
+    /// The Redis queue hands back the payload of an event it dead-letters:
+    /// the event's own runs fail, one left running by a worker that died and
+    /// one held for a redelivery that will not come; the stream's other runs,
+    /// such as the one that sent the event, go on.
+    #[tokio::test]
+    async fn dead_lettered_event_fails_only_its_own_runs() {
+        use hot::db::run::{Run, RunStatus, RunType};
+
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let event_id = Uuid::now_v7();
+        hot::db::Event::insert_event(
+            &db,
+            &event_id,
+            &data.env_id,
+            &data.stream_id,
+            "demo:event",
+            &serde_json::json!({}),
+            chrono::Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        // A running run and a held one (pending retry with no retry time).
+        let mut event_runs = Vec::new();
+        for status_id in [RunStatus::Running.as_id(), RunStatus::PendingRetry.as_id()] {
+            let run_id = Uuid::now_v7();
+            Run::insert_run(
+                &db,
+                &run_id,
+                &data.env_id,
+                &data.stream_id,
+                Some(&data.build_id),
+                RunType::Event.as_id(),
+                None,
+                &data.user_id,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE run SET event_id = ?, status_id = ?, next_retry_at = NULL WHERE run_id = ?",
+            )
+            .bind(event_id)
+            .bind(status_id)
+            .bind(run_id)
+            .execute(pool)
+            .await
+            .unwrap();
+            event_runs.push(run_id);
+        }
+        sqlx::query("UPDATE run SET status_id = 1 WHERE run_id = ?")
+            .bind(data.run_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let message = Message {
+            id: event_id,
+            head: val!({}),
+            body: val!({"execution_context": {"stream_id": data.stream_id.to_string()}}),
+        };
+        let payload = zstd::encode_all(
+            std::io::Cursor::new(serde_json::to_vec(&message).unwrap()),
+            1,
+        )
+        .unwrap();
+
+        settle_dead_lettered_event_runs(&db, &payload).await;
+        let status = async |run_id: Uuid| Run::get_run(&db, &run_id).await.unwrap().status_id;
+        for run_id in event_runs {
+            assert_eq!(status(run_id).await, RunStatus::Failed.as_id());
+        }
+        assert_eq!(status(data.run_id).await, RunStatus::Running.as_id());
+
+        pool.close().await;
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[test]
     fn orphaned_message_decompression_is_bounded() {
         let oversized = vec![b'x'; 8 * 1024 * 1024 + 1];
@@ -9358,6 +10358,18 @@ mod tests {
 
         assert_eq!(
             extract_schedule_id_from_event_data(&event_data),
+            Some(schedule_id)
+        );
+
+        // A dynamic schedule's event carries the user's args and the id
+        // beside them.
+        let dynamic = val!({
+            "fn": "demo/steps/check-due",
+            "args": [{"schedule_id": "not-this-one"}],
+            "schedule_id": schedule_id.to_string(),
+        });
+        assert_eq!(
+            extract_schedule_id_from_event_data(&dynamic),
             Some(schedule_id)
         );
     }
@@ -9854,7 +10866,8 @@ mod tests {
     }
 
     #[test]
-    fn claim_fence_trips_once_when_the_claim_is_lost_or_long_unconfirmed() {
+    fn claim_fence_trips_when_the_claim_is_lost_or_long_unconfirmed() {
+        use hot::queue::streams::PendingTouch;
         let secs = std::time::Duration::from_secs;
         let idle_ms = min_event_orphan_idle_floor_ms(secs(DEFAULT_RUN_TIMEOUT_SECONDS));
         let fence_after = event_claim_fence_after(idle_ms);
@@ -9871,10 +10884,13 @@ mod tests {
         // Failed touches short of the fence leave the run alone, and a
         // confirmed touch restarts the clock.
         assert_eq!(fence.observe(None, start + fence_after - secs(1)), None);
-        assert_eq!(fence.observe(Some(true), start + fence_after), None);
+        assert_eq!(
+            fence.observe(Some(PendingTouch::Touched), start + fence_after),
+            None
+        );
         assert_eq!(fence.observe(None, start + fence_after * 2 - secs(1)), None);
         assert_eq!(*claim.borrow(), None);
-        // Failing for the whole fence window trips it.
+        // Failing for the whole fence window trips it, once.
         let unconfirmed = ClaimLoss::Unconfirmed {
             unconfirmed: fence_after,
             reclaimable_at: start + fence_after + reclaim_after,
@@ -9883,16 +10899,145 @@ mod tests {
             fence.observe(None, start + fence_after * 2),
             Some(unconfirmed)
         );
+        assert_eq!(fence.observe(None, start + fence_after * 2 + secs(5)), None);
         assert_eq!(*claim.borrow(), Some(unconfirmed));
-        // The verdict is one-way.
-        assert_eq!(fence.observe(Some(true), start + fence_after * 3), None);
-        assert_eq!(fence.observe(Some(false), start + fence_after * 3), None);
-        assert_eq!(*claim.borrow(), Some(unconfirmed));
-
-        // A touch that finds the delivery gone trips it at once.
-        let (mut fence, claim) = ClaimFence::new(fence_after, reclaim_after, start);
-        assert_eq!(fence.observe(Some(false), start), Some(ClaimLoss::Lost));
+        // A confirmation clears an unconfirmed claim, and the next outage is
+        // measured from it.
+        let confirmed_at = start + fence_after * 2 + secs(10);
+        assert_eq!(
+            fence.observe(Some(PendingTouch::Touched), confirmed_at),
+            None
+        );
+        assert_eq!(*claim.borrow(), None);
+        assert_eq!(
+            fence.observe(None, confirmed_at + fence_after),
+            Some(ClaimLoss::Unconfirmed {
+                unconfirmed: fence_after,
+                reclaimable_at: confirmed_at + reclaim_after,
+            })
+        );
+        // A reclaimed delivery is lost, for good.
+        let later = confirmed_at + fence_after + secs(1);
+        assert_eq!(
+            fence.observe(Some(PendingTouch::Reclaimed), later),
+            Some(ClaimLoss::Lost)
+        );
+        assert_eq!(fence.observe(Some(PendingTouch::Touched), later), None);
+        assert_eq!(fence.observe(Some(PendingTouch::Trimmed), later), None);
         assert_eq!(*claim.borrow(), Some(ClaimLoss::Lost));
+
+        // A touch that finds the delivery reclaimed trips it at once.
+        let (mut fence, claim) = ClaimFence::new(fence_after, reclaim_after, start);
+        assert_eq!(
+            fence.observe(Some(PendingTouch::Reclaimed), start),
+            Some(ClaimLoss::Lost)
+        );
+        assert_eq!(*claim.borrow(), Some(ClaimLoss::Lost));
+
+        // One that finds it trimmed or acknowledged does not: nobody else
+        // can be handed the event, so its runs go on. That also settles an
+        // unconfirmed claim.
+        for settled in [PendingTouch::Trimmed, PendingTouch::Acked] {
+            let (mut fence, claim) = ClaimFence::new(fence_after, reclaim_after, start);
+            assert!(fence.observe(None, start + fence_after).is_some());
+            assert_eq!(fence.observe(Some(settled), start + fence_after), None);
+            assert_eq!(*claim.borrow(), None, "{settled:?}");
+        }
+    }
+
+    /// The fence's clock starts when Redis handed the delivery over, not at
+    /// executor pickup: a delivery that waited in the prefetch buffer is
+    /// that much closer to being reclaimable.
+    #[test]
+    fn claim_fence_clock_starts_at_delivery() {
+        let secs = std::time::Duration::from_secs;
+        let delivered_at = tokio::time::Instant::now();
+        let (mut fence, _claim) = ClaimFence::new(secs(300), secs(450), delivered_at);
+        // The first touch, at pickup 300 s later, fails.
+        assert_eq!(
+            fence.observe(None, delivered_at + secs(300)),
+            Some(ClaimLoss::Unconfirmed {
+                unconfirmed: secs(300),
+                reclaimable_at: delivered_at + secs(450),
+            })
+        );
+    }
+
+    /// Before each handler, a delivery checks its claim: none starts once
+    /// another worker has the event, or once an unconfirmed claim's stop time
+    /// has passed; one still in time starts.
+    #[test]
+    fn handlers_do_not_start_after_the_claim_is_gone() {
+        let secs = std::time::Duration::from_secs;
+        let now = tokio::time::Instant::now();
+        assert_eq!(claim_stops_new_runs(None, now), None);
+        let (tx, claim) = tokio::sync::watch::channel(None);
+        assert_eq!(claim_stops_new_runs(Some(&claim), now), None);
+        tx.send_replace(Some(ClaimLoss::Lost));
+        assert_eq!(
+            claim_stops_new_runs(Some(&claim), now),
+            Some(ClaimLoss::Lost)
+        );
+        let unwind = RUN_TIMEOUT_HARD_GRACE + RUN_RESULT_FLUSH_TIMEOUT;
+        let in_time = ClaimLoss::Unconfirmed {
+            unconfirmed: secs(300),
+            reclaimable_at: now + unwind + secs(1),
+        };
+        tx.send_replace(Some(in_time));
+        assert_eq!(claim_stops_new_runs(Some(&claim), now), None);
+        assert_eq!(
+            claim_stops_new_runs(Some(&claim), now + secs(1)),
+            Some(in_time)
+        );
+    }
+
+    /// Regression for #157's invariant: a claim confirmed again after a
+    /// Redis outage stops nothing, even past the outage's reclaim time, and
+    /// a later outage stops the run only at its own stop time.
+    #[tokio::test(start_paused = true)]
+    async fn reconfirmed_claim_does_not_stop_runs() {
+        use hot::queue::streams::PendingTouch;
+        let secs = std::time::Duration::from_secs;
+        let started = tokio::time::Instant::now();
+        let budget = RunBudget::new(Some(3_600), secs(300), secs(7_200));
+        let (budget_tx, budget_rx) = tokio::sync::oneshot::channel();
+        budget_tx.send(budget).unwrap();
+        let (mut fence, claim) = ClaimFence::new(secs(300), secs(450), started);
+        let stop = tokio::spawn(run_must_stop(
+            started,
+            budget,
+            budget_rx,
+            Some(claim),
+            Arc::new(OnceLock::new()),
+            None,
+        ));
+
+        // Touches fail for 300 s: the run would stop at 450 s minus unwind.
+        tokio::time::sleep(secs(300)).await;
+        assert!(fence.observe(None, tokio::time::Instant::now()).is_some());
+        // Redis is back at 333 s.
+        tokio::time::sleep(secs(33)).await;
+        assert_eq!(
+            fence.observe(Some(PendingTouch::Touched), tokio::time::Instant::now()),
+            None
+        );
+        tokio::time::sleep(secs(600)).await;
+        assert!(!stop.is_finished(), "a confirmed claim stops nothing");
+
+        // The next outage stops the run 450 s after the last confirmation.
+        let confirmed = tokio::time::Instant::now();
+        fence.observe(Some(PendingTouch::Touched), confirmed);
+        tokio::time::sleep(secs(300)).await;
+        assert!(fence.observe(None, tokio::time::Instant::now()).is_some());
+        let RunStop::ClaimLost(ClaimLoss::Unconfirmed { reclaimable_at, .. }) = stop.await.unwrap()
+        else {
+            panic!("expected the second outage to stop the run");
+        };
+        assert_eq!(reclaimable_at, confirmed + secs(450));
+        assert_eq!(
+            tokio::time::Instant::now(),
+            confirmed + secs(450) - RUN_TIMEOUT_HARD_GRACE - RUN_RESULT_FLUSH_TIMEOUT
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -9916,7 +11061,10 @@ mod tests {
 
         tokio::time::sleep(secs(600)).await;
         assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
-        fence.observe(Some(false), tokio::time::Instant::now());
+        fence.observe(
+            Some(hot::queue::streams::PendingTouch::Reclaimed),
+            tokio::time::Instant::now(),
+        );
         tokio::task::yield_now().await;
         assert!(
             cancel.load(std::sync::atomic::Ordering::Relaxed),
@@ -9988,6 +11136,108 @@ mod tests {
         assert_eq!(reclaimable_at, started + reclaim_after);
         assert_eq!(started.elapsed(), reclaim_after - unwind);
         assert!(trip.await.unwrap().is_some());
+    }
+
+    /// `run:start` reaches the run's stream and environment once, after the
+    /// run's row is flushed and ahead of what the VM publishes next.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_start_publisher_publishes_once_after_the_row_is_flushed() {
+        use hot::lang::emitter::EngineEvent;
+        use hot::stream::{EnvSubscriberFactory, StreamNext, StreamSubscriberFactory};
+
+        #[derive(Default)]
+        struct Record(std::sync::Mutex<Vec<String>>);
+        impl EngineEventEmitter for Record {
+            fn emit(&self, event: EngineEvent) {
+                self.0.lock().unwrap().push(event.event_type);
+            }
+            fn flush_run(
+                &self,
+                _run_id: Uuid,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
+            {
+                self.0.lock().unwrap().push("flush".to_string());
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let record = Arc::new(Record::default());
+        let pubsub = Arc::new(StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap());
+        let (run_id, env_id, stream_id) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let mut stream_sub = pubsub.subscribe_in_env(env_id, stream_id).await.unwrap();
+        let mut env_sub = pubsub.subscribe_env(env_id).await.unwrap();
+        let emitter = Arc::new(RunStartPublisher {
+            inner: record.clone(),
+            publisher: Arc::clone(&pubsub),
+            run_id,
+            env_id,
+            stream_id,
+            event_id: None,
+            project_id: None,
+            fn_name: "::app/f".to_string(),
+            run_type: run_type_name("hot:call"),
+            published: std::sync::atomic::AtomicBool::new(false),
+        });
+        let context = move |run_id| {
+            ExecutionContext::new(
+                run_id,
+                stream_id,
+                hot::db::run::RunType::Call.as_id(),
+                Some(env_id),
+                None,
+                None,
+                None,
+            )
+        };
+
+        let vm_pubsub = Arc::clone(&pubsub);
+        tokio::task::spawn_blocking(move || {
+            emitter.emit(EngineEvent::run_start(&context(run_id)));
+            // A repeated start, or another run's, publishes nothing more.
+            emitter.emit(EngineEvent::run_start(&context(run_id)));
+            emitter.emit(EngineEvent::run_start(&context(Uuid::now_v7())));
+            tokio::runtime::Handle::current().block_on(async {
+                vm_pubsub
+                    .publish(StreamEvent::StreamData {
+                        stream_data_id: Uuid::now_v7(),
+                        run_id,
+                        env_id: Some(env_id),
+                        stream_id,
+                        data_type: "chunk".to_string(),
+                        payload: serde_json::json!(1),
+                    })
+                    .await
+                    .unwrap();
+            });
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            record.0.lock().unwrap()[..2],
+            ["run:start".to_string(), "flush".to_string()]
+        );
+        let first = stream_sub.next().await;
+        assert!(
+            matches!(first, StreamNext::Event(StreamEvent::RunStart { run_id: got, .. }) if got == run_id),
+            "{first:?}"
+        );
+        let second = stream_sub.next().await;
+        assert!(
+            matches!(second, StreamNext::Event(StreamEvent::StreamData { .. })),
+            "{second:?}"
+        );
+        let env_event = env_sub.next().await;
+        assert!(
+            matches!(
+                &env_event,
+                Some(EnvEvent::RunStart { run_id: got, run_type, .. }) if *got == run_id && run_type == "call"
+            ),
+            "{env_event:?}"
+        );
+        let more =
+            tokio::time::timeout(std::time::Duration::from_millis(50), stream_sub.next()).await;
+        assert!(more.is_err(), "{more:?}");
     }
 
     #[test]
@@ -10320,6 +11570,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(cache_dir);
     }
 
+    /// A hot:call to a function no build has runs a deployed call handler,
+    /// the target project's when it has one, so the call fails visibly.
+    #[tokio::test]
+    async fn missing_function_calls_run_a_deployed_call_handler() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let other_project_id = Uuid::now_v7();
+        hot::db::Project::insert_project(
+            &db,
+            &other_project_id,
+            &test_data.env_id,
+            "other-project",
+            &test_data.user_id,
+        )
+        .await
+        .unwrap();
+        let other_build_id = Uuid::now_v7();
+        Build::insert_build(
+            &db,
+            &other_build_id,
+            &other_project_id,
+            "other-hash",
+            0,
+            Build::BUILD_TYPE_LIVE,
+            &test_data.user_id,
+        )
+        .await
+        .unwrap();
+        Build::activate_build_directly(&db, &other_build_id, &test_data.user_id)
+            .await
+            .unwrap();
+        let handler = |build_id| EventHandler {
+            event_handler_id: Uuid::now_v7(),
+            build_id,
+            event_type: "hot:call".to_string(),
+            ns: "::hot::lang".to_string(),
+            var: "call-event-handler".to_string(),
+            meta: None,
+            value: None,
+            file: None,
+            line: None,
+            column: None,
+            position: None,
+        };
+        let handlers = [handler(test_data.build_id), handler(other_build_id)];
+        let picked = |target| {
+            let db = &db;
+            let handlers = &handlers;
+            async move {
+                handler_for_missing_function(db, handlers, target)
+                    .await
+                    .unwrap()
+                    .map(|h| h.build_id)
+            }
+        };
+
+        // Only deployed, runnable builds qualify.
+        assert_eq!(
+            picked(Some(test_data.project_id)).await,
+            Some(other_build_id)
+        );
+
+        Build::activate_build_directly(&db, &test_data.build_id, &test_data.user_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            picked(Some(test_data.project_id)).await,
+            Some(test_data.build_id)
+        );
+        assert_eq!(picked(Some(other_project_id)).await, Some(other_build_id));
+        assert_eq!(picked(None).await, Some(test_data.build_id));
+        let none: [EventHandler; 0] = [];
+        assert!(
+            handler_for_missing_function(&db, &none, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[tokio::test]
     async fn missing_deployed_bundle_never_falls_back_to_host_sources() {
         let (db, db_path) = migrated_sqlite_file_db().await;
@@ -10438,10 +11775,13 @@ mod tests {
         )
         .await;
 
+        let error = result.unwrap_err();
         assert!(
-            result.unwrap_err().contains("Failed to retrieve build"),
+            error.contains("Failed to retrieve build"),
             "missing bundle must stop source resolution before host source compilation"
         );
+        // Nothing ran: the event is delivered again rather than acknowledged.
+        assert!(run_never_started(&error).is_some(), "{error}");
         assert_eq!(
             shutdown_coordinator.active_run_count(),
             0,
@@ -10557,6 +11897,7 @@ fn (url: Str, wait: Int): Int {
             workspace.path().join("extracted"),
             build_id,
             "timeout-test".to_string(),
+            true,
         )
         .unwrap();
         let build_path_cache = Arc::new(BuildPathCache::new());
@@ -10734,7 +12075,10 @@ fn (url: Str, wait: Int): Int {
         );
         let lose_claim = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            fence.observe(Some(false), tokio::time::Instant::now())
+            fence.observe(
+                Some(hot::queue::streams::PendingTouch::Reclaimed),
+                tokio::time::Instant::now(),
+            )
         });
         let (result, elapsed) = run(
             "timeout-test:patient",
@@ -10906,6 +12250,7 @@ handler fn () { initialized }
                     extract_dir.clone(),
                     Uuid::now_v7(),
                     "scope-project".into(),
+                    true,
                 )
                 .unwrap()
             };
@@ -11071,12 +12416,6 @@ handler fn () { initialized }
                 .unwrap(),
             1
         );
-        sqlx::query("UPDATE org SET lifecycle_state = 'active' WHERE org_id = ?")
-            .bind(test_data.org_id)
-            .execute(pool)
-            .await
-            .unwrap();
-        // Reactivation republishes the parked event and releases its row.
         let replay_queue = ProcessingQueue::<Message>::new(
             QueueType::Memory,
             "hot:event-parked-test".to_string(),
@@ -11084,6 +12423,24 @@ handler fn () { initialized }
             Serialization::Json,
         )
         .expect("memory queue should build");
+        // While the account is suspended, replay leaves its events parked.
+        replay_parked_events(&db, &replay_queue)
+            .await
+            .expect("parked events should replay");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM parked_event WHERE message_id=?")
+                .bind(thin_message.id)
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            1
+        );
+        sqlx::query("UPDATE org SET lifecycle_state = 'active' WHERE org_id = ?")
+            .bind(test_data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        // Reactivation republishes the parked event and releases its row.
         replay_parked_events(&db, &replay_queue)
             .await
             .expect("parked events should replay");
@@ -11524,5 +12881,295 @@ handler fn () { initialized }
             .expect("claimer should stop on shutdown")
             .unwrap()
             .unwrap();
+    }
+
+    fn test_handler(ns: &str, var: &str) -> EventHandler {
+        EventHandler {
+            event_handler_id: Uuid::now_v7(),
+            build_id: Uuid::now_v7(),
+            event_type: "demo:event".to_string(),
+            ns: ns.to_string(),
+            var: var.to_string(),
+            meta: None,
+            value: None,
+            file: None,
+            line: None,
+            column: None,
+            position: None,
+        }
+    }
+
+    #[test]
+    fn handler_run_ids_survive_redeploys() {
+        let event_id = Uuid::now_v7();
+        let project_id = Uuid::now_v7();
+        let run_id = |handler: &EventHandler, project_id: Uuid, retry: i16| {
+            event_handler_run_id(event_id, project_id, "demo:event", handler, retry)
+        };
+        let deployed = test_handler("demo", "on-event");
+        // A redeploy gives the handler a new id in a new build.
+        let redeployed = test_handler("demo", "on-event");
+        assert_eq!(
+            run_id(&deployed, project_id, 0),
+            run_id(&redeployed, project_id, 0)
+        );
+        assert_ne!(
+            run_id(&deployed, project_id, 0),
+            run_id(&deployed, project_id, 1)
+        );
+        assert_ne!(
+            run_id(&deployed, project_id, 0),
+            run_id(&deployed, Uuid::now_v7(), 0)
+        );
+        assert_ne!(
+            run_id(&deployed, project_id, 0),
+            run_id(&test_handler("demo", "other"), project_id, 0)
+        );
+    }
+
+    #[test]
+    fn errors_from_before_the_run_started_are_recognized() {
+        assert_eq!(
+            run_never_started(&format!("Parse errors {RUN_NOT_STARTED_TOKEN}")),
+            Some("Parse errors")
+        );
+        assert_eq!(run_never_started("Parse errors"), None);
+        let deferred = format!(
+            "{} account suspended {RUN_NOT_STARTED_TOKEN}",
+            hot::lang::runtime::vm::RUN_ADMISSION_DEFERRED
+        );
+        assert!(should_defer_run_admission(&deferred, false));
+        let timeout = format!("{EVENT_SETUP_TIMEOUT_ERROR} after 30s {RUN_NOT_STARTED_TOKEN}");
+        assert!(should_redeliver_event_after_handler_error(&timeout, false));
+    }
+
+    /// An event of `data`'s environment with one handler run of `build`.
+    async fn event_with_run(
+        db: &DatabasePool,
+        data: &hot::db::TestData,
+    ) -> (EventMessage, Build, Uuid) {
+        let event_id = Uuid::now_v7();
+        hot::db::Event::insert_event(
+            db,
+            &event_id,
+            &data.env_id,
+            &data.stream_id,
+            "demo:event",
+            &serde_json::json!({}),
+            chrono::Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        let event_message = EventMessage {
+            id: event_id,
+            head: AHashMap::new(),
+            body: hot::lang::event::queue::EventMessageBody {
+                event: hot::lang::event::Event {
+                    event_id,
+                    env_id: data.env_id,
+                    stream_id: data.stream_id,
+                    event_type: "demo:event".to_string(),
+                    event_data: val!({}),
+                    event_time: chrono::Utc::now(),
+                    target_project_id: None,
+                    target_project_name: None,
+                },
+                execution_context: ExecutionContext::new(
+                    Uuid::now_v7(),
+                    data.stream_id,
+                    hot::db::run::RunType::Event.as_id(),
+                    Some(data.env_id),
+                    Some(data.user_id),
+                    Some(data.org_id),
+                    None,
+                ),
+            },
+        };
+        let build = Build::get_build(db, &data.build_id).await.unwrap();
+        let handler = test_handler("demo", "on-event");
+        let run_id = event_handler_run_id(event_id, build.project_id, "demo:event", &handler, 0);
+        (event_message, build, run_id)
+    }
+
+    #[tokio::test]
+    async fn setup_failures_hold_their_run_for_the_redelivery_then_fail_it() {
+        use hot::db::run::{EarlierDelivery, Run, RunStatus};
+
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let (event_message, build, run_id) = event_with_run(&db, &data).await;
+        let event_id = event_message.body.event.event_id;
+
+        record_unstarted_run(&db, &event_message, &build, run_id, "Parse errors", true).await;
+        let run = Run::get_run(&db, &run_id).await.unwrap();
+        assert_eq!(run.status_id, RunStatus::PendingRetry.as_id());
+        assert_eq!(run.event_id, Some(event_id));
+        assert!(run.result.unwrap().to_string().contains("Parse errors"));
+        let earlier = Run::earlier_deliveries(&db, &event_id).await.unwrap();
+        assert_eq!(earlier.get(&run_id), Some(&EarlierDelivery::Held));
+
+        // The redelivery reopens it; when its setup fails for good, so does the run.
+        Run::reopen_held_runs(&db, &[run_id]).await.unwrap();
+        assert_eq!(
+            Run::get_run(&db, &run_id).await.unwrap().status_id,
+            RunStatus::Running.as_id()
+        );
+        record_unstarted_run(&db, &event_message, &build, run_id, "Still broken", false).await;
+        let run = Run::get_run(&db, &run_id).await.unwrap();
+        assert_eq!(run.status_id, RunStatus::Failed.as_id());
+        assert!(run.stop_time.is_some());
+
+        // A finished run stays as it finished.
+        record_unstarted_run(&db, &event_message, &build, run_id, "Late", true).await;
+        let run = Run::get_run(&db, &run_id).await.unwrap();
+        assert_eq!(run.status_id, RunStatus::Failed.as_id());
+        assert!(run.result.unwrap().to_string().contains("Still broken"));
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn redeliveries_settle_earlier_runs_they_no_longer_run() {
+        use hot::db::run::{Run, RunStatus};
+
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let (event_message, build, running) = event_with_run(&db, &data).await;
+        let row = |run_id| event_handler_run_row(&event_message, &build, run_id);
+        let held = Uuid::now_v7();
+        let finished = Uuid::now_v7();
+        for run_id in [running, held, finished] {
+            Run::open_event_run(&db, &row(run_id)).await.unwrap();
+        }
+        Run::hold_orphaned_runs_for_redelivery(&db, &event_message.body.event.event_id)
+            .await
+            .unwrap();
+        Run::reopen_held_runs(&db, &[running]).await.unwrap();
+        Run::update_stop_time_and_status(&db, &finished, None, &RunStatus::Succeeded)
+            .await
+            .unwrap();
+
+        fail_unrun_earlier_deliveries(&db, &[running, held, finished]).await;
+        let status = async |run_id| Run::get_run(&db, &run_id).await.unwrap().status_id;
+        assert_eq!(status(running).await, RunStatus::Failed.as_id());
+        assert_eq!(status(held).await, RunStatus::Failed.as_id());
+        assert_eq!(status(finished).await, RunStatus::Succeeded.as_id());
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn recovered_runs_written_first_fail_when_their_event_is_dead_lettered() {
+        use hot::db::run::{Run, RunStatus};
+
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let (event_message, build, run_id) = event_with_run(&db, &data).await;
+        let event_id = event_message.body.event.event_id;
+
+        Run::open_event_run(&db, &event_handler_run_row(&event_message, &build, run_id))
+            .await
+            .unwrap();
+        settle_orphaned_event_runs(
+            &db,
+            [OrphanedMessageIds {
+                event_id,
+                stream_id: None,
+            }],
+            CRASHED_EVENT_DEAD_LETTERED,
+            OrphanedEvents::DeadLettered,
+        )
+        .await;
+        let run = Run::get_run(&db, &run_id).await.unwrap();
+        assert_eq!(run.status_id, RunStatus::Failed.as_id());
+        assert!(
+            run.result
+                .unwrap()
+                .to_string()
+                .contains("each time it ran alone")
+        );
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn partial_bundle_extractions_are_cleared_only_by_the_lock_holder() {
+        let temp = tempfile::tempdir().unwrap();
+        let extract_dir = temp.path().join("build");
+        assert!(clear_partial_bundle_extraction(&extract_dir, false).is_ok());
+
+        std::fs::create_dir_all(extract_dir.join("hot/src")).unwrap();
+        std::fs::write(extract_dir.join("manifest.hot"), "{}").unwrap();
+        assert!(clear_partial_bundle_extraction(&extract_dir, false).is_err());
+        assert!(extract_dir.exists());
+        clear_partial_bundle_extraction(&extract_dir, true).unwrap();
+        assert!(!extract_dir.exists());
+
+        std::fs::create_dir_all(&extract_dir).unwrap();
+        BuildPathCache::mark_extraction_complete(&extract_dir);
+        clear_partial_bundle_extraction(&extract_dir, true).unwrap();
+        assert!(BuildPathCache::is_extraction_complete(&extract_dir));
+    }
+
+    #[test]
+    fn deployment_wait_counts_from_the_deployment_message() {
+        let published = chrono::Utc::now() - chrono::Duration::minutes(20);
+        let timestamp = uuid::Timestamp::from_unix(
+            uuid::NoContext,
+            published.timestamp() as u64,
+            published.timestamp_subsec_nanos(),
+        );
+        let waited = deployment_wait(Uuid::new_v7(timestamp), chrono::Utc::now());
+        assert!(
+            waited >= std::time::Duration::from_secs(19 * 60),
+            "{waited:?}"
+        );
+        assert!(waited > NEWER_RUNTIME_DEPLOY_GRACE);
+
+        let waited = deployment_wait(Uuid::new_v4(), chrono::Utc::now());
+        assert!(waited < NEWER_RUNTIME_DEPLOY_GRACE);
+    }
+
+    #[tokio::test]
+    async fn crash_quarantine_runs_recovered_deliveries_alone() {
+        let quarantine = CrashQuarantine::default();
+        let short = tokio::time::Duration::from_millis(50);
+
+        let shared = quarantine.enter(false, None, 0).await;
+        let also_shared = quarantine.enter(false, None, 1).await;
+        // A recovered delivery waits for the others to finish.
+        let alone = tokio::spawn({
+            let quarantine = quarantine.clone();
+            async move {
+                let _alone = quarantine.enter(true, None, 2).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        });
+        tokio::time::sleep(short).await;
+        assert!(!alone.is_finished());
+        drop(shared);
+        drop(also_shared);
+        // While it runs, no other delivery starts.
+        tokio::time::sleep(short).await;
+        assert!(
+            tokio::time::timeout(short / 5, quarantine.enter(false, None, 0))
+                .await
+                .is_err()
+        );
+        alone.await.unwrap();
+        let _shared = tokio::time::timeout(short, quarantine.enter(false, None, 0))
+            .await
+            .expect("deliveries run again once the recovered one is done");
     }
 }

@@ -30,8 +30,46 @@ pub enum OrgApiKeyError {
     NotFound,
     #[error("Invalid request: {0}")]
     Invalid(String),
+    /// The key's root account is suspended or archived. Unlike `Unauthorized`
+    /// this is reversible: the key works again when the account is reactivated.
+    #[error("The account is suspended or archived")]
+    AccountSuspended,
+    /// The target child organization is suspended or archived.
+    #[error("The organization is suspended or archived")]
+    OrgSuspended,
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+}
+
+/// Whether a key works right now, following its issuer chain. `Revoked`,
+/// `Expired` and `IssuerInactive` org keys never work again; `Suspended` keys
+/// work again when their organization or environment is reactivated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyStatus {
+    Active,
+    Revoked,
+    Expired,
+    /// A key in its issuer chain is revoked or expired.
+    IssuerInactive,
+    Suspended,
+}
+
+impl KeyStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Revoked => "revoked",
+            Self::Expired => "expired",
+            Self::IssuerInactive => "issuer_inactive",
+            Self::Suspended => "suspended",
+        }
+    }
+
+    /// False once the key or one of its issuers is revoked or expired. A
+    /// suspension does not count: it ends when the organization is reactivated.
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Active | Self::Suspended)
+    }
 }
 
 impl From<PermissionError> for OrgApiKeyError {
@@ -218,7 +256,97 @@ async fn require_root_admin(
 
 impl OrgApiKey {
     pub fn is_usable(&self) -> bool {
-        self.active && self.revoked_at.is_none() && self.expires_at.is_none_or(|at| at > Utc::now())
+        self.own_status() == KeyStatus::Active
+    }
+
+    fn own_status(&self) -> KeyStatus {
+        if !self.active || self.revoked_at.is_some() {
+            KeyStatus::Revoked
+        } else if self.expires_at.is_some_and(|at| at <= Utc::now()) {
+            KeyStatus::Expired
+        } else {
+            KeyStatus::Active
+        }
+    }
+
+    /// The key's status following its issuer chain, then its account's admission.
+    pub async fn status(&self, db: &DatabasePool) -> Result<KeyStatus, OrgApiKeyError> {
+        let own = self.own_status();
+        if own != KeyStatus::Active {
+            return Ok(own);
+        }
+        let lookup = auth_db(db);
+        let mut issuer = self.issuer_org_api_key_id;
+        let mut depth = 1;
+        while let Some(id) = issuer {
+            depth += 1;
+            let ancestor = match Self::get(&lookup, id).await {
+                Ok(ancestor) => ancestor,
+                Err(OrgApiKeyError::NotFound) => return Ok(KeyStatus::IssuerInactive),
+                Err(error) => return Err(error),
+            };
+            if depth > MAX_ORG_KEY_DEPTH || ancestor.org_id != self.org_id || !ancestor.is_usable()
+            {
+                return Ok(KeyStatus::IssuerInactive);
+            }
+            issuer = ancestor.issuer_org_api_key_id;
+        }
+        let org = Org::get_org_uncached(&lookup, &self.org_id)
+            .await
+            .map_err(org_lookup_error(OrgApiKeyError::NotFound))?;
+        Ok(if org.is_admitting() {
+            KeyStatus::Active
+        } else {
+            KeyStatus::Suspended
+        })
+    }
+
+    /// The status of an environment key: its own state, then the chain of the
+    /// org key that minted it (`issuer`), then its environment's admission.
+    pub async fn env_key_status(
+        db: &DatabasePool,
+        key: &ApiKey,
+        state: &super::api_key::ApiKeyCredentialState,
+        issuer: Option<Uuid>,
+        env: &Env,
+    ) -> Result<KeyStatus, OrgApiKeyError> {
+        if !key.active {
+            return Ok(KeyStatus::Revoked);
+        }
+        if state.is_expired() {
+            return Ok(KeyStatus::Expired);
+        }
+        let lookup = auth_db(db);
+        if let Some(issuer) = issuer {
+            let issuer = match Self::get(&lookup, issuer).await {
+                Ok(issuer) => issuer,
+                Err(OrgApiKeyError::NotFound) => return Ok(KeyStatus::IssuerInactive),
+                Err(error) => return Err(error),
+            };
+            match issuer.status(&lookup).await? {
+                KeyStatus::Active => {}
+                KeyStatus::Suspended => return Ok(KeyStatus::Suspended),
+                _ => return Ok(KeyStatus::IssuerInactive),
+            }
+        }
+        if !env.active {
+            return Ok(KeyStatus::Suspended);
+        }
+        let org = Org::get_org_uncached(&lookup, &env.org_id)
+            .await
+            .map_err(org_lookup_error(OrgApiKeyError::NotFound))?;
+        let root_admitting = match org.parent_org_id {
+            Some(root) => Org::get_org_uncached(&lookup, &root)
+                .await
+                .map_err(org_lookup_error(OrgApiKeyError::NotFound))?
+                .is_admitting(),
+            None => true,
+        };
+        Ok(if org.is_admitting() && root_admitting {
+            KeyStatus::Active
+        } else {
+            KeyStatus::Suspended
+        })
     }
 
     pub fn get_permissions(&self) -> Result<Permissions, OrgApiKeyError> {
@@ -405,7 +533,7 @@ impl OrgApiKey {
             return Err(OrgApiKeyError::NotFound);
         }
         if require_admitting && !org.is_admitting() {
-            return Err(OrgApiKeyError::Unauthorized);
+            return Err(OrgApiKeyError::OrgSuspended);
         }
         Ok(org)
     }
@@ -502,13 +630,14 @@ impl OrgApiKey {
     }
 
     /// Current authority: own grants intersected with every ancestor's. Fails
-    /// when any key in the chain is unusable or the org is not an admitting root.
+    /// when any key in the chain is unusable or the org is not a root, and with
+    /// `AccountSuspended` when the chain is sound but the root is not admitting.
     pub async fn effective(&self, db: &DatabasePool) -> Result<EffectiveOrgGrants, OrgApiKeyError> {
         let lookup = auth_db(db);
         let org = Org::get_org_uncached(&lookup, &self.org_id)
             .await
             .map_err(org_lookup_error(OrgApiKeyError::Unauthorized))?;
-        if org.parent_org_id.is_some() || !org.is_admitting() || !self.is_usable() {
+        if org.parent_org_id.is_some() || !self.is_usable() {
             return Err(OrgApiKeyError::Unauthorized);
         }
         let mut permissions = self.get_permissions()?;
@@ -531,6 +660,11 @@ impl OrgApiKey {
                 (a, b) => a.or(b),
             };
             issuer = ancestor.issuer_org_api_key_id;
+        }
+        // Checked after the chain, so a revoked or expired chain is reported
+        // as such even while the account is suspended.
+        if !org.is_admitting() {
+            return Err(OrgApiKeyError::AccountSuspended);
         }
         Ok(EffectiveOrgGrants {
             permissions,
@@ -581,6 +715,16 @@ impl OrgApiKey {
         if state.is_expired() {
             return Err(OrgApiKeyError::Unauthorized);
         }
+        Self::effective_env_permissions_of_verified(&lookup, api_key).await
+    }
+
+    /// [`Self::effective_env_permissions`] for a key [`ApiKey::verify_api_key`]
+    /// returned, which has already checked its expiry.
+    pub async fn effective_env_permissions_of_verified(
+        db: &DatabasePool,
+        api_key: &ApiKey,
+    ) -> Result<Permissions, OrgApiKeyError> {
+        let lookup = auth_db(db);
         let own = api_key
             .get_permissions()
             .map_err(|_| OrgApiKeyError::Unauthorized)?;
@@ -724,7 +868,7 @@ impl OrgApiKey {
             &root_id,
             "security",
             "org-api-key.revoke",
-            "Root administrator revoked an org API key",
+            "An administrator revoked an org API key",
             Some(&serde_json::json!({"org_api_key_id": id})),
             Some(&user_id),
         )

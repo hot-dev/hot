@@ -166,6 +166,8 @@ meta ["test"] fn () {
     // Test flatten function
     nested_list [[1, 2], [3, [4, 5]], 6]
     assert-eq([1, 2, 3, 4, 5, 6], flatten(nested_list), "flatten flattens nested colls")
+    assert-eq(["ab", "cd", "ef"], flatten([["ab", "cd"], ["ef"]]), "flatten keeps strings whole")
+    assert-eq([{a: 1}, "x", 2], flatten([[{a: 1}], ["x", [2]]]), "flatten keeps maps whole")
 }
 
 test-zipmap
@@ -1537,4 +1539,44 @@ meta ["test"] fn () {
     assert-eq({host: "a.example", port: "1"}, map-vals(base, Str(%)), "map-vals transforms the fields")
     assert-eq([["port", 1]], filter(base, (k, v) { is-int(v) }), "filter sees the fields")
     assert-eq({host: "a.example"}, delete(base, "port"), "delete removes a field")
+}
+
+// The map-building functions take one pass: each used to copy its whole map
+// for every entry, so 20,000 distinct keys took most of a minute.
+test-map-building-functions-scale-linearly
+meta ["test"] fn () {
+    n 20000
+    started ::hot::time/epoch-millis(::hot::time/now())
+    nums range(0, n)
+    by-self index-by(nums, (x) { x })
+    groups group-by(nums, (x) { x })
+    counts frequencies(nums)
+    doubled map-vals(by-self, (v) { mul(v, 2) })
+    shifted map-keys(by-self, (k) { add(k, n) })
+    evens filter-vals(by-self, (v) { eq(mod(v, 2), 0) })
+    small filter-keys(by-self, (k) { lt(k, 10) })
+    elapsed sub(::hot::time/epoch-millis(::hot::time/now()), started)
+
+    assert-eq(n, length(by-self), "index-by keeps every key")
+    assert-eq([7], get(groups, 7), "group-by groups each element")
+    assert-eq(1, get(counts, 19999), "frequencies counts each element")
+    assert-eq(19998, get(doubled, 9999), "map-vals applies the function")
+    assert-eq(5, get(shifted, add(n, 5)), "map-keys applies the function")
+    assert-eq(div(n, 2), length(evens), "filter-vals keeps matching values")
+    assert-eq(range(0, 10), keys(small), "filter-keys keeps matching keys in order")
+    assert(lt(elapsed, 20000), `the map-building functions took ${elapsed} ms for ${n} keys`)
+}
+
+test-map-building-functions-keep-first-seen-key-order
+meta ["test"] fn () {
+    counts frequencies(["b", "a", "b"])
+    assert-eq(["b", "a"], keys(counts), "frequencies keys are in first-seen order")
+    assert-eq(2, get(counts, "b"), "frequencies counts each element")
+    groups group-by([3, 2, 1], if(eq(mod(%, 2), 0), "even", "odd"))
+    assert-eq(["odd", "even"], keys(groups), "group-by keys are in first-seen order")
+    assert-eq([3, 1], groups.odd, "group-by keeps elements in order")
+    idx index-by(["a", "b", "c"], (s) { if(eq(s, "b"), 2, 1) })
+    assert-eq([1, 2], keys(idx), "index-by keeps a key in its first place")
+    assert-eq("c", get(idx, 1), "index-by keeps the last element with a key")
+    assert-eq({x: 1}, map-keys({a: 1}, (k) { "x" }), "map-keys maps the keys")
 }

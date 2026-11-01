@@ -167,7 +167,7 @@ function confirmDeleteStoreEntryMobile(button) {
 }
 {% if is_admin %}
 (function () {
-    var storeNameUrl = '{{ store.name_url }}';
+    var storeNameUrl = {{ store.name_url|js|safe }};
 
     function valueCells() {
         return Array.prototype.slice.call(document.querySelectorAll('.js-store-value-cell')).filter(function (cell) {

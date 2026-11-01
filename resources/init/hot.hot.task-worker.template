@@ -86,5 +86,3 @@ hot.file.aws.secret-access-key ::env/get("HOT_FILE_AWS_SECRET_ACCESS_KEY", "")
 hot.file.gcs.bucket ::env/get("HOT_FILE_GCS_BUCKET", "")
 hot.file.gcs.prefix ::env/get("HOT_FILE_GCS_PREFIX", "")
 
-// Daemon Mode
-hot.daemon true

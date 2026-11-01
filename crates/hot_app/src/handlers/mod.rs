@@ -54,6 +54,125 @@ pub(super) fn plain_text_error(
     axum::response::IntoResponse::into_response((status, message.into()))
 }
 
+/// Render the shared error page in the app layout. `message` is shown as text.
+pub(crate) fn error_page(
+    session: &crate::auth::Session,
+    status: axum::http::StatusCode,
+    message: impl Into<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    let heading = match status {
+        StatusCode::NOT_FOUND => "Not found",
+        StatusCode::FORBIDDEN => "Not available",
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => "Request rejected",
+        _ => "Something went wrong",
+    };
+    error_page_with(session, status, heading, message, "/", "Back to dashboard")
+}
+
+/// [`error_page`] with an explicit heading and a link back to where the user came from.
+pub(crate) fn error_page_with(
+    session: &crate::auth::Session,
+    status: axum::http::StatusCode,
+    heading: &str,
+    message: impl Into<String>,
+    back_href: &str,
+    back_label: &str,
+) -> axum::response::Response {
+    use askama::Template;
+    let template = crate::templates::ErrorPage {
+        title: heading.to_string(),
+        page_context: crate::templates::PrivatePageContext::new("error", session),
+        status: status.as_u16(),
+        heading: heading.to_string(),
+        message: message.into(),
+        back_href: back_href.to_string(),
+        back_label: back_label.to_string(),
+    };
+    match template.render() {
+        Ok(html) => {
+            axum::response::IntoResponse::into_response((status, axum::response::Html(html)))
+        }
+        Err(_) => plain_text_error(status, template.message),
+    }
+}
+
+/// Render bare and plain-text error responses to page navigations as the shared error page,
+/// so unknown ids and malformed paths get the app layout and a real status code. JSON, HTML,
+/// HTMX and non-GET responses pass through unchanged.
+pub async fn render_error_pages(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    let navigation = request.method() == axum::http::Method::GET
+        && !is_htmx_request(request.headers())
+        && request
+            .headers()
+            .get(header::ACCEPT)
+            .and_then(|accept| accept.to_str().ok())
+            .is_some_and(|accept| accept.contains("text/html"));
+    let session = request.extensions().get::<crate::auth::Session>().cloned();
+    let response = next.run(request).await;
+    let status = response.status();
+    let Some(session) = session.filter(|_| navigation) else {
+        return response;
+    };
+    if !(status.is_client_error() || status.is_server_error()) {
+        return response;
+    }
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !(content_type.is_empty() || content_type.starts_with("text/plain")) {
+        return response;
+    }
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap_or_default();
+    let text = String::from_utf8_lossy(&body).trim().to_string();
+    // A path segment that doesn't parse (an id that isn't a UUID) names nothing that exists.
+    if status == StatusCode::BAD_REQUEST && text.starts_with("Invalid URL") {
+        return error_page(
+            &session,
+            StatusCode::NOT_FOUND,
+            "Nothing exists at this address.",
+        );
+    }
+    let message = if text.is_empty() || text.len() > 300 {
+        match status {
+            StatusCode::NOT_FOUND => "Nothing exists at this address.".to_string(),
+            StatusCode::FORBIDDEN => "You don't have access to this page.".to_string(),
+            _ => "The request could not be completed.".to_string(),
+        }
+    } else {
+        text
+    };
+    error_page(&session, status, message)
+}
+
+/// A rendered 404 for an id or name that doesn't exist in the current scope.
+pub(crate) fn not_found_page(
+    session: &crate::auth::Session,
+    what: &str,
+    back_href: &str,
+    back_label: &str,
+) -> axum::response::Response {
+    error_page_with(
+        session,
+        axum::http::StatusCode::NOT_FOUND,
+        &format!("{what} not found"),
+        format!(
+            "This {} doesn't exist in the selected environment, or you can't see it.",
+            what.to_lowercase()
+        ),
+        back_href,
+        back_label,
+    )
+}
+
 // Re-export handlers from modules for backward compatibility
 pub use account::{
     account_handler, account_update_handler, notifications_handler, notifications_update_handler,
@@ -409,6 +528,9 @@ fn extract_arg_name(arg: &JsonValue) -> String {
     "arg".to_string()
 }
 
+/// The password `hot init` gave the local identity before 3.0.1.
+const PRE_3_0_1_LOCAL_PASSWORD: &str = "hotdev";
+
 // Helper function to authenticate user with email and password
 pub async fn authenticate_user(
     db: &DatabasePool,
@@ -416,6 +538,14 @@ pub async fn authenticate_user(
     password: &str,
 ) -> Result<User, String> {
     tracing::debug!("Starting authentication for email: {}", email);
+
+    // Before 3.0.1, `hot init` gave the local identity this published
+    // password, and a database it set up may still have it. Sign-up needs 8
+    // characters, so nothing else has it.
+    if password == PRE_3_0_1_LOCAL_PASSWORD {
+        tracing::warn!("Refused the local identity's pre-3.0.1 password");
+        return Err("Invalid email or password".to_string());
+    }
 
     // Get user authentication record
     let user_auth = match UserAuth::get_user_auth(db, "email_password", email).await {
@@ -761,18 +891,11 @@ pub async fn switch_env_handler(
     }
 
     // Set the environment cookie
-    let new_cookies = cookies.add(
-        axum_extra::extract::cookie::Cookie::build((
-            crate::auth::current_env_cookie_name(),
-            env_id.to_string(),
-        ))
-        .path("/")
-        .max_age(time::Duration::days(30))
-        .same_site(axum_extra::extract::cookie::SameSite::Lax)
-        .http_only(true)
-        .secure(!hot::env::is_local_dev())
-        .build(),
-    );
+    let new_cookies = cookies.add(crate::auth::build_cookie(
+        crate::auth::current_env_cookie_name(),
+        env_id.to_string(),
+        time::Duration::days(30),
+    ));
 
     let org_id = session
         .current_org_id()
@@ -795,12 +918,13 @@ pub async fn status_handler() -> Json<JsonValue> {
 }
 
 /// Build grouped JSON for MCP tools and webhooks in an environment.
-/// Returns `(mcp_tools_json, webhooks_json)` — each a JSON array of
-/// `{"service":"...","items":["..."]}` objects, grouped by service.
+/// Returns `(mcp_tools, webhooks)` — each a JSON array of
+/// `{"service":"...","items":["..."]}` objects, grouped by service. Templates embed them with
+/// the `js` filter: tool names and webhook paths come from deployed code.
 pub async fn build_permission_path_options(
     db: &hot::db::DatabasePool,
     env_id: &uuid::Uuid,
-) -> (String, String) {
+) -> (JsonValue, JsonValue) {
     use std::collections::BTreeMap;
 
     // MCP tools grouped by service
@@ -828,9 +952,9 @@ pub async fn build_permission_path_options(
                     serde_json::json!({"service": service, "items": items})
                 })
                 .collect();
-            serde_json::to_string(&groups).unwrap_or_else(|_| "[]".into())
+            JsonValue::Array(groups)
         }
-        Err(_) => "[]".into(),
+        Err(_) => JsonValue::Array(Vec::new()),
     };
 
     // Webhooks grouped by service
@@ -852,9 +976,9 @@ pub async fn build_permission_path_options(
                     serde_json::json!({"service": service, "items": items})
                 })
                 .collect();
-            serde_json::to_string(&groups).unwrap_or_else(|_| "[]".into())
+            JsonValue::Array(groups)
         }
-        Err(_) => "[]".into(),
+        Err(_) => JsonValue::Array(Vec::new()),
     };
 
     (mcp_json, webhooks_json)

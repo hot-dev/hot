@@ -37,20 +37,25 @@
 //!
 //! ## Cache Key
 //! Each cache entry is keyed by:
-//! - Hash of all source files in the unit
+//! - The path and content hash of each source file the unit loads (for a
+//!   package, the files its `src-paths` select, plus its `pkg.hot`)
 //! - Hot engine version
 //! - Cache format version
+//!
+//! A load keys by the files as they are on disk; a save keys by the bytes
+//! that were actually parsed. A file edited while it is being parsed then
+//! saves under the old content's key, so the next run misses and reparses
+//! instead of running the old AST.
 //!
 //! ## Serialization Strategy
 //! Uses the ast_cache module which provides tagged JSON serialization
 //! that correctly handles Val::Map with non-string keys. The JSON is then
 //! compressed with zstd.
 
-use crate::hasher::{CacheKeyBuilder, CacheType, compute_hot_file_hashes};
+use crate::hasher::{CacheKeyBuilder, CacheType, HotHasher};
 use crate::lang::ast::{Namespace, NsPath};
 use crate::lang::cache::ast_cache;
 use indexmap::IndexMap;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -240,26 +245,49 @@ impl UnitCache {
         self.dir_for(unit).join(filename)
     }
 
-    /// Compute cache key for a compilation unit
-    /// Uses unified CacheKeyBuilder which includes Hot version and format version
-    pub fn compute_cache_key(&self, unit: &CompilationUnit) -> Result<String, String> {
-        let file_hashes = compute_hot_file_hashes(unit.path())?;
+    /// Compute the cache key for a unit made of the files in `file_hashes`
+    /// (`(path, content hash)` pairs: from disk for a load, from the parsed
+    /// bytes for a save). It covers exactly the files the unit loads, so an
+    /// edit to any of them, wherever it lives, changes the key.
+    ///
+    /// A package's key also covers its `pkg.hot`, which selects those files
+    /// and carries its version. Uses the unified CacheKeyBuilder, which
+    /// includes the Hot version and format version.
+    pub fn compute_cache_key(
+        &self,
+        unit: &CompilationUnit,
+        file_hashes: &[(String, String)],
+    ) -> Result<String, String> {
+        let mut hashes = file_hashes.to_vec();
+        if let CompilationUnit::Package { path, .. } = unit {
+            let pkg_hot = path.join("pkg.hot");
+            match std::fs::read(&pkg_hot) {
+                Ok(content) => hashes.push((
+                    pkg_hot.to_string_lossy().to_string(),
+                    HotHasher::hash_content(&content),
+                )),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("Failed to read {}: {}", pkg_hot.display(), e)),
+            }
+        }
 
         Ok(CacheKeyBuilder::new(CacheType::Ast)
             .with_prefix(&unit.id())
-            .with_file_hashes(&file_hashes)
+            .with_file_hashes(&hashes)
             .finalize())
     }
 
-    /// Try to load a cached unit
-    /// The full computed key and runtime metadata are revalidated from the
-    /// payload before the entry is accepted.
-    pub fn load(&self, unit: &CompilationUnit) -> Result<Option<CachedUnit>, String> {
-        // Compute cache key (includes version + file hashes)
-        let cache_key = self.compute_cache_key(unit)?;
-
+    /// Try to load a cached unit stored under `cache_key` (from
+    /// [`Self::compute_cache_key`] over the unit's files as they are on disk).
+    /// The full key and runtime metadata are revalidated from the payload
+    /// before the entry is accepted.
+    pub fn load(
+        &self,
+        unit: &CompilationUnit,
+        cache_key: &str,
+    ) -> Result<Option<CachedUnit>, String> {
         // Check if cache file exists
-        let cache_path = self.cache_path(unit, &cache_key);
+        let cache_path = self.cache_path(unit, cache_key);
         if !cache_path.exists() {
             return Ok(None);
         }
@@ -271,7 +299,7 @@ impl UnitCache {
             let data = zstd::decode_all(compressed.as_slice()).map_err(|e| e.to_string())?;
             let cache_file: CacheFile = postcard::from_bytes(&data)
                 .map_err(|e| format!("Failed to deserialize cache file: {}", e))?;
-            validate_cache_metadata(&cache_file.metadata, &cache_key)?;
+            validate_cache_metadata(&cache_file.metadata, cache_key)?;
             let namespaces = ast_cache::deserialize_namespaces(&cache_file.namespaces_data)?;
             Ok((cache_file.metadata, namespaces))
         })();
@@ -292,17 +320,19 @@ impl UnitCache {
         }))
     }
 
-    /// Save a compilation unit to cache
+    /// Save a compilation unit's namespaces under `cache_key`.
+    ///
+    /// The caller computes the key from the bytes it parsed, not from the
+    /// files as they are now: re-hashing here would store the old AST under
+    /// the new content's key when a file changed during the parse.
     /// Uses parallel zstd compression for faster saves on larger payloads
     /// Uses file locking to prevent cross-process races
     pub fn save(
         &self,
         unit: &CompilationUnit,
+        cache_key: &str,
         namespaces: &IndexMap<NsPath, Namespace>,
     ) -> Result<(), String> {
-        // Compute cache key (includes version + file hashes)
-        let cache_key = self.compute_cache_key(unit)?;
-
         // Ensure cache directory exists
         std::fs::create_dir_all(self.dir_for(unit)).map_err(|e| e.to_string())?;
 
@@ -315,7 +345,7 @@ impl UnitCache {
         let file_lock_guard = file_lock.as_mut().and_then(|lock| lock.write().ok());
 
         // Check if cache already exists (another process may have just saved it)
-        let cache_path = self.cache_path(unit, &cache_key);
+        let cache_path = self.cache_path(unit, cache_key);
         if cache_path.exists() {
             tracing::debug!("Cache already exists for {} (skipping save)", unit.id());
             return Ok(());
@@ -329,7 +359,7 @@ impl UnitCache {
             metadata: CacheMetadata {
                 version: CacheType::Ast.format_version(),
                 hot_version: crate::build_info::VERSION.to_string(),
-                source_hash: cache_key.clone(),
+                source_hash: cache_key.to_string(),
             },
             namespaces_data,
         };
@@ -448,54 +478,6 @@ impl std::fmt::Display for CacheStats {
     }
 }
 
-/// Result of loading cached units
-pub struct CacheLoadResult {
-    /// Successfully loaded cached units
-    pub cached: Vec<(CompilationUnit, IndexMap<NsPath, Namespace>)>,
-    /// Units that need parsing (cache miss)
-    pub needs_parsing: Vec<CompilationUnit>,
-}
-
-impl UnitCache {
-    /// Load multiple units in parallel, returning which need parsing
-    pub fn load_units(&self, units: &[CompilationUnit]) -> CacheLoadResult {
-        let results: Vec<(CompilationUnit, Option<IndexMap<NsPath, Namespace>>)> = units
-            .par_iter()
-            .map(|unit| {
-                let cached = self.load(unit).ok().flatten().map(|c| c.namespaces);
-                (unit.clone(), cached)
-            })
-            .collect();
-
-        let mut cached = Vec::new();
-        let mut needs_parsing = Vec::new();
-
-        for (unit, namespaces) in results {
-            if let Some(ns) = namespaces {
-                cached.push((unit, ns));
-            } else {
-                needs_parsing.push(unit);
-            }
-        }
-
-        CacheLoadResult {
-            cached,
-            needs_parsing,
-        }
-    }
-
-    /// Save multiple units in parallel
-    pub fn save_units(
-        &self,
-        units: &[(CompilationUnit, IndexMap<NsPath, Namespace>)],
-    ) -> Vec<Result<(), String>> {
-        units
-            .par_iter()
-            .map(|(unit, namespaces)| self.save(unit, namespaces))
-            .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,6 +514,13 @@ mod tests {
         };
 
         (path, ns)
+    }
+
+    /// The key a load computes for `unit`: every `.hot` file under its path,
+    /// hashed as it is on disk now.
+    fn disk_key(cache: &UnitCache, unit: &CompilationUnit) -> String {
+        let hashes = crate::hasher::compute_hot_file_hashes(unit.path()).unwrap();
+        cache.compute_cache_key(unit, &hashes).unwrap()
     }
 
     fn create_test_unit(root: &Path) -> CompilationUnit {
@@ -572,7 +561,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let unit = create_test_unit(root.path());
         let cache = UnitCache::new(root.path().join("cache"));
-        let requested_key = cache.compute_cache_key(&unit).unwrap();
+        let requested_key = disk_key(&cache, &unit);
         let (path, namespace) = create_test_namespace("test");
         let namespaces = [(path, namespace)].into_iter().collect();
         let cache_path = write_unit_cache_file(
@@ -584,13 +573,20 @@ mod tests {
         );
 
         let error = cache
-            .load(&unit)
+            .load(&unit, &disk_key(&cache, &unit))
             .expect_err("source hash mismatch must fail");
         assert!(error.contains("source hash mismatch"));
         assert!(!cache_path.exists(), "stale unit cache must be deleted");
 
-        cache.save(&unit, &namespaces).expect("save must repair");
-        assert!(cache.load(&unit).unwrap().is_some());
+        cache
+            .save(&unit, &disk_key(&cache, &unit), &namespaces)
+            .expect("save must repair");
+        assert!(
+            cache
+                .load(&unit, &disk_key(&cache, &unit))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -598,12 +594,12 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let unit = create_test_unit(root.path());
         let cache = UnitCache::new(root.path().join("cache"));
-        let key = cache.compute_cache_key(&unit).unwrap();
+        let key = disk_key(&cache, &unit);
         std::fs::create_dir_all(&cache.cache_dir).unwrap();
         let path = cache.cache_path(&unit, &key);
         std::fs::write(&path, b"not-zstd").unwrap();
 
-        assert!(cache.load(&unit).is_err());
+        assert!(cache.load(&unit, &disk_key(&cache, &unit)).is_err());
         assert!(!path.exists(), "corrupt unit cache must be deleted");
     }
 
@@ -612,12 +608,12 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let unit = create_test_unit(root.path());
         let cache = UnitCache::new(root.path().join("cache"));
-        let key = cache.compute_cache_key(&unit).unwrap();
+        let key = disk_key(&cache, &unit);
         std::fs::create_dir_all(&cache.cache_dir).unwrap();
         let path = cache.cache_path(&unit, &key);
         std::fs::create_dir(&path).unwrap();
 
-        assert!(cache.load(&unit).is_err());
+        assert!(cache.load(&unit, &disk_key(&cache, &unit)).is_err());
         assert!(path.is_dir(), "read failures must leave the entry in place");
     }
 
@@ -628,15 +624,22 @@ mod tests {
         let cache = UnitCache::new(root.path().join("cache"));
         let (path, namespace) = create_test_namespace("test");
         let namespaces = [(path, namespace)].into_iter().collect();
-        cache.save(&unit, &namespaces).unwrap();
+        cache
+            .save(&unit, &disk_key(&cache, &unit), &namespaces)
+            .unwrap();
 
-        let key = cache.compute_cache_key(&unit).unwrap();
+        let key = disk_key(&cache, &unit);
         let cache_path = cache.cache_path(&unit, &key);
         let old_system = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
         let old = filetime::FileTime::from_system_time(old_system);
         filetime::set_file_mtime(&cache_path, old).unwrap();
 
-        assert!(cache.load(&unit).unwrap().is_some());
+        assert!(
+            cache
+                .load(&unit, &disk_key(&cache, &unit))
+                .unwrap()
+                .is_some()
+        );
         let touched = std::fs::metadata(&cache_path).unwrap().modified().unwrap();
         assert!(
             touched > old_system,
@@ -1159,8 +1162,12 @@ MyType -> Str fn (t: MyType): Str {
         };
 
         let namespaces = IndexMap::new();
-        cache.save(&package, &namespaces).expect("save package");
-        cache.save(&source, &namespaces).expect("save source");
+        cache
+            .save(&package, &disk_key(&cache, &package), &namespaces)
+            .expect("save package");
+        cache
+            .save(&source, &disk_key(&cache, &source), &namespaces)
+            .expect("save source");
 
         let entries = |dir: &Path| -> Vec<String> {
             std::fs::read_dir(dir)
@@ -1195,11 +1202,19 @@ MyType -> Str fn (t: MyType): Str {
         );
     }
 
+    /// The key a load computes for a package at `root`: the files its
+    /// `src-paths` select, hashed as they are on disk now.
+    fn package_disk_key(cache: &UnitCache, unit: &CompilationUnit) -> String {
+        let files =
+            crate::lang::engine::Engine::discover_dependency_source_files(unit.path()).unwrap();
+        let hashes = crate::hasher::hash_files(&files).unwrap();
+        cache.compute_cache_key(unit, &hashes).unwrap()
+    }
+
     /// The shared package cache must never serve one version's AST for
-    /// another. The key hashes every `.hot` file under the package root —
-    /// including `pkg.hot`, which carries the declared version — so a version
-    /// bump, a source edit, or a different install location all produce
-    /// distinct entries.
+    /// another. The key hashes the package's source files and its `pkg.hot`,
+    /// which carries the declared version, so a version bump, a source edit,
+    /// or a different install location all produce distinct entries.
     #[test]
     fn package_cache_key_distinguishes_version_sources_and_location() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1223,22 +1238,22 @@ MyType -> Str fn (t: MyType): Str {
 
         let root = dir.path().join("demo");
         write_pkg(&root, "1.0.0", "::demo ns\n\nvalue 1\n");
-        let v1 = cache.compute_cache_key(&unit_at(&root)).unwrap();
+        let v1 = package_disk_key(&cache, &unit_at(&root));
 
         // Same sources, bumped version in pkg.hot.
         write_pkg(&root, "2.0.0", "::demo ns\n\nvalue 1\n");
-        let v2 = cache.compute_cache_key(&unit_at(&root)).unwrap();
+        let v2 = package_disk_key(&cache, &unit_at(&root));
         assert_ne!(v1, v2, "a version bump must change the cache key");
 
         // Same version, edited sources.
         write_pkg(&root, "2.0.0", "::demo ns\n\nvalue 2\n");
-        let v2_edited = cache.compute_cache_key(&unit_at(&root)).unwrap();
+        let v2_edited = package_disk_key(&cache, &unit_at(&root));
         assert_ne!(v2, v2_edited, "a source edit must change the cache key");
 
         // Same name and content at a different install location.
         let elsewhere = dir.path().join("elsewhere").join("demo");
         write_pkg(&elsewhere, "2.0.0", "::demo ns\n\nvalue 2\n");
-        let other_location = cache.compute_cache_key(&unit_at(&elsewhere)).unwrap();
+        let other_location = package_disk_key(&cache, &unit_at(&elsewhere));
         assert_ne!(
             v2_edited, other_location,
             "a different install location must not reuse another package's entry"
@@ -1248,9 +1263,73 @@ MyType -> Str fn (t: MyType): Str {
         write_pkg(&root, "2.0.0", "::demo ns\n\nvalue 2\n");
         assert_eq!(
             v2_edited,
-            cache.compute_cache_key(&unit_at(&root)).unwrap(),
+            package_disk_key(&cache, &unit_at(&root)),
             "unchanged package must produce a stable key"
         );
+
+        // A file the package doesn't load (its tests) leaves the key alone.
+        std::fs::create_dir_all(root.join("test")).unwrap();
+        std::fs::write(root.join("test/lib.test.hot"), "::demo-test ns\n\nt 1\n").unwrap();
+        assert_eq!(
+            v2_edited,
+            package_disk_key(&cache, &unit_at(&root)),
+            "files outside src-paths are not part of the unit"
+        );
+    }
+
+    /// The key covers exactly the files a unit loads, wherever they are: a
+    /// unit whose file list reaches outside its root still misses when that
+    /// file changes.
+    #[test]
+    fn cache_key_covers_every_listed_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = UnitCache::new(dir.path().join("cache"));
+        let root = dir.path().join("lib");
+        std::fs::create_dir_all(&root).unwrap();
+        let inside = root.join("lib.hot");
+        let outside = dir.path().join("shared.hot");
+        std::fs::write(&inside, "::lib ns\n\nv 1\n").unwrap();
+        std::fs::write(&outside, "::shared ns\n\nv 1\n").unwrap();
+        let unit = CompilationUnit::Package {
+            name: "lib".to_string(),
+            path: root.clone(),
+        };
+        let files = vec![
+            inside.to_string_lossy().to_string(),
+            outside.to_string_lossy().to_string(),
+        ];
+        let key = || cache.compute_cache_key(&unit, &crate::hasher::hash_files(&files).unwrap());
+
+        let before = key().unwrap();
+        std::fs::write(&outside, "::shared ns\n\nv 2\n").unwrap();
+        assert_ne!(before, key().unwrap());
+    }
+
+    /// A save stores the AST under the key of the bytes that were parsed. A
+    /// file edited after it was read (an editor save, a checkout, `hot fmt`)
+    /// then misses on the next load instead of serving the old AST.
+    #[test]
+    fn save_keys_by_the_parsed_bytes_not_the_file_on_disk() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let unit = create_test_unit(root.path());
+        let cache = UnitCache::new(root.path().join("cache"));
+        let file = unit.path().join("test.hot");
+        let parsed_key = disk_key(&cache, &unit);
+        let (path, namespace) = create_test_namespace("test");
+        let namespaces = [(path, namespace)].into_iter().collect();
+
+        // The file changes between the read and the save.
+        std::fs::write(&file, b"::test ns\nvalue 2\n").unwrap();
+        cache.save(&unit, &parsed_key, &namespaces).unwrap();
+
+        assert!(
+            cache
+                .load(&unit, &disk_key(&cache, &unit))
+                .unwrap()
+                .is_none(),
+            "the edited file must not load the AST parsed from its old content"
+        );
+        assert!(cache.load(&unit, &parsed_key).unwrap().is_some());
     }
 
     /// A mutable unit must not accumulate generations, and the sweep must be
@@ -1292,7 +1371,9 @@ MyType -> Str fn (t: MyType): Str {
             "::mylib ns\n\nv 3\n",
         ] {
             make_lib(&a, body);
-            cache.save(&unit_at(&a), &namespaces).expect("save");
+            cache
+                .save(&unit_at(&a), &disk_key(&cache, &unit_at(&a)), &namespaces)
+                .expect("save");
         }
         let a_prefix = unit_at(&a).scoped_fs_id();
         assert_eq!(
@@ -1304,7 +1385,9 @@ MyType -> Str fn (t: MyType): Str {
         // Project B has a different local dependency, also called `mylib`.
         let b = dir.path().join("b").join("mylib");
         make_lib(&b, "::mylib ns\n\nother 1\n");
-        cache.save(&unit_at(&b), &namespaces).expect("save");
+        cache
+            .save(&unit_at(&b), &disk_key(&cache, &unit_at(&b)), &namespaces)
+            .expect("save");
         let b_prefix = unit_at(&b).scoped_fs_id();
         assert_ne!(
             a_prefix, b_prefix,
@@ -1315,7 +1398,9 @@ MyType -> Str fn (t: MyType): Str {
 
         // Project A edits again: still must not touch project B.
         make_lib(&a, "::mylib ns\n\nv 4\n");
-        cache.save(&unit_at(&a), &namespaces).expect("save");
+        cache
+            .save(&unit_at(&a), &disk_key(&cache, &unit_at(&a)), &namespaces)
+            .expect("save");
         assert_eq!(entries(&a_prefix), 1);
         assert_eq!(entries(&b_prefix), 1, "sweep is scoped to one location");
     }
@@ -1345,7 +1430,9 @@ MyType -> Str fn (t: MyType): Str {
         std::fs::write(&legacy, b"stale").unwrap();
         std::fs::write(&other_location, b"other project").unwrap();
 
-        cache.save(&unit, &IndexMap::new()).expect("save");
+        cache
+            .save(&unit, &disk_key(&cache, &unit), &IndexMap::new())
+            .expect("save");
 
         assert!(!legacy.exists(), "unreachable legacy entry is reclaimed");
         assert!(
@@ -1388,7 +1475,7 @@ MyType -> Str fn (t: MyType): Str {
             std::thread::spawn(move || {
                 let cache = UnitCache::new(cache_dir);
                 let _ = started_tx.send(());
-                let result = cache.save(&unit, &IndexMap::new());
+                let result = cache.save(&unit, &disk_key(&cache, &unit), &IndexMap::new());
                 let _ = done_tx.send(result);
             })
         };
@@ -1431,7 +1518,9 @@ MyType -> Str fn (t: MyType): Str {
                 format!("::mylib ns\n\nv {}\n", generation),
             )
             .unwrap();
-            cache.save(&unit, &IndexMap::new()).expect("save");
+            cache
+                .save(&unit, &disk_key(&cache, &unit), &IndexMap::new())
+                .expect("save");
 
             let entries: Vec<_> = std::fs::read_dir(&cache_dir)
                 .unwrap()
@@ -1448,7 +1537,7 @@ MyType -> Str fn (t: MyType): Str {
 
         assert!(
             UnitCache::new(cache_dir)
-                .load(&unit)
+                .load(&unit, &disk_key(&cache, &unit))
                 .ok()
                 .flatten()
                 .is_some(),

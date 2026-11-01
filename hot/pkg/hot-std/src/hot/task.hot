@@ -84,7 +84,8 @@ meta {
 
     **Fields**
     - `timeout` - Maximum task duration in milliseconds (default: 1,800,000 = 30 minutes)
-    - `type` - Task type label, e.g. `"code"`, `"container"` (default: `"code"`)
+    - `type` - Task type label (default: `"code"`). `"container"` is reserved:
+      container tasks start only through `::hot::box/start`.
     - `retry` - Retry configuration. Simple: `3` (3 attempts, default delay). Full: `{attempts: 5, delay: 5000, backoff: "exponential", max_delay: 300000, jitter: true}`
 
     **Examples**
@@ -156,7 +157,9 @@ meta {
     will not execute. If the task is running, a cancellation message is
     delivered to its `receive` channel (as `{$cancel: true}`) so it can
     exit cooperatively. The task worker also monitors for the cancel signal
-    and will terminate the task if it does not exit on its own.
+    and will terminate the task if it does not exit on its own. A container
+    task started with `::hot::box/start` has its container stopped, and is
+    charged compute units for the time it ran until then.
 
     Returns `true` if the task was cancelled, `false` if it was already
     in a terminal state (completed, failed, timed_out, or cancelled).
@@ -344,10 +347,14 @@ meta {
     timed_out, or cancelled), then returns a `TaskResult` with all
     execution details including timing breakdown and CUS.
 
+    It waits at most the task's timeout, and gives up with an error 5
+    seconds before the calling run's own deadline, so the run has time to
+    finish. The task keeps running; `await` it again from a later run.
+
     **Examples**
 
     ```hot
-    task ::box/start(BoxConf({"image": "alpine", "cmd": ["echo", "hello"], "size": "nano"}))
+    task ::box/start(BoxConf({"image": "alpine:3.21", "cmd": ["echo", "hello"], "size": "nano"}))
     result ::hot::task/await(task.id)
     result.status         // "completed"
     result.stdout         // "hello\n"

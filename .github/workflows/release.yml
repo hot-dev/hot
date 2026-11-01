@@ -36,7 +36,7 @@ env:
   CARGO_NET_RETRY: 2
   CARGO_HTTP_TIMEOUT: 30
   SQLX_OFFLINE: 'true'
-  TAILWIND_VERSION: v4.3.0
+  TAILWIND_VERSION: v4.3.3
 
 jobs:
   validate-release:
@@ -47,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read  # to find the hot workflow's run for the tagged commit
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
@@ -55,7 +56,7 @@ jobs:
       publish_package_cdn: ${{ steps.version.outputs.publish_package_cdn }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         fetch-depth: 0
 
@@ -113,6 +114,21 @@ jobs:
         echo "publish_package_cdn=$PUBLISH_PACKAGE_CDN" >> "$GITHUB_OUTPUT"
         echo "Validated release ${TAG_NAME} (beta: ${IS_BETA}, package-only: ${IS_PACKAGE_ONLY}, publish package CDN: ${PUBLISH_PACKAGE_CDN})"
 
+    # Tag a commit only after its CI passed: a release must ship exactly
+    # what the hot workflow tested.
+    - name: Require green CI on the tagged commit
+      if: github.ref_type == 'tag'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        conclusions="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow hot.yml \
+          --commit "$GITHUB_SHA" --status completed --json conclusion --jq '.[].conclusion')"
+        if ! grep -qx success <<<"$conclusions"; then
+          echo "::error::The hot workflow has no successful run for ${GITHUB_SHA}. Wait for CI on that commit to pass, then push the tag again."
+          exit 1
+        fi
+        echo "The hot workflow passed for ${GITHUB_SHA}"
+
   package-cdn:
     name: Generate Package CDN
     needs: validate-release
@@ -122,7 +138,7 @@ jobs:
       id-token: write
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Setup toolchain, cache, sccache, tailwind
       uses: ./.github/actions/rust-setup
@@ -150,7 +166,7 @@ jobs:
       run: ./scripts/hot-pkg-cdn.sh ./cdn-output
 
     - name: Upload package CDN artifact
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: package-cdn
         path: cdn-output/
@@ -176,6 +192,46 @@ jobs:
         PACKAGE_CDN_BUCKET: ${{ vars.PKG_S3_BUCKET }}
         CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.PKG_CLOUDFRONT_DIST_ID }}
       run: ./scripts/hot-pkg-cdn-upload.sh ./cdn-output
+
+  # Checks that need the network. A vendored browser library with an
+  # unreviewed advisory stops the release; the SDK pin check only warns,
+  # because the SDKs are published after Hot (they need its API).
+  release-checks:
+    name: Release Checks
+    needs: validate-release
+    if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+    - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      with:
+        node-version: '24'
+
+    - name: Versions are in sync
+      run: ./scripts/check-version-sync.sh
+
+    # Exit 1: an advisory nobody reviewed (record a reviewed one under
+    # ignored_advisories in resources/app/assets/js/vendor.json). Exit 2: the
+    # OSV query failed, which only warns.
+    - name: Vendored browser libraries have no unreviewed advisories
+      run: |
+        status=0
+        node scripts/check-vendored-js.mjs || status=$?
+        if [[ $status -eq 2 ]]; then
+          echo "::warning::The OSV query failed; the vendored browser libraries were not checked."
+        elif [[ $status -ne 0 ]]; then
+          exit "$status"
+        fi
+
+    - name: The SDK version the docs pin is published
+      run: |
+        if ! node scripts/check-sdk-doc-pins.mjs; then
+          echo "::warning::resources/docs/api/sdks.md pins an SDK version some registries don't have yet. Publish the SDKs before hot.dev deploys these docs."
+        fi
 
   # Build binaries for all targets
   build:
@@ -226,7 +282,7 @@ jobs:
       run: Set-MpPreference -DisableRealtimeMonitoring $true
 
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -234,41 +290,23 @@ jobs:
         toolchain: 1.99.1
         targets: ${{ matrix.target }}
 
-    - name: Install TailwindCSS CLI (macOS/Linux)
-      if: runner.os != 'Windows'
+    # Downloads the standalone binary from GitHub releases (no npm or winget)
+    # and verifies it against the SHA-256 the script pins per asset.
+    - name: Install TailwindCSS CLI
       shell: bash
       run: |
-        case "$RUNNER_OS-$RUNNER_ARCH" in
-          Linux-X64)   asset=tailwindcss-linux-x64 ;;
-          Linux-ARM64) asset=tailwindcss-linux-arm64 ;;
-          macOS-ARM64) asset=tailwindcss-macos-arm64 ;;
-          macOS-X64)   asset=tailwindcss-macos-x64 ;;
-          *) echo "unsupported runner: $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
-        esac
-        install_dir="$RUNNER_TEMP/tailwindcss-bin"
-        mkdir -p "$install_dir"
-        curl -sSfL --retry 3 -o "$install_dir/tailwindcss" \
-          "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/$asset"
-        chmod +x "$install_dir/tailwindcss"
-        echo "$install_dir" >> "$GITHUB_PATH"
-
-    - name: Install TailwindCSS CLI (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        # Download TailwindCSS standalone binary directly from GitHub releases
-        # This avoids winget issues with msstore source agreements in CI
-        $tailwindVersion = "${{ env.TAILWIND_VERSION }}"
-        $url = "https://github.com/tailwindlabs/tailwindcss/releases/download/${tailwindVersion}/tailwindcss-windows-x64.exe"
-        $installDir = "C:\Program Files\TailwindCSS"
-
-        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-        Invoke-WebRequest -Uri $url -OutFile "$installDir\tailwindcss.exe"
-
-        # Add to PATH for this workflow
-        echo $installDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-        echo "TailwindCSS installed to $installDir"
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          install_dir="$(cygpath -u "$RUNNER_TEMP")/tailwindcss-bin"
+        else
+          install_dir="$RUNNER_TEMP/tailwindcss-bin"
+        fi
+        bash scripts/install-tailwind.sh "$TAILWIND_VERSION" "$install_dir"
+        # Later steps run native processes, so Windows needs a Windows path.
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          cygpath -w "$install_dir" >> "$GITHUB_PATH"
+        else
+          echo "$install_dir" >> "$GITHUB_PATH"
+        fi
 
     - name: Verify TailwindCSS installation
       run: |
@@ -295,14 +333,18 @@ jobs:
     # builds release targets, so sccache and rust-cache hit 0% and only cost
     # time to save, pushing main's CI caches past the 10 GB budget.
 
-    - name: Cache ORT downloads (macOS)
-      if: runner.os == 'macOS'
-      uses: actions/cache@v5
+    # The ONNX Runtime prebuilt fastembed downloads, as main's CI saved it
+    # for this runner (see the rust-setup action; the paths must match it).
+    # A tag's own caches are never restored by a later run, so don't save.
+    - name: Restore ORT downloads
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
-        path: ~/Library/Caches/ort.pyke.io
-        key: ort-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
-        restore-keys: |
-          ort-${{ runner.os }}-${{ matrix.target }}-
+        path: |
+          ~/.cache/ort.pyke.io
+          ~/Library/Caches/ort.pyke.io
+          ~/AppData/Local/ort.pyke.io
+        key: ort-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: ort-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Verify macOS linker runtime
       if: runner.os == 'macOS'
@@ -341,7 +383,7 @@ jobs:
         if [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
           export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
         fi
-        cargo build --release --target ${{ matrix.target }} -j 4
+        cargo build --release --locked --target ${{ matrix.target }} -j 4
 
     - name: Smoke test Windows x64 release binary
       if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -360,7 +402,7 @@ jobs:
 
     - name: Build hotbox binary (Linux x86_64, static musl)
       if: matrix.platform == 'linux' && matrix.arch == 'x86_64'
-      run: cargo build --release --target x86_64-unknown-linux-musl -p hotbox -j 4
+      run: cargo build --release --locked --target x86_64-unknown-linux-musl -p hotbox -j 4
 
     - name: Build hotbox binary (Linux aarch64, static musl via Docker)
       if: matrix.platform == 'linux' && matrix.arch == 'aarch64'
@@ -371,7 +413,7 @@ jobs:
           -f - \
           --output "type=local,dest=target/hotbox-musl-build" \
           . <<'DOCKERFILE'
-        FROM rust:1.99.1-slim AS builder
+        FROM rust:1.99.1-slim-bookworm AS builder
         RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
         RUN rustup target add aarch64-unknown-linux-musl
         RUN apt-get update && apt-get install -y gcc-aarch64-linux-gnu && rm -rf /var/lib/apt/lists/*
@@ -384,7 +426,7 @@ jobs:
         RUN --mount=type=cache,id=hotbox-arm64-registry-${CARGO_LOCK_HASH},target=/usr/local/cargo/registry \
             --mount=type=cache,id=hotbox-arm64-git-${CARGO_LOCK_HASH},target=/usr/local/cargo/git \
             --mount=type=cache,id=hotbox-arm64-target-${CARGO_LOCK_HASH},target=/workspace/target \
-            cargo build --release --target aarch64-unknown-linux-musl -p hotbox && \
+            cargo build --release --locked --target aarch64-unknown-linux-musl -p hotbox && \
             cp /workspace/target/aarch64-unknown-linux-musl/release/hotbox /hotbox
         FROM scratch
         COPY --from=builder /hotbox /hotbox
@@ -419,7 +461,7 @@ jobs:
         copy target\${{ matrix.target }}\release\hot.exe artifacts\hot-${{ matrix.platform }}-${{ matrix.arch }}.exe
 
     - name: Upload binary artifact
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: binary-${{ matrix.platform }}-${{ matrix.arch }}
         path: artifacts/
@@ -431,10 +473,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Download Linux binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-linux-*
         path: binaries/
@@ -454,7 +496,7 @@ jobs:
       run: ./scripts/package-linux.sh
 
     - name: Upload Linux packages
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: packages-linux
         path: |
@@ -468,17 +510,17 @@ jobs:
     runs-on: macos-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Download macOS binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-macos-*
         path: binaries/
         merge-multiple: true
 
     - name: Download Linux hotbox binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-linux-*
         path: binaries/
@@ -552,7 +594,7 @@ jobs:
         fi
 
     - name: Upload macOS packages
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: packages-macos
         path: target/packages/*.pkg
@@ -564,17 +606,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Download macOS binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-macos-*
         path: binaries/
         merge-multiple: true
 
     - name: Download Linux binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-linux-*
         path: binaries/
@@ -665,7 +707,7 @@ jobs:
         cat packages/homebrew-checksums.txt
 
     - name: Upload Homebrew tarballs
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: packages-homebrew
         path: |
@@ -679,17 +721,17 @@ jobs:
     runs-on: windows-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Download Windows binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-windows-*
         path: binaries/
         merge-multiple: true
 
     - name: Download Linux hotbox binaries
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: binary-linux-*
         path: binaries/
@@ -1143,7 +1185,7 @@ jobs:
         exclude-interactive-browser-credential: true
 
     - name: Upload Windows packages
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: packages-windows
         path: target/packages/*.exe
@@ -1271,7 +1313,7 @@ jobs:
 
   # Create GitHub Release with all packages
   create-release:
-    needs: [validate-release, package-linux, package-macos, package-homebrew, package-windows, determine-release-channel]
+    needs: [validate-release, release-checks, package-linux, package-macos, package-homebrew, package-windows, determine-release-channel]
     if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
     runs-on: ubuntu-latest
     permissions:
@@ -1279,7 +1321,7 @@ jobs:
       id-token: write  # Required for AWS OIDC
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Get version
       id: version
@@ -1289,7 +1331,7 @@ jobs:
         echo "Release version: $VERSION"
 
     - name: Download all packages
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         pattern: packages-*
         path: packages/
@@ -1300,6 +1342,18 @@ jobs:
         echo "Packages to release:"
         ls -la packages/
 
+    # Curated notes (Breaking, Upgrade, Features, Fixes) go in
+    # .github/release-notes/<tag>.md; the generated PR list follows them.
+    - name: Find curated release notes
+      id: notes
+      run: |
+        notes=".github/release-notes/${{ needs.validate-release.outputs.tag_name }}.md"
+        if [[ -f "$notes" ]]; then
+          echo "body_path=$notes" >> "$GITHUB_OUTPUT"
+        elif [[ "${{ needs.determine-release-channel.outputs.is_stable_release }}" == "true" ]]; then
+          echo "::warning::No curated release notes at $notes; the release body lists merged PRs only."
+        fi
+
     - name: Create GitHub Release
       if: ${{ needs.validate-release.outputs.is_beta != 'true' }}
       uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
@@ -1307,6 +1361,7 @@ jobs:
         tag_name: ${{ needs.validate-release.outputs.tag_name }}
         name: Hot v${{ steps.version.outputs.version }}
         files: packages/*
+        body_path: ${{ steps.notes.outputs.body_path }}
         generate_release_notes: true
         draft: false
         prerelease: ${{ needs.determine-release-channel.outputs.is_stable_release != 'true' }}

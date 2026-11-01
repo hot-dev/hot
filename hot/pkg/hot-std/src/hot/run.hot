@@ -114,10 +114,10 @@ meta {
 }
 fn () {
     r info()
-    or(eq(r.type, "run"),
-       eq(r.type, "eval"),
-       eq(r.type, "repl"),
-       eq(r.type, "test"))
+    or(eq(r.run.type, "run"),
+       eq(r.run.type, "eval"),
+       eq(r.run.type, "repl"),
+       eq(r.run.type, "test"))
 }
 
 is-local-dev
