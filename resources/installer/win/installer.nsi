@@ -333,6 +333,16 @@ Section "Install"
     ; Create uninstaller
     WriteUninstaller "$INSTDIR\uninstall.exe"
 
+    ; Preserve the scope even when the user chose a custom directory. The
+    ; receipt lives beside hot.exe so hot update can find it in any folder.
+    FileOpen $0 "$INSTDIR\install-scope" w
+!ifdef PER_USER
+    FileWrite $0 "user"
+!else
+    FileWrite $0 "system"
+!endif
+    FileClose $0
+
     ; Add to PATH
     Call AddToPath
 
@@ -355,6 +365,7 @@ Section "Uninstall"
     Delete "$INSTDIR\hot.exe"
     Delete "$INSTDIR\hot_icon.ico"
     Delete "$INSTDIR\uninstall.exe"
+    Delete "$INSTDIR\install-scope"
     RMDir /r "$INSTDIR\resources"
     ; Remove legacy paths from older installers
     RMDir /r "$INSTDIR\pkg"

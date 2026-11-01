@@ -188,7 +188,7 @@ install_linux() {
 # $AS runs each step (empty, or sudo for a system install). Each step that
 # replaces a file or folder is a rename within the prefix, so a failure
 # leaves the old install working.
-install_archive() {
+install_archive() (
     bin_dir="$PREFIX/bin"
     share_dir="$PREFIX/share"
 
@@ -201,27 +201,65 @@ install_archive() {
     fi
 
     $AS mkdir -p "$bin_dir" "$share_dir" || error "Could not create $bin_dir and $share_dir"
-    stage="$share_dir/.hot-install.$$"
-    $AS rm -rf "$stage"
+    work_dir="$($AS mktemp -d "$share_dir/.hot-install.XXXXXXXX")"
+    stage="$work_dir/new"
+    old_resources="$work_dir/old"
+    new_exe=""
+    swapping_resources=false
+    committed=false
+
+    # Called by the EXIT trap below.
+    # shellcheck disable=SC2329
+    cleanup_archive() {
+        status=$?
+        trap - 0 INT TERM
+        rollback_ok=true
+        # The final rename may have completed just before a signal arrived.
+        if [ -n "$new_exe" ] && [ ! -e "$new_exe" ]; then
+            committed=true
+        fi
+        if [ "$committed" != true ]; then
+            if [ "$swapping_resources" = true ] && [ ! -e "$stage" ]; then
+                $AS mv "$share_dir/hot" "$stage" || rollback_ok=false
+            fi
+            if [ -e "$old_resources" ] && [ "$rollback_ok" = true ]; then
+                $AS mv "$old_resources" "$share_dir/hot" || rollback_ok=false
+            fi
+        fi
+        if [ -n "$new_exe" ]; then
+            $AS rm -f "$new_exe"
+        fi
+        if [ "$rollback_ok" = true ]; then
+            $AS rm -rf "$work_dir"
+        else
+            echo "Could not restore the previous resources; they are preserved in $old_resources" >&2
+        fi
+        exit "$status"
+    }
+    trap cleanup_archive 0
+    trap 'exit 1' INT TERM
+
     $AS mkdir "$stage"
     echo "Installing Hot into $PREFIX..."
-    if ! $AS tar -xzf "$1" -C "$stage" || [ ! -f "$stage/hot" ] || [ ! -d "$stage/pkg/hot-std" ]; then
-        $AS rm -rf "$stage"
+    # System installs extract as root. Keep that ownership instead of giving
+    # the installed files to the release builder's UID and GID.
+    if ! $AS tar --no-same-owner -xzf "$1" -C "$stage" || [ ! -f "$stage/hot" ] || [ ! -d "$stage/pkg/hot-std" ]; then
         error "Could not unpack the hot binary and its standard library from $(basename "$1")"
     fi
 
-    $AS mv "$stage/hot" "$bin_dir/.hot.new.$$"
-    $AS chmod 755 "$bin_dir/.hot.new.$$"
+    new_exe="$($AS mktemp "$bin_dir/.hot.new.XXXXXXXX")"
+    $AS mv "$stage/hot" "$new_exe"
+    $AS chmod 755 "$new_exe"
     printf '{"method": "archive"}\n' | $AS tee "$stage/$RECEIPT" >/dev/null
 
+    swapping_resources=true
     if [ -e "$share_dir/hot" ]; then
-        $AS rm -rf "$share_dir/hot.old.$$"
-        $AS mv "$share_dir/hot" "$share_dir/hot.old.$$"
+        $AS mv "$share_dir/hot" "$old_resources"
     fi
     $AS mv "$stage" "$share_dir/hot"
-    $AS mv -f "$bin_dir/.hot.new.$$" "$bin_dir/hot"
-    $AS rm -rf "$share_dir/hot.old.$$"
-}
+    $AS mv -f "$new_exe" "$bin_dir/hot"
+    committed=true
+)
 
 on_path() {
     case ":${PATH}:" in

@@ -415,20 +415,101 @@ fn archive_install_prefix(exe: &Path) -> Option<PathBuf> {
         .then(|| prefix.to_path_buf())
 }
 
-/// Whether `exe` is a Windows user install: the per-user installer puts it
-/// under `%LOCALAPPDATA%\Programs`, the machine installer in Program Files.
-fn is_windows_user_install(exe: &Path, local_app_data: Option<&Path>) -> bool {
+/// The installer records its scope beside the executable. Older per-user
+/// installers can be recognized by their HKCU uninstall registration, even
+/// when the user chose a directory outside LOCALAPPDATA.
+fn is_windows_user_install(
+    exe: &Path,
+    local_app_data: Option<&Path>,
+    user_uninstaller: Option<&str>,
+) -> bool {
+    if let Some(dir) = exe.parent()
+        && let Ok(scope) = std::fs::read_to_string(dir.join("install-scope"))
+    {
+        match scope.trim() {
+            "user" => return true,
+            "system" => return false,
+            _ => {}
+        }
+    }
+    let normalize = |path: &str| {
+        path.trim_matches('"')
+            .replace('/', "\\")
+            .trim_start_matches(r"\\?\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    };
+    let exe = normalize(&exe.to_string_lossy());
+    if let Some(uninstaller) = user_uninstaller {
+        let uninstaller = normalize(uninstaller);
+        if let Some(dir) = uninstaller.strip_suffix(r"\uninstall.exe")
+            && exe == format!(r"{dir}\hot.exe")
+        {
+            return true;
+        }
+    }
+
+    // Compatibility with an older default install whose registration is gone.
     let Some(local_app_data) = local_app_data else {
         return false;
     };
-    // Windows paths ignore case
-    let exe = exe.to_string_lossy().to_lowercase();
-    let base = local_app_data.to_string_lossy().to_lowercase();
-    let base = base.trim_end_matches(['\\', '/']);
+    let base = normalize(&local_app_data.to_string_lossy());
     !base.is_empty()
         && exe
-            .strip_prefix(base)
-            .is_some_and(|rest| rest.starts_with(['\\', '/']))
+            .strip_prefix(&base)
+            .is_some_and(|rest| rest.starts_with('\\'))
+}
+
+fn windows_user_uninstaller() -> Option<String> {
+    // NSIS writes its uninstall registration in the 32-bit view. Use JSON and
+    // UTF-8 output so paths containing non-ASCII characters survive capture.
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; \
+             $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey(\
+                 [Microsoft.Win32.RegistryHive]::CurrentUser, \
+                 [Microsoft.Win32.RegistryView]::Registry32).OpenSubKey(\
+                 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\HotDev'); \
+             if ($key) { $key.GetValue('UninstallString') | ConvertTo-Json -Compress }",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+fn powershell_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn windows_update_command(
+    user_install: bool,
+    install_dir: &Path,
+    target_version: Option<&str>,
+    installer_url: &str,
+) -> String {
+    let scope = if user_install { "user" } else { "system" };
+    let mut script = format!(
+        "$env:HOT_INSTALL_SCOPE={}; $env:HOT_INSTALL_DIR={}; ",
+        powershell_literal(scope),
+        powershell_literal(&install_dir.to_string_lossy())
+    );
+    if let Some(version) = target_version {
+        script.push_str(&format!(
+            "$env:HOT_VERSION={}; ",
+            powershell_literal(version)
+        ));
+    }
+    script.push_str(&format!("irm {} | iex", powershell_literal(installer_url)));
+    format!(
+        "Start-Process powershell -ArgumentList @('-ExecutionPolicy','Bypass','-Command',{}){}",
+        powershell_literal(&script),
+        if user_install { "" } else { " -Verb RunAs" }
+    )
 }
 
 /// Detect how Hot was installed by checking the binary path
@@ -499,24 +580,18 @@ pub async fn run_installer(
 
         // Spawn PowerShell to run the install script, for the install that's
         // running: a user install updates without administrator rights.
-        let user_install = std::env::current_exe().is_ok_and(|exe| {
-            is_windows_user_install(
-                &exe,
-                std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
-            )
-        });
-        let mut env = format!(
-            "$env:HOT_INSTALL_SCOPE=''{}''; ",
-            if user_install { "user" } else { "system" }
+        let exe = std::env::current_exe()?;
+        let install_dir = exe.parent().ok_or("Could not find the install directory")?;
+        let user_install = is_windows_user_install(
+            &exe,
+            std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
+            windows_user_uninstaller().as_deref(),
         );
-        if let Some(version) = target_version {
-            env.push_str(&format!("$env:HOT_VERSION=''{}''; ", version));
-        }
-        let ps_command = format!(
-            "Start-Process powershell -ArgumentList @('-ExecutionPolicy','Bypass','-Command','{}irm {} | iex'){}",
-            env,
-            windows_installer_url(),
-            if user_install { "" } else { " -Verb RunAs" }
+        let ps_command = windows_update_command(
+            user_install,
+            install_dir,
+            target_version,
+            &windows_installer_url(),
         );
         Command::new("powershell")
             .args(["-ExecutionPolicy", "Bypass", "-Command", &ps_command])
@@ -872,26 +947,79 @@ mod tests {
         let local = Some(Path::new(r"C:\Users\Ada\AppData\Local"));
         assert!(is_windows_user_install(
             Path::new(r"C:\Users\Ada\AppData\Local\Programs\Hot Dev\hot.exe"),
-            local
+            local,
+            None
         ));
         // Paths ignore case on Windows
         assert!(is_windows_user_install(
             Path::new(r"c:\users\ada\appdata\local\Programs\Hot Dev\hot.exe"),
-            Some(Path::new(r"C:\Users\Ada\AppData\Local\"))
+            Some(Path::new(r"C:\Users\Ada\AppData\Local\")),
+            None
         ));
         assert!(!is_windows_user_install(
             Path::new(r"C:\Program Files\Hot Dev\hot.exe"),
-            local
+            local,
+            None
         ));
         // A sibling folder that only shares the prefix
         assert!(!is_windows_user_install(
             Path::new(r"C:\Users\Ada\AppData\LocalLow\Hot Dev\hot.exe"),
-            local
+            local,
+            None
         ));
         assert!(!is_windows_user_install(
             Path::new(r"C:\Users\Ada\AppData\Local\Programs\Hot Dev\hot.exe"),
+            None,
             None
         ));
+    }
+
+    #[test]
+    fn a_custom_windows_install_keeps_its_recorded_scope() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("hot.exe");
+        let receipt = root.path().join("install-scope");
+        std::fs::write(&receipt, "user").unwrap();
+        assert!(is_windows_user_install(&exe, None, None));
+
+        std::fs::write(&receipt, "system").unwrap();
+        assert!(!is_windows_user_install(&exe, Some(root.path()), None));
+    }
+
+    #[test]
+    fn an_older_custom_user_install_matches_its_uninstall_registration() {
+        let exe = Path::new(r"\\?\C:\Users\Ada\Tools\Hot Dev\hot.exe");
+        let uninstaller = Some(r#""c:\users\ada\tools\Hot Dev\uninstall.exe""#);
+        assert!(is_windows_user_install(exe, None, uninstaller));
+        assert!(!is_windows_user_install(
+            Path::new(r"C:\Program Files\Hot Dev\hot.exe"),
+            None,
+            uninstaller
+        ));
+    }
+
+    #[test]
+    fn windows_updates_pass_the_directory_and_quote_powershell_literals() {
+        let command = windows_update_command(
+            true,
+            Path::new(r"C:\Users\O'Brien\Tools\Hot Dev"),
+            Some("3.0.2"),
+            DEFAULT_WINDOWS_INSTALLER_URL,
+        );
+        assert!(command.contains("HOT_INSTALL_SCOPE=''user''"));
+        assert!(command.contains(r"HOT_INSTALL_DIR=''C:\Users\O''''Brien\Tools\Hot Dev''"));
+        assert!(command.contains("HOT_VERSION=''3.0.2''"));
+        assert!(!command.contains("-Verb RunAs"));
+
+        let command = windows_update_command(
+            false,
+            Path::new(r"D:\Tools\Hot Dev"),
+            None,
+            DEFAULT_WINDOWS_INSTALLER_URL,
+        );
+        assert!(command.contains("HOT_INSTALL_SCOPE=''system''"));
+        assert!(command.contains(r"HOT_INSTALL_DIR=''D:\Tools\Hot Dev''"));
+        assert!(command.ends_with(" -Verb RunAs"));
     }
 
     #[test]
