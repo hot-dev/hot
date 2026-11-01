@@ -27,7 +27,7 @@ pub enum OrgError {
     /// Slugs are global, so another account may already hold this one.
     #[error("Organization slug is already taken")]
     SlugTaken,
-    #[error("A child organization with this external ID already exists")]
+    #[error("A sub-organization with this external ID already exists")]
     ExternalIdTaken,
 }
 

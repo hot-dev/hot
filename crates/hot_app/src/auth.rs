@@ -969,9 +969,14 @@ fn hold_reason(org: &hot::db::org::Org, user_orgs: &[hot::db::org::Org]) -> Stri
 /// short fragment for HTMX widgets, instead of an empty body.
 fn scope_error_response(session: &Session, status: StatusCode, is_htmx: bool) -> Response {
     let message = match (status, &session.current_org_hold) {
-        (StatusCode::FORBIDDEN, Some(hold)) => format!(
-            "{hold} Runs, deploys and data are unavailable until a root administrator restores it."
-        ),
+        (StatusCode::FORBIDDEN, Some(hold)) => {
+            // Name the parent only to members who can see it.
+            let admins = match session.billing_org() {
+                Some(parent) => format!("an administrator of {}", parent.name),
+                None => "an administrator of its parent organization".to_string(),
+            };
+            format!("{hold} Runs, deploys and data are unavailable until {admins} restores it.")
+        }
         (StatusCode::FORBIDDEN, None) if session.current_env.as_ref().is_some_and(|env| !env.active) => {
             "This environment is inactive. Choose another environment or reactivate it.".to_string()
         }

@@ -282,7 +282,7 @@ For actions initiated from the dashboard (e.g., re-running a function), the orig
 Hot supports multi-tenant organization structures:
 
 - **Organizations** - Top-level accounts with billing and user management
-- **Child organizations** - Workspaces an organization creates and manages, for example one per customer
+- **Sub-organizations** - Workspaces an organization creates and manages, for example one per customer
 - **Teams** - Groups within an organization for access control
 - **Environments** - Isolated execution contexts (dev, staging, production)
 
@@ -293,29 +293,32 @@ Hot supports multi-tenant organization structures:
 | Admin | Full access, manage users, billing, projects, settings |
 | Member | View and execute, limited configuration |
 
-### Child Organizations
+### Sub-organizations
 
-An organization account can own child organizations. Each child has its own
-environments, deployments, credentials, and data. The parent keeps billing and
-account members, and its plan limits are shared with its children. The plan
-can also limit how many children an account has. A key for one child can't
-reach the parent or another child.
+An organization account can own sub-organizations. Each sub-organization has
+its own environments, deployments, credentials, and data. The parent keeps
+billing and account members, and its plan limits are shared with its
+sub-organizations. The plan can also limit how many sub-organizations an
+account has. A key for one sub-organization can't reach the parent or another
+sub-organization.
 
-Root administrators manage children from the organization's **Children** tab:
+Administrators of the parent organization manage sub-organizations from its
+**Sub-orgs** tab:
 
-- **Create a child.** Enter a name, a handle, and an optional customer
-  reference. Handles are unique across Hot.
-- **Grant access.** Root administrators can open every child. Give other
-  account members access to a child as a Member or an Administrator, or remove
-  their access.
-- **Change status.** A child is active, suspended, or archived. Suspending a
-  child holds its new work. Restore an archived child to suspended before you
-  activate it. Suspending the account itself holds new work in every child.
+- **Create a sub-organization.** Enter a name, a handle, and an optional
+  customer reference. Handles are unique across Hot.
+- **Grant access.** Administrators of the parent organization can open every
+  sub-organization. Give other account members access to a sub-organization
+  as a Member or an Administrator, or remove their access.
+- **Change status.** A sub-organization is active, suspended, or archived.
+  Suspending a sub-organization holds its new work. Restore an archived
+  sub-organization to suspended before you activate it. Suspending the account
+  itself holds new work in every sub-organization.
 - **Create org API keys.** An org API key lets your own systems create and
-  manage children, their environments, and their API keys through
+  manage sub-organizations, their environments, and their API keys through
   [`/v1/orgs`](/docs/api/management). Give it a description, its permissions
   as `org:` URNs, and an optional expiry. The key is shown once. Revoking it
   also stops every key it created.
 
 The tab also shows an account overview: runs, failures, file bytes, and
-environments for the root and each child.
+environments for the parent organization and each sub-organization.

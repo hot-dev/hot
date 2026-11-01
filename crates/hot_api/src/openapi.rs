@@ -1241,41 +1241,41 @@ mod tests {
 }
 
 #[utoipa::path(get, path = "/v1/orgs", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Children of the key's organization that it may read (`org:*` or `org:{org}` with `read`).",
+    description = "Sub-organizations of the key's organization that it may read (`org:*` or `org:{org}` with `read`).",
     params(("limit" = Option<i64>, Query, description = "Max results (default 20, maximum 500)"), ("offset" = Option<i64>, Query, description = "Pagination offset")),
-    responses((status = 200, description = "Child organizations", body = ApiListResponse<OrgResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
+    responses((status = 200, description = "Sub-organizations", body = ApiListResponse<OrgResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_list_doc() {}
 
 #[utoipa::path(post, path = "/v1/orgs", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Create a child organization and its default environment (`org:*` with `create`). Idempotent by `idempotency_key`: a replay returns the original child with `created: false` and status 200. A slug taken by any account answers 409 `slug_taken`; an `external_id` another child of the account uses answers 409 `external_id_taken`.",
+    description = "Create a sub-organization and its default environment (`org:*` with `create`). Idempotent by `idempotency_key`: a replay returns the original sub-organization with `created: false` and status 200. A slug taken by any account answers 409 `slug_taken`; an `external_id` another sub-organization of the account uses answers 409 `external_id_taken`.",
     request_body = crate::handlers::orgs::CreateOrgRequest,
     responses(
-        (status = 201, description = "Child organization and its default environment", body = ApiResponse<CreateOrgResponse>),
+        (status = 201, description = "Sub-organization and its default environment", body = ApiResponse<CreateOrgResponse>),
         (status = 200, description = "Replay of an earlier request with the same idempotency key", body = ApiResponse<CreateOrgResponse>),
         (status = 409, description = "`slug_taken` or `external_id_taken`", body = ApiErrorResponse),
         (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_create_doc() {}
 
 #[utoipa::path(get, path = "/v1/orgs/{org_id}", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "The key's organization or one of its children (`org:{org}` with `read`).",
+    description = "The key's organization or one of its sub-organizations (`org:{org}` with `read`).",
     params(("org_id" = Uuid, Path, description = "Organization UUID")),
     responses((status = 200, description = "Organization", body = ApiResponse<OrgResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_get_doc() {}
 
 #[utoipa::path(patch, path = "/v1/orgs/{org_id}", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Change a child's lifecycle state (`org:{org}` with `update`).",
+    description = "Change a sub-organization's lifecycle state (`org:{org}` with `update`).",
     params(("org_id" = Uuid, Path, description = "Organization UUID")), request_body = crate::handlers::orgs::UpdateOrgRequest,
     responses((status = 200, description = "Updated organization", body = ApiResponse<OrgResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_update_doc() {}
 
 #[utoipa::path(get, path = "/v1/orgs/{org_id}/usage", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Account usage across the root and its children (`org:{root}/usage:*` with `read`). The response has `org_id`, `usage_scope: \"account\"`, `period_start`, `period_end` and `usage`.",
+    description = "Account usage across the parent organization and its sub-organizations (`org:{parent}/usage:*` with `read`). The response has `org_id`, `usage_scope: \"account\"`, `period_start`, `period_end` and `usage`.",
     params(("org_id" = Uuid, Path, description = "Organization UUID")),
     responses((status = 200, description = "Account usage", body = serde_json::Value), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_usage_doc() {}
 
 #[utoipa::path(delete, path = "/v1/orgs/{org_id}/calls", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Delete every call trace in an organization's environments, and its children's with `include_sub_orgs` (`org:{org}/env:*/call:*` with `delete` for each organization). Runs remain. Repeat until `complete` is true.",
+    description = "Delete every call trace in an organization's environments, and its sub-organizations' with `include_sub_orgs` (`org:{org}/env:*/call:*` with `delete` for each organization). Runs remain. Repeat until `complete` is true.",
     params(("org_id" = Uuid, Path, description = "Organization UUID"), crate::handlers::orgs::PurgeCallsQuery),
     responses((status = 200, description = "Calls deleted, payloads released, and whether the purge finished", body = ApiResponse<CallPurgeResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn orgs_purge_calls_doc() {}
@@ -1326,7 +1326,7 @@ fn orgs_list_org_keys_doc() {}
 fn orgs_mint_org_key_doc() {}
 
 #[utoipa::path(get, path = "/v1/api-keys/{key_id}", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "An org or environment API key in the caller's organization or a child (`api-key:{key}` with `read`, qualified by its org and environment).",
+    description = "An org or environment API key in the caller's organization or a sub-organization (`api-key:{key}` with `read`, qualified by its org and environment).",
     params(("key_id" = Uuid, Path, description = "Org or environment API key UUID")),
     responses((status = 200, description = "API key, without its secret", body = ApiResponse<ApiKeyResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn api_keys_get_doc() {}

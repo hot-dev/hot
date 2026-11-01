@@ -868,7 +868,7 @@ impl OrgApiKey {
             &root_id,
             "security",
             "org-api-key.revoke",
-            "Root administrator revoked an org API key",
+            "An administrator revoked an org API key",
             Some(&serde_json::json!({"org_api_key_id": id})),
             Some(&user_id),
         )

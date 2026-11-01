@@ -412,7 +412,7 @@ impl OrgPlan {
             != *org_id
         {
             return Err(PlanError::InvalidOrganization(
-                "child subscriptions are managed by the root".into(),
+                "sub-organization subscriptions are managed by the parent organization".into(),
             ));
         }
         let org_plan_id = Uuid::now_v7();

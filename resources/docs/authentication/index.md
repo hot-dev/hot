@@ -11,15 +11,16 @@ The [Hot runtime API](/docs/api) supports three credential types for authenticat
 | **API Key** | `hot_<uuid>_<secret>` | Long-lived | Full environment access for you and your team |
 | **Service Key** | `<uuid>_<secret>` | Long-lived (optional expiry) | Permission-scoped access for your customers and integrations |
 | **Session** | `s_<uuid>_<secret>` | Short-lived (1h default, 24h max) | Ephemeral, permission-scoped access, such as a backend acting for a browser visitor |
-| **Org API Key** | `hot_<uuid>_<secret>` | Long-lived (optional expiry) | Creating and managing child organizations, their environments and API keys |
+| **Org API Key** | `hot_<uuid>_<secret>` | Long-lived (optional expiry) | Creating and managing sub-organizations, their environments and API keys |
 
-Children own independent environments and deployments. Use a child's environment
-credential to access its resources. A parent's runtime key does not inherit child
-access, and service-key metadata cannot change scope. Root administrators can
-create [org API keys](/docs/api/management) for child provisioning and for
-minting child environment keys; org keys cannot execute workflows or call
-runtime endpoints. Org keys replaced the `hm_` management credentials of Hot
-3.0.0, which no longer authenticate.
+Sub-organizations own independent environments and deployments. Use a
+sub-organization's environment credential to access its resources. A parent
+organization's runtime key does not reach its sub-organizations, and
+service-key metadata cannot change scope. Administrators of the parent
+organization can create [org API keys](/docs/api/management) to provision
+sub-organizations and mint their environment keys; org keys cannot execute
+workflows or call runtime endpoints. Org keys replaced the `hm_` management
+credentials of Hot 3.0.0, which no longer authenticate.
 
 The API sends no CORS headers: call it from your backend, not from browser
 code. See [Browser Clients and CORS](/docs/api#browser-clients-and-cors).
