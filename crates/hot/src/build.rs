@@ -594,8 +594,13 @@ pub async fn create_build(
     // Fail before compiling when two files would share a bundle path
     crate::bundle::check_unique_bundle_paths(&all_files)?;
 
-    // Create a temporary empty file for validation (same approach as CLI compile command)
-    let temp_file = std::env::temp_dir().join("build_create_validation.hot");
+    // Create a temporary empty file for validation (same approach as CLI compile command).
+    // Each build gets its own: two builds in one process would otherwise remove
+    // the file while the other still reads it.
+    let temp_file = std::env::temp_dir().join(format!(
+        "build_create_validation-{}.hot",
+        Uuid::now_v7().simple()
+    ));
     std::fs::write(&temp_file, "// Build create validation file")
         .map_err(|e| format!("Failed to create temporary validation file: {}", e))?;
 
