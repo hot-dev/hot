@@ -116,11 +116,12 @@ impl SecretValues {
     pub fn register_minted(&self, value: &Val) {
         let mut forms = vec![value.clone()];
         if let Val::Bytes(bytes) = value {
-            forms.push(Val::from(hex::encode(bytes)));
+            forms.push(Val::from(hex::encode(bytes.as_slice())));
         }
         let mut new_hashes = AHashSet::new();
         crate::lang::hot::ctx::hash_secret_value_recursive(value, &mut new_hashes);
         if let Val::Bytes(bytes) = value {
+            let bytes = bytes.as_slice();
             new_hashes.insert(value_hash(&Val::from(hex::encode(bytes))));
             for encoded in [
                 base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -1477,13 +1478,13 @@ mod tests {
     fn minted_values_mask_without_marking_records_stale() {
         let registry = SecretValues::default();
         let signature: Vec<u8> = (0u8..32).map(|byte| byte.wrapping_mul(7) ^ 0xa5).collect();
-        registry.register_minted(&Val::Bytes(signature.clone()));
+        registry.register_minted(&Val::bytes(signature.clone()));
         assert_eq!(registry.generation(), 0);
 
         let hashes = AHashSet::new();
         let mask = RecordMask::new(&registry, &hashes);
         assert_eq!(
-            mask.mask_val(Val::Bytes(signature.clone())),
+            mask.mask_val(Val::bytes(signature.clone())),
             Val::from(MASK)
         );
         let url = url_b64_bytes(&signature);
@@ -1497,7 +1498,7 @@ mod tests {
     #[test]
     fn a_key_a_native_made_marks_no_record_stale() {
         let registry = SecretValues::default();
-        let minted = Val::Bytes(vec![0xa5; 32]);
+        let minted = Val::bytes(vec![0xa5; 32]);
         registry.register_minted(&minted);
         registry.register_key(&minted);
         assert_eq!(registry.generation(), 0);
@@ -1514,12 +1515,12 @@ mod tests {
                 .collect()
         };
         for n in 0..=MAX_MINTED_SUBSTRINGS as u32 {
-            registry.register_minted(&Val::Bytes(minted(n)));
+            registry.register_minted(&Val::bytes(minted(n)));
         }
         let hashes = AHashSet::new();
         let mask = RecordMask::new(&registry, &hashes);
         let last = minted(MAX_MINTED_SUBSTRINGS as u32);
-        assert_eq!(mask.mask_val(Val::Bytes(last.clone())), Val::from(MASK));
+        assert_eq!(mask.mask_val(Val::bytes(last.clone())), Val::from(MASK));
         let url = url_b64_bytes(&last);
         assert_eq!(mask.mask_val(Val::from(url.clone())), Val::from(MASK));
         let hex_form = hex::encode(&last);
