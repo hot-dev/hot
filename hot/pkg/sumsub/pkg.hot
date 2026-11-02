@@ -3,7 +3,7 @@
 hot.pkg.sumsub {
   name: "hot.dev/sumsub",
   version: "0.1.0",
-  hot-min-version: "3.0.0",
+  hot-min-version: "3.0.2",
   description: "Sumsub KYC, KYB and AML bindings for Hot: signed App Token requests, applicants (create, fetch, status, level changes, ID document upload, reset, check, tags, notes), WebSDK access tokens and links, company applicants and beneficiaries, transaction monitoring (KYT) and Travel Rule submissions, webhook digest verification, and a review-decision helper.",
   author: "Hot Dev",
   email: "support@hot.dev",

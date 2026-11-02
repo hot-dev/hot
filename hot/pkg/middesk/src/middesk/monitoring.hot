@@ -10,7 +10,6 @@ meta {
 }
 
 ::api ::middesk::api
-RequestOptions ::middesk::api/RequestOptions
 
 seg ::middesk::api/seg
 
@@ -24,9 +23,9 @@ meta {
 }
 fn
 (business-id: Str): Map {
-  get-monitor(business-id, RequestOptions({}))
+  get-monitor(business-id, {})
 },
-(business-id: Str, options: RequestOptions): Map {
+(business-id: Str, options: Map): Map {
   ::api/send("GET", path(business-id), {}, null, options)
 }
 
@@ -44,9 +43,9 @@ meta {
 }
 fn
 (business-id: Str, event-types: Vec<Str>): Map {
-  create-monitor(business-id, event-types, RequestOptions({}))
+  create-monitor(business-id, event-types, {})
 },
-(business-id: Str, event-types: Vec<Str>, options: RequestOptions): Map {
+(business-id: Str, event-types: Vec<Str>, options: Map): Map {
   ::api/send("POST", path(business-id), {}, {event_types: event-types}, options)
 }
 
@@ -56,9 +55,9 @@ meta {
 }
 fn
 (business-id: Str, event-types: Vec<Str>): Map {
-  update-monitor(business-id, event-types, RequestOptions({}))
+  update-monitor(business-id, event-types, {})
 },
-(business-id: Str, event-types: Vec<Str>, options: RequestOptions): Map {
+(business-id: Str, event-types: Vec<Str>, options: Map): Map {
   ::api/send("PUT", path(business-id), {}, {event_types: event-types}, options)
 }
 
@@ -68,8 +67,8 @@ meta {
 }
 fn
 (business-id: Str): Any {
-  delete-monitor(business-id, RequestOptions({}))
+  delete-monitor(business-id, {})
 },
-(business-id: Str, options: RequestOptions): Any {
+(business-id: Str, options: Map): Any {
   ::api/send("DELETE", path(business-id), {}, null, options)
 }

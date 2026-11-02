@@ -38,6 +38,52 @@ fn () {
     assert-eq(null, ::hot::ctx/get("company-registry.companies-house.api-key"), "per-call keys are never written to ctx")
 }
 
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"company-registry.companies-house.api-key": "ctx-key", "company-registry.sec.user-agent": "Ctx ops@ctx.test"})
+    for-each(["api-key", "user-agent"], (k) {
+      for-each(["", "  ", null], (v) {
+        out ::api/resolve(assoc({}, k, v))
+        assert(is-err(out), `blank ${k} never falls back to context`)
+        assert(::hot::str/contains(err-message(out), k), `the Err names ${k}`)
+      })
+    })
+    ::hot::ctx/set({"company-registry.companies-house.api-key": null, "company-registry.sec.user-agent": null})
+}
+
+test-blank-credential-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::ch/company("00445790", {api-key: ""})), "Companies House")
+    assert(is-err(::sec/submissions(320193, {user-agent: ""})), "SEC")
+    assert(is-err(::gleif/search("x", {api-key: ""})), "GLEIF")
+    assert(is-err(::company-registry/lookup("x", {api-key: ""})), "lookup")
+}
+
+test-keyed-url-needs-a-per-call-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"company-registry.companies-house.api-key": "ctx-key"})
+    for-each(["companies-house-base-url", "document-base-url"], (k) {
+      out ::api/resolve(assoc({}, k, "https://proxy.example"))
+      assert(is-err(out), `the context key never goes to ${k}`)
+      assert(::hot::str/contains(err-message(out), k), `names ${k}`)
+      assert(::hot::str/contains(err-message(out), "api-key"), "names api-key")
+      assert(is-ok(::api/resolve(assoc({api-key: "t"}, k, "https://proxy.example"))), "fine with a per-call key")
+    })
+    assert-eq("https://gleif.example", ::api/resolve({gleif-base-url: "https://gleif.example/"}).gleif-base-url, "GLEIF takes no credential")
+    ::hot::ctx/set({"company-registry.companies-house.api-key": null})
+}
+
+test-resolve-marks-and-returns-credentials-unchanged
+meta ["test"]
+fn () {
+    cfg ::api/resolve({api-key: "marked-ch-key", user-agent: "Marked Co marked@acme.test"})
+    assert-eq("marked-ch-key", cfg.api-key)
+    assert-eq("Marked Co marked@acme.test", cfg.user-agent)
+}
+
 test-missing-credentials-are-errors
 meta ["test"]
 fn () {

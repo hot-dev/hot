@@ -13,7 +13,7 @@ meta {
 }
 
 ::api ::persona::api
-RequestOptions ::persona::api/RequestOptions
+::ctx ::hot::ctx
 
 seg ::persona::api/seg
 
@@ -21,6 +21,13 @@ seg ::persona::api/seg
 // inquiries can be resumed; `completed` ones can still be approved or
 // declined by a workflow or a reviewer.
 DONE_STATUSES ["completed", "needs_review", "approved", "declined", "failed", "expired"]
+
+// `meta` keys that hold a hosted-flow credential, in every key inflection.
+HOSTED_FLOW_SECRET_KEYS [
+  "session-token", "session_token", "sessionToken",
+  "one-time-link", "one_time_link", "oneTimeLink",
+  "one-time-link-short", "one_time_link_short", "oneTimeLinkShort"
+]
 
 template-attribute
 meta {
@@ -52,6 +59,21 @@ fn (template-id: Str, opts: Map): Map {
   }, or(get(opts, "meta"), {}))
 }
 
+mark-hosted-flow-secrets
+meta {
+    doc: """Mask a response's session token and one-time links in call records and return the response unchanged. Each one lets anyone continue the user's verification. An Err passes through. Exposed for testing."""
+}
+fn (response: Result): Any {
+  cond {
+    is-err(response) => { response }
+    => {
+      m if(is-map(response), or(get(response, "meta"), {}), {})
+      ::ctx/mark-secret(filter(map(HOSTED_FLOW_SECRET_KEYS, (k) { get(m, k) }), is-str))
+      response
+    }
+  }
+}
+
 create-inquiry
 meta {
     doc: """
@@ -70,7 +92,7 @@ meta {
       auto-create-one-time-link: true, auto-create-inquiry-session: true,
       expiration-after-create-interval-seconds: 86400}`
 
-    Pass `RequestOptions({idempotency-key: ...})` so a retry can't create a
+    Pass `{idempotency-key: ...}` as the trailing options so a retry can't create a
     second inquiry.
 
     **Example**
@@ -79,7 +101,7 @@ meta {
     inquiry ::persona::inquiries/create-inquiry("itmpl_...", {
       reference-id: "user-42",
       meta: {auto-create-one-time-link: true}
-    }, ::persona::api/RequestOptions({idempotency-key: "user-42-kyc"}))
+    }, {idempotency-key: "user-42-kyc"})
     inquiry.data.id              // "inq_..."
     inquiry.meta.one-time-link   // send this to the user
     ```
@@ -87,13 +109,13 @@ meta {
 }
 fn
 (template-id: Str): Map {
-  create-inquiry(template-id, {}, RequestOptions({}))
+  create-inquiry(template-id, {}, {})
 },
 (template-id: Str, opts: Map): Map {
-  create-inquiry(template-id, opts, RequestOptions({}))
+  create-inquiry(template-id, opts, opts)
 },
-(template-id: Str, opts: Map, options: RequestOptions): Map {
-  ::api/send("POST", "/inquiries", {}, create-body(template-id, opts), options)
+(template-id: Str, opts: Map, options: Map): Map {
+  mark-hosted-flow-secrets(::api/send("POST", "/inquiries", {}, create-body(template-id, opts), options))
 }
 
 get-inquiry
@@ -113,12 +135,12 @@ meta {
 }
 fn
 (inquiry-id: Str): Map {
-  get-inquiry(inquiry-id, {}, RequestOptions({}))
+  get-inquiry(inquiry-id, {}, {})
 },
 (inquiry-id: Str, opts: Map): Map {
-  get-inquiry(inquiry-id, opts, RequestOptions({}))
+  get-inquiry(inquiry-id, opts, opts)
 },
-(inquiry-id: Str, opts: Map, options: RequestOptions): Map {
+(inquiry-id: Str, opts: Map, options: Map): Map {
   ::api/send("GET", `/inquiries/${seg(inquiry-id)}`, ::api/read-query(opts), null, options)
 }
 
@@ -141,12 +163,12 @@ meta {
 }
 fn
 (filters: Map): Map {
-  list-inquiries(filters, {}, RequestOptions({}))
+  list-inquiries(filters, {}, {})
 },
 (filters: Map, opts: Map): Map {
-  list-inquiries(filters, opts, RequestOptions({}))
+  list-inquiries(filters, opts, opts)
 },
-(filters: Map, opts: Map, options: RequestOptions): Map {
+(filters: Map, opts: Map, options: Map): Map {
   ::api/list-page("/inquiries", filters, opts, options)
 }
 
@@ -156,9 +178,9 @@ meta {
 }
 fn
 (filters: Map, limit: Int): Vec {
-  ::api/collect("/inquiries", filters, limit, RequestOptions({}))
+  ::api/collect("/inquiries", filters, limit, {})
 },
-(filters: Map, limit: Int, options: RequestOptions): Vec {
+(filters: Map, limit: Int, options: Map): Vec {
   ::api/collect("/inquiries", filters, limit, options)
 }
 
@@ -180,12 +202,12 @@ meta {
 }
 fn
 (query: Map): Map {
-  search-inquiries(query, {}, RequestOptions({}))
+  search-inquiries(query, {}, {})
 },
 (query: Map, opts: Map): Map {
-  search-inquiries(query, opts, RequestOptions({}))
+  search-inquiries(query, opts, opts)
 },
-(query: Map, opts: Map, options: RequestOptions): Map {
+(query: Map, opts: Map, options: Map): Map {
   size get(opts, "page-size")
   body ::api/compact({query: query, sort: get(opts, "sort"), page: if(is-some(size), {size: size}, null)})
   ::api/send("POST", "/inquiries/search", {}, body, options)
@@ -197,13 +219,13 @@ meta {
 }
 fn
 (inquiry-id: Str, attributes: Map): Map {
-  update-inquiry(inquiry-id, attributes, RequestOptions({}))
+  update-inquiry(inquiry-id, attributes, {})
 },
-(inquiry-id: Str, attributes: Map, options: RequestOptions): Map {
+(inquiry-id: Str, attributes: Map, options: Map): Map {
   ::api/send("PATCH", `/inquiries/${seg(inquiry-id)}`, {}, ::api/document(null, attributes, {}), options)
 }
 
-action fn (inquiry-id: Str, name: Str, meta-block: Map, options: RequestOptions): Map {
+action fn (inquiry-id: Str, name: Str, meta-block: Map, options: Map): Map {
   ::api/send("POST", `/inquiries/${seg(inquiry-id)}/${name}`, {}, ::api/meta-document(meta-block), options)
 }
 
@@ -213,12 +235,12 @@ meta {
 }
 fn
 (inquiry-id: Str): Map {
-  approve-inquiry(inquiry-id, null, RequestOptions({}))
+  approve-inquiry(inquiry-id, null, {})
 },
 (inquiry-id: Str, comment: Str?): Map {
-  approve-inquiry(inquiry-id, comment, RequestOptions({}))
+  approve-inquiry(inquiry-id, comment, {})
 },
-(inquiry-id: Str, comment: Str?, options: RequestOptions): Map {
+(inquiry-id: Str, comment: Str?, options: Map): Map {
   action(inquiry-id, "approve", {comment: comment}, options)
 }
 
@@ -228,12 +250,12 @@ meta {
 }
 fn
 (inquiry-id: Str): Map {
-  decline-inquiry(inquiry-id, null, RequestOptions({}))
+  decline-inquiry(inquiry-id, null, {})
 },
 (inquiry-id: Str, comment: Str?): Map {
-  decline-inquiry(inquiry-id, comment, RequestOptions({}))
+  decline-inquiry(inquiry-id, comment, {})
 },
-(inquiry-id: Str, comment: Str?, options: RequestOptions): Map {
+(inquiry-id: Str, comment: Str?, options: Map): Map {
   action(inquiry-id, "decline", {comment: comment}, options)
 }
 
@@ -243,9 +265,9 @@ meta {
 }
 fn
 (inquiry-id: Str): Map {
-  mark-for-review(inquiry-id, RequestOptions({}))
+  mark-for-review(inquiry-id, {})
 },
-(inquiry-id: Str, options: RequestOptions): Map {
+(inquiry-id: Str, options: Map): Map {
   action(inquiry-id, "mark-for-review", {}, options)
 }
 
@@ -255,9 +277,9 @@ meta {
 }
 fn
 (inquiry-id: Str): Map {
-  expire-inquiry(inquiry-id, RequestOptions({}))
+  expire-inquiry(inquiry-id, {})
 },
-(inquiry-id: Str, options: RequestOptions): Map {
+(inquiry-id: Str, options: Map): Map {
   action(inquiry-id, "expire", {}, options)
 }
 
@@ -280,10 +302,10 @@ meta {
 }
 fn
 (inquiry-id: Str): Map {
-  resume-inquiry(inquiry-id, RequestOptions({}))
+  resume-inquiry(inquiry-id, {})
 },
-(inquiry-id: Str, options: RequestOptions): Map {
-  action(inquiry-id, "resume", {}, options)
+(inquiry-id: Str, options: Map): Map {
+  mark-hosted-flow-secrets(action(inquiry-id, "resume", {}, options))
 }
 
 session-token
@@ -316,13 +338,13 @@ meta {
 }
 fn
 (inquiry-id: Str): Map {
-  generate-one-time-link(inquiry-id, null, RequestOptions({}))
+  generate-one-time-link(inquiry-id, null, {})
 },
 (inquiry-id: Str, expires-in-seconds: Int?): Map {
-  generate-one-time-link(inquiry-id, expires-in-seconds, RequestOptions({}))
+  generate-one-time-link(inquiry-id, expires-in-seconds, {})
 },
-(inquiry-id: Str, expires-in-seconds: Int?, options: RequestOptions): Map {
-  action(inquiry-id, "generate-one-time-link", {expires-in-seconds: expires-in-seconds}, options)
+(inquiry-id: Str, expires-in-seconds: Int?, options: Map): Map {
+  mark-hosted-flow-secrets(action(inquiry-id, "generate-one-time-link", {expires-in-seconds: expires-in-seconds}, options))
 }
 
 one-time-link
@@ -343,9 +365,9 @@ meta {
 }
 fn
 (inquiry-id: Str): Map {
-  redact-inquiry(inquiry-id, RequestOptions({}))
+  redact-inquiry(inquiry-id, {})
 },
-(inquiry-id: Str, options: RequestOptions): Map {
+(inquiry-id: Str, options: Map): Map {
   ::api/send("DELETE", `/inquiries/${seg(inquiry-id)}`, {}, null, options)
 }
 
@@ -355,9 +377,9 @@ meta {
 }
 fn
 (inquiry-id: Str, tag-name: Str): Map {
-  add-tag(inquiry-id, tag-name, RequestOptions({}))
+  add-tag(inquiry-id, tag-name, {})
 },
-(inquiry-id: Str, tag-name: Str, options: RequestOptions): Map {
+(inquiry-id: Str, tag-name: Str, options: Map): Map {
   action(inquiry-id, "add-tag", {tag-name: tag-name}, options)
 }
 
@@ -367,9 +389,9 @@ meta {
 }
 fn
 (inquiry-id: Str, tag-name: Str): Map {
-  remove-tag(inquiry-id, tag-name, RequestOptions({}))
+  remove-tag(inquiry-id, tag-name, {})
 },
-(inquiry-id: Str, tag-name: Str, options: RequestOptions): Map {
+(inquiry-id: Str, tag-name: Str, options: Map): Map {
   action(inquiry-id, "remove-tag", {tag-name: tag-name}, options)
 }
 
@@ -379,9 +401,9 @@ meta {
 }
 fn
 (inquiry-id: Str): Bytes {
-  print-inquiry(inquiry-id, RequestOptions({}))
+  print-inquiry(inquiry-id, {})
 },
-(inquiry-id: Str, options: RequestOptions): Bytes {
+(inquiry-id: Str, options: Map): Bytes {
   ::api/get-bytes(`/inquiries/${seg(inquiry-id)}/print`, options)
 }
 
@@ -399,7 +421,7 @@ fn (api-key: Any): Bool {
 
 simulate
 meta {
-    ctx: {"persona.api.key": {required: true}},
+    ctx: {"persona.api.key": {required: false}},
     doc: """
     POST /inquiries/{id}/perform-simulate-actions - Sandbox only: drive an
     inquiry through its lifecycle and fire the real webhooks. `actions` is
@@ -417,9 +439,9 @@ meta {
 }
 fn
 (inquiry-id: Str, actions: Vec): Map {
-  simulate(inquiry-id, actions, RequestOptions({}))
+  simulate(inquiry-id, actions, {})
 },
-(inquiry-id: Str, actions: Vec, options: RequestOptions): Map {
+(inquiry-id: Str, actions: Vec, options: Map): Map {
   resolved ::api/resolve(options)
   cond {
     is-err(resolved) => { resolved }

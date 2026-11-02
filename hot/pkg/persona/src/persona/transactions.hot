@@ -12,7 +12,6 @@ meta {
 }
 
 ::api ::persona::api
-RequestOptions ::persona::api/RequestOptions
 
 seg ::persona::api/seg
 
@@ -33,18 +32,18 @@ meta {
     txn ::persona::transactions/create-transaction("txntp_...", {
       business_name: "Acme Robotics LLC",
       business_registered_address: {street_1: "1 Main St", city: "Austin", subdivision: "TX", postal_code: "78701", country_code: "US"}
-    }, {reference-id: "biz-42"}, ::persona::api/RequestOptions({idempotency-key: "biz-42-kyb"}))
+    }, {reference-id: "biz-42"}, {idempotency-key: "biz-42-kyb"})
     ```
     """
 }
 fn
 (transaction-type-id: Str, fields: Map): Map {
-  create-transaction(transaction-type-id, fields, {}, RequestOptions({}))
+  create-transaction(transaction-type-id, fields, {}, {})
 },
 (transaction-type-id: Str, fields: Map, opts: Map): Map {
-  create-transaction(transaction-type-id, fields, opts, RequestOptions({}))
+  create-transaction(transaction-type-id, fields, opts, opts)
 },
-(transaction-type-id: Str, fields: Map, opts: Map, options: RequestOptions): Map {
+(transaction-type-id: Str, fields: Map, opts: Map, options: Map): Map {
   body ::api/document(null, {
     transaction-type-id: transaction-type-id,
     fields: if(is-empty(fields), null, fields),
@@ -60,12 +59,12 @@ meta {
 }
 fn
 (transaction-id: Str): Map {
-  get-transaction(transaction-id, {}, RequestOptions({}))
+  get-transaction(transaction-id, {}, {})
 },
 (transaction-id: Str, opts: Map): Map {
-  get-transaction(transaction-id, opts, RequestOptions({}))
+  get-transaction(transaction-id, opts, opts)
 },
-(transaction-id: Str, opts: Map, options: RequestOptions): Map {
+(transaction-id: Str, opts: Map, options: Map): Map {
   ::api/send("GET", `/transactions/${seg(transaction-id)}`, ::api/read-query(opts), null, options)
 }
 
@@ -75,12 +74,12 @@ meta {
 }
 fn
 (filters: Map): Map {
-  list-transactions(filters, {}, RequestOptions({}))
+  list-transactions(filters, {}, {})
 },
 (filters: Map, opts: Map): Map {
-  list-transactions(filters, opts, RequestOptions({}))
+  list-transactions(filters, opts, opts)
 },
-(filters: Map, opts: Map, options: RequestOptions): Map {
+(filters: Map, opts: Map, options: Map): Map {
   ::api/list-page("/transactions", filters, opts, options)
 }
 
@@ -90,9 +89,9 @@ meta {
 }
 fn
 (transaction-id: Str, attributes: Map): Map {
-  update-transaction(transaction-id, attributes, RequestOptions({}))
+  update-transaction(transaction-id, attributes, {})
 },
-(transaction-id: Str, attributes: Map, options: RequestOptions): Map {
+(transaction-id: Str, attributes: Map, options: Map): Map {
   ::api/send("PATCH", `/transactions/${seg(transaction-id)}`, {}, ::api/document(null, attributes, {}), options)
 }
 
@@ -102,12 +101,12 @@ meta {
 }
 fn
 (transaction-id: Str, label: Str): Map {
-  label-transaction(transaction-id, label, {}, RequestOptions({}))
+  label-transaction(transaction-id, label, {}, {})
 },
 (transaction-id: Str, label: Str, opts: Map): Map {
-  label-transaction(transaction-id, label, opts, RequestOptions({}))
+  label-transaction(transaction-id, label, opts, opts)
 },
-(transaction-id: Str, label: Str, opts: Map, options: RequestOptions): Map {
+(transaction-id: Str, label: Str, opts: Map, options: Map): Map {
   body ::api/meta-document({label: label, score: get(opts, "score"), model-version: get(opts, "model-version")})
   ::api/send("POST", `/transactions/${seg(transaction-id)}/label`, {}, body, options)
 }
@@ -118,9 +117,9 @@ meta {
 }
 fn
 (transaction-id: Str): Map {
-  redact-transaction(transaction-id, RequestOptions({}))
+  redact-transaction(transaction-id, {})
 },
-(transaction-id: Str, options: RequestOptions): Map {
+(transaction-id: Str, options: Map): Map {
   ::api/send("DELETE", `/transactions/${seg(transaction-id)}`, {}, null, options)
 }
 

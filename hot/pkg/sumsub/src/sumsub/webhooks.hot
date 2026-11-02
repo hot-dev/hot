@@ -68,7 +68,8 @@ meta {
     Check a hex digest over the raw body in constant time. False for an
     empty secret, a missing digest, an unknown or missing algorithm, or
     an algorithm not in `allowed` (a Vec of `X-Payload-Digest-Alg`
-    values). Exposed for testing; `verify-request` uses it.
+    values). The secret is masked in call records. Exposed for testing;
+    `verify-request` uses it.
     """
 }
 fn (secret: Str, body: Str | Bytes, digest: Str?, alg-header: Str?, allowed: Vec): Bool {
@@ -81,7 +82,10 @@ fn (secret: Str, body: Str | Bytes, digest: Str?, alg-header: Str?, allowed: Vec
     is-empty(given) => { false }
     is-null(algorithm) => { false }
     not(in(name, allowed)) => { false }
-    => { ::hmac/hmac-verify-hex(secret, body, given, algorithm) }
+    => {
+      ::ctx/mark-secret(secret)
+      ::hmac/hmac-verify-hex(secret, body, given, algorithm)
+    }
   }
 }
 

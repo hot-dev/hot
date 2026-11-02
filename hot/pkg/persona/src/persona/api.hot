@@ -1,7 +1,7 @@
 ::persona::api ns
 meta {
     ctx: {
-        "persona.api.key": {required: true},
+        "persona.api.key": {required: false},
         "persona.api.version": {required: false, secret: false},
         "persona.key-inflection": {required: false, secret: false}
     },
@@ -18,6 +18,15 @@ meta {
     or schedule `retry` policy. Creates accept an `idempotency-key`, so a
     retried create returns the first result instead of making a second
     inquiry.
+
+    **Per-call credentials.** Every API-calling function takes an optional
+    trailing options Map, resolved by `resolve`: options first, then the
+    context variables, then the defaults. Nothing from options is written
+    to ctx, so one run can act for many tenants, and per-call credentials
+    are masked in call records. An `api-key` present but blank or null is
+    an error, never a fallback to context. A per-call `base-url` needs an
+    `api-key` in the same options: `persona.api.key` is never sent to a
+    per-call URL.
     """
 }
 
@@ -158,7 +167,6 @@ fn (value: Any): Int? {
   cond {
     is-int(value) => { value }
     not(is-str(value)) => { null }
-    // WORKAROUND(hot-bug-6): Int("abc") halts the run; match the digits first.
     ::re/is-match(trim(value), "^-?[0-9]{1,15}$") => { Int(trim(value)) }
     => { null }
   }
@@ -245,18 +253,17 @@ fn (headers: Map): Int? {
   if(is-some(retry), retry, parse-int(get(headers, "ratelimit-reset")))
 }
 
-http-error
+HttpResponse -> HttpError
 meta {
-    doc: """Build the `HttpError` for a non-2xx response: decode and redact the body, lift the first error's fields, and read `Request-Id` and the rate-limit reset. Exposed for testing; every request uses it."""
+    doc: """Build the `HttpError` for a non-2xx response: decode and redact the body, lift the first error's fields, and read `Request-Id` and the rate-limit reset. Every request uses it."""
 }
-fn (response: Map): HttpError {
-  headers or(get(response, "headers"), {})
-  body redact(decode-body(get(response, "body")))
+fn (response: HttpResponse): HttpError {
+  headers or(response.headers, {})
+  body redact(decode-body(response.body))
   entries error-entries(body)
   head if(is-empty(entries), {}, first(entries))
   request-id str-or-null(get(headers, "request-id"))
   raw-errors if(is-map(body), get(body, "errors"), null)
-  // WORKAROUND(hot-bug-1): build HttpError in an explicit function, never via T(response) or an arrow.
   HttpError({
     status: response.status,
     headers: headers,
@@ -269,13 +276,6 @@ fn (response: Map): HttpError {
     request-id: request-id,
     retry-after: retry-after-seconds(headers)
   })
-}
-
-// WORKAROUND(hot-bug-1): HttpError(response) ignores this arrow and copies
-// fields, so the package always calls `http-error` directly. The arrow is
-// kept for callers that coerce a response themselves.
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
-  http-error(response)
 }
 
 plain-error fn (error: Result): Any {
@@ -325,7 +325,10 @@ meta {
       or a value tied to your own record, e.g. `"signup-42-kyc"`.
     - `persona-version`: overrides `Persona-Version` for this call
     - `key-inflection`: `"kebab"`, `"snake"` or `"camel"` for this call
-    - `api-key`: overrides `persona.api.key` for this call
+    - `api-key`: overrides `persona.api.key` for this call. Masked in call
+      records. Blank or null is an error, never a fallback to context.
+    - `base-url`: another API root for this call, such as a proxy. Needs an
+      `api-key` in the same options.
 
     **Example**
 
@@ -338,13 +341,25 @@ type {
     idempotency-key: Str?,
     persona-version: Str?,
     key-inflection: Str?,
-    api-key: Str?
+    api-key: Str?,
+    base-url: Str?
 }
 
 KEY_INFLECTIONS ["kebab", "snake", "camel"]
 
+// Keys `resolve` reads. They never go into a request body.
+REQUEST_OPTION_KEYS ["api-key", "base-url", "persona-version", "key-inflection", "idempotency-key"]
+
+without-request-options
+meta {
+    doc: """`opts` without the keys `resolve` reads, for a function that sends the rest of `opts` as attributes. Exposed for testing."""
+}
+fn (opts: Map): Map {
+  filter-keys(opts, (k) { not(in(k, REQUEST_OPTION_KEYS)) })
+}
+
 non-blank fn (value: Any): Str? {
-  if(and(is-str(value), not(is-empty(trim(or(value, ""))))), trim(value), null)
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 resolve-from
@@ -352,11 +367,12 @@ meta {
     doc: """
     The one resolver, pure: settings for a call from `options` first, then
     `ctx-values` (a Map of context variables), then defaults. Returns
-    `{api-key, persona-version, key-inflection?, idempotency-key?}`, or an
-    Err when no API key is set or `key-inflection` isn't `kebab`, `snake`
-    or `camel`. An `api-key` in `options` means the context key is never
-    read for that call. Nothing is written to ctx. Exposed for testing;
-    `resolve` feeds it the context.
+    `{api-key, base-url, persona-version, key-inflection?,
+    idempotency-key?}`, or an Err when no API key is set, when `api-key`
+    is in `options` but blank or null (that never falls back to context),
+    when `options` has `base-url` without `api-key`, or when
+    `key-inflection` isn't `kebab`, `snake` or `camel`. Nothing is written
+    to ctx. Exposed for testing; `resolve` feeds it the context.
     """
 }
 fn (options: Map, ctx-values: Map): Map {
@@ -371,11 +387,20 @@ fn (options: Map, ctx-values: Map): Map {
   }
 
   cond {
+    and(in("api-key", keys(options)), is-null(non-blank(get(options, "api-key")))) => {
+      err("persona: api-key is in the call's options but is blank or null. Pass a value, or leave api-key out to use persona.api.key.")
+    }
+
+    and(is-some(non-blank(get(options, "base-url"))), is-null(non-blank(get(options, "api-key")))) => {
+      err("persona: base-url is in the call's options without api-key. Pass api-key with it. Context credentials are never sent to a per-call URL.")
+    }
+
     is-null(api-key) => { err("persona: persona.api.key is not set. Add your Persona API key in Context Variables, or pass {api-key: ...} in the call's options.") }
     is-err(inflection) => { inflection }
     => {
       filter-vals({
         api-key: api-key,
+        base-url: ::re/replace-all(or(non-blank(get(options, "base-url")), ::persona/BASE_URL), "/+$", ""),
         persona-version: version,
         key-inflection: inflection,
         idempotency-key: non-blank(get(options, "idempotency-key"))
@@ -387,16 +412,17 @@ fn (options: Map, ctx-values: Map): Map {
 resolve
 meta {
     ctx: {
-        "persona.api.key": {required: true},
+        "persona.api.key": {required: false},
         "persona.api.version": {required: false, secret: false},
         "persona.key-inflection": {required: false, secret: false}
     },
     doc: """
-    Settings for one call: `options` (a `RequestOptions` or a plain Map
-    with `api-key`, `persona-version`, `key-inflection`,
+    Settings for one call: `options` (a Map, or a `RequestOptions`, with
+    `api-key`, `base-url`, `persona-version`, `key-inflection`,
     `idempotency-key`) over the context variables, over the defaults (see
-    `resolve-from`). Per-call credentials stay in the call; nothing is
-    written to ctx, so parallel flows and tenants never share them.
+    `resolve-from`). An `api-key` from `options` is masked in call records
+    and returned unchanged; nothing is written to ctx, so parallel flows
+    and tenants never share credentials.
 
     **Example**
 
@@ -407,6 +433,8 @@ meta {
 }
 fn (options: Any): Map {
   opts if(is-null(options), {}, untype(options))
+  key non-blank(get(opts, "api-key"))
+  if(is-some(key), ::ctx/mark-secret(key))
   resolve-from(opts, {
     "persona.api.key": ::ctx/get("persona.api.key"),
     "persona.api.version": ::ctx/get("persona.api.version"),
@@ -594,28 +622,28 @@ meta {
     doc: """
     Send one Persona request and return the decoded body on 2xx, or an
     Err: `HttpError` for a non-2xx response, or the transport error.
-    `path` is relative to `::persona/BASE_URL`; `query` becomes the query
+    `path` is relative to the resolved `base-url` (`::persona/BASE_URL` by default); `query` becomes the query
     string and a Map `body` the JSON body (`null` sends none). The most
     general form; `call` picks query or body by method.
 
     **Example**
 
     ```hot
-    ::persona::api/send("POST", "/inquiries/search", {}, {query: {attribute: "status", operator: "eq", value: "needs_review"}}, ::persona::api/RequestOptions({}))
+    ::persona::api/send("POST", "/inquiries/search", {}, {query: {attribute: "status", operator: "eq", value: "needs_review"}}, ::persona::api/{})
     ```
     """
 }
-fn (method: Str, path: Str, query: Map, body: Any, options: RequestOptions): Any {
+fn (method: Str, path: Str, query: Map, body: Any, options: Map): Any {
   resolved resolve(options)
   cond {
     is-err(resolved) => { resolved }
     => {
-      url `${::persona/BASE_URL}${path}${query-string(query)}`
+      url `${resolved.base-url}${path}${query-string(query)}`
       response ::hot::http/request(build-request(method, url, body, resolved))
       cond {
         is-err(response) => { response }
         is-ok-response(response) => { response-body(response.body) }
-        => { err(http-error(response)) }
+        => { err(HttpError(response)) }
       }
     }
   }
@@ -639,12 +667,12 @@ meta {
 }
 fn
 (method: Str, path: Str): Any {
-  call(method, path, {}, RequestOptions({}))
+  call(method, path, {}, {})
 },
 (method: Str, path: Str, params: Map): Any {
-  call(method, path, params, RequestOptions({}))
+  call(method, path, params, {})
 },
-(method: Str, path: Str, params: Map, options: RequestOptions): Any {
+(method: Str, path: Str, params: Map, options: Map): Any {
   m uppercase(method)
   in-query or(eq(m, "GET"), eq(m, "DELETE"))
   send(m, path, if(in-query, params, {}), if(in-query, null, params), options)
@@ -654,17 +682,17 @@ get-bytes
 meta {
     doc: """GET a binary endpoint (e.g. `/inquiries/{id}/print`) and return the body as `Bytes`, or an Err carrying `HttpError`. The bytes are never put into errors or logs."""
 }
-fn (path: Str, options: RequestOptions): Bytes {
+fn (path: Str, options: Map): Bytes {
   resolved resolve(options)
   cond {
     is-err(resolved) => { resolved }
     => {
-      req build-request("GET", `${::persona/BASE_URL}${path}`, null, resolved)
+      req build-request("GET", `${resolved.base-url}${path}`, null, resolved)
       response ::hot::http/request(HttpRequest({...untype(req), headers: {...req.headers, Accept: "application/pdf, */*"}}))
       cond {
         is-err(response) => { response }
         is-ok-response(response) => { or(response.body-bytes, Bytes("")) }
-        => { err(http-error(response)) }
+        => { err(HttpError(response)) }
       }
     }
   }
@@ -740,9 +768,9 @@ meta {
 }
 fn
 (path: Str, filters: Map, options: Map): Any {
-  list-page(path, filters, options, RequestOptions({}))
+  list-page(path, filters, options, {})
 },
-(path: Str, filters: Map, options: Map, request-options: RequestOptions): Any {
+(path: Str, filters: Map, options: Map, request-options: Map): Any {
   send("GET", path, list-query(filters, options), null, request-options)
 }
 
@@ -784,9 +812,9 @@ meta {
 }
 fn
 (path: Str, filters: Map, limit: Int): Vec {
-  collect(path, filters, limit, RequestOptions({}))
+  collect(path, filters, limit, {})
 },
-(path: Str, filters: Map, limit: Int, options: RequestOptions): Vec {
+(path: Str, filters: Map, limit: Int, options: Map): Vec {
   cond {
     lte(limit, 0) => { [] }
     => {

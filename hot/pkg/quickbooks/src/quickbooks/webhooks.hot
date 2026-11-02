@@ -96,6 +96,7 @@ fn
   verify-request(request, Str(verifier))
 },
 (request: Map, verifier: Str): Bool {
+  ::ctx/mark-secret(verifier)
   signature signature-header(request)
   cond {
     // An empty key would make every signature forgeable: fail closed.

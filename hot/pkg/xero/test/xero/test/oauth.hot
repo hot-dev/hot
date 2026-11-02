@@ -115,6 +115,30 @@ meta ["test"] fn () {
     assert(is-err(::oauth/app-credentials({client-id: "id"}, true)), "but required for client credentials")
 }
 
+test-app-credentials-blank-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"xero.client.id": "ctx-id", "xero.client.secret": "ctx-sec"})
+    from-ctx ::oauth/app-credentials({}, true)
+    secret ::oauth/app-credentials({client-secret: ""}, false)
+    secret-null ::oauth/app-credentials({client-secret: null}, false)
+    id ::oauth/app-credentials({client-id: "  "}, false)
+    refreshed ::oauth/refresh("RT", {client-secret: ""})
+    clear-ctx()
+    assert-eq("ctx-sec", from-ctx.client-secret)
+    assert(is-err(secret), "a blank secret never falls back to context")
+    assert(contains(err-message(secret), "client-secret"), err-message(secret))
+    assert(is-err(secret-null))
+    assert(contains(err-message(id), "client-id"), err-message(id))
+    assert(is-err(refreshed), "token calls check it before sending")
+}
+
+test-mark-tokens-returns-the-body-unchanged
+meta ["test"] fn () {
+    body {access_token: "AT-VALUE", refresh_token: "RT-VALUE", token_type: "Bearer", expires_in: 1800}
+    assert-eq(body, ::oauth/mark-tokens(body))
+    assert-eq({access_token: "AT-VALUE"}, ::oauth/mark-tokens({access_token: "AT-VALUE"}), "absent tokens are fine")
+}
+
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
@@ -172,4 +196,22 @@ meta ["test"] fn () {
     assert(::auth/is-fresh(e, 1))
     d ::auth/token-entry({access-token: "AT"}, 0)
     assert-eq(mul(1740, 1000), d.expires-at, "Xero access tokens default to 30 minutes")
+}
+
+test-mark-entry-returns-the-entry-unchanged
+meta ["test"] fn () {
+    entry {access-token: "AT-VALUE", refresh-token: "RT-VALUE", expires-at: 1000}
+    assert-eq(entry, ::auth/mark-entry(entry))
+    assert(is-null(::auth/mark-entry(null)))
+}
+
+test-resolve-credentials-blank-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"xero.access.token": "CTX-AT"})
+    blank ::auth/access-token({access-token: ""})
+    latest ::auth/current-refresh-token({refresh-token: ""})
+    clear-ctx()
+    assert(is-err(blank), "a blank access token never falls back to context")
+    assert(contains(err-message(blank), "access-token"), err-message(blank))
+    assert(is-null(latest))
 }

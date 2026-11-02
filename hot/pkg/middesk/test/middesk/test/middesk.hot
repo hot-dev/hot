@@ -8,6 +8,8 @@ meta ["test"]
 ::decisions ::middesk::decisions
 
 RequestOptions ::middesk::api/RequestOptions
+HttpError ::middesk::api/HttpError
+HttpResponse ::hot::http/HttpResponse
 
 // ============================================================================
 // Auth and environment
@@ -155,7 +157,7 @@ meta ["test"] fn () {
 
 test-http-error
 meta ["test"] fn () {
-    e ::api/http-error({status: 422, headers: {}, body: {errors: [{message: "Name is required", parameter: "name"}, {message: "Addresses is invalid"}]}})
+    e HttpError(HttpResponse({status: 422, headers: {}, body: {errors: [{message: "Name is required", parameter: "name"}, {message: "Addresses is invalid"}]}}))
     assert-eq(422, e.status)
     assert-eq("name", e.parameter)
     assert-eq("middesk: HTTP 422: Name is required (name); Addresses is invalid", e.message)
@@ -164,11 +166,11 @@ meta ["test"] fn () {
 
 test-http-error-redacts
 meta ["test"] fn () {
-    e ::api/http-error({status: 400, headers: {}, body: {
+    e HttpError(HttpResponse({status: 400, headers: {}, body: {
       errors: [{message: "TIN 12-3410000 does not match; contact ops@acme.com", parameter: "tin"}],
       tin: {tin: "123410000"},
       people: [{name: "Jane Doe", ssn: "123456789", dob: "1990-01-31"}]
-    }})
+    }}))
     assert(not(contains(e.message, "3410000")), "no TIN in message")
     assert(not(contains(e.message, "ops@acme.com")), "no email in message")
     assert-eq("[redacted]", e.body.tin)
@@ -179,12 +181,12 @@ meta ["test"] fn () {
 
 test-http-error-plain-text-429
 meta ["test"] fn () {
-    e ::api/http-error({status: 429, headers: {retry-after: "7"}, body: "Retry later"})
+    e HttpError(HttpResponse({status: 429, headers: {retry-after: "7"}, body: "Retry later"}))
     assert-eq("middesk: HTTP 429: Retry later", e.message)
     assert-eq(7, e.retry-after)
     assert(::api/is-retryable(e), "429 is retryable")
     assert(::api/is-retryable(err(e)), "through an Err")
-    assert(not(::api/is-retryable(::api/http-error({status: 422, headers: {}, body: {}}))), "422 is not")
+    assert(not(::api/is-retryable(HttpError(HttpResponse({status: 422, headers: {}, body: {}})))), "422 is not")
 }
 
 test-parse-int
@@ -307,6 +309,29 @@ meta ["test"] fn () {
     assert(is-err(missing), "no key is an Err")
     assert(contains(Str(err-value(missing)), "middesk.api.key"), "the error names the context variable")
     assert(is-err(::api/resolve-from({api-key: "mk_live_x"}, {"middesk.env": "sandbox"})), "a live key with a sandbox env errs")
+}
+
+test-blank-api-key-is-an-err-naming-the-key
+meta ["test"] fn () {
+    blank ::api/resolve-from({api-key: "  "}, CTX)
+    assert(is-err(blank), "a blank key never falls back to context")
+    assert(contains(err-value(blank), "api-key"), "the Err names the key")
+    assert(is-err(::api/resolve-from({api-key: ""}, CTX)), "empty")
+    assert(is-err(::api/resolve-from({api-key: null}, CTX)), "null")
+    assert(is-err(::api/resolve({api-key: ""})), "through resolve")
+    assert-eq("mk_test_ctx", ::api/resolve-from(untype(RequestOptions({})), CTX).api-key, "an unset typed field is not a blank key")
+}
+
+test-resolve-marks-and-returns-the-key-unchanged
+meta ["test"] fn () {
+    assert-eq("mk_test_marked_key", ::api/resolve({api-key: "mk_test_marked_key"}).api-key)
+}
+
+test-plain-map-reaches-resolve-on-wrappers
+meta ["test"] fn () {
+    out ::businesses/get-business("biz_1", {api-key: ""})
+    assert(is-err(out), "a literal Map works as the trailing options")
+    assert(contains(err-value(out), "api-key"))
 }
 
 test-resolve-never-writes-ctx

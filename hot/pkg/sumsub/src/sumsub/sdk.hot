@@ -12,6 +12,7 @@ meta {
 }
 
 ::api ::sumsub::api
+::ctx ::hot::ctx
 
 query ::sumsub::api/query
 
@@ -19,6 +20,21 @@ query ::sumsub::api/query
 DEFAULT_TOKEN_TTL_SECONDS 600
 DEFAULT_LINK_TTL_SECONDS 1800
 MAX_LINK_TTL_SECONDS 2592000
+
+mark-returned
+meta {
+    doc: """Mask the bearer credential at `key` of a response in call records and return the response unchanged. An Err passes through. Exposed for testing."""
+}
+fn (response: Result, key: Str): Any {
+  cond {
+    is-err(response) => { response }
+    => {
+      value if(is-map(response), get(response, key), null)
+      if(is-str(value), ::ctx/mark-secret(value))
+      response
+    }
+  }
+}
 
 access-token-request
 meta {
@@ -49,7 +65,8 @@ meta {
     Generate a WebSDK/MobileSDK access token for your user (`userId` is
     your `externalUserId`; the applicant is created on first use).
     Returns `{token, userId}`. Tokens are bearer credentials for that
-    user's verification: hand them only to that user's session.
+    user's verification: hand them only to that user's session. The token
+    is masked in call records.
 
     **Example**
 
@@ -67,7 +84,7 @@ fn
   create-access-token(user-id, level-name, options, {})
 },
 (user-id: Str, level-name: Str, options: Map, opts: Map): Map {
-  ::api/call(access-token-request(user-id, level-name, options), opts)
+  mark-returned(::api/call(access-token-request(user-id, level-name, options), opts), "token")
 }
 
 LINK_QUERY_KEYS ["lang", "customizationName", "translationName", "source"]
@@ -100,7 +117,8 @@ meta {
     doc: """
     Create a hosted verification link for one user. Returns `{url}`.
     Anyone holding the URL can continue that user's verification until it
-    expires, so send it only to the user.
+    expires, so send it only to the user. The URL is masked in call
+    records.
 
     **Example**
 
@@ -120,5 +138,7 @@ fn
   create-websdk-link(level-name, options, {})
 },
 (level-name: Str, options: Map, opts: Map): Map {
-  ::api/call(websdk-link-request(level-name, options), opts)
+  sign-key get-in(untype(options), ["redirect", "signKey"])
+  if(is-str(sign-key), ::ctx/mark-secret(sign-key))
+  mark-returned(::api/call(websdk-link-request(level-name, options), opts), "url")
 }

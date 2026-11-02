@@ -21,7 +21,6 @@ meta {
 }
 
 ::api ::middesk::api
-RequestOptions ::middesk::api/RequestOptions
 
 ::ctx ::hot::ctx
 ::hmac ::hot::hmac
@@ -42,7 +41,10 @@ fn (signature: Str, raw-body: Str | Bytes, secret: Str): Bool {
     // An empty key would make every signature forgeable: fail closed.
     is-empty(secret) => { false }
     is-empty(sig) => { false }
-    => { secure-compare(::hmac/hmac-sha256(secret, raw-body), sig) }
+    => {
+      ::ctx/mark-secret(secret)
+      secure-compare(::hmac/hmac-sha256(secret, raw-body), sig)
+    }
   }
 }
 
@@ -162,13 +164,23 @@ meta {
 }
 fn
 (): Map {
-  list-webhooks({}, RequestOptions({}))
+  list-webhooks({}, {})
 },
 (params: Map): Map {
-  list-webhooks(params, RequestOptions({}))
+  list-webhooks(params, {})
 },
-(params: Map, options: RequestOptions): Map {
+(params: Map, options: Map): Map {
   ::api/list-page("/webhooks", params, options)
+}
+
+mark-webhook-secret
+meta {
+    doc: """Mask the signing secret in `create-webhook` or `update-webhook` params in call records, and return the params unchanged. Exposed for testing."""
+}
+fn (params: Map): Map {
+  secret get(params, "secret")
+  if(is-str(secret), ::ctx/mark-secret(secret))
+  params
 }
 
 create-webhook
@@ -191,9 +203,10 @@ meta {
 }
 fn
 (url: Str, enabled-events: Vec<Str>, opts: Map): Map {
-  create-webhook(url, enabled-events, opts, RequestOptions({}))
+  create-webhook(url, enabled-events, opts, {})
 },
-(url: Str, enabled-events: Vec<Str>, opts: Map, options: RequestOptions): Map {
+(url: Str, enabled-events: Vec<Str>, opts: Map, options: Map): Map {
+  mark-webhook-secret(opts)
   ::api/send("POST", "/webhooks", {}, ::api/compact({...untype(opts), url: url, enabled_events: enabled-events}), options)
 }
 
@@ -203,9 +216,9 @@ meta {
 }
 fn
 (webhook-id: Str): Map {
-  get-webhook(webhook-id, RequestOptions({}))
+  get-webhook(webhook-id, {})
 },
-(webhook-id: Str, options: RequestOptions): Map {
+(webhook-id: Str, options: Map): Map {
   ::api/send("GET", `/webhooks/${seg(webhook-id)}`, {}, null, options)
 }
 
@@ -215,9 +228,10 @@ meta {
 }
 fn
 (webhook-id: Str, params: Map): Map {
-  update-webhook(webhook-id, params, RequestOptions({}))
+  update-webhook(webhook-id, params, {})
 },
-(webhook-id: Str, params: Map, options: RequestOptions): Map {
+(webhook-id: Str, params: Map, options: Map): Map {
+  mark-webhook-secret(params)
   ::api/send("PUT", `/webhooks/${seg(webhook-id)}`, {}, ::api/compact(untype(params)), options)
 }
 
@@ -227,8 +241,8 @@ meta {
 }
 fn
 (webhook-id: Str): Any {
-  delete-webhook(webhook-id, RequestOptions({}))
+  delete-webhook(webhook-id, {})
 },
-(webhook-id: Str, options: RequestOptions): Any {
+(webhook-id: Str, options: Map): Any {
   ::api/send("DELETE", `/webhooks/${seg(webhook-id)}`, {}, null, options)
 }

@@ -14,7 +14,17 @@ meta {
     `sandbox` or `production`; unset means production. Anything else is
     an Err, so a typo never sends sandbox credentials to production or
     the reverse. Sandbox and production companies have different realm
-    ids and tokens.
+    ids and tokens, so a per-call `environment` that differs from
+    `quickbooks.environment` needs a credential (`access-token`,
+    `refresh-token` or `token-store`) in the same `opts`: context
+    credentials never go to the other environment's host.
+
+    **Per-call credentials.** Every function that calls the API takes a
+    trailing `opts` Map, resolved by `resolve`: `opts` first, then
+    context, then defaults. Nothing from `opts` is written to ctx, and
+    per-call credentials are masked in call records. A credential,
+    `realm-id` or `environment` present in `opts` but blank or null is an
+    Err naming the key, never a fallback to context.
 
     **Company.** Every call is scoped to `/v3/company/{realmId}`: the
     `quickbooks.realm.id` context variable or `opts.realm-id`. Realm ids
@@ -196,13 +206,10 @@ fn (headers: Map?): Int? {
   int-or-null(get(or(headers, {}), "retry-after"))
 }
 
-http-error
-meta {
-    doc: """Build an `HttpError` with a readable `message` from a response (`{status, headers, body}`). Pure; exposed for testing."""
-}
-fn (response: Map): HttpError {
-  headers or(get(response, "headers"), {})
-  body decode-body(get(response, "body"))
+// A readable `message` built from Intuit's `Fault`, with its fields lifted.
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  headers or(response.headers, {})
+  body decode-body(response.body)
   details fault-details(body)
   errors details.errors
   first-error if(is-empty(errors), {}, first(errors))
@@ -215,7 +222,6 @@ fn (response: Map): HttpError {
   }
 
   tid-part if(is-some(tid), ` (intuit_tid: ${tid})`, "")
-  // WORKAROUND(hot-bug-1): build HttpError in an explicit function, never via T(response) or an arrow.
   HttpError({
     status: response.status,
     headers: headers,
@@ -306,10 +312,40 @@ fn (value: Any): Str {
 
 environment
 meta {
-    doc: """The environment for a call: `opts.environment`, else `quickbooks.environment`, else production."""
+    doc: """The environment for a call: `opts.environment`, else `quickbooks.environment`, else production. An `environment` in `opts` that is blank or null is an Err, so it never means production by accident."""
 }
 fn (opts: Map): Str {
-  validate-environment(or(get(opts, "environment"), ::ctx/get("quickbooks.environment")))
+  cond {
+    is-some(::quickbooks::oauth/blank-option(opts, ["environment"])) => {
+      err("quickbooks: environment is in the call's opts but is blank or null. Pass \"sandbox\" or \"production\", or leave it out to use quickbooks.environment.")
+    }
+    => { validate-environment(or(get(opts, "environment"), ::ctx/get("quickbooks.environment"))) }
+  }
+}
+
+call-environment
+meta {
+    doc: """
+    `environment(opts)`, or an Err when `environment` in `opts` differs
+    from `quickbooks.environment` and `opts` has no credential of its own
+    (`access-token`, `refresh-token` or `token-store`): sandbox and
+    production tokens differ, so context credentials never go to the other
+    environment's host.
+    """
+}
+fn (opts: Map): Str {
+  env environment(opts)
+  configured validate-environment(::ctx/get("quickbooks.environment"))
+  cond {
+    is-err(env) => { env }
+    is-null(get(opts, "environment")) => { env }
+    ::auth/has-primary-credential(opts) => { env }
+    is-err(configured) => { configured }
+    eq(env, configured) => { env }
+    => {
+      err(`quickbooks: environment "${env}" is in the call's opts but quickbooks.environment is "${configured}", and opts has no access-token, refresh-token or token-store. Pass one with it: context credentials never go to another environment's host.`)
+    }
+  }
 }
 
 base-url
@@ -335,9 +371,16 @@ fn (value: Any): Str {
 }
 
 realm-id
-meta {doc: """The company for a call: `opts.realm-id`, else `quickbooks.realm.id`."""}
+meta {
+    doc: """The company for a call: `opts.realm-id`, else `quickbooks.realm.id`. A `realm-id` in `opts` that is blank or null is an Err, so a tenant whose id is missing never runs on the configured company."""
+}
 fn (opts: Map): Str {
-  validate-realm-id(or(get(opts, "realm-id"), ::ctx/get("quickbooks.realm.id")))
+  cond {
+    is-some(::quickbooks::oauth/blank-option(opts, ["realm-id"])) => {
+      err("quickbooks: realm-id is in the call's opts but is blank or null. Pass a value, or leave realm-id out to use quickbooks.realm.id.")
+    }
+    => { validate-realm-id(or(get(opts, "realm-id"), ::ctx/get("quickbooks.realm.id"))) }
+  }
 }
 
 validate-minorversion
@@ -435,9 +478,12 @@ meta {
     then context, then defaults. Returns `{credentials, environment,
     realm-id, minorversion, request-id}` (`credentials` as
     `::quickbooks::auth/credentials-from` describes), or the first Err
-    (bad environment, missing or malformed realm, retired minorversion,
-    no credentials). It only reads context; per-call values are never
-    written to it, so parallel flows for different companies stay apart.
+    (bad environment, a per-call environment without a per-call
+    credential, missing or malformed realm, retired minorversion, a blank
+    credential in `opts`, no credentials). It only reads context; per-call
+    values are never written to it, so parallel flows for different
+    companies stay apart, and per-call credentials are masked in call
+    records.
 
     ```hot
     r ::quickbooks::api/resolve({realm-id: "9341453", refresh-token: tenant-refresh-token, environment: "sandbox"})
@@ -446,7 +492,7 @@ meta {
     """
 }
 fn (opts: Map): Map {
-  env environment(opts)
+  env call-environment(opts)
   realm realm-id(opts)
   minor minorversion(opts)
   request-id validate-request-id(get(opts, "request-id"))
@@ -575,8 +621,8 @@ meta {
 fn (response: Result): Any {
   cond {
     is-err(response) => { response }
-    not(is-ok-response(response)) => { err(http-error(response)) }
-    is-some(fault-of(response.body)) => { err(http-error(response)) }
+    not(is-ok-response(response)) => { err(HttpError(response)) }
+    is-some(fault-of(response.body)) => { err(HttpError(response)) }
     => { decode-body(response.body) }
   }
 }
@@ -613,7 +659,7 @@ fn (path: Str, accept: Str, opts: Map): Bytes {
   response request("GET", path, {}, "", {Accept: accept}, opts)
   cond {
     is-err(response) => { response }
-    not(is-ok-response(response)) => { err(http-error({status: response.status, headers: response.headers, body: or(response.body-bytes, response.body)})) }
+    not(is-ok-response(response)) => { err(HttpError(HttpResponse({status: response.status, headers: response.headers, body: or(response.body-bytes, response.body)}))) }
     => { or(response.body-bytes, Bytes([])) }
   }
 }

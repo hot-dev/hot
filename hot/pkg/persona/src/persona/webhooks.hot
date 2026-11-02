@@ -20,7 +20,6 @@ meta {
 }
 
 ::api ::persona::api
-RequestOptions ::persona::api/RequestOptions
 
 ::ctx ::hot::ctx
 ::hmac ::hot::hmac
@@ -90,14 +89,17 @@ set-matches fn (set: Map, secret: Str, raw-body: Str | Bytes, tolerance-seconds:
 
 verify-signature
 meta {
-    doc: """Verify a `Persona-Signature` header value against a raw body and secret, with a replay window in seconds (0 skips the timestamp check). Fails closed on an empty secret or header. Exposed for testing; `verify-request` reads the header and body from the request."""
+    doc: """Verify a `Persona-Signature` header value against a raw body and secret, with a replay window in seconds (0 skips the timestamp check). Fails closed on an empty secret or header. The secret is masked in call records. Exposed for testing; `verify-request` reads the header and body from the request."""
 }
 fn (header: Str, raw-body: Str | Bytes, secret: Str, tolerance-seconds: Int): Bool {
   cond {
     // An empty key would make every signature forgeable: fail closed.
     is-empty(secret) => { false }
     is-empty(trim(header)) => { false }
-    => { some(parse-signature-header(header), (set) { set-matches(set, secret, raw-body, tolerance-seconds) }) }
+    => {
+      ::ctx/mark-secret(secret)
+      some(parse-signature-header(header), (set) { set-matches(set, secret, raw-body, tolerance-seconds) })
+    }
   }
 }
 
@@ -248,13 +250,28 @@ meta {
 }
 fn
 (): Map {
-  list-webhooks({}, RequestOptions({}))
+  list-webhooks({}, {})
 },
 (opts: Map): Map {
-  list-webhooks(opts, RequestOptions({}))
+  list-webhooks(opts, {})
 },
-(opts: Map, options: RequestOptions): Map {
+(opts: Map, options: Map): Map {
   ::api/list-page("/webhooks", {}, opts, options)
+}
+
+mark-signing-secrets
+meta {
+    doc: """Mask the signing secrets in a webhook response's `attributes.secrets` in call records and return the response unchanged. An Err passes through. Exposed for testing."""
+}
+fn (response: Result): Any {
+  cond {
+    is-err(response) => { response }
+    => {
+      secrets ::api/attr(response, "secrets")
+      if(is-some(secrets), ::ctx/mark-secret(secrets))
+      response
+    }
+  }
 }
 
 create-webhook
@@ -280,12 +297,12 @@ meta {
 }
 fn
 (name: Str, url: Str, enabled-events: Vec<Str>): Map {
-  create-webhook(name, url, enabled-events, {}, RequestOptions({}))
+  create-webhook(name, url, enabled-events, {}, {})
 },
 (name: Str, url: Str, enabled-events: Vec<Str>, opts: Map): Map {
-  create-webhook(name, url, enabled-events, opts, RequestOptions({}))
+  create-webhook(name, url, enabled-events, ::api/without-request-options(opts), opts)
 },
-(name: Str, url: Str, enabled-events: Vec<Str>, opts: Map, options: RequestOptions): Map {
+(name: Str, url: Str, enabled-events: Vec<Str>, opts: Map, options: Map): Map {
   attributes {
     ...opts,
     name: name,
@@ -294,7 +311,7 @@ fn
     api-version: or(get(opts, "api-version"), ::persona/API_VERSION)
   }
 
-  ::api/send("POST", "/webhooks", {}, ::api/document(null, attributes, {}), options)
+  mark-signing-secrets(::api/send("POST", "/webhooks", {}, ::api/document(null, attributes, {}), options))
 }
 
 get-webhook
@@ -303,9 +320,9 @@ meta {
 }
 fn
 (webhook-id: Str): Map {
-  get-webhook(webhook-id, RequestOptions({}))
+  get-webhook(webhook-id, {})
 },
-(webhook-id: Str, options: RequestOptions): Map {
+(webhook-id: Str, options: Map): Map {
   ::api/send("GET", `/webhooks/${seg(webhook-id)}`, {}, null, options)
 }
 
@@ -315,13 +332,13 @@ meta {
 }
 fn
 (webhook-id: Str, attributes: Map): Map {
-  update-webhook(webhook-id, attributes, RequestOptions({}))
+  update-webhook(webhook-id, attributes, {})
 },
-(webhook-id: Str, attributes: Map, options: RequestOptions): Map {
+(webhook-id: Str, attributes: Map, options: Map): Map {
   ::api/send("PATCH", `/webhooks/${seg(webhook-id)}`, {}, ::api/document(null, attributes, {}), options)
 }
 
-webhook-action fn (webhook-id: Str, name: Str, meta-block: Map, options: RequestOptions): Map {
+webhook-action fn (webhook-id: Str, name: Str, meta-block: Map, options: Map): Map {
   ::api/send("POST", `/webhooks/${seg(webhook-id)}/${name}`, {}, ::api/meta-document(meta-block), options)
 }
 
@@ -331,9 +348,9 @@ meta {
 }
 fn
 (webhook-id: Str): Map {
-  webhook-action(webhook-id, "enable", {}, RequestOptions({}))
+  webhook-action(webhook-id, "enable", {}, {})
 },
-(webhook-id: Str, options: RequestOptions): Map {
+(webhook-id: Str, options: Map): Map {
   webhook-action(webhook-id, "enable", {}, options)
 }
 
@@ -343,9 +360,9 @@ meta {
 }
 fn
 (webhook-id: Str): Map {
-  webhook-action(webhook-id, "disable", {}, RequestOptions({}))
+  webhook-action(webhook-id, "disable", {}, {})
 },
-(webhook-id: Str, options: RequestOptions): Map {
+(webhook-id: Str, options: Map): Map {
   webhook-action(webhook-id, "disable", {}, options)
 }
 
@@ -355,9 +372,9 @@ meta {
 }
 fn
 (webhook-id: Str): Map {
-  webhook-action(webhook-id, "archive", {}, RequestOptions({}))
+  webhook-action(webhook-id, "archive", {}, {})
 },
-(webhook-id: Str, options: RequestOptions): Map {
+(webhook-id: Str, options: Map): Map {
   webhook-action(webhook-id, "archive", {}, options)
 }
 
@@ -367,8 +384,8 @@ meta {
 }
 fn
 (webhook-id: Str, expires-in-seconds: Int): Map {
-  rotate-secret(webhook-id, expires-in-seconds, RequestOptions({}))
+  rotate-secret(webhook-id, expires-in-seconds, {})
 },
-(webhook-id: Str, expires-in-seconds: Int, options: RequestOptions): Map {
-  webhook-action(webhook-id, "rotate-secret", {expires-in-seconds: expires-in-seconds}, options)
+(webhook-id: Str, expires-in-seconds: Int, options: Map): Map {
+  mark-signing-secrets(webhook-action(webhook-id, "rotate-secret", {expires-in-seconds: expires-in-seconds}, options))
 }

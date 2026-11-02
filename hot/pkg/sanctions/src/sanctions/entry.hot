@@ -174,7 +174,6 @@ meta {
     doc: """The `[from, to]` years an ISO date of birth covers (`"1959/1962"` → `[1959, 1962]`, `"1948-12-10"` → `[1948, 1948]`), or null."""
 }
 fn (dob: Str): Vec? {
-  // WORKAROUND(hot-bug-6): Int() only sees strings a regex has already proven numeric.
   r ::re/capture(dob, "^(\\d{4})/(\\d{4})$")
   y ::re/capture(dob, "^(\\d{4})")
   cond {

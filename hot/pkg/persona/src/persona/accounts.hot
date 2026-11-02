@@ -9,7 +9,6 @@ meta {
 }
 
 ::api ::persona::api
-RequestOptions ::persona::api/RequestOptions
 
 seg ::persona::api/seg
 
@@ -31,12 +30,12 @@ meta {
 }
 fn
 (attributes: Map): Map {
-  create-account(attributes, {}, RequestOptions({}))
+  create-account(attributes, {}, {})
 },
 (attributes: Map, opts: Map): Map {
-  create-account(attributes, opts, RequestOptions({}))
+  create-account(attributes, opts, opts)
 },
-(attributes: Map, opts: Map, options: RequestOptions): Map {
+(attributes: Map, opts: Map, options: Map): Map {
   ::api/send("POST", "/accounts", {}, ::api/document(null, attributes, or(get(opts, "meta"), {})), options)
 }
 
@@ -46,12 +45,12 @@ meta {
 }
 fn
 (account-id: Str): Map {
-  get-account(account-id, {}, RequestOptions({}))
+  get-account(account-id, {}, {})
 },
 (account-id: Str, opts: Map): Map {
-  get-account(account-id, opts, RequestOptions({}))
+  get-account(account-id, opts, opts)
 },
-(account-id: Str, opts: Map, options: RequestOptions): Map {
+(account-id: Str, opts: Map, options: Map): Map {
   ::api/send("GET", `/accounts/${seg(account-id)}`, ::api/read-query(opts), null, options)
 }
 
@@ -61,12 +60,12 @@ meta {
 }
 fn
 (filters: Map): Map {
-  list-accounts(filters, {}, RequestOptions({}))
+  list-accounts(filters, {}, {})
 },
 (filters: Map, opts: Map): Map {
-  list-accounts(filters, opts, RequestOptions({}))
+  list-accounts(filters, opts, opts)
 },
-(filters: Map, opts: Map, options: RequestOptions): Map {
+(filters: Map, opts: Map, options: Map): Map {
   ::api/list-page("/accounts", filters, opts, options)
 }
 
@@ -76,9 +75,9 @@ meta {
 }
 fn
 (reference-id: Str): Map? {
-  find-by-reference-id(reference-id, RequestOptions({}))
+  find-by-reference-id(reference-id, {})
 },
-(reference-id: Str, options: RequestOptions): Map? {
+(reference-id: Str, options: Map): Map? {
   page list-accounts({reference-id: reference-id}, {page-size: 1}, options)
   cond {
     is-err(page) => { page }
@@ -95,9 +94,9 @@ meta {
 }
 fn
 (account-id: Str, attributes: Map): Map {
-  update-account(account-id, attributes, RequestOptions({}))
+  update-account(account-id, attributes, {})
 },
-(account-id: Str, attributes: Map, options: RequestOptions): Map {
+(account-id: Str, attributes: Map, options: Map): Map {
   ::api/send("PATCH", `/accounts/${seg(account-id)}`, {}, ::api/document(null, attributes, {}), options)
 }
 
@@ -112,9 +111,9 @@ meta {
 }
 fn
 (account-id: Str, source-account-ids: Vec<Str>): Map {
-  consolidate-accounts(account-id, source-account-ids, RequestOptions({}))
+  consolidate-accounts(account-id, source-account-ids, {})
 },
-(account-id: Str, source-account-ids: Vec<Str>, options: RequestOptions): Map {
+(account-id: Str, source-account-ids: Vec<Str>, options: Map): Map {
   ::api/send("POST", `/accounts/${seg(account-id)}/consolidate`, {}, ::api/meta-document({source-account-ids: source-account-ids}), options)
 }
 
@@ -124,9 +123,9 @@ meta {
 }
 fn
 (account-id: Str): Map {
-  redact-account(account-id, RequestOptions({}))
+  redact-account(account-id, {})
 },
-(account-id: Str, options: RequestOptions): Map {
+(account-id: Str, options: Map): Map {
   ::api/send("DELETE", `/accounts/${seg(account-id)}`, {}, null, options)
 }
 
@@ -136,8 +135,8 @@ meta {
 }
 fn
 (account-id: Str, tag-name: Str): Map {
-  add-tag(account-id, tag-name, RequestOptions({}))
+  add-tag(account-id, tag-name, {})
 },
-(account-id: Str, tag-name: Str, options: RequestOptions): Map {
+(account-id: Str, tag-name: Str, options: Map): Map {
   ::api/send("POST", `/accounts/${seg(account-id)}/add-tag`, {}, ::api/meta-document({tag-name: tag-name}), options)
 }

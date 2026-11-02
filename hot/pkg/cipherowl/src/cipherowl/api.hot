@@ -1,8 +1,8 @@
 ::cipherowl::api ns
 meta {
     ctx: {
-        "cipherowl.client.id": {required: true},
-        "cipherowl.client.secret": {required: true},
+        "cipherowl.client.id": {required: false},
+        "cipherowl.client.secret": {required: false},
         "cipherowl.base.url": {required: false, secret: false}
     },
     doc: """
@@ -15,6 +15,13 @@ meta {
     Addresses and risk results are wallet-risk data. Error messages from
     this package never include an address, a reference, or the body
     CipherOwl returned; the vendor's text is kept in `HttpError.detail`.
+
+    **Per-call credentials.** Every API-calling function has a trailing
+    `opts` Map, resolved by `resolve`: `opts` first, then context, then
+    defaults. Per-call credentials and minted tokens are masked in call
+    records. A credential present but blank or null is an error, never a
+    fallback to context. A per-call `base-url` needs a credential in the
+    same `opts`: context credentials are never sent to a per-call URL.
     """
 }
 
@@ -87,7 +94,6 @@ fn (headers: Any): Int? {
   value header(headers, "retry-after")
   cond {
     is-null(value) => { null }
-    // WORKAROUND(hot-bug-6): check the text is numeric before Int(), so an HTTP-date value can't halt the run.
     ::re/is-match(trim(value), "^[0-9]{1,9}$") => { Int(trim(value)) }
     => { null }
   }
@@ -120,14 +126,13 @@ fn (status: Int, retry: Int?): Str {
   `cipherowl: request failed with HTTP ${status}${hint-part}${retry-part}`
 }
 
-http-error
+HttpResponse -> HttpError
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """Build an `HttpError` from a non-2xx response. Every request uses it."""
 }
 fn (response: HttpResponse): HttpError {
   headers or(response.headers, {})
   retry retry-after(headers)
-  // WORKAROUND(hot-bug-1): built field by field in a function, never via the HttpResponse -> HttpError arrow.
   HttpError({
     status: response.status,
     headers: headers,
@@ -136,10 +141,6 @@ fn (response: HttpResponse): HttpError {
     detail: error-detail(response.body),
     retry-after: retry
   })
-}
-
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
-  http-error(response)
 }
 
 is-status
@@ -240,7 +241,6 @@ meta {
 fn (value: Any): Any {
   cond {
     or(is-int(value), is-dec(value)) => { value }
-    // WORKAROUND(hot-bug-6): check the text is numeric before parsing, so "Infinity" or junk can't halt the run.
     and(is-str(value), ::re/is-match(trim(Str(value)), "^-?[0-9]{1,18}(\\.[0-9]+)?$")) => { from-json(trim(Str(value))) }
     => { null }
   }
@@ -339,11 +339,13 @@ fn (body: Any): Any {
 // Requests
 // ---------------------------------------------------------------------------
 
+CREDENTIAL_KEYS ["access-token", "client-id", "client-secret"]
+
 resolve
 meta {
     ctx: {
-        "cipherowl.client.id": {required: true},
-        "cipherowl.client.secret": {required: true},
+        "cipherowl.client.id": {required: false},
+        "cipherowl.client.secret": {required: false},
         "cipherowl.base.url": {required: false, secret: false}
     },
     doc: """
@@ -352,12 +354,14 @@ meta {
     access-token, base-url}`, or an Err naming what is missing.
 
     `opts` keys: `access-token` (a token you minted; used as is),
-    `client-id` and `client-secret` (when `opts` has either credential,
-    context credentials are ignored for the call), and `base-url`
-    (default `::cipherowl/BASE_URL`). Nothing is written to context
-    except the minted-token cache (a secret, keyed by a hash of the
-    credential identity), so tenants and parallel flows never share
-    credentials.
+    `client-id` and `client-secret` (a pair; context credentials are then
+    ignored for the call), and `base-url` (default `::cipherowl/BASE_URL`;
+    it needs a credential in the same `opts`). Credentials from `opts` are
+    masked in call records and returned unchanged. A credential present
+    but blank or null is an Err naming the key, never a fallback to
+    context. Nothing is written to context except the minted-token cache
+    (a secret, keyed by a hash of the credential identity), so tenants and
+    parallel flows never share credentials.
 
     **Example**
 
@@ -372,19 +376,30 @@ fn
   resolve({})
 },
 (opts: Map): Map {
-  o if(is-map(opts), opts, {})
   present (v) { and(is-str(v), not(is-empty(trim(or(v, ""))))) }
-  base-url or(get(o, "base-url"), or(::ctx/get("cipherowl.base.url"), ::cipherowl/BASE_URL))
+  given (k) { present(get(opts, k)) }
+  blank find-first(CREDENTIAL_KEYS, (k) { and(in(k, keys(opts)), not(given(k))) })
+  ::ctx/mark-secret(filter(map(CREDENTIAL_KEYS, (k) { get(opts, k) }), present))
+  from-opts or(given("access-token"), given("client-id"), given("client-secret"))
+  base-url or(get(opts, "base-url"), or(::ctx/get("cipherowl.base.url"), ::cipherowl/BASE_URL))
   base if(is-empty(or(base-url, "")), ::cipherowl/BASE_URL, base-url)
   cond {
-    present(get(o, "access-token")) => {
-      {client-id: null, client-secret: null, access-token: get(o, "access-token"), base-url: base}
+    is-some(blank) => {
+      err(`CipherOwl: ${blank} is in the call's opts but is blank or null. Pass a value, or leave it out to use the context credentials.`)
     }
 
-    or(present(get(o, "client-id")), present(get(o, "client-secret"))) => {
+    and(given("base-url"), not(from-opts)) => {
+      err("CipherOwl: base-url is in the call's opts without access-token or client-id and client-secret. Pass one with it. Context credentials are never sent to a per-call URL.")
+    }
+
+    given("access-token") => {
+      {client-id: null, client-secret: null, access-token: opts.access-token, base-url: base}
+    }
+
+    from-opts => {
       cond {
-        and(present(get(o, "client-id")), present(get(o, "client-secret"))) => {
-          {client-id: get(o, "client-id"), client-secret: get(o, "client-secret"), access-token: null, base-url: base}
+        and(given("client-id"), given("client-secret")) => {
+          {client-id: opts.client-id, client-secret: opts.client-secret, access-token: null, base-url: base}
         }
         => { err("CipherOwl credentials are incomplete: pass both client-id and client-secret in opts.") }
       }
@@ -475,7 +490,7 @@ fn (response: HttpResponse): Any {
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response-body(response.body) }
-    => { err(http-error(response)) }
+    => { err(HttpError(response)) }
   }
 }
 

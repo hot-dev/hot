@@ -259,7 +259,6 @@ meta {
     doc: """A report amount Str (`"1200.00"`, `"-35.5"`) as a Dec; null for blanks and non-numbers."""
 }
 fn (value: Any): Dec? {
-  // WORKAROUND(hot-bug-6): match the number before Dec() so a bad value returns null instead of halting.
   cond {
     is-int(value) => { Dec(value) }
     is-dec(value) => { value }

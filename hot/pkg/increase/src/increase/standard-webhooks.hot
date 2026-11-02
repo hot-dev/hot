@@ -25,6 +25,7 @@ meta {
 }
 
 ::b64 ::hot::base64
+::ctx ::hot::ctx
 ::hmac ::hot::hmac
 ::time ::hot::time
 ::re ::hot::regex
@@ -86,14 +87,14 @@ meta {
     """
 }
 fn (secret: Str): Bytes {
-  raw trim(secret)
+  raw trim(::ctx/mark-secret(secret))
   body if(starts-with(raw, SECRET_PREFIX), slice(raw, length(SECRET_PREFIX), length(raw)), raw)
   cond {
     is-empty(body) => { err("standard-webhooks: the webhook secret is empty") }
     not(::re/is-match(body, "^[A-Za-z0-9+/]+={0,2}$")) => { err("standard-webhooks: the webhook secret is not base64") }
     => {
       padded pad-base64(body)
-      if(::b64/is-valid(padded), ::b64/decode(padded), err("standard-webhooks: the webhook secret is not base64"))
+      if(::b64/is-valid(padded), ::ctx/mark-secret(::b64/decode(padded)), err("standard-webhooks: the webhook secret is not base64"))
     }
   }
 }
@@ -123,6 +124,7 @@ meta {
     """
 }
 fn (key: Str | Bytes, msg-id: Str, timestamp: Str, body: Str | Bytes): Str {
+  ::ctx/mark-secret(key)
   `v1,${::b64/encode(::hmac/hmac-sha256-bytes(key, signed-content(msg-id, timestamp, body)))}`
 }
 
@@ -166,6 +168,7 @@ meta {
     """
 }
 fn (headers: Map, body: Str | Bytes, key: Str | Bytes, tolerance-seconds: Int, now: Int): Bool {
+  ::ctx/mark-secret(key)
   msg-id header(headers, "webhook-id")
   timestamp header(headers, "webhook-timestamp")
   signature header(headers, "webhook-signature")
@@ -175,7 +178,7 @@ fn (headers: Map, body: Str | Bytes, key: Str | Bytes, tolerance-seconds: Int, n
     is-empty(msg-id) => { false }
     is-empty(signature) => { false }
     lte(tolerance-seconds, 0) => { false }
-    // WORKAROUND(hot-bug-6): Int("abc") halts the run; match the digits first.
+    // Int("abc") is an Err that halts when consumed; match the digits first.
     not(::re/is-match(timestamp, "^[0-9]{1,15}$")) => { false }
     => {
       expected sign(key, msg-id, timestamp, body)
@@ -227,6 +230,6 @@ meta {
     doc: """The `webhook-challenge-response` header value for a Standard Webhooks endpoint-verification `challenge`: `v1,` + base64 HMAC-SHA256 of the challenge under HMAC-SHA256(key, `"wev-v1"`). Increase doesn't send challenges; this is here for other Standard Webhooks senders."""
 }
 fn (key: Str | Bytes, challenge: Str): Str {
-  verification-key ::hmac/hmac-sha256-bytes(key, "wev-v1")
+  verification-key ::ctx/mark-secret(::hmac/hmac-sha256-bytes(::ctx/mark-secret(key), "wev-v1"))
   `v1,${::b64/encode(::hmac/hmac-sha256-bytes(verification-key, challenge))}`
 }

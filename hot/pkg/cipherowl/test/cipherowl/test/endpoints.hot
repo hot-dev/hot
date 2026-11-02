@@ -135,6 +135,21 @@ meta ["test"] fn () {
     assert(is-null(::risk/parse-score({riskBand: "Odd"}).band))
 }
 
+test-parse-score-sorts-mixed-int-and-dec-contributions
+meta ["test"] fn () {
+    s ::risk/parse-score({
+        breakdown: [
+            {category: "a", riskContribution: 65},
+            {category: "b", riskContribution: 82.32},
+            {category: "c", riskContribution: 9},
+            {category: "d", riskContribution: 100},
+            {category: "e", riskContribution: 64.9},
+            {category: "f", riskContribution: "70.5"}
+        ]
+    })
+    assert-eq(["d", "b", "f", "a", "e", "c"], map(s.breakdown, (i) { i.category }), "numeric order across Int and Dec")
+}
+
 test-report-error
 meta ["test"] fn () {
     assert-eq("generation failed", ::reports/report-error({found_risk: true, report: null, error: "generation failed"}))

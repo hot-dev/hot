@@ -22,7 +22,6 @@ meta {
 }
 
 ::api ::middesk::api
-RequestOptions ::middesk::api/RequestOptions
 
 seg ::middesk::api/seg
 
@@ -57,12 +56,12 @@ meta {
 }
 fn
 (business-id: Str, product: Str): Map {
-  create-order(business-id, product, {}, RequestOptions({}))
+  create-order(business-id, product, {}, {})
 },
 (business-id: Str, product: Str, opts: Map): Map {
-  create-order(business-id, product, opts, RequestOptions({}))
+  create-order(business-id, product, opts, {})
 },
-(business-id: Str, product: Str, opts: Map, options: RequestOptions): Map {
+(business-id: Str, product: Str, opts: Map, options: Map): Map {
   ::api/send("POST", `/businesses/${seg(business-id)}/orders`, {}, order-body(product, opts), options)
 }
 
@@ -72,12 +71,12 @@ meta {
 }
 fn
 (business-id: Str): Map {
-  list-orders(business-id, {}, RequestOptions({}))
+  list-orders(business-id, {}, {})
 },
 (business-id: Str, params: Map): Map {
-  list-orders(business-id, params, RequestOptions({}))
+  list-orders(business-id, params, {})
 },
-(business-id: Str, params: Map, options: RequestOptions): Map {
+(business-id: Str, params: Map, options: Map): Map {
   ::api/list-page(`/businesses/${seg(business-id)}/orders`, params, options)
 }
 
@@ -87,9 +86,9 @@ meta {
 }
 fn
 (order-id: Str): Map {
-  get-order(order-id, RequestOptions({}))
+  get-order(order-id, {})
 },
-(order-id: Str, options: RequestOptions): Map {
+(order-id: Str, options: Map): Map {
   ::api/send("GET", `/orders/${seg(order-id)}`, {}, null, options)
 }
 
@@ -99,9 +98,9 @@ meta {
 }
 fn
 (order-id: Str, params: Map): Map {
-  update-order(order-id, params, RequestOptions({}))
+  update-order(order-id, params, {})
 },
-(order-id: Str, params: Map, options: RequestOptions): Map {
+(order-id: Str, params: Map, options: Map): Map {
   ::api/send("PUT", `/orders/${seg(order-id)}`, {}, ::api/compact(untype(params)), options)
 }
 

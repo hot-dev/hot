@@ -25,16 +25,20 @@ meta {
 ACCEPT "application/vnd.api+json"
 MAX_PAGE_SIZE 200
 
-base-url fn (opts: Map): Str {
-  ::api/resolve(opts).gleif-base-url
-}
-
 gleif-get fn (path: Str, params: Map, opts: Map): Any {
-  ::api/get-json("gleif", `${base-url(opts)}${path}${::api/query-string(params)}`, {Accept: ACCEPT})
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => { ::api/get-json("gleif", `${cfg.gleif-base-url}${path}${::api/query-string(params)}`, {Accept: ACCEPT}) }
+  }
 }
 
 get-or-null fn (path: Str, opts: Map): Any {
-  ::api/get-json-or-null("gleif", `${base-url(opts)}${path}`, {Accept: ACCEPT})
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => { ::api/get-json-or-null("gleif", `${cfg.gleif-base-url}${path}`, {Accept: ACCEPT}) }
+  }
 }
 
 page-params
@@ -92,7 +96,6 @@ LETTER_VALUES {
 }
 
 mod97 fn (s: Str): Int {
-  // WORKAROUND(hot-bug-6): Int() only sees single digits (is-lei checks the pattern first).
   digits join(map(::hot::regex/split(s, ""), (c) {
     v get(LETTER_VALUES, c)
     if(is-some(v), Str(v), c)

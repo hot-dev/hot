@@ -164,3 +164,11 @@ test-event-feeds-decision
 meta ["test"] fn () {
     assert(::decisions/is-approved(::webhooks/parse-event(PAYLOAD)))
 }
+
+test-non-ascii-body-digests-its-utf8-bytes
+meta ["test"] fn () {
+    // hmac.new(SECRET, body.encode(), hashlib.sha256).hexdigest()
+    body """{"name":"José 日本"}"""
+    assert(::webhooks/verify-digest(SECRET, body, "2f012ace1a82ae07d9aabc2ef273f89f94c3505345e02793d635e0b66bfadd0a", "HMAC_SHA256_HEX", ["HMAC_SHA256_HEX"]), "Str body")
+    assert(::webhooks/verify-digest(SECRET, Bytes(body), "2f012ace1a82ae07d9aabc2ef273f89f94c3505345e02793d635e0b66bfadd0a", "HMAC_SHA256_HEX", ["HMAC_SHA256_HEX"]), "the same bytes")
+}

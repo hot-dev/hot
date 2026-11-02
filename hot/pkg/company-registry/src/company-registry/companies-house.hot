@@ -70,10 +70,12 @@ fn (number: Any): Str {
 // Errors are returned, not consumed: consuming an Err would halt the run.
 with-key fn (opts: Map, f: Fn): Any {
   cfg ::api/resolve(opts)
-  key ::api/require-api-key(cfg)
   cond {
-    is-err(key) => { key }
-    => { f(cfg, auth-header(key)) }
+    is-err(cfg) => { cfg }
+    => {
+      key ::api/require-api-key(cfg)
+      if(is-err(key), key, f(cfg, auth-header(key)))
+    }
   }
 }
 

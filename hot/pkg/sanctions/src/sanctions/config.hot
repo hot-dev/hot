@@ -20,6 +20,11 @@ meta {
     | `api-key` | `sanctions.opensanctions.api-key` | none (OpenSanctions only) |
     | `base-url` | `sanctions.opensanctions.base-url` | `https://api.opensanctions.org` |
     | `dataset` | `sanctions.opensanctions.dataset` | `"default"` |
+
+    **Per-call credentials.** An `api-key` in `opts` is masked in call
+    records. Present but blank or null, it is an error, never a fallback
+    to context. The context key is never sent to a per-call `base-url`: a
+    self-hosted yente that needs no key gets none.
     """
 }
 
@@ -49,7 +54,6 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
 }
 
 to-int fn (v: Any, default: Int): Int {
-  // WORKAROUND(hot-bug-6): Int() only sees strings a regex has already proven numeric.
   match v {
     Int => { v }
     Str => { if(::hot::regex/is-match(trim(v), "^\\d+$"), Int(trim(v)), default) }
@@ -62,7 +66,9 @@ meta {
     doc: """
     Resolve settings for one call: `{store, max-age-days, api-key,
     base-url, dataset}`. An `api-key` in `opts` replaces the context key
-    for that call only; `api-key` is null when neither is set.
+    for that call only and comes back unchanged; `api-key` is null when
+    neither is set, and when `opts` has a `base-url` without one. An Err
+    when `api-key` is in `opts` but blank or null.
 
     **Example**
 
@@ -72,23 +78,33 @@ meta {
     """
 }
 fn (opts: Map): Map {
+  key get(opts, "api-key")
+  if(given(key), ::ctx/mark-secret(key))
   base pick(opts, "base-url", "sanctions.opensanctions.base-url", DEFAULT_OPENSANCTIONS_URL)
-  {
-    store: pick(opts, "store", "sanctions.store", DEFAULT_STORE),
-    max-age-days: to-int(pick(opts, "max-age-days", "sanctions.max-age-days", DEFAULT_MAX_AGE_DAYS), DEFAULT_MAX_AGE_DAYS),
-    api-key: pick(opts, "api-key", "sanctions.opensanctions.api-key", null),
-    base-url: ::hot::regex/replace-all(Str(base), "/+$", ""),
-    dataset: pick(opts, "dataset", "sanctions.opensanctions.dataset", DEFAULT_DATASET)
+  cond {
+    and(in("api-key", keys(opts)), not(given(key))) => {
+      err("sanctions: api-key is in the call's opts but is blank or null. Pass a value, or leave api-key out to use sanctions.opensanctions.api-key.")
+    }
+    => {
+      {
+        store: pick(opts, "store", "sanctions.store", DEFAULT_STORE),
+        max-age-days: to-int(pick(opts, "max-age-days", "sanctions.max-age-days", DEFAULT_MAX_AGE_DAYS), DEFAULT_MAX_AGE_DAYS),
+        api-key: if(given(get(opts, "base-url")), key, pick(opts, "api-key", "sanctions.opensanctions.api-key", null)),
+        base-url: ::hot::regex/replace-all(Str(base), "/+$", ""),
+        dataset: pick(opts, "dataset", "sanctions.opensanctions.dataset", DEFAULT_DATASET)
+      }
+    }
   }
 }
 
 require-api-key
 meta {
-    doc: """The resolved OpenSanctions API key, or an Err naming where to set it."""
+    doc: """The resolved OpenSanctions API key. The hosted API needs one, so its absence there is an Err naming where to set it; a self-hosted yente may need none, which gives null."""
 }
-fn (cfg: Map): Str {
+fn (cfg: Map): Str? {
   cond {
     given(cfg.api-key) => { cfg.api-key }
-    => { err("sanctions: no OpenSanctions API key; set sanctions.opensanctions.api-key or pass {api-key: ...} in opts") }
+    ne(cfg.base-url, DEFAULT_OPENSANCTIONS_URL) => { null }
+    => { err("sanctions: no OpenSanctions API key; set sanctions.opensanctions.api-key or pass {api-key: ...} in opts. The context key is never sent to a per-call base-url.") }
   }
 }

@@ -30,7 +30,10 @@ meta {
     `token-store`, `refresh-token` or `custom-connection`), context
     credentials are ignored for the call; the app's client id and secret
     still fall back to context. Order within a source: access token,
-    keeper, refresh token, Custom Connection.
+    keeper, refresh token, Custom Connection. A credential key in `opts`
+    that is blank or null is an Err naming the key, never a fallback to
+    context. Per-call credentials are marked, so they are masked in call
+    records.
 
     **Run cache.** Refreshed and client-credentials tokens are cached in
     the run's context (as secrets) until a minute before expiry, with
@@ -67,6 +70,9 @@ meta {
 CACHE_PREFIX "xero.token-cache."
 EXPIRY_MARGIN_SECONDS 60
 DEFAULT_STORE_KEY "default"
+
+// Credential keys that are an Err when present in `opts` but blank or null.
+NO_FALLBACK_KEYS ["access-token", "refresh-token", "token-store", "token-store-key", "client-id", "client-secret"]
 
 // Keys an `opts` Map may carry that belong to this package rather than
 // to the API being called.
@@ -187,9 +193,18 @@ fn (source: Map): Map {
 }
 
 resolve-credentials
-meta {doc: """Resolve the credentials for a call from `opts` and context."""}
+meta {
+    doc: """Resolve the credentials for a call from `opts` and context, marking per-call credentials so they are masked in call records. A credential key in `opts` that is blank or null is a `TokenError` naming the key."""
+}
 fn (opts: Map): Map {
-  credentials-from(merge-sources(opts, ctx-source()))
+  ::ctx/mark-secret([get(opts, "access-token"), get(opts, "refresh-token"), get(opts, "client-secret")])
+  blank ::oauth/blank-option(opts, NO_FALLBACK_KEYS)
+  cond {
+    is-some(blank) => {
+      err(token-error(`xero: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use context.`))
+    }
+    => { credentials-from(merge-sources(opts, ctx-source())) }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +261,15 @@ fn (entry: Any, fallback: Str?): Str? {
 // Minting
 // ---------------------------------------------------------------------------
 
+mark-entry
+meta {
+    doc: """Mask the tokens in a keeper entry and return it unchanged. Null passes through. Exposed for testing."""
+}
+fn (entry: Any): Any {
+  if(is-map(entry), ::ctx/mark-secret([get(entry, "access-token"), get(entry, "refresh-token")]), null)
+  entry
+}
+
 store-map fn (name: Str) {
   ::store/Map({name: name})
 }
@@ -269,7 +293,7 @@ meta {
 }
 fn (store-name: Str, key: Str, tokens: Str | Map): Map {
   now now-ms()
-  entry if(is-str(tokens), {refresh-token: tokens, updated-at: now}, token-entry(untype(tokens), now))
+  entry mark-entry(if(is-str(tokens), {refresh-token: tokens, updated-at: now}, token-entry(untype(tokens), now)))
   ::store/put(store-map(store-name), key, entry)
   entry
 }
@@ -279,7 +303,7 @@ meta {
     doc: """Read a keeper entry (null when absent). It holds tokens: never log it."""
 }
 fn (store-name: Str, key: Str): Map? {
-  ::store/get(store-map(store-name), key)
+  mark-entry(::store/get(store-map(store-name), key))
 }
 
 refresh-into-entry fn (creds: Map, refresh-token: Str, now: Int): Map {
@@ -293,7 +317,7 @@ meta {
 }
 fn (creds: Map, now: Int): Map {
   sm store-map(creds.store)
-  current ::store/get(sm, creds.key)
+  current mark-entry(::store/get(sm, creds.key))
   cond {
     is-fresh(current, now) => { current }
     => {
@@ -306,7 +330,7 @@ fn (creds: Map, now: Int): Map {
             is-err(fresh) => { fresh }
             ::store/put-if(sm, creds.key, current, fresh) => { fresh }
             => {
-              winner ::store/get(sm, creds.key)
+              winner mark-entry(::store/get(sm, creds.key))
               if(is-fresh(winner, now), winner, fresh)
             }
           }
@@ -368,7 +392,7 @@ fn (creds: Map, cache-key: Str?): Bool {
       cond {
         eq(creds.kind, "keeper") => {
           sm store-map(creds.store)
-          current ::store/get(sm, creds.key)
+          current mark-entry(::store/get(sm, creds.key))
           if(is-map(current), ::store/put-if(sm, creds.key, current, {...current, expires-at: 0}), false)
           true
         }

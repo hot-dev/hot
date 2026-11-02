@@ -230,7 +230,6 @@ meta {
 }
 fn (value: Any): Dec? {
   text if(is-str(value), replace(trim(Str(value)), ",", ""), null)
-  // WORKAROUND(hot-bug-6): match the number before Dec() so a bad value returns null instead of halting.
   cond {
     is-int(value) => { Dec(value) }
     is-dec(value) => { value }

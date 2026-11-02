@@ -52,6 +52,21 @@ meta ["test"] fn () {
     assert(not(::webhooks/verify-request(request-with(SIG, BODY), "")), "an empty secret never verifies")
 }
 
+test-non-ascii-body-signs-its-utf8-bytes
+meta ["test"] fn () {
+    // hmac.new(SECRET, body.encode(), hashlib.sha256).hexdigest()
+    body """{"name":"José 日本"}"""
+    assert(::webhooks/verify-signature("5ee3d4a621ede3053cda09d55862b2ceb593c38ee7a0b699a8121a124fab6fbd", body, SECRET), "Str body")
+    assert(::webhooks/verify-signature("5ee3d4a621ede3053cda09d55862b2ceb593c38ee7a0b699a8121a124fab6fbd", Bytes(body), SECRET), "the same bytes")
+}
+
+test-mark-webhook-secret-returns-params-unchanged
+meta ["test"] fn () {
+    params {secret: "a-webhook-secret-value", include: "x"}
+    assert-eq(params, ::webhooks/mark-webhook-secret(params))
+    assert-eq({include: "x"}, ::webhooks/mark-webhook-secret({include: "x"}), "no secret")
+}
+
 test-construct-event
 meta ["test"] fn () {
     e ::webhooks/construct-event(request-with(SIG, BODY), SECRET)

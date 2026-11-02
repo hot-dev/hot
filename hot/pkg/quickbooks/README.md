@@ -28,7 +28,19 @@ Create an app at [developer.intuit.com](https://developer.intuit.com) with the `
 | `quickbooks.token.store` | no | Store name for the opt-in token keeper |
 | `quickbooks.webhook.verifier` | yes | The webhook verifier token |
 
-Every function that calls the API takes a trailing `opts` Map that overrides context for that call: `access-token`, `refresh-token`, `client-id`, `client-secret`, `token-store`, `token-store-key`, `realm-id`, `environment`, `minorversion`, `request-id` and `retry`. When `opts` carries a credential, context credentials are ignored, so one run can act for many companies (and parallel flows never share per-call values: nothing is written to context except the hashed, secret token cache). `::quickbooks::api/resolve(opts)` shows what a call would use.
+### Per-call credentials
+
+Every function that calls the API takes a trailing `opts` Map that overrides context for that call: `access-token`, `refresh-token`, `client-id`, `client-secret`, `token-store`, `token-store-key`, `realm-id`, `environment`, `minorversion`, `request-id` and `retry`. When `opts` carries a credential, context credentials are ignored, so one run can act for many companies. Parallel flows never share per-call values: nothing is written to context except the hashed, secret token cache, and per-call credentials are masked in call records.
+
+```hot
+// Company B in the sandbox, with its own refresh token
+page ::quickbooks::query/query("select * from Invoice", {realm-id: "9341453", refresh-token: company-b-refresh-token, environment: "sandbox"})
+```
+
+- A credential, `realm-id` or `environment` that is present but blank or null is an error naming the key, never a fallback to context.
+- A per-call `environment` that differs from `quickbooks.environment` needs `access-token`, `refresh-token` or `token-store` in the same `opts`. Sandbox and production tokens differ, so context credentials never go to the other environment's host. There is no per-call URL.
+
+`::quickbooks::api/resolve(opts)` shows what a call would use.
 
 ### Connecting a company
 
@@ -110,7 +122,7 @@ Updates need the entity's current `SyncToken` (optimistic locking); a stale one 
 
 **`::quickbooks::auth`**: `access-token`, `current-refresh-token`, `keeper-seed`, `keeper-entry`, `resolve-credentials`.
 
-**`::quickbooks::api`**: `resolve`, `request`, `json`, `bytes`, `http-error`, `fault-details`, `is-retryable`, `company-url`, `query-string`.
+**`::quickbooks::api`**: `resolve`, `request`, `json`, `bytes`, `HttpError`, `fault-details`, `is-retryable`, `company-url`, `query-string`.
 
 ## Webhooks
 

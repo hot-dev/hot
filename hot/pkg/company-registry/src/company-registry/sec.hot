@@ -34,9 +34,15 @@ meta {
     doc: """The SEC request headers (`User-Agent` from settings), or an Err when no user-agent is set."""
 }
 fn (opts: Map): Map {
-  ua ::api/require-user-agent(::api/resolve(opts))
+  cfg ::api/resolve(opts)
   // Returned, not consumed: consuming an Err would halt the run.
-  if(is-err(ua), ua, {User-Agent: ua})
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      ua ::api/require-user-agent(cfg)
+      if(is-err(ua), ua, {User-Agent: ua})
+    }
+  }
 }
 
 sec-get fn (url: Str, opts: Map): Any {

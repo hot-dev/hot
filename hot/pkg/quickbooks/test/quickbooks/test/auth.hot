@@ -107,3 +107,21 @@ meta ["test"] fn () {
     assert-eq("AT-1", ::auth/access-token({access-token: "AT-1"}))
     assert(is-err(::auth/access-token({})), "nothing configured errs")
 }
+
+test-mark-entry-returns-the-entry-unchanged
+meta ["test"] fn () {
+    entry {access-token: "AT-VALUE", refresh-token: "RT-VALUE", expires-at: 1000}
+    assert-eq(entry, ::auth/mark-entry(entry))
+    assert(is-null(::auth/mark-entry(null)))
+}
+
+test-resolve-credentials-blank-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"quickbooks.access.token": "CTX-AT"})
+    blank ::auth/access-token({access-token: ""})
+    latest ::auth/current-refresh-token({refresh-token: ""})
+    clear-ctx()
+    assert(is-err(blank), "a blank access token never falls back to context")
+    assert(contains(err-message(blank), "access-token"), err-message(blank))
+    assert(is-null(latest))
+}

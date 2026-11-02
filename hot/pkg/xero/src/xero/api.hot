@@ -9,7 +9,17 @@ meta {
     **Tenant.** Every call sends `xero-tenant-id`: `opts.tenant-id`, else
     the `xero.tenant.id` context variable (from
     `::xero::oauth/connections`). Custom Connections reach one
-    organisation and may omit it. Tenant ids must be GUIDs.
+    organisation and may omit it. Tenant ids must be GUIDs. A `tenant-id`
+    in `opts` that is blank or null is an Err, so a tenant whose id is
+    missing never runs on the configured organisation.
+
+    **Per-call credentials.** Every function that calls the API takes a
+    trailing `opts` Map, resolved by `resolve`: `opts` first, then
+    context, then defaults. Nothing from `opts` is written to ctx, and
+    per-call credentials are masked in call records. A credential present
+    in `opts` but blank or null is an Err naming the key, never a fallback
+    to context. Requests only go to Xero's own hosts; there is no per-call
+    URL.
 
     **Per-call options** (besides credentials): `tenant-id`,
     `if-modified-since` (only records changed since; a timestamp such as
@@ -148,13 +158,11 @@ body-excerpt fn (body: Any): Str {
   if(gt(length(text), 300), `${slice(text, 0, 300)}...`, text)
 }
 
-http-error
-meta {
-    doc: """Build an `HttpError` with a readable `message` from a response (`{status, headers, body}`). Pure; exposed for testing."""
-}
-fn (response: Map): HttpError {
-  headers or(get(response, "headers"), {})
-  body decode-body(get(response, "body"))
+// A readable `message` with validation errors joined in, and the error and
+// rate-limit fields lifted.
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  headers or(response.headers, {})
+  body decode-body(response.body)
   m if(is-map(body), body, {})
   vmsgs validation-messages(body)
   limits rate-limits(headers)
@@ -183,7 +191,6 @@ fn (response: Map): HttpError {
   }
 
   type-part if(is-some(error-type), ` ${error-type}`, "")
-  // WORKAROUND(hot-bug-1): build HttpError in an explicit function, never via T(response) or an arrow.
   HttpError({
     status: response.status,
     headers: headers,
@@ -287,10 +294,15 @@ fn (value: Any): Str? {
 
 tenant-id
 meta {
-    doc: """The tenant for a call: `opts.tenant-id`, else `xero.tenant.id`; null when neither is set."""
+    doc: """The tenant for a call: `opts.tenant-id`, else `xero.tenant.id`; null when neither is set. A `tenant-id` in `opts` that is blank or null is an Err."""
 }
 fn (opts: Map): Str? {
-  validate-tenant-id(or(get(opts, "tenant-id"), ::ctx/get("xero.tenant.id")))
+  cond {
+    is-some(::xero::oauth/blank-option(opts, ["tenant-id"])) => {
+      err("xero: tenant-id is in the call's opts but is blank or null. Pass a value, or leave tenant-id out to use xero.tenant.id.")
+    }
+    => { validate-tenant-id(or(get(opts, "tenant-id"), ::ctx/get("xero.tenant.id"))) }
+  }
 }
 
 encode-param fn (value: Any): Str {
@@ -406,20 +418,6 @@ send-with-retry fn (req: HttpRequest, budget: Int): HttpResponse {
   }
 }
 
-not-modified
-meta {
-    doc: """Map a transport result for a conditional request (pure): with `If-Modified-Since` set, the Err a bodiless 304 comes back as becomes `{status: 304, headers: {}, body: ""}`."""
-}
-fn (response: Result, conditional: Bool): HttpResponse {
-  cond {
-    // WORKAROUND(hot-bug-2): a 3xx without Location (Xero's 304 Not Modified) comes back as an Err.
-    and(conditional, is-err(response), contains(err-message(response), "redirect missing valid Location")) => {
-      HttpResponse({status: 304, headers: {}, body: ""})
-    }
-    => { response }
-  }
-}
-
 rate-limits-key
 meta {
     doc: """The context key the latest rate limits for a tenant are kept under: `xero.rate-limits.{tenant-id}` (`.default` without a tenant)."""
@@ -461,9 +459,10 @@ meta {
     then context, then defaults. Returns `{credentials, tenant-id,
     idempotency-key}` (`credentials` as `::xero::auth/credentials-from`
     describes), or the first Err (malformed tenant id, over-long
-    idempotency key, no credentials). It only reads context; per-call
-    values are never written to it, so parallel flows for different
-    users and organisations stay apart.
+    idempotency key, a blank credential in `opts`, no credentials). It
+    only reads context; per-call values are never written to it, so
+    parallel flows for different users and organisations stay apart, and
+    per-call credentials are masked in call records.
 
     ```hot
     r ::xero::api/resolve({tenant-id: "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f", refresh-token: user-refresh-token})
@@ -502,7 +501,6 @@ fn
   resolved resolve(opts)
   url api-url(path, params)
   budget retry-budget(opts, method)
-  conditional not(is-blank(get(opts, "if-modified-since")))
   cond {
     is-err(resolved) => { resolved }
     => {
@@ -512,14 +510,13 @@ fn
       cond {
         is-err(auth) => { auth }
         => {
-          response not-modified(send-with-retry(build-request(method, url, auth.token, tenant, body, opts, extra-headers), budget), conditional)
+          response send-with-retry(build-request(method, url, auth.token, tenant, body, opts, extra-headers), budget)
           record-limits(response, tenant)
           cond {
             and(auth.cached, not(is-err(response)), eq(response.status, 401)) => {
               ::auth/evict(creds, auth.cache-key)
               fresh ::auth/bearer(creds)
-              if(is-err(fresh), fresh,
-                not-modified(send-with-retry(build-request(method, url, fresh.token, tenant, body, opts, extra-headers), budget), conditional))
+              if(is-err(fresh), fresh, send-with-retry(build-request(method, url, fresh.token, tenant, body, opts, extra-headers), budget))
             }
             => { response }
           }
@@ -541,7 +538,7 @@ fn (response: Result): Any {
       decoded decode-body(response.body)
       if(and(is-str(decoded), is-empty(trim(decoded))), null, decoded)
     }
-    => { err(http-error(response)) }
+    => { err(HttpError(response)) }
   }
 }
 
@@ -575,7 +572,7 @@ fn (path: Str, accept: Str, opts: Map): Bytes {
   response request("GET", path, {}, "", {Accept: accept}, opts)
   cond {
     is-err(response) => { response }
-    not(is-ok-response(response)) => { err(http-error({status: response.status, headers: response.headers, body: or(response.body-bytes, response.body)})) }
+    not(is-ok-response(response)) => { err(HttpError(HttpResponse({status: response.status, headers: response.headers, body: or(response.body-bytes, response.body)}))) }
     => { or(response.body-bytes, Bytes([])) }
   }
 }

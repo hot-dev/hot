@@ -1,7 +1,7 @@
 ::increase::api ns
 meta {
     ctx: {
-        "increase.api.key": {required: true},
+        "increase.api.key": {required: false},
         "increase.environment": {required: false, secret: false},
         "increase.transfers.require-approval": {required: false, secret: false}
     },
@@ -17,6 +17,15 @@ meta {
     up with `find-by-idempotency-key`, then resend the same call with the
     same idempotency key if it isn't there. Increase returns the original
     object for a repeated key, so a resend can't move money twice.
+
+    **Per-call credentials.** Every function that calls the API takes an
+    optional trailing `opts` Map, resolved by `resolve`: `opts` first,
+    then context, then defaults. Nothing from `opts` is written to ctx,
+    and per-call credentials are masked in call records. An `api-key`
+    present but blank or null is an Err, never a fallback to context. A
+    per-call `environment` that differs from `increase.environment` needs
+    an `api-key` in the same `opts`: a context key never goes to another
+    environment's host.
     """
 }
 
@@ -150,7 +159,7 @@ fn (value: Any): Int? {
   cond {
     is-int(value) => { value }
     not(is-str(value)) => { null }
-    // WORKAROUND(hot-bug-6): Int("abc") halts the run; match the digits first.
+    // Int("abc") is an Err that halts when consumed; match the digits first.
     ::re/is-match(trim(value), "^-?[0-9]{1,15}$") => { Int(trim(value)) }
     => { null }
   }
@@ -211,11 +220,9 @@ fn (status: Int, body: Any): Str {
   redact-text(`increase: HTTP ${status}${type-part}: ${text}`)
 }
 
-http-error
-meta {
-    doc: """Build the `HttpError` for a non-2xx response: decode and redact the body, lift Increase's problem fields, and read `retry_after` from the body or the `Retry-After` header. Exposed for testing; every request uses it."""
-}
-fn (response: HttpResponse): HttpError {
+// Decode and redact the body, lift Increase's problem fields, and read
+// `retry_after` from the body or the `Retry-After` header.
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   headers or(response.headers, {})
   body redact(decode-body(response.body))
   errors field(body, "errors")
@@ -233,13 +240,6 @@ fn (response: HttpResponse): HttpError {
     errors: if(is-vec(errors), errors, null),
     retry_after: if(is-some(retry-body), retry-body, parse-int(get(headers, "retry-after")))
   })
-}
-
-// WORKAROUND(hot-bug-1): HttpError(response) ignores this arrow and copies
-// fields, so the package always calls `http-error` directly. The arrow is
-// kept for callers that coerce a response themselves.
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
-  http-error(response)
 }
 
 plain-error fn (error: Result): Any {
@@ -319,9 +319,9 @@ fn (environment: Str, operation: Str): Bool {
 
 // Per-call options. Every function that calls the API takes an optional
 // trailing `opts` Map:
-// - `api-key`: overrides `increase.api.key` for this call
-// - `environment`: overrides `increase.environment` (`"sandbox"` or
-//   `"production"`)
+// - `api-key`: replaces `increase.api.key` for this call
+// - `environment`: `"sandbox"` or `"production"` for this call; one that
+//   differs from `increase.environment` needs an `api-key` as well
 // - `idempotency-key`: sent as `Idempotency-Key` (at most 200
 //   characters); required by every call that moves money
 // `resolve` applies them: opts first, then context, then defaults.
@@ -494,16 +494,34 @@ present fn (value: Any): Bool {
   and(is-some(value), not(is-empty(trim(Str(or(value, ""))))))
 }
 
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+blank-option
+meta {
+    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an Err, never a fallback to context: a tenant whose key or environment is missing must not run on the project's. Exposed for testing."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+}
+
 resolve
 meta {
     doc: """
     The settings for one call: `{api-key, environment, base-url,
     idempotency-key}`. Each comes from `opts` first, then context
     (`increase.api.key`, `increase.environment`), then the default
-    (`"sandbox"`). An `api-key` in `opts` replaces the context key for
-    that call. Errs when no API key is available or the environment is
-    invalid. Never writes to context, so parallel calls for different
-    tenants can't see each other's keys.
+    (`"sandbox"`). Never writes to context, so parallel calls for
+    different tenants can't see each other's keys, and marks a per-call
+    `api-key` so it is masked in call records.
+
+    Errs when no API key is available, when the environment is invalid,
+    when `api-key` or `environment` is in `opts` but blank or null (that
+    never falls back to context), and when `environment` in `opts` differs
+    from `increase.environment` without an `api-key` in the same `opts`:
+    sandbox and production keys differ, so a context key is never sent to
+    the other environment's host.
 
     **Example**
 
@@ -514,13 +532,22 @@ meta {
     """
 }
 fn (opts: Map): Map {
-  explicit-key get(opts, "api-key")
-  api-key if(present(explicit-key), Str(explicit-key), trim(Str(or(::ctx/get("increase.api.key"), ""))))
-  explicit-env get(opts, "environment")
-  environment if(present(explicit-env), normalize-environment(Str(explicit-env)), current-environment())
+  explicit-key non-blank(::ctx/mark-secret(get(opts, "api-key")))
+  blank blank-option(opts, ["api-key", "environment"])
+  api-key or(explicit-key, non-blank(::ctx/get("increase.api.key")))
+  configured current-environment()
+  environment environment-of(opts)
   cond {
-    is-empty(api-key) => { err("increase: no API key. Set increase.api.key in Context Variables or pass {api-key: ...} in opts.") }
+    is-some(blank) => {
+      err(`increase: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use context.`)
+    }
+
     is-err(environment) => { environment }
+    is-null(api-key) => { err("increase: no API key. Set increase.api.key in Context Variables or pass {api-key: ...} in opts.") }
+    and(is-null(explicit-key), is-err(configured)) => { configured }
+    and(is-null(explicit-key), ne(environment, configured)) => {
+      err(`increase: environment "${environment}" is in the call's opts but increase.environment is "${configured}", and opts has no api-key. Pass api-key with it: a context key never goes to another environment's host.`)
+    }
     => {
       {
         api-key: api-key,
@@ -531,8 +558,6 @@ fn (opts: Map): Map {
     }
   }
 }
-
-
 
 call
 meta {
@@ -572,7 +597,7 @@ fn
       cond {
         is-err(response) => { response }
         is-ok-response(response) => { response-body(response.body) }
-        => { err(http-error(response)) }
+        => { err(HttpError(response)) }
       }
     }
   }

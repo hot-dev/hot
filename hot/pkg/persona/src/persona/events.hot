@@ -4,7 +4,6 @@ meta {
 }
 
 ::api ::persona::api
-RequestOptions ::persona::api/RequestOptions
 
 seg ::persona::api/seg
 
@@ -24,12 +23,12 @@ meta {
 }
 fn
 (filters: Map): Map {
-  list-events(filters, {}, RequestOptions({}))
+  list-events(filters, {}, {})
 },
 (filters: Map, opts: Map): Map {
-  list-events(filters, opts, RequestOptions({}))
+  list-events(filters, opts, opts)
 },
-(filters: Map, opts: Map, options: RequestOptions): Map {
+(filters: Map, opts: Map, options: Map): Map {
   ::api/list-page("/events", filters, opts, options)
 }
 
@@ -39,8 +38,8 @@ meta {
 }
 fn
 (event-id: Str): Map {
-  get-event(event-id, RequestOptions({}))
+  get-event(event-id, {})
 },
-(event-id: Str, options: RequestOptions): Map {
+(event-id: Str, options: Map): Map {
   ::api/send("GET", `/events/${seg(event-id)}`, {}, null, options)
 }

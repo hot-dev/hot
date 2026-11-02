@@ -16,8 +16,8 @@ hot.project.my-app.deps {
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `cipherowl.client.id` | yes | API client id from https://app.cipherowl.ai |
-| `cipherowl.client.secret` | yes | API client secret |
+| `cipherowl.client.id` | yes, unless passed in `opts` | API client id from https://app.cipherowl.ai |
+| `cipherowl.client.secret` | yes, unless passed in `opts` | API client secret |
 | `cipherowl.base.url` | no | Overrides `https://svc.cipherowl.ai` (also used for `/oauth/token`). Not secret |
 
 **Auth.** OAuth2 client credentials.
@@ -25,9 +25,12 @@ hot.project.my-app.deps {
 - **Caching:** tokens last 24 hours and there is no refresh token. A token is cached for the run with `::hot::ctx/set-secret`, so it is masked in run logs. The cache key is a SHA-256 of the credential identity, never the credential itself. The token is re-minted 60 seconds before it expires.
 - **401s:** a 401 evicts the token, mints a new one and retries the request once.
 
-**Per-call credentials.** Every function that calls the API has a trailing `opts` arity.
-- **Credentials:** pass `{client-id, client-secret}` to act for another tenant, or `{access-token}` with a token you minted yourself. Context credentials are then ignored for that call.
-- **Settings:** `opts` can also carry `base-url`.
+## Per-call credentials
+
+Every function that calls the API has a trailing `opts` arity.
+- **Credentials:** pass `{client-id, client-secret}` to act for another tenant, or `{access-token}` with a token you minted yourself. Context credentials are then ignored for that call. A credential that is present but blank or null is an error naming the key, never a fallback to context.
+- **Per-call URL:** `opts` can also carry `base-url`, which needs a credential in the same `opts`. Context credentials are never sent to a per-call URL.
+- **Masking:** per-call credentials and minted tokens are masked in call records.
 - **Resolver:** `::cipherowl::api/resolve(opts)` is the one resolver: opts first, then context, then defaults. Per-call credentials are never written to context.
 
 ```hot
@@ -222,7 +225,7 @@ The integration suite (`hot test -p pkg-integration-cipherowl`) only reads:
 
 Addresses, risk verdicts, exposure paths and reports are wallet-risk data. They can identify a customer's funds and their counterparties.
 - **Error messages:** this package never puts an address, a reference, a risk result or a credential in an error message. CipherOwl's own error text is kept in `HttpError.detail`.
-- **Run traces:** Hot records function arguments and results in the run trace. Client credentials and minted tokens are context secrets and are masked there. Addresses and results are not masked, so restrict access to the run logs of flows that screen.
+- **Run traces:** Hot records function arguments and results in the run trace. Client credentials and minted tokens are masked there, whether they came from context or `opts`. Addresses and results are not masked, so restrict access to the run logs of flows that screen.
 - **Evidence:** `decide` leaves exposure paths and counterparty addresses out of its result. Store reports and detail with the case file, not in logs.
 - **Reference:** `reference` is your own label and is stamped on CipherOwl's screening logs. Don't put customer PII in it.
 

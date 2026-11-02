@@ -16,21 +16,31 @@ hot.project.my-app.deps {
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `increase.api.key` | yes | An API key from the Increase dashboard. Sandbox and production keys differ |
+| `increase.api.key` | yes, unless every call passes `api-key` | An API key from the Increase dashboard. Sandbox and production keys differ |
 | `increase.environment` | no | `"sandbox"` (default, `https://sandbox.increase.com`) or `"production"` (`https://api.increase.com`). Any other value is an error, so a typo can't send requests anywhere |
 | `increase.webhook.secret` | for webhooks | The Event Subscription's `shared_secret` |
 | `increase.transfers.require-approval` | no | `true` sends `require_approval: true` on every transfer that doesn't set it, so each one waits for a person |
 
 Requests use `Authorization: Bearer <key>`. Every function returns the decoded JSON body.
 
-Every function that calls the API takes an optional trailing `opts` Map: `api-key` and `environment` override the context for that call (useful for many tenants in one run, or parallel flows), and `idempotency-key` is sent as `Idempotency-Key`. `::increase::api/resolve(opts)` applies opts first, then context, then defaults, and never writes per-call keys into context.
+The sandbox is self-serve: sign up in the dashboard, or create an empty sandbox with an unauthenticated `POST https://sandbox.increase.com/groups`, which returns a sandbox API key. No money moves in the sandbox. Production needs an agreement with Increase.
+
+## Per-call credentials
+
+Every function that calls the API takes an optional trailing `opts` Map, so one run can act for many tenants and parallel flows don't share keys. Nothing from `opts` is written to ctx, and per-call credentials are masked in call records.
+
+| Key | Effect |
+|---|---|
+| `api-key` | The API key for this call, instead of `increase.api.key` |
+| `environment` | `"sandbox"` or `"production"` for this call. If it differs from `increase.environment`, it needs an `api-key` in the same `opts`: a context key never goes to another environment's host |
+| `idempotency-key` | Sent as `Idempotency-Key` |
 
 ```hot
 // Tenant B's sandbox, without touching context
 page ::increase::accounts/list-accounts({limit: 10}, {api-key: "tenant_b_sandbox_key", environment: "sandbox"})
 ```
 
-The sandbox is self-serve: sign up in the dashboard, or create an empty sandbox with an unauthenticated `POST https://sandbox.increase.com/groups`, which returns a sandbox API key. No money moves in the sandbox. Production needs an agreement with Increase.
+An `api-key` or `environment` that is present but blank or null is an error naming the key, never a fallback to context. There is no per-call URL: requests only go to Increase's two hosts. `::increase::api/resolve(opts)` is the one place this is decided.
 
 ## Moving money safely
 

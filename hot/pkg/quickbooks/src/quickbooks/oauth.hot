@@ -124,12 +124,28 @@ meta {
     doc: """An Int from an Int or digit-only Str; null otherwise. Guards `Int()` so bad input never halts a run."""
 }
 fn (value: Any): Int? {
-  // WORKAROUND(hot-bug-6): match digits before Int() so a bad value returns null instead of halting.
   cond {
     is-int(value) => { value }
     and(is-str(value), ::hot::regex/is-match(trim(Str(value)), "^[0-9]{1,15}$")) => { Int(trim(value)) }
     => { null }
   }
+}
+
+blank-option
+meta {
+    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an Err, never a fallback to context: a tenant whose credential is missing must not run on the project's. Exposed for testing."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-blank(get(opts, name))) })
+}
+
+mark-tokens
+meta {
+    doc: """Mask the tokens in a token-endpoint response and return it unchanged. Only the tokens: marking the whole body would also hide values like `token_type` and `scope`. Exposed for testing."""
+}
+fn (body: Map): Map {
+  ::ctx/mark-secret([get(body, "access_token"), get(body, "refresh_token"), get(body, "id_token")])
+  body
 }
 
 now-ms fn (): Int {
@@ -184,12 +200,18 @@ meta {
         "quickbooks.client.id": {required: false, secret: false},
         "quickbooks.client.secret": {required: false}
     },
-    doc: """The app's `{client-id, client-secret}` from `opts`, else context. Returns a `TokenError` naming what is missing."""
+    doc: """The app's `{client-id, client-secret}` from `opts`, else context, with a per-call secret marked so it is masked in call records. A `TokenError` names what is missing; a key in `opts` that is blank or null is one too, never a fallback to context."""
 }
 fn (opts: Map): Map {
+  ::ctx/mark-secret(get(opts, "client-secret"))
+  blank blank-option(opts, ["client-id", "client-secret"])
   id or(get(opts, "client-id"), ::ctx/get("quickbooks.client.id"))
   secret or(get(opts, "client-secret"), ::ctx/get("quickbooks.client.secret"))
   cond {
+    is-some(blank) => {
+      err(token-error(`quickbooks: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use context.`))
+    }
+
     or(is-blank(id), is-blank(secret)) => {
       err(token-error("quickbooks: the OAuth client id and secret are not set. Set quickbooks.client.id and quickbooks.client.secret in Context Variables, or pass client-id and client-secret in opts."))
     }
@@ -358,13 +380,13 @@ fn (body: Map, sent-refresh-token: Str?, now: Int): TokenSet {
 
 send-token-request
 meta {
-    doc: """Send a token request; the decoded body on 2xx, else a `TokenError` prefixed with `prefix`."""
+    doc: """Send a token request; the decoded body on 2xx with its tokens marked so they are masked in call records, else a `TokenError` prefixed with `prefix`."""
 }
 fn (req: HttpRequest, prefix: Str): Map {
   response http-request(req)
   cond {
     is-err(response) => { err(token-error(prefix, err-message(response))) }
-    and(::hot::http/is-ok-response(response), is-map(response.body), is-some(get(response.body, "access_token"))) => { response.body }
+    and(::hot::http/is-ok-response(response), is-map(response.body), is-some(get(response.body, "access_token"))) => { mark-tokens(response.body) }
     => { err(token-error(prefix, {status: response.status, body: response.body, headers: or(response.headers, {})})) }
   }
 }
@@ -382,6 +404,7 @@ fn
   exchange-code(code, redirect-uri, {})
 },
 (code: Str, redirect-uri: Str, opts: Map): TokenSet {
+  ::ctx/mark-secret([code, get(opts, "code-verifier")])
   app app-credentials(opts)
   cond {
     is-err(app) => { app }
@@ -415,6 +438,7 @@ fn
   refresh(refresh-token, {})
 },
 (refresh-token: Str, opts: Map): TokenSet {
+  ::ctx/mark-secret(refresh-token)
   app app-credentials(opts)
   cond {
     is-err(app) => { app }
@@ -459,6 +483,7 @@ fn
   revoke(token, {})
 },
 (token: Str, opts: Map): Bool {
+  ::ctx/mark-secret(token)
   app app-credentials(opts)
   cond {
     is-err(app) => { app }

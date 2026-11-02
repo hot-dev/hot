@@ -106,12 +106,28 @@ meta {
     doc: """An Int from an Int or digit-only Str; null otherwise. Guards `Int()` so bad input never halts a run."""
 }
 fn (value: Any): Int? {
-  // WORKAROUND(hot-bug-6): match digits before Int() so a bad value returns null instead of halting.
   cond {
     is-int(value) => { value }
     and(is-str(value), ::hot::regex/is-match(trim(Str(value)), "^-?[0-9]{1,15}$")) => { Int(trim(value)) }
     => { null }
   }
+}
+
+blank-option
+meta {
+    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an Err, never a fallback to context: a tenant whose credential is missing must not run on the project's. Exposed for testing."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-blank(get(opts, name))) })
+}
+
+mark-tokens
+meta {
+    doc: """Mask the tokens in a token-endpoint response and return it unchanged. Only the tokens: marking the whole body would also hide values like `token_type` and `scope`. Exposed for testing."""
+}
+fn (body: Map): Map {
+  ::ctx/mark-secret([get(body, "access_token"), get(body, "refresh_token"), get(body, "id_token")])
+  body
 }
 
 now-ms fn (): Int {
@@ -160,12 +176,18 @@ meta {
         "xero.client.id": {required: false, secret: false},
         "xero.client.secret": {required: false}
     },
-    doc: """The app's `{client-id, client-secret}` from `opts`, else context. The secret may be null for PKCE apps unless `require-secret` is true."""
+    doc: """The app's `{client-id, client-secret}` from `opts`, else context, with a per-call secret marked so it is masked in call records. The secret may be null for PKCE apps unless `require-secret` is true. A key in `opts` that is blank or null is a `TokenError`, never a fallback to context; a PKCE app leaves `client-secret` out."""
 }
 fn (opts: Map, require-secret: Bool): Map {
+  ::ctx/mark-secret(get(opts, "client-secret"))
+  blank blank-option(opts, ["client-id", "client-secret"])
   id or(get(opts, "client-id"), ::ctx/get("xero.client.id"))
   secret or(get(opts, "client-secret"), ::ctx/get("xero.client.secret"))
   cond {
+    is-some(blank) => {
+      err(token-error(`xero: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use context.`))
+    }
+
     is-blank(id) => { err(token-error("xero: the OAuth client id is not set. Set xero.client.id (and xero.client.secret) in Context Variables, or pass client-id in opts.")) }
     and(require-secret, is-blank(secret)) => { err(token-error("xero: the OAuth client secret is not set. Set xero.client.secret or pass client-secret in opts.")) }
     => { {client-id: Str(id), client-secret: if(is-blank(secret), null, Str(secret))} }
@@ -210,7 +232,7 @@ fn
 },
 (client-id: Str, redirect-uri: Str, scopes: Str | Vec, state: Str, opts: Map): Str {
   scope normalize-scopes(scopes)
-  verifier get(opts, "code-verifier")
+  verifier ::ctx/mark-secret(get(opts, "code-verifier"))
   challenge or(get(opts, "code-challenge"), if(is-blank(verifier), null, pkce-challenge(Str(verifier))))
   cond {
     is-blank(state) => { err(token-error("xero: authorize-url needs a non-empty state (your CSRF token)")) }
@@ -318,7 +340,7 @@ send-token-request fn (req: HttpRequest, prefix: Str): Map {
   response http-request(req)
   cond {
     is-err(response) => { err(token-error(prefix, err-message(response))) }
-    and(::hot::http/is-ok-response(response), is-map(response.body), is-some(get(response.body, "access_token"))) => { response.body }
+    and(::hot::http/is-ok-response(response), is-map(response.body), is-some(get(response.body, "access_token"))) => { mark-tokens(response.body) }
     => { err(token-error(prefix, {status: response.status, body: response.body})) }
   }
 }
@@ -332,6 +354,7 @@ fn
   exchange-code(code, redirect-uri, {})
 },
 (code: Str, redirect-uri: Str, opts: Map): TokenSet {
+  ::ctx/mark-secret([code, get(opts, "code-verifier")])
   app app-credentials(opts, false)
   cond {
     is-err(app) => { app }
@@ -360,6 +383,7 @@ fn
   refresh(refresh-token, {})
 },
 (refresh-token: Str, opts: Map): TokenSet {
+  ::ctx/mark-secret(refresh-token)
   app app-credentials(opts, false)
   cond {
     is-err(app) => { app }
@@ -420,6 +444,7 @@ fn
   revoke(refresh-token, {})
 },
 (refresh-token: Str, opts: Map): Bool {
+  ::ctx/mark-secret(refresh-token)
   app app-credentials(opts, true)
   cond {
     is-err(app) => { app }
@@ -454,6 +479,7 @@ fn
   connections(access-token, null)
 },
 (access-token: Str, auth-event-id: Str?): Vec {
+  ::ctx/mark-secret(access-token)
   url if(is-blank(auth-event-id), ::xero/CONNECTIONS_URL, `${::xero/CONNECTIONS_URL}?authEventId=${::uri/encode(Str(auth-event-id))}`)
   response http-request(HttpRequest({
     method: "GET",
@@ -472,6 +498,7 @@ meta {
     doc: """DELETE /connections/{id} - disconnect one organisation (the connection `id`, not the tenant id). Returns true, or a `TokenError`."""
 }
 fn (access-token: Str, connection-id: Str): Bool {
+  ::ctx/mark-secret(access-token)
   response http-request(HttpRequest({
     method: "DELETE",
     url: `${::xero/CONNECTIONS_URL}/${::uri/encode(connection-id)}`,

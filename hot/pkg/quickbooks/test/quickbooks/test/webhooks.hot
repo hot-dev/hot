@@ -44,6 +44,18 @@ meta ["test"] fn () {
     assert(::wh/verify-request(request, VERIFIER), "body-bytes wins over body-raw")
 }
 
+// Computed with Python over the UTF-8 bytes, and over bytes that aren't UTF-8.
+MULTIBYTE_BODY """{"note":"Café €5 日本語"}"""
+MULTIBYTE_SIG "vxUgefS7Ol6tuAhtqS2+4gikLAxVlgkZrbljYrUDZN4="
+BINARY_SIG "SRyXqQFkKs3L9aVxe4H1g2ienVT7sE1d9ktysK4XIoM="
+
+test-verify-covers-multibyte-and-binary-bodies
+meta ["test"] fn () {
+    assert(::wh/verify-request(req(MULTIBYTE_BODY, MULTIBYTE_SIG), VERIFIER), "a multibyte Str body is signed over its UTF-8 bytes")
+    assert(::wh/verify-request({...req("lossy", MULTIBYTE_SIG), body-bytes: Bytes(MULTIBYTE_BODY)}, VERIFIER), "multibyte body-bytes")
+    assert(::wh/verify-request({...req("lossy", BINARY_SIG), body-bytes: Bytes([123, 255, 254, 0, 125])}, VERIFIER), "a body that isn't UTF-8 verifies")
+}
+
 test-parse-legacy
 meta ["test"] fn () {
     events ::wh/parse-events(LEGACY_BODY)

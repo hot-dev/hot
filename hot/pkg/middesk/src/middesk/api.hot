@@ -1,7 +1,7 @@
 ::middesk::api ns
 meta {
     ctx: {
-        "middesk.api.key": {required: true},
+        "middesk.api.key": {required: false},
         "middesk.env": {required: false, secret: false}
     },
     doc: """
@@ -15,6 +15,13 @@ meta {
     20 requests per second per key (and 5 per 15 seconds for
     `PATCH /businesses/{id}`); a 429 comes back as `err(HttpError)`. Check
     `is-retryable` and let a handler or schedule `retry` policy back off.
+
+    **Per-call credentials.** Every API-calling function takes an optional
+    trailing options Map, resolved by `resolve`: options first, then the
+    context variables, then the defaults. Nothing from options is written
+    to ctx, so one run can serve many Middesk accounts, and per-call keys
+    are masked in call records. An `api-key` present but blank or null is
+    an error, never a fallback to context.
     """
 }
 
@@ -122,7 +129,6 @@ fn (value: Any): Int? {
   cond {
     is-int(value) => { value }
     not(is-str(value)) => { null }
-    // WORKAROUND(hot-bug-6): Int("abc") halts the run; match the digits first.
     ::re/is-match(trim(value), "^-?[0-9]{1,15}$") => { Int(trim(value)) }
     => { null }
   }
@@ -191,16 +197,15 @@ fn (status: Int, body: Any): Str {
   `middesk: HTTP ${status}: ${redact-text(text)}`
 }
 
-http-error
+HttpResponse -> HttpError
 meta {
-    doc: """Build the `HttpError` for a non-2xx response: decode and redact the body, lift the first error's `parameter`, read `Retry-After`. Exposed for testing; every request uses it."""
+    doc: """Build the `HttpError` for a non-2xx response: decode and redact the body, lift the first error's `parameter`, read `Retry-After`. Every request uses it."""
 }
-fn (response: Map): HttpError {
-  headers or(get(response, "headers"), {})
-  body redact(decode-body(get(response, "body")))
+fn (response: HttpResponse): HttpError {
+  headers or(response.headers, {})
+  body redact(decode-body(response.body))
   entries error-entries(body)
   raw-errors if(is-map(body), get(body, "errors"), null)
-  // WORKAROUND(hot-bug-1): build HttpError in an explicit function, never via T(response) or an arrow.
   HttpError({
     status: response.status,
     headers: headers,
@@ -210,13 +215,6 @@ fn (response: Map): HttpError {
     parameter: if(is-empty(entries), null, first(entries).parameter),
     retry-after: parse-int(get(headers, "retry-after"))
   })
-}
-
-// WORKAROUND(hot-bug-1): HttpError(response) ignores this arrow and copies
-// fields, so the package always calls `http-error` directly. The arrow is
-// kept for callers that coerce a response themselves.
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
-  http-error(response)
 }
 
 plain-error fn (error: Result): Any {
@@ -309,7 +307,8 @@ meta {
     Per-request options, the optional last argument of every function
     that calls the API. A plain Map with the same keys works too.
 
-    - `api-key`: overrides `middesk.api.key` for this call
+    - `api-key`: overrides `middesk.api.key` for this call. Masked in call
+      records. Blank or null is an error, never a fallback to context.
     - `env`: overrides `middesk.env` for this call
 
     Middesk has no idempotency keys. To make a create safe to retry, set
@@ -323,7 +322,7 @@ type {
 }
 
 non-blank fn (value: Any): Str? {
-  if(and(is-str(value), not(is-empty(trim(or(value, ""))))), trim(value), null)
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 resolve-from
@@ -331,16 +330,20 @@ meta {
     doc: """
     The one resolver, pure: `{api-key, env}` for a call from `options`
     first (`api-key`, `env`), then `ctx-values` (a Map of context
-    variables), then defaults. An `api-key` in `options` means the
-    context key is never read for that call. An Err when no key is set or
-    the environment is invalid (see `resolve-env`). Nothing is written to
-    ctx. Exposed for testing; `resolve` feeds it the context.
+    variables), then defaults. An Err when no key is set, when `api-key`
+    is in `options` but blank or null (that never falls back to context),
+    or when the environment is invalid (see `resolve-env`). Nothing is
+    written to ctx. Exposed for testing; `resolve` feeds it the context.
     """
 }
 fn (options: Map, ctx-values: Map): Map {
   key or(non-blank(get(options, "api-key")), non-blank(get(ctx-values, "middesk.api.key")))
   configured or(non-blank(get(options, "env")), non-blank(get(ctx-values, "middesk.env")))
   cond {
+    and(in("api-key", keys(options)), is-null(non-blank(get(options, "api-key")))) => {
+      err("middesk: api-key is in the call's options but is blank or null. Pass a value, or leave api-key out to use middesk.api.key.")
+    }
+
     is-null(key) => { err("middesk: middesk.api.key is not set. Add your Middesk API key in Context Variables, or pass {api-key: ...} in the call's options.") }
     => {
       env resolve-env(key, configured)
@@ -352,18 +355,21 @@ fn (options: Map, ctx-values: Map): Map {
 resolve
 meta {
     ctx: {
-        "middesk.api.key": {required: true},
+        "middesk.api.key": {required: false},
         "middesk.env": {required: false, secret: false}
     },
     doc: """
-    Credentials for one call: `options` (a `RequestOptions` or a plain Map
-    with `api-key`, `env`) over the context variables (see
-    `resolve-from`). Per-call keys stay in the call; nothing is written to
-    ctx, so parallel flows and tenants never share them.
+    Credentials for one call: `options` (a Map, or a `RequestOptions`, with
+    `api-key`, `env`) over the context variables (see `resolve-from`). An
+    `api-key` from `options` is masked in call records and returned
+    unchanged; nothing is written to ctx, so parallel flows and tenants
+    never share credentials.
     """
 }
 fn (options: Any): Map {
   opts if(is-null(options), {}, untype(options))
+  key non-blank(get(opts, "api-key"))
+  if(is-some(key), ::ctx/mark-secret(key))
   resolve-from(opts, {"middesk.api.key": ::ctx/get("middesk.api.key"), "middesk.env": ::ctx/get("middesk.env")})
 }
 
@@ -447,7 +453,7 @@ meta {
     or the transport error.
     """
 }
-fn (method: Str, path: Str, query: Map, body: Any, options: RequestOptions): Any {
+fn (method: Str, path: Str, query: Map, body: Any, options: Map): Any {
   creds resolve(options)
   cond {
     is-err(creds) => { creds }
@@ -457,7 +463,7 @@ fn (method: Str, path: Str, query: Map, body: Any, options: RequestOptions): Any
       cond {
         is-err(response) => { response }
         is-ok-response(response) => { response-body(response.body) }
-        => { err(http-error(response)) }
+        => { err(HttpError(response)) }
       }
     }
   }
@@ -481,12 +487,12 @@ meta {
 }
 fn
 (method: Str, path: Str): Any {
-  call(method, path, {}, RequestOptions({}))
+  call(method, path, {}, {})
 },
 (method: Str, path: Str, params: Map): Any {
-  call(method, path, params, RequestOptions({}))
+  call(method, path, params, {})
 },
-(method: Str, path: Str, params: Map, options: RequestOptions): Any {
+(method: Str, path: Str, params: Map, options: Map): Any {
   m uppercase(method)
   in-query or(eq(m, "GET"), eq(m, "DELETE"))
   send(m, path, if(in-query, params, {}), if(in-query, null, params), options)
@@ -496,7 +502,7 @@ get-bytes
 meta {
     doc: """GET a binary endpoint (e.g. `/businesses/{id}/pdf`) and return the body as `Bytes`, or an Err carrying `HttpError`. The bytes are never put into errors or logs."""
 }
-fn (path: Str, options: RequestOptions): Bytes {
+fn (path: Str, options: Map): Bytes {
   creds resolve(options)
   cond {
     is-err(creds) => { creds }
@@ -506,7 +512,7 @@ fn (path: Str, options: RequestOptions): Bytes {
       cond {
         is-err(response) => { response }
         is-ok-response(response) => { or(response.body-bytes, Bytes("")) }
-        => { err(http-error(response)) }
+        => { err(HttpError(response)) }
       }
     }
   }
@@ -541,9 +547,9 @@ meta {
 }
 fn
 (path: Str, params: Map): Any {
-  list-page(path, params, RequestOptions({}))
+  list-page(path, params, {})
 },
-(path: Str, params: Map, options: RequestOptions): Any {
+(path: Str, params: Map, options: Map): Any {
   send("GET", path, params, null, options)
 }
 
@@ -585,9 +591,9 @@ meta {
 }
 fn
 (path: Str, params: Map, limit: Int): Vec {
-  collect(path, params, limit, RequestOptions({}))
+  collect(path, params, limit, {})
 },
-(path: Str, params: Map, limit: Int, options: RequestOptions): Vec {
+(path: Str, params: Map, limit: Int, options: Map): Vec {
   cond {
     lte(limit, 0) => { [] }
     => {

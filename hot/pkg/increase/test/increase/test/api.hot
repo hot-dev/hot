@@ -103,6 +103,58 @@ meta ["test"] fn () {
 // Idempotency and required fields
 // ============================================================================
 
+test-resolve-blank-option-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"increase.api.key": "ctx_key"})
+    empty ::api/resolve({api-key: ""})
+    spaces ::api/resolve({api-key: "   "})
+    nothing ::api/resolve({api-key: null})
+    env ::api/resolve({environment: ""})
+    env-null ::api/resolve({api-key: "k", environment: null})
+    ::hot::ctx/set({"increase.api.key": ""})
+    assert(is-err(empty), "a blank key never falls back to context")
+    assert(contains(err-message(empty), "api-key"), "and the error names the key")
+    assert(is-err(spaces))
+    assert(is-err(nothing), "a null key is blank too")
+    assert(contains(err-message(nothing), "api-key"))
+    assert(is-err(env), "a blank environment never falls back to context")
+    assert(contains(err-message(env), "environment"))
+    assert(is-err(env-null))
+}
+
+test-resolve-environment-needs-a-per-call-key
+meta ["test"] fn () {
+    ::hot::ctx/set({"increase.api.key": "ctx_key", "increase.environment": "production"})
+    to-sandbox ::api/resolve({environment: "sandbox"})
+    same ::api/resolve({environment: "Production"})
+    with-key ::api/resolve({api-key: "tenant_key", environment: "sandbox"})
+    simulated ::increase::simulations/settle-ach-transfer("ach_transfer_1", {}, {environment: "sandbox"})
+    ::hot::ctx/set({"increase.environment": ""})
+    to-production ::api/resolve({environment: "production"})
+    ::hot::ctx/set({"increase.environment": "staging"})
+    bad-context ::api/resolve({environment: "sandbox"})
+    bad-context-with-key ::api/resolve({api-key: "tenant_key", environment: "sandbox"})
+    ::hot::ctx/set({"increase.api.key": "", "increase.environment": ""})
+
+    assert(is-err(to-sandbox), "a production key never goes to the sandbox host")
+    assert(contains(err-message(to-sandbox), "environment"), "the error names both keys")
+    assert(contains(err-message(to-sandbox), "api-key"))
+    assert-eq("https://api.increase.com", same.base-url, "the configured environment needs no key")
+    assert-eq("https://sandbox.increase.com", with-key.base-url, "a per-call key may choose its environment")
+    assert-eq("tenant_key", with-key.api-key)
+    assert(is-err(simulated), "a simulation can't borrow a production key")
+    assert(is-err(to-production), "a key for the default sandbox never goes to production")
+    assert(is-err(bad-context), "an invalid increase.environment can't be compared, so it errs")
+    assert-eq("sandbox", bad-context-with-key.environment, "a per-call key doesn't depend on context")
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    settings ::api/resolve({api-key: "tenant_key_value", environment: "sandbox"})
+    assert-eq("tenant_key_value", settings.api-key, "marking a credential doesn't change it")
+    assert-eq("Bearer tenant_key_value", ::api/build-request("GET", "https://sandbox.increase.com/accounts", {}, {}, settings.api-key).headers.Authorization)
+}
+
 test-option-headers
 meta ["test"] fn () {
     assert-eq({Idempotency-Key: "k1"}, ::api/option-headers({idempotency-key: "k1"}))
@@ -307,7 +359,7 @@ meta ["test"] fn () {
             detail: null
         }
     })
-    e ::api/http-error(response)
+    e ::api/HttpError(response)
     assert-eq(409, e.status)
     assert-eq("invalid_operation_error", e.type)
     assert-eq("increase: HTTP 409 invalid_operation_error: The action you specified can't be performed on the object in its current state.", e.message)
@@ -328,7 +380,7 @@ meta ["test"] fn () {
             errors: [{field: "routing_number", routing_number: "101050001", message: "invalid"}]
         }
     })
-    e ::api/http-error(response)
+    e ::api/HttpError(response)
     assert-eq("invalid_parameters_error", e.type)
     assert-eq("Routing number ****0001 is not valid for account ****9012.", e.detail)
     assert-eq("[redacted]", e.errors[0].routing_number)
@@ -339,21 +391,21 @@ meta ["test"] fn () {
 
 test-http-error-idempotency-conflict-and-rate-limit
 meta ["test"] fn () {
-    conflict ::api/http-error(HttpResponse({
+    conflict ::api/HttpError(HttpResponse({
         status: 409,
         headers: {},
         body: {status: 409, type: "idempotency_key_already_used_error", title: "The idempotency key submitted has already been used.", detail: null, resource_id: "ach_transfer_uoxatyh3lt5evrsdvo7q"}
     }))
     assert-eq("ach_transfer_uoxatyh3lt5evrsdvo7q", conflict.resource_id)
 
-    limited ::api/http-error(HttpResponse({
+    limited ::api/HttpError(HttpResponse({
         status: 429,
         headers: {retry-after: "7"},
         body: {status: 429, type: "rate_limited_error", title: "You've hit the rate limit.", detail: null}
     }))
     assert-eq(7, limited.retry_after, "Retry-After header when the body has none")
 
-    from-body ::api/http-error(HttpResponse({
+    from-body ::api/HttpError(HttpResponse({
         status: 429,
         headers: {retry-after: "7"},
         body: {status: 429, type: "rate_limited_error", title: "Slow down.", detail: null, retry_after: 3}
@@ -363,7 +415,7 @@ meta ["test"] fn () {
 
 test-http-error-unauthorized-and-non-json
 meta ["test"] fn () {
-    unauthorized ::api/http-error(HttpResponse({
+    unauthorized ::api/HttpError(HttpResponse({
         status: 401,
         headers: {},
         body: "{\"status\":401,\"type\":\"invalid_api_key_error\",\"title\":\"Invalid API key.\",\"detail\":\"Invalid API key: No Authorization header provided.\",\"reason\":\"no_header\"}"
@@ -372,7 +424,7 @@ meta ["test"] fn () {
     assert-eq("no_header", unauthorized.reason)
     assert-eq("increase: HTTP 401 invalid_api_key_error: Invalid API key. Invalid API key: No Authorization header provided.", unauthorized.message)
 
-    gateway ::api/http-error(HttpResponse({status: 502, headers: {}, body: "Bad Gateway"}))
+    gateway ::api/HttpError(HttpResponse({status: 502, headers: {}, body: "Bad Gateway"}))
     assert-eq("increase: HTTP 502: Bad Gateway", gateway.message)
     assert(is-null(gateway.type))
     assert(is-null(gateway.retry_after))

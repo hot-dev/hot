@@ -132,6 +132,30 @@ meta ["test"] fn () {
     assert-eq("id", app.client-id)
 }
 
+test-app-credentials-blank-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"quickbooks.client.id": "ctx-id", "quickbooks.client.secret": "ctx-sec"})
+    from-ctx ::oauth/app-credentials({})
+    secret ::oauth/app-credentials({client-secret: ""})
+    secret-null ::oauth/app-credentials({client-secret: null})
+    id ::oauth/app-credentials({client-id: "  "})
+    refreshed ::oauth/refresh("RT", {client-secret: ""})
+    ::hot::ctx/set({"quickbooks.client.id": "", "quickbooks.client.secret": ""})
+    assert-eq("ctx-sec", from-ctx.client-secret)
+    assert(is-err(secret), "a blank secret never falls back to context")
+    assert(contains(err-message(secret), "client-secret"), err-message(secret))
+    assert(is-err(secret-null))
+    assert(contains(err-message(id), "client-id"), err-message(id))
+    assert(is-err(refreshed), "token calls check it before sending")
+}
+
+test-mark-tokens-returns-the-body-unchanged
+meta ["test"] fn () {
+    body {access_token: "AT-VALUE", refresh_token: "RT-VALUE", token_type: "bearer", expires_in: 3600}
+    assert-eq(body, ::oauth/mark-tokens(body))
+    assert-eq({access_token: "AT-VALUE"}, ::oauth/mark-tokens({access_token: "AT-VALUE"}), "absent tokens are fine")
+}
+
 test-int-or-null
 meta ["test"] fn () {
     assert-eq(12, ::oauth/int-or-null("12"))

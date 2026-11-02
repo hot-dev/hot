@@ -113,6 +113,18 @@ meta ["test"] fn () {
     assert(::wh/verify-request(request, KEY), "body-bytes wins over body-raw")
 }
 
+// Computed with Python over the UTF-8 bytes, and over bytes that aren't UTF-8.
+MULTIBYTE_BODY """{"note":"Café €5 日本語"}"""
+MULTIBYTE_SIG "2qDSHHULxHyBWIQEPlASafEt5Cx+cGV0DIubsyJAqBU="
+BINARY_SIG "Azh36z7/YR2/ScZwz2W/J7BEWX4gy6xwu50EhJtjUKI="
+
+test-verify-covers-multibyte-and-binary-bodies
+meta ["test"] fn () {
+    assert(::wh/verify-request(req(MULTIBYTE_BODY, MULTIBYTE_SIG), KEY), "a multibyte Str body is signed over its UTF-8 bytes")
+    assert(::wh/verify-request({...req("lossy", MULTIBYTE_SIG), body-bytes: Bytes(MULTIBYTE_BODY)}, KEY), "multibyte body-bytes")
+    assert(::wh/verify-request({...req("lossy", BINARY_SIG), body-bytes: Bytes([123, 255, 254, 0, 125])}, KEY), "a body that isn't UTF-8 verifies")
+}
+
 test-intent-to-receive-responses
 meta ["test"] fn () {
     good ::wh/respond(req(INTENT, INTENT_SIG), KEY)

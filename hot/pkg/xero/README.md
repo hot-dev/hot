@@ -29,7 +29,16 @@ Create an app at [developer.xero.com](https://developer.xero.com/app/manage). Te
 | `xero.token.store-key` | no | Keeper entry key (default `default`) |
 | `xero.webhook.key` | yes | The webhook signing key |
 
-Every function that calls the API takes a trailing `opts` Map that overrides context for that call: `access-token`, `refresh-token`, `client-id`, `client-secret`, `custom-connection`, `scopes`, `token-store`, `token-store-key`, `tenant-id`, `if-modified-since`, `idempotency-key` and `retry`. When `opts` carries a credential, context credentials are ignored, so one run can act for many users and organisations; per-call values are never written to context. `::xero::api/resolve(opts)` shows what a call would use.
+### Per-call credentials
+
+Every function that calls the API takes a trailing `opts` Map that overrides context for that call: `access-token`, `refresh-token`, `client-id`, `client-secret`, `custom-connection`, `scopes`, `token-store`, `token-store-key`, `tenant-id`, `if-modified-since`, `idempotency-key` and `retry`. When `opts` carries a credential, context credentials are ignored, so one run can act for many users and organisations. Per-call values are never written to context, and per-call credentials are masked in call records.
+
+```hot
+// One user's organisation, with that user's own refresh token
+invoices ::xero::accounting/list-page("Invoices", {page: 1}, {tenant-id: "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f", refresh-token: user-refresh-token})
+```
+
+A credential or `tenant-id` that is present but blank or null is an error naming the key, never a fallback to context. There is no per-call URL: requests only go to Xero's own hosts. `::xero::api/resolve(opts)` shows what a call would use.
 
 ### Scopes
 
@@ -116,7 +125,7 @@ List params use Xero's names: `where`, `order`, `page`, `pageSize` (up to 1000 w
 
 **`::xero::auth`**: `access-token`, `current-refresh-token`, `keeper-seed`, `keeper-entry`, `resolve-credentials`.
 
-**`::xero::api`**: `resolve`, `request`, `json`, `bytes`, `connections`, `delete-connection`, `http-error`, `is-retryable`, `rate-limits`, `last-rate-limits`, `parse-date`, `next-page`, `query-string`.
+**`::xero::api`**: `resolve`, `request`, `json`, `bytes`, `connections`, `delete-connection`, `HttpError`, `is-retryable`, `rate-limits`, `last-rate-limits`, `parse-date`, `next-page`, `query-string`.
 
 ## Webhooks
 

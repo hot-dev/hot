@@ -10,80 +10,32 @@ meta {
     This is not a general XML parser. It relies on the list formats:
     record elements do not nest inside themselves, field elements hold
     plain text, and there are no CDATA sections or comments inside
-    records. It is used instead of `::hot::xml` for two reasons:
-    strings are cheap to pass around while every call that takes a
-    parsed tree copies it (a 6,000-record file took minutes), and
-    `::hot::xml` currently drops entity-decoded text such as `&amp;`.
+    records.
+
+    **Why not `::hot::xml` for the whole file.** Speed. `from-xml` parses
+    22 MB in under a second, but every call that takes part of a parsed
+    tree copies it, and a record's fields take dozens of such calls.
+    Strings are cheap to pass. Measured on the real UK list (22 MB, 6,418
+    records) with a debug build: 55 s here, 91 to 109 s walking the tree,
+    with identical entries. Whole-tree parsing is worth revisiting if passing
+    a tree to a function stops copying it.
     """
 }
 
 ::re ::hot::regex
 ::str ::hot::str
 
-// WORKAROUND(hot-bug-5): list XML is read with regexes and decoded by `decode`, not ::hot::xml, which drops entity-decoded text such as `&amp;`.
-
 // ---------------------------------------------------------------------------
 // Character references
 // ---------------------------------------------------------------------------
 
-utf8-bytes fn (cp: Int): Vec<Int> {
-  cond {
-    lt(cp, 128) => { [cp] }
-    lt(cp, 2048) => { [add(192, floor(div(cp, 64))), add(128, mod(cp, 64))] }
-    lt(cp, 65536) => {
-      [add(224, floor(div(cp, 4096))), add(128, mod(floor(div(cp, 64)), 64)), add(128, mod(cp, 64))]
-    }
-    => {
-      [
-        add(240, floor(div(cp, 262144))),
-        add(128, mod(floor(div(cp, 4096)), 64)),
-        add(128, mod(floor(div(cp, 64)), 64)),
-        add(128, mod(cp, 64))
-      ]
-    }
-  }
-}
-
-HEX_DIGITS {
-  "0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
-  a: 10, b: 11, c: 12, d: 13, e: 14, f: 15
-}
-
-hex-value fn (hex: Str): Int {
-  reduce(::sanctions::text/chars(lowercase(hex)), (acc, c) { add(mul(acc, 16), get(HEX_DIGITS, c, 0)) }, 0)
-}
-
-char-for-reference
-meta {
-    doc: """
-    The character a numeric reference stands for: `"&#233;"` and
-    `"&#xE9;"` are `"é"`. Control characters and out-of-range values
-    become a space.
-    """
-}
-fn (ref: Str): Str {
-  // WORKAROUND(hot-bug-6): Int() only sees strings a regex has already proven numeric.
-  m ::re/capture(ref, "^&#(x?)([0-9A-Fa-f]{1,7});$")
-  cp cond {
-    is-null(m) => { 32 }
-    eq(lowercase(m.groups[0]), "x") => { hex-value(m.groups[1]) }
-    ::re/is-match(m.groups[1], "^[0-9]{1,7}$") => { Int(m.groups[1]) }
-    => { 32 }
-  }
-
-  cond {
-    or(lt(cp, 32), gt(cp, 1114111)) => { " " }
-    and(gte(cp, 55296), lte(cp, 57343)) => { " " }
-    => { Str(Bytes(utf8-bytes(cp))) }
-  }
-}
-
 decode
 meta {
     doc: """
-    Decode XML character references in text: the five named entities
-    and numeric references (`&#233;`, `&#xA;`). `&amp;` is decoded last,
-    so `&amp;lt;` stays the literal text `&lt;`.
+    Decode XML character references in text with `::hot::xml`: the five
+    named entities and numeric references (`&#233;`, `&#xA;`). `&amp;lt;`
+    stays the literal text `&lt;`. Text the parser refuses comes back as
+    it was.
 
     **Example**
 
@@ -96,14 +48,8 @@ fn (s: Str): Str {
   cond {
     not(::str/contains(s, "&")) => { s }
     => {
-      refs distinct(map(::re/find-all(s, "&#[xX]?[0-9A-Fa-f]{1,7};"), (m) { m.match }))
-      numeric reduce(refs, (acc, ref) { ::str/replace(acc, ref, char-for-reference(ref)) }, s)
-      numeric
-        |> ::str/replace("&lt;", "<")
-        |> ::str/replace("&gt;", ">")
-        |> ::str/replace("&quot;", "\"")
-        |> ::str/replace("&apos;", "'")
-        |> ::str/replace("&amp;", "&")
+      parsed from-xml(`<v>${s}</v>`)
+      if(is-err(parsed), s, ::hot::xml/text(parsed))
     }
   }
 }

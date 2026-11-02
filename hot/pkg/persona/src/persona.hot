@@ -65,7 +65,7 @@ meta {
     release as of Nov 2026), sent on every request so responses don't
     depend on the API key's default version. Override per project with
     the `persona.api.version` context variable, or per call with
-    `::persona::api/RequestOptions({persona-version: ...})`.
+    `{persona-version: ...}` in the trailing options.
 
     See https://docs.withpersona.com/versioning.
     """

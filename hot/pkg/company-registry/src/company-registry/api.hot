@@ -23,8 +23,14 @@ meta {
     | `gleif-base-url` | `company-registry.gleif.base-url` | `https://api.gleif.org/api/v1` |
     | `sources` | `company-registry.sources` | `["gleif", "sec", "companies-house"]` minus any without credentials |
 
-    Per-call credentials are never written to context, so parallel
-    flows and tenants in one run don't see each other's keys.
+    **Per-call credentials.** `api-key` and `user-agent` in `opts` are
+    masked in call records and never written to context, so parallel
+    flows and tenants in one run don't see each other's keys. Present but
+    blank or null, either one is an error, never a fallback to context. A
+    per-call `companies-house-base-url` or `document-base-url` needs an
+    `api-key` in the same `opts`: the context key is never sent to a
+    per-call URL. GLEIF takes no credential, so `gleif-base-url` needs
+    none.
     """
 }
 
@@ -67,6 +73,13 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   }
 }
 
+// Keys that hold a credential. Both are context secrets too; the SEC
+// user-agent is contact details.
+CREDENTIAL_KEYS ["api-key", "user-agent"]
+
+// Per-call URLs that receive the Companies House key.
+KEYED_URL_KEYS ["companies-house-base-url", "document-base-url"]
+
 strip-slash fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
@@ -85,8 +98,10 @@ meta {
     doc: """
     Resolve settings for one call: `{user-agent, api-key,
     companies-house-base-url, document-base-url, gleif-base-url,
-    sources}`. Values in `opts` win over context; a credential in
-    `opts` is used for that call only.
+    sources}`. Values in `opts` win over context; a credential in `opts`
+    is used for that call only and comes back unchanged. An Err when a
+    credential is in `opts` but blank or null, or when `opts` has a
+    Companies House URL without `api-key`.
 
     **Example**
 
@@ -96,16 +111,30 @@ meta {
     """
 }
 fn (opts: Map): Map {
+  ::ctx/mark-secret(filter(map(CREDENTIAL_KEYS, (k) { get(opts, k) }), given))
+  blank find-first(CREDENTIAL_KEYS, (k) { and(in(k, keys(opts)), not(given(get(opts, k)))) })
+  keyed-url find-first(KEYED_URL_KEYS, (k) { given(get(opts, k)) })
   ua pick(opts, "user-agent", "company-registry.sec.user-agent", null)
   key pick(opts, "api-key", "company-registry.companies-house.api-key", null)
   configured filter(["gleif", if(given(ua), "sec", null), if(given(key), "companies-house", null)], is-some)
-  {
-    user-agent: ua,
-    api-key: key,
-    companies-house-base-url: strip-slash(pick(opts, "companies-house-base-url", "company-registry.companies-house.base-url", COMPANIES_HOUSE_BASE)),
-    document-base-url: strip-slash(pick(opts, "document-base-url", "company-registry.companies-house.document-base-url", DOCUMENT_BASE)),
-    gleif-base-url: strip-slash(pick(opts, "gleif-base-url", "company-registry.gleif.base-url", GLEIF_BASE)),
-    sources: or(as-list(pick(opts, "sources", "company-registry.sources", null)), configured)
+  cond {
+    is-some(blank) => {
+      err(`company-registry: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use the context variable.`)
+    }
+
+    and(is-some(keyed-url), not(given(get(opts, "api-key")))) => {
+      err(`company-registry: ${keyed-url} is in the call's opts without api-key. Pass api-key with it. The context key is never sent to a per-call URL.`)
+    }
+    => {
+      {
+        user-agent: ua,
+        api-key: key,
+        companies-house-base-url: strip-slash(pick(opts, "companies-house-base-url", "company-registry.companies-house.base-url", COMPANIES_HOUSE_BASE)),
+        document-base-url: strip-slash(pick(opts, "document-base-url", "company-registry.companies-house.document-base-url", DOCUMENT_BASE)),
+        gleif-base-url: strip-slash(pick(opts, "gleif-base-url", "company-registry.gleif.base-url", GLEIF_BASE)),
+        sources: or(as-list(pick(opts, "sources", "company-registry.sources", null)), configured)
+      }
+    }
   }
 }
 
@@ -174,7 +203,6 @@ body-detail fn (body: Any): Str? {
 }
 
 retry-after fn (headers: Map): Int? {
-  // WORKAROUND(hot-bug-6): Int() only sees strings a regex has already proven numeric.
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -188,7 +216,6 @@ meta {
     doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
 }
 fn (source: Str, response: HttpResponse, url: Str): HttpError {
-  // WORKAROUND(hot-bug-1): built field by field; T(response) and a Map-literal HttpError can come out empty.
   headers or(response.headers, {})
   detail body-detail(response.body)
   HttpError({

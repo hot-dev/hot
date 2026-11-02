@@ -48,6 +48,18 @@ meta ["test"] fn () {
     assert(not(::webhooks/verify-request({...request(SIGNATURE, BODY), body-raw: """{"event":"completed"}"""}, KEY)), "a different body")
 }
 
+// Computed with Python over the UTF-8 bytes, and over bytes that aren't UTF-8.
+MULTIBYTE_BODY """{"note":"Café €5 日本語"}"""
+MULTIBYTE_SIGNATURE "faaa6016df24128c15a8e2385f917de43661a9cee825a0f34157f60478d9a3e2"
+BINARY_SIGNATURE "a44af091a97e71bc78fb69b5742f3dbf4b68d7996b5afefb7fe0e68818cffbbe"
+
+test-verify-covers-raw-bytes
+meta ["test"] fn () {
+    assert(::webhooks/verify-request(request(MULTIBYTE_SIGNATURE, MULTIBYTE_BODY), KEY), "a multibyte Str body is signed over its UTF-8 bytes")
+    assert(::webhooks/verify-request({...request(MULTIBYTE_SIGNATURE, "lossy"), body-bytes: Bytes(MULTIBYTE_BODY)}, KEY), "body-bytes wins over body-raw")
+    assert(::webhooks/verify-request({...request(BINARY_SIGNATURE, "lossy"), body-bytes: Bytes([123, 255, 254, 0, 125])}, KEY), "a body that isn't UTF-8 verifies")
+}
+
 test-parse-event
 meta ["test"] fn () {
     e ::webhooks/parse-event(request(SIGNATURE, BODY))

@@ -162,6 +162,21 @@ fn () {
     assert-eq(0.0, ::sim/token-set([], ["x"]))
 }
 
+test-similarity-counts-code-points
+meta ["test"]
+fn () {
+    // Same results as the ASCII pairs with one letter per position swapped for a
+    // multi-byte one, computed independently with Python over code points.
+    assert-eq(::sim/jaro-winkler("martha", "marhta"), ::sim/jaro-winkler("mértha", "mérhta"))
+    assert-eq(0.9611, ::sim/jaro-winkler("日本語テスト", "日本語ステト"))
+    assert-eq(1, ::sim/levenshtein("José", "Jose"))
+    assert-eq(0.75, ::sim/levenshtein-ratio("José", "Jose"))
+    assert-eq(3, ::sim/levenshtein("кіттен", "сіттінг"))
+    assert-eq(0.5714, ::sim/levenshtein-ratio("кіттен", "сіттінг"))
+    assert-eq(["p:日本語テ", "s:日本語テスト"], ::sanctions::text/token-keys("日本語テスト") |> sort(), "five characters, not bytes, earn a prefix key")
+    assert-eq(["s:日本語"], ::sanctions::text/token-keys("日本語"), "nine bytes are still three characters")
+}
+
 test-name-similarity
 meta ["test"]
 fn () {

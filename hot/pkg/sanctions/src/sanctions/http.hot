@@ -45,7 +45,6 @@ meta {
     doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
 }
 fn (response: HttpResponse, url: Str): HttpError {
-  // WORKAROUND(hot-bug-1): built field by field; T(response) and a Map-literal HttpError can come out empty.
   snippet body-snippet(response.body)
   HttpError({
     status: response.status,
@@ -104,16 +103,16 @@ meta {
     doc: """
     HEAD a list file and return `{etag, last-modified, content-length,
     accept-ranges}` (each null when not sent). Refreshes compare these
-    with the cached version instead of sending a conditional GET.
+    with the cached version. A conditional GET would save no request: a
+    changed file over the response cap still needs this HEAD for its size
+    and Range support.
     """
 }
 fn (url: Str): Map {
-  // WORKAROUND(hot-bug-2): a 304 Not Modified has no Location and comes back as an Err, so no If-None-Match GETs.
   response request("HEAD", url, {}, "")
   cond {
     is-err(response) => { response }
     => {
-      // WORKAROUND(hot-bug-6): Int() only sees strings a regex has already proven numeric.
       len header(response, "content-length")
       {
         etag: header(response, "etag"),

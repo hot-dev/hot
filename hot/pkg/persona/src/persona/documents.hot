@@ -13,7 +13,6 @@ meta {
 }
 
 ::api ::persona::api
-RequestOptions ::persona::api/RequestOptions
 
 is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
@@ -39,9 +38,9 @@ meta {
 }
 fn
 (document-id: Str): Map {
-  get-document(document-id, RequestOptions({}))
+  get-document(document-id, {})
 },
-(document-id: Str, options: RequestOptions): Map {
+(document-id: Str, options: Map): Map {
   ::api/send("GET", `/documents/${seg(document-id)}`, {}, null, options)
 }
 

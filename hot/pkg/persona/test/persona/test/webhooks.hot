@@ -52,6 +52,22 @@ meta ["test"] fn () {
     assert(::webhooks/verify-request(req, NEW_SECRET), "fresh, valid signature verifies")
 }
 
+test-signing-secrets-pass-through-unchanged
+meta ["test"] fn () {
+    hook {data: {type: "webhook", attributes: {name: "w", secrets: [{value: "wbhsec_returned_secret"}]}}}
+    assert-eq(hook, ::webhooks/mark-signing-secrets(hook))
+    assert-eq("x", err-value(::webhooks/mark-signing-secrets(err("x"))), "an Err passes through")
+}
+
+test-non-ascii-body-signs-its-utf8-bytes
+meta ["test"] fn () {
+    // hmac.new(b"wbhsec_test_secret_new", b"1700000000." + body.encode(), hashlib.sha256).hexdigest()
+    body """{"name":"José 日本"}"""
+    header `t=1700000000,v1=1e630f2280d3e1234754e87ce85c8c0988148fb8dab84cf961076ccae59cc865`
+    assert(::webhooks/verify-signature(header, body, NEW_SECRET, 0), "Str body")
+    assert(::webhooks/verify-signature(header, Bytes(body), NEW_SECRET, 0), "the same bytes")
+}
+
 test-bytes-body
 meta ["test"] fn () {
     ts now-seconds()

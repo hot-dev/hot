@@ -16,21 +16,31 @@ hot.project.my-app.deps {
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `modern-treasury.organization.id` | yes | Your Organization ID (Developers → API Keys) |
-| `modern-treasury.api.key` | yes | An API key for that organization |
+| `modern-treasury.organization.id` | yes, unless every call passes it | Your Organization ID (Developers → API Keys) |
+| `modern-treasury.api.key` | yes, unless every call passes it | An API key for that organization |
 | `modern-treasury.environment` | no | `"sandbox"` or `"production"`. Sandbox and live organizations share the host `https://app.moderntreasury.com`; this setting only unlocks the sandbox simulation. Unset counts as production, and any other value is an error |
 | `modern-treasury.webhook.key` | for webhooks | The webhook key (Developers → Webhooks) |
 
 Requests use HTTP Basic auth, with the organization id as the user and the API key as the password. Every function returns the decoded JSON body.
 
-Every function that calls the API takes an optional trailing `opts` Map: `organization-id` and `api-key` replace the context credentials for that call (pass both; an `api-key` in opts never pairs with the context organization), `environment` overrides `modern-treasury.environment`, and `idempotency-key` is sent as `Idempotency-Key`. `::modern-treasury::api/resolve(opts)` applies opts first, then context, then defaults, and never writes per-call credentials into context.
+The sandbox is self-serve: sign up free at [app.moderntreasury.com/sign_up](https://app.moderntreasury.com/sign_up), and the new organization starts in sandbox. No money moves there. Going live with a bank needs a contract with Modern Treasury.
+
+## Per-call credentials
+
+Every function that calls the API takes an optional trailing `opts` Map, so one run can act for many organizations and parallel flows don't share credentials. Nothing from `opts` is written to ctx, and per-call credentials are masked in call records.
+
+| Key | Effect |
+|---|---|
+| `organization-id`, `api-key` | The credentials for this call, instead of the context ones. Pass both: together they are one Basic auth credential |
+| `environment` | Overrides `modern-treasury.environment`. It only unlocks the sandbox simulation; all environments share one host |
+| `idempotency-key` | Sent as `Idempotency-Key` |
 
 ```hot
 // Another organization's sandbox, without touching context
 page ::modern-treasury::payment-orders/list-payment-orders({per_page: 10}, {organization-id: "org_b", api-key: "key_b"})
 ```
 
-The sandbox is self-serve: sign up free at [app.moderntreasury.com/sign_up](https://app.moderntreasury.com/sign_up), and the new organization starts in sandbox. No money moves there. Going live with a bank needs a contract with Modern Treasury.
+An `organization-id` or `api-key` that is present but blank or null is an error naming the key, never a fallback to context. There is no per-call URL. `::modern-treasury::api/resolve(opts)` is the one place this is decided.
 
 ## Moving money safely
 

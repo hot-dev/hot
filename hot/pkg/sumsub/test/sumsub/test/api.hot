@@ -3,6 +3,8 @@ meta ["test"]
 
 ::api ::sumsub::api
 
+HttpError ::sumsub::api/HttpError
+
 // Vectors computed independently with Python's hmac module. The secret is
 // the example secret from Sumsub's official AppTokenUsageExamples repo.
 SECRET "Hej2ch71kG2kTd1iIUDZFNsO5C1lh5Gq"
@@ -40,6 +42,18 @@ meta ["test"] fn () {
     assert-eq("{\"externalUserId\":\"user-42\",\"fixedInfo\":{\"country\":\"GBR\"}}", body)
     assert-eq("8bbe235225b20b58e48dd2b4871dc8f1a1168998f42b6ac41ea4454af95c321e",
         ::api/sign(SECRET, 1700000000, "POST", "/resources/applicants?levelName=basic-kyc-level", body))
+}
+
+test-sign-non-ascii-body-is-over-its-utf8-bytes
+meta ["test"] fn () {
+    // hmac.new(SECRET, b"1700000000POST/resources/applicants" + body.encode(), hashlib.sha256).hexdigest()
+    body """{"name":"José 日本"}"""
+    assert-eq("c4278257899a4414f4fbb27d64a117e0070fb571975e79f71b773c43cf73d318", ::api/sign(SECRET, 1700000000, "POST", "/resources/applicants", body))
+    assert-eq("c4278257899a4414f4fbb27d64a117e0070fb571975e79f71b773c43cf73d318", ::api/sign(SECRET, 1700000000, "POST", "/resources/applicants", Bytes(body)), "the same bytes")
+    assert-eq(body, ::api/encode-body({name: "José 日本"}), "to-json keeps the characters, so the signed text is the sent text")
+    req ::api/build-request("POST", "/resources/applicants", ::api/encode-body({name: "José 日本"}), null, {}, {app-token: APP_TOKEN, secret-key: SECRET}, 1700000000)
+    assert-eq(body, req.body, "the body is sent as signed")
+    assert-eq("c4278257899a4414f4fbb27d64a117e0070fb571975e79f71b773c43cf73d318", get(req.headers, "X-App-Access-Sig"))
 }
 
 test-sign-bytes-body
@@ -120,6 +134,40 @@ meta ["test"] fn () {
     assert(is-err(::api/resolve({app-token: APP_TOKEN})), "an opts app-token without its secret key errs")
 }
 
+test-resolve-blank-credential-is-an-err-naming-the-key
+meta ["test"] fn () {
+    ::hot::ctx/set({"sumsub.app.token": "ctx-tok", "sumsub.secret.key": "ctx-secret"})
+    blank ::api/resolve({app-token: "  ", secret-key: "tenant-secret"})
+    assert(is-err(blank), "a blank token never falls back to context")
+    assert(contains(err-value(blank), "app-token"), "names the key")
+    no-secret ::api/resolve({app-token: "tenant-tok", secret-key: null})
+    assert(is-err(no-secret), "a null secret never falls back to context")
+    assert(contains(err-value(no-secret), "secret-key"), "names the key")
+    assert(is-err(::api/resolve({secret-key: ""})), "empty secret key")
+    only-secret ::api/resolve({secret-key: "tenant-secret"})
+    assert(is-err(only-secret), "an opts secret key is not paired with a context token")
+    assert(contains(err-value(only-secret), "app-token"))
+    ::hot::ctx/set({"sumsub.app.token": null, "sumsub.secret.key": null})
+}
+
+test-resolve-per-call-url-needs-per-call-credentials
+meta ["test"] fn () {
+    ::hot::ctx/set({"sumsub.app.token": "ctx-tok", "sumsub.secret.key": "ctx-secret"})
+    alone ::api/resolve({base-url: "https://proxy.example"})
+    assert(is-err(alone), "context credentials never sign for a per-call URL")
+    assert(contains(err-value(alone), "base-url"), "names base-url")
+    assert(contains(err-value(alone), "app-token"), "names the credential")
+    assert-eq("https://api.sumsub.com", ::api/resolve({}).base-url)
+    ::hot::ctx/set({"sumsub.app.token": null, "sumsub.secret.key": null})
+}
+
+test-resolve-marks-and-returns-credentials-unchanged
+meta ["test"] fn () {
+    r ::api/resolve({app-token: "sbx:marked-token", secret-key: "marked-secret-key"})
+    assert-eq("sbx:marked-token", r.app-token)
+    assert-eq("marked-secret-key", r.secret-key)
+}
+
 test-resolve-opts-only
 meta ["test"] fn () {
     r ::api/resolve({app-token: "tenant-tok", secret-key: "tenant-secret", level-name: "kyc"})
@@ -163,7 +211,7 @@ meta ["test"] fn () {
         headers: {},
         body: {description: "Request signature mismatch", code: 401, correlationId: "req-f677f", errorCode: 4003, errorName: "app-token-signature mismatch"}
     })
-    e ::api/http-error(response)
+    e HttpError(response)
     assert-eq(401, e.status)
     assert-eq(4003, e.error-code)
     assert-eq("app-token-signature mismatch", e.error-name)
@@ -184,7 +232,7 @@ meta ["test"] fn () {
         headers: {"retry-after": "7"},
         body: {description: "Invalid dob 1815-12-10 for Ada Lovelace", code: 400}
     })
-    e ::api/http-error(response)
+    e HttpError(response)
     assert(not(contains(e.message, "Lovelace")), "no PII in the message")
     assert(not(contains(e.message, "1815")), "no PII in the message")
     assert-eq(7, e.retry-after)
@@ -193,7 +241,7 @@ meta ["test"] fn () {
 
 test-http-error-text-body
 meta ["test"] fn () {
-    e ::api/http-error(::hot::http/HttpResponse({status: 502, headers: {}, body: "Bad Gateway"}))
+    e HttpError(::hot::http/HttpResponse({status: 502, headers: {}, body: "Bad Gateway"}))
     assert-eq(502, e.status)
     assert-eq("sumsub: request failed with HTTP 502", e.message)
     assert(is-null(e.description))

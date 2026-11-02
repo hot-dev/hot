@@ -17,7 +17,6 @@ meta {
 }
 
 ::api ::persona::api
-RequestOptions ::persona::api/RequestOptions
 
 seg ::persona::api/seg
 
@@ -69,12 +68,12 @@ meta {
 }
 fn
 (verification-id: Str): Map {
-  get-verification(verification-id, {}, RequestOptions({}))
+  get-verification(verification-id, {}, {})
 },
 (verification-id: Str, opts: Map): Map {
-  get-verification(verification-id, opts, RequestOptions({}))
+  get-verification(verification-id, opts, opts)
 },
-(verification-id: Str, opts: Map, options: RequestOptions): Map {
+(verification-id: Str, opts: Map, options: Map): Map {
   ::api/send("GET", `/verifications/${seg(verification-id)}`, ::api/read-query(opts), null, options)
 }
 
@@ -84,9 +83,9 @@ meta {
 }
 fn
 (type-name: Str, verification-id: Str): Map {
-  get-verification-by-type(type-name, verification-id, RequestOptions({}))
+  get-verification-by-type(type-name, verification-id, {})
 },
-(type-name: Str, verification-id: Str, options: RequestOptions): Map {
+(type-name: Str, verification-id: Str, options: Map): Map {
   path type-path(type-name, verification-id)
   if(is-err(path), path, ::api/send("GET", path, {}, null, options))
 }
@@ -109,9 +108,9 @@ meta {
 }
 fn
 (inquiry-id: Str): Vec {
-  list-for-inquiry(inquiry-id, RequestOptions({}))
+  list-for-inquiry(inquiry-id, {})
 },
-(inquiry-id: Str, options: RequestOptions): Vec {
+(inquiry-id: Str, options: Map): Vec {
   doc ::persona::inquiries/get-inquiry(inquiry-id, {include: ["verifications"]}, options)
   if(is-err(doc), doc, from-document(doc))
 }
@@ -143,8 +142,8 @@ meta {
 }
 fn
 (verification-id: Str): Map {
-  redact-verification(verification-id, RequestOptions({}))
+  redact-verification(verification-id, {})
 },
-(verification-id: Str, options: RequestOptions): Map {
+(verification-id: Str, options: Map): Map {
   ::api/send("DELETE", `/verifications/${seg(verification-id)}`, {}, null, options)
 }

@@ -91,7 +91,8 @@ fn
   meta-of(source, {})
 },
 (source: Str, opts: Map): Map? {
-  ::store/get(meta-store(::cfg/resolve(opts)), `meta:${source}`)
+  cfg ::cfg/resolve(opts)
+  if(is-err(cfg), cfg, ::store/get(meta-store(cfg), `meta:${source}`))
 }
 
 status
@@ -112,11 +113,17 @@ fn
   status({})
 },
 (opts: Map): Vec<Map> {
-  ms meta-store(::cfg/resolve(opts))
-  map(SOURCES, (s) {
-    m ::store/get(ms, `meta:${s}`)
-    if(is-null(m), {source: s, list: get(LIST_NAMES, s), cached: false}, {...m, cached: true})
-  })
+  cfg ::cfg/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      ms meta-store(cfg)
+      map(SOURCES, (s) {
+        m ::store/get(ms, `meta:${s}`)
+        if(is-null(m), {source: s, list: get(LIST_NAMES, s), cached: false}, {...m, cached: true})
+      })
+    }
+  }
 }
 
 fetch-source
@@ -157,6 +164,13 @@ fn
 },
 (source: Str, opts: Map): Map {
   cfg ::cfg/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => { refresh-with(source, opts, cfg) }
+  }
+}
+
+refresh-with fn (source: Str, opts: Map, cfg: Map): Map {
   ms meta-store(cfg)
   meta-key `meta:${source}`
   current ::store/get(ms, meta-key)
@@ -261,11 +275,11 @@ meta {
 }
 fn (opts: Map): Map {
   cfg ::cfg/resolve(opts)
-  ms meta-store(cfg)
   wanted check-sources(get(opts, "sources"))
   cond {
+    is-err(cfg) => { cfg }
     is-err(wanted) => { wanted }
-    => { open-lists(ms, cfg, wanted, opts) }
+    => { open-lists(meta-store(cfg), cfg, wanted, opts) }
   }
 }
 

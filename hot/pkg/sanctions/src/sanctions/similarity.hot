@@ -165,7 +165,7 @@ meta {
     """
 }
 fn (a: Str, b: Str): Dec {
-  longest max(length(::text/chars(a)), length(::text/chars(b)))
+  longest max(length(a), length(b))
   cond {
     eq(longest, 0) => { 1.0 }
     => { round4(sub(1, div(levenshtein(a, b), longest))) }

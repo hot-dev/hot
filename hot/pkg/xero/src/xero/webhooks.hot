@@ -65,6 +65,7 @@ fn
   verify-request(request, ctx-key())
 },
 (request: Map, webhook-key: Str): Bool {
+  ::ctx/mark-secret(webhook-key)
   signature trim(Str(or(get(or(get(request, "headers"), {}), "x-xero-signature"), "")))
   cond {
     // An empty key would make every signature forgeable: fail closed.

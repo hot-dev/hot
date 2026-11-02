@@ -16,23 +16,37 @@ hot.project.my-app.deps {
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `persona.api.key` | yes | A sandbox (`persona_sandbox_...`) or production (`persona_production_...`) API key. Both use `https://api.withpersona.com/api/v1`; the key picks the environment |
+| `persona.api.key` | yes, unless passed in options | A sandbox (`persona_sandbox_...`) or production (`persona_production_...`) API key. Both use `https://api.withpersona.com/api/v1`; the key picks the environment |
 | `persona.api.version` | no | Overrides the `Persona-Version` header (default `2026-09-29`, `::persona/API_VERSION`) |
 | `persona.key-inflection` | no | `kebab` (Persona's default), `snake` or `camel` for response keys. The read helpers accept all three |
 | `persona.webhook.secret` | for webhooks | The webhook's signing secret (`wbhsec_...`) |
 
-Requests use `Authorization: Bearer <key>`. Every function that calls the API takes an optional trailing options argument, a `::persona::api/RequestOptions` or a plain Map:
+Requests use `Authorization: Bearer <key>`.
+
+## Per-call credentials
+
+Every function that calls the API takes an optional trailing options Map (a `::persona::api/RequestOptions` works too), so one run can act for many tenants. Where a function also takes `opts`, that one Map can hold both.
+
+```hot
+tenant {api-key: "persona_sandbox_tenant_b"}
+inquiry ::persona::inquiries/get-inquiry("inq_123", {include: ["account"]}, tenant)
+page ::persona::inquiries/list-inquiries({status: ["needs_review"]}, {page-size: 25, ...tenant})
+::persona::cases/get-case("case_123", {}, tenant)
+```
 
 | Option | Effect |
 |---|---|
 | `api-key` | Use this key instead of `persona.api.key` for one call (many tenants in one run, or parallel flows) |
+| `base-url` | Another API root for one call, such as a proxy. Needs an `api-key` in the same Map; `persona.api.key` is never sent to a per-call URL |
 | `persona-version` | `Persona-Version` for one call |
 | `key-inflection` | `Key-Inflection` for one call |
 | `idempotency-key` | Sent as `Idempotency-Key` on POSTs. Persona replays the first response for a repeated key (kept at least 24 hours), so a retried create never makes a second inquiry, report or transaction |
 
-`::persona::api/resolve(opts)` is the one place options, context and defaults are merged. Per-call keys are never written to ctx.
+An `api-key` that is present but blank or null is an error naming the key, never a fallback to `persona.api.key`. `::persona::api/resolve(opts)` is the one place options, context and defaults are merged. Per-call credentials are masked in call records and never written to ctx.
 
-**Sandbox.** Sign up at [withpersona.com](https://withpersona.com/dashboard/signup) for immediate, free access to a sandbox environment and its `persona_sandbox_` key; production needs a contract with Persona's sales team. Sandbox inquiries run no real checks: the hosted flow has a pass/fail toggle, `::persona::inquiries/simulate` drives an inquiry through its lifecycle (and fires real webhooks), and reports return canned hits for documented test names (for example "Kim Jong Un" on a watchlist report, "Boris Johnson" for PEP, "Globovision" for business watchlist and adverse media). KYB transactions accept `fields.debug: "passed"` or `"failed"`. Templates, report templates, case templates and transaction types are created in the dashboard, per environment.
+## Sandbox
+
+Sign up at [withpersona.com](https://withpersona.com/dashboard/signup) for immediate, free access to a sandbox environment and its `persona_sandbox_` key; production needs a contract with Persona's sales team. Sandbox inquiries run no real checks: the hosted flow has a pass/fail toggle, `::persona::inquiries/simulate` drives an inquiry through its lifecycle (and fires real webhooks), and reports return canned hits for documented test names (for example "Kim Jong Un" on a watchlist report, "Boris Johnson" for PEP, "Globovision" for business watchlist and adverse media). KYB transactions accept `fields.debug: "passed"` or `"failed"`. Templates, report templates, case templates and transaction types are created in the dashboard, per environment.
 
 ## Quick start
 
@@ -46,7 +60,7 @@ start-kyc fn (user-id: Str): Str {
   inquiry ::inquiries/create-inquiry("itmpl_...", {
     reference-id: user-id,
     meta: {auto-create-one-time-link: true}
-  }, ::api/RequestOptions({idempotency-key: `${user-id}-kyc`}))
+  }, {idempotency-key: `${user-id}-kyc`})
   ::inquiries/one-time-link(inquiry)
 }
 
@@ -104,7 +118,7 @@ start-kyb fn (business-id: Str): Map {
   ::txns/create-transaction("txntp_...", {
     business_name: "Acme Robotics LLC",
     business_registered_address: {street_1: "1 Main St", city: "Austin", subdivision: "TX", postal_code: "78701", country_code: "US"}
-  }, {reference-id: business-id}, ::persona::api/RequestOptions({idempotency-key: `${business-id}-kyb`}))
+  }, {reference-id: business-id}, {idempotency-key: `${business-id}-kyb`})
 }
 ```
 

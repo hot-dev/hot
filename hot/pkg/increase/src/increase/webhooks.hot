@@ -24,7 +24,7 @@ meta {
     doc: """The HMAC key for an Increase shared secret: its raw UTF-8 bytes. Increase's SDKs verify with `new Webhook("whsec_" + base64(secret))`, which decodes back to these bytes. Exposed for testing."""
 }
 fn (secret: Str): Bytes {
-  Bytes(secret)
+  ::ctx/mark-secret(Bytes(::ctx/mark-secret(secret)))
 }
 
 verify-request
@@ -68,6 +68,7 @@ fn
   verify-request(request, secret, ::sw/DEFAULT_TOLERANCE_SECONDS)
 },
 (request: Map, secret: Str, tolerance-seconds: Int): Bool {
+  ::ctx/mark-secret(secret)
   cond {
     // An empty key would make every signature forgeable: fail closed.
     is-empty(secret) => { false }

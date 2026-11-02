@@ -1,8 +1,8 @@
 ::modern-treasury::api ns
 meta {
     ctx: {
-        "modern-treasury.organization.id": {required: true, secret: false},
-        "modern-treasury.api.key": {required: true},
+        "modern-treasury.organization.id": {required: false, secret: false},
+        "modern-treasury.api.key": {required: false},
         "modern-treasury.environment": {required: false, secret: false}
     },
     doc: """
@@ -18,6 +18,14 @@ meta {
     idempotency key, so after a transport failure it is safe to resend the
     same call with the same key; a different key would make a second
     payment.
+
+    **Per-call credentials.** Every function that calls the API takes an
+    optional trailing `opts` Map, resolved by `resolve`: `opts` first,
+    then context, then defaults. Nothing from `opts` is written to ctx,
+    and per-call credentials are masked in call records. `organization-id`
+    and `api-key` go together; either one present but blank or null is an
+    Err, never a fallback to context. Requests only go to Modern
+    Treasury's own host; there is no per-call URL.
     """
 }
 
@@ -125,7 +133,7 @@ fn (value: Any): Int? {
   cond {
     is-int(value) => { value }
     not(is-str(value)) => { null }
-    // WORKAROUND(hot-bug-6): Int("abc") halts the run; match the digits first.
+    // Int("abc") is an Err that halts when consumed; match the digits first.
     ::re/is-match(trim(value), "^-?[0-9]{1,15}$") => { Int(trim(value)) }
     => { null }
   }
@@ -183,11 +191,9 @@ fn (status: Int, body: Any): Str {
   redact-text(`modern-treasury: HTTP ${status}${code-part}${parameter-part}: ${text}`)
 }
 
-http-error
-meta {
-    doc: """Build the `HttpError` for a non-2xx response: decode and redact the body, lift `errors.code`, `errors.message` and `errors.parameter`, and parse `Retry-After`. Exposed for testing; every request uses it."""
-}
-fn (response: HttpResponse): HttpError {
+// Decode and redact the body, lift `errors.code`, `errors.message` and
+// `errors.parameter`, and parse `Retry-After`.
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   headers or(response.headers, {})
   body redact(decode-body(response.body))
   errors field(body, "errors")
@@ -201,13 +207,6 @@ fn (response: HttpResponse): HttpError {
     parameter: str-field(errors, "parameter"),
     retry_after: parse-int(header(headers, "retry-after"))
   })
-}
-
-// WORKAROUND(hot-bug-1): HttpError(response) ignores this arrow and copies
-// fields, so the package always calls `http-error` directly. The arrow is
-// kept for callers that coerce a response themselves.
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
-  http-error(response)
 }
 
 plain-error fn (error: Result): Any {
@@ -284,7 +283,7 @@ fn (organization-id: Str, api-key: Str): Str {
 // Per-call options. Every function that calls the API takes an optional
 // trailing `opts` Map:
 // - `organization-id` and `api-key`: replace the context credentials for
-//   this call (an `api-key` in opts means context credentials are ignored)
+//   this call; pass both or neither
 // - `environment`: overrides `modern-treasury.environment`
 // - `idempotency-key`: sent as `Idempotency-Key`; required by every call
 //   that moves money
@@ -317,6 +316,18 @@ present fn (value: Any): Bool {
   and(is-some(value), not(is-empty(trim(Str(or(value, ""))))))
 }
 
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+blank-credential
+meta {
+    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an Err, never a fallback to context: a tenant whose key is missing must not run on the project's credentials. Exposed for testing."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+}
+
 resolve
 meta {
     doc: """
@@ -324,10 +335,14 @@ meta {
     authorization, environment, idempotency-key}`. Each comes from `opts`
     first, then context (`modern-treasury.organization.id`,
     `modern-treasury.api.key`, `modern-treasury.environment`), then the
-    default. When `opts` has an `api-key`, the context credentials are
-    ignored for that call, so `opts` must carry the `organization-id` as
-    well. Errs when credentials are missing or the environment is
-    invalid. Never writes to context.
+    default. Never writes to context, and marks per-call credentials so
+    they are masked in call records.
+
+    `organization-id` and `api-key` in `opts` go together: one without the
+    other is an Err, because the pair is one Basic auth credential. Also
+    errs when either is in `opts` but blank or null (that never falls back
+    to context), when no credentials are available, and when the
+    environment is invalid.
 
     **Example**
 
@@ -338,23 +353,28 @@ meta {
     """
 }
 fn (opts: Map): Map {
-  explicit-key present(get(opts, "api-key"))
-  ctx-str (key) { trim(Str(or(::ctx/get(key), ""))) }
-  organization-id cond {
-    present(get(opts, "organization-id")) => { trim(Str(get(opts, "organization-id"))) }
-    explicit-key => { "" }
-    => { ctx-str("modern-treasury.organization.id") }
-  }
-
-  api-key if(explicit-key, trim(Str(get(opts, "api-key"))), ctx-str("modern-treasury.api.key"))
+  ::ctx/mark-secret([get(opts, "organization-id"), get(opts, "api-key")])
+  explicit-org non-blank(get(opts, "organization-id"))
+  explicit-key non-blank(get(opts, "api-key"))
+  blank blank-credential(opts, ["organization-id", "api-key"])
+  organization-id or(explicit-org, non-blank(::ctx/get("modern-treasury.organization.id")))
+  api-key or(explicit-key, non-blank(::ctx/get("modern-treasury.api.key")))
   explicit-env get(opts, "environment")
   environment if(present(explicit-env), normalize-environment(Str(explicit-env)), current-environment())
   cond {
-    and(explicit-key, is-empty(organization-id)) => {
+    is-some(blank) => {
+      err(`modern-treasury: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use context.`)
+    }
+
+    and(is-some(explicit-key), is-null(explicit-org)) => {
       err("modern-treasury: opts has an api-key but no organization-id; pass both.")
     }
 
-    or(is-empty(organization-id), is-empty(api-key)) => {
+    and(is-some(explicit-org), is-null(explicit-key)) => {
+      err("modern-treasury: opts has an organization-id but no api-key; pass both.")
+    }
+
+    or(is-null(organization-id), is-null(api-key)) => {
       err("modern-treasury: no credentials. Set modern-treasury.organization.id and modern-treasury.api.key in Context Variables, or pass {organization-id, api-key} in opts.")
     }
 
@@ -518,7 +538,7 @@ fn (method: Str, path: Str, params: Map, opts: Map): HttpResponse {
       cond {
         is-err(response) => { response }
         is-ok-response(response) => { response }
-        => { err(http-error(response)) }
+        => { err(HttpError(response)) }
       }
     }
   }

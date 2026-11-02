@@ -3,6 +3,8 @@ meta ["test"]
 
 ::api ::quickbooks::api
 
+HttpResponse ::hot::http/HttpResponse
+
 VALIDATION_FAULT {
     Fault: {
         Error: [{
@@ -185,46 +187,108 @@ meta ["test"] fn () {
 
 test-http-error-message
 meta ["test"] fn () {
-    e ::api/http-error({status: 400, headers: {intuit_tid: "1-6730abc"}, body: VALIDATION_FAULT})
+    e ::api/HttpError(HttpResponse({status: 400, headers: {intuit_tid: "1-6730abc"}, body: VALIDATION_FAULT}))
     assert-eq(400, e.status)
     assert-eq("quickbooks: HTTP 400 ValidationFault 6240: Duplicate Name Exists Error: The name supplied already exists. : Another customer is already using this name. (intuit_tid: 1-6730abc)", e.message)
     assert-eq("6240", e.code)
     assert-eq("1-6730abc", e.intuit-tid)
     assert-eq("ValidationFault", e.fault-type)
 
-    auth ::api/http-error({status: 401, headers: {}, body: AUTH_FAULT})
+    auth ::api/HttpError(HttpResponse({status: 401, headers: {}, body: AUTH_FAULT}))
     assert(contains(auth.message, "HTTP 401 AUTHENTICATION 3200"), auth.message)
     assert(is-null(auth.intuit-tid))
 
-    text ::api/http-error({status: 502, headers: {retry-after: "30"}, body: "Bad Gateway"})
+    text ::api/HttpError(HttpResponse({status: 502, headers: {retry-after: "30"}, body: "Bad Gateway"}))
     assert-eq("quickbooks: HTTP 502: Bad Gateway", text.message)
     assert-eq(30, text.retry-after)
 
-    bytes ::api/http-error({status: 400, headers: {}, body: Bytes(to-json(VALIDATION_FAULT))})
+    bytes ::api/HttpError(HttpResponse({status: 400, headers: {}, body: Bytes(to-json(VALIDATION_FAULT))}))
     assert-eq("6240", bytes.code, "Bytes bodies (PDF calls) are decoded")
 }
 
 test-unwrap-fault-in-200
 meta ["test"] fn () {
-    ok ::api/unwrap({status: 200, headers: {}, body: {Customer: {Id: "5"}}})
+    ok ::api/unwrap(HttpResponse({status: 200, headers: {}, body: {Customer: {Id: "5"}}}))
     assert-eq("5", ok.Customer.Id)
-    faulted ::api/unwrap({status: 200, headers: {}, body: VALIDATION_FAULT})
+    faulted ::api/unwrap(HttpResponse({status: 200, headers: {}, body: VALIDATION_FAULT}))
     assert(is-err(faulted), "a 2xx Fault is an error")
     assert(contains(err-message(faulted), "6240"), err-message(faulted))
-    assert(is-err(::api/unwrap({status: 404, headers: {}, body: ""})))
+    assert(is-err(::api/unwrap(HttpResponse({status: 404, headers: {}, body: ""}))))
 }
 
 test-is-retryable
 meta ["test"] fn () {
-    throttled ::api/http-error({status: 429, headers: {}, body: {Fault: {Error: [{Message: "ThrottleExceeded", code: "3001"}], type: "SERVICE"}}})
+    throttled ::api/HttpError(HttpResponse({status: 429, headers: {}, body: {Fault: {Error: [{Message: "ThrottleExceeded", code: "3001"}], type: "SERVICE"}}}))
     assert(::api/is-retryable(err(throttled)))
     assert(::api/is-retryable(throttled), "a bare HttpError works too")
-    assert(::api/is-retryable(err(::api/http-error({status: 503, headers: {}, body: ""}))))
-    assert(not(::api/is-retryable(err(::api/http-error({status: 400, headers: {}, body: VALIDATION_FAULT})))), "validation is permanent")
-    assert(not(::api/is-retryable(err(::api/http-error({status: 401, headers: {}, body: AUTH_FAULT})))))
-    code-only ::api/http-error({status: 400, headers: {}, body: {Fault: {Error: [{Message: "Throttle", code: "003001"}], type: "SERVICE"}}})
+    assert(::api/is-retryable(err(::api/HttpError(HttpResponse({status: 503, headers: {}, body: ""})))))
+    assert(not(::api/is-retryable(err(::api/HttpError(HttpResponse({status: 400, headers: {}, body: VALIDATION_FAULT}))))), "validation is permanent")
+    assert(not(::api/is-retryable(err(::api/HttpError(HttpResponse({status: 401, headers: {}, body: AUTH_FAULT}))))))
+    code-only ::api/HttpError(HttpResponse({status: 400, headers: {}, body: {Fault: {Error: [{Message: "Throttle", code: "003001"}], type: "SERVICE"}}}))
     assert(::api/is-retryable(code-only), "throttle fault codes are retryable")
     assert(::api/is-retryable(err("http request failed: connection reset")))
     assert(not(::api/is-retryable(err("response exceeds the size limit"))))
     assert(not(::api/is-retryable({Customer: {}})), "successes are not retryable")
+}
+
+// ---------------------------------------------------------------------------
+// Per-call credentials
+// ---------------------------------------------------------------------------
+
+test-resolve-blank-option-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"quickbooks.access.token": "CTX-AT", "quickbooks.realm.id": "9341453", "quickbooks.environment": "sandbox"})
+    results map(["access-token", "refresh-token", "client-id", "client-secret", "token-store", "token-store-key", "realm-id", "environment"], (name) {
+        {
+            name: name,
+            empty: ::api/resolve(assoc({}, name, "")),
+            spaces: ::api/resolve(assoc({}, name, "   ")),
+            nothing: ::api/resolve(assoc({}, name, null))
+        }
+    })
+    ::hot::ctx/set({"quickbooks.access.token": "", "quickbooks.realm.id": "", "quickbooks.environment": ""})
+    for-each(results, (r) {
+        assert(is-err(r.empty), `blank ${r.name} never falls back to context`)
+        assert(contains(err-message(r.empty), r.name), err-message(r.empty))
+        assert(is-err(r.spaces), `whitespace ${r.name}`)
+        assert(is-err(r.nothing), `null ${r.name}`)
+        assert(contains(err-message(r.nothing), r.name), err-message(r.nothing))
+    })
+}
+
+test-resolve-environment-needs-a-per-call-credential
+meta ["test"] fn () {
+    ::hot::ctx/set({"quickbooks.access.token": "CTX-AT", "quickbooks.realm.id": "9341453", "quickbooks.environment": "production"})
+    to-sandbox ::api/resolve({environment: "sandbox"})
+    same ::api/resolve({environment: " Production "})
+    with-token ::api/resolve({access-token: "TENANT-AT", environment: "sandbox"})
+    with-store ::api/resolve({token-store: "qb-tokens", client-id: "id", client-secret: "sec", environment: "sandbox"})
+    ::hot::ctx/set({"quickbooks.environment": "sandbox"})
+    to-production ::api/resolve({environment: "production"})
+    ::hot::ctx/set({"quickbooks.environment": ""})
+    from-default ::api/resolve({environment: "sandbox"})
+    ::hot::ctx/set({"quickbooks.environment": "staging"})
+    bad-context ::api/resolve({environment: "sandbox"})
+    bad-context-with-token ::api/resolve({access-token: "TENANT-AT", environment: "sandbox"})
+    ::hot::ctx/set({"quickbooks.access.token": "", "quickbooks.realm.id": "", "quickbooks.environment": ""})
+
+    assert(is-err(to-sandbox), "a production token never goes to the sandbox host")
+    assert(contains(err-message(to-sandbox), "environment"), "the error names both keys")
+    assert(contains(err-message(to-sandbox), "access-token"))
+    assert-eq("production", same.environment, "the configured environment needs no credential")
+    assert-eq("sandbox", with-token.environment, "a per-call token may choose its environment")
+    assert-eq("sandbox", with-store.environment)
+    assert(is-err(to-production), "a sandbox token never goes to the production host")
+    assert(is-err(from-default), "unset means production, so the same rule holds")
+    assert(is-err(bad-context), "an invalid quickbooks.environment can't be compared, so it errs")
+    assert-eq("sandbox", bad-context-with-token.environment, "a per-call credential doesn't depend on context")
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    token ::api/resolve({realm-id: "42", access-token: "TENANT-AT-VALUE"})
+    assert-eq("TENANT-AT-VALUE", token.credentials.token, "marking a credential doesn't change it")
+    refresh ::api/resolve({realm-id: "42", refresh-token: "TENANT-RT-VALUE", client-id: "id", client-secret: "SECRET-VALUE"})
+    assert-eq("TENANT-RT-VALUE", refresh.credentials.refresh-token)
+    assert-eq("SECRET-VALUE", refresh.credentials.client-secret)
 }

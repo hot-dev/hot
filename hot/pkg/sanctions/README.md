@@ -23,10 +23,21 @@ The official lists need no account or key. Every setting below is optional. Each
 | `sanctions.store` | `store` | `"sanctions"` | Name of the cache's metadata store. Each list version gets its own data store, `<store>:<source>:<hash>` |
 | `sanctions.max-age-days` | `max-age-days` | `7` | Lists not refreshed for longer produce a warning in screening results |
 | `sanctions.opensanctions.api-key` | `api-key` | none | OpenSanctions API key (secret), only for `::sanctions::opensanctions` |
-| `sanctions.opensanctions.base-url` | `base-url` | `https://api.opensanctions.org` | Your own self-hosted yente server, if you run one |
+| `sanctions.opensanctions.base-url` | `base-url` | `https://api.opensanctions.org` | Your own self-hosted yente server, if you run one. See Per-call credentials |
 | `sanctions.opensanctions.dataset` | `dataset` | `"default"` | `"default"` (sanctions plus PEPs and more) or `"sanctions"` |
 
 Runtime setting: **`http.max-response-bytes` must be at least 33554432 (32 MiB) for the run that refreshes the EU list.** The EU file is about 26 MB, and its server ignores Range requests. The UK file (about 22 MB) is fetched in 8 MiB Range requests, so it works with the default 16 MiB cap.
+
+## Per-call credentials
+
+Every function that reads settings takes a trailing `opts` Map, so one run can use many OpenSanctions keys. `::sanctions::config/resolve(opts)` is the one resolver.
+
+```hot
+tenant {api-key: "tenant-opensanctions-key", dataset: "sanctions"}
+::sanctions::opensanctions/screen("Aleksandr Lukashenko", {kind: "individual", ...tenant})
+```
+
+An `api-key` in `opts` is masked in call records and never written to ctx. Present but blank or null, it is an error naming the key, never a fallback to `sanctions.opensanctions.api-key`. A per-call `base-url` only uses an `api-key` from the same `opts`: the context key is never sent there, and without a per-call key a self-hosted yente gets no key at all. The hosted API always needs one.
 
 ## Quick start
 
@@ -134,7 +145,7 @@ Every list is parsed into the same `::sanctions::entry/Entry`:
 | `::sanctions::country` | `code`, `key`, `name` |
 | `::sanctions::ofac` | `parse`, `parse-csv`, `parse-remarks`, `manifest`, `parse-manifest`, `version`, `fetch`, `export-url`, `detail-url` |
 | `::sanctions::uk`, `::sanctions::eu`, `::sanctions::un` | `parse`, `parse-designation` / `parse-entity` / `parse-record`, `fetch` |
-| `::sanctions::opensanctions` | `screen`, `match-body`, `match-query`, `match-url`, `parse-response`, `to-match` |
+| `::sanctions::opensanctions` | `screen`, `match-body`, `match-query`, `match-url`, `match-headers`, `parse-response`, `to-match` |
 | `::sanctions::config` | `resolve`, `require-api-key` |
 | `::sanctions::http` | `get-text`, `head`, `request`, `byte-ranges`, `http-error`, `body-text`; type `HttpError` |
 | `::sanctions::xml` | `records`, `blocks`, `block`, `texts`, `text`, `start-tags`, `attr`, `decode` |
@@ -177,7 +188,7 @@ These numbers come from Hot 3.0.2's **debug** build, on a machine with a load av
 - Fuzzy matching only works within the transliteration table. A query in Arabic script matches only the Arabic-script aliases that the UK and UN lists publish.
 - The EU file needs `http.max-response-bytes` of at least 32 MiB. If your runtime caps responses lower, leave `eu` out of `refresh-lists` and `screen`.
 - A refresh writes a whole new store before switching to it and then deletes the old one. A screening call that started on the old version just before the switch can miss entries. Run refreshes outside business hours.
-- `::hot::xml` is not used: the package reads the list XML with regexes over record strings (`::sanctions::xml`). That is faster in Hot, and it decodes entities correctly. It relies on each list's current layout.
+- The package reads the list XML with regexes over record strings (`::sanctions::xml`) and uses `::hot::xml` only to decode text. In Hot that is nearly twice as fast as walking a parsed tree: 55 s against 91 to 109 s for the 22 MB UK list on a debug build, with identical entries. It relies on each list's format (record elements do not nest inside themselves, and there are no CDATA sections or comments inside records).
 
 ## License
 

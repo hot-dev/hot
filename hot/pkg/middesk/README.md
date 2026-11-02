@@ -16,15 +16,29 @@ hot.project.my-app.deps {
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `middesk.api.key` | yes | A sandbox (`mk_test_...`) or production (`mk_live_...`) API key, from Dashboard > Settings > Developer > Credentials |
+| `middesk.api.key` | yes, unless passed in options | A sandbox (`mk_test_...`) or production (`mk_live_...`) API key, from Dashboard > Settings > Developer > Credentials |
 | `middesk.env` | no | `"sandbox"` or `"production"`, for a key without a recognizable prefix. The key's prefix normally decides: `mk_test_` goes to `https://api-sandbox.middesk.com/v1`, `mk_live_` to `https://api.middesk.com/v1`. A setting that contradicts the prefix is an error, since Middesk rejects a key on the other host |
 | `middesk.webhook.secret` | for webhooks | The `secret` you set on the webhook endpoint |
 
-Requests use HTTP Basic auth with the API key as the username and an empty password. Every function that calls the API takes an optional trailing options argument, a `::middesk::api/RequestOptions` or a plain Map with `api-key` and `env`, so one run can serve many Middesk accounts. `::middesk::api/resolve(opts)` merges options over context; per-call keys are never written to ctx.
+Requests use HTTP Basic auth with the API key as the username and an empty password.
 
 Middesk has no idempotency keys. Set `unique_external_id` on create: Middesk refuses a second business with the same value, so a retried create can't make a duplicate.
 
-**Sandbox.** Every Middesk account is provisioned with a sandbox key (`mk_test_`) alongside the production key, and sandbox requests are free. You get an account through Middesk's sales team (there's no public self-serve signup). Sandbox results are fake, even for real data, and businesses never enter `in_audit`. Documented test values drive outcomes:
+## Per-call credentials
+
+Every function that calls the API takes an optional trailing options Map with `api-key` and `env` (a `::middesk::api/RequestOptions` works too), so one run can serve many Middesk accounts. Options always come last; where a function also takes `params`, pass `{}` for those.
+
+```hot
+tenant {api-key: "mk_test_tenant_b"}
+business ::middesk::businesses/get-business("biz_123", tenant)
+page ::middesk::businesses/list-businesses({per_page: 10}, tenant)
+```
+
+An `api-key` that is present but blank or null is an error naming the key, never a fallback to `middesk.api.key`. `::middesk::api/resolve(opts)` merges options over context. Per-call keys are masked in call records and never written to ctx.
+
+## Sandbox
+
+Every Middesk account is provisioned with a sandbox key (`mk_test_`) alongside the production key, and sandbox requests are free. You get an account through Middesk's sales team (there's no public self-serve signup). Sandbox results are fake, even for real data, and businesses never enter `in_audit`. Documented test values drive outcomes:
 
 | Input | Sandbox outcome |
 |---|---|

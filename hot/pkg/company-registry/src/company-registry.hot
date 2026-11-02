@@ -359,12 +359,17 @@ fn
 },
 (name: Str, opts: Map): Map {
   cfg ::api/resolve(opts)
-  sources cfg.sources
-  limit or(get(opts, "limit"), 5)
-  results pmap(sources, (s) { lookup-source(s, name, limit, opts) }, OnErr.Preserve)
-  pairs map(range(0, length(sources)), (i) { {source: get(sources, i), result: get(results, i)} })
-  {
-    companies: mapcat(filter(pairs, (p) { is-ok(p.result) }), (p) { p.result }),
-    errors: map(filter(pairs, (p) { is-err(p.result) }), (p) { {source: p.source, message: err-message(p.result)} })
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      sources cfg.sources
+      limit or(get(opts, "limit"), 5)
+      results pmap(sources, (s) { lookup-source(s, name, limit, opts) }, OnErr.Preserve)
+      pairs map(range(0, length(sources)), (i) { {source: get(sources, i), result: get(results, i)} })
+      {
+        companies: mapcat(filter(pairs, (p) { is-ok(p.result) }), (p) { p.result }),
+        errors: map(filter(pairs, (p) { is-err(p.result) }), (p) { {source: p.source, message: err-message(p.result)} })
+      }
+    }
   }
 }

@@ -9,7 +9,6 @@ meta {
 }
 
 ::api ::persona::api
-RequestOptions ::persona::api/RequestOptions
 
 seg ::persona::api/seg
 
@@ -30,12 +29,12 @@ meta {
 }
 fn
 (case-template-id: Str): Map {
-  create-case(case-template-id, {}, RequestOptions({}))
+  create-case(case-template-id, {}, {})
 },
 (case-template-id: Str, opts: Map): Map {
-  create-case(case-template-id, opts, RequestOptions({}))
+  create-case(case-template-id, opts, opts)
 },
-(case-template-id: Str, opts: Map, options: RequestOptions): Map {
+(case-template-id: Str, opts: Map, options: Map): Map {
   body ::api/document(null, {
     case-template-id: case-template-id,
     case-queue-id: get(opts, "case-queue-id"),
@@ -55,12 +54,12 @@ meta {
 }
 fn
 (case-id: Str): Map {
-  get-case(case-id, {}, RequestOptions({}))
+  get-case(case-id, {}, {})
 },
 (case-id: Str, opts: Map): Map {
-  get-case(case-id, opts, RequestOptions({}))
+  get-case(case-id, opts, opts)
 },
-(case-id: Str, opts: Map, options: RequestOptions): Map {
+(case-id: Str, opts: Map, options: Map): Map {
   ::api/send("GET", `/cases/${seg(case-id)}`, ::api/read-query(opts), null, options)
 }
 
@@ -70,12 +69,12 @@ meta {
 }
 fn
 (filters: Map): Map {
-  list-cases(filters, {}, RequestOptions({}))
+  list-cases(filters, {}, {})
 },
 (filters: Map, opts: Map): Map {
-  list-cases(filters, opts, RequestOptions({}))
+  list-cases(filters, opts, opts)
 },
-(filters: Map, opts: Map, options: RequestOptions): Map {
+(filters: Map, opts: Map, options: Map): Map {
   ::api/list-page("/cases", filters, opts, options)
 }
 
@@ -85,9 +84,9 @@ meta {
 }
 fn
 (case-id: Str, attributes: Map): Map {
-  update-case(case-id, attributes, RequestOptions({}))
+  update-case(case-id, attributes, {})
 },
-(case-id: Str, attributes: Map, options: RequestOptions): Map {
+(case-id: Str, attributes: Map, options: Map): Map {
   ::api/send("PATCH", `/cases/${seg(case-id)}`, {}, ::api/document(null, attributes, {}), options)
 }
 
@@ -97,9 +96,9 @@ meta {
 }
 fn
 (case-id: Str, user-email-address: Str): Map {
-  assign-case(case-id, user-email-address, RequestOptions({}))
+  assign-case(case-id, user-email-address, {})
 },
-(case-id: Str, user-email-address: Str, options: RequestOptions): Map {
+(case-id: Str, user-email-address: Str, options: Map): Map {
   ::api/send("POST", `/cases/${seg(case-id)}/assign`, {}, ::api/meta-document({user-email-address: user-email-address}), options)
 }
 
@@ -109,9 +108,9 @@ meta {
 }
 fn
 (case-id: Str, status: Str): Map {
-  set-status(case-id, status, RequestOptions({}))
+  set-status(case-id, status, {})
 },
-(case-id: Str, status: Str, options: RequestOptions): Map {
+(case-id: Str, status: Str, options: Map): Map {
   ::api/send("POST", `/cases/${seg(case-id)}/set-status`, {}, ::api/meta-document({status: status}), options)
 }
 
@@ -121,9 +120,9 @@ meta {
 }
 fn
 (case-id: Str, object-ids: Vec<Str>): Map {
-  add-objects(case-id, object-ids, RequestOptions({}))
+  add-objects(case-id, object-ids, {})
 },
-(case-id: Str, object-ids: Vec<Str>, options: RequestOptions): Map {
+(case-id: Str, object-ids: Vec<Str>, options: Map): Map {
   ::api/send("POST", `/cases/${seg(case-id)}/add-objects`, {}, ::api/meta-document({object-ids: object-ids}), options)
 }
 
@@ -133,9 +132,9 @@ meta {
 }
 fn
 (case-id: Str, comment: Str): Map {
-  add-comment(case-id, comment, RequestOptions({}))
+  add-comment(case-id, comment, {})
 },
-(case-id: Str, comment: Str, options: RequestOptions): Map {
+(case-id: Str, comment: Str, options: Map): Map {
   ::api/send("POST", `/cases/${seg(case-id)}/add-comment`, {}, ::api/meta-document({message: comment}), options)
 }
 
@@ -145,8 +144,8 @@ meta {
 }
 fn
 (case-id: Str): Map {
-  redact-case(case-id, RequestOptions({}))
+  redact-case(case-id, {})
 },
-(case-id: Str, options: RequestOptions): Map {
+(case-id: Str, options: Map): Map {
   ::api/send("DELETE", `/cases/${seg(case-id)}`, {}, null, options)
 }

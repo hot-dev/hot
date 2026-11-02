@@ -179,6 +179,18 @@ fn (base-url: Str, dataset: Str, opts: Map): Str {
   `${base-url}/match/${::hot::uri/encode(dataset)}${match-query(opts)}`
 }
 
+match-headers
+meta {
+    doc: """The `/match` request headers (pure): `Authorization: ApiKey ...` only when there is a key, since a self-hosted yente may need none."""
+}
+fn (key: Str?): Map {
+  filter-vals({
+    Authorization: if(is-some(key), `ApiKey ${key}`, null),
+    Content-Type: "application/json",
+    Accept: "application/json"
+  }, is-some)
+}
+
 screen
 meta {
     doc: """
@@ -187,7 +199,8 @@ meta {
     `limit`, `algorithm`, `topics` (e.g. `["sanction"]`),
     `include-datasets`, plus credentials and settings: `api-key`,
     `base-url`, `dataset` (`"default"`, or `"sanctions"` for sanctions
-    only).
+    only). The hosted API needs a key. A per-call `base-url` only uses an
+    `api-key` from the same `opts`; without one, no key is sent.
 
     Sends the queried name, date of birth and country to OpenSanctions.
 
@@ -204,19 +217,20 @@ fn
 },
 (name: Str, opts: Map): ScreenResult {
   cfg ::cfg/resolve(opts)
-  key ::cfg/require-api-key(cfg)
   cond {
-    is-err(key) => { key }
+    is-err(cfg) => { cfg }
     => {
-      url match-url(cfg.base-url, cfg.dataset, opts)
-      response ::http/request("POST", url, {
-        Authorization: `ApiKey ${key}`,
-        Content-Type: "application/json",
-        Accept: "application/json"
-      }, to-json(match-body(name, opts)))
+      key ::cfg/require-api-key(cfg)
       cond {
-        is-err(response) => { response }
-        => { parse-response(response.body, name, {...opts, dataset: cfg.dataset}, cfg.base-url) }
+        is-err(key) => { key }
+        => {
+          url match-url(cfg.base-url, cfg.dataset, opts)
+          response ::http/request("POST", url, match-headers(key), to-json(match-body(name, opts)))
+          cond {
+            is-err(response) => { response }
+            => { parse-response(response.body, name, {...opts, dataset: cfg.dataset}, cfg.base-url) }
+          }
+        }
       }
     }
   }

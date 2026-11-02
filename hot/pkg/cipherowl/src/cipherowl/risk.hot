@@ -224,8 +224,7 @@ fn (body: Any): Map {
     score: ::api/number-or-null(get(b, "riskScore")),
     band: ::api/normalize-band(get(b, "riskBand")),
     band-label: get(b, "riskBand"),
-    // WORKAROUND(hot-bug-new): sort-by misorders mixed Int and Dec keys (65 sorts after 82.32), so compare as Dec.
-    breakdown: reverse(sort-by(items, (i) { add(i.contribution, 0.0) })),
+    breakdown: reverse(sort-by(items, (i) { i.contribution })),
     computed-at: get(b, "timestamp")
   }
 }

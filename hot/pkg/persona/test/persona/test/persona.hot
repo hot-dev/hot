@@ -10,6 +10,8 @@ meta ["test"]
 ::decisions ::persona::decisions
 
 RequestOptions ::persona::api/RequestOptions
+HttpError ::persona::api/HttpError
+HttpResponse ::hot::http/HttpResponse
 
 // ============================================================================
 // Headers
@@ -62,7 +64,7 @@ meta ["test"] fn () {
     r ::api/resolve-from({}, CTX)
     assert-eq("persona_sandbox_ctx", r.api-key)
     assert-eq("2025-10-27", r.persona-version)
-    assert-eq({api-key: "persona_sandbox_ctx", persona-version: "2026-09-29"}, ::api/resolve-from({}, {"persona.api.key": "persona_sandbox_ctx"}), "defaults")
+    assert-eq({api-key: "persona_sandbox_ctx", base-url: "https://api.withpersona.com/api/v1", persona-version: "2026-09-29"}, ::api/resolve-from({}, {"persona.api.key": "persona_sandbox_ctx"}), "defaults")
 }
 
 test-resolve-errors
@@ -83,10 +85,65 @@ meta ["test"] fn () {
     assert-eq("persona_sandbox_tenant_d", t.api-key)
 }
 
+test-blank-api-key-is-an-err-naming-the-key
+meta ["test"] fn () {
+    blank ::api/resolve-from({api-key: "  "}, CTX)
+    assert(is-err(blank), "a blank key never falls back to context")
+    assert(contains(err-value(blank), "api-key"), "the Err names the key")
+    assert(is-err(::api/resolve-from({api-key: ""}, CTX)), "empty")
+    assert(is-err(::api/resolve-from({api-key: null}, CTX)), "null")
+    assert(is-err(::api/resolve({api-key: ""})), "through resolve")
+    assert(is-err(::api/resolve(RequestOptions({api-key: ""}))), "through RequestOptions")
+    assert(is-ok(::api/resolve(RequestOptions({idempotency-key: "x", api-key: "k"}))), "a typed value still resolves")
+    assert-eq("persona_sandbox_ctx", ::api/resolve-from(untype(RequestOptions({})), CTX).api-key, "an unset typed field is not a blank key")
+}
+
+test-per-call-url-needs-a-per-call-key
+meta ["test"] fn () {
+    alone ::api/resolve-from({base-url: "https://proxy.example"}, CTX)
+    assert(is-err(alone), "the context key never goes to a per-call URL")
+    assert(contains(err-value(alone), "base-url"), "names base-url")
+    assert(contains(err-value(alone), "api-key"), "names api-key")
+    r ::api/resolve-from({base-url: "https://proxy.example/v1/", api-key: "tenant"}, CTX)
+    assert-eq("https://proxy.example/v1", r.base-url, "trailing slashes dropped")
+    assert-eq("tenant", r.api-key)
+    assert-eq(::persona/BASE_URL, ::api/resolve-from({}, CTX).base-url)
+    assert-eq(::persona/BASE_URL, ::api/resolve-from({base-url: "  "}, CTX).base-url, "a blank URL is no URL")
+}
+
+test-resolve-marks-and-returns-the-key-unchanged
+meta ["test"] fn () {
+    assert-eq("persona_sandbox_marked_key", ::api/resolve({api-key: "persona_sandbox_marked_key"}).api-key)
+    assert-eq("Bearer persona_sandbox_marked_key", ::api/build-headers("GET", ::api/resolve({api-key: "persona_sandbox_marked_key"}), false).Authorization)
+}
+
+test-without-request-options
+meta ["test"] fn () {
+    assert-eq({description: "d"}, ::api/without-request-options({description: "d", api-key: "k", base-url: "u", idempotency-key: "i", persona-version: "v", key-inflection: "camel"}))
+}
+
+test-option-map-also-carries-credentials
+meta ["test"] fn () {
+    out ::inquiries/get-inquiry("inq_1", {include: ["account"], api-key: ""})
+    assert(is-err(out), "the one options Map is read for credentials too")
+    assert(contains(err-value(out), "api-key"))
+    created ::inquiries/create-inquiry("itmpl_1", {reference-id: "u", api-key: ""})
+    assert(is-err(created), "creates too")
+    assert(not(in("api-key", keys(::inquiries/create-body("itmpl_1", {api-key: "k"}).data.attributes))), "credentials never go in the body")
+}
+
+test-hosted-flow-secrets-pass-through-unchanged
+meta ["test"] fn () {
+    doc {data: {id: "inq_1"}, meta: {session-token: "tok-session-abcdef", one-time-link: "https://inquiry.withpersona.com/verify?code=abc"}}
+    assert-eq(doc, ::inquiries/mark-hosted-flow-secrets(doc))
+    assert-eq("x", err-value(::inquiries/mark-hosted-flow-secrets(err("x"))), "an Err passes through")
+    assert-eq({data: {id: "inq_2"}}, ::inquiries/mark-hosted-flow-secrets({data: {id: "inq_2"}}), "no meta")
+}
+
 test-plain-map-options-on-typed-functions
 meta ["test"] fn () {
     out ::inquiries/simulate("inq_1", ["complete_inquiry"], {api-key: "persona_production_abc"})
-    assert(is-err(out), "a plain Map is accepted as options")
+    assert(contains(err-value(out), "persona_sandbox_"), "a plain Map reaches the sandbox check")
 }
 
 test-send-without-key-errs
@@ -272,11 +329,11 @@ meta ["test"] fn () {
 
 test-http-error
 meta ["test"] fn () {
-    e ::api/http-error({
+    e HttpError(HttpResponse({
       status: 422,
       headers: {request-id: "req_1", ratelimit-reset: "12"},
       body: {errors: [{title: "Unprocessable Entity", details: "data.attributes.inquiry-template-id is missing", source: {pointer: "/data/attributes/inquiry-template-id"}}]}
-    })
+    }))
     assert-eq(422, e.status)
     assert-eq("Unprocessable Entity", e.title)
     assert-eq("/data/attributes/inquiry-template-id", e.pointer)
@@ -287,7 +344,7 @@ meta ["test"] fn () {
 
 test-http-error-redacts-pii
 meta ["test"] fn () {
-    e ::api/http-error({
+    e HttpError(HttpResponse({
       status: 400,
       headers: {},
       body: {
@@ -295,7 +352,7 @@ meta ["test"] fn () {
         social-security-number: "123456789",
         attributes: {birthdate: "1990-01-31", name-first: "Jane"}
       }
-    })
+    }))
     assert(not(contains(e.message, "1990")), "no birth date in message")
     assert(not(contains(e.message, "6789")), "no SSN in message")
     assert(not(contains(e.message, "jane@example.com")), "no email in message")
@@ -307,13 +364,13 @@ meta ["test"] fn () {
 
 test-http-error-non-json
 meta ["test"] fn () {
-    e ::api/http-error({status: 502, headers: {retry-after: "30"}, body: "Bad Gateway"})
+    e HttpError(HttpResponse({status: 502, headers: {retry-after: "30"}, body: "Bad Gateway"}))
     assert-eq("persona: HTTP 502: Bad Gateway", e.message)
     assert-eq(30, e.retry-after)
     assert-eq([], e.errors)
     assert(::api/is-retryable(e), "502 is retryable")
-    assert(not(::api/is-retryable(::api/http-error({status: 404, headers: {}, body: {}}))), "404 is not")
-    assert(::api/is-not-found(err(::api/http-error({status: 404, headers: {}, body: {}}))), "404 through an Err")
+    assert(not(::api/is-retryable(HttpError(HttpResponse({status: 404, headers: {}, body: {}})))), "404 is not")
+    assert(::api/is-not-found(err(HttpError(HttpResponse({status: 404, headers: {}, body: {}})))), "404 through an Err")
 }
 
 test-redact-text

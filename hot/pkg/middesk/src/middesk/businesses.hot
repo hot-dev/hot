@@ -13,7 +13,6 @@ meta {
 }
 
 ::api ::middesk::api
-RequestOptions ::middesk::api/RequestOptions
 
 seg ::middesk::api/seg
 
@@ -71,9 +70,9 @@ meta {
 }
 fn
 (params: Map): Map {
-  create-business(params, RequestOptions({}))
+  create-business(params, {})
 },
-(params: Map, options: RequestOptions): Map {
+(params: Map, options: Map): Map {
   body validate-create(params)
   if(is-err(body), body, ::api/send("POST", "/businesses", {}, body, options))
 }
@@ -84,9 +83,9 @@ meta {
 }
 fn
 (name: Str, tin: Str, address: Map): Map {
-  verify-tin(name, tin, address, RequestOptions({}))
+  verify-tin(name, tin, address, {})
 },
-(name: Str, tin: Str, address: Map, options: RequestOptions): Map {
+(name: Str, tin: Str, address: Map, options: Map): Map {
   digits replace(trim(tin), "-", "")
   create-business({name: name, tin: {tin: digits}, addresses: [address], orders: [{product: "tin"}]}, options)
 }
@@ -104,9 +103,9 @@ meta {
 }
 fn
 (business-id: Str): Map {
-  get-business(business-id, RequestOptions({}))
+  get-business(business-id, {})
 },
-(business-id: Str, options: RequestOptions): Map {
+(business-id: Str, options: Map): Map {
   ::api/send("GET", `/businesses/${seg(business-id)}`, {}, null, options)
 }
 
@@ -128,9 +127,9 @@ meta {
 }
 fn
 (params: Map): Map {
-  list-businesses(params, RequestOptions({}))
+  list-businesses(params, {})
 },
-(params: Map, options: RequestOptions): Map {
+(params: Map, options: Map): Map {
   ::api/list-page("/businesses", params, options)
 }
 
@@ -140,9 +139,9 @@ meta {
 }
 fn
 (params: Map, limit: Int): Vec {
-  ::api/collect("/businesses", params, limit, RequestOptions({}))
+  ::api/collect("/businesses", params, limit, {})
 },
-(params: Map, limit: Int, options: RequestOptions): Vec {
+(params: Map, limit: Int, options: Map): Vec {
   ::api/collect("/businesses", params, limit, options)
 }
 
@@ -152,9 +151,9 @@ meta {
 }
 fn
 (external-id: Str): Map? {
-  find-by-external-id(external-id, RequestOptions({}))
+  find-by-external-id(external-id, {})
 },
-(external-id: Str, options: RequestOptions): Map? {
+(external-id: Str, options: Map): Map? {
   page list-businesses({external_id: external-id, per_page: 1}, options)
   cond {
     is-err(page) => { page }
@@ -171,9 +170,9 @@ meta {
 }
 fn
 (business-id: Str, params: Map): Map {
-  update-business(business-id, params, RequestOptions({}))
+  update-business(business-id, params, {})
 },
-(business-id: Str, params: Map, options: RequestOptions): Map {
+(business-id: Str, params: Map, options: Map): Map {
   ::api/send("PATCH", `/businesses/${seg(business-id)}`, {}, ::api/compact(untype(params)), options)
 }
 
@@ -195,9 +194,9 @@ meta {
 }
 fn
 (business-id: Str, status: Str): Map {
-  set-status(business-id, status, RequestOptions({}))
+  set-status(business-id, status, {})
 },
-(business-id: Str, status: Str, options: RequestOptions): Map {
+(business-id: Str, status: Str, options: Map): Map {
   cond {
     not(in(status, SETTABLE_STATUSES)) => { err(`middesk: status must be approved, rejected or in_review (got '${status}'); nothing was sent`) }
     => { update-business(business-id, {status: status}, options) }
@@ -210,9 +209,9 @@ meta {
 }
 fn
 (business-id: Str): Map {
-  get-review(business-id, RequestOptions({}))
+  get-review(business-id, {})
 },
-(business-id: Str, options: RequestOptions): Map {
+(business-id: Str, options: Map): Map {
   ::api/send("GET", `/businesses/${seg(business-id)}/review`, {}, null, options)
 }
 
@@ -222,9 +221,9 @@ meta {
 }
 fn
 (business-id: Str): Map {
-  get-policy-results(business-id, RequestOptions({}))
+  get-policy-results(business-id, {})
 },
-(business-id: Str, options: RequestOptions): Map {
+(business-id: Str, options: Map): Map {
   ::api/send("GET", `/businesses/${seg(business-id)}/policy_results`, {}, null, options)
 }
 
@@ -234,9 +233,9 @@ meta {
 }
 fn
 (business-id: Str, params: Map): Map {
-  get-timeline(business-id, params, RequestOptions({}))
+  get-timeline(business-id, params, {})
 },
-(business-id: Str, params: Map, options: RequestOptions): Map {
+(business-id: Str, params: Map, options: Map): Map {
   ::api/send("GET", `/businesses/${seg(business-id)}/timeline`, params, null, options)
 }
 
@@ -246,9 +245,9 @@ meta {
 }
 fn
 (business-id: Str): Map {
-  get-latest-risk-assessment(business-id, RequestOptions({}))
+  get-latest-risk-assessment(business-id, {})
 },
-(business-id: Str, options: RequestOptions): Map {
+(business-id: Str, options: Map): Map {
   ::api/send("GET", `/businesses/${seg(business-id)}/risk_assessments/latest`, {}, null, options)
 }
 
@@ -258,9 +257,9 @@ meta {
 }
 fn
 (business-id: Str): Bytes {
-  get-pdf(business-id, RequestOptions({}))
+  get-pdf(business-id, {})
 },
-(business-id: Str, options: RequestOptions): Bytes {
+(business-id: Str, options: Map): Bytes {
   ::api/get-bytes(`/businesses/${seg(business-id)}/pdf`, options)
 }
 

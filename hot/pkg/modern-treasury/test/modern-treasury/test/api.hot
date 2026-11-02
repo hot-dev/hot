@@ -100,6 +100,34 @@ meta ["test"] fn () {
     assert-eq("sandbox", ::api/environment-of({environment: "Sandbox"}))
 }
 
+test-resolve-blank-credential-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"modern-treasury.organization.id": "org_123", "modern-treasury.api.key": "key_abc"})
+    empty ::api/resolve({organization-id: "org_b", api-key: ""})
+    spaces ::api/resolve({organization-id: "org_b", api-key: "  "})
+    nothing ::api/resolve({api-key: null})
+    blank-org ::api/resolve({organization-id: "", api-key: "key_b"})
+    org-only ::api/resolve({organization-id: "org_b"})
+    ::hot::ctx/set({"modern-treasury.organization.id": "", "modern-treasury.api.key": ""})
+    assert(is-err(empty), "a blank key never falls back to context")
+    assert(contains(err-message(empty), "api-key"), "and the error names the key")
+    assert(is-err(spaces))
+    assert(is-err(nothing), "a null key is blank too")
+    assert(contains(err-message(nothing), "api-key"))
+    assert(is-err(blank-org))
+    assert(contains(err-message(blank-org), "organization-id"))
+    assert(is-err(org-only), "an organization-id in opts never pairs with the context key")
+    assert(contains(err-message(org-only), "api-key"))
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    settings ::api/resolve({organization-id: "org_b", api-key: "key_b"})
+    assert-eq("org_b", settings.organization-id, "marking a credential doesn't change it")
+    assert-eq("key_b", settings.api-key)
+    assert-eq("Basic b3JnX2I6a2V5X2I=", settings.authorization)
+}
+
 // ============================================================================
 // Idempotency and fields
 // ============================================================================
@@ -186,7 +214,7 @@ meta ["test"] fn () {
 
 test-http-error
 meta ["test"] fn () {
-    e ::api/http-error(HttpResponse({
+    e ::api/HttpError(HttpResponse({
         status: 422,
         headers: {content-type: "application/json"},
         body: {errors: {code: "parameter_invalid", message: "Amount must be greater than 0", parameter: "amount"}}
@@ -203,7 +231,7 @@ meta ["test"] fn () {
 
 test-http-error-redacts
 meta ["test"] fn () {
-    e ::api/http-error(HttpResponse({
+    e ::api/HttpError(HttpResponse({
         status: 422,
         headers: {},
         body: "{\"errors\":{\"code\":\"parameter_invalid\",\"message\":\"Account number 123456789012 is invalid\",\"parameter\":\"account_number\"},\"account_number\":\"123456789012\"}"
@@ -216,11 +244,11 @@ meta ["test"] fn () {
 
 test-http-error-rate-limit-and-plain-text
 meta ["test"] fn () {
-    limited ::api/http-error(HttpResponse({status: 429, headers: {Retry-After: "2"}, body: {errors: {code: "too_many_requests", message: "Too many requests"}}}))
+    limited ::api/HttpError(HttpResponse({status: 429, headers: {Retry-After: "2"}, body: {errors: {code: "too_many_requests", message: "Too many requests"}}}))
     assert-eq(2, limited.retry_after, "Retry-After is read case-insensitively")
     assert-eq("modern-treasury: HTTP 429 too_many_requests: Too many requests", limited.message)
 
-    gateway ::api/http-error(HttpResponse({status: 503, headers: {}, body: "Service Unavailable"}))
+    gateway ::api/HttpError(HttpResponse({status: 503, headers: {}, body: "Service Unavailable"}))
     assert-eq("modern-treasury: HTTP 503: Service Unavailable", gateway.message)
     assert(is-null(gateway.code))
 }

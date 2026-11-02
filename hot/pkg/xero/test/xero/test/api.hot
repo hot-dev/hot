@@ -2,6 +2,8 @@
 meta ["test"]
 
 ::api ::xero::api
+
+HttpResponse ::hot::http/HttpResponse
 ::acc ::xero::accounting
 ::w ::xero::where
 
@@ -89,7 +91,7 @@ meta ["test"] fn () {
 
 test-validation-error
 meta ["test"] fn () {
-    e ::api/http-error({status: 400, headers: {xero-correlation-id: "corr-1"}, body: VALIDATION})
+    e ::api/HttpError(HttpResponse({status: 400, headers: {xero-correlation-id: "corr-1"}, body: VALIDATION}))
     assert-eq("xero: HTTP 400 ValidationException: A validation exception occurred: Email address must be valid.; Account code '999' is not a valid code.", e.message)
     assert-eq(["Email address must be valid.", "Account code '999' is not a valid code."], e.validation-errors, "messages are de-duplicated")
     assert-eq(10, e.error-number)
@@ -98,39 +100,31 @@ meta ["test"] fn () {
 
 test-other-errors
 meta ["test"] fn () {
-    limited ::api/http-error({status: 429, headers: {retry-after: "27", x-rate-limit-problem: "minute", x-minlimit-remaining: "0"}, body: ""})
+    limited ::api/HttpError(HttpResponse({status: 429, headers: {retry-after: "27", x-rate-limit-problem: "minute", x-minlimit-remaining: "0"}, body: ""}))
     assert-eq("xero: HTTP 429: rate limited (minute limit); retry after 27s", limited.message)
     assert-eq(27, limited.retry-after)
     assert-eq("minute", limited.rate-limits.problem)
     assert(::api/is-retryable(err(limited)))
 
-    unauthorized ::api/http-error({status: 401, headers: {}, body: "{\"Type\":null,\"Title\":\"Unauthorized\",\"Status\":401,\"Detail\":\"AuthenticationUnsuccessful\"}"})
+    unauthorized ::api/HttpError(HttpResponse({status: 401, headers: {}, body: "{\"Type\":null,\"Title\":\"Unauthorized\",\"Status\":401,\"Detail\":\"AuthenticationUnsuccessful\"}"}))
     assert-eq("xero: HTTP 401 Unauthorized: AuthenticationUnsuccessful", unauthorized.message, "problem+json bodies parse")
     assert(not(::api/is-retryable(unauthorized)))
 
-    query ::api/http-error({status: 400, headers: {}, body: {ErrorNumber: 16, Type: "QueryParseException", Message: "No property or field 'Foo' exists"}})
+    query ::api/HttpError(HttpResponse({status: 400, headers: {}, body: {ErrorNumber: 16, Type: "QueryParseException", Message: "No property or field 'Foo' exists"}}))
     assert-eq("xero: HTTP 400 QueryParseException: No property or field 'Foo' exists", query.message)
 
-    text ::api/http-error({status: 404, headers: {}, body: "The resource you're looking for cannot be found"})
+    text ::api/HttpError(HttpResponse({status: 404, headers: {}, body: "The resource you're looking for cannot be found"}))
     assert-eq("xero: HTTP 404: The resource you're looking for cannot be found", text.message)
-    assert(::api/is-retryable(::api/http-error({status: 503, headers: {}, body: ""})))
+    assert(::api/is-retryable(::api/HttpError(HttpResponse({status: 503, headers: {}, body: ""}))))
     assert(::api/is-retryable(err("http request failed: connection reset")))
 }
 
 test-unwrap
 meta ["test"] fn () {
-    assert-eq({Invoices: []}, ::api/unwrap({status: 200, headers: {}, body: {Invoices: []}}))
-    assert(is-null(::api/unwrap({status: 204, headers: {}, body: ""})), "204 is null")
-    assert-eq({not-modified: true}, ::api/unwrap({status: 304, headers: {}, body: ""}))
-    assert(is-err(::api/unwrap({status: 400, headers: {}, body: VALIDATION})))
-}
-
-test-not-modified-workaround
-meta ["test"] fn () {
-    mapped ::api/not-modified(err("redirect missing valid Location"), true)
-    assert-eq(304, mapped.status)
-    assert(is-err(::api/not-modified(err("redirect missing valid Location"), false)), "only for conditional requests")
-    assert(is-err(::api/not-modified(err("connection refused"), true)), "other errors pass through")
+    assert-eq({Invoices: []}, ::api/unwrap(HttpResponse({status: 200, headers: {}, body: {Invoices: []}})))
+    assert(is-null(::api/unwrap(HttpResponse({status: 204, headers: {}, body: ""}))), "204 is null")
+    assert-eq({not-modified: true}, ::api/unwrap(HttpResponse({status: 304, headers: {}, body: ""})))
+    assert(is-err(::api/unwrap(HttpResponse({status: 400, headers: {}, body: VALIDATION}))))
 }
 
 test-parse-date
@@ -294,4 +288,38 @@ meta ["test"] fn () {
     assert(not(is-err(::api/resolve({access-token: "AT"}))), "no tenant is allowed (Custom Connections)")
     assert(is-null(::api/last-rate-limits({tenant-id: TENANT})), "no rate limits before any call")
     assert-eq("xero.rate-limits.default", ::api/rate-limits-key(null))
+}
+
+// ---------------------------------------------------------------------------
+// Per-call credentials
+// ---------------------------------------------------------------------------
+
+test-resolve-blank-option-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"xero.access.token": "CTX-AT", "xero.tenant.id": TENANT})
+    results map(["access-token", "refresh-token", "client-id", "client-secret", "token-store", "token-store-key", "tenant-id"], (name) {
+        {
+            name: name,
+            empty: ::api/resolve(assoc({}, name, "")),
+            spaces: ::api/resolve(assoc({}, name, "   ")),
+            nothing: ::api/resolve(assoc({}, name, null))
+        }
+    })
+    ::hot::ctx/set({"xero.access.token": "", "xero.tenant.id": ""})
+    for-each(results, (r) {
+        assert(is-err(r.empty), `blank ${r.name} never falls back to context`)
+        assert(contains(err-message(r.empty), r.name), err-message(r.empty))
+        assert(is-err(r.spaces), `whitespace ${r.name}`)
+        assert(is-err(r.nothing), `null ${r.name}`)
+        assert(contains(err-message(r.nothing), r.name), err-message(r.nothing))
+    })
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    token ::api/resolve({access-token: "USER-AT-VALUE"})
+    assert-eq("USER-AT-VALUE", token.credentials.token, "marking a credential doesn't change it")
+    refresh ::api/resolve({refresh-token: "USER-RT-VALUE", client-id: "id", client-secret: "SECRET-VALUE"})
+    assert-eq("USER-RT-VALUE", refresh.credentials.refresh-token)
+    assert-eq("SECRET-VALUE", refresh.credentials.client-secret)
 }

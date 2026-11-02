@@ -31,6 +31,18 @@ Each setting comes from per-call `opts` first, then the Context Variable, then t
 | `company-registry.gleif.base-url` | `gleif-base-url` | `https://api.gleif.org/api/v1` | GLEIF API root |
 | `company-registry.sources` | `sources` | GLEIF, plus every source whose credential is set | Default sources for `lookup` (a Vec or a comma list) |
 
+## Per-call credentials
+
+Every API function takes a trailing `opts` Map, so one run can serve many tenants.
+
+```hot
+tenant {api-key: "tenant-ch-key", user-agent: "Tenant Co ops@tenant.example"}
+::company-registry::companies-house/company("00445790", tenant)
+::company-registry::sec/submissions(320193, tenant)
+```
+
+`api-key` and `user-agent` from `opts` are masked in call records and never written to ctx. Present but blank or null, either one is an error naming the key, never a fallback to the Context Variable. A per-call `companies-house-base-url` or `document-base-url` needs an `api-key` in the same `opts`: the context key is never sent to a per-call URL. GLEIF takes no credential, so `gleif-base-url` needs none.
+
 ## Quick start
 
 ```hot

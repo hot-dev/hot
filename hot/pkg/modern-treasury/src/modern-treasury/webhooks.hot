@@ -29,7 +29,7 @@ meta {
     doc: """The `X-Signature` value Modern Treasury would send for `body`: lowercase hex HMAC-SHA256 under `key`. Use it to build test deliveries."""
 }
 fn (key: Str, body: Str | Bytes): Str {
-  ::hmac/hmac-sha256(key, body)
+  ::hmac/hmac-sha256(::ctx/mark-secret(key), body)
 }
 
 verify-signature
@@ -37,6 +37,7 @@ meta {
     doc: """True when `signature` (hex) is the HMAC-SHA256 of `body` under `key`, compared in constant time. An empty key or signature never verifies. Pass the raw body, never a re-serialized one."""
 }
 fn (body: Str | Bytes, signature: Str, key: Str): Bool {
+  ::ctx/mark-secret(key)
   cond {
     // An empty key would make every signature forgeable: fail closed.
     is-empty(key) => { false }

@@ -129,7 +129,7 @@ meta {
 fn (response: Any): Any {
   cond {
     is-err(response) => { response }
-    not(::hot::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+    not(::hot::http/is-ok-response(response)) => { err(::api/HttpError(response)) }
     => {
       content-type or(::api/header(response.headers, "content-type"), "")
       cond {

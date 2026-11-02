@@ -4,6 +4,8 @@ meta ["test"]
 ::api ::cipherowl::api
 ::auth ::cipherowl::auth
 
+HttpError ::cipherowl::api/HttpError
+
 EVM "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704"
 
 // ============================================================================
@@ -65,6 +67,39 @@ test-resolve-missing
 meta ["test"] fn () {
     assert(is-err(::api/resolve({})), "no credentials anywhere")
     assert(is-err(::api/resolve({client-id: "only-id"})), "opts client-id without its secret")
+}
+
+test-resolve-blank-credential-is-an-err-naming-the-key
+meta ["test"] fn () {
+    ::hot::ctx/set({"cipherowl.client.id": "ctx-id", "cipherowl.client.secret": "ctx-secret"})
+    for-each(["access-token", "client-id", "client-secret"], (k) {
+      for-each(["", "  ", null], (v) {
+        out ::api/resolve(assoc({client-id: "tenant-id", client-secret: "tenant-secret"}, k, v))
+        assert(is-err(out), `blank ${k} never falls back to context`)
+        assert(contains(err-value(out), k), `the Err names ${k}`)
+      })
+    })
+    ::hot::ctx/set({"cipherowl.client.id": null, "cipherowl.client.secret": null})
+}
+
+test-resolve-per-call-url-needs-a-per-call-credential
+meta ["test"] fn () {
+    ::hot::ctx/set({"cipherowl.client.id": "ctx-id", "cipherowl.client.secret": "ctx-secret"})
+    alone ::api/resolve({base-url: "https://proxy.example"})
+    assert(is-err(alone), "context credentials never go to a per-call URL")
+    assert(contains(err-value(alone), "base-url"), "names base-url")
+    assert(contains(err-value(alone), "client-id"), "names the credential")
+    assert-eq("https://proxy.example", ::api/resolve({base-url: "https://proxy.example", client-id: "i", client-secret: "s"}).base-url)
+    assert-eq("https://svc.cipherowl.ai", ::api/resolve({}).base-url)
+    ::hot::ctx/set({"cipherowl.client.id": null, "cipherowl.client.secret": null})
+}
+
+test-resolve-marks-and-returns-credentials-unchanged
+meta ["test"] fn () {
+    r ::api/resolve({client-id: "marked-client-id", client-secret: "marked-client-secret"})
+    assert-eq("marked-client-id", r.client-id)
+    assert-eq("marked-client-secret", r.client-secret)
+    assert-eq("marked-access-token", ::api/resolve({access-token: "marked-access-token"}).access-token)
 }
 
 test-resolve-opts
@@ -208,7 +243,7 @@ meta ["test"] fn () {
 
 test-http-error
 meta ["test"] fn () {
-    e ::api/http-error(::hot::http/HttpResponse({status: 400, headers: {}, body: {message: `invalid address ${EVM} for chain evm`}}))
+    e HttpError(::hot::http/HttpResponse({status: 400, headers: {}, body: {message: `invalid address ${EVM} for chain evm`}}))
     assert-eq(400, e.status)
     assert(not(contains(e.message, EVM)), "no wallet data in the message")
     assert(contains(e.message, "HTTP 400"))
@@ -219,12 +254,12 @@ meta ["test"] fn () {
 
 test-http-error-gateway-and-429
 meta ["test"] fn () {
-    gw ::api/http-error(::hot::http/HttpResponse({status: 403, headers: {"content-type": "text/plain"}, body: "Forbidden\n"}))
+    gw HttpError(::hot::http/HttpResponse({status: 403, headers: {"content-type": "text/plain"}, body: "Forbidden\n"}))
     assert-eq("Forbidden", gw.detail, "plain-text gateway body")
-    limited ::api/http-error(::hot::http/HttpResponse({status: 429, headers: {"Retry-After": "12"}, body: ""}))
+    limited HttpError(::hot::http/HttpResponse({status: 429, headers: {"Retry-After": "12"}, body: ""}))
     assert-eq(12, limited.retry-after)
     assert-eq("cipherowl: request failed with HTTP 429: rate limited; retry after 12s", limited.message)
-    dated ::api/http-error(::hot::http/HttpResponse({status: 429, headers: {"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, body: ""}))
+    dated HttpError(::hot::http/HttpResponse({status: 429, headers: {"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, body: ""}))
     assert(is-null(dated.retry-after), "an HTTP-date Retry-After is not parsed (and never halts)")
 }
 

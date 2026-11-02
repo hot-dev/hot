@@ -16,15 +16,17 @@ hot.project.my-app.deps {
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `sumsub.app.token` | yes | An App Token from the dashboard (Dev space → App tokens). Sandbox tokens start `sbx:`, production tokens `prd:`; a token works only in the environment it was made in |
-| `sumsub.secret.key` | yes | The token's secret key, shown once when the token is created. It signs every request and is never sent |
+| `sumsub.app.token` | yes, unless passed in `opts` | An App Token from the dashboard (Dev space → App tokens). Sandbox tokens start `sbx:`, production tokens `prd:`; a token works only in the environment it was made in |
+| `sumsub.secret.key` | yes, unless passed in `opts` | The token's secret key, shown once when the token is created. It signs every request and is never sent |
 | `sumsub.level.name` | no | Default verification level for `create-applicant` when you pass null. Not secret |
 | `sumsub.base.url` | no | Overrides `https://api.sumsub.com` (sandbox and production share it). Not secret |
 | `sumsub.webhook.secret` | for webhooks | The webhook's own secret key from the Webhook manager. It is not the App Token secret |
 
 **Signing.** Each request carries `X-App-Token`, `X-App-Access-Ts` (Unix seconds) and `X-App-Access-Sig`. The signature is the lowercase hex HMAC-SHA256 of `ts + METHOD + path-with-query + body`, keyed with the secret key. The body is the exact bytes sent, so multipart uploads are signed byte for byte. Sumsub rejects a timestamp more than a minute from its clock (error 4004), so keep the host clock in sync. `::sumsub::api/sign` is the pure signing function.
 
-**Per-call credentials.** Every function that calls the API has a trailing `opts` arity. Pass `{app-token, secret-key}` to act for another tenant; context credentials are then ignored for that call. `opts` can also carry `base-url` and `level-name`. `::sumsub::api/resolve(opts)` is the one resolver: opts first, then context, then defaults. It never writes to context, so credentials can't leak between tenants or parallel flows.
+## Per-call credentials
+
+Every function that calls the API has a trailing `opts` arity. Pass `{app-token, secret-key}` to act for another tenant; context credentials are then ignored for that call. `opts` can also carry `level-name`, and `base-url`, which needs the pair in the same `opts`: context credentials are never sent to a per-call URL. A credential that is present but blank or null, or one of the pair without the other, is an error naming the key, never a fallback to context. `::sumsub::api/resolve(opts)` is the one resolver: opts first, then context, then defaults. Per-call credentials are masked in call records and never written to context, so they can't leak between tenants or parallel flows.
 
 ```hot
 tenant {app-token: "sbx:tenant-token", secret-key: "tenant-secret"}

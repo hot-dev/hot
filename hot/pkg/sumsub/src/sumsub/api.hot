@@ -1,8 +1,8 @@
 ::sumsub::api ns
 meta {
     ctx: {
-        "sumsub.app.token": {required: true},
-        "sumsub.secret.key": {required: true},
+        "sumsub.app.token": {required: false},
+        "sumsub.secret.key": {required: false},
         "sumsub.base.url": {required: false, secret: false},
         "sumsub.level.name": {required: false, secret: false}
     },
@@ -16,6 +16,15 @@ meta {
     (which can echo submitted values); they carry the status, Sumsub's
     numeric `errorCode`/`errorName` and the `correlationId` to quote to
     Sumsub support.
+
+    **Per-call credentials.** Every API-calling function has a trailing
+    `opts` Map, resolved by `resolve`: `opts` first, then context, then
+    defaults. Nothing from `opts` is written to context, so one run can
+    act for many tenants, and per-call credentials are masked in call
+    records. `app-token` and `secret-key` come as a pair; either one
+    present but blank or null is an error, never a fallback to context. A
+    per-call `base-url` needs the pair in the same `opts`: context
+    credentials are never sent to a per-call URL.
     """
 }
 
@@ -70,7 +79,6 @@ meta {
 fn (value: Any): Int? {
   cond {
     is-int(value) => { value }
-    // WORKAROUND(hot-bug-6): check the text is numeric before Int(), so a bad value can't halt the run.
     and(is-str(value), ::re/is-match(trim(Str(value)), "^-?[0-9]{1,15}$")) => { Int(trim(Str(value))) }
     => { null }
   }
@@ -115,9 +123,9 @@ fn (status: Int, error-code: Int?, error-name: Str?, correlation-id: Str?): Str 
   `sumsub: request failed with HTTP ${status}${code-part}${hint}${id-part}`
 }
 
-http-error
+HttpResponse -> HttpError
 meta {
-    doc: """Build an `HttpError` from a non-2xx response, lifting Sumsub's error fields out of the body. Exposed for testing; every request uses it."""
+    doc: """Build an `HttpError` from a non-2xx response, lifting Sumsub's error fields out of the body. Every request uses it."""
 }
 fn (response: HttpResponse): HttpError {
   body response.body
@@ -128,7 +136,6 @@ fn (response: HttpResponse): HttpError {
   cid body-field(body, "correlationId")
   correlation-id if(is-str(cid), cid, null)
   desc body-field(body, "description")
-  // WORKAROUND(hot-bug-1): built field by field in a function, never via the HttpResponse -> HttpError arrow.
   HttpError({
     status: response.status,
     headers: headers,
@@ -140,10 +147,6 @@ fn (response: HttpResponse): HttpError {
     correlation-id: correlation-id,
     retry-after: int-or-null(header(headers, "retry-after"))
   })
-}
-
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
-  http-error(response)
 }
 
 is-error-code
@@ -207,11 +210,13 @@ fn (app-token: Str, secret: Str, ts: Int, method: Str, path: Str, body: Any): Ma
   }
 }
 
+CREDENTIAL_KEYS ["app-token", "secret-key"]
+
 resolve
 meta {
     ctx: {
-        "sumsub.app.token": {required: true},
-        "sumsub.secret.key": {required: true},
+        "sumsub.app.token": {required: false},
+        "sumsub.secret.key": {required: false},
         "sumsub.base.url": {required: false, secret: false},
         "sumsub.level.name": {required: false, secret: false}
     },
@@ -220,12 +225,13 @@ meta {
     context, then defaults. Returns `{app-token, secret-key, base-url,
     level-name}`, or an Err naming what is missing.
 
-    `opts` keys: `app-token` and `secret-key` (when `opts` has an
-    `app-token`, context credentials are ignored for the call, so the
-    pair must come together), `base-url` (default `::sumsub/BASE_URL`)
-    and `level-name` (default `sumsub.level.name`). Nothing is written to
-    context, so per-call credentials never leak across parallel flows or
-    tenants.
+    `opts` keys: `app-token` and `secret-key` (a pair; context credentials
+    are then ignored for the call, and they are masked in call records),
+    `base-url` (default `::sumsub/BASE_URL`; needs the pair in the same
+    `opts`) and `level-name` (default `sumsub.level.name`). A credential
+    present but blank or null is an Err naming the key, never a fallback
+    to context. Nothing is written to context, so per-call credentials
+    never leak across parallel flows or tenants.
 
     **Example**
 
@@ -240,16 +246,31 @@ fn
   resolve({})
 },
 (opts: Map): Map {
-  o if(is-map(opts), opts, {})
   present (v) { and(is-str(v), not(is-empty(trim(or(v, ""))))) }
-  from-opts present(get(o, "app-token"))
-  app-token if(from-opts, get(o, "app-token"), or(::ctx/get("sumsub.app.token"), ""))
-  secret-key if(from-opts, or(get(o, "secret-key"), ""), or(::ctx/get("sumsub.secret.key"), ""))
-  base-url or(get(o, "base-url"), or(::ctx/get("sumsub.base.url"), ::sumsub/BASE_URL))
-  level-name or(get(o, "level-name"), ::ctx/get("sumsub.level.name"))
+  given (k) { present(get(opts, k)) }
+  blank find-first(CREDENTIAL_KEYS, (k) { and(in(k, keys(opts)), not(given(k))) })
+  if(given("app-token"), ::ctx/mark-secret(opts.app-token))
+  if(given("secret-key"), ::ctx/mark-secret(opts.secret-key))
+  from-opts and(given("app-token"), given("secret-key"))
+  app-token if(from-opts, opts.app-token, or(::ctx/get("sumsub.app.token"), ""))
+  secret-key if(from-opts, opts.secret-key, or(::ctx/get("sumsub.secret.key"), ""))
+  base-url or(get(opts, "base-url"), or(::ctx/get("sumsub.base.url"), ::sumsub/BASE_URL))
+  level-name or(get(opts, "level-name"), ::ctx/get("sumsub.level.name"))
   cond {
-    and(from-opts, not(present(secret-key))) => {
+    is-some(blank) => {
+      err(`Sumsub: ${blank} is in the call's opts but is blank or null. Pass a value, or leave it out to use the context credentials.`)
+    }
+
+    and(given("app-token"), not(from-opts)) => {
       err("Sumsub credentials are incomplete: opts.app-token was given without opts.secret-key.")
+    }
+
+    and(given("secret-key"), not(from-opts)) => {
+      err("Sumsub credentials are incomplete: opts.secret-key was given without opts.app-token.")
+    }
+
+    and(given("base-url"), not(from-opts)) => {
+      err("Sumsub: base-url is in the call's opts without app-token and secret-key. Pass them with it. Context credentials are never sent to a per-call URL.")
     }
 
     or(not(present(app-token)), not(present(secret-key))) => {
@@ -398,7 +419,7 @@ fn (response: HttpResponse): Any {
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response-body(response.body) }
-    => { err(http-error(response)) }
+    => { err(HttpError(response)) }
   }
 }
 

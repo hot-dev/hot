@@ -236,6 +236,50 @@ fn () {
     assert-eq(null, ::hot::ctx/get("sanctions.opensanctions.api-key"), "per-call keys are never written to ctx")
 }
 
+test-config-blank-api-key-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"sanctions.opensanctions.api-key": "ctx-key"})
+    for-each(["", "  ", null], (v) {
+      out ::cfg/resolve({api-key: v})
+      assert(is-err(out), "a blank key never falls back to context")
+      assert(contains(err-message(out), "api-key"), "names the key")
+    })
+    assert-eq("ctx-key", ::cfg/resolve({}).api-key)
+    ::hot::ctx/set({"sanctions.opensanctions.api-key": null})
+}
+
+test-config-blank-api-key-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::sanctions::opensanctions/screen("x", {api-key: ""})), "opensanctions")
+    assert(is-err(::sanctions::cache/status({api-key: ""})), "status")
+    assert(is-err(::sanctions::cache/meta-of("un", {api-key: ""})), "meta-of")
+    assert(is-err(::sanctions::cache/refresh-source("un", {api-key: ""})), "refresh-source")
+    assert(is-err(::sanctions::cache/open-sources({api-key: ""})), "open-sources")
+}
+
+test-config-context-key-never-goes-to-a-per-call-url
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"sanctions.opensanctions.api-key": "ctx-key"})
+    yente ::cfg/resolve({base-url: "https://yente.internal"})
+    assert-eq(null, yente.api-key, "the context key is not used")
+    assert-eq(null, ::cfg/require-api-key(yente), "a self-hosted yente may need no key")
+    assert(not(in("Authorization", keys(::sanctions::opensanctions/match-headers(null)))), "no key, no header")
+    assert-eq("ApiKey k", ::sanctions::opensanctions/match-headers("k").Authorization)
+    assert-eq("t", ::cfg/resolve({base-url: "https://yente.internal", api-key: "t"}).api-key)
+    hosted ::cfg/resolve({base-url: "https://api.opensanctions.org"})
+    assert(is-err(::cfg/require-api-key(hosted)), "the hosted API named per call still needs a per-call key")
+    ::hot::ctx/set({"sanctions.opensanctions.api-key": null})
+}
+
+test-config-marks-and-returns-the-key-unchanged
+meta ["test"]
+fn () {
+    assert-eq("marked-opensanctions-key", ::cfg/resolve({api-key: "marked-opensanctions-key"}).api-key)
+}
+
 test-config-missing-key-error
 meta ["test"]
 fn () {

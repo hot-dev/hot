@@ -9,6 +9,9 @@ meta {
     token_type: "Bearer"}` (24 hours by default). There is no refresh
     token: a new token is minted the same way.
 
+    **Masking.** A minted token is marked as a secret as soon as it comes
+    back, so it is masked in call records.
+
     **Token cache.** A minted token is stored in the run's execution
     context as a secret (so it is masked in run logs) and reused until 60
     seconds before it expires. The cache lives for one run. When the API
@@ -69,13 +72,17 @@ fn (status: Int, body: Any): Str {
 
 mint
 meta {
-    doc: """Mint a new access token (no cache). Returns the token response, or an Err."""
+    doc: """Mint a new access token (no cache). Returns the token response with the token masked in call records, or an Err."""
 }
 fn (client-id: Str, client-secret: Str, base-url: Str): Map {
   response ::hot::http/request(token-request(client-id, client-secret, base-url))
   cond {
     is-err(response) => { response }
-    and(is-ok-response(response), is-map(response.body), is-str(get(response.body, "access_token"))) => { response.body }
+    and(is-ok-response(response), is-map(response.body), is-str(get(response.body, "access_token"))) => {
+      ::ctx/mark-secret(response.body.access_token)
+      response.body
+    }
+
     is-ok-response(response) => { err("cipherowl: the token response had no access_token") }
     => { err(token-error(response.status, response.body)) }
   }

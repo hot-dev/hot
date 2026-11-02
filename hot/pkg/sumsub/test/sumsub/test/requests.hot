@@ -246,3 +246,10 @@ meta ["test"] fn () {
     assert(is-err(::kyb/add-beneficiary("co1", {types: []}, tenant)))
     assert(is-err(::kyt/review-transaction("t1", "YELLOW", tenant)))
 }
+
+test-mark-returned-passes-the-response-through
+meta ["test"] fn () {
+    assert-eq({token: "_act-token", userId: "u"}, ::sumsub::sdk/mark-returned({token: "_act-token", userId: "u"}, "token"))
+    assert-eq("x", err-value(::sumsub::sdk/mark-returned(err("x"), "token")), "an Err passes through")
+    assert-eq({userId: "u"}, ::sumsub::sdk/mark-returned({userId: "u"}, "token"), "nothing to mark")
+}
