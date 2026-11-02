@@ -1116,7 +1116,7 @@ pub fn concat(args: &[Val]) -> HotResult<Val> {
                     result.extend(bytes.iter());
                 }
             }
-            HotResult::Ok(Val::Bytes(result))
+            HotResult::Ok(Val::bytes(result))
         }
         "Vec" => {
             let mut result = Vec::new();
@@ -3330,9 +3330,9 @@ pub fn slice(args: &[Val]) -> HotResult<Val> {
 
             if start_idx <= end_idx {
                 let sliced = bytes[start_idx..end_idx].to_vec();
-                HotResult::Ok(Val::Bytes(sliced))
+                HotResult::Ok(Val::bytes(sliced))
             } else {
-                HotResult::Ok(Val::Bytes(Vec::new()))
+                HotResult::Ok(Val::bytes(Vec::new()))
             }
         }
         _ => HotResult::Err(Val::from(
@@ -4092,10 +4092,10 @@ mod tests {
     fn test_get_bytes_found() {
         let bytes = vec![65u8, 66, 67]; // ABC
 
-        let result = get(&[Val::Bytes(bytes.clone()), Val::Int(0)]);
+        let result = get(&[Val::bytes(bytes.clone()), Val::Int(0)]);
         assert_eq!(result, HotResult::Ok(Val::Int(65)));
 
-        let result = get(&[Val::Bytes(bytes), Val::Int(2)]);
+        let result = get(&[Val::bytes(bytes), Val::Int(2)]);
         assert_eq!(result, HotResult::Ok(Val::Int(67)));
     }
 
@@ -4103,7 +4103,7 @@ mod tests {
     fn test_get_bytes_out_of_bounds() {
         let bytes = vec![65u8, 66, 67];
 
-        let result = get(&[Val::Bytes(bytes), Val::Int(10)]);
+        let result = get(&[Val::bytes(bytes), Val::Int(10)]);
         assert_eq!(result, HotResult::Ok(Val::Null));
     }
 
@@ -4111,7 +4111,7 @@ mod tests {
     fn test_get_bytes_with_default() {
         let bytes = vec![65u8, 66, 67];
 
-        let result = get(&[Val::Bytes(bytes), Val::Int(10), Val::Int(-1)]);
+        let result = get(&[Val::bytes(bytes), Val::Int(10), Val::Int(-1)]);
         assert_eq!(result, HotResult::Ok(Val::Int(-1)));
     }
 

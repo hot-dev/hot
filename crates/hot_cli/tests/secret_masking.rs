@@ -399,7 +399,7 @@ fn native_output(
 
 fn native_bytes(result: hot::lang::hot::r#type::HotResult<hot::val::Val>) -> Vec<u8> {
     match result {
-        hot::lang::hot::r#type::HotResult::Ok(hot::val::Val::Bytes(bytes)) => bytes,
+        hot::lang::hot::r#type::HotResult::Ok(hot::val::Val::Bytes(bytes)) => bytes.to_vec(),
         hot::lang::hot::r#type::HotResult::Ok(hot::val::Val::Str(text)) => text.as_bytes().to_vec(),
         _ => panic!("the native should succeed"),
     }

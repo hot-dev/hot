@@ -356,7 +356,7 @@ pub fn peer_cert_hash(args: &[Val]) -> HotResult<Val> {
     match cert {
         Some(der) => {
             let digest = aws_lc_rs::digest::digest(algorithm, &der);
-            HotResult::Ok(Val::Bytes(digest.as_ref().to_vec()))
+            HotResult::Ok(Val::bytes(digest.as_ref().to_vec()))
         }
         None => HotResult::Err(err_val(format!(
             "{}: no peer certificate (connection has not been upgraded to TLS)",
@@ -498,9 +498,9 @@ bFnC3vIJb6vFzmYBofuCaGXWbIQ/HnZsZRgEOTBaN3XlJ5J3WUMER9wT\n\
             }
 
             // Echo through the TLS stream
-            unwrap_ok(tcp::write(&[tls_conn.clone(), Val::Bytes(vec![9, 8, 7])]));
+            unwrap_ok(tcp::write(&[tls_conn.clone(), Val::bytes(vec![9, 8, 7])]));
             let echoed = unwrap_ok(tcp::read_exact(&[tls_conn.clone(), Val::Int(3)]));
-            assert_eq!(echoed, Val::Bytes(vec![9, 8, 7]));
+            assert_eq!(echoed, Val::bytes(vec![9, 8, 7]));
 
             // peer-cert-hash matches sha256 of the certificate DER
             let expected: Vec<CertificateDer<'static>> =
@@ -510,7 +510,7 @@ bFnC3vIJb6vFzmYBofuCaGXWbIQ/HnZsZRgEOTBaN3XlJ5J3WUMER9wT\n\
             let expected_hash =
                 aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, expected[0].as_ref());
             let hash = unwrap_ok(peer_cert_hash(std::slice::from_ref(&tls_conn)));
-            assert_eq!(hash, Val::Bytes(expected_hash.as_ref().to_vec()));
+            assert_eq!(hash, Val::bytes(expected_hash.as_ref().to_vec()));
 
             // Double upgrade errors
             let err = expect_err(upgrade(std::slice::from_ref(&tls_conn)));
@@ -554,7 +554,7 @@ bFnC3vIJb6vFzmYBofuCaGXWbIQ/HnZsZRgEOTBaN3XlJ5J3WUMER9wT\n\
 
             unwrap_ok(tcp::write(&[tls_conn.clone(), Val::from("ping")]));
             let echoed = unwrap_ok(tcp::read_exact(&[tls_conn.clone(), Val::Int(4)]));
-            assert_eq!(echoed, Val::Bytes(b"ping".to_vec()));
+            assert_eq!(echoed, Val::bytes(b"ping".to_vec()));
 
             unwrap_ok(tcp::close(&[tls_conn]));
         })

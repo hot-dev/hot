@@ -60,7 +60,7 @@ pub(crate) fn str_internal(args: &[Val]) -> HotResult<Val> {
         Val::Vec(v) => HotResult::Ok(Val::from(format_vec_for_string(v))),
         Val::Bytes(bytes) => {
             // Convert bytes to UTF-8 string (lossy - replaces invalid UTF-8 with replacement char)
-            match String::from_utf8(bytes.clone()) {
+            match String::from_utf8(bytes.to_vec()) {
                 Ok(s) => HotResult::Ok(Val::from(s)),
                 Err(_) => {
                     // Fall back to lossy conversion if not valid UTF-8
@@ -519,11 +519,11 @@ pub fn bytes_constructor(args: &[Val]) -> HotResult<Val> {
                     }
                 }
             }
-            HotResult::Ok(Val::Bytes(bytes))
+            HotResult::Ok(Val::bytes(bytes))
         }
         Val::Str(s) => {
             // Convert string to UTF-8 bytes
-            HotResult::Ok(Val::Bytes(s.as_bytes().to_vec()))
+            HotResult::Ok(Val::bytes(s.as_bytes().to_vec()))
         }
         _ => HotResult::Err(Val::from(format!("Cannot convert {:?} to Bytes", args[0]))),
     }
@@ -1559,7 +1559,7 @@ mod constructor_tests {
         );
         // Bytes become ints
         assert_eq!(
-            vec_constructor(&[Val::Bytes(vec![7, 8])]),
+            vec_constructor(&[Val::bytes(vec![7, 8])]),
             HotResult::Ok(Val::vec(vec![Val::Int(7), Val::Int(8)]))
         );
         // Scalars wrap
@@ -1678,7 +1678,7 @@ mod constructor_tests {
             "[::app/handler]"
         );
         assert_eq!(
-            text(Val::vec(vec![Val::Byte(7), Val::Bytes(vec![1, 2])])),
+            text(Val::vec(vec![Val::Byte(7), Val::bytes(vec![1, 2])])),
             "[Byte(7), Bytes([1, 2])]"
         );
     }

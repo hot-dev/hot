@@ -18,7 +18,7 @@ const MAX_ITERATIONS: i64 = 100_000_000;
 fn get_bytes_from_arg(fn_name: &str, arg_name: &str, arg: &Val) -> Result<Vec<u8>, Val> {
     match arg {
         Val::Str(s) => Ok(s.as_bytes().to_vec()),
-        Val::Bytes(b) => Ok(b.clone()),
+        Val::Bytes(b) => Ok(b.to_vec()),
         _ => Err(Val::from(format!(
             "{}: {} must be Str or Bytes",
             fn_name, arg_name
@@ -98,7 +98,7 @@ pub fn pbkdf2_hmac_sha256(args: &[Val]) -> HotResult<Val> {
         &mut out,
     );
 
-    HotResult::Ok(Val::Bytes(out))
+    HotResult::Ok(Val::bytes(out))
 }
 
 /// Decode a PEM body: strip the BEGIN/END lines and base64-decode the rest.
@@ -175,7 +175,7 @@ pub fn rsa_sha256_sign(args: &[Val]) -> HotResult<Val> {
     let rng = SystemRandom::new();
     let mut signature = vec![0u8; key_pair.public_modulus_len()];
     match key_pair.sign(&RSA_PKCS1_SHA256, &rng, &message, &mut signature) {
-        Ok(()) => HotResult::Ok(Val::Bytes(signature)),
+        Ok(()) => HotResult::Ok(Val::bytes(signature)),
         Err(e) => HotResult::Err(Val::from(format!("{}: signing failed: {}", FN, e))),
     }
 }
@@ -276,7 +276,7 @@ mod tests {
         let result =
             pbkdf2_hmac_sha256(&[Val::from(password), Val::from(salt), Val::Int(iterations)]);
         match result {
-            HotResult::Ok(Val::Bytes(b)) => hex::encode(b),
+            HotResult::Ok(Val::Bytes(b)) => hex::encode(b.as_slice()),
             other => panic!("Expected bytes, got {:?}", other),
         }
     }
@@ -314,10 +314,10 @@ mod tests {
         let salt = base64::engine::general_purpose::STANDARD
             .decode("W22ZaJ0SNY7soEsUEjb6gQ==")
             .unwrap();
-        let result = pbkdf2_hmac_sha256(&[Val::from("pencil"), Val::Bytes(salt), Val::Int(4096)]);
+        let result = pbkdf2_hmac_sha256(&[Val::from("pencil"), Val::bytes(salt), Val::Int(4096)]);
         match result {
             HotResult::Ok(Val::Bytes(b)) => assert_eq!(
-                hex::encode(b),
+                hex::encode(b.as_slice()),
                 "c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d"
             ),
             other => panic!("Expected bytes, got {:?}", other),
@@ -409,7 +409,7 @@ QXhWy10d3WpWR4Z0MjiJ0/Pm+gRizor9Zqvdd6HVd4K4yWaB+M5J
 
     fn sign_with(pem: &str) -> Vec<u8> {
         match rsa_sha256_sign(&[Val::from(pem), Val::from(RSA_TEST_MESSAGE)]) {
-            HotResult::Ok(Val::Bytes(b)) => b,
+            HotResult::Ok(Val::Bytes(b)) => b.to_vec(),
             other => panic!("Expected signature bytes, got {:?}", other),
         }
     }
@@ -418,10 +418,10 @@ QXhWy10d3WpWR4Z0MjiJ0/Pm+gRizor9Zqvdd6HVd4K4yWaB+M5J
         let n = hex::decode(RSA_MODULUS_HEX.to_lowercase()).unwrap();
         let e = vec![0x01, 0x00, 0x01];
         match rsa_sha256_verify(&[
-            Val::Bytes(n),
-            Val::Bytes(e),
+            Val::bytes(n),
+            Val::bytes(e),
             Val::from(message),
-            Val::Bytes(signature),
+            Val::bytes(signature),
         ]) {
             HotResult::Ok(Val::Bool(ok)) => ok,
             other => panic!("Expected bool, got {:?}", other),
