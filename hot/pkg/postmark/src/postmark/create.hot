@@ -22,7 +22,11 @@ create-inbound-rule-trigger
 meta {
     doc: """Create a new inbound rule trigger. The rule specifies an email pattern to match for inbound processing."""
 }
-fn (request: CreateInboundRuleRequest): CreateInboundRuleResponse {
-  response api-request("POST", `${::postmark/BASE_URL}/triggers/inboundrules`, {}, request)
+fn
+(request: CreateInboundRuleRequest): CreateInboundRuleResponse {
+  create-inbound-rule-trigger(request, {})
+},
+(request: CreateInboundRuleRequest, opts: Map): CreateInboundRuleResponse {
+  response api-request("POST", `${::postmark/BASE_URL}/triggers/inboundrules`, {}, request, opts)
   if(is-ok-response(response), CreateInboundRuleResponse(response.body), err(HttpError(response)))
 }

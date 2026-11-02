@@ -7,7 +7,26 @@ meta {
     and request quirks. The ctx-reading functions (`ollama()`, `groq()`,
     `openrouter()`, ...) return an `::openai::compatible/CompatibleProvider`;
     `provider(...)` turns that into an `::ai::chat/ProviderRegistration`
-    for `::ai::chat/run-loop`, using OpenAI's chat-tools adapter.
+    for `::ai::chat/run-loop`, using OpenAI's chat-tools adapter. Each
+    registration's `variant` is `Provider.Compat({name})` (see
+    `::openai::compatible`), so every preset keeps its identity.
+
+    **Per-call credentials.** Every named preset takes an `opts` Map, resolved
+    by `resolve`: `opts` first, then the preset's ctx variables, then its
+    defaults.
+
+    - `api-key`: overrides the preset's key. Present but null or blank is an
+      Err, never a fallback to ctx.
+    - `base-url`: overrides the URL. On a hosted preset it needs `api-key` in
+      `opts` too: the ctx key is never sent to a per-call URL. On a server that
+      needs no key (Ollama, vLLM, LM Studio, `custom`) it sends none.
+    - `model-prefix`, `name`, `headers`, `max-tokens`, `extra-body`: as in
+      `configure`.
+
+    The functions in `::openai-compatible::chat`, `::models` and `::embeddings`
+    also take a trailing `opts` over a built provider, and so does the run
+    loop through `ChatOptions.provider-opts`. A key from `opts` is masked in
+    the run's call records, and nothing is written to ctx.
 
     **Example**
 
@@ -46,6 +65,9 @@ meta {
     - `model-prefix`: routing prefix for `::ai::chat` registries.
     - `key-ctx`: ctx variable the named preset function reads the key from
       (null for keyless servers).
+    - `key-required`: true when the service needs a key. Calls without one are
+      an Err naming `key-ctx`, and a per-call URL needs its own key.
+    - `base-url-ctx`: ctx variable that overrides `base-url` (null for none).
     - `key-env`: the provider's conventional env var, for your ctx file.
     - `max-tokens-param`: body field for the output ceiling
       (`max_tokens` or `max_completion_tokens`).
@@ -63,7 +85,9 @@ type {
     max-tokens-param: Str,
     stream-usage: Bool,
     capabilities: Vec<Str>,
-    docs-url: Str
+    docs-url: Str,
+    key-required: Bool?,
+    base-url-ctx: Str?
 }
 
 OLLAMA
@@ -73,6 +97,7 @@ meta {
 
 Preset({
     name: "Ollama",
+    base-url-ctx: "ollama.base.url",
     base-url: "http://localhost:11434/v1",
     model-prefix: "ollama/",
     key-ctx: "ollama.api.key",
@@ -90,6 +115,7 @@ meta {
 
 Preset({
     name: "vLLM",
+    base-url-ctx: "vllm.base.url",
     base-url: "http://localhost:8000/v1",
     model-prefix: "vllm/",
     key-ctx: "vllm.api.key",
@@ -104,6 +130,7 @@ LM_STUDIO
 meta {doc: "LM Studio's local server. Keyless."}
 Preset({
     name: "LM Studio",
+    base-url-ctx: "lm-studio.base.url",
     base-url: "http://localhost:1234/v1",
     model-prefix: "lmstudio/",
     key-ctx: null,
@@ -121,6 +148,7 @@ meta {
 
 Preset({
     name: "Groq",
+    key-required: true,
     base-url: "https://api.groq.com/openai/v1",
     model-prefix: "groq/",
     key-ctx: "groq.api.key",
@@ -138,6 +166,7 @@ meta {
 
 Preset({
     name: "OpenRouter",
+    key-required: true,
     base-url: "https://openrouter.ai/api/v1",
     model-prefix: "openrouter/",
     key-ctx: "openrouter.api.key",
@@ -155,6 +184,7 @@ meta {
 
 Preset({
     name: "DeepSeek",
+    key-required: true,
     base-url: "https://api.deepseek.com",
     model-prefix: "deepseek/",
     key-ctx: "deepseek.api.key",
@@ -172,6 +202,7 @@ meta {
 
 Preset({
     name: "Together AI",
+    key-required: true,
     base-url: "https://api.together.ai/v1",
     model-prefix: "together/",
     key-ctx: "together.api.key",
@@ -189,6 +220,7 @@ meta {
 
 Preset({
     name: "Fireworks AI",
+    key-required: true,
     base-url: "https://api.fireworks.ai/inference/v1",
     model-prefix: "fireworks/",
     key-ctx: "fireworks.api.key",
@@ -206,6 +238,7 @@ meta {
 
 Preset({
     name: "Mistral",
+    key-required: true,
     base-url: "https://api.mistral.ai/v1",
     model-prefix: "mistral/",
     key-ctx: "mistral.api.key",
@@ -223,6 +256,7 @@ meta {
 
 Preset({
     name: "Cerebras",
+    key-required: true,
     base-url: "https://api.cerebras.ai/v1",
     model-prefix: "cerebras/",
     key-ctx: "cerebras.api.key",
@@ -245,6 +279,7 @@ meta {
 
 Preset({
     name: "Perplexity",
+    key-required: true,
     base-url: "https://api.perplexity.ai",
     model-prefix: "perplexity/",
     key-ctx: "perplexity.api.key",
@@ -259,6 +294,28 @@ PRESETS
 meta {doc: "Every built-in preset."}
 [OLLAMA, VLLM, LM_STUDIO, GROQ, OPENROUTER, DEEPSEEK, TOGETHER, FIREWORKS, MISTRAL, CEREBRAS, PERPLEXITY]
 
+CUSTOM
+meta {
+    doc: """
+    Any other OpenAI-compatible server or private gateway. It has no default
+    URL: `openai-compatible.url`, or `base-url` in `opts`. Sends `max_tokens`
+    and no `stream_options`, the most widely accepted shape.
+    """
+}
+
+Preset({
+    name: "OpenAI-compatible",
+    base-url: "",
+    base-url-ctx: "openai-compatible.url",
+    model-prefix: "custom/",
+    key-ctx: "openai-compatible.api.key",
+    key-env: "OPENAI_COMPATIBLE_API_KEY",
+    max-tokens-param: "max_tokens",
+    stream-usage: false,
+    capabilities: ["tools", "streaming"],
+    docs-url: "https://platform.openai.com/docs/api-reference/chat"
+})
+
 // ============================================================================
 // Building providers
 // ============================================================================
@@ -271,7 +328,9 @@ meta {
 
     `overrides` may set `base-url`, `model-prefix`, `name`, `headers`,
     `max-tokens` (output ceiling, default 4096) and `extra-body`
-    (provider-specific request fields).
+    (provider-specific request fields). The key is masked in the run's call
+    records. A hosted preset with no key and no `base-url` override gives a
+    provider whose calls need `api-key` in their `opts`.
 
     **Example**
 
@@ -300,14 +359,106 @@ fn
         extra-body: get(overrides, "extra-body")
     })
     headers get(overrides, "headers")
-    ep ::api/endpoint(or(get(overrides, "base-url"), preset.base-url), api-key, if(is-empty(or(headers, {})), null, headers))
+    url-override ::api/non-blank(get(overrides, "base-url"))
+    ep ::api/endpoint(or(url-override, preset.base-url), api-key, if(is-empty(or(headers, {})), null, headers))
 
-    CompatibleProvider({
-        name: or(get(overrides, "name"), preset.name),
-        endpoint: ep,
-        model-prefix: or(get(overrides, "model-prefix"), preset.model-prefix),
-        options: options,
-        capabilities: preset.capabilities
+    cond {
+        is-err(ep) => { ep }
+        => {
+            CompatibleProvider({
+                name: or(get(overrides, "name"), preset.name),
+                endpoint: ep,
+                model-prefix: or(get(overrides, "model-prefix"), preset.model-prefix),
+                options: options,
+                capabilities: preset.capabilities,
+                key-name: if(and(eq(preset.key-required, true), is-null(url-override)), preset.key-ctx, null)
+            })
+        }
+    }
+}
+
+resolve-from
+meta {
+    doc: """
+    The resolver for named presets, pure: a provider for `preset` from `opts`
+    first, then `ctx-values` (`{key, base-url}`, the values of the preset's ctx
+    variables), then defaults. An Err when `api-key` in `opts` is blank (never
+    a fallback to ctx), when a hosted preset has a `base-url` in `opts` but no
+    `api-key` (the ctx key is never sent to a per-call URL), when that
+    `base-url` is not a plain http(s) URL, or when the preset has no URL at
+    all. On a server that needs no key, a per-call `base-url` sends none.
+    Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::openai-compatible/resolve-from(::openai-compatible/GROQ, {api-key: "k"}, {}).endpoint.api-key  // => "k"
+    ```
+    """
+}
+fn (preset: Preset, opts: Map, ctx-values: Map): CompatibleProvider {
+    has-own-key in("api-key", keys(opts))
+    own-key ::api/non-blank(get(opts, "api-key"))
+    per-call-url ::api/non-blank(get(opts, "base-url"))
+    url-without-key and(is-some(per-call-url), not(has-own-key))
+    url-override or(per-call-url, ::api/non-blank(get(ctx-values, "base-url")))
+    key cond {
+        has-own-key => { own-key }
+        is-some(per-call-url) => { null }
+        => { ::api/non-blank(get(ctx-values, "key")) }
+    }
+
+    cond {
+        and(has-own-key, is-null(own-key)) => {
+            err(`${preset.name}: api-key in the call's opts is blank. Pass the key, or leave api-key out to use ${or(preset.key-ctx, "no key")}.`)
+        }
+
+        and(url-without-key, eq(preset.key-required, true)) => {
+            err(`${preset.name}: base-url in the call's opts needs api-key in opts too. ${preset.key-ctx} is never sent to a per-call base URL.`)
+        }
+
+        and(is-some(per-call-url), is-null(::api/url-parts(trim(or(per-call-url, ""))))) => {
+            err(`${preset.name}: base-url in the call's opts is not a plain http(s) URL. Userinfo, backslashes and control characters are refused.`)
+        }
+
+        and(is-null(url-override), is-empty(preset.base-url)) => {
+            err(`${preset.name}: no base URL. Set ${preset.base-url-ctx} in Context Variables, or pass {base-url: ...} in the call's opts.`)
+        }
+
+        is-some(url-override) => { configure(preset, key, {...opts, base-url: url-override}) }
+        => { configure(preset, key, opts) }
+    }
+}
+
+ctx-value fn (key: Str?): Any {
+    cond {
+        is-null(key) => { null }
+        => { ::ctx/get(key) }
+    }
+}
+
+resolve
+meta {
+    doc: """
+    A provider for `preset` under one call's `opts`: `opts` over the preset's
+    ctx variables over its defaults (see `resolve-from`). With an `api-key` in
+    `opts`, the ctx key is not read. Nothing is written to ctx, and a key from
+    `opts` is masked in the run's call records.
+
+    **Example**
+
+    ```hot
+    tenant ::openai-compatible/resolve(::openai-compatible/GROQ, {api-key: "gsk_tenant"})
+    remote ::openai-compatible/resolve(::openai-compatible/OLLAMA, {base-url: "http://gpu-box.internal:11434/v1"})
+    ```
+    """
+}
+fn (preset: Preset, opts: Map): CompatibleProvider {
+    ::ctx/mark-secret(opts.api-key)
+    has-own-key in("api-key", keys(opts))
+    resolve-from(preset, opts, {
+        key: if(has-own-key, null, ctx-value(preset.key-ctx)),
+        base-url: ctx-value(preset.base-url-ctx)
     })
 }
 
@@ -345,6 +496,22 @@ fn (p: CompatibleProvider): Fn {
     ::compat/chat-stream-fn(p)
 }
 
+chat-opts-fn
+meta {
+    doc: "The `::ai::chat/run-loop` chat function bound to `p` that also takes `ChatOptions.provider-opts` (for `ChatOptions.chat-opts-fn`)."
+}
+fn (p: CompatibleProvider): Fn {
+    ::compat/chat-opts-fn(p)
+}
+
+chat-stream-opts-fn
+meta {
+    doc: "The `::ai::chat/run-loop-stream` chat function bound to `p` that also takes `ChatOptions.provider-opts` (for `ChatOptions.chat-stream-opts-fn`)."
+}
+fn (p: CompatibleProvider): Fn {
+    ::compat/chat-stream-opts-fn(p)
+}
+
 // ============================================================================
 // Named presets (read keys from ctx)
 // ============================================================================
@@ -361,8 +528,12 @@ meta {
         "ollama.api.key": {required: false}
     }
 }
-fn (): CompatibleProvider {
-    configure(OLLAMA, ::ctx/get("ollama.api.key"), {base-url: ::ctx/get("ollama.base.url", OLLAMA.base-url)})
+fn
+(): CompatibleProvider {
+    ollama({})
+},
+(opts: Map): CompatibleProvider {
+    resolve(OLLAMA, opts)
 }
 
 vllm
@@ -373,8 +544,12 @@ meta {
         "vllm.api.key": {required: false}
     }
 }
-fn (): CompatibleProvider {
-    configure(VLLM, ::ctx/get("vllm.api.key"), {base-url: ::ctx/get("vllm.base.url", VLLM.base-url)})
+fn
+(): CompatibleProvider {
+    vllm({})
+},
+(opts: Map): CompatibleProvider {
+    resolve(VLLM, opts)
 }
 
 lm-studio
@@ -382,17 +557,25 @@ meta {
     doc: """LM Studio server at `lm-studio.base.url` (default `http://localhost:1234/v1`). Keyless.""",
     ctx: {"lm-studio.base.url": {required: false, default: "http://localhost:1234/v1", secret: false}}
 }
-fn (): CompatibleProvider {
-    configure(LM_STUDIO, null, {base-url: ::ctx/get("lm-studio.base.url", LM_STUDIO.base-url)})
+fn
+(): CompatibleProvider {
+    lm-studio({})
+},
+(opts: Map): CompatibleProvider {
+    resolve(LM_STUDIO, opts)
 }
 
 groq
 meta {
     doc: "Groq with the `groq.api.key` ctx key.",
-    ctx: {"groq.api.key": {}}
+    ctx: {"groq.api.key": {required: false}}
 }
-fn (): CompatibleProvider {
-    configure(GROQ, ::ctx/get("groq.api.key"))
+fn
+(): CompatibleProvider {
+    groq({})
+},
+(opts: Map): CompatibleProvider {
+    resolve(GROQ, opts)
 }
 
 openrouter
@@ -403,14 +586,18 @@ meta {
     `HTTP-Referer` and `X-OpenRouter-Title` attribution headers.
     """,
     ctx: {
-        "openrouter.api.key": {},
+        "openrouter.api.key": {required: false},
         "openrouter.app.url": {required: false, secret: false},
         "openrouter.app.title": {required: false, secret: false}
     }
 }
-fn (): CompatibleProvider {
+fn
+(): CompatibleProvider {
+    openrouter({})
+},
+(opts: Map): CompatibleProvider {
     headers openrouter-headers(::ctx/get("openrouter.app.url"), ::ctx/get("openrouter.app.title"))
-    configure(OPENROUTER, ::ctx/get("openrouter.api.key"), {headers: headers})
+    resolve(OPENROUTER, {headers: headers, ...opts})
 }
 
 openrouter-headers
@@ -435,81 +622,98 @@ fn (app-url: Str?, app-title: Str?): Map {
 deepseek
 meta {
     doc: "DeepSeek with the `deepseek.api.key` ctx key.",
-    ctx: {"deepseek.api.key": {}}
+    ctx: {"deepseek.api.key": {required: false}}
 }
-fn (): CompatibleProvider {
-    configure(DEEPSEEK, ::ctx/get("deepseek.api.key"))
+fn
+(): CompatibleProvider {
+    deepseek({})
+},
+(opts: Map): CompatibleProvider {
+    resolve(DEEPSEEK, opts)
 }
 
 together
 meta {
     doc: "Together AI with the `together.api.key` ctx key.",
-    ctx: {"together.api.key": {}}
+    ctx: {"together.api.key": {required: false}}
 }
-fn (): CompatibleProvider {
-    configure(TOGETHER, ::ctx/get("together.api.key"))
+fn
+(): CompatibleProvider {
+    together({})
+},
+(opts: Map): CompatibleProvider {
+    resolve(TOGETHER, opts)
 }
 
 fireworks
 meta {
     doc: "Fireworks AI with the `fireworks.api.key` ctx key.",
-    ctx: {"fireworks.api.key": {}}
+    ctx: {"fireworks.api.key": {required: false}}
 }
-fn (): CompatibleProvider {
-    configure(FIREWORKS, ::ctx/get("fireworks.api.key"))
+fn
+(): CompatibleProvider {
+    fireworks({})
+},
+(opts: Map): CompatibleProvider {
+    resolve(FIREWORKS, opts)
 }
 
 mistral
 meta {
     doc: "Mistral with the `mistral.api.key` ctx key.",
-    ctx: {"mistral.api.key": {}}
+    ctx: {"mistral.api.key": {required: false}}
 }
-fn (): CompatibleProvider {
-    configure(MISTRAL, ::ctx/get("mistral.api.key"))
+fn
+(): CompatibleProvider {
+    mistral({})
+},
+(opts: Map): CompatibleProvider {
+    resolve(MISTRAL, opts)
 }
 
 cerebras
 meta {
     doc: "Cerebras with the `cerebras.api.key` ctx key.",
-    ctx: {"cerebras.api.key": {}}
+    ctx: {"cerebras.api.key": {required: false}}
 }
-fn (): CompatibleProvider {
-    configure(CEREBRAS, ::ctx/get("cerebras.api.key"))
+fn
+(): CompatibleProvider {
+    cerebras({})
+},
+(opts: Map): CompatibleProvider {
+    resolve(CEREBRAS, opts)
 }
 
 perplexity
 meta {
     doc: "Perplexity Sonar with the `perplexity.api.key` ctx key. No tool calling.",
-    ctx: {"perplexity.api.key": {}}
+    ctx: {"perplexity.api.key": {required: false}}
 }
-fn (): CompatibleProvider {
-    configure(PERPLEXITY, ::ctx/get("perplexity.api.key"))
+fn
+(): CompatibleProvider {
+    perplexity({})
+},
+(opts: Map): CompatibleProvider {
+    resolve(PERPLEXITY, opts)
 }
 
 custom
 meta {
     doc: """
-    Any other OpenAI-compatible server or private gateway:
-    `openai-compatible.url` (required) and optional
-    `openai-compatible.api.key`. Routing prefix `custom/`; sends
-    `max_tokens` and no `stream_options`, the most widely accepted shape.
+    Any other OpenAI-compatible server or private gateway (see `CUSTOM`):
+    `openai-compatible.url`, or `base-url` in `opts`, and an optional
+    `openai-compatible.api.key`. Routing prefix `custom/`. No URL at all is
+    an Err, so a key can't end up at a default.
     """,
     ctx: {
-        "openai-compatible.url": {secret: false},
+        "openai-compatible.url": {required: false, secret: false},
         "openai-compatible.api.key": {required: false}
     }
 }
-fn (): CompatibleProvider {
-    custom-preset ::openai-compatible/Preset({
-        name: "OpenAI-compatible",
-        base-url: ::ctx/get("openai-compatible.url"),
-        model-prefix: "custom/",
-        key-ctx: "openai-compatible.api.key",
-        key-env: "OPENAI_COMPATIBLE_API_KEY",
-        max-tokens-param: "max_tokens",
-        stream-usage: false,
-        capabilities: ["tools", "streaming"],
-        docs-url: "https://platform.openai.com/docs/api-reference/chat"
-    })
-    configure(custom-preset, ::ctx/get("openai-compatible.api.key"))
+fn
+(): CompatibleProvider {
+    custom({})
+},
+(opts: Map): CompatibleProvider {
+    resolve(CUSTOM, opts)
 }

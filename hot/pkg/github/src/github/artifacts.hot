@@ -19,10 +19,13 @@ fn
   ::api/json("GET", ::actions/actions-path(owner, repo, "/artifacts"))
 },
 (owner: Str, repo: Str, params: Map): Map {
+  list-artifacts(owner, repo, params, {})
+},
+(owner: Str, repo: Str, params: Map, opts: Map): Map {
   ::api/json(
     "GET",
     ::actions/actions-path(owner, repo, "/artifacts") |> ::actions/with-query(params)
-  )
+  , {}, "", opts)
 }
 
 list-workflow-run-artifacts
@@ -38,19 +41,26 @@ fn
   ::api/json("GET", `${::actions/run-path(owner, repo, run-id)}/artifacts`)
 },
 (owner: Str, repo: Str, run-id: Any, params: Map): Map {
+  list-workflow-run-artifacts(owner, repo, run-id, params, {})
+},
+(owner: Str, repo: Str, run-id: Any, params: Map, opts: Map): Map {
   ::api/json(
     "GET",
     `${::actions/run-path(owner, repo, run-id)}/artifacts`
     |> ::actions/with-query(params)
-  )
+  , {}, "", opts)
 }
 
 get-artifact
 meta {
     doc: """GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id} - Get artifact metadata."""
 }
-fn (owner: Str, repo: Str, artifact-id: Any): Map {
-  ::api/json("GET", artifact-path(owner, repo, artifact-id))
+fn
+(owner: Str, repo: Str, artifact-id: Any): Map {
+  get-artifact(owner, repo, artifact-id, {})
+},
+(owner: Str, repo: Str, artifact-id: Any, opts: Map): Map {
+  ::api/json("GET", artifact-path(owner, repo, artifact-id), {}, "", opts)
 }
 
 download-artifact
@@ -60,14 +70,22 @@ meta {
     Download an artifact ZIP archive as Bytes.
     """
 }
-fn (owner: Str, repo: Str, artifact-id: Any): Any {
-  ::api/download(`${artifact-path(owner, repo, artifact-id)}/zip`)
+fn
+(owner: Str, repo: Str, artifact-id: Any): Any {
+  download-artifact(owner, repo, artifact-id, {})
+},
+(owner: Str, repo: Str, artifact-id: Any, opts: Map): Any {
+  ::api/download(`${artifact-path(owner, repo, artifact-id)}/zip`, opts)
 }
 
 delete-artifact
 meta {
     doc: """DELETE /repos/{owner}/{repo}/actions/artifacts/{artifact_id} - Delete an artifact."""
 }
-fn (owner: Str, repo: Str, artifact-id: Any): Any {
-  ::api/json("DELETE", artifact-path(owner, repo, artifact-id))
+fn
+(owner: Str, repo: Str, artifact-id: Any): Any {
+  delete-artifact(owner, repo, artifact-id, {})
+},
+(owner: Str, repo: Str, artifact-id: Any, opts: Map): Any {
+  ::api/json("DELETE", artifact-path(owner, repo, artifact-id), {}, "", opts)
 }

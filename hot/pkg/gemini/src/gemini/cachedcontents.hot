@@ -1,6 +1,6 @@
 ::gemini::cachedcontents ns
 
-api-request ::gemini::api/request
+api-call ::gemini::api/call
 HttpError ::gemini::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -182,7 +182,10 @@ meta {
     """
 }
 fn (request: CachedContentsListRequest): CachedContentsListResponse {
-  response api-request("GET", `${::gemini/BASE_URL}/v1/cachedContents?pageSize=${request.page-size}&pageToken=${request.page-token}`)
+  list(request, {})
+},
+(request: CachedContentsListRequest, opts: Map): CachedContentsListResponse {
+  response api-call("GET", `/v1/cachedContents?pageSize=${request.page-size}&pageToken=${request.page-token}`, {}, "", opts)
   if(is-ok-response(response), CachedContentsListResponse(response.body), err(HttpError(response)))
 }
 
@@ -236,7 +239,10 @@ meta {
     """
 }
 fn (request: CachedContentsCreateRequest): CachedContentsCreateResponse {
-  response api-request("POST", `${::gemini/BASE_URL}/v1/cachedContents`, {}, request)
+  create(request, {})
+},
+(request: CachedContentsCreateRequest, opts: Map): CachedContentsCreateResponse {
+  response api-call("POST", `/v1/cachedContents`, {}, request, opts)
   if(is-ok-response(response), CachedContentsCreateResponse(response.body), err(HttpError(response)))
 }
 
@@ -279,7 +285,10 @@ meta {
     """
 }
 fn (request: CachedContentsGetRequest): CachedContentsGetResponse {
-  response api-request("GET", `${::gemini/BASE_URL}/v1/cachedContents/${request.name}`)
+  get(request, {})
+},
+(request: CachedContentsGetRequest, opts: Map): CachedContentsGetResponse {
+  response api-call("GET", `/v1/cachedContents/${request.name}`, {}, "", opts)
   if(is-ok-response(response), CachedContentsGetResponse(response.body), err(HttpError(response)))
 }
 
@@ -321,7 +330,10 @@ meta {
     """
 }
 fn (name: Str, update-mask: Str, request: CachedContentsUpdateRequest): CachedContentsUpdateResponse {
-  response api-request("PATCH", `${::gemini/BASE_URL}/v1/cachedContents/${name}?updateMask=${update-mask}`, {}, request)
+  update(name, update-mask, request, {})
+},
+(name: Str, update-mask: Str, request: CachedContentsUpdateRequest, opts: Map): CachedContentsUpdateResponse {
+  response api-call("PATCH", `/v1/cachedContents/${name}?updateMask=${update-mask}`, {}, request, opts)
   if(is-ok-response(response), CachedContentsUpdateResponse(response.body), err(HttpError(response)))
 }
 
@@ -349,6 +361,9 @@ meta {
     """
 }
 fn (request: CachedContentsDeleteRequest): CachedContentsDeleteResponse {
-  response api-request("DELETE", `${::gemini/BASE_URL}/v1/cachedContents/${request.name}`)
+  delete(request, {})
+},
+(request: CachedContentsDeleteRequest, opts: Map): CachedContentsDeleteResponse {
+  response api-call("DELETE", `/v1/cachedContents/${request.name}`, {}, "", opts)
   if(is-ok-response(response), CachedContentsDeleteResponse(response.body), err(HttpError(response)))
 }

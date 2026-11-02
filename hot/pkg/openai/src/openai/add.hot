@@ -31,7 +31,15 @@ add-upload-part
 meta {
     doc: """POST /uploads/{upload_id}/parts - Add a part to a multi-part upload. Returns the part ID to use when completing the upload."""
 }
-fn (upload-id: Str, request: AddUploadPartRequest): AddUploadPartResponse {
-  response api-request("POST", `${::openai::api/base-url()}/uploads/${upload-id}/parts`, {}, request)
-  if(is-ok-response(response), AddUploadPartResponse(response.body), err(HttpError(response)))
+fn
+(upload-id: Str, request: AddUploadPartRequest): AddUploadPartResponse {
+  add-upload-part(upload-id, request, {})
+},
+(upload-id: Str, request: AddUploadPartRequest, opts: Map): AddUploadPartResponse {
+  response api-request("POST", `/uploads/${upload-id}/parts`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AddUploadPartResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

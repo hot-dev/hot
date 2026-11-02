@@ -38,8 +38,12 @@ response.ok  // => true
 ```
 """
 }
-fn (request: ChatDeleteRequest): ChatDeleteResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/chat.delete`, {}, request)
+fn
+(request: ChatDeleteRequest): ChatDeleteResponse {
+  chat-delete(request, {})
+},
+(request: ChatDeleteRequest, opts: Map): ChatDeleteResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/chat.delete`, {}, request, opts)
   if(is-ok-response(response), ChatDeleteResponse(response.body), err(HttpError(response)))
 }
 
@@ -59,8 +63,12 @@ chat-delete-scheduled-message
 meta {
     doc: """POST /chat.deleteScheduledMessage - Delete a pending scheduled message before it is sent. Requires the `scheduled_message_id` from the original schedule response."""
 }
-fn (request: ChatDeleteScheduledMessageRequest): ChatDeleteScheduledMessageResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/chat.deleteScheduledMessage`, {}, request)
+fn
+(request: ChatDeleteScheduledMessageRequest): ChatDeleteScheduledMessageResponse {
+  chat-delete-scheduled-message(request, {})
+},
+(request: ChatDeleteScheduledMessageRequest, opts: Map): ChatDeleteScheduledMessageResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/chat.deleteScheduledMessage`, {}, request, opts)
   if(is-ok-response(response), ChatDeleteScheduledMessageResponse(response.body), err(HttpError(response)))
 }
 
@@ -93,8 +101,12 @@ response.permalink  // => "https://myteam.slack.com/archives/C1234567/p123456789
 ```
 """
 }
-fn (request: ChatGetPermalinkRequest): ChatGetPermalinkResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/chat.getPermalink?channel=${request.channel}&message_ts=${request.message_ts}`)
+fn
+(request: ChatGetPermalinkRequest): ChatGetPermalinkResponse {
+  chat-get-permalink(request, {})
+},
+(request: ChatGetPermalinkRequest, opts: Map): ChatGetPermalinkResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/chat.getPermalink?channel=${request.channel}&message_ts=${request.message_ts}`, {}, "", opts)
   if(is-ok-response(response), ChatGetPermalinkResponse(response.body), err(HttpError(response)))
 }
 
@@ -115,8 +127,12 @@ chat-me-message
 meta {
     doc: """POST /chat.meMessage - Send a /me message. These appear as italicized action text (e.g., "_user is typing..._")."""
 }
-fn (request: ChatMeMessageRequest): ChatMeMessageResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/chat.meMessage`, {}, request)
+fn
+(request: ChatMeMessageRequest): ChatMeMessageResponse {
+  chat-me-message(request, {})
+},
+(request: ChatMeMessageRequest, opts: Map): ChatMeMessageResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/chat.meMessage`, {}, request, opts)
   if(is-ok-response(response), ChatMeMessageResponse(response.body), err(HttpError(response)))
 }
 
@@ -141,8 +157,12 @@ chat-post-ephemeral
 meta {
     doc: """POST /chat.postEphemeral - Send an ephemeral message visible only to a specific user. The message disappears when the user navigates away. Requires both `channel` and `user` fields."""
 }
-fn (request: ChatPostEphemeralRequest): ChatPostEphemeralResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/chat.postEphemeral`, {}, request)
+fn
+(request: ChatPostEphemeralRequest): ChatPostEphemeralResponse {
+  chat-post-ephemeral(request, {})
+},
+(request: ChatPostEphemeralRequest, opts: Map): ChatPostEphemeralResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/chat.postEphemeral`, {}, request, opts)
   if(is-ok-response(response), ChatPostEphemeralResponse(response.body), err(HttpError(response)))
 }
 
@@ -185,8 +205,12 @@ response.ts       // => "1234567890.123456"
 ```
 """
 }
-fn (request: ChatPostMessageRequest): ChatPostMessageResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/chat.postMessage`, {}, request)
+fn
+(request: ChatPostMessageRequest): ChatPostMessageResponse {
+  chat-post-message(request, {})
+},
+(request: ChatPostMessageRequest, opts: Map): ChatPostMessageResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/chat.postMessage`, {}, request, opts)
   if(is-ok-response(response), ChatPostMessageResponse(response.body), err(HttpError(response)))
 }
 
@@ -217,8 +241,12 @@ chat-schedule-message
 meta {
     doc: """POST /chat.scheduleMessage - Schedule a message for later. The `post_at` field is a Unix timestamp for when the message should be sent. Returns a `scheduled_message_id` that can be used to cancel it."""
 }
-fn (request: ChatScheduleMessageRequest): ChatScheduleMessageResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/chat.scheduleMessage`, {}, request)
+fn
+(request: ChatScheduleMessageRequest): ChatScheduleMessageResponse {
+  chat-schedule-message(request, {})
+},
+(request: ChatScheduleMessageRequest, opts: Map): ChatScheduleMessageResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/chat.scheduleMessage`, {}, request, opts)
   if(is-ok-response(response), ChatScheduleMessageResponse(response.body), err(HttpError(response)))
 }
 
@@ -238,8 +266,12 @@ chat-unfurl
 meta {
     doc: """POST /chat.unfurl - Provide custom unfurl behavior for URLs. Pass a map of URL-to-attachment pairs in `unfurls` to control how links are previewed."""
 }
-fn (request: ChatUnfurlRequest): ChatUnfurlResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/chat.unfurl`, {}, request)
+fn
+(request: ChatUnfurlRequest): ChatUnfurlResponse {
+  chat-unfurl(request, {})
+},
+(request: ChatUnfurlRequest, opts: Map): ChatUnfurlResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/chat.unfurl`, {}, request, opts)
   if(is-ok-response(response), ChatUnfurlResponse(response.body), err(HttpError(response)))
 }
 
@@ -280,8 +312,12 @@ response.ts  // => "1234567890.123456"
 ```
 """
 }
-fn (request: ChatUpdateRequest): ChatUpdateResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/chat.update`, {}, request)
+fn
+(request: ChatUpdateRequest): ChatUpdateResponse {
+  chat-update(request, {})
+},
+(request: ChatUpdateRequest, opts: Map): ChatUpdateResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/chat.update`, {}, request, opts)
   if(is-ok-response(response), ChatUpdateResponse(response.body), err(HttpError(response)))
 }
 
@@ -305,8 +341,12 @@ chat-scheduled-messages-list
 meta {
     doc: """POST /chat.scheduledMessages.list - List pending scheduled messages. Optionally filter by channel and time range. Supports cursor-based pagination."""
 }
-fn (request: ChatScheduledMessagesListRequest): ChatScheduledMessagesListResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/chat.scheduledMessages.list`, {}, request)
+fn
+(request: ChatScheduledMessagesListRequest): ChatScheduledMessagesListResponse {
+  chat-scheduled-messages-list(request, {})
+},
+(request: ChatScheduledMessagesListRequest, opts: Map): ChatScheduledMessagesListResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/chat.scheduledMessages.list`, {}, request, opts)
   if(is-ok-response(response), ChatScheduledMessagesListResponse(response.body), err(HttpError(response)))
 }
 
@@ -342,8 +382,12 @@ POST /reactions.add - Add an emoji reaction to a message. Use the emoji name wit
 ```
 """
 }
-fn (request: ReactionsAddRequest): ReactionsAddResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/reactions.add`, {}, request)
+fn
+(request: ReactionsAddRequest): ReactionsAddResponse {
+  reactions-add(request, {})
+},
+(request: ReactionsAddRequest, opts: Map): ReactionsAddResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/reactions.add`, {}, request, opts)
   if(is-ok-response(response), ReactionsAddResponse(response.body), err(HttpError(response)))
 }
 
@@ -369,8 +413,12 @@ reactions-get
 meta {
     doc: """GET /reactions.get - Get reactions for an item. Specify the item by `channel` + `timestamp`, `file`, or `file_comment`. Set `full: true` to include the complete reaction list."""
 }
-fn (request: ReactionsGetRequest): ReactionsGetResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/reactions.get?channel=${or(request.channel, "")}&file=${or(request.file, "")}&file_comment=${or(request.file_comment, "")}&full=${or(request.full, "")}&timestamp=${or(request.timestamp, "")}`)
+fn
+(request: ReactionsGetRequest): ReactionsGetResponse {
+  reactions-get(request, {})
+},
+(request: ReactionsGetRequest, opts: Map): ReactionsGetResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/reactions.get?channel=${or(request.channel, "")}&file=${or(request.file, "")}&file_comment=${or(request.file_comment, "")}&full=${or(request.full, "")}&timestamp=${or(request.timestamp, "")}`, {}, "", opts)
   if(is-ok-response(response), ReactionsGetResponse(response.body), err(HttpError(response)))
 }
 
@@ -396,8 +444,12 @@ reactions-list
 meta {
     doc: """GET /reactions.list - List reactions made by a user. Returns items the user has reacted to. Supports cursor-based pagination."""
 }
-fn (request: ReactionsListRequest): ReactionsListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/reactions.list?user=${or(request.user, "")}&full=${or(request.full, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}&cursor=${or(request.cursor, "")}&limit=${or(request.limit, "")}`)
+fn
+(request: ReactionsListRequest): ReactionsListResponse {
+  reactions-list(request, {})
+},
+(request: ReactionsListRequest, opts: Map): ReactionsListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/reactions.list?user=${or(request.user, "")}&full=${or(request.full, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}&cursor=${or(request.cursor, "")}&limit=${or(request.limit, "")}`, {}, "", opts)
   if(is-ok-response(response), ReactionsListResponse(response.body), err(HttpError(response)))
 }
 
@@ -431,8 +483,12 @@ POST /reactions.remove - Remove an emoji reaction from a message. Specify the em
 ```
 """
 }
-fn (request: ReactionsRemoveRequest): ReactionsRemoveResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/reactions.remove`, {}, request)
+fn
+(request: ReactionsRemoveRequest): ReactionsRemoveResponse {
+  reactions-remove(request, {})
+},
+(request: ReactionsRemoveRequest, opts: Map): ReactionsRemoveResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/reactions.remove`, {}, request, opts)
   if(is-ok-response(response), ReactionsRemoveResponse(response.body), err(HttpError(response)))
 }
 
@@ -461,8 +517,12 @@ search-messages
 meta {
     doc: """GET /search.messages - Search for messages matching a query. Supports Slack search syntax (e.g., "from:@user in:#channel"). Sort by `score` or `timestamp`."""
 }
-fn (request: SearchMessagesRequest): SearchMessagesResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/search.messages?query=${request.query}&count=${or(request.count, "")}&highlight=${or(request.highlight, "")}&page=${or(request.page, "")}&sort=${or(request.sort, "")}&sort_dir=${or(request.sort_dir, "")}`)
+fn
+(request: SearchMessagesRequest): SearchMessagesResponse {
+  search-messages(request, {})
+},
+(request: SearchMessagesRequest, opts: Map): SearchMessagesResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/search.messages?query=${request.query}&count=${or(request.count, "")}&highlight=${or(request.highlight, "")}&page=${or(request.page, "")}&sort=${or(request.sort, "")}&sort_dir=${or(request.sort_dir, "")}`, {}, "", opts)
   if(is-ok-response(response), SearchMessagesResponse(response.body), err(HttpError(response)))
 }
 
@@ -487,8 +547,12 @@ reminders-add
 meta {
     doc: """POST /reminders.add - Create a reminder. The `time` can be a Unix timestamp or natural language (e.g., "in 15 minutes", "every Thursday"). Optionally set for another user."""
 }
-fn (request: RemindersAddRequest): RemindersAddResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/reminders.add`, {}, request)
+fn
+(request: RemindersAddRequest): RemindersAddResponse {
+  reminders-add(request, {})
+},
+(request: RemindersAddRequest, opts: Map): RemindersAddResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/reminders.add`, {}, request, opts)
   if(is-ok-response(response), RemindersAddResponse(response.body), err(HttpError(response)))
 }
 
@@ -506,8 +570,12 @@ reminders-complete
 meta {
     doc: """POST /reminders.complete - Mark a reminder as complete. Pass the `reminder` ID."""
 }
-fn (request: RemindersCompleteRequest): RemindersCompleteResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/reminders.complete`, {}, request)
+fn
+(request: RemindersCompleteRequest): RemindersCompleteResponse {
+  reminders-complete(request, {})
+},
+(request: RemindersCompleteRequest, opts: Map): RemindersCompleteResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/reminders.complete`, {}, request, opts)
   if(is-ok-response(response), RemindersCompleteResponse(response.body), err(HttpError(response)))
 }
 
@@ -525,8 +593,12 @@ reminders-delete
 meta {
     doc: """POST /reminders.delete - Delete a reminder permanently. Pass the `reminder` ID."""
 }
-fn (request: RemindersDeleteRequest): RemindersDeleteResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/reminders.delete`, {}, request)
+fn
+(request: RemindersDeleteRequest): RemindersDeleteResponse {
+  reminders-delete(request, {})
+},
+(request: RemindersDeleteRequest, opts: Map): RemindersDeleteResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/reminders.delete`, {}, request, opts)
   if(is-ok-response(response), RemindersDeleteResponse(response.body), err(HttpError(response)))
 }
 
@@ -545,8 +617,12 @@ reminders-info
 meta {
     doc: """GET /reminders.info - Get information about a reminder. Returns the reminder text, time, and completion status."""
 }
-fn (request: RemindersInfoRequest): RemindersInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/reminders.info?reminder=${request.reminder}`)
+fn
+(request: RemindersInfoRequest): RemindersInfoResponse {
+  reminders-info(request, {})
+},
+(request: RemindersInfoRequest, opts: Map): RemindersInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/reminders.info?reminder=${request.reminder}`, {}, "", opts)
   if(is-ok-response(response), RemindersInfoResponse(response.body), err(HttpError(response)))
 }
 
@@ -564,8 +640,12 @@ reminders-list
 meta {
     doc: """GET /reminders.list - List all reminders for the current user. Returns both pending and completed reminders."""
 }
-fn (request: RemindersListRequest): RemindersListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/reminders.list`)
+fn
+(request: RemindersListRequest): RemindersListResponse {
+  reminders-list(request, {})
+},
+(request: RemindersListRequest, opts: Map): RemindersListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/reminders.list`, {}, "", opts)
   if(is-ok-response(response), RemindersListResponse(response.body), err(HttpError(response)))
 }
 
@@ -599,8 +679,12 @@ POST /pins.add - Pin a message to a channel. Pinned messages appear in the chann
 ```
 """
 }
-fn (request: PinsAddRequest): PinsAddResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/pins.add`, {}, request)
+fn
+(request: PinsAddRequest): PinsAddResponse {
+  pins-add(request, {})
+},
+(request: PinsAddRequest, opts: Map): PinsAddResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/pins.add`, {}, request, opts)
   if(is-ok-response(response), PinsAddResponse(response.body), err(HttpError(response)))
 }
 
@@ -630,8 +714,12 @@ response.items  // => [{type: "message", message: {...}, ...}, ...]
 ```
 """
 }
-fn (request: PinsListRequest): PinsListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/pins.list?channel=${request.channel}`)
+fn
+(request: PinsListRequest): PinsListResponse {
+  pins-list(request, {})
+},
+(request: PinsListRequest, opts: Map): PinsListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/pins.list?channel=${request.channel}`, {}, "", opts)
   if(is-ok-response(response), PinsListResponse(response.body), err(HttpError(response)))
 }
 
@@ -661,8 +749,12 @@ POST /pins.remove - Unpin a message from a channel.
 ```
 """
 }
-fn (request: PinsRemoveRequest): PinsRemoveResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/pins.remove`, {}, request)
+fn
+(request: PinsRemoveRequest): PinsRemoveResponse {
+  pins-remove(request, {})
+},
+(request: PinsRemoveRequest, opts: Map): PinsRemoveResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/pins.remove`, {}, request, opts)
   if(is-ok-response(response), PinsRemoveResponse(response.body), err(HttpError(response)))
 }
 
@@ -687,8 +779,12 @@ stars-add
 meta {
     doc: """POST /stars.add - Star an item. Specify the item by `channel` + `timestamp`, `file`, or `file_comment`. This API is deprecated but still available."""
 }
-fn (request: StarsAddRequest): StarsAddResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/stars.add`, {}, request)
+fn
+(request: StarsAddRequest): StarsAddResponse {
+  stars-add(request, {})
+},
+(request: StarsAddRequest, opts: Map): StarsAddResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/stars.add`, {}, request, opts)
   if(is-ok-response(response), StarsAddResponse(response.body), err(HttpError(response)))
 }
 
@@ -711,8 +807,12 @@ stars-list
 meta {
     doc: """GET /stars.list - List starred items for the authenticated user. Results are paginated. This API is deprecated but still available."""
 }
-fn (request: StarsListRequest): StarsListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/stars.list?count=${or(request.count, "")}&page=${or(request.page, "")}&cursor=${or(request.cursor, "")}&limit=${or(request.limit, "")}`)
+fn
+(request: StarsListRequest): StarsListResponse {
+  stars-list(request, {})
+},
+(request: StarsListRequest, opts: Map): StarsListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/stars.list?count=${or(request.count, "")}&page=${or(request.page, "")}&cursor=${or(request.cursor, "")}&limit=${or(request.limit, "")}`, {}, "", opts)
   if(is-ok-response(response), StarsListResponse(response.body), err(HttpError(response)))
 }
 
@@ -733,7 +833,11 @@ stars-remove
 meta {
     doc: """POST /stars.remove - Remove a star from an item. Specify the item by `channel` + `timestamp`, `file`, or `file_comment`. This API is deprecated but still available."""
 }
-fn (request: StarsRemoveRequest): StarsRemoveResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/stars.remove`, {}, request)
+fn
+(request: StarsRemoveRequest): StarsRemoveResponse {
+  stars-remove(request, {})
+},
+(request: StarsRemoveRequest, opts: Map): StarsRemoveResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/stars.remove`, {}, request, opts)
   if(is-ok-response(response), StarsRemoveResponse(response.body), err(HttpError(response)))
 }

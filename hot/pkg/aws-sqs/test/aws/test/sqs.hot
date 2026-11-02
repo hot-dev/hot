@@ -1,0 +1,126 @@
+::aws::test::sqs ns
+meta ["test"]
+
+// Hermetic: no network, no aws.* context. A `transport` in opts stands in for the network.
+
+::messages ::aws::sqs::messages
+::queues ::aws::sqs::queues
+
+HttpResponse ::hot::http/HttpResponse
+
+// Every call is answered 418 with the signed request as the body.
+echo fn (): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { HttpResponse({status: 418, headers: {}, body: req}) }
+    }
+}
+
+// The request a call would have sent.
+sent fn (result: Result): Any {
+    if(is-err(result), err-value(result).body, result.body)
+}
+
+// Every call is answered 200 with these headers and body.
+answer fn (headers: Map, body: Any): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { HttpResponse({status: 200, headers: headers, body: body, body-bytes: if(is-bytes(body), body, Bytes(""))}) }
+    }
+}
+
+// Answered 200 with an AWS JSON body, which the runtime hands over as Bytes.
+amz fn (body: Map): Map {
+    answer({"content-type": "application/x-amz-json-1.0"}, Bytes(to-json(body)))
+}
+
+assert-missing-credentials fn (result: Result) {
+    assert(is-err(result))
+    assert(contains(err-value(result), "aws.access-key-id"))
+}
+
+assert-target fn (result: Result, target: Str) {
+    request sent(result)
+    assert-eq("https://sqs.eu-west-1.amazonaws.com/", request.url)
+    assert-eq("POST", request.method)
+    assert-eq(`AmazonSQS.${target}`, get(request.headers, "X-Amz-Target"))
+    assert-eq("sqs.eu-west-1.amazonaws.com", get(request.headers, "Host"))
+    auth get(request.headers, "Authorization")
+    assert(contains(auth, "Credential=AKIDOPTS/"), auth)
+    assert(contains(auth, "/eu-west-1/sqs/aws4_request"), auth)
+    assert(is-null(::hot::ctx/get("aws.access-key-id")), "no ctx writes")
+}
+
+test-messages-opts-reach-the-request
+meta ["test"] fn () {
+    q "https://sqs.eu-west-1.amazonaws.com/1/q"
+    assert-target(::messages/send-message(q, "hi", echo()), "SendMessage")
+    assert-target(::messages/send-message(q, "hi", 5, {}, echo()), "SendMessage")
+    assert-target(::messages/receive-messages(q, echo()), "ReceiveMessage")
+    assert-target(::messages/receive-messages(q, 2, echo()), "ReceiveMessage")
+    assert-target(::messages/receive-messages(q, 2, 3, echo()), "ReceiveMessage")
+    assert-target(::messages/receive-messages(q, 2, 3, 4, echo()), "ReceiveMessage")
+    assert-target(::messages/delete-message(q, "r", echo()), "DeleteMessage")
+    assert-target(::messages/change-message-visibility(q, "r", 60, echo()), "ChangeMessageVisibility")
+    assert-target(::messages/purge-queue(q, echo()), "PurgeQueue")
+    assert-target(::messages/send-message-batch(q, [], echo()), "SendMessageBatch")
+    assert-target(::messages/delete-message-batch(q, [], echo()), "DeleteMessageBatch")
+}
+
+test-queues-opts-reach-the-request
+meta ["test"] fn () {
+    q "https://sqs.eu-west-1.amazonaws.com/1/q"
+    assert-target(::queues/create-queue("q", {}, echo()), "CreateQueue")
+    assert-target(::queues/delete-queue(q, echo()), "DeleteQueue")
+    assert-target(::queues/get-queue-url("q", echo()), "GetQueueUrl")
+    assert-target(::queues/list-queues("p", echo()), "ListQueues")
+    assert-target(::queues/list-queues(echo()), "ListQueues")
+    assert-target(::queues/get-queue-attributes(q, ["All"], echo()), "GetQueueAttributes")
+    assert-target(::queues/set-queue-attributes(q, {}, echo()), "SetQueueAttributes")
+}
+
+test-existing-arities-read-ctx
+meta ["test"] fn () {
+    assert-missing-credentials(::messages/send-message("q", "hi"))
+    assert-missing-credentials(::messages/send-message("q", "hi", 5))
+    assert-missing-credentials(::messages/send-message("q", "hi", 5, {a: 1}))
+    assert-missing-credentials(::queues/create-queue("q", {FifoQueue: "true"}))
+    assert-missing-credentials(::queues/list-queues())
+}
+
+test-map-argument-is-still-attributes
+meta ["test"] fn () {
+    // create-queue(name, attributes) keeps its meaning; opts come after
+    body from-json(sent(::queues/create-queue("q", {FifoQueue: "true"}, echo())).body)
+    assert-eq({FifoQueue: "true"}, body.Attributes)
+}
+
+test-endpoint-opt
+meta ["test"] fn () {
+    request sent(::queues/get-queue-url("q", {...echo(), endpoint: "http://localhost:4566"}))
+    assert-eq("http://localhost:4566/", request.url)
+    assert-eq("localhost:4566", get(request.headers, "Host"))
+}
+
+test-amz-json-responses-are-parsed
+meta ["test"] fn () {
+    sent-message ::messages/send-message("q", "hi", amz({MessageId: "m1", MD5OfMessageBody: "d"}))
+    assert-eq("m1", sent-message.message_id)
+
+    received ::messages/receive-messages("q", amz({Messages: [{MessageId: "m1", ReceiptHandle: "r", Body: "hi"}]}))
+    assert-eq("hi", first(received.messages).body)
+
+    assert-eq(["u"], ::queues/list-queues(amz({QueueUrls: ["u"]})).queue_urls)
+    assert-eq("u", ::queues/get-queue-url("q", amz({QueueUrl: "u"})).queue_url)
+}
+
+test-unsafe-region-never-reaches-the-request
+meta ["test"] fn () {
+    out ::queues/get-queue-url("q", {...echo(), region: "evil.example/"})
+    assert(is-err(out), "it would be interpolated into the hostname")
+    assert(not(contains(err-value(out), "evil.example")), "the value isn't echoed")
+}

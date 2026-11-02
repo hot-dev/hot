@@ -20,15 +20,22 @@ fn
   ::api/json("GET", `/repos/${owner}/${repo}/pulls`)
 },
 (owner: Str, repo: Str, params: Map): Vec {
-  ::api/json("GET", `/repos/${owner}/${repo}/pulls${query-string(params)}`)
+  list-pulls(owner, repo, params, {})
+},
+(owner: Str, repo: Str, params: Map, opts: Map): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/pulls${query-string(params)}`, {}, "", opts)
 }
 
 get-pull
 meta {
     doc: """GET /repos/{owner}/{repo}/pulls/{number} - One pull request (mergeability, head/base, diff stats)."""
 }
-fn (owner: Str, repo: Str, number: Int): Map {
-  ::api/json("GET", pull-path(owner, repo, number))
+fn
+(owner: Str, repo: Str, number: Int): Map {
+  get-pull(owner, repo, number, {})
+},
+(owner: Str, repo: Str, number: Int, opts: Map): Map {
+  ::api/json("GET", pull-path(owner, repo, number), {}, "", opts)
 }
 
 create-pull
@@ -53,7 +60,10 @@ fn
   create-pull(owner, repo, title, head, base, {})
 },
 (owner: Str, repo: Str, title: Str, head: Str, base: Str, options: Map): Map {
-  ::api/json("POST", `/repos/${owner}/${repo}/pulls`, {}, {title: title, head: head, base: base, ...options})
+  create-pull(owner, repo, title, head, base, options, {})
+},
+(owner: Str, repo: Str, title: Str, head: Str, base: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", `/repos/${owner}/${repo}/pulls`, {}, {title: title, head: head, base: base, ...options}, opts)
 }
 
 update-pull
@@ -64,8 +74,12 @@ meta {
     `maintainer_can_modify`.
     """
 }
-fn (owner: Str, repo: Str, number: Int, changes: Map): Map {
-  ::api/json("PATCH", pull-path(owner, repo, number), {}, changes)
+fn
+(owner: Str, repo: Str, number: Int, changes: Map): Map {
+  update-pull(owner, repo, number, changes, {})
+},
+(owner: Str, repo: Str, number: Int, changes: Map, opts: Map): Map {
+  ::api/json("PATCH", pull-path(owner, repo, number), {}, changes, opts)
 }
 
 list-files
@@ -77,7 +91,10 @@ fn
   ::api/json("GET", `${pull-path(owner, repo, number)}/files`)
 },
 (owner: Str, repo: Str, number: Int, params: Map): Vec {
-  ::api/json("GET", `${pull-path(owner, repo, number)}/files${query-string(params)}`)
+  list-files(owner, repo, number, params, {})
+},
+(owner: Str, repo: Str, number: Int, params: Map, opts: Map): Vec {
+  ::api/json("GET", `${pull-path(owner, repo, number)}/files${query-string(params)}`, {}, "", opts)
 }
 
 list-pull-commits
@@ -93,7 +110,10 @@ fn
   ::api/json("GET", `${pull-path(owner, repo, number)}/commits`)
 },
 (owner: Str, repo: Str, number: Int, params: Map): Vec {
-  ::api/json("GET", `${pull-path(owner, repo, number)}/commits${query-string(params)}`)
+  list-pull-commits(owner, repo, number, params, {})
+},
+(owner: Str, repo: Str, number: Int, params: Map, opts: Map): Vec {
+  ::api/json("GET", `${pull-path(owner, repo, number)}/commits${query-string(params)}`, {}, "", opts)
 }
 
 list-reviews
@@ -108,15 +128,22 @@ fn
   ::api/json("GET", `${pull-path(owner, repo, number)}/reviews`)
 },
 (owner: Str, repo: Str, number: Int, params: Map): Vec {
-  ::api/json("GET", `${pull-path(owner, repo, number)}/reviews${query-string(params)}`)
+  list-reviews(owner, repo, number, params, {})
+},
+(owner: Str, repo: Str, number: Int, params: Map, opts: Map): Vec {
+  ::api/json("GET", `${pull-path(owner, repo, number)}/reviews${query-string(params)}`, {}, "", opts)
 }
 
 get-review
 meta {
     doc: """GET /repos/{owner}/{repo}/pulls/{number}/reviews/{review_id} - One pull-request review."""
 }
-fn (owner: Str, repo: Str, number: Int, review-id: Any): Map {
-  ::api/json("GET", review-path(owner, repo, number, review-id))
+fn
+(owner: Str, repo: Str, number: Int, review-id: Any): Map {
+  get-review(owner, repo, number, review-id, {})
+},
+(owner: Str, repo: Str, number: Int, review-id: Any, opts: Map): Map {
+  ::api/json("GET", review-path(owner, repo, number, review-id), {}, "", opts)
 }
 
 list-review-comments
@@ -132,7 +159,10 @@ fn
   ::api/json("GET", `${pull-path(owner, repo, number)}/comments`)
 },
 (owner: Str, repo: Str, number: Int, params: Map): Vec {
-  ::api/json("GET", `${pull-path(owner, repo, number)}/comments${query-string(params)}`)
+  list-review-comments(owner, repo, number, params, {})
+},
+(owner: Str, repo: Str, number: Int, params: Map, opts: Map): Vec {
+  ::api/json("GET", `${pull-path(owner, repo, number)}/comments${query-string(params)}`, {}, "", opts)
 }
 
 list-review-comments-for-review
@@ -148,10 +178,13 @@ fn
   ::api/json("GET", `${review-path(owner, repo, number, review-id)}/comments`)
 },
 (owner: Str, repo: Str, number: Int, review-id: Any, params: Map): Vec {
+  list-review-comments-for-review(owner, repo, number, review-id, params, {})
+},
+(owner: Str, repo: Str, number: Int, review-id: Any, params: Map, opts: Map): Vec {
   ::api/json(
     "GET",
     `${review-path(owner, repo, number, review-id)}/comments${query-string(params)}`
-  )
+  , {}, "", opts)
 }
 
 create-review
@@ -166,10 +199,16 @@ meta {
 }
 fn
 (owner: Str, repo: Str, number: Int, review: Map): Map {
-  ::api/json("POST", `${pull-path(owner, repo, number)}/reviews`, {}, review)
+  create-review(owner, repo, number, review, {})
+},
+(owner: Str, repo: Str, number: Int, review: Map, opts: Map): Map {
+  ::api/json("POST", `${pull-path(owner, repo, number)}/reviews`, {}, review, opts)
 },
 (owner: Str, repo: Str, number: Int, event: Str, body: Str): Map {
-  create-review(owner, repo, number, {event: event, body: body})
+  create-review(owner, repo, number, event, body, {})
+},
+(owner: Str, repo: Str, number: Int, event: Str, body: Str, opts: Map): Map {
+  create-review(owner, repo, number, {event: event, body: body}, opts)
 }
 
 list-requested-reviewers
@@ -179,16 +218,24 @@ meta {
     teams whose review is still requested.
     """
 }
-fn (owner: Str, repo: Str, number: Int): Map {
-  ::api/json("GET", `${pull-path(owner, repo, number)}/requested_reviewers`)
+fn
+(owner: Str, repo: Str, number: Int): Map {
+  list-requested-reviewers(owner, repo, number, {})
+},
+(owner: Str, repo: Str, number: Int, opts: Map): Map {
+  ::api/json("GET", `${pull-path(owner, repo, number)}/requested_reviewers`, {}, "", opts)
 }
 
 request-reviewers
 meta {
     doc: """POST /repos/{owner}/{repo}/pulls/{number}/requested_reviewers - Request reviews from users."""
 }
-fn (owner: Str, repo: Str, number: Int, reviewers: Vec): Map {
-  ::api/json("POST", `${pull-path(owner, repo, number)}/requested_reviewers`, {}, {reviewers: reviewers})
+fn
+(owner: Str, repo: Str, number: Int, reviewers: Vec): Map {
+  request-reviewers(owner, repo, number, reviewers, {})
+},
+(owner: Str, repo: Str, number: Int, reviewers: Vec, opts: Map): Map {
+  ::api/json("POST", `${pull-path(owner, repo, number)}/requested_reviewers`, {}, {reviewers: reviewers}, opts)
 }
 
 merge-pull
@@ -200,5 +247,8 @@ fn
   ::api/json("PUT", `${pull-path(owner, repo, number)}/merge`, {}, {})
 },
 (owner: Str, repo: Str, number: Int, options: Map): Map {
-  ::api/json("PUT", `${pull-path(owner, repo, number)}/merge`, {}, options)
+  merge-pull(owner, repo, number, options, {})
+},
+(owner: Str, repo: Str, number: Int, options: Map, opts: Map): Map {
+  ::api/json("PUT", `${pull-path(owner, repo, number)}/merge`, {}, options, opts)
 }

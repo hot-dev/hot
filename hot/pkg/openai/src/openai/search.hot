@@ -57,7 +57,15 @@ search-vector-store
 meta {
     doc: """POST /vector_stores/{vector_store_id}/search - Search a vector store for relevant file content using semantic search."""
 }
-fn (vector-store-id: Str, request: SearchVectorStoreRequest): SearchVectorStoreResponse {
-  response api-request("POST", `${::openai::api/base-url()}/vector_stores/${vector-store-id}/search`, {}, request)
-  if(is-ok-response(response), SearchVectorStoreResponse(response.body), err(HttpError(response)))
+fn
+(vector-store-id: Str, request: SearchVectorStoreRequest): SearchVectorStoreResponse {
+  search-vector-store(vector-store-id, request, {})
+},
+(vector-store-id: Str, request: SearchVectorStoreRequest, opts: Map): SearchVectorStoreResponse {
+  response api-request("POST", `/vector_stores/${vector-store-id}/search`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { SearchVectorStoreResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

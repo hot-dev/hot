@@ -1,0 +1,483 @@
+::ai::test::chat-provider-opts ns
+meta ["test"]
+
+::chat ::ai::chat
+::tool ::ai::tool
+
+ChatOptions ::chat/ChatOptions
+ReplyDelta  ::chat/ReplyDelta
+TextDelta   ::chat/TextDelta
+
+TENANT {api-key: "sk-tenant-a", base-url: "https://gw.example.com"}
+
+reply-text fn (text: Str): ::chat/ChatReply {
+    ::chat/ChatReply({text: text, tool-calls: null, stop-reason: "end_turn", usage: null, raw: null})
+}
+
+// ----------------------------------------------------------------------------
+// Fake providers
+// ----------------------------------------------------------------------------
+
+echo-opts
+meta { doc: """A chat-opts-fn that answers with the provider-opts it received.""" }
+fn (model: Str, messages: Any, system: Any, tools: Any, provider-opts: Map): ::chat/ChatReply {
+    reply-text(to-json(provider-opts))
+}
+
+echo-opts-stream
+meta { doc: """A chat-stream-opts-fn that streams the provider-opts it received.""" }
+fn (model: Str, messages: Any, system: Any, tools: Any, on-delta: Fn, provider-opts: Map): ::chat/ChatReply {
+    text to-json(provider-opts)
+    on-delta(ReplyDelta.TextDelta(TextDelta({text: text})))
+    reply-text(text)
+}
+
+legacy-chat
+meta { doc: """A chat-fn from before provider-opts: exactly four parameters.""" }
+fn (model: Str, messages: Any, system: Any, tools: Any): ::chat/ChatReply {
+    reply-text("legacy")
+}
+
+legacy-stream
+meta {
+    doc: """A chat-stream-fn from before provider-opts: exactly five parameters."""
+}
+fn (model: Str, messages: Any, system: Any, tools: Any, on-delta: Fn): ::chat/ChatReply {
+    reply-text("legacy-stream")
+}
+
+multi-arity-chat
+meta { doc: """Shaped like the provider adapters: both contracts on one function.""" }
+fn
+(model: Str, messages: Any, system: Any, tools: Any): ::chat/ChatReply {
+    multi-arity-chat(model, messages, system, tools, {})
+},
+(model: Str, messages: Any, system: Any, tools: Any, opts: Map): ::chat/ChatReply {
+    reply-text(or(get(opts, "api-key"), "no-key"))
+}
+
+add-fn
+meta { doc: """Test tool.""" }
+fn (x: Int, y: Int): Int {
+    add(x, y)
+}
+
+tool-then-echo
+meta {
+    doc: """Calls a tool on the first turn, then echoes provider-opts, proving each turn gets them."""
+}
+fn (model: Str, messages: Any, system: Any, tools: Any, provider-opts: Map): ::chat/ChatReply {
+    cond {
+        eq(last(messages).role, "tool") => { reply-text(to-json(provider-opts)) }
+        => {
+            ::chat/ChatReply({
+                text: null,
+                tool-calls: [::tool/ToolCall({id: "t1", name: "add-fn", input: {x: 1, y: 2}})],
+                stop-reason: "tool_use",
+                usage: null,
+                raw: null
+            })
+        }
+    }
+}
+
+registration fn (fields: Map): ::chat/ProviderRegistration {
+    ::chat/ProviderRegistration({
+        variant: ::chat/Provider.Anthropic,
+        detect: ::chat/prefix-detector("fake"),
+        display-name: "Fake",
+        chat-fn: null,
+        chat-stream-fn: null,
+        embed-fn: null,
+        meta: null,
+        ...fields
+    })
+}
+
+// ----------------------------------------------------------------------------
+// Forwarding through the run loop
+// ----------------------------------------------------------------------------
+
+test-run-loop-forwards-provider-opts-to-chat-opts-fn
+meta ["test"] fn () {
+    opts ChatOptions({chat-opts-fn: echo-opts, model: "m", provider-opts: TENANT})
+    assert-eq(TENANT, from-json(::chat/run-loop(opts, "hi")))
+}
+
+test-chat-opts-fn-gets-empty-map-when-unset
+meta ["test"] fn () {
+    opts ChatOptions({chat-opts-fn: echo-opts, model: "m"})
+    assert-eq({}, from-json(::chat/run-loop(opts, "hi")))
+}
+
+test-run-loop-forwards-on-every-turn
+meta ["test"] fn () {
+    opts ChatOptions({
+        chat-opts-fn: tool-then-echo,
+        model: "m",
+        tools: [::tool/from-fn(add-fn)],
+        provider-opts: TENANT
+    })
+    assert-eq(TENANT, from-json(::chat/run-loop(opts, "hi")))
+}
+
+test-run-loop-forwards-through-a-registration
+meta ["test"] fn () {
+    opts ChatOptions({
+        model: "fake-1",
+        providers: ::chat/with-providers([registration({chat-opts-fn: echo-opts})]),
+        provider-opts: TENANT
+    })
+    assert-eq(TENANT, from-json(::chat/run-loop(opts, "hi")))
+}
+
+test-registration-prefers-chat-opts-fn-over-chat-fn
+meta ["test"] fn () {
+    opts ChatOptions({
+        model: "fake-1",
+        providers: ::chat/with-providers([registration({chat-fn: legacy-chat, chat-opts-fn: echo-opts})]),
+        provider-opts: TENANT
+    })
+    assert-eq(TENANT, from-json(::chat/run-loop(opts, "hi")))
+}
+
+test-chat-opts-fn-wins-over-chat-fn
+meta ["test"] fn () {
+    opts ChatOptions({chat-fn: legacy-chat, chat-opts-fn: echo-opts, model: "m", provider-opts: TENANT})
+    assert-eq(TENANT, from-json(::chat/run-loop(opts, "hi")))
+}
+
+test-multi-arity-adapter-in-the-opts-slot
+meta ["test"] fn () {
+    with-key ChatOptions({chat-opts-fn: multi-arity-chat, model: "m", provider-opts: {api-key: "sk-a"}})
+    assert-eq("sk-a", ::chat/run-loop(with-key, "hi"))
+    assert-eq("no-key", ::chat/run-loop(ChatOptions({chat-opts-fn: multi-arity-chat, model: "m"}), "hi"))
+    assert-eq("no-key", ::chat/run-loop(ChatOptions({chat-fn: multi-arity-chat, model: "m"}), "hi"), "and in the old slot")
+}
+
+test-tenants-do-not-mix
+meta ["test"] fn () {
+    a ChatOptions({chat-opts-fn: multi-arity-chat, model: "m", provider-opts: {api-key: "sk-a"}})
+    b ChatOptions({chat-opts-fn: multi-arity-chat, model: "m", provider-opts: {api-key: "sk-b"}})
+    results parallel {
+        first ::chat/run-loop(a, "hi")
+        second ::chat/run-loop(b, "hi")
+    }
+
+    assert-eq("sk-a", results.first)
+    assert-eq("sk-b", results.second)
+}
+
+// ----------------------------------------------------------------------------
+// Streaming
+// ----------------------------------------------------------------------------
+
+test-run-loop-stream-forwards-provider-opts
+meta ["test"] fn () {
+    opts ChatOptions({chat-stream-opts-fn: echo-opts-stream, model: "m", provider-opts: TENANT})
+    assert-eq(TENANT, from-json(::chat/run-loop-stream(opts, "hi")))
+}
+
+test-run-loop-stream-forwards-through-a-registration
+meta ["test"] fn () {
+    opts ChatOptions({
+        model: "fake-1",
+        providers: ::chat/with-providers([registration({chat-stream-fn: legacy-stream, chat-stream-opts-fn: echo-opts-stream})]),
+        provider-opts: TENANT
+    })
+    assert-eq(TENANT, from-json(::chat/run-loop-stream(opts, "hi")))
+}
+
+// ----------------------------------------------------------------------------
+// Functions that can't read provider-opts: fine without it, a failure with it
+// ----------------------------------------------------------------------------
+
+assert-unsupported
+meta {
+    doc: """Fails saying `label` doesn't support per-call credentials, with no credential value."""
+}
+fn (call: Fn, label: Str) {
+    attempt ::hot::internal::exec/contain(call)
+    assert(is-err(attempt), `${label}: provider-opts it can't read is an Err`)
+    text to-json(untype(err-value(attempt)))
+    assert(contains(text, label), `names ${label}, got ${text}`)
+    assert(contains(text, "does not support per-call credentials"), `says why, got ${text}`)
+    assert(not(contains(text, "sk-tenant-a")), "holds no credential value")
+}
+
+test-legacy-functions-keep-working-without-provider-opts
+meta ["test"] fn () {
+    registry ::chat/with-providers([registration({chat-fn: legacy-chat, chat-stream-fn: legacy-stream})])
+    assert-eq("legacy", ::chat/run-loop(ChatOptions({chat-fn: legacy-chat, model: "m"}), "hi"))
+    assert-eq("legacy", ::chat/run-loop(ChatOptions({model: "fake-1", providers: registry}), "hi"))
+    assert-eq("legacy-stream", ::chat/run-loop-stream(ChatOptions({chat-stream-fn: legacy-stream, model: "m"}), "hi"))
+    assert-eq("legacy-stream", ::chat/run-loop-stream(ChatOptions({model: "fake-1", providers: registry}), "hi"))
+    assert-eq("legacy", ::chat/run-loop(ChatOptions({chat-fn: legacy-chat, model: "m", provider-opts: {}}), "hi"), "an empty Map is no provider-opts")
+}
+
+test-legacy-chat-fn-with-provider-opts-fails
+meta ["test"] fn () {
+    opts ChatOptions({chat-fn: legacy-chat, model: "m", provider-opts: TENANT})
+    assert-unsupported(() { ::chat/run-loop(opts, "hi") }, "ChatOptions.chat-fn")
+}
+
+test-legacy-registration-with-provider-opts-fails-naming-the-provider
+meta ["test"] fn () {
+    opts ChatOptions({
+        model: "fake-1",
+        providers: ::chat/with-providers([registration({chat-fn: legacy-chat, chat-stream-fn: legacy-stream})]),
+        provider-opts: TENANT
+    })
+    assert-unsupported(() { ::chat/run-loop(opts, "hi") }, "Fake")
+    assert-unsupported(() { ::chat/run-loop-stream(opts, "hi") }, "Fake")
+}
+
+test-legacy-stream-fn-with-provider-opts-fails
+meta ["test"] fn () {
+    opts ChatOptions({chat-stream-fn: legacy-stream, model: "m", provider-opts: TENANT})
+    assert-unsupported(() { ::chat/run-loop-stream(opts, "hi") }, "ChatOptions.chat-stream-fn")
+}
+
+test-legacy-function-is-not-called-when-provider-opts-is-set
+meta ["test"] fn () {
+    opts ChatOptions({chat-fn: legacy-chat, model: "m", provider-opts: {base-url: "https://gw.example.com", api-key: "sk-tenant-a"}})
+    attempt ::hot::internal::exec/contain(::chat/run-loop, [opts, "hi"])
+    assert(is-err(attempt), "nothing runs on the project's key")
+}
+
+// ----------------------------------------------------------------------------
+// A per-call base URL never receives a ctx key
+// ----------------------------------------------------------------------------
+
+test-base-url-without-a-credential-fails
+meta ["test"] fn () {
+    for-each([
+        {model: "m", chat-opts-fn: echo-opts},
+        {model: "m", chat-stream-opts-fn: echo-opts-stream}
+    ], (fields) {
+        opts ChatOptions({...fields, provider-opts: {base-url: "https://tenant.example.com"}})
+        call if(is-null(opts.chat-opts-fn), ::chat/run-loop-stream, ::chat/run-loop)
+        attempt ::hot::internal::exec/contain(call, [opts, "hi"])
+        assert(is-err(attempt), "a per-call URL with no credential is an Err")
+        text to-json(untype(err-value(attempt)))
+        assert(contains(text, "base-url"), `names base-url, got ${text}`)
+        assert(contains(text, "api-key"), `and api-key, got ${text}`)
+    })
+}
+
+test-management-base-url-needs-the-management-key
+meta ["test"] fn () {
+    for-each([
+        {management-base-url: "https://tenant.example.com"},
+        {management-base-url: "https://tenant.example.com", api-key: "sk-tenant-a"}
+    ], (provider-opts) {
+        opts ChatOptions({chat-opts-fn: echo-opts, model: "m", provider-opts: provider-opts})
+        attempt ::hot::internal::exec/contain(::chat/run-loop, [opts, "hi"])
+        assert(is-err(attempt), "a per-call management URL needs the management key")
+        text to-json(untype(err-value(attempt)))
+        assert(contains(text, "management-base-url"), `names management-base-url, got ${text}`)
+        assert(contains(text, "management-api-key"), `and management-api-key, got ${text}`)
+    })
+}
+
+test-management-key-does-not-count-for-base-url
+meta ["test"] fn () {
+    opts ChatOptions({chat-opts-fn: echo-opts, model: "m", provider-opts: {base-url: "https://tenant.example.com", management-api-key: "sk-m"}})
+    attempt ::hot::internal::exec/contain(::chat/run-loop, [opts, "hi"])
+    assert(is-err(attempt), "a management key doesn't stand in for the base-url credential")
+}
+
+test-base-url-with-a-credential-is-forwarded
+meta ["test"] fn () {
+    for-each([
+        {base-url: "https://gw.example.com", api-key: "sk-a"},
+        {base-url: "https://gw.example.com", custom-token: "sk-a"},
+        {management-base-url: "https://gw.example.com", management-api-key: "sk-a"},
+        {base-url: "", management-base-url: null}
+    ], (provider-opts) {
+        opts ChatOptions({chat-opts-fn: echo-opts, model: "m", provider-opts: provider-opts})
+        assert-eq(provider-opts, from-json(::chat/run-loop(opts, "hi")))
+    })
+}
+
+test-registration-without-a-chat-function-still-fails-clearly
+meta ["test"] fn () {
+    opts ChatOptions({
+        model: "fake-1",
+        providers: ::chat/with-providers([registration({})]),
+        provider-opts: TENANT
+    })
+    attempt ::hot::internal::exec/contain(::chat/run-loop, [opts, "hi"])
+    assert(is-err(attempt), "no chat function is an Err")
+    assert(contains(to-json(untype(err-value(attempt))), "Fake"), `that names the provider, got ${to-json(untype(err-value(attempt)))}`)
+}
+
+// ----------------------------------------------------------------------------
+// A blank credential never falls back to the provider's default
+// ----------------------------------------------------------------------------
+
+assert-blank-credential-fails
+meta { doc: """Fails naming the key, without running the provider.""" }
+fn (call: Fn, key: Str, label: Str) {
+    attempt ::hot::internal::exec/contain(call)
+    assert(is-err(attempt), `${label}: a blank credential is an Err`)
+    text to-json(untype(err-value(attempt)))
+    assert(contains(text, key), `${label}: names ${key}, got ${text}`)
+}
+
+test-blank-credentials-fail-on-every-path
+meta ["test"] fn () {
+    for-each([{api-key: null}, {api-key: ""}, {api-key: "   "}, {management-api-key: null}, {custom-token: ""}], (blank) {
+        name first(keys(blank))
+        opts-fn ChatOptions({chat-opts-fn: echo-opts, model: "m", provider-opts: blank})
+        assert-blank-credential-fails(() { ::chat/run-loop(opts-fn, "hi") }, name, "chat-opts-fn")
+
+        legacy ChatOptions({chat-fn: legacy-chat, model: "m", provider-opts: blank})
+        assert-blank-credential-fails(() { ::chat/run-loop(legacy, "hi") }, name, "legacy chat-fn")
+
+        stream ChatOptions({chat-stream-opts-fn: echo-opts-stream, model: "m", provider-opts: blank})
+        assert-blank-credential-fails(() { ::chat/run-loop-stream(stream, "hi") }, name, "chat-stream-opts-fn")
+
+        registered ChatOptions({
+            model: "fake-1",
+            providers: ::chat/with-providers([registration({chat-fn: legacy-chat, chat-stream-fn: legacy-stream})]),
+            provider-opts: blank
+        })
+        assert-blank-credential-fails(() { ::chat/run-loop(registered, "hi") }, name, "registration")
+        assert-blank-credential-fails(() { ::chat/run-loop-stream(registered, "hi") }, name, "registration stream")
+
+        assert-blank-credential-fails(() { ::chat/complete-prompt(opts-fn, "hi", null) }, name, "complete-prompt")
+    })
+}
+
+test-blank-settings-are-allowed
+meta ["test"] fn () {
+    opts ChatOptions({chat-opts-fn: multi-arity-chat, model: "m", provider-opts: {api-key: "sk-a", base-url: "", api-version: null}})
+    assert-eq("sk-a", ::chat/run-loop(opts, "hi"))
+}
+
+// ----------------------------------------------------------------------------
+// Credentials stay out of what the run loop stores and emits
+// ----------------------------------------------------------------------------
+
+SECRET "sk-tenant-a"
+
+assert-no-secret fn (value: Any, label: Str) {
+    assert(not(contains(to-json(untype(value)), SECRET)), `${label}: no credential value`)
+}
+
+test-blank-credential-failure-holds-no-other-values
+meta ["test"] fn () {
+    opts ChatOptions({chat-opts-fn: echo-opts, model: "m", provider-opts: {api-key: SECRET, other-token: ""}})
+    attempt ::hot::internal::exec/contain(::chat/run-loop, [opts, "hi"])
+    assert(is-err(attempt), "a blank credential is an Err")
+    assert(contains(to-json(untype(err-value(attempt))), "other-token"), "the failure is the blank-credential one")
+    assert-no-secret(err-value(attempt), "failure")
+}
+
+test-run-loop-writes-nothing-to-ctx
+meta ["test"] fn () {
+    ::chat/run-loop(ChatOptions({chat-opts-fn: echo-opts, model: "m", provider-opts: TENANT}), "hi")
+    assert(is-null(::hot::ctx/get("api-key")), "no credential key in ctx")
+    assert(is-null(::hot::ctx/get("provider-opts")), "no provider-opts in ctx")
+}
+
+test-step-record-holds-no-credentials
+meta ["test"] fn () {
+    opts ChatOptions({chat-opts-fn: echo-opts, model: "m", provider-opts: TENANT})
+    payload ::chat/step-payload(opts, 1, reply-text("hi"), null)
+    assert-no-secret(payload, "step record")
+    assert(not(in("provider-opts", keys(payload))), "no provider-opts field")
+}
+
+check-history
+meta {
+    doc: """A chat-opts-fn that fails if what it is handed besides provider-opts holds the credential."""
+}
+fn (model: Str, messages: Any, system: Any, tools: Any, provider-opts: Map): ::chat/ChatReply {
+    assert-no-secret(messages, "chat history")
+    assert-no-secret(system, "system prompt")
+    assert-no-secret(tools, "tools")
+    tool-then-echo(model, messages, system, tools, provider-opts)
+}
+
+test-history-tools-and-system-hold-no-credentials
+meta ["test"] fn () {
+    opts ChatOptions({
+        chat-opts-fn: check-history,
+        model: "m",
+        system: "s",
+        tools: [::tool/from-fn(add-fn)],
+        provider-opts: TENANT
+    })
+    assert-eq(TENANT, from-json(::chat/run-loop(opts, "hi")))
+}
+
+test-max-iterations-failure-holds-no-credentials
+meta ["test"] fn () {
+    opts ChatOptions({
+        chat-opts-fn: tool-then-echo,
+        model: "m",
+        tools: [::tool/from-fn(add-fn)],
+        max-iterations: 1,
+        provider-opts: TENANT
+    })
+    attempt ::hot::internal::exec/contain(::chat/run-loop, [opts, "hi"])
+    assert(is-err(attempt), "hitting the cap fails")
+    assert(contains(to-json(untype(err-value(attempt))), "max-iterations"), "the failure is the cap one")
+    assert-no-secret(err-value(attempt), "failure")
+}
+
+test-budget-failure-holds-no-credentials
+meta ["test"] fn () {
+    opts ChatOptions({chat-opts-fn: echo-opts, model: "m", max-context-tokens: 1, provider-opts: TENANT})
+    attempt ::hot::internal::exec/contain(::chat/run-loop, [opts, "a message well over one token"])
+    assert(is-err(attempt), "over budget fails")
+    assert(contains(to-json(untype(err-value(attempt))), "context_overflow"), "the failure is the budget one")
+    assert-no-secret(err-value(attempt), "failure")
+}
+
+test-spreading-options-keeps-provider-opts
+meta ["test"] fn () {
+    base ChatOptions({chat-opts-fn: echo-opts, model: "m", provider-opts: TENANT})
+    turn ChatOptions({...untype(base), system: "s"})
+    assert-eq(TENANT, from-json(::chat/run-loop(turn, "hi")), "hot-ai-agent's chat-turn and synthesis build options this way")
+}
+
+// ----------------------------------------------------------------------------
+// One-shot prompts (::ai::rag)
+// ----------------------------------------------------------------------------
+
+legacy-prompt
+meta { doc: """The legacy `(model, prompt, system) -> Str` shape.""" }
+fn (model: Str, prompt: Str, system: Str?): Str {
+    `legacy:${prompt}`
+}
+
+echo-prompt
+meta { doc: """A chat-opts-fn that answers with the prompt and the key it got.""" }
+fn (model: Str, messages: Any, system: Any, tools: Any, provider-opts: Map): ::chat/ChatReply {
+    reply-text(`${messages[0].content}:${provider-opts.api-key}`)
+}
+
+test-complete-prompt-forwards-provider-opts
+meta ["test"] fn () {
+    opts ChatOptions({chat-opts-fn: echo-prompt, model: "m", provider-opts: TENANT})
+    assert-eq("hello:sk-tenant-a", ::chat/complete-prompt(opts, "hello", null))
+}
+
+test-complete-prompt-keeps-the-legacy-shape
+meta ["test"] fn () {
+    assert-eq("legacy:hello", ::chat/complete-prompt(ChatOptions({chat-fn: legacy-prompt, model: "m"}), "hello", null))
+    with-opts ChatOptions({chat-fn: legacy-prompt, model: "m", provider-opts: TENANT})
+    assert-unsupported(() { ::chat/complete-prompt(with-opts, "hello", null) }, "ChatOptions.chat-fn")
+}
+
+test-marking-leaves-provider-opts-unchanged
+meta ["test"] fn () {
+    fn-value (request: Any) { request }
+    provider-opts {token: "tenant-credential-a", endpoint: "https://gw.example.com", path-style: true, region: "eu-west-1", transport: fn-value}
+    assert(is-null(::chat/mark-provider-opts(provider-opts)))
+    plain {token: "tenant-credential-a", endpoint: "https://gw.example.com", region: "eu-west-1"}
+    assert-eq(plain, from-json(::chat/run-loop(ChatOptions({chat-opts-fn: echo-opts, model: "m", provider-opts: plain}), "hi")))
+}

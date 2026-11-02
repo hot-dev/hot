@@ -1,0 +1,139 @@
+::attio::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no attio.* context.
+
+::api ::attio::api
+::comments ::attio::comments
+::lists ::attio::lists
+::notes ::attio::notes
+::records ::attio::records
+::tasks ::attio::tasks
+::workspace ::attio::workspace
+
+OFFLINE {api-key: "tenant-key", base-url: "http://127.0.0.1:1"}
+
+// Nothing listens on port 1, so a call fails at the socket, with the URL
+// in the error. That error proves the call got past the credential check
+// and used this `opts`, without any network traffic.
+reaches fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "127.0.0.1:1"))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({api-key: "opt-key", base-url: "https://proxy.example/v2/"}, {"attio.api.key": "ctx-key"})
+    assert-eq("opt-key", r.api-key)
+    assert-eq("https://proxy.example/v2", r.base-url, "the trailing slash goes")
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    r ::api/resolve-from({}, {"attio.api.key": "ctx-key"})
+    assert-eq("ctx-key", r.api-key)
+    assert-eq("https://api.attio.com/v2", r.base-url)
+}
+
+test-resolve-missing-credential-is-a-clear-error
+meta ["test"] fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "attio.api.key"))
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("attio.api.key")
+    assert-eq("call-key", ::api/resolve({api-key: "call-key"}).api-key)
+    assert(reaches(::workspace/get-self(OFFLINE)))
+    assert-eq(before, ::hot::ctx/get("attio.api.key"))
+}
+
+test-existing-arity-reads-ctx
+meta ["test"] fn () {
+    cond {
+        is-some(::hot::ctx/get("attio.api.key")) => { assert(true) }
+        => {
+            out ::records/get-record("people", "rec-1")
+            assert(is-err(out))
+            assert(contains(err-message(out), "attio.api.key"))
+        }
+    }
+}
+
+test-build-request
+meta ["test"] fn () {
+    bare ::api/build-request("GET", "/self", "", ::api/resolve-from({api-key: "a"}, {}))
+    assert-eq("https://api.attio.com/v2/self", bare.url)
+    assert-eq("Bearer a", bare.headers.Authorization)
+    assert(is-null(get(bare.headers, "Content-Type")))
+    posted ::api/build-request("POST", "/notes", {data: {}}, {api-key: "b", base-url: "https://proxy.example"})
+    assert-eq("https://proxy.example/notes", posted.url)
+    assert-eq("Bearer b", posted.headers.Authorization)
+    assert-eq("application/json", get(posted.headers, "Content-Type"))
+    assert-eq({data: {}}, from-json(posted.body))
+}
+
+test-opts-reach-every-module
+meta ["test"] fn () {
+    assert(reaches(::api/json("GET", "/self", "", OFFLINE)))
+    assert(reaches(::workspace/list-members(OFFLINE)))
+    assert(reaches(::lists/add-entry("l", {parent_object: "people", parent_record_id: "r"}, {}, OFFLINE)))
+    assert(reaches(::comments/list-threads("people", "r", OFFLINE)))
+    assert(reaches(::tasks/create-task("Do it", {}, OFFLINE)))
+    assert(reaches(::tasks/list-tasks({limit: 1}, OFFLINE)))
+    assert(reaches(::notes/create-note("people", "r", "t", "c", OFFLINE)))
+    assert(reaches(::notes/list-notes("people", "r", OFFLINE)))
+}
+
+test-opts-reach-the-records-functions-crm-uses
+meta ["test"] fn () {
+    assert(reaches(::records/query-records("people", {limit: 1}, OFFLINE)))
+    assert(reaches(::records/get-record("people", "r", OFFLINE)))
+    assert(reaches(::records/create-record("people", {}, OFFLINE)))
+    assert(reaches(::records/assert-record("people", "email_addresses", {}, OFFLINE)))
+    assert(reaches(::records/update-record("people", "r", {}, OFFLINE)))
+    assert(reaches(::records/delete-record("people", "r", OFFLINE)))
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    ctx {"attio.api.key": "ctx-key"}
+    results map([{api-key: ""}, {api-key: "   "}, {api-key: null}], (o) {
+        out ::api/resolve-from(o, ctx)
+        assert(is-err(out), "never falls back to attio.api.key")
+        assert(contains(err-message(out), "api-key"))
+        true
+    })
+    assert-eq(3, length(results))
+    assert(is-err(::records/get-record("people", "r", {api-key: ""})), "the error reaches the caller")
+}
+
+test-base-url-without-credential-is-an-error
+meta ["test"] fn () {
+    out ::api/resolve-from({base-url: "https://collector.example"}, {"attio.api.key": "ctx_secret_key"})
+    assert(is-err(out), "the context key must not go to a per-call URL")
+    assert(contains(err-message(out), "base-url"))
+    assert(contains(err-message(out), "api-key"))
+    assert(not(contains(err-message(out), "ctx_secret_key")), "the key stays out of messages")
+    assert-eq("https://collector.example", ::api/resolve-from({base-url: "https://collector.example", api-key: "tenant"}, {"attio.api.key": "ctx_secret_key"}).base-url, "with a credential it works")
+    assert-eq("ctx_secret_key", ::api/resolve-from({base-url: ""}, {"attio.api.key": "ctx_secret_key"}).api-key, "a blank base-url is the default root")
+}
+
+test-base-url-without-credential-sends-nothing
+meta ["test"] fn () {
+    before ::hot::ctx/get("attio.api.key")
+    ::hot::ctx/set-secret("attio.api.key", "ctx_secret_key")
+    assert-eq("ctx_secret_key", ::api/resolve({}).api-key, "control: the live context key is set")
+    out ::records/get-record("people", "r", {base-url: "http://127.0.0.1:1"})
+    assert(is-err(out))
+    assert(contains(err-message(out), "base-url"))
+    assert(not(reaches(out)), "no request was attempted: the failure isn't the socket")
+    assert(reaches(::records/get-record("people", "r", {api-key: "tenant", base-url: "http://127.0.0.1:1"})), "control: with a credential it reaches the socket")
+    ::hot::ctx/set-secret("attio.api.key", before)
+}
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({api-key: "tenant-credential-a"}).api-key)
+}

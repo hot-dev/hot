@@ -41,3 +41,31 @@ meta ["test"] fn () {
     assert(not(::webhooks/verify-request(slack-request(SLACK_SIG, SLACK_TS), "other", 0)))
     assert(not(::webhooks/verify-request({headers: {}, body-raw: SLACK_BODY}, SECRET, 0)), "missing headers fail")
 }
+
+test-verify-with-signing-secret-in-opts
+meta ["test"] fn () {
+    ts Str(::hot::time/epoch-seconds())
+    sig ::hot::hmac/hmac-sha256(SECRET, `v0:${ts}:${SLACK_BODY}`)
+    assert(::webhooks/verify-request(slack-request(sig, ts), {signing-secret: SECRET}), "the right secret verifies")
+    assert(not(::webhooks/verify-request(slack-request(sig, ts), {signing-secret: "other"})), "the wrong secret doesn't")
+    assert(not(::webhooks/verify-request(slack-request(SLACK_SIG, SLACK_TS), {signing-secret: SECRET})), "the replay window still applies")
+    assert(is-null(::hot::ctx/get("slack.signing.secret")), "the secret is not written to ctx")
+}
+
+test-verify-opts-fall-back-to-ctx-only-without-the-key
+meta ["test"] fn () {
+    ts Str(::hot::time/epoch-seconds())
+    sig ::hot::hmac/hmac-sha256(SECRET, `v0:${ts}:${SLACK_BODY}`)
+    req slack-request(sig, ts)
+    missing ::hot::internal::exec/contain(::webhooks/verify-request, [req, {}])
+    assert(is-err(missing), "no secret anywhere fails")
+    assert(contains(::hot::type/err-message(err-value(missing)), "slack.signing.secret"), "the failure names the context variable")
+    ::hot::ctx/set("slack.signing.secret", SECRET)
+    from-ctx ::webhooks/verify-request(req, {})
+    blank ::webhooks/verify-request(req, {signing-secret: ""})
+    nulled ::webhooks/verify-request(req, {signing-secret: null})
+    ::hot::ctx/set("slack.signing.secret", null)
+    assert(from-ctx, "empty opts use the context secret")
+    assert(not(blank), "a blank secret in opts is rejected, not replaced by the context secret")
+    assert(not(nulled), "so is a null one")
+}

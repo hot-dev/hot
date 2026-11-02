@@ -2,13 +2,12 @@
 
 // SQS Queue operations
 
-http-request ::hot::http/request
 HttpResponse ::hot::http/HttpResponse
 is-ok-response ::hot::http/is-ok-response
 
-get-credentials ::aws::core/get-credentials
-get-region ::aws::core/get-region
-sign-request ::aws::core/sign-request
+resolve ::aws::core/resolve
+send-signed ::aws::core/send-signed
+service-url ::aws::core/service-url
 AwsError ::aws::core/AwsError
 
 // Queue attributes type
@@ -66,33 +65,32 @@ meta {
     """
 }
 fn
-(queue_name: Str, attributes: Map): CreateQueueResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+(queue_name: Str, attributes: Map, opts: Map): CreateQueueResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            QueueName: queue_name,
+            Attributes: attributes
+        })
 
-    body to-json({
-        QueueName: queue_name,
-        Attributes: attributes
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.CreateQueue"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { CreateQueueResponse({
+                queue_url: response.body.QueueUrl
+            }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.CreateQueue",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { CreateQueueResponse({
-            queue_url: response.body.QueueUrl
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(queue_name: Str, attributes: Map): CreateQueueResponse | AwsError {
+    create-queue(queue_name, attributes, {})
 },
 (queue_name: Str): CreateQueueResponse | AwsError {
     create-queue(queue_name, {})
@@ -111,30 +109,30 @@ meta {
     ```
     """
 }
-fn (queue_url: Str): Map | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(queue_url: Str, opts: Map): Map | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            QueueUrl: queue_url
+        })
 
-    body to-json({
-        QueueUrl: queue_url
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.DeleteQueue"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { { success: true } }
+            => { AwsError(response) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.DeleteQueue",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { { success: true } }
-        => { AwsError(response) }
-    }
+},
+(queue_url: Str): Map | AwsError {
+    delete-queue(queue_url, {})
 }
 
 // Get queue URL by name
@@ -151,32 +149,32 @@ meta {
     ```
     """
 }
-fn (queue_name: Str): GetQueueUrlResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(queue_name: Str, opts: Map): GetQueueUrlResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            QueueName: queue_name
+        })
 
-    body to-json({
-        QueueName: queue_name
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.GetQueueUrl"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { GetQueueUrlResponse({
+                queue_url: response.body.QueueUrl
+            }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.GetQueueUrl",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { GetQueueUrlResponse({
-            queue_url: response.body.QueueUrl
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(queue_name: Str): GetQueueUrlResponse | AwsError {
+    get-queue-url(queue_name, {})
 }
 
 // List all queues
@@ -199,32 +197,34 @@ meta {
     """
 }
 fn
-(queue_name_prefix: Str): ListQueuesResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+(queue_name_prefix: Str?, opts: Map): ListQueuesResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            QueueNamePrefix: queue_name_prefix
+        })
 
-    body to-json({
-        QueueNamePrefix: queue_name_prefix
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.ListQueues"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { ListQueuesResponse({
+                queue_urls: if(is-null(response.body.QueueUrls), [], response.body.QueueUrls)
+            }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.ListQueues",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { ListQueuesResponse({
-            queue_urls: if(is-null(response.body.QueueUrls), [], response.body.QueueUrls)
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(opts: Map): ListQueuesResponse | AwsError {
+    list-queues("", opts)
+},
+(queue_name_prefix: Str?): ListQueuesResponse | AwsError {
+    list-queues(queue_name_prefix, {})
 },
 (): ListQueuesResponse | AwsError {
     list-queues("")
@@ -246,33 +246,33 @@ meta {
     ```
     """
 }
-fn (queue_url: Str, attribute_names: Vec<Str>): GetQueueAttributesResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(queue_url: Str, attribute_names: Vec<Str>, opts: Map): GetQueueAttributesResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            QueueUrl: queue_url,
+            AttributeNames: attribute_names
+        })
 
-    body to-json({
-        QueueUrl: queue_url,
-        AttributeNames: attribute_names
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.GetQueueAttributes"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { GetQueueAttributesResponse({
+                attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
+            }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.GetQueueAttributes",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { GetQueueAttributesResponse({
-            attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(queue_url: Str, attribute_names: Vec<Str>): GetQueueAttributesResponse | AwsError {
+    get-queue-attributes(queue_url, attribute_names, {})
 }
 
 // Set queue attributes
@@ -291,29 +291,29 @@ meta {
     ```
     """
 }
-fn (queue_url: Str, attributes: Map): Map | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(queue_url: Str, attributes: Map, opts: Map): Map | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            QueueUrl: queue_url,
+            Attributes: attributes
+        })
 
-    body to-json({
-        QueueUrl: queue_url,
-        Attributes: attributes
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.SetQueueAttributes"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { { success: true } }
+            => { AwsError(response) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.SetQueueAttributes",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { { success: true } }
-        => { AwsError(response) }
-    }
+},
+(queue_url: Str, attributes: Map): Map | AwsError {
+    set-queue-attributes(queue_url, attributes, {})
 }

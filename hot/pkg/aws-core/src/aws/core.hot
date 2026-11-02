@@ -27,6 +27,9 @@ contains ::hot::str/contains
 // Time utilities - use now() for UTC time
 now ::hot::time/now
 
+is-str ::hot::type/is-str
+is-bytes ::hot::type/is-bytes
+
 // AWS Credentials type
 Credentials
 meta { doc: """AWS credentials used for signing requests.""" }
@@ -65,33 +68,414 @@ HttpResponse -> AwsError fn (response: HttpResponse): AwsError {
     })
 }
 
+// Blank strings count as unset, so "" in opts or ctx never signs a request.
+non-blank fn (value: Any): Any {
+    cond {
+        not(is-str(value)) => { value }
+        eq(trim(value), "") => { null }
+        => { value }
+    }
+}
+
+MISSING_CREDENTIALS "aws: credentials are not set. Set aws.access-key-id and aws.secret-access-key in Context Variables, or pass {access-key-id: ..., secret-access-key: ...} in the call's opts."
+
+// Credentials from the context variable values, or an Err naming them.
+credentials-from-ctx fn (ctx-values: Map): Credentials {
+    access_key_id non-blank(get(ctx-values, "aws.access-key-id"))
+    secret_access_key non-blank(get(ctx-values, "aws.secret-access-key"))
+    session_token non-blank(get(ctx-values, "aws.session-token"))
+
+    cond {
+        or(is-null(access_key_id), is-null(secret_access_key)) => { err(MISSING_CREDENTIALS) }
+        => { Credentials({access_key_id, secret_access_key, session_token}) }
+    }
+}
+
+// A ready `credentials` value from opts: a Credentials, or a Map in either spelling.
+credentials-from-value fn (value: Any): Credentials {
+    fields untype(value)
+    access_key_id cond {
+        is-map(fields) => { non-blank(or(get(fields, "access_key_id"), get(fields, "access-key-id"))) }
+        => { null }
+    }
+
+    secret_access_key cond {
+        is-map(fields) => { non-blank(or(get(fields, "secret_access_key"), get(fields, "secret-access-key"))) }
+        => { null }
+    }
+
+    session_token cond {
+        is-map(fields) => { non-blank(or(get(fields, "session_token"), get(fields, "session-token"))) }
+        => { null }
+    }
+
+    cond {
+        or(is-null(access_key_id), is-null(secret_access_key)) => { err("aws: opts.credentials needs both an access key id and a secret access key.") }
+        => { Credentials({access_key_id, secret_access_key, session_token}) }
+    }
+}
+
+// The required credential keys of opts. One that is present but blank is an error, never a
+// fallback: a tenant with a missing key must not silently run on the project's credentials.
+// session-token is optional: blank means no token, and keys in opts never take the ctx token.
+CREDENTIAL_OPTS ["credentials", "access-key-id", "secret-access-key"]
+
+// Credentials from opts, null when opts carries none, or an Err for a blank key or partial set.
+// Keys are never mixed with ctx: a key in opts next to a secret in ctx would sign with the wrong pair.
+credentials-from-opts fn (opts: Map): Any {
+    blank-keys filter(CREDENTIAL_OPTS, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+    given get(opts, "credentials")
+    access_key_id non-blank(get(opts, "access-key-id"))
+    secret_access_key non-blank(get(opts, "secret-access-key"))
+    session_token non-blank(get(opts, "session-token"))
+
+    cond {
+        not(is-empty(blank-keys)) => { err(`aws: opts.${first(blank-keys)} is present but blank. Pass a value, or leave the key out to use the aws.* context variables.`) }
+        is-some(given) => { credentials-from-value(given) }
+        and(is-some(access_key_id), is-some(secret_access_key)) => { Credentials({access_key_id, secret_access_key, session_token}) }
+        is-some(access_key_id) => { err("aws: opts has access-key-id but no secret-access-key.") }
+        is-some(secret_access_key) => { err("aws: opts has secret-access-key but no access-key-id.") }
+        is-some(session_token) => { err("aws: opts has session-token but no access-key-id and secret-access-key.") }
+        => { null }
+    }
+}
+
+// =============================================================================
+// Names that become part of a URL
+// =============================================================================
+
+// Region and bucket names go into hostnames. Anything that could end or re-point the host
+// (/, @, backslash, ?, #, control characters) must never get that far: the request would carry
+// a signature and access key id to wherever it pointed. These errors don't echo the value.
+
+// An AWS region: us-east-1, ap-southeast-2, us-gov-west-1, eusc-de-east-1
+AWS_REGION_PATTERN "^[a-z]{2,}(-[a-z]+)+-[0-9]+$"
+
+// With a custom endpoint the region is only part of the signing scope, and stores name their own:
+// auto (R2), or whatever a MinIO admin chose. No dots or slashes, so it stays one scope segment.
+STORE_REGION_PATTERN "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+
+// A DNS-safe bucket: one hostname label under the wildcard certificate
+VIRTUAL_HOST_BUCKET_PATTERN "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$"
+
+// Any bucket S3 has allowed, legacy us-east-1 names included. Safe in a path once encoded.
+BUCKET_PATTERN "^[A-Za-z0-9][A-Za-z0-9._-]{1,253}[A-Za-z0-9]$"
+
+// A URL's host, with an optional port. No user info.
+HOST_PATTERN "^([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]+)?$"
+
+// Characters no URL we send may contain: the HTTP client strips or reinterprets them
+UNSAFE_URL_PATTERN "[\\x00-\\x1F\\x7F\\\\]"
+
+check-region
+meta {
+    doc: """
+    `region` when it is safe to use, else an Err naming `source` and not echoing the value.
+    Without a custom endpoint it goes into an AWS hostname and must be a plain AWS region
+    name like `us-east-1`. With one (`has-endpoint`) it only signs, so a store's own name
+    like `auto` passes, but still nothing that could leave its place.
+    """
+}
+fn (region: Any, source: Str, has-endpoint: Bool): Any {
+    pattern if(has-endpoint, STORE_REGION_PATTERN, AWS_REGION_PATTERN)
+    cond {
+        not(is-str(region)) => { err(`aws: ${source} isn't a plain region name.`) }
+        not(::hot::regex/is-match(region, pattern)) => { err(`aws: ${source} isn't a plain region name.`) }
+        => { region }
+    }
+}
+
+is-virtual-host-bucket
+meta {
+    doc: """True when a bucket can be a hostname label: 3 to 63 lowercase letters, numbers and hyphens. Dotted names don't match the TLS wildcard certificate, and uppercase legacy names don't survive a hostname, so those use path-style."""
+}
+fn (bucket: Str): Bool {
+    ::hot::regex/is-match(bucket, VIRTUAL_HOST_BUCKET_PATTERN)
+}
+
+check-bucket
+meta {
+    doc: """`bucket` when it is a valid S3 bucket name (3 to 255 letters, numbers, dots, hyphens and underscores, starting and ending with a letter or number, no `..`), else an Err that doesn't echo the value. Dotted names are valid; see `is-virtual-host-bucket`."""
+}
+fn (bucket: Any): Any {
+    cond {
+        not(is-str(bucket)) => { err("aws: the bucket isn't a valid S3 bucket name.") }
+        not(::hot::regex/is-match(bucket, BUCKET_PATTERN)) => { err("aws: the bucket isn't a valid S3 bucket name.") }
+        contains(bucket, "..") => { err("aws: the bucket isn't a valid S3 bucket name.") }
+        => { bucket }
+    }
+}
+
+// A custom endpoint without its trailing slash, or an Err when it isn't a plain http(s) URL.
+normalize-endpoint fn (endpoint: Any, source: Str): Any {
+    value non-blank(endpoint)
+    cond {
+        is-null(value) => { null }
+        not(is-str(value)) => { err(`aws: ${source} must be a plain http(s) URL.`) }
+        ends-with(value, "/") => { normalize-endpoint(slice(value, 0, sub(length(value), 1)), source) }
+        not(::hot::regex/is-match(value, "^https?://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]+)?(/[^\\x00-\\x20\\x7F\\\\?#]*)?$")) => { err(`aws: ${source} must be a plain http(s) URL, with no user info, query or fragment.`) }
+        => { value }
+    }
+}
+
 // Get AWS credentials from context
 get-credentials
 meta {
-    doc: """Get AWS credentials from context (aws.access-key-id, aws.secret-access-key)""",
+    doc: """
+    Get AWS credentials from context (aws.access-key-id, aws.secret-access-key,
+    aws.session-token). Returns an Err naming the variables when they aren't set.
+    """,
     ctx: {
-        "aws.access-key-id": {},
-        "aws.secret-access-key": {},
+        "aws.access-key-id": {required: false},
+        "aws.secret-access-key": {required: false},
         "aws.session-token": {required: false}
     }
 }
 fn (): Credentials {
-    access_key_id ::ctx/get("aws.access-key-id")
-    secret_access_key ::ctx/get("aws.secret-access-key")
-    session_token ::ctx/get("aws.session-token")
-
-    Credentials({access_key_id, secret_access_key, session_token})
+    credentials-from-ctx({
+        "aws.access-key-id": ::ctx/get("aws.access-key-id"),
+        "aws.secret-access-key": ::ctx/get("aws.secret-access-key"),
+        "aws.session-token": ::ctx/get("aws.session-token")
+    })
 }
 
 // Get AWS region from context
 get-region
 meta {
-    doc: """Get AWS region from context (aws.region). Defaults to us-east-1 if not set.""",
-    ctx: {"aws.region": {required: false, default: "us-east-1"}}
+    doc: """Get AWS region from context (aws.region). Defaults to us-east-1 if not set. An Err when it isn't a plain region name; see `check-region`.""",
+    ctx: {
+        "aws.region": {required: false, secret: false, default: "us-east-1"},
+        "aws.endpoint": {required: false, secret: false}
+    }
 }
 fn (): Str {
-    ctx-region ::ctx/get("aws.region")
-    if(is-null(ctx-region), "us-east-1", ctx-region)
+    ctx-region non-blank(::ctx/get("aws.region"))
+    check-region(or(ctx-region, "us-east-1"), "aws.region", is-some(non-blank(::ctx/get("aws.endpoint"))))
+}
+
+// =============================================================================
+// Per-call credentials
+// =============================================================================
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: settings for a call from `opts` first, then
+    `ctx-values` (a Map of context variables), then defaults. Returns
+    `{credentials, region, endpoint?, transport?, path-style?}`, or an Err when
+    credentials are missing or only partly given, or when `access-key-id`,
+    `secret-access-key` or `credentials` is present in `opts` but null or blank
+    (naming the key; it never falls back to context), when `opts` sets `endpoint`
+    without credentials of its own, or when the region, from either place, isn't
+    a plain region name (`check-region`).
+    Credentials in `opts` mean the context credentials, session token included,
+    are ignored for the call.
+    Nothing is written to ctx. Exposed for testing; `resolve` feeds it the context.
+    """
+}
+fn (opts: Map?, ctx-values: Map): Map {
+    o if(is-null(opts), {}, untype(opts))
+    from-opts credentials-from-opts(o)
+    opts-endpoint normalize-endpoint(get(o, "endpoint"), "opts.endpoint")
+    ctx-endpoint normalize-endpoint(get(ctx-values, "aws.endpoint"), "aws.endpoint")
+    credentials cond {
+        is-err(from-opts) => { from-opts }
+        is-some(from-opts) => { from-opts }
+        => { credentials-from-ctx(ctx-values) }
+    }
+
+    cond {
+        is-err(from-opts) => { from-opts }
+        is-err(opts-endpoint) => { opts-endpoint }
+        // The project's access key id and a signature must not go to a host it didn't configure
+        and(is-some(opts-endpoint), is-null(from-opts)) => { err("aws: opts.endpoint needs its own credentials: pass opts.access-key-id and opts.secret-access-key (or opts.credentials) with it. Context credentials are never sent to an endpoint set per call.") }
+        is-err(credentials) => { credentials }
+        is-err(ctx-endpoint) => { ctx-endpoint }
+        => {
+            endpoint or(opts-endpoint, ctx-endpoint)
+            opts-region non-blank(get(o, "region"))
+            region or(opts-region, non-blank(get(ctx-values, "aws.region")), "us-east-1")
+            region-source if(is-some(opts-region), "opts.region", "aws.region")
+
+            if-ok(check-region(region, region-source, is-some(endpoint)), (checked) {
+                filter-vals({
+                    credentials: credentials,
+                    region: checked,
+                    endpoint: endpoint,
+                    path-style: get(o, "path-style"),
+                    transport: get(o, "transport")
+                }, is-some)
+            })
+        }
+    }
+}
+
+// Mask the credentials opts carries in the run's call records. A Credentials value is unwrapped
+// so that its fields are what gets registered.
+mark-opts-credentials fn (opts: Map?): Null {
+    o if(is-null(opts), {}, untype(opts))
+    given o.credentials
+    ::ctx/mark-secret([
+        o.access-key-id,
+        o.secret-access-key,
+        o.session-token,
+        if(is-null(given), null, untype(given))
+    ])
+    null
+}
+
+resolve
+meta {
+    doc: """
+    Settings for one call: `opts` over the context variables, over the defaults.
+    Returns `{credentials, region, endpoint?, transport?, path-style?}`, or an Err
+    when no credentials are available.
+
+    `opts` keys, all optional:
+    - `access-key-id`, `secret-access-key`, `session-token`: per-call credentials.
+      When they are given the context credentials are ignored for that call. An
+      access key or secret that is present but null or blank is an Err: leave it out
+      instead. A null or blank `session-token` means no session token.
+    - `credentials`: a ready `Credentials` value, instead of the three keys.
+    - `region`: signing region and endpoint region. It goes into a hostname, so it must
+      be a plain AWS region name like `us-east-1`, or an Err comes back. With a custom
+      endpoint it only signs, so a store's own name like `auto` is fine.
+    - `endpoint`: base URL replacing the AWS endpoint (LocalStack, a VPC endpoint,
+      an S3-compatible store). It needs credentials in the same opts, so the project's
+      access key id and signatures never go to a host set per call. The `aws.endpoint`
+      context variable sets one for the project, used with any credentials.
+    - `path-style`: aws-s3 only, see its README.
+    - `transport`: a function taking the signed `HttpRequest` and returning an
+      `HttpResponse`, used instead of the network. For tests.
+
+    Per-call credentials stay in the call. Nothing is written to ctx, so parallel
+    flows and tenants never share them, and they are masked in the run's call records.
+
+    **Example**
+
+    ```hot
+    resolved ::aws::core/resolve({access-key-id: "AKIAEXAMPLE", secret-access-key: "secret", region: "eu-west-1"})
+    resolved.region  // "eu-west-1"
+    ```
+    """,
+    ctx: {
+        "aws.access-key-id": {required: false},
+        "aws.secret-access-key": {required: false},
+        "aws.session-token": {required: false},
+        "aws.region": {required: false, secret: false, default: "us-east-1"},
+        "aws.endpoint": {required: false, secret: false}
+    }
+}
+fn
+(opts: Map?): Map {
+    mark-opts-credentials(opts)
+    resolve-from(opts, {
+        "aws.access-key-id": ::ctx/get("aws.access-key-id"),
+        "aws.secret-access-key": ::ctx/get("aws.secret-access-key"),
+        "aws.session-token": ::ctx/get("aws.session-token"),
+        "aws.region": ::ctx/get("aws.region"),
+        "aws.endpoint": ::ctx/get("aws.endpoint")
+    })
+},
+(): Map {
+    resolve({})
+}
+
+// Base URL for a service: the custom endpoint when there is one, else the regional AWS host.
+service-url
+meta {
+    doc: """Base URL (no trailing slash) for a service host prefix such as `sqs` or `bedrock-runtime`: `resolved.endpoint` when set, else `https://<prefix>.<region>.amazonaws.com`."""
+}
+fn (resolved: Map, prefix: Str): Str {
+    endpoint get(resolved, "endpoint")
+    if(is-some(endpoint), endpoint, regional-url(prefix, resolved.region))
+}
+
+// Every AWS hostname built from a region goes through here.
+regional-url
+meta {
+    doc: """`https://<prefix>.<region>.amazonaws.com`, or an Err when `region` isn't a plain AWS region name."""
+}
+fn (prefix: Str, region: Str): Str {
+    if-ok(check-region(region, "region", false), (checked) { `https://${prefix}.${checked}.amazonaws.com` })
+}
+
+// Read a response header. The runtime lowercases response header names.
+response-header
+meta {
+    doc: """Read a header from an HTTP response by name, in any case. HTTP responses carry lowercase header names."""
+}
+fn (response: Any, name: Str): Str? {
+    headers or(response.headers, {})
+    or(get(headers, lowercase(name)), get(headers, name))
+}
+
+// Parse a whole non-negative number, null for anything else.
+parse-int
+meta {
+    doc: """A whole non-negative number from a header or XML text, or null when it is absent or isn't one. Never fails."""
+}
+fn (value: Any): Int? {
+    cond {
+        is-int(value) => { value }
+        not(is-str(value)) => { null }
+        ::hot::regex/is-match(trim(value), "^[0-9]+$") => { Int(trim(value)) }
+        => { null }
+    }
+}
+
+// Some AWS JSON date fields are epoch numbers; the response types declare them Str.
+opt-str
+meta {
+    doc: """`Str(value)`, keeping null as null. For JSON fields that AWS sends as numbers (epoch dates) and the response types declare `Str?`."""
+}
+fn (value: Any): Str? {
+    if(is-null(value), null, Str(value))
+}
+
+// The runtime only parses JSON for textual content types, and `application/x-amz-json-1.x`
+// isn't one: DynamoDB, SQS and Secrets Manager bodies arrive as Bytes.
+parse-json-body
+meta {
+    doc: """
+    Return `response` as an `HttpResponse`, with a JSON body parsed when the runtime left it
+    as Bytes (`application/x-amz-json-1.0` and `-1.1` responses). The runtime's response is a
+    plain Map, and only a typed one takes the `HttpResponse -> AwsError` arrow: without this
+    an `AwsError` would be that Map, carrying the headers and `body-bytes` too.
+    """
+}
+fn (response: Result): Any {
+    cond {
+        is-err(response) => { response }
+        not(is-bytes(response.body)) => { HttpResponse(untype(response)) }
+        not(contains(lowercase(or(response-header(response, "content-type"), "")), "json")) => { HttpResponse(untype(response)) }
+        => {
+            parsed from-json(Str(response.body))
+            HttpResponse(if(is-err(parsed), untype(response), {...untype(response), body: parsed}))
+        }
+    }
+}
+
+// Sign and send with resolved settings.
+send-signed
+meta {
+    doc: """
+    Sign a request with `resolved` (from `resolve`) and send it, through
+    `resolved.transport` when set. The Host header comes from `url`. JSON bodies
+    are parsed whatever the JSON content type. Used by all AWS service packages.
+    """
+}
+fn (method: Str, url: Str, service: Str, resolved: Map, headers: Map, body: Str | Bytes): HttpResponse {
+    if-ok(sign-request(method, url, resolved.region, service, resolved.credentials, headers, body), (signed-headers) {
+        req HttpRequest({
+            method: method,
+            url: url,
+            headers: signed-headers,
+            body: body
+        })
+        transport get(resolved, "transport")
+        parse-json-body(if(is-some(transport), transport(req), http-request(req)))
+    })
 }
 
 // =============================================================================
@@ -111,18 +495,28 @@ fn (url: Str): Map {
         => { url }
     }
 
-    // FIRST split by "?" to separate query string (which may contain "/" in values)
-    url-query-parts split(without-protocol, "?")
+    // Drop any fragment; it is never sent
+    without-fragment first(split(without-protocol, "#"))
+
+    // FIRST split by "?" to separate query string (which may contain "/" or "?" in values)
+    url-query-parts split(without-fragment, "?")
     host-and-path first(url-query-parts)
-    query if(gt(length(url-query-parts), 1), get(url-query-parts, 1), "")
+    query join(rest(url-query-parts), "?")
 
     // NOW split host from path using "/"
     parts-by-slash split(host-and-path, "/")
-    host first(parts-by-slash)
+    raw-host first(parts-by-slash)
     rest-parts rest(parts-by-slash)
     path cond {
         is-empty(rest-parts) => { "/" }
         => { `/${join(rest-parts, "/")}` }
+    }
+
+    // The Host header sent omits the scheme's default port
+    host cond {
+        and(starts-with(url, "https://"), ends-with(raw-host, ":443")) => { slice(raw-host, 0, sub(length(raw-host), 4)) }
+        and(starts-with(url, "http://"), ends-with(raw-host, ":80")) => { slice(raw-host, 0, sub(length(raw-host), 3)) }
+        => { raw-host }
     }
 
     {host, path, query}
@@ -184,45 +578,87 @@ fn (): Str {
 // URI encode a string (AWS-style)
 uri-encode
 meta {
-    doc: """URI encode a string for AWS canonical request. Encodes all characters except unreserved characters."""
+    doc: """URI encode a string for an AWS request: every byte except `A-Z a-z 0-9 - _ . ~` becomes `%XX` (uppercase hex, UTF-8), `/` and `%` included."""
 }
 fn (s: Str): Str {
-    // For now, return as-is - a full implementation would encode special chars
-    // AWS requires encoding everything except: A-Z a-z 0-9 - _ . ~
-    s
+    ::hot::uri/encode(s)
+}
+
+// URI encode a path, keeping the slashes
+uri-encode-path
+meta {
+    doc: """URI encode a path or S3 object key for a request URL: `uri-encode` on each `/`-separated segment."""
+}
+fn (path: Str): Str {
+    split(path, "/") |> map(uri-encode) |> join("/")
+}
+
+// The two hex digits an escape starts with, or null
+hex-prefix fn (s: Str): Str? {
+    prefix slice(s, 0, 2)
+    if(::hot::regex/is-match(prefix, "^[0-9A-Fa-f]{2}$"), prefix, null)
+}
+
+// Encode what isn't already encoded
+normalize-encoding
+meta {
+    doc: """URI encode `s`, keeping valid `%XX` escapes (in uppercase) so already-encoded input isn't encoded twice. A `%` that doesn't start an escape becomes `%25`."""
+}
+fn (s: Str): Str {
+    pieces split(s, "%")
+    tail map(rest(pieces), (piece) {
+        hex hex-prefix(piece)
+        cond {
+            is-null(hex) => { `%25${uri-encode(piece)}` }
+            => { `%${uppercase(hex)}${uri-encode(slice(piece, 2, length(piece)))}` }
+        }
+    })
+    join(concat([uri-encode(first(pieces))], tail), "")
 }
 
 // URL-encode a single value for AWS canonical query string
-// Only encodes characters that must be encoded per RFC 3986 + AWS requirements
 url-encode-value
 meta {
-    doc: """URL-encode a value for AWS query string (encodes / and other special chars)"""
+    doc: """URL-encode a value for an AWS query string. The same as `uri-encode`."""
 }
 fn (value: Str): Str {
-    // Replace special characters that need encoding
-    // Note: using replace-all via recursion for each character
-    v1 replace-all-char(value, "/", "%2F")
-    v2 replace-all-char(v1, ":", "%3A")
-    v3 replace-all-char(v2, " ", "%20")
-    v4 replace-all-char(v3, "+", "%2B")
-    v5 replace-all-char(v4, "?", "%3F")
-    v6 replace-all-char(v5, "#", "%23")
-    v6
+    uri-encode(value)
 }
 
 // URL-encode a path for AWS canonical URI (does NOT encode /)
 url-encode-path
 meta {
-    doc: """URL-encode a URI path for AWS canonical request (encodes : but not /)"""
+    doc: """URL-encode a URI path once for an AWS request, keeping `/` and existing `%XX` escapes. This is the S3 canonical URI; see `canonical-uri` for other services."""
 }
 fn (path: Str): Str {
-    // Encode special characters except /
-    v1 replace-all-char(path, ":", "%3A")
-    v2 replace-all-char(v1, " ", "%20")
-    v3 replace-all-char(v2, "+", "%2B")
-    v4 replace-all-char(v3, "?", "%3F")
-    v5 replace-all-char(v4, "#", "%23")
-    v5
+    split(path, "/") |> map(normalize-encoding) |> join("/")
+}
+
+// Characters the HTTP client escapes in a URL path before sending it.
+// Everything else goes on the wire as written, so a second pass must see it unescaped.
+wire-path
+meta {
+    doc: """The path as the HTTP client sends it: spaces, quotes, angle brackets, braces, backticks and non-ASCII characters escaped, everything else (existing `%XX` included) unchanged."""
+}
+fn (path: Str): Str {
+    ::hot::regex/find-all(path, "[ \"<>`{}]|[^\\x00-\\x7F]")
+        |> reduce((sent, found) { replace-all-char(sent, found.match, uri-encode(found.match)) }, path)
+}
+
+// The canonical URI for SigV4
+canonical-uri
+meta {
+    doc: """
+    The canonical URI of a request path. S3 signs the path as sent, single-encoded.
+    Every other service encodes the sent path again, so a path segment `a%3Ab` signs
+    as `a%253Ab`. `/` is never encoded in either case.
+    """
+}
+fn (path: Str, service: Str): Str {
+    cond {
+        eq(service, "s3") => { url-encode-path(path) }
+        => { uri-encode-path(wire-path(path)) }
+    }
 }
 
 // Helper to replace all occurrences of a character
@@ -242,50 +678,52 @@ fn cond (s: Str, from: Str, to: Str): Str {
 // Encode a single query parameter (key=value)
 encode-query-param
 meta {
-    doc: """URL-encode the value part of a query parameter"""
+    doc: """URL-encode the name and value of a query parameter, keeping existing `%XX` escapes. A parameter with no `=` gets an empty value (`uploads` becomes `uploads=`)."""
 }
 fn (param: Str): Str {
     // Split by = - first part is key, rest is value (may contain =)
     parts split(param, "=")
-    if(lt(length(parts), 2),
-        param,  // No = found, return as-is
-        {
-            key first(parts)
-            // Value is everything after the first =
-            value rest(parts) |> join("=")
-            encoded-value url-encode-value(value)
-            `${key}=${encoded-value}`
-        }
-    )
+    key normalize-encoding(first(parts))
+    value normalize-encoding(join(rest(parts), "="))
+    `${key}=${value}`
 }
 
 // Sort query parameters for canonical query string
 sort-query-params
 meta {
-    doc: """Sort and URL-encode query parameters for AWS canonical request"""
+    doc: """The canonical query string: each name and value URL-encoded, sorted by encoded name, then by encoded value."""
 }
-fn (query: Str): Str {
+fn (query: Str?): Str {
     match query {
         Null | "" => { "" }
         _ => { query
             |> split("&")
+            |> filter(ne(%, ""))
             |> map(encode-query-param)
-            |> sort
+            |> sort-by((param) { split(param, "=") })
             |> join("&") }
+    }
+}
+
+// Collapse runs of spaces inside a header value
+collapse-spaces fn (value: Str): Str {
+    cond {
+        contains(value, "  ") => { split(value, " ") |> filter(ne(%, "")) |> join(" ") }
+        => { value }
     }
 }
 
 // Create canonical headers string
 canonical-headers
 meta {
-    doc: """Create canonical headers string for AWS Signature V4"""
+    doc: """Create canonical headers string for AWS Signature V4: lowercase names sorted by name, values trimmed with runs of spaces collapsed."""
 }
 fn (headers: Map): Str {
-    // Get sorted lowercase header names and values
-    // For now, just format the headers we have
+    // Sort by name, not by "name:value": "a-b:" sorts before "a:" but "a" comes first
     canonical keys(headers)
-        |> map(`${lowercase(%)}:${trim(Str(headers[%]))}`)
-        |> sort()
+        |> map((name) { [lowercase(name), collapse-spaces(trim(Str(headers[name])))] })
+        |> sort-by(first)
+        |> map((pair) { `${first(pair)}:${last(pair)}` })
         |> join("\n")
     `${canonical}\n`
 }
@@ -309,11 +747,12 @@ meta {
     doc: """Derive AWS signing key using HMAC-SHA256 chain"""
 }
 fn (secret_key: Str, date_stamp: Str, region: Str, service: Str): Bytes {
-    // date -> region -> service -> "aws4_request", each keyed on the last
-    hmac-sha256-bytes(`AWS4${secret_key}`, date_stamp)
-        |> hmac-sha256-bytes(region)
-        |> hmac-sha256-bytes(service)
-        |> hmac-sha256-bytes("aws4_request")
+    // date -> region -> service -> "aws4_request", each keyed on the last. Each one can sign
+    // for its scope, so each is masked in the run's call records.
+    date-key ::ctx/mark-secret(hmac-sha256-bytes(`AWS4${secret_key}`, date_stamp))
+    region-key ::ctx/mark-secret(hmac-sha256-bytes(date-key, region))
+    service-key ::ctx/mark-secret(hmac-sha256-bytes(region-key, service))
+    ::ctx/mark-secret(hmac-sha256-bytes(service-key, "aws4_request"))
 }
 
 // Create the canonical request string
@@ -336,83 +775,96 @@ fn (amz-date: Str, date-stamp: Str, region: Str, service: Str, canonical-request
     join([algorithm, amz-date, credential-scope, canonical-request-hash], "\n")
 }
 
+// The signature over a canonical request
+signature-for
+meta {
+    doc: """The hex SigV4 signature of a canonical request at `amz-date`, in `region` and `service`."""
+}
+fn (canonical-request: Str, amz-date: Str, region: Str, service: Str, secret-access-key: Str): Str {
+    date-stamp slice(amz-date, 0, 8)
+    string-to-sign create-string-to-sign(amz-date, date-stamp, region, service, sha256(canonical-request))
+    hmac-sha256(derive-signing-key(secret-access-key, date-stamp, region, service), string-to-sign)
+}
+
+// Nothing is signed for a target that could be something other than it looks.
+check-signing-target
+meta {
+    doc: """Null when `url` and `region` are safe to sign for: a plain host with no user info, no backslash or control characters in the URL, and a region that stays one segment of the signing scope. Else an Err that doesn't echo them."""
+}
+fn (url: Str, region: Any): Any {
+    checked-region check-region(region, "region", true)
+    cond {
+        is-err(checked-region) => { checked-region }
+        ::hot::regex/is-match(url, UNSAFE_URL_PATTERN) => { err("aws: the URL contains a backslash or control character.") }
+        not(::hot::regex/is-match(parse-url(url).host, HOST_PATTERN)) => { err("aws: the URL's host isn't a plain host name.") }
+        => { null }
+    }
+}
+
 // Generate AWS Signature V4 headers
 sign-request
 meta {
-    doc: """Sign a request using AWS Signature V4. Returns headers map with Authorization header."""
+    doc: """
+    Sign a request using AWS Signature V4. Returns headers map with Authorization header.
+
+    `url` is the URL as it will be sent, with path segments and query values already
+    encoded (`uri-encode`, `uri-encode-path`). The Host header always comes from `url`:
+    the HTTP client sends that host whatever the headers say. The arity with `amz-date`
+    (`YYYYMMDD'T'HHMMSS'Z'`) signs at that time instead of now. An Err when the URL's host or
+    the region isn't plain; see `check-signing-target`.
+    """
 }
-fn (method: Str, url: Str, region: Str, service: Str, credentials: Credentials, headers: Map, payload: Str | Bytes | Null): Map {
-    // Parse URL
-    url-parts parse-url(url)
+fn
+(method: Str, url: Str, region: Str, service: Str, credentials: Credentials, headers: Map, payload: Str | Bytes | Null): Map {
+    sign-request(method, url, region, service, credentials, headers, payload, get-amz-date())
+},
+(method: Str, url: Str, region: Str, service: Str, credentials: Credentials, headers: Map, payload: Str | Bytes | Null, amz-date: Str): Map {
+    ::ctx/mark-secret(untype(credentials))
 
-    // Get timestamps
-    amz-date get-amz-date()
-    date-stamp slice(amz-date, 0, 8)
+    if-ok(check-signing-target(url, region), (checked) {
+        // Parse URL
+        url-parts parse-url(url)
 
-    // Hash the payload
-    payload-hash sha256(if(is-null(payload), "", payload))
+        date-stamp slice(amz-date, 0, 8)
 
-    // Build headers with required AWS headers
-    base-headers {...headers, "x-amz-date": amz-date, "x-amz-content-sha256": payload-hash}
+        // Hash the payload
+        payload-hash sha256(if(is-null(payload), "", payload))
 
-    // Add session token if present (not null and not empty)
-    with-token match credentials.session_token {
-        Null | "" => { base-headers }
-        _ => { {...base-headers, "x-amz-security-token": credentials.session_token} }
-    }
+        // Unset headers aren't sent, so they aren't signed; any Host is replaced by the URL's
+        sent-headers filter-keys(filter-vals(headers, is-some), (name) { ne(lowercase(name), "host") })
 
-    // Ensure host header is present
-    all-headers cond {
-        is-null(with-token.Host) => { {...with-token, "Host": url-parts.host} }
-        => { with-token }
-    }
+        // Build headers with required AWS headers
+        base-headers {...sent-headers, "x-amz-date": amz-date, "x-amz-content-sha256": payload-hash, "Host": lowercase(url-parts.host)}
 
-    // Create canonical request components
-    // URL-encode the path for the canonical URI (encodes : but not /)
-    canonical-uri url-encode-path(url-parts.path)
-    canonical-query-string sort-query-params(url-parts.query)
-    canonical-headers-str canonical-headers(all-headers)
-    signed-headers-str signed-headers(all-headers)
+        // Add session token if present (not null and not empty)
+        all-headers match credentials.session_token {
+            Null | "" => { base-headers }
+            _ => { {...base-headers, "x-amz-security-token": credentials.session_token} }
+        }
 
-    // Create canonical request
-    canonical-request create-canonical-request(
-        method,
-        canonical-uri,
-        canonical-query-string,
-        canonical-headers-str,
-        signed-headers-str,
-        payload-hash
-    )
+        // Create canonical request components
+        signed-headers-str signed-headers(all-headers)
 
-    // Hash the canonical request
-    canonical-request-hash sha256(canonical-request)
+        // Create canonical request
+        canonical-request create-canonical-request(
+            method,
+            canonical-uri(url-parts.path, service),
+            sort-query-params(url-parts.query),
+            canonical-headers(all-headers),
+            signed-headers-str,
+            payload-hash
+        )
 
-    // Create string to sign
-    string-to-sign create-string-to-sign(
-        amz-date,
-        date-stamp,
-        region,
-        service,
-        canonical-request-hash
-    )
+        // Calculate signature
+        signature signature-for(canonical-request, amz-date, region, service, credentials.secret_access_key)
 
-    // Derive signing key
-    signing-key derive-signing-key(
-        credentials.secret_access_key,
-        date-stamp,
-        region,
-        service
-    )
+        // Build authorization header
+        credential-scope `${date-stamp}/${region}/${service}/aws4_request`
+        authorization-header `AWS4-HMAC-SHA256 Credential=${credentials.access_key_id}/${credential-scope}, SignedHeaders=${signed-headers-str}, Signature=${signature}`
 
-    // Calculate signature
-    signature hmac-sha256(signing-key, string-to-sign)
-
-    // Build authorization header
-    credential-scope `${date-stamp}/${region}/${service}/aws4_request`
-    authorization-header `AWS4-HMAC-SHA256 Credential=${credentials.access_key_id}/${credential-scope}, SignedHeaders=${signed-headers-str}, Signature=${signature}`
-
-    // Return headers with authorization
-    {...all-headers, "Authorization": authorization-header}
+        // Return headers with authorization
+        {...all-headers, "Authorization": authorization-header}
+    })
 }
 
 // Make an authenticated AWS request
@@ -438,6 +890,12 @@ fn
         headers: signed-headers,
         body: body
     }))
+},
+// 7-arity with opts: credentials, endpoint and transport from `resolve(opts)`
+(method: Str, url: Str, service: Str, region: Str, headers: Map, body: Str | Bytes, opts: Map): HttpResponse {
+    if-ok(resolve(opts), (resolved) {
+        send-signed(method, url, service, {...resolved, region: region}, headers, body)
+    })
 }
 
 // =============================================================================
@@ -460,102 +918,78 @@ meta {
     - service: AWS service name (s3, etc.)
     - credentials: AWS credentials
     - expires_in: URL expiration time in seconds (default 3600 = 1 hour, max 604800 = 7 days)
+    - amz-date: signing time (YYYYMMDD'T'HHMMSS'Z'), default now
+
+    An Err when the URL's host or the region isn't plain; see `check-signing-target`.
     """
 }
 fn
 (method: Str, url: Str, region: Str, service: Str, credentials: Credentials, expires_in: Int): Str {
-    // Parse URL to get host, path, and existing query
-    url-parts parse-url(url)
-    host url-parts.host
-    path url-parts.path
-    existing-query url-parts.query
+    sign-url(method, url, region, service, credentials, expires_in, get-amz-date())
+},
+(method: Str, url: Str, region: Str, service: Str, credentials: Credentials, expires_in: Int, amz-date: Str): Str {
+    ::ctx/mark-secret(untype(credentials))
 
-    // Get timestamps
-    amz-date get-amz-date()
-    date-stamp slice(amz-date, 0, 8)
+    if-ok(check-signing-target(url, region), (checked) {
+        // Parse URL to get host, path, and existing query
+        url-parts parse-url(url)
+        host lowercase(url-parts.host)
+        path url-parts.path
+        existing-query url-parts.query
 
-    // Build credential scope
-    credential-scope `${date-stamp}/${region}/${service}/aws4_request`
+        date-stamp slice(amz-date, 0, 8)
 
-    // URL-encode the credential (the / characters must be encoded)
-    credential-value `${credentials.access_key_id}/${credential-scope}`
-    encoded-credential url-encode-value(credential-value)
+        // Build credential scope
+        credential-scope `${date-stamp}/${region}/${service}/aws4_request`
 
-    // Build the required query parameters
-    // These must be in the canonical query string for signing
-    base-params [
-        `X-Amz-Algorithm=AWS4-HMAC-SHA256`,
-        `X-Amz-Credential=${encoded-credential}`,
-        `X-Amz-Date=${amz-date}`,
-        `X-Amz-Expires=${expires_in}`,
-        `X-Amz-SignedHeaders=host`
-    ]
+        // URL-encode the credential (the / characters must be encoded)
+        credential-value `${credentials.access_key_id}/${credential-scope}`
+        encoded-credential url-encode-value(credential-value)
 
-    // Add session token if present
-    params-with-token match credentials.session_token {
-        Null | "" => { base-params }
-        _ => { concat(base-params, [`X-Amz-Security-Token=${url-encode-value(credentials.session_token)}`]) }
-    }
+        // Build the required query parameters
+        base-params [
+            `X-Amz-Algorithm=AWS4-HMAC-SHA256`,
+            `X-Amz-Credential=${encoded-credential}`,
+            `X-Amz-Date=${amz-date}`,
+            `X-Amz-Expires=${expires_in}`,
+            `X-Amz-SignedHeaders=host`
+        ]
 
-    // Combine with existing query params
-    all-params cond {
-        eq(existing-query, "") => { params-with-token }
-        => { concat(params-with-token, split(existing-query, "&")) }
-    }
+        // Add session token if present
+        params-with-token match credentials.session_token {
+            Null | "" => { base-params }
+            _ => { concat(base-params, [`X-Amz-Security-Token=${url-encode-value(credentials.session_token)}`]) }
+        }
 
-    // Sort all query parameters for canonical query string
-    canonical-query-string sort(all-params) |> join("&")
+        // Combine with existing query params and sort for the canonical query string
+        all-params cond {
+            eq(existing-query, "") => { params-with-token }
+            => { concat(params-with-token, split(existing-query, "&")) }
+        }
 
-    // Build canonical headers (only host for presigned URLs)
-    canonical-headers-str `host:${host}\n`
-    signed-headers-str "host"
+        canonical-query-string sort-query-params(join(all-params, "&"))
 
-    // For presigned URLs, payload is always UNSIGNED-PAYLOAD
-    payload-hash "UNSIGNED-PAYLOAD"
+        // Create canonical request; for presigned URLs only host is signed and the payload is unsigned
+        canonical-request create-canonical-request(
+            method,
+            canonical-uri(path, service),
+            canonical-query-string,
+            `host:${host}\n`,
+            "host",
+            "UNSIGNED-PAYLOAD"
+        )
 
-    // URL-encode the path for the canonical URI
-    canonical-uri url-encode-path(path)
+        // Calculate signature
+        signature signature-for(canonical-request, amz-date, region, service, credentials.secret_access_key)
 
-    // Create canonical request
-    canonical-request create-canonical-request(
-        method,
-        canonical-uri,
-        canonical-query-string,
-        canonical-headers-str,
-        signed-headers-str,
-        payload-hash
-    )
+        // Build the final presigned URL
+        protocol if(starts-with(url, "http://"), "http://", "https://")
+        sent-path if(eq(service, "s3"), url-encode-path(path), wire-path(path))
+        base-url `${protocol}${host}${sent-path}`
 
-    // Hash the canonical request
-    canonical-request-hash sha256(canonical-request)
-
-    // Create string to sign
-    string-to-sign create-string-to-sign(
-        amz-date,
-        date-stamp,
-        region,
-        service,
-        canonical-request-hash
-    )
-
-    // Derive signing key
-    signing-key derive-signing-key(
-        credentials.secret_access_key,
-        date-stamp,
-        region,
-        service
-    )
-
-    // Calculate signature
-    signature hmac-sha256(signing-key, string-to-sign)
-
-    // Build the final presigned URL
-    // Get the base URL (protocol + host)
-    protocol if(starts-with(url, "http://"), "http://", "https://")
-    base-url `${protocol}${host}${path}`
-
-    // Add all query params plus signature
-    `${base-url}?${canonical-query-string}&X-Amz-Signature=${signature}`
+        // Add all query params plus signature
+        `${base-url}?${canonical-query-string}&X-Amz-Signature=${signature}`
+    })
 },
 // Convenience overload with default expiration (1 hour)
 (method: Str, url: Str, region: Str, service: Str, credentials: Credentials): Str {
@@ -565,12 +999,21 @@ fn
 // S3 endpoint helper
 s3-endpoint
 meta {
-    doc: """Get the S3 endpoint URL for a given bucket and region"""
+    doc: """
+    Get the S3 URL of a bucket in a region: virtual-hosted, `https://<bucket>.s3.<region>.amazonaws.com`,
+    the standard form in every region including us-east-1. A bucket that can't be a hostname label
+    (dots, legacy uppercase names) gets the path-style form, `https://s3.<region>.amazonaws.com/<bucket>`.
+    An Err when the bucket or region isn't valid.
+    """
 }
 fn (bucket: Str, region: Str): Str {
+    checked-bucket check-bucket(bucket)
+    checked-region check-region(region, "region", false)
     cond {
-        eq(region, "us-east-1") => { `https://${bucket}.s3.amazonaws.com` }
-        => { `https://${bucket}.s3.${region}.amazonaws.com` }
+        is-err(checked-bucket) => { checked-bucket }
+        is-err(checked-region) => { checked-region }
+        is-virtual-host-bucket(bucket) => { `https://${bucket}.s3.${region}.amazonaws.com` }
+        => { `https://s3.${region}.amazonaws.com/${uri-encode(bucket)}` }
     }
 }
 
@@ -580,7 +1023,7 @@ meta {
     doc: """Get the SES endpoint URL for a given region"""
 }
 fn (region: Str): Str {
-    `https://email.${region}.amazonaws.com`
+    regional-url("email", region)
 }
 
 // Lambda endpoint helper
@@ -589,7 +1032,7 @@ meta {
     doc: """Get the Lambda endpoint URL for a given region"""
 }
 fn (region: Str): Str {
-    `https://lambda.${region}.amazonaws.com`
+    regional-url("lambda", region)
 }
 
 // SQS endpoint helper
@@ -598,7 +1041,7 @@ meta {
     doc: """Get the SQS endpoint URL for a given region"""
 }
 fn (region: Str): Str {
-    `https://sqs.${region}.amazonaws.com`
+    regional-url("sqs", region)
 }
 
 // DynamoDB endpoint helper
@@ -607,7 +1050,7 @@ meta {
     doc: """Get the DynamoDB endpoint URL for a given region"""
 }
 fn (region: Str): Str {
-    `https://dynamodb.${region}.amazonaws.com`
+    regional-url("dynamodb", region)
 }
 
 // Secrets Manager endpoint helper
@@ -616,7 +1059,7 @@ meta {
     doc: """Get the Secrets Manager endpoint URL for a given region"""
 }
 fn (region: Str): Str {
-    `https://secretsmanager.${region}.amazonaws.com`
+    regional-url("secretsmanager", region)
 }
 
 // Bedrock endpoint helper
@@ -625,7 +1068,7 @@ meta {
     doc: """Get the Bedrock control plane endpoint URL for a given region"""
 }
 fn (region: Str): Str {
-    `https://bedrock.${region}.amazonaws.com`
+    regional-url("bedrock", region)
 }
 
 // Bedrock Runtime endpoint helper
@@ -634,5 +1077,5 @@ meta {
     doc: """Get the Bedrock runtime endpoint URL for model invocation"""
 }
 fn (region: Str): Str {
-    `https://bedrock-runtime.${region}.amazonaws.com`
+    regional-url("bedrock-runtime", region)
 }

@@ -34,6 +34,14 @@ meta {
 
     Token calls return the provider's decoded JSON body on success, or an
     Err carrying `{status, body}` on failure.
+
+    **Masking.** Client secrets, codes, refresh tokens, PKCE verifiers and JWT
+    assertions are marked with `::hot::ctx/mark-secret` on the way in, and
+    `access_token`, `refresh_token` and `id_token` on the way out, so they are
+    masked in the run's call records, including when a provider echoes them
+    back in an error. Values are returned unchanged. Records of your own calls
+    that finished before a value reached this package may already be written, so
+    mark a secret your code fetches as soon as you have it.
     """
 }
 
@@ -43,6 +51,33 @@ meta {
 ::b64 ::hot::base64
 ::random ::hot::random
 ::http ::hot::http
+::ctx ::hot::ctx
+
+// Option keys of the grant builders that are credentials
+SECRET_OPTIONS ["client-secret", "code", "refresh-token", "code-verifier"]
+
+// Fields of a form-encoded token request that are credentials
+SECRET_FIELDS ["client_secret", "code", "refresh_token", "code_verifier", "assertion", "client_assertion", "password"]
+
+// Fields of a token response that are credentials
+TOKEN_FIELDS ["access_token", "refresh_token", "id_token"]
+
+// Mask the listed keys of `values` in the run's call records. Returns `values` unchanged.
+mark-fields fn (values: Map, names: Vec): Map {
+  ::ctx/mark-secret(filter-keys(values, in(%, names)))
+  values
+}
+
+mark-tokens
+meta {
+    doc: """Mask the tokens in a token endpoint's reply and return it unchanged: `access_token`, `refresh_token` and `id_token` of a Map, or the whole reply if it isn't JSON."""
+}
+fn (reply: Any): Any {
+  cond {
+    is-map(reply) => { mark-fields(reply, TOKEN_FIELDS) }
+    => { ::ctx/mark-secret(reply) }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // PKCE (RFC 7636)
@@ -53,7 +88,7 @@ meta {
     doc: """Generate a high-entropy PKCE code verifier (43 characters, base64url of 32 random bytes). Store it for the token exchange."""
 }
 fn (): Str {
-  ::b64/encode-url(::random/random-bytes(32))
+  ::ctx/mark-secret(::b64/encode-url(::ctx/mark-secret(::random/random-bytes(32))))
 }
 
 pkce-challenge
@@ -71,6 +106,7 @@ meta {
     """
 }
 fn (verifier: Str): Str {
+  ::ctx/mark-secret(verifier)
   ::b64/encode-url(::hex/decode(::hash/sha256(verifier)))
 }
 
@@ -111,6 +147,7 @@ meta {
     doc: """Build the `authorization_code` grant body. Fields: `client-id`, `code`, `redirect-uri` (required); `client-secret`, `code-verifier` (optional — PKCE public clients omit the secret)."""
 }
 fn (options: Map): Map {
+  mark-fields(options, SECRET_OPTIONS)
   filter-vals({
     grant_type: "authorization_code",
     code: options.code,
@@ -126,6 +163,7 @@ meta {
     doc: """Build the `refresh_token` grant body. Fields: `client-id`, `refresh-token` (required); `client-secret`, `scope` (optional)."""
 }
 fn (options: Map): Map {
+  mark-fields(options, SECRET_OPTIONS)
   filter-vals({
     grant_type: "refresh_token",
     refresh_token: options.refresh-token,
@@ -140,6 +178,7 @@ meta {
     doc: """Build the `client_credentials` grant body. Fields: `client-id`, `client-secret` (required); `scope`, `audience` (optional)."""
 }
 fn (options: Map): Map {
+  mark-fields(options, SECRET_OPTIONS)
   filter-vals({
     grant_type: "client_credentials",
     client_id: options.client-id,
@@ -154,6 +193,7 @@ meta {
     doc: """Build the RFC 7523 JWT-bearer grant body from a signed assertion (e.g. a Google service-account JWT)."""
 }
 fn (assertion: Str): Map {
+  ::ctx/mark-secret(assertion)
   {
     grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
     assertion: assertion
@@ -164,27 +204,37 @@ fn (assertion: Str): Map {
 // Token endpoint requests
 // ---------------------------------------------------------------------------
 
+token-result
+meta {
+    doc: """What `token-request` returns for an HTTP response: the decoded reply with its tokens masked, an Err `{status, body}` for a non-2xx reply, or the transport Err. Exposed for testing."""
+}
+fn (response: Result): Map {
+  cond {
+    is-err(response) => { response }
+    ::http/is-ok-response(response) => { mark-tokens(response.body) }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
 token-request
 meta {
     doc: """
     POST a form-encoded grant body to a token endpoint and decode the JSON
     response. Returns the token response Map (`access_token`,
     `expires_in`, ...) or an Err `{status, body}` for a non-2xx reply.
-    The grant-specific helpers below are usually more convenient.
+    The grant-specific helpers below are usually more convenient. Credentials
+    in `body` and tokens in the reply are masked in the run's call records.
     """
 }
 fn (token-url: Str, body: Map): Map {
+  mark-fields(body, SECRET_FIELDS)
   response ::http/request(::http/HttpRequest({
     method: "POST",
     url: token-url,
     headers: {Content-Type: "application/x-www-form-urlencoded", Accept: "application/json"},
     body: ::uri/encode-query(body)
   }))
-  cond {
-    is-err(response) => { response }
-    ::http/is-ok-response(response) => { response.body }
-    => { err({status: response.status, body: response.body}) }
-  }
+  token-result(response)
 }
 
 exchange-code

@@ -10,7 +10,7 @@ Add this to the `deps` in your `hot.hot` file:
 "hot.dev/openai-compatible": "0.1.0"
 ```
 
-It pulls in `hot.dev/openai` 1.3.0 and `hot.dev/hot-ai` 1.8.1.
+It pulls in `hot.dev/openai` 1.3.0 and `hot.dev/hot-ai` 1.9.0.
 
 ## Setup
 
@@ -31,7 +31,7 @@ Each named preset function reads its own ctx variables, and only the presets you
 | `perplexity()` | `https://api.perplexity.ai` | `perplexity.api.key` | `PERPLEXITY_API_KEY` |
 | `custom()` | any | `openai-compatible.url` (required), `openai-compatible.api.key` (optional) | `OPENAI_COMPATIBLE_URL`, `OPENAI_COMPATIBLE_API_KEY` |
 
-Keyless servers get no `Authorization` header. Nothing here reads `openai.api.key`.
+Keyless servers get no `Authorization` header. Nothing here reads `openai.api.key`. A hosted preset with no key is fine to build: its calls are an Err naming the ctx variable unless they carry an `api-key` of their own.
 
 A ctx file for Groq and a local Ollama:
 
@@ -43,6 +43,42 @@ A ctx file for Groq and a local Ollama:
     "ollama.base.url": ::hot::env/get("OLLAMA_BASE_URL", "")
 }, (v) { not(is-empty(v)) }))
 ```
+
+## Per-call credentials
+
+Every named preset takes an `opts` Map that wins over ctx, so one run can serve many tenants. So do the chat, models and embeddings functions, over a provider you already built. Nothing is written to ctx.
+
+| `opts` key | Notes |
+| --- | --- |
+| `api-key` | Overrides the preset's key. Present but null or blank is an Err, never a fallback to ctx |
+| `base-url` | Overrides the URL. On a hosted preset it needs `api-key` in `opts` too: the ctx key is never sent to a per-call URL. On a server that needs no key (`ollama`, `vllm`, `lm-studio`, `custom`) it sends none |
+| `endpoint` | An `::openai::api/Endpoint`, replacing the provider's for that call. Not for the named presets |
+
+```hot
+::oc ::openai-compatible
+::chat ::openai-compatible::chat
+
+tenant-groq ::oc/groq({api-key: tenant-key})
+answer ::chat/chat(tenant-groq, "llama-3.3-70b-versatile", "Why is the sky blue?")
+
+same ::chat/chat(::oc/groq(), "llama-3.3-70b-versatile", "Why is the sky blue?", {api-key: tenant-key})
+gpu-box ::oc/ollama({base-url: "http://gpu-box.internal:11434/v1"})
+```
+
+The run loop passes `ChatOptions.provider-opts` to the chat function of the provider a registry picks:
+
+```hot
+ask fn (tenant-key: Str, question: Str): Str {
+    opts ::ai::chat/ChatOptions({
+        model: "groq/llama-3.3-70b-versatile",
+        providers: ::ai::chat/with-providers([::openai-compatible/provider(::openai-compatible/groq())]),
+        provider-opts: {api-key: tenant-key}
+    })
+    ::ai::chat/run-loop(opts, question)
+}
+```
+
+To reach a keyless server through `provider-opts`, pass a keyless `Endpoint` as `endpoint`: hot-ai refuses a bare `base-url` there. Keys passed in `opts`, an `Endpoint` or `configure` are masked in the run's call records, including inside strings like `Bearer ${key}`. A key shorter than 8 bytes is masked only as a whole value.
 
 ## Quick start
 
@@ -70,9 +106,9 @@ ask fn (question: Str): Str {
 }
 ```
 
-Each preset claims models that start with its prefix (`ollama/`, `vllm/`, `lmstudio/`, `groq/`, `openrouter/`, `deepseek/`, `together/`, `fireworks/`, `mistral/`, `cerebras/`, `perplexity/`, `custom/`) and strips the prefix before the request. OpenRouter ids keep their vendor part: `openrouter/anthropic/claude-sonnet-4.5` is sent as `anthropic/claude-sonnet-4.5`. Built-in hot-ai providers (`claude-*`, `gpt-*`, ...) still resolve as usual.
+Each registration's `variant` is `Provider.Compat({name})`, so `reg.variant.name` tells presets apart and none passes for OpenAI. Each preset claims models that start with its prefix (`ollama/`, `vllm/`, `lmstudio/`, `groq/`, `openrouter/`, `deepseek/`, `together/`, `fireworks/`, `mistral/`, `cerebras/`, `perplexity/`, `custom/`) and strips the prefix before the request. OpenRouter ids keep their vendor part: `openrouter/anthropic/claude-sonnet-4.5` is sent as `anthropic/claude-sonnet-4.5`. Built-in hot-ai providers (`claude-*`, `gpt-*`, ...) still resolve as usual.
 
-To skip routing, bind one provider directly:
+To skip routing, bind one provider directly. `chat-opts-fn` and `chat-stream-opts-fn` are the same functions with `provider-opts`:
 
 ```hot
 ask-local fn (question: Str): Str {
@@ -121,7 +157,7 @@ Requests are plain Maps in OpenAI's shape. Messages can be `::openai::chat/Messa
 
 ### Explicit keys and overrides
 
-`configure(preset, api-key, overrides?)` reads no ctx. `overrides` can set `base-url`, `model-prefix`, `name`, `headers`, `max-tokens` (default 4096) and `extra-body`:
+`configure(preset, api-key, overrides?)` reads no ctx, and `resolve(preset, opts)` is what the named presets call. `overrides` can set `base-url`, `model-prefix`, `name`, `headers`, `max-tokens` (default 4096) and `extra-body`:
 
 ```hot
 ::oc ::openai-compatible
@@ -140,7 +176,7 @@ registry fn (): Vec<::ai::chat/ProviderRegistration> {
 
 | Module | Functions |
 |---|---|
-| `::openai-compatible` | Presets (`OLLAMA`, `VLLM`, `LM_STUDIO`, `GROQ`, `OPENROUTER`, `DEEPSEEK`, `TOGETHER`, `FIREWORKS`, `MISTRAL`, `CEREBRAS`, `PERPLEXITY`, `PRESETS`), named ctx presets (`ollama()` ... `custom()`), `configure`, `provider`, `chat-fn`, `chat-stream-fn`, `openrouter-headers` |
+| `::openai-compatible` | Presets (`OLLAMA`, `VLLM`, `LM_STUDIO`, `GROQ`, `OPENROUTER`, `DEEPSEEK`, `TOGETHER`, `FIREWORKS`, `MISTRAL`, `CEREBRAS`, `PERPLEXITY`, `PRESETS`, `CUSTOM`), named ctx presets (`ollama()` ... `custom()`), `configure`, `resolve`, `provider`, `chat-fn`, `chat-stream-fn`, `chat-opts-fn`, `chat-stream-opts-fn`, `openrouter-headers` |
 | `::openai-compatible::chat` | `complete`, `complete-stream`, `chat`, `reply-text`, `prepare-request`, message helpers, `extract-chunk-text`, `is-stream-done` |
 | `::openai-compatible::models` | `list-models`, `get-model`, `model-path` |
 | `::openai-compatible::embeddings` | `EmbeddingsRequest`, `create-embeddings` |

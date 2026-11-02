@@ -29,8 +29,12 @@ users-conversations
 meta {
     doc: """GET /users.conversations - List conversations the calling user may access. Filter by `types` (e.g., "public_channel,private_channel") and `exclude_archived`. Supports cursor-based pagination."""
 }
-fn (request: UsersConversationsRequest): UsersConversationsResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.conversations?user=${or(request.user, "")}&types=${or(request.types, "")}&exclude_archived=${or(request.exclude_archived, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`)
+fn
+(request: UsersConversationsRequest): UsersConversationsResponse {
+  users-conversations(request, {})
+},
+(request: UsersConversationsRequest, opts: Map): UsersConversationsResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/users.conversations?user=${or(request.user, "")}&types=${or(request.types, "")}&exclude_archived=${or(request.exclude_archived, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
   if(is-ok-response(response), UsersConversationsResponse(response.body), err(HttpError(response)))
 }
 
@@ -47,8 +51,12 @@ users-delete-photo
 meta {
     doc: """POST /users.deletePhoto - Delete the user profile photo. Resets to the default avatar."""
 }
-fn (request: UsersDeletePhotoRequest): UsersDeletePhotoResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/users.deletePhoto`, {}, request)
+fn
+(request: UsersDeletePhotoRequest): UsersDeletePhotoResponse {
+  users-delete-photo(request, {})
+},
+(request: UsersDeletePhotoRequest, opts: Map): UsersDeletePhotoResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/users.deletePhoto`, {}, request, opts)
   if(is-ok-response(response), UsersDeletePhotoResponse(response.body), err(HttpError(response)))
 }
 
@@ -72,8 +80,12 @@ users-get-presence
 meta {
     doc: """GET /users.getPresence - Get user presence information. Returns the user's current `presence` status ("active" or "away") and connection details."""
 }
-fn (request: UsersGetPresenceRequest): UsersGetPresenceResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.getPresence?user=${request.user}`)
+fn
+(request: UsersGetPresenceRequest): UsersGetPresenceResponse {
+  users-get-presence(request, {})
+},
+(request: UsersGetPresenceRequest, opts: Map): UsersGetPresenceResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/users.getPresence?user=${request.user}`, {}, "", opts)
   if(is-ok-response(response), UsersGetPresenceResponse(response.body), err(HttpError(response)))
 }
 
@@ -89,8 +101,12 @@ users-identity
 meta {
     doc: """GET /users.identity - Get a user's identity (Sign in with Slack). Requires the `identity.basic` scope. Returns user name, email, and team info."""
 }
-fn (): UsersIdentityResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.identity`)
+fn
+(): UsersIdentityResponse {
+  users-identity({})
+},
+(opts: Map): UsersIdentityResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/users.identity`, {}, "", opts)
   if(is-ok-response(response), UsersIdentityResponse(response.body), err(HttpError(response)))
 }
 
@@ -123,8 +139,12 @@ response.user.real_name    // => "John Doe"
 ```
 """
 }
-fn (request: UsersInfoRequest): UsersInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.info?user=${request.user}&include_locale=${or(request.include_locale, "")}`)
+fn
+(request: UsersInfoRequest): UsersInfoResponse {
+  users-info(request, {})
+},
+(request: UsersInfoRequest, opts: Map): UsersInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/users.info?user=${request.user}&include_locale=${or(request.include_locale, "")}`, {}, "", opts)
   if(is-ok-response(response), UsersInfoResponse(response.body), err(HttpError(response)))
 }
 
@@ -161,8 +181,12 @@ user.name  // => "johndoe"
 ```
 """
 }
-fn (request: UsersListRequest): UsersListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.list?limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}&include_locale=${or(request.include_locale, "")}`)
+fn
+(request: UsersListRequest): UsersListResponse {
+  users-list(request, {})
+},
+(request: UsersListRequest, opts: Map): UsersListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/users.list?limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}&include_locale=${or(request.include_locale, "")}`, {}, "", opts)
   if(is-ok-response(response), UsersListResponse(response.body), err(HttpError(response)))
 }
 
@@ -181,8 +205,12 @@ users-lookup-by-email
 meta {
     doc: """GET /users.lookupByEmail - Find a user with an email address. Returns the matching user object or an error if not found."""
 }
-fn (request: UsersLookupByEmailRequest): UsersLookupByEmailResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.lookupByEmail?email=${request.email}`)
+fn
+(request: UsersLookupByEmailRequest): UsersLookupByEmailResponse {
+  users-lookup-by-email(request, {})
+},
+(request: UsersLookupByEmailRequest, opts: Map): UsersLookupByEmailResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/users.lookupByEmail?email=${request.email}`, {}, "", opts)
   if(is-ok-response(response), UsersLookupByEmailResponse(response.body), err(HttpError(response)))
 }
 
@@ -199,8 +227,12 @@ users-set-active
 meta {
     doc: """POST /users.setActive - Mark the calling user as active. This updates the user's presence to "active"."""
 }
-fn (request: UsersSetActiveRequest): UsersSetActiveResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/users.setActive`, {}, request)
+fn
+(request: UsersSetActiveRequest): UsersSetActiveResponse {
+  users-set-active(request, {})
+},
+(request: UsersSetActiveRequest, opts: Map): UsersSetActiveResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/users.setActive`, {}, request, opts)
   if(is-ok-response(response), UsersSetActiveResponse(response.body), err(HttpError(response)))
 }
 
@@ -221,8 +253,12 @@ users-set-photo
 meta {
     doc: """POST /users.setPhoto - Set the user profile photo. Pass the `image` data and optional crop coordinates (`crop_x`, `crop_y`, `crop_w`)."""
 }
-fn (request: UsersSetPhotoRequest): UsersSetPhotoResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/users.setPhoto`, {}, request)
+fn
+(request: UsersSetPhotoRequest): UsersSetPhotoResponse {
+  users-set-photo(request, {})
+},
+(request: UsersSetPhotoRequest, opts: Map): UsersSetPhotoResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/users.setPhoto`, {}, request, opts)
   if(is-ok-response(response), UsersSetPhotoResponse(response.body), err(HttpError(response)))
 }
 
@@ -240,8 +276,12 @@ users-set-presence
 meta {
     doc: """POST /users.setPresence - Set the user presence. Pass `presence: "auto"` to let Slack manage presence, or `"away"` to manually set as away."""
 }
-fn (request: UsersSetPresenceRequest): UsersSetPresenceResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/users.setPresence`, {}, request)
+fn
+(request: UsersSetPresenceRequest): UsersSetPresenceResponse {
+  users-set-presence(request, {})
+},
+(request: UsersSetPresenceRequest, opts: Map): UsersSetPresenceResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/users.setPresence`, {}, request, opts)
   if(is-ok-response(response), UsersSetPresenceResponse(response.body), err(HttpError(response)))
 }
 
@@ -262,8 +302,12 @@ dnd-end-dnd
 meta {
     doc: """POST /dnd.endDnd - End the current user's Do Not Disturb session immediately."""
 }
-fn (request: DndEndDndRequest): DndEndDndResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/dnd.endDnd`, {}, request)
+fn
+(request: DndEndDndRequest): DndEndDndResponse {
+  dnd-end-dnd(request, {})
+},
+(request: DndEndDndRequest, opts: Map): DndEndDndResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/dnd.endDnd`, {}, request, opts)
   if(is-ok-response(response), DndEndDndResponse(response.body), err(HttpError(response)))
 }
 
@@ -284,8 +328,12 @@ dnd-end-snooze
 meta {
     doc: """POST /dnd.endSnooze - End the current user's snooze mode. Returns the updated DND schedule."""
 }
-fn (request: DndEndSnoozeRequest): DndEndSnoozeResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/dnd.endSnooze`, {}, request)
+fn
+(request: DndEndSnoozeRequest): DndEndSnoozeResponse {
+  dnd-end-snooze(request, {})
+},
+(request: DndEndSnoozeRequest, opts: Map): DndEndSnoozeResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/dnd.endSnooze`, {}, request, opts)
   if(is-ok-response(response), DndEndSnoozeResponse(response.body), err(HttpError(response)))
 }
 
@@ -309,8 +357,12 @@ dnd-info
 meta {
     doc: """GET /dnd.info - Retrieve a user's current DND status. Returns whether DND is enabled, next scheduled DND times, and snooze state."""
 }
-fn (request: DndInfoRequest): DndInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/dnd.info?user=${or(request.user, "")}`)
+fn
+(request: DndInfoRequest): DndInfoResponse {
+  dnd-info(request, {})
+},
+(request: DndInfoRequest, opts: Map): DndInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/dnd.info?user=${or(request.user, "")}`, {}, "", opts)
   if(is-ok-response(response), DndInfoResponse(response.body), err(HttpError(response)))
 }
 
@@ -331,8 +383,12 @@ dnd-set-snooze
 meta {
     doc: """POST /dnd.setSnooze - Turn on Do Not Disturb mode for the current user. Specify `num_minutes` for the snooze duration."""
 }
-fn (request: DndSetSnoozeRequest): DndSetSnoozeResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/dnd.setSnooze`, {}, request)
+fn
+(request: DndSetSnoozeRequest): DndSetSnoozeResponse {
+  dnd-set-snooze(request, {})
+},
+(request: DndSetSnoozeRequest, opts: Map): DndSetSnoozeResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/dnd.setSnooze`, {}, request, opts)
   if(is-ok-response(response), DndSetSnoozeResponse(response.body), err(HttpError(response)))
 }
 
@@ -351,8 +407,12 @@ dnd-team-info
 meta {
     doc: """GET /dnd.teamInfo - Retrieve DND status for users on a team. Pass a comma-separated list of user IDs."""
 }
-fn (request: DndTeamInfoRequest): DndTeamInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/dnd.teamInfo?users=${request.users}`)
+fn
+(request: DndTeamInfoRequest): DndTeamInfoResponse {
+  dnd-team-info(request, {})
+},
+(request: DndTeamInfoRequest, opts: Map): DndTeamInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/dnd.teamInfo?users=${request.users}`, {}, "", opts)
   if(is-ok-response(response), DndTeamInfoResponse(response.body), err(HttpError(response)))
 }
 
@@ -379,8 +439,12 @@ usergroups-create
 meta {
     doc: """POST /usergroups.create - Create a user group. Provide a `name` and optionally a `handle` (mention name), `description`, and default `channels`."""
 }
-fn (request: UsergroupsCreateRequest): UsergroupsCreateResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/usergroups.create`, {}, request)
+fn
+(request: UsergroupsCreateRequest): UsergroupsCreateResponse {
+  usergroups-create(request, {})
+},
+(request: UsergroupsCreateRequest, opts: Map): UsergroupsCreateResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/usergroups.create`, {}, request, opts)
   if(is-ok-response(response), UsergroupsCreateResponse(response.body), err(HttpError(response)))
 }
 
@@ -400,8 +464,12 @@ usergroups-disable
 meta {
     doc: """POST /usergroups.disable - Disable an existing user group. Disabled groups can no longer be mentioned or used."""
 }
-fn (request: UsergroupsDisableRequest): UsergroupsDisableResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/usergroups.disable`, {}, request)
+fn
+(request: UsergroupsDisableRequest): UsergroupsDisableResponse {
+  usergroups-disable(request, {})
+},
+(request: UsergroupsDisableRequest, opts: Map): UsergroupsDisableResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/usergroups.disable`, {}, request, opts)
   if(is-ok-response(response), UsergroupsDisableResponse(response.body), err(HttpError(response)))
 }
 
@@ -421,8 +489,12 @@ usergroups-enable
 meta {
     doc: """POST /usergroups.enable - Re-enable a disabled user group. The group can be mentioned and used again."""
 }
-fn (request: UsergroupsEnableRequest): UsergroupsEnableResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/usergroups.enable`, {}, request)
+fn
+(request: UsergroupsEnableRequest): UsergroupsEnableResponse {
+  usergroups-enable(request, {})
+},
+(request: UsergroupsEnableRequest, opts: Map): UsergroupsEnableResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/usergroups.enable`, {}, request, opts)
   if(is-ok-response(response), UsergroupsEnableResponse(response.body), err(HttpError(response)))
 }
 
@@ -443,8 +515,12 @@ usergroups-list
 meta {
     doc: """GET /usergroups.list - List all user groups in a workspace. Set `include_disabled: true` to include disabled groups and `include_users: true` to include member lists."""
 }
-fn (request: UsergroupsListRequest): UsergroupsListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/usergroups.list?include_users=${or(request.include_users, "")}&include_count=${or(request.include_count, "")}&include_disabled=${or(request.include_disabled, "")}`)
+fn
+(request: UsergroupsListRequest): UsergroupsListResponse {
+  usergroups-list(request, {})
+},
+(request: UsergroupsListRequest, opts: Map): UsergroupsListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/usergroups.list?include_users=${or(request.include_users, "")}&include_count=${or(request.include_count, "")}&include_disabled=${or(request.include_disabled, "")}`, {}, "", opts)
   if(is-ok-response(response), UsergroupsListResponse(response.body), err(HttpError(response)))
 }
 
@@ -468,8 +544,12 @@ usergroups-update
 meta {
     doc: """POST /usergroups.update - Update an existing user group. Change the name, handle, description, or default channels."""
 }
-fn (request: UsergroupsUpdateRequest): UsergroupsUpdateResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/usergroups.update`, {}, request)
+fn
+(request: UsergroupsUpdateRequest): UsergroupsUpdateResponse {
+  usergroups-update(request, {})
+},
+(request: UsergroupsUpdateRequest, opts: Map): UsergroupsUpdateResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/usergroups.update`, {}, request, opts)
   if(is-ok-response(response), UsergroupsUpdateResponse(response.body), err(HttpError(response)))
 }
 
@@ -489,8 +569,12 @@ usergroups-users-list
 meta {
     doc: """GET /usergroups.users.list - List users in a user group. Returns a Vec of user IDs. Set `include_disabled: true` to include deactivated users."""
 }
-fn (request: UsergroupsUsersListRequest): UsergroupsUsersListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/usergroups.users.list?usergroup=${request.usergroup}&include_disabled=${or(request.include_disabled, "")}`)
+fn
+(request: UsergroupsUsersListRequest): UsergroupsUsersListResponse {
+  usergroups-users-list(request, {})
+},
+(request: UsergroupsUsersListRequest, opts: Map): UsergroupsUsersListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/usergroups.users.list?usergroup=${request.usergroup}&include_disabled=${or(request.include_disabled, "")}`, {}, "", opts)
   if(is-ok-response(response), UsergroupsUsersListResponse(response.body), err(HttpError(response)))
 }
 
@@ -511,8 +595,12 @@ usergroups-users-update
 meta {
     doc: """POST /usergroups.users.update - Update the list of users in a user group. Pass a comma-separated list of user IDs in `users`. This replaces the entire member list."""
 }
-fn (request: UsergroupsUsersUpdateRequest): UsergroupsUsersUpdateResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/usergroups.users.update`, {}, request)
+fn
+(request: UsergroupsUsersUpdateRequest): UsergroupsUsersUpdateResponse {
+  usergroups-users-update(request, {})
+},
+(request: UsergroupsUsersUpdateRequest, opts: Map): UsergroupsUsersUpdateResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/usergroups.users.update`, {}, request, opts)
   if(is-ok-response(response), UsergroupsUsersUpdateResponse(response.body), err(HttpError(response)))
 }
 
@@ -547,8 +635,12 @@ response.profile  // => {real_name: "John Doe", email: "john@example.com", ...}
 ```
 """
 }
-fn (request: UsersProfileGetRequest): UsersProfileGetResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.profile.get?user=${or(request.user, "")}&include_labels=${or(request.include_labels, "")}`)
+fn
+(request: UsersProfileGetRequest): UsersProfileGetResponse {
+  users-profile-get(request, {})
+},
+(request: UsersProfileGetRequest, opts: Map): UsersProfileGetResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/users.profile.get?user=${or(request.user, "")}&include_labels=${or(request.include_labels, "")}`, {}, "", opts)
   if(is-ok-response(response), UsersProfileGetResponse(response.body), err(HttpError(response)))
 }
 
@@ -570,7 +662,11 @@ users-profile-set
 meta {
     doc: """POST /users.profile.set - Set a user's profile information. Update a single field with `name`/`value`, or pass a full `profile` map to update multiple fields at once."""
 }
-fn (request: UsersProfileSetRequest): UsersProfileSetResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/users.profile.set`, {}, request)
+fn
+(request: UsersProfileSetRequest): UsersProfileSetResponse {
+  users-profile-set(request, {})
+},
+(request: UsersProfileSetRequest, opts: Map): UsersProfileSetResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/users.profile.set`, {}, request, opts)
   if(is-ok-response(response), UsersProfileSetResponse(response.body), err(HttpError(response)))
 }

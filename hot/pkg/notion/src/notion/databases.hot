@@ -6,8 +6,12 @@ get-database
 meta {
     doc: """GET /databases/{id} - The database schema: property names, types, and options."""
 }
-fn (database-id: Str): Map {
-  ::api/json("GET", `/databases/${database-id}`)
+fn
+(database-id: Str): Map {
+  get-database(database-id, {})
+},
+(database-id: Str, opts: Map): Map {
+  ::api/json("GET", `/databases/${database-id}`, {}, "", opts)
 }
 
 query-database
@@ -34,17 +38,24 @@ fn
   query-database(database-id, {})
 },
 (database-id: Str, options: Map): Map {
-  ::api/json("POST", `/databases/${database-id}/query`, {}, options)
+  query-database(database-id, options, {})
+},
+(database-id: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", `/databases/${database-id}/query`, {}, options, opts)
 }
 
 create-database
 meta {
     doc: """POST /databases - Create a database under a parent page. `properties` is the schema, e.g. `{Name: {title: {}}, Status: {select: {options: [{name: "Todo"}]}}}`."""
 }
-fn (parent-page-id: Str, title: Str, properties: Map): Map {
+fn
+(parent-page-id: Str, title: Str, properties: Map): Map {
+  create-database(parent-page-id, title, properties, {})
+},
+(parent-page-id: Str, title: Str, properties: Map, opts: Map): Map {
   ::api/json("POST", "/databases", {}, {
     parent: {type: "page_id", page_id: parent-page-id},
     title: ::notion/rich-text(title),
     properties: properties
-  })
+  }, opts)
 }

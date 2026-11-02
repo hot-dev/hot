@@ -33,6 +33,20 @@ tokens ::oauth2/jwt-bearer("https://oauth2.googleapis.com/token", assertion)
 
 Token calls return the provider's decoded JSON body or an Err `{status, body}`.
 
+## Masked credentials
+
+Client secrets, codes, refresh tokens, PKCE verifiers and JWT assertions are masked in the run's call records from when they reach this package, and so are `access_token`, `refresh_token` and `id_token` in the reply, including inside strings and when a provider echoes them in an error. A secret shorter than 8 bytes is masked only as a whole value. Values are returned unchanged.
+
+Records of your own calls that finished before a value reached this package may already be written, so mark a secret your code fetches as soon as you have it:
+
+```hot
+::ctx ::hot::ctx
+
+client-secret ::ctx/mark-secret(::hot::env/get("OAUTH_CLIENT_SECRET", ""))
+```
+
+Requires Hot 3.0.2.
+
 ## License
 
 Apache-2.0 - see [LICENSE](LICENSE)

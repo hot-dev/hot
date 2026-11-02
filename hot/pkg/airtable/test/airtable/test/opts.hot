@@ -1,0 +1,142 @@
+::airtable::test::opts ns
+meta ["test"]
+
+// Hermetic. These tests never send an HTTP request: a token with a newline is
+// not a legal header value, so the HTTP client refuses to build the request.
+// An error from ::hot::http/request therefore proves that the token got
+// through the function to the client, and the "not set" error proves the
+// function went through the resolver. A host-name lookup can still happen
+// first; when it fails, the error comes from the same place.
+
+::api ::airtable::api
+::at ::airtable
+
+UNSENDABLE "opts\ncredential"
+
+// One valid call to every function that calls the API, without its opts.
+every-call fn (): Vec {
+  [
+    {f: ::at/list-records, args: ["app1", "Leads", {maxRecords: 1}]},
+    {f: ::at/get-record, args: ["app1", "Leads", "rec1"]},
+    {f: ::at/create-records, args: ["app1", "Leads", [{fields: {Name: "Ada"}}]]},
+    {f: ::at/update-records, args: ["app1", "Leads", [{id: "rec1", fields: {Name: "Ada"}}]]},
+    {f: ::at/delete-record, args: ["app1", "Leads", "rec1"]},
+    {f: ::at/upsert-records, args: ["app1", "Leads", ["Email"], [{fields: {Email: "a@example.com"}}]]},
+    {f: ::at/delete-records, args: ["app1", "Leads", ["rec1"]]},
+    {f: ::at/list-comments, args: ["app1", "Leads", "rec1", {pageSize: 1}]},
+    {f: ::at/create-comment, args: ["app1", "Leads", "rec1", "text"]},
+    {f: ::at/update-comment, args: ["app1", "Leads", "rec1", "com1", "text"]},
+    {f: ::at/delete-comment, args: ["app1", "Leads", "rec1", "com1"]},
+    {f: ::at/whoami, args: []},
+    {f: ::at/list-bases, args: []},
+    {f: ::at/get-base-schema, args: ["app1"]}
+  ]
+}
+
+failure fn (f: Any, args: Vec): Str {
+  attempt ::hot::internal::exec/contain(f, args)
+  cond {
+    is-err(attempt) => { ::hot::type/err-message(err-value(attempt)) }
+    => { "no error" }
+  }
+}
+
+reached-http fn (message: Str): Bool {
+  contains(message, "::hot::http/request")
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+  assert-eq("from-opts", ::api/resolve-from({token: "from-opts"}, {"airtable.token": "from-ctx"}).token)
+}
+
+test-resolve-ctx-when-opts-empty
+meta ["test"] fn () {
+  assert-eq("from-ctx", ::api/resolve-from({}, {"airtable.token": "from-ctx"}).token)
+}
+
+test-resolve-missing-credential
+meta ["test"] fn () {
+  missing ::api/resolve-from({}, {})
+  assert(is-err(missing), "no token is an Err")
+  assert(contains(err-value(missing), "airtable.token"), "the error names the context variable")
+  assert(contains(err-value(missing), "{token: ...}"), "the error names the opts key")
+  assert(is-err(::api/resolve-from({}, {"airtable.token": "  "})), "a blank context value counts as missing")
+}
+
+test-resolve-blank-opts-credential-never-falls-back-to-ctx
+meta ["test"] fn () {
+  assert(is-err(::api/resolve-from({token: null}, {"airtable.token": "from-ctx"})), "null")
+  assert(is-err(::api/resolve-from({token: ""}, {"airtable.token": "from-ctx"})), "empty")
+  assert(is-err(::api/resolve-from({token: "  "}, {"airtable.token": "from-ctx"})), "blank")
+}
+
+test-resolve-reads-ctx-and-never-writes-it
+meta ["test"] fn () {
+  assert(is-err(::api/resolve({})), "no context in tests")
+  assert-eq("tenant-b", ::api/resolve({token: "tenant-b"}).token)
+  assert(is-null(::hot::ctx/get("airtable.token")), "a per-call token is not written to ctx")
+  ::hot::ctx/set("airtable.token", "from-ctx")
+  from-ctx ::api/resolve({})
+  overridden ::api/resolve({token: "tenant-b"})
+  still ::hot::ctx/get("airtable.token")
+  ::hot::ctx/set("airtable.token", null)
+  assert-eq("from-ctx", from-ctx.token)
+  assert-eq("tenant-b", overridden.token, "opts win over the real context")
+  assert-eq("from-ctx", still, "the override leaves ctx alone")
+}
+
+test-raw-request-explicit-token-still-works
+meta ["test"] fn () {
+  assert(reached-http(failure(::at/request, ["GET", "/meta/whoami", "", UNSENDABLE])), "the explicit Str token arity")
+  assert(contains(failure(::at/request, ["GET", "/meta/whoami", ""]), "airtable.token is not set"), "the ctx arity")
+}
+
+test-every-function-reports-a-missing-credential
+meta ["test"] fn () {
+  for-each(every-call(), (call) {
+    assert(contains(failure(call.f, concat(call.args, [{}])), "airtable.token is not set"), `${call.f} with empty opts`)
+    assert(contains(failure(call.f, call.args), "airtable.token is not set"), `${call.f} without opts`)
+  })
+}
+
+test-every-opts-arity-takes-its-token-from-opts
+meta ["test"] fn () {
+  for-each(every-call(), (call) {
+    assert(reached-http(failure(call.f, concat(call.args, [{token: UNSENDABLE}]))), `${call.f} with a token in opts`)
+  })
+}
+
+test-every-opts-arity-rejects-a-blank-token-even-with-ctx-set
+meta ["test"] fn () {
+  ::hot::ctx/set("airtable.token", UNSENDABLE)
+  results map(every-call(), (call) {
+    {f: call.f, message: failure(call.f, concat(call.args, [{token: ""}]))}
+  })
+  ::hot::ctx/set("airtable.token", null)
+  for-each(results, (r) {
+    assert(contains(r.message, "is empty"), `${r.f} with a blank token`)
+  })
+}
+
+test-every-existing-arity-still-uses-ctx
+meta ["test"] fn () {
+  ::hot::ctx/set("airtable.token", UNSENDABLE)
+  results map(every-call(), (call) {
+    {f: call.f, message: failure(call.f, call.args)}
+  })
+  // The shorter list-records and list-comments arities
+  short-list failure(::at/list-records, ["app1", "Leads"])
+  short-comments failure(::at/list-comments, ["app1", "Leads", "rec1"])
+  ::hot::ctx/set("airtable.token", null)
+  for-each(results, (r) {
+    assert(reached-http(r.message), `${r.f} with the token in ctx`)
+  })
+  assert(reached-http(short-list))
+  assert(reached-http(short-comments))
+}
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({token: "tenant-credential-a"}).token)
+}

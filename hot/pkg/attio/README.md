@@ -42,6 +42,28 @@ hits ::records/query-records("companies", {
 attrs ::records/list-attributes("people")
 ```
 
+## Per-call credentials
+
+Every function that calls Attio takes an optional trailing `opts` Map, so one run can act for many workspaces and parallel flows don't share credentials. Nothing from `opts` is written to ctx.
+
+A per-call credential is masked in the run's call records, including inside strings like `Bearer ${key}`. A secret shorter than 8 bytes is masked only as a whole value. Records of your own calls that finished before this one may already be written, so mark a credential your code fetches with `::hot::ctx/mark-secret` as soon as you have it.
+
+| Key | Effect |
+|---|---|
+| `api-key` | The access token for this call, instead of `attio.api.key` |
+| `base-url` | Another API root, such as a proxy. Needs an `api-key` in the same `opts`; `attio.api.key` is never sent to a per-call URL |
+
+`opts` always comes last. Where a function already takes `options`, pass `{}` for those.
+
+```hot
+tenant {api-key: "tenant-b-token"}
+me ::attio::workspace/get-self(tenant)
+hits ::attio::records/query-records("companies", {limit: 10}, tenant)
+note ::attio::notes/list-notes("people", "rec-123", tenant)
+```
+
+An `api-key` that is present but blank or null is an error naming the key, never a fallback to `attio.api.key`. `::attio::api/resolve(opts)` is the one place this is decided.
+
 ## License
 
 Apache-2.0 - see [LICENSE](LICENSE)
