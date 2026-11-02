@@ -384,9 +384,13 @@ Two independent filters do this.
 - Values passed to `::hot::ctx/mark-secret`. Use it for a credential that arrives as an ordinary argument, like a per-call `opts` Map.
 - For webhooks and MCP tools, the request's `auth` subtree, its `original-url`, and its sensitive headers, including those named in `secret-headers`.
 
-A registered value is masked wherever it appears inside a string, as itself or URL-encoded, form-encoded, JSON-escaped or base64-encoded, including base64 of a longer string like `Basic base64(user:secret)`. Inside a Map or Vec, each value is registered separately. So is a JSON object held in a string, like a service account key, and the credential after the scheme in `Bearer <credential>`.
+A registered value is masked wherever it appears inside a string, as itself or URL-encoded, form-encoded, JSON-escaped, base64-encoded or as a quoted CSV cell holds it, including base64 of a longer string like `Basic base64(user:secret)`. Inside a Map or Vec, each value is registered separately. So is a JSON object held in a string, like a service account key, and the credential after the scheme in `Bearer <credential>`.
+
+The same goes for bytes: a `Bytes` value holding a registered value or a credential field is masked whole, wherever it is recorded. So are bytes rendered as numbers, as in `Bytes([83, 69, ...])`, which is how a failure's message shows them when an `Err` holds a response's `body-bytes`, and a Vec holding nothing but bytes. An `Err` that `hot run` prints as a program's result is masked too. Any other result is the program's output, and is printed as it is.
 
 Values shorter than 8 bytes are masked only where they are the whole value, because inside other text they would match by chance. `true`, `false`, `null` and `""` are never masked.
+
+**Keys and what they sign** are registered by the functions that use them, without anything marking them. That's the key or password given to `::hot::hmac/hmac-sha256`, `hmac-sha256-bytes`, `hmac-sha512`, `hmac-sha1` and `hmac-verify`, `::hot::crypto/rsa-sha256-sign` and `::hot::crypto/pbkdf2-hmac-sha256`, and what they return, as itself or in hex or base64. So a token signed in a run can't be rebuilt from its parts, and an HMAC you return from a run reads `<secret>` in its stored result. A run matches the first 64 of these inside longer strings, and the rest only as whole values, since a run may sign thousands of requests.
 
 **Credential fields** are masked whether or not anything registered their values, by the field's name, in any case and in `snake_case`, `kebab-case`, `dot.case` or `camelCase`. A prefix doesn't matter: `stripe_api_key` matches `api_key`. The names, in full, are in `CREDENTIAL_FIELDS` in `crates/hot/src/lang/masking.rs`:
 
@@ -406,14 +410,15 @@ A bare `token`, `key` or `code` is not on the list: those names mostly hold pagi
 
 Masking is a safety net for records, not a guarantee. Treat any secret that may have been recorded as exposed.
 
-- **Records already written.** The records of a running call and of its callers are masked again when a secret is registered, so `mark-secret` protects the frames that passed the credential down. A call that already finished and was written keeps what it had. Calls are written every half second, so register a credential as soon as you have it, before passing it to anything else.
-- **Before registration.** The first function to return a credential under a name that isn't a credential field records it. Only a return value in the same half second as the registration is masked.
+- **Before registration, for a moment.** Call rows the run has already written are masked again when it registers a secret: right away the first time, and at most every 30 seconds if it keeps registering new ones, then once more when the run ends. Until then, or if the process stops first, they hold what they held. If the database keeps refusing the update after a few tries, the run reports that its records couldn't be saved. So register a credential as soon as you have it, before passing it to anything else. Large values already spilled to blob storage aren't masked again.
+- **Before registration, outside call rows.** What was already delivered to a stream or printed to the console can't be taken back.
 - **Context keys no function declares.** A key is only a secret if some `meta {ctx: ...}` in the run's call graph declares it; `hot check` warns about the others. Reading an undeclared key with `::hot::ctx/get` doesn't register its value.
 - **Values Hot can't recognize.** A secret that was hashed, encrypted, compressed, hex-encoded, reversed, encoded twice, split up or otherwise transformed doesn't match. Nor does a credential in free-form text under a name that isn't on the list.
 - **Payloads handlers need.** Event data (`::hot::event/send` and webhook or MCP requests, in the `event` table) and task arguments and results (the `task` table) are the inputs and outputs of other code, so they are stored as they are. Don't put secrets in event data or task arguments: have the handler or task read them from the context. A value passed to another run this way isn't registered there until that run registers it.
 - **A run's result as delivered.** The waiting webhook or MCP caller receives the run's real result, since it may be what they asked for, and `hot run` prints it. The stored `run.result` is masked, so **a caller that reads a result back through the API sees `<secret>`** for a credential field or registered secret in it.
 - **Stream data.** `::hot::stream/data` and HTTP stream chunks go to their consumers with registered secrets masked, but not credential fields, which may be what a consumer asked for.
 - **Large values spilled to blob storage.** Masking happens before a value is spilled, but a running call's large argument spilled before a secret was registered stays in its blob, though its record is masked and written again without it.
+- **Columns in raw CSV text.** A `password` column is a credential field once `from-csv` makes it a Map key, but not in the text passed to it. Mark such values with `::hot::ctx/mark-secret`, or use `iter-csv` so the text never enters a record.
 - **Trace-level logs.** `HOT_LOG_LEVEL=trace` logs values as the VM handles them. Don't use it where logs are shared.
 
 ### Runtime Functions
