@@ -3,7 +3,7 @@
 hot.pkg.web-search {
   name: "hot.dev/web-search",
   version: "0.1.0",
-  hot-min-version: "3.0.0",
+  hot-min-version: "3.0.2",
   description: "Web search for Hot agents: Tavily, Brave, Exa, and Firecrawl behind one normalized search() with provider choice, fallback, freshness and domain filters, plus each provider's native API.",
   author: "Hot Dev",
   email: "support@hot.dev",

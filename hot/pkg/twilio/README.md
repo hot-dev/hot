@@ -14,7 +14,7 @@ Add this to the `deps` in your `hot.hot` file:
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `twilio.account.sid` | yes | Account SID (`AC...`). Every 2010-04-01 resource URL is scoped to it. |
+| `twilio.account.sid` | yes, unless every call passes credentials | Account SID (`AC...`). Every 2010-04-01 resource URL is scoped to it. |
 | `twilio.api.key.sid` | one of these | API Key SID (`SK...`). With `twilio.api.key.secret`, preferred over the Auth Token when both are set. |
 | `twilio.api.key.secret` | credential forms | The API key's secret. |
 | `twilio.auth.token` | | Auth Token. Also the key Twilio signs webhooks with, so `::twilio::webhooks/verify-request` needs it even when calls use an API key. |
@@ -33,6 +33,28 @@ page ::messages/list-messages(sub, ::messages/ListMessagesRequest({PageSize: 20}
 ```
 
 `::api/auth-token-client(account-sid, auth-token)` does the same with an Auth Token, and `::api/client-from-ctx()` is the client the short forms use.
+
+## Per-call credentials
+
+Every function that calls Twilio also takes an optional trailing `opts` Map, so one run can act for many accounts and parallel flows don't share credentials. Nothing from `opts` is written to ctx. Secrets in `opts` or in a `Client` are masked in call records.
+
+| Key | Effect |
+|---|---|
+| `account-sid` | The account for this call. Needs credentials in the same `opts`; context credentials are never sent to a per-call account |
+| `auth-token` | The account's Auth Token. Needs `account-sid` |
+| `api-key-sid`, `api-key-secret` | An API key. Needs `account-sid`, and wins over `auth-token` |
+
+`opts` always comes last.
+
+```hot
+::messages ::twilio::messages
+
+tenant {account-sid: "AC1111111111111111111111111111111", api-key-sid: "SK2222222222222222222222222222222", api-key-secret: "key-secret"}
+page ::messages/list-messages(::messages/ListMessagesRequest({PageSize: 20}), tenant)
+everything ::messages/list-all-messages(::messages/ListMessagesRequest({PageSize: 100}), 300, tenant)
+```
+
+With credentials in `opts`, context variables are ignored for that call. A credential key that is present but blank or null is an error naming the key, never a fallback to context. `::twilio::api/resolve` is the one place credentials are decided, whether they come from `opts`, a `Client` or context.
 
 ## Quick start
 
@@ -93,7 +115,7 @@ signed-in eq(check.status, "approved")
 
 **TwiML** (`::twilio::twiml`): `voice-response` and `messaging-response` documents; voice verbs `say`, `play`, `pause`, `gather`, `dial` (with nouns `number`, `client`, `sip`, `conference`, `queue`), `enqueue`, `record`, `hangup`, `reject`, `redirect`; messaging `message` (with `body`, `media`); `element` for anything else; `http-response` for the webhook reply. Text and attribute values are XML-escaped.
 
-**Low level** (`::twilio::api`): `request`, `json`, `form-encode`, `query-string`, `next-page`, `collect-pages`, and the client constructors.
+**Low level** (`::twilio::api`): `request`, `json`, `form-encode`, `query-string`, `next-page`, `collect-pages`, `resolve`, and the client constructors.
 
 ### Paging
 

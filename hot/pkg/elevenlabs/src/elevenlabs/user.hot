@@ -7,16 +7,20 @@ meta {
 
 get-user
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """GET /v1/user: the account (`user_id`, `first_name`, `subscription`, ...). The cheapest key smoke test."""
 }
-fn (): Map {
-  ::api/json("GET", "/v1/user")
+fn
+(): Map {
+  get-user({})
+},
+(opts: Map): Map {
+  ::api/json("GET", "/v1/user", {}, "", opts)
 }
 
 get-subscription
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """
     GET /v1/user/subscription: tier, status, and quota
     (`character_count`, `character_limit`, `next_character_count_reset_unix`,
@@ -30,6 +34,10 @@ meta {
     ```
     """
 }
-fn (): Map {
-  ::api/json("GET", "/v1/user/subscription")
+fn
+(): Map {
+  get-subscription({})
+},
+(opts: Map): Map {
+  ::api/json("GET", "/v1/user/subscription", {}, "", opts)
 }

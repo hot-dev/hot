@@ -9,7 +9,7 @@ meta ["test"] fn () {
     f ::drive/to-doc-file({
         id: "1A", name: "report.pdf", mimeType: "application/pdf", size: "2048",
         modifiedTime: "2026-10-30T12:00:00.000Z", createdTime: "2026-10-01T00:00:00.000Z",
-        parents: ["P"], md5Checksum: "abc", sha256Checksum: "def", webViewLink: "https://drive.google.com/file/d/1A/view",
+        parents: ["P"], md5Checksum: "abc", sha1Checksum: "bcd", sha256Checksum: "def", webViewLink: "https://drive.google.com/file/d/1A/view",
         version: "17", headRevisionId: "rev9", trashed: false
     })
     assert-eq("google-drive", f.provider)
@@ -20,6 +20,8 @@ meta ["test"] fn () {
     assert-eq("https://drive.google.com/file/d/1A/view", f.web-url)
     assert-eq("abc", f.md5)
     assert-eq("def", f.sha256)
+    assert-eq({md5: "abc", sha1: "bcd", sha256: "def"}, f.hashes)
+    assert(is-null(f.path), "Drive has no path")
     assert(not(f.is-folder))
     assert(not(f.is-google-native))
     assert(not(f.trashed))
@@ -46,6 +48,8 @@ meta ["test"] fn () {
     assert-eq("", sparse.name)
     assert(is-null(sparse.size))
     assert-eq(false, sparse.trashed)
+    assert-eq({}, sparse.hashes, "no checksums, no keys")
+    assert-eq({md5: "abc"}, ::drive/to-doc-file({id: "M", md5Checksum: "abc"}).hashes, "only the ones Drive gave")
 }
 
 CHANGES [

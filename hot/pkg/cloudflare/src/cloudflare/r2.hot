@@ -7,7 +7,7 @@ meta {
     `https://{account_id}.r2.cloudflarestorage.com` (region `auto`) with an
     R2 access key pair.
     """,
-    ctx: {"cloudflare.token": {required: true}, "cloudflare.account.id": {required: true}}
+    ctx: {"cloudflare.token": {required: false}, "cloudflare.account.id": {required: false, secret: false}}
 }
 
 ::api ::cloudflare::api
@@ -30,15 +30,15 @@ fn (jurisdiction: Str?): Map {
   }
 }
 
-send-json fn (method: Str, suffix: Str, body: Any, jurisdiction: Str?): Any {
-  path ::api/account-path(suffix)
+send-json fn (method: Str, suffix: Str, body: Any, jurisdiction: Str?, opts: Map): Any {
+  path ::api/account-path(suffix, opts)
   headers jurisdiction-headers(jurisdiction)
   cond {
     is-err(path) => { path }
     => {
       response cond {
-        eq(body, "") => { ::api/send(method, path, headers, "") }
-        => { ::api/send(method, path, {...headers, Content-Type: "application/json"}, to-json(untype(body))) }
+        eq(body, "") => { ::api/send(method, path, headers, "", opts) }
+        => { ::api/send(method, path, {...headers, Content-Type: "application/json"}, to-json(untype(body)), opts) }
       }
 
       cond {
@@ -64,9 +64,12 @@ fn
   list-buckets({})
 },
 (params: Map): ListPage {
+  list-buckets(params, {})
+},
+(params: Map, opts: Map): ListPage {
   jurisdiction get(params, "jurisdiction")
   query-params filter-keys(params, (k) { ne(k, "jurisdiction") })
-  envelope send-json("GET", `/r2/buckets${::api/query(query-params)}`, "", jurisdiction)
+  envelope send-json("GET", `/r2/buckets${::api/query(query-params)}`, "", jurisdiction, opts)
   cond {
     is-err(envelope) => { envelope }
     => { ::api/to-page(envelope, "buckets") }
@@ -85,23 +88,30 @@ fn
   list-all-buckets(params, ::api/DEFAULT_MAX_ITEMS)
 },
 (params: Map, max: Int): Vec {
-  ::api/collect-cursor(list-buckets, {per_page: 1000, ...params}, max)
+  list-all-buckets(params, max, {})
+},
+(params: Map, opts: Map): Vec {
+  list-all-buckets(params, ::api/DEFAULT_MAX_ITEMS, opts)
+},
+(params: Map, max: Int, opts: Map): Vec {
+  ::api/collect-cursor((p) { list-buckets(p, opts) }, {per_page: 1000, ...params}, max)
 }
 
 create-bucket-body
 meta {
-    doc: """The create body: `{name, locationHint?, storageClass?}` from `opts` (`location_hint`/`locationHint`, `storage_class`/`storageClass`). Exposed for testing."""
+    doc: """The create body: `{name, locationHint?, storageClass?}` from `options` (`location_hint`/`locationHint`, `storage_class`/`storageClass`). Exposed for testing."""
 }
-fn (name: Str, opts: Map): Map {
+fn
+(name: Str, options: Map): Map {
   {name: name}
-    |> assoc-some("locationHint", or(get(opts, "locationHint"), get(opts, "location_hint")))
-    |> assoc-some("storageClass", or(get(opts, "storageClass"), get(opts, "storage_class")))
+    |> assoc-some("locationHint", or(get(options, "locationHint"), get(options, "location_hint")))
+    |> assoc-some("storageClass", or(get(options, "storageClass"), get(options, "storage_class")))
 }
 
 create-bucket
 meta {
     doc: """
-    POST /accounts/{account_id}/r2/buckets - Create a bucket. `opts`:
+    POST /accounts/{account_id}/r2/buckets - Create a bucket. `options`:
     `location_hint` (`apac`, `eeur`, `enam`, `weur`, `wnam`, `oc`),
     `storage_class` (`Standard`, `InfrequentAccess`), `jurisdiction`.
 
@@ -116,8 +126,11 @@ fn
 (name: Str): Map {
   create-bucket(name, {})
 },
-(name: Str, opts: Map): Map {
-  envelope send-json("POST", "/r2/buckets", create-bucket-body(name, opts), get(opts, "jurisdiction"))
+(name: Str, options: Map): Map {
+  create-bucket(name, options, {})
+},
+(name: Str, options: Map, opts: Map): Map {
+  envelope send-json("POST", "/r2/buckets", create-bucket-body(name, options), get(options, "jurisdiction"), opts)
   cond {
     is-err(envelope) => { envelope }
     => { get(envelope, "result") }
@@ -133,7 +146,13 @@ fn
   get-bucket(name, null)
 },
 (name: Str, jurisdiction: Str?): Map {
-  envelope send-json("GET", bucket-suffix(name), "", jurisdiction)
+  get-bucket(name, jurisdiction, {})
+},
+(name: Str, opts: Map): Map {
+  get-bucket(name, null, opts)
+},
+(name: Str, jurisdiction: Str?, opts: Map): Map {
+  envelope send-json("GET", bucket-suffix(name), "", jurisdiction, opts)
   cond {
     is-err(envelope) => { envelope }
     => { get(envelope, "result") }
@@ -149,7 +168,13 @@ fn
   delete-bucket(name, null)
 },
 (name: Str, jurisdiction: Str?): Any {
-  envelope send-json("DELETE", bucket-suffix(name), "", jurisdiction)
+  delete-bucket(name, jurisdiction, {})
+},
+(name: Str, opts: Map): Any {
+  delete-bucket(name, null, opts)
+},
+(name: Str, jurisdiction: Str?, opts: Map): Any {
+  envelope send-json("DELETE", bucket-suffix(name), "", jurisdiction, opts)
   cond {
     is-err(envelope) => { envelope }
     => { get(envelope, "result") }

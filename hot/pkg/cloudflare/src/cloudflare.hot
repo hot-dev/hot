@@ -19,6 +19,9 @@ meta {
     - `cloudflare.account.id` — for account-scoped APIs (KV, Workers, R2, D1, Pages)
     - `cloudflare.turnstile.secret` — for Turnstile verification
 
+    Any of these can also come per call, in the trailing `opts` Map of an
+    API-calling function (see `::cloudflare::api`).
+
     **Quick start**
 
     ```hot

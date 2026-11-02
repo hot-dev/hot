@@ -24,16 +24,24 @@ balance.pending    // => [{amount: 4500, currency: "usd", ...}]
 ```
 """
 }
-fn (): Map {
-  api-call("GET", "/v1/balance")
+fn
+(): Map {
+  get-balance({})
+},
+(opts: Map): Map {
+  api-call("GET", "/v1/balance", "", opts)
 }
 
 get-balance-transaction
 meta {
     doc: """GET /v1/balance_transactions/{id} - Retrieve a balance transaction (charge, refund, payout, fee, ...) by ID."""
 }
-fn (transaction: Str): Map {
-  api-call("GET", `/v1/balance_transactions/${seg(transaction)}`)
+fn
+(transaction: Str): Map {
+  get-balance-transaction(transaction, {})
+},
+(transaction: Str, opts: Map): Map {
+  api-call("GET", `/v1/balance_transactions/${seg(transaction)}`, "", opts)
 }
 
 ListBalanceTransactionsRequest type {
@@ -57,5 +65,8 @@ fn
   list-balance-transactions(ListBalanceTransactionsRequest({}))
 },
 (request: ListBalanceTransactionsRequest): Map {
-  api-call("GET", "/v1/balance_transactions", request)
+  list-balance-transactions(request, {})
+},
+(request: ListBalanceTransactionsRequest, opts: Map): Map {
+  api-call("GET", "/v1/balance_transactions", request, opts)
 }

@@ -1,7 +1,7 @@
 ::sentry::projects ns
 meta {
     doc: """Sentry projects and teams in the organization.""",
-    ctx: {"sentry.token": {required: true}, "sentry.org": {required: true}}
+    ctx: {"sentry.token": {required: false}, "sentry.org": {required: false, secret: false}}
 }
 
 ::api ::sentry::api
@@ -17,7 +17,10 @@ fn
   list-projects({})
 },
 (params: Map): Page {
-  ::api/org-page("/projects/", params)
+  list-projects(params, {})
+},
+(params: Map, opts: Map): Page {
+  ::api/org-page("/projects/", params, opts)
 }
 
 list-all-projects
@@ -29,18 +32,28 @@ fn
   list-all-projects(::api/DEFAULT_MAX_ITEMS)
 },
 (max: Int): Vec {
-  ::api/collect-pages(list-projects, {}, max)
+  list-all-projects(max, {})
+},
+(opts: Map): Vec {
+  list-all-projects(::api/DEFAULT_MAX_ITEMS, opts)
+},
+(max: Int, opts: Map): Vec {
+  ::api/collect-pages((p) { list-projects(p, opts) }, {}, max)
 }
 
 get-project
 meta {
     doc: """GET /projects/{org}/{project}/ - One project by slug or id: platform, teams, options."""
 }
-fn (project: Str): Map {
-  slug ::api/org()
+fn
+(project: Str): Map {
+  get-project(project, {})
+},
+(project: Str, opts: Map): Map {
+  slug ::api/org(opts)
   cond {
     is-err(slug) => { slug }
-    => { ::api/json("GET", `/projects/${::api/seg(slug)}/${::api/seg(project)}/`) }
+    => { ::api/json("GET", `/projects/${::api/seg(slug)}/${::api/seg(project)}/`, "", opts) }
   }
 }
 
@@ -53,7 +66,10 @@ fn
   list-teams({})
 },
 (params: Map): Page {
-  ::api/org-page("/teams/", params)
+  list-teams(params, {})
+},
+(params: Map, opts: Map): Page {
+  ::api/org-page("/teams/", params, opts)
 }
 
 list-all-teams
@@ -65,5 +81,11 @@ fn
   list-all-teams(::api/DEFAULT_MAX_ITEMS)
 },
 (max: Int): Vec {
-  ::api/collect-pages(list-teams, {}, max)
+  list-all-teams(max, {})
+},
+(opts: Map): Vec {
+  list-all-teams(::api/DEFAULT_MAX_ITEMS, opts)
+},
+(max: Int, opts: Map): Vec {
+  ::api/collect-pages((p) { list-teams(p, opts) }, {}, max)
 }

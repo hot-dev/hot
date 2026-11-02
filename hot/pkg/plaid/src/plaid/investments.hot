@@ -14,7 +14,10 @@ fn
   get-holdings(access-token, null)
 },
 (access-token: Str, options: Map?): Map {
-  ::api/post("/investments/holdings/get", {access_token: access-token, options: options})
+  get-holdings(access-token, options, {})
+},
+(access-token: Str, options: Map?, opts: Map): Map {
+  ::api/post("/investments/holdings/get", {access_token: access-token, options: options}, opts)
 }
 
 get-investment-transactions
@@ -26,12 +29,15 @@ fn
   get-investment-transactions(access-token, start-date, end-date, null)
 },
 (access-token: Str, start-date: Str, end-date: Str, options: Map?): Map {
+  get-investment-transactions(access-token, start-date, end-date, options, {})
+},
+(access-token: Str, start-date: Str, end-date: Str, options: Map?, opts: Map): Map {
   ::api/post("/investments/transactions/get", {
     access_token: access-token,
     start_date: start-date,
     end_date: end-date,
     options: options
-  })
+  }, opts)
 }
 
 get-liabilities
@@ -43,5 +49,8 @@ fn
   get-liabilities(access-token, null)
 },
 (access-token: Str, options: Map?): Map {
-  ::api/post("/liabilities/get", {access_token: access-token, options: options})
+  get-liabilities(access-token, options, {})
+},
+(access-token: Str, options: Map?, opts: Map): Map {
+  ::api/post("/liabilities/get", {access_token: access-token, options: options}, opts)
 }

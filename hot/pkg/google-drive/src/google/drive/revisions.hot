@@ -69,7 +69,7 @@ fn
   response ::api/request(::drive/READ_SCOPE, "GET", full-url, {}, "", ::drive/creds(opts))
   cond {
     is-err(response) => { response }
-    not(is-ok-response(response)) => { err(::api/error-from-response(response)) }
+    not(is-ok-response(response)) => { err(::api/HttpError(response)) }
     => { ::drive/content-from-response(file-id, response, "download") }
   }
 }

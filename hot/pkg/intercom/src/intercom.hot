@@ -25,6 +25,9 @@ meta {
       region your workspace is hosted in
     - `intercom.version` (optional): override the pinned `Intercom-Version`
 
+    Every API-calling function also takes a trailing `opts` Map for
+    per-call credentials and settings; see `::intercom::api`.
+
     **Quick start**
 
     ```hot

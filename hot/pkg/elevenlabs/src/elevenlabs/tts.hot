@@ -67,7 +67,7 @@ fn
 
 text-to-speech
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """
     POST /v1/text-to-speech/{voice_id}: convert text to speech. Returns
     the audio as `Bytes` (mp3 44.1kHz 128kbps by default). The optional
@@ -97,12 +97,15 @@ fn
   text-to-speech(voice-id, request, null)
 },
 (voice-id: Str, request: TextToSpeechRequest, output: Any): Bytes {
-  ::api/bytes("POST", tts-path(voice-id, output), request)
+  text-to-speech(voice-id, request, output, {})
+},
+(voice-id: Str, request: TextToSpeechRequest, output: Any, opts: Map): Bytes {
+  ::api/bytes("POST", tts-path(voice-id, output), request, opts)
 }
 
 text-to-speech-with-timestamps
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """
     POST /v1/text-to-speech/{voice_id}/with-timestamps: speech plus
     character-level timing. Returns `{audio, alignment,
@@ -127,8 +130,10 @@ fn
   text-to-speech-with-timestamps(voice-id, request, null)
 },
 (voice-id: Str, request: TextToSpeechRequest, output: Any): Map {
-  body ::api/json("POST", tts-path(voice-id, "/with-timestamps", output), request)
-  decode-timestamped(body)
+  text-to-speech-with-timestamps(voice-id, request, output, {})
+},
+(voice-id: Str, request: TextToSpeechRequest, output: Any, opts: Map): Map {
+  ::api/json("POST", tts-path(voice-id, "/with-timestamps", output), {}, request, opts) |> if-ok(decode-timestamped)
 }
 
 decode-timestamped
@@ -179,7 +184,7 @@ close-word fn (acc: Map): Vec {
 
 text-to-speech-stream
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """
     POST /v1/text-to-speech/{voice_id}/stream: stream speech as it is
     generated. Returns a `StreamingHttpResponse` whose body iterates raw
@@ -202,5 +207,8 @@ fn
   text-to-speech-stream(voice-id, request, null)
 },
 (voice-id: Str, request: TextToSpeechRequest, output: Any): ::hot::http/StreamingHttpResponse {
-  ::api/request-stream("POST", tts-path(voice-id, "/stream", output), {}, request)
+  text-to-speech-stream(voice-id, request, output, {})
+},
+(voice-id: Str, request: TextToSpeechRequest, output: Any, opts: Map): ::hot::http/StreamingHttpResponse {
+  ::api/request-stream("POST", tts-path(voice-id, "/stream", output), {}, request, opts)
 }

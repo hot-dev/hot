@@ -57,10 +57,11 @@ ATOM_PHRASE_PATTERN "^[A-Za-z0-9!#$%&'*+/=?^_`{|}~ -]+$"
 CONTROL_PATTERN "[\\x00-\\x08\\x0A-\\x1F\\x7F]+"
 LINE_BREAK_PATTERN "[\\r\\n]"
 
-// Bytes of UTF-8 per RFC 2047 encoded word: 45 bytes is 60 base64
-// characters, which keeps `=?UTF-8?B?...?=` within 75.
-WORD_BYTES 45
-// ASCII header text longer than this is encoded (and so folded).
+// Bytes of UTF-8 per RFC 2047 encoded word: 39 bytes is 52 base64
+// characters, so `=?UTF-8?B?...?=` is 64 and a line with one, after a header
+// name such as `Subject: `, stays within RFC 2047's 76.
+WORD_BYTES 39
+// Bytes of header text past which it is encoded (and so folded).
 MAX_PLAIN_HEADER 900
 
 // ---------------------------------------------------------------------------
@@ -87,12 +88,16 @@ fn (value: Any): Str {
   trim(::re/replace-all(Str(value), CONTROL_PATTERN, " "))
 }
 
+byte-length fn (text: Str): Int {
+  length(Bytes(text))
+}
+
 utf8-chunks fn (text: Str, max-bytes: Int): Vec {
   chars filter(split(text, ""), (c) { not(eq(c, "")) })
   reduce(chars, (acc, ch) {
     current last(acc)
     candidate `${current}${ch}`
-    if(and(gt(length(Bytes(candidate)), max-bytes), not(eq(current, ""))),
+    if(and(gt(byte-length(candidate), max-bytes), not(eq(current, ""))),
       concat(acc, [ch]),
       concat(butlast(acc), [candidate]))
   }, [""])
@@ -102,8 +107,8 @@ encode-words
 meta {
     doc: """
     RFC 2047 encode `text` as UTF-8 B encoded words, split on character
-    boundaries so each word stays within 75 characters, joined with a
-    folding `CRLF SP`: `encode-words("Zoë")` is `"=?UTF-8?B?Wm/Dqw==?="`.
+    boundaries by byte count so each word stays within 75 characters and
+    a character is never cut in two, joined with a folding `CRLF SP`: `encode-words("Zoë")` is `"=?UTF-8?B?Wm/Dqw==?="`.
     """
 }
 fn (text: Str): Str {
@@ -116,7 +121,7 @@ meta {
 }
 fn (value: Any): Str {
   v clean-header-value(value)
-  if(and(is-ascii(v), lte(length(v), MAX_PLAIN_HEADER)), v, encode-words(v))
+  if(and(is-ascii(v), lte(byte-length(v), MAX_PLAIN_HEADER)), v, encode-words(v))
 }
 
 encode-phrase
@@ -240,7 +245,7 @@ meta {
 fn (addresses: Vec): Str {
   parts map(addresses, format-address)
   joined join(parts, ", ")
-  if(gt(length(joined), MAX_PLAIN_HEADER), join(parts, ",\r\n "), joined)
+  if(gt(byte-length(joined), MAX_PLAIN_HEADER), join(parts, ",\r\n "), joined)
 }
 
 emails

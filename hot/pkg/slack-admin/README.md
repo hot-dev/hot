@@ -26,6 +26,26 @@ The Admin API does not accept bot tokens (`xoxb-...`) or tokens from a single-wo
 
 This package uses its own context variable so a project can use a bot token with `hot.dev/slack` (`slack.api.key`) and an admin user token here side by side.
 
+## Per-call credentials
+
+Every function that calls Slack takes an optional trailing `opts` Map, so one run can act for many organizations and parallel flows don't share credentials. Nothing from `opts` is written to ctx, and a `token` from `opts` is masked in call records.
+
+| Key | Effect |
+|---|---|
+| `token` | The org-level admin user token for this call, instead of `slack.admin.token` |
+
+`opts` always comes last.
+
+```hot
+::users ::slack::admin::users
+
+tenant {token: "xoxp-tenant-b"}
+page ::users/list(::users/ListRequest({team_id: "T0123ABCDEF", limit: 50}), tenant)
+everyone ::users/list-all(::users/ListRequest({team_id: "T0123ABCDEF"}), 1000, tenant)
+```
+
+A `token` that is present but blank or null is an error naming the key, never a fallback to `slack.admin.token`. `::slack::admin::api/resolve(opts)` is the one place this is decided.
+
 ## Quick start
 
 ```hot

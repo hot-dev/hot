@@ -1,9 +1,9 @@
 ::web-search::exa ns
 meta {
-    doc: """Exa: neural web search with page contents (https://docs.exa.ai). Context variable: `exa.api.key`, sent as `x-api-key`."""
+    doc: """Exa: neural web search with page contents (https://docs.exa.ai). Context variable: `exa.api.key`, or `exa-api-key` in a call's trailing `opts` (see `::web-search::api`); sent as `x-api-key`."""
 }
 
-::ctx ::hot::ctx
+::api ::web-search::api
 ::http ::web-search::http
 ::time ::hot::time
 
@@ -18,13 +18,12 @@ MAX_RESULTS 100
 // `content` does not depend on Exa's defaults.
 CONTENT_MAX_CHARACTERS 1000
 
-post fn
-(path: Str, body: Map): Any {
-  post(path, body, ::ctx/get("exa.api.key"))
-},
-// 3-arity: explicit API key override
-(path: Str, body: Map, api-key: Str): Any {
-  ::http/send("exa", "Exa", HttpRequest({
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` for a key. Pure; exposed for testing."""
+}
+fn (path: Str, body: Map, api-key: Str): HttpRequest {
+  HttpRequest({
     method: "POST",
     url: `${BASE_URL}${path}`,
     headers: {
@@ -32,12 +31,29 @@ post fn
       Content-Type: "application/json"
     },
     body: to-json(untype(filter-vals(body, is-some)))
-  }))
+  })
+}
+
+post fn
+(path: Str, body: Map): Any {
+  post(path, body, {})
+},
+// 3-arity: explicit API key override
+(path: Str, body: Map, api-key: Str?): Any {
+  post(path, body, {exa-api-key: api-key})
+},
+// 3-arity: per-call credentials (see `::web-search::api`)
+(path: Str, body: Map, opts: Map): Any {
+  api-key ::api/api-key("exa", opts)
+  cond {
+    is-err(api-key) => { api-key }
+    => { ::http/send("exa", "Exa", build-request(path, body, api-key)) }
+  }
 }
 
 search
 meta {
-    ctx: {"exa.api.key": {required: true}},
+    ctx: {"exa.api.key": {required: false}},
     doc: """
     POST /search - Exa search. `options`: `type` ("auto" default,
     "lite", "deep-lite", "deep"), `numResults` (1-100), `category`
@@ -63,12 +79,15 @@ fn
   search(query, {})
 },
 (query: Str, options: Map): Map {
-  post("/search", {...options, query: query})
+  search(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Map {
+  post("/search", {...options, query: query}, opts)
 }
 
 get-contents
 meta {
-    ctx: {"exa.api.key": {required: true}},
+    ctx: {"exa.api.key": {required: false}},
     doc: """POST /contents - Clean page text for URLs (or Exa result ids). The 2-arity form takes contents options such as `{text: {maxCharacters: 5000}, highlights: true, maxAgeHours: 0}`. Returns `{results: [{url, title, text}], statuses}`."""
 }
 fn
@@ -76,12 +95,15 @@ fn
   get-contents(urls, {text: true})
 },
 (urls: Vec, options: Map): Map {
-  post("/contents", {...options, urls: urls})
+  get-contents(urls, options, {})
+},
+(urls: Vec, options: Map, opts: Map): Map {
+  post("/contents", {...options, urls: urls}, opts)
 }
 
 find-similar
 meta {
-    ctx: {"exa.api.key": {required: true}},
+    ctx: {"exa.api.key": {required: false}},
     doc: """POST /findSimilar - Pages similar to a URL. `options`: `numResults`, `includeDomains`/`excludeDomains`, `excludeSourceDomain`, `startPublishedDate`, `contents`."""
 }
 fn
@@ -89,7 +111,10 @@ fn
   find-similar(url, {})
 },
 (url: Str, options: Map): Map {
-  post("/findSimilar", {...options, url: url})
+  find-similar(url, options, {})
+},
+(url: Str, options: Map, opts: Map): Map {
+  post("/findSimilar", {...options, url: url}, opts)
 }
 
 FRESHNESS_DAYS {day: 1, week: 7, month: 31, year: 365}
@@ -133,7 +158,7 @@ fn (body: Map): Vec {
   })
 }
 
-search-normalized fn (query: Str, max-results: Int, filters: Map): Vec {
+search-normalized fn (query: Str, max-results: Int, filters: Map, opts: Map): Vec {
   now ::time/epoch-millis(::time/now())
-  search(query, build-search-options(max-results, filters, now)) |> if-ok((body) { normalize(body) })
+  search(query, build-search-options(max-results, filters, now), opts) |> if-ok((body) { normalize(body) })
 }

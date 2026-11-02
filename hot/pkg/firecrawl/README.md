@@ -17,6 +17,8 @@ Add this to the `deps` in your `hot.hot` file:
 | `firecrawl.api.key` | API key from the [Firecrawl dashboard](https://www.firecrawl.dev/app) (`fc-...`), sent as `Authorization: Bearer` |
 | `firecrawl.webhook.secret` | Webhook signing secret (dashboard, account settings, Advanced tab), for `::firecrawl::webhooks/verify-request` |
 
+The API key can also be passed per call; see [Per-call credentials](#per-call-credentials).
+
 ## Quick start
 
 ```hot
@@ -121,7 +123,28 @@ fn (request) {
 
 ## Errors
 
-Non-2xx responses return an Err carrying `::firecrawl::api/HttpError`: `status`, a readable `message` built from Firecrawl's `error` field (for example `Firecrawl API error 402: Payment required`), `headers`, and the raw `body`. Transport failures come back as the HTTP client's Err.
+Non-2xx responses return an Err carrying `::firecrawl::api/HttpError`: `status`, a readable `message` built from Firecrawl's `error` field (for example `Firecrawl API error 402: Payment required`), `headers`, and the raw `body`. Transport failures come back as the HTTP client's Err. A missing API key is an Err before any request is sent.
+
+## Per-call credentials
+
+Every function that calls Firecrawl takes an optional trailing `opts` Map, so one run can act for many tenants and parallel flows don't share credentials. Credentials in `opts` are masked in call records, and nothing from `opts` is written to ctx.
+
+| Key | Effect |
+|---|---|
+| `api-key` | The API key for this call, instead of `firecrawl.api.key` |
+| `base-url` | Another API root, such as a self-hosted Firecrawl (`https://firecrawl.example.com/v2`). Needs an `api-key` in the same `opts`; `firecrawl.api.key` is never sent to a per-call URL |
+
+`opts` always comes last. Where a function already takes `options`, pass `{}` for those.
+
+```hot
+tenant {api-key: "fc-tenant-b"}
+page ::firecrawl/scrape("https://example.com", {formats: ["markdown"]}, tenant)
+job ::firecrawl/crawl("https://docs.firecrawl.dev", {limit: 10}, tenant)
+site ::firecrawl/get-crawl-all(job.id, tenant)
+credits ::firecrawl/credit-usage(tenant)
+```
+
+An `api-key` that is present but blank or null is an error naming the key, never a fallback to `firecrawl.api.key`. `::firecrawl::api/resolve(opts)` is the one place this is decided. `::firecrawl::webhooks/verify-request` takes an explicit secret too, and masks it the same way. `get-*-all` only follows `next` links under the call's own API root.
 
 ## Notes and limits
 

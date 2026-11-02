@@ -1,0 +1,248 @@
+::cloudflare::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no cloudflare.* context.
+
+::api ::cloudflare::api
+::cache ::cloudflare::cache
+::d1 ::cloudflare::d1
+::dns ::cloudflare::dns
+::kv ::cloudflare::kv
+::pages ::cloudflare::pages
+::r2 ::cloudflare::r2
+::turnstile ::cloudflare::turnstile
+::workers ::cloudflare::workers
+::zones ::cloudflare::zones
+
+BLANK {token: "", account-id: "acc123"}
+
+// A blank token error can only come from the call's own opts, so it proves
+// the opts reached `send`, past the account check, without any network
+// traffic.
+stops fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "token is in the call's opts"))
+}
+
+test-resolve-token-wins
+meta ["test"] fn () {
+    r ::api/resolve-from({token: "t", api-key: "k", email: "e@example.com"}, {"cloudflare.token": "ctx"})
+    assert-eq("t", r.token)
+    assert(is-null(r.api-key), "the pair isn't sent next to a token")
+    assert-eq({Authorization: "Bearer t"}, ::api/auth-headers(r.token, r.api-key, r.email))
+}
+
+test-resolve-key-pair-in-opts-wins-over-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({api-key: "k", email: "e@example.com"}, {"cloudflare.token": "ctx"})
+    assert(is-null(r.token), "the context token isn't used")
+    assert-eq("k", r.api-key)
+    assert-eq("e@example.com", r.email)
+}
+
+test-resolve-half-a-pair-is-an-error
+meta ["test"] fn () {
+    ctx {"cloudflare.api.key": "ctx-key", "cloudflare.email": "ctx@example.com"}
+    only-key ::api/resolve-from({api-key: "k"}, ctx)
+    assert(is-err(only-key), "never pairs with context")
+    assert(contains(err-message(only-key), "api-key"))
+    assert(contains(err-message(only-key), "email"))
+    assert(is-err(::api/resolve-from({email: "e@example.com"}, ctx)))
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    assert-eq("ctx", ::api/resolve-from({}, {"cloudflare.token": "ctx"}).token)
+    pair ::api/resolve-from({}, {"cloudflare.api.key": "ctx-key", "cloudflare.email": "ctx@example.com"})
+    assert-eq("ctx-key", pair.api-key)
+    assert-eq("ctx@example.com", pair.email)
+}
+
+test-resolve-account-id-opts-then-ctx
+meta ["test"] fn () {
+    ctx {"cloudflare.token": "t", "cloudflare.account.id": "ctx-acc"}
+    assert-eq("opt-acc", ::api/resolve-from({account-id: "opt-acc"}, ctx).account-id)
+    assert-eq("ctx-acc", ::api/resolve-from({}, ctx).account-id)
+    assert-eq("/accounts/opt-acc/x", ::api/account-path("/x", {account-id: "opt-acc"}))
+}
+
+test-resolve-missing-credential-is-a-clear-error
+meta ["test"] fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "cloudflare.token"))
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    assert-eq("call-token-value", ::api/resolve({token: "call-token-value"}).token)
+    pair ::api/resolve({api-key: "call-key-value", email: "e@example.com"})
+    assert-eq("call-key-value", pair.api-key)
+    assert-eq("e@example.com", pair.email)
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("cloudflare.token")
+    assert-eq("call-token", ::api/resolve({token: "call-token"}).token)
+    assert-eq(before, ::hot::ctx/get("cloudflare.token"))
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    ctx {"cloudflare.token": "ctx", "cloudflare.api.key": "ctx-key", "cloudflare.email": "ctx@example.com", "cloudflare.account.id": "ctx-acc"}
+    results map(["token", "api-key", "email", "account-id"], (name) {
+        map(["", "   ", null], (blank) {
+            out ::api/resolve-from(assoc({}, name, blank), ctx)
+            assert(is-err(out), "never falls back to context")
+            assert(contains(err-message(out), name))
+            true
+        })
+    })
+    assert-eq(4, length(results))
+    assert(contains(err-message(::api/account-id({account-id: ""})), "account-id"))
+    assert(is-err(::zones/get-zone("z", {token: ""})), "the error reaches the caller")
+}
+
+test-build-request
+meta ["test"] fn () {
+    bearer ::api/build-request("GET", "/zones", {}, "", ::api/resolve-from({token: "a"}, {}))
+    assert-eq("https://api.cloudflare.com/client/v4/zones", bearer.url)
+    assert-eq("Bearer a", bearer.headers.Authorization)
+    pair ::api/build-request("POST", "/zones", {Content-Type: "application/json"}, "{}", ::api/resolve-from({api-key: "k", email: "e@example.com"}, {}))
+    assert-eq("k", get(pair.headers, "X-Auth-Key"))
+    assert-eq("e@example.com", get(pair.headers, "X-Auth-Email"))
+    assert-eq("application/json", get(pair.headers, "Content-Type"))
+}
+
+test-opts-reach-the-transport
+meta ["test"] fn () {
+    assert(stops(::api/send("GET", "/x", {}, "", BLANK)))
+    assert(stops(::api/request("GET", "/x", "", BLANK)))
+    assert(stops(::api/json("GET", "/x", "", BLANK)))
+    assert(stops(::api/json-page("/x", "", BLANK)))
+    assert(stops(::api/account-json("GET", "/x", "", BLANK)))
+    assert(stops(::api/account-page("/x", "", BLANK)))
+    assert(stops(::api/send-multipart("POST", "/x", [], BLANK)))
+}
+
+test-opts-reach-zones-dns-cache
+meta ["test"] fn () {
+    assert(stops(::zones/list-zones({}, BLANK)))
+    assert(stops(::zones/list-all-zones({}, BLANK)))
+    assert(stops(::zones/list-all-zones({}, 5, BLANK)))
+    assert(stops(::zones/find-zone("example.com", BLANK)))
+    assert(stops(::zones/get-zone("z", BLANK)))
+    assert(stops(::dns/list-dns-records("z", {}, BLANK)))
+    assert(stops(::dns/list-all-dns-records("z", {}, BLANK)))
+    assert(stops(::dns/list-all-dns-records("z", {}, 5, BLANK)))
+    assert(stops(::dns/find-dns-records("z", "a.example.com", BLANK)))
+    assert(stops(::dns/find-dns-records("z", "a.example.com", "A", BLANK)))
+    assert(stops(::dns/get-dns-record("z", "r", BLANK)))
+    assert(stops(::dns/create-dns-record("z", {type: "A"}, BLANK)))
+    assert(stops(::dns/update-dns-record("z", "r", {content: "c"}, BLANK)))
+    assert(stops(::dns/overwrite-dns-record("z", "r", {type: "A"}, BLANK)))
+    assert(stops(::dns/delete-dns-record("z", "r", BLANK)))
+    assert(stops(::cache/purge("z", {files: []}, BLANK)))
+    assert(stops(::cache/purge-urls("z", [], BLANK)))
+    assert(stops(::cache/purge-tags("z", [], BLANK)))
+    assert(stops(::cache/purge-hosts("z", [], BLANK)))
+    assert(stops(::cache/purge-prefixes("z", [], BLANK)))
+    assert(stops(::cache/purge-everything("z", BLANK)))
+}
+
+test-opts-reach-kv
+meta ["test"] fn () {
+    assert(stops(::kv/list-namespaces({}, BLANK)))
+    assert(stops(::kv/list-all-namespaces(BLANK)))
+    assert(stops(::kv/list-all-namespaces(5, BLANK)))
+    assert(stops(::kv/create-namespace("t", BLANK)))
+    assert(stops(::kv/delete-namespace("n", BLANK)))
+    assert(stops(::kv/list-keys("n", {}, BLANK)))
+    assert(stops(::kv/list-all-keys("n", {}, BLANK)))
+    assert(stops(::kv/list-all-keys("n", {}, 5, BLANK)))
+    assert(stops(::kv/read("n", "k", BLANK)))
+    assert(stops(::kv/read-text("n", "k", BLANK)))
+    assert(stops(::kv/read-json("n", "k", BLANK)))
+    assert(stops(::kv/read-metadata("n", "k", BLANK)))
+    assert(stops(::kv/write("n", "k", "v", {}, BLANK)))
+    assert(stops(::kv/write("n", "k", "v", {metadata: {a: 1}}, BLANK)))
+    assert(stops(::kv/delete-key("n", "k", BLANK)))
+    assert(stops(::kv/write-bulk("n", [], BLANK)))
+    assert(stops(::kv/delete-bulk("n", [], BLANK)))
+}
+
+test-opts-reach-workers-r2-d1-pages
+meta ["test"] fn () {
+    assert(stops(::workers/list-scripts(BLANK)))
+    assert(stops(::workers/get-script-settings("s", BLANK)))
+    assert(stops(::workers/deploy-module("s", "code", {}, BLANK)))
+    assert(stops(::workers/delete-script("s", BLANK)))
+    assert(stops(::workers/delete-script("s", true, BLANK)))
+    assert(stops(::workers/list-routes("z", BLANK)))
+    assert(stops(::workers/create-route("z", "p", "s", BLANK)))
+    assert(stops(::workers/delete-route("z", "r", BLANK)))
+    assert(stops(::r2/list-buckets({}, BLANK)))
+    assert(stops(::r2/list-all-buckets({}, BLANK)))
+    assert(stops(::r2/list-all-buckets({}, 5, BLANK)))
+    assert(stops(::r2/create-bucket("b", {}, BLANK)))
+    assert(stops(::r2/get-bucket("b", BLANK)))
+    assert(stops(::r2/get-bucket("b", "eu", BLANK)))
+    assert(stops(::r2/delete-bucket("b", BLANK)))
+    assert(stops(::r2/delete-bucket("b", "eu", BLANK)))
+    assert(stops(::d1/list-databases({}, BLANK)))
+    assert(stops(::d1/list-all-databases({}, BLANK)))
+    assert(stops(::d1/list-all-databases({}, 5, BLANK)))
+    assert(stops(::d1/find-database("d", BLANK)))
+    assert(stops(::d1/get-database("d", BLANK)))
+    assert(stops(::d1/query("d", "SELECT 1", BLANK)))
+    assert(stops(::d1/query("d", "SELECT ?", [1], BLANK)))
+    assert(stops(::d1/rows("d", "SELECT 1", BLANK)))
+    assert(stops(::d1/rows("d", "SELECT ?", [1], BLANK)))
+    assert(stops(::pages/list-projects({}, BLANK)))
+    assert(stops(::pages/list-all-projects(BLANK)))
+    assert(stops(::pages/list-all-projects(5, BLANK)))
+    assert(stops(::pages/get-project("p", BLANK)))
+    assert(stops(::pages/list-deployments("p", {}, BLANK)))
+    assert(stops(::pages/get-deployment("p", "d", BLANK)))
+    assert(stops(::pages/create-deployment("p", {}, BLANK)))
+    assert(stops(::pages/retry-deployment("p", "d", BLANK)))
+    assert(stops(::pages/rollback-deployment("p", "d", BLANK)))
+}
+
+test-account-scoped-call-without-an-account-names-it
+meta ["test"] fn () {
+    out ::kv/read("n", "k", {token: "t"})
+    assert(is-err(out))
+    assert(contains(err-message(out), "cloudflare.account.id"))
+    assert(contains(err-message(::kv/read("n", "k", {token: "t", account-id: ""})), "account-id is in the call's opts"))
+}
+
+test-existing-arity-reads-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("cloudflare.token")
+    ::hot::ctx/set("cloudflare.token", "")
+    out ::zones/get-zone("z")
+    assert(is-err(out))
+    assert(contains(err-message(out), "cloudflare.token"))
+    ::hot::ctx/set("cloudflare.token", before)
+}
+
+test-turnstile-secret-key
+meta ["test"] fn () {
+    assert-eq("widget-secret-value", ::turnstile/secret({secret-key: "widget-secret-value"}), "marked and unchanged")
+    assert-eq("trimmed-secret", ::turnstile/secret({secret-key: " trimmed-secret "}))
+    before ::hot::ctx/get("cloudflare.turnstile.secret")
+    ::hot::ctx/set-secret("cloudflare.turnstile.secret", "ctx_widget_secret")
+    assert-eq("ctx_widget_secret", ::turnstile/secret({}))
+    results map(["", "   ", null], (blank) {
+        out ::turnstile/secret({secret-key: blank})
+        assert(is-err(out), "never falls back to context")
+        assert(contains(err-message(out), "secret-key"))
+        assert(not(contains(err-message(out), "ctx_widget_secret")))
+        true
+    })
+    assert-eq(3, length(results))
+    assert(is-err(::turnstile/siteverify("t", {secret-key: ""})))
+    assert(is-err(::turnstile/is-valid("t", {secret-key: null})), "null doesn't get dropped into a fallback")
+    ::hot::ctx/set-secret("cloudflare.turnstile.secret", before)
+}

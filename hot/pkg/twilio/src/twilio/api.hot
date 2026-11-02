@@ -1,4 +1,33 @@
 ::twilio::api ns
+meta {
+    ctx: {
+      "twilio.account.sid": {required: false, secret: false},
+      "twilio.auth.token": {required: false},
+      "twilio.api.key.sid": {required: false, secret: false},
+      "twilio.api.key.secret": {required: false}
+    },
+    doc: """
+    Transport for the Twilio APIs: HTTP Basic credentials, form encoding,
+    and page links.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes credentials three ways, all resolved by `resolve`: a `Client` as
+    its first argument, an optional trailing `opts` Map, or context
+    variables. Nothing from `opts` is written to ctx, so one run can act
+    for many accounts and parallel flows don't share credentials. Secrets
+    in a `Client` or in `opts` are masked in call records.
+
+    - `account-sid`: the account for this call. It needs credentials in the
+      same `opts`: context credentials are never sent to a per-call account.
+    - `auth-token`: the account's Auth Token. It needs `account-sid`.
+    - `api-key-sid`, `api-key-secret`: an API key. They need `account-sid`,
+      and win over `auth-token`.
+
+    With credentials in `opts`, context variables are ignored for that
+    call. One of those keys present but blank or null is an error, never a
+    fallback to context.
+    """
+}
 
 ::ctx ::hot::ctx
 ::base64 ::hot::base64
@@ -35,7 +64,8 @@ meta {
     Key SID (`SK...`) and its secret. Build one with `client-from-ctx`,
     `auth-token-client`, or `api-key-client`, and pass it as the first
     argument of any resource function to call a different account (a
-    subaccount, a customer's account) than the one in context.
+    subaccount, a customer's account) than the one in context. The
+    constructors mask the secret in call records.
     """
 }
 type {
@@ -58,7 +88,7 @@ meta {
     """
 }
 fn (account-sid: Str, auth-token: Str): Client {
-  Client({account-sid: account-sid, username: account-sid, password: auth-token})
+  Client({account-sid: account-sid, username: account-sid, password: ::ctx/mark-secret(auth-token)})
 }
 
 api-key-client
@@ -78,44 +108,141 @@ meta {
     """
 }
 fn (account-sid: Str, key-sid: Str, key-secret: Str): Client {
-  Client({account-sid: account-sid, username: key-sid, password: key-secret})
+  Client({account-sid: account-sid, username: key-sid, password: ::ctx/mark-secret(key-secret)})
+}
+
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+CREDENTIAL_KEYS ["account-sid", "auth-token", "api-key-sid", "api-key-secret"]
+
+blank-credential
+meta {
+    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+}
+
+client-from-values
+meta {
+    doc: """A `Client` from an Account SID and the credentials given, API key first, or an Err when an API key is half set or there is no credential. `source` names where the values came from, for the error."""
+}
+fn (account-sid: Str, key-sid: Str?, key-secret: Str?, auth-token: Str?, source: Str): Client {
+  cond {
+    and(is-some(key-sid), is-some(key-secret)) => { api-key-client(account-sid, key-sid, key-secret) }
+    is-some(auth-token) => { auth-token-client(account-sid, auth-token) }
+    => { err(`twilio: no credentials in ${source}. Set an auth token, or an API key SID and secret.`) }
+  }
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver for credentials by value, pure: a `Client` for a call
+    from `opts` first, then `ctx-values` (a Map of context variables). An
+    Err when a credential key in `opts` is blank or null (that never falls
+    back to context), when `opts` has `account-sid` without credentials or
+    credentials without `account-sid`, when `opts` has half an API key, or
+    when nothing is set. Exposed for testing; `resolve` feeds it the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Client {
+  blank blank-credential(opts, CREDENTIAL_KEYS)
+  account-sid non-blank(get(opts, "account-sid"))
+  auth-token non-blank(get(opts, "auth-token"))
+  key-sid non-blank(get(opts, "api-key-sid"))
+  key-secret non-blank(get(opts, "api-key-secret"))
+  has-credential or(is-some(auth-token), is-some(key-sid), is-some(key-secret))
+  ctx-account non-blank(get(ctx-values, "twilio.account.sid"))
+  cond {
+    is-some(blank) => {
+      err(`twilio: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use context credentials.`)
+    }
+
+    not(eq(is-some(key-sid), is-some(key-secret))) => {
+      err("twilio: an API key needs both api-key-sid and api-key-secret in the call's opts.")
+    }
+
+    and(is-some(account-sid), not(has-credential)) => {
+      err("twilio: account-sid is in the call's opts without auth-token, or api-key-sid and api-key-secret. Pass credentials with it. Context credentials are never sent to a per-call account.")
+    }
+
+    and(is-null(account-sid), has-credential) => {
+      err("twilio: credentials in the call's opts need account-sid in the same opts.")
+    }
+
+    has-credential => { client-from-values(account-sid, key-sid, key-secret, auth-token, "the call's opts") }
+    is-null(ctx-account) => {
+      err("twilio: twilio.account.sid is not set. Add it in Context Variables, or pass {account-sid: ..., auth-token: ...} in the call's opts.")
+    }
+    => {
+      client-from-values(
+        ctx-account,
+        non-blank(get(ctx-values, "twilio.api.key.sid")),
+        non-blank(get(ctx-values, "twilio.api.key.secret")),
+        non-blank(get(ctx-values, "twilio.auth.token")),
+        "Context Variables (twilio.auth.token, or twilio.api.key.sid and twilio.api.key.secret)"
+      )
+    }
+  }
+}
+
+resolve
+meta {
+    ctx: {
+      "twilio.account.sid": {required: false, secret: false},
+      "twilio.auth.token": {required: false},
+      "twilio.api.key.sid": {required: false, secret: false},
+      "twilio.api.key.secret": {required: false}
+    },
+    doc: """
+    The `Client` for one call: the one place credentials are decided. A
+    `Client` passes through; `opts` go through `resolve-from` with the
+    context. Either way the secret is masked in call records with
+    `::hot::ctx/mark-secret`, and `opts` values are never written to ctx.
+
+    **Example**
+
+    ```hot
+    c ::twilio::api/resolve({account-sid: "AC1111...", auth-token: "tenant-auth-token"})
+    ::twilio::api/account-url(c)
+    ```
+    """
+}
+fn
+(opts: Map): Client {
+  resolve-from(opts, {
+    "twilio.account.sid": ::ctx/get("twilio.account.sid"),
+    "twilio.auth.token": ::ctx/get("twilio.auth.token"),
+    "twilio.api.key.sid": ::ctx/get("twilio.api.key.sid"),
+    "twilio.api.key.secret": ::ctx/get("twilio.api.key.secret")
+  })
+},
+(client: Client): Client {
+  ::ctx/mark-secret(client.password)
+  client
 }
 
 client-from-ctx
 meta {
     ctx: {
-      "twilio.account.sid": {required: true},
+      "twilio.account.sid": {required: false, secret: false},
       "twilio.auth.token": {required: false},
-      "twilio.api.key.sid": {required: false},
+      "twilio.api.key.sid": {required: false, secret: false},
       "twilio.api.key.secret": {required: false}
     },
     doc: """
     The `Client` described by context variables: `twilio.account.sid` plus
     either an API key (`twilio.api.key.sid` and `twilio.api.key.secret`,
-    preferred when both are set) or `twilio.auth.token`. Every resource
-    function's short arity uses this. Halts with a clear message when the
-    Account SID or both credential forms are missing.
+    preferred when both are set) or `twilio.auth.token`. An Err with a clear
+    message when the Account SID or both credential forms are missing. Same
+    as `resolve({})`.
     """
 }
 fn (): Client {
-  account-sid or(::ctx/get("twilio.account.sid"), "")
-  key-sid or(::ctx/get("twilio.api.key.sid"), "")
-  key-secret or(::ctx/get("twilio.api.key.secret"), "")
-  auth-token or(::ctx/get("twilio.auth.token"), "")
-  cond {
-    is-empty(account-sid) => {
-      fail("twilio.account.sid is not set. Add it in Context Variables.")
-    }
-
-    and(not(is-empty(key-sid)), not(is-empty(key-secret))) => {
-      api-key-client(account-sid, key-sid, key-secret)
-    }
-
-    not(is-empty(auth-token)) => { auth-token-client(account-sid, auth-token) }
-    => {
-      fail("No Twilio credentials: set twilio.auth.token, or twilio.api.key.sid and twilio.api.key.secret, in Context Variables.")
-    }
-  }
+  resolve({})
 }
 
 auth-header
@@ -181,17 +308,18 @@ fn (params: Map): Str {
 request
 meta {
     ctx: {
-      "twilio.account.sid": {required: true},
+      "twilio.account.sid": {required: false, secret: false},
       "twilio.auth.token": {required: false},
-      "twilio.api.key.sid": {required: false},
+      "twilio.api.key.sid": {required: false, secret: false},
       "twilio.api.key.secret": {required: false}
     },
     doc: """
     Make an authenticated HTTP request to a Twilio API. Uses HTTP Basic Auth
-    with the credentials of a `Client` (the 5-arity form) or of
-    `client-from-ctx()` (the shorter forms). POST bodies are form-encoded
-    (application/x-www-form-urlencoded) per Twilio's API convention; null
-    values are dropped and Vec values become repeated parameters.
+    with the credentials of a `Client` (the Client-first form), of per-call
+    `opts` (the trailing Map), or of the context (the shorter forms). POST
+    bodies are form-encoded (application/x-www-form-urlencoded) per Twilio's
+    API convention; null values are dropped and Vec values become repeated
+    parameters.
 
     The 6-arity form takes an Account SID and Auth Token directly.
 
@@ -211,17 +339,20 @@ meta {
 }
 fn
 (method: Str, url: Str): HttpResponse {
-  request(client-from-ctx(), method, url, {}, {})
+  request(method, url, {}, {}, {})
 },
 (method: Str, url: Str, additional-headers: Map): HttpResponse {
-  request(client-from-ctx(), method, url, additional-headers, {})
+  request(method, url, additional-headers, {}, {})
 },
 (method: Str, url: Str, additional-headers: Map, body: Map): HttpResponse {
-  request(client-from-ctx(), method, url, additional-headers, body)
+  request(method, url, additional-headers, body, {})
+},
+(method: Str, url: Str, additional-headers: Map, body: Map, opts: Map): HttpResponse {
+  resolve(opts) |> if-ok((client) { request(client, method, url, additional-headers, body) })
 },
 (client: Client, method: Str, url: Str, additional-headers: Map, body: Map): HttpResponse {
   has-body not(is-empty(filter-vals(body, is-some)))
-  default-headers {Authorization: auth-header(client)}
+  default-headers {Authorization: auth-header(resolve(client))}
   headers if(has-body, {...default-headers, Content-Type: "application/x-www-form-urlencoded"}, default-headers)
   final-headers {...headers, ...additional-headers}
 
@@ -245,18 +376,33 @@ fn
 (client: Client, method: Str, url: Str): Map {
   json(client, method, url, {})
 },
+(method: Str, url: Str, body: Map, opts: Map): Map {
+  resolve(opts) |> if-ok((client) { json(client, method, url, body) })
+},
 (client: Client, method: Str, url: Str, body: Map): Map {
   response request(client, method, url, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
+  }
 }
 
 delete-request
 meta {
     doc: """DELETE a resource; `true` on success (Twilio answers 204), `err(HttpError)` otherwise."""
 }
-fn (client: Client, url: Str): Bool {
+fn
+(url: Str, opts: Map): Bool {
+  resolve(opts) |> if-ok((client) { delete-request(client, url) })
+},
+(client: Client, url: Str): Bool {
   response request(client, "DELETE", url, {}, {})
-  if(is-ok-response(response), true, err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { true }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -313,11 +459,25 @@ meta {
 }
 fn
 (page: Map): Map? {
-  next-page(client-from-ctx(), page)
+  next-page(page, {})
+},
+(page: Map, opts: Map): Map? {
+  resolve(opts) |> if-ok((client) { next-page(client, page) })
 },
 (client: Client, page: Map): Map? {
   ref next-page-ref(page)
-  if(is-null(ref), null, json(client, "GET", page-url(ref)))
+  cond {
+    is-null(ref) => { null }
+    => { fetch-page(client, ref) }
+  }
+}
+
+fetch-page fn (client: Client, ref: Str): Map {
+  url page-url(ref)
+  cond {
+    is-err(url) => { url }
+    => { json(client, "GET", url) }
+  }
 }
 
 collect-pages
@@ -325,10 +485,14 @@ meta {
     doc: """
     Collect the items under `key` from `page` and the pages after it, up
     to `limit` items (pages are fetched only while more are needed). Each
-    `list-all-*` function uses this.
+    `list-all-*` function uses this. A failed page comes back as its Err.
     """
 }
-fn (client: Client, page: Map, key: Str, limit: Int): Vec<Map> {
+fn
+(page: Map, key: Str, limit: Int, opts: Map): Vec<Map> {
+  resolve(opts) |> if-ok((client) { collect-pages(client, page, key, limit, []) })
+},
+(client: Client, page: Map, key: Str, limit: Int): Vec<Map> {
   collect-pages(client, page, key, limit, [])
 },
 (client: Client, page: Map, key: Str, limit: Int, acc: Vec): Vec<Map> {
@@ -337,6 +501,12 @@ fn (client: Client, page: Map, key: Str, limit: Int): Vec<Map> {
   cond {
     gte(length(items), limit) => { slice(items, 0, limit) }
     is-null(ref) => { items }
-    => { collect-pages(client, json(client, "GET", page-url(ref)), key, limit, items) }
+    => {
+      next fetch-page(client, ref)
+      cond {
+        is-err(next) => { next }
+        => { collect-pages(client, next, key, limit, items) }
+      }
+    }
   }
 }

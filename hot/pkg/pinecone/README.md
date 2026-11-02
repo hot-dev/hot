@@ -17,6 +17,8 @@ Add this to the `deps` in your `hot.hot` file:
 | `pinecone.api.key` | API key from the [Pinecone console](https://app.pinecone.io), sent as `Api-Key` |
 | `pinecone.api.version` | Optional. Overrides the `X-Pinecone-Api-Version` header (default `2026-07`, `::pinecone/API_VERSION`) |
 
+Both can also be passed per call; see [Per-call credentials](#per-call-credentials).
+
 ## Quick start
 
 ```hot
@@ -133,6 +135,31 @@ first(ranked.data).index
 ## Errors
 
 Non-2xx responses return an Err carrying `::pinecone::api/HttpError`: `status`, a readable `message` (for example `Pinecone API error 400 (INVALID_ARGUMENT): ...`), `headers`, and the raw `body`.
+
+## Per-call credentials
+
+Every function that calls Pinecone takes an optional trailing `opts` Map, so one run can act for many projects and parallel flows don't share credentials. Credentials in `opts` are masked in call records, and nothing from `opts` is written to ctx.
+
+| Key | Effect |
+|---|---|
+| `api-key` | The API key for this call, instead of `pinecone.api.key` |
+| `api-version` | The `X-Pinecone-Api-Version` for this call, instead of `pinecone.api.version` |
+
+`opts` always comes last. Where a function already takes `options`, a namespace, or `parameters`, pass `{}` or `null` for those.
+
+```hot
+::indexes ::pinecone::indexes
+::vectors ::pinecone::vectors
+
+tenant {api-key: "tenant-b-key"}
+index ::indexes/describe-index("docs", tenant)
+::vectors/upsert(index.host, [{id: "doc-1", values: [0.1, 0.2, 0.3]}], "guides", tenant)
+hits ::vectors/query(index.host, {vector: [0.1, 0.2, 0.3], topK: 5}, tenant)
+```
+
+An `api-key` that is present but blank or null is an error naming the key, never a fallback to `pinecone.api.key`. `::pinecone::api/resolve(opts)` is the one place this is decided.
+
+An index `host` is a per-call URL, so `pinecone.api.key` only goes to `https://*.pinecone.io` hosts, which is what `describe-index` returns. Any other host, such as Pinecone Local at `http://localhost:5080`, needs an `api-key` in the call's `opts`; without one the call is an Err before anything is sent.
 
 ## Notes and limits
 

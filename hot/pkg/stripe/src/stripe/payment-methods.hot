@@ -15,8 +15,12 @@ get-payment-method
 meta {
     doc: """GET /v1/payment_methods/{payment_method} - Retrieve a PaymentMethod by ID."""
 }
-fn (payment-method: Str): Map {
-  api-call("GET", `/v1/payment_methods/${seg(payment-method)}`)
+fn
+(payment-method: Str): Map {
+  get-payment-method(payment-method, {})
+},
+(payment-method: Str, opts: Map): Map {
+  api-call("GET", `/v1/payment_methods/${seg(payment-method)}`, "", opts)
 }
 
 attach-payment-method
@@ -37,7 +41,7 @@ fn
 (payment-method: Str, customer: Str): Map {
   attach-payment-method(payment-method, customer, RequestOptions({}))
 },
-(payment-method: Str, customer: Str, options: RequestOptions): Map {
+(payment-method: Str, customer: Str, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/payment_methods/${seg(payment-method)}/attach`, {customer: customer}, options)
 }
 
@@ -49,7 +53,7 @@ fn
 (payment-method: Str): Map {
   detach-payment-method(payment-method, RequestOptions({}))
 },
-(payment-method: Str, options: RequestOptions): Map {
+(payment-method: Str, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/payment_methods/${seg(payment-method)}/detach`, {}, options)
 }
 
@@ -69,7 +73,7 @@ fn
 (payment-method: Str, request: UpdatePaymentMethodRequest): Map {
   update-payment-method(payment-method, request, RequestOptions({}))
 },
-(payment-method: Str, request: UpdatePaymentMethodRequest, options: RequestOptions): Map {
+(payment-method: Str, request: UpdatePaymentMethodRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/payment_methods/${seg(payment-method)}`, request, options)
 }
 
@@ -91,5 +95,8 @@ fn
   list-payment-methods(customer, ListPaymentMethodsRequest({}))
 },
 (customer: Str, request: ListPaymentMethodsRequest): Map {
-  api-call("GET", `/v1/customers/${seg(customer)}/payment_methods`, request)
+  list-payment-methods(customer, request, {})
+},
+(customer: Str, request: ListPaymentMethodsRequest, opts: Map): Map {
+  api-call("GET", `/v1/customers/${seg(customer)}/payment_methods`, request, opts)
 }

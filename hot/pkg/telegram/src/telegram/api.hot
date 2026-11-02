@@ -1,4 +1,22 @@
 ::telegram::api ns
+meta {
+    ctx: {"telegram.bot.token": {required: false}},
+    doc: """
+    Transport for the Telegram Bot API: JSON and multipart requests, the
+    response envelope, and file downloads.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `telegram.bot.token` context variable. Nothing from
+    `opts` is written to ctx, so one run can act as many bots and parallel
+    flows don't share credentials. A `bot-token` from `opts` is masked in
+    call records, and marked before the URL is built because it goes in the
+    URL path. A `bot-token` present but blank or null is an error, never a
+    fallback to `telegram.bot.token`.
+
+    - `bot-token`: the bot token for this call
+    """
+}
 
 ::ctx ::hot::ctx
 ::uri ::hot::uri
@@ -259,37 +277,52 @@ fn (response: HttpResponse): Any {
   }
 }
 
-request
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+resolve-from
 meta {
-    ctx: {"telegram.bot.token": {required: true}},
+    doc: """The one resolver, pure: `{bot-token}` for a call from `opts` first, then `ctx-values` (a Map of context variables). An Err when no token is set, or when `bot-token` is in `opts` but blank or null (that never falls back to context). Exposed for testing; `resolve` feeds it the context."""
+}
+fn (opts: Map, ctx-values: Map): Map {
+  opts-token non-blank(get(opts, "bot-token"))
+  token or(opts-token, non-blank(get(ctx-values, "telegram.bot.token")))
+  cond {
+    and(in("bot-token", keys(opts)), is-null(opts-token)) => {
+      err("telegram: bot-token is in the call's opts but is blank or null. Pass a value, or leave bot-token out to use telegram.bot.token.")
+    }
+
+    is-null(token) => { err("telegram: telegram.bot.token is not set. Add it in Context Variables, or pass {bot-token: ...} in the call's opts.") }
+    => { {bot-token: token} }
+  }
+}
+
+resolve
+meta {
+    ctx: {"telegram.bot.token": {required: false}},
     doc: """
-    Call a Telegram Bot API method. The bot token is read from the `telegram.bot.token` context variable (or passed as the 3rd argument) and placed in the URL path per Telegram's convention.
-
-    Bodies are sent as JSON, or as multipart/form-data when they carry an `InputFile` (see `input-file`). Unset and null top-level fields are omitted; a call with no parameters is a GET.
-
-    Returns the `result` field of the response envelope (`{ok: true, result: ...}`). An `ok: false` answer returns `err(TelegramError)` with `error_code`, `description`, and `retry_after`; other failures return `err(HttpError)`.
+    The bot token for one call (see `resolve-from`). A `bot-token` from
+    `opts` is masked in call records with `::hot::ctx/mark-secret`, before
+    any URL holds it, and `opts` values are never written to ctx.
 
     **Example**
 
     ```hot
-    ::api ::telegram::api
-
-    // GET method (no body)
-    me ::api/request("getMe")
-
-    // POST method with JSON body
-    sent ::api/request("sendMessage", {chat_id: 123456, text: "Hello"})
+    ::telegram::api/resolve({bot-token: "123456:tenant-b-token"}).bot-token
     ```
     """
 }
-fn
-(method: Str): Any {
-  request(method, {}, ::ctx/get("telegram.bot.token"))
-},
-(method: Str, body: Map): Any {
-  request(method, body, ::ctx/get("telegram.bot.token"))
-},
-(method: Str, body: Map, bot-token: Str): Any {
+fn (opts: Map): Map {
+  resolved resolve-from(opts, {"telegram.bot.token": ::ctx/get("telegram.bot.token")})
+  cond {
+    is-err(resolved) => { resolved }
+    in("bot-token", keys(opts)) => { {bot-token: ::ctx/mark-secret(resolved.bot-token)} }
+    => { resolved }
+  }
+}
+
+send fn (method: Str, body: Map, bot-token: Str): Any {
   url method-url(method, bot-token)
   prepared clean-body(body)
   upload prepare-upload(prepared)
@@ -316,7 +349,55 @@ fn
     }
   }
 
-  parse-response(::hot::http/request(http))
+  response ::hot::http/request(http)
+  cond {
+    is-err(response) => { response }
+    => { parse-response(response) }
+  }
+}
+
+request
+meta {
+    ctx: {"telegram.bot.token": {required: false}},
+    doc: """
+    Call a Telegram Bot API method. The bot token comes from per-call `opts` (see `resolve`), the `telegram.bot.token` context variable, or a token passed as the 3rd argument, and is placed in the URL path per Telegram's convention.
+
+    Bodies are sent as JSON, or as multipart/form-data when they carry an `InputFile` (see `input-file`). Unset and null top-level fields are omitted; a call with no parameters is a GET.
+
+    Returns the `result` field of the response envelope (`{ok: true, result: ...}`). An `ok: false` answer returns `err(TelegramError)` with `error_code`, `description`, and `retry_after`; other failures return `err(HttpError)`.
+
+    **Example**
+
+    ```hot
+    ::api ::telegram::api
+
+    // GET method (no body)
+    me ::api/request("getMe")
+
+    // POST method with JSON body
+    sent ::api/request("sendMessage", {chat_id: 123456, text: "Hello"})
+
+    // As another bot
+    other ::api/request("getMe", {}, {bot-token: "123456:tenant-b-token"})
+    ```
+    """
+}
+fn
+(method: Str): Any {
+  request(method, {}, {})
+},
+(method: Str, body: Map): Any {
+  request(method, body, {})
+},
+(method: Str, body: Map, bot-token: Str): Any {
+  request(method, body, {bot-token: bot-token})
+},
+(method: Str, body: Map, opts: Map): Any {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { send(method, body, resolved.bot-token) }
+  }
 }
 
 // ============================================================================
@@ -334,16 +415,29 @@ fn (file-path: Str, bot-token: Str): Str {
 
 download
 meta {
-    ctx: {"telegram.bot.token": {required: true}},
+    ctx: {"telegram.bot.token": {required: false}},
     doc: """
     Download a file by its `file_path` (from `::telegram::files/get-file`) and return its `Bytes`. Bots can download files up to 20 MB. Prefer `::telegram::files/download-file`, which takes a file_id.
     """
 }
 fn
 (file-path: Str): Bytes {
-  download(file-path, ::ctx/get("telegram.bot.token"))
+  download(file-path, {})
 },
 (file-path: Str, bot-token: Str): Bytes {
-  response ::hot::http/request(HttpRequest({method: "GET", url: file-url(file-path, bot-token), headers: {}, body: ""}))
-  if(is-ok-response(response), response.body-bytes, parse-response(response))
+  download(file-path, {bot-token: bot-token})
+},
+(file-path: Str, opts: Map): Bytes {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      response ::hot::http/request(HttpRequest({method: "GET", url: file-url(file-path, resolved.bot-token), headers: {}, body: ""}))
+      cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { response.body-bytes }
+        => { parse-response(response) }
+      }
+    }
+  }
 }

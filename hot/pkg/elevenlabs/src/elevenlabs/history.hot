@@ -7,7 +7,7 @@ meta {
 
 list-history
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """
     GET /v1/history: past generations, newest first. Returns `{history:
     [...], has_more, last_history_item_id}`; each item has
@@ -31,32 +31,47 @@ fn
   list-history({})
 },
 (options: Map): Map {
-  ::api/json("GET", `/v1/history${::api/query-string(options)}`)
+  list-history(options, {})
+},
+(options: Map, opts: Map): Map {
+  ::api/json("GET", `/v1/history${::api/query-string(options)}`, {}, "", opts)
 }
 
 get-history-item
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """GET /v1/history/{history_item_id}: one generation's metadata."""
 }
-fn (history-item-id: Str): Map {
-  ::api/json("GET", `/v1/history/${::api/path-segment(history-item-id)}`)
+fn
+(history-item-id: Str): Map {
+  get-history-item(history-item-id, {})
+},
+(history-item-id: Str, opts: Map): Map {
+  ::api/json("GET", `/v1/history/${::api/path-segment(history-item-id)}`, {}, "", opts)
 }
 
 get-history-audio
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """GET /v1/history/{history_item_id}/audio: the generation's audio as `Bytes`."""
 }
-fn (history-item-id: Str): Bytes {
-  ::api/bytes("GET", `/v1/history/${::api/path-segment(history-item-id)}/audio`)
+fn
+(history-item-id: Str): Bytes {
+  get-history-audio(history-item-id, {})
+},
+(history-item-id: Str, opts: Map): Bytes {
+  ::api/bytes("GET", `/v1/history/${::api/path-segment(history-item-id)}/audio`, "", opts)
 }
 
 delete-history-item
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """DELETE /v1/history/{history_item_id}: delete a generation. Returns `{status: "ok"}`."""
 }
-fn (history-item-id: Str): Map {
-  ::api/json("DELETE", `/v1/history/${::api/path-segment(history-item-id)}`)
+fn
+(history-item-id: Str): Map {
+  delete-history-item(history-item-id, {})
+},
+(history-item-id: Str, opts: Map): Map {
+  ::api/json("DELETE", `/v1/history/${::api/path-segment(history-item-id)}`, {}, "", opts)
 }

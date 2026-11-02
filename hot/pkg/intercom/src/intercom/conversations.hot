@@ -1,7 +1,7 @@
 ::intercom::conversations ns
 meta {
     ctx: {
-        "intercom.token": {required: true},
+        "intercom.token": {required: false},
         "intercom.admin.id": {required: false, secret: false}
     },
     doc: """
@@ -23,7 +23,10 @@ fn
   list-conversations({})
 },
 (options: Map): Any {
-  ::api/request("GET", `/conversations${::api/query-string(options)}`, "")
+  list-conversations(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/request("GET", `/conversations${::api/query-string(options)}`, "", opts)
 }
 
 get-conversation
@@ -35,7 +38,10 @@ fn
   get-conversation(id, {})
 },
 (id: Str, options: Map): Any {
-  ::api/request("GET", `/conversations/${::api/path-segment(id)}${::api/query-string(options)}`, "")
+  get-conversation(id, options, {})
+},
+(id: Str, options: Map, opts: Map): Any {
+  ::api/request("GET", `/conversations/${::api/path-segment(id)}${::api/query-string(options)}`, "", opts)
 }
 
 search-conversations
@@ -65,16 +71,23 @@ fn
   search-conversations(query, {})
 },
 (query: Map, options: Map): Any {
-  ::api/request("POST", "/conversations/search", ::api/build-search-body(query, options))
+  search-conversations(query, options, {})
+},
+(query: Map, options: Map, opts: Map): Any {
+  ::api/request("POST", "/conversations/search", ::api/build-search-body(query, options), opts)
 }
 
 search-all-conversations
 meta {
     doc: """Run `search-conversations` across pages (150 per page) until `limit` conversations or the last page. Returns a Vec."""
 }
-fn (query: Map, limit: Int): Vec {
+fn
+(query: Map, limit: Int): Vec {
+  search-all-conversations(query, limit, {})
+},
+(query: Map, limit: Int, opts: Map): Vec {
   ::api/collect-pages(
-    (cursor) { search-conversations(query, {per_page: ::api/page-size(limit), starting_after: cursor}) },
+    (cursor) { search-conversations(query, {per_page: ::api/page-size(limit), starting_after: cursor}, opts) },
     "conversations", null, limit, []
   )
 }
@@ -93,7 +106,7 @@ fn (message-type: Str, admin-id: Str, body: Str, options: Map): Map {
 
 reply
 meta {
-    ctx: {"intercom.admin.id": {required: true, secret: false}},
+    ctx: {"intercom.admin.id": {required: false, secret: false}},
     doc: """POST /conversations/{id}/reply - Reply to the customer as the configured admin (visible to them). `body` may be HTML. `options`: `attachment_urls`, `skip_notifications`."""
 }
 fn
@@ -101,18 +114,29 @@ fn
   reply(conversation-id, body, {})
 },
 (conversation-id: Str, body: Str, options: Map): Any {
-  ::api/request("POST", `/conversations/${::api/path-segment(conversation-id)}/reply`,
-    build-reply-body("comment", ::api/admin-id(), body, options))
+  reply(conversation-id, body, options, {})
+},
+(conversation-id: Str, body: Str, options: Map, opts: Map): Any {
+  ::api/with-admin(opts, (admin) {
+    ::api/request("POST", `/conversations/${::api/path-segment(conversation-id)}/reply`,
+      build-reply-body("comment", admin, body, options), opts)
+  })
 }
 
 add-note
 meta {
-    ctx: {"intercom.admin.id": {required: true, secret: false}},
+    ctx: {"intercom.admin.id": {required: false, secret: false}},
     doc: """POST /conversations/{id}/reply with `message_type: note` - An internal note teammates see but the customer doesn't."""
 }
-fn (conversation-id: Str, body: Str): Any {
-  ::api/request("POST", `/conversations/${::api/path-segment(conversation-id)}/reply`,
-    build-reply-body("note", ::api/admin-id(), body, {}))
+fn
+(conversation-id: Str, body: Str): Any {
+  add-note(conversation-id, body, {})
+},
+(conversation-id: Str, body: Str, opts: Map): Any {
+  ::api/with-admin(opts, (admin) {
+    ::api/request("POST", `/conversations/${::api/path-segment(conversation-id)}/reply`,
+      build-reply-body("note", admin, body, {}), opts)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -163,35 +187,49 @@ fn (admin-id: Str, assignee-id: Str, options: Map): Map {
   })
 }
 
-manage fn (conversation-id: Str, body: Map): Any {
-  ::api/request("POST", `/conversations/${::api/path-segment(conversation-id)}/parts`, body)
+manage fn
+(conversation-id: Str, body: Map): Any {
+  manage(conversation-id, body, {})
+},
+(conversation-id: Str, body: Map, opts: Map): Any {
+  ::api/request("POST", `/conversations/${::api/path-segment(conversation-id)}/parts`, body, opts)
 }
 
 close-conversation
 meta {
-    ctx: {"intercom.admin.id": {required: true, secret: false}},
+    ctx: {"intercom.admin.id": {required: false, secret: false}},
     doc: """Close a conversation, optionally with a closing message to the customer."""
 }
 fn
 (conversation-id: Str): Any {
-  manage(conversation-id, build-close-body(::api/admin-id(), null))
+  close-conversation(conversation-id, {})
+},
+(conversation-id: Str, opts: Map): Any {
+  ::api/with-admin(opts, (admin) { manage(conversation-id, build-close-body(admin, null), opts) })
 },
 (conversation-id: Str, body: Str): Any {
-  manage(conversation-id, build-close-body(::api/admin-id(), body))
+  close-conversation(conversation-id, body, {})
+},
+(conversation-id: Str, body: Str, opts: Map): Any {
+  ::api/with-admin(opts, (admin) { manage(conversation-id, build-close-body(admin, body), opts) })
 }
 
 open-conversation
 meta {
-    ctx: {"intercom.admin.id": {required: true, secret: false}},
+    ctx: {"intercom.admin.id": {required: false, secret: false}},
     doc: """Reopen a snoozed or closed conversation."""
 }
-fn (conversation-id: Str): Any {
-  manage(conversation-id, build-open-body(::api/admin-id()))
+fn
+(conversation-id: Str): Any {
+  open-conversation(conversation-id, {})
+},
+(conversation-id: Str, opts: Map): Any {
+  ::api/with-admin(opts, (admin) { manage(conversation-id, build-open-body(admin), opts) })
 }
 
 snooze-conversation
 meta {
-    ctx: {"intercom.admin.id": {required: true, secret: false}},
+    ctx: {"intercom.admin.id": {required: false, secret: false}},
     doc: """
     Snooze a conversation until `snoozed-until` (Unix seconds); it
     reopens then.
@@ -204,13 +242,17 @@ meta {
     ```
     """
 }
-fn (conversation-id: Str, snoozed-until: Int): Any {
-  manage(conversation-id, build-snooze-body(::api/admin-id(), snoozed-until))
+fn
+(conversation-id: Str, snoozed-until: Int): Any {
+  snooze-conversation(conversation-id, snoozed-until, {})
+},
+(conversation-id: Str, snoozed-until: Int, opts: Map): Any {
+  ::api/with-admin(opts, (admin) { manage(conversation-id, build-snooze-body(admin, snoozed-until), opts) })
 }
 
 assign-conversation
 meta {
-    ctx: {"intercom.admin.id": {required: true, secret: false}},
+    ctx: {"intercom.admin.id": {required: false, secret: false}},
     doc: """
     Assign a conversation to an admin (default) or a team. `options`:
     `type` ("admin" or "team"), `body` (a note posted with the
@@ -228,5 +270,8 @@ fn
   assign-conversation(conversation-id, assignee-id, {})
 },
 (conversation-id: Str, assignee-id: Str, options: Map): Any {
-  manage(conversation-id, build-assign-body(::api/admin-id(), assignee-id, options))
+  assign-conversation(conversation-id, assignee-id, options, {})
+},
+(conversation-id: Str, assignee-id: Str, options: Map, opts: Map): Any {
+  ::api/with-admin(opts, (admin) { manage(conversation-id, build-assign-body(admin, assignee-id, options), opts) })
 }

@@ -45,7 +45,10 @@ fn
   list-assignments(ListAssignmentsRequest({}))
 },
 (request: ListAssignmentsRequest): Map {
-  ::api/call("admin.roles.listAssignments", request)
+  list-assignments(request, {})
+},
+(request: ListAssignmentsRequest, opts: Map): Map {
+  ::api/call("admin.roles.listAssignments", request, opts)
 }
 
 list-assignments-all
@@ -62,7 +65,10 @@ fn
   list-assignments-all(request, 1000)
 },
 (request: ListAssignmentsRequest, max-items: Int): Vec {
-  ::api/paginate("admin.roles.listAssignments", request, "role_assignments", max-items)
+  list-assignments-all(request, max-items, {})
+},
+(request: ListAssignmentsRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.roles.listAssignments", request, "role_assignments", max-items, opts)
 }
 
 AddAssignmentsRequest type {
@@ -79,8 +85,12 @@ meta {
     Scope: `admin.roles:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: AddAssignmentsRequest): Map {
-  ::api/call("admin.roles.addAssignments", request)
+fn
+(request: AddAssignmentsRequest): Map {
+  add-assignments(request, {})
+},
+(request: AddAssignmentsRequest, opts: Map): Map {
+  ::api/call("admin.roles.addAssignments", request, opts)
 }
 
 RemoveAssignmentsRequest type {
@@ -97,6 +107,10 @@ meta {
     Scope: `admin.roles:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: RemoveAssignmentsRequest): Map {
-  ::api/call("admin.roles.removeAssignments", request)
+fn
+(request: RemoveAssignmentsRequest): Map {
+  remove-assignments(request, {})
+},
+(request: RemoveAssignmentsRequest, opts: Map): Map {
+  ::api/call("admin.roles.removeAssignments", request, opts)
 }

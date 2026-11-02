@@ -13,7 +13,7 @@ meta {
 
 upsert-records
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     POST {host}/records/namespaces/{namespace}/upsert - Upsert records
     (up to 96 per call): each needs an `_id` and the text field named
@@ -31,8 +31,12 @@ meta {
     ```
     """
 }
-fn (host: Str, namespace: Str, records: Vec): Any {
-  ::api/ndjson(::api/data-url(host, ["records", "namespaces", namespace, "upsert"], {}), records)
+fn
+(host: Str, namespace: Str, records: Vec): Any {
+  upsert-records(host, namespace, records, {})
+},
+(host: Str, namespace: Str, records: Vec, opts: Map): Any {
+  ::api/ndjson(::api/data-url(host, ["records", "namespaces", namespace, "upsert"], {}), records, opts)
 }
 
 build-search-body
@@ -58,7 +62,7 @@ fn (text: Str, options: Map): Map {
 
 search-records
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     POST {host}/records/namespaces/{namespace}/search - Search by text.
     `options` as for `build-search-body`. Returns `{result: {hits:
@@ -81,5 +85,8 @@ fn
   search-records(host, namespace, text, {})
 },
 (host: Str, namespace: Str, text: Str, options: Map): Map {
-  ::api/json("POST", ::api/data-url(host, ["records", "namespaces", namespace, "search"], {}), build-search-body(text, options))
+  search-records(host, namespace, text, options, {})
+},
+(host: Str, namespace: Str, text: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/data-url(host, ["records", "namespaces", namespace, "search"], {}), build-search-body(text, options), opts)
 }

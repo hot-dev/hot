@@ -1,7 +1,7 @@
 ::cloudflare::zones ns
 meta {
     doc: """Cloudflare zones: list (paged or all), look up by name, get by id.""",
-    ctx: {"cloudflare.token": {required: true}}
+    ctx: {"cloudflare.token": {required: false}}
 }
 
 ::api ::cloudflare::api
@@ -30,7 +30,10 @@ fn
   list-zones({})
 },
 (params: Map): ListPage {
-  ::api/json-page(`/zones${::api/query(params)}`)
+  list-zones(params, {})
+},
+(params: Map, opts: Map): ListPage {
+  ::api/json-page(`/zones${::api/query(params)}`, "", opts)
 }
 
 list-all-zones
@@ -45,15 +48,25 @@ fn
   list-all-zones(params, ::api/DEFAULT_MAX_ITEMS)
 },
 (params: Map, max: Int): Vec {
-  ::api/collect-pages(list-zones, {per_page: 50, ...params}, max)
+  list-all-zones(params, max, {})
+},
+(params: Map, opts: Map): Vec {
+  list-all-zones(params, ::api/DEFAULT_MAX_ITEMS, opts)
+},
+(params: Map, max: Int, opts: Map): Vec {
+  ::api/collect-pages((p) { list-zones(p, opts) }, {per_page: 50, ...params}, max)
 }
 
 find-zone
 meta {
     doc: """The zone whose name is exactly `name` (e.g. `"example.com"`), or null when the token can't see one."""
 }
-fn (name: Str): Map? {
-  page list-zones({name: name})
+fn
+(name: Str): Map? {
+  find-zone(name, {})
+},
+(name: Str, opts: Map): Map? {
+  page list-zones({name: name}, opts)
   cond {
     is-err(page) => { page }
     is-empty(page.result) => { null }
@@ -65,6 +78,10 @@ get-zone
 meta {
     doc: """GET /zones/{zone_id} - One zone: name, status, name servers, plan."""
 }
-fn (zone-id: Str): Map {
-  ::api/json("GET", `/zones/${::api/seg(zone-id)}`)
+fn
+(zone-id: Str): Map {
+  get-zone(zone-id, {})
+},
+(zone-id: Str, opts: Map): Map {
+  ::api/json("GET", `/zones/${::api/seg(zone-id)}`, "", opts)
 }

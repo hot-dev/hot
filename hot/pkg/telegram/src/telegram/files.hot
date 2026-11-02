@@ -21,7 +21,7 @@ type {
 
 get-file
 meta {
-    ctx: {"telegram.bot.token": {required: true}},
+    ctx: {"telegram.bot.token": {required: false}},
     doc: """
 getFile - Resolve a `file_id` (from a message's `photo`, `document`, `voice`, ...) to a downloadable `file_path`. Bots can download files up to 20 MB.
 
@@ -35,13 +35,17 @@ file.file_path  // => "photos/file_12.jpg"
 ```
 """
 }
-fn (file-id: Str): File {
-  File(api-request("getFile", {file_id: file-id}))
+fn
+(file-id: Str): File {
+  get-file(file-id, {})
+},
+(file-id: Str, opts: Map): File {
+  if-ok(api-request("getFile", {file_id: file-id}, opts), (result) { File(result) })
 }
 
 download-file
 meta {
-    ctx: {"telegram.bot.token": {required: true}},
+    ctx: {"telegram.bot.token": {required: false}},
     doc: """
 getFile, then download the file's content as `Bytes` (up to 20 MB).
 
@@ -56,10 +60,15 @@ on-voice fn (message: Map): Bytes {
 ```
 """
 }
-fn (file-id: Str): Bytes {
-  file get-file(file-id)
+fn
+(file-id: Str): Bytes {
+  download-file(file-id, {})
+},
+(file-id: Str, opts: Map): Bytes {
+  file get-file(file-id, opts)
   cond {
+    is-err(file) => { file }
     is-null(file.file_path) => { err(`Telegram returned no file_path for ${file-id} (file larger than 20 MB?)`) }
-    => { ::telegram::api/download(file.file_path) }
+    => { ::telegram::api/download(file.file_path, opts) }
   }
 }

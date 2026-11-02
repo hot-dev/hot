@@ -49,7 +49,7 @@ meta {
     doc: """
 Verify a Stripe webhook request signature using HMAC-SHA256 over the raw request body (`::hot::http/raw-body`). Returns true if any `v1` signature matches (constant-time comparison) and the signed timestamp is within the tolerance window (default 300 seconds, matching Stripe's official libraries). Pass a tolerance of 0 to skip the timestamp check.
 
-Uses the `stripe.webhook.secret` context variable (your endpoint's `whsec_...` signing secret) by default, failing when it is unset; or accepts an explicit secret — an empty explicit secret never verifies.
+Uses the `stripe.webhook.secret` context variable (your endpoint's `whsec_...` signing secret) by default, failing when it is unset; or accepts an explicit secret, masked in call records — an empty explicit secret never verifies.
 
 Always verify before trusting a webhook — unverified requests can be forged payment events.
 
@@ -90,9 +90,10 @@ fn
     is-empty(webhook-secret) => { false }
     is-empty(header) => { false }
     => {
+      secret ::ctx/mark-secret(webhook-secret)
       parsed parse-signature-header(header)
       // hmac-sha256 returns the digest as a lowercase hex string
-      expected ::hmac/hmac-sha256(webhook-secret, signed-payload(parsed.t, ::hot::http/raw-body(request)))
+      expected ::hmac/hmac-sha256(secret, signed-payload(parsed.t, ::hot::http/raw-body(request)))
       signature-valid reduce(parsed.v1, (acc, sig) { or(acc, secure-compare(expected, lowercase(sig))) }, false)
 
       cond {
@@ -171,7 +172,7 @@ CreateWebhookEndpointRequest type {
 create-webhook-endpoint
 meta {
     doc: """
-POST /v1/webhook_endpoints - Register a webhook endpoint. The response includes the signing `secret` (whsec_...) — store it; it is only returned on creation. Set `api_version: ::stripe/API_VERSION` so event payloads match the shapes this package's API calls return; otherwise events use the account's default version.
+POST /v1/webhook_endpoints - Register a webhook endpoint. The response includes the signing `secret` (whsec_...), masked in call records — store it; it is only returned on creation. Set `api_version: ::stripe/API_VERSION` so event payloads match the shapes this package's API calls return; otherwise events use the account's default version.
 
 **Example**
 
@@ -191,16 +192,25 @@ fn
 (request: CreateWebhookEndpointRequest): Map {
   create-webhook-endpoint(request, RequestOptions({}))
 },
-(request: CreateWebhookEndpointRequest, options: RequestOptions): Map {
-  api-call("POST", "/v1/webhook_endpoints", request, options)
+(request: CreateWebhookEndpointRequest, options: RequestOptions | Map): Map {
+  endpoint api-call("POST", "/v1/webhook_endpoints", request, options)
+  cond {
+    is-err(endpoint) => { endpoint }
+    is-null(get(endpoint, "secret")) => { endpoint }
+    => { {...endpoint, secret: ::ctx/mark-secret(endpoint.secret)} }
+  }
 }
 
 get-webhook-endpoint
 meta {
     doc: """GET /v1/webhook_endpoints/{webhook_endpoint} - Retrieve a webhook endpoint by ID."""
 }
-fn (webhook-endpoint: Str): Map {
-  api-call("GET", `/v1/webhook_endpoints/${seg(webhook-endpoint)}`)
+fn
+(webhook-endpoint: Str): Map {
+  get-webhook-endpoint(webhook-endpoint, {})
+},
+(webhook-endpoint: Str, opts: Map): Map {
+  api-call("GET", `/v1/webhook_endpoints/${seg(webhook-endpoint)}`, "", opts)
 }
 
 UpdateWebhookEndpointRequest type {
@@ -220,7 +230,7 @@ fn
 (webhook-endpoint: Str, request: UpdateWebhookEndpointRequest): Map {
   update-webhook-endpoint(webhook-endpoint, request, RequestOptions({}))
 },
-(webhook-endpoint: Str, request: UpdateWebhookEndpointRequest, options: RequestOptions): Map {
+(webhook-endpoint: Str, request: UpdateWebhookEndpointRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/webhook_endpoints/${seg(webhook-endpoint)}`, request, options)
 }
 
@@ -228,8 +238,12 @@ delete-webhook-endpoint
 meta {
     doc: """DELETE /v1/webhook_endpoints/{webhook_endpoint} - Delete a webhook endpoint."""
 }
-fn (webhook-endpoint: Str): Map {
-  api-call("DELETE", `/v1/webhook_endpoints/${seg(webhook-endpoint)}`)
+fn
+(webhook-endpoint: Str): Map {
+  delete-webhook-endpoint(webhook-endpoint, {})
+},
+(webhook-endpoint: Str, opts: Map): Map {
+  api-call("DELETE", `/v1/webhook_endpoints/${seg(webhook-endpoint)}`, "", opts)
 }
 
 list-webhook-endpoints
@@ -241,5 +255,8 @@ fn
   list-webhook-endpoints({})
 },
 (params: Map): Map {
-  api-call("GET", "/v1/webhook_endpoints", params)
+  list-webhook-endpoints(params, {})
+},
+(params: Map, opts: Map): Map {
+  api-call("GET", "/v1/webhook_endpoints", params, opts)
 }

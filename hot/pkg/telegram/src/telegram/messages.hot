@@ -49,8 +49,12 @@ response ::messages/send-message(::messages/SendMessageRequest({
 ```
 """
 }
-fn (request: SendMessageRequest): Map {
-  api-request("sendMessage", untype(request))
+fn
+(request: SendMessageRequest): Map {
+  send-message(request, {})
+},
+(request: SendMessageRequest, opts: Map): Map {
+  api-request("sendMessage", untype(request), opts)
 }
 
 ForwardMessageRequest type {
@@ -69,8 +73,12 @@ forward-message
 meta {
     doc: """forwardMessage - Forward a message from one chat to another. The forwarded message shows the original sender."""
 }
-fn (request: ForwardMessageRequest): Map {
-  api-request("forwardMessage", untype(request))
+fn
+(request: ForwardMessageRequest): Map {
+  forward-message(request, {})
+},
+(request: ForwardMessageRequest, opts: Map): Map {
+  api-request("forwardMessage", untype(request), opts)
 }
 
 CopyMessageRequest type {
@@ -96,8 +104,12 @@ copy-message
 meta {
     doc: """copyMessage - Copy a message without the "Forwarded from" attribution. Returns the new message ID rather than the full message object."""
 }
-fn (request: CopyMessageRequest): Map {
-  api-request("copyMessage", untype(request))
+fn
+(request: CopyMessageRequest): Map {
+  copy-message(request, {})
+},
+(request: CopyMessageRequest, opts: Map): Map {
+  api-request("copyMessage", untype(request), opts)
 }
 
 EditMessageTextRequest type {
@@ -130,8 +142,12 @@ editMessageText - Edit a text message. Provide either `chat_id` + `message_id` f
 ```
 """
 }
-fn (request: EditMessageTextRequest): Any {
-  api-request("editMessageText", untype(request))
+fn
+(request: EditMessageTextRequest): Any {
+  edit-message-text(request, {})
+},
+(request: EditMessageTextRequest, opts: Map): Any {
+  api-request("editMessageText", untype(request), opts)
 }
 
 EditMessageCaptionRequest type {
@@ -150,8 +166,12 @@ edit-message-caption
 meta {
     doc: """editMessageCaption - Edit the caption of a photo, video, document, or animation message."""
 }
-fn (request: EditMessageCaptionRequest): Any {
-  api-request("editMessageCaption", untype(request))
+fn
+(request: EditMessageCaptionRequest): Any {
+  edit-message-caption(request, {})
+},
+(request: EditMessageCaptionRequest, opts: Map): Any {
+  api-request("editMessageCaption", untype(request), opts)
 }
 
 EditMessageReplyMarkupRequest type {
@@ -166,8 +186,12 @@ edit-message-reply-markup
 meta {
     doc: """editMessageReplyMarkup - Edit the reply markup (inline keyboard) of a message."""
 }
-fn (request: EditMessageReplyMarkupRequest): Any {
-  api-request("editMessageReplyMarkup", untype(request))
+fn
+(request: EditMessageReplyMarkupRequest): Any {
+  edit-message-reply-markup(request, {})
+},
+(request: EditMessageReplyMarkupRequest, opts: Map): Any {
+  api-request("editMessageReplyMarkup", untype(request), opts)
 }
 
 DeleteMessageRequest type {
@@ -179,8 +203,12 @@ delete-message
 meta {
     doc: """deleteMessage - Delete a message. Bots can delete messages they sent, messages in private chats, and messages in groups/channels where they have delete permissions."""
 }
-fn (request: DeleteMessageRequest): Bool {
-  api-request("deleteMessage", untype(request))
+fn
+(request: DeleteMessageRequest): Bool {
+  delete-message(request, {})
+},
+(request: DeleteMessageRequest, opts: Map): Bool {
+  api-request("deleteMessage", untype(request), opts)
 }
 
 DeleteMessagesRequest type {
@@ -192,8 +220,12 @@ delete-messages
 meta {
     doc: """deleteMessages - Delete multiple messages at once (up to 100). Messages must be from the same chat and no older than 48 hours."""
 }
-fn (request: DeleteMessagesRequest): Bool {
-  api-request("deleteMessages", untype(request))
+fn
+(request: DeleteMessagesRequest): Bool {
+  delete-messages(request, {})
+},
+(request: DeleteMessagesRequest, opts: Map): Bool {
+  api-request("deleteMessages", untype(request), opts)
 }
 
 // ============================================================================
@@ -248,8 +280,12 @@ response ::messages/send-photo(::messages/SendPhotoRequest({
 ```
 """
 }
-fn (request: SendPhotoRequest): Map {
-  api-request("sendPhoto", untype(request))
+fn
+(request: SendPhotoRequest): Map {
+  send-photo(request, {})
+},
+(request: SendPhotoRequest, opts: Map): Map {
+  api-request("sendPhoto", untype(request), opts)
 }
 
 SendDocumentRequest type {
@@ -275,8 +311,12 @@ send-document
 meta {
     doc: """sendDocument - Send a general file. `document` can be a file_id, an HTTP URL, or an `InputFile` to upload bytes (up to 50 MB)."""
 }
-fn (request: SendDocumentRequest): Map {
-  api-request("sendDocument", untype(request))
+fn
+(request: SendDocumentRequest): Map {
+  send-document(request, {})
+},
+(request: SendDocumentRequest, opts: Map): Map {
+  api-request("sendDocument", untype(request), opts)
 }
 
 SendVideoRequest type {
@@ -309,8 +349,12 @@ send-video
 meta {
     doc: """sendVideo - Send an MPEG4 video. `video` can be a file_id, an HTTP URL, or an `InputFile` to upload bytes (up to 50 MB)."""
 }
-fn (request: SendVideoRequest): Map {
-  api-request("sendVideo", untype(request))
+fn
+(request: SendVideoRequest): Map {
+  send-video(request, {})
+},
+(request: SendVideoRequest, opts: Map): Map {
+  api-request("sendVideo", untype(request), opts)
 }
 
 SendAudioRequest type {
@@ -338,8 +382,12 @@ send-audio
 meta {
     doc: """sendAudio - Send an MP3 or M4A file to show in the music player. `audio` can be a file_id, an HTTP URL, or an `InputFile` to upload bytes (up to 50 MB)."""
 }
-fn (request: SendAudioRequest): Map {
-  api-request("sendAudio", untype(request))
+fn
+(request: SendAudioRequest): Map {
+  send-audio(request, {})
+},
+(request: SendAudioRequest, opts: Map): Map {
+  api-request("sendAudio", untype(request), opts)
 }
 
 SendVoiceRequest type {
@@ -364,8 +412,12 @@ send-voice
 meta {
     doc: """sendVoice - Send a voice message (OGG/OPUS, MP3, or M4A). `voice` can be a file_id, an HTTP URL, or an `InputFile` to upload bytes."""
 }
-fn (request: SendVoiceRequest): Map {
-  api-request("sendVoice", untype(request))
+fn
+(request: SendVoiceRequest): Map {
+  send-voice(request, {})
+},
+(request: SendVoiceRequest, opts: Map): Map {
+  api-request("sendVoice", untype(request), opts)
 }
 
 SendLocationRequest type {
@@ -391,8 +443,12 @@ send-location
 meta {
     doc: """sendLocation - Send a point on the map. Set `live_period` (60-86400 seconds) for a live location that updates."""
 }
-fn (request: SendLocationRequest): Map {
-  api-request("sendLocation", untype(request))
+fn
+(request: SendLocationRequest): Map {
+  send-location(request, {})
+},
+(request: SendLocationRequest, opts: Map): Map {
+  api-request("sendLocation", untype(request), opts)
 }
 
 SendContactRequest type {
@@ -416,8 +472,12 @@ send-contact
 meta {
     doc: """sendContact - Send a phone contact."""
 }
-fn (request: SendContactRequest): Map {
-  api-request("sendContact", untype(request))
+fn
+(request: SendContactRequest): Map {
+  send-contact(request, {})
+},
+(request: SendContactRequest, opts: Map): Map {
+  api-request("sendContact", untype(request), opts)
 }
 
 SendPollRequest type {
@@ -451,8 +511,12 @@ send-poll
 meta {
     doc: """sendPoll - Send a poll with 1-12 options, each `{text: "Option text"}`. Set `type: "quiz"` for quiz mode with `correct_option_ids` (0-based, increasing)."""
 }
-fn (request: SendPollRequest): Map {
-  api-request("sendPoll", untype(request))
+fn
+(request: SendPollRequest): Map {
+  send-poll(request, {})
+},
+(request: SendPollRequest, opts: Map): Map {
+  api-request("sendPoll", untype(request), opts)
 }
 
 SendDiceRequest type {
@@ -473,8 +537,12 @@ send-dice
 meta {
     doc: """sendDice - Send an animated dice/emoji. `emoji` can be a die, dart, basketball, football, bowling, or slot machine emoji. Default is die."""
 }
-fn (request: SendDiceRequest): Map {
-  api-request("sendDice", untype(request))
+fn
+(request: SendDiceRequest): Map {
+  send-dice(request, {})
+},
+(request: SendDiceRequest, opts: Map): Map {
+  api-request("sendDice", untype(request), opts)
 }
 
 SendChatActionRequest type {
@@ -488,8 +556,12 @@ send-chat-action
 meta {
     doc: """sendChatAction - Show a typing indicator or upload status. `action`: "typing", "upload_photo", "record_video", "upload_video", "record_voice", "upload_voice", "upload_document", "find_location", "record_video_note", "upload_video_note"."""
 }
-fn (request: SendChatActionRequest): Bool {
-  api-request("sendChatAction", untype(request))
+fn
+(request: SendChatActionRequest): Bool {
+  send-chat-action(request, {})
+},
+(request: SendChatActionRequest, opts: Map): Bool {
+  api-request("sendChatAction", untype(request), opts)
 }
 
 // ============================================================================
@@ -523,8 +595,12 @@ on-callback fn (update: Map): Bool {
 ```
 """
 }
-fn (request: AnswerCallbackQueryRequest): Bool {
-  api-request("answerCallbackQuery", untype(request))
+fn
+(request: AnswerCallbackQueryRequest): Bool {
+  answer-callback-query(request, {})
+},
+(request: AnswerCallbackQueryRequest, opts: Map): Bool {
+  api-request("answerCallbackQuery", untype(request), opts)
 }
 
 // ============================================================================
@@ -572,8 +648,12 @@ length(album)  // => 2
 ```
 """
 }
-fn (request: SendMediaGroupRequest): Vec<Map> {
-  api-request("sendMediaGroup", untype(request))
+fn
+(request: SendMediaGroupRequest): Vec<Map> {
+  send-media-group(request, {})
+},
+(request: SendMediaGroupRequest, opts: Map): Vec<Map> {
+  api-request("sendMediaGroup", untype(request), opts)
 }
 
 EditMessageMediaRequest
@@ -607,8 +687,12 @@ editMessageMedia - Replace a message's photo, video, document, audio, or animati
 ```
 """
 }
-fn (request: EditMessageMediaRequest): Any {
-  api-request("editMessageMedia", untype(request))
+fn
+(request: EditMessageMediaRequest): Any {
+  edit-message-media(request, {})
+},
+(request: EditMessageMediaRequest, opts: Map): Any {
+  api-request("editMessageMedia", untype(request), opts)
 }
 
 // ============================================================================
@@ -640,8 +724,12 @@ setMessageReaction - Set the bot's reactions on a message. Each reaction is `{ty
 ```
 """
 }
-fn (request: SetMessageReactionRequest): Bool {
-  api-request("setMessageReaction", untype(request))
+fn
+(request: SetMessageReactionRequest): Bool {
+  set-message-reaction(request, {})
+},
+(request: SetMessageReactionRequest, opts: Map): Bool {
+  api-request("setMessageReaction", untype(request), opts)
 }
 
 StopPollRequest type {
@@ -655,8 +743,12 @@ stop-poll
 meta {
     doc: """stopPoll - Close a poll the bot sent. Returns the final Poll with vote counts."""
 }
-fn (request: StopPollRequest): Map {
-  api-request("stopPoll", untype(request))
+fn
+(request: StopPollRequest): Map {
+  stop-poll(request, {})
+},
+(request: StopPollRequest, opts: Map): Map {
+  api-request("stopPoll", untype(request), opts)
 }
 
 // ============================================================================
@@ -701,6 +793,10 @@ on-inline fn (update: Map): Bool {
 ```
 """
 }
-fn (request: AnswerInlineQueryRequest): Bool {
-  api-request("answerInlineQuery", untype(request))
+fn
+(request: AnswerInlineQueryRequest): Bool {
+  answer-inline-query(request, {})
+},
+(request: AnswerInlineQueryRequest, opts: Map): Bool {
+  api-request("answerInlineQuery", untype(request), opts)
 }

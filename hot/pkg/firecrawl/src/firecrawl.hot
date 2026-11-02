@@ -6,7 +6,9 @@ meta {
     Firecrawl reads them as single pages, batches, whole sites, or
     structured extraction.
 
-    **Setup**: context variable `firecrawl.api.key` (`fc-...`).
+    **Setup**: context variable `firecrawl.api.key` (`fc-...`), or a
+    per-call `api-key` in the trailing `opts` Map of any API-calling
+    function (see `::firecrawl::api`).
 
     **Quick start**
 
@@ -42,7 +44,7 @@ BASE_URL "https://api.firecrawl.dev/v2"
 
 scrape
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """
     POST /scrape - Fetch one URL as clean content. `options` (camelCase,
     as Firecrawl documents them) include `formats` (e.g. `["markdown",
@@ -64,13 +66,16 @@ fn
   scrape(url, {})
 },
 (url: Str, options: Map): Map {
-  ::api/request("POST", "/scrape", ::api/body-with({url: url}, options))
+  scrape(url, options, {})
+},
+(url: Str, options: Map, opts: Map): Map {
+  ::api/request("POST", "/scrape", ::api/body-with({url: url}, options), opts)
     |> if-ok((body) { body.data })
 }
 
 map-site
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """
     POST /map - Discover a site's URLs fast (sitemap plus link
     discovery). `options`: `search` (rank links by relevance to a
@@ -85,12 +90,15 @@ fn
   map-site(url, {})
 },
 (url: Str, options: Map): Map {
-  ::api/request("POST", "/map", ::api/body-with({url: url}, options))
+  map-site(url, options, {})
+},
+(url: Str, options: Map, opts: Map): Map {
+  ::api/request("POST", "/map", ::api/body-with({url: url}, options), opts)
 }
 
 search
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """
     POST /search - Web search, optionally scraping each hit. `options`:
     `limit` (1-100, default 10), `sources` (e.g. `["web", "news"]`),
@@ -113,7 +121,10 @@ fn
   search(query, {})
 },
 (query: Str, options: Map): Map {
-  ::api/request("POST", "/search", ::api/body-with({query: query}, options))
+  search(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Map {
+  ::api/request("POST", "/search", ::api/body-with({query: query}, options), opts)
     |> if-ok((body) { body.data })
 }
 
@@ -123,7 +134,7 @@ fn
 
 crawl
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """
     POST /crawl - Start crawling a site. `options`: `limit` (page cap,
     default 10000; always set one), `includePaths`/`excludePaths`
@@ -139,12 +150,15 @@ fn
   crawl(url, {})
 },
 (url: Str, options: Map): Map {
-  ::api/request("POST", "/crawl", ::api/body-with({url: url}, options))
+  crawl(url, options, {})
+},
+(url: Str, options: Map, opts: Map): Map {
+  ::api/request("POST", "/crawl", ::api/body-with({url: url}, options), opts)
 }
 
 get-crawl
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """
     GET /crawl/{id} - One status page: `{status, total, completed,
     creditsUsed, expiresAt, next?, data: [documents]}`. `status` is
@@ -153,45 +167,64 @@ meta {
     `get-crawl-all` to follow every page.
     """
 }
-fn (id: Str): Map {
-  ::api/request("GET", ::api/job-path("crawl", id), "")
+fn
+(id: Str): Map {
+  get-crawl(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::api/request("GET", ::api/job-path("crawl", id), "", opts)
 }
 
 get-crawl-all
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """GET /crawl/{id}, following `next` - The current status with `data` holding the documents from every page fetched so far. While the crawl is still running, `next` stays set when the cursor has caught up with the crawler."""
 }
-fn (id: Str): Map {
-  first-page get-crawl(id)
-  if-ok(first-page, (page) { ::api/collect-pages(page, (path) { ::api/request("GET", path, "") }) })
+fn
+(id: Str): Map {
+  get-crawl-all(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::api/get-all-pages(::api/job-path("crawl", id), opts)
 }
 
 cancel-crawl
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """DELETE /crawl/{id} - Cancel a running crawl. Returns `{status: "cancelled"}`."""
 }
-fn (id: Str): Map {
-  ::api/request("DELETE", ::api/job-path("crawl", id), "")
+fn
+(id: Str): Map {
+  cancel-crawl(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::api/request("DELETE", ::api/job-path("crawl", id), "", opts)
 }
 
 get-crawl-errors
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """GET /crawl/{id}/errors - Pages that failed (`errors: [{id, timestamp, url, error}]`) and URLs blocked by robots.txt (`robotsBlocked`)."""
 }
-fn (id: Str): Map {
-  ::api/request("GET", ::api/job-path("crawl", id, "/errors"), "")
+fn
+(id: Str): Map {
+  get-crawl-errors(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::api/request("GET", ::api/job-path("crawl", id, "/errors"), "", opts)
 }
 
 list-active-crawls
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """GET /crawl/active - The team's running crawls: `{crawls: [{id, teamId, url, options}]}`."""
 }
-fn (): Map {
-  ::api/request("GET", "/crawl/active", "")
+fn
+(): Map {
+  list-active-crawls({})
+},
+(opts: Map): Map {
+  ::api/request("GET", "/crawl/active", "", opts)
 }
 
 // =============================================================================
@@ -200,7 +233,7 @@ fn (): Map {
 
 batch-scrape
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """
     POST /batch/scrape - Start scraping many URLs at once. `options`
     take the same scrape options as `scrape` at the top level
@@ -224,44 +257,62 @@ fn
   batch-scrape(urls, {})
 },
 (urls: Vec, options: Map): Map {
-  ::api/request("POST", "/batch/scrape", ::api/body-with({urls: urls}, options))
+  batch-scrape(urls, options, {})
+},
+(urls: Vec, options: Map, opts: Map): Map {
+  ::api/request("POST", "/batch/scrape", ::api/body-with({urls: urls}, options), opts)
 }
 
 get-batch-scrape
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """GET /batch/scrape/{id} - One status page, shaped like `get-crawl`: `{status, total, completed, creditsUsed, next?, data}`."""
 }
-fn (id: Str): Map {
-  ::api/request("GET", ::api/job-path("batch/scrape", id), "")
+fn
+(id: Str): Map {
+  get-batch-scrape(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::api/request("GET", ::api/job-path("batch/scrape", id), "", opts)
 }
 
 get-batch-scrape-all
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """GET /batch/scrape/{id}, following `next` - The current status with `data` from every page fetched so far."""
 }
-fn (id: Str): Map {
-  first-page get-batch-scrape(id)
-  if-ok(first-page, (page) { ::api/collect-pages(page, (path) { ::api/request("GET", path, "") }) })
+fn
+(id: Str): Map {
+  get-batch-scrape-all(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::api/get-all-pages(::api/job-path("batch/scrape", id), opts)
 }
 
 cancel-batch-scrape
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """DELETE /batch/scrape/{id} - Cancel a running batch scrape. Returns `{status: "cancelled"}`."""
 }
-fn (id: Str): Map {
-  ::api/request("DELETE", ::api/job-path("batch/scrape", id), "")
+fn
+(id: Str): Map {
+  cancel-batch-scrape(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::api/request("DELETE", ::api/job-path("batch/scrape", id), "", opts)
 }
 
 get-batch-scrape-errors
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """GET /batch/scrape/{id}/errors - Failed URLs (`errors: [{id, timestamp, url, error}]`) and `robotsBlocked`."""
 }
-fn (id: Str): Map {
-  ::api/request("GET", ::api/job-path("batch/scrape", id, "/errors"), "")
+fn
+(id: Str): Map {
+  get-batch-scrape-errors(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::api/request("GET", ::api/job-path("batch/scrape", id, "/errors"), "", opts)
 }
 
 // =============================================================================
@@ -270,7 +321,7 @@ fn (id: Str): Map {
 
 extract
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """
     POST /extract - Start an LLM-structured extraction across URLs.
     Provide a `prompt` and/or a JSON `schema`; wildcard URLs
@@ -291,17 +342,25 @@ meta {
     ```
     """
 }
-fn (urls: Vec, options: Map): Map {
-  ::api/request("POST", "/extract", ::api/body-with({urls: urls}, options))
+fn
+(urls: Vec, options: Map): Map {
+  extract(urls, options, {})
+},
+(urls: Vec, options: Map, opts: Map): Map {
+  ::api/request("POST", "/extract", ::api/body-with({urls: urls}, options), opts)
 }
 
 get-extract
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """GET /extract/{id} - Extraction status: `{status, data, expiresAt, tokensUsed?}`; `status` is "processing", "completed", "failed", or "cancelled"."""
 }
-fn (id: Str): Map {
-  ::api/request("GET", ::api/job-path("extract", id), "")
+fn
+(id: Str): Map {
+  get-extract(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::api/request("GET", ::api/job-path("extract", id), "", opts)
 }
 
 // =============================================================================
@@ -341,9 +400,13 @@ fn (job: Map): Bool {
 
 credit-usage
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """GET /team/credit-usage - Remaining credits: `{remainingCredits, planCredits, billingPeriodStart, billingPeriodEnd}`. Free, so it doubles as a key check."""
 }
-fn (): Map {
-  ::api/request("GET", "/team/credit-usage", "") |> if-ok((body) { body.data })
+fn
+(): Map {
+  credit-usage({})
+},
+(opts: Map): Map {
+  ::api/request("GET", "/team/credit-usage", "", opts) |> if-ok((body) { body.data })
 }

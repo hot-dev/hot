@@ -12,7 +12,8 @@ meta {
     - `plaid.version`: optional, overrides the `Plaid-Version` header
 
     Plaid authenticates with the client id and secret in the request
-    body; this package injects them.
+    body; this package injects them. Every API-calling function also takes
+    them per call in a trailing `opts` Map (see `::plaid::api`).
 
     **Quick start**
 

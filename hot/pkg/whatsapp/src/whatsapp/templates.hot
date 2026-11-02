@@ -22,7 +22,11 @@ list-templates-url
 meta {
     doc: """The list URL with only the set filters, each URL-encoded; `fields` is comma-joined. Exposed for testing."""
 }
-fn (request: ListTemplatesRequest): Str {
+fn
+(request: ListTemplatesRequest): Str {
+  list-templates-url(request, {})
+},
+(request: ListTemplatesRequest, opts: Map): Str {
   params {
     limit: request.limit,
     after: request.after,
@@ -34,7 +38,7 @@ fn (request: ListTemplatesRequest): Str {
     fields: if(is-some(request.fields), join(request.fields, ","), null)
   }
 
-  ::api/url(`${::api/segment(request.waba_id)}/message_templates${::hot::uri/query-string(params)}`)
+  ::api/url(`${::api/segment(request.waba_id)}/message_templates${::hot::uri/query-string(params)}`, opts)
 }
 
 list-templates
@@ -61,8 +65,12 @@ next-page if(is-some(cursor),
 ```
 """
 }
-fn (request: ListTemplatesRequest): Map {
-  ::api/request("GET", list-templates-url(request))
+fn
+(request: ListTemplatesRequest): Map {
+  list-templates(request, {})
+},
+(request: ListTemplatesRequest, opts: Map): Map {
+  ::api/request("GET", list-templates-url(request, opts), opts)
 }
 
 next-cursor
@@ -89,8 +97,12 @@ get-template
 meta {
     doc: """GET /{template-id} - Get one message template by id."""
 }
-fn (request: GetTemplateRequest): Map {
-  ::api/request("GET", ::api/url(::api/segment(request.template_id)))
+fn
+(request: GetTemplateRequest): Map {
+  get-template(request, {})
+},
+(request: GetTemplateRequest, opts: Map): Map {
+  ::api/request("GET", ::api/url(::api/segment(request.template_id), opts), opts)
 }
 
 CreateTemplateRequest type {
@@ -127,7 +139,11 @@ response.status // => "PENDING"
 ```
 """
 }
-fn (request: CreateTemplateRequest): Map {
+fn
+(request: CreateTemplateRequest): Map {
+  create-template(request, {})
+},
+(request: CreateTemplateRequest, opts: Map): Map {
   body {
     name: request.name,
     language: request.language,
@@ -137,7 +153,7 @@ fn (request: CreateTemplateRequest): Map {
     |> assoc-some("allow_category_change", request.allow_category_change)
     |> assoc-some("parameter_format", request.parameter_format)
 
-  ::api/request("POST", ::api/url(`${::api/segment(request.waba_id)}/message_templates`), {}, body)
+  ::api/request("POST", ::api/url(`${::api/segment(request.waba_id)}/message_templates`, opts), {}, body, opts)
 }
 
 EditTemplateRequest type {
@@ -150,12 +166,16 @@ edit-template
 meta {
     doc: """POST /{template-id} - Edit an existing message template. Only approved or rejected templates can be edited. Editing resubmits for approval."""
 }
-fn (request: EditTemplateRequest): Map {
+fn
+(request: EditTemplateRequest): Map {
+  edit-template(request, {})
+},
+(request: EditTemplateRequest, opts: Map): Map {
   body {}
     |> assoc-some("components", request.components)
     |> assoc-some("category", request.category)
 
-  ::api/request("POST", ::api/url(::api/segment(request.template_id)), {}, body)
+  ::api/request("POST", ::api/url(::api/segment(request.template_id), opts), {}, body, opts)
 }
 
 DeleteTemplateRequest type {
@@ -168,15 +188,23 @@ delete-templates-url
 meta {
     doc: """The delete URL: `name` always, `hsm_id` when set, both URL-encoded. Exposed for testing."""
 }
-fn (request: DeleteTemplateRequest): Str {
+fn
+(request: DeleteTemplateRequest): Str {
+  delete-templates-url(request, {})
+},
+(request: DeleteTemplateRequest, opts: Map): Str {
   params {name: request.name, hsm_id: request.hsm_id}
-  ::api/url(`${::api/segment(request.waba_id)}/message_templates${::hot::uri/query-string(params)}`)
+  ::api/url(`${::api/segment(request.waba_id)}/message_templates${::hot::uri/query-string(params)}`, opts)
 }
 
 delete-template
 meta {
     doc: """DELETE /{waba-id}/message_templates - Delete a message template by name. If `hsm_id` (the template id) is provided, only that template is deleted; otherwise every template with that name (all languages) is deleted. Returns `{success: true}`."""
 }
-fn (request: DeleteTemplateRequest): Map {
-  ::api/request("DELETE", delete-templates-url(request))
+fn
+(request: DeleteTemplateRequest): Map {
+  delete-template(request, {})
+},
+(request: DeleteTemplateRequest, opts: Map): Map {
+  ::api/request("DELETE", delete-templates-url(request, opts), opts)
 }

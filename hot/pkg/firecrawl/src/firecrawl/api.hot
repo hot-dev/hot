@@ -1,15 +1,29 @@
 ::firecrawl::api ns
 meta {
-    ctx: {"firecrawl.api.key": {required: true}},
+    ctx: {"firecrawl.api.key": {required: false}},
     doc: """
     Low-level Firecrawl HTTP client plus the pure helpers behind the
     job functions: body building, `next`-page following, and job
     status checks. Most code wants the functions in `::firecrawl` instead.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `firecrawl.api.key` context variable, then the
+    defaults. Nothing from `opts` is written to ctx, so one run can act for
+    many tenants and parallel flows don't share credentials. Credentials
+    in `opts` are masked in call records. An `api-key` present but blank or
+    null is an error, never a fallback to context.
+
+    - `api-key`: the API key for this call
+    - `base-url`: another API root, such as a self-hosted Firecrawl. It
+      needs an `api-key` in the same `opts`: `firecrawl.api.key` is never
+      sent to a per-call URL.
     """
 }
 
 ::ctx ::hot::ctx
 ::uri ::hot::uri
+::re ::hot::regex
 
 is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
@@ -52,11 +66,7 @@ text-or-null fn (value: Any): Any {
   if(and(is-str(value), not(is-blank(value))), value, null)
 }
 
-http-error
-meta {
-    doc: """Build the `HttpError` for a non-2xx response. Exposed for testing."""
-}
-fn (response: HttpResponse): HttpError {
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   HttpError({
     status: response.status,
     message: error-message(response.status, response.body),
@@ -66,8 +76,71 @@ fn (response: HttpResponse): HttpError {
 }
 
 // =============================================================================
+// Credentials
+// =============================================================================
+
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-blank(value), null, trim(value)), null)
+}
+
+resolve-from
+meta {
+    doc: """The one resolver, pure: `{api-key, base-url}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no API key is set, when `api-key` is in `opts` but blank or null (that never falls back to context), or when `opts` has `base-url` without `api-key`. Exposed for testing; `resolve` feeds it the context."""
+}
+fn (opts: Map, ctx-values: Map): Map {
+  opt-key non-blank(get(opts, "api-key"))
+  opt-url non-blank(get(opts, "base-url"))
+  api-key or(opt-key, non-blank(get(ctx-values, "firecrawl.api.key")))
+  cond {
+    and(in("api-key", keys(opts)), is-null(opt-key)) => {
+      err("firecrawl: api-key is in the call's opts but is blank or null. Pass a value, or leave api-key out to use firecrawl.api.key.")
+    }
+
+    and(is-some(opt-url), is-null(opt-key)) => {
+      err("firecrawl: base-url is in the call's opts without api-key. Pass api-key with it. Context credentials are never sent to a per-call URL.")
+    }
+
+    is-null(api-key) => { err("firecrawl: firecrawl.api.key is not set. Add it in Context Variables, or pass {api-key: ...} in the call's opts.") }
+    => { {api-key: api-key, base-url: ::re/replace-all(or(opt-url, ::firecrawl/BASE_URL), "/+$", "")} }
+  }
+}
+
+resolve
+meta {
+    ctx: {"firecrawl.api.key": {required: false}},
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). An `api-key`
+    from `opts` is masked in this run's records and never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::firecrawl::api/resolve({api-key: "fc-tenant-b"}).base-url  // "https://api.firecrawl.dev/v2"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  ::ctx/mark-secret(non-blank(get(opts, "api-key")))
+  resolve-from(opts, {"firecrawl.api.key": ::ctx/get("firecrawl.api.key")})
+}
+
+// =============================================================================
 // Requests
 // =============================================================================
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). A `""` body sends no `Content-Type`. Pure; exposed for testing."""
+}
+fn (method: Str, path: Str, body: Any, resolved: Map): HttpRequest {
+  auth {Authorization: `Bearer ${resolved.api-key}`}
+  HttpRequest({
+    method,
+    url: `${resolved.base-url}${path}`,
+    headers: if(eq(body, ""), auth, {...auth, Content-Type: "application/json"}),
+    body: if(eq(body, ""), "", to-json(untype(body)))
+  })
+}
 
 request
 meta {
@@ -80,25 +153,25 @@ meta {
 }
 fn
 (method: Str, path: Str, body: Any): Any {
-  request(method, path, body, ::ctx/get("firecrawl.api.key"))
+  request(method, path, body, {})
 },
 // 4-arity: explicit API key override
-(method: Str, path: Str, body: Any, api-key: Str): Any {
-  headers if(eq(body, ""),
-    {Authorization: `Bearer ${api-key}`},
-    {Authorization: `Bearer ${api-key}`, Content-Type: "application/json"})
-
-  encoded if(eq(body, ""), "", to-json(untype(body)))
-  response ::hot::http/request(HttpRequest({
-    method,
-    url: `${::firecrawl/BASE_URL}${path}`,
-    headers: headers,
-    body: encoded
-  }))
+(method: Str, path: Str, body: Any, api-key: Str?): Any {
+  request(method, path, body, {api-key: api-key})
+},
+// 4-arity: per-call credentials and settings (see `resolve`)
+(method: Str, path: Str, body: Any, opts: Map): Any {
+  resolved resolve(opts)
   cond {
-    is-err(response) => { response }
-    is-ok-response(response) => { response.body }
-    => { err(http-error(response)) }
+    is-err(resolved) => { resolved }
+    => {
+      response ::hot::http/request(build-request(method, path, body, resolved))
+      cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { response.body }
+        => { err(HttpError(response)) }
+      }
+    }
   }
 }
 
@@ -133,13 +206,17 @@ next-path
 meta {
     doc: """
     The path to request for a status response's `next` URL, relative to
-    the v2 base URL, or null when there is no next page. A `next` that
-    points anywhere other than the Firecrawl API is never followed, so
-    the API key is only ever sent to Firecrawl. Exposed for testing.
+    `base-url` (default the v2 base URL), or null when there is no next
+    page. A `next` that points anywhere other than that API root is never
+    followed, so the API key is only ever sent there. Exposed for testing.
     """
 }
-fn (next: Any): Any {
-  prefix `${::firecrawl/BASE_URL}/`
+fn
+(next: Any): Any {
+  next-path(next, ::firecrawl/BASE_URL)
+},
+(next: Any, base-url: Str): Any {
+  prefix `${base-url}/`
   cond {
     not(is-str(next)) => { null }
     starts-with(next, prefix) => { slice(next, sub(length(prefix), 1)) }
@@ -155,15 +232,20 @@ meta {
     status fields with `data` holding every page's documents. Stops on
     the last page, on a running job's repeated empty cursor (keeping
     `next` so you can resume), or on an Err from `fetch` (returned).
+    `base-url` (default the v2 base URL) is the only root it follows.
     Exposed for testing.
     """
 }
-fn (page: Map, fetch: Fn): Map {
-  collect-loop(page, or(get(page, "data"), []), fetch, 0)
+fn
+(page: Map, fetch: Fn): Map {
+  collect-pages(page, fetch, ::firecrawl/BASE_URL)
+},
+(page: Map, fetch: Fn, base-url: Str): Map {
+  collect-loop(page, or(get(page, "data"), []), fetch, 0, base-url)
 }
 
-collect-loop fn (page: Map, docs: Vec, fetch: Fn, count: Int): Map {
-  path next-path(get(page, "next"))
+collect-loop fn (page: Map, docs: Vec, fetch: Fn, count: Int, base-url: Str): Map {
+  path next-path(get(page, "next"), base-url)
   cond {
     is-null(path) => { {...page, data: docs} }
     gte(count, MAX_PAGES) => { {...page, data: docs} }
@@ -177,9 +259,24 @@ collect-loop fn (page: Map, docs: Vec, fetch: Fn, count: Int): Map {
           {...next-page, data: docs}
         }
         => {
-          collect-loop(next-page, concat(docs, or(get(next-page, "data"), [])), fetch, add(count, 1))
+          collect-loop(next-page, concat(docs, or(get(next-page, "data"), [])), fetch, add(count, 1), base-url)
         }
       }
+    }
+  }
+}
+
+get-all-pages
+meta {
+    doc: """`GET` a status path and follow `next` across the pages, with the credentials and API root from `opts`."""
+}
+fn (path: Str, opts: Map): Map {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      request("GET", path, "", opts)
+        |> if-ok((page) { collect-pages(page, (next) { request("GET", next, "", opts) }, resolved.base-url) })
     }
   }
 }

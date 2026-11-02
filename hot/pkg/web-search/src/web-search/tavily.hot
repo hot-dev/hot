@@ -1,9 +1,9 @@
 ::web-search::tavily ns
 meta {
-    doc: """Tavily: search built for LLM agents (https://docs.tavily.com). Context variable: `tavily.api.key` (`tvly-...`), sent as `Authorization: Bearer`."""
+    doc: """Tavily: search built for LLM agents (https://docs.tavily.com). Context variable: `tavily.api.key` (`tvly-...`), or `tavily-api-key` in a call's trailing `opts` (see `::web-search::api`); sent as `Authorization: Bearer`."""
 }
 
-::ctx ::hot::ctx
+::api ::web-search::api
 ::http ::web-search::http
 
 HttpRequest ::hot::http/HttpRequest
@@ -13,13 +13,12 @@ BASE_URL "https://api.tavily.com"
 // Tavily's documented max_results range is 0-20.
 MAX_RESULTS 20
 
-post fn
-(path: Str, body: Map): Any {
-  post(path, body, ::ctx/get("tavily.api.key"))
-},
-// 3-arity: explicit API key override
-(path: Str, body: Map, api-key: Str): Any {
-  ::http/send("tavily", "Tavily", HttpRequest({
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` for a key. Pure; exposed for testing."""
+}
+fn (path: Str, body: Map, api-key: Str): HttpRequest {
+  HttpRequest({
     method: "POST",
     url: `${BASE_URL}${path}`,
     headers: {
@@ -27,12 +26,29 @@ post fn
       Content-Type: "application/json"
     },
     body: to-json(untype(filter-vals(body, is-some)))
-  }))
+  })
+}
+
+post fn
+(path: Str, body: Map): Any {
+  post(path, body, {})
+},
+// 3-arity: explicit API key override
+(path: Str, body: Map, api-key: Str?): Any {
+  post(path, body, {tavily-api-key: api-key})
+},
+// 3-arity: per-call credentials (see `::web-search::api`)
+(path: Str, body: Map, opts: Map): Any {
+  api-key ::api/api-key("tavily", opts)
+  cond {
+    is-err(api-key) => { api-key }
+    => { ::http/send("tavily", "Tavily", build-request(path, body, api-key)) }
+  }
 }
 
 search
 meta {
-    ctx: {"tavily.api.key": {required: true}},
+    ctx: {"tavily.api.key": {required: false}},
     doc: """
     POST /search - Tavily search. `options`: `search_depth` ("basic",
     "advanced", "fast", "ultra-fast"), `topic` ("general", "news",
@@ -56,12 +72,15 @@ fn
   search(query, {})
 },
 (query: Str, options: Map): Map {
-  post("/search", {...options, query: query})
+  search(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Map {
+  post("/search", {...options, query: query}, opts)
 }
 
 extract
 meta {
-    ctx: {"tavily.api.key": {required: true}},
+    ctx: {"tavily.api.key": {required: false}},
     doc: """POST /extract - Fetch and clean page content for up to 20 URLs. `options`: `extract_depth` ("basic"/"advanced"), `format` ("markdown"/"text"), `query` (rerank chunks by relevance), `include_images`, `timeout` (seconds). Returns `{results: [{url, raw_content}], failed_results: [{url, error}]}`; check both."""
 }
 fn
@@ -69,7 +88,10 @@ fn
   extract(urls, {})
 },
 (urls: Vec, options: Map): Map {
-  post("/extract", {...options, urls: urls})
+  extract(urls, options, {})
+},
+(urls: Vec, options: Map, opts: Map): Map {
+  post("/extract", {...options, urls: urls}, opts)
 }
 
 TIME_RANGES {day: "day", week: "week", month: "month", year: "year"}
@@ -102,6 +124,6 @@ fn (body: Map): Vec {
   })
 }
 
-search-normalized fn (query: Str, max-results: Int, filters: Map): Vec {
-  search(query, build-search-options(max-results, filters)) |> if-ok((body) { normalize(body) })
+search-normalized fn (query: Str, max-results: Int, filters: Map, opts: Map): Vec {
+  search(query, build-search-options(max-results, filters), opts) |> if-ok((body) { normalize(body) })
 }

@@ -7,7 +7,7 @@ meta {
     https://developers.cloudflare.com/cache/how-to/purge-cache/). The
     token needs the Zone → Cache Purge permission.
     """,
-    ctx: {"cloudflare.token": {required: true}}
+    ctx: {"cloudflare.token": {required: false}}
 }
 
 ::api ::cloudflare::api
@@ -20,8 +20,12 @@ meta {
     Returns `{id}`.
     """
 }
-fn (zone-id: Str, body: Map): Map {
-  ::api/json("POST", `/zones/${::api/seg(zone-id)}/purge_cache`, body)
+fn
+(zone-id: Str, body: Map): Map {
+  purge(zone-id, body, {})
+},
+(zone-id: Str, body: Map, opts: Map): Map {
+  ::api/json("POST", `/zones/${::api/seg(zone-id)}/purge_cache`, body, opts)
 }
 
 purge-urls
@@ -38,38 +42,58 @@ meta {
     ```
     """
 }
-fn (zone-id: Str, urls: Vec): Map {
-  purge(zone-id, {files: urls})
+fn
+(zone-id: Str, urls: Vec): Map {
+  purge-urls(zone-id, urls, {})
+},
+(zone-id: Str, urls: Vec, opts: Map): Map {
+  purge(zone-id, {files: urls}, opts)
 }
 
 purge-tags
 meta {
     doc: """Purge everything whose `Cache-Tag` response header carries any of `tags`."""
 }
-fn (zone-id: Str, tags: Vec<Str>): Map {
-  purge(zone-id, {tags: tags})
+fn
+(zone-id: Str, tags: Vec<Str>): Map {
+  purge-tags(zone-id, tags, {})
+},
+(zone-id: Str, tags: Vec<Str>, opts: Map): Map {
+  purge(zone-id, {tags: tags}, opts)
 }
 
 purge-hosts
 meta {
     doc: """Purge everything cached for the given hostnames (e.g. `["www.example.com"]`)."""
 }
-fn (zone-id: Str, hosts: Vec<Str>): Map {
-  purge(zone-id, {hosts: hosts})
+fn
+(zone-id: Str, hosts: Vec<Str>): Map {
+  purge-hosts(zone-id, hosts, {})
+},
+(zone-id: Str, hosts: Vec<Str>, opts: Map): Map {
+  purge(zone-id, {hosts: hosts}, opts)
 }
 
 purge-prefixes
 meta {
     doc: """Purge by URL prefix: hostname plus path, no scheme, query, or fragment (e.g. `["www.example.com/blog/"]`)."""
 }
-fn (zone-id: Str, prefixes: Vec<Str>): Map {
-  purge(zone-id, {prefixes: prefixes})
+fn
+(zone-id: Str, prefixes: Vec<Str>): Map {
+  purge-prefixes(zone-id, prefixes, {})
+},
+(zone-id: Str, prefixes: Vec<Str>, opts: Map): Map {
+  purge(zone-id, {prefixes: prefixes}, opts)
 }
 
 purge-everything
 meta {
     doc: """Purge the zone's entire cache. Expect a burst of origin traffic afterwards."""
 }
-fn (zone-id: Str): Map {
-  purge(zone-id, {purge_everything: true})
+fn
+(zone-id: Str): Map {
+  purge-everything(zone-id, {})
+},
+(zone-id: Str, opts: Map): Map {
+  purge(zone-id, {purge_everything: true}, opts)
 }

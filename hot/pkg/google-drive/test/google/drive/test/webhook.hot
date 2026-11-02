@@ -43,6 +43,7 @@ meta ["test"] fn () {
     assert(not(::changes/verify-channel-token(request(null), "secret-1")), "missing header")
     assert(not(::changes/verify-channel-token(request(""), "")), "empty expected token fails closed")
     assert(not(::changes/verify-channel-token(request("x"), null)), "null expected token fails closed")
+    assert(not(::changes/verify-channel-token(request("x"), "  ")), "blank expected token fails closed")
 }
 
 test-verify-notification

@@ -1,6 +1,6 @@
 ::zendesk::search ns
 meta {
-    ctx: {"zendesk.subdomain": {required: true, secret: false}},
+    ctx: {"zendesk.subdomain": {required: false, secret: false}},
     doc: """
     Search across tickets, users, organizations and groups with Zendesk
     search syntax (`type:ticket status:open priority:urgent`,
@@ -36,15 +36,22 @@ fn
   search(query, {})
 },
 (query: Str, options: Map): Any {
-  ::api/request("GET", `/search${build-search-query(query, options)}`, "")
+  search(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Any {
+  ::api/request("GET", `/search${build-search-query(query, options)}`, "", opts)
 }
 
 count
 meta {
     doc: """GET /search/count - How many results a query matches: `{count}`."""
 }
-fn (query: Str): Any {
-  ::api/request("GET", `/search/count${::api/query-string({query: query})}`, "")
+fn
+(query: Str): Any {
+  count(query, {})
+},
+(query: Str, opts: Map): Any {
+  ::api/request("GET", `/search/count${::api/query-string({query: query})}`, "", opts)
 }
 
 build-export-query
@@ -64,7 +71,10 @@ fn
   export(query, object-type, {})
 },
 (query: Str, object-type: Str, options: Map): Any {
-  ::api/request("GET", `/search/export${build-export-query(query, object-type, options)}`, "")
+  export(query, object-type, options, {})
+},
+(query: Str, object-type: Str, options: Map, opts: Map): Any {
+  ::api/request("GET", `/search/export${build-export-query(query, object-type, options)}`, "", opts)
 }
 
 search-all
@@ -80,10 +90,14 @@ meta {
     ```
     """
 }
-fn (query: Str, object-type: Str, limit: Int): Vec {
+fn
+(query: Str, object-type: Str, limit: Int): Vec {
+  search-all(query, object-type, limit, {})
+},
+(query: Str, object-type: Str, limit: Int, opts: Map): Vec {
   size min(::zendesk/DEFAULT_PAGE_SIZE, max(1, limit))
   ::api/collect-pages(
-    (cursor) { export(query, object-type, {page_size: size, after: cursor}) },
+    (cursor) { export(query, object-type, {page_size: size, after: cursor}, opts) },
     "results", null, limit, []
   )
 }

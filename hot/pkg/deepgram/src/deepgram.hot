@@ -12,7 +12,9 @@ meta {
     covered. For near-real-time flows, transcribe short audio chunks
     with `transcribe-audio`.
 
-    **Setup**: context variable `deepgram.api.key`.
+    **Setup**: context variable `deepgram.api.key`, or a per-call `api-key`
+    in the trailing `opts` Map of any API-calling function (see
+    `::deepgram::api`).
 
     **Quick start**
 
@@ -89,14 +91,31 @@ fn (callback-url: Str, secret: Any): Map {
 }
 
 // Append callback params to options, keeping any `extra` the caller set.
-with-callback fn (options: Map, callback-url: Str): Map {
+with-callback fn
+(options: Map, callback-url: Str): Map {
+  with-callback(options, callback-url, ::hot::ctx/get("deepgram.callback.secret"))
+},
+(options: Map, callback-url: Str, secret: Str?): Map {
   params listen-params(options)
-  cb callback-params(callback-url, ::hot::ctx/get("deepgram.callback.secret"))
+  cb callback-params(callback-url, secret)
   existing or(get(params, "extra"), [])
   existing-vec if(is-vec(existing), existing, [existing])
   cb-extra or(get(cb, "extra"), [])
   extra concat(existing-vec, cb-extra)
   {...params, callback: cb.callback, extra: if(is-empty(extra), null, extra)}
+}
+
+// Start an async transcription and return its request id.
+post-async fn (body: Any, content-type: Str, callback-url: Str, options: Map, opts: Map): Str {
+  resolved ::api/resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      params with-callback(options, callback-url, resolved.callback-secret)
+      out ::api/json("POST", `/v1/listen${::api/query-string(params)}`, content-type, body, opts)
+      if-ok(out, request-id)
+    }
+  }
 }
 
 // ============================================================================
@@ -105,7 +124,7 @@ with-callback fn (options: Map, callback-url: Str): Map {
 
 transcribe-url
 meta {
-    ctx: {"deepgram.api.key": {required: true}},
+    ctx: {"deepgram.api.key": {required: false}},
     doc: """
     POST /v1/listen with a hosted audio URL. `options` map to Deepgram
     query params and are merged over `model: "nova-3"` and
@@ -135,12 +154,15 @@ fn
   transcribe-url(audio-url, {})
 },
 (audio-url: Str, options: Map): Map {
-  ::api/json("POST", listen-path(options), "application/json", to-json({url: audio-url}))
+  transcribe-url(audio-url, options, {})
+},
+(audio-url: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", listen-path(options), "application/json", to-json({url: audio-url}), opts)
 }
 
 transcribe-audio
 meta {
-    ctx: {"deepgram.api.key": {required: true}},
+    ctx: {"deepgram.api.key": {required: false}},
     doc: """
     POST /v1/listen with raw audio `Bytes` (wav, mp3, ogg, flac, webm,
     m4a, ...). Same `options` as `transcribe-url`. Deepgram detects
@@ -165,13 +187,19 @@ fn
   transcribe-audio(audio, options, "application/octet-stream")
 },
 (audio: Bytes, options: Map, mime-type: Str): Map {
-  ::api/json("POST", listen-path(options), mime-type, audio)
+  transcribe-audio(audio, options, mime-type, {})
+},
+(audio: Bytes, options: Map, opts: Map): Map {
+  transcribe-audio(audio, options, "application/octet-stream", opts)
+},
+(audio: Bytes, options: Map, mime-type: Str, opts: Map): Map {
+  ::api/json("POST", listen-path(options), mime-type, audio, opts)
 }
 
 transcribe-url-async
 meta {
     ctx: {
-        "deepgram.api.key": {required: true},
+        "deepgram.api.key": {required: false},
         "deepgram.callback.secret": {required: false}
     },
     doc: """
@@ -197,15 +225,16 @@ fn
   transcribe-url-async(audio-url, callback-url, {})
 },
 (audio-url: Str, callback-url: Str, options: Map): Str {
-  out ::api/json("POST", `/v1/listen${::api/query-string(with-callback(options, callback-url))}`,
-    "application/json", to-json({url: audio-url}))
-  request-id(out)
+  transcribe-url-async(audio-url, callback-url, options, {})
+},
+(audio-url: Str, callback-url: Str, options: Map, opts: Map): Str {
+  post-async(to-json({url: audio-url}), "application/json", callback-url, options, opts)
 }
 
 transcribe-audio-async
 meta {
     ctx: {
-        "deepgram.api.key": {required: true},
+        "deepgram.api.key": {required: false},
         "deepgram.callback.secret": {required: false}
     },
     doc: """Asynchronous `transcribe-audio`: uploads the `Bytes`, returns Deepgram's `request_id`, and delivers the result to `callback-url`. See `transcribe-url-async`."""
@@ -215,9 +244,10 @@ fn
   transcribe-audio-async(audio, callback-url, {})
 },
 (audio: Bytes, callback-url: Str, options: Map): Str {
-  out ::api/json("POST", `/v1/listen${::api/query-string(with-callback(options, callback-url))}`,
-    "application/octet-stream", audio)
-  request-id(out)
+  transcribe-audio-async(audio, callback-url, options, {})
+},
+(audio: Bytes, callback-url: Str, options: Map, opts: Map): Str {
+  post-async(audio, "application/octet-stream", callback-url, options, opts)
 }
 
 // ============================================================================
@@ -330,7 +360,7 @@ fn (options: Map): Str {
 
 speak
 meta {
-    ctx: {"deepgram.api.key": {required: true}},
+    ctx: {"deepgram.api.key": {required: false}},
     doc: """
     POST /v1/speak: Aura text-to-speech. Returns the audio as `Bytes`
     (mp3 by default). `options`: `model` (default "aura-2-thalia-en";
@@ -352,12 +382,15 @@ fn
   speak(text, {})
 },
 (text: Str, options: Map): Bytes {
-  ::api/bytes("POST", speak-path(options), "application/json", to-json({text: text}))
+  speak(text, options, {})
+},
+(text: Str, options: Map, opts: Map): Bytes {
+  ::api/bytes("POST", speak-path(options), "application/json", to-json({text: text}), opts)
 }
 
 speak-flux
 meta {
-    ctx: {"deepgram.api.key": {required: true}},
+    ctx: {"deepgram.api.key": {required: false}},
     doc: """
     POST /v2/speak: Flux text-to-speech (batch). `model` is required and
     must be a Flux voice (e.g. "flux-alexis-en"). Takes the same audio
@@ -375,7 +408,10 @@ fn
   speak-flux(text, model, {})
 },
 (text: Str, model: Str, options: Map): Bytes {
-  ::api/bytes("POST", `/v2/speak${::api/query-string({...options, model: model})}`, "application/json", to-json({text: text}))
+  speak-flux(text, model, options, {})
+},
+(text: Str, model: Str, options: Map, opts: Map): Bytes {
+  ::api/bytes("POST", `/v2/speak${::api/query-string({...options, model: model})}`, "application/json", to-json({text: text}), opts)
 }
 
 // ============================================================================
@@ -384,7 +420,7 @@ fn
 
 list-models
 meta {
-    ctx: {"deepgram.api.key": {required: true}},
+    ctx: {"deepgram.api.key": {required: false}},
     doc: """
     GET /v1/models: the latest public models as `{stt: [...], tts: [...]}`
     (each with `name`, `canonical_name`, `languages`, ...; TTS entries
@@ -402,5 +438,11 @@ fn
   list-models(false)
 },
 (include-outdated: Bool): Map {
-  ::api/json("GET", `/v1/models${::api/query-string({include_outdated: if(include-outdated, true, null)})}`)
+  list-models(include-outdated, {})
+},
+(opts: Map): Map {
+  list-models(false, opts)
+},
+(include-outdated: Bool, opts: Map): Map {
+  ::api/json("GET", `/v1/models${::api/query-string({include_outdated: if(include-outdated, true, null)})}`, "", "", opts)
 }

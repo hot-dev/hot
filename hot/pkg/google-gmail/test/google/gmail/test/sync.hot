@@ -30,6 +30,7 @@ meta ["test"] fn () {
     assert(not(::sync/verify-push-token(push(null), "s3cret")), "missing token")
     assert(not(::sync/verify-push-token(push(""), "")), "empty expected token fails closed")
     assert(not(::sync/verify-push-token(push("x"), null)), "null expected token fails closed")
+    assert(not(::sync/verify-push-token(push("x"), "  ")), "blank expected token fails closed")
     ok ::sync/verify-push(push("s3cret"), "s3cret")
     assert-eq("9876543210", ok.history-id)
     bad ::sync/verify-push(push("nope"), "s3cret")
@@ -63,9 +64,9 @@ meta ["test"] fn () {
 
 test-is-history-expired
 meta ["test"] fn () {
-    gone err(::google::api/error-from-response({status: 404, headers: {}, body: {error: {code: 404, message: "Requested entity was not found.", status: "NOT_FOUND"}}}))
+    gone err(::google::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: {error: {code: 404, message: "Requested entity was not found.", status: "NOT_FOUND"}}})))
     assert(::sync/is-history-expired(gone))
-    assert(not(::sync/is-history-expired(err(::google::api/error-from-response({status: 500, headers: {}, body: ""})))))
+    assert(not(::sync/is-history-expired(err(::google::api/HttpError(::hot::http/HttpResponse({status: 500, headers: {}, body: ""}))))))
     assert(not(::sync/is-history-expired({history: []})))
     assert(not(::sync/is-history-expired(err("google: no credentials configured"))))
 }

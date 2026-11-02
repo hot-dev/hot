@@ -15,7 +15,10 @@ fn
   get-charge(charge, {})
 },
 (charge: Str, params: Map): Map {
-  api-call("GET", `/v1/charges/${seg(charge)}`, params)
+  get-charge(charge, params, {})
+},
+(charge: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/charges/${seg(charge)}`, params, opts)
 }
 
 ListChargesRequest type {
@@ -38,7 +41,10 @@ fn
   list-charges(ListChargesRequest({}))
 },
 (request: ListChargesRequest): Map {
-  api-call("GET", "/v1/charges", request)
+  list-charges(request, {})
+},
+(request: ListChargesRequest, opts: Map): Map {
+  api-call("GET", "/v1/charges", request, opts)
 }
 
 search-charges
@@ -50,5 +56,8 @@ fn
   search-charges(query, {})
 },
 (query: Str, params: Map): Map {
-  api-call("GET", "/v1/charges/search", {...params, query: query})
+  search-charges(query, params, {})
+},
+(query: Str, params: Map, opts: Map): Map {
+  api-call("GET", "/v1/charges/search", {...params, query: query}, opts)
 }

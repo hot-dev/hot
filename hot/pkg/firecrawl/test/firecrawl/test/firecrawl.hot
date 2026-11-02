@@ -49,7 +49,7 @@ meta ["test"] fn () {
 
 test-http-error-from-response
 meta ["test"] fn () {
-    e ::api/http-error(::hot::http/HttpResponse({status: 401, body: {success: false, error: "Unauthorized: Invalid token"}}))
+    e ::api/HttpError(::hot::http/HttpResponse({status: 401, body: {success: false, error: "Unauthorized: Invalid token"}}))
     assert-eq(401, e.status)
     assert-eq("Firecrawl API error 401: Unauthorized: Invalid token", e.message)
     assert-eq({}, e.headers, "missing headers become an empty map")

@@ -55,8 +55,14 @@ send-message
 meta {
     doc: """POST /{phone-number-id}/messages with a prebuilt payload — the escape hatch for message types without a dedicated function."""
 }
-fn (phone-number-id: Str, body: Map): Map {
-  ::api/request("POST", ::api/url(`${::api/segment(phone-number-id)}/messages`), {}, body)
+fn
+(phone-number-id: Str?, body: Map): Map {
+  send-message(phone-number-id, body, {})
+},
+(phone-number-id: Str?, body: Map, opts: Map): Map {
+  ::api/with-phone-number(phone-number-id, opts, (id) {
+    ::api/request("POST", ::api/url(`${id}/messages`, opts), {}, body, opts)
+  })
 }
 
 // ============================================================================
@@ -64,7 +70,7 @@ fn (phone-number-id: Str, body: Map): Map {
 // ============================================================================
 
 SendTextRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   text: Str,
   preview_url: Bool?,
@@ -96,8 +102,12 @@ meta {
     ```
     """
 }
-fn (request: SendTextRequest): Map {
-  send-message(request.phone_number_id, build-text-body(request))
+fn
+(request: SendTextRequest): Map {
+  send-text(request, {})
+},
+(request: SendTextRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-text-body(request), opts)
 }
 
 // ============================================================================
@@ -105,7 +115,7 @@ fn (request: SendTextRequest): Map {
 // ============================================================================
 
 SendImageRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   image_url: Str?,
   image_id: Str?,
@@ -139,12 +149,16 @@ meta {
     ```
     """
 }
-fn (request: SendImageRequest): Map {
-  send-message(request.phone_number_id, build-image-body(request))
+fn
+(request: SendImageRequest): Map {
+  send-image(request, {})
+},
+(request: SendImageRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-image-body(request), opts)
 }
 
 SendDocumentRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   document_url: Str?,
   document_id: Str?,
@@ -165,12 +179,16 @@ send-document
 meta {
     doc: """Send a document. Provide either `document_id` or `document_url`. `filename` sets the name shown to the recipient. Supports PDF, Office formats, plain text; max 100 MB."""
 }
-fn (request: SendDocumentRequest): Map {
-  send-message(request.phone_number_id, build-document-body(request))
+fn
+(request: SendDocumentRequest): Map {
+  send-document(request, {})
+},
+(request: SendDocumentRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-document-body(request), opts)
 }
 
 SendVideoRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   video_url: Str?,
   video_id: Str?,
@@ -189,12 +207,16 @@ send-video
 meta {
     doc: """Send a video. Provide either `video_id` or `video_url`. Supports MP4 and 3GPP (H.264 video, AAC audio); max 16 MB."""
 }
-fn (request: SendVideoRequest): Map {
-  send-message(request.phone_number_id, build-video-body(request))
+fn
+(request: SendVideoRequest): Map {
+  send-video(request, {})
+},
+(request: SendVideoRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-video-body(request), opts)
 }
 
 SendAudioRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   audio_url: Str?,
   audio_id: Str?,
@@ -211,12 +233,16 @@ send-audio
 meta {
     doc: """Send an audio file. Provide either `audio_id` or `audio_url`. Supports AAC, AMR, MP3, MP4 audio, OGG (OPUS codec only, which plays as a voice note); max 16 MB."""
 }
-fn (request: SendAudioRequest): Map {
-  send-message(request.phone_number_id, build-audio-body(request))
+fn
+(request: SendAudioRequest): Map {
+  send-audio(request, {})
+},
+(request: SendAudioRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-audio-body(request), opts)
 }
 
 SendStickerRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   sticker_url: Str?,
   sticker_id: Str?,
@@ -233,8 +259,12 @@ send-sticker
 meta {
     doc: """Send a sticker. Provide either `sticker_id` or `sticker_url`. WebP only; static max 100 KB, animated max 500 KB."""
 }
-fn (request: SendStickerRequest): Map {
-  send-message(request.phone_number_id, build-sticker-body(request))
+fn
+(request: SendStickerRequest): Map {
+  send-sticker(request, {})
+},
+(request: SendStickerRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-sticker-body(request), opts)
 }
 
 // ============================================================================
@@ -242,7 +272,7 @@ fn (request: SendStickerRequest): Map {
 // ============================================================================
 
 SendLocationRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   latitude: Dec,
   longitude: Dec,
@@ -263,8 +293,12 @@ send-location
 meta {
     doc: """Send a location pin. Optionally include a `name` and `address` for the pin label."""
 }
-fn (request: SendLocationRequest): Map {
-  send-message(request.phone_number_id, build-location-body(request))
+fn
+(request: SendLocationRequest): Map {
+  send-location(request, {})
+},
+(request: SendLocationRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-location-body(request), opts)
 }
 
 // ============================================================================
@@ -272,7 +306,7 @@ fn (request: SendLocationRequest): Map {
 // ============================================================================
 
 SendContactsRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   contacts: Vec<Map>,
   reply_to: Str?
@@ -310,8 +344,12 @@ meta {
     ```
     """
 }
-fn (request: SendContactsRequest): Map {
-  send-message(request.phone_number_id, build-contacts-body(request))
+fn
+(request: SendContactsRequest): Map {
+  send-contacts(request, {})
+},
+(request: SendContactsRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-contacts-body(request), opts)
 }
 
 // ============================================================================
@@ -319,7 +357,7 @@ fn (request: SendContactsRequest): Map {
 // ============================================================================
 
 SendReactionRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   message_id: Str,
   emoji: Str
@@ -348,8 +386,12 @@ meta {
     ```
     """
 }
-fn (request: SendReactionRequest): Map {
-  send-message(request.phone_number_id, build-reaction-body(request))
+fn
+(request: SendReactionRequest): Map {
+  send-reaction(request, {})
+},
+(request: SendReactionRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-reaction-body(request), opts)
 }
 
 // ============================================================================
@@ -357,7 +399,7 @@ fn (request: SendReactionRequest): Map {
 // ============================================================================
 
 SendTemplateRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   template_name: Str,
   language_code: Str,
@@ -406,8 +448,12 @@ meta {
     ```
     """
 }
-fn (request: SendTemplateRequest): Map {
-  send-message(request.phone_number_id, build-template-body(request))
+fn
+(request: SendTemplateRequest): Map {
+  send-template(request, {})
+},
+(request: SendTemplateRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-template-body(request), opts)
 }
 
 // ============================================================================
@@ -427,7 +473,7 @@ fn (to: Str, kind: Str, body-text: Str, action: Map, header: Map?, footer-text: 
 }
 
 SendButtonsRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   body_text: Str,
   buttons: Vec<Map>,
@@ -464,12 +510,16 @@ meta {
     ```
     """
 }
-fn (request: SendButtonsRequest): Map {
-  send-message(request.phone_number_id, build-buttons-body(request))
+fn
+(request: SendButtonsRequest): Map {
+  send-buttons(request, {})
+},
+(request: SendButtonsRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-buttons-body(request), opts)
 }
 
 SendListRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   body_text: Str,
   button_text: Str,
@@ -516,12 +566,16 @@ meta {
     ```
     """
 }
-fn (request: SendListRequest): Map {
-  send-message(request.phone_number_id, build-list-body(request))
+fn
+(request: SendListRequest): Map {
+  send-list(request, {})
+},
+(request: SendListRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-list-body(request), opts)
 }
 
 SendCtaUrlRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   body_text: Str,
   display_text: Str,
@@ -557,12 +611,16 @@ meta {
     ```
     """
 }
-fn (request: SendCtaUrlRequest): Map {
-  send-message(request.phone_number_id, build-cta-url-body(request))
+fn
+(request: SendCtaUrlRequest): Map {
+  send-cta-url(request, {})
+},
+(request: SendCtaUrlRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-cta-url-body(request), opts)
 }
 
 SendLocationRequestRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   body_text: Str,
   reply_to: Str?
@@ -591,12 +649,16 @@ meta {
     ```
     """
 }
-fn (request: SendLocationRequestRequest): Map {
-  send-message(request.phone_number_id, build-location-request-body(request))
+fn
+(request: SendLocationRequestRequest): Map {
+  send-location-request(request, {})
+},
+(request: SendLocationRequestRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-location-request-body(request), opts)
 }
 
 SendFlowRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   to: Str,
   body_text: Str,
   flow_cta: Str,
@@ -656,8 +718,12 @@ meta {
     ```
     """
 }
-fn (request: SendFlowRequest): Map {
-  send-message(request.phone_number_id, build-flow-body(request))
+fn
+(request: SendFlowRequest): Map {
+  send-flow(request, {})
+},
+(request: SendFlowRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-flow-body(request), opts)
 }
 
 // ============================================================================
@@ -665,7 +731,7 @@ fn (request: SendFlowRequest): Map {
 // ============================================================================
 
 MarkReadRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   message_id: Str,
   typing_indicator: Bool?
 }
@@ -693,6 +759,10 @@ meta {
     ```
     """
 }
-fn (request: MarkReadRequest): Map {
-  send-message(request.phone_number_id, build-mark-read-body(request))
+fn
+(request: MarkReadRequest): Map {
+  mark-read(request, {})
+},
+(request: MarkReadRequest, opts: Map): Map {
+  send-message(request.phone_number_id, build-mark-read-body(request), opts)
 }

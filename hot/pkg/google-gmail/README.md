@@ -41,6 +41,18 @@ Each function documents the scope it asks for. The defaults:
 
 Every function has an options arity. Gmail query parameters use Gmail's own names (`q`, `maxResults`, `pageToken`, `labelIds`, `format`, ...); credential keys (`token`, `refresh-token`, `service-account`, `subject`, `scopes`, `retry`) are handled by `google-core`.
 
+### Per-call credentials
+
+Credentials in `opts` override context for that call only, so one app can act for many users; see the [google-core README](../google-core/README.md#per-call-credentials-multi-tenant) for every key.
+
+```hot
+::messages ::google::gmail::messages
+
+inbox ::messages/list-messages({q: "is:unread", token: "ya29.tenant-access-token"})
+```
+
+Per-call credentials are masked in call records and never written to context. A credential key that is present but blank or null is an error naming the key, never a fallback to context.
+
 ## Quick start
 
 ```hot

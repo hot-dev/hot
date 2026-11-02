@@ -22,7 +22,7 @@ hot.project.my-app.deps {
 | `sentry.region` | Optional. `us` or `de`, to call `https://{region}.sentry.io` directly (lower latency). Ignored when `sentry.base.url` is set |
 | `sentry.webhook.secret` | An integration's client secret, for `::sentry::webhooks/verify-request` |
 
-A missing token or organization is an Err carrying `ConfigError` that names the variable.
+A missing token or organization is an Err carrying `ConfigError` that names the variable. All but the webhook secret can also be passed per call; see [Per-call credentials](#per-call-credentials).
 
 ## Quick start
 
@@ -113,6 +113,28 @@ fn (request) {
 ```
 
 `hook-resource` returns `Sentry-Hook-Resource` (`issue`, `error`, `event_alert`, `metric_alert`, `comment`, `installation`, …), `hook-timestamp` the Unix-seconds `Sentry-Hook-Timestamp`, and `request-id` the delivery's `Request-ID` (for de-duplicating retries). The timestamp is not part of the signature, so there is no replay window by default; `verify-request(request, secret, max-age-seconds)` adds one if you want it.
+
+## Per-call credentials
+
+Every function that calls Sentry takes an optional trailing `opts` Map, so one run can act for many organizations and parallel flows don't share credentials. Credentials in `opts` are masked in call records, and nothing from `opts` is written to ctx.
+
+| Key | Effect |
+|---|---|
+| `token` | The auth token for this call, instead of `sentry.token` |
+| `org` | The organization slug for this call, instead of `sentry.org` |
+| `base-url` | A self-hosted instance or explicit host. Needs a `token` in the same `opts`; `sentry.token` is never sent to a per-call URL |
+| `region` | `us` or `de`, to call `https://{region}.sentry.io`. Needs a `token` when `sentry.base.url` is set |
+
+`opts` always comes last. Where a function already takes `params` or `options`, pass `{}` for those.
+
+```hot
+tenant {token: "sntrys_tenant_b", org: "tenant-b", region: "de"}
+page ::sentry::issues/list-issues({query: "is:unresolved"}, tenant)
+::sentry::issues/resolve-issue(first(page.items).id, tenant)
+::sentry::releases/create-release("my-api@1.4.0", "my-api", {}, tenant)
+```
+
+A `token` or `org` that is present but blank or null is an error naming the key, never a fallback to context. `::sentry::api/resolve(opts)` is the one place this is decided. `::sentry::webhooks/verify-request` takes an explicit secret too, and masks it the same way.
 
 ## Errors
 

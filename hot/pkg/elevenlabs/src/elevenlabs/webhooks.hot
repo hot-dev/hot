@@ -42,8 +42,8 @@ meta {
     from now (default 1800, ElevenLabs' 30 minutes). Pass a tolerance of
     0 or less to skip the age check. Uses the
     `elevenlabs.webhook.secret` context variable by default (failing
-    when it is unset), or an explicit secret; an empty explicit secret
-    never verifies.
+    when it is unset), or an explicit secret, which is masked in call
+    records; an empty explicit secret never verifies.
 
     **Example**
 
@@ -66,22 +66,23 @@ fn
   )
   verify-request(request, secret)
 },
-(request: Map, secret: Str): Bool {
+(request: Map, secret: Str?): Bool {
   verify-request(request, secret, DEFAULT_TOLERANCE_SECONDS)
 },
-(request: Map, secret: Str, tolerance-seconds: Int): Bool {
+(request: Map, secret: Str?, tolerance-seconds: Int): Bool {
   header or(get(or(get(request, "headers"), {}), "elevenlabs-signature"), "")
   parsed parse-signature-header(header)
   timestamp parsed.timestamp
   cond {
     // An empty key would make every signature forgeable: fail closed.
-    is-empty(secret) => { false }
+    or(is-null(secret), is-blank(secret)) => { false }
     or(is-null(timestamp), is-empty(Str(timestamp))) => { false }
     is-empty(parsed.signatures) => { false }
     => {
+      key ::ctx/mark-secret(secret)
       raw-body ::hot::http/raw-body(request)
       signed concat(Bytes(`${timestamp}.`), if(is-bytes(raw-body), raw-body, Bytes(raw-body)))
-      matched some(parsed.signatures, (sig) { ::hmac/hmac-verify-hex(secret, signed, sig, "sha256") })
+      matched some(parsed.signatures, (sig) { ::hmac/hmac-verify-hex(key, signed, sig, "sha256") })
       cond {
         not(matched) => { false }
         // The signature is what makes the timestamp trustworthy, so the

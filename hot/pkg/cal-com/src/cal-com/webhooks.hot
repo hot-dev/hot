@@ -1,7 +1,7 @@
 ::cal-com::webhooks ns
 meta {
     ctx: {
-        "cal-com.api.key": {required: true},
+        "cal-com.api.key": {required: false},
         "cal-com.webhook.secret": {required: false}
     },
     doc: """
@@ -69,13 +69,22 @@ fn
     // An empty key would make every signature forgeable: fail closed.
     is-empty(secret) => { false }
     is-empty(signature) => { false }
-    => { ::hmac/hmac-verify-hex(secret, ::hot::http/raw-body(request), signature, "sha256") }
+    => { ::hmac/hmac-verify-hex(::ctx/mark-secret(secret), ::hot::http/raw-body(request), signature, "sha256") }
   }
 }
 
 // ---------------------------------------------------------------------------
 // Subscriptions
 // ---------------------------------------------------------------------------
+
+mark-webhook-secret
+meta {
+    doc: """Mask a `secret` set in webhook fields in call records. Returns `fields` unchanged. Exposed for testing."""
+}
+fn (fields: Map): Map {
+  if(is-some(get(fields, "secret")), ::ctx/mark-secret(fields.secret))
+  fields
+}
 
 build-webhook-body
 meta {
@@ -98,15 +107,22 @@ fn
   list-webhooks({})
 },
 (options: Map): Any {
-  ::api/request("GET", `/webhooks${::api/query-string(options)}`, "", "")
+  list-webhooks(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/request("GET", `/webhooks${::api/query-string(options)}`, "", "", opts)
 }
 
 get-webhook
 meta {
     doc: """GET /webhooks/{id} - One user-level webhook."""
 }
-fn (webhook-id: Str): Any {
-  ::api/request("GET", `/webhooks/${::api/path-segment(webhook-id)}`, "", "")
+fn
+(webhook-id: Str): Any {
+  get-webhook(webhook-id, {})
+},
+(webhook-id: Str, opts: Map): Any {
+  ::api/request("GET", `/webhooks/${::api/path-segment(webhook-id)}`, "", "", opts)
 }
 
 create-webhook
@@ -131,23 +147,34 @@ fn
   create-webhook(subscriber-url, triggers, {})
 },
 (subscriber-url: Str, triggers: Vec, options: Map): Any {
-  ::api/request("POST", "/webhooks", build-webhook-body(subscriber-url, triggers, options), "")
+  create-webhook(subscriber-url, triggers, options, {})
+},
+(subscriber-url: Str, triggers: Vec, options: Map, opts: Map): Any {
+  ::api/request("POST", "/webhooks", build-webhook-body(subscriber-url, triggers, mark-webhook-secret(options)), "", opts)
 }
 
 update-webhook
 meta {
     doc: """PATCH /webhooks/{id} - Update `subscriberUrl`, `triggers`, `active`, `secret` or `payloadTemplate`. Unset fields are omitted."""
 }
-fn (webhook-id: Str, changes: Map): Any {
-  ::api/request("PATCH", `/webhooks/${::api/path-segment(webhook-id)}`, ::api/compact(changes), "")
+fn
+(webhook-id: Str, changes: Map): Any {
+  update-webhook(webhook-id, changes, {})
+},
+(webhook-id: Str, changes: Map, opts: Map): Any {
+  ::api/request("PATCH", `/webhooks/${::api/path-segment(webhook-id)}`, ::api/compact(mark-webhook-secret(changes)), "", opts)
 }
 
 delete-webhook
 meta {
     doc: """DELETE /webhooks/{id} - Delete a user-level webhook."""
 }
-fn (webhook-id: Str): Any {
-  ::api/request("DELETE", `/webhooks/${::api/path-segment(webhook-id)}`, "", "")
+fn
+(webhook-id: Str): Any {
+  delete-webhook(webhook-id, {})
+},
+(webhook-id: Str, opts: Map): Any {
+  ::api/request("DELETE", `/webhooks/${::api/path-segment(webhook-id)}`, "", "", opts)
 }
 
 list-event-type-webhooks
@@ -159,15 +186,22 @@ fn
   list-event-type-webhooks(event-type-id, {})
 },
 (event-type-id: Any, options: Map): Any {
-  ::api/request("GET", `${webhook-path(event-type-id)}${::api/query-string(options)}`, "", "")
+  list-event-type-webhooks(event-type-id, options, {})
+},
+(event-type-id: Any, options: Map, opts: Map): Any {
+  ::api/request("GET", `${webhook-path(event-type-id)}${::api/query-string(options)}`, "", "", opts)
 }
 
 get-event-type-webhook
 meta {
     doc: """GET /event-types/{id}/webhooks/{webhookId} - One event-type webhook."""
 }
-fn (event-type-id: Any, webhook-id: Str): Any {
-  ::api/request("GET", `${webhook-path(event-type-id)}/${::api/path-segment(webhook-id)}`, "", "")
+fn
+(event-type-id: Any, webhook-id: Str): Any {
+  get-event-type-webhook(event-type-id, webhook-id, {})
+},
+(event-type-id: Any, webhook-id: Str, opts: Map): Any {
+  ::api/request("GET", `${webhook-path(event-type-id)}/${::api/path-segment(webhook-id)}`, "", "", opts)
 }
 
 create-event-type-webhook
@@ -179,21 +213,32 @@ fn
   create-event-type-webhook(event-type-id, subscriber-url, triggers, {})
 },
 (event-type-id: Any, subscriber-url: Str, triggers: Vec, options: Map): Any {
-  ::api/request("POST", webhook-path(event-type-id), build-webhook-body(subscriber-url, triggers, options), "")
+  create-event-type-webhook(event-type-id, subscriber-url, triggers, options, {})
+},
+(event-type-id: Any, subscriber-url: Str, triggers: Vec, options: Map, opts: Map): Any {
+  ::api/request("POST", webhook-path(event-type-id), build-webhook-body(subscriber-url, triggers, mark-webhook-secret(options)), "", opts)
 }
 
 update-event-type-webhook
 meta {
     doc: """PATCH /event-types/{id}/webhooks/{webhookId} - Update an event-type webhook. Unset fields are omitted."""
 }
-fn (event-type-id: Any, webhook-id: Str, changes: Map): Any {
-  ::api/request("PATCH", `${webhook-path(event-type-id)}/${::api/path-segment(webhook-id)}`, ::api/compact(changes), "")
+fn
+(event-type-id: Any, webhook-id: Str, changes: Map): Any {
+  update-event-type-webhook(event-type-id, webhook-id, changes, {})
+},
+(event-type-id: Any, webhook-id: Str, changes: Map, opts: Map): Any {
+  ::api/request("PATCH", `${webhook-path(event-type-id)}/${::api/path-segment(webhook-id)}`, ::api/compact(mark-webhook-secret(changes)), "", opts)
 }
 
 delete-event-type-webhook
 meta {
     doc: """DELETE /event-types/{id}/webhooks/{webhookId} - Delete one event-type webhook."""
 }
-fn (event-type-id: Any, webhook-id: Str): Any {
-  ::api/request("DELETE", `${webhook-path(event-type-id)}/${::api/path-segment(webhook-id)}`, "", "")
+fn
+(event-type-id: Any, webhook-id: Str): Any {
+  delete-event-type-webhook(event-type-id, webhook-id, {})
+},
+(event-type-id: Any, webhook-id: Str, opts: Map): Any {
+  ::api/request("DELETE", `${webhook-path(event-type-id)}/${::api/path-segment(webhook-id)}`, "", "", opts)
 }

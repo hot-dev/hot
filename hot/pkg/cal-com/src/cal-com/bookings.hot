@@ -1,6 +1,6 @@
 ::cal-com::bookings ns
 meta {
-    ctx: {"cal-com.api.key": {required: true}},
+    ctx: {"cal-com.api.key": {required: false}},
     doc: """Bookings (`cal-api-version: 2024-08-13`): create, list with filters and take/skip paging, get, confirm, decline, cancel, reschedule, and mark absences (no-shows)."""
 }
 
@@ -34,8 +34,12 @@ meta {
     ```
     """
 }
-fn (booking: Map): Any {
-  ::api/request("POST", "/bookings", ::api/compact(booking), v())
+fn
+(booking: Map): Any {
+  create-booking(booking, {})
+},
+(booking: Map, opts: Map): Any {
+  ::api/request("POST", "/bookings", ::api/compact(booking), v(), opts)
 }
 
 build-list-query
@@ -78,7 +82,10 @@ fn
   list-bookings({})
 },
 (options: Map): Any {
-  ::api/request-envelope("GET", `/bookings${build-list-query(options)}`, "", v())
+  list-bookings(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/request-envelope("GET", `/bookings${build-list-query(options)}`, "", v(), opts)
 }
 
 collect-pages
@@ -94,14 +101,19 @@ meta {
 fn (fetch: Fn, options: Map, skip: Int, limit: Int, acc: Vec): Vec {
   remaining sub(limit, length(acc))
   page fetch({...options, take: min(DEFAULT_PAGE_SIZE, remaining), skip: skip})
-  items or(get(page, "data"), [])
-  combined concat(acc, items)
-  has-next get(or(get(page, "pagination"), {}), "hasNextPage", false)
   cond {
-    is-empty(items) => { combined }
-    gte(length(combined), limit) => { slice(combined, 0, limit) }
-    not(eq(has-next, true)) => { combined }
-    => { collect-pages(fetch, options, add(skip, length(items)), limit, combined) }
+    is-err(page) => { page }
+    => {
+      items or(get(page, "data"), [])
+      combined concat(acc, items)
+      has-next get(or(get(page, "pagination"), {}), "hasNextPage", false)
+      cond {
+        is-empty(items) => { combined }
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        not(eq(has-next, true)) => { combined }
+        => { collect-pages(fetch, options, add(skip, length(items)), limit, combined) }
+      }
+    }
   }
 }
 
@@ -119,10 +131,14 @@ meta {
     ```
     """
 }
-fn (options: Map, limit: Int): Vec {
+fn
+(options: Map, limit: Int): Vec {
+  list-all-bookings(options, limit, {})
+},
+(options: Map, limit: Int, opts: Map): Vec {
   cond {
     lte(limit, 0) => { [] }
-    => { collect-pages(list-bookings, options, or(get(options, "skip"), 0), limit, []) }
+    => { collect-pages((page-options) { list-bookings(page-options, opts) }, options, or(get(options, "skip"), 0), limit, []) }
   }
 }
 
@@ -130,16 +146,24 @@ get-booking
 meta {
     doc: """GET /bookings/{uid} - One booking by uid."""
 }
-fn (uid: Str): Any {
-  ::api/request("GET", `/bookings/${::api/path-segment(uid)}`, "", v())
+fn
+(uid: Str): Any {
+  get-booking(uid, {})
+},
+(uid: Str, opts: Map): Any {
+  ::api/request("GET", `/bookings/${::api/path-segment(uid)}`, "", v(), opts)
 }
 
 confirm-booking
 meta {
     doc: """POST /bookings/{uid}/confirm - Confirm a booking that is waiting for approval (event types that require confirmation). Must be called by the booking's owner."""
 }
-fn (uid: Str): Any {
-  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/confirm`, "", v())
+fn
+(uid: Str): Any {
+  confirm-booking(uid, {})
+},
+(uid: Str, opts: Map): Any {
+  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/confirm`, "", v(), opts)
 }
 
 decline-booking
@@ -148,10 +172,16 @@ meta {
 }
 fn
 (uid: Str): Any {
-  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/decline`, {}, v())
+  decline-booking(uid, {})
+},
+(uid: Str, opts: Map): Any {
+  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/decline`, {}, v(), opts)
 },
 (uid: Str, reason: Str): Any {
-  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/decline`, {reason: reason}, v())
+  decline-booking(uid, reason, {})
+},
+(uid: Str, reason: Str, opts: Map): Any {
+  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/decline`, {reason: reason}, v(), opts)
 }
 
 cancel-booking
@@ -168,7 +198,10 @@ fn
   cancel-booking(uid, {cancellationReason: reason})
 },
 (uid: Str, options: Map): Any {
-  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/cancel`, ::api/compact(options), v())
+  cancel-booking(uid, options, {})
+},
+(uid: Str, options: Map, opts: Map): Any {
+  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/cancel`, ::api/compact(options), v(), opts)
 }
 
 reschedule-booking
@@ -185,7 +218,10 @@ fn
   reschedule-booking(uid, new-start, {})
 },
 (uid: Str, new-start: Str, options: Map): Any {
-  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/reschedule`, ::api/compact({...options, start: new-start}), v())
+  reschedule-booking(uid, new-start, options, {})
+},
+(uid: Str, new-start: Str, options: Map, opts: Map): Any {
+  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/reschedule`, ::api/compact({...options, start: new-start}), v(), opts)
 }
 
 build-absent-body
@@ -222,5 +258,8 @@ fn
   mark-absent(uid, build-absent-body(null, absent-emails))
 },
 (uid: Str, body: Map): Any {
-  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/mark-absent`, ::api/compact(body), v())
+  mark-absent(uid, body, {})
+},
+(uid: Str, body: Map, opts: Map): Any {
+  ::api/request("POST", `/bookings/${::api/path-segment(uid)}/mark-absent`, ::api/compact(body), v(), opts)
 }

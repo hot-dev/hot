@@ -1,7 +1,7 @@
 ::cloudflare::dns ns
 meta {
     doc: """Cloudflare DNS records: list with filters (paged or all), find by name and type, create, update, overwrite, delete.""",
-    ctx: {"cloudflare.token": {required: true}}
+    ctx: {"cloudflare.token": {required: false}}
 }
 
 ::api ::cloudflare::api
@@ -39,7 +39,10 @@ fn
   list-dns-records(zone-id, {})
 },
 (zone-id: Str, params: Map): ListPage {
-  ::api/json-page(`${records-path(zone-id)}${::api/query(params)}`)
+  list-dns-records(zone-id, params, {})
+},
+(zone-id: Str, params: Map, opts: Map): ListPage {
+  ::api/json-page(`${records-path(zone-id)}${::api/query(params)}`, "", opts)
 }
 
 list-all-dns-records
@@ -54,7 +57,13 @@ fn
   list-all-dns-records(zone-id, params, ::api/DEFAULT_MAX_ITEMS)
 },
 (zone-id: Str, params: Map, max: Int): Vec {
-  ::api/collect-pages((p) { list-dns-records(zone-id, p) }, {per_page: 500, ...params}, max)
+  list-all-dns-records(zone-id, params, max, {})
+},
+(zone-id: Str, params: Map, opts: Map): Vec {
+  list-all-dns-records(zone-id, params, ::api/DEFAULT_MAX_ITEMS, opts)
+},
+(zone-id: Str, params: Map, max: Int, opts: Map): Vec {
+  ::api/collect-pages((p) { list-dns-records(zone-id, p, opts) }, {per_page: 500, ...params}, max)
 }
 
 find-dns-records
@@ -72,18 +81,28 @@ meta {
 }
 fn
 (zone-id: Str, name: Str): Vec {
-  list-all-dns-records(zone-id, {name: {exact: name}})
+  find-dns-records(zone-id, name, null, {})
 },
 (zone-id: Str, name: Str, record-type: Str): Vec {
-  list-all-dns-records(zone-id, {name: {exact: name}, type: record-type})
+  find-dns-records(zone-id, name, record-type, {})
+},
+(zone-id: Str, name: Str, opts: Map): Vec {
+  find-dns-records(zone-id, name, null, opts)
+},
+(zone-id: Str, name: Str, record-type: Str?, opts: Map): Vec {
+  list-all-dns-records(zone-id, {name: {exact: name}, type: record-type}, opts)
 }
 
 get-dns-record
 meta {
     doc: """GET /zones/{zone_id}/dns_records/{id} - One record."""
 }
-fn (zone-id: Str, record-id: Str): Map {
-  ::api/json("GET", record-path(zone-id, record-id))
+fn
+(zone-id: Str, record-id: Str): Map {
+  get-dns-record(zone-id, record-id, {})
+},
+(zone-id: Str, record-id: Str, opts: Map): Map {
+  ::api/json("GET", record-path(zone-id, record-id), "", opts)
 }
 
 create-dns-record
@@ -100,30 +119,46 @@ meta {
     ```
     """
 }
-fn (zone-id: Str, record: Map): Map {
-  ::api/json("POST", records-path(zone-id), filter-vals(untype(record), is-some))
+fn
+(zone-id: Str, record: Map): Map {
+  create-dns-record(zone-id, record, {})
+},
+(zone-id: Str, record: Map, opts: Map): Map {
+  ::api/json("POST", records-path(zone-id), filter-vals(untype(record), is-some), opts)
 }
 
 update-dns-record
 meta {
     doc: """PATCH /zones/{zone_id}/dns_records/{id} - Change only the given fields (e.g. `{content: "203.0.113.8"}`)."""
 }
-fn (zone-id: Str, record-id: Str, changes: Map): Map {
-  ::api/json("PATCH", record-path(zone-id, record-id), filter-vals(untype(changes), is-some))
+fn
+(zone-id: Str, record-id: Str, changes: Map): Map {
+  update-dns-record(zone-id, record-id, changes, {})
+},
+(zone-id: Str, record-id: Str, changes: Map, opts: Map): Map {
+  ::api/json("PATCH", record-path(zone-id, record-id), filter-vals(untype(changes), is-some), opts)
 }
 
 overwrite-dns-record
 meta {
     doc: """PUT /zones/{zone_id}/dns_records/{id} - Replace a record entirely (`type`, `name`, `content` required; unset fields reset to defaults)."""
 }
-fn (zone-id: Str, record-id: Str, record: Map): Map {
-  ::api/json("PUT", record-path(zone-id, record-id), filter-vals(untype(record), is-some))
+fn
+(zone-id: Str, record-id: Str, record: Map): Map {
+  overwrite-dns-record(zone-id, record-id, record, {})
+},
+(zone-id: Str, record-id: Str, record: Map, opts: Map): Map {
+  ::api/json("PUT", record-path(zone-id, record-id), filter-vals(untype(record), is-some), opts)
 }
 
 delete-dns-record
 meta {
     doc: """DELETE /zones/{zone_id}/dns_records/{id} - Delete a record. Returns `{id}`."""
 }
-fn (zone-id: Str, record-id: Str): Map {
-  ::api/json("DELETE", record-path(zone-id, record-id))
+fn
+(zone-id: Str, record-id: Str): Map {
+  delete-dns-record(zone-id, record-id, {})
+},
+(zone-id: Str, record-id: Str, opts: Map): Map {
+  ::api/json("DELETE", record-path(zone-id, record-id), "", opts)
 }

@@ -22,11 +22,12 @@ meta ["test"] fn () {
 
 test-api-version-default-and-override
 meta ["test"] fn () {
-    assert-eq("2026-07", ::api/api-version(), "defaults to the pinned stable version")
+    key {api-key: "k"}
+    assert-eq("2026-07", ::api/resolve(key).api-version, "defaults to the pinned stable version")
     ::hot::ctx/set("pinecone.api.version", "2026-04")
-    assert-eq("2026-04", ::api/api-version(), "the context variable overrides it")
+    assert-eq("2026-04", ::api/resolve(key).api-version, "the context variable overrides it")
     ::hot::ctx/set("pinecone.api.version", "")
-    assert-eq("2026-07", ::api/api-version(), "a blank override falls back")
+    assert-eq("2026-07", ::api/resolve(key).api-version, "a blank override falls back")
 }
 
 // ============================================================================
@@ -88,7 +89,7 @@ meta ["test"] fn () {
 
 test-http-error-from-response
 meta ["test"] fn () {
-    e ::api/http-error(::hot::http/HttpResponse({status: 404, body: {error: {code: "NOT_FOUND", message: "Resource docs not found"}, status: 404}}))
+    e ::api/HttpError(::hot::http/HttpResponse({status: 404, body: {error: {code: "NOT_FOUND", message: "Resource docs not found"}, status: 404}}))
     assert-eq(404, e.status)
     assert-eq("Pinecone API error 404 (NOT_FOUND): Resource docs not found", e.message)
 }

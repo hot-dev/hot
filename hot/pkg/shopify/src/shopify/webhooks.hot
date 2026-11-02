@@ -57,7 +57,7 @@ fn
     is-empty(signature) => { false }
     => {
       raw-body ::hot::http/raw-body(request)
-      ::hmac/hmac-verify-base64(secret, raw-body, signature, "sha256")
+      ::hmac/hmac-verify-base64(::ctx/mark-secret(secret), raw-body, signature, "sha256")
     }
   }
 }
@@ -173,6 +173,9 @@ fn
   create-subscription(topic, uri, {})
 },
 (topic: Str, uri: Str, options: Map): Map {
+  create-subscription(topic, uri, options, {})
+},
+(topic: Str, uri: Str, options: Map, opts: Map): Map {
   mutation ```
   mutation WebhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
     webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
@@ -184,8 +187,8 @@ fn
   payload ::api/mutate(mutation, {
     topic: topic,
     webhookSubscription: build-subscription-input(uri, options)
-  }, "webhookSubscriptionCreate")
-  payload.webhookSubscription
+  }, "webhookSubscriptionCreate", opts)
+  if-ok(payload, %(%.webhookSubscription))
 }
 
 list-subscriptions
@@ -197,6 +200,9 @@ fn
   list-subscriptions({})
 },
 (options: Map): Map {
+  list-subscriptions(options, {})
+},
+(options: Map, opts: Map): Map {
   query ```
   query WebhookSubscriptions($first: Int!, $after: String, $topics: [WebhookSubscriptionTopic!], $uri: String) {
     webhookSubscriptions(first: $first, after: $after, topics: $topics, uri: $uri) {
@@ -206,15 +212,19 @@ fn
   }
   ```
   vars ::api/connection-variables(options)
-  data ::api/graphql(query, filter-vals({...vars, topics: get(options, "topics"), uri: get(options, "uri")}, is-some))
-  data.webhookSubscriptions
+  data ::api/graphql(query, filter-vals({...vars, topics: get(options, "topics"), uri: get(options, "uri")}, is-some), opts)
+  if-ok(data, %(%.webhookSubscriptions))
 }
 
 delete-subscription
 meta {
     doc: """Delete a webhook subscription by id (`webhookSubscriptionDelete`). Returns the deleted id."""
 }
-fn (id: Str): Str {
+fn
+(id: Str): Str {
+  delete-subscription(id, {})
+},
+(id: Str, opts: Map): Str {
   mutation """
   mutation WebhookSubscriptionDelete($id: ID!) {
     webhookSubscriptionDelete(id: $id) {
@@ -223,6 +233,6 @@ fn (id: Str): Str {
     }
   }
   """
-  payload ::api/mutate(mutation, {id: id}, "webhookSubscriptionDelete")
-  payload.deletedWebhookSubscriptionId
+  payload ::api/mutate(mutation, {id: id}, "webhookSubscriptionDelete", opts)
+  if-ok(payload, %(%.deletedWebhookSubscriptionId))
 }

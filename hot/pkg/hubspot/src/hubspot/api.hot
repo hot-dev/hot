@@ -1,10 +1,25 @@
 ::hubspot::api ns
 meta {
-    ctx: {"hubspot.token": {required: true}},
+    ctx: {
+        "hubspot.token": {required: false},
+        "hubspot.api.version": {required: false, secret: false}
+    },
     doc: """
     Low-level HubSpot client: authenticated requests, response unwrapping,
     date-versioned CRM path building, query strings, and cursor pagination
     over `paging.next.after`.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `hubspot.*` context variables, then the defaults. A
+    per-call token is masked in call records and never written to ctx, so
+    one run can act for many portals.
+
+    - `token`: the private app or OAuth access token for this call
+    - `api-version`: the date-based API version for this call
+
+    A `token` that is present but blank or null is an Err naming the key,
+    never a fallback to context.
     """
 }
 
@@ -38,14 +53,82 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+resolve-from
+meta {
+    doc: """The one resolver, pure: `{token, api-version}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no token is set, or when `token` is in `opts` but blank or null (that never falls back to context). Exposed for testing; `resolve` feeds it the context."""
+}
+fn (opts: Map, ctx-values: Map): Map {
+  token or(non-blank(get(opts, "token")), non-blank(get(ctx-values, "hubspot.token")))
+  cond {
+    and(in("token", keys(opts)), is-null(non-blank(get(opts, "token")))) => {
+      err("hubspot: token is in the call's opts but is blank or null. Pass a value, or leave token out to use hubspot.token.")
+    }
+
+    is-null(token) => { err("hubspot: hubspot.token is not set. Add it in Context Variables, or pass {token: ...} in the call's opts.") }
+    => {
+      {
+        token: token,
+        api-version: or(non-blank(get(opts, "api-version")), non-blank(get(ctx-values, "hubspot.api.version")), DEFAULT_API_VERSION)
+      }
+    }
+  }
+}
+
+mark-credentials
+meta {
+    doc: """Mask the `token` in `opts` in this run's call records. Called first wherever `opts` arrives, so the records of the calls after it are masked too. Returns null."""
+}
+fn (opts: Map): Any {
+  ::ctx/mark-secret(opts.token)
+  null
+}
+
+resolve
+meta {
+    ctx: {
+        "hubspot.token": {required: false},
+        "hubspot.api.version": {required: false, secret: false}
+    },
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). The token
+    is masked in this run's call records, and nothing from `opts` is
+    written to ctx.
+
+    **Example**
+
+    ```hot
+    ::hubspot::api/resolve({token: "pat-tenant", api-version: "2026-03"}).api-version  // "2026-03"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  mark-credentials(opts)
+  resolved resolve-from(opts, {
+    "hubspot.token": ::ctx/get("hubspot.token"),
+    "hubspot.api.version": ::ctx/get("hubspot.api.version")
+  })
+  cond {
+    is-err(resolved) => { resolved }
+    => { {...resolved, token: ::ctx/mark-secret(resolved.token)} }
+  }
+}
+
 api-version
 meta {
-    ctx: {"hubspot.api.version": {required: false}},
-    doc: """The date-based API version used in CRM paths: the `hubspot.api.version` context variable when set (e.g. `"2026-03"`), otherwise `DEFAULT_API_VERSION`."""
+    ctx: {"hubspot.api.version": {required: false, secret: false}},
+    doc: """The date-based API version used in CRM paths: `api-version` in `opts`, then the `hubspot.api.version` context variable (e.g. `"2026-03"`), otherwise `DEFAULT_API_VERSION`."""
 }
-fn (): Str {
-  configured or(::ctx/get("hubspot.api.version"), "")
-  if(is-blank(configured), DEFAULT_API_VERSION, trim(configured))
+fn
+(): Str {
+  api-version({})
+},
+(opts: Map): Str {
+  mark-credentials(opts)
+  or(non-blank(get(opts, "api-version")), non-blank(::ctx/get("hubspot.api.version")), DEFAULT_API_VERSION)
 }
 
 crm-path
@@ -54,11 +137,15 @@ meta {
     A date-versioned CRM path: `crm-path("objects", "/contacts/123")` gives
     `/crm/objects/2026-09/contacts/123`. `api` is the API family:
     `objects`, `associations`, `pipelines`, `properties`, `owners`, or
-    `lists`.
+    `lists`. `opts` can carry the call's `api-version`.
     """
 }
-fn (api: Str, rest: Str): Str {
-  `/crm/${api}/${api-version()}${rest}`
+fn
+(api: Str, rest: Str): Str {
+  crm-path(api, rest, {})
+},
+(api: Str, rest: Str, opts: Map): Str {
+  `/crm/${api}/${api-version(opts)}${rest}`
 }
 
 segment
@@ -78,19 +165,11 @@ fn (params: Map): Str {
   ::uri/query-string(flattened)
 }
 
-request
+build-request
 meta {
-    doc: """Make an authenticated HubSpot request and return the raw `HttpResponse`. `path` is relative to api.hubapi.com (e.g. `/crm/objects/2026-09/contacts`). A `""` body sends no body; anything else is sent as JSON."""
+    doc: """The outgoing `HttpRequest` for a token. A `""` body sends no body and no `Content-Type`; `additional-headers` win over the defaults. Pure; exposed for testing."""
 }
-fn
-(method: Str, path: Str): HttpResponse {
-  request(method, path, {}, "")
-},
-(method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, path, additional-headers, body, ::ctx/get("hubspot.token"))
-},
-// 5-arity: explicit token override
-(method: Str, path: Str, additional-headers: Map, body: Any, token: Str): HttpResponse {
+fn (method: Str, path: Str, additional-headers: Map, body: Any, token: Str): HttpRequest {
   default-headers {
     Authorization: `Bearer ${token}`
   }
@@ -99,12 +178,40 @@ fn
   final-headers {...headers, ...additional-headers}
 
   encoded-body if(eq(body, ""), "", to-json(untype(body)))
-  ::hot::http/request(HttpRequest({
+  HttpRequest({
     method,
     url: `${::hubspot/BASE_URL}${path}`,
     headers: final-headers,
     body: encoded-body
-  }))
+  })
+}
+
+request
+meta {
+    doc: """Make an authenticated HubSpot request and return the raw `HttpResponse`. `path` is relative to api.hubapi.com (e.g. `/crm/objects/2026-09/contacts`). A `""` body sends no body; anything else is sent as JSON. Build the path with `crm-path` and the same `opts` so a per-call `api-version` reaches it."""
+}
+fn
+(method: Str, path: Str): HttpResponse {
+  request(method, path, {}, "", {})
+},
+// 3-arity: per-call credentials (see `resolve`)
+(method: Str, path: Str, opts: Map): HttpResponse {
+  request(method, path, {}, "", opts)
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, path, additional-headers, body, {})
+},
+// 5-arity: explicit token
+(method: Str, path: Str, additional-headers: Map, body: Any, token: Str): HttpResponse {
+  request(method, path, additional-headers, body, {token: token})
+},
+// 5-arity: per-call credentials (see `resolve`)
+(method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { ::hot::http/request(build-request(method, path, additional-headers, body, resolved.token)) }
+  }
 }
 
 handle-response
@@ -124,18 +231,22 @@ meta {
 }
 fn
 (method: Str, path: Str): Any {
-  json(method, path, {}, "")
+  json(method, path, {}, "", {})
+},
+// 3-arity: per-call credentials (see `resolve`)
+(method: Str, path: Str, opts: Map): Any {
+  json(method, path, {}, "", opts)
 },
 (method: Str, path: Str, additional-headers: Map, body: Any): Any {
-  response request(method, path, additional-headers, body)
-  cond {
-    is-err(response) => { response }
-    => { handle-response(response) }
-  }
+  json(method, path, additional-headers, body, {})
 },
-// 5-arity: explicit token override
+// 5-arity: explicit token
 (method: Str, path: Str, additional-headers: Map, body: Any, token: Str): Any {
-  response request(method, path, additional-headers, body, token)
+  json(method, path, additional-headers, body, {token: token})
+},
+// 5-arity: per-call credentials (see `resolve`)
+(method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): Any {
+  response request(method, path, additional-headers, body, opts)
   cond {
     is-err(response) => { response }
     => { handle-response(response) }
@@ -147,7 +258,8 @@ meta {
     doc: """The message from a failed call's error value: HubSpot's `body.message` when present, otherwise the stringified body."""
 }
 fn (error: Any): Str? {
-  body if(is-map(error), get(error, "body"), null)
+  fields untype(error)
+  body if(is-map(fields), get(fields, "body"), null)
   cond {
     and(is-map(body), is-some(get(body, "message"))) => { Str(body.message) }
     is-some(body) => { Str(body) }

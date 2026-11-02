@@ -39,8 +39,12 @@ meta {
     ```
     """
 }
-fn (request: GetGuildRequest): Map {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}`, {query: {with_counts: request.with_counts}})
+fn
+(request: GetGuildRequest): Map {
+  get-guild(request, {})
+},
+(request: GetGuildRequest, opts: Map): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}`, {query: {with_counts: request.with_counts}}, opts)
 }
 
 GetGuildPreviewRequest type {
@@ -51,8 +55,12 @@ get-guild-preview
 meta {
     doc: """GET /guilds/{guild_id}/preview - Public preview of a guild the bot is in or a discoverable guild: name, icon, emojis, features and counts."""
 }
-fn (request: GetGuildPreviewRequest): Map {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/preview`)
+fn
+(request: GetGuildPreviewRequest): Map {
+  get-guild-preview(request, {})
+},
+(request: GetGuildPreviewRequest, opts: Map): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/preview`, {}, opts)
 }
 
 ModifyGuildRequest type {
@@ -101,11 +109,15 @@ meta {
     ```
     """
 }
-fn (request: ModifyGuildRequest): Map {
+fn
+(request: ModifyGuildRequest): Map {
+  modify-guild(request, {})
+},
+(request: ModifyGuildRequest, opts: Map): Map {
   ::api/call("PATCH", `/guilds/${seg(request.guild_id)}`, {
     body: ::api/body(request, ["guild_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 // ============================================================================
@@ -135,8 +147,12 @@ meta {
     ```
     """
 }
-fn (request: GetGuildMemberRequest): Map {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}`)
+fn
+(request: GetGuildMemberRequest): Map {
+  get-guild-member(request, {})
+},
+(request: GetGuildMemberRequest, opts: Map): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}`, {}, opts)
 }
 
 ListGuildMembersRequest type {
@@ -149,8 +165,12 @@ list-guild-members
 meta {
     doc: """GET /guilds/{guild_id}/members - Up to `limit` (1-1000, default 1) members ordered by user id; page with `after`, or use `list-all-guild-members`. Needs the privileged GUILD_MEMBERS intent."""
 }
-fn (request: ListGuildMembersRequest): Vec<Map> {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/members`, {query: {limit: request.limit, after: request.after}})
+fn
+(request: ListGuildMembersRequest): Vec<Map> {
+  list-guild-members(request, {})
+},
+(request: ListGuildMembersRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/members`, {query: {limit: request.limit, after: request.after}}, opts)
 }
 
 list-all-guild-members
@@ -172,8 +192,11 @@ fn
   list-all-guild-members(guild-id, 10000)
 },
 (guild-id: Str, max-items: Int): Vec<Map> {
+  list-all-guild-members(guild-id, max-items, {})
+},
+(guild-id: Str, max-items: Int, opts: Map): Vec<Map> {
   ::api/paginate(
-    (after) { list-guild-members(ListGuildMembersRequest({guild_id: guild-id, limit: 1000, after: after})) },
+    (after) { list-guild-members(ListGuildMembersRequest({guild_id: guild-id, limit: 1000, after: after}), opts) },
     (page) { last(page).user.id },
     1000,
     max-items
@@ -205,8 +228,12 @@ meta {
     ```
     """
 }
-fn (request: SearchGuildMembersRequest): Vec<Map> {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/members/search`, {query: {query: request.query, limit: request.limit}})
+fn
+(request: SearchGuildMembersRequest): Vec<Map> {
+  search-guild-members(request, {})
+},
+(request: SearchGuildMembersRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/members/search`, {query: {query: request.query, limit: request.limit}}, opts)
 }
 
 ModifyGuildMemberRequest type {
@@ -263,11 +290,15 @@ meta {
     ```
     """
 }
-fn (request: ModifyGuildMemberRequest): Map {
+fn
+(request: ModifyGuildMemberRequest): Map {
+  modify-guild-member(request, {})
+},
+(request: ModifyGuildMemberRequest, opts: Map): Map {
   ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}`, {
     body: ::api/body(request, ["guild_id", "user_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 ModifyCurrentMemberRequest type {
@@ -284,11 +315,15 @@ modify-current-member
 meta {
     doc: """PATCH /guilds/{guild_id}/members/@me - Change the bot's own per-guild `nick`, `avatar`, `banner` (data URIs) or `bio`. Only fields you set are sent; list fields in `clear` to reset them."""
 }
-fn (request: ModifyCurrentMemberRequest): Map {
+fn
+(request: ModifyCurrentMemberRequest): Map {
+  modify-current-member(request, {})
+},
+(request: ModifyCurrentMemberRequest, opts: Map): Map {
   ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/members/@me`, {
     body: ::api/body(request, ["guild_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 AddGuildMemberRoleRequest type {
@@ -309,16 +344,24 @@ add-guild-member-role
 meta {
     doc: """PUT /guilds/{guild_id}/members/{user_id}/roles/{role_id} - Give a member a role. Needs MANAGE_ROLES."""
 }
-fn (request: AddGuildMemberRoleRequest): Bool {
-  ::api/call-ok("PUT", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}/roles/${seg(request.role_id)}`, {reason: request.reason})
+fn
+(request: AddGuildMemberRoleRequest): Bool {
+  add-guild-member-role(request, {})
+},
+(request: AddGuildMemberRoleRequest, opts: Map): Bool {
+  ::api/call-ok("PUT", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}/roles/${seg(request.role_id)}`, {reason: request.reason}, opts)
 }
 
 remove-guild-member-role
 meta {
     doc: """DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id} - Take a role from a member. Needs MANAGE_ROLES."""
 }
-fn (request: RemoveGuildMemberRoleRequest): Bool {
-  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}/roles/${seg(request.role_id)}`, {reason: request.reason})
+fn
+(request: RemoveGuildMemberRoleRequest): Bool {
+  remove-guild-member-role(request, {})
+},
+(request: RemoveGuildMemberRoleRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}/roles/${seg(request.role_id)}`, {reason: request.reason}, opts)
 }
 
 RemoveGuildMemberRequest type {
@@ -331,8 +374,12 @@ remove-guild-member
 meta {
     doc: """DELETE /guilds/{guild_id}/members/{user_id} - Kick a member. Needs KICK_MEMBERS."""
 }
-fn (request: RemoveGuildMemberRequest): Bool {
-  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}`, {reason: request.reason})
+fn
+(request: RemoveGuildMemberRequest): Bool {
+  remove-guild-member(request, {})
+},
+(request: RemoveGuildMemberRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/members/${seg(request.user_id)}`, {reason: request.reason}, opts)
 }
 
 // ============================================================================
@@ -347,8 +394,12 @@ get-guild-roles
 meta {
     doc: """GET /guilds/{guild_id}/roles - Every role in a guild. The @everyone role's id is the guild id."""
 }
-fn (request: GetGuildRolesRequest): Vec<Map> {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/roles`)
+fn
+(request: GetGuildRolesRequest): Vec<Map> {
+  get-guild-roles(request, {})
+},
+(request: GetGuildRolesRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/roles`, {}, opts)
 }
 
 GetGuildRoleRequest type {
@@ -360,8 +411,12 @@ get-guild-role
 meta {
     doc: """GET /guilds/{guild_id}/roles/{role_id} - One role."""
 }
-fn (request: GetGuildRoleRequest): Map {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/roles/${seg(request.role_id)}`)
+fn
+(request: GetGuildRoleRequest): Map {
+  get-guild-role(request, {})
+},
+(request: GetGuildRoleRequest, opts: Map): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/roles/${seg(request.role_id)}`, {}, opts)
 }
 
 CreateGuildRoleRequest type {
@@ -398,11 +453,15 @@ meta {
     ```
     """
 }
-fn (request: CreateGuildRoleRequest): Map {
+fn
+(request: CreateGuildRoleRequest): Map {
+  create-guild-role(request, {})
+},
+(request: CreateGuildRoleRequest, opts: Map): Map {
   ::api/call("POST", `/guilds/${seg(request.guild_id)}/roles`, {
     body: ::api/body(request, ["guild_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 ModifyGuildRoleRequest type {
@@ -424,11 +483,15 @@ modify-guild-role
 meta {
     doc: """PATCH /guilds/{guild_id}/roles/{role_id} - Change a role. Only fields you set are sent; `clear: ["icon"]` removes the role icon. Needs MANAGE_ROLES."""
 }
-fn (request: ModifyGuildRoleRequest): Map {
+fn
+(request: ModifyGuildRoleRequest): Map {
+  modify-guild-role(request, {})
+},
+(request: ModifyGuildRoleRequest, opts: Map): Map {
   ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/roles/${seg(request.role_id)}`, {
     body: ::api/body(request, ["guild_id", "role_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 ModifyGuildRolePositionsRequest type {
@@ -441,11 +504,15 @@ modify-guild-role-positions
 meta {
     doc: """PATCH /guilds/{guild_id}/roles - Reorder roles. `positions` is `[{id, position}]`. Returns every role. Needs MANAGE_ROLES."""
 }
-fn (request: ModifyGuildRolePositionsRequest): Vec<Map> {
+fn
+(request: ModifyGuildRolePositionsRequest): Vec<Map> {
+  modify-guild-role-positions(request, {})
+},
+(request: ModifyGuildRolePositionsRequest, opts: Map): Vec<Map> {
   ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/roles`, {
     body: map(request.positions, (p) { ::api/body(p, []) }),
     reason: request.reason
-  })
+  }, opts)
 }
 
 DeleteGuildRoleRequest type {
@@ -458,8 +525,12 @@ delete-guild-role
 meta {
     doc: """DELETE /guilds/{guild_id}/roles/{role_id} - Delete a role. Needs MANAGE_ROLES."""
 }
-fn (request: DeleteGuildRoleRequest): Bool {
-  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/roles/${seg(request.role_id)}`, {reason: request.reason})
+fn
+(request: DeleteGuildRoleRequest): Bool {
+  delete-guild-role(request, {})
+},
+(request: DeleteGuildRoleRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/roles/${seg(request.role_id)}`, {reason: request.reason}, opts)
 }
 
 // ============================================================================
@@ -477,10 +548,14 @@ get-guild-bans
 meta {
     doc: """GET /guilds/{guild_id}/bans - Bans (`{user, reason}`), up to `limit` (1-1000). Page with `before`/`after` user ids, or use `get-all-guild-bans`. Needs BAN_MEMBERS."""
 }
-fn (request: GetGuildBansRequest): Vec<Map> {
+fn
+(request: GetGuildBansRequest): Vec<Map> {
+  get-guild-bans(request, {})
+},
+(request: GetGuildBansRequest, opts: Map): Vec<Map> {
   ::api/call("GET", `/guilds/${seg(request.guild_id)}/bans`, {
     query: {limit: request.limit, before: request.before, after: request.after}
-  })
+  }, opts)
 }
 
 get-all-guild-bans
@@ -492,8 +567,11 @@ fn
   get-all-guild-bans(guild-id, 10000)
 },
 (guild-id: Str, max-items: Int): Vec<Map> {
+  get-all-guild-bans(guild-id, max-items, {})
+},
+(guild-id: Str, max-items: Int, opts: Map): Vec<Map> {
   ::api/paginate(
-    (after) { get-guild-bans(GetGuildBansRequest({guild_id: guild-id, limit: 1000, after: after})) },
+    (after) { get-guild-bans(GetGuildBansRequest({guild_id: guild-id, limit: 1000, after: after}), opts) },
     (page) { last(page).user.id },
     1000,
     max-items
@@ -509,8 +587,12 @@ get-guild-ban
 meta {
     doc: """GET /guilds/{guild_id}/bans/{user_id} - One ban; a 404 `Err` means the user is not banned."""
 }
-fn (request: GetGuildBanRequest): Map {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/bans/${seg(request.user_id)}`)
+fn
+(request: GetGuildBanRequest): Map {
+  get-guild-ban(request, {})
+},
+(request: GetGuildBanRequest, opts: Map): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/bans/${seg(request.user_id)}`, {}, opts)
 }
 
 CreateGuildBanRequest type {
@@ -541,11 +623,15 @@ meta {
     ```
     """
 }
-fn (request: CreateGuildBanRequest): Bool {
+fn
+(request: CreateGuildBanRequest): Bool {
+  create-guild-ban(request, {})
+},
+(request: CreateGuildBanRequest, opts: Map): Bool {
   ::api/call-ok("PUT", `/guilds/${seg(request.guild_id)}/bans/${seg(request.user_id)}`, {
     body: ::api/body(request, ["guild_id", "user_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 RemoveGuildBanRequest type {
@@ -558,8 +644,12 @@ remove-guild-ban
 meta {
     doc: """DELETE /guilds/{guild_id}/bans/{user_id} - Unban a user. Needs BAN_MEMBERS."""
 }
-fn (request: RemoveGuildBanRequest): Bool {
-  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/bans/${seg(request.user_id)}`, {reason: request.reason})
+fn
+(request: RemoveGuildBanRequest): Bool {
+  remove-guild-ban(request, {})
+},
+(request: RemoveGuildBanRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/bans/${seg(request.user_id)}`, {reason: request.reason}, opts)
 }
 
 BulkGuildBanRequest type {
@@ -573,11 +663,15 @@ bulk-guild-ban
 meta {
     doc: """POST /guilds/{guild_id}/bulk-ban - Ban up to 200 users at once. Returns `{banned_users, failed_users}`. Needs BAN_MEMBERS and MANAGE_GUILD."""
 }
-fn (request: BulkGuildBanRequest): Map {
+fn
+(request: BulkGuildBanRequest): Map {
+  bulk-guild-ban(request, {})
+},
+(request: BulkGuildBanRequest, opts: Map): Map {
   ::api/call("POST", `/guilds/${seg(request.guild_id)}/bulk-ban`, {
     body: ::api/body(request, ["guild_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 // ============================================================================
@@ -592,8 +686,12 @@ list-guild-emojis
 meta {
     doc: """GET /guilds/{guild_id}/emojis - The guild's custom emoji."""
 }
-fn (request: ListGuildEmojisRequest): Vec<Map> {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/emojis`)
+fn
+(request: ListGuildEmojisRequest): Vec<Map> {
+  list-guild-emojis(request, {})
+},
+(request: ListGuildEmojisRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/emojis`, {}, opts)
 }
 
 GetGuildEmojiRequest type {
@@ -605,8 +703,12 @@ get-guild-emoji
 meta {
     doc: """GET /guilds/{guild_id}/emojis/{emoji_id} - One custom emoji."""
 }
-fn (request: GetGuildEmojiRequest): Map {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/emojis/${seg(request.emoji_id)}`)
+fn
+(request: GetGuildEmojiRequest): Map {
+  get-guild-emoji(request, {})
+},
+(request: GetGuildEmojiRequest, opts: Map): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/emojis/${seg(request.emoji_id)}`, {}, opts)
 }
 
 CreateGuildEmojiRequest type {
@@ -621,11 +723,15 @@ create-guild-emoji
 meta {
     doc: """POST /guilds/{guild_id}/emojis - Create a custom emoji. `image` is a data URI (max 256 KiB); `roles` limits who may use it. Needs CREATE_GUILD_EXPRESSIONS."""
 }
-fn (request: CreateGuildEmojiRequest): Map {
+fn
+(request: CreateGuildEmojiRequest): Map {
+  create-guild-emoji(request, {})
+},
+(request: CreateGuildEmojiRequest, opts: Map): Map {
   ::api/call("POST", `/guilds/${seg(request.guild_id)}/emojis`, {
     body: ::api/body(request, ["guild_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 ModifyGuildEmojiRequest type {
@@ -641,11 +747,15 @@ modify-guild-emoji
 meta {
     doc: """PATCH /guilds/{guild_id}/emojis/{emoji_id} - Rename an emoji or change its `roles`; `clear: ["roles"]` opens it to everyone. Needs MANAGE_GUILD_EXPRESSIONS."""
 }
-fn (request: ModifyGuildEmojiRequest): Map {
+fn
+(request: ModifyGuildEmojiRequest): Map {
+  modify-guild-emoji(request, {})
+},
+(request: ModifyGuildEmojiRequest, opts: Map): Map {
   ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/emojis/${seg(request.emoji_id)}`, {
     body: ::api/body(request, ["guild_id", "emoji_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 DeleteGuildEmojiRequest type {
@@ -658,8 +768,12 @@ delete-guild-emoji
 meta {
     doc: """DELETE /guilds/{guild_id}/emojis/{emoji_id} - Delete a custom emoji. Needs MANAGE_GUILD_EXPRESSIONS."""
 }
-fn (request: DeleteGuildEmojiRequest): Bool {
-  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/emojis/${seg(request.emoji_id)}`, {reason: request.reason})
+fn
+(request: DeleteGuildEmojiRequest): Bool {
+  delete-guild-emoji(request, {})
+},
+(request: DeleteGuildEmojiRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/emojis/${seg(request.emoji_id)}`, {reason: request.reason}, opts)
 }
 
 // ============================================================================
@@ -676,9 +790,13 @@ get-guild-prune-count
 meta {
     doc: """GET /guilds/{guild_id}/prune - How many members a prune of inactive (`days`, 1-30, default 7) members would remove. Needs MANAGE_GUILD and KICK_MEMBERS."""
 }
-fn (request: GetGuildPruneCountRequest): Map {
+fn
+(request: GetGuildPruneCountRequest): Map {
+  get-guild-prune-count(request, {})
+},
+(request: GetGuildPruneCountRequest, opts: Map): Map {
   roles if(is-null(request.include_roles), null, join(request.include_roles, ","))
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/prune`, {query: {days: request.days, include_roles: roles}})
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/prune`, {query: {days: request.days, include_roles: roles}}, opts)
 }
 
 BeginGuildPruneRequest type {
@@ -693,11 +811,15 @@ begin-guild-prune
 meta {
     doc: """POST /guilds/{guild_id}/prune - Kick members inactive for `days`. Set `compute_prune_count: false` on large guilds. Returns `{pruned}`. Needs MANAGE_GUILD and KICK_MEMBERS."""
 }
-fn (request: BeginGuildPruneRequest): Map {
+fn
+(request: BeginGuildPruneRequest): Map {
+  begin-guild-prune(request, {})
+},
+(request: BeginGuildPruneRequest, opts: Map): Map {
   ::api/call("POST", `/guilds/${seg(request.guild_id)}/prune`, {
     body: ::api/body(request, ["guild_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 // ============================================================================
@@ -735,7 +857,11 @@ meta {
     ```
     """
 }
-fn (request: GetGuildAuditLogRequest): Map {
+fn
+(request: GetGuildAuditLogRequest): Map {
+  get-guild-audit-log(request, {})
+},
+(request: GetGuildAuditLogRequest, opts: Map): Map {
   ::api/call("GET", `/guilds/${seg(request.guild_id)}/audit-logs`, {
     query: {
       user_id: request.user_id,
@@ -744,7 +870,7 @@ fn (request: GetGuildAuditLogRequest): Map {
       after: request.after,
       limit: request.limit
     }
-  })
+  }, opts)
 }
 
 GetGuildInvitesRequest type {
@@ -755,6 +881,10 @@ get-guild-invites
 meta {
     doc: """GET /guilds/{guild_id}/invites - Every invite in a guild, with metadata. Needs MANAGE_GUILD or VIEW_AUDIT_LOG."""
 }
-fn (request: GetGuildInvitesRequest): Vec<Map> {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/invites`)
+fn
+(request: GetGuildInvitesRequest): Vec<Map> {
+  get-guild-invites(request, {})
+},
+(request: GetGuildInvitesRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/invites`, {}, opts)
 }

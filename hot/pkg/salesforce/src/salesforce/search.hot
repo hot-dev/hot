@@ -53,8 +53,12 @@ meta {
     ```
     """
 }
-fn (statement: Str): Map {
-  ::api/json("GET", `/search${::api/query-string({q: statement})}`)
+fn
+(statement: Str): Map {
+  sosl(statement, {})
+},
+(statement: Str, opts: Map): Map {
+  ::api/json("GET", `/search${::api/query-string({q: statement})}`, null, opts)
 }
 
 find
@@ -79,7 +83,10 @@ fn
   find(term, {})
 },
 (term: Str, options: Map): Vec {
-  out sosl(build-sosl(term, options))
+  find(term, options, {})
+},
+(term: Str, options: Map, opts: Map): Vec {
+  out sosl(build-sosl(term, options), opts)
   cond {
     is-err(out) => { out }
     => { or(get(out, "searchRecords"), []) }

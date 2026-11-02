@@ -110,7 +110,8 @@ meta {
     `token_type`, `id_token` when `openid` was requested), or a
     `::google::auth/TokenError` such as
     `"google: token exchange failed: invalid_grant (Bad Request)"`.
-    `opts.code-verifier` completes a PKCE flow.
+    `opts.code-verifier` completes a PKCE flow. The client secret and the
+    returned tokens are masked in call records.
     """
 }
 fn
@@ -118,6 +119,7 @@ fn
   exchange-code(client-id, client-secret, code, redirect-uri, {})
 },
 (client-id: Str, client-secret: Str?, code: Str, redirect-uri: Str, opts: Map): Map {
+  ::auth/mark-fields({client-secret: client-secret}, ::auth/SECRET_KEYS)
   tokens ::oauth2/exchange-code(::google/TOKEN_URL, filter-vals({
     client-id: client-id,
     client-secret: if(::auth/is-blank-value(client-secret), null, client-secret),
@@ -125,7 +127,7 @@ fn
     redirect-uri: redirect-uri,
     code-verifier: get(opts, "code-verifier")
   }, is-some))
-  if(is-err(tokens), err(::auth/token-error("google: token exchange failed", err-value(tokens))), tokens)
+  if(is-err(tokens), err(::auth/token-error("google: token exchange failed", err-value(tokens))), ::auth/mark-token-response(tokens))
 }
 
 refresh-access-token
@@ -138,9 +140,10 @@ fn (client-id: Str, client-secret: Str?, refresh-token: Str): Map {
 
 revoke-token
 meta {
-    doc: """Revoke an access or refresh token (revoking a refresh token also revokes its access tokens). Returns true, or a `TokenError`."""
+    doc: """Revoke an access or refresh token (revoking a refresh token also revokes its access tokens). Returns true, or a `TokenError`. The token is masked in call records."""
 }
 fn (token: Str): Bool {
+  ::auth/mark-fields({token: token}, ::auth/SECRET_KEYS)
   response ::http/request(::http/HttpRequest({
     method: "POST",
     url: ::google/REVOKE_URL,

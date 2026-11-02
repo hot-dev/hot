@@ -1,6 +1,6 @@
 ::intercom::companies ns
 meta {
-    ctx: {"intercom.token": {required: true}},
+    ctx: {"intercom.token": {required: false}},
     doc: """
     Companies: create or update by your `company_id`, update by Intercom
     `id`, look up, list, and attach contacts. A company only shows in
@@ -27,32 +27,48 @@ meta {
     ```
     """
 }
-fn (fields: Map): Any {
-  ::api/request("POST", "/companies", ::api/compact(fields))
+fn
+(fields: Map): Any {
+  upsert-company(fields, {})
+},
+(fields: Map, opts: Map): Any {
+  ::api/request("POST", "/companies", ::api/compact(fields), opts)
 }
 
 update-company
 meta {
     doc: """PUT /companies/{id} - Update a company by Intercom `id`. `company_id` cannot change after creation. Unset fields are omitted."""
 }
-fn (id: Str, fields: Map): Any {
-  ::api/request("PUT", `/companies/${::api/path-segment(id)}`, ::api/compact(fields))
+fn
+(id: Str, fields: Map): Any {
+  update-company(id, fields, {})
+},
+(id: Str, fields: Map, opts: Map): Any {
+  ::api/request("PUT", `/companies/${::api/path-segment(id)}`, ::api/compact(fields), opts)
 }
 
 get-company
 meta {
     doc: """GET /companies/{id} - One company by Intercom `id`."""
 }
-fn (id: Str): Any {
-  ::api/request("GET", `/companies/${::api/path-segment(id)}`, "")
+fn
+(id: Str): Any {
+  get-company(id, {})
+},
+(id: Str, opts: Map): Any {
+  ::api/request("GET", `/companies/${::api/path-segment(id)}`, "", opts)
 }
 
 find-company
 meta {
     doc: """GET /companies?company_id= - The company with your `company_id`, or an Err with status 404."""
 }
-fn (company-id: Str): Any {
-  ::api/request("GET", `/companies${::api/query-string({company_id: company-id})}`, "")
+fn
+(company-id: Str): Any {
+  find-company(company-id, {})
+},
+(company-id: Str, opts: Map): Any {
+  ::api/request("GET", `/companies${::api/query-string({company_id: company-id})}`, "", opts)
 }
 
 list-companies
@@ -64,23 +80,34 @@ fn
   list-companies({})
 },
 (options: Map): Any {
-  ::api/request("GET", `/companies${::api/query-string(options)}`, "")
+  list-companies(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/request("GET", `/companies${::api/query-string(options)}`, "", opts)
 }
 
 attach-contact
 meta {
     doc: """Attach a contact to a company (Intercom ids). Same as `::intercom::contacts/attach-company`, argument order company-first."""
 }
-fn (company-id: Str, contact-id: Str): Any {
-  ::intercom::contacts/attach-company(contact-id, company-id)
+fn
+(company-id: Str, contact-id: Str): Any {
+  attach-contact(company-id, contact-id, {})
+},
+(company-id: Str, contact-id: Str, opts: Map): Any {
+  ::intercom::contacts/attach-company(contact-id, company-id, opts)
 }
 
 detach-contact
 meta {
     doc: """Detach a contact from a company (Intercom ids)."""
 }
-fn (company-id: Str, contact-id: Str): Any {
-  ::intercom::contacts/detach-company(contact-id, company-id)
+fn
+(company-id: Str, contact-id: Str): Any {
+  detach-contact(company-id, contact-id, {})
+},
+(company-id: Str, contact-id: Str, opts: Map): Any {
+  ::intercom::contacts/detach-company(contact-id, company-id, opts)
 }
 
 list-contacts
@@ -92,5 +119,8 @@ fn
   list-contacts(company-id, {})
 },
 (company-id: Str, options: Map): Any {
-  ::api/request("GET", `/companies/${::api/path-segment(company-id)}/contacts${::api/query-string(options)}`, "")
+  list-contacts(company-id, options, {})
+},
+(company-id: Str, options: Map, opts: Map): Any {
+  ::api/request("GET", `/companies/${::api/path-segment(company-id)}/contacts${::api/query-string(options)}`, "", opts)
 }

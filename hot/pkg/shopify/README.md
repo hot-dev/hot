@@ -18,8 +18,8 @@ hot.project.my-app.deps {
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `shopify.shop` | yes | The shop, as `acme` or `acme.myshopify.com` (both work; `https://` and paths are stripped) |
-| `shopify.access.token` | yes | An Admin API access token (`shpat_...`) from a custom app or your app's OAuth flow |
+| `shopify.shop` | yes, unless passed per call | The shop, as `acme` or `acme.myshopify.com` (both work; `https://` and paths are stripped) |
+| `shopify.access.token` | yes, unless passed per call | An Admin API access token (`shpat_...`) from a custom app or your app's OAuth flow |
 | `shopify.api.version` | no | Overrides the pinned `2026-10`, e.g. `"2027-01"` |
 | `shopify.webhook.secret` | for webhooks | The app's client secret (or, for webhooks created in the Shopify admin, the store's webhook signing secret) |
 
@@ -43,6 +43,29 @@ hits ::products/search-products("title:*sticker* status:active", {first: 10})
 // Anything else via raw GraphQL
 shop ::shopify::api/graphql("{ shop { name currencyCode } }")
 ```
+
+## Per-call credentials
+
+Every function that calls Shopify takes an optional trailing `opts` Map, so one run can act for many shops and parallel flows don't share credentials. Per-call credentials are masked in call records, and nothing from `opts` is written to ctx.
+
+| Key | Effect |
+|---|---|
+| `access-token` | The Admin API access token for this call, instead of `shopify.access.token` |
+| `shop` | The shop for this call, instead of `shopify.shop`. Needs an `access-token` in the same `opts`; `shopify.access.token` is never sent to a per-call shop |
+| `api-version` | The Admin API version for this call, instead of `shopify.api.version` |
+
+`opts` always comes last. Where a function also takes list or mutation options, pass `{}` for those.
+
+```hot
+tenant {shop: "acme", access-token: "shpat_tenant_token"}
+
+order ::shopify::orders/get-order("gid://shopify/Order/1", tenant)
+page ::shopify::orders/list-orders({first: 20}, tenant)
+every ::shopify::orders/collect-orders({query: "financial_status:paid"}, 500, tenant)
+shop ::shopify::api/graphql("{ shop { name } }", {}, tenant)
+```
+
+An `access-token` or `shop` that is present but blank or null is an error naming the key, never a fallback to context. `::shopify::api/resolve(opts)` is the one place this is decided.
 
 ## Functions
 

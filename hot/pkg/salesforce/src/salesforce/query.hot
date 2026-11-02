@@ -127,30 +127,45 @@ fn
   soql(query, {})
 },
 (query: Str, options: Map): Map {
+  soql(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Map {
   path query-path(query, Bool(get(options, "include-deleted", false)))
-  ::api/unwrap(::api/send("GET", path, null, query-headers(options)))
+  ::api/unwrap(::api/send("GET", path, null, query-headers(options), opts))
 }
 
 query-all
 meta {
     doc: """GET /queryAll?q= - Like `soql`, but includes deleted (recycle bin) and archived records (`IsDeleted = true` rows, archived Tasks and Events). One page; see `soql-records` with `include-deleted` for every page."""
 }
-fn (query: Str): Map {
-  soql(query, {include-deleted: true})
+fn
+(query: Str): Map {
+  query-all(query, {})
+},
+(query: Str, opts: Map): Map {
+  soql(query, {include-deleted: true}, opts)
 }
 
 next-page
 meta {
     doc: """Fetch the next page of a SOQL result from its `nextRecordsUrl` (a full `/services/data/vXX.X/query/...` path, used as is)."""
 }
-fn (next-records-url: Str): Map {
+fn
+(next-records-url: Str): Map {
+  next-page(next-records-url, {})
+},
+(next-records-url: Str, opts: Map): Map {
   cond {
     not(starts-with(next-records-url, "/services/")) => { err(`salesforce: unexpected nextRecordsUrl shape: ${next-records-url}`) }
-    => { ::api/json("GET", next-records-url) }
+    => { ::api/json("GET", next-records-url, null, opts) }
   }
 }
 
-collect-pages fn (page: Any, acc: Vec, max-records: Any): Vec {
+collect-pages fn
+(page: Result, acc: Vec, max-records: Any): Vec {
+  collect-pages(page, acc, max-records, {})
+},
+(page: Result, acc: Vec, max-records: Any, opts: Map): Vec {
   cond {
     is-err(page) => { page }
     => {
@@ -159,7 +174,7 @@ collect-pages fn (page: Any, acc: Vec, max-records: Any): Vec {
       cond {
         reached => { slice(records, 0, max-records) }
         or(get(page, "done", true), is-null(get(page, "nextRecordsUrl"))) => { records }
-        => { collect-pages(next-page(page.nextRecordsUrl), records, max-records) }
+        => { collect-pages(next-page(page.nextRecordsUrl, opts), records, max-records, opts) }
       }
     }
   }
@@ -186,5 +201,8 @@ fn
   soql-records(query, {})
 },
 (query: Str, options: Map): Vec {
-  collect-pages(soql(query, options), [], get(options, "max-records"))
+  soql-records(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Vec {
+  collect-pages(soql(query, options, opts), [], get(options, "max-records"), opts)
 }

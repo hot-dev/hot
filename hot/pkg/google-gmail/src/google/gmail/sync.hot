@@ -315,13 +315,15 @@ fn (request: Map): PushNotification {
 
 verify-push-token
 meta {
-    doc: """True when the request's `token` query parameter equals `expected` (constant-time compare). Fails closed: an empty `expected` or a missing parameter is false."""
+    doc: """True when the request's `token` query parameter equals `expected` (constant-time compare). Fails closed: an empty `expected` or a missing parameter is false. `expected` is masked in call records."""
 }
 fn (request: Map, expected: Str?): Bool {
   query or(get(request, "query"), {})
   got get(query, "token")
+  blank or(is-null(expected), eq(trim(or(expected, "")), ""))
+  if(not(blank), ::ctx/mark-secret(expected))
   cond {
-    or(is-null(expected), eq(trim(or(expected, "")), "")) => { false }
+    blank => { false }
     or(is-null(got), eq(got, "")) => { false }
     => { ::hot::random/secure-compare(Str(got), expected) }
   }

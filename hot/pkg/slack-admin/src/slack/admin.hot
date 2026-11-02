@@ -10,7 +10,9 @@ meta {
     **Setup**: set `slack.admin.token` to a user token (`xoxp-...`) from an
     app installed on the whole Enterprise organization by an Org Owner or
     Org Admin, with the `admin.*` scopes the calls need. Bot tokens and
-    workspace-level installs are rejected by every admin method.
+    workspace-level installs are rejected by every admin method. Every
+    API-calling function also takes a trailing `opts` Map for a per-call
+    token; see `::slack::admin::api`.
 
     Every call returns Slack's response body. Slack answers HTTP 200 with
     `ok: false` for failures; those come back as an `Err(SlackError)`

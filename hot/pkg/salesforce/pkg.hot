@@ -3,7 +3,7 @@
 hot.pkg.salesforce {
   name: "hot.dev/salesforce",
   version: "0.1.0",
-  hot-min-version: "3.0.0",
+  hot-min-version: "3.0.2",
   description: "Salesforce REST API bindings for Hot: sObject CRUD and external-id upserts, auto-paging SOQL, SOSL search, describe, sObject collections and composite, Bulk API 2.0 ingest and query jobs, and limits. Access-token, refresh-token, JWT-bearer and client-credentials auth with per-run session caching.",
   author: "Hot Dev",
   email: "support@hot.dev",

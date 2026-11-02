@@ -6,7 +6,7 @@ meta {
     `read-text` and `read-json` decode them. Values written through the
     API become visible at the edge within about 60 seconds.
     """,
-    ctx: {"cloudflare.token": {required: true}, "cloudflare.account.id": {required: true}}
+    ctx: {"cloudflare.token": {required: false}, "cloudflare.account.id": {required: false, secret: false}}
 }
 
 ::api ::cloudflare::api
@@ -37,7 +37,10 @@ fn
   list-namespaces({})
 },
 (params: Map): ListPage {
-  ::api/account-page(`${namespaces-suffix}${::api/query(params)}`)
+  list-namespaces(params, {})
+},
+(params: Map, opts: Map): ListPage {
+  ::api/account-page(`${namespaces-suffix}${::api/query(params)}`, "", opts)
 }
 
 list-all-namespaces
@@ -49,23 +52,37 @@ fn
   list-all-namespaces(::api/DEFAULT_MAX_ITEMS)
 },
 (max: Int): Vec {
-  ::api/collect-pages(list-namespaces, {per_page: 1000}, max)
+  list-all-namespaces(max, {})
+},
+(opts: Map): Vec {
+  list-all-namespaces(::api/DEFAULT_MAX_ITEMS, opts)
+},
+(max: Int, opts: Map): Vec {
+  ::api/collect-pages((p) { list-namespaces(p, opts) }, {per_page: 1000}, max)
 }
 
 create-namespace
 meta {
     doc: """POST /accounts/{account_id}/storage/kv/namespaces - Create a namespace titled `title`. Returns `{id, title, supports_url_encoding}`."""
 }
-fn (title: Str): Map {
-  ::api/account-json("POST", namespaces-suffix, {title: title})
+fn
+(title: Str): Map {
+  create-namespace(title, {})
+},
+(title: Str, opts: Map): Map {
+  ::api/account-json("POST", namespaces-suffix, {title: title}, opts)
 }
 
 delete-namespace
 meta {
     doc: """DELETE a namespace and every key in it."""
 }
-fn (namespace-id: Str): Any {
-  ::api/account-json("DELETE", namespace-suffix(namespace-id))
+fn
+(namespace-id: Str): Any {
+  delete-namespace(namespace-id, {})
+},
+(namespace-id: Str, opts: Map): Any {
+  ::api/account-json("DELETE", namespace-suffix(namespace-id), "", opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +111,10 @@ fn
   list-keys(namespace-id, {})
 },
 (namespace-id: Str, params: Map): ListPage {
-  ::api/account-page(`${namespace-suffix(namespace-id)}/keys${::api/query(params)}`)
+  list-keys(namespace-id, params, {})
+},
+(namespace-id: Str, params: Map, opts: Map): ListPage {
+  ::api/account-page(`${namespace-suffix(namespace-id)}/keys${::api/query(params)}`, "", opts)
 }
 
 list-all-keys
@@ -109,7 +129,13 @@ fn
   list-all-keys(namespace-id, params, ::api/DEFAULT_MAX_ITEMS)
 },
 (namespace-id: Str, params: Map, max: Int): Vec {
-  ::api/collect-cursor((p) { list-keys(namespace-id, p) }, {limit: 1000, ...params}, max)
+  list-all-keys(namespace-id, params, max, {})
+},
+(namespace-id: Str, params: Map, opts: Map): Vec {
+  list-all-keys(namespace-id, params, ::api/DEFAULT_MAX_ITEMS, opts)
+},
+(namespace-id: Str, params: Map, max: Int, opts: Map): Vec {
+  ::api/collect-cursor((p) { list-keys(namespace-id, p, opts) }, {limit: 1000, ...params}, max)
 }
 
 // ---------------------------------------------------------------------------
@@ -129,12 +155,16 @@ meta {
     ```
     """
 }
-fn (namespace-id: Str, key: Str): Bytes {
-  path ::api/account-path(value-suffix(namespace-id, key))
+fn
+(namespace-id: Str, key: Str): Bytes {
+  read(namespace-id, key, {})
+},
+(namespace-id: Str, key: Str, opts: Map): Bytes {
+  path ::api/account-path(value-suffix(namespace-id, key), opts)
   cond {
     is-err(path) => { path }
     => {
-      response ::api/send("GET", path, {}, "")
+      response ::api/send("GET", path, {}, "", opts)
       cond {
         is-err(response) => { response }
         => { or(response.body-bytes, Bytes("")) }
@@ -147,8 +177,12 @@ read-text
 meta {
     doc: """A value decoded as UTF-8 text."""
 }
-fn (namespace-id: Str, key: Str): Str {
-  value read(namespace-id, key)
+fn
+(namespace-id: Str, key: Str): Str {
+  read-text(namespace-id, key, {})
+},
+(namespace-id: Str, key: Str, opts: Map): Str {
+  value read(namespace-id, key, opts)
   cond {
     is-err(value) => { value }
     => { Str(value) }
@@ -159,8 +193,12 @@ read-json
 meta {
     doc: """A value parsed as JSON (an Err when it is not valid JSON)."""
 }
-fn (namespace-id: Str, key: Str): Any {
-  text read-text(namespace-id, key)
+fn
+(namespace-id: Str, key: Str): Any {
+  read-json(namespace-id, key, {})
+},
+(namespace-id: Str, key: Str, opts: Map): Any {
+  text read-text(namespace-id, key, opts)
   cond {
     is-err(text) => { text }
     => { ::hot::json/from-json(text) }
@@ -171,8 +209,12 @@ read-metadata
 meta {
     doc: """GET .../metadata/{key} - The JSON metadata stored with a key (null when none)."""
 }
-fn (namespace-id: Str, key: Str): Any {
-  ::api/account-json("GET", `${namespace-suffix(namespace-id)}/metadata/${::api/seg(key)}`)
+fn
+(namespace-id: Str, key: Str): Any {
+  read-metadata(namespace-id, key, {})
+},
+(namespace-id: Str, key: Str, opts: Map): Any {
+  ::api/account-json("GET", `${namespace-suffix(namespace-id)}/metadata/${::api/seg(key)}`, "", opts)
 }
 
 status-of fn (e: Any): Int? {
@@ -197,10 +239,11 @@ write-query
 meta {
     doc: """The `?expiration_ttl=…&expiration=…` suffix for a write; unset options are omitted. Exposed for testing."""
 }
-fn (opts: Map): Str {
+fn
+(options: Map): Str {
   ::api/query({
-    expiration_ttl: get(opts, "expiration_ttl"),
-    expiration: get(opts, "expiration")
+    expiration_ttl: get(options, "expiration_ttl"),
+    expiration: get(options, "expiration")
   })
 }
 
@@ -219,7 +262,7 @@ write
 meta {
     doc: """
     PUT .../values/{key} - Store `value` (Str or Bytes; a Map/Vec is
-    stored as JSON). `opts`:
+    stored as JSON). `options`:
     - `expiration_ttl` — seconds until the key expires (minimum 60)
     - `expiration` — absolute expiry, seconds since the epoch
     - `metadata` — JSON (up to 1024 bytes serialized) kept alongside the key
@@ -239,15 +282,18 @@ fn
 (namespace-id: Str, key: Str, value: Any): Any {
   write(namespace-id, key, value, {})
 },
-(namespace-id: Str, key: Str, value: Any, opts: Map): Any {
-  suffix `${value-suffix(namespace-id, key)}${write-query(opts)}`
-  path ::api/account-path(suffix)
-  metadata get(opts, "metadata")
+(namespace-id: Str, key: Str, value: Any, options: Map): Any {
+  write(namespace-id, key, value, options, {})
+},
+(namespace-id: Str, key: Str, value: Any, options: Map, opts: Map): Any {
+  suffix `${value-suffix(namespace-id, key)}${write-query(options)}`
+  path ::api/account-path(suffix, opts)
+  metadata get(options, "metadata")
   cond {
     is-err(path) => { path }
-    is-some(metadata) => { ::api/send-multipart("PUT", path, write-parts(value, metadata)) }
+    is-some(metadata) => { ::api/send-multipart("PUT", path, write-parts(value, metadata), opts) }
     => {
-      response ::api/send("PUT", path, {Content-Type: "application/octet-stream"}, ::api/as-bytes(value))
+      response ::api/send("PUT", path, {Content-Type: "application/octet-stream"}, ::api/as-bytes(value), opts)
       cond {
         is-err(response) => { response }
         => { get(or(response.body, {}), "result") }
@@ -260,8 +306,12 @@ delete-key
 meta {
     doc: """DELETE .../values/{key} - Remove a key (succeeds for absent keys too)."""
 }
-fn (namespace-id: Str, key: Str): Any {
-  ::api/account-json("DELETE", value-suffix(namespace-id, key))
+fn
+(namespace-id: Str, key: Str): Any {
+  delete-key(namespace-id, key, {})
+},
+(namespace-id: Str, key: Str, opts: Map): Any {
+  ::api/account-json("DELETE", value-suffix(namespace-id, key), "", opts)
 }
 
 write-bulk
@@ -273,14 +323,22 @@ meta {
     values). Returns `{successful_key_count, unsuccessful_keys}`.
     """
 }
-fn (namespace-id: Str, entries: Vec): Map {
-  ::api/account-json("PUT", `${namespace-suffix(namespace-id)}/bulk`, map(entries, (e) { filter-vals(untype(e), is-some) }))
+fn
+(namespace-id: Str, entries: Vec): Map {
+  write-bulk(namespace-id, entries, {})
+},
+(namespace-id: Str, entries: Vec, opts: Map): Map {
+  ::api/account-json("PUT", `${namespace-suffix(namespace-id)}/bulk`, map(entries, (e) { filter-vals(untype(e), is-some) }), opts)
 }
 
 delete-bulk
 meta {
     doc: """POST .../bulk/delete - Delete up to 10,000 keys in one request."""
 }
-fn (namespace-id: Str, key-names: Vec<Str>): Map {
-  ::api/account-json("POST", `${namespace-suffix(namespace-id)}/bulk/delete`, key-names)
+fn
+(namespace-id: Str, key-names: Vec<Str>): Map {
+  delete-bulk(namespace-id, key-names, {})
+},
+(namespace-id: Str, key-names: Vec<Str>, opts: Map): Map {
+  ::api/account-json("POST", `${namespace-suffix(namespace-id)}/bulk/delete`, key-names, opts)
 }

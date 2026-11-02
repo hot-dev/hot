@@ -19,7 +19,7 @@ DEFAULT_LAST_NAME "Unknown"
 
 is-blank-value ::crm/is-blank-value
 
-first-or-null fn (out: Any): Any {
+first-or-null fn (out: Result): Any {
   cond {
     is-err(out) => { out }
     is-empty(out.records) => { null }
@@ -224,8 +224,12 @@ fn (contact-id: Str, body: Str, options: Map): Map {
 // Contacts
 // ============================================================================
 
-find-contact fn (email: Str): Any {
-  found first-or-null(::query/soql(`SELECT ${join(CONTACT_FIELDS, ", ")} FROM Contact WHERE Email = ${literal(email)} ORDER BY CreatedDate ASC LIMIT 1`))
+find-contact fn
+(email: Str): Any {
+  find-contact(email, {})
+},
+(email: Str, opts: Map): Any {
+  found first-or-null(::query/soql(`SELECT ${join(CONTACT_FIELDS, ", ")} FROM Contact WHERE Email = ${literal(email)} ORDER BY CreatedDate ASC LIMIT 1`, {}, opts))
   cond {
     is-err(found) => { found }
     is-null(found) => { null }
@@ -233,27 +237,35 @@ find-contact fn (email: Str): Any {
   }
 }
 
-find-account-by-name fn (name: Str): Any {
-  first-or-null(::query/soql(`SELECT Id FROM Account WHERE Name = ${literal(name)} ORDER BY CreatedDate ASC LIMIT 1`))
+find-account-by-name fn
+(name: Str): Any {
+  find-account-by-name(name, {})
+},
+(name: Str, opts: Map): Any {
+  first-or-null(::query/soql(`SELECT Id FROM Account WHERE Name = ${literal(name)} ORDER BY CreatedDate ASC LIMIT 1`, {}, opts))
 }
 
 resolve-account-id
 meta {
     doc: """The `AccountId` to write for a contact: `company-id` when given, else the Account named `company` (created when none exists), else null."""
 }
-fn (fields: Map): Any {
+fn
+(fields: Map): Any {
+  resolve-account-id(fields, {})
+},
+(fields: Map, opts: Map): Any {
   company-id get(fields, "company-id")
   company get(fields, "company")
   cond {
     not(is-blank-value(company-id)) => { company-id }
     is-blank-value(company) => { null }
     => {
-      found find-account-by-name(company)
+      found find-account-by-name(company, opts)
       cond {
         is-err(found) => { found }
         is-some(found) => { found.Id }
         => {
-          created ::sobjects/create-record("Account", {Name: company})
+          created ::sobjects/create-record("Account", {Name: company}, opts)
           cond {
             is-err(created) => { created }
             => { created.id }
@@ -264,37 +276,45 @@ fn (fields: Map): Any {
   }
 }
 
-fetch-contact fn (id: Str): ::crm/Contact {
-  fetched ::sobjects/get-record("Contact", id, CONTACT_FIELDS)
+fetch-contact fn
+(id: Str): ::crm/Contact {
+  fetch-contact(id, {})
+},
+(id: Str, opts: Map): ::crm/Contact {
+  fetched ::sobjects/get-record("Contact", id, CONTACT_FIELDS, opts)
   cond {
     is-err(fetched) => { fetched }
     => { normalize-contact(fetched) }
   }
 }
 
-upsert-contact fn (fields: Map): ::crm/Contact {
-  existing find-contact(fields.email)
+upsert-contact fn
+(fields: Map): ::crm/Contact {
+  upsert-contact(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Contact {
+  existing find-contact(fields.email, opts)
   account-id cond {
     is-err(existing) => { null }
-    => { resolve-account-id(fields) }
+    => { resolve-account-id(fields, opts) }
   }
 
   cond {
     is-err(existing) => { existing }
     is-err(account-id) => { account-id }
     is-null(existing) => {
-      created ::sobjects/create-record("Contact", contact-fields(fields, true, account-id))
+      created ::sobjects/create-record("Contact", contact-fields(fields, true, account-id), opts)
       cond {
         is-err(created) => { created }
-        => { fetch-contact(created.id) }
+        => { fetch-contact(created.id, opts) }
       }
     }
     => {
       changes contact-fields(fields, false, account-id)
-      updated if(is-empty(changes), null, ::sobjects/update-record("Contact", existing.id, changes))
+      updated if(is-empty(changes), null, ::sobjects/update-record("Contact", existing.id, changes, opts))
       cond {
         is-err(updated) => { updated }
-        => { fetch-contact(existing.id) }
+        => { fetch-contact(existing.id, opts) }
       }
     }
   }
@@ -304,9 +324,13 @@ upsert-contact fn (fields: Map): ::crm/Contact {
 // Activities
 // ============================================================================
 
-log-activity fn (contact-id: Str, body: Str, options: Map): ::crm/Activity {
+log-activity fn
+(contact-id: Str, body: Str, options: Map): ::crm/Activity {
+  log-activity(contact-id, body, options, {})
+},
+(contact-id: Str, body: Str, options: Map, opts: Map): ::crm/Activity {
   task build-task-body(contact-id, body, options)
-  created ::sobjects/create-record("Task", task)
+  created ::sobjects/create-record("Task", task, opts)
   cond {
     is-err(created) => { created }
     => {
@@ -322,8 +346,12 @@ log-activity fn (contact-id: Str, body: Str, options: Map): ::crm/Activity {
   }
 }
 
-list-activities fn (contact-id: Str, limit: Int): Vec {
-  out ::query/soql(`SELECT ${join(TASK_FIELDS, ", ")} FROM Task WHERE WhoId = ${literal(contact-id)} ORDER BY CreatedDate DESC LIMIT ${limit}`)
+list-activities fn
+(contact-id: Str, limit: Int): Vec {
+  list-activities(contact-id, limit, {})
+},
+(contact-id: Str, limit: Int, opts: Map): Vec {
+  out ::query/soql(`SELECT ${join(TASK_FIELDS, ", ")} FROM Task WHERE WhoId = ${literal(contact-id)} ORDER BY CreatedDate DESC LIMIT ${limit}`, {}, opts)
   cond {
     is-err(out) => { out }
     => { map(out.records, normalize-activity) }
@@ -334,12 +362,16 @@ list-activities fn (contact-id: Str, limit: Int): Vec {
 // Companies
 // ============================================================================
 
-find-company fn (domain: Str): Any {
+find-company fn
+(domain: Str): Any {
+  find-company(domain, {})
+},
+(domain: Str, opts: Map): Any {
   field domain-field()
   cond {
     is-err(field) => { field }
     => {
-      out ::query/soql(build-company-soql(domain, field))
+      out ::query/soql(build-company-soql(domain, field), {}, opts)
       cond {
         is-err(out) => { out }
         => {
@@ -351,18 +383,26 @@ find-company fn (domain: Str): Any {
   }
 }
 
-fetch-company fn (id: Str, field: Any): ::crm/Company {
-  fetched ::sobjects/get-record("Account", id, account-fields(field))
+fetch-company fn
+(id: Str, field: Any): ::crm/Company {
+  fetch-company(id, field, {})
+},
+(id: Str, field: Any, opts: Map): ::crm/Company {
+  fetched ::sobjects/get-record("Account", id, account-fields(field), opts)
   cond {
     is-err(fetched) => { fetched }
     => { normalize-company(fetched, field) }
   }
 }
 
-upsert-company fn (fields: Map): ::crm/Company {
+upsert-company fn
+(fields: Map): ::crm/Company {
+  upsert-company(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Company {
   domain fields.domain
   field domain-field()
-  existing find-company(domain)
+  existing find-company(domain, opts)
   name get(fields, "name")
   cond {
     is-err(field) => { field }
@@ -370,19 +410,19 @@ upsert-company fn (fields: Map): ::crm/Company {
     is-null(existing) => {
       record filter-vals({Name: or(name, domain), Website: domain}, is-some)
       with-domain if(is-null(field), record, assoc(record, field, domain))
-      created ::sobjects/create-record("Account", with-domain)
+      created ::sobjects/create-record("Account", with-domain, opts)
       cond {
         is-err(created) => { created }
-        => { fetch-company(created.id, field) }
+        => { fetch-company(created.id, field, opts) }
       }
     }
 
     is-blank-value(name) => { existing }
     => {
-      updated ::sobjects/update-record("Account", existing.id, {Name: name})
+      updated ::sobjects/update-record("Account", existing.id, {Name: name}, opts)
       cond {
         is-err(updated) => { updated }
-        => { fetch-company(existing.id, field) }
+        => { fetch-company(existing.id, field, opts) }
       }
     }
   }
@@ -392,36 +432,48 @@ upsert-company fn (fields: Map): ::crm/Company {
 // Deals
 // ============================================================================
 
-fetch-deal fn (id: Str): ::crm/Deal {
-  fetched ::sobjects/get-record("Opportunity", id, DEAL_FIELDS)
+fetch-deal fn
+(id: Str): ::crm/Deal {
+  fetch-deal(id, {})
+},
+(id: Str, opts: Map): ::crm/Deal {
+  fetched ::sobjects/get-record("Opportunity", id, DEAL_FIELDS, opts)
   cond {
     is-err(fetched) => { fetched }
     => { normalize-deal(fetched) }
   }
 }
 
-find-deals fn (criteria: Map): Vec {
-  out ::query/soql(build-deals-soql(criteria))
+find-deals fn
+(criteria: Map): Vec {
+  find-deals(criteria, {})
+},
+(criteria: Map, opts: Map): Vec {
+  out ::query/soql(build-deals-soql(criteria), {}, opts)
   cond {
     is-err(out) => { out }
     => { map(out.records, normalize-deal) }
   }
 }
 
-create-deal fn (fields: Map): ::crm/Deal {
+create-deal fn
+(fields: Map): ::crm/Deal {
+  create-deal(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Deal {
   missing missing-deal-fields(fields)
   cond {
     not(is-empty(missing)) => { err(`crm: a Salesforce Opportunity needs ${join(missing, ", ")}`) }
     => {
-      created ::sobjects/create-record("Opportunity", deal-fields(fields))
+      created ::sobjects/create-record("Opportunity", deal-fields(fields), opts)
       contact-id get(fields, "contact-id")
       cond {
         is-err(created) => { created }
         => {
-          role if(is-blank-value(contact-id), null, ::sobjects/create-record("OpportunityContactRole", {OpportunityId: created.id, ContactId: contact-id}))
+          role if(is-blank-value(contact-id), null, ::sobjects/create-record("OpportunityContactRole", {OpportunityId: created.id, ContactId: contact-id}, opts))
           cond {
             is-err(role) => { role }
-            => { fetch-deal(created.id) }
+            => { fetch-deal(created.id, opts) }
           }
         }
       }
@@ -429,15 +481,23 @@ create-deal fn (fields: Map): ::crm/Deal {
   }
 }
 
-update-deal fn (id: Str, fields: Map): ::crm/Deal {
+update-deal fn
+(id: Str, fields: Map): ::crm/Deal {
+  update-deal(id, fields, {})
+},
+(id: Str, fields: Map, opts: Map): ::crm/Deal {
   changes deal-fields(fields)
-  updated if(is-empty(changes), null, ::sobjects/update-record("Opportunity", id, changes))
+  updated if(is-empty(changes), null, ::sobjects/update-record("Opportunity", id, changes, opts))
   cond {
     is-err(updated) => { updated }
-    => { fetch-deal(id) }
+    => { fetch-deal(id, opts) }
   }
 }
 
-move-stage fn (id: Str, stage: Str): ::crm/Deal {
-  update-deal(id, {stage: stage})
+move-stage fn
+(id: Str, stage: Str): ::crm/Deal {
+  move-stage(id, stage, {})
+},
+(id: Str, stage: Str, opts: Map): ::crm/Deal {
+  update-deal(id, {stage: stage}, opts)
 }

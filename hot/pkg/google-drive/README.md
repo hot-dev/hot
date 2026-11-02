@@ -36,6 +36,18 @@ Set credentials once in Context Variables (any `google-core` flow), or pass them
 
 Every function has an options arity. Drive query parameters use Drive's own names (`q`, `pageSize`, `pageToken`, `fields`, `orderBy`, `driveId`, ...); credential keys (`token`, `refresh-token`, `service-account`, `subject`, `scopes`, `retry`) are handled by `google-core`.
 
+### Per-call credentials
+
+Credentials in `opts` override context for that call only, so one app can act for many users; see the [google-core README](../google-core/README.md#per-call-credentials-multi-tenant) for every key.
+
+```hot
+::files ::google::drive::files
+
+page ::files/list-files({q: "trashed = false", token: "ya29.tenant-access-token"})
+```
+
+Per-call credentials are masked in call records and never written to context. A credential key that is present but blank or null is an error naming the key, never a fallback to context.
+
 ## Quick start
 
 ```hot
@@ -94,11 +106,13 @@ List functions return Drive's resources as Maps (`list-files` returns the raw pa
 |---|---|
 | `provider` | `"google-drive"` |
 | `id`, `name`, `mime-type` | `id`, `name`, `mimeType` |
+| `path` | always null: Drive addresses files by id and has no path |
 | `size` | `size` as an Int (null for Google-native files and folders) |
 | `modified`, `created` | `modifiedTime`, `createdTime` |
 | `parents`, `drive-id`, `web-url` | `parents`, `driveId`, `webViewLink` |
 | `version`, `revision-id` | `version` (use as an etag), `headRevisionId` |
 | `md5`, `sha256` | `md5Checksum`, `sha256Checksum` |
+| `hashes` | a Map with `md5`, `sha1`, `sha256` as Drive gives them (empty for folders and Google-native files) |
 | `is-folder`, `is-google-native`, `is-shortcut`, `shortcut-target-id`, `trashed` | derived |
 | `export-formats` | the MIME types in `exportLinks` |
 | `raw` | the Drive resource |
@@ -238,7 +252,7 @@ fn (request) {
 
 ## Large files
 
-- **Uploads** over 5 MiB (or with `resumable: true`) use a resumable session, sent in 8 MiB chunks (`chunk-size`, rounded down to 256 KiB multiples); a failed chunk is resent once. `start-resumable-upload` + `upload-resumable` give you the session URI to keep; `upload-status` and `resume-upload` continue an interrupted one.
+- **Uploads** over 5 MiB (or with `resumable: true`) use a resumable session, sent in 8 MiB chunks (`chunk-size`, rounded down to 256 KiB multiples). After each chunk, the upload continues from the offset Drive reports it has stored; when a chunk fails, it asks Drive for that offset and carries on from it, once. `start-resumable-upload` + `upload-resumable` give you the session URI to keep. `upload-status` returns the stored offset, and `resume-upload` continues an interrupted upload from it, in this run or a later one, for as long as the session lasts (a week). A session URI must be a Google URL (or under `google.drive.api-root`) unless `opts` has its own credential.
 - **Downloads** larger than one response (`http.max-response-bytes`, 16 MiB by default) switch to Range requests automatically; `download-file-chunked` does it explicitly and `download-range` reads a slice. The whole file is still held in memory.
 - **Exports** cannot be chunked (Drive does not support Range on exports), so a single export must fit in `http.max-response-bytes`.
 
@@ -248,7 +262,6 @@ fn (request) {
 - `delete-file` skips the trash and cannot be undone; `trash-file` is recoverable for 30 days.
 - Sharing to users and groups emails them unless you pass `{sendNotificationEmail: false}`.
 - Service accounts have no Drive storage: uploads to a service account's own Drive fail with `storageQuotaExceeded`. Upload into a shared drive or impersonate a user.
-- Hot 3.0.x's HTTP client reports Drive's `308 Resume Incomplete` as a redirect error. Chunked uploads handle this by assuming each 256 KiB-aligned chunk was stored, but `upload-status` cannot read the stored offset, so `resume-upload` asks you to restart. Uploads that fit in one chunk are unaffected.
 - Errors are `::google::api/HttpError` with Google's `reason` (e.g. `notFound`, `insufficientFilePermissions`, `storageQuotaExceeded`). Nothing is retried with backoff inside a run: check `::google::api/is-retryable(result)` and let a handler or task `retry` policy reschedule (see the [google-core README](../google-core/README.md#retries)).
 
 ## License

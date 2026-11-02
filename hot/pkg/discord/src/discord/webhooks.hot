@@ -8,12 +8,28 @@ meta {
 }
 
 ::api ::discord::api
+::ctx ::hot::ctx
 
 seg ::discord::api/seg
 
 // ============================================================================
 // Webhook management (bot token)
 // ============================================================================
+
+mark-webhook-tokens
+meta {
+    doc: """Mask the `token` of a webhook object, or of each in a Vec, in call records. Returns `value` unchanged. Exposed for testing."""
+}
+fn (value: Any): Any {
+  cond {
+    is-vec(value) => { map(value, mark-webhook-tokens) }
+    and(is-map(value), is-str(get(value, "token"))) => {
+      ::ctx/mark-secret(value.token)
+      value
+    }
+    => { value }
+  }
+}
 
 CreateWebhookRequest type {
   channel_id: Str,
@@ -42,11 +58,15 @@ meta {
     ```
     """
 }
-fn (request: CreateWebhookRequest): Map {
-  ::api/call("POST", `/channels/${seg(request.channel_id)}/webhooks`, {
+fn
+(request: CreateWebhookRequest): Map {
+  create-webhook(request, {})
+},
+(request: CreateWebhookRequest, opts: Map): Map {
+  if-ok(::api/call("POST", `/channels/${seg(request.channel_id)}/webhooks`, {
     body: ::api/body(request, ["channel_id"]),
     reason: request.reason
-  })
+  }, opts), mark-webhook-tokens)
 }
 
 GetChannelWebhooksRequest type {
@@ -57,8 +77,12 @@ get-channel-webhooks
 meta {
     doc: """GET /channels/{channel_id}/webhooks - Webhooks in a channel. Needs MANAGE_WEBHOOKS."""
 }
-fn (request: GetChannelWebhooksRequest): Vec<Map> {
-  ::api/call("GET", `/channels/${seg(request.channel_id)}/webhooks`)
+fn
+(request: GetChannelWebhooksRequest): Vec<Map> {
+  get-channel-webhooks(request, {})
+},
+(request: GetChannelWebhooksRequest, opts: Map): Vec<Map> {
+  if-ok(::api/call("GET", `/channels/${seg(request.channel_id)}/webhooks`, {}, opts), mark-webhook-tokens)
 }
 
 GetGuildWebhooksRequest type {
@@ -69,8 +93,12 @@ get-guild-webhooks
 meta {
     doc: """GET /guilds/{guild_id}/webhooks - Webhooks in a guild. Needs MANAGE_WEBHOOKS."""
 }
-fn (request: GetGuildWebhooksRequest): Vec<Map> {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/webhooks`)
+fn
+(request: GetGuildWebhooksRequest): Vec<Map> {
+  get-guild-webhooks(request, {})
+},
+(request: GetGuildWebhooksRequest, opts: Map): Vec<Map> {
+  if-ok(::api/call("GET", `/guilds/${seg(request.guild_id)}/webhooks`, {}, opts), mark-webhook-tokens)
 }
 
 GetWebhookRequest type {
@@ -81,8 +109,12 @@ get-webhook
 meta {
     doc: """GET /webhooks/{webhook_id} - A webhook by id. Needs MANAGE_WEBHOOKS."""
 }
-fn (request: GetWebhookRequest): Map {
-  ::api/call("GET", `/webhooks/${seg(request.webhook_id)}`)
+fn
+(request: GetWebhookRequest): Map {
+  get-webhook(request, {})
+},
+(request: GetWebhookRequest, opts: Map): Map {
+  if-ok(::api/call("GET", `/webhooks/${seg(request.webhook_id)}`, {}, opts), mark-webhook-tokens)
 }
 
 ModifyWebhookRequest type {
@@ -113,11 +145,15 @@ meta {
     ```
     """
 }
-fn (request: ModifyWebhookRequest): Map {
+fn
+(request: ModifyWebhookRequest): Map {
+  modify-webhook(request, {})
+},
+(request: ModifyWebhookRequest, opts: Map): Map {
   ::api/call("PATCH", `/webhooks/${seg(request.webhook_id)}`, {
     body: ::api/body(request, ["webhook_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 DeleteWebhookRequest type {
@@ -129,8 +165,12 @@ delete-webhook
 meta {
     doc: """DELETE /webhooks/{webhook_id} - Delete a webhook. Needs MANAGE_WEBHOOKS."""
 }
-fn (request: DeleteWebhookRequest): Bool {
-  ::api/call-ok("DELETE", `/webhooks/${seg(request.webhook_id)}`, {reason: request.reason})
+fn
+(request: DeleteWebhookRequest): Bool {
+  delete-webhook(request, {})
+},
+(request: DeleteWebhookRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/webhooks/${seg(request.webhook_id)}`, {reason: request.reason}, opts)
 }
 
 // ============================================================================
@@ -138,7 +178,7 @@ fn (request: DeleteWebhookRequest): Bool {
 // ============================================================================
 
 token-path fn (webhook-id: Str, webhook-token: Str): Str {
-  `/webhooks/${seg(webhook-id)}/${seg(webhook-token)}`
+  `/webhooks/${seg(webhook-id)}/${::api/token-seg(webhook-token)}`
 }
 
 GetWebhookWithTokenRequest type {
@@ -150,8 +190,12 @@ get-webhook-with-token
 meta {
     doc: """GET /webhooks/{webhook_id}/{webhook_token} - A webhook, authenticated by its token (no bot token, no `user` field)."""
 }
-fn (request: GetWebhookWithTokenRequest): Map {
-  ::api/call("GET", token-path(request.webhook_id, request.webhook_token), {auth: false})
+fn
+(request: GetWebhookWithTokenRequest): Map {
+  get-webhook-with-token(request, {})
+},
+(request: GetWebhookWithTokenRequest, opts: Map): Map {
+  ::api/call("GET", token-path(request.webhook_id, request.webhook_token), {auth: false}, opts)
 }
 
 ModifyWebhookWithTokenRequest type {
@@ -166,11 +210,15 @@ modify-webhook-with-token
 meta {
     doc: """PATCH /webhooks/{webhook_id}/{webhook_token} - Rename a webhook or change its avatar using its token. Cannot move channels."""
 }
-fn (request: ModifyWebhookWithTokenRequest): Map {
+fn
+(request: ModifyWebhookWithTokenRequest): Map {
+  modify-webhook-with-token(request, {})
+},
+(request: ModifyWebhookWithTokenRequest, opts: Map): Map {
   ::api/call("PATCH", token-path(request.webhook_id, request.webhook_token), {
     body: ::api/body(request, ["webhook_id", "webhook_token"]),
     auth: false
-  })
+  }, opts)
 }
 
 DeleteWebhookWithTokenRequest type {
@@ -182,8 +230,12 @@ delete-webhook-with-token
 meta {
     doc: """DELETE /webhooks/{webhook_id}/{webhook_token} - Delete a webhook using its token."""
 }
-fn (request: DeleteWebhookWithTokenRequest): Bool {
-  ::api/call-ok("DELETE", token-path(request.webhook_id, request.webhook_token), {auth: false})
+fn
+(request: DeleteWebhookWithTokenRequest): Bool {
+  delete-webhook-with-token(request, {})
+},
+(request: DeleteWebhookWithTokenRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", token-path(request.webhook_id, request.webhook_token), {auth: false}, opts)
 }
 
 ExecuteWebhookRequest type {
@@ -239,7 +291,11 @@ meta {
     ```
     """
 }
-fn (request: ExecuteWebhookRequest): Map? {
+fn
+(request: ExecuteWebhookRequest): Map? {
+  execute-webhook(request, {})
+},
+(request: ExecuteWebhookRequest, opts: Map): Map? {
   files or(request.files, [])
   payload ::api/body(request, ["webhook_id", "webhook_token", "wait", "thread_id", "with_components"])
   final cond {
@@ -252,7 +308,7 @@ fn (request: ExecuteWebhookRequest): Map? {
     body: final,
     files: files,
     auth: false
-  })
+  }, opts)
 }
 
 GetWebhookMessageRequest type {
@@ -266,11 +322,15 @@ get-webhook-message
 meta {
     doc: """GET /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} - A message this webhook sent. Pass `thread_id` for messages in a thread."""
 }
-fn (request: GetWebhookMessageRequest): Map {
+fn
+(request: GetWebhookMessageRequest): Map {
+  get-webhook-message(request, {})
+},
+(request: GetWebhookMessageRequest, opts: Map): Map {
   ::api/call("GET", `${token-path(request.webhook_id, request.webhook_token)}/messages/${seg(request.message_id)}`, {
     query: {thread_id: request.thread_id},
     auth: false
-  })
+  }, opts)
 }
 
 EditWebhookMessageRequest type {
@@ -298,13 +358,17 @@ meta {
     `attachments` is the full list to keep; new `files` are appended.
     """
 }
-fn (request: EditWebhookMessageRequest): Map {
+fn
+(request: EditWebhookMessageRequest): Map {
+  edit-webhook-message(request, {})
+},
+(request: EditWebhookMessageRequest, opts: Map): Map {
   ::api/call("PATCH", `${token-path(request.webhook_id, request.webhook_token)}/messages/${seg(request.message_id)}`, {
     query: {thread_id: request.thread_id, with_components: request.with_components},
     body: ::api/body(request, ["webhook_id", "webhook_token", "message_id", "thread_id", "with_components"]),
     files: or(request.files, []),
     auth: false
-  })
+  }, opts)
 }
 
 DeleteWebhookMessageRequest type {
@@ -318,11 +382,15 @@ delete-webhook-message
 meta {
     doc: """DELETE /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} - Delete a message this webhook sent."""
 }
-fn (request: DeleteWebhookMessageRequest): Bool {
+fn
+(request: DeleteWebhookMessageRequest): Bool {
+  delete-webhook-message(request, {})
+},
+(request: DeleteWebhookMessageRequest, opts: Map): Bool {
   ::api/call-ok("DELETE", `${token-path(request.webhook_id, request.webhook_token)}/messages/${seg(request.message_id)}`, {
     query: {thread_id: request.thread_id},
     auth: false
-  })
+  }, opts)
 }
 
 // ============================================================================
@@ -342,7 +410,7 @@ signed-message fn (timestamp: Str, raw: Str | Bytes): Str | Bytes {
 
 verify-request
 meta {
-    ctx: {"discord.public.key": {required: false}},
+    ctx: {"discord.public.key": {required: false, secret: false}},
     doc: """
     Verify a Discord interaction (or webhook event) request: the Ed25519
     signature in `X-Signature-Ed25519` over `X-Signature-Timestamp` plus

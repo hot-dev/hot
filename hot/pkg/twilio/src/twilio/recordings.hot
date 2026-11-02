@@ -4,7 +4,7 @@
 
 api-request ::twilio::api/request
 account-url ::twilio::api/account-url
-client-from-ctx ::twilio::api/client-from-ctx
+resolve ::twilio::api/resolve
 Client ::twilio::api/Client
 HttpError ::twilio::api/HttpError
 is-ok-response ::hot::http/is-ok-response
@@ -82,7 +82,7 @@ fn (request: ListRecordingsRequest): Str {
 
 list-recordings
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 GET /Accounts/{AccountSid}/Recordings.json - List call and conference recordings, newest first. Filter by `CallSid` to get one call's recordings.
 
@@ -98,11 +98,18 @@ page.recordings  // => [{sid: "RE...", duration: "14", status: "completed", ...}
 }
 fn
 (request: ListRecordingsRequest): ListRecordingsResponse {
-  list-recordings(client-from-ctx(), request)
+  list-recordings(request, {})
+},
+(request: ListRecordingsRequest, opts: Map): ListRecordingsResponse {
+  resolve(opts) |> if-ok((client) { list-recordings(client, request) })
 },
 (client: Client, request: ListRecordingsRequest): ListRecordingsResponse {
   response api-request(client, "GET", `${account-url(client)}/Recordings.json${list-recordings-query(request)}`, {}, {})
-  if(is-ok-response(response), ListRecordingsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListRecordingsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetRecordingRequest type {
@@ -111,16 +118,23 @@ GetRecordingRequest type {
 
 get-recording
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """GET /Accounts/{AccountSid}/Recordings/{Sid}.json - Get a recording's metadata (status, duration, source, price)."""
 }
 fn
 (request: GetRecordingRequest): Recording {
-  get-recording(client-from-ctx(), request)
+  get-recording(request, {})
+},
+(request: GetRecordingRequest, opts: Map): Recording {
+  resolve(opts) |> if-ok((client) { get-recording(client, request) })
 },
 (client: Client, request: GetRecordingRequest): Recording {
   response api-request(client, "GET", `${account-url(client)}/Recordings/${::uri/encode(request.sid)}.json`, {}, {})
-  if(is-ok-response(response), Recording(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Recording(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DownloadRecordingRequest
@@ -143,7 +157,7 @@ fn (client: Client, request: DownloadRecordingRequest): Str {
 
 download-recording
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 GET /Accounts/{AccountSid}/Recordings/{Sid}.mp3|.wav - Download the recording audio as `Bytes`. Authenticated, so it works with HTTP Basic auth for media enabled.
 
@@ -159,11 +173,18 @@ audio ::recordings/download-recording(::recordings/DownloadRecordingRequest({sid
 }
 fn
 (request: DownloadRecordingRequest): Bytes {
-  download-recording(client-from-ctx(), request)
+  download-recording(request, {})
+},
+(request: DownloadRecordingRequest, opts: Map): Bytes {
+  resolve(opts) |> if-ok((client) { download-recording(client, request) })
 },
 (client: Client, request: DownloadRecordingRequest): Bytes {
   response api-request(client, "GET", recording-media-url(client, request), {}, {})
-  if(is-ok-response(response), response.body-bytes, err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body-bytes }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteRecordingRequest type {
@@ -172,12 +193,15 @@ DeleteRecordingRequest type {
 
 delete-recording
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """DELETE /Accounts/{AccountSid}/Recordings/{Sid}.json - Delete a recording and its media. Permanent."""
 }
 fn
 (request: DeleteRecordingRequest): Bool {
-  delete-recording(client-from-ctx(), request)
+  delete-recording(request, {})
+},
+(request: DeleteRecordingRequest, opts: Map): Bool {
+  resolve(opts) |> if-ok((client) { delete-recording(client, request) })
 },
 (client: Client, request: DeleteRecordingRequest): Bool {
   ::twilio::api/delete-request(client, `${account-url(client)}/Recordings/${::uri/encode(request.sid)}.json`)

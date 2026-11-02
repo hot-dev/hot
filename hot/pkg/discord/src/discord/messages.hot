@@ -43,10 +43,14 @@ meta {
     ```
     """
 }
-fn (request: GetChannelMessagesRequest): Vec<Map> {
+fn
+(request: GetChannelMessagesRequest): Vec<Map> {
+  get-channel-messages(request, {})
+},
+(request: GetChannelMessagesRequest, opts: Map): Vec<Map> {
   ::api/call("GET", `/channels/${seg(request.channel_id)}/messages`, {
     query: {around: request.around, before: request.before, after: request.after, limit: request.limit}
-  })
+  }, opts)
 }
 
 get-message-history
@@ -68,13 +72,16 @@ fn
   get-message-history(channel-id, max-items, null)
 },
 (channel-id: Str, max-items: Int, before: Str?): Vec<Map> {
+  get-message-history(channel-id, max-items, before, {})
+},
+(channel-id: Str, max-items: Int, before: Str?, opts: Map): Vec<Map> {
   ::api/paginate(
     (cursor) {
       get-channel-messages(GetChannelMessagesRequest({
         channel_id: channel-id,
         before: or(cursor, before),
         limit: min(100, max-items)
-      }))
+      }), opts)
     },
     (page) { last(page).id },
     min(100, max-items),
@@ -91,8 +98,12 @@ get-message
 meta {
     doc: """GET /channels/{channel_id}/messages/{message_id} - One message by id."""
 }
-fn (request: GetMessageRequest): Map {
-  ::api/call("GET", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}`)
+fn
+(request: GetMessageRequest): Map {
+  get-message(request, {})
+},
+(request: GetMessageRequest, opts: Map): Map {
+  ::api/call("GET", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}`, {}, opts)
 }
 
 // ============================================================================
@@ -147,7 +158,11 @@ meta {
     ```
     """
 }
-fn (request: CreateMessageRequest): Map {
+fn
+(request: CreateMessageRequest): Map {
+  create-message(request, {})
+},
+(request: CreateMessageRequest, opts: Map): Map {
   files or(request.files, [])
   payload ::api/body(request, ["channel_id"])
   final cond {
@@ -155,7 +170,7 @@ fn (request: CreateMessageRequest): Map {
     => { payload }
   }
 
-  ::api/call("POST", `/channels/${seg(request.channel_id)}/messages`, {body: final, files: files})
+  ::api/call("POST", `/channels/${seg(request.channel_id)}/messages`, {body: final, files: files}, opts)
 }
 
 EditMessageRequest type {
@@ -196,11 +211,15 @@ meta {
     ```
     """
 }
-fn (request: EditMessageRequest): Map {
+fn
+(request: EditMessageRequest): Map {
+  edit-message(request, {})
+},
+(request: EditMessageRequest, opts: Map): Map {
   ::api/call("PATCH", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}`, {
     body: ::api/body(request, ["channel_id", "message_id"]),
     files: or(request.files, [])
-  })
+  }, opts)
 }
 
 DeleteMessageRequest type {
@@ -212,8 +231,12 @@ delete-message
 meta {
     doc: """DELETE /channels/{channel_id}/messages/{message_id} - Delete a message. Deleting another user's message needs MANAGE_MESSAGES."""
 }
-fn (request: DeleteMessageRequest): Bool {
-  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}`)
+fn
+(request: DeleteMessageRequest): Bool {
+  delete-message(request, {})
+},
+(request: DeleteMessageRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}`, {}, opts)
 }
 
 BulkDeleteMessagesRequest type {
@@ -226,11 +249,15 @@ bulk-delete-messages
 meta {
     doc: """POST /channels/{channel_id}/messages/bulk-delete - Delete 2-100 messages at once. Messages older than 14 days are rejected. Needs MANAGE_MESSAGES. `reason` goes to the audit log."""
 }
-fn (request: BulkDeleteMessagesRequest): Bool {
+fn
+(request: BulkDeleteMessagesRequest): Bool {
+  bulk-delete-messages(request, {})
+},
+(request: BulkDeleteMessagesRequest, opts: Map): Bool {
   ::api/call-ok("POST", `/channels/${seg(request.channel_id)}/messages/bulk-delete`, {
     body: {messages: request.messages},
     reason: request.reason
-  })
+  }, opts)
 }
 
 CrosspostMessageRequest type {
@@ -242,8 +269,12 @@ crosspost-message
 meta {
     doc: """POST /channels/{channel_id}/messages/{message_id}/crosspost - Publish a message in an Announcement channel to every following channel."""
 }
-fn (request: CrosspostMessageRequest): Map {
-  ::api/call("POST", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}/crosspost`)
+fn
+(request: CrosspostMessageRequest): Map {
+  crosspost-message(request, {})
+},
+(request: CrosspostMessageRequest, opts: Map): Map {
+  ::api/call("POST", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}/crosspost`, {}, opts)
 }
 
 // ============================================================================
@@ -280,8 +311,12 @@ meta {
     ```
     """
 }
-fn (request: CreateReactionRequest): Bool {
-  ::api/call-ok("PUT", `${reaction-path(request.channel_id, request.message_id, request.emoji)}/@me`)
+fn
+(request: CreateReactionRequest): Bool {
+  create-reaction(request, {})
+},
+(request: CreateReactionRequest, opts: Map): Bool {
+  ::api/call-ok("PUT", `${reaction-path(request.channel_id, request.message_id, request.emoji)}/@me`, {}, opts)
 }
 
 DeleteOwnReactionRequest type {
@@ -294,8 +329,12 @@ delete-own-reaction
 meta {
     doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me - Remove the bot's own reaction."""
 }
-fn (request: DeleteOwnReactionRequest): Bool {
-  ::api/call-ok("DELETE", `${reaction-path(request.channel_id, request.message_id, request.emoji)}/@me`)
+fn
+(request: DeleteOwnReactionRequest): Bool {
+  delete-own-reaction(request, {})
+},
+(request: DeleteOwnReactionRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `${reaction-path(request.channel_id, request.message_id, request.emoji)}/@me`, {}, opts)
 }
 
 DeleteUserReactionRequest type {
@@ -309,8 +348,12 @@ delete-user-reaction
 meta {
     doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/{user_id} - Remove another user's reaction. Needs MANAGE_MESSAGES."""
 }
-fn (request: DeleteUserReactionRequest): Bool {
-  ::api/call-ok("DELETE", `${reaction-path(request.channel_id, request.message_id, request.emoji)}/${seg(request.user_id)}`)
+fn
+(request: DeleteUserReactionRequest): Bool {
+  delete-user-reaction(request, {})
+},
+(request: DeleteUserReactionRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `${reaction-path(request.channel_id, request.message_id, request.emoji)}/${seg(request.user_id)}`, {}, opts)
 }
 
 GetReactionsRequest type {
@@ -326,10 +369,14 @@ get-reactions
 meta {
     doc: """GET /channels/{channel_id}/messages/{message_id}/reactions/{emoji} - Users who reacted with `emoji` (up to `limit`, 1-100). `type` 0 = normal, 1 = super reactions. Page with `after` (a user id)."""
 }
-fn (request: GetReactionsRequest): Vec<Map> {
+fn
+(request: GetReactionsRequest): Vec<Map> {
+  get-reactions(request, {})
+},
+(request: GetReactionsRequest, opts: Map): Vec<Map> {
   ::api/call("GET", reaction-path(request.channel_id, request.message_id, request.emoji), {
     query: {type: request.type, after: request.after, limit: request.limit}
-  })
+  }, opts)
 }
 
 DeleteAllReactionsRequest type {
@@ -341,8 +388,12 @@ delete-all-reactions
 meta {
     doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions - Remove every reaction from a message. Needs MANAGE_MESSAGES."""
 }
-fn (request: DeleteAllReactionsRequest): Bool {
-  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}/reactions`)
+fn
+(request: DeleteAllReactionsRequest): Bool {
+  delete-all-reactions(request, {})
+},
+(request: DeleteAllReactionsRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}/reactions`, {}, opts)
 }
 
 DeleteAllReactionsForEmojiRequest type {
@@ -355,8 +406,12 @@ delete-all-reactions-for-emoji
 meta {
     doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji} - Remove every reaction of one emoji. Needs MANAGE_MESSAGES."""
 }
-fn (request: DeleteAllReactionsForEmojiRequest): Bool {
-  ::api/call-ok("DELETE", reaction-path(request.channel_id, request.message_id, request.emoji))
+fn
+(request: DeleteAllReactionsForEmojiRequest): Bool {
+  delete-all-reactions-for-emoji(request, {})
+},
+(request: DeleteAllReactionsForEmojiRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", reaction-path(request.channel_id, request.message_id, request.emoji), {}, opts)
 }
 
 // ============================================================================
@@ -390,19 +445,27 @@ meta {
     ```
     """
 }
-fn (request: GetChannelPinsRequest): Map {
+fn
+(request: GetChannelPinsRequest): Map {
+  get-channel-pins(request, {})
+},
+(request: GetChannelPinsRequest, opts: Map): Map {
   ::api/call("GET", `/channels/${seg(request.channel_id)}/messages/pins`, {
     query: {before: request.before, limit: request.limit}
-  })
+  }, opts)
 }
 
-get-all-pins-loop fn (channel-id: Str, max-items: Int, before: Str?, acc: Vec): Vec<Map> {
-  page get-channel-pins(GetChannelPinsRequest({channel_id: channel-id, before: before, limit: 50}))
+get-all-pins-loop fn
+(channel-id: Str, max-items: Int, before: Str?, acc: Vec): Vec<Map> {
+  get-all-pins-loop(channel-id, max-items, before, acc, {})
+},
+(channel-id: Str, max-items: Int, before: Str?, acc: Vec, opts: Map): Vec<Map> {
+  page get-channel-pins(GetChannelPinsRequest({channel_id: channel-id, before: before, limit: 50}), opts)
   all concat(acc, page.items)
   cond {
     or(not(page.has_more), is-empty(page.items)) => { slice(all, 0, min(length(all), max-items)) }
     gte(length(all), max-items) => { slice(all, 0, max-items) }
-    => { get-all-pins-loop(channel-id, max-items, last(page.items).pinned_at, all) }
+    => { get-all-pins-loop(channel-id, max-items, last(page.items).pinned_at, all, opts) }
   }
 }
 
@@ -412,10 +475,16 @@ meta {
 }
 fn
 (channel-id: Str): Vec<Map> {
-  get-all-pins-loop(channel-id, 1000, null, [])
+  get-all-pins(channel-id, {})
+},
+(channel-id: Str, opts: Map): Vec<Map> {
+  get-all-pins-loop(channel-id, 1000, null, [], opts)
 },
 (channel-id: Str, max-items: Int): Vec<Map> {
-  get-all-pins-loop(channel-id, max-items, null, [])
+  get-all-pins(channel-id, max-items, {})
+},
+(channel-id: Str, max-items: Int, opts: Map): Vec<Map> {
+  get-all-pins-loop(channel-id, max-items, null, [], opts)
 }
 
 PinMessageRequest type {
@@ -428,8 +497,12 @@ pin-message
 meta {
     doc: """PUT /channels/{channel_id}/messages/pins/{message_id} - Pin a message. Needs PIN_MESSAGES. `reason` goes to the audit log."""
 }
-fn (request: PinMessageRequest): Bool {
-  ::api/call-ok("PUT", `/channels/${seg(request.channel_id)}/messages/pins/${seg(request.message_id)}`, {reason: request.reason})
+fn
+(request: PinMessageRequest): Bool {
+  pin-message(request, {})
+},
+(request: PinMessageRequest, opts: Map): Bool {
+  ::api/call-ok("PUT", `/channels/${seg(request.channel_id)}/messages/pins/${seg(request.message_id)}`, {reason: request.reason}, opts)
 }
 
 UnpinMessageRequest type {
@@ -442,6 +515,10 @@ unpin-message
 meta {
     doc: """DELETE /channels/{channel_id}/messages/pins/{message_id} - Unpin a message. Needs PIN_MESSAGES. `reason` goes to the audit log."""
 }
-fn (request: UnpinMessageRequest): Bool {
-  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/messages/pins/${seg(request.message_id)}`, {reason: request.reason})
+fn
+(request: UnpinMessageRequest): Bool {
+  unpin-message(request, {})
+},
+(request: UnpinMessageRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/messages/pins/${seg(request.message_id)}`, {reason: request.reason}, opts)
 }

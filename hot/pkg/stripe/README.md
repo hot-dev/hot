@@ -14,7 +14,7 @@ Add this to the `deps` in your `hot.hot` file:
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `stripe.api.key` | yes | Secret or restricted key: `sk_test_...` / `rk_test_...` in test mode, `sk_live_...` / `rk_live_...` in live mode |
+| `stripe.api.key` | yes, unless passed per call | Secret or restricted key: `sk_test_...` / `rk_test_...` in test mode, `sk_live_...` / `rk_live_...` in live mode |
 | `stripe.webhook.secret` | for webhooks | The endpoint's signing secret (`whsec_...`), used by `::stripe::webhooks/verify-request` and `construct-event` |
 | `stripe.api.version` | no | Override the pinned `Stripe-Version` (default `::stripe/API_VERSION`, `2026-10-28.endive`) |
 
@@ -144,13 +144,14 @@ Request types mirror Stripe's parameter names (`CreateSubscriptionRequest({custo
 
 ### Request options
 
-Every write function takes an optional last argument `::stripe::api/RequestOptions`:
+Every write function takes an optional last argument: a `::stripe::api/RequestOptions`, or the same options as a Map (see [Per-call credentials](#per-call-credentials)).
 
-| Field | Header | Use |
-|---|---|---|
-| `idempotency_key` | `Idempotency-Key` | Safe retries of creates, confirms, captures, refunds, and invoice payments: Stripe replays the first result for 24 hours |
-| `stripe_account` | `Stripe-Account` | Act on a Connect connected account |
-| `stripe_version` | `Stripe-Version` | Use a different API version for this one call |
+| Field | Map key | Header | Use |
+|---|---|---|---|
+| `idempotency_key` | `idempotency-key` | `Idempotency-Key` | Safe retries of creates, confirms, captures, refunds, and invoice payments: Stripe replays the first result for 24 hours |
+| `stripe_account` | `stripe-account` | `Stripe-Account` | Act on a Connect connected account |
+| `stripe_version` | `api-version` | `Stripe-Version` | Use a different API version for this one call |
+| `api_key` | `api-key` | `Authorization` | Use another Stripe account's key for this one call |
 
 ### Anything else
 
@@ -162,9 +163,38 @@ clock ::stripe::api/call("POST", "/v1/test_helpers/test_clocks", {frozen_time: 1
 ::stripe::api/call("DELETE", `/v1/test_helpers/test_clocks/${clock.id}`)
 ```
 
+## Per-call credentials
+
+Every function that calls Stripe takes an optional last argument, so one run can act for many Stripe accounts and parallel flows don't share credentials. Per-call credentials are masked in call records, and nothing from them is written to ctx.
+
+| Key | Effect |
+|---|---|
+| `api-key` | The secret or restricted key for this call, instead of `stripe.api.key` |
+| `api-version` | The `Stripe-Version` for this call, instead of `stripe.api.version` |
+| `stripe-account` | The connected account to act for |
+| `idempotency-key` | The `Idempotency-Key` for this write |
+
+It always comes last. Where a function also takes params or a request, pass `{}` for those.
+
+```hot
+tenant {api-key: "sk_test_tenant_b"}
+
+balance ::stripe::balance/get-balance(tenant)
+customer ::stripe::customers/get-customer("cus_123", {}, tenant)
+page ::stripe::customers/list-customers(::stripe::customers/ListCustomersRequest({limit: 10}), tenant)
+everyone ::stripe::api/list-all("/v1/customers", {}, 1000, tenant)
+
+::stripe::customers/create-customer(
+  ::stripe::customers/CreateCustomerRequest({email: "alice@example.com"}),
+  {...tenant, idempotency-key: "signup-alice"}
+)
+```
+
+An `api-key`, `stripe-account` or `idempotency-key` that is present but blank or null is an error naming the key, never a fallback. A `url` outside `https://api.stripe.com` given to `::stripe::api/request` needs an `api-key` in the call: `stripe.api.key` is only ever sent to Stripe. `::stripe::api/resolve(options)` is the one place this is decided.
+
 ## Webhooks
 
-`verify-request` checks the `Stripe-Signature` HMAC-SHA256 over the raw request body with a constant-time comparison, accepts any `v1` signature (so secret rolls work), and rejects timestamps more than 300 seconds from now. It fails if `stripe.webhook.secret` is unset, and an empty explicit secret never verifies. `construct-event` verifies and returns the event, or an Err.
+`verify-request` checks the `Stripe-Signature` HMAC-SHA256 over the raw request body with a constant-time comparison, accepts any `v1` signature (so secret rolls work), and rejects timestamps more than 300 seconds from now. It fails if `stripe.webhook.secret` is unset, and an empty explicit secret never verifies. An explicit secret is masked in call records. `construct-event` verifies and returns the event, or an Err.
 
 ```hot
 stripe-webhook

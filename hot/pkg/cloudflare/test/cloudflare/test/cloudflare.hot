@@ -344,7 +344,7 @@ meta ["test"] fn () {
 
 test-turnstile-rejects-empty-token-locally
 meta ["test"] fn () {
-    assert(not(::turnstile/is-valid("", {secret: "1x0000000000000000000000000000000AA"})))
+    assert(not(::turnstile/is-valid("", {secret-key: "1x0000000000000000000000000000000AA"})))
 }
 
 test-turnstile-missing-secret-is-err

@@ -20,8 +20,12 @@ meta {
     ```
     """
 }
-fn (): Map {
-  ::api/call("GET", "/users/@me")
+fn
+(): Map {
+  get-current-user({})
+},
+(opts: Map): Map {
+  ::api/call("GET", "/users/@me", {}, opts)
 }
 
 GetUserRequest type {
@@ -43,8 +47,12 @@ meta {
     ```
     """
 }
-fn (request: GetUserRequest): Map {
-  ::api/call("GET", `/users/${seg(request.user_id)}`)
+fn
+(request: GetUserRequest): Map {
+  get-user(request, {})
+},
+(request: GetUserRequest, opts: Map): Map {
+  ::api/call("GET", `/users/${seg(request.user_id)}`, {}, opts)
 }
 
 ModifyCurrentUserRequest type {
@@ -72,8 +80,12 @@ meta {
     ```
     """
 }
-fn (request: ModifyCurrentUserRequest): Map {
-  ::api/call("PATCH", "/users/@me", {body: ::api/body(request, [])})
+fn
+(request: ModifyCurrentUserRequest): Map {
+  modify-current-user(request, {})
+},
+(request: ModifyCurrentUserRequest, opts: Map): Map {
+  ::api/call("PATCH", "/users/@me", {body: ::api/body(request, [])}, opts)
 }
 
 GetCurrentUserGuildsRequest type {
@@ -93,7 +105,11 @@ meta {
     `shard`.
     """
 }
-fn (request: GetCurrentUserGuildsRequest): Vec<Map> {
+fn
+(request: GetCurrentUserGuildsRequest): Vec<Map> {
+  get-current-user-guilds(request, {})
+},
+(request: GetCurrentUserGuildsRequest, opts: Map): Vec<Map> {
   ::api/call("GET", "/users/@me/guilds", {
     query: {
       before: request.before,
@@ -102,7 +118,7 @@ fn (request: GetCurrentUserGuildsRequest): Vec<Map> {
       with_counts: request.with_counts,
       shard: request.shard
     }
-  })
+  }, opts)
 }
 
 get-all-current-user-guilds
@@ -114,8 +130,11 @@ fn
   get-all-current-user-guilds(1000)
 },
 (max-items: Int): Vec<Map> {
+  get-all-current-user-guilds(max-items, {})
+},
+(max-items: Int, opts: Map): Vec<Map> {
   ::api/paginate(
-    (after) { get-current-user-guilds(GetCurrentUserGuildsRequest({after: after, limit: 200})) },
+    (after) { get-current-user-guilds(GetCurrentUserGuildsRequest({after: after, limit: 200}), opts) },
     (page) { last(page).id },
     200,
     max-items
@@ -130,8 +149,12 @@ get-current-user-guild-member
 meta {
     doc: """GET /users/@me/guilds/{guild_id}/member - The current user's member object in a guild. Needs the `guilds.members.read` OAuth2 scope (user tokens); bots should use `::discord::guilds/get-guild-member`."""
 }
-fn (request: GetCurrentUserGuildMemberRequest): Map {
-  ::api/call("GET", `/users/@me/guilds/${seg(request.guild_id)}/member`)
+fn
+(request: GetCurrentUserGuildMemberRequest): Map {
+  get-current-user-guild-member(request, {})
+},
+(request: GetCurrentUserGuildMemberRequest, opts: Map): Map {
+  ::api/call("GET", `/users/@me/guilds/${seg(request.guild_id)}/member`, {}, opts)
 }
 
 LeaveGuildRequest type {
@@ -142,8 +165,12 @@ leave-guild
 meta {
     doc: """DELETE /users/@me/guilds/{guild_id} - Make the bot leave a guild."""
 }
-fn (request: LeaveGuildRequest): Bool {
-  ::api/call-ok("DELETE", `/users/@me/guilds/${seg(request.guild_id)}`)
+fn
+(request: LeaveGuildRequest): Bool {
+  leave-guild(request, {})
+},
+(request: LeaveGuildRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/users/@me/guilds/${seg(request.guild_id)}`, {}, opts)
 }
 
 CreateDMRequest type {
@@ -167,14 +194,22 @@ meta {
     ```
     """
 }
-fn (request: CreateDMRequest): Map {
-  ::api/call("POST", "/users/@me/channels", {body: {recipient_id: request.recipient_id}})
+fn
+(request: CreateDMRequest): Map {
+  create-dm(request, {})
+},
+(request: CreateDMRequest, opts: Map): Map {
+  ::api/call("POST", "/users/@me/channels", {body: {recipient_id: request.recipient_id}}, opts)
 }
 
 get-current-user-connections
 meta {
     doc: """GET /users/@me/connections - The current user's connected accounts. Needs a user OAuth2 token with the `connections` scope; bot tokens are rejected."""
 }
-fn (): Vec<Map> {
-  ::api/call("GET", "/users/@me/connections")
+fn
+(): Vec<Map> {
+  get-current-user-connections({})
+},
+(opts: Map): Vec<Map> {
+  ::api/call("GET", "/users/@me/connections", {}, opts)
 }
