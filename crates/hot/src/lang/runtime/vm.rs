@@ -7605,10 +7605,8 @@ impl VirtualMachine {
                     self.instruction_pointer,
                 ));
             };
-            *arg = self.execute_function_call_by_qualified_name(
-                &impl_name,
-                std::slice::from_ref(arg),
-            )?;
+            *arg = self
+                .execute_function_call_by_qualified_name(&impl_name, std::slice::from_ref(arg))?;
         }
         Ok(args)
     }
