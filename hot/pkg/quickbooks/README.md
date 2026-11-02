@@ -158,7 +158,7 @@ Paging: `query-page` and `query-all` add `STARTPOSITION`/`MAXRESULTS` (1000 per 
 - **API metering.** Under the Intuit App Partner Program, calls are classed as Core (writes such as creating invoices; free and unmetered) or CorePlus (most reads: queries, reads, reports, CompanyInfo), which are metered. The free Builder tier includes 500,000 CorePlus credits a month and blocks CorePlus calls beyond that; paid tiers (Silver, Gold, Platinum) raise the allowance and add Premium APIs. Prefer CDC and narrow `where` clauses over repeated full queries.
 - **Sandbox.** Sandbox companies are free and come with sample data. Set `quickbooks.environment` to `sandbox`; sandbox tokens and realm ids do not work against production.
 - **Payments.** Card and ACH processing (the QuickBooks Payments API, scope `com.intuit.quickbooks.payment`) is a separate API not covered here; `Payment` entities here record payments against invoices.
-- **Data handling.** Customer, vendor and employee records hold personal data, and payment records may hold bank details. Tokens are cached only as run secrets, keeper entries live in your Hot store (restrict who can read it), and error messages never include tokens or request bodies. Intuit's error `Detail` can echo field values, so treat error messages as account data.
+- **Data handling.** Customer, vendor and employee records hold personal data, and payment records may hold bank details. Tokens are cached only as run secrets, keeper entries are plain text in your Hot store, so anyone who can read the store can read those tokens (restrict who can read it), and error messages never include tokens or request bodies. Intuit's error `Detail` can echo field values, so treat error messages as account data.
 
 ## License
 

@@ -162,7 +162,7 @@ Dates: Xero's JSON dates look like `/Date(1761955200000+0000)/`; `::xero::api/pa
 - **Statuses, not deletes.** Approved invoices are voided (`void-invoice`), drafts deleted by status, contacts archived; payments are removed with `delete-payment` before an invoice can be voided.
 - **Sizes.** Up to 10 attachments of at most 25 MB per record; keep write batches to about 50 records (requests are capped at 3.5 MB).
 - **Payroll, bank feeds, projects, assets and files** are separate Xero APIs not covered here.
-- **Data handling.** Contacts hold personal data, and bank transactions hold account details. Tokens are cached only as run secrets, keeper entries live in your Hot store (restrict who can read it), and error messages never include tokens or request bodies.
+- **Data handling.** Contacts hold personal data, and bank transactions hold account details. Tokens are cached only as run secrets, keeper entries are plain text in your Hot store, so anyone who can read the store can read those tokens (restrict who can read it), and error messages never include tokens or request bodies.
 
 ## License
 
