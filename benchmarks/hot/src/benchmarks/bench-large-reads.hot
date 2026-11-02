@@ -1,0 +1,56 @@
+::benchmarks::large-reads ns
+meta {doc: "Reading a large Map or Vec must cost the same as reading a small one"}
+
+::time ::hot::time
+
+Rec type {
+    k: Str,
+    v: Str
+}
+
+ignore-it fn (coll, i) { i }
+
+big-map fn (n: Int): Map {
+    index-by(map(range(n), (i) { {k: `k-${i}`, v: "some text in the value"} }), %.k)
+}
+
+big-vec fn (n: Int): Vec {
+    map(range(n), (i) { {k: `k-${i}`, v: "some text in the value"} })
+}
+
+big-typed-map fn (n: Int): Map {
+    index-by(map(range(n), (i) { Rec(k: `k-${i}`, v: "some text in the value") }), %.k)
+}
+
+time-it fn (name: Str, n: Int, f: Fn) {
+    iterations 1000
+    start ::time/epoch-nanos(::time/now())
+    done map(range(iterations), (i) { f(i) })
+    end ::time/epoch-nanos(::time/now())
+    per-call div(Dec(sub(end, start)), mul(iterations, 1000))
+    println(`${name} n=${n}: ${round(per-call)}us per call`)
+}
+
+run-size fn (n: Int) {
+    m big-map(n)
+    v big-vec(n)
+    t big-typed-map(n)
+    time-it("Map: pass to a function", n, (i) { ignore-it(m, i) })
+    time-it("Map: get", n, (i) { get(m, "k-0") })
+    time-it("Map: dot access", n, (i) { m.k-0 })
+    time-it("Map: length", n, (i) { length(m) })
+    time-it("Typed Map: pass to a function", n, (i) { ignore-it(t, i) })
+    time-it("Typed Map: get", n, (i) { get(t, "k-0") })
+    time-it("Typed Map: dot access", n, (i) { t.k-0 })
+    time-it("Vec: pass to a function", n, (i) { ignore-it(v, i) })
+    time-it("Vec: index", n, (i) { v[0] })
+    time-it("Vec: length", n, (i) { length(v) })
+}
+
+run-bench fn () {
+    run-size(100)
+    run-size(1000)
+    run-size(10000)
+}
+
+run-bench()

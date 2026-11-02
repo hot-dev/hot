@@ -78,7 +78,7 @@ fn bundle(root: &Path, content: &str) -> Arc<ResourceRegistry> {
     std::fs::create_dir_all(root.join("resources")).unwrap();
     std::fs::write(root.join("resources/tenant.txt"), content).unwrap();
     Arc::new(resource::build_registry_from_manifest(
-        &Val::Vec(vec![hot::val!({"path":"tenant.txt"})]),
+        &Val::vec(vec![hot::val!({"path":"tenant.txt"})]),
         root,
     ))
 }
@@ -112,31 +112,31 @@ fn parallel_and_pmap_workers_inherit_bundle_resource_authority() {
                 let mut vm = vm();
                 assert_eq!(
                     call(&mut vm, "parallel-load"),
-                    Val::Vec(vec![
+                    Val::vec(vec![
                         Val::from(expected),
                         Val::from(expected),
                         Val::Bool(false)
                     ]),
                 );
-                let mapped = Val::Vec(vec![Val::from(expected); 8]);
+                let mapped = Val::vec(vec![Val::from(expected); 8]);
                 assert_eq!(call(&mut vm, "mapped-load"), mapped);
                 assert_eq!(
                     call(&mut vm, "mapped-host"),
-                    Val::Vec(vec![Val::Bool(false); 8])
+                    Val::vec(vec![Val::Bool(false); 8])
                 );
                 assert_eq!(
                     call(&mut vm, "nested-load"),
-                    Val::Vec(vec![mapped.clone(), mapped])
+                    Val::vec(vec![mapped.clone(), mapped])
                 );
                 // Empty bundle scopes still deny host resources in every worker.
                 let _empty = ThreadRegistryGuard::install(Arc::new(ResourceRegistry::default()));
                 assert_eq!(
                     call(&mut vm, "parallel-host"),
-                    Val::Vec(vec![Val::Bool(false); 2])
+                    Val::vec(vec![Val::Bool(false); 2])
                 );
                 assert_eq!(
                     call(&mut vm, "mapped-host"),
-                    Val::Vec(vec![Val::Bool(false); 8])
+                    Val::vec(vec![Val::Bool(false); 8])
                 );
             }));
         }
@@ -151,10 +151,10 @@ fn parallel_and_pmap_workers_inherit_bundle_resource_authority() {
     let mut host_vm = vm();
     assert_eq!(
         call(&mut host_vm, "mapped-host"),
-        Val::Vec(vec![Val::Bool(true); 8])
+        Val::vec(vec![Val::Bool(true); 8])
     );
     assert_eq!(
         call(&mut host_vm, "mapped-load"),
-        Val::Vec(vec![Val::from("host-secret"); 8])
+        Val::vec(vec![Val::from("host-secret"); 8])
     );
 }

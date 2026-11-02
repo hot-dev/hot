@@ -328,12 +328,12 @@ fn self_tail_calls_with_owned_arguments_loop() {
     on_vm_thread(|| {
         let price = Val::Dec(D256::from(5) / D256::from(2));
         let items = |n: usize| {
-            Val::Vec(
+            Val::vec(
                 (0..n)
                     .map(|_| {
                         let mut item = indexmap::IndexMap::new();
                         item.insert(val!("price"), price.clone());
-                        Val::Map(Box::new(item))
+                        Val::map(item)
                     })
                     .collect(),
             )
@@ -381,7 +381,7 @@ fn self_tail_calls_with_owned_arguments_loop() {
                 Ok(Val::Bool(false)),
                 Ok(val!(0)),
                 // An even number of swaps.
-                Ok(Val::Vec(vec![one, two])),
+                Ok(Val::vec(vec![one, two])),
             ]
         );
     });

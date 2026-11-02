@@ -522,7 +522,7 @@ fn collect_callees_from_val(
             }
         }
         Val::Vec(items) => {
-            for item in items {
+            for item in items.iter() {
                 collect_callees_from_val(item, current_ns, aliases, callees);
             }
         }
@@ -600,11 +600,11 @@ mod tests {
                 let config: IndexMap<Val, Val> = [(Val::from("required"), Val::Bool(required))]
                     .into_iter()
                     .collect();
-                (Val::from(k), Val::Map(Box::new(config)))
+                (Val::from(k), Val::map(config))
             })
             .collect();
 
-        let meta_map: IndexMap<Val, Val> = [(Val::from("ctx"), Val::Map(Box::new(ctx_map)))]
+        let meta_map: IndexMap<Val, Val> = [(Val::from("ctx"), Val::map(ctx_map))]
             .into_iter()
             .collect();
 
@@ -613,7 +613,7 @@ mod tests {
             deep_set: None,
             deep_path: None,
             meta: Some(Meta {
-                val: Val::Map(Box::new(meta_map)),
+                val: Val::map(meta_map),
             }),
             type_annotation: None,
             src: None,
@@ -1272,7 +1272,7 @@ mod tests {
             box_map.insert(Val::from("network"), Val::Bool(net));
         }
 
-        let meta_map: IndexMap<Val, Val> = [(Val::from("box"), Val::Map(Box::new(box_map)))]
+        let meta_map: IndexMap<Val, Val> = [(Val::from("box"), Val::map(box_map))]
             .into_iter()
             .collect();
 
@@ -1281,7 +1281,7 @@ mod tests {
             deep_set: None,
             deep_path: None,
             meta: Some(Meta {
-                val: Val::Map(Box::new(meta_map)),
+                val: Val::map(meta_map),
             }),
             type_annotation: None,
             src: None,

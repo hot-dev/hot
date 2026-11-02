@@ -961,7 +961,7 @@ fn insert_modern_mcp_request_context(
         "request-state": call_params.request_state,
     });
     let mcp_val: Val = serde_json::from_value(mcp_context).unwrap_or(Val::Null);
-    request_map.insert(Val::from("mcp"), mcp_val);
+    Arc::make_mut(request_map).insert(Val::from("mcp"), mcp_val);
 }
 
 fn build_json_schema(schema: &JsonValue, field: &str) -> Result<jsonschema::Validator, String> {
@@ -1237,7 +1237,7 @@ fn convert_named_args_to_positional(
     };
 
     if args_map.is_empty() {
-        return Ok(Val::Vec(vec![]));
+        return Ok(Val::vec(vec![]));
     }
 
     // Convert named args to positional Vec in parameter order
@@ -1250,7 +1250,7 @@ fn convert_named_args_to_positional(
         };
         positional_args.push(val);
     }
-    Ok(Val::Vec(positional_args))
+    Ok(Val::vec(positional_args))
 }
 
 /// The queue name that MCP publishes events to.
@@ -2336,7 +2336,7 @@ async fn handle_tools_call_streaming(
                 }
             }
         }
-        None => Val::Vec(vec![]),
+        None => Val::vec(vec![]),
     };
 
     // Build enriched request Val for hot.request ctx injection.
@@ -4551,7 +4551,7 @@ mod tests {
         let bound = convert_named_args_to_positional(&args, &recorded).unwrap();
         assert_eq!(
             bound,
-            Val::Vec(vec![Val::from("Alice"), Val::from("formal")])
+            Val::vec(vec![Val::from("Alice"), Val::from("formal")])
         );
     }
 
@@ -4649,7 +4649,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             bound,
-            Val::Vec(vec![Val::Int(5), Val::from("x"), Val::Int(2)])
+            Val::vec(vec![Val::Int(5), Val::from("x"), Val::Int(2)])
         );
 
         if let hot::db::DatabasePool::Postgres(pool) = &db {
@@ -4685,7 +4685,7 @@ mod tests {
     /// build_call_event_data must produce a map with "fn" key.
     #[test]
     fn test_event_data_fn_key_matches_worker_contract() {
-        let event_data = build_call_event_data("::test/fn", Val::Vec(vec![]), None);
+        let event_data = build_call_event_data("::test/fn", Val::vec(vec![]), None);
         if let Val::Map(map) = &event_data {
             assert!(
                 map.get(&Val::from("fn")).is_some(),
@@ -4702,7 +4702,7 @@ mod tests {
     ///   - Hot: `call-event-handler` reads `event.data.fn` and `event.data.args`
     #[test]
     fn test_build_call_event_data_structure() {
-        let args = Val::Vec(vec![Val::from("Alice")]);
+        let args = Val::vec(vec![Val::from("Alice")]);
         let event_data = build_call_event_data("::hot::hi/greet", args, None);
 
         match &event_data {
@@ -4736,7 +4736,7 @@ mod tests {
     #[test]
     fn test_event_data_fn_extractable_by_worker() {
         let event_data =
-            build_call_event_data("::hot::hi/greet", Val::Vec(vec![Val::from("test")]), None);
+            build_call_event_data("::hot::hi/greet", Val::vec(vec![Val::from("test")]), None);
 
         // Simulate worker's extract_target_function_from_event
         let extracted = match &event_data {

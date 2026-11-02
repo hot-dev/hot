@@ -131,7 +131,7 @@ impl SecretValues {
                 }
             }
             Val::Vec(items) => {
-                for child in items {
+                for child in items.iter() {
                     self.register_hashed(child, hashes);
                 }
             }
@@ -176,7 +176,7 @@ fn collect_values(value: &Val, out: &mut Vec<Vec<u8>>) {
             }
         }
         Val::Vec(items) => {
-            for child in items {
+            for child in items.iter() {
                 collect_values(child, out);
             }
         }
@@ -742,7 +742,7 @@ impl<'a> RecordMask<'a> {
         }
         match value {
             Val::Map(map) => {
-                let masked: indexmap::IndexMap<Val, Val> = map
+                let masked: indexmap::IndexMap<Val, Val> = Arc::unwrap_or_clone(map)
                     .into_iter()
                     .map(|(key, child)| {
                         let credential = matches!(&key, Val::Str(name) if is_credential_field(name))
@@ -755,13 +755,18 @@ impl<'a> RecordMask<'a> {
                         }
                     })
                     .collect();
-                Val::Map(Box::new(masked))
+                Val::map(masked)
             }
             Val::Vec(items) => {
                 if vec_as_bytes(&items).is_some_and(|bytes| self.bytes_hide_something(&bytes)) {
                     return Val::from(MASK);
                 }
-                Val::Vec(items.into_iter().map(|v| self.mask_val(v)).collect())
+                Val::vec(
+                    Arc::unwrap_or_clone(items)
+                        .into_iter()
+                        .map(|v| self.mask_val(v))
+                        .collect(),
+                )
             }
             Val::Str(text) => match self.mask_text(&text) {
                 Cow::Borrowed(_) => Val::Str(text),
@@ -824,16 +829,22 @@ impl<'a> RecordMask<'a> {
             return value;
         };
         match value {
-            Val::Map(map) => Val::Map(Box::new(
-                map.into_iter()
+            Val::Map(map) => Val::map(
+                Arc::unwrap_or_clone(map)
+                    .into_iter()
                     .map(|(key, child)| (self.mask_delivered(key), self.mask_delivered(child)))
                     .collect(),
-            )),
+            ),
             Val::Vec(items) => {
                 if vec_as_bytes(&items).is_some_and(|bytes| self.bytes_hold_secret(&bytes)) {
                     return Val::from(MASK);
                 }
-                Val::Vec(items.into_iter().map(|v| self.mask_delivered(v)).collect())
+                Val::vec(
+                    Arc::unwrap_or_clone(items)
+                        .into_iter()
+                        .map(|v| self.mask_delivered(v))
+                        .collect(),
+                )
             }
             Val::Str(text) => {
                 let masked = then_mask(matcher.mask(&text), |text| {
@@ -1224,6 +1235,33 @@ mod tests {
         );
     }
 
+    // A constructed value (`{$type, $val}`), as a real HTTP response is, masks
+    // like the plain Map it wraps, and keeps its type.
+    #[test]
+    fn masks_fields_inside_a_constructed_value() {
+        let fields = || {
+            let Val::Map(fields) = crate::val!({
+                "status": 200,
+                "headers": {"authorization": "Bearer abc123"},
+                "body": {"password": "hunter2", "note": "kept"},
+            }) else {
+                panic!("a map");
+            };
+            Arc::unwrap_or_clone(fields)
+        };
+        let masked = mask_plain(Val::constructed("::hot::http/HttpResponse", fields()));
+        assert!(masked.is_type("::hot::http/HttpResponse"));
+        assert_eq!(
+            crate::val::as_fields(&masked),
+            &mask_plain(Val::map(fields())),
+            "a tagged response masks as its plain fields do"
+        );
+        let text = masked.to_string();
+        assert!(!text.contains("abc123"), "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(text.contains("kept"), "{text}");
+    }
+
     #[test]
     fn masks_map_keys_that_hold_secrets() {
         let (registry, hashes) = mask_for(&[PLAIN]);
@@ -1322,17 +1360,17 @@ mod tests {
     fn masks_vecs_of_bytes_holding_a_secret() {
         let (registry, hashes) = mask_for(&[PLAIN]);
         let mask = RecordMask::new(&registry, &hashes);
-        let ints = Val::Vec(
+        let ints = Val::vec(
             PLAIN
                 .bytes()
                 .map(|byte| Val::Int(i64::from(byte)))
                 .collect(),
         );
-        let bytes = Val::Vec(PLAIN.bytes().map(Val::Byte).collect());
+        let bytes = Val::vec(PLAIN.bytes().map(Val::Byte).collect());
         assert_eq!(mask.mask_val(ints.clone()), Val::from(MASK));
         assert_eq!(mask.mask_val(bytes), Val::from(MASK));
         assert_eq!(mask.mask_delivered(ints), Val::from(MASK));
-        let numbers = Val::Vec((1..=20).map(Val::Int).collect());
+        let numbers = Val::vec((1..=20).map(Val::Int).collect());
         assert_eq!(mask.mask_val(numbers.clone()), numbers);
     }
 

@@ -110,7 +110,7 @@ pub fn encodings(args: &[Val]) -> HotResult<Val> {
         ));
     }
     let out: Vec<Val> = SUPPORTED_ENCODINGS.iter().map(|s| Val::from(*s)).collect();
-    HotResult::Ok(Val::Vec(out))
+    HotResult::Ok(Val::vec(out))
 }
 
 #[cfg(test)]
