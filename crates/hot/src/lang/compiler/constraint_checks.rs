@@ -1778,8 +1778,8 @@ impl Evaluator<'_, '_> {
             },
             ("is-null", 1) => Val::Bool(matches!(arg(self, 0)?, Val::Null)),
             ("length", 1) => match arg(self, 0)? {
-                // Hot's `length` of a Str counts bytes.
-                Val::Str(s) => Val::Int(s.len() as i64),
+                // Hot's `length` of a Str counts characters.
+                Val::Str(s) => Val::Int(s.chars().count() as i64),
                 Val::Vec(items) => Val::Int(items.len() as i64),
                 _ => return None,
             },

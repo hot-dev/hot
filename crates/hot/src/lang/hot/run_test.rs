@@ -344,6 +344,94 @@ probe("abc")"#;
         }
     }
 
+    /// Lambdas, placeholder lambdas and natives consume an Err as user
+    /// functions do, and each halt names what consumed it.
+    #[test]
+    fn consumed_err_halt_names_lambda_placeholder_and_native() {
+        let cases = [
+            (
+                "probe fn (): Any { f (x) { 1 }\n f(err(\"boom\")) }",
+                "boom (an Err passed to parameter `x` of a lambda;",
+            ),
+            (
+                "probe fn (): Any { map([err(\"boom\")], add(%, 1)) }",
+                "boom (an Err passed to placeholder `%` of a lambda;",
+            ),
+            (
+                "probe fn (): Any { is-null(err(\"boom\")) }",
+                "boom (an Err passed as argument 1 of ::hot::type/is-null, which needs a value;",
+            ),
+            (
+                "probe fn (n: Int): Any { add(n, err(\"boom\")) }",
+                "boom (an Err passed as argument 2 of ::hot::math/add, which needs a value;",
+            ),
+            (
+                "probe fn (): Any { length(err(\"boom\")) }",
+                "boom (an Err passed as argument 1 of ::hot::str/length, which needs a value;",
+            ),
+        ];
+        for (body, expected) in cases {
+            let call = if body.contains("(n: Int)") { "probe(1)" } else { "probe()" };
+            let src = format!("::t ns\n{body}\n{call}");
+            for (mode, conf) in [
+                ("jit", crate::val!({"jit": {"threshold": 1}})),
+                ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+            ] {
+                let error = compile_and_run_with_std_conf(&src, Some(conf))
+                    .expect_err("the Err is consumed");
+                assert!(
+                    error.contains(&format!("Result error: {expected}")),
+                    "{mode}: {error}\n{src}"
+                );
+            }
+        }
+    }
+
+    /// Compiled code halts on a numeric op's Err at the op when every path
+    /// consumes it, so it has to name the consumer the interpreter names.
+    #[test]
+    fn numeric_err_consumed_in_compiled_code_names_its_consumer() {
+        let cases = [
+            (
+                "takes fn (x: Int): Int { x }\nprobe fn (n: Int): Int { takes(add(n, 9223372036854775807)) }",
+                "Integer overflow (an Err passed to parameter `x` of ::t/takes;",
+            ),
+            (
+                "probe fn (n: Int): Int { mul(add(n, 9223372036854775807), 2) }",
+                "Integer overflow (an Err passed as argument 1 of ::hot::math/mul, which needs a value;",
+            ),
+        ];
+        for (body, expected) in cases {
+            let src = format!("::t ns\n{body}\nprobe(0)\nprobe(0)\nprobe(1)");
+            for (mode, conf) in [
+                ("jit", crate::val!({"jit": {"threshold": 1}})),
+                ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+            ] {
+                let error = compile_and_run_with_std_conf(&src, Some(conf))
+                    .expect_err("the overflow is consumed");
+                assert!(
+                    error.contains(&format!("Result error: {expected}")),
+                    "{mode}: {error}\n{src}"
+                );
+            }
+        }
+    }
+
+    /// A lambda bound at top level and called by name receives an Err in a
+    /// `Result` parameter. The by-name call found only functions named `f`,
+    /// not the lambda its dispatch runs, so the argument was consumed.
+    #[test]
+    fn top_level_lambda_with_result_parameter_receives_err() {
+        let src = r#"::t ns
+f (x: Result) { is-err(x) }
+r err("boom")
+[f(err("boom")), f(r), f(ok(1))]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::Vec(vec![Val::Bool(true), Val::Bool(true), Val::Bool(false)]),
+        );
+    }
+
     /// `Name({...})` inside a custom constructor of a field-less `Name type fn`
     /// type reaches the default Map constructor. These types had no default
     /// constructor, so the inner call resolved back to a custom overload and

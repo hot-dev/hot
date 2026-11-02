@@ -26,14 +26,27 @@ use ahash::AHashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NumericErrUse {
-    /// Every path consumes the result before anything else can be observed.
-    Consumed,
+    /// Every path consumes the result before anything else can be observed,
+    /// in the same place, which the halt message names.
+    Consumed(Consumer),
     /// Every path returns the result from the function.
     Returned,
     /// No path reads the result.
     Unread,
     /// The result is used some other way, so it must be a real value.
     Kept,
+}
+
+/// What consumes a result, for the halt message: the interpreter names the
+/// callee and argument an Err is passed to (`consume_err_arg`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Consumer {
+    /// The VM's own arithmetic or comparison, whose halt names no callee.
+    Op,
+    /// Argument `index` of a core function compiled inline.
+    Core(KnownCoreCall, usize),
+    /// Argument `index` of a user function.
+    Function(FunctionId, usize),
 }
 
 /// The Err a compiled numeric op gives, by the message it halts with
@@ -443,11 +456,15 @@ impl ErrPath {
             // The VM's own arithmetic and comparisons halt on an Err operand.
             Instruction::Add { dest, left, right }
             | Instruction::Sub { dest, left, right }
-            | Instruction::Mul { dest, left, right } => {
-                self.operands(scope, *dest, &[*left, *right], Some(NumericErr::Overflow))
-            }
+            | Instruction::Mul { dest, left, right } => self.operands(
+                scope,
+                *dest,
+                &[*left, *right],
+                Some(NumericErr::Overflow),
+                None,
+            ),
             Instruction::Gt { dest, left, right } | Instruction::Lt { dest, left, right } => {
-                self.operands(scope, *dest, &[*left, *right], None)
+                self.operands(scope, *dest, &[*left, *right], None, None)
             }
             _ => Step::Done(Kept),
         }
@@ -471,17 +488,19 @@ impl ErrPath {
         {
             return Step::Done(NumericErrUse::Kept);
         }
-        self.operands(scope, dest, &args, NumericErr::of(core))
+        self.operands(scope, dest, &args, NumericErr::of(core), Some(core))
     }
 
     /// An operation that consumes `operands` in order and writes `dest`,
-    /// which may be its own Err `own`.
+    /// which may be its own Err `own`: the core function `core`, or else the
+    /// VM's own operator.
     fn operands(
         &mut self,
         scope: &ErrUseScope<'_>,
         dest: u32,
         operands: &[u32],
         own: Option<NumericErr>,
+        core: Option<KnownCoreCall>,
     ) -> Step {
         match operands.iter().position(|reg| self.holds_result(*reg)) {
             Some(first) => {
@@ -492,7 +511,10 @@ impl ErrPath {
                 {
                     return Step::Done(NumericErrUse::Kept);
                 }
-                Step::Done(NumericErrUse::Consumed)
+                Step::Done(NumericErrUse::Consumed(match core {
+                    Some(core) => Consumer::Core(core, first),
+                    None => Consumer::Op,
+                }))
             }
             None => {
                 // It can't run code, and can halt only as the result's Err
@@ -535,7 +557,7 @@ impl ErrPath {
         Step::Done(if earlier_may_halt {
             NumericErrUse::Kept
         } else {
-            NumericErrUse::Consumed
+            NumericErrUse::Consumed(Consumer::Function(callee, first))
         })
     }
 }
@@ -752,7 +774,10 @@ mod tests {
             call(5, 4, 2, 2),
             Instruction::Return { value: 5 },
         ];
-        assert_eq!(use_of(&program, rest, &[]), NumericErrUse::Consumed);
+        assert!(matches!(
+            use_of(&program, rest, &[]),
+            NumericErrUse::Consumed(_)
+        ));
     }
 
     #[test]
@@ -766,7 +791,10 @@ mod tests {
             Instruction::Return { value: 5 },
         ];
         assert_eq!(use_of(&program, rest.clone(), &[7]), NumericErrUse::Kept);
-        assert_eq!(use_of(&program, rest, &[]), NumericErrUse::Consumed);
+        assert!(matches!(
+            use_of(&program, rest, &[]),
+            NumericErrUse::Consumed(_)
+        ));
     }
 
     #[test]
@@ -784,7 +812,10 @@ mod tests {
             call(5, 4, 0, 1),
             Instruction::Return { value: 5 },
         ];
-        assert_eq!(use_of(&program, rest, &[]), NumericErrUse::Consumed);
+        assert!(matches!(
+            use_of(&program, rest, &[]),
+            NumericErrUse::Consumed(_)
+        ));
     }
 
     #[test]
@@ -940,11 +971,12 @@ mod tests {
         };
         assert_eq!(numeric_err_use(&scope, op, 0), NumericErrUse::Returned);
         // In an inlined lazy argument, returning it is the call's use.
+        let consumed = NumericErrUse::Consumed(Consumer::Function(0, 0));
         let scope = ErrUseScope {
-            returned: NumericErrUse::Consumed,
+            returned: consumed,
             ..scope
         };
-        assert_eq!(numeric_err_use(&scope, op, 0), NumericErrUse::Consumed);
+        assert_eq!(numeric_err_use(&scope, op, 0), consumed);
     }
 
     #[test]
@@ -985,7 +1017,10 @@ mod tests {
             call(12, 4, 10, 2),
             Instruction::Return { value: 12 },
         ];
-        assert_eq!(use_of_core_op(&program, MUL, rest), NumericErrUse::Consumed);
+        assert!(matches!(
+            use_of_core_op(&program, MUL, rest),
+            NumericErrUse::Consumed(_)
+        ));
     }
 
     #[test]
