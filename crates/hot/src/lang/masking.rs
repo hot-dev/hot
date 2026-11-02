@@ -597,7 +597,7 @@ const MIN_BYTE_RUN_LEN: usize = 15;
 
 fn decode_byte_run(run: &str) -> Vec<u8> {
     run.split(',')
-        .filter_map(|number| number.trim().parse().ok())
+        .filter_map(|number| number.trim().parse::<u8>().ok())
         .collect()
 }
 
