@@ -9,6 +9,7 @@
 use crate::db::{DatabasePool, DatabaseScope, current_database_scope};
 use crate::lang::emitter::postgres_safety::{sanitize_json_for_jsonb, sanitize_text_for_postgres};
 use crate::lang::event::ExecutionContext;
+use crate::lang::masking::RecordMask;
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use sqlx::Sqlite;
@@ -274,6 +275,11 @@ pub enum DatabaseWrite {
         stop_time: Option<chrono::DateTime<chrono::Utc>>,
         duration_us: Option<i64>,
     },
+    /// Mask a run's written calls again, after their writes: it registered a
+    /// secret they may hold.
+    RemaskCalls {
+        execution_context: Box<ExecutionContext>,
+    },
 }
 
 impl DatabaseWrite {
@@ -284,7 +290,8 @@ impl DatabaseWrite {
             } => execution_context.run_id,
             DatabaseWrite::Call {
                 execution_context, ..
-            } => execution_context.run_id,
+            }
+            | DatabaseWrite::RemaskCalls { execution_context } => execution_context.run_id,
             DatabaseWrite::RunStop { run_id, .. }
             | DatabaseWrite::RunFail { run_id, .. }
             | DatabaseWrite::RunCancel { run_id, .. }
@@ -292,6 +299,20 @@ impl DatabaseWrite {
         }
     }
 }
+
+/// How long to wait before each further try at masking a run's written calls.
+#[cfg(not(test))]
+const REMASK_RETRY_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(4),
+];
+#[cfg(test)]
+const REMASK_RETRY_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(200),
+    std::time::Duration::from_millis(400),
+];
 
 struct ScopedWrite {
     write: DatabaseWrite,
@@ -564,7 +585,8 @@ impl DatabaseWriter {
             } => Some(execution_context),
             DatabaseWrite::Call {
                 execution_context, ..
-            } => Some(execution_context.as_ref()),
+            }
+            | DatabaseWrite::RemaskCalls { execution_context } => Some(execution_context.as_ref()),
             _ => None,
         };
         let provided_scope = context
@@ -806,6 +828,12 @@ impl DatabaseWriter {
                 (pool, None) => pool.clone(),
                 (None, Some(_)) => None,
             };
+            let remasks: Vec<DatabaseWrite> = batch
+                .extract_if(.., |write| {
+                    matches!(write, DatabaseWrite::RemaskCalls { .. })
+                })
+                .collect();
+            let remask_pool = scoped_pool.clone();
             let scoped_db = Arc::new(RwLock::new(scoped_pool));
             let run_ids: Vec<_> = batch.iter().map(DatabaseWrite::run_id).collect();
             if !Self::process_scoped_batch(
@@ -821,6 +849,147 @@ impl DatabaseWriter {
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .extend(run_ids.into_iter().map(|id| (id, Instant::now())));
+            }
+            for write in remasks {
+                let DatabaseWrite::RemaskCalls { execution_context } = write else {
+                    continue;
+                };
+                let Some(pool) = &remask_pool else { continue };
+                if let Err(error) = Self::remask_calls_retrying(pool, &execution_context).await {
+                    tracing::error!(
+                        run_id = %execution_context.run_id,
+                        "DatabaseWriter: Masking a run's written calls failed: {error}"
+                    );
+                    failed_runs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .insert(execution_context.run_id, Instant::now());
+                }
+            }
+        }
+    }
+
+    /// Mask a run's written calls, through a brief database failure: nothing
+    /// asks for this pass again, and once the run's process is gone nothing can.
+    /// A failure holds up only this shard, whose other writes are likely failing
+    /// too.
+    async fn remask_calls_retrying(
+        pool: &DatabasePool,
+        ctx: &ExecutionContext,
+    ) -> Result<(), sqlx::Error> {
+        for delay in REMASK_RETRY_DELAYS {
+            match Self::remask_calls(pool, ctx).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    tracing::warn!(
+                        run_id = %ctx.run_id,
+                        "DatabaseWriter: Masking a run's written calls failed, retrying: {error}"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+        Self::remask_calls(pool, ctx).await
+    }
+
+    /// Mask what a run's call rows hold with all it has registered. Rows are
+    /// read in pages, and only those that change are written.
+    async fn remask_calls(pool: &DatabasePool, ctx: &ExecutionContext) -> Result<(), sqlx::Error> {
+        const PAGE: i64 = 200;
+        type Row = (
+            Uuid,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        const SELECT: &str = "SELECT call_id, CAST(args AS TEXT), CAST(return_value AS TEXT), \
+             CAST(flow AS TEXT), error FROM call \
+             WHERE run_id = $1 AND call_id > $2 ORDER BY call_id LIMIT $3";
+        let mask = RecordMask::new(&ctx.secret_values, &ctx.secret_value_hashes);
+        let mut after = Uuid::nil();
+        loop {
+            let rows: Vec<Row> = match pool {
+                DatabasePool::Postgres(pg) => {
+                    sqlx::query_as::<_, Row>(SELECT)
+                        .bind(ctx.run_id)
+                        .bind(after)
+                        .bind(PAGE)
+                        .fetch_all(pg)
+                        .await?
+                }
+                DatabasePool::Sqlite(sqlite) => {
+                    sqlx::query_as::<_, Row>(SELECT)
+                        .bind(ctx.run_id)
+                        .bind(after)
+                        .bind(PAGE)
+                        .fetch_all(sqlite)
+                        .await?
+                }
+            };
+            let Some((last, ..)) = rows.last() else {
+                return Ok(());
+            };
+            after = *last;
+            let full_page = rows.len() as i64 == PAGE;
+            for (call_id, args, return_value, flow, error) in rows {
+                let remask = |json: &Option<String>| {
+                    json.as_deref()
+                        .and_then(|json| mask.remask_json(json))
+                        .map(|masked| sanitize_json_for_jsonb(&masked).into_owned())
+                };
+                let (new_args, new_return, new_flow) =
+                    (remask(&args), remask(&return_value), remask(&flow));
+                let new_error = error
+                    .as_deref()
+                    .and_then(|error| match mask.mask_text(error) {
+                        std::borrow::Cow::Borrowed(_) => None,
+                        std::borrow::Cow::Owned(masked) => {
+                            Some(sanitize_text_for_postgres(&masked).into_owned())
+                        }
+                    });
+                if new_args.is_none()
+                    && new_return.is_none()
+                    && new_flow.is_none()
+                    && new_error.is_none()
+                {
+                    continue;
+                }
+                match pool {
+                    DatabasePool::Postgres(pg) => {
+                        sqlx::query(
+                            "UPDATE call SET args = COALESCE($2::jsonb, args), \
+                             return_value = COALESCE($3::jsonb, return_value), \
+                             flow = COALESCE($4::jsonb, flow), error = COALESCE($5, error) \
+                             WHERE call_id = $1",
+                        )
+                        .bind(call_id)
+                        .bind(new_args)
+                        .bind(new_return)
+                        .bind(new_flow)
+                        .bind(new_error)
+                        .execute(pg)
+                        .await?;
+                    }
+                    DatabasePool::Sqlite(sqlite) => {
+                        sqlx::query(
+                            "UPDATE call SET args = COALESCE($2, args), \
+                             return_value = COALESCE($3, return_value), \
+                             flow = COALESCE($4, flow), error = COALESCE($5, error) \
+                             WHERE call_id = $1",
+                        )
+                        .bind(call_id)
+                        .bind(new_args)
+                        .bind(new_return)
+                        .bind(new_flow)
+                        .bind(new_error)
+                        .execute(sqlite)
+                        .await?;
+                    }
+                }
+            }
+            if !full_page {
+                return Ok(());
             }
         }
     }
@@ -986,7 +1155,9 @@ impl DatabaseWriter {
                         );
                     }
                 }
-                DatabaseWrite::Call { .. } => unreachable!("call writes were partitioned out"),
+                DatabaseWrite::Call { .. } | DatabaseWrite::RemaskCalls { .. } => {
+                    unreachable!("call writes were partitioned out")
+                }
             }
         }
 

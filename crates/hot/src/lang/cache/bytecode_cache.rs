@@ -1670,7 +1670,7 @@ mod tests {
         let mut map = indexmap::IndexMap::new();
         map.insert(crate::val::Val::Int(1), crate::val::Val::from("one"));
         program.add_constant(Constant::Val(crate::val::Val::map(map)));
-        program.add_constant(Constant::Val(crate::val::Val::Bytes(vec![1, 2, 3])));
+        program.add_constant(Constant::Val(crate::val::Val::bytes(vec![1, 2, 3])));
         program.add_constant(Constant::FunctionRef("::canary/f".into()));
         program.add_constant(Constant::StringRef("branch".into()));
 

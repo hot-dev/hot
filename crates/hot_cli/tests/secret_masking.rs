@@ -31,6 +31,39 @@ const FAILURE: &str = "SENTINEL-FAILURE-FFFFF";
 const FAILURE_BYTES: &str = "SENTINEL-FAILURE-BYTES-GGGGG";
 const FAILURE_RESPONSE: &str = "SENTINEL-FAILURE-RESPONSE-HHHHH";
 const UNMARKED_BYTES: &str = "SENTINEL-UNMARKED-BYTES-IIIII";
+const MARKED_AFTER_WRITE: &str = "SENTINEL-MARKED-AFTER-WRITE-JJJJJ";
+const HMAC_KEY: &str = "SENTINEL-HMAC-KEY-KKKKK";
+const HMAC_BYTES_KEY: &str = "SENTINEL-HMAC-BYTES-KEY-LLLLL";
+const PBKDF2_PASSWORD: &str = "SENTINEL-PBKDF2-PASSWORD-MMMMM";
+const SIGNING_INPUT: &str = "header.payload";
+const RSA_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCrYPuXclov+8mi
+QdHLEqzPRBYk680SEdPgKvJYB3ennG7GuR1KXk3i9pvVHqtN+g2sfvSYxd2IZubt
+Z0cfBDG6a8idkH9tZDqfOB48BABntG3Kxkjjm5OUXcLu48VN+TLpl0j1jVr9jy/a
+Zhci+YJNOox+GqZJ7YiDJKXgMrRGMwChPuK0A++p1DJteS2Kv9lGZdYcH6I4CHLR
+xOXuyFYL/3KWWxCWf3xORTXgHCLcTT+gdKm1rnkUAkVE5J7fgWBcT8tvwJ44lZ/U
+mzhbId2El1TmTkjfil+813QxZRJbkPDrDQWJT/9Zh389hcP5jffaLI6fzjXMX27/
+e1yKC/dfAgMBAAECggEADywl/TzEZRTtDBgfEaDEu0RwLQxrp0rI9iktmgNU1OCu
+fAB3UK/nRFpustNx+Uegi0hIF/hrvWY8a2f/1DkKVmwX1djgamTIiqasvCwWHxhK
+huLyhz556W8HN+zi+TbAcUBecLYQu3vZ3p0em9v47PGe7sRZB+WA9vjsVVxLBbkP
+O76TRYU+kQU6gxOCS7bZ2TbIxvCTFzzi4AObeDy493jQe49HJJF31BWfWQnd61aC
+Fe5ipcmfEVuuzqWpNIYfq8f/O/+4EKRrxPNAkF9cWDMLUiUFr6uRrIDHqwjfPtb5
+jVuyfaJpgCrshVIc5KSd38GERzQfGoQMpzgtBNaP9QKBgQDhS/Orc+2wMt9Knx1J
+tee9+GcqT88p3prgI2abKI3bMTegnrkbJUfxjmh6p94JqvFHUQ97nM4qucvaOXXD
+MX8Yf/HvKc4NiNnJRzGvi41I+J5ewK1xKfEJhuCT+iZulTPpTZpZXTs1Wz0WVQa+
+xGmY/RL405kpR57t8aYEF+dHdQKBgQDCu/g545bEVKbtZWjXS5wNzOxkSeD0dr5g
+mkoJUmU5ntv+p7mhTLXAxAHoNUpIR5CLbbwZ6+CpN9JZ4B/UOChrgbgwzWCkaSKD
+h4VhEJEIN/k/VkQ1C5g6NBLVMYiVqOOX3syYaJgm25HsVRDKM2l8oktrXV0zFpzG
+iMTkBmp9AwKBgAJoCUY/ir5jDLeDU5DB/KOuz4tIJvJPil/ygNoPaNR6hhmVGG0N
+zOLrnnoQ6PI5fTJBz2SGnD0glujRzEw1byIX28GuNKE4YPshY4p4dx3cafShIjkf
+NY/gfO2Xsmlj9pX7WjayJDvBqblfVx8agfY8XcOCnxQty6jG9/r7NmExAoGBAKUG
+zNaqI5OgNZKLVSzW+5nKZy6aWVRy6OVO+50owXXyRXdqxmqGaqTAtukFeD0GwN0Y
+EsdY2RwunUnjILYlHUP2O5TIB7VtD32ttH/MnUv8u3JMdiMJ/2ibxrX7c0d5R97l
+RjeGtCKCAwjoEgF5TlT76LRE+/2WlSe+sjSXp1jnAoGAYC+BiprgvwdVfGuWzvcf
+KU1nCqCFUaY4zu6FYeHCss2skbLb2fJf5XcNRc6KxdTwc0iVyxVTtth6YqraCPyG
+vpgguFcjN8C7xIYtsVn/Vl0ehcacqupv7NdBeFbLXR3dalZHhnQyOInT8+b6BGLO
+iv1mq913odV3grjJZoH4zkk=
+-----END PRIVATE KEY-----"#;
 
 const SENTINELS: &[&str] = &[
     DECLARED,
@@ -51,6 +84,10 @@ const SENTINELS: &[&str] = &[
     FAILURE_BYTES,
     FAILURE_RESPONSE,
     UNMARKED_BYTES,
+    MARKED_AFTER_WRITE,
+    HMAC_KEY,
+    HMAC_BYTES_KEY,
+    PBKDF2_PASSWORD,
 ];
 
 /// Programs that end in an Err, which a failure's message has to render.
@@ -168,7 +205,33 @@ all fn (): Vec {
         mint().token_type,
         with-opts("https://example.com", {"api-key": "SENTINEL-OPTS-KEY-BBBBB"}),
         oauth(),
+        marked-after-write(),
+        length(signs()),
     ]
+}
+
+passes fn (value: Str): Str { value }
+
+// Long enough for the calls before it to be written.
+wait-for-a-flush fn (): Any { ::hot::http/get(`${base()}/slow`) }
+
+marked-after-write fn (): Int {
+    key passes("SENTINEL-MARKED-AFTER-WRITE-JJJJJ")
+    wait-for-a-flush()
+    ::hot::ctx/mark-secret(key)
+    length(key)
+}
+
+// Tokens anyone could rebuild from their parts, with nothing marked.
+signs fn (): Vec {
+    signature ::hot::crypto/rsa-sha256-sign("@RSA_KEY@", "header.payload")
+    encoded ::hot::base64/encode-url(signature)
+    tag ::hot::hmac/hmac-sha256-bytes("SENTINEL-HMAC-BYTES-KEY-LLLLL", "header.payload")
+    encoded-tag ::hot::base64/encode-url(tag)
+    hex-tag ::hot::hmac/hmac-sha256("SENTINEL-HMAC-KEY-KKKKK", "header.payload")
+    derived ::hot::crypto/pbkdf2-hmac-sha256("SENTINEL-PBKDF2-PASSWORD-MMMMM", "salt", 10)
+    wait-for-a-flush()
+    [`header.payload.${encoded}`, `header.payload.${encoded-tag}`, hex-tag, derived]
 }
 
 fails fn (): Any {
@@ -300,9 +363,58 @@ fn needles() -> Vec<String> {
             needles.push(base64::engine::general_purpose::URL_SAFE.encode(&composed));
         }
     }
+    needles.extend(signature_forms(&native_output(
+        hot::lang::hot::crypto::rsa_sha256_sign,
+        &[RSA_KEY, SIGNING_INPUT],
+    )));
+    needles.extend(signature_forms(&native_output(
+        hot::lang::hot::hmac::hmac_sha256_bytes,
+        &[HMAC_BYTES_KEY, SIGNING_INPUT],
+    )));
+    let hex_tag = native_output(
+        hot::lang::hot::hmac::hmac_sha256,
+        &[HMAC_KEY, SIGNING_INPUT],
+    );
+    needles.push(String::from_utf8(hex_tag).unwrap());
+    let derived = hot::lang::hot::crypto::pbkdf2_hmac_sha256(&[
+        hot::val::Val::from(PBKDF2_PASSWORD),
+        hot::val::Val::from("salt"),
+        hot::val::Val::Int(10),
+    ]);
+    needles.extend(signature_forms(&native_bytes(derived)));
+    // A line from the middle of the key.
+    needles.push(RSA_KEY.lines().nth(2).unwrap().to_string());
     needles.sort();
     needles.dedup();
     needles
+}
+
+fn native_output(
+    native: fn(&[hot::val::Val]) -> hot::lang::hot::r#type::HotResult<hot::val::Val>,
+    args: &[&str],
+) -> Vec<u8> {
+    let args: Vec<hot::val::Val> = args.iter().map(|arg| hot::val::Val::from(*arg)).collect();
+    native_bytes(native(&args))
+}
+
+fn native_bytes(result: hot::lang::hot::r#type::HotResult<hot::val::Val>) -> Vec<u8> {
+    match result {
+        hot::lang::hot::r#type::HotResult::Ok(hot::val::Val::Bytes(bytes)) => bytes.to_vec(),
+        hot::lang::hot::r#type::HotResult::Ok(hot::val::Val::Str(text)) => text.as_bytes().to_vec(),
+        _ => panic!("the native should succeed"),
+    }
+}
+
+/// How a record could hold bytes that aren't text: as itself, a Bytes record
+/// decodes the same way, or encoded.
+fn signature_forms(bytes: &[u8]) -> Vec<String> {
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    vec![
+        String::from_utf8_lossy(bytes).into_owned(),
+        URL_SAFE_NO_PAD.encode(bytes),
+        STANDARD.encode(bytes),
+        hex::encode(bytes),
+    ]
 }
 
 fn percent_encode(text: &str) -> String {
@@ -322,11 +434,15 @@ fn write_project(dir: &Path, base: &str, db_uri: &str) {
     std::fs::write(
         dir.join("hot.hot"),
         format!(
-            "::hot::conf ns\nhot.set.project \"masking\"\nhot.project.masking.src.paths [\"./src\"]\nhot.db.uri \"{db_uri}\"\n"
+            "::hot::conf ns\nhot.set.project \"masking\"\nhot.project.masking.src.paths [\"./src\"]\nhot.db.uri \"{db_uri}\"\nhot.build.allow-secret-shape true\n"
         ),
     )
     .unwrap();
-    std::fs::write(dir.join("src/secrets.hot"), PROGRAM).unwrap();
+    std::fs::write(
+        dir.join("src/secrets.hot"),
+        PROGRAM.replace("@RSA_KEY@", &RSA_KEY.replace('\n', "\\n")),
+    )
+    .unwrap();
     std::fs::write(
         dir.join("ctx.hot"),
         format!(

@@ -312,7 +312,7 @@ async fn ws_connect_async(url: &str, headers: &IndexMap<Val, Val>) -> HotResult<
                                 Err(_) => Val::from(s),
                             }
                         }
-                        Message::Binary(data) => Val::Bytes(data.to_vec()),
+                        Message::Binary(data) => Val::bytes(data.to_vec()),
                         Message::Close(_) => {
                             closed_for_read.store(true, Ordering::Relaxed);
                             break;
@@ -590,7 +590,7 @@ fn extract_raw_receiver(fn_name: &str, conn: &Val) -> Result<WsReceiver, Val> {
 fn val_to_message(val: &Val) -> Message {
     match val {
         Val::Str(s) => Message::Text(s.to_string().into()),
-        Val::Bytes(b) => Message::Binary(b.clone().into()),
+        Val::Bytes(b) => Message::Binary(b.to_vec().into()),
         Val::Map(_) | Val::Vec(_) => {
             let json_value: JsonValue = val.into();
             Message::Text(json_value.to_string().into())
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_val_to_message_bytes() {
-        let val = Val::Bytes(vec![1, 2, 3]);
+        let val = Val::bytes(vec![1, 2, 3]);
         let msg = val_to_message(&val);
         assert!(matches!(msg, Message::Binary(_)));
     }

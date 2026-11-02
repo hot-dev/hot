@@ -110,6 +110,24 @@ f fn (n: Int): Str {
     reduce(range(n), (acc, i) { concat(acc, `item-${i}-`) }, "")
 }
 length(f(200))"#,
+            // --- Results that change kind between Int and Dec, per element ---
+            r#"::t ns
+f fn (n: Int): Dec {
+    range(1, add(n, 1))
+    |> map((x) { div(x, 2) })
+    |> map((d) { mul(d, 3) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+f(50)"#,
+            // --- A Str accumulator replaced for every element, newest first ---
+            r#"::t ns
+f fn (n: Int): Str {
+    range(1, add(n, 1))
+    |> map((i) { `item-${i}` })
+    |> map((s) { concat(s, "!") })
+    |> reduce((acc, s) { concat(s, acc) }, "")
+}
+f(10)"#,
             // --- Some/All terminals ---
             r#"::t ns
 f fn (n: Int): Bool {
@@ -170,6 +188,52 @@ f(100)"#,
         }
     }
 
+    /// Reading a few characters from the start of a string costs the same at
+    /// any length. A read that copied the string would take far longer on the
+    /// large one, so the margin leaves only that able to fail this.
+    #[test]
+    fn reading_the_start_of_a_string_costs_the_same_at_any_length() {
+        let src = r#"::t ns
+fastest-ms fn (f: Fn): Int {
+    tries map(range(3), (_try) {
+        start ::hot::time/epoch-millis(::hot::time/now())
+        done map(range(500), (i) { f(i) })
+        sub(::hot::time/epoch-millis(::hot::time/now()), start)
+    })
+    reduce(tries, min(%1, %2), first(tries))
+}
+timings fn (s: Str): Map {
+    {
+        slice-start: fastest-ms((i) { slice(s, 0, 5) }),
+        get: fastest-ms((i) { get(s, 3) }),
+        nth: fastest-ms((i) { ::hot::coll/nth(s, 3) }),
+        index: fastest-ms((i) { s[3] }),
+    }
+}
+sixteen-mb reduce(range(20), (acc, _i) { concat(acc, acc) }, "0123456789abcdef")
+{small: timings("0123456789"), large: timings(sixteen-mb)}"#;
+        for conf in [
+            Some(val!({"jit": {"mode": "off"}})),
+            Some(val!({"jit": {"threshold": 1}})),
+        ] {
+            let label = format!("{conf:?}");
+            let out = compile_and_run_with_std_conf(src, conf).expect("run");
+            let (Some(Val::Map(small)), Some(Val::Map(large))) = (out.get("small"), out.get("large"))
+            else {
+                panic!("{label}: unexpected result {out:?}");
+            };
+            for (read, small_ms) in small.iter() {
+                let (Val::Int(small_ms), Some(Val::Int(large_ms))) = (small_ms, large.get(read)) else {
+                    panic!("{label}: {read} has no timing");
+                };
+                assert!(
+                    *large_ms <= small_ms * 20 + 100,
+                    "{label}: {read} took {small_ms}ms on 10 characters, {large_ms}ms on 16 MB"
+                );
+            }
+        }
+    }
+
     /// Reading a Map or Vec shares its storage rather than copying it, which
     /// is what makes a read cost the same at any size. Each entry of the result
     /// holds the same collection, reached by a different read: a copy on any of
@@ -180,6 +244,7 @@ f(100)"#,
         let src = r#"::t ns
 same fn (x) { x }
 annotated fn (x: Map): Map { x }
+annotated-bytes fn (x: Bytes): Bytes { x }
 bound fn (x) {
     y x
     z y
@@ -189,22 +254,27 @@ held fn (x) {
     box {x: x}
     box.x
 }
-reads fn (m: Map, v: Vec) {
+reads fn (m: Map, v: Vec, b: Bytes) {
     reader () { m }
+    bytes-reader () { b }
     called map([1, 2], (i) { same(m) })
     mapped map([1], (i) { v })
-    listed [m, v]
+    bytes-mapped map([1], (i) { same(b) })
+    listed [m, v, b]
     {
         m: [same(m), annotated(m), bound(m), reader(), called[0], called[1], listed[0], held(m)],
         v: [same(v), bound(v), mapped[0], listed[1], held(v)],
         child: [m.child, get(m, "child"), same(m).child],
         item: [v[0], first(v), get(v, 0), same(v)[0]],
+        b: [same(b), annotated-bytes(b), bound(b), bytes-reader(), bytes-mapped[0], listed[2], held(b)],
+        data: [m.data, get(m, "data"), same(m).data],
     }
 }
 run fn () {
-    m {child: {a: 1}, other: 2}
+    b Bytes([1, 2, 3])
+    m {child: {a: 1}, other: 2, data: Bytes([4, 5])}
     v [{b: 1}, {b: 2}]
-    {m, v, reads: reads(m, v)}
+    {m, v, b, reads: reads(m, v, b)}
 }
 run()
 run()
@@ -219,7 +289,9 @@ run()"#;
             let reads = field(&out, "reads");
             let m = field(&out, "m");
             let v = field(&out, "v");
+            let b = field(&out, "b");
             let child = field(&m, "child");
+            let data = field(&m, "data");
             let Val::Vec(items) = &v else {
                 panic!("v is {v:?}");
             };
@@ -228,6 +300,8 @@ run()"#;
                 (&v, "v"),
                 (&child, "child"),
                 (&items[0], "item"),
+                (&b, "b"),
+                (&data, "data"),
             ] {
                 let Val::Vec(held) = field(&reads, name) else {
                     panic!("{name} is not a Vec");
@@ -236,6 +310,7 @@ run()"#;
                     let shared = match (expected, value) {
                         (Val::Map(a), Val::Map(b)) => Arc::ptr_eq(a, b),
                         (Val::Vec(a), Val::Vec(b)) => Arc::ptr_eq(a, b),
+                        (Val::Bytes(a), Val::Bytes(b)) => Arc::ptr_eq(a, b),
                         _ => false,
                     };
                     assert!(shared, "{label}: read {index} of {name} was copied: {value:?}");
@@ -263,9 +338,9 @@ grown assoc(m, "b", 1)
     }
 
     /// A read costs the same whatever the size of the collection. One that
-    /// scaled would take thousands of times longer on the large collection, so
-    /// the margin leaves only that able to fail this. `bench-large-reads.hot`
-    /// prints the numbers.
+    /// scaled would take far longer on the large collection, so the margin
+    /// leaves only that able to fail this. `bench-large-reads.hot` prints the
+    /// numbers.
     #[test]
     fn reads_cost_the_same_at_any_size() {
         let src = r#"::t ns
@@ -281,7 +356,7 @@ fastest-ms fn (f: Fn): Int {
 rows fn (n: Int): Vec {
     map(range(n), (i) { {k: `k-${i}`, v: "some text in the value"} })
 }
-timings fn (n: Int): Map {
+timings fn (n: Int, b: Bytes): Map {
     v rows(n)
     m index-by(v, %.k)
     {
@@ -292,9 +367,13 @@ timings fn (n: Int): Map {
         vec-pass: fastest-ms((i) { ignore-it(v, i) }),
         vec-index: fastest-ms((i) { v[0] }),
         vec-first: fastest-ms((i) { first(v) }),
+        bytes-pass: fastest-ms((i) { ignore-it(b, i) }),
+        bytes-length: fastest-ms((i) { length(b) }),
+        bytes-get: fastest-ms((i) { get(b, 0) }),
     }
 }
-{small: timings(10), large: timings(200000)}"#;
+sixty-four-mb reduce(range(6), (acc, _i) { concat(acc, acc) }, random-bytes(1000000))
+{small: timings(10, random-bytes(10)), large: timings(200000, sixty-four-mb)}"#;
         for conf in [
             Some(val!({"jit": {"mode": "off"}})),
             Some(val!({"jit": {"threshold": 1}})),
@@ -311,7 +390,7 @@ timings fn (n: Int): Map {
                 };
                 assert!(
                     *large_ms <= small_ms * 20 + 100,
-                    "{label}: {read} took {small_ms}ms on 10 entries, {large_ms}ms on 200000"
+                    "{label}: {read} took {small_ms}ms small, {large_ms}ms large"
                 );
             }
         }
