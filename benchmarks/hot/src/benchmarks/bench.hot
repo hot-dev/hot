@@ -193,6 +193,26 @@ fib-cond fn (n: Int): Int {
 // BENCHMARK RUNNER
 // ============================================================================
 
+// ============================================================================
+// BENCHMARK 8: Pipelines After JIT Tier-Up
+// ============================================================================
+
+// The shape of sum-even-squares, in a function of its own so its calls are
+// counted from zero. `sum-even-squares(10000)` above runs 50 times, under the
+// JIT threshold of 100, so it only ever times the interpreter.
+compiled-sum-even-squares fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> filter((x) { is-zero(mod(x, 2)) })
+    |> map((x) { mul(x, x) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+
+// Compile it, then time it. A pipeline that stops being fused once its function
+// is compiled shows up here about 10x slower than sum-even-squares above.
+compile-sum-even-squares fn (): Int {
+    reduce(range(150), (_acc, _i) { compiled-sum-even-squares(10) }, 0)
+}
+
 // Helper to measure execution time
 measure-repeat fn (name: Str, iterations: Int, f: Fn): Map {
     start now()
@@ -245,6 +265,10 @@ run-benchmarks fn (): Vec<Map> {
         measure-repeat("cond-skip-expensive(1000)", 20, () { cond-skip-expensive(1000) }),
         measure-repeat("owned-lazy-branch(1000)", 10, () { owned-lazy-branch(1000) }),
         measure-repeat("hotlib-json-roundtrip(200)", 20, () { hotlib-json-roundtrip(200) }),
+
+        // Past the JIT threshold (Hot-only regression guard; see section 8)
+        measure("compile-sum-even-squares", () { compile-sum-even-squares() }),
+        measure-repeat("compiled-sum-even-squares(10000)", 50, () { compiled-sum-even-squares(10000) }),
 
         // Deep recursion (Hot-only regression guards; see section 7)
         measure("sum-to-tail(1000000)", () { sum-to-tail(1000000, 0) }),
