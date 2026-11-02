@@ -6433,6 +6433,17 @@ impl Compiler {
         Ok(())
     }
 
+    /// The qualified path an arrow's target registers under. A dotted target
+    /// (`Animal.Bird`) resolves its enum and keeps the variant.
+    fn resolve_arrow_target(&self, target_type: &str) -> String {
+        match target_type.rsplit_once('.') {
+            Some((enum_path, variant)) if !target_type.starts_with("::") => {
+                format!("{}.{}", self.resolve_type_path(enum_path).0, variant)
+            }
+            _ => self.resolve_type_path(target_type).0,
+        }
+    }
+
     fn compile_type_implementation(
         &mut self,
         type_impl: &crate::lang::ast::TypeImplementation,
@@ -6453,22 +6464,16 @@ impl Compiler {
         // For now, compile the implementation function and store it
         let impl_reg = self.compile_value(&type_impl.implementation)?;
 
-        // Register the type implementation in the appropriate scope
-        // Normalize target type name to short form for consistent lookup
-        let target_type_short =
-            if let Some(last_part) = type_impl.target_type.split('/').next_back() {
-                last_part.to_string()
-            } else {
-                type_impl.target_type.clone()
-            };
-        // Resolve the arrow's source type through declaration-site scope
-        // (local declaration, import/alias, core auto-import). Registering
-        // the resolved qualified name is what keeps two namespaces'
+        // Register the type implementation in the appropriate scope.
+        // Resolve both ends of the arrow through declaration-site scope (local
+        // declaration, import/alias, core auto-import). Registering the
+        // resolved qualified names is what keeps two namespaces'
         // same-short-named types from colliding in the global registry: a
         // short name only means something in the scope that declared the
         // arrow, so the registry must not be keyed by it.
         let (qualified_source, _source_found) = self.resolve_type_path(&type_impl.source_type);
-        let key_resolved = (qualified_source.clone(), target_type_short.clone());
+        let qualified_target = self.resolve_arrow_target(&type_impl.target_type);
+        let key_resolved = (qualified_source.clone(), qualified_target.clone());
         let impl_name = format!(
             "impl_{}_{}",
             type_impl.source_type,
@@ -6497,7 +6502,7 @@ impl Compiler {
             // For function-scoped implementations, we need to emit bytecode instructions
             // that will register the implementation in the VM's current scope when executed
             let source_type_id = self.program.add_string_ref(qualified_source.clone());
-            let target_type_id = self.program.add_string_ref(target_type_short.clone());
+            let target_type_id = self.program.add_string_ref(qualified_target.clone());
             let impl_name_id = self.program.add_string_ref(qualified_impl_name.clone());
             self.emit_instruction(
                 crate::lang::bytecode::Instruction::RegisterLocalImplementation {
@@ -6513,9 +6518,9 @@ impl Compiler {
                 impl_name
             );
 
-            // Register under the scope-resolved qualified source name only.
-            // No short-name key: the runtime registry is global, and a bare
-            // source name is only meaningful in the declaring scope.
+            // Register under the scope-resolved qualified names only. No
+            // short-name key: the runtime registry is global, and a bare type
+            // name is only meaningful in the declaring scope.
             self.type_implementations
                 .insert(key_resolved.clone(), qualified_impl_name.clone());
         }
