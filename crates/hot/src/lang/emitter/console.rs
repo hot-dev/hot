@@ -1,4 +1,5 @@
 use super::{EngineEvent, EngineEventEmitter};
+use crate::lang::masking::RecordMask;
 
 pub struct ConsoleEngineEventEmitter;
 
@@ -16,12 +17,17 @@ impl Default for ConsoleEngineEventEmitter {
 
 impl EngineEventEmitter for ConsoleEngineEventEmitter {
     fn emit(&self, event: EngineEvent) {
+        let data = RecordMask::new(
+            &event.execution_context.secret_values,
+            &event.execution_context.secret_value_hashes,
+        )
+        .mask_val(event.event_data.to_hot_data_repr());
         println!(
             "[{}] {:<15} {} - {}",
             event.event_id,
             event.event_type,
             event.event_time.format("%H:%M:%S%.6f"),
-            event.event_data
+            data
         );
     }
 }

@@ -24,6 +24,7 @@ pub mod fmt;
 pub mod hot;
 pub mod json_schema;
 pub mod lexer;
+pub mod masking;
 pub mod parser;
 pub mod project;
 pub mod refs;

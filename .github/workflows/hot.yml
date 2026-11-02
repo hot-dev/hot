@@ -77,6 +77,11 @@ jobs:
       - name: Self-host bundle tests
         run: python3 -m unittest discover -s infra/tests
 
+      - name: Archive installer regressions
+        run: |
+          python3 scripts/test-install-archive.py
+          sudo python3 scripts/test-install-archive.py ArchiveInstallTests.test_extracted_files_belong_to_installer
+
       # Clippy intentionally uses the workspace default feature set. Keeping it
       # aligned with the workspace test feature set avoids forcing cargo to
       # rebuild the full dependency graph between the two jobs once caches warm.

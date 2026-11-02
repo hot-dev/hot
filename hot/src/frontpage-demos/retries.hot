@@ -12,6 +12,6 @@ fn (event) {
     if(not(::http/is-ok-response(result)), fail(`Request failed: ${result.status}`))
     {
         status: result.status,
-        bytes: length(to-json(result.body)),
+        bytes: length(Bytes(to-json(result.body))),
     }
 }

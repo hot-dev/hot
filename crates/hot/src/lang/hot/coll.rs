@@ -31,7 +31,7 @@ pub fn fast_length_vec(v: &[Val]) -> Val {
 
 #[inline(always)]
 pub fn fast_length_str(s: &str) -> Val {
-    Val::Int(s.len() as i64)
+    Val::Int(s.chars().count() as i64)
 }
 
 #[inline(always)]
@@ -918,7 +918,7 @@ pub fn collection_length(val: &Val) -> Option<usize> {
     match crate::val::as_fields(val) {
         Val::Vec(v) => Some(v.len()),
         Val::Map(m) => Some(m.len()),
-        Val::Str(s) => Some(s.len()),
+        Val::Str(s) => Some(s.chars().count()),
         Val::Bytes(b) => Some(b.len()),
         _ => None,
     }
@@ -2907,18 +2907,18 @@ pub fn sort(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Helper function to compare two Val instances for sorting
+/// The order `sort` and `sort-by` use. Int and Dec compare by value, as
+/// `lt` does; an Int and a Dec of equal value keep a fixed order (Int
+/// first) so the order stays total. Other values follow `Val`'s own total
+/// order, which groups them by type, numbers together.
 fn compare_vals(a: &Val, b: &Val) -> std::cmp::Ordering {
+    use fastnum::D256;
     use std::cmp::Ordering;
 
     match (a, b) {
-        (Val::Int(a), Val::Int(b)) => a.cmp(b),
-        (Val::Str(a), Val::Str(b)) => a.cmp(b),
-        (Val::Dec(a), Val::Dec(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-        (Val::Bool(a), Val::Bool(b)) => a.cmp(b),
-        (Val::Byte(a), Val::Byte(b)) => a.cmp(b),
-        // Mixed type comparisons - convert to string for comparison
-        _ => format!("{:?}", a).cmp(&format!("{:?}", b)),
+        (Val::Int(a), Val::Dec(b)) => D256::from(*a).cmp(b).then(Ordering::Less),
+        (Val::Dec(a), Val::Int(b)) => a.cmp(&D256::from(*b)).then(Ordering::Greater),
+        _ => a.cmp(b),
     }
 }
 
@@ -4266,5 +4266,47 @@ mod tests {
             return;
         }
         panic!("assoc_in preserve siblings failed: {:?}", result);
+    }
+
+    // Ints and Decs sort by value together; they used to sort by type, as
+    // their debug strings (`Dec(..)` before `Int(..)`).
+    #[test]
+    fn sort_orders_mixed_int_and_dec_by_value() {
+        let dec = |s: &str| Val::Dec(s.parse().unwrap());
+        let input = Val::Vec(vec![dec("82.32"), Val::Int(65), dec("70.5"), Val::Int(100)]);
+        let HotResult::Ok(sorted) = sort(&[input]) else {
+            panic!("sort failed");
+        };
+        assert_eq!(
+            sorted,
+            Val::Vec(vec![Val::Int(65), dec("70.5"), dec("82.32"), Val::Int(100)])
+        );
+
+        // Equal values keep a fixed order, and a mixed list is totally
+        // ordered: numbers stay together, by value, among other types.
+        let input = Val::Vec(vec![
+            Val::from("b"),
+            dec("2.0"),
+            Val::Null,
+            Val::Int(2),
+            Val::Int(-3),
+            Val::from("a"),
+            dec("-3.5"),
+        ]);
+        let HotResult::Ok(sorted) = sort(&[input]) else {
+            panic!("sort failed");
+        };
+        assert_eq!(
+            sorted,
+            Val::Vec(vec![
+                Val::Null,
+                dec("-3.5"),
+                Val::Int(-3),
+                Val::Int(2),
+                dec("2.0"),
+                Val::from("a"),
+                Val::from("b"),
+            ])
+        );
     }
 }

@@ -145,7 +145,11 @@ impl Task {
                         plan.as_ref().and_then(|p| p.2),
                         plan.as_ref().and_then(|p| p.3),
                     );
-                    crate::db::usage::prepare_task_period(&billing, root_id, period).await?;
+                    if !crate::db::usage::prepare_task_period(&billing, root_id, period).await? {
+                        return Err(TaskError::QuotaExceeded(
+                            "Usage counters are still moving to the new billing period".into(),
+                        ));
+                    }
                 }
                 // Lock the account root only for a limit that reads usage. NO KEY
                 // UPDATE doesn't block foreign-key checks on inserts that
@@ -485,6 +489,57 @@ mod tests {
             check_capacity(Some(&plan), None, false, true, &reserve, (0, 0, 0, 0, 0)),
             Err(TaskError::QuotaExhausted(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn early_usage_checks_read_what_admission_charged() {
+        let (db, root, e1, e2) = fixture(
+            r#"{"runs_per_month":-1,"box_concurrent_tasks":-1,"compute_units_per_month":-1,"compute_units_budget":100}"#,
+        )
+        .await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let period = crate::db::subscription::monthly_usage_start(Utc::now(), None, None);
+        for (env, units) in [(e1, 7), (e2, 5)] {
+            let task = queued(&db, env).await;
+            let reserve = TaskQuotaReservation {
+                compute_units: 20,
+                duration_ms: 60_000,
+            };
+            assert!(
+                Task::claim_for_worker_with_quota(&db, &task, "w", reserve)
+                    .await
+                    .unwrap()
+            );
+            sqlx::query("UPDATE task SET task_status_id=3,stop_time=?,duration_ms=1000,result=? WHERE task_id=?")
+                .bind(Utc::now())
+                .bind(serde_json::json!({"compute-units":units}).to_string())
+                .bind(task)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        let usage = crate::db::usage::account_task_usage(&db, &root, period)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((usage.compute_units, usage.duration_ms), (12, 2000));
+        // Admission sees the same 12 used: 88 more fit the budget, 89 do not.
+        let next = queued(&db, e1).await;
+        let reserve = |compute_units| TaskQuotaReservation {
+            compute_units,
+            duration_ms: 60_000,
+        };
+        assert!(matches!(
+            Task::claim_for_worker_with_quota(&db, &next, "w", reserve(89)).await,
+            Err(TaskError::QuotaExhausted(_))
+        ));
+        assert!(
+            Task::claim_for_worker_with_quota(&db, &next, "w", reserve(88))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
