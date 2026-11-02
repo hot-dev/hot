@@ -1,0 +1,150 @@
+::persona::verifications ns
+meta {
+    doc: """
+    Verifications: the individual checks inside an inquiry (government ID,
+    selfie, database, document, phone, email, ...). Persona has no list
+    endpoint; an inquiry's verifications come from its `verifications`
+    relationship, which `list-for-inquiry` reads for you.
+
+    Statuses: `initiated`, `submitted`, `passed`, `failed`, `skipped`,
+    `canceled`, plus `confirmed` (email and phone) and
+    `tentatively_passed`/`tentatively_failed` on some types. Each one has
+    `checks[]`: `{name, status: passed|failed|not_applicable, reasons}`.
+
+    Government ID and selfie verifications carry photo URLs and extracted
+    id numbers and birth dates. Don't log them.
+    """
+}
+
+::api ::persona::api
+RequestOptions ::persona::api/RequestOptions
+
+seg ::persona::api/seg
+
+// Verification types with a typed retrieve endpoint, mapped to the plural
+// path segment under /verification/.
+TYPE_PATHS {
+  government-id: "government-ids",
+  government-id-nfc: "government-id-nfcs",
+  selfie: "selfies",
+  database: "databases",
+  database-standard: "database-standards",
+  database-business: "database-businesses",
+  database-tin: "database-tins",
+  database-ecbsv: "database-ecbsvs",
+  database-phone-carrier: "database-phone-carriers",
+  database-serpro: "database-serpros",
+  aamva: "aamvas",
+  document: "documents",
+  email-address: "email-addresses",
+  phone-number: "phone-numbers"
+}
+
+type-path
+meta {
+    doc: """The typed retrieve path for a verification type, given as `"government-id"` or `"verification/government-id"`: `/verification/government-ids/{id}`. An Err for a type without a typed endpoint (use `get-verification`). Exposed for testing."""
+}
+fn (type-name: Str, verification-id: Str): Str {
+  short replace(trim(type-name), "verification/", "")
+  plural get(TYPE_PATHS, short)
+  cond {
+    is-null(plural) => { err(`persona: no typed endpoint for verification type '${type-name}'; use get-verification`) }
+    => { `/verification/${plural}/${seg(verification-id)}` }
+  }
+}
+
+get-verification
+meta {
+    doc: """
+    GET /verifications/{id} - Retrieve any verification by id (`ver_...`).
+    `opts` takes `include` and `fields`.
+
+    **Example**
+
+    ```hot
+    v ::persona::verifications/get-verification("ver_...")
+    ::persona::api/attr(v, "status")  // "passed"
+    ```
+    """
+}
+fn
+(verification-id: Str): Map {
+  get-verification(verification-id, {}, RequestOptions({}))
+},
+(verification-id: Str, opts: Map): Map {
+  get-verification(verification-id, opts, RequestOptions({}))
+},
+(verification-id: Str, opts: Map, options: RequestOptions): Map {
+  ::api/send("GET", `/verifications/${seg(verification-id)}`, ::api/read-query(opts), null, options)
+}
+
+get-verification-by-type
+meta {
+    doc: """GET /verification/{type-plural}/{id} - Retrieve a verification through its typed endpoint, e.g. `get-verification-by-type("government-id", "ver_...")`. See `TYPE_PATHS` for the supported types."""
+}
+fn
+(type-name: Str, verification-id: Str): Map {
+  get-verification-by-type(type-name, verification-id, RequestOptions({}))
+},
+(type-name: Str, verification-id: Str, options: RequestOptions): Map {
+  path type-path(type-name, verification-id)
+  if(is-err(path), path, ::api/send("GET", path, {}, null, options))
+}
+
+list-for-inquiry
+meta {
+    doc: """
+    Every verification on an inquiry, as resources: fetches the inquiry
+    with `include=verifications` and returns the included
+    `verification/*` objects (oldest first, as Persona orders the
+    relationship).
+
+    **Example**
+
+    ```hot
+    checks ::persona::verifications/list-for-inquiry("inq_...")
+    map(checks, (v) { {type: v.type, status: ::persona::api/attr(v, "status")} })
+    ```
+    """
+}
+fn
+(inquiry-id: Str): Vec {
+  list-for-inquiry(inquiry-id, RequestOptions({}))
+},
+(inquiry-id: Str, options: RequestOptions): Vec {
+  doc ::persona::inquiries/get-inquiry(inquiry-id, {include: ["verifications"]}, options)
+  if(is-err(doc), doc, from-document(doc))
+}
+
+from-document
+meta {
+    doc: """The verifications included in an inquiry document, in the order of its `verifications` relationship. Exposed for testing."""
+}
+fn (doc: Any): Vec {
+  ids ::api/relationship-ids(doc, "verifications")
+  found ::api/included(doc, "verification")
+  ordered filter(map(ids, (id) { ::api/find-included(doc, id) }), is-some)
+  if(is-empty(ordered), found, ordered)
+}
+
+failed-checks
+meta {
+    doc: """The names of a verification's checks with status `failed` (sorted), e.g. `["id_barcode_inconsistency", "id_expired"]`. These name the check, never the user's data."""
+}
+fn (doc: Any): Vec<Str> {
+  checks or(::api/attr(doc, "checks"), [])
+  names map(filter(checks, (c) { and(is-map(c), eq(get(c, "status"), "failed")) }), (c) { Str(get(c, "name")) })
+  sort(distinct(names))
+}
+
+redact-verification
+meta {
+    doc: """DELETE /verifications/{id} - Permanently remove a verification's PII. Persona returns 409 while it is investigation-locked."""
+}
+fn
+(verification-id: Str): Map {
+  redact-verification(verification-id, RequestOptions({}))
+},
+(verification-id: Str, options: RequestOptions): Map {
+  ::api/send("DELETE", `/verifications/${seg(verification-id)}`, {}, null, options)
+}

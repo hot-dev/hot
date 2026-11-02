@@ -1,0 +1,152 @@
+::persona::cases ns
+meta {
+    doc: """
+    Cases: a human review queue item that groups inquiries, reports,
+    verifications and transactions. Statuses are configured per case
+    template (for example `Open`, `Pending`, `Approved`, `Declined`), so
+    `set-status` takes the status name as configured.
+    """
+}
+
+::api ::persona::api
+RequestOptions ::persona::api/RequestOptions
+
+seg ::persona::api/seg
+
+create-case
+meta {
+    doc: """
+    POST /cases - Open a case from a case template (`ctmpl_...`).
+    `opts`: `case-queue-id`, `creator-email-address`, `fields`, `tags`,
+    `object-ids` (inquiries, reports, accounts, ... to attach),
+    `sla-expires-in-seconds`.
+
+    **Example**
+
+    ```hot
+    ::persona::cases/create-case("ctmpl_...", {object-ids: ["inq_..."], tags: ["agent-escalation"]})
+    ```
+    """
+}
+fn
+(case-template-id: Str): Map {
+  create-case(case-template-id, {}, RequestOptions({}))
+},
+(case-template-id: Str, opts: Map): Map {
+  create-case(case-template-id, opts, RequestOptions({}))
+},
+(case-template-id: Str, opts: Map, options: RequestOptions): Map {
+  body ::api/document(null, {
+    case-template-id: case-template-id,
+    case-queue-id: get(opts, "case-queue-id"),
+    creator-email-address: get(opts, "creator-email-address"),
+    fields: get(opts, "fields"),
+    tags: get(opts, "tags")
+  }, {
+    object-ids: get(opts, "object-ids"),
+    sla-expires-in-seconds: get(opts, "sla-expires-in-seconds")
+  })
+  ::api/send("POST", "/cases", {}, body, options)
+}
+
+get-case
+meta {
+    doc: """GET /cases/{id} - Retrieve a case. `opts` takes `include` (e.g. `["inquiries", "reports"]`) and `fields`."""
+}
+fn
+(case-id: Str): Map {
+  get-case(case-id, {}, RequestOptions({}))
+},
+(case-id: Str, opts: Map): Map {
+  get-case(case-id, opts, RequestOptions({}))
+},
+(case-id: Str, opts: Map, options: RequestOptions): Map {
+  ::api/send("GET", `/cases/${seg(case-id)}`, ::api/read-query(opts), null, options)
+}
+
+list-cases
+meta {
+    doc: """GET /cases - One page of cases. Filters: `status`, `case-template-id`, `account-id`, `reference-id`, `inquiry-id`, `report-id`. `opts` takes `page-size`, `after`, `before`."""
+}
+fn
+(filters: Map): Map {
+  list-cases(filters, {}, RequestOptions({}))
+},
+(filters: Map, opts: Map): Map {
+  list-cases(filters, opts, RequestOptions({}))
+},
+(filters: Map, opts: Map, options: RequestOptions): Map {
+  ::api/list-page("/cases", filters, opts, options)
+}
+
+update-case
+meta {
+    doc: """PATCH /cases/{id} - Update `case-queue-id` or `fields`."""
+}
+fn
+(case-id: Str, attributes: Map): Map {
+  update-case(case-id, attributes, RequestOptions({}))
+},
+(case-id: Str, attributes: Map, options: RequestOptions): Map {
+  ::api/send("PATCH", `/cases/${seg(case-id)}`, {}, ::api/document(null, attributes, {}), options)
+}
+
+assign-case
+meta {
+    doc: """POST /cases/{id}/assign - Assign a case to a dashboard user by email."""
+}
+fn
+(case-id: Str, user-email-address: Str): Map {
+  assign-case(case-id, user-email-address, RequestOptions({}))
+},
+(case-id: Str, user-email-address: Str, options: RequestOptions): Map {
+  ::api/send("POST", `/cases/${seg(case-id)}/assign`, {}, ::api/meta-document({user-email-address: user-email-address}), options)
+}
+
+set-status
+meta {
+    doc: """POST /cases/{id}/set-status - Move a case to a status configured on its template, e.g. `"Approved"`."""
+}
+fn
+(case-id: Str, status: Str): Map {
+  set-status(case-id, status, RequestOptions({}))
+},
+(case-id: Str, status: Str, options: RequestOptions): Map {
+  ::api/send("POST", `/cases/${seg(case-id)}/set-status`, {}, ::api/meta-document({status: status}), options)
+}
+
+add-objects
+meta {
+    doc: """POST /cases/{id}/add-objects - Attach inquiries, reports, accounts, verifications, transactions or documents by id."""
+}
+fn
+(case-id: Str, object-ids: Vec<Str>): Map {
+  add-objects(case-id, object-ids, RequestOptions({}))
+},
+(case-id: Str, object-ids: Vec<Str>, options: RequestOptions): Map {
+  ::api/send("POST", `/cases/${seg(case-id)}/add-objects`, {}, ::api/meta-document({object-ids: object-ids}), options)
+}
+
+add-comment
+meta {
+    doc: """POST /cases/{id}/add-comment - Add a comment for reviewers. Keep PII out of comments."""
+}
+fn
+(case-id: Str, comment: Str): Map {
+  add-comment(case-id, comment, RequestOptions({}))
+},
+(case-id: Str, comment: Str, options: RequestOptions): Map {
+  ::api/send("POST", `/cases/${seg(case-id)}/add-comment`, {}, ::api/meta-document({message: comment}), options)
+}
+
+redact-case
+meta {
+    doc: """DELETE /cases/{id} - Permanently remove a case's PII."""
+}
+fn
+(case-id: Str): Map {
+  redact-case(case-id, RequestOptions({}))
+},
+(case-id: Str, options: RequestOptions): Map {
+  ::api/send("DELETE", `/cases/${seg(case-id)}`, {}, null, options)
+}

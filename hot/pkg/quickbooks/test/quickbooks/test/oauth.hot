@@ -1,0 +1,141 @@
+::quickbooks::test::oauth ns
+meta ["test"]
+
+::oauth ::quickbooks::oauth
+::uri ::hot::uri
+
+test-basic-auth-vector
+meta ["test"] fn () {
+    // base64("ABcd123:s3cr3t") generated independently with Python
+    assert-eq("Basic QUJjZDEyMzpzM2NyM3Q=", ::oauth/basic-auth("ABcd123", "s3cr3t"))
+}
+
+test-authorize-url
+meta ["test"] fn () {
+    url ::oauth/authorize-url("ABcd123", "https://app.example.com/oauth/qb", "csrf-1")
+    assert(starts-with(url, "https://appcenter.intuit.com/connect/oauth2?"), "Intuit's authorize endpoint")
+    q ::uri/decode-query(slice(url, add(length("https://appcenter.intuit.com/connect/oauth2?"), 0), length(url)))
+    assert-eq("code", q.response_type)
+    assert-eq("ABcd123", q.client_id)
+    assert-eq("https://app.example.com/oauth/qb", q.redirect_uri)
+    assert-eq("com.intuit.quickbooks.accounting", q.scope, "accounting scope by default")
+    assert-eq("csrf-1", q.state)
+    assert(is-null(get(q, "code_challenge")), "no PKCE params unless asked")
+}
+
+test-authorize-url-scopes-and-state
+meta ["test"] fn () {
+    url ::oauth/authorize-url("id", "https://x.example/cb", "s", {scopes: ["com.intuit.quickbooks.accounting", "openid", "email"]})
+    assert(contains(url, "scope=com.intuit.quickbooks.accounting+openid+email"), "scopes are space-joined")
+    assert(is-err(::oauth/authorize-url("id", "https://x.example/cb", "")), "state is required")
+}
+
+test-normalize-scopes
+meta ["test"] fn () {
+    assert-eq("com.intuit.quickbooks.accounting", ::oauth/normalize-scopes(null))
+    assert-eq("a b", ::oauth/normalize-scopes("a, b a"))
+    assert-eq("com.intuit.quickbooks.accounting", ::oauth/normalize-scopes([]))
+}
+
+test-callback-params
+meta ["test"] fn () {
+    cb ::oauth/callback-params({query: {code: "AB11", state: "csrf-1", realmId: "9341453"}})
+    assert-eq("AB11", cb.code)
+    assert-eq("9341453", cb.realm-id)
+    assert(is-null(cb.error))
+    denied ::oauth/callback-params({query: {error: "access_denied", state: "csrf-1"}})
+    assert-eq("access_denied", denied.error)
+}
+
+test-token-request-shape
+meta ["test"] fn () {
+    req ::oauth/build-token-request(::oauth/build-refresh-body("RT-1"), "ABcd123", "s3cr3t")
+    assert-eq("POST", req.method)
+    assert-eq("https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer", req.url)
+    assert-eq("Basic QUJjZDEyMzpzM2NyM3Q=", req.headers.Authorization)
+    assert-eq("application/x-www-form-urlencoded", get(req.headers, "Content-Type"))
+    assert-eq("true", get(req.headers, "x-include-refresh-token-hard-expires-in"))
+    form ::uri/decode-query(req.body)
+    assert-eq("refresh_token", form.grant_type)
+    assert-eq("RT-1", form.refresh_token)
+    assert(is-null(get(form, "client_id")), "client credentials travel in the Basic header only")
+    assert(is-null(get(form, "client_secret")), "the secret is never in the body")
+}
+
+test-exchange-body
+meta ["test"] fn () {
+    body ::oauth/build-exchange-body("AB11", "https://x.example/cb", null)
+    assert-eq({grant_type: "authorization_code", code: "AB11", redirect_uri: "https://x.example/cb"}, body)
+    pkce ::oauth/build-exchange-body("AB11", "https://x.example/cb", "verifier-1")
+    assert-eq("verifier-1", pkce.code_verifier)
+}
+
+test-revoke-request
+meta ["test"] fn () {
+    req ::oauth/build-revoke-request("RT-1", "ABcd123", "s3cr3t")
+    assert-eq("https://developer.api.intuit.com/v2/oauth2/tokens/revoke", req.url)
+    assert-eq({token: "RT-1"}, from-json(req.body))
+    assert-eq("application/json", get(req.headers, "Content-Type"))
+}
+
+test-token-set-rotation
+meta ["test"] fn () {
+    body {
+        access_token: "AT-2",
+        refresh_token: "RT-2",
+        token_type: "bearer",
+        expires_in: 3600,
+        x_refresh_token_expires_in: 8726400,
+        x_refresh_token_hard_expires_in: 157680000
+    }
+
+    t ::oauth/token-set(body, "RT-1", 1000)
+    assert-eq("AT-2", t.access-token)
+    assert-eq("RT-2", t.refresh-token, "the new refresh token is returned")
+    assert(t.rotated, "a different refresh token is a rotation")
+    assert-eq(3601000, t.expires-at)
+    assert-eq(8726400, t.refresh-token-expires-in)
+    assert-eq(157680000, t.refresh-token-hard-expires-in)
+
+    same ::oauth/token-set({...body, refresh_token: "RT-1"}, "RT-1", 1000)
+    assert(not(same.rotated), "same value is not a rotation")
+
+    missing ::oauth/token-set({access_token: "AT-3", expires_in: "3600"}, "RT-1", 0)
+    assert-eq("RT-1", missing.refresh-token, "keeps the sent refresh token when none is returned")
+    assert-eq(3600, missing.expires-in, "numeric strings parse")
+    assert(not(missing.rotated))
+
+    exchanged ::oauth/token-set(body, null, 0)
+    assert(not(exchanged.rotated), "a code exchange is not a rotation")
+}
+
+test-token-error-message
+meta ["test"] fn () {
+    e ::oauth/token-error("quickbooks: token refresh failed", {
+        status: 400,
+        body: {error: "invalid_grant", error_description: "Incorrect or invalid refresh token"},
+        headers: {intuit_tid: "1-abc"}
+    })
+    assert-eq("quickbooks: token refresh failed: invalid_grant (Incorrect or invalid refresh token) (intuit_tid: 1-abc)", e.message)
+    assert-eq("invalid_grant", e.error-code)
+    assert-eq(400, e.status)
+    assert-eq("1-abc", e.intuit-tid)
+    plain ::oauth/token-error("quickbooks: token refresh failed", {status: 503, body: "", headers: {}})
+    assert-eq("quickbooks: token refresh failed: HTTP 503", plain.message)
+}
+
+test-app-credentials
+meta ["test"] fn () {
+    ::hot::ctx/set({"quickbooks.client.id": "", "quickbooks.client.secret": ""})
+    assert(is-err(::oauth/app-credentials({})), "missing app credentials err")
+    app ::oauth/app-credentials({client-id: "id", client-secret: "sec"})
+    assert-eq("id", app.client-id)
+}
+
+test-int-or-null
+meta ["test"] fn () {
+    assert-eq(12, ::oauth/int-or-null("12"))
+    assert-eq(12, ::oauth/int-or-null(12))
+    assert(is-null(::oauth/int-or-null("abc")), "non-numbers never halt")
+    assert(is-null(::oauth/int-or-null(null)))
+}

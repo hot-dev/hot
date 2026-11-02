@@ -1,0 +1,424 @@
+::xero::auth ns
+meta {
+    ctx: {
+        "xero.access.token": {required: false},
+        "xero.refresh.token": {required: false},
+        "xero.client.id": {required: false, secret: false},
+        "xero.client.secret": {required: false},
+        "xero.custom-connection": {required: false, secret: false},
+        "xero.scopes": {required: false, secret: false},
+        "xero.token.store": {required: false, secret: false},
+        "xero.token.store-key": {required: false, secret: false}
+    },
+    doc: """
+    Credential resolution, the per-run access-token cache, and the opt-in
+    store-backed token keeper. Usually used indirectly through
+    `::xero::api`.
+
+    **Sources.** Per-call `opts` override context, which is how one run
+    acts for many users:
+
+    | Credential | `opts` keys | Context variables |
+    |---|---|---|
+    | Access token | `access-token` | `xero.access.token` |
+    | Token keeper | `token-store` (+ `token-store-key`) | `xero.token.store`, `xero.token.store-key` |
+    | Refresh token | `refresh-token` | `xero.refresh.token` |
+    | Custom Connection | `custom-connection: true` (+ `scopes`) | `xero.custom-connection`, `xero.scopes` |
+    | App | `client-id`, `client-secret` | `xero.client.id`, `xero.client.secret` |
+
+    When `opts` carries a primary credential (`access-token`,
+    `token-store`, `refresh-token` or `custom-connection`), context
+    credentials are ignored for the call; the app's client id and secret
+    still fall back to context. Order within a source: access token,
+    keeper, refresh token, Custom Connection.
+
+    **Run cache.** Refreshed and client-credentials tokens are cached in
+    the run's context (as secrets) until a minute before expiry, with
+    the newest refresh token, so later refreshes in the same run use the
+    rotated value. Xero rotates the refresh token on every refresh, so
+    without the keeper call `current-refresh-token(opts)` and persist it
+    before the run ends; the old value only works for 30 more minutes.
+
+    **Token keeper (opt-in).** Set `xero.token.store` (or
+    `opts.token-store`) to a `::hot::store` Map name. Entries are keyed
+    by `token-store-key` (default `"default"`). Key by the *user
+    authorisation*, not the tenant: one refresh token covers every
+    organisation the user connected, so two tenant entries holding copies
+    of it would invalidate each other on rotation. The keeper reuses a
+    fresh access token, otherwise refreshes and writes the new tokens
+    back with `::hot::store/put-if`.
+
+    *Race note.* Two runs that find the same stale entry both refresh
+    with the same refresh token. Within Xero's 30-minute grace period
+    both succeed, but each gets a different new refresh token; `put-if`
+    keeps exactly one (the loser re-reads and uses the winner's tokens).
+    The loser's refresh token is discarded, which is safe because the
+    stored one is the newest. For heavy concurrency, refresh from a
+    single scheduled function. Store values hold tokens in the platform
+    store; restrict who can read it.
+    """
+}
+
+::ctx ::hot::ctx
+::hash ::hot::hash
+::store ::hot::store
+::oauth ::xero::oauth
+
+CACHE_PREFIX "xero.token-cache."
+EXPIRY_MARGIN_SECONDS 60
+DEFAULT_STORE_KEY "default"
+
+// Keys an `opts` Map may carry that belong to this package rather than
+// to the API being called.
+CREDENTIAL_KEYS [
+  "access-token",
+  "refresh-token",
+  "client-id",
+  "client-secret",
+  "custom-connection",
+  "scopes",
+  "token-store",
+  "token-store-key",
+  "tenant-id",
+  "if-modified-since",
+  "idempotency-key",
+  "retry",
+  "idempotent"
+]
+
+is-blank ::xero::oauth/is-blank
+now-ms ::xero::oauth/now-ms
+token-error ::xero::oauth/token-error
+
+is-true fn (value: Any): Bool {
+  or(eq(value, true), and(is-str(value), eq(lowercase(trim(Str(value))), "true")))
+}
+
+// ---------------------------------------------------------------------------
+// Resolution (pure)
+// ---------------------------------------------------------------------------
+
+has-primary-credential
+meta {
+    doc: """True when `source` carries `access-token`, `token-store`, `refresh-token` or `custom-connection: true`."""
+}
+fn (source: Map): Bool {
+  or(
+    not(is-blank(get(source, "access-token"))),
+    not(is-blank(get(source, "token-store"))),
+    not(is-blank(get(source, "refresh-token"))),
+    is-true(get(source, "custom-connection"))
+  )
+}
+
+ctx-source
+meta {doc: """The credential source read from context, in the `opts` shape."""}
+fn (): Map {
+  {
+    access-token: ::ctx/get("xero.access.token"),
+    refresh-token: ::ctx/get("xero.refresh.token"),
+    token-store: ::ctx/get("xero.token.store"),
+    token-store-key: ::ctx/get("xero.token.store-key"),
+    custom-connection: ::ctx/get("xero.custom-connection"),
+    scopes: ::ctx/get("xero.scopes"),
+    client-id: ::ctx/get("xero.client.id"),
+    client-secret: ::ctx/get("xero.client.secret")
+  }
+}
+
+merge-sources
+meta {
+    doc: """Pick the source for a call: `opts` when it has a primary credential (client id and secret still fall back to `ctx`), else `ctx`. Pure."""
+}
+fn (opts: Map, ctx: Map): Map {
+  base if(has-primary-credential(opts), opts, ctx)
+  {
+    ...base,
+    client-id: or(get(opts, "client-id"), get(ctx, "client-id")),
+    client-secret: or(get(opts, "client-secret"), get(ctx, "client-secret"))
+  }
+}
+
+credentials-from
+meta {
+    doc: """
+    Turn a source Map into resolved credentials: `{kind: "token"}`,
+    `{kind: "keeper", store, key, seed-refresh-token, ...}`,
+    `{kind: "refresh", refresh-token, ...}` or `{kind:
+    "client-credentials", scopes, ...}`, or a `TokenError`. Pure.
+    """
+}
+fn (source: Map): Map {
+  id get(source, "client-id")
+  secret get(source, "client-secret")
+  app {client-id: if(is-blank(id), null, Str(id)), client-secret: if(is-blank(secret), null, Str(secret))}
+  cond {
+    not(is-blank(get(source, "access-token"))) => { {kind: "token", token: Str(get(source, "access-token"))} }
+    and(not(is-blank(get(source, "token-store"))), is-blank(id)) => {
+      err(token-error("xero: the token keeper needs the app's client id (xero.client.id)"))
+    }
+
+    not(is-blank(get(source, "token-store"))) => {
+      key get(source, "token-store-key")
+      {
+        kind: "keeper",
+        store: Str(get(source, "token-store")),
+        key: if(is-blank(key), DEFAULT_STORE_KEY, Str(key)),
+        seed-refresh-token: if(is-blank(get(source, "refresh-token")), null, Str(get(source, "refresh-token"))),
+        ...app
+      }
+    }
+
+    and(not(is-blank(get(source, "refresh-token"))), is-blank(id)) => {
+      err(token-error("xero: refreshing needs the app's client id. Set xero.client.id (and xero.client.secret) or pass client-id in opts."))
+    }
+
+    not(is-blank(get(source, "refresh-token"))) => { {kind: "refresh", refresh-token: Str(get(source, "refresh-token")), ...app} }
+    is-true(get(source, "custom-connection")) => {
+      cond {
+        or(is-blank(id), is-blank(secret)) => { err(token-error("xero: a Custom Connection needs xero.client.id and xero.client.secret")) }
+        => { {kind: "client-credentials", scopes: ::oauth/normalize-scopes(get(source, "scopes")), ...app} }
+      }
+    }
+    => {
+      err(token-error("xero: no credentials configured. Set xero.access.token, or xero.refresh.token with xero.client.id and xero.client.secret, or xero.custom-connection, in Context Variables, or pass access-token / refresh-token in opts."))
+    }
+  }
+}
+
+resolve-credentials
+meta {doc: """Resolve the credentials for a call from `opts` and context."""}
+fn (opts: Map): Map {
+  credentials-from(merge-sources(opts, ctx-source()))
+}
+
+// ---------------------------------------------------------------------------
+// Cache entries (pure)
+// ---------------------------------------------------------------------------
+
+cache-key
+meta {
+    doc: """The run-context key a token is cached under (hashed), or null for explicit access tokens."""
+}
+fn (creds: Map): Str? {
+  identity cond {
+    eq(creds.kind, "refresh") => { join(["refresh", creds.client-id, creds.refresh-token], "|") }
+    eq(creds.kind, "keeper") => { join(["keeper", creds.store, creds.key], "|") }
+    eq(creds.kind, "client-credentials") => { join(["cc", creds.client-id, ::hash/sha256(or(creds.client-secret, "")), creds.scopes], "|") }
+    => { null }
+  }
+
+  if(is-null(identity), null, concat(CACHE_PREFIX, ::hash/sha256(identity)))
+}
+
+token-entry
+meta {
+    doc: """The cached or stored form of a `TokenSet`: `{access-token, expires-at, refresh-token, updated-at}`, `expires-at` pulled in by `EXPIRY_MARGIN_SECONDS`."""
+}
+fn (tokens: Map, now: Int): Map {
+  expires-in or(get(tokens, "expires-in"), 1800)
+  filter-vals({
+    access-token: get(tokens, "access-token"),
+    expires-at: add(now, mul(sub(expires-in, EXPIRY_MARGIN_SECONDS), 1000)),
+    refresh-token: get(tokens, "refresh-token"),
+    updated-at: now
+  }, is-some)
+}
+
+is-fresh
+meta {
+    doc: """True when an entry has an access token before its margin-adjusted expiry."""
+}
+fn (entry: Any, now: Int): Bool {
+  and(is-map(entry), is-some(get(entry, "access-token")), lt(now, or(get(entry, "expires-at"), 0)))
+}
+
+newest-refresh-token
+meta {
+    doc: """The refresh token to use: the entry's (newest) one, else the fallback."""
+}
+fn (entry: Any, fallback: Str?): Str? {
+  stored if(is-map(entry), get(entry, "refresh-token"), null)
+  if(is-blank(stored), fallback, stored)
+}
+
+// ---------------------------------------------------------------------------
+// Minting
+// ---------------------------------------------------------------------------
+
+store-map fn (name: Str) {
+  ::store/Map({name: name})
+}
+
+app-opts fn (creds: Map): Map {
+  filter-vals({client-id: get(creds, "client-id"), client-secret: get(creds, "client-secret")}, is-some)
+}
+
+keeper-seed
+meta {
+    doc: """
+    Seed (or replace) a keeper entry, e.g. right after
+    `::xero::oauth/exchange-code`. Pass the `TokenSet` to store its
+    access token too, or just a refresh token Str. Returns the entry.
+
+    ```hot
+    tokens ::xero::oauth/exchange-code(cb.code, redirect-uri)
+    ::xero::auth/keeper-seed("xero-tokens", user-id, tokens)
+    ```
+    """
+}
+fn (store-name: Str, key: Str, tokens: Str | Map): Map {
+  now now-ms()
+  entry if(is-str(tokens), {refresh-token: tokens, updated-at: now}, token-entry(untype(tokens), now))
+  ::store/put(store-map(store-name), key, entry)
+  entry
+}
+
+keeper-entry
+meta {
+    doc: """Read a keeper entry (null when absent). It holds tokens: never log it."""
+}
+fn (store-name: Str, key: Str): Map? {
+  ::store/get(store-map(store-name), key)
+}
+
+refresh-into-entry fn (creds: Map, refresh-token: Str, now: Int): Map {
+  tokens ::oauth/refresh(refresh-token, app-opts(creds))
+  if(is-err(tokens), tokens, token-entry(untype(tokens), now))
+}
+
+keeper-mint
+meta {
+    doc: """A fresh entry for keeper credentials: the stored one when fresh, else refresh and write back with `put-if` (re-reading on a lost race)."""
+}
+fn (creds: Map, now: Int): Map {
+  sm store-map(creds.store)
+  current ::store/get(sm, creds.key)
+  cond {
+    is-fresh(current, now) => { current }
+    => {
+      rt newest-refresh-token(current, get(creds, "seed-refresh-token"))
+      cond {
+        is-blank(rt) => { err(token-error("xero: the token keeper has no refresh token for this key. Seed it with ::xero::auth/keeper-seed or set xero.refresh.token.")) }
+        => {
+          fresh refresh-into-entry(creds, rt, now)
+          cond {
+            is-err(fresh) => { fresh }
+            ::store/put-if(sm, creds.key, current, fresh) => { fresh }
+            => {
+              winner ::store/get(sm, creds.key)
+              if(is-fresh(winner, now), winner, fresh)
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+mint-entry fn (creds: Map, cached: Any, now: Int): Map {
+  cond {
+    eq(creds.kind, "keeper") => { keeper-mint(creds, now) }
+    eq(creds.kind, "client-credentials") => {
+      tokens ::oauth/client-credentials(creds.scopes, app-opts(creds))
+      if(is-err(tokens), tokens, token-entry(untype(tokens), now))
+    }
+    => { refresh-into-entry(creds, newest-refresh-token(cached, creds.refresh-token), now) }
+  }
+}
+
+bearer
+meta {
+    doc: """Resolve a bearer token for resolved credentials with the run cache: `{token, cache-key, cached}` or a `TokenError`."""
+}
+fn (creds: Map): Map {
+  cond {
+    eq(creds.kind, "token") => { {token: creds.token, cache-key: null, cached: false} }
+    => {
+      key cache-key(creds)
+      now now-ms()
+      hit ::ctx/get(key)
+      cond {
+        is-fresh(hit, now) => { {token: hit.access-token, cache-key: key, cached: true} }
+        => {
+          entry mint-entry(creds, hit, now)
+          cond {
+            is-err(entry) => { entry }
+            => {
+              ::ctx/set-secret(key, entry)
+              {token: entry.access-token, cache-key: key, cached: false}
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+evict
+meta {
+    doc: """Expire a cached access token (after a 401), keeping the newest refresh token; also expires a keeper entry's access token."""
+}
+fn (creds: Map, cache-key: Str?): Bool {
+  cond {
+    is-null(cache-key) => { false }
+    => {
+      hit ::ctx/get(cache-key)
+      if(is-map(hit), ::ctx/set-secret(cache-key, {...hit, expires-at: 0}), null)
+      cond {
+        eq(creds.kind, "keeper") => {
+          sm store-map(creds.store)
+          current ::store/get(sm, creds.key)
+          if(is-map(current), ::store/put-if(sm, creds.key, current, {...current, expires-at: 0}), false)
+          true
+        }
+        => { true }
+      }
+    }
+  }
+}
+
+access-token
+meta {
+    doc: """An access token for a call from `opts` and context (refreshing and caching as needed), or a `TokenError`."""
+}
+fn
+(): Str {
+  access-token({})
+},
+(opts: Map): Str {
+  creds resolve-credentials(opts)
+  cond {
+    is-err(creds) => { creds }
+    => {
+      auth bearer(creds)
+      if(is-err(auth), auth, auth.token)
+    }
+  }
+}
+
+current-refresh-token
+meta {
+    doc: """
+    The newest refresh token known to this run for the credentials in
+    `opts` / context: the rotated value after a refresh in this run, else
+    the configured one (null for access tokens and Custom Connections).
+    Persist it before the run ends when you are not using the keeper.
+    """
+}
+fn
+(): Str? {
+  current-refresh-token({})
+},
+(opts: Map): Str? {
+  creds resolve-credentials(opts)
+  cond {
+    is-err(creds) => { null }
+    in(creds.kind, ["token", "client-credentials"]) => { null }
+    => {
+      hit ::ctx/get(cache-key(creds))
+      fallback if(eq(creds.kind, "refresh"), creds.refresh-token, newest-refresh-token(keeper-entry(creds.store, creds.key), get(creds, "seed-refresh-token")))
+      newest-refresh-token(hit, fallback)
+    }
+  }
+}

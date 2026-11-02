@@ -1,0 +1,143 @@
+::persona::accounts ns
+meta {
+    doc: """
+    Accounts: the long-lived record of one end user (or business) that
+    inquiries, verifications and reports attach to. Look an account up by
+    your own `reference-id`, read its consolidated `fields`, and merge
+    duplicates.
+    """
+}
+
+::api ::persona::api
+RequestOptions ::persona::api/RequestOptions
+
+seg ::persona::api/seg
+
+create-account
+meta {
+    doc: """
+    POST /accounts - Create an account. `attributes` (all optional):
+    `reference-id` (your user id; a duplicate returns 409),
+    `account-type-id` (`acttp_...`), `account-status`, `tags`, `fields`
+    (template field keys and plain values; PII). `opts.meta` passes
+    request meta, e.g. `{upsert-by: "reference-id"}`.
+
+    **Example**
+
+    ```hot
+    ::persona::accounts/create-account({reference-id: "user-42", tags: ["beta"]})
+    ```
+    """
+}
+fn
+(attributes: Map): Map {
+  create-account(attributes, {}, RequestOptions({}))
+},
+(attributes: Map, opts: Map): Map {
+  create-account(attributes, opts, RequestOptions({}))
+},
+(attributes: Map, opts: Map, options: RequestOptions): Map {
+  ::api/send("POST", "/accounts", {}, ::api/document(null, attributes, or(get(opts, "meta"), {})), options)
+}
+
+get-account
+meta {
+    doc: """GET /accounts/{id} - Retrieve an account. `opts` takes `include` and `fields` as in `::persona::inquiries/get-inquiry`."""
+}
+fn
+(account-id: Str): Map {
+  get-account(account-id, {}, RequestOptions({}))
+},
+(account-id: Str, opts: Map): Map {
+  get-account(account-id, opts, RequestOptions({}))
+},
+(account-id: Str, opts: Map, options: RequestOptions): Map {
+  ::api/send("GET", `/accounts/${seg(account-id)}`, ::api/read-query(opts), null, options)
+}
+
+list-accounts
+meta {
+    doc: """GET /accounts - One page of accounts. The only filter is `reference-id`; `opts` takes `page-size`, `after`, `before`."""
+}
+fn
+(filters: Map): Map {
+  list-accounts(filters, {}, RequestOptions({}))
+},
+(filters: Map, opts: Map): Map {
+  list-accounts(filters, opts, RequestOptions({}))
+},
+(filters: Map, opts: Map, options: RequestOptions): Map {
+  ::api/list-page("/accounts", filters, opts, options)
+}
+
+find-by-reference-id
+meta {
+    doc: """The account (a resource, not a document) with this `reference-id`, or null when there is none."""
+}
+fn
+(reference-id: Str): Map? {
+  find-by-reference-id(reference-id, RequestOptions({}))
+},
+(reference-id: Str, options: RequestOptions): Map? {
+  page list-accounts({reference-id: reference-id}, {page-size: 1}, options)
+  cond {
+    is-err(page) => { page }
+    => {
+      data or(get(page, "data"), [])
+      if(is-empty(data), null, first(data))
+    }
+  }
+}
+
+update-account
+meta {
+    doc: """PATCH /accounts/{id} - Update `reference-id`, `account-status`, `tags` or `fields`."""
+}
+fn
+(account-id: Str, attributes: Map): Map {
+  update-account(account-id, attributes, RequestOptions({}))
+},
+(account-id: Str, attributes: Map, options: RequestOptions): Map {
+  ::api/send("PATCH", `/accounts/${seg(account-id)}`, {}, ::api/document(null, attributes, {}), options)
+}
+
+consolidate-accounts
+meta {
+    doc: """
+    POST /accounts/{id}/consolidate - Merge `source-account-ids` into the
+    account `account-id`. Their inquiries, verifications and reports move
+    to the target (attributes don't), and each source is archived. A
+    source can be consolidated only once.
+    """
+}
+fn
+(account-id: Str, source-account-ids: Vec<Str>): Map {
+  consolidate-accounts(account-id, source-account-ids, RequestOptions({}))
+},
+(account-id: Str, source-account-ids: Vec<Str>, options: RequestOptions): Map {
+  ::api/send("POST", `/accounts/${seg(account-id)}/consolidate`, {}, ::api/meta-document({source-account-ids: source-account-ids}), options)
+}
+
+redact-account
+meta {
+    doc: """DELETE /accounts/{id} - Permanently remove the account's PII. Cannot be undone."""
+}
+fn
+(account-id: Str): Map {
+  redact-account(account-id, RequestOptions({}))
+},
+(account-id: Str, options: RequestOptions): Map {
+  ::api/send("DELETE", `/accounts/${seg(account-id)}`, {}, null, options)
+}
+
+add-tag
+meta {
+    doc: """POST /accounts/{id}/add-tag - Add a tag by name."""
+}
+fn
+(account-id: Str, tag-name: Str): Map {
+  add-tag(account-id, tag-name, RequestOptions({}))
+},
+(account-id: Str, tag-name: Str, options: RequestOptions): Map {
+  ::api/send("POST", `/accounts/${seg(account-id)}/add-tag`, {}, ::api/meta-document({tag-name: tag-name}), options)
+}

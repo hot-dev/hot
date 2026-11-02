@@ -1,0 +1,166 @@
+::cipherowl::reports ns
+meta {
+    doc: """
+    Reports (SRR API). Reports are generated synchronously on each call
+    and returned as JSON; there is no separate generate-then-fetch step
+    and no PDF. The `report` field is a Markdown narrative written per
+    request (wording varies between calls, and the call takes a few
+    seconds). The graph endpoint can also return a PNG image.
+
+    Reports describe an address's risk exposure and counterparties:
+    store them with your case files, not in logs.
+    """
+}
+
+::api ::cipherowl::api
+::risk ::cipherowl::risk
+
+seg ::cipherowl::api/seg
+query ::cipherowl::api/query
+
+report-path
+meta {
+    doc: """`/api/report/v1/{kind}/chains/{chain}/addresses/{address}` plus the query, with chain and address validated. Exposed for testing."""
+}
+fn (kind: Str, chain: Str, address: Str, params: Map): Str {
+  // The Report API rejects a specific chain (e.g. base) and wants its class (evm).
+  c ::api/validate-chain(chain)
+  a if(is-err(c), c, ::api/validate-address(c, address))
+  cond {
+    is-err(a) => { a }
+    => { `/api/report/v1/${kind}/chains/${seg(c)}/addresses/${seg(a)}${query(params)}` }
+  }
+}
+
+config-param fn (options: Map): Str? {
+  config get(options, "config")
+  if(is-empty(or(config, "")), null, config)
+}
+
+with-resolved-config
+meta {
+    doc: """A report body plus `resolved-config`, the configuration CipherOwl applied (from the `cipherowl-resolved-config` response header). Exposed for testing."""
+}
+fn (response: Any): Map {
+  body ::api/unwrap(response)
+  {...or(body, {}), resolved-config: ::api/header(response.headers, "cipherowl-resolved-config")}
+}
+
+risk-assessment
+meta {
+    doc: """
+    A risk-assessment report: `{risk_level, found_risk, report
+    (Markdown), error, timestamp, resolved-config, requested-chain}`.
+    `risk_level` is deprecated; rely on `found_risk`. A generation
+    failure comes back in `error` with HTTP 200: check `report-error`.
+    `chain` may be a class (`evm`) or a specific chain (`base`), which is
+    translated to its class with `::cipherowl::risk/chain-class`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::reports/risk-assessment("evm", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", {config: "co-sandbox"})
+    out.report
+    ```
+    """
+}
+fn
+(chain: Str, address: Str): Map {
+  risk-assessment(chain, address, {}, {})
+},
+(chain: Str, address: Str, options: Map): Map {
+  risk-assessment(chain, address, options, {})
+},
+(chain: Str, address: Str, options: Map, opts: Map): Map {
+  report("risk-assessment", chain, address, {config: config-param(options)}, opts)
+}
+
+sar-report
+meta {
+    doc: """A DRAFT suspicious-activity report (SAR) narrative, same shape as `risk-assessment`. It is evidence for an officer to read and adapt; nothing is filed."""
+}
+fn
+(chain: Str, address: Str, options: Map): Map {
+  sar-report(chain, address, options, {})
+},
+(chain: Str, address: Str, options: Map, opts: Map): Map {
+  report("sar", chain, address, {config: config-param(options)}, opts)
+}
+
+report
+meta {
+    doc: """GET one narrative report for `chain` (translated to its class), with the resolved config added."""
+}
+fn (kind: Str, chain: Str, address: Str, params: Map, opts: Map): Map {
+  family ::risk/chain-class(chain, opts)
+  path if(is-err(family), family, report-path(kind, family, address, params))
+  cond {
+    is-err(path) => { path }
+    => { ::api/with-requested-chain(with-resolved-config(::api/send("GET", path, "", opts)), chain) }
+  }
+}
+
+report-error
+meta {
+    doc: """The generation failure CipherOwl reports in a report or graph body (`error`), or null. Reports fail in the body, not the HTTP status, so check this before using `report` or `graph`. Pure."""
+}
+fn (body: Any): Str? {
+  e if(is-map(body), get(body, "error"), null)
+  if(and(is-str(e), not(is-empty(trim(or(e, ""))))), e, null)
+}
+
+graph-params
+meta {
+    doc: """Query fields for the graph report: `config`, `output_format` (`mermaid` default, `html`, `png`), `interactive` (default true), `style` (`detailed` default, `compact`; compact needs mermaid). Unset options are dropped. Exposed for testing."""
+}
+fn (options: Map): Map {
+  {
+    config: config-param(options),
+    output_format: get(options, "output_format"),
+    interactive: get(options, "interactive"),
+    style: get(options, "style")
+  }
+}
+
+graph-result
+meta {
+    doc: """Shape a graph response: an image (`content-type` starting `image/`) becomes `{content-type, bytes}` with the raw `body-bytes`; anything else is the JSON body `{graph, legend, summary, error, timestamp}`. Exposed for testing."""
+}
+fn (response: Any): Any {
+  cond {
+    is-err(response) => { response }
+    not(::hot::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+    => {
+      content-type or(::api/header(response.headers, "content-type"), "")
+      cond {
+        starts-with(lowercase(content-type), "image/") => { {content-type: content-type, bytes: response.body-bytes} }
+        => { ::api/response-body(response.body) }
+      }
+    }
+  }
+}
+
+graph
+meta {
+    doc: """
+    The fund-flow graph for an address. With `output_format: "png"`
+    returns `{content-type: "image/png", bytes}` (Bytes, ready for
+    `::hot::file/write-file-bytes`); otherwise the JSON body with the
+    Mermaid (or HTML) `graph`.
+
+    **Example**
+
+    ```hot
+    png ::cipherowl::reports/graph("evm", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", {output_format: "png"})
+    ```
+    """
+}
+fn
+(chain: Str, address: Str, options: Map): Any {
+  graph(chain, address, options, {})
+},
+(chain: Str, address: Str, options: Map, opts: Map): Any {
+  family ::risk/chain-class(chain, opts)
+  path if(is-err(family), family, report-path("graph", family, address, graph-params(options)))
+  if(is-err(path), path, graph-result(::api/send("GET", path, "", opts)))
+}

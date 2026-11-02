@@ -1,0 +1,499 @@
+::sumsub::api ns
+meta {
+    ctx: {
+        "sumsub.app.token": {required: true},
+        "sumsub.secret.key": {required: true},
+        "sumsub.base.url": {required: false, secret: false},
+        "sumsub.level.name": {required: false, secret: false}
+    },
+    doc: """
+    Transport for the Sumsub API: App Token request signing, JSON and
+    multipart bodies that never send unset fields, path and query
+    encoding, Sumsub's error object lifted into `HttpError`, and the
+    offset pagination used by list endpoints.
+
+    Error messages never include request data or Sumsub's `description`
+    (which can echo submitted values); they carry the status, Sumsub's
+    numeric `errorCode`/`errorName` and the `correlationId` to quote to
+    Sumsub support.
+    """
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::uri ::hot::uri
+::re ::hot::regex
+::time ::hot::time
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx Sumsub response. `status`, `headers` and `body` as in the
+    sibling packages, plus Sumsub's error object lifted to the top:
+    `error-code` (e.g. 4003 signature mismatch, 4004 request expired,
+    6008 sandbox applicant limit), `error-name`, `correlation-id` (quote
+    it to Sumsub support), `description` (Sumsub's text; it can echo
+    values you sent, so don't log it where PII must not go) and
+    `retry-after` (seconds, from `Retry-After`, set on the temporary 409
+    from approve/reject). `message` is a readable summary that never
+    contains request data or the description.
+    """
+}
+type {
+    status: Int,
+    headers: Map,
+    body: Any,
+    message: Str,
+    description: Str?,
+    error-code: Int?,
+    error-name: Str?,
+    correlation-id: Str?,
+    retry-after: Int?
+}
+
+body-field fn (body: Any, key: Str): Any {
+  if(is-map(body), get(body, key), null)
+}
+
+int-or-null
+meta {
+    doc: """An Int from an Int or a numeric Str, otherwise null. Never errs. Exposed for testing."""
+}
+fn (value: Any): Int? {
+  cond {
+    is-int(value) => { value }
+    // WORKAROUND(hot-bug-6): check the text is numeric before Int(), so a bad value can't halt the run.
+    and(is-str(value), ::re/is-match(trim(Str(value)), "^-?[0-9]{1,15}$")) => { Int(trim(Str(value))) }
+    => { null }
+  }
+}
+
+header
+meta {
+    doc: """A header value by name, case-insensitively (inbound webhook headers are lowercase; outbound response headers may not be). Null when absent. Exposed for testing."""
+}
+fn (headers: Any, name: Str): Str? {
+  hs if(is-map(headers), headers, {})
+  wanted lowercase(name)
+  direct get(hs, wanted)
+  cond {
+    is-some(direct) => { Str(direct) }
+    => {
+      matches filter(keys(hs), (k) { eq(lowercase(Str(k)), wanted) })
+      if(is-empty(matches), null, Str(get(hs, first(matches))))
+    }
+  }
+}
+
+error-message
+meta {
+    doc: """The readable `message` for an error: status, `errorCode`/`errorName` and `correlationId`, plus a hint for auth (401) and rate-limit (429) failures. Never includes the description or any request data. Exposed for testing."""
+}
+fn (status: Int, error-code: Int?, error-name: Str?, correlation-id: Str?): Str {
+  code-part cond {
+    and(is-some(error-code), is-some(error-name)) => { ` (errorCode ${error-code} ${error-name})` }
+    is-some(error-code) => { ` (errorCode ${error-code})` }
+    is-some(error-name) => { ` (${error-name})` }
+    => { "" }
+  }
+
+  hint cond {
+    eq(status, 401) => { "; check sumsub.app.token and sumsub.secret.key, that the token matches the environment (sandbox or production), and the system clock (Sumsub allows 60s of skew)" }
+    eq(status, 429) => { "; rate limited (or a sandbox daily limit was reached)" }
+    => { "" }
+  }
+
+  id-part if(is-some(correlation-id), `; correlationId ${correlation-id}`, "")
+  `sumsub: request failed with HTTP ${status}${code-part}${hint}${id-part}`
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response, lifting Sumsub's error fields out of the body. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse): HttpError {
+  body response.body
+  headers or(response.headers, {})
+  error-code int-or-null(body-field(body, "errorCode"))
+  name body-field(body, "errorName")
+  error-name if(is-str(name), name, null)
+  cid body-field(body, "correlationId")
+  correlation-id if(is-str(cid), cid, null)
+  desc body-field(body, "description")
+  // WORKAROUND(hot-bug-1): built field by field in a function, never via the HttpResponse -> HttpError arrow.
+  HttpError({
+    status: response.status,
+    headers: headers,
+    body: body,
+    message: error-message(response.status, error-code, error-name, correlation-id),
+    description: if(is-str(desc), desc, null),
+    error-code: error-code,
+    error-name: error-name,
+    correlation-id: correlation-id,
+    retry-after: int-or-null(header(headers, "retry-after"))
+  })
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  http-error(response)
+}
+
+is-error-code
+meta {
+    doc: """True when `e` is a Sumsub `HttpError` with this numeric `errorCode` (e.g. `4004` for an expired signature, `6008` for the sandbox applicant limit)."""
+}
+fn (e: Any, code: Int): Bool {
+  cond {
+    or(is-null(e), is-str(e)) => { false }
+    => { eq(get-in(e, ["error-code"]), code) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Signing
+// ---------------------------------------------------------------------------
+
+string-to-sign
+meta {
+    doc: """The text prefix Sumsub signs before the body: `ts + METHOD + path`, where `path` starts with `/` and includes the query string exactly as sent. Exposed for testing."""
+}
+fn (ts: Int | Str, method: Str, path: Str): Str {
+  `${ts}${uppercase(method)}${path}`
+}
+
+sign
+meta {
+    doc: """
+    The `X-App-Access-Sig` value: lowercase hex HMAC-SHA256, keyed with
+    the App Token's secret key, over `ts + METHOD + path-with-query +
+    body`. `body` is the exact payload sent: a Str (JSON), Bytes (a
+    multipart body, signed byte for byte), or `""`/null for none.
+
+    **Example**
+
+    ```hot
+    ::sumsub::api/sign("secret", 1607551635, "GET", "/resources/applicants/123?fields=info", "")
+    ```
+    """
+}
+fn (secret: Str, ts: Int | Str, method: Str, path: Str, body: Any): Str {
+  prefix string-to-sign(ts, method, path)
+  data cond {
+    is-null(body) => { prefix }
+    is-bytes(body) => { concat(Bytes(prefix), body) }
+    => { `${prefix}${body}` }
+  }
+
+  ::hmac/hmac-sha256(secret, data)
+}
+
+auth-headers
+meta {
+    doc: """The three signing headers for one request: `X-App-Token`, `X-App-Access-Ts` and `X-App-Access-Sig`. Exposed for testing."""
+}
+fn (app-token: Str, secret: Str, ts: Int, method: Str, path: Str, body: Any): Map {
+  {
+    X-App-Token: app-token,
+    X-App-Access-Ts: Str(ts),
+    X-App-Access-Sig: sign(secret, ts, method, path, body)
+  }
+}
+
+resolve
+meta {
+    ctx: {
+        "sumsub.app.token": {required: true},
+        "sumsub.secret.key": {required: true},
+        "sumsub.base.url": {required: false, secret: false},
+        "sumsub.level.name": {required: false, secret: false}
+    },
+    doc: """
+    Resolve credentials and settings for one call: `opts` first, then
+    context, then defaults. Returns `{app-token, secret-key, base-url,
+    level-name}`, or an Err naming what is missing.
+
+    `opts` keys: `app-token` and `secret-key` (when `opts` has an
+    `app-token`, context credentials are ignored for the call, so the
+    pair must come together), `base-url` (default `::sumsub/BASE_URL`)
+    and `level-name` (default `sumsub.level.name`). Nothing is written to
+    context, so per-call credentials never leak across parallel flows or
+    tenants.
+
+    **Example**
+
+    ```hot
+    tenant {app-token: "sbx:...", secret-key: "..."}
+    ::sumsub::applicants/get-applicant("65f0c1e2a3b4c5d6e7f80912", tenant)
+    ```
+    """
+}
+fn
+(): Map {
+  resolve({})
+},
+(opts: Map): Map {
+  o if(is-map(opts), opts, {})
+  present (v) { and(is-str(v), not(is-empty(trim(or(v, ""))))) }
+  from-opts present(get(o, "app-token"))
+  app-token if(from-opts, get(o, "app-token"), or(::ctx/get("sumsub.app.token"), ""))
+  secret-key if(from-opts, or(get(o, "secret-key"), ""), or(::ctx/get("sumsub.secret.key"), ""))
+  base-url or(get(o, "base-url"), or(::ctx/get("sumsub.base.url"), ::sumsub/BASE_URL))
+  level-name or(get(o, "level-name"), ::ctx/get("sumsub.level.name"))
+  cond {
+    and(from-opts, not(present(secret-key))) => {
+      err("Sumsub credentials are incomplete: opts.app-token was given without opts.secret-key.")
+    }
+
+    or(not(present(app-token)), not(present(secret-key))) => {
+      err("Sumsub is not configured: set sumsub.app.token and sumsub.secret.key (Dev space → App tokens), or pass app-token and secret-key in opts.")
+    }
+    => {
+      {
+        app-token: app-token,
+        secret-key: secret-key,
+        base-url: if(is-empty(or(base-url, "")), ::sumsub/BASE_URL, base-url),
+        level-name: if(is-empty(or(level-name, "")), null, level-name)
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bodies, paths and queries
+// ---------------------------------------------------------------------------
+
+compact
+meta {
+    doc: """Drop null-valued keys from a body, recursively through nested maps and vectors of maps, so unset optionals are omitted rather than sent as JSON null. Empty maps are kept (`applicant: {}` is meaningful). Exposed for testing."""
+}
+fn (value: Any): Any {
+  match value {
+    Map => { filter-vals(map-vals(value, (v) { compact(v) }), is-some) }
+    Vec => { map(value, (v) { compact(v) }) }
+    _ => { value }
+  }
+}
+
+encode-body
+meta {
+    doc: """The exact payload to send and sign: a Map or Vec becomes compacted JSON, Bytes and Str pass through, null becomes `""`. Exposed for testing."""
+}
+fn (body: Any): Str | Bytes {
+  cond {
+    is-null(body) => { "" }
+    is-bytes(body) => { body }
+    is-str(body) => { body }
+    => { to-json(compact(untype(body))) }
+  }
+}
+
+seg
+meta {
+    doc: """Percent-encode one path segment (an applicant id, `externalUserId`, level name or transaction id)."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+query
+meta {
+    doc: """A `?a=1&b=2` suffix from the non-null entries of `params` (URL-encoded); `""` when none are set."""
+}
+fn (params: Map): Str {
+  ::uri/query-string(params)
+}
+
+response-body
+meta {
+    doc: """Normalize a decoded 2xx body: empty text becomes null; anything else passes through. Exposed for testing."""
+}
+fn (body: Any): Any {
+  match body {
+    Str => { if(is-empty(trim(body)), null, body) }
+    _ => { body }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+build-request
+meta {
+    doc: """
+    The signed `HttpRequest` for one call, given resolved credentials
+    (`{app-token, secret-key, base-url}`, see `resolve`) and an explicit
+    Unix timestamp: the URL is `base-url + path`, `payload` is sent
+    exactly as signed, and `Content-Type` defaults to `application/json`
+    (Sumsub asks for it even on bodiless requests). Exposed for testing.
+    """
+}
+fn (
+  method: Str, path: Str, payload: Str | Bytes, content-type: Str?,
+  extra-headers: Map, creds: Map, ts: Int,
+): HttpRequest {
+  verb uppercase(method)
+  HttpRequest({
+    method: verb,
+    url: `${or(get(creds, "base-url"), ::sumsub/BASE_URL)}${path}`,
+    headers: {
+      Accept: "application/json",
+      Content-Type: or(content-type, "application/json"),
+      User-Agent: "hot-dev-sumsub-pkg",
+      ...extra-headers,
+      ...auth-headers(creds.app-token, creds.secret-key, ts, verb, path, payload)
+    },
+    body: payload
+  })
+}
+
+send-signed fn (method: Str, path: Str, payload: Str | Bytes, content-type: Str?, extra-headers: Map, creds: Map): HttpResponse {
+  ::hot::http/request(build-request(method, path, payload, content-type, extra-headers, creds, ::time/epoch-seconds()))
+}
+
+send
+meta {
+    doc: """
+    Send a signed request and return the raw `HttpResponse` (or the Err
+    of a transport failure). A GET whose connection fails is retried
+    once, freshly signed; nothing else is retried. Use this when you
+    need response headers (e.g. `X-Image-Id`); `request` unwraps the
+    body. `opts` as for `resolve`.
+    """
+}
+fn
+(method: Str, path: Str, body: Any, content-type: Str?, extra-headers: Map): HttpResponse {
+  send(method, path, body, content-type, extra-headers, {})
+},
+(method: Str, path: Str, body: Any, content-type: Str?, extra-headers: Map, opts: Map): HttpResponse {
+  creds resolve(opts)
+  cond {
+    is-err(creds) => { creds }
+    => {
+      payload encode-body(body)
+      first-try send-signed(method, path, payload, content-type, extra-headers, creds)
+      cond {
+        and(is-err(first-try), eq(uppercase(method), "GET")) => {
+          send-signed(method, path, payload, content-type, extra-headers, creds)
+        }
+        => { first-try }
+      }
+    }
+  }
+}
+
+unwrap
+meta {
+    doc: """The decoded body of a 2xx response (null when empty), the Err of a failed transport, or `err(HttpError)` for a non-2xx response."""
+}
+fn (response: HttpResponse): Any {
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response-body(response.body) }
+    => { err(http-error(response)) }
+  }
+}
+
+request
+meta {
+    doc: """
+    Make a signed Sumsub request. `path` starts with `/resources/...` and
+    includes any query string; `body` is a Map or Vec (sent as JSON with
+    nulls dropped), Bytes, a Str, or `""` for none. Returns the decoded
+    body on 2xx, or an Err carrying `HttpError`. The escape hatch for
+    endpoints this package does not wrap. `opts` overrides credentials
+    and settings for this call (see `resolve`).
+
+    **Example**
+
+    ```hot
+    levels ::sumsub::api/request("GET", "/resources/applicants/-/levels", "")
+    ```
+    """
+}
+fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, {})
+},
+(method: Str, path: Str, body: Any, opts: Map): Any {
+  unwrap(send(method, path, body, null, {}, opts))
+}
+
+call
+meta {
+    doc: """Run a request spec `{method, path, body?}` (as the `*-request` builders return) through `request`. A spec that is an Err (a validation failure) is returned as is, without a request."""
+}
+fn
+(spec: Result): Any {
+  call(spec, {})
+},
+(spec: Result, opts: Map): Any {
+  cond {
+    is-err(spec) => { spec }
+    => { request(spec.method, spec.path, or(get(spec, "body"), ""), opts) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Offset pagination
+// ---------------------------------------------------------------------------
+
+page-envelope
+meta {
+    doc: """The `{items, totalItems, pageInfo?}` part of a list response, which some endpoints wrap in `list`. Exposed for testing."""
+}
+fn (page: Any): Map {
+  cond {
+    not(is-map(page)) => { {} }
+    is-map(get(page, "list")) => { get(page, "list") }
+    => { page }
+  }
+}
+
+page-items
+meta {
+    doc: """The `items` of a list response (wrapped in `list` or not); `[]` when absent."""
+}
+fn (page: Any): Vec {
+  items get(page-envelope(page), "items")
+  if(is-vec(items), items, [])
+}
+
+next-offset
+meta {
+    doc: """The `offset` for the page after `page`, fetched at `offset`: null when this page was empty or `totalItems` says nothing is left. Exposed for testing."""
+}
+fn (page: Any, offset: Int): Int? {
+  envelope page-envelope(page)
+  count length(page-items(page))
+  total int-or-null(get(envelope, "totalItems"))
+  next add(offset, count)
+  cond {
+    eq(count, 0) => { null }
+    and(is-some(total), gte(next, total)) => { null }
+    => { next }
+  }
+}
+
+collect-offset
+meta {
+    doc: """Follow offset pages, concatenating `items`, until `limit` items or the last page. `fetch` takes `(offset, limit)` and returns one page. Exposed for testing; `::sumsub::applicants/list-all-notes` uses it."""
+}
+fn (fetch: Fn, offset: Int, page-size: Int, limit: Int, acc: Vec): Vec {
+  page fetch(offset, page-size)
+  combined concat(acc, page-items(page))
+  next next-offset(page, offset)
+  cond {
+    gte(length(combined), limit) => { slice(combined, 0, limit) }
+    is-null(next) => { combined }
+    => { collect-offset(fetch, next, page-size, limit, combined) }
+  }
+}

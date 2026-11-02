@@ -1,0 +1,297 @@
+::xero::test::api ns
+meta ["test"]
+
+::api ::xero::api
+::acc ::xero::accounting
+::w ::xero::where
+
+TENANT "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f"
+
+VALIDATION {
+    ErrorNumber: 10,
+    Type: "ValidationException",
+    Message: "A validation exception occurred",
+    Elements: [
+        {ValidationErrors: [{Message: "Email address must be valid."}, {Message: "Account code '999' is not a valid code."}]},
+        {ValidationErrors: [{Message: "Email address must be valid."}]}
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Tenant, URLs, headers
+// ---------------------------------------------------------------------------
+
+test-tenant-id
+meta ["test"] fn () {
+    assert-eq(TENANT, ::api/validate-tenant-id(TENANT))
+    assert(is-null(::api/validate-tenant-id("")), "blank means none (Custom Connections)")
+    assert(is-err(::api/validate-tenant-id("acme")), "non-GUIDs are rejected")
+    ::hot::ctx/set("xero.tenant.id", TENANT)
+    assert-eq(TENANT, ::api/tenant-id({}))
+    assert(is-err(::api/tenant-id({tenant-id: "../x"})), "opts win and are checked")
+    ::hot::ctx/set("xero.tenant.id", "")
+}
+
+test-query-string
+meta ["test"] fn () {
+    assert-eq("", ::api/query-string({where: null}))
+    assert-eq("?where=Status%3D%3D%22AUTHORISED%22", ::api/query-string({where: "Status==\"AUTHORISED\""}), "where is fully encoded")
+    assert-eq("?Statuses=AUTHORISED,PAID", ::api/query-string({Statuses: ["AUTHORISED", "PAID"]}))
+    assert-eq("?order=DueDate%20DESC&page=2", ::api/query-string({order: "DueDate DESC", page: 2}))
+    assert-eq("?includeArchived=true", ::api/query-string({includeArchived: true}))
+    assert-eq("https://api.xero.com/api.xro/2.0/Invoices?page=1", ::api/api-url("/Invoices", {page: 1}))
+}
+
+test-headers
+meta ["test"] fn () {
+    h ::api/build-headers("AT", TENANT, {if-modified-since: "2026-10-01T00:00:00", idempotency-key: "k-1"}, true, {})
+    assert-eq("Bearer AT", h.Authorization)
+    assert-eq(TENANT, get(h, "xero-tenant-id"))
+    assert-eq("2026-10-01T00:00:00", get(h, "If-Modified-Since"))
+    assert-eq("k-1", get(h, "Idempotency-Key"))
+    assert-eq("application/json", get(h, "Content-Type"))
+    bare ::api/build-headers("AT", null, {}, false, {Accept: "application/pdf"})
+    assert-eq(["Authorization", "Accept"], keys(bare), "unset optionals are omitted")
+    assert-eq("application/pdf", bare.Accept, "extra headers win")
+}
+
+test-build-request-bodies
+meta ["test"] fn () {
+    req ::api/build-request("PUT", "https://x.example", "AT", TENANT, {Contacts: [{Name: "Acme"}]}, {}, {})
+    assert-eq({Contacts: [{Name: "Acme"}]}, from-json(req.body))
+    raw ::api/build-request("PUT", "https://x.example", "AT", TENANT, Bytes([37, 80, 68, 70]), {}, {Content-Type: "application/pdf"})
+    assert(is-bytes(raw.body), "Bytes are sent verbatim")
+    assert-eq("application/pdf", get(raw.headers, "Content-Type"))
+    none ::api/build-request("GET", "https://x.example", "AT", null, "", {}, {})
+    assert-eq("", none.body)
+    assert(is-null(get(none.headers, "Content-Type")))
+}
+
+test-retry-budget
+meta ["test"] fn () {
+    assert-eq(1, ::api/retry-budget({}, "GET"))
+    assert-eq(0, ::api/retry-budget({}, "PUT"), "writes are not retried")
+    assert-eq(1, ::api/retry-budget({idempotency-key: "k"}, "PUT"), "unless they carry an idempotency key")
+    assert-eq(0, ::api/retry-budget({retry: false}, "GET"))
+    assert(is-err(::api/check-idempotency-key(join(map(range(130), (i) { "x" }), ""))), "keys are capped at 128")
+}
+
+// ---------------------------------------------------------------------------
+// Errors and rate limits
+// ---------------------------------------------------------------------------
+
+test-rate-limits
+meta ["test"] fn () {
+    limits ::api/rate-limits({x-minlimit-remaining: "57", x-daylimit-remaining: "4990", x-appminlimit-remaining: "9998"})
+    assert-eq({minute-remaining: 57, day-remaining: 4990, app-minute-remaining: 9998, retry-after: null, problem: null}, limits)
+    assert-eq(null, ::api/rate-limits({x-minlimit-remaining: "lots"}).minute-remaining, "bad numbers never halt")
+}
+
+test-validation-error
+meta ["test"] fn () {
+    e ::api/http-error({status: 400, headers: {xero-correlation-id: "corr-1"}, body: VALIDATION})
+    assert-eq("xero: HTTP 400 ValidationException: A validation exception occurred: Email address must be valid.; Account code '999' is not a valid code.", e.message)
+    assert-eq(["Email address must be valid.", "Account code '999' is not a valid code."], e.validation-errors, "messages are de-duplicated")
+    assert-eq(10, e.error-number)
+    assert-eq("corr-1", e.correlation-id)
+}
+
+test-other-errors
+meta ["test"] fn () {
+    limited ::api/http-error({status: 429, headers: {retry-after: "27", x-rate-limit-problem: "minute", x-minlimit-remaining: "0"}, body: ""})
+    assert-eq("xero: HTTP 429: rate limited (minute limit); retry after 27s", limited.message)
+    assert-eq(27, limited.retry-after)
+    assert-eq("minute", limited.rate-limits.problem)
+    assert(::api/is-retryable(err(limited)))
+
+    unauthorized ::api/http-error({status: 401, headers: {}, body: "{\"Type\":null,\"Title\":\"Unauthorized\",\"Status\":401,\"Detail\":\"AuthenticationUnsuccessful\"}"})
+    assert-eq("xero: HTTP 401 Unauthorized: AuthenticationUnsuccessful", unauthorized.message, "problem+json bodies parse")
+    assert(not(::api/is-retryable(unauthorized)))
+
+    query ::api/http-error({status: 400, headers: {}, body: {ErrorNumber: 16, Type: "QueryParseException", Message: "No property or field 'Foo' exists"}})
+    assert-eq("xero: HTTP 400 QueryParseException: No property or field 'Foo' exists", query.message)
+
+    text ::api/http-error({status: 404, headers: {}, body: "The resource you're looking for cannot be found"})
+    assert-eq("xero: HTTP 404: The resource you're looking for cannot be found", text.message)
+    assert(::api/is-retryable(::api/http-error({status: 503, headers: {}, body: ""})))
+    assert(::api/is-retryable(err("http request failed: connection reset")))
+}
+
+test-unwrap
+meta ["test"] fn () {
+    assert-eq({Invoices: []}, ::api/unwrap({status: 200, headers: {}, body: {Invoices: []}}))
+    assert(is-null(::api/unwrap({status: 204, headers: {}, body: ""})), "204 is null")
+    assert-eq({not-modified: true}, ::api/unwrap({status: 304, headers: {}, body: ""}))
+    assert(is-err(::api/unwrap({status: 400, headers: {}, body: VALIDATION})))
+}
+
+test-not-modified-workaround
+meta ["test"] fn () {
+    mapped ::api/not-modified(err("redirect missing valid Location"), true)
+    assert-eq(304, mapped.status)
+    assert(is-err(::api/not-modified(err("redirect missing valid Location"), false)), "only for conditional requests")
+    assert(is-err(::api/not-modified(err("connection refused"), true)), "other errors pass through")
+}
+
+test-parse-date
+meta ["test"] fn () {
+    assert-eq(1761955200000, ::api/parse-date("/Date(1761955200000+0000)/"))
+    assert-eq(1573755038314, ::api/parse-date("/Date(1573755038314)/"))
+    assert(is-null(::api/parse-date("2026-11-01")))
+    assert(is-null(::api/parse-date(null)))
+}
+
+test-next-page
+meta ["test"] fn () {
+    assert-eq(2, ::api/next-page(1, 100, 100, null), "a full page continues")
+    assert(is-null(::api/next-page(1, 100, 42, null)), "a short page ends")
+    assert(is-null(::api/next-page(3, 100, 0, null)), "an empty page ends")
+    assert-eq(2, ::api/next-page(1, 1000, 1000, {page: 1, pageSize: 1000, pageCount: 3, itemCount: 2500}))
+    assert(is-null(::api/next-page(3, 1000, 500, {page: 3, pageCount: 3})), "pageCount wins")
+    assert(is-null(::api/next-page(1, 100, 100, {pageCount: 1})), "even when the page is full")
+}
+
+// ---------------------------------------------------------------------------
+// Accounting building
+// ---------------------------------------------------------------------------
+
+test-resources
+meta ["test"] fn () {
+    for-each(["Contacts", "Invoices", "CreditNotes", "Payments", "BankTransactions", "BankTransfers", "Accounts", "Items",
+        "ManualJournals", "PurchaseOrders", "Quotes", "TaxRates", "TrackingCategories", "Organisation"], (r) {
+        assert(not(is-err(::acc/resource-info(r))), r)
+    })
+    assert-eq("BankTransactions", ::acc/canonical-name("banktransactions"))
+    assert(is-err(::acc/canonical-name("Widgets")))
+    assert(is-err(::acc/require-op("Payments", "update")), "payments are not updated in place")
+    assert(is-err(::acc/require-op("Organisation", "create")))
+}
+
+test-list-params
+meta ["test"] fn () {
+    inv ::acc/resource-info("Invoices")
+    assert-eq({where: "AmountDue>0", page: 2, pageSize: 1000}, ::acc/list-params(inv, {where: "AmountDue>0", pageSize: 5000, order: null}, 2), "pageSize is capped; nulls dropped")
+    quotes ::acc/resource-info("Quotes")
+    assert-eq({page: 1}, ::acc/list-params(quotes, {pageSize: 50}, 1), "pageSize only where supported")
+    accounts ::acc/resource-info("Accounts")
+    assert-eq({where: "Status==\"ACTIVE\""}, ::acc/list-params(accounts, {where: "Status==\"ACTIVE\"", page: 3}, null), "unpaged resources get no page")
+}
+
+test-write-body-and-params
+meta ["test"] fn () {
+    inv ::acc/resource-info("invoices")
+    assert-eq({Invoices: [{Type: "ACCREC"}]}, ::acc/write-body(inv, {Type: "ACCREC", Reference: null}), "one record is wrapped; nulls dropped")
+    assert-eq(2, length(::acc/write-body(inv, [{Type: "ACCREC"}, {Type: "ACCPAY"}]).Invoices))
+    assert-eq({summarizeErrors: false}, ::acc/write-params({summarize-errors: false, tenant-id: TENANT}))
+    assert-eq({}, ::acc/write-params({}))
+}
+
+test-to-page
+meta ["test"] fn () {
+    inv ::acc/resource-info("Invoices")
+    p ::acc/to-page(inv, {Invoices: [{InvoiceID: "a"}], pagination: {page: 1, pageSize: 100, pageCount: 2, itemCount: 101}}, 1, 100)
+    assert-eq(1, length(p.items))
+    assert-eq(2, p.next-page, "pageCount says there is more")
+    assert(not(p.not-modified))
+    nm ::acc/to-page(inv, {not-modified: true}, 1, 100)
+    assert(nm.not-modified)
+    assert-eq([], nm.items)
+    assert(is-null(nm.next-page))
+    org ::acc/to-page(::acc/resource-info("Organisation"), {Organisations: [{Name: "Demo Company (US)"}]}, null, 100)
+    assert-eq("Demo Company (US)", org.items[0].Name)
+}
+
+test-element-errors
+meta ["test"] fn () {
+    body {Invoices: [
+        {InvoiceID: "00000000-0000-0000-0000-000000000000", HasValidationErrors: true, ValidationErrors: [{Message: "Contact must be valid"}]},
+        {InvoiceID: "6f1b3c1e-2d4b-4a69-9f7a-0a4f3c1e2d4b", HasValidationErrors: false},
+        {StatusAttributeString: "ERROR", ValidationErrors: [{Message: "Line items are required"}]}
+    ]}
+    errors ::acc/element-errors("Invoices", body)
+    assert-eq(2, length(errors))
+    assert-eq(0, errors[0].index)
+    assert-eq(["Contact must be valid"], errors[0].messages)
+    assert-eq(2, errors[1].index)
+}
+
+test-file-names-and-guards
+meta ["test"] fn () {
+    assert-eq("receipt.pdf", ::acc/check-file-name("receipt.pdf"))
+    assert(is-err(::acc/check-file-name("../etc/passwd")), "no path separators")
+    assert(is-err(::acc/check-file-name("")))
+    assert(is-err(::acc/upload-attachment("Items", "x", "a.pdf", "x", "application/pdf")), "Items take no attachments")
+    assert(is-err(::acc/record-pdf("Contacts", "x")), "contacts have no PDF")
+    assert(is-err(::acc/get-record("Invoices", "")), "an id is required")
+}
+
+// ---------------------------------------------------------------------------
+// Where
+// ---------------------------------------------------------------------------
+
+test-where-literals
+meta ["test"] fn () {
+    assert-eq("\"ACCREC\"", ::w/quote("ACCREC"))
+    assert-eq("O'Brien", slice(::w/quote("O'Brien"), 1, 8), "apostrophes are fine inside double quotes")
+    assert(is-err(::w/quote("say \"hi\"")), "double quotes have no documented escape, so they err")
+    assert(is-err(::w/quote("a\\b")), "backslashes err")
+    assert-eq("guid(\"6d2b51ce-0a4f-4a8b-9f7a-3c1e2d4b5a69\")", ::w/literal(::w/guid("6d2b51ce-0a4f-4a8b-9f7a-3c1e2d4b5a69")))
+    assert(is-err(::w/guid("not-a-guid")))
+    assert-eq("DateTime(2026,01,05)", ::w/literal(::w/date(2026, 1, 5)))
+    assert(is-err(::w/date(2026, 13, 1)))
+    assert-eq("12.5", ::w/literal(12.5))
+    assert-eq("true", ::w/literal(true))
+    assert(is-err(::w/literal(null)))
+}
+
+test-where-conditions
+meta ["test"] fn () {
+    assert-eq("Type==\"ACCREC\"", ::w/condition("Type", "==", "ACCREC"))
+    assert-eq("Contact.ContactID==guid(\"6d2b51ce-0a4f-4a8b-9f7a-3c1e2d4b5a69\")", ::w/condition("Contact.ContactID", "==", ::w/guid("6d2b51ce-0a4f-4a8b-9f7a-3c1e2d4b5a69")))
+    assert(is-err(::w/condition("Type) OR (1", "==", "x")), "field names are checked")
+    assert(is-err(::w/condition("Type", "=", "x")), "operators are checked")
+    assert-eq("(Type==\"ACCREC\") AND (AmountDue>0)", ::w/all-of([["Type", "==", "ACCREC"], ["AmountDue", ">", 0]]))
+    assert-eq("Status==\"PAID\"", ::w/all-of([["Status", "==", "PAID"]]), "one part is not parenthesised")
+    assert-eq("(Status==\"PAID\") OR (Status==\"AUTHORISED\")", ::w/any-of([["Status", "==", "PAID"], "Status==\"AUTHORISED\""]))
+    assert(is-err(::w/all-of([["Name", "==", "say \"hi\""]])), "a bad part makes the whole filter an Err")
+    assert(is-err(::w/all-of([])))
+}
+
+// ---------------------------------------------------------------------------
+// Resolver
+// ---------------------------------------------------------------------------
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    ::hot::ctx/set({
+        "xero.tenant.id": "11111111-2222-3333-4444-555555555555",
+        "xero.access.token": "CTX-AT",
+        "xero.refresh.token": "",
+        "xero.token.store": "",
+        "xero.custom-connection": ""
+    })
+    r ::api/resolve({tenant-id: TENANT, access-token: "USER-AT", idempotency-key: "k-1"})
+    assert-eq(TENANT, r.tenant-id, "opts win over ctx")
+    assert-eq("USER-AT", r.credentials.token, "per-call credentials win")
+    assert-eq("k-1", r.idempotency-key)
+
+    from-ctx ::api/resolve({})
+    assert-eq("11111111-2222-3333-4444-555555555555", from-ctx.tenant-id, "ctx is used when opts is empty")
+    assert-eq("CTX-AT", from-ctx.credentials.token)
+
+    assert-eq("11111111-2222-3333-4444-555555555555", ::hot::ctx/get("xero.tenant.id"), "resolve never writes per-call values to ctx")
+    assert-eq("CTX-AT", ::hot::ctx/get("xero.access.token"))
+    ::hot::ctx/set({"xero.tenant.id": "", "xero.access.token": ""})
+}
+
+test-resolve-errors
+meta ["test"] fn () {
+    ::hot::ctx/set({"xero.access.token": "", "xero.refresh.token": "", "xero.token.store": "", "xero.custom-connection": "", "xero.tenant.id": ""})
+    none ::api/resolve({tenant-id: TENANT})
+    assert(is-err(none), "no credentials errs")
+    assert(contains(err-message(none), "no credentials configured"), err-message(none))
+    assert(is-err(::api/resolve({tenant-id: "acme", access-token: "AT"})), "a malformed tenant errs")
+    assert(not(is-err(::api/resolve({access-token: "AT"}))), "no tenant is allowed (Custom Connections)")
+    assert(is-null(::api/last-rate-limits({tenant-id: TENANT})), "no rate limits before any call")
+    assert-eq("xero.rate-limits.default", ::api/rate-limits-key(null))
+}

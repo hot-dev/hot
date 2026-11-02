@@ -1,0 +1,240 @@
+::xero::reports ns
+meta {
+    doc: """
+    Xero reports, plus `flatten-report`, which turns a report's sections
+    into flat records an agent or a spreadsheet can use.
+
+    Each report takes Xero's own parameters: `fromDate` / `toDate` /
+    `date` (`YYYY-MM-DD`), `periods` and `timeframe` (`MONTH`,
+    `QUARTER`, `YEAR`) for comparisons, `trackingCategoryID` /
+    `trackingOptionID`, `standardLayout`, `paymentsOnly` (cash basis).
+    Null values are dropped. Reports need the granular report scopes
+    (`accounting.reports.profitandloss.read`, ...) or, for apps created
+    before 2 March 2026, `accounting.reports.read`.
+
+    ```hot
+    ::r ::xero::reports
+
+    pnl ::r/profit-and-loss({fromDate: "2026-07-01", toDate: "2026-09-30"})
+    rows ::r/flatten-report(pnl)
+    net find-first(rows, (row) { eq(row.label, "Net Profit") })
+    ```
+    """
+}
+
+::api ::xero::api
+::re ::hot::regex
+
+is-blank ::xero::oauth/is-blank
+
+REPORTS [
+  "ProfitAndLoss",
+  "BalanceSheet",
+  "TrialBalance",
+  "AgedReceivablesByContact",
+  "AgedPayablesByContact",
+  "BankSummary",
+  "ExecutiveSummary",
+  "BudgetSummary"
+]
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+check-name fn (name: Str): Str {
+  cond {
+    ::re/is-match(name, "^[A-Za-z]{2,64}$") => { name }
+    => { err(`xero: invalid report name '${name}'`) }
+  }
+}
+
+run-report
+meta {
+    doc: """GET /Reports/{name} with `params`. Returns the first report (`ReportName`, `ReportTitles`, `ReportDate`, `Rows`, ...). Use `flatten-report` for records."""
+}
+fn
+(name: Str): Map {
+  run-report(name, {}, {})
+},
+(name: Str, params: Map): Map {
+  run-report(name, params, {})
+},
+(name: Str, params: Map, opts: Map): Map {
+  checked check-name(name)
+  cond {
+    is-err(checked) => { checked }
+    => {
+      body ::api/json("GET", `/Reports/${checked}`, filter-vals(untype(params), is-some), "", opts)
+      reports if(and(not(is-err(body)), is-map(body)), or(get(body, "Reports"), []), [])
+      cond {
+        is-err(body) => { body }
+        is-empty(reports) => { err(`xero: no ${checked} report returned`) }
+        => { first(reports) }
+      }
+    }
+  }
+}
+
+profit-and-loss
+meta {
+    doc: """The ProfitAndLoss report. Params: `fromDate`, `toDate`, `periods`, `timeframe`, `trackingCategoryID`, `trackingOptionID`, `standardLayout`, `paymentsOnly`."""
+}
+fn
+(params: Map): Map {
+  run-report("ProfitAndLoss", params, {})
+},
+(params: Map, opts: Map): Map {
+  run-report("ProfitAndLoss", params, opts)
+}
+
+balance-sheet
+meta {
+    doc: """The BalanceSheet report. Params: `date`, `periods`, `timeframe`, `trackingOptionID1`, `trackingOptionID2`, `standardLayout`, `paymentsOnly`."""
+}
+fn
+(params: Map): Map {
+  run-report("BalanceSheet", params, {})
+},
+(params: Map, opts: Map): Map {
+  run-report("BalanceSheet", params, opts)
+}
+
+trial-balance
+meta {doc: """The TrialBalance report. Params: `date`, `paymentsOnly`."""}
+fn
+(params: Map): Map {
+  run-report("TrialBalance", params, {})
+},
+(params: Map, opts: Map): Map {
+  run-report("TrialBalance", params, opts)
+}
+
+aged-receivables
+meta {
+    doc: """The AgedReceivablesByContact report for one contact (Xero requires `contactId`). Params: `date`, `fromDate`, `toDate`."""
+}
+fn
+(contact-id: Str, params: Map): Map {
+  aged-receivables(contact-id, params, {})
+},
+(contact-id: Str, params: Map, opts: Map): Map {
+  cond {
+    is-blank(contact-id) => { err("xero: aged receivables need a contact id") }
+    => { run-report("AgedReceivablesByContact", {...untype(params), contactId: contact-id}, opts) }
+  }
+}
+
+aged-payables
+meta {
+    doc: """The AgedPayablesByContact report for one contact (`contactId` required). Params: `date`, `fromDate`, `toDate`."""
+}
+fn
+(contact-id: Str, params: Map): Map {
+  aged-payables(contact-id, params, {})
+},
+(contact-id: Str, params: Map, opts: Map): Map {
+  cond {
+    is-blank(contact-id) => { err("xero: aged payables need a contact id") }
+    => { run-report("AgedPayablesByContact", {...untype(params), contactId: contact-id}, opts) }
+  }
+}
+
+bank-summary
+meta {
+    doc: """The BankSummary report: opening balance, cash received, cash spent and closing balance per bank account. Params: `fromDate`, `toDate`. The usual starting point for a bank reconciliation check."""
+}
+fn
+(params: Map): Map {
+  run-report("BankSummary", params, {})
+},
+(params: Map, opts: Map): Map {
+  run-report("BankSummary", params, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Flattening (pure)
+// ---------------------------------------------------------------------------
+
+cell-values fn (cells: Any): Vec {
+  map(or(cells, []), (c) { Str(or(get(c, "Value"), "")) })
+}
+
+column-keys
+meta {
+    doc: """Column keys from a report's `Header` row: each header cell's text, else `col{i}`; repeated keys get `_{i}` appended."""
+}
+fn (report: Map): Vec {
+  header find-first(or(get(report, "Rows"), []), (r) { eq(get(r, "RowType"), "Header") })
+  titles cell-values(if(is-map(header), get(header, "Cells"), []))
+  raw map-indexed(titles, (i, t) { if(is-empty(trim(t)), `col${i}`, trim(t)) })
+  map-indexed(raw, (i, k) {
+    earlier slice(raw, 0, i)
+    if(in(k, earlier), `${k}_${i}`, k)
+  })
+}
+
+account-id fn (cells: Any): Str? {
+  attrs mapcat(or(cells, []), (c) { or(get(c, "Attributes"), []) })
+  hit find-first(attrs, (a) { eq(get(a, "Id"), "account") })
+  if(is-map(hit), get(hit, "Value"), null)
+}
+
+record fn (row: Map, section: Str?, col-keys: Vec): Map {
+  cells cell-values(get(row, "Cells"))
+  values reduce(range(0, min(length(col-keys), length(cells))), (acc, i) { assoc(acc, col-keys[i], cells[i]) }, {})
+  filter-vals({
+    type: get(row, "RowType"),
+    section: section,
+    label: if(is-empty(cells), null, first(cells)),
+    account-id: account-id(get(row, "Cells")),
+    values: values,
+    cells: cells
+  }, is-some)
+}
+
+flatten-report
+meta {
+    doc: """
+    Flatten a report (as `run-report` returns it) into records:
+
+    - `type` - `"Row"` or `"SummaryRow"` (section totals)
+    - `section` - the section title (`"Income"`, `"Less Operating Expenses"`), when not blank
+    - `label` - the first cell (account or line name)
+    - `account-id` - the account GUID when Xero links one
+    - `values` - every cell keyed by the header row (`{"31 Oct 2026": "1200.00"}`)
+    - `cells` - the cell values as a Vec of Str
+
+    Header rows are used for the keys, not returned. Amounts stay as Strs;
+    `parse-amount` converts one.
+    """
+}
+fn (report: Map): Vec {
+  col-keys column-keys(report)
+  rows or(get(report, "Rows"), [])
+  mapcat(filter(rows, (r) { ne(get(r, "RowType"), "Header") }), (r) {
+    title get(r, "Title")
+    section if(is-blank(title), null, title)
+    cond {
+      eq(get(r, "RowType"), "Section") => {
+        map(filter(or(get(r, "Rows"), []), is-map), (child) { record(child, section, col-keys) })
+      }
+      => { [record(r, null, col-keys)] }
+    }
+  })
+}
+
+parse-amount
+meta {
+    doc: """A report amount Str (`"1200.00"`, `"-35.50"`, `"1,200.00"`) as a Dec; null for blanks and non-numbers."""
+}
+fn (value: Any): Dec? {
+  text if(is-str(value), replace(trim(Str(value)), ",", ""), null)
+  // WORKAROUND(hot-bug-6): match the number before Dec() so a bad value returns null instead of halting.
+  cond {
+    is-int(value) => { Dec(value) }
+    is-dec(value) => { value }
+    and(is-some(text), ::re/is-match(or(text, ""), "^-?[0-9]{1,18}(\\.[0-9]{1,10})?$")) => { Dec(text) }
+    => { null }
+  }
+}

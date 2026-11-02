@@ -1,0 +1,156 @@
+::cipherowl::onchain ns
+meta {
+    doc: """
+    Onchain Service: supported networks, native and token balances, and
+    transactions. These endpoints take a network key (e.g.
+    `ethereum_mainnet`, `bitcoin_mainnet`, `tron_mainnet`), not a chain;
+    `list-networks` returns the live list.
+
+    Balances are strings in the asset's smallest unit (wei, satoshi), so
+    nothing is lost to floating point; convert with each token's
+    `decimals`.
+    """
+}
+
+::api ::cipherowl::api
+
+seg ::cipherowl::api/seg
+query ::cipherowl::api/query
+
+MAX_BATCH_BALANCES 100
+
+network-path fn (network: Str): Str {
+  n ::api/validate-network(network)
+  cond {
+    is-err(n) => { n }
+    => { `/api/onchain/v1/networks/${seg(n)}` }
+  }
+}
+
+list-networks
+meta {
+    doc: """The networks the Onchain Service supports: `{chains: [{network, name, symbol, supportsTokens}]}`."""
+}
+fn
+(): Map {
+  list-networks({})
+},
+(opts: Map): Map {
+  ::api/request("GET", "/api/onchain/v1/networks", "", opts)
+}
+
+get-balance
+meta {
+    doc: """
+    An address's balance on a network: `{network, chain, balance:
+    {address, balance, unit, tokens: [{contract, name, symbol, balance,
+    decimals, type}], error}}`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::onchain/get-balance("ethereum_mainnet", "0x0000000000000000000000000000000000000001")
+    out.balance.balance
+    ```
+    """
+}
+fn
+(network: Str, address: Str): Map {
+  get-balance(network, address, {})
+},
+(network: Str, address: Str, opts: Map): Map {
+  base network-path(network)
+  if(is-err(base), base, ::api/request("GET", `${base}/addresses/${seg(trim(address))}/balance`, "", opts))
+}
+
+batch-balances-request
+meta {
+    doc: """The spec for a batch balance read: 1 to 100 addresses. Exposed for testing."""
+}
+fn (network: Str, addresses: Vec<Str>): Map {
+  cond {
+    is-empty(addresses) => { err("cipherowl: at least one address is required") }
+    gt(length(addresses), MAX_BATCH_BALANCES) => { err(`cipherowl: at most ${MAX_BATCH_BALANCES} addresses per batch balance call`) }
+    => {
+      base network-path(network)
+      cond {
+        is-err(base) => { base }
+        => { {method: "POST", path: `${base}/balances:batchget`, body: {addresses: map(addresses, (a) { trim(a) }), network: trim(network)}} }
+      }
+    }
+  }
+}
+
+batch-balances
+meta {
+    doc: """Balances for up to 100 addresses: `{network, chain, balances: [...]}` in request order. A failed address carries its own `error` instead of failing the call."""
+}
+fn
+(network: Str, addresses: Vec<Str>): Map {
+  batch-balances(network, addresses, {})
+},
+(network: Str, addresses: Vec<Str>, opts: Map): Map {
+  ::api/call(batch-balances-request(network, addresses), opts)
+}
+
+get-transaction-scripts
+meta {
+    doc: """The scripts of one transaction (Bitcoin-family networks only, currently `bitcoin_mainnet`)."""
+}
+fn
+(network: Str, txid: Str): Map {
+  get-transaction-scripts(network, txid, {})
+},
+(network: Str, txid: Str, opts: Map): Map {
+  base network-path(network)
+  if(is-err(base), base, ::api/request("GET", `${base}/transactions/${seg(trim(txid))}/scripts`, "", opts))
+}
+
+transactions-request
+meta {
+    doc: """The spec for one page of an address's transactions. `options` takes `page` (1-based), `pageSize` (default 25, max 100) and `opReturnOnly`. Exposed for testing."""
+}
+fn (network: Str, address: Str, options: Map): Map {
+  base network-path(network)
+  cond {
+    is-err(base) => { base }
+    => { transactions-spec(base, address, options) }
+  }
+}
+
+transactions-spec fn (base: Str, address: Str, options: Map): Map {
+  {
+    method: "GET",
+    path: `${base}/addresses/${seg(trim(address))}/transactions/scripts${query({
+      page: get(options, "page"),
+      pageSize: get(options, "pageSize"),
+      opReturnOnly: get(options, "opReturnOnly")
+    })}`,
+    body: ""
+  }
+}
+
+list-address-transactions
+meta {
+    doc: """One page of an address's transactions: `{network, chain, address, transactions, page, totalPages, totalItems}`. Page numbers start at 1; the next page exists while `page` is below `totalPages` (see `next-page`)."""
+}
+fn
+(network: Str, address: Str, options: Map): Map {
+  list-address-transactions(network, address, options, {})
+},
+(network: Str, address: Str, options: Map, opts: Map): Map {
+  ::api/call(transactions-request(network, address, options), opts)
+}
+
+next-page
+meta {
+    doc: """The next 1-based `page` number for a numbered page, or null on the last page. Pure."""
+}
+fn (page: Any): Int? {
+  current get(or(page, {}), "page")
+  total get(or(page, {}), "totalPages")
+  cond {
+    and(is-int(current), is-int(total), lt(current, total)) => { add(current, 1) }
+    => { null }
+  }
+}

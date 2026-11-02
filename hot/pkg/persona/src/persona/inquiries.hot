@@ -1,0 +1,511 @@
+::persona::inquiries ns
+meta {
+    doc: """
+    Inquiries: one end user's run through an inquiry template (KYC or
+    KYB). Create one, send the user to the hosted flow (a one-time link,
+    or a resume link with a session token), wait for the `inquiry.*`
+    webhook, read the result, then approve, decline or mark it for review.
+
+    Statuses: `created`, `pending`, `completed`, `needs_review`,
+    `approved`, `declined`, `failed`, `expired`. See
+    `::persona::decisions/inquiry-decision` to normalize them.
+    """
+}
+
+::api ::persona::api
+RequestOptions ::persona::api/RequestOptions
+
+seg ::persona::api/seg
+
+// Statuses after which the end user has nothing left to do. `expired`
+// inquiries can be resumed; `completed` ones can still be approved or
+// declined by a workflow or a reviewer.
+DONE_STATUSES ["completed", "needs_review", "approved", "declined", "failed", "expired"]
+
+template-attribute
+meta {
+    doc: """The create attribute for a template id: `itmplv_...` is `inquiry-template-version-id`, legacy `tmpl_...` is `template-id`, anything else (`itmpl_...`) is `inquiry-template-id`. Exposed for testing."""
+}
+fn (template-id: Str): Map {
+  cond {
+    starts-with(template-id, "itmplv_") => { {inquiry-template-version-id: template-id} }
+    starts-with(template-id, "tmpl_") => { {template-id: template-id} }
+    => { {inquiry-template-id: template-id} }
+  }
+}
+
+create-body
+meta {
+    doc: """The JSON:API body for `create-inquiry`. Exposed for testing."""
+}
+fn (template-id: Str, opts: Map): Map {
+  ::api/document(null, {
+    ...template-attribute(template-id),
+    account-id: get(opts, "account-id"),
+    reference-id: get(opts, "reference-id"),
+    fields: get(opts, "fields"),
+    note: get(opts, "note"),
+    tags: get(opts, "tags"),
+    redirect-uri: get(opts, "redirect-uri"),
+    theme-set-id: get(opts, "theme-set-id"),
+    initial-step-name: get(opts, "initial-step-name")
+  }, or(get(opts, "meta"), {}))
+}
+
+create-inquiry
+meta {
+    doc: """
+    POST /inquiries - Create an inquiry from a template (`itmpl_...`,
+    `itmplv_...` or legacy `tmpl_...`).
+
+    `opts` (all optional):
+    - `reference-id`: your user id (Persona now prefers
+      `meta: {auto-create-account-reference-id: ...}`)
+    - `account-id`: attach to an existing account (`act_...`)
+    - `fields`: prefill, e.g. `{name-first: "Jane", birthdate: "1990-01-31"}`
+      (template field keys; plain values). These are PII; they go in the
+      request body only, never a URL.
+    - `note`, `tags`, `redirect-uri`, `theme-set-id`, `initial-step-name`
+    - `meta`: e.g. `{auto-create-account-reference-id: "user-42",
+      auto-create-one-time-link: true, auto-create-inquiry-session: true,
+      expiration-after-create-interval-seconds: 86400}`
+
+    Pass `RequestOptions({idempotency-key: ...})` so a retry can't create a
+    second inquiry.
+
+    **Example**
+
+    ```hot
+    inquiry ::persona::inquiries/create-inquiry("itmpl_...", {
+      reference-id: "user-42",
+      meta: {auto-create-one-time-link: true}
+    }, ::persona::api/RequestOptions({idempotency-key: "user-42-kyc"}))
+    inquiry.data.id              // "inq_..."
+    inquiry.meta.one-time-link   // send this to the user
+    ```
+    """
+}
+fn
+(template-id: Str): Map {
+  create-inquiry(template-id, {}, RequestOptions({}))
+},
+(template-id: Str, opts: Map): Map {
+  create-inquiry(template-id, opts, RequestOptions({}))
+},
+(template-id: Str, opts: Map, options: RequestOptions): Map {
+  ::api/send("POST", "/inquiries", {}, create-body(template-id, opts), options)
+}
+
+get-inquiry
+meta {
+    doc: """
+    GET /inquiries/{id} - Retrieve an inquiry. `opts.include` lists
+    relationships to embed in `included` (since 2025-10-27 nothing is
+    included unless asked), e.g. `["verifications", "reports", "account",
+    "documents", "sessions"]`; `opts.fields` takes sparse fieldsets.
+
+    **Example**
+
+    ```hot
+    inquiry ::persona::inquiries/get-inquiry("inq_...", {include: ["verifications", "reports"]})
+    ```
+    """
+}
+fn
+(inquiry-id: Str): Map {
+  get-inquiry(inquiry-id, {}, RequestOptions({}))
+},
+(inquiry-id: Str, opts: Map): Map {
+  get-inquiry(inquiry-id, opts, RequestOptions({}))
+},
+(inquiry-id: Str, opts: Map, options: RequestOptions): Map {
+  ::api/send("GET", `/inquiries/${seg(inquiry-id)}`, ::api/read-query(opts), null, options)
+}
+
+list-inquiries
+meta {
+    doc: """
+    GET /inquiries - One page of inquiries, newest first. `filters` become
+    `filter[...]`: `reference-id`, `account-id`, `inquiry-id`,
+    `inquiry-template-id`, `template-id`, `status` (Vec values are
+    comma-joined), `created-at-start`, `created-at-end`, `note`. `opts`:
+    `page-size` (1-100), `after`, `before`. Continue with
+    `::persona::api/next-cursor(page)`.
+
+    **Example**
+
+    ```hot
+    page ::persona::inquiries/list-inquiries({status: ["needs_review"]}, {page-size: 50})
+    ```
+    """
+}
+fn
+(filters: Map): Map {
+  list-inquiries(filters, {}, RequestOptions({}))
+},
+(filters: Map, opts: Map): Map {
+  list-inquiries(filters, opts, RequestOptions({}))
+},
+(filters: Map, opts: Map, options: RequestOptions): Map {
+  ::api/list-page("/inquiries", filters, opts, options)
+}
+
+collect-inquiries
+meta {
+    doc: """Up to `limit` inquiries matching `filters` (see `list-inquiries`), following cursors."""
+}
+fn
+(filters: Map, limit: Int): Vec {
+  ::api/collect("/inquiries", filters, limit, RequestOptions({}))
+},
+(filters: Map, limit: Int, options: RequestOptions): Vec {
+  ::api/collect("/inquiries", filters, limit, options)
+}
+
+search-inquiries
+meta {
+    doc: """
+    POST /inquiries/search - Search with a predicate tree. `query` is a
+    predicate `{attribute, operator: "eq"|"gt"|"gte"|"lt"|"lte", value}` or
+    `{and: [...]}`/`{or: [...]}`/`{not: ...}`; `opts` takes `sort`
+    (`{attribute, direction}`) and `page-size`. Search is eventually
+    consistent: don't use it to read your own writes.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/search-inquiries({attribute: "status", operator: "eq", value: "needs_review"}, {page-size: 20})
+    ```
+    """
+}
+fn
+(query: Map): Map {
+  search-inquiries(query, {}, RequestOptions({}))
+},
+(query: Map, opts: Map): Map {
+  search-inquiries(query, opts, RequestOptions({}))
+},
+(query: Map, opts: Map, options: RequestOptions): Map {
+  size get(opts, "page-size")
+  body ::api/compact({query: query, sort: get(opts, "sort"), page: if(is-some(size), {size: size}, null)})
+  ::api/send("POST", "/inquiries/search", {}, body, options)
+}
+
+update-inquiry
+meta {
+    doc: """PATCH /inquiries/{id} - Update `note`, `fields`, `tags` or `redirect-uri`. Unset keys are left alone."""
+}
+fn
+(inquiry-id: Str, attributes: Map): Map {
+  update-inquiry(inquiry-id, attributes, RequestOptions({}))
+},
+(inquiry-id: Str, attributes: Map, options: RequestOptions): Map {
+  ::api/send("PATCH", `/inquiries/${seg(inquiry-id)}`, {}, ::api/document(null, attributes, {}), options)
+}
+
+action fn (inquiry-id: Str, name: Str, meta-block: Map, options: RequestOptions): Map {
+  ::api/send("POST", `/inquiries/${seg(inquiry-id)}/${name}`, {}, ::api/meta-document(meta-block), options)
+}
+
+approve-inquiry
+meta {
+    doc: """POST /inquiries/{id}/approve - Approve an inquiry, with an optional reviewer `comment`. Fires `inquiry.approved`."""
+}
+fn
+(inquiry-id: Str): Map {
+  approve-inquiry(inquiry-id, null, RequestOptions({}))
+},
+(inquiry-id: Str, comment: Str?): Map {
+  approve-inquiry(inquiry-id, comment, RequestOptions({}))
+},
+(inquiry-id: Str, comment: Str?, options: RequestOptions): Map {
+  action(inquiry-id, "approve", {comment: comment}, options)
+}
+
+decline-inquiry
+meta {
+    doc: """POST /inquiries/{id}/decline - Decline an inquiry, with an optional reviewer `comment`. Fires `inquiry.declined`."""
+}
+fn
+(inquiry-id: Str): Map {
+  decline-inquiry(inquiry-id, null, RequestOptions({}))
+},
+(inquiry-id: Str, comment: Str?): Map {
+  decline-inquiry(inquiry-id, comment, RequestOptions({}))
+},
+(inquiry-id: Str, comment: Str?, options: RequestOptions): Map {
+  action(inquiry-id, "decline", {comment: comment}, options)
+}
+
+mark-for-review
+meta {
+    doc: """POST /inquiries/{id}/mark-for-review - Move an inquiry to `needs_review` for a human. Not allowed once approved or declined."""
+}
+fn
+(inquiry-id: Str): Map {
+  mark-for-review(inquiry-id, RequestOptions({}))
+},
+(inquiry-id: Str, options: RequestOptions): Map {
+  action(inquiry-id, "mark-for-review", {}, options)
+}
+
+expire-inquiry
+meta {
+    doc: """POST /inquiries/{id}/expire - Expire every session and cancel pending verifications. The inquiry can still be resumed."""
+}
+fn
+(inquiry-id: Str): Map {
+  expire-inquiry(inquiry-id, RequestOptions({}))
+},
+(inquiry-id: Str, options: RequestOptions): Map {
+  action(inquiry-id, "expire", {}, options)
+}
+
+resume-inquiry
+meta {
+    doc: """
+    POST /inquiries/{id}/resume - Resume a `pending` or `expired` inquiry
+    and get a session token for the hosted flow (`meta.session-token`;
+    read it with `session-token`). Persona returns 409 for other statuses.
+    A session token lets anyone continue the user's verification: treat
+    it as a secret and never log it.
+
+    **Example**
+
+    ```hot
+    resumed ::persona::inquiries/resume-inquiry("inq_...")
+    url ::persona::inquiries/resume-url("inq_...", ::persona::inquiries/session-token(resumed))
+    ```
+    """
+}
+fn
+(inquiry-id: Str): Map {
+  resume-inquiry(inquiry-id, RequestOptions({}))
+},
+(inquiry-id: Str, options: RequestOptions): Map {
+  action(inquiry-id, "resume", {}, options)
+}
+
+session-token
+meta {
+    doc: """The `meta.session-token` of a create or resume response (any inflection), or null."""
+}
+fn (doc: Any): Str? {
+  m if(is-map(doc), get(doc, "meta"), null)
+  cond {
+    not(is-map(m)) => { null }
+    => { or(get(m, "session-token"), or(get(m, "session_token"), get(m, "sessionToken"))) }
+  }
+}
+
+generate-one-time-link
+meta {
+    doc: """
+    POST /inquiries/{id}/generate-one-time-link - A single-use hosted-flow
+    link (`meta.one-time-link`, plus `meta.one-time-link-short`), valid
+    for `expires-in-seconds` (default 24 hours). Resume an expired inquiry
+    first. Read it with `one-time-link`.
+
+    **Example**
+
+    ```hot
+    out ::persona::inquiries/generate-one-time-link("inq_...", 3600)
+    ::persona::inquiries/one-time-link(out)  // "https://inquiry.withpersona.com/verify?code=..."
+    ```
+    """
+}
+fn
+(inquiry-id: Str): Map {
+  generate-one-time-link(inquiry-id, null, RequestOptions({}))
+},
+(inquiry-id: Str, expires-in-seconds: Int?): Map {
+  generate-one-time-link(inquiry-id, expires-in-seconds, RequestOptions({}))
+},
+(inquiry-id: Str, expires-in-seconds: Int?, options: RequestOptions): Map {
+  action(inquiry-id, "generate-one-time-link", {expires-in-seconds: expires-in-seconds}, options)
+}
+
+one-time-link
+meta {
+    doc: """The `meta.one-time-link` of a response (any inflection), or null."""
+}
+fn (doc: Any): Str? {
+  m if(is-map(doc), get(doc, "meta"), null)
+  cond {
+    not(is-map(m)) => { null }
+    => { or(get(m, "one-time-link"), or(get(m, "one_time_link"), get(m, "oneTimeLink"))) }
+  }
+}
+
+redact-inquiry
+meta {
+    doc: """DELETE /inquiries/{id} - Permanently remove the inquiry's PII (child objects are redacted asynchronously). Cannot be undone."""
+}
+fn
+(inquiry-id: Str): Map {
+  redact-inquiry(inquiry-id, RequestOptions({}))
+},
+(inquiry-id: Str, options: RequestOptions): Map {
+  ::api/send("DELETE", `/inquiries/${seg(inquiry-id)}`, {}, null, options)
+}
+
+add-tag
+meta {
+    doc: """POST /inquiries/{id}/add-tag - Add a tag by name."""
+}
+fn
+(inquiry-id: Str, tag-name: Str): Map {
+  add-tag(inquiry-id, tag-name, RequestOptions({}))
+},
+(inquiry-id: Str, tag-name: Str, options: RequestOptions): Map {
+  action(inquiry-id, "add-tag", {tag-name: tag-name}, options)
+}
+
+remove-tag
+meta {
+    doc: """POST /inquiries/{id}/remove-tag - Remove a tag by name."""
+}
+fn
+(inquiry-id: Str, tag-name: Str): Map {
+  remove-tag(inquiry-id, tag-name, RequestOptions({}))
+},
+(inquiry-id: Str, tag-name: Str, options: RequestOptions): Map {
+  action(inquiry-id, "remove-tag", {tag-name: tag-name}, options)
+}
+
+print-inquiry
+meta {
+    doc: """GET /inquiries/{id}/print - The inquiry as a PDF (`Bytes`). It contains the user's PII and document images: store it like the originals, never log it."""
+}
+fn
+(inquiry-id: Str): Bytes {
+  print-inquiry(inquiry-id, RequestOptions({}))
+},
+(inquiry-id: Str, options: RequestOptions): Bytes {
+  ::api/get-bytes(`/inquiries/${seg(inquiry-id)}/print`, options)
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox simulation
+// ---------------------------------------------------------------------------
+
+is-sandbox-key
+meta {
+    doc: """True when an API key is a sandbox key (`persona_sandbox_...`). Exposed for testing."""
+}
+fn (api-key: Any): Bool {
+  and(is-str(api-key), starts-with(or(api-key, ""), "persona_sandbox_"))
+}
+
+simulate
+meta {
+    ctx: {"persona.api.key": {required: true}},
+    doc: """
+    POST /inquiries/{id}/perform-simulate-actions - Sandbox only: drive an
+    inquiry through its lifecycle and fire the real webhooks. `actions` is
+    a Vec of action names: `start_inquiry`, `complete_inquiry`,
+    `fail_inquiry`, `expire_inquiry`, `mark_for_review_inquiry`,
+    `approve_inquiry`, `decline_inquiry`. Refuses (without sending) unless
+    the key in use is a `persona_sandbox_` key.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/simulate("inq_...", ["start_inquiry", "complete_inquiry"])
+    ```
+    """
+}
+fn
+(inquiry-id: Str, actions: Vec): Map {
+  simulate(inquiry-id, actions, RequestOptions({}))
+},
+(inquiry-id: Str, actions: Vec, options: RequestOptions): Map {
+  resolved ::api/resolve(options)
+  cond {
+    is-err(resolved) => { resolved }
+    not(is-sandbox-key(resolved.api-key)) => { err("persona: simulate only runs with a persona_sandbox_ API key; nothing was sent") }
+    => { action(inquiry-id, "perform-simulate-actions", {simulate-actions: map(actions, (a) { {type: a} })}, options) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hosted flow links
+// ---------------------------------------------------------------------------
+
+hosted-flow-url
+meta {
+    doc: """
+    A hosted-flow link that creates a new inquiry when opened:
+    `https://inquiry.withpersona.com/verify?inquiry-template-id=...`.
+
+    `opts` (all optional): `environment-id` (`env_...`, from the
+    dashboard; required for sandbox templates), `reference-id` or
+    `account-id`, `account-type-id`, `redirect-uri` (Persona appends
+    `?inquiry-id=...`), `language`, `theme-set-id`, `style-variant`.
+
+    Field prefill (`fields[...]`) is deliberately not supported: values in
+    a URL end up in browser history, proxies and logs. To prefill PII,
+    create the inquiry with `create-inquiry(..., {fields: ...})` and send
+    a `generate-one-time-link` or `resume-url` link instead.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/hosted-flow-url("itmpl_abc", {environment-id: "env_123", reference-id: "user-42"})
+    // => "https://inquiry.withpersona.com/verify?inquiry-template-id=itmpl_abc&environment-id=env_123&reference-id=user-42"
+    ```
+    """
+}
+fn (template-id: Str, opts: Map): Str {
+  template template-attribute(template-id)
+  params [
+    [first(keys(template)), template-id],
+    ["environment-id", get(opts, "environment-id")],
+    ["reference-id", get(opts, "reference-id")],
+    ["account-id", get(opts, "account-id")],
+    ["account-type-id", get(opts, "account-type-id")],
+    ["redirect-uri", get(opts, "redirect-uri")],
+    ["language", get(opts, "language")],
+    ["theme-set-id", get(opts, "theme-set-id")],
+    ["style-variant", get(opts, "style-variant")]
+  ]
+  link-with(params)
+}
+
+link-with fn (params: Vec): Str {
+  pairs map(filter(params, (p) { is-some(p[1]) }), (p) { `${::hot::uri/encode(p[0])}=${::hot::uri/encode(Str(p[1]))}` })
+  `${::persona/HOSTED_FLOW_URL}?${join(pairs, "&")}`
+}
+
+resume-url
+meta {
+    doc: """
+    The hosted-flow link that continues an existing inquiry:
+    `...?inquiry-id=inq_...&session-token=...`. Get the token from
+    `resume-inquiry`. The link carries a session token: send it only to
+    the user, and don't log it.
+    """
+}
+fn (inquiry-id: Str, session-token: Str): Str {
+  link-with([["inquiry-id", inquiry-id], ["session-token", session-token]])
+}
+
+// ---------------------------------------------------------------------------
+// Status helpers
+// ---------------------------------------------------------------------------
+
+status
+meta {
+    doc: """An inquiry's `status` from a document or resource, or null."""
+}
+fn (doc: Any): Str? {
+  ::api/attr(doc, "status")
+}
+
+is-done
+meta {
+    doc: """True when the end user has nothing left to do: the status is `completed`, `needs_review`, `approved`, `declined`, `failed` or `expired`. Use it after a webhook, or from a scheduled check, instead of waiting in a run."""
+}
+fn (doc: Any): Bool {
+  in(or(status(doc), ""), DONE_STATUSES)
+}

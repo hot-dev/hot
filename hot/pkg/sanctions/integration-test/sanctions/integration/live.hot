@@ -1,0 +1,54 @@
+::sanctions::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// SANCTIONS_LIVE=1 downloads and parses the UN list (about 2 MB) and reads
+// the OFAC SLS file listing. OPENSANCTIONS_API_KEY additionally runs one
+// /match query. Nothing is written to the store.
+// Run with: SANCTIONS_LIVE=1 hot test -p pkg-integration-sanctions
+
+::ctx ::sanctions::integration::ctx
+
+test-un-list-downloads-and-parses
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("SANCTIONS_LIVE is not 1") }
+        => {
+            out ::sanctions::un/fetch(null)
+            assert(not(out.unchanged), "a null known version always parses")
+            assert(gt(length(out.entries), 500), "the UN list has about 1,000 records")
+            assert-eq(16, length(out.version))
+            sample first(out.entries)
+            assert(not(is-empty(sample.name)), "entries have names")
+            assert(some(out.entries, (e) { eq(e.kind, "entity") }), "entities are present")
+            again ::sanctions::un/fetch(out.version)
+            assert(again.unchanged, "the same body is recognized as unchanged")
+        }
+    }
+}
+
+test-ofac-manifest
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("SANCTIONS_LIVE is not 1") }
+        => {
+            files ::sanctions::ofac/manifest("ofac-sdn")
+            assert(is-some(get(files, "SDN.CSV")), "SDN.CSV is listed")
+            assert-eq(16, length(::sanctions::ofac/version("ofac-sdn", files)))
+        }
+    }
+}
+
+test-opensanctions-match
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("SANCTIONS_LIVE=1 and OPENSANCTIONS_API_KEY are needed") }
+        => {
+            r ::sanctions::opensanctions/screen("Vladimir Putin", {kind: "individual", dataset: "sanctions", limit: 3})
+            assert-eq("possible-match", r.status)
+            assert(gt(length(r.matches), 0), "a well-known listed person matches")
+        }
+    }
+}

@@ -1,0 +1,21 @@
+::hot::pkg ns
+
+hot.pkg.xero {
+  name: "hot.dev/xero",
+  version: "0.1.0",
+  hot-min-version: "3.0.0",
+  description: "Xero Accounting API bindings for Hot, built for agentic finance ops: OAuth 2.0 with rotating refresh tokens (authorize, exchange, refresh, revoke, PKCE, Custom Connections, tenant connections, a per-run token cache and an opt-in store-backed token keeper), the granular 2026 scopes, contacts, invoices (PDF and email), credit notes, payments, bank transactions and transfers, accounts, items, manual journals, purchase orders, quotes, tax rates, tracking categories and the organisation, attachments, where/order/paging with collect-all, If-Modified-Since and Idempotency-Key, reports (profit and loss, balance sheet, trial balance, aged receivables and payables, bank summary) with a row flattener, rate-limit headers and readable validation errors, and webhook verification with the intent-to-receive handshake.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["xero", "accounting", "finance", "invoicing", "bookkeeping"],
+  deps: {
+    "hot.dev/oauth2": {
+      local: "../oauth2",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/oauth2"
+    }
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.cipherowl {
+  name: "hot.dev/cipherowl",
+  version: "0.1.0",
+  hot-min-version: "3.0.0",
+  description: "CipherOwl blockchain address compliance bindings for Hot: OAuth2 client credentials with a per-run token cache, address screening (single and batch), risk score, breakdown and evidence detail, risk-assessment, SAR and graph reports, continuous monitoring pools and risk-change polling, organization allowlist and denylist overrides, onchain balances and transactions, read-only case management, and a configurable clear/review/block decision helper.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["fintech", "crypto", "blockchain", "compliance", "aml", "sanctions", "cipherowl"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

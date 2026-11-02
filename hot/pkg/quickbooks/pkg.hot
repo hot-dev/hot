@@ -1,0 +1,21 @@
+::hot::pkg ns
+
+hot.pkg.quickbooks {
+  name: "hot.dev/quickbooks",
+  version: "0.1.0",
+  hot-min-version: "3.0.0",
+  description: "QuickBooks Online Accounting API v3 bindings for Hot, built for agentic finance ops: OAuth 2.0 with rotating refresh tokens (authorize, exchange, refresh, revoke, a per-run token cache and an opt-in store-backed token keeper), sandbox and production companies, a pinned minorversion, CRUD with sparse updates for customers, vendors, items, accounts, invoices (send and PDF), payments, bills, bill payments, purchases, journal entries, estimates, sales receipts, credit memos, deposits, transfers, tax codes, classes, departments and employees, the SQL-like query endpoint with safe literals and pagination, reports with a row flattener, batch, change data capture, Fault parsing with intuit_tid, and webhook verification for both the legacy and CloudEvents payloads.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["quickbooks", "intuit", "accounting", "finance", "invoicing", "bookkeeping"],
+  deps: {
+    "hot.dev/oauth2": {
+      local: "../oauth2",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/oauth2"
+    }
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

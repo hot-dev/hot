@@ -1,0 +1,42 @@
+::modern-treasury::returns ns
+meta {
+    doc: """Returns: payments sent back by the receiving bank (against your payment orders) and returns you send for incoming payments. Return objects can hold corrected account and routing numbers: don't log them."""
+}
+
+::api ::modern-treasury::api
+seg ::modern-treasury::api/seg
+
+list-returns
+meta {
+    doc: """GET /api/returns: one page. Filters: `returnable_id`, `returnable_type` (`"payment_order"`, `"incoming_payment_detail"`, `"reversal"`, `"return"`), `internal_account_id`, `counterparty_id`, `per_page`, `after_cursor`."""
+}
+fn
+(): Map {
+  list-returns({})
+},
+(params: Map): Map {
+  list-returns(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/returns", params, opts)
+}
+
+get-return
+meta {
+    doc: """GET /api/returns/{id}: retrieve a return (`code`, e.g. `"R01"`, `reason`, `status`)."""
+}
+fn
+(return-id: Str): Map {
+  get-return(return-id, {})
+},
+(return-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/returns/${seg(return-id)}`, {}, opts)
+}
+
+create-return
+meta {
+    doc: """POST /api/returns: return an incoming payment to its sender. `params` needs `returnable_id` (an incoming payment detail id) and `returnable_type` (`"incoming_payment_detail"`); optional `code` (e.g. `"R10"`), `reason`, `date_of_death`, `additional_information`, `data`. Sends money back: needs an `idempotency-key`."""
+}
+fn (params: Map, opts: Map): Map {
+  ::api/move-money("/api/returns", params, ["returnable_id", "returnable_type"], opts, "create-return")
+}

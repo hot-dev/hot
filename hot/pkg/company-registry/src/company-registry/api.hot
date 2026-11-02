@@ -1,0 +1,313 @@
+::company-registry::api ns
+meta {
+    ctx: {
+        "company-registry.sec.user-agent": {required: false},
+        "company-registry.companies-house.api-key": {required: false},
+        "company-registry.companies-house.base-url": {required: false, secret: false},
+        "company-registry.companies-house.document-base-url": {required: false, secret: false},
+        "company-registry.gleif.base-url": {required: false, secret: false},
+        "company-registry.sources": {required: false, secret: false}
+    },
+    doc: """
+    Shared transport for the three registries: the one settings
+    resolver (per-call `opts` first, then context variables, then
+    defaults), a typed `HttpError`, JSON GETs, and query-string
+    building that drops unset values.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `user-agent` | `company-registry.sec.user-agent` | none: SEC calls fail without it |
+    | `api-key` | `company-registry.companies-house.api-key` | none: Companies House calls fail without it |
+    | `companies-house-base-url` | `company-registry.companies-house.base-url` | `https://api.company-information.service.gov.uk` |
+    | `document-base-url` | `company-registry.companies-house.document-base-url` | `https://document-api.company-information.service.gov.uk` |
+    | `gleif-base-url` | `company-registry.gleif.base-url` | `https://api.gleif.org/api/v1` |
+    | `sources` | `company-registry.sources` | `["gleif", "sec", "companies-house"]` minus any without credentials |
+
+    Per-call credentials are never written to context, so parallel
+    flows and tenants in one run don't see each other's keys.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+GLEIF_BASE "https://api.gleif.org/api/v1"
+COMPANIES_HOUSE_BASE "https://api.company-information.service.gov.uk"
+DOCUMENT_BASE "https://document-api.company-information.service.gov.uk"
+PACKAGE_AGENT "hot-dev-company-registry-pkg/0.1 (+https://hot.dev)"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+as-list fn (v: Any): Vec? {
+  cond {
+    is-null(v) => { null }
+    is-vec(v) => { v }
+    is-str(v) => { filter(map(split(v, ","), trim), (s) { not(is-empty(s)) }) }
+    => { null }
+  }
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{user-agent, api-key,
+    companies-house-base-url, document-base-url, gleif-base-url,
+    sources}`. Values in `opts` win over context; a credential in
+    `opts` is used for that call only.
+
+    **Example**
+
+    ```hot
+    cfg ::company-registry::api/resolve({api-key: tenant.ch-key})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  ua pick(opts, "user-agent", "company-registry.sec.user-agent", null)
+  key pick(opts, "api-key", "company-registry.companies-house.api-key", null)
+  configured filter(["gleif", if(given(ua), "sec", null), if(given(key), "companies-house", null)], is-some)
+  {
+    user-agent: ua,
+    api-key: key,
+    companies-house-base-url: strip-slash(pick(opts, "companies-house-base-url", "company-registry.companies-house.base-url", COMPANIES_HOUSE_BASE)),
+    document-base-url: strip-slash(pick(opts, "document-base-url", "company-registry.companies-house.document-base-url", DOCUMENT_BASE)),
+    gleif-base-url: strip-slash(pick(opts, "gleif-base-url", "company-registry.gleif.base-url", GLEIF_BASE)),
+    sources: or(as-list(pick(opts, "sources", "company-registry.sources", null)), configured)
+  }
+}
+
+require-user-agent
+meta {
+    doc: """The SEC User-Agent from resolved settings, or an Err explaining that SEC requires one with contact details."""
+}
+fn (cfg: Map): Str {
+  cond {
+    given(cfg.user-agent) => { cfg.user-agent }
+    => { err("company-registry: SEC EDGAR requires a User-Agent with contact details, e.g. \"Acme Corp ops@acme.com\"; set company-registry.sec.user-agent or pass {user-agent: ...}") }
+  }
+}
+
+require-api-key
+meta {
+    doc: """The Companies House API key from resolved settings, or an Err naming where to set it."""
+}
+fn (cfg: Map): Str {
+  cond {
+    given(cfg.api-key) => { cfg.api-key }
+    => { err("company-registry: no Companies House API key; set company-registry.companies-house.api-key or pass {api-key: ...}") }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx registry response. `source` is `"gleif"`, `"sec"` or
+    `"companies-house"`; `url` the requested URL (registries take no
+    credentials in URLs); `retry-after` the parsed `Retry-After` seconds
+    on 429s; `message` a one-line summary that never includes
+    credentials.
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
+    is-map(body) => {
+      // GLEIF: {errors: [{title, detail}]}; Companies House: {errors: [{error}]} or {error}; SEC: text
+      first-error if(is-vec(get(body, "errors")), first(get(body, "errors")), null)
+      or(
+        get(or(first-error, {}), "detail"),
+        get(or(first-error, {}), "title"),
+        get(or(first-error, {}), "error"),
+        get(body, "error"),
+        get(body, "message")
+      )
+    }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  // WORKAROUND(hot-bug-6): Int() only sees strings a regex has already proven numeric.
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (source: Str, response: HttpResponse, url: Str): HttpError {
+  // WORKAROUND(hot-bug-1): built field by field; T(response) and a Map-literal HttpError can come out empty.
+  headers or(response.headers, {})
+  detail body-detail(response.body)
+  HttpError({
+    source: source,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${source}: HTTP ${response.status}: ${detail}`, `${source}: HTTP ${response.status} for ${url}`)
+  })
+}
+
+is-not-found
+meta {
+    doc: """True when `e` is an `HttpError` with status 404."""
+}
+fn (e: Any): Bool {
+  and(is-map(e), eq(get(e, "status"), 404))
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains. Keys may contain brackets (`filter[fulltext]`, `page[size]`) and are encoded."""
+}
+fn (params: Map): Str {
+  ::uri/query-string(filter-vals(params, given))
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+request
+meta {
+    doc: """
+    GET (or another method) a registry URL with `headers`, returning the
+    `HttpResponse` on 2xx or an Err carrying `HttpError`. `source` names
+    the registry in errors. A transport failure passes through as its
+    own Err.
+    """
+}
+fn (source: Str, method: Str, url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, ...headers},
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    => { err(http-error(source, response, url)) }
+  }
+}
+
+get-json
+meta {
+    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+}
+fn (source: Str, url: Str, headers: Map): Any {
+  response request(source, "GET", url, {Accept: "application/json", ...headers})
+  cond {
+    is-err(response) => { response }
+    is-str(response.body) => {
+      text trim(response.body)
+      if(or(::hot::str/starts-with(text, "{"), ::hot::str/starts-with(text, "[")), from-json(text), response.body)
+    }
+    => { response.body }
+  }
+}
+
+get-json-or-null
+meta {
+    doc: """`get-json`, but a 404 gives null (an absent parent, a missing filing) instead of an Err."""
+}
+fn (source: Str, url: Str, headers: Map): Any {
+  out get-json(source, url, headers)
+  cond {
+    and(is-err(out), is-not-found(err-value(out))) => { null }
+    => { out }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Columns to rows
+// ---------------------------------------------------------------------------
+
+columns-to-rows
+meta {
+    doc: """
+    Turn a columnar Map (`{a: [1, 2], b: [3, 4]}`, as in EDGAR's
+    `filings.recent`) into a Vec of row Maps (`[{a: 1, b: 3}, {a: 2, b:
+    4}]`), at most `limit` rows. Columns shorter than the first are
+    padded with null. Pure.
+    """
+}
+fn (columns: Map, limit: Int): Vec<Map> {
+  names keys(columns)
+  cond {
+    is-empty(names) => { [] }
+    => {
+      n min(limit, length(or(get(columns, first(names)), [])))
+      cols map(vals(columns), (c) { slice(concat(or(c, []), map(range(0, n), (i) { null })), 0, n) })
+      // Grow rows one column at a time with native interleave/partition;
+      // a lambda that indexed every column per row would copy them all.
+      start map(first(cols), (v) { [v] })
+      rows reduce(rest(cols), (acc, col) {
+        map(partition(interleave(acc, col), 2), (pair) { concat(pair[0], [pair[1]]) })
+      }, start)
+      map(rows, (r) { zipmap(names, r) })
+    }
+  }
+}

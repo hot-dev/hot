@@ -1,0 +1,53 @@
+::sumsub ns
+meta {
+    doc: """
+    Sumsub bindings: identity verification (KYC), business verification
+    (KYB) and transaction monitoring (KYT/AML) for fintech builders.
+
+    Covers applicants (create, fetch by id or `externalUserId`, review
+    status, level changes, ID document upload, reset, request a check,
+    tags, notes), WebSDK access tokens and verification links, company
+    applicants and their beneficiaries, transaction monitoring and
+    Travel Rule submissions, webhook digest verification, and a helper
+    that turns a review into approved / declined / pending.
+
+    **Setup**: context variables
+    - `sumsub.app.token` and `sumsub.secret.key`: an App Token pair from
+      the dashboard (Dev space → App tokens). Sandbox tokens start `sbx:`.
+    - `sumsub.level.name`: optional default verification level
+    - `sumsub.webhook.secret`: the webhook's secret key, for
+      `::sumsub::webhooks/verify-request`
+
+    Every request is signed: `X-App-Access-Sig` is the hex HMAC-SHA256
+    of `ts + METHOD + path-with-query + body` (see
+    `::sumsub::api/sign`).
+
+    **Quick start**
+
+    ```hot
+    ::applicants ::sumsub::applicants
+    ::sdk ::sumsub::sdk
+
+    // 1. Create the applicant for your user
+    applicant ::applicants/create-applicant("basic-kyc-level", {externalUserId: "user-42"})
+
+    // 2. Hand the user a hosted verification link
+    link ::sdk/create-websdk-link("basic-kyc-level", {userId: "user-42"})
+
+    // 3. Later (or from the applicantReviewed webhook) read the outcome
+    outcome ::sumsub::decisions/review-outcome(::applicants/get-status(applicant.id))
+    ```
+    """
+}
+
+// Sandbox and production share one host; the App Token decides which
+// environment a request reaches.
+BASE_URL "https://api.sumsub.com"
+
+// Sumsub rejects a signed request whose X-App-Access-Ts is more than a
+// minute from its clock (error 4004, app-token-request-expired).
+MAX_CLOCK_SKEW_SECONDS 60
+
+// Sandbox limits (per 24 hours, counted from the first request).
+SANDBOX_APPLICANTS_PER_DAY 500
+SANDBOX_KYT_TXNS_PER_DAY 1000

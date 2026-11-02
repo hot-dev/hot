@@ -1,0 +1,95 @@
+::increase::fednow-transfers ns
+meta {
+    doc: """
+    FedNow transfers over the Federal Reserve's instant payment network:
+    instant and final. The receiving bank must be on FedNow. Use
+    `require_approval: true`.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+create-fednow-transfer
+meta {
+    doc: """
+    POST /fednow_transfers: create a FedNow Transfer. Moves money: `opts` must carry an
+    `idempotency-key` (the call errs without one and sends nothing), and
+    the call is never retried. `params` needs `amount`, `creditor_name`, `debtor_name`, `source_account_number_id`, `unstructured_remittance_information`.
+
+    The destination is `external_account_id` or `account_number` plus
+    `routing_number`. Optional: `creditor_address` and `debtor_address`
+    (`{line1, city, state, postal_code}`).
+
+    **Example**
+
+    ```hot
+    ::increase::fednow-transfers/create-fednow-transfer({
+      source_account_number_id: "account_number_v18nkfqm6afpsrvy82b2",
+      external_account_id: "external_account_ukk55lr923a3ac0pp7iv",
+      amount: 5000,
+      creditor_name: "Ian Crease",
+      debtor_name: "National Phonograph Company",
+      unstructured_remittance_information: "Invoice 42",
+      require_approval: true
+    }, {idempotency-key: "invoice-42-fednow"})
+    ```
+
+    Set `require_approval: true` (or the `increase.transfers.require-approval`
+    context variable) so a person approves the transfer before it is sent.
+    """
+}
+fn (params: Map, opts: Map): Map {
+  ::api/move-money("/fednow_transfers", params, ["amount", "creditor_name", "debtor_name", "source_account_number_id", "unstructured_remittance_information"], true, opts, "create-fednow-transfer")
+}
+
+get-fednow-transfer
+meta {
+    doc: """GET /fednow_transfers/{id}: retrieve a FedNow Transfer."""
+}
+fn
+(transfer-id: Str): Map {
+  get-fednow-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("GET", `/fednow_transfers/${seg(transfer-id)}`, {}, opts)
+}
+
+list-fednow-transfers
+meta {
+    doc: """GET /fednow_transfers: one page of FedNow Transfers (`{data, next_cursor}`). Filters: `account_id`, `external_account_id`, `"status.in"`, `idempotency_key`, `created_at: {after, before, on_or_after, on_or_before}`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-fednow-transfers({})
+},
+(params: Map): Map {
+  list-fednow-transfers(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/fednow_transfers", params, opts)
+}
+
+approve-fednow-transfer
+meta {
+    doc: """POST /fednow_transfers/{id}/approve: approve a FedNow Transfer in `pending_approval`. Approving releases the transfer to be sent: agents must not approve on their own; leave it to a person (in the Increase dashboard, or through your own approval step that calls this)."""
+}
+fn
+(transfer-id: Str): Map {
+  approve-fednow-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("POST", `/fednow_transfers/${seg(transfer-id)}/approve`, {}, opts)
+}
+
+cancel-fednow-transfer
+meta {
+    doc: """POST /fednow_transfers/{id}/cancel: cancel a FedNow Transfer that is still `pending_approval`."""
+}
+fn
+(transfer-id: Str): Map {
+  cancel-fednow-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("POST", `/fednow_transfers/${seg(transfer-id)}/cancel`, {}, opts)
+}

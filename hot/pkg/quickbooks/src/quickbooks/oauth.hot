@@ -1,0 +1,474 @@
+::quickbooks::oauth ns
+meta {
+    ctx: {
+        "quickbooks.client.id": {required: false, secret: false},
+        "quickbooks.client.secret": {required: false}
+    },
+    doc: """
+    Intuit OAuth 2.0 for QuickBooks Online, built on `hot.dev/oauth2`.
+
+    **Flow**
+
+    1. Redirect the user to `authorize-url(...)`. Intuit asks them to pick
+       a company and approve your app.
+    2. Intuit calls your redirect URI with `?code=...&state=...&realmId=...`.
+       `callback-params(request)` reads them; check `state` against the
+       value you issued.
+    3. `exchange-code(code, redirect-uri)` returns a `TokenSet`.
+    4. Persist `refresh-token` and `realm-id` per company. Access tokens
+       last an hour; refresh tokens last 100 days from their last use and
+       at most five years in all.
+
+    **Rotation.** Refresh tokens rotate: `refresh` can return a different
+    refresh token than the one you sent, and once it does the old value
+    stops working. Every `TokenSet` carries the refresh token to keep
+    (`refresh-token`) and `rotated: true` when it changed. Always
+    persist it, or let the `::quickbooks::auth` token keeper do that in a
+    `::hot::store`.
+
+    Token calls authenticate the app with HTTP Basic (`client_secret_basic`),
+    as Intuit's SDKs do. The client id and secret come from `opts`
+    (`client-id`, `client-secret`) or the `quickbooks.client.id` /
+    `quickbooks.client.secret` context variables.
+
+    ```hot
+    ::oauth ::quickbooks::oauth
+
+    url ::oauth/authorize-url("ABcd123", "https://app.example.com/oauth/quickbooks", "csrf-123")
+
+    // In the callback handler:
+    cb ::oauth/callback-params(request)
+    tokens ::oauth/exchange-code(cb.code, "https://app.example.com/oauth/quickbooks")
+    // persist tokens.refresh-token and cb.realm-id for this company
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+::b64 ::hot::base64
+::time ::hot::time
+::uri ::hot::uri
+::oauth2 ::oauth2
+
+http-request ::hot::http/request
+HttpRequest ::hot::http/HttpRequest
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+TokenError
+meta {
+    doc: """
+    A credential or token-endpoint failure. `message` is readable, e.g.
+    `"quickbooks: token refresh failed: invalid_grant (Token invalid)"`.
+    `error-code` / `error-description` carry Intuit's OAuth `error` /
+    `error_description`, and `intuit-tid` the response's `intuit_tid`
+    header for support requests. Token values never appear in messages.
+    """
+}
+type {
+    message: Str,
+    status: Int?,
+    error-code: Str?,
+    error-description: Str?,
+    intuit-tid: Str?
+}
+
+TokenSet
+meta {
+    doc: """
+    The result of a code exchange or refresh.
+
+    - `access-token` - the bearer token (about an hour)
+    - `refresh-token` - **the refresh token to persist**; it may differ
+      from the one you sent
+    - `rotated` - true when `refresh-token` differs from the token sent
+    - `expires-in`, `expires-at` - access-token lifetime (seconds) and
+      expiry (epoch ms)
+    - `refresh-token-expires-in`, `refresh-token-expires-at` - Intuit's
+      `x_refresh_token_expires_in` (rolling, about 100 days)
+    - `refresh-token-hard-expires-in` - the absolute five-year limit
+      (`x_refresh_token_hard_expires_in`), when Intuit returns it
+    - `token-type`, `id-token` (OpenID scopes only), `scope`
+    """
+}
+type {
+    access-token: Str,
+    refresh-token: Str?,
+    rotated: Bool,
+    expires-in: Int?,
+    expires-at: Int?,
+    refresh-token-expires-in: Int?,
+    refresh-token-expires-at: Int?,
+    refresh-token-hard-expires-in: Int?,
+    token-type: Str?,
+    id-token: Str?,
+    scope: Str?
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+is-blank
+meta {
+    doc: """True for null, `""` and whitespace-only strings (unset env placeholders arrive as `""`)."""
+}
+fn (value: Any): Bool {
+  or(is-null(value), and(is-str(value), is-empty(trim(value))))
+}
+
+int-or-null
+meta {
+    doc: """An Int from an Int or digit-only Str; null otherwise. Guards `Int()` so bad input never halts a run."""
+}
+fn (value: Any): Int? {
+  // WORKAROUND(hot-bug-6): match digits before Int() so a bad value returns null instead of halting.
+  cond {
+    is-int(value) => { value }
+    and(is-str(value), ::hot::regex/is-match(trim(Str(value)), "^[0-9]{1,15}$")) => { Int(trim(value)) }
+    => { null }
+  }
+}
+
+now-ms fn (): Int {
+  ::time/epoch-millis(::time/now())
+}
+
+token-error
+meta {
+    doc: """Build a `TokenError`. The 1-arity form wraps a message; the 2-arity form describes a failed token response (`{status, body, headers}`) or transport error, prefixed with `prefix`."""
+}
+fn
+(message: Str): TokenError {
+  TokenError({message: message})
+},
+(prefix: Str, payload: Any): TokenError {
+  body if(is-map(payload), get(payload, "body"), null)
+  status if(is-map(payload), get(payload, "status"), null)
+  headers if(is-map(payload), or(get(payload, "headers"), {}), {})
+  code if(is-map(body), get(body, "error"), null)
+  desc if(is-map(body), get(body, "error_description"), null)
+  tid get(headers, "intuit_tid")
+  detail cond {
+    and(is-some(code), is-some(desc)) => { `${code} (${desc})` }
+    is-some(code) => { Str(code) }
+    is-some(status) => { `HTTP ${status}` }
+    is-str(payload) => { payload }
+    => { err-message(payload) }
+  }
+
+  tid-part if(is-some(tid), ` (intuit_tid: ${tid})`, "")
+  TokenError({
+    message: `${prefix}: ${detail}${tid-part}`,
+    status: status,
+    error-code: if(is-some(code), Str(code), null),
+    error-description: if(is-some(desc), Str(desc), null),
+    intuit-tid: tid
+  })
+}
+
+basic-auth
+meta {
+    doc: """The `Authorization` header value for token calls: `Basic base64(client-id:client-secret)`."""
+}
+fn (client-id: Str, client-secret: Str): Str {
+  pair `${client-id}:${client-secret}`
+  `Basic ${::b64/encode(Bytes(pair))}`
+}
+
+app-credentials
+meta {
+    ctx: {
+        "quickbooks.client.id": {required: false, secret: false},
+        "quickbooks.client.secret": {required: false}
+    },
+    doc: """The app's `{client-id, client-secret}` from `opts`, else context. Returns a `TokenError` naming what is missing."""
+}
+fn (opts: Map): Map {
+  id or(get(opts, "client-id"), ::ctx/get("quickbooks.client.id"))
+  secret or(get(opts, "client-secret"), ::ctx/get("quickbooks.client.secret"))
+  cond {
+    or(is-blank(id), is-blank(secret)) => {
+      err(token-error("quickbooks: the OAuth client id and secret are not set. Set quickbooks.client.id and quickbooks.client.secret in Context Variables, or pass client-id and client-secret in opts."))
+    }
+    => { {client-id: Str(id), client-secret: Str(secret)} }
+  }
+}
+
+normalize-scopes
+meta {
+    doc: """Scopes as a space-separated Str from a Vec or a space/comma-separated Str; `SCOPE_ACCOUNTING` when null or empty."""
+}
+fn (scopes: Any): Str {
+  raw cond {
+    is-null(scopes) => { [] }
+    is-vec(scopes) => { scopes }
+    => { split(replace(Str(scopes), ",", " "), " ") }
+  }
+
+  cleaned distinct(filter(map(raw, (s) { trim(Str(s)) }), (s) { not(is-empty(s)) }))
+  if(is-empty(cleaned), ::quickbooks/SCOPE_ACCOUNTING, join(cleaned, " "))
+}
+
+// ---------------------------------------------------------------------------
+// Authorization URL and callback
+// ---------------------------------------------------------------------------
+
+authorize-url
+meta {
+    doc: """
+    Build Intuit's consent URL. `state` is your CSRF token (Intuit
+    requires one). Options: `scopes` (Vec or Str; default
+    `com.intuit.quickbooks.accounting`; add `openid email` for the user's
+    identity), `code-challenge` (an S256 PKCE challenge), and `extra` (any
+    other parameters).
+
+    ```hot
+    url ::quickbooks::oauth/authorize-url("ABcd123", "https://app.example.com/oauth/quickbooks", "csrf-123",
+      {scopes: ["com.intuit.quickbooks.accounting", "openid", "email"]})
+    ```
+    """
+}
+fn
+(client-id: Str, redirect-uri: Str, state: Str): Str {
+  authorize-url(client-id, redirect-uri, state, {})
+},
+(client-id: Str, redirect-uri: Str, state: Str, opts: Map): Str {
+  cond {
+    is-blank(state) => { err(token-error("quickbooks: authorize-url needs a non-empty state (your CSRF token)")) }
+    => {
+      ::oauth2/authorize-url(filter-vals({
+        authorize-url: ::quickbooks/AUTHORIZE_URL,
+        client-id: client-id,
+        redirect-uri: redirect-uri,
+        scope: normalize-scopes(get(opts, "scopes")),
+        state: state,
+        code-challenge: get(opts, "code-challenge"),
+        extra: get(opts, "extra")
+      }, is-some))
+    }
+  }
+}
+
+callback-params
+meta {
+    doc: """
+    Read Intuit's redirect: `{code, state, realm-id, error,
+    error-description}` from the request's query (fields are null when
+    absent). `realm-id` is the company the user picked; store it next to
+    the refresh token. Compare `state` with the value you issued before
+    exchanging the code.
+    """
+}
+fn (request: Map): Map {
+  q or(get(request, "query"), {})
+  {
+    code: get(q, "code"),
+    state: get(q, "state"),
+    realm-id: get(q, "realmId"),
+    error: get(q, "error"),
+    error-description: get(q, "error_description")
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Token requests
+// ---------------------------------------------------------------------------
+
+build-token-request
+meta {
+    doc: """
+    Build (without sending) the token-endpoint `HttpRequest`: a
+    form-encoded grant `body`, HTTP Basic client authentication, and the
+    `x-include-refresh-token-hard-expires-in` header so Intuit reports
+    the five-year refresh-token limit. Pure; exposed for testing.
+    """
+}
+fn (body: Map, client-id: Str, client-secret: Str): HttpRequest {
+  HttpRequest({
+    method: "POST",
+    url: ::quickbooks/TOKEN_URL,
+    headers: {
+      Authorization: basic-auth(client-id, client-secret),
+      Accept: "application/json",
+      Content-Type: "application/x-www-form-urlencoded",
+      x-include-refresh-token-hard-expires-in: "true"
+    },
+    body: ::uri/encode-query(body)
+  })
+}
+
+// The ::oauth2 body builders include client_id/client_secret for
+// client_secret_post; Intuit's SDKs authenticate with Basic instead.
+without-client fn (body: Map): Map {
+  delete(delete(body, "client_id"), "client_secret")
+}
+
+build-exchange-body
+meta {
+    doc: """The `authorization_code` grant body (client credentials go in the Basic header). `code-verifier` completes a PKCE flow."""
+}
+fn (code: Str, redirect-uri: Str, code-verifier: Str?): Map {
+  without-client(::oauth2/build-exchange-body(filter-vals({
+    client-id: "",
+    code: code,
+    redirect-uri: redirect-uri,
+    code-verifier: code-verifier
+  }, is-some)))
+}
+
+build-refresh-body
+meta {
+    doc: """The `refresh_token` grant body (client credentials go in the Basic header)."""
+}
+fn (refresh-token: Str): Map {
+  without-client(::oauth2/build-refresh-body({client-id: "", refresh-token: refresh-token}))
+}
+
+token-set
+meta {
+    doc: """
+    Turn Intuit's token response into a `TokenSet` (pure). `sent-refresh-token`
+    is the refresh token the request used (null for a code exchange):
+    when Intuit's response has no `refresh_token` the sent one is kept,
+    and `rotated` says whether the value changed. `now` is epoch ms.
+    """
+}
+fn (body: Map, sent-refresh-token: Str?, now: Int): TokenSet {
+  returned get(body, "refresh_token")
+  refresh-token if(is-blank(returned), sent-refresh-token, Str(returned))
+  expires-in int-or-null(get(body, "expires_in"))
+  rt-expires-in int-or-null(get(body, "x_refresh_token_expires_in"))
+  TokenSet({
+    access-token: Str(get(body, "access_token")),
+    refresh-token: refresh-token,
+    rotated: and(is-some(sent-refresh-token), is-some(refresh-token), ne(refresh-token, sent-refresh-token)),
+    expires-in: expires-in,
+    expires-at: if(is-some(expires-in), add(now, mul(or(expires-in, 0), 1000)), null),
+    refresh-token-expires-in: rt-expires-in,
+    refresh-token-expires-at: if(is-some(rt-expires-in), add(now, mul(or(rt-expires-in, 0), 1000)), null),
+    refresh-token-hard-expires-in: int-or-null(get(body, "x_refresh_token_hard_expires_in")),
+    token-type: get(body, "token_type"),
+    id-token: get(body, "id_token"),
+    scope: get(body, "scope")
+  })
+}
+
+send-token-request
+meta {
+    doc: """Send a token request; the decoded body on 2xx, else a `TokenError` prefixed with `prefix`."""
+}
+fn (req: HttpRequest, prefix: Str): Map {
+  response http-request(req)
+  cond {
+    is-err(response) => { err(token-error(prefix, err-message(response))) }
+    and(::hot::http/is-ok-response(response), is-map(response.body), is-some(get(response.body, "access_token"))) => { response.body }
+    => { err(token-error(prefix, {status: response.status, body: response.body, headers: or(response.headers, {})})) }
+  }
+}
+
+exchange-code
+meta {
+    doc: """
+    Exchange the authorization `code` for a `TokenSet`. `redirect-uri`
+    must match the one used for `authorize-url`. Options: `client-id`,
+    `client-secret` (else context), `code-verifier` (PKCE).
+    """
+}
+fn
+(code: Str, redirect-uri: Str): TokenSet {
+  exchange-code(code, redirect-uri, {})
+},
+(code: Str, redirect-uri: Str, opts: Map): TokenSet {
+  app app-credentials(opts)
+  cond {
+    is-err(app) => { app }
+    => {
+      body send-token-request(
+        build-token-request(build-exchange-body(code, redirect-uri, get(opts, "code-verifier")), app.client-id, app.client-secret),
+        "quickbooks: code exchange failed"
+      )
+      if(is-err(body), body, token-set(body, null, now-ms()))
+    }
+  }
+}
+
+refresh
+meta {
+    doc: """
+    Exchange a refresh token for a new `TokenSet` (no cache). **Persist
+    the returned `refresh-token`**: Intuit rotates it, and the old value
+    stops working once a new one is issued. A revoked or expired refresh
+    token gives `error-code: "invalid_grant"`; the company must connect
+    again. Options: `client-id`, `client-secret` (else context).
+
+    ```hot
+    tokens ::quickbooks::oauth/refresh(stored.refresh-token)
+    if(tokens.rotated, save-refresh-token(realm-id, tokens.refresh-token), null)
+    ```
+    """
+}
+fn
+(refresh-token: Str): TokenSet {
+  refresh(refresh-token, {})
+},
+(refresh-token: Str, opts: Map): TokenSet {
+  app app-credentials(opts)
+  cond {
+    is-err(app) => { app }
+    is-blank(refresh-token) => { err(token-error("quickbooks: refresh needs a non-empty refresh token")) }
+    => {
+      body send-token-request(
+        build-token-request(build-refresh-body(refresh-token), app.client-id, app.client-secret),
+        "quickbooks: token refresh failed"
+      )
+      if(is-err(body), body, token-set(body, refresh-token, now-ms()))
+    }
+  }
+}
+
+build-revoke-request
+meta {
+    doc: """Build the revoke `HttpRequest` (JSON `{token}`, Basic client auth). Pure; exposed for testing."""
+}
+fn (token: Str, client-id: Str, client-secret: Str): HttpRequest {
+  HttpRequest({
+    method: "POST",
+    url: ::quickbooks/REVOKE_URL,
+    headers: {
+      Authorization: basic-auth(client-id, client-secret),
+      Accept: "application/json",
+      Content-Type: "application/json"
+    },
+    body: to-json({token: token})
+  })
+}
+
+revoke
+meta {
+    doc: """
+    Revoke a refresh or access token, disconnecting the app from the
+    company (revoking the refresh token also ends its access tokens).
+    Returns true, or a `TokenError`. Options: `client-id`, `client-secret`.
+    """
+}
+fn
+(token: Str): Bool {
+  revoke(token, {})
+},
+(token: Str, opts: Map): Bool {
+  app app-credentials(opts)
+  cond {
+    is-err(app) => { app }
+    => {
+      response http-request(build-revoke-request(token, app.client-id, app.client-secret))
+      cond {
+        is-err(response) => { err(token-error("quickbooks: token revocation failed", err-message(response))) }
+        ::hot::http/is-ok-response(response) => { true }
+        => { err(token-error("quickbooks: token revocation failed", {status: response.status, body: response.body, headers: or(response.headers, {})})) }
+      }
+    }
+  }
+}

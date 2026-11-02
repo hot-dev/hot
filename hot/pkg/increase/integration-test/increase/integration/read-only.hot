@@ -1,0 +1,54 @@
+::increase::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests (live Increase sandbox, read-only)
+// =============================================================================
+// Requires ctx: increase.api.key (INCREASE_API_KEY, a sandbox key);
+// increase.environment (INCREASE_ENVIRONMENT) defaults to "sandbox".
+// A free sandbox comes from the dashboard, or unauthenticated
+// `POST https://sandbox.increase.com/groups`. Every test only reads.
+// Without credentials each test records a skip and passes.
+// Run with: hot test --project pkg-integration-increase
+
+::ctx ::increase::integration::ctx
+
+test-list-accounts
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            page ::increase::accounts/list-accounts({limit: 2})
+            assert(is-vec(page.data), "list returns a data array")
+            assert(lte(length(page.data), 2), "limit caps the page")
+        }
+    }
+}
+
+test-account-balance
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            page ::increase::accounts/list-accounts({limit: 1})
+            cond {
+                is-empty(page.data) => { assert(true, "no accounts in this sandbox yet") }
+                => {
+                    balance ::increase::accounts/get-balance(first(page.data).id)
+                    assert(is-int(balance.available_balance), "balance is an Int in cents")
+                }
+            }
+        }
+    }
+}
+
+test-list-events-and-transactions
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            assert(is-vec(::increase::events/list-events({limit: 1}).data), "events list")
+            assert(is-vec(::increase::transactions/list-transactions({limit: 1}).data), "transactions list")
+        }
+    }
+}

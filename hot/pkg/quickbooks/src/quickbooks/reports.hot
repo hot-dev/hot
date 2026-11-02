@@ -1,0 +1,269 @@
+::quickbooks::reports ns
+meta {
+    doc: """
+    QuickBooks Online reports, plus `flatten-report`, which turns a report's
+    nested sections into flat records an agent or a spreadsheet can use.
+
+    Every report takes a params Map with Intuit's own parameter names;
+    common ones are `start_date` / `end_date` (`YYYY-MM-DD`),
+    `date_macro` (`"This Fiscal Year-to-date"`, `"Last Month"`, ...),
+    `accounting_method` (`Cash` / `Accrual`), `summarize_column_by`
+    (`Total`, `Month`, `Quarter`, `Customers`, `Classes`, ...),
+    `customer`, `vendor`, `class`, `department`, `report_date` and
+    `aging_period` / `num_periods` (aged reports), and `columns`
+    (TransactionList, GeneralLedger; a Vec is comma-joined). Null values
+    are dropped.
+
+    ```hot
+    ::r ::quickbooks::reports
+
+    pnl ::r/profit-and-loss({start_date: "2026-01-01", end_date: "2026-09-30", accounting_method: "Accrual"})
+    rows ::r/flatten-report(pnl)
+    revenue find-first(rows, (row) { eq(row.label, "Total Income") })
+    revenue.values.Total
+    ```
+
+    Reports are read calls: under the Intuit App Partner Program they are
+    metered CorePlus calls.
+    """
+}
+
+::api ::quickbooks::api
+::re ::hot::regex
+
+REPORTS [
+  "ProfitAndLoss",
+  "ProfitAndLossDetail",
+  "BalanceSheet",
+  "CashFlow",
+  "TrialBalance",
+  "GeneralLedger",
+  "TransactionList",
+  "AgedReceivables",
+  "AgedReceivableDetail",
+  "AgedPayables",
+  "AgedPayableDetail",
+  "CustomerBalance",
+  "VendorBalance",
+  "AccountList",
+  "JournalReport"
+]
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+check-name
+meta {
+    doc: """A report name (letters only, e.g. `ProfitAndLoss`), or an Err. Names outside `REPORTS` are allowed for reports this package does not list."""
+}
+fn (name: Str): Str {
+  cond {
+    ::re/is-match(name, "^[A-Za-z]{2,64}$") => { name }
+    => { err(`quickbooks: invalid report name '${name}'`) }
+  }
+}
+
+run-report
+meta {
+    doc: """GET /reports/{name} with `params`. Returns the report (`Header`, `Columns`, `Rows`). Use `flatten-report` for records."""
+}
+fn
+(name: Str): Map {
+  run-report(name, {}, {})
+},
+(name: Str, params: Map): Map {
+  run-report(name, params, {})
+},
+(name: Str, params: Map, opts: Map): Map {
+  checked check-name(name)
+  cond {
+    is-err(checked) => { checked }
+    => { ::api/json("GET", `/reports/${checked}`, untype(params), "", opts) }
+  }
+}
+
+profit-and-loss
+meta {doc: """The ProfitAndLoss report (income statement)."""}
+fn
+(params: Map): Map {
+  run-report("ProfitAndLoss", params, {})
+},
+(params: Map, opts: Map): Map {
+  run-report("ProfitAndLoss", params, opts)
+}
+
+balance-sheet
+meta {doc: """The BalanceSheet report."""}
+fn
+(params: Map): Map {
+  run-report("BalanceSheet", params, {})
+},
+(params: Map, opts: Map): Map {
+  run-report("BalanceSheet", params, opts)
+}
+
+cash-flow
+meta {doc: """The CashFlow (statement of cash flows) report."""}
+fn
+(params: Map): Map {
+  run-report("CashFlow", params, {})
+},
+(params: Map, opts: Map): Map {
+  run-report("CashFlow", params, opts)
+}
+
+aged-receivables
+meta {
+    doc: """The AgedReceivables (A/R aging summary) report. `report_date`, `aging_period`, `num_periods` and `customer` narrow it."""
+}
+fn
+(params: Map): Map {
+  run-report("AgedReceivables", params, {})
+},
+(params: Map, opts: Map): Map {
+  run-report("AgedReceivables", params, opts)
+}
+
+aged-payables
+meta {
+    doc: """The AgedPayables (A/P aging summary) report. `report_date`, `aging_period`, `num_periods` and `vendor` narrow it."""
+}
+fn
+(params: Map): Map {
+  run-report("AgedPayables", params, {})
+},
+(params: Map, opts: Map): Map {
+  run-report("AgedPayables", params, opts)
+}
+
+general-ledger
+meta {
+    doc: """The GeneralLedger report. `account` (comma-separated ids), `columns` and `source_account_type` narrow it."""
+}
+fn
+(params: Map): Map {
+  run-report("GeneralLedger", params, {})
+},
+(params: Map, opts: Map): Map {
+  run-report("GeneralLedger", params, opts)
+}
+
+transaction-list
+meta {
+    doc: """The TransactionList report: every transaction in a period, the usual input to reconciliation. `transaction_type`, `columns`, `payment_method` and `cleared` narrow it."""
+}
+fn
+(params: Map): Map {
+  run-report("TransactionList", params, {})
+},
+(params: Map, opts: Map): Map {
+  run-report("TransactionList", params, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Flattening (pure)
+// ---------------------------------------------------------------------------
+
+column-meta fn (column: Map, name: Str): Str? {
+  hit find-first(or(get(column, "MetaData"), []), (m) { eq(get(m, "Name"), name) })
+  if(is-map(hit), get(hit, "Value"), null)
+}
+
+column-keys
+meta {
+    doc: """
+    The key for each report column: its `ColTitle`, else its `ColKey`
+    metadata, else its `ColType`, else `col{i}`. Repeated keys get
+    `_{i}` appended, so every key is unique.
+    """
+}
+fn (report: Map): Vec {
+  columns or(get(or(get(report, "Columns"), {}), "Column"), [])
+  raw map-indexed(columns, (i, c) {
+    title get(c, "ColTitle")
+    col-key column-meta(c, "ColKey")
+    col-type get(c, "ColType")
+    cond {
+      and(is-str(title), not(is-empty(trim(title)))) => { trim(title) }
+      is-some(col-key) => { col-key }
+      and(is-str(col-type), not(is-empty(col-type))) => { col-type }
+      => { `col${i}` }
+    }
+  })
+  map-indexed(raw, (i, k) {
+    earlier slice(raw, 0, i)
+    if(in(k, earlier), `${k}_${i}`, k)
+  })
+}
+
+cell-values fn (col-data: Any): Vec {
+  map(or(col-data, []), (c) { or(get(c, "value"), "") })
+}
+
+record fn (kind: Str, path: Vec, group: Str?, col-data: Any, col-keys: Vec, depth: Int): Map {
+  cells cell-values(col-data)
+  first-cell if(is-empty(or(col-data, [])), {}, first(col-data))
+  values reduce(range(0, min(length(col-keys), length(cells))), (acc, i) { assoc(acc, col-keys[i], cells[i]) }, {})
+  filter-vals({
+    type: kind,
+    path: path,
+    group: group,
+    depth: depth,
+    label: if(is-empty(cells), null, first(cells)),
+    id: get(first-cell, "id"),
+    values: values,
+    cells: cells
+  }, is-some)
+}
+
+flatten-rows fn (rows: Vec, col-keys: Vec, path: Vec, group: Str?, depth: Int): Vec {
+  mapcat(rows, (row) {
+    row-group or(get(row, "group"), group)
+    header-cells get(or(get(row, "Header"), {}), "ColData")
+    header-label if(is-vec(header-cells), if(is-empty(header-cells), null, get(first(header-cells), "value")), null)
+    child-path if(is-null(header-label), path, concat(path, [header-label]))
+    children or(get(or(get(row, "Rows"), {}), "Row"), [])
+    summary get(or(get(row, "Summary"), {}), "ColData")
+    data get(row, "ColData")
+    own if(is-vec(data), [record("Data", path, row-group, data, col-keys, depth)], [])
+    nested flatten-rows(children, col-keys, child-path, row-group, add(depth, 1))
+    totals if(is-vec(summary), [record("Summary", child-path, row-group, summary, col-keys, depth)], [])
+    concat(own, nested, totals)
+  })
+}
+
+flatten-report
+meta {
+    doc: """
+    Flatten a report into records, in report order:
+
+    - `type` - `"Data"` for detail rows, `"Summary"` for section totals
+    - `label` - the first column (account, customer or transaction name)
+    - `id` - the first column's entity id, when the report links one
+    - `values` - every column by `column-keys` (`{"Total": "1200.00"}`)
+    - `cells` - the column values as a Vec of Str
+    - `path` - the section headers above the row (`["Income", "Services"]`)
+    - `group` - the nearest section's `group` (`"Income"`, `"NetIncome"`, ...)
+    - `depth` - nesting level, 0 at the top
+
+    Amounts stay as the Strs QuickBooks sends; `parse-amount` converts one.
+    """
+}
+fn (report: Map): Vec {
+  flatten-rows(or(get(or(get(report, "Rows"), {}), "Row"), []), column-keys(report), [], null, 0)
+}
+
+parse-amount
+meta {
+    doc: """A report amount Str (`"1200.00"`, `"-35.5"`) as a Dec; null for blanks and non-numbers."""
+}
+fn (value: Any): Dec? {
+  // WORKAROUND(hot-bug-6): match the number before Dec() so a bad value returns null instead of halting.
+  cond {
+    is-int(value) => { Dec(value) }
+    is-dec(value) => { value }
+    and(is-str(value), ::re/is-match(trim(Str(value)), "^-?[0-9]{1,18}(\\.[0-9]{1,10})?$")) => { Dec(trim(value)) }
+    => { null }
+  }
+}

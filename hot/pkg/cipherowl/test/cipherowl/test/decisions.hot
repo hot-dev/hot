@@ -1,0 +1,124 @@
+::cipherowl::test::decisions ns
+meta ["test"]
+
+::d ::cipherowl::decisions
+
+// Sandbox responses from CipherOwl's "SRR Investigation Workflow" guide
+// (address fields trimmed).
+SCREEN_RISKY {config: "co-sandbox", chain: "evm", foundRisk: true}
+SCREEN_CLEAN {config: "co-sandbox", chain: "evm", foundRisk: false}
+
+SCORE {
+    config: "co-sandbox",
+    riskScore: 100,
+    riskBand: "Severe Risk",
+    breakdown: [
+        {category: "hack", direction: "DIRECT", hops: 0, riskContribution: 65},
+        {category: "jp_sanctioned", direction: "RECEIVE", hops: 1, usdValue: 8244129, riskContribution: 82.32},
+        {category: "ofac", direction: "RECEIVE", hops: 1, usdValue: 8244129, riskContribution: 82.32}
+    ]
+}
+
+DETAIL {
+    foundRisk: true,
+    reasons: [
+        {category: "hack", direction: "SEND", totalUsdValue: "Infinity", totalPercentage: 100},
+        {category: "ofac", direction: "RECEIVE", hops: 1, totalUsdValue: 8244129.04, paths: [{addresses: ["0xf7b31119c2682c88d88d455dbb9d5932c65cf1be"]}]}
+    ]
+}
+
+POLICY {found-risk: "review", review-score: 40, block-score: 75}
+
+test-clear
+meta ["test"] fn () {
+    out ::d/decide(SCREEN_CLEAN, POLICY)
+    assert-eq("clear", out.decision)
+    assert-eq([], out.triggers)
+    assert-eq(false, out.found-risk)
+    assert-eq("co-sandbox", out.config)
+}
+
+test-found-risk-follows-policy
+meta ["test"] fn () {
+    assert-eq("review", ::d/decide(SCREEN_RISKY, POLICY).decision)
+    assert-eq("block", ::d/decide(SCREEN_RISKY, {found-risk: "block"}).decision)
+    assert-eq(["found-risk"], ::d/decide(SCREEN_RISKY, POLICY).triggers)
+}
+
+test-score-thresholds
+meta ["test"] fn () {
+    out ::d/decide([SCREEN_RISKY, SCORE], POLICY)
+    assert-eq("block", out.decision)
+    assert-eq(100, out.score)
+    assert-eq("severe", out.band, "bands are normalized")
+    assert(in("block-score>=75", out.triggers))
+    assert(in("review-score>=40", out.triggers))
+    mid ::d/decide({riskScore: 50, riskBand: "Medium Risk"}, POLICY)
+    assert-eq("review", mid.decision)
+    low ::d/decide({riskScore: 10, riskBand: "Low Risk"}, POLICY)
+    assert-eq("clear", low.decision, "a score below every threshold is clear")
+    exact ::d/decide({riskScore: 75}, POLICY)
+    assert-eq("block", exact.decision, "thresholds are inclusive")
+}
+
+test-bands
+meta ["test"] fn () {
+    p {found-risk: "review", block-bands: ["Severe Risk"], review-bands: ["high", "Medium Risk"]}
+    assert-eq("block", ::d/decide({riskScore: 90, riskBand: "Severe Risk"}, p).decision)
+    assert-eq("review", ::d/decide({riskScore: 60, riskBand: "High Risk"}, p).decision)
+    assert-eq("clear", ::d/decide({riskScore: 5, riskBand: "Low Risk"}, p).decision)
+    assert(in("block-band:severe", ::d/decide({riskScore: 90, riskBand: "Severe Risk"}, p).triggers))
+}
+
+test-categories-and-hops
+meta ["test"] fn () {
+    p {found-risk: "clear", block-categories: ["OFAC"], max-hops: 1}
+    out ::d/decide([SCREEN_RISKY, SCORE], p)
+    assert-eq("block", out.decision)
+    assert-eq(["block-category:ofac"], out.triggers)
+    far ::d/decide({breakdown: [{category: "ofac", direction: "RECEIVE", hops: 3}]}, p)
+    assert-eq("clear", far.decision, "exposure beyond max-hops does not count")
+}
+
+test-direct-block-categories
+meta ["test"] fn () {
+    p {found-risk: "review", direct-block-categories: ["hack"]}
+    assert-eq("block", ::d/decide(DETAIL, p).decision, "a reason without hops is direct exposure")
+    indirect ::d/decide({foundRisk: true, risks: [{type: "INDIRECT", category: "hack", direction: "RECEIVE", hops: 1}]}, p)
+    assert-eq("review", indirect.decision, "indirect exposure does not trigger a direct-only rule")
+}
+
+test-reasons-omit-paths-and-values
+meta ["test"] fn () {
+    out ::d/decide(DETAIL, POLICY)
+    assert-eq(2, length(out.reasons))
+    r out.reasons[1]
+    assert-eq({category: "ofac", direction: "receive", hops: 1, direct: false, source: "detail"}, r)
+    assert(not(contains(to-json(out), "0xf7b3")), "counterparty addresses are not copied into the decision")
+}
+
+test-no-evidence-is-review
+meta ["test"] fn () {
+    out ::d/decide({}, POLICY)
+    assert-eq("review", out.decision)
+    assert-eq(["no-evidence"], out.triggers)
+    assert-eq("review", ::d/decide([], {found-risk: "clear"}).decision)
+}
+
+test-policy-validation
+meta ["test"] fn () {
+    assert(is-err(::d/validate-policy({})), "found-risk is required: no defaults in code")
+    assert(is-err(::d/validate-policy({found-risk: "allow"})))
+    assert(is-err(::d/validate-policy({found-risk: "review", block-score: 120})))
+    assert(is-err(::d/validate-policy({found-risk: "review", review-score: 80, block-score: 50})), "review above block")
+    assert(is-err(::d/validate-policy({found-risk: "review", block-bands: "Severe Risk"})), "bands must be a list")
+    assert(is-err(::d/validate-policy({found-risk: "review", max-hops: 9})))
+    assert(is-err(::d/decide(SCREEN_RISKY, {})), "decide refuses an invalid policy")
+}
+
+test-decide-batch
+meta ["test"] fn () {
+    batch {results: [{address: "0xa", foundRisk: true}, {address: "0xb", foundRisk: false}]}
+    out ::d/decide-batch(batch, {found-risk: "block"})
+    assert-eq([{address: "0xa", decision: "block", triggers: ["found-risk"]}, {address: "0xb", decision: "clear", triggers: []}], out)
+}

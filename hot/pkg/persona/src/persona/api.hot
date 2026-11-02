@@ -1,0 +1,957 @@
+::persona::api ns
+meta {
+    ctx: {
+        "persona.api.key": {required: true},
+        "persona.api.version": {required: false, secret: false},
+        "persona.key-inflection": {required: false, secret: false}
+    },
+    doc: """
+    Transport for the Persona API: Bearer auth, the `Persona-Version`,
+    `Key-Inflection` and `Idempotency-Key` headers, JSON:API request bodies
+    with unset fields dropped, `filter[...]`/`page[...]` query strings,
+    cursor pagination over `links.next`, JSON:API read helpers, and errors
+    parsed into `HttpError` with PII redacted.
+
+    **No retries.** Nothing here retries a request or waits. A 429 or 5xx
+    comes back as `err(HttpError)` with `retry-after` set; check it with
+    `is-retryable` and let Hot back off by failing the run under a handler
+    or schedule `retry` policy. Creates accept an `idempotency-key`, so a
+    retried create returns the first result instead of making a second
+    inquiry.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+USER_AGENT "hot-dev-persona/0.1.0"
+
+// Safety stop for `collect` when the limit is very large.
+MAX_PAGES 1000
+
+// Statuses worth retrying later (with backoff from the run's retry policy).
+RETRYABLE_STATUSES [408, 429, 500, 502, 503, 504]
+
+// Attribute names whose values are never kept in an `HttpError`, compared
+// after lowercasing and dropping `-` and `_` (so kebab, snake and camel
+// inflections all match): government ids, tax ids, birth dates, document
+// images, session tokens and secrets.
+SENSITIVE_KEYS [
+  "socialsecuritynumber",
+  "ssn",
+  "birthdate",
+  "dob",
+  "dateofbirth",
+  "identificationnumber",
+  "idnumber",
+  "documentnumber",
+  "taxidentificationnumber",
+  "tin",
+  "ein",
+  "frontphoto",
+  "backphoto",
+  "selfiephoto",
+  "photourls",
+  "frontphotourl",
+  "backphotourl",
+  "sessiontoken",
+  "onetimelink",
+  "onetimelinkshort",
+  "secret",
+  "secrets",
+  "apikey",
+  "authorization"
+]
+
+// ---------------------------------------------------------------------------
+// Redaction
+// ---------------------------------------------------------------------------
+
+redact-text
+meta {
+    doc: """Mask what could be PII in free text: every run of four or more digits (allowing spaces, dots, slashes and dashes inside, so SSNs, birth dates, phone and id numbers) becomes `[redacted]`, and every email address becomes `[redacted-email]`. Exposed for testing."""
+}
+fn (text: Str): Str {
+  text
+    |> ::re/replace-all("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", "[redacted-email]")
+    |> ::re/replace-all("[0-9][0-9 ./-]{2,}[0-9]", "[redacted]")
+}
+
+is-sensitive-key
+meta {
+    doc: """True when an attribute name is in `SENSITIVE_KEYS`, in any inflection (`social-security-number`, `social_security_number`, `socialSecurityNumber`). Exposed for testing."""
+}
+fn (key: Any): Bool {
+  normalized lowercase(Str(key)) |> replace("-", "") |> replace("_", "")
+  in(normalized, SENSITIVE_KEYS)
+}
+
+redact
+meta {
+    doc: """Remove PII from a decoded body: values under sensitive keys (see `is-sensitive-key`) become `"[redacted]"`, and every other string is masked by `redact-text`. Applied to every `HttpError`, so errors are safe to log. Exposed for testing."""
+}
+fn (value: Any): Any {
+  cond {
+    is-map(value) => {
+      reduce(keys(value), (acc, k) {
+        v get(value, k)
+        assoc(acc, k, if(and(is-sensitive-key(k), is-some(v)), "[redacted]", redact(v)))
+      }, {})
+    }
+
+    is-vec(value) => { map(value, (item) { redact(item) }) }
+    is-str(value) => { redact-text(value) }
+    => { value }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx Persona response.
+
+    - `status`: the HTTP status
+    - `errors`: Persona's `errors` array, each `{title, details, source:
+      {pointer}, meta}` (redacted)
+    - `title`, `details`: from the first error
+    - `pointer`: the first error's `source.pointer`, e.g.
+      `/data/attributes/inquiry-template-id`
+    - `request-id`: the `Request-Id` header; quote it to Persona support
+    - `retry-after`: seconds until the rate limit resets (`Retry-After` or
+      `RateLimit-Reset`), else null
+    - `message`: one readable line, e.g.
+      `"persona: HTTP 404: Record not found [req_123]"`
+    - `headers`, `body`: the response, with the body redacted
+
+    Values under PII-bearing keys and digit runs or emails in free text
+    are redacted from `body`, `errors` and `message` (see `redact`), so an
+    `HttpError` never carries an SSN, birth date or id number.
+    """
+}
+type {
+    status: Int,
+    headers: Map,
+    body: Any,
+    message: Str,
+    errors: Vec,
+    title: Str?,
+    details: Str?,
+    pointer: Str?,
+    request-id: Str?,
+    retry-after: Int?
+}
+
+parse-int
+meta {
+    doc: """An Int from an Int or a decimal-digit Str; null for anything else. Never errs on bad input. Exposed for testing."""
+}
+fn (value: Any): Int? {
+  cond {
+    is-int(value) => { value }
+    not(is-str(value)) => { null }
+    // WORKAROUND(hot-bug-6): Int("abc") halts the run; match the digits first.
+    ::re/is-match(trim(value), "^-?[0-9]{1,15}$") => { Int(trim(value)) }
+    => { null }
+  }
+}
+
+decode-body fn (body: Any): Any {
+  cond {
+    is-bytes(body) => {
+      parsed from-json(Str(body))
+      if(is-err(parsed), Str(body), parsed)
+    }
+
+    is-str(body) => {
+      trimmed trim(body)
+      cond {
+        or(starts-with(trimmed, "{"), starts-with(trimmed, "[")) => {
+          parsed from-json(trimmed)
+          if(is-err(parsed), body, parsed)
+        }
+        => { body }
+      }
+    }
+    => { body }
+  }
+}
+
+str-or-null fn (value: Any): Str? {
+  if(and(is-str(value), not(is-empty(or(value, "")))), value, null)
+}
+
+error-entries
+meta {
+    doc: """Persona's `errors` array from a (decoded) error body, each entry as `{title, details, pointer}` with absent parts null. Empty when the body has no `errors`. Exposed for testing."""
+}
+fn (body: Any): Vec {
+  errors if(is-map(body), get(body, "errors"), null)
+  cond {
+    not(is-vec(errors)) => { [] }
+    => {
+      map(filter(errors, is-map), (e) {
+        source get(e, "source")
+        {
+          title: str-or-null(get(e, "title")),
+          details: str-or-null(get(e, "details")),
+          pointer: if(is-map(source), str-or-null(get(source, "pointer")), null)
+        }
+      })
+    }
+  }
+}
+
+describe-entry fn (entry: Map): Str {
+  parts filter([entry.title, if(eq(entry.details, entry.title), null, entry.details)], is-some)
+  text join(parts, ": ")
+  if(is-some(entry.pointer), `${text} (${entry.pointer})`, text)
+}
+
+error-message
+meta {
+    doc: """The readable `message` for an error: `persona: HTTP {status}: {title}: {details} ({pointer}); ... [{request-id}]`. Only Persona's error titles, details and pointers are used (never the request), and they are passed through `redact-text`. Exposed for testing."""
+}
+fn (status: Int, body: Any, request-id: Str?): Str {
+  entries error-entries(body)
+  described filter(map(entries, describe-entry), (s) { not(is-empty(s)) })
+  text cond {
+    not(is-empty(described)) => { join(described, "; ") }
+    and(is-str(body), not(is-empty(trim(or(body, ""))))) => {
+      t trim(body)
+      if(gt(length(t), 200), `${slice(t, 0, 200)}...`, t)
+    }
+    => { "no error details" }
+  }
+
+  rid if(is-some(request-id), ` [${request-id}]`, "")
+  `persona: HTTP ${status}: ${redact-text(text)}${rid}`
+}
+
+retry-after-seconds
+meta {
+    doc: """Seconds to wait from response headers: `Retry-After` when numeric, else `RateLimit-Reset`, else null. Exposed for testing."""
+}
+fn (headers: Map): Int? {
+  retry parse-int(get(headers, "retry-after"))
+  if(is-some(retry), retry, parse-int(get(headers, "ratelimit-reset")))
+}
+
+http-error
+meta {
+    doc: """Build the `HttpError` for a non-2xx response: decode and redact the body, lift the first error's fields, and read `Request-Id` and the rate-limit reset. Exposed for testing; every request uses it."""
+}
+fn (response: Map): HttpError {
+  headers or(get(response, "headers"), {})
+  body redact(decode-body(get(response, "body")))
+  entries error-entries(body)
+  head if(is-empty(entries), {}, first(entries))
+  request-id str-or-null(get(headers, "request-id"))
+  raw-errors if(is-map(body), get(body, "errors"), null)
+  // WORKAROUND(hot-bug-1): build HttpError in an explicit function, never via T(response) or an arrow.
+  HttpError({
+    status: response.status,
+    headers: headers,
+    body: body,
+    message: error-message(response.status, body, request-id),
+    errors: if(is-vec(raw-errors), raw-errors, []),
+    title: get(head, "title"),
+    details: get(head, "details"),
+    pointer: get(head, "pointer"),
+    request-id: request-id,
+    retry-after: retry-after-seconds(headers)
+  })
+}
+
+// WORKAROUND(hot-bug-1): HttpError(response) ignores this arrow and copies
+// fields, so the package always calls `http-error` directly. The arrow is
+// kept for callers that coerce a response themselves.
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  http-error(response)
+}
+
+plain-error fn (error: Result): Any {
+  payload if(is-err(error), err-value(error), error)
+  if(or(is-null(payload), is-str(payload)), payload, untype(payload))
+}
+
+error-status
+meta {
+    doc: """The HTTP status of a failed call (an `HttpError` or a `Result.Err` holding one), or null for transport errors."""
+}
+fn (error: Result): Int? {
+  payload plain-error(error)
+  if(is-map(payload), get(payload, "status"), null)
+}
+
+is-retryable
+meta {
+    doc: """True when a failed call is worth retrying later: HTTP 408, 429, 500, 502, 503 or 504. Let the handler or schedule `retry` policy do the waiting (see `retry-after` on the error)."""
+}
+fn (error: Result): Bool {
+  status error-status(error)
+  and(is-some(status), in(status, RETRYABLE_STATUSES))
+}
+
+is-not-found
+meta {
+    doc: """True when a failed call is an HTTP 404."""
+}
+fn (error: Result): Bool {
+  eq(error-status(error), 404)
+}
+
+// ---------------------------------------------------------------------------
+// Options and headers
+// ---------------------------------------------------------------------------
+
+RequestOptions
+meta {
+    doc: """
+    Per-request options, the optional last argument of every function
+    that calls the API. A plain Map with the same keys works too.
+
+    - `idempotency-key`: sent as `Idempotency-Key` on POSTs. Persona stores
+      the first response for a key (at least 24 hours) and replays it for a
+      repeat, so a retried create can't make a second inquiry. Use a UUID
+      or a value tied to your own record, e.g. `"signup-42-kyc"`.
+    - `persona-version`: overrides `Persona-Version` for this call
+    - `key-inflection`: `"kebab"`, `"snake"` or `"camel"` for this call
+    - `api-key`: overrides `persona.api.key` for this call
+
+    **Example**
+
+    ```hot
+    ::persona::api/RequestOptions({idempotency-key: "signup-42-kyc"})
+    ```
+    """
+}
+type {
+    idempotency-key: Str?,
+    persona-version: Str?,
+    key-inflection: Str?,
+    api-key: Str?
+}
+
+KEY_INFLECTIONS ["kebab", "snake", "camel"]
+
+non-blank fn (value: Any): Str? {
+  if(and(is-str(value), not(is-empty(trim(or(value, ""))))), trim(value), null)
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: settings for a call from `options` first, then
+    `ctx-values` (a Map of context variables), then defaults. Returns
+    `{api-key, persona-version, key-inflection?, idempotency-key?}`, or an
+    Err when no API key is set or `key-inflection` isn't `kebab`, `snake`
+    or `camel`. An `api-key` in `options` means the context key is never
+    read for that call. Nothing is written to ctx. Exposed for testing;
+    `resolve` feeds it the context.
+    """
+}
+fn (options: Map, ctx-values: Map): Map {
+  pick (key, ctx-key) { or(non-blank(get(options, key)), non-blank(get(ctx-values, ctx-key))) }
+  api-key pick("api-key", "persona.api.key")
+  version or(pick("persona-version", "persona.api.version"), ::persona/API_VERSION)
+  raw-inflection pick("key-inflection", "persona.key-inflection")
+  inflection cond {
+    is-null(raw-inflection) => { null }
+    in(lowercase(raw-inflection), KEY_INFLECTIONS) => { lowercase(raw-inflection) }
+    => { err(`persona: Key-Inflection must be kebab, snake or camel (got '${raw-inflection}')`) }
+  }
+
+  cond {
+    is-null(api-key) => { err("persona: persona.api.key is not set. Add your Persona API key in Context Variables, or pass {api-key: ...} in the call's options.") }
+    is-err(inflection) => { inflection }
+    => {
+      filter-vals({
+        api-key: api-key,
+        persona-version: version,
+        key-inflection: inflection,
+        idempotency-key: non-blank(get(options, "idempotency-key"))
+      }, is-some)
+    }
+  }
+}
+
+resolve
+meta {
+    ctx: {
+        "persona.api.key": {required: true},
+        "persona.api.version": {required: false, secret: false},
+        "persona.key-inflection": {required: false, secret: false}
+    },
+    doc: """
+    Settings for one call: `options` (a `RequestOptions` or a plain Map
+    with `api-key`, `persona-version`, `key-inflection`,
+    `idempotency-key`) over the context variables, over the defaults (see
+    `resolve-from`). Per-call credentials stay in the call; nothing is
+    written to ctx, so parallel flows and tenants never share them.
+
+    **Example**
+
+    ```hot
+    ::persona::api/resolve({api-key: "persona_sandbox_tenant_b"}).persona-version  // "2026-09-29"
+    ```
+    """
+}
+fn (options: Any): Map {
+  opts if(is-null(options), {}, untype(options))
+  resolve-from(opts, {
+    "persona.api.key": ::ctx/get("persona.api.key"),
+    "persona.api.version": ::ctx/get("persona.api.version"),
+    "persona.key-inflection": ::ctx/get("persona.key-inflection")
+  })
+}
+
+build-headers
+meta {
+    doc: """
+    Request headers from resolved settings (see `resolve`):
+    `Authorization: Bearer`, `Accept`, `Persona-Version`, `User-Agent`,
+    plus `Key-Inflection` when set, `Idempotency-Key` on POSTs when set,
+    and `Content-Type` when there is a body. Exposed for testing.
+    """
+}
+fn (method: Str, resolved: Map, has-body: Bool): Map {
+  base {
+    Authorization: `Bearer ${get(resolved, "api-key")}`,
+    Accept: "application/json",
+    Persona-Version: or(get(resolved, "persona-version"), ::persona/API_VERSION),
+    User-Agent: USER_AGENT
+  }
+
+  filter-vals({
+    ...base,
+    Key-Inflection: get(resolved, "key-inflection"),
+    Idempotency-Key: if(eq(uppercase(method), "POST"), get(resolved, "idempotency-key"), null),
+    Content-Type: if(has-body, "application/json", null)
+  }, is-some)
+}
+
+// ---------------------------------------------------------------------------
+// Bodies and query strings
+// ---------------------------------------------------------------------------
+
+compact
+meta {
+    doc: """Drop null values recursively through maps and the maps inside vectors, so unset optionals are omitted rather than sent as JSON `null`. `false`, `0` and `""` are kept. Exposed for testing."""
+}
+fn (value: Any): Any {
+  cond {
+    is-map(value) => {
+      reduce(keys(value), (acc, k) {
+        v get(value, k)
+        if(is-null(v), acc, assoc(acc, k, compact(v)))
+      }, {})
+    }
+
+    is-vec(value) => { map(filter(value, is-some), (item) { compact(item) }) }
+    => { value }
+  }
+}
+
+document
+meta {
+    doc: """
+    A JSON:API request body: `{data: {type?, attributes}, meta}`, with
+    nulls dropped and empty `attributes`, `data` and `meta` left out.
+    `type` may be null. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/document(null, {inquiry-template-id: "itmpl_1", note: null}, {})
+    // => {data: {attributes: {inquiry-template-id: "itmpl_1"}}}
+    ```
+    """
+}
+fn (type-name: Str?, attributes: Map, meta-block: Map): Map {
+  attrs compact(attributes)
+  m compact(meta-block)
+  data filter-vals({
+    type: type-name,
+    attributes: if(is-empty(attrs), null, attrs)
+  }, is-some)
+
+  filter-vals({
+    data: if(is-empty(data), null, data),
+    meta: if(is-empty(m), null, m)
+  }, is-some)
+}
+
+meta-document
+meta {
+    doc: """A body with only `meta` (the shape of Persona's action endpoints, e.g. approve or add-tag), nulls dropped; `{}` when nothing is set."""
+}
+fn (meta-block: Map): Map {
+  document(null, {}, meta-block)
+}
+
+query-value fn (value: Any): Str {
+  cond {
+    is-vec(value) => { join(map(filter(value, is-some), (v) { Str(v) }), ",") }
+    => { Str(value) }
+  }
+}
+
+query-pairs
+meta {
+    doc: """
+    Flatten query params the way Persona reads them: nested maps nest in
+    brackets (`{filter: {status: ["approved", "declined"]}}` gives
+    `filter[status]=approved,declined`, `{page: {size: 10}}` gives
+    `page[size]=10`), vectors become comma-separated, and nulls and empty
+    vectors are dropped. Keys and values are percent-encoded. Exposed for
+    testing.
+    """
+}
+fn (params: Map, prefix: Str): Vec<Str> {
+  reduce(keys(params), (acc, k) {
+    v get(params, k)
+    name if(is-empty(prefix), Str(k), `${prefix}[${k}]`)
+    cond {
+      is-null(v) => { acc }
+      is-map(v) => { concat(acc, query-pairs(v, name)) }
+      and(is-vec(v), is-empty(filter(v, is-some))) => { acc }
+      => { concat(acc, [`${::uri/encode(name)}=${::uri/encode(query-value(v))}`]) }
+    }
+  }, [])
+}
+
+query-string
+meta {
+    doc: """`?a=1&filter%5Bstatus%5D=approved` from `params` (see `query-pairs`), or `""` when nothing remains."""
+}
+fn (params: Map): Str {
+  pairs query-pairs(untype(params), "")
+  if(is-empty(pairs), "", `?${join(pairs, "&")}`)
+}
+
+seg
+meta {
+    doc: """Percent-encode one path segment (an object id), so an id from user input can't change which endpoint is called."""
+}
+fn (id: Any): Str {
+  ::uri/encode(Str(id))
+}
+
+read-query
+meta {
+    doc: """
+    The query for a single-object read from options: `include` (a Vec or
+    comma string of relationship names, e.g. `["verifications",
+    "account"]`) and `fields` (sparse fieldsets, e.g. `{inquiry:
+    ["status", "reference-id"]}`). Exposed for testing.
+    """
+}
+fn (options: Map): Map {
+  filter-vals({include: get(options, "include"), fields: get(options, "fields")}, is-some)
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+build-request
+meta {
+    doc: """Build (without sending) the `HttpRequest` for a Persona call. `url` is the full URL including any query string. A non-empty Map `body` is compacted and JSON-encoded; otherwise no body is sent. Exposed for testing."""
+}
+fn (method: Str, url: Str, body: Any, resolved: Map): HttpRequest {
+  payload if(is-map(body), compact(untype(body)), null)
+  has-body and(is-map(payload), not(is-empty(payload)))
+  HttpRequest({
+    method: uppercase(method),
+    url: url,
+    headers: build-headers(method, resolved, has-body),
+    body: if(has-body, to-json(payload), "")
+  })
+}
+
+response-body
+meta {
+    doc: """Normalize a 2xx body: empty text (204) becomes null; anything else passes through. Exposed for testing."""
+}
+fn (body: Any): Any {
+  cond {
+    and(is-str(body), is-empty(trim(or(body, "")))) => { null }
+    => { body }
+  }
+}
+
+send
+meta {
+    doc: """
+    Send one Persona request and return the decoded body on 2xx, or an
+    Err: `HttpError` for a non-2xx response, or the transport error.
+    `path` is relative to `::persona/BASE_URL`; `query` becomes the query
+    string and a Map `body` the JSON body (`null` sends none). The most
+    general form; `call` picks query or body by method.
+
+    **Example**
+
+    ```hot
+    ::persona::api/send("POST", "/inquiries/search", {}, {query: {attribute: "status", operator: "eq", value: "needs_review"}}, ::persona::api/RequestOptions({}))
+    ```
+    """
+}
+fn (method: Str, path: Str, query: Map, body: Any, options: RequestOptions): Any {
+  resolved resolve(options)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      url `${::persona/BASE_URL}${path}${query-string(query)}`
+      response ::hot::http/request(build-request(method, url, body, resolved))
+      cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { response-body(response.body) }
+        => { err(http-error(response)) }
+      }
+    }
+  }
+}
+
+call
+meta {
+    doc: """
+    Call a Persona endpoint by path (relative to `/api/v1`) and return the
+    decoded JSON:API document, or an Err carrying `HttpError`. `params`
+    become the query string for GET and DELETE and the JSON body
+    otherwise; nulls are omitted. The escape hatch for endpoints without a
+    typed wrapper.
+
+    **Example**
+
+    ```hot
+    templates ::persona::api/call("GET", "/inquiry-templates", {page: {size: 10}})
+    ```
+    """
+}
+fn
+(method: Str, path: Str): Any {
+  call(method, path, {}, RequestOptions({}))
+},
+(method: Str, path: Str, params: Map): Any {
+  call(method, path, params, RequestOptions({}))
+},
+(method: Str, path: Str, params: Map, options: RequestOptions): Any {
+  m uppercase(method)
+  in-query or(eq(m, "GET"), eq(m, "DELETE"))
+  send(m, path, if(in-query, params, {}), if(in-query, null, params), options)
+}
+
+get-bytes
+meta {
+    doc: """GET a binary endpoint (e.g. `/inquiries/{id}/print`) and return the body as `Bytes`, or an Err carrying `HttpError`. The bytes are never put into errors or logs."""
+}
+fn (path: Str, options: RequestOptions): Bytes {
+  resolved resolve(options)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      req build-request("GET", `${::persona/BASE_URL}${path}`, null, resolved)
+      response ::hot::http/request(HttpRequest({...untype(req), headers: {...req.headers, Accept: "application/pdf, */*"}}))
+      cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { or(response.body-bytes, Bytes("")) }
+        => { err(http-error(response)) }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cursor pagination
+// ---------------------------------------------------------------------------
+
+list-query
+meta {
+    doc: """
+    The query for one list page. `filters` become `filter[...]` (Vec values
+    comma-joined); `options` takes `page-size` (`page[size]`, 1 to 100),
+    `after` and `before` (`page[after]`/`page[before]`, object ids from
+    the previous page) and `fields` (sparse fieldsets). Exposed for
+    testing.
+    """
+}
+fn (filters: Map, options: Map): Map {
+  page filter-vals({
+    size: get(options, "page-size"),
+    after: get(options, "after"),
+    before: get(options, "before")
+  }, is-some)
+
+  filter-vals({
+    filter: if(is-empty(compact(untype(filters))), null, untype(filters)),
+    page: if(is-empty(page), null, page),
+    fields: get(options, "fields")
+  }, is-some)
+}
+
+link-cursor
+meta {
+    doc: """The `page[after]` (or `page[before]`, for `key: "before"`) value inside a Persona `links.next`/`links.prev` URL such as `/api/v1/inquiries?page%5Bafter%5D=inq_123`, or null. Exposed for testing."""
+}
+fn (link: Any, key: Str): Str? {
+  cond {
+    not(is-str(link)) => { null }
+    not(contains(link, "?")) => { null }
+    => {
+      query last(split(link, "?"))
+      params ::uri/decode-query(query)
+      non-blank(get(params, `page[${key}]`))
+    }
+  }
+}
+
+next-cursor
+meta {
+    doc: """The cursor for the page after `page` (from `links.next`), or null on the last page."""
+}
+fn (page: Any): Str? {
+  links if(is-map(page), get(page, "links"), null)
+  if(is-map(links), link-cursor(get(links, "next"), "after"), null)
+}
+
+list-page
+meta {
+    doc: """
+    GET one page of a list endpoint. Returns the JSON:API document:
+    `data` (newest first), `links: {prev, next}`. Read the next cursor
+    with `next-cursor`. `include` is not allowed on list endpoints.
+
+    **Example**
+
+    ```hot
+    page ::persona::api/list-page("/inquiries", {status: "needs_review"}, {page-size: 25})
+    more ::persona::api/list-page("/inquiries", {status: "needs_review"}, {page-size: 25, after: ::persona::api/next-cursor(page)})
+    ```
+    """
+}
+fn
+(path: Str, filters: Map, options: Map): Any {
+  list-page(path, filters, options, RequestOptions({}))
+},
+(path: Str, filters: Map, options: Map, request-options: RequestOptions): Any {
+  send("GET", path, list-query(filters, options), null, request-options)
+}
+
+collect-pages
+meta {
+    doc: """Follow cursors, concatenating each page's `data`, until `limit` items, the last page, or `MAX_PAGES`. `fetch` takes the cursor (null first) and returns one page; the first Err is returned. Exposed for testing; `collect` uses it."""
+}
+fn (fetch: Fn, cursor: Str?, limit: Int, acc: Vec, pages-left: Int): Vec {
+  page fetch(cursor)
+  cond {
+    is-err(page) => { page }
+    => {
+      items or(get(page, "data"), [])
+      combined concat(acc, items)
+      next next-cursor(page)
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        is-null(next) => { combined }
+        lte(pages-left, 1) => { combined }
+        => { collect-pages(fetch, next, limit, combined, sub(pages-left, 1)) }
+      }
+    }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Collect up to `limit` objects from a list endpoint, following
+    `links.next`. `filters` as in `list-page`.
+
+    **Example**
+
+    ```hot
+    pending ::persona::api/collect("/inquiries", {status: ["completed", "needs_review"]}, 500)
+    ```
+    """
+}
+fn
+(path: Str, filters: Map, limit: Int): Vec {
+  collect(path, filters, limit, RequestOptions({}))
+},
+(path: Str, filters: Map, limit: Int, options: RequestOptions): Vec {
+  cond {
+    lte(limit, 0) => { [] }
+    => {
+      size min(::persona/DEFAULT_PAGE_SIZE, limit)
+      collect-pages((cursor) { list-page(path, filters, filter-vals({page-size: size, after: cursor}, is-some), options) }, null, limit, [], MAX_PAGES)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// JSON:API read helpers
+// ---------------------------------------------------------------------------
+
+capitalize fn (s: Str): Str {
+  if(is-empty(s), s, `${uppercase(slice(s, 0, 1))}${slice(s, 1, length(s))}`)
+}
+
+key-variants
+meta {
+    doc: """The kebab, snake and camel spellings of a kebab-case key: `"has-match"` gives `["has-match", "has_match", "hasMatch"]`. Exposed for testing."""
+}
+fn (key: Str): Vec<Str> {
+  parts split(key, "-")
+  camel join(concat([first(parts)], map(rest(parts), capitalize)), "")
+  distinct([key, join(parts, "_"), camel])
+}
+
+resource
+meta {
+    doc: """The primary resource of a JSON:API document (`doc.data`), or `doc` itself when it is already a resource (has `type` and `attributes`)."""
+}
+fn (doc: Any): Map? {
+  cond {
+    not(is-map(doc)) => { null }
+    and(is-map(get(doc, "data")), is-some(get(get(doc, "data"), "type"))) => { get(doc, "data") }
+    => { doc }
+  }
+}
+
+attr
+meta {
+    doc: """
+    An attribute of a resource (or document) by its kebab-case name, in
+    whichever inflection the response used (`has-match`, `has_match` or
+    `hasMatch`), or null.
+
+    **Example**
+
+    ```hot
+    inquiry ::persona::inquiries/get-inquiry("inq_...")
+    ::persona::api/attr(inquiry, "reference-id")
+    ```
+    """
+}
+fn (doc: Any, key: Str): Any {
+  r resource(doc)
+  attributes if(is-map(r), get(r, "attributes"), null)
+  cond {
+    not(is-map(attributes)) => { null }
+    => {
+      found find-first(key-variants(key), (k) { is-some(get(attributes, k)) })
+      if(is-some(found), get(attributes, found), null)
+    }
+  }
+}
+
+relationship-ids
+meta {
+    doc: """The ids in a relationship (`relationships.<name>.data`) as a Vec: one id for a to-one relationship, every id for a to-many, `[]` when empty."""
+}
+fn (doc: Any, name: Str): Vec<Str> {
+  r resource(doc)
+  rels if(is-map(r), or(get(r, "relationships"), {}), {})
+  found find-first(key-variants(name), (k) { is-some(get(rels, k)) })
+  data if(is-some(found), get(get(rels, found), "data"), null)
+  cond {
+    is-vec(data) => { filter(map(data, (d) { get(d, "id") }), is-some) }
+    is-map(data) => { filter([get(data, "id")], is-some) }
+    => { [] }
+  }
+}
+
+included
+meta {
+    doc: """
+    The objects in a document's `included` whose `type` is `type-name` or
+    one of its subtypes: `included(doc, "verification")` matches
+    `verification/government-id`, `verification/selfie`, ...
+
+    **Example**
+
+    ```hot
+    inquiry ::persona::inquiries/get-inquiry("inq_...", {include: ["verifications"]})
+    ::persona::api/included(inquiry, "verification")
+    ```
+    """
+}
+fn (doc: Any, type-name: Str): Vec {
+  items if(is-map(doc), or(get(doc, "included"), []), [])
+  filter(items, (item) {
+    t or(get(item, "type"), "")
+    or(eq(t, type-name), starts-with(t, `${type-name}/`))
+  })
+}
+
+find-included
+meta {
+    doc: """The object in `included` with this `id`, or null."""
+}
+fn (doc: Any, id: Str): Map? {
+  items if(is-map(doc), or(get(doc, "included"), []), [])
+  find-first(items, (item) { eq(get(item, "id"), id) })
+}
+
+field-values
+meta {
+    doc: """
+    A resource's `fields` as plain values: Persona returns
+    `{name-first: {type: "string", value: "Jane"}}`, this gives
+    `{name-first: "Jane"}`. Field keys keep the template's casing. These
+    are the end user's PII; don't log them.
+    """
+}
+fn (doc: Any): Map {
+  fields attr(doc, "fields")
+  cond {
+    not(is-map(fields)) => { {} }
+    => { map-vals(fields, (v) { if(and(is-map(v), in("value", keys(v))), get(v, "value"), v) }) }
+  }
+}
+
+flatten
+meta {
+    doc: """
+    A compact view of a resource for code and LLMs: `{id, type, ...attributes,
+    relationships: {name: id | [ids]}}`. Attribute keys keep the response's
+    inflection; `fields` is flattened with `field-values`.
+
+    **Example**
+
+    ```hot
+    ::persona::api/flatten(::persona::inquiries/get-inquiry("inq_..."))
+    // => {id: "inq_...", type: "inquiry", status: "approved", reference-id: "user-42", fields: {...}, relationships: {account: "act_..."}}
+    ```
+    """
+}
+fn (doc: Any): Map {
+  r resource(doc)
+  cond {
+    not(is-map(r)) => { {} }
+    => {
+      attributes or(get(r, "attributes"), {})
+      rels or(get(r, "relationships"), {})
+      flat-rels reduce(keys(rels), (acc, k) {
+        data get(or(get(rels, k), {}), "data")
+        cond {
+          is-vec(data) => { assoc(acc, k, filter(map(data, (d) { get(d, "id") }), is-some)) }
+          is-map(data) => { assoc(acc, k, get(data, "id")) }
+          => { acc }
+        }
+      }, {})
+
+      fields-key find-first(["fields"], (k) { is-map(get(attributes, k)) })
+      attrs if(is-some(fields-key), assoc(attributes, "fields", field-values(r)), attributes)
+      {id: get(r, "id"), type: get(r, "type"), ...attrs, relationships: flat-rels}
+    }
+  }
+}

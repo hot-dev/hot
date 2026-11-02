@@ -1,0 +1,124 @@
+::sumsub::sdk ns
+meta {
+    doc: """
+    Hosted verification: short-lived access tokens for the WebSDK and
+    MobileSDK, and shareable WebSDK links (permalinks) that open
+    Sumsub's hosted verification page for one user.
+
+    Use `create-access-token` when your frontend embeds the WebSDK (it
+    calls back for a fresh token on expiry), and `create-websdk-link`
+    when you want to send the user a URL (email, SMS, redirect).
+    """
+}
+
+::api ::sumsub::api
+
+query ::sumsub::api/query
+
+// Sumsub's defaults, stated here so callers can see them.
+DEFAULT_TOKEN_TTL_SECONDS 600
+DEFAULT_LINK_TTL_SECONDS 1800
+MAX_LINK_TTL_SECONDS 2592000
+
+access-token-request
+meta {
+    doc: """
+    The spec for `POST /resources/accessTokens/sdk`. `options` takes
+    `ttlInSecs` (Sumsub default 600), `applicantIdentifiers` (`{email,
+    phone}`, prefilled in the SDK) and `externalActionId` (for applicant
+    actions). Unset options are dropped. Exposed for testing.
+    """
+}
+fn (user-id: Str, level-name: Str, options: Map): Map {
+  {
+    method: "POST",
+    path: "/resources/accessTokens/sdk",
+    body: ::api/compact({
+      userId: user-id,
+      levelName: level-name,
+      ttlInSecs: get(options, "ttlInSecs"),
+      applicantIdentifiers: get(options, "applicantIdentifiers"),
+      externalActionId: get(options, "externalActionId")
+    })
+  }
+}
+
+create-access-token
+meta {
+    doc: """
+    Generate a WebSDK/MobileSDK access token for your user (`userId` is
+    your `externalUserId`; the applicant is created on first use).
+    Returns `{token, userId}`. Tokens are bearer credentials for that
+    user's verification: hand them only to that user's session.
+
+    **Example**
+
+    ```hot
+    out ::sumsub::sdk/create-access-token("user-42", "basic-kyc-level", {ttlInSecs: 1200})
+    out.token
+    ```
+    """
+}
+fn
+(user-id: Str, level-name: Str): Map {
+  create-access-token(user-id, level-name, {}, {})
+},
+(user-id: Str, level-name: Str, options: Map): Map {
+  create-access-token(user-id, level-name, options, {})
+},
+(user-id: Str, level-name: Str, options: Map, opts: Map): Map {
+  ::api/call(access-token-request(user-id, level-name, options), opts)
+}
+
+LINK_QUERY_KEYS ["lang", "customizationName", "translationName", "source"]
+
+websdk-link-request
+meta {
+    doc: """
+    The spec for `POST /resources/sdkIntegrations/levels/-/websdkLink`.
+    `options` takes body fields `userId` (your `externalUserId`),
+    `ttlInSecs` (Sumsub default 1800, max 2592000), `externalActionId`,
+    `applicantIdentifiers` (`{email, phone}`) and `redirect`
+    (`{successUrl, rejectUrl, signKey?, allowedQueryParams?}`), and query
+    options `lang`, `customizationName`, `translationName` and `source`.
+    Unset options are dropped. Exposed for testing.
+    """
+}
+fn (level-name: Str, options: Map): Map {
+  opts untype(options)
+  query-opts filter-keys(opts, (k) { in(k, LINK_QUERY_KEYS) })
+  body-opts filter-keys(opts, (k) { not(in(k, LINK_QUERY_KEYS)) })
+  {
+    method: "POST",
+    path: `/resources/sdkIntegrations/levels/-/websdkLink${query(query-opts)}`,
+    body: ::api/compact({...body-opts, levelName: level-name})
+  }
+}
+
+create-websdk-link
+meta {
+    doc: """
+    Create a hosted verification link for one user. Returns `{url}`.
+    Anyone holding the URL can continue that user's verification until it
+    expires, so send it only to the user.
+
+    **Example**
+
+    ```hot
+    link ::sumsub::sdk/create-websdk-link("basic-kyc-level", {
+      userId: "user-42",
+      ttlInSecs: 86400,
+      lang: "en",
+      redirect: {successUrl: "https://app.example.com/kyc/done"}
+    })
+    link.url
+    ```
+    """
+}
+fn
+(level-name: Str, options: Map): Map {
+  create-websdk-link(level-name, options, {})
+},
+(level-name: Str, options: Map, opts: Map): Map {
+  ::api/call(websdk-link-request(level-name, options), opts)
+}

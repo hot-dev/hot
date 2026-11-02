@@ -1,0 +1,86 @@
+::increase::entities ns
+meta {
+    doc: """
+    Entities: the legal owners of accounts (a natural person, a
+    corporation, a trust, a joint ownership, a sole proprietorship or a
+    government authority). Entity bodies carry tax ids, birth dates and
+    identification numbers: never log them or the responses that echo
+    them. See https://increase.com/documentation/api/entities.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+create-entity
+meta {
+    doc: """
+    POST /entities: create an Entity. `params` needs `structure`
+    (`"natural_person"`, `"corporation"`, `"joint"`, `"trust"`,
+    `"sole_proprietorship"` or `"government_authority"`) and the object of
+    the same name, e.g. `natural_person: {name, date_of_birth, address,
+    identification}`. Optional: `description`, `supplemental_documents`,
+    `terms_agreements`, `third_party_verification`, `risk_rating`.
+
+    **Example**
+
+    ```hot
+    ::increase::entities/create-entity({
+      structure: "corporation",
+      corporation: {
+        name: "National Phonograph Company",
+        website: "https://example.com",
+        legal_identifier: {category: "us_employer_identification_number", value: "602214076"},
+        address: {line1: "33 Liberty Street", city: "New York", state: "NY", zip: "10045", country: "US"},
+        beneficial_owners: []
+      }
+    }, {idempotency-key: "entity-acme"})
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  create-entity(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/create("/entities", params, ["structure"], opts, "create-entity")
+}
+
+get-entity
+meta {
+    doc: """GET /entities/{entity_id}: retrieve an Entity."""
+}
+fn
+(entity-id: Str): Map {
+  get-entity(entity-id, {})
+},
+(entity-id: Str, opts: Map): Map {
+  ::api/call("GET", `/entities/${seg(entity-id)}`, {}, opts)
+}
+
+list-entities
+meta {
+    doc: """GET /entities: one page of Entities. Filters: `"status.in"` (`active`, `archived`, `disabled`), `"validation_status.in"`, `created_at: {after, before, on_or_after, on_or_before}`, `idempotency_key`, plus `limit` and `cursor`."""
+}
+fn
+(): Map {
+  list-entities({})
+},
+(params: Map): Map {
+  list-entities(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/entities", params, opts)
+}
+
+update-entity
+meta {
+    doc: """PATCH /entities/{entity_id}: update an Entity's details (e.g. `corporation`, `natural_person`, `risk_rating`, `third_party_verification`, `details_confirmed_at`)."""
+}
+fn
+(entity-id: Str, params: Map): Map {
+  update-entity(entity-id, params, {})
+},
+(entity-id: Str, params: Map, opts: Map): Map {
+  ::api/call("PATCH", `/entities/${seg(entity-id)}`, params, opts)
+}

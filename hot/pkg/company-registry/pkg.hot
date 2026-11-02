@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.company-registry {
+  name: "hot.dev/company-registry",
+  version: "0.1.0",
+  hot-min-version: "3.0.0",
+  description: "Free company registries for Hot behind one normalized Company record: the GLEIF LEI API (search, fuzzy names, LEI and ISIN lookups, direct and ultimate parents and children), SEC EDGAR (tickers to CIK, submissions and filings, XBRL company facts, concepts and frames, filing documents, full-text search) and UK Companies House (company and officer search, profiles, officers, persons with significant control, filing history and document downloads), plus a multi-source lookup.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["kyb", "company-data", "gleif", "lei", "sec", "edgar", "companies-house"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

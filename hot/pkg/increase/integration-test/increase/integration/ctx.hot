@@ -1,0 +1,22 @@
+::increase::integration::ctx ns
+
+::env ::hot::env
+
+// Credentials for the increase integration suite. Unset environment
+// variables are skipped entirely, so absent credentials behave exactly as
+// if never configured. INCREASE_ENVIRONMENT defaults to "sandbox".
+::hot::ctx/set(filter-vals({
+    "increase.api.key": ::env/get("INCREASE_API_KEY", ""),
+    "increase.environment": ::env/get("INCREASE_ENVIRONMENT", ""),
+}, (v) { not(is-empty(v)) }))
+
+// True when INCREASE_API_KEY is set. Tests call this first and `skip`
+// when it is false, so an unconfigured run makes no calls.
+configured fn (): Bool {
+    not(is-empty(::env/get("INCREASE_API_KEY", "")))
+}
+
+skip fn (): Bool {
+    println("skipped: set INCREASE_API_KEY (a sandbox key) to run the Increase integration tests")
+    assert(true, "skipped: no Increase credentials")
+}

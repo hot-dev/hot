@@ -1,0 +1,82 @@
+::persona ns
+meta {
+    doc: """
+    Persona identity verification bindings for agentic KYC/KYB onboarding:
+    create an inquiry (or a KYB transaction), wait for the webhook, review
+    what Persona found, then decide.
+
+    - `::persona::inquiries` creates, reads, lists, updates, approves,
+      declines, marks for review, expires, resumes and redacts inquiries,
+      and builds hosted-flow links
+    - `::persona::accounts` manages the accounts inquiries attach to
+    - `::persona::verifications` reads verifications by id or type, and
+      lists the ones on an inquiry
+    - `::persona::reports` runs watchlist, PEP, adverse media and business
+      reports, and re-runs monitored ones
+    - `::persona::cases` creates, assigns and resolves review cases
+    - `::persona::documents` reads document metadata and downloads files
+    - `::persona::transactions` runs API-first KYB (and other) transactions
+    - `::persona::events` lists and reads events
+    - `::persona::webhooks` verifies `Persona-Signature`, parses events,
+      and manages webhook endpoints
+    - `::persona::decisions` normalizes inquiry, report, verification,
+      transaction and case statuses to
+      `approved | declined | needs-review | pending | failed`, with reasons
+    - `::persona::api` holds the transport, JSON:API helpers, cursor
+      pagination and the `call` escape hatch
+
+    **Setup**: context variables
+    - `persona.api.key`: a sandbox (`persona_sandbox_...`) or production
+      (`persona_production_...`) API key. Both use the same host; the key
+      picks the environment.
+    - `persona.api.version`: optional, overrides the `Persona-Version`
+      header (default `::persona/API_VERSION`)
+    - `persona.key-inflection`: optional, `kebab` (default), `snake` or
+      `camel`
+    - `persona.webhook.secret`: the webhook endpoint's secret (`wbhsec_...`)
+
+    **Quick start**
+
+    ```hot
+    ::inquiries ::persona::inquiries
+    ::decisions ::persona::decisions
+
+    inquiry ::inquiries/create-inquiry("itmpl_...", {reference-id: "user-42"})
+    link ::inquiries/generate-one-time-link(inquiry.data.id)
+    // send link.meta.one-time-link to the user; wait for the inquiry webhook
+
+    later ::inquiries/get-inquiry(inquiry.data.id, {include: ["verifications"]})
+    ::decisions/inquiry-decision(later)
+    // => {decision: "approved", status: "approved", reasons: [], ...}
+    ```
+    """
+}
+
+BASE_URL
+meta {
+    doc: """Persona API base URL (no trailing slash). Sandbox and production share it; the API key selects the environment."""
+}
+"https://api.withpersona.com/api/v1"
+
+API_VERSION
+meta {
+    doc: """
+    The `Persona-Version` this package is written against (the latest
+    release as of Nov 2026), sent on every request so responses don't
+    depend on the API key's default version. Override per project with
+    the `persona.api.version` context variable, or per call with
+    `::persona::api/RequestOptions({persona-version: ...})`.
+
+    See https://docs.withpersona.com/versioning.
+    """
+}
+"2026-09-29"
+
+HOSTED_FLOW_URL
+meta {
+    doc: """The Persona hosted flow (`inquiry` is the default subdomain; organizations can customize it)."""
+}
+"https://inquiry.withpersona.com/verify"
+
+// Cursor page size for the collect helpers; 100 is Persona's maximum.
+DEFAULT_PAGE_SIZE 100

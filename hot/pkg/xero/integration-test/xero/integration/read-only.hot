@@ -1,0 +1,48 @@
+::xero::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests (live Xero organisation, read-only)
+// =============================================================================
+// See ctx.hot for the environment variables. Every test only reads.
+// Run with: hot test --project pkg-integration-xero
+
+::ctx ::xero::integration::ctx
+
+test-organisation
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            org ::xero::accounting/get-organisation()
+            assert(not(is-err(org)), `organisation: ${if-err(org, (e) { err-message(e) })}`)
+            assert(is-some(org.Name), "the organisation has a name")
+            assert(is-map(::xero::api/last-rate-limits()), "rate-limit headers are recorded")
+        }
+    }
+}
+
+test-connections-include-tenant
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            tenants ::xero::api/connections()
+            assert(not(is-err(tenants)), `connections: ${if-err(tenants, (e) { err-message(e) })}`)
+            ids map(tenants, (t) { t.tenantId })
+            assert(in(::hot::env/get("XERO_TENANT_ID", ""), ids), "the configured tenant is connected")
+        }
+    }
+}
+
+test-contacts-page
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            page ::xero::accounting/list-page("Contacts", {pageSize: 5, summaryOnly: true})
+            assert(not(is-err(page)), `contacts: ${if-err(page, (e) { err-message(e) })}`)
+            assert(lte(length(page.items), 5), "pageSize caps the page")
+        }
+    }
+}

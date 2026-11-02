@@ -1,0 +1,172 @@
+::modern-treasury::webhooks ns
+meta {
+    ctx: {"modern-treasury.webhook.key": {required: false}},
+    doc: """
+    Verify Modern Treasury webhooks. Modern Treasury sends `X-Signature`,
+    the hex HMAC-SHA256 of the raw request body keyed with your webhook
+    key (Developers → Webhooks). Nothing else is signed: `X-Event-Time`
+    and the other headers are not covered, so there is no signed
+    timestamp to enforce a replay window with. Deduplicate on
+    `X-Webhook-ID` (stable across retries) and act on the current state
+    of the object (re-fetch it) rather than on the payload alone.
+
+    Other headers: `X-Topic` (e.g. `"payment_order"`), `X-Event-ID`,
+    `X-Event-Time`, `X-Delivery-ID` (changes per attempt), `X-Live-Mode`
+    (`"true"` or `"false"`). The body is `{event, data}`: `event` names
+    what happened (e.g. `"completed"`), `data` is the object. Modern
+    Treasury waits five seconds for a 2xx and retries with backoff (15
+    attempts over about a day and a half), then pauses the endpoint.
+    """
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+
+header ::modern-treasury::api/header
+
+sign
+meta {
+    doc: """The `X-Signature` value Modern Treasury would send for `body`: lowercase hex HMAC-SHA256 under `key`. Use it to build test deliveries."""
+}
+fn (key: Str, body: Str | Bytes): Str {
+  ::hmac/hmac-sha256(key, body)
+}
+
+verify-signature
+meta {
+    doc: """True when `signature` (hex) is the HMAC-SHA256 of `body` under `key`, compared in constant time. An empty key or signature never verifies. Pass the raw body, never a re-serialized one."""
+}
+fn (body: Str | Bytes, signature: Str, key: Str): Bool {
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(key) => { false }
+    is-empty(trim(signature)) => { false }
+    => { ::hmac/hmac-verify-hex(key, body, trim(signature), "sha256") }
+  }
+}
+
+verify-request
+meta {
+    ctx: {"modern-treasury.webhook.key": {required: false}},
+    doc: """
+    True when an inbound request carries a valid `X-Signature` over its
+    raw body. The 1-arity form reads `modern-treasury.webhook.key` and
+    fails the run when it is unset; an explicit empty key never verifies.
+
+    **Example**
+
+    ```hot
+    mt-webhook
+    meta {webhook: {service: "modern-treasury", path: "/modern-treasury/webhook"}}
+    fn (request) {
+      cond {
+        not(::modern-treasury::webhooks/verify-request(request)) => {
+          ::hot::http/HttpResponse({status: 401, body: "invalid signature"})
+        }
+        => {
+          e ::modern-treasury::webhooks/parse-event(request)
+          // enqueue e.webhook_id, e.topic, e.event, e.id for processing
+          ::hot::http/HttpResponse({status: 200, body: {received: true}})
+        }
+      }
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  key Str(or(::ctx/get("modern-treasury.webhook.key"), ""))
+  if(is-empty(key),
+    fail("modern-treasury.webhook.key is not set. Add the webhook key from Developers > Webhooks in Context Variables.")
+  )
+  verify-request(request, key)
+},
+(request: Map, key: Str): Bool {
+  signature or(header(get(request, "headers"), "x-signature"), "")
+  verify-signature(::hot::http/raw-body(request), signature, key)
+}
+
+Event
+meta {
+    doc: """A parsed Modern Treasury webhook: `topic` (`X-Topic`, e.g. `"payment_order"`), `event` (e.g. `"completed"`), `data` (the object), `id` (`data.id`), `webhook_id` (`X-Webhook-ID`, the dedupe key), `event_id`, `event_time`, `live_mode` (Bool, from `X-Live-Mode`)."""
+}
+type {
+    topic: Str?,
+    event: Str?,
+    data: Any?,
+    id: Str?,
+    webhook_id: Str?,
+    event_id: Str?,
+    event_time: Str?,
+    live_mode: Bool?
+}
+
+parse-event
+meta {
+    doc: """
+    Parse a webhook request (verify it first) into an `Event`. The body is
+    read from the raw body, so it works whether or not Hot already decoded
+    it. Errs when the body isn't a JSON object.
+
+    **Example**
+
+    ```hot
+    e ::modern-treasury::webhooks/parse-event(request)
+    cond {
+      and(eq(e.topic, "payment_order"), eq(e.event, "completed")) => {
+        order ::modern-treasury::payment-orders/get-payment-order(e.id)
+        // act on order.status
+      }
+      => { null }
+    }
+    ```
+    """
+}
+fn (request: Map): Event {
+  raw ::hot::http/raw-body(request)
+  decoded cond {
+    is-map(get(request, "body")) => { get(request, "body") }
+    is-bytes(raw) => { from-json(Str(raw)) }
+    => { from-json(raw) }
+  }
+
+  headers get(request, "headers")
+  live header(headers, "x-live-mode")
+  cond {
+    is-err(decoded) => { err("modern-treasury: the webhook body is not valid JSON") }
+    not(is-map(decoded)) => { err("modern-treasury: the webhook body is not a JSON object") }
+    => {
+      data get(decoded, "data")
+      Event({
+        topic: header(headers, "x-topic"),
+        event: get(decoded, "event"),
+        data: data,
+        id: if(is-map(data), get(data, "id"), null),
+        webhook_id: header(headers, "x-webhook-id"),
+        event_id: header(headers, "x-event-id"),
+        event_time: header(headers, "x-event-time"),
+        live_mode: if(is-null(live), null, eq(lowercase(live), "true"))
+      })
+    }
+  }
+}
+
+construct-event
+meta {
+    ctx: {"modern-treasury.webhook.key": {required: false}},
+    doc: """Verify a request (see `verify-request`) and return its `Event`, or an Err when the signature doesn't verify. The 2-arity form takes an explicit key."""
+}
+fn
+(request: Map): Any {
+  key Str(or(::ctx/get("modern-treasury.webhook.key"), ""))
+  if(is-empty(key),
+    fail("modern-treasury.webhook.key is not set. Add the webhook key from Developers > Webhooks in Context Variables.")
+  )
+  construct-event(request, key)
+},
+(request: Map, key: Str): Any {
+  cond {
+    not(verify-request(request, key)) => { err("modern-treasury: webhook signature verification failed") }
+    => { parse-event(request) }
+  }
+}

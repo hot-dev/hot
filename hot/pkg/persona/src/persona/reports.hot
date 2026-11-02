@@ -1,0 +1,192 @@
+::persona::reports ns
+meta {
+    doc: """
+    Reports: screenings and lookups run on demand or attached to an
+    inquiry, such as watchlist, politically exposed person, adverse media,
+    and the KYB reports (`report/business-lookup`, `business-watchlist`,
+    `business-adverse-media`, `business-search`, ...).
+
+    Reports run asynchronously. Create one, then wait for the
+    `report/<type>.ready` (or `.errored`) webhook, or check `is-done` from
+    a schedule. Statuses: `pending`, `ready`, `errored`; a ready report
+    sets `has-match`.
+    """
+}
+
+::api ::persona::api
+RequestOptions ::persona::api/RequestOptions
+
+seg ::persona::api/seg
+
+report-type
+meta {
+    doc: """The JSON:API type for a report: `"watchlist"` and `"report/watchlist"` both give `"report/watchlist"`. Exposed for testing."""
+}
+fn (type-name: Str): Str {
+  t trim(type-name)
+  if(starts-with(t, "report/"), t, `report/${t}`)
+}
+
+create-body
+meta {
+    doc: """The JSON:API body for `create-report`. Exposed for testing."""
+}
+fn (type-name: Str, template-id: Str?, query: Map, opts: Map): Map {
+  ::api/document(report-type(type-name), {
+    report-template-id: template-id,
+    account-id: get(opts, "account-id"),
+    query: query
+  }, or(get(opts, "meta"), {}))
+}
+
+create-report
+meta {
+    doc: """
+    POST /reports - Run a report. `type-name` is the report type
+    (`"watchlist"`, `"politically-exposed-person"`, `"adverse-media"`,
+    `"business-lookup"`, `"business-watchlist"`, `"business-adverse-media"`,
+    `"email-address"`, `"phone-number"`, ...); `template-id` is its report
+    template (`rptp_...`, from the dashboard); `query` holds the inputs,
+    e.g. `{name-first, name-last, birthdate, address-country-code}` for a
+    watchlist or `{business-name, address-street-1, address-city,
+    address-subdivision, address-postal-code}` for a business lookup.
+    `opts`: `account-id`, `meta` (e.g. `{auto-create-account-reference-id:
+    "user-42"}`).
+
+    **Example**
+
+    ```hot
+    report ::persona::reports/create-report("watchlist", "rptp_...", {
+      name-first: "Jane", name-last: "Doe", address-country-code: "US"
+    }, {}, ::persona::api/RequestOptions({idempotency-key: "user-42-watchlist"}))
+    ```
+    """
+}
+fn
+(type-name: Str, template-id: Str?, query: Map): Map {
+  create-report(type-name, template-id, query, {}, RequestOptions({}))
+},
+(type-name: Str, template-id: Str?, query: Map, opts: Map): Map {
+  create-report(type-name, template-id, query, opts, RequestOptions({}))
+},
+(type-name: Str, template-id: Str?, query: Map, opts: Map, options: RequestOptions): Map {
+  ::api/send("POST", "/reports", {}, create-body(type-name, template-id, query, opts), options)
+}
+
+create-watchlist-report
+meta {
+    doc: """Run a `report/watchlist` (sanctions) screening on a person. `query` as in `create-report`; `term` can replace the name parts."""
+}
+fn
+(template-id: Str, query: Map): Map {
+  create-report("watchlist", template-id, query, {}, RequestOptions({}))
+},
+(template-id: Str, query: Map, options: RequestOptions): Map {
+  create-report("watchlist", template-id, query, {}, options)
+}
+
+create-business-lookup-report
+meta {
+    doc: """Run a `report/business-lookup` (KYB registry lookup). `query` needs `business-name`, `address-street-1`, `address-city`, `address-subdivision`, `address-postal-code`; optional `ein`, `website`, `phone-number`, `address-country-code`, `associated-people`."""
+}
+fn
+(template-id: Str, query: Map): Map {
+  create-report("business-lookup", template-id, query, {}, RequestOptions({}))
+},
+(template-id: Str, query: Map, options: RequestOptions): Map {
+  create-report("business-lookup", template-id, query, {}, options)
+}
+
+get-report
+meta {
+    doc: """GET /reports/{id} - Retrieve a report. `opts` takes `include` and `fields`."""
+}
+fn
+(report-id: Str): Map {
+  get-report(report-id, {}, RequestOptions({}))
+},
+(report-id: Str, opts: Map): Map {
+  get-report(report-id, opts, RequestOptions({}))
+},
+(report-id: Str, opts: Map, options: RequestOptions): Map {
+  ::api/send("GET", `/reports/${seg(report-id)}`, ::api/read-query(opts), null, options)
+}
+
+list-reports
+meta {
+    doc: """GET /reports - One page of reports. Filters: `reference-id`, `account-id`. `opts` takes `page-size`, `after`, `before`."""
+}
+fn
+(filters: Map): Map {
+  list-reports(filters, {}, RequestOptions({}))
+},
+(filters: Map, opts: Map): Map {
+  list-reports(filters, opts, RequestOptions({}))
+},
+(filters: Map, opts: Map, options: RequestOptions): Map {
+  ::api/list-page("/reports", filters, opts, options)
+}
+
+rerun-report
+meta {
+    doc: """POST /reports/{id}/run - Re-run a (continuously monitored) report now. Watch for the next `.ready` event."""
+}
+fn
+(report-id: Str): Map {
+  rerun-report(report-id, RequestOptions({}))
+},
+(report-id: Str, options: RequestOptions): Map {
+  ::api/send("POST", `/reports/${seg(report-id)}/run`, {}, null, options)
+}
+
+redact-report
+meta {
+    doc: """DELETE /reports/{id} - Permanently remove a report's PII."""
+}
+fn
+(report-id: Str): Map {
+  redact-report(report-id, RequestOptions({}))
+},
+(report-id: Str, options: RequestOptions): Map {
+  ::api/send("DELETE", `/reports/${seg(report-id)}`, {}, null, options)
+}
+
+add-tag
+meta {
+    doc: """POST /reports/{id}/add-tag - Add a tag by name."""
+}
+fn
+(report-id: Str, tag-name: Str): Map {
+  add-tag(report-id, tag-name, RequestOptions({}))
+},
+(report-id: Str, tag-name: Str, options: RequestOptions): Map {
+  ::api/send("POST", `/reports/${seg(report-id)}/add-tag`, {}, ::api/meta-document({tag-name: tag-name}), options)
+}
+
+print-report
+meta {
+    doc: """GET /reports/{id}/print - The report as a PDF (`Bytes`)."""
+}
+fn
+(report-id: Str): Bytes {
+  print-report(report-id, RequestOptions({}))
+},
+(report-id: Str, options: RequestOptions): Bytes {
+  ::api/get-bytes(`/reports/${seg(report-id)}/print`, options)
+}
+
+is-done
+meta {
+    doc: """True when a report has finished: status `ready` or `errored`."""
+}
+fn (doc: Any): Bool {
+  in(or(::api/attr(doc, "status"), ""), ["ready", "errored"])
+}
+
+has-match
+meta {
+    doc: """True when a ready report found a match (`has-match`)."""
+}
+fn (doc: Any): Bool {
+  eq(::api/attr(doc, "has-match"), true)
+}

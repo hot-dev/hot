@@ -1,0 +1,69 @@
+::increase ns
+meta {
+    doc: """
+    Increase banking API bindings: hold deposits, issue account numbers
+    and cards, and move money over ACH, Fedwire, Real-Time Payments,
+    FedNow, checks and book transfers.
+
+    - `::increase::entities`, `::increase::accounts` (accounts, account
+      numbers, balances, statements) and `::increase::external-accounts`
+    - transfers, one namespace per rail: `::increase::ach-transfers`,
+      `::increase::wire-transfers`, `::increase::rtp-transfers`,
+      `::increase::fednow-transfers`, `::increase::check-transfers`,
+      `::increase::account-transfers`
+    - `::increase::inbound-transfers`: inbound ACH, wire, RTP and FedNow,
+      with ACH returns and declines, wire reversals and RTP returns
+    - `::increase::transactions`: transactions, pending transactions and
+      declined transactions
+    - `::increase::cards`: cards, card details and physical cards
+    - `::increase::events`: events and event subscriptions (webhooks)
+    - `::increase::simulations`: sandbox-only simulations, guarded so they
+      err unless `increase.environment` is `"sandbox"`
+    - `::increase::webhooks` and `::increase::standard-webhooks`: webhook
+      signature verification
+    - `::increase::api`: transport, errors, pagination and the `call`
+      escape hatch
+
+    **Setup**: context variables
+    - `increase.api.key`: an API key from the Increase dashboard (sandbox
+      and production keys differ)
+    - `increase.environment`: `"sandbox"` (default) or `"production"`
+    - `increase.webhook.secret`: the event subscription's shared secret
+    - `increase.transfers.require-approval`: `true` to send
+      `require_approval: true` on every transfer that doesn't set it
+
+    **Money movement.** Every call that creates a transfer, a return or a
+    reversal needs an `idempotency-key` in its trailing `opts` Map and errs
+    locally without one. Nothing in this package retries a request.
+    Agents should create transfers with `require_approval: true` and leave
+    the approval to a person.
+
+    **Quick start**
+
+    ```hot
+    ::api ::increase::api
+    ::ach ::increase::ach-transfers
+
+    accounts ::increase::accounts/list-accounts({"status.in": ["open"]})
+
+    transfer ::ach/create-ach-transfer({
+      account_id: "account_in71c4amph0vgo2qllky",
+      external_account_id: "external_account_ukk55lr923a3ac0pp7iv",
+      amount: 10000,
+      statement_descriptor: "Invoice 42",
+      require_approval: true
+    }, {idempotency-key: "invoice-42-payout"})
+    ```
+    """
+}
+
+// Increase's two environments. The production host moves real money, so
+// it is only used when `increase.environment` says "production".
+SANDBOX_URL "https://sandbox.increase.com"
+
+PRODUCTION_URL "https://api.increase.com"
+
+DEFAULT_ENVIRONMENT "sandbox"
+
+// The default and maximum page size of every list endpoint.
+MAX_PAGE_SIZE 100

@@ -1,0 +1,518 @@
+::persona::test ns
+meta ["test"]
+
+::api ::persona::api
+::inquiries ::persona::inquiries
+::accounts ::persona::accounts
+::verifications ::persona::verifications
+::reports ::persona::reports
+::documents ::persona::documents
+::decisions ::persona::decisions
+
+RequestOptions ::persona::api/RequestOptions
+
+// ============================================================================
+// Headers
+// ============================================================================
+
+test-headers-defaults
+meta ["test"] fn () {
+    h ::api/build-headers("GET", ::api/resolve-from({}, {"persona.api.key": "persona_sandbox_k"}), false)
+    assert-eq("Bearer persona_sandbox_k", h.Authorization)
+    assert-eq("2026-09-29", get(h, "Persona-Version"))
+    assert-eq("application/json", h.Accept)
+    assert(is-null(get(h, "Content-Type")), "no Content-Type without a body")
+    assert(is-null(get(h, "Key-Inflection")), "Key-Inflection omitted by default")
+    assert(is-null(get(h, "Idempotency-Key")), "Idempotency-Key omitted by default")
+}
+
+test-headers-options
+meta ["test"] fn () {
+    opts {api-key: "k", idempotency-key: "user-42-kyc", persona-version: "2025-12-08", key-inflection: "snake"}
+    h ::api/build-headers("POST", ::api/resolve-from(opts, {}), true)
+    assert-eq("Bearer k", h.Authorization)
+    assert-eq("user-42-kyc", get(h, "Idempotency-Key"))
+    assert-eq("2025-12-08", get(h, "Persona-Version"))
+    assert-eq("snake", get(h, "Key-Inflection"))
+    assert-eq("application/json", get(h, "Content-Type"))
+}
+
+test-idempotency-key-only-on-post
+meta ["test"] fn () {
+    h ::api/build-headers("PATCH", ::api/resolve-from({api-key: "k", idempotency-key: "x"}, {}), true)
+    assert(is-null(get(h, "Idempotency-Key")), "Persona ignores the key off POST; don't send it")
+}
+
+// ============================================================================
+// Resolver
+// ============================================================================
+
+CTX {"persona.api.key": "persona_sandbox_ctx", "persona.api.version": "2025-10-27", "persona.key-inflection": "camel"}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({api-key: "persona_sandbox_tenant_b", persona-version: "2026-09-29"}, CTX)
+    assert-eq("persona_sandbox_tenant_b", r.api-key)
+    assert-eq("2026-09-29", r.persona-version)
+    assert-eq("camel", r.key-inflection, "unset options fall back to ctx")
+}
+
+test-resolve-ctx-when-opts-empty
+meta ["test"] fn () {
+    r ::api/resolve-from({}, CTX)
+    assert-eq("persona_sandbox_ctx", r.api-key)
+    assert-eq("2025-10-27", r.persona-version)
+    assert-eq({api-key: "persona_sandbox_ctx", persona-version: "2026-09-29"}, ::api/resolve-from({}, {"persona.api.key": "persona_sandbox_ctx"}), "defaults")
+}
+
+test-resolve-errors
+meta ["test"] fn () {
+    missing ::api/resolve-from({}, {})
+    assert(is-err(missing), "no key is an Err")
+    assert(contains(Str(err-value(missing)), "persona.api.key"), "the error names the context variable")
+    assert(is-err(::api/resolve-from({api-key: "k", key-inflection: "pascal"}, {})), "unknown inflection errs")
+    assert-eq("camel", ::api/resolve-from({api-key: "k", key-inflection: "CAMEL"}, {}).key-inflection)
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    r ::api/resolve({api-key: "persona_sandbox_tenant_c"})
+    assert-eq("persona_sandbox_tenant_c", r.api-key, "plain Map options work")
+    assert(is-null(::hot::ctx/get("persona.api.key")), "per-call keys are not written to ctx")
+    t ::api/resolve(RequestOptions({api-key: "persona_sandbox_tenant_d"}))
+    assert-eq("persona_sandbox_tenant_d", t.api-key)
+}
+
+test-plain-map-options-on-typed-functions
+meta ["test"] fn () {
+    out ::inquiries/simulate("inq_1", ["complete_inquiry"], {api-key: "persona_production_abc"})
+    assert(is-err(out), "a plain Map is accepted as options")
+}
+
+test-send-without-key-errs
+meta ["test"] fn () {
+    out ::api/send("GET", "/inquiries", {}, null, RequestOptions({}))
+    assert(is-err(out), "no persona.api.key means nothing is sent")
+}
+
+test-build-request
+meta ["test"] fn () {
+    req ::api/build-request("post", "https://api.withpersona.com/api/v1/inquiries", {data: {attributes: {note: null, reference-id: "u1"}}}, {api-key: "k"})
+    assert-eq("POST", req.method)
+    assert-eq({data: {attributes: {reference-id: "u1"}}}, from-json(req.body))
+    empty ::api/build-request("GET", "https://x", null, {api-key: "k"})
+    assert-eq("", empty.body)
+    assert(is-null(get(empty.headers, "Content-Type")), "no body, no content type")
+}
+
+// ============================================================================
+// Bodies and queries
+// ============================================================================
+
+test-document-drops-nulls
+meta ["test"] fn () {
+    assert-eq({data: {attributes: {inquiry-template-id: "itmpl_1"}}}, ::api/document(null, {inquiry-template-id: "itmpl_1", note: null}, {}))
+    assert-eq({data: {type: "report/watchlist", attributes: {query: {name-last: "Doe"}}}, meta: {a: 1}},
+      ::api/document("report/watchlist", {query: {name-last: "Doe", name-first: null}}, {a: 1, b: null}))
+    assert-eq({}, ::api/meta-document({comment: null}))
+    assert-eq({meta: {comment: "ok"}}, ::api/meta-document({comment: "ok"}))
+}
+
+test-compact-keeps-falsy
+meta ["test"] fn () {
+    assert-eq({a: false, b: 0, c: "", d: [{e: 1}]}, ::api/compact({a: false, b: 0, c: "", d: [{e: 1, f: null}, null], g: null}))
+}
+
+test-query-string
+meta ["test"] fn () {
+    assert-eq("", ::api/query-string({}))
+    assert-eq("", ::api/query-string({filter: {status: null}, include: []}))
+    assert-eq("?include=verifications%2Creports", ::api/query-string({include: ["verifications", "reports"]}))
+    assert-eq("?filter%5Bstatus%5D=approved%2Cdeclined", ::api/query-string({filter: {status: ["approved", "declined"]}}))
+    assert-eq("?fields%5Binquiry%5D=status%2Creference-id", ::api/query-string({fields: {inquiry: ["status", "reference-id"]}}))
+}
+
+test-list-query
+meta ["test"] fn () {
+    q ::api/list-query({reference-id: "u 1", status: null}, {page-size: 25, after: "inq_9"})
+    assert-eq({filter: {reference-id: "u 1", status: null}, page: {size: 25, after: "inq_9"}}, q)
+    assert-eq("?filter%5Breference-id%5D=u%201&page%5Bsize%5D=25&page%5Bafter%5D=inq_9", ::api/query-string(q))
+    assert-eq({}, ::api/list-query({}, {}))
+}
+
+test-seg-encodes
+meta ["test"] fn () {
+    assert-eq("inq_1%2F..%2Fapprove", ::api/seg("inq_1/../approve"))
+    assert-eq("inq_abc", ::api/seg("inq_abc"))
+}
+
+test-read-query
+meta ["test"] fn () {
+    assert-eq({}, ::api/read-query({}))
+    assert-eq({include: ["account"]}, ::api/read-query({include: ["account"], other: 1}))
+}
+
+test-inquiry-create-body
+meta ["test"] fn () {
+    body ::inquiries/create-body("itmpl_abc", {reference-id: "user-42", fields: {name-first: "Jane"}, note: null, meta: {auto-create-one-time-link: true}})
+    assert-eq({
+      data: {attributes: {inquiry-template-id: "itmpl_abc", reference-id: "user-42", fields: {name-first: "Jane"}}},
+      meta: {auto-create-one-time-link: true}
+    }, body)
+    assert-eq({data: {attributes: {inquiry-template-id: "itmpl_abc"}}}, ::inquiries/create-body("itmpl_abc", {}))
+}
+
+test-template-attribute
+meta ["test"] fn () {
+    assert-eq({inquiry-template-id: "itmpl_1"}, ::inquiries/template-attribute("itmpl_1"))
+    assert-eq({inquiry-template-version-id: "itmplv_1"}, ::inquiries/template-attribute("itmplv_1"))
+    assert-eq({template-id: "tmpl_1"}, ::inquiries/template-attribute("tmpl_1"))
+}
+
+test-report-create-body
+meta ["test"] fn () {
+    body ::reports/create-body("watchlist", "rptp_1", {name-first: "Jane", birthdate: null}, {account-id: "act_1"})
+    assert-eq({data: {type: "report/watchlist", attributes: {report-template-id: "rptp_1", account-id: "act_1", query: {name-first: "Jane"}}}}, body)
+    assert-eq("report/business-lookup", ::reports/report-type("report/business-lookup"))
+}
+
+test-verification-type-path
+meta ["test"] fn () {
+    assert-eq("/verification/government-ids/ver_1", ::verifications/type-path("government-id", "ver_1"))
+    assert-eq("/verification/database-businesses/ver_2", ::verifications/type-path("verification/database-business", "ver_2"))
+    assert(is-err(::verifications/type-path("crypto-wallet", "ver_3")), "types without a typed endpoint err")
+}
+
+// ============================================================================
+// Hosted flow
+// ============================================================================
+
+test-hosted-flow-url
+meta ["test"] fn () {
+    assert-eq("https://inquiry.withpersona.com/verify?inquiry-template-id=itmpl_abc&environment-id=env_123&reference-id=user%2042",
+      ::inquiries/hosted-flow-url("itmpl_abc", {environment-id: "env_123", reference-id: "user 42", fields: {name-first: "Jane"}}))
+    assert-eq("https://inquiry.withpersona.com/verify?inquiry-template-version-id=itmplv_1&redirect-uri=https%3A%2F%2Fapp.example.com%2Fdone",
+      ::inquiries/hosted-flow-url("itmplv_1", {redirect-uri: "https://app.example.com/done"}))
+}
+
+test-hosted-flow-url-never-carries-fields
+meta ["test"] fn () {
+    url ::inquiries/hosted-flow-url("itmpl_abc", {fields: {birthdate: "1990-01-31"}})
+    assert(not(contains(url, "1990")), "PII prefill is never put in a URL")
+}
+
+test-resume-url
+meta ["test"] fn () {
+    assert-eq("https://inquiry.withpersona.com/verify?inquiry-id=inq_1&session-token=tok%2Babc", ::inquiries/resume-url("inq_1", "tok+abc"))
+}
+
+test-session-token-and-link
+meta ["test"] fn () {
+    assert-eq("tok", ::inquiries/session-token({meta: {session-token: "tok"}}))
+    assert-eq("tok2", ::inquiries/session-token({meta: {session_token: "tok2"}}))
+    assert(is-null(::inquiries/session-token({data: {}})), "no meta")
+    assert-eq("https://inquiry.withpersona.com/verify?code=abc", ::inquiries/one-time-link({meta: {one-time-link: "https://inquiry.withpersona.com/verify?code=abc"}}))
+}
+
+test-simulate-refuses-production
+meta ["test"] fn () {
+    assert(::inquiries/is-sandbox-key("persona_sandbox_abc"), "sandbox key")
+    assert(not(::inquiries/is-sandbox-key("persona_production_abc")), "production key")
+    out ::inquiries/simulate("inq_1", ["complete_inquiry"], RequestOptions({api-key: "persona_production_abc"}))
+    assert(is-err(out), "simulate never runs on production")
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-link-cursor
+meta ["test"] fn () {
+    assert-eq("inq_ByBd", ::api/link-cursor("/api/v1/inquiries?page%5Bafter%5D=inq_ByBd", "after"))
+    assert-eq("inq_2", ::api/link-cursor("/api/v1/inquiries?page%5Bsize%5D=2&page%5Bafter%5D=inq_2", "after"))
+    assert-eq("inq_0", ::api/link-cursor("/api/v1/inquiries?page[before]=inq_0", "before"))
+    assert(is-null(::api/link-cursor(null, "after")), "null link")
+    assert(is-null(::api/link-cursor("/api/v1/inquiries", "after")), "no query")
+}
+
+test-next-cursor
+meta ["test"] fn () {
+    assert-eq("inq_2", ::api/next-cursor({data: [], links: {prev: null, next: "/api/v1/inquiries?page%5Bafter%5D=inq_2"}}))
+    assert(is-null(::api/next-cursor({data: [], links: {prev: null, next: null}})), "last page")
+    assert(is-null(::api/next-cursor({data: []})), "no links")
+}
+
+page-for fn (cursor: Str?): Map {
+    cond {
+      is-null(cursor) => { {data: [{id: "a"}, {id: "b"}], links: {next: "/api/v1/x?page%5Bafter%5D=b"}} }
+      eq(cursor, "b") => { {data: [{id: "c"}, {id: "d"}], links: {next: "/api/v1/x?page%5Bafter%5D=d"}} }
+      => { {data: [{id: "e"}], links: {next: null}} }
+    }
+}
+
+test-collect-pages
+meta ["test"] fn () {
+    all ::api/collect-pages(page-for, null, 100, [], 10)
+    assert-eq(["a", "b", "c", "d", "e"], map(all, (x) { x.id }))
+    capped ::api/collect-pages(page-for, null, 3, [], 10)
+    assert-eq(["a", "b", "c"], map(capped, (x) { x.id }))
+    one ::api/collect-pages(page-for, null, 100, [], 1)
+    assert-eq(["a", "b"], map(one, (x) { x.id }), "pages-left caps the walk")
+}
+
+test-collect-pages-returns-err
+meta ["test"] fn () {
+    out ::api/collect-pages((c) { err("boom") }, null, 10, [], 10)
+    assert(is-err(out), "first Err is returned")
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-http-error
+meta ["test"] fn () {
+    e ::api/http-error({
+      status: 422,
+      headers: {request-id: "req_1", ratelimit-reset: "12"},
+      body: {errors: [{title: "Unprocessable Entity", details: "data.attributes.inquiry-template-id is missing", source: {pointer: "/data/attributes/inquiry-template-id"}}]}
+    })
+    assert-eq(422, e.status)
+    assert-eq("Unprocessable Entity", e.title)
+    assert-eq("/data/attributes/inquiry-template-id", e.pointer)
+    assert-eq("req_1", e.request-id)
+    assert-eq(12, e.retry-after)
+    assert-eq("persona: HTTP 422: Unprocessable Entity: data.attributes.inquiry-template-id is missing (/data/attributes/inquiry-template-id) [req_1]", e.message)
+}
+
+test-http-error-redacts-pii
+meta ["test"] fn () {
+    e ::api/http-error({
+      status: 400,
+      headers: {},
+      body: {
+        errors: [{title: "Bad Request", details: "Birthdate 1990-01-31 and SSN 123-45-6789 for jane@example.com are invalid"}],
+        social-security-number: "123456789",
+        attributes: {birthdate: "1990-01-31", name-first: "Jane"}
+      }
+    })
+    assert(not(contains(e.message, "1990")), "no birth date in message")
+    assert(not(contains(e.message, "6789")), "no SSN in message")
+    assert(not(contains(e.message, "jane@example.com")), "no email in message")
+    assert-eq("[redacted]", e.body.social-security-number)
+    assert-eq("[redacted]", e.body.attributes.birthdate)
+    assert-eq("Jane", e.body.attributes.name-first)
+    assert(not(contains(to-json(e.errors), "6789")), "errors are redacted too")
+}
+
+test-http-error-non-json
+meta ["test"] fn () {
+    e ::api/http-error({status: 502, headers: {retry-after: "30"}, body: "Bad Gateway"})
+    assert-eq("persona: HTTP 502: Bad Gateway", e.message)
+    assert-eq(30, e.retry-after)
+    assert-eq([], e.errors)
+    assert(::api/is-retryable(e), "502 is retryable")
+    assert(not(::api/is-retryable(::api/http-error({status: 404, headers: {}, body: {}}))), "404 is not")
+    assert(::api/is-not-found(err(::api/http-error({status: 404, headers: {}, body: {}}))), "404 through an Err")
+}
+
+test-redact-text
+meta ["test"] fn () {
+    assert-eq("id [redacted] ok", ::api/redact-text("id 123-45-6789 ok"))
+    assert-eq("page 100 of 3", ::api/redact-text("page 100 of 3"))
+    assert-eq("mail [redacted-email].", ::api/redact-text("mail a.b+c@example.co.uk."))
+    assert(::api/is-sensitive-key("socialSecurityNumber"), "camel")
+    assert(::api/is-sensitive-key("identification_number"), "snake")
+    assert(not(::api/is-sensitive-key("name-first")), "names are kept")
+}
+
+test-parse-int
+meta ["test"] fn () {
+    assert-eq(5, ::api/parse-int(" 5 "))
+    assert(is-null(::api/parse-int("abc")), "non-numeric is null")
+    assert(is-null(::api/parse-int(null)), "null")
+}
+
+// ============================================================================
+// JSON:API helpers
+// ============================================================================
+
+INQUIRY {
+  data: {
+    type: "inquiry",
+    id: "inq_1",
+    attributes: {
+      status: "completed",
+      reference-id: "user-42",
+      fields: {name-first: {type: "string", value: "Jane"}, birthdate: {type: "date", value: "1990-01-31"}}
+    },
+    relationships: {
+      account: {data: {type: "account", id: "act_1"}},
+      verifications: {data: [{type: "verification/government-id", id: "ver_2"}, {type: "verification/selfie", id: "ver_1"}]},
+      reports: {data: []},
+      template: {data: null}
+    }
+  },
+  included: [
+    {type: "verification/selfie", id: "ver_1", attributes: {status: "passed", checks: []}},
+    {type: "verification/government-id", id: "ver_2", attributes: {status: "failed", checks: [
+      {name: "id_expired", status: "failed"},
+      {name: "id_barcode_inconsistency", status: "failed"},
+      {name: "id_tamper", status: "passed"}
+    ]}},
+    {type: "report/watchlist", id: "rep_1", attributes: {status: "ready", has-match: true}}
+  ]
+}
+
+test-attr-inflections
+meta ["test"] fn () {
+    assert-eq("user-42", ::api/attr(INQUIRY, "reference-id"))
+    assert-eq("user-42", ::api/attr({data: {type: "inquiry", attributes: {reference_id: "user-42"}}}, "reference-id"))
+    assert-eq(true, ::api/attr({type: "report/watchlist", attributes: {hasMatch: true}}, "has-match"))
+    assert(is-null(::api/attr(INQUIRY, "missing-key")), "absent attribute")
+    assert-eq(["has-match", "has_match", "hasMatch"], ::api/key-variants("has-match"))
+    assert-eq(["status"], ::api/key-variants("status"))
+}
+
+test-relationships-and-included
+meta ["test"] fn () {
+    assert-eq(["act_1"], ::api/relationship-ids(INQUIRY, "account"))
+    assert-eq(["ver_2", "ver_1"], ::api/relationship-ids(INQUIRY, "verifications"))
+    assert-eq([], ::api/relationship-ids(INQUIRY, "template"))
+    assert-eq(2, length(::api/included(INQUIRY, "verification")))
+    assert-eq(1, length(::api/included(INQUIRY, "report/watchlist")))
+    assert-eq("ver_1", ::api/find-included(INQUIRY, "ver_1").id)
+}
+
+test-field-values-and-flatten
+meta ["test"] fn () {
+    assert-eq({name-first: "Jane", birthdate: "1990-01-31"}, ::api/field-values(INQUIRY))
+    flat ::api/flatten(INQUIRY)
+    assert-eq("inq_1", flat.id)
+    assert-eq("completed", flat.status)
+    assert-eq("Jane", flat.fields.name-first)
+    assert-eq("act_1", flat.relationships.account)
+    assert-eq(["ver_2", "ver_1"], flat.relationships.verifications)
+}
+
+test-verifications-from-document
+meta ["test"] fn () {
+    ids map(::verifications/from-document(INQUIRY), (v) { v.id })
+    assert-eq(["ver_2", "ver_1"], ids, "relationship order")
+    assert-eq(["id_barcode_inconsistency", "id_expired"], ::verifications/failed-checks(::api/find-included(INQUIRY, "ver_2")))
+}
+
+test-document-files-hide-urls
+meta ["test"] fn () {
+    doc {data: {type: "document/government-id", id: "doc_1", attributes: {
+      front-photo: {filename: "front.jpg", url: "https://files.withpersona.com/front.jpg?access_token=secret", byte-size: 100},
+      files: [{filename: "a.pdf", url: "https://files.withpersona.com/a.pdf?access_token=s2", byte-size: 5}]
+    }}}
+    entries ::documents/files(doc)
+    assert-eq([{key: "files", filename: "a.pdf", byte-size: 5, has-url: true}, {key: "front-photo", filename: "front.jpg", byte-size: 100, has-url: true}], entries)
+    assert(not(contains(to-json(entries), "access_token")), "signed URLs are not in the metadata")
+    assert-eq("https://files.withpersona.com/a.pdf?access_token=s2", ::documents/file-url(doc, "files", 0))
+    assert(is-null(::documents/file-url(doc, "files", 3)), "out of range")
+}
+
+test-download-only-persona-hosts
+meta ["test"] fn () {
+    assert(::documents/is-persona-file-url("https://files.withpersona.com/x.jpg?access_token=1"), "files host")
+    assert(not(::documents/is-persona-file-url("https://withpersona.com.evil.com/x")), "suffix trick")
+    assert(not(::documents/is-persona-file-url("http://files.withpersona.com/x")), "plain http")
+    assert(is-err(::documents/download-file("https://evil.example.com/x")), "other hosts are refused without a request")
+}
+
+// ============================================================================
+// Decisions
+// ============================================================================
+
+with-status fn (doc: Map, status: Str): Map {
+    {...doc, data: {...doc.data, attributes: {...doc.data.attributes, status: status}}}
+}
+
+test-inquiry-decision
+meta ["test"] fn () {
+    d ::decisions/inquiry-decision(INQUIRY)
+    assert-eq("needs-review", d.decision)
+    assert-eq(false, d.final)
+    assert-eq("inq_1", d.object-id)
+    assert-eq([
+      "inquiry completed without a decision",
+      "report/watchlist has a match",
+      "verification/government-id failed: id_barcode_inconsistency, id_expired"
+    ], d.reasons)
+
+    assert-eq("approved", ::decisions/inquiry-decision(INQUIRY, {completed-as: "approved"}).decision)
+    assert-eq("approved", ::decisions/inquiry-decision(with-status(INQUIRY, "approved")).decision)
+    assert(::decisions/inquiry-decision(with-status(INQUIRY, "approved")).final, "approved is final")
+    assert-eq("declined", ::decisions/inquiry-decision(with-status(INQUIRY, "declined")).decision)
+    assert-eq("needs-review", ::decisions/inquiry-decision(with-status(INQUIRY, "needs_review")).decision)
+    assert-eq("pending", ::decisions/inquiry-decision(with-status(INQUIRY, "pending")).decision)
+    assert-eq("pending", ::decisions/inquiry-decision(with-status(INQUIRY, "created")).decision)
+    assert-eq("failed", ::decisions/inquiry-decision(with-status(INQUIRY, "expired")).decision)
+    assert-eq("failed", ::decisions/inquiry-decision(with-status(INQUIRY, "failed")).decision)
+    assert-eq("needs-review", ::decisions/inquiry-decision(with-status(INQUIRY, "brand_new_status")).decision, "unknown never approves")
+}
+
+test-report-decision
+meta ["test"] fn () {
+    rep (status, matched) { {type: "report/watchlist", id: "rep_1", attributes: {status: status, has-match: matched}} }
+    assert-eq("needs-review", ::decisions/report-decision(rep("ready", true)).decision)
+    assert-eq(["report/watchlist has a match"], ::decisions/report-decision(rep("ready", true)).reasons)
+    assert-eq("approved", ::decisions/report-decision(rep("ready", false)).decision)
+    assert-eq("pending", ::decisions/report-decision(rep("pending", false)).decision)
+    assert-eq("failed", ::decisions/report-decision(rep("errored", false)).decision)
+}
+
+test-verification-decision
+meta ["test"] fn () {
+    ver (status) { {type: "verification/selfie", id: "ver_1", attributes: {status: status, checks: []}} }
+    assert-eq("approved", ::decisions/verification-decision(ver("passed")).decision)
+    assert-eq("approved", ::decisions/verification-decision(ver("confirmed")).decision)
+    assert-eq("declined", ::decisions/verification-decision(ver("failed")).decision)
+    assert-eq(["verification/selfie failed"], ::decisions/verification-decision(ver("failed")).reasons)
+    assert-eq("pending", ::decisions/verification-decision(ver("submitted")).decision)
+    assert-eq("needs-review", ::decisions/verification-decision(ver("tentatively_passed")).decision)
+    assert-eq("failed", ::decisions/verification-decision(ver("canceled")).decision)
+}
+
+test-transaction-and-case-decisions
+meta ["test"] fn () {
+    txn (status) { {data: {type: "transaction", id: "txn_1", attributes: {status: status}}} }
+    assert-eq("approved", ::decisions/transaction-decision(txn("approved")).decision)
+    assert-eq("needs-review", ::decisions/transaction-decision(txn("needs_review")).decision)
+    assert-eq("failed", ::decisions/transaction-decision(txn("errored")).decision)
+    assert-eq("pending", ::decisions/transaction-decision(txn("created")).decision)
+    assert-eq("needs-review", ::decisions/transaction-decision(txn("escalated")).decision)
+    case-doc (status) { {data: {type: "case", id: "case_1", attributes: {status: status}}} }
+    assert-eq("approved", ::decisions/case-decision(case-doc("Approved")).decision)
+    assert-eq("declined", ::decisions/case-decision(case-doc("Declined")).decision)
+    assert-eq("pending", ::decisions/case-decision(case-doc("Open")).decision)
+}
+
+test-decide-dispatch
+meta ["test"] fn () {
+    assert-eq("inquiry", ::decisions/decide(INQUIRY).object-type)
+    assert-eq("needs-review", ::decisions/decide({type: "report/watchlist", id: "r", attributes: {status: "ready", has-match: true}}).decision)
+    assert-eq("needs-review", ::decisions/decide({type: "mystery", id: "m", attributes: {}}).decision)
+}
+
+test-inquiry-summary
+meta ["test"] fn () {
+    s ::decisions/inquiry-summary(INQUIRY)
+    assert-eq("needs-review", s.decision)
+    assert-eq(["verification/government-id", "verification/selfie"], map(s.verifications, (v) { v.type }))
+    assert-eq(["id_barcode_inconsistency", "id_expired"], s.verifications[0].failed-checks)
+    assert-eq(true, s.reports[0].has-match)
+    assert(not(contains(to-json(s), "1990")), "no PII in the summary")
+    assert(not(contains(to-json(s), "Jane")), "no names in the summary")
+}
+
+test-is-done-helpers
+meta ["test"] fn () {
+    assert(::inquiries/is-done(INQUIRY), "completed is done")
+    assert(not(::inquiries/is-done(with-status(INQUIRY, "pending"))), "pending is not")
+    assert(::reports/is-done({type: "report/watchlist", attributes: {status: "errored"}}), "errored report is done")
+    assert(not(::reports/is-done({type: "report/watchlist", attributes: {status: "pending"}})), "pending report is not")
+}

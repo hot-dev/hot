@@ -1,0 +1,619 @@
+::quickbooks::api ns
+meta {
+    ctx: {
+        "quickbooks.realm.id": {required: false, secret: false},
+        "quickbooks.environment": {required: false, secret: false},
+        "quickbooks.minorversion": {required: false, secret: false}
+    },
+    doc: """
+    The authenticated request helpers for the Accounting API, plus
+    environment and realm handling, the pinned `minorversion`, Intuit
+    `Fault` parsing and retry classification.
+
+    **Environment.** `quickbooks.environment` (or `opts.environment`) is
+    `sandbox` or `production`; unset means production. Anything else is
+    an Err, so a typo never sends sandbox credentials to production or
+    the reverse. Sandbox and production companies have different realm
+    ids and tokens.
+
+    **Company.** Every call is scoped to `/v3/company/{realmId}`: the
+    `quickbooks.realm.id` context variable or `opts.realm-id`. Realm ids
+    must be digits.
+
+    **Idempotent writes.** Pass `opts.request-id` (at most 50 characters,
+    unique per operation) on a create or update: Intuit sends it as
+    `requestid` and returns the original result for a repeated id instead
+    of writing twice. Such calls are then also eligible for the one
+    immediate retry on a connection failure.
+
+    **Retry.** This package never waits. A connection failure on a GET
+    (or a POST with `request-id`, or a query) is retried once,
+    immediately (`opts.retry: false` turns that off). 429 throttling and
+    5xx come back as `err(HttpError)`; check `is-retryable` and let a Hot
+    `retry` policy back off (see https://hot.dev/docs/retries). Intuit
+    allows about 500 requests a minute and 10 concurrent requests per
+    company, and 40 batch requests a minute.
+
+    **401.** When a cached token is rejected, it is evicted and the call
+    is retried once with a freshly refreshed token.
+    """
+}
+
+::auth ::quickbooks::auth
+::ctx ::hot::ctx
+::re ::hot::regex
+::uri ::hot::uri
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+is-blank ::quickbooks::oauth/is-blank
+int-or-null ::quickbooks::oauth/int-or-null
+
+RETRY_STATUSES [408, 429, 500, 502, 503, 504]
+// Intuit's throttling fault codes (ThrottleExceeded).
+RETRY_FAULT_CODES ["3001", "003001"]
+MAX_IMMEDIATE_RETRIES 1
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A failed Accounting API call: a non-2xx response, or a 2xx whose body
+    is an Intuit `Fault`.
+
+    - `status`, `headers`, `body` - the raw response
+    - `message` - readable, e.g. `"quickbooks: HTTP 400 ValidationFault
+      6240: Duplicate Name Exists Error: The name supplied already exists.
+      (intuit_tid: 1-6730...)"`
+    - `fault-type` - `ValidationFault`, `SystemFault`, `AuthenticationFault`,
+      `AuthorizationFault`, ...
+    - `code`, `detail`, `element` - from the first `Fault.Error[]`
+    - `errors` - every `Fault.Error[]` as `{message, detail, code, element}`
+    - `intuit-tid` - the `intuit_tid` response header; quote it to Intuit support
+    - `retry-after` - seconds from a numeric `Retry-After` header, else null
+    """
+}
+type {
+    status: Int,
+    headers: Map?,
+    body: Any,
+    message: Str,
+    fault-type: Str?,
+    code: Str?,
+    detail: Str?,
+    element: Str?,
+    errors: Vec?,
+    intuit-tid: Str?,
+    retry-after: Int?
+}
+
+decode-body fn (body: Any): Any {
+  cond {
+    is-bytes(body) => {
+      parsed from-json(Str(body))
+      if(is-err(parsed), Str(body), parsed)
+    }
+
+    is-str(body) => {
+      t trim(body)
+      cond {
+        or(starts-with(t, "{"), starts-with(t, "[")) => {
+          parsed from-json(t)
+          if(is-err(parsed), body, parsed)
+        }
+        => { body }
+      }
+    }
+    => { body }
+  }
+}
+
+// Intuit sends `Fault` / `Error` / `Message` on most errors but lowercase
+// `fault` / `error` / `message` on authentication failures.
+pick fn (m: Any, upper: Str, lower: Str): Any {
+  cond {
+    not(is-map(m)) => { null }
+    is-some(get(m, upper)) => { get(m, upper) }
+    => { get(m, lower) }
+  }
+}
+
+fault-of
+meta {doc: """The `Fault` object of a decoded body (either case), or null."""}
+fn (body: Any): Map? {
+  f pick(decode-body(body), "Fault", "fault")
+  if(is-map(f), f, null)
+}
+
+fault-details
+meta {
+    doc: """
+    Parse an Intuit `Fault` (`{Fault: {Error: [{Message, Detail, code,
+    element}], type}}`, or the lowercase shape of authentication
+    failures) into `{fault-type, errors}`, where each error is
+    `{message, detail, code, element}`. `errors` is empty when the body
+    has no fault. Pure.
+    """
+}
+fn (body: Any): Map {
+  f fault-of(body)
+  raw-errors pick(f, "Error", "error")
+  errors-vec cond {
+    is-vec(raw-errors) => { raw-errors }
+    is-map(raw-errors) => { [raw-errors] }
+    => { [] }
+  }
+
+  errors map(filter(errors-vec, is-map), (e) {
+    filter-vals({
+      message: pick(e, "Message", "message"),
+      detail: pick(e, "Detail", "detail"),
+      code: if(is-some(pick(e, "code", "Code")), Str(pick(e, "code", "Code")), null),
+      element: if(is-blank(pick(e, "element", "Element")), null, pick(e, "element", "Element"))
+    }, is-some)
+  })
+  {fault-type: pick(f, "type", "Type"), errors: errors}
+}
+
+body-excerpt
+meta {
+    doc: """A short (at most 300 characters) printable form of a body, for error messages."""
+}
+fn (body: Any): Str {
+  text cond {
+    is-null(body) => { "" }
+    is-str(body) => { body }
+    is-bytes(body) => { Str(body) }
+    => { to-json(untype(body)) }
+  }
+
+  if(gt(length(text), 300), `${slice(text, 0, 300)}...`, text)
+}
+
+describe-error fn (e: Map): Str {
+  message get(e, "message")
+  detail get(e, "detail")
+  element get(e, "element")
+  base cond {
+    and(is-some(message), is-some(detail), ne(message, detail)) => { `${message}: ${detail}` }
+    is-some(detail) => { Str(detail) }
+    is-some(message) => { Str(message) }
+    => { "unknown error" }
+  }
+
+  if(is-some(element), `${base} [${element}]`, base)
+}
+
+retry-after-seconds
+meta {doc: """A numeric `Retry-After` header as whole seconds, or null."""}
+fn (headers: Map?): Int? {
+  int-or-null(get(or(headers, {}), "retry-after"))
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` with a readable `message` from a response (`{status, headers, body}`). Pure; exposed for testing."""
+}
+fn (response: Map): HttpError {
+  headers or(get(response, "headers"), {})
+  body decode-body(get(response, "body"))
+  details fault-details(body)
+  errors details.errors
+  first-error if(is-empty(errors), {}, first(errors))
+  tid get(headers, "intuit_tid")
+  type-part if(is-some(details.fault-type), ` ${details.fault-type}`, "")
+  code-part if(is-some(get(first-error, "code")), ` ${get(first-error, "code")}`, "")
+  text cond {
+    not(is-empty(errors)) => { join(map(errors, describe-error), "; ") }
+    => { body-excerpt(body) }
+  }
+
+  tid-part if(is-some(tid), ` (intuit_tid: ${tid})`, "")
+  // WORKAROUND(hot-bug-1): build HttpError in an explicit function, never via T(response) or an arrow.
+  HttpError({
+    status: response.status,
+    headers: headers,
+    body: body,
+    message: `quickbooks: HTTP ${response.status}${type-part}${code-part}: ${text}${tid-part}`,
+    fault-type: details.fault-type,
+    code: get(first-error, "code"),
+    detail: get(first-error, "detail"),
+    element: get(first-error, "element"),
+    errors: errors,
+    intuit-tid: tid,
+    retry-after: retry-after-seconds(headers)
+  })
+}
+
+plain-payload fn (value: Result): Any {
+  payload if(is-err(value), err-value(value), value)
+  if(or(is-null(payload), is-str(payload)), payload, untype(payload))
+}
+
+is-connection-failure
+meta {
+    doc: """True when a transport error message is a connection or read failure, not a size-limit or URL error."""
+}
+fn (message: Str): Bool {
+  and(
+    or(contains(message, "request failed"), contains(message, "failed to read body")),
+    not(contains(message, "exceeds"))
+  )
+}
+
+is-retryable
+meta {
+    doc: """
+    True when a failed call is worth retrying later: an `HttpError` (or
+    Err holding one) with status 408, 429 or 5xx, or Intuit's throttling
+    fault code 3001; or a connection failure. False for successes and
+    for permanent errors (400 validation, 401, 403, 404, stale
+    `SyncToken`).
+
+    This package never waits and retries for you; give the handler or
+    schedule a `retry` policy and fail the run when this is true.
+
+    ```hot
+    sync-invoices
+    meta {schedule: "every 15 minutes", retry: {attempts: 5, delay: 2000, backoff: "exponential", max_delay: 60000}}
+    fn (event) {
+      page ::quickbooks::query/query("select * from Invoice where Balance > '0'")
+      cond {
+        ::quickbooks::api/is-retryable(page) => { fail(`quickbooks: retrying later: ${err-message(page)}`) }
+        is-err(page) => { println(`quickbooks: giving up: ${err-message(page)}`) }
+        => { length(page.items) }
+      }
+    }
+    ```
+    """
+}
+fn (error: Result): Bool {
+  payload plain-payload(error)
+  cond {
+    is-str(payload) => { is-connection-failure(payload) }
+    not(is-map(payload)) => { false }
+    is-int(get(payload, "status")) => {
+      codes map(or(get(payload, "errors"), []), (e) { get(e, "code") })
+      or(in(payload.status, RETRY_STATUSES), gt(length(filter(codes, (c) { in(c, RETRY_FAULT_CODES) })), 0))
+    }
+
+    is-str(get(payload, "message")) => { is-connection-failure(payload.message) }
+    => { false }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Environment, company, version (pure apart from context reads)
+// ---------------------------------------------------------------------------
+
+validate-environment
+meta {
+    doc: """`"sandbox"` or `"production"` (trimmed, lowercased) from a value; null means production. Anything else is an Err. Pure."""
+}
+fn (value: Any): Str {
+  cond {
+    is-blank(value) => { ::quickbooks/DEFAULT_ENVIRONMENT }
+    in(lowercase(trim(Str(value))), ::quickbooks/ENVIRONMENTS) => { lowercase(trim(Str(value))) }
+    => { err(`quickbooks: environment must be "sandbox" or "production" (got '${value}')`) }
+  }
+}
+
+environment
+meta {
+    doc: """The environment for a call: `opts.environment`, else `quickbooks.environment`, else production."""
+}
+fn (opts: Map): Str {
+  validate-environment(or(get(opts, "environment"), ::ctx/get("quickbooks.environment")))
+}
+
+base-url
+meta {
+    doc: """The API host for an environment: `https://sandbox-quickbooks.api.intuit.com` or `https://quickbooks.api.intuit.com`."""
+}
+fn (env: Str): Str {
+  checked validate-environment(env)
+  if(eq(checked, "sandbox"), ::quickbooks/SANDBOX_BASE_URL, ::quickbooks/PRODUCTION_BASE_URL)
+}
+
+validate-realm-id
+meta {
+    doc: """A realm id (company id) as a digit Str, or an Err. Ints are accepted. Pure."""
+}
+fn (value: Any): Str {
+  text if(is-null(value), "", trim(Str(value)))
+  cond {
+    is-empty(text) => { err("quickbooks: no company selected. Set quickbooks.realm.id in Context Variables or pass realm-id in opts.") }
+    ::re/is-match(text, "^[0-9]{1,32}$") => { text }
+    => { err(`quickbooks: a realm id must be digits (got '${text}')`) }
+  }
+}
+
+realm-id
+meta {doc: """The company for a call: `opts.realm-id`, else `quickbooks.realm.id`."""}
+fn (opts: Map): Str {
+  validate-realm-id(or(get(opts, "realm-id"), ::ctx/get("quickbooks.realm.id")))
+}
+
+validate-minorversion
+meta {
+    doc: """A minorversion as a digit Str: null means `MINOR_VERSION`; values below `MIN_MINOR_VERSION` (retired by Intuit) and non-numbers are Errs. Pure."""
+}
+fn (value: Any): Str {
+  text if(is-blank(value), ::quickbooks/MINOR_VERSION, trim(Str(value)))
+  n int-or-null(text)
+  cond {
+    is-null(n) => { err(`quickbooks: minorversion must be a number (got '${text}')`) }
+    lt(n, ::quickbooks/MIN_MINOR_VERSION) => {
+      err(`quickbooks: minorversion ${text} is retired; Intuit serves ${::quickbooks/MIN_MINOR_VERSION} or later`)
+    }
+    => { Str(n) }
+  }
+}
+
+minorversion
+meta {
+    doc: """The minorversion for a call: `opts.minorversion`, else `quickbooks.minorversion`, else `MINOR_VERSION`."""
+}
+fn (opts: Map): Str {
+  validate-minorversion(or(get(opts, "minorversion"), ::ctx/get("quickbooks.minorversion")))
+}
+
+validate-request-id
+meta {
+    doc: """An `opts.request-id` (1-50 characters) or null; longer values are an Err. Pure."""
+}
+fn (value: Any): Str? {
+  cond {
+    is-blank(value) => { null }
+    gt(length(Str(value)), 50) => { err("quickbooks: request-id must be at most 50 characters") }
+    => { Str(value) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// URL building (pure)
+// ---------------------------------------------------------------------------
+
+encode-param fn (value: Any): Str {
+  cond {
+    is-bool(value) => { if(value, "true", "false") }
+    // Vec values are comma-joined; each element is encoded, the commas are not.
+    is-vec(value) => { join(map(filter(value, is-some), encode-param), ",") }
+    => { ::uri/encode(Str(value)) }
+  }
+}
+
+query-string
+meta {
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map: null values are dropped, Bools
+    encode as `true`/`false`, Vecs are comma-joined (`entities=Invoice,Bill`),
+    and keys and values are percent-encoded (spaces as `%20`). `""` when
+    nothing remains. Pure.
+    """
+}
+fn (params: Map): Str {
+  present filter-vals(params, is-some)
+  parts map(keys(present), (k) { `${::uri/encode(Str(k))}=${encode-param(get(present, k))}` })
+  if(is-empty(parts), "", `?${join(parts, "&")}`)
+}
+
+segment
+meta {
+    doc: """Percent-encode one path segment (an entity id). Ints pass through as text."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+company-url
+meta {
+    doc: """
+    The full URL for a company-scoped path (pure): `{host}/v3/company/{realm}{path}`
+    with `minorversion` and `params` in the query. `path` starts with `/`.
+
+    ```hot
+    ::quickbooks::api/company-url("sandbox", "9341453", "75", "/invoice/130/pdf", {})
+    // "https://sandbox-quickbooks.api.intuit.com/v3/company/9341453/invoice/130/pdf?minorversion=75"
+    ```
+    """
+}
+fn (env: Str, realm: Str, minor: Str, path: Str, params: Map): Str {
+  `${base-url(env)}/v3/company/${segment(validate-realm-id(realm))}${path}${query-string({...params, minorversion: minor})}`
+}
+
+resolve
+meta {
+    doc: """
+    The package's single resolver: everything a call needs from `opts`,
+    then context, then defaults. Returns `{credentials, environment,
+    realm-id, minorversion, request-id}` (`credentials` as
+    `::quickbooks::auth/credentials-from` describes), or the first Err
+    (bad environment, missing or malformed realm, retired minorversion,
+    no credentials). It only reads context; per-call values are never
+    written to it, so parallel flows for different companies stay apart.
+
+    ```hot
+    r ::quickbooks::api/resolve({realm-id: "9341453", refresh-token: tenant-refresh-token, environment: "sandbox"})
+    r.credentials.kind   // "refresh"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  env environment(opts)
+  realm realm-id(opts)
+  minor minorversion(opts)
+  request-id validate-request-id(get(opts, "request-id"))
+  creds ::auth/resolve-credentials(opts, if(is-err(realm), null, realm))
+  cond {
+    is-err(env) => { env }
+    is-err(realm) => { realm }
+    is-err(minor) => { minor }
+    is-err(request-id) => { request-id }
+    is-err(creds) => { creds }
+    => { {credentials: creds, environment: env, realm-id: realm, minorversion: minor, request-id: request-id} }
+  }
+}
+
+resolved-url
+meta {doc: """The full URL for `path` and `params` from a `resolve` result (pure)."""}
+fn (resolved: Map, path: Str, params: Map): Str {
+  company-url(resolved.environment, resolved.realm-id, resolved.minorversion, path, {...params, requestid: resolved.request-id})
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+build-request
+meta {
+    doc: """
+    Build the outgoing `HttpRequest` (pure). Map/Vec bodies are sent as
+    JSON; a Str body is sent verbatim (set its `Content-Type` in
+    `headers`); `""` or null sends no body. `Accept` defaults to
+    `application/json`. Caller headers win.
+    """
+}
+fn (method: Str, url: Str, token: Str, body: Any, headers: Map): HttpRequest {
+  no-body or(is-null(body), and(is-str(body), is-empty(body)))
+  is-raw or(is-str(body), is-bytes(body))
+  encoded cond {
+    no-body => { "" }
+    is-raw => { body }
+    => { to-json(untype(body)) }
+  }
+
+  type-headers if(or(no-body, is-raw), {}, {Content-Type: "application/json"})
+  HttpRequest({
+    method: method,
+    url: url,
+    headers: {Authorization: `Bearer ${token}`, Accept: "application/json", ...type-headers, ...headers},
+    body: encoded
+  })
+}
+
+retry-budget
+meta {
+    doc: """How many immediate retries a call gets (0 or 1): none when `opts.retry` is false or 0, or when the call is not idempotent. Pure."""
+}
+fn (opts: Map, idempotent: Bool): Int {
+  r get(opts, "retry")
+  cond {
+    not(idempotent) => { 0 }
+    or(eq(r, false), eq(r, 0)) => { 0 }
+    => { MAX_IMMEDIATE_RETRIES }
+  }
+}
+
+send-with-retry fn (req: HttpRequest, budget: Int): HttpResponse {
+  response http-request(req)
+  cond {
+    and(is-err(response), gt(budget, 0), is-connection-failure(err-message(response))) => { send-with-retry(req, sub(budget, 1)) }
+    => { response }
+  }
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated Accounting API request and return the raw
+    `HttpResponse` (non-2xx included), or an Err for credential, config
+    and transport failures. `path` is relative to `/v3/company/{realm}`
+    (e.g. `/invoice/130`); `params` go in the query string with
+    `minorversion`; `body` is a Map (JSON), a Str (verbatim, set
+    `Content-Type` in `headers`) or `""`. `opts` carries per-call
+    credentials, `realm-id`, `environment`, `minorversion`, `request-id`
+    and `retry`.
+    """
+}
+fn
+(method: Str, path: Str, params: Map, body: Any, opts: Map): HttpResponse {
+  request(method, path, params, body, {}, opts)
+},
+(method: Str, path: Str, params: Map, body: Any, headers: Map, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  idempotent or(
+    eq(uppercase(method), "GET"),
+    is-some(get(opts, "request-id")),
+    eq(get(opts, "idempotent"), true)
+  )
+  budget retry-budget(opts, idempotent)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      url resolved-url(resolved, path, params)
+      creds resolved.credentials
+      auth ::auth/bearer(creds)
+      cond {
+        is-err(auth) => { auth }
+        => {
+          response send-with-retry(build-request(method, url, auth.token, body, headers), budget)
+          cond {
+            and(auth.cached, not(is-err(response)), eq(response.status, 401)) => {
+              ::auth/evict(creds, auth.cache-key)
+              fresh ::auth/bearer(creds)
+              if(is-err(fresh), fresh, send-with-retry(build-request(method, url, fresh.token, body, headers), budget))
+            }
+            => { response }
+          }
+        }
+      }
+    }
+  }
+}
+
+unwrap
+meta {
+    doc: """The decoded body of a successful response; an Err for transport failures; `err(HttpError)` for non-2xx responses and for 2xx bodies that carry a `Fault`."""
+}
+fn (response: Result): Any {
+  cond {
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err(http-error(response)) }
+    is-some(fault-of(response.body)) => { err(http-error(response)) }
+    => { decode-body(response.body) }
+  }
+}
+
+json
+meta {
+    doc: """
+    Like `request`, but unwrapped: the decoded JSON body, or an Err
+    carrying `HttpError` (credential problems carry
+    `::quickbooks::oauth/TokenError`). Use it for any endpoint the typed
+    modules do not cover.
+
+    ```hot
+    prefs ::quickbooks::api/json("GET", "/preferences", {}, "", {})
+    ```
+    """
+}
+fn
+(method: Str, path: Str): Any {
+  json(method, path, {}, "", {})
+},
+(method: Str, path: Str, params: Map, body: Any, opts: Map): Any {
+  unwrap(request(method, path, params, body, opts))
+},
+(method: Str, path: Str, params: Map, body: Any, headers: Map, opts: Map): Any {
+  unwrap(request(method, path, params, body, headers, opts))
+}
+
+bytes
+meta {
+    doc: """GET `path` as binary (e.g. `/invoice/130/pdf`) with `Accept: accept`. Returns the response `Bytes`, or an Err carrying `HttpError`."""
+}
+fn (path: Str, accept: Str, opts: Map): Bytes {
+  response request("GET", path, {}, "", {Accept: accept}, opts)
+  cond {
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err(http-error({status: response.status, headers: response.headers, body: or(response.body-bytes, response.body)})) }
+    => { or(response.body-bytes, Bytes([])) }
+  }
+}

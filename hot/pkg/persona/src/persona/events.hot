@@ -1,0 +1,46 @@
+::persona::events ns
+meta {
+    doc: """Events: the record behind every webhook (kept 30 days). Use `list-events` to backfill after downtime or to reconcile missed deliveries."""
+}
+
+::api ::persona::api
+RequestOptions ::persona::api/RequestOptions
+
+seg ::persona::api/seg
+
+list-events
+meta {
+    doc: """
+    GET /events - One page of events, newest first. Filters: `name` (e.g.
+    `["inquiry.approved", "inquiry.declined"]`), `object-id`, `id`.
+    `opts` takes `page-size`, `after`, `before`.
+
+    **Example**
+
+    ```hot
+    ::persona::events/list-events({object-id: "inq_..."}, {page-size: 20})
+    ```
+    """
+}
+fn
+(filters: Map): Map {
+  list-events(filters, {}, RequestOptions({}))
+},
+(filters: Map, opts: Map): Map {
+  list-events(filters, opts, RequestOptions({}))
+},
+(filters: Map, opts: Map, options: RequestOptions): Map {
+  ::api/list-page("/events", filters, opts, options)
+}
+
+get-event
+meta {
+    doc: """GET /events/{id} - Retrieve one event (`evt_...`)."""
+}
+fn
+(event-id: Str): Map {
+  get-event(event-id, RequestOptions({}))
+},
+(event-id: Str, options: RequestOptions): Map {
+  ::api/send("GET", `/events/${seg(event-id)}`, {}, null, options)
+}

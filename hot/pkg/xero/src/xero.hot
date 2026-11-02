@@ -1,0 +1,130 @@
+::xero ns
+meta {
+    doc: """
+    Xero Accounting API bindings, built for agentic finance ops:
+    reconciliation, invoicing, AP/AR and reporting.
+
+    - `::xero::oauth` - authorize URL (with PKCE), code exchange, refresh
+      (the refresh token rotates on every use: persist the one each
+      refresh returns), Custom Connections (client credentials), revoke,
+      and the tenant connections endpoint
+    - `::xero::auth` - credential resolution (context or per-call
+      `opts`), the per-run access-token cache and the opt-in
+      `::hot::store`-backed token keeper
+    - `::xero::api` - the request helpers (`xero-tenant-id` on every
+      call, `If-Modified-Since`, `Idempotency-Key`), `HttpError` with
+      validation errors and rate-limit headers, `is-retryable`, paging
+      and Xero date parsing
+    - `::xero::accounting` - list, get, create, update, upsert and
+      delete for contacts, invoices, credit notes, payments, bank
+      transactions and transfers, accounts, items, manual journals,
+      purchase orders, quotes, tax rates, tracking categories and the
+      organisation; PDFs, invoice email and attachments
+    - `::xero::where` - safe `where` filter building
+    - `::xero::reports` - profit and loss, balance sheet, trial balance,
+      aged receivables and payables, bank summary, and a row flattener
+    - `::xero::webhooks` - `x-xero-signature` verification, the
+      intent-to-receive response, and event parsing
+
+    **Setup** (Context Variables):
+
+    | Variable | Secret | Meaning |
+    |---|---|---|
+    | `xero.client.id` | no | Your app's OAuth client id |
+    | `xero.client.secret` | yes | Your app's client secret |
+    | `xero.refresh.token` | yes | A user's refresh token (rotates on every refresh) |
+    | `xero.access.token` | yes | A ready access token (skips refresh) |
+    | `xero.tenant.id` | no | The organisation (tenant) id sent as `xero-tenant-id` |
+    | `xero.custom-connection` | no | `true` for a Custom Connection (client credentials) |
+    | `xero.scopes` | no | Scopes for a Custom Connection token |
+    | `xero.token.store` | no | Store name for the token keeper (opt-in) |
+    | `xero.webhook.key` | yes | The webhook signing key |
+
+    **Quick start**
+
+    ```hot
+    ::acc ::xero::accounting
+    ::w ::xero::where
+
+    unpaid ::acc/list-all("Invoices", {
+      where: ::w/all-of([["Type", "==", "ACCREC"], ["AmountDue", ">", 0]]),
+      order: "DueDate"
+    }, 500)
+    pdf ::acc/invoice-pdf(first(unpaid).InvoiceID)
+    ```
+    """
+}
+
+// ---------------------------------------------------------------------------
+// Endpoints (https://identity.xero.com/.well-known/openid-configuration)
+// ---------------------------------------------------------------------------
+
+AUTHORIZE_URL "https://login.xero.com/identity/connect/authorize"
+TOKEN_URL "https://identity.xero.com/connect/token"
+REVOKE_URL "https://identity.xero.com/connect/revocation"
+CONNECTIONS_URL "https://api.xero.com/connections"
+API_ROOT "https://api.xero.com/api.xro/2.0"
+
+// ---------------------------------------------------------------------------
+// Scopes
+// ---------------------------------------------------------------------------
+
+SCOPES_FINANCE_OPS
+meta {
+    doc: """
+    The granular scopes (required for apps created on or after 2 March
+    2026) for read-write finance ops with this package: contacts,
+    settings (accounts, items, tax rates, tracking), invoices (also
+    credit notes, purchase orders, quotes), payments, bank transactions
+    and transfers, manual journals, attachments and the reports, plus
+    `offline_access` for a refresh token and `openid profile email`.
+    Older apps can still use the broad `accounting.transactions` and
+    `accounting.reports.read` until 13 September 2027.
+    """
+}
+[
+  "openid",
+  "profile",
+  "email",
+  "offline_access",
+  "accounting.contacts",
+  "accounting.settings",
+  "accounting.invoices",
+  "accounting.payments",
+  "accounting.banktransactions",
+  "accounting.manualjournals",
+  "accounting.attachments",
+  "accounting.reports.profitandloss.read",
+  "accounting.reports.balancesheet.read",
+  "accounting.reports.trialbalance.read",
+  "accounting.reports.aged.read",
+  "accounting.reports.banksummary.read"
+]
+
+SCOPES_READ_ONLY
+meta {
+    doc: """The read-only granular scopes for the same areas as `SCOPES_FINANCE_OPS`, plus `offline_access`."""
+}
+[
+  "openid",
+  "profile",
+  "email",
+  "offline_access",
+  "accounting.contacts.read",
+  "accounting.settings.read",
+  "accounting.invoices.read",
+  "accounting.payments.read",
+  "accounting.banktransactions.read",
+  "accounting.manualjournals.read",
+  "accounting.attachments.read",
+  "accounting.reports.profitandloss.read",
+  "accounting.reports.balancesheet.read",
+  "accounting.reports.trialbalance.read",
+  "accounting.reports.aged.read",
+  "accounting.reports.banksummary.read"
+]
+
+// List endpoints return 100 records per page by default; endpoints that
+// accept pageSize take up to 1000.
+DEFAULT_PAGE_SIZE 100
+MAX_PAGE_SIZE 1000

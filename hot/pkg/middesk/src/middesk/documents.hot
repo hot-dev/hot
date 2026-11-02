@@ -1,0 +1,112 @@
+::middesk::documents ns
+meta {
+    doc: """
+    Documents: Secretary of State filings, certificates of good standing,
+    UCC documents and other files Middesk retrieved for a business. A
+    document carries metadata and a signed, expiring `download_url`;
+    `download-document` fetches the bytes. The signed URL grants access
+    without a key: never log it. For the full report as a PDF, use
+    `::middesk::businesses/get-pdf`.
+    """
+}
+
+::api ::middesk::api
+RequestOptions ::middesk::api/RequestOptions
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+
+seg ::middesk::api/seg
+
+list-documents
+meta {
+    doc: """GET /businesses/{id}/documents - A business's documents: `{object: "list", data: [{id, document_type, filename, content_type, size, filing_date, ...}]}`."""
+}
+fn
+(business-id: Str): Map {
+  list-documents(business-id, RequestOptions({}))
+},
+(business-id: Str, options: RequestOptions): Map {
+  ::api/send("GET", `/businesses/${seg(business-id)}/documents`, {}, null, options)
+}
+
+get-document
+meta {
+    doc: """GET /documents/{id} - Retrieve one document's metadata."""
+}
+fn
+(document-id: Str): Map {
+  get-document(document-id, RequestOptions({}))
+},
+(document-id: Str, options: RequestOptions): Map {
+  ::api/send("GET", `/documents/${seg(document-id)}`, {}, null, options)
+}
+
+get-download-url
+meta {
+    doc: """GET /documents/{id}/download_url - A fresh signed URL for the file (`{data: "<url>"}`). Treat it as a secret."""
+}
+fn
+(document-id: Str): Map {
+  get-download-url(document-id, RequestOptions({}))
+},
+(document-id: Str, options: RequestOptions): Map {
+  ::api/send("GET", `/documents/${seg(document-id)}/download_url`, {disposition: "attachment"}, null, options)
+}
+
+metadata
+meta {
+    doc: """A document's metadata without its signed URL: `{id, document_type, filename, content_type, size, filing_date, created_at}`. Safe to log or hand to an LLM. Exposed for testing."""
+}
+fn (document: Map): Map {
+  filter-vals({
+    id: get(document, "id"),
+    document_type: get(document, "document_type"),
+    filename: get(document, "filename"),
+    content_type: get(document, "content_type"),
+    size: get(document, "size"),
+    filing_date: get(document, "filing_date"),
+    created_at: get(document, "created_at")
+  }, is-some)
+}
+
+fetch-signed-url
+meta {
+    doc: """GET a signed URL with no credentials and return its `Bytes`. Only `https://` URLs are fetched; on failure the Err says only the HTTP status, never the URL. Exposed for testing."""
+}
+fn (url: Any): Bytes {
+  cond {
+    not(and(is-str(url), starts-with(or(url, ""), "https://"))) => { err("middesk: the document has no https download URL") }
+    => {
+      response ::hot::http/request(HttpRequest({method: "GET", url: url, headers: {User-Agent: ::middesk::api/USER_AGENT}}))
+      cond {
+        is-err(response) => { err("middesk: document download failed (connection error)") }
+        is-ok-response(response) => { or(response.body-bytes, Bytes("")) }
+        => { err(`middesk: document download failed: HTTP ${response.status}`) }
+      }
+    }
+  }
+}
+
+download-document
+meta {
+    doc: """
+    Download a document's file as `Bytes`: asks Middesk for a fresh
+    signed URL, then fetches it without the API key.
+
+    **Example**
+
+    ```hot
+    docs ::middesk::documents/list-documents("biz_...")
+    pdf ::middesk::documents/download-document(first(docs.data).id)
+    ```
+    """
+}
+fn
+(document-id: Str): Bytes {
+  download-document(document-id, RequestOptions({}))
+},
+(document-id: Str, options: RequestOptions): Bytes {
+  out get-download-url(document-id, options)
+  if(is-err(out), out, fetch-signed-url(get(out, "data")))
+}

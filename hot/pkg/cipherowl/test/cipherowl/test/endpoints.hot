@@ -1,0 +1,309 @@
+::cipherowl::test::endpoints ns
+meta ["test"]
+
+::screening ::cipherowl::screening
+::risk ::cipherowl::risk
+::reports ::cipherowl::reports
+::monitoring ::cipherowl::monitoring
+::pd ::cipherowl::private-data
+::onchain ::cipherowl::onchain
+::cases ::cipherowl::cases
+
+EVM "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704"
+CLEAN "0x0000000000000000000000000000000000000001"
+
+// ============================================================================
+// Screening
+// ============================================================================
+
+test-screen-request
+meta ["test"] fn () {
+    bare ::screening/screen-request("evm", EVM, {})
+    assert-eq("GET", bare.method)
+    assert-eq(`/api/screen/v1/chains/evm/addresses/${EVM}`, bare.path, "unset options are omitted")
+    full ::screening/screen-request("EVM", EVM, {config: "co-sandbox", hops: 2, reference: "Acme.Withdrawals", trackAlert: false})
+    assert-eq(`/api/screen/v1/chains/evm/addresses/${EVM}?config=co-sandbox&reference=acme.withdrawals&hops=2&trackAlert=false`, full.path)
+    assert-eq(`/api/screen/v1/chains/evm/addresses/${EVM}`, ::screening/screen-request("evm", EVM, {config: ""}).path, "empty config means the org default")
+}
+
+test-screen-request-validates
+meta ["test"] fn () {
+    assert(is-err(::screening/screen-request("", EVM, {})), "a chain is required")
+    assert(is-err(::screening/screen-request("evm", "0x12", {})), "bad EVM address")
+    assert(is-err(::screening/screen-request("evm", EVM, {hops: 12})), "hops out of range")
+    assert(is-err(::screening/screen-request("evm", EVM, {reference: "bad ref"})), "bad reference")
+}
+
+test-batch-request
+meta ["test"] fn () {
+    spec ::screening/batch-request("evm", [EVM, CLEAN], {config: "co-sandbox"})
+    assert-eq("POST", spec.method)
+    assert-eq("/api/screen/v1/chains/evm/batch", spec.path)
+    assert-eq({config: "co-sandbox", addresses: [EVM, CLEAN]}, spec.body)
+    assert(is-err(::screening/batch-request("evm", [], {})), "empty batch")
+    assert(is-err(::screening/batch-request("evm", [EVM, "nope"], {})), "every address is validated")
+    assert(is-err(::screening/batch-request("evm", map(range(0, 51), (i) { EVM }), {})), "at most 50 per batch")
+    assert-eq(50, length(::screening/batch-request("evm", map(range(0, 50), (i) { EVM }), {}).body.addresses))
+}
+
+test-risky-addresses
+meta ["test"] fn () {
+    out {results: [{address: EVM, foundRisk: true}, {address: CLEAN, foundRisk: false}]}
+    assert-eq([EVM], ::screening/risky-addresses(out))
+    assert-eq([], ::screening/risky-addresses({}))
+}
+
+// ============================================================================
+// Risk and reports
+// ============================================================================
+
+test-reason-path
+meta ["test"] fn () {
+    assert-eq(`/api/reason/v2/chains/evm/addresses/${EVM}/risk-score?config=co-sandbox&riskProfile=default&hops=3`,
+        ::risk/reason-path("evm", EVM, "risk-score", {config: "co-sandbox", riskProfile: "default", hops: 3}))
+    assert-eq(`/api/reason/v2/chains/evm/addresses/${EVM}/detail?config=co-sandbox`,
+        ::risk/reason-path("evm", EVM, "detail", {config: "co-sandbox", riskProfile: "default"}), "riskProfile only applies to risk-score")
+    assert-eq("/api/reason/v2/chains/tron/addresses/TEAqwfMhXLaomXhZ8KeMhx3njGmQEDnsUR/risk-breakdown",
+        ::risk/reason-path("tron", "TEAqwfMhXLaomXhZ8KeMhx3njGmQEDnsUR", "risk-breakdown", {}))
+}
+
+test-networks-for-chain
+meta ["test"] fn () {
+    caps {capabilities: {ethereum: {chainClass: "evm"}, base: {chainClass: "evm"}, tron: {chainClass: "tron"}}}
+    assert-eq(["base", "ethereum"], ::risk/networks-for-chain(caps, "evm"))
+    assert-eq([], ::risk/networks-for-chain({}, "evm"))
+}
+
+test-chain-class-of
+meta ["test"] fn () {
+    caps {capabilities: {base: {chainClass: "evm", screening: true}, tron: {chainClass: "tron"}}}
+    assert-eq("evm", ::risk/chain-class-of("base", caps), "reports want the class")
+    assert-eq("evm", ::risk/chain-class-of("evm", {}), "a class passes through")
+    assert-eq("dogecoin", ::risk/chain-class-of("dogecoin", caps), "unknown passes through for CipherOwl to reject")
+    assert-eq("evm", ::risk/chain-class("evm"), "no call for a class")
+}
+
+// From CipherOwl's sandbox guide, with the string "Infinity" and Unix-seconds strings.
+DETAIL_BODY {
+    chain: "evm",
+    requested-chain: "base",
+    address: "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704",
+    config: "co-sandbox",
+    foundRisk: true,
+    reasons: [
+        {category: "hack", direction: "SEND", totalUsdValue: "Infinity", totalPercentage: 100},
+        {
+            category: "ofac", direction: "RECEIVE", hops: 1, totalUsdValue: 8244129.049350821, totalPercentage: 99.95,
+            firstExposureTimestamp: "1652499489", lastExposureTimestamp: "1652499489", isPartialSet: true,
+            paths: [{addresses: ["0xf7b31119c2682c88d88d455dbb9d5932c65cf1be", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704"]}]
+        }
+    ]
+}
+
+test-parse-detail
+meta ["test"] fn () {
+    d ::risk/parse-detail(DETAIL_BODY)
+    assert-eq(true, d.found-risk)
+    assert-eq("base", d.requested-chain)
+    hack d.reasons[0]
+    assert-eq("send", hack.direction)
+    assert(is-null(hack.total-usd-value), "Infinity becomes null")
+    assert(is-null(hack.hops))
+    assert-eq([], hack.paths)
+    ofac d.reasons[1]
+    assert-eq(1652499489, ofac.first-exposure-at, "Unix-seconds string parsed")
+    assert-eq(1, ofac.hops)
+    assert-eq(true, ofac.partial)
+    assert-eq([["0xf7b31119c2682c88d88d455dbb9d5932c65cf1be", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704"]], ofac.paths)
+}
+
+test-parse-score
+meta ["test"] fn () {
+    s ::risk/parse-score({
+        chain: "evm", riskScore: 100, riskBand: "Severe Risk", riskProfile: "default", timestamp: "2026-06-24T08:06:13Z",
+        breakdown: [
+            {category: "hack", direction: "DIRECT", hops: 0, riskContribution: 65},
+            {category: "ofac", direction: "RECEIVE", hops: 1, usdValue: 8244129, riskContribution: 82.32}
+        ]
+    })
+    assert-eq(100, s.score)
+    assert-eq("severe", s.band)
+    assert-eq("Severe Risk", s.band-label)
+    assert-eq(["ofac", "hack"], map(s.breakdown, (i) { i.category }), "largest contribution first")
+    assert-eq("direct", s.breakdown[1].direction)
+    assert(is-null(s.breakdown[1].usd-value))
+    assert(is-null(::risk/parse-score({riskBand: "Odd"}).band))
+}
+
+test-report-error
+meta ["test"] fn () {
+    assert-eq("generation failed", ::reports/report-error({found_risk: true, report: null, error: "generation failed"}))
+    assert(is-null(::reports/report-error({found_risk: true, report: "## Risk", error: null})))
+    assert(is-null(::reports/report-error({error: ""})))
+}
+
+test-report-paths
+meta ["test"] fn () {
+    assert-eq(`/api/report/v1/risk-assessment/chains/evm/addresses/${EVM}?config=co-sandbox`, ::reports/report-path("risk-assessment", "evm", EVM, {config: "co-sandbox"}))
+    assert-eq(`/api/report/v1/sar/chains/evm/addresses/${EVM}`, ::reports/report-path("sar", "evm", EVM, {config: null}))
+    assert-eq(`/api/report/v1/graph/chains/evm/addresses/${EVM}?output_format=png&interactive=false`,
+        ::reports/report-path("graph", "evm", EVM, ::reports/graph-params({output_format: "png", interactive: false})))
+}
+
+test-with-resolved-config
+meta ["test"] fn () {
+    response ::hot::http/HttpResponse({status: 200, headers: {"cipherowl-resolved-config": "co-vasp"}, body: {found_risk: true, report: "## Risk"}})
+    out ::reports/with-resolved-config(response)
+    assert-eq("co-vasp", out.resolved-config)
+    assert-eq(true, out.found_risk)
+}
+
+test-graph-result-png-bytes
+meta ["test"] fn () {
+    png ::hot::hex/decode("89504e470d0a1a0aff00")
+    out ::reports/graph-result(::hot::http/HttpResponse({status: 200, headers: {"content-type": "image/png"}, body: "lossy", body-bytes: png}))
+    assert-eq("image/png", out.content-type)
+    assert(is-bytes(out.bytes))
+    assert-eq("89504e470d0a1a0aff00", ::hot::hex/encode(out.bytes), "PNG bytes are kept exactly")
+    json ::reports/graph-result(::hot::http/HttpResponse({status: 200, headers: {"content-type": "application/json"}, body: {graph: "graph TD"}}))
+    assert-eq("graph TD", json.graph)
+    assert(is-err(::reports/graph-result(::hot::http/HttpResponse({status: 403, headers: {}, body: "Forbidden"}))))
+}
+
+// ============================================================================
+// Monitoring
+// ============================================================================
+
+test-create-pool-request
+meta ["test"] fn () {
+    spec ::monitoring/create-pool-request({name: "hot-wallets", description: null, riskConfigs: [{riskConfig: "co-vasp", riskLevel: "HIGH"}], openCaseRiskLevels: ["SEVERE"]})
+    assert-eq("/api/monitoring/v1/pools", spec.path)
+    assert-eq({name: "hot-wallets", riskConfigs: [{riskConfig: "co-vasp", riskLevel: "HIGH"}], openCaseRiskLevels: ["SEVERE"]}, spec.body)
+    assert(is-err(::monitoring/create-pool-request({name: " ", riskConfigs: [{riskConfig: "co-vasp", riskLevel: "HIGH"}]})), "name required")
+    assert(is-err(::monitoring/create-pool-request({name: "p", riskConfigs: []})), "1 to 3 risk configs")
+}
+
+test-update-pool-request
+meta ["test"] fn () {
+    spec ::monitoring/update-pool-request("pool-1", {openCaseRiskLevels: ["HIGH", "SEVERE"]})
+    assert-eq("PATCH", spec.method)
+    assert-eq({openCaseRiskLevels: {levels: ["HIGH", "SEVERE"]}}, spec.body, "levels are wrapped; unset name omitted")
+    assert-eq({name: "renamed"}, ::monitoring/update-pool-request("pool-1", {name: "renamed"}).body)
+}
+
+test-address-entries
+meta ["test"] fn () {
+    assert-eq([{chain: "evm", address: EVM}], ::monitoring/address-entries([{chain: "EVM", address: EVM, riskLevel: null}]))
+    assert-eq([{chain: "tron", address: "TEAqwfMhXLaomXhZ8KeMhx3njGmQEDnsUR", riskLevel: "LOW"}],
+        ::monitoring/address-entries([{chain: "tron", address: "TEAqwfMhXLaomXhZ8KeMhx3njGmQEDnsUR", riskLevel: "LOW"}]))
+    assert(is-err(::monitoring/address-entries([])))
+    assert(is-err(::monitoring/address-entries([{chain: "", address: EVM}])), "chain validated")
+    assert(is-err(::monitoring/address-entries([{chain: "evm", address: "0x1"}])), "EVM address validated")
+}
+
+test-risk-changes-request
+meta ["test"] fn () {
+    assert-eq("/api/monitoring/v1/pools/pool-1/risk-changes?pageSize=1000&pageToken=abc", ::monitoring/risk-changes-request("pool-1", {pageSize: 1000, pageToken: "abc"}).path)
+    assert-eq("/api/monitoring/v1/pools/pool-1/risk-changes?since=2026-11-01T00%3A00%3A00Z", ::monitoring/risk-changes-request("pool-1", {pageToken: "", since: "2026-11-01T00:00:00Z"}).path, "empty token is absent")
+}
+
+FEED {
+    start: {changes: [{changeId: "c1"}, {changeId: "c2"}], nextPageToken: "p2"},
+    p2: {changes: [{changeId: "c3"}], nextPageToken: "p3"},
+    p3: {changes: [], nextPageToken: ""}
+}
+
+feed-fetch fn (token: Str?): Map {
+    get(FEED, or(token, "start"))
+}
+
+test-drain-pages
+meta ["test"] fn () {
+    out ::monitoring/drain-pages(feed-fetch, null, 10, [])
+    assert-eq(["c1", "c2", "c3"], map(out.changes, (c) { c.changeId }))
+    assert-eq("p3", out.page-token, "resume from the last non-empty page's token")
+    caught-up ::monitoring/drain-pages(feed-fetch, "p3", 10, [])
+    assert-eq([], caught-up.changes)
+    assert-eq("p3", caught-up.page-token, "an empty page keeps the token")
+    capped ::monitoring/drain-pages(feed-fetch, null, 1, [])
+    assert-eq(2, length(capped.changes))
+    assert-eq("p2", capped.page-token)
+}
+
+// ============================================================================
+// Private data
+// ============================================================================
+
+test-list-type
+meta ["test"] fn () {
+    assert-eq("LIST_TYPE_ALLOWLIST", ::pd/list-type("allowlist"))
+    assert-eq("LIST_TYPE_DENYLIST", ::pd/list-type("DENYLIST"))
+    assert-eq("LIST_TYPE_UNSPECIFIED", ::pd/list-type("both"))
+    assert-eq("LIST_TYPE_DENYLIST", ::pd/list-type("LIST_TYPE_DENYLIST"))
+    assert(is-err(::pd/list-type("blocklist")))
+}
+
+test-overrides-list-request
+meta ["test"] fn () {
+    assert-eq("/api/private-data/v2/overrides/networks/ethereum_mainnet/addresses?listType=LIST_TYPE_DENYLIST&pageSize=100",
+        ::pd/list-request("ethereum_mainnet", {listType: "denylist", pageSize: 100}).path)
+    assert-eq("/api/private-data/v2/overrides/networks/ethereum_mainnet/addresses", ::pd/list-request("ethereum_mainnet", {}).path)
+    assert(is-err(::pd/list-request("evm", {})), "a network, not a chain")
+}
+
+test-upsert-request
+meta ["test"] fn () {
+    spec ::pd/upsert-request("ethereum_mainnet", {listType: "allowlist", address: CLEAN, notes: null, addLabels: ["internal"]})
+    assert-eq("POST", spec.method)
+    assert-eq({listType: "LIST_TYPE_ALLOWLIST", address: CLEAN, addLabels: ["internal"], expectedVersion: "0"}, spec.body)
+    updated ::pd/upsert-request("ethereum_mainnet", {listType: "denylist", address: CLEAN, expectedVersion: 3})
+    assert-eq("3", updated.body.expectedVersion, "int64 is sent as a string")
+    assert(is-err(::pd/upsert-request("ethereum_mainnet", {address: CLEAN})), "listType required")
+    assert(is-err(::pd/upsert-request("ethereum_mainnet", {listType: "allowlist"})), "address required")
+}
+
+// ============================================================================
+// Onchain and cases
+// ============================================================================
+
+test-batch-balances-request
+meta ["test"] fn () {
+    spec ::onchain/batch-balances-request("ethereum_mainnet", [CLEAN])
+    assert-eq("/api/onchain/v1/networks/ethereum_mainnet/balances:batchget", spec.path)
+    assert-eq({addresses: [CLEAN], network: "ethereum_mainnet"}, spec.body)
+    assert(is-err(::onchain/batch-balances-request("ethereum_mainnet", [])))
+    assert(is-err(::onchain/batch-balances-request("ethereum_mainnet", map(range(0, 101), (i) { CLEAN }))), "at most 100")
+}
+
+test-transactions-request-and-next-page
+meta ["test"] fn () {
+    assert-eq("/api/onchain/v1/networks/bitcoin_mainnet/addresses/bc1qxyz/transactions/scripts?page=2&pageSize=50&opReturnOnly=true",
+        ::onchain/transactions-request("bitcoin_mainnet", "bc1qxyz", {page: 2, pageSize: 50, opReturnOnly: true}).path)
+    assert-eq(3, ::onchain/next-page({page: 2, totalPages: 5}))
+    assert(is-null(::onchain/next-page({page: 5, totalPages: 5})))
+    assert(is-null(::onchain/next-page({})))
+}
+
+test-list-cases-request
+meta ["test"] fn () {
+    assert-eq("/api/case-management/v1/cases?status=OPEN&pageSize=20&excludeClosed=true",
+        ::cases/list-cases-request({status: "OPEN", pageSize: 20, excludeClosed: true, bogus: "x", network: null}).path, "unknown filters dropped")
+}
+
+test-invalid-input-returns-err-without-a-request
+meta ["test"] fn () {
+    // Validation fails before credentials are resolved or anything is sent.
+    assert(is-err(::screening/screen-address("evm", "0x1", {}, {access-token: "unused"})))
+    assert(is-err(::screening/batch-screen("evm", [], {}, {access-token: "unused"})))
+    assert(is-err(::risk/risk-score("evm", "0x1", {}, {access-token: "unused"})))
+    assert(is-err(::monitoring/add-addresses("pool-1", [{chain: "evm", address: "0x1"}], {access-token: "unused"})))
+    assert(is-err(::pd/upsert-override("evm", {listType: "allowlist", address: CLEAN}, {access-token: "unused"})))
+    assert(is-err(::onchain/batch-balances("ethereum_mainnet", [], {access-token: "unused"})))
+}
+
+test-members-request
+meta ["test"] fn () {
+    spec ::monitoring/members-request("pool-1", "addresses:batchDelete", [{chain: "evm", address: EVM}])
+    assert-eq("/api/monitoring/v1/pools/pool-1/addresses:batchDelete", spec.path, "the colon is a literal part of the path")
+    assert-eq({addresses: [{chain: "evm", address: EVM}]}, spec.body)
+}

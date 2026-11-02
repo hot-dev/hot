@@ -1,0 +1,225 @@
+::sanctions::xml ns
+meta {
+    doc: """
+    A small regex-based XML reader for the UK, EU and UN list files.
+    The documents are split into record strings, and fields are read
+    from each record with regexes: element text by tag, nested blocks,
+    and attributes of start tags. Character references are decoded on
+    the way out.
+
+    This is not a general XML parser. It relies on the list formats:
+    record elements do not nest inside themselves, field elements hold
+    plain text, and there are no CDATA sections or comments inside
+    records. It is used instead of `::hot::xml` for two reasons:
+    strings are cheap to pass around while every call that takes a
+    parsed tree copies it (a 6,000-record file took minutes), and
+    `::hot::xml` currently drops entity-decoded text such as `&amp;`.
+    """
+}
+
+::re ::hot::regex
+::str ::hot::str
+
+// WORKAROUND(hot-bug-5): list XML is read with regexes and decoded by `decode`, not ::hot::xml, which drops entity-decoded text such as `&amp;`.
+
+// ---------------------------------------------------------------------------
+// Character references
+// ---------------------------------------------------------------------------
+
+utf8-bytes fn (cp: Int): Vec<Int> {
+  cond {
+    lt(cp, 128) => { [cp] }
+    lt(cp, 2048) => { [add(192, floor(div(cp, 64))), add(128, mod(cp, 64))] }
+    lt(cp, 65536) => {
+      [add(224, floor(div(cp, 4096))), add(128, mod(floor(div(cp, 64)), 64)), add(128, mod(cp, 64))]
+    }
+    => {
+      [
+        add(240, floor(div(cp, 262144))),
+        add(128, mod(floor(div(cp, 4096)), 64)),
+        add(128, mod(floor(div(cp, 64)), 64)),
+        add(128, mod(cp, 64))
+      ]
+    }
+  }
+}
+
+HEX_DIGITS {
+  "0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
+  a: 10, b: 11, c: 12, d: 13, e: 14, f: 15
+}
+
+hex-value fn (hex: Str): Int {
+  reduce(::sanctions::text/chars(lowercase(hex)), (acc, c) { add(mul(acc, 16), get(HEX_DIGITS, c, 0)) }, 0)
+}
+
+char-for-reference
+meta {
+    doc: """
+    The character a numeric reference stands for: `"&#233;"` and
+    `"&#xE9;"` are `"é"`. Control characters and out-of-range values
+    become a space.
+    """
+}
+fn (ref: Str): Str {
+  // WORKAROUND(hot-bug-6): Int() only sees strings a regex has already proven numeric.
+  m ::re/capture(ref, "^&#(x?)([0-9A-Fa-f]{1,7});$")
+  cp cond {
+    is-null(m) => { 32 }
+    eq(lowercase(m.groups[0]), "x") => { hex-value(m.groups[1]) }
+    ::re/is-match(m.groups[1], "^[0-9]{1,7}$") => { Int(m.groups[1]) }
+    => { 32 }
+  }
+
+  cond {
+    or(lt(cp, 32), gt(cp, 1114111)) => { " " }
+    and(gte(cp, 55296), lte(cp, 57343)) => { " " }
+    => { Str(Bytes(utf8-bytes(cp))) }
+  }
+}
+
+decode
+meta {
+    doc: """
+    Decode XML character references in text: the five named entities
+    and numeric references (`&#233;`, `&#xA;`). `&amp;` is decoded last,
+    so `&amp;lt;` stays the literal text `&lt;`.
+
+    **Example**
+
+    ```hot
+    ::sanctions::xml/decode("Smith &amp; Sons &#233;t&#xE9;")  // "Smith & Sons été"
+    ```
+    """
+}
+fn (s: Str): Str {
+  cond {
+    not(::str/contains(s, "&")) => { s }
+    => {
+      refs distinct(map(::re/find-all(s, "&#[xX]?[0-9A-Fa-f]{1,7};"), (m) { m.match }))
+      numeric reduce(refs, (acc, ref) { ::str/replace(acc, ref, char-for-reference(ref)) }, s)
+      numeric
+        |> ::str/replace("&lt;", "<")
+        |> ::str/replace("&gt;", ">")
+        |> ::str/replace("&quot;", "\"")
+        |> ::str/replace("&apos;", "'")
+        |> ::str/replace("&amp;", "&")
+    }
+  }
+}
+
+clean fn (s: Str): Str? {
+  t trim(::re/replace-all(decode(s), "\\s+", " "))
+  if(is-empty(t), null, t)
+}
+
+// ---------------------------------------------------------------------------
+// Elements
+// ---------------------------------------------------------------------------
+
+element-pattern fn (tag: Str): Str {
+  `(?s)<${tag}(?:\\s[^>]*)?>(.*?)</${tag}>`
+}
+
+records
+meta {
+    doc: """
+    Every `<tag ...>...</tag>` element of a document as a raw string.
+    The tag must not nest inside itself; `<tag/>` is skipped.
+
+    **Example**
+
+    ```hot
+    ::sanctions::xml/records("<a><r>1</r><r>2</r></a>", "r")  // ["<r>1</r>", "<r>2</r>"]
+    ```
+    """
+}
+fn (doc: Str, tag: Str): Vec<Str> {
+  map(::re/find-all(doc, `(?s)<${tag}(?:\\s[^>]*)?>.*?</${tag}>`), (m) { m.match })
+}
+
+blocks
+meta {
+    doc: """The raw inner content of every `<tag>` element in `fragment`, in order (for nested structures such as a UK `<Name>`)."""
+}
+fn (fragment: Str?, tag: Str): Vec<Str> {
+  cond {
+    is-null(fragment) => { [] }
+    => { map(::re/capture-all(fragment, element-pattern(tag)), (m) { or(m.groups[0], "") }) }
+  }
+}
+
+block
+meta {
+    doc: """The inner content of the first `<tag>` element, or null."""
+}
+fn (fragment: Str?, tag: Str): Str? {
+  first(blocks(fragment, tag))
+}
+
+texts
+meta {
+    doc: """
+    The text of every `<tag>` element in `fragment`: references
+    decoded, whitespace runs collapsed, trimmed, blanks dropped. Use it
+    for elements that hold text only.
+
+    **Example**
+
+    ```hot
+    ::sanctions::xml/texts("<n><v>A &amp; B</v><v/><v> C </v></n>", "v")  // ["A & B", "C"]
+    ```
+    """
+}
+fn (fragment: Str?, tag: Str): Vec<Str> {
+  filter(map(blocks(fragment, tag), clean), is-some)
+}
+
+text
+meta {
+    doc: """The text of the first non-blank `<tag>` element, or null."""
+}
+fn (fragment: Str?, tag: Str): Str? {
+  first(texts(fragment, tag))
+}
+
+start-tags
+meta {
+    doc: """Every start (or empty-element) tag `<tag .../>` in `fragment`, as raw strings, for reading attributes."""
+}
+fn (fragment: Str?, tag: Str): Vec<Str> {
+  cond {
+    is-null(fragment) => { [] }
+    => { map(::re/find-all(fragment, `<${tag}(?:\\s[^>]*)?>`), (m) { m.match }) }
+  }
+}
+
+attr
+meta {
+    doc: """
+    An attribute of a start tag string, decoded and trimmed, or null
+    when missing or blank.
+
+    **Example**
+
+    ```hot
+    ::sanctions::xml/attr("<nameAlias wholeName=\\"Abu Ali\\" strong=\\"true\\">", "wholeName")  // "Abu Ali"
+    ```
+    """
+}
+fn (start-tag: Str?, name: Str): Str? {
+  cond {
+    is-null(start-tag) => { null }
+    => {
+      dq ::re/capture(start-tag, `\\s${name}="([^"]*)"`)
+      sq ::re/capture(start-tag, `\\s${name}='([^']*)'`)
+      raw cond {
+        is-some(dq) => { dq.groups[0] }
+        is-some(sq) => { sq.groups[0] }
+        => { null }
+      }
+
+      if(is-null(raw), null, clean(raw))
+    }
+  }
+}

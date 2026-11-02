@@ -1,0 +1,80 @@
+::cipherowl::cases ns
+meta {
+    doc: """
+    Case management (read-only): the cases CipherOwl opens from risky
+    screenings (`trackAlert`) and from monitoring pools reaching their
+    `openCaseRiskLevels`, with their screenings and audit trail. Cases
+    are worked in the CipherOwl application; the API reads them.
+
+    Lists are numbered pages: `page` (1 to 10000) and `pageSize` (1 to
+    100, default 50); responses carry `totalCount`.
+    """
+}
+
+::api ::cipherowl::api
+
+seg ::cipherowl::api/seg
+query ::cipherowl::api/query
+
+CASES_PATH "/api/case-management/v1/cases"
+
+CASE_FILTERS [
+  "investigatorId", "clientReference", "network", "address", "status", "createdFrom",
+  "createdTo", "pageSize", "queueStage", "page", "muted", "priority", "deletedOnly",
+  "excludeClosed", "updatedFrom", "updatedTo"
+]
+
+list-cases-request
+meta {
+    doc: """The spec for one page of cases. `filters` takes CipherOwl's query fields (`CASE_FILTERS`: `status`, `network`, `address`, `clientReference`, `createdFrom`/`createdTo` and `updatedFrom`/`updatedTo` (RFC 3339), `excludeClosed`, `page`, `pageSize`, ...); other keys are ignored. Exposed for testing."""
+}
+fn (filters: Map): Map {
+  kept filter-keys(untype(filters), (k) { in(k, CASE_FILTERS) })
+  {method: "GET", path: `${CASES_PATH}${query(kept)}`, body: ""}
+}
+
+list-cases
+meta {doc: """One page of cases: `{cases, totalCount, page, pageSize}`."""}
+fn
+(filters: Map): Map {
+  list-cases(filters, {})
+},
+(filters: Map, opts: Map): Map {
+  ::api/call(list-cases-request(filters), opts)
+}
+
+get-case
+meta {doc: """One case: `{case, screeningRoute}`."""}
+fn
+(case-id: Str): Map {
+  get-case(case-id, {})
+},
+(case-id: Str, opts: Map): Map {
+  ::api/request("GET", `${CASES_PATH}/${seg(case-id)}`, "", opts)
+}
+
+list-case-screenings
+meta {
+    doc: """The screenings attached to a case. `options` takes `page` and `pageSize`."""
+}
+fn
+(case-id: Str, options: Map): Map {
+  list-case-screenings(case-id, options, {})
+},
+(case-id: Str, options: Map, opts: Map): Map {
+  ::api/request("GET", `${CASES_PATH}/${seg(case-id)}/screenings${query({page: get(options, "page"), pageSize: get(options, "pageSize")})}`, "", opts)
+}
+
+list-case-audit-events
+meta {
+    doc: """A case's audit trail. `options` takes `page`, `pageSize`, `descending`, `createdAfter`, `createdBefore`, `actorType`, and the keyset cursor `cursorCreatedAt` plus `cursorEventSequence`."""
+}
+fn
+(case-id: Str, options: Map): Map {
+  list-case-audit-events(case-id, options, {})
+},
+(case-id: Str, options: Map, opts: Map): Map {
+  keys-allowed ["page", "pageSize", "descending", "beforeSequence", "createdAfter", "createdBefore", "actorIds", "actorType", "cursorCreatedAt", "cursorEventSequence"]
+  kept filter-keys(untype(options), (k) { in(k, keys-allowed) })
+  ::api/request("GET", `${CASES_PATH}/${seg(case-id)}/audit-events${query(kept)}`, "", opts)
+}

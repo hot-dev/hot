@@ -1,0 +1,317 @@
+::middesk::test ns
+meta ["test"]
+
+::api ::middesk::api
+::businesses ::middesk::businesses
+::orders ::middesk::orders
+::documents ::middesk::documents
+::decisions ::middesk::decisions
+
+RequestOptions ::middesk::api/RequestOptions
+
+// ============================================================================
+// Auth and environment
+// ============================================================================
+
+test-auth-header-vector
+meta ["test"] fn () {
+    // base64("mk_test_abc123:") generated independently with Python
+    assert-eq("Basic bWtfdGVzdF9hYmMxMjM6", ::api/auth-header("mk_test_abc123"))
+}
+
+test-key-env
+meta ["test"] fn () {
+    assert-eq("sandbox", ::api/key-env("mk_test_1"))
+    assert-eq("production", ::api/key-env("mk_live_1"))
+    assert(is-null(::api/key-env("other")), "unknown prefix")
+}
+
+test-resolve-env
+meta ["test"] fn () {
+    assert-eq("sandbox", ::api/resolve-env("mk_test_1", null))
+    assert-eq("production", ::api/resolve-env("mk_live_1", null))
+    assert-eq("production", ::api/resolve-env("mk_live_1", " Production "))
+    assert-eq("production", ::api/resolve-env("custom-key", "production"))
+    assert-eq("sandbox", ::api/resolve-env("custom-key", null))
+    assert(is-err(::api/resolve-env("mk_test_1", "production")), "a sandbox key never goes to production")
+    assert(is-err(::api/resolve-env("mk_live_1", "staging")), "unknown env errs")
+}
+
+test-base-url
+meta ["test"] fn () {
+    assert-eq("https://api-sandbox.middesk.com/v1", ::api/base-url("sandbox"))
+    assert-eq("https://api.middesk.com/v1", ::api/base-url("production"))
+}
+
+test-send-without-key-errs
+meta ["test"] fn () {
+    assert(is-err(::api/send("GET", "/businesses", {}, null, RequestOptions({}))), "no key, nothing sent")
+}
+
+test-build-request
+meta ["test"] fn () {
+    req ::api/build-request("post", "https://api-sandbox.middesk.com/v1/businesses", {name: "Acme", website: null}, "mk_test_abc123")
+    assert-eq("POST", req.method)
+    assert-eq("Basic bWtfdGVzdF9hYmMxMjM6", req.headers.Authorization)
+    assert-eq("application/json", get(req.headers, "Content-Type"))
+    assert-eq({name: "Acme"}, from-json(req.body))
+    empty ::api/build-request("GET", "https://x", null, "k")
+    assert-eq("", empty.body)
+    assert(is-null(get(empty.headers, "Content-Type")), "no body, no content type")
+}
+
+// ============================================================================
+// Bodies, queries and paths
+// ============================================================================
+
+test-query-string
+meta ["test"] fn () {
+    assert-eq("", ::api/query-string({}))
+    assert-eq("", ::api/query-string({status: null}))
+    assert-eq("?page=2&per_page=10&tags=a%2Cb", ::api/query-string({page: 2, per_page: 10, tags: ["a", "b"], status: null}))
+    assert-eq("?external_id=acct%2042", ::api/query-string({external_id: "acct 42"}))
+}
+
+test-seg
+meta ["test"] fn () {
+    assert-eq("biz%2F..%2Fwebhooks", ::api/seg("biz/../webhooks"))
+}
+
+test-compact
+meta ["test"] fn () {
+    assert-eq({a: false, b: [{c: 1}]}, ::api/compact({a: false, b: [{c: 1, d: null}, null], e: null}))
+}
+
+test-validate-create
+meta ["test"] fn () {
+    ok-body ::businesses/validate-create({name: "Acme", addresses: [{full_address: "1 Main St, Austin, TX 78701"}], tin: null})
+    assert-eq({name: "Acme", addresses: [{full_address: "1 Main St, Austin, TX 78701"}]}, ok-body)
+    missing ::businesses/validate-create({tin: {tin: "123410000"}})
+    assert(is-err(missing), "name and addresses are required")
+    assert(not(contains(Str(err-value(missing)), "123410000")), "the error never echoes the TIN")
+    assert(is-err(::businesses/validate-create({name: " ", addresses: [{full_address: "x"}]})), "blank name")
+    assert(is-err(::businesses/create-business({name: "Acme"})), "create checks before sending")
+}
+
+test-set-status-guard
+meta ["test"] fn () {
+    assert(is-err(::businesses/set-status("biz_1", "pending")), "only final statuses can be set")
+}
+
+test-order-body
+meta ["test"] fn () {
+    assert-eq({product: "liens"}, ::orders/order-body("liens", {}))
+    assert-eq({product: "liens"}, ::orders/order-body("liens", {subproducts: []}))
+    assert-eq({product: "website", subproducts: ["industry_classification"]}, ::orders/order-body("website", {subproducts: ["industry_classification"]}))
+    assert-eq({product: "tin", options: {person_match: true}}, ::orders/order-body("tin", {options: {person_match: true}}))
+}
+
+test-document-metadata-hides-url
+meta ["test"] fn () {
+    doc {id: "d1", document_type: "Articles of Incorporation", filename: "a.pdf", content_type: "application/pdf", size: 10, download_url: "https://storage.googleapis.com/x?sig=secret"}
+    m ::documents/metadata(doc)
+    assert-eq({id: "d1", document_type: "Articles of Incorporation", filename: "a.pdf", content_type: "application/pdf", size: 10}, m)
+    assert(is-err(::documents/fetch-signed-url(null)), "no URL is an Err without a request")
+    assert(is-err(::documents/fetch-signed-url("http://insecure.example.com/x")), "plain http is refused")
+}
+
+test-is-done
+meta ["test"] fn () {
+    assert(::businesses/is-done({status: "in_review"}), "in_review is done")
+    assert(not(::businesses/is-done({status: "pending"})), "pending is not")
+    assert(::orders/is-done({status: "completed"}), "completed order")
+    assert(not(::orders/is-done({status: "pending"})), "pending order")
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-next-page
+meta ["test"] fn () {
+    assert-eq(3, ::api/next-page({has_more: true, data: [1]}, 2))
+    assert(is-null(::api/next-page({has_more: false, data: [1]}, 2)), "last page")
+    assert(is-null(::api/next-page({data: []}, 1)), "no has_more")
+}
+
+page-for fn (n: Int): Map {
+    cond {
+      eq(n, 1) => { {data: [{id: "a"}, {id: "b"}], has_more: true} }
+      eq(n, 2) => { {data: [{id: "c"}, {id: "d"}], has_more: true} }
+      => { {data: [{id: "e"}], has_more: false} }
+    }
+}
+
+test-collect-pages
+meta ["test"] fn () {
+    assert-eq(["a", "b", "c", "d", "e"], map(::api/collect-pages(page-for, 1, 100, []), (x) { x.id }))
+    assert-eq(["a", "b", "c"], map(::api/collect-pages(page-for, 1, 3, []), (x) { x.id }))
+    assert(is-err(::api/collect-pages((n) { err("boom") }, 1, 10, [])), "first Err is returned")
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-http-error
+meta ["test"] fn () {
+    e ::api/http-error({status: 422, headers: {}, body: {errors: [{message: "Name is required", parameter: "name"}, {message: "Addresses is invalid"}]}})
+    assert-eq(422, e.status)
+    assert-eq("name", e.parameter)
+    assert-eq("middesk: HTTP 422: Name is required (name); Addresses is invalid", e.message)
+    assert-eq(2, length(e.errors))
+}
+
+test-http-error-redacts
+meta ["test"] fn () {
+    e ::api/http-error({status: 400, headers: {}, body: {
+      errors: [{message: "TIN 12-3410000 does not match; contact ops@acme.com", parameter: "tin"}],
+      tin: {tin: "123410000"},
+      people: [{name: "Jane Doe", ssn: "123456789", dob: "1990-01-31"}]
+    }})
+    assert(not(contains(e.message, "3410000")), "no TIN in message")
+    assert(not(contains(e.message, "ops@acme.com")), "no email in message")
+    assert-eq("[redacted]", e.body.tin)
+    assert-eq("[redacted]", e.body.people[0].ssn)
+    assert-eq("[redacted]", e.body.people[0].dob)
+    assert-eq("Jane Doe", e.body.people[0].name)
+}
+
+test-http-error-plain-text-429
+meta ["test"] fn () {
+    e ::api/http-error({status: 429, headers: {retry-after: "7"}, body: "Retry later"})
+    assert-eq("middesk: HTTP 429: Retry later", e.message)
+    assert-eq(7, e.retry-after)
+    assert(::api/is-retryable(e), "429 is retryable")
+    assert(::api/is-retryable(err(e)), "through an Err")
+    assert(not(::api/is-retryable(::api/http-error({status: 422, headers: {}, body: {}}))), "422 is not")
+}
+
+test-parse-int
+meta ["test"] fn () {
+    assert-eq(7, ::api/parse-int("7"))
+    assert(is-null(::api/parse-int("soon")), "non-numeric is null")
+}
+
+// ============================================================================
+// Decisions
+// ============================================================================
+
+BUSINESS {
+  object: "business",
+  id: "biz_1",
+  name: "Middesk",
+  status: "in_review",
+  tin: {name: "MIDDESK INC", tin: "123410000", mismatch: false, unknown: false, verified: true, issued: true, error: null},
+  watchlist: {object: "watchlist", lists: [{title: "OFAC SDN", results: []}, {title: "DPL", results: [{id: "r1"}]}]},
+  review: {tasks: [
+    {category: "tin", key: "tin", label: "TIN Match", sub_label: "Not Found", status: "failure", message: "The IRS does not have a record", sources: [{id: "s"}]},
+    {category: "name", key: "name", label: "Business Name", sub_label: "Verified", status: "success", message: "Match identified"},
+    {category: "address", key: "address_verification", label: "Office Address", sub_label: "Similar Match", status: "warning", message: "Similar match"},
+    {category: "watchlist", key: "watchlist", label: "Watchlist", sub_label: "No Hits", status: "success", message: "No hits"}
+  ]},
+  registrations: [{state: "DE", status: "active"}, {state: "CA", status: "active"}, {state: "CA", status: "inactive"}],
+  liens: [{id: "l1"}],
+  litigations: [],
+  orders: [{product: "website", status: "completed"}, {product: "business_verification_verify", status: "completed"}],
+  people: [{name: "Jane Doe", dob: "1990-01-31", ssn: "123456789"}]
+}
+
+test-status-decision
+meta ["test"] fn () {
+    assert-eq("approved", ::decisions/status-decision("approved"))
+    assert-eq("declined", ::decisions/status-decision("rejected"))
+    assert-eq("needs-review", ::decisions/status-decision("in_review"))
+    assert-eq("pending", ::decisions/status-decision("pending"))
+    assert-eq("pending", ::decisions/status-decision("in_audit"))
+    assert-eq("needs-review", ::decisions/status-decision("brand_new"))
+    assert-eq("needs-review", ::decisions/status-decision(null))
+}
+
+test-summarize
+meta ["test"] fn () {
+    s ::decisions/summarize(BUSINESS)
+    assert-eq("biz_1", s.id)
+    assert-eq("needs-review", s.decision)
+    assert-eq(true, s.needs-review)
+    assert-eq(false, s.final)
+    assert-eq(["name", "watchlist"], s.passed)
+    assert-eq([{key: "tin", label: "TIN Match", sub_label: "Not Found", message: "The IRS does not have a record"}], s.failed)
+    assert-eq(["address_verification"], map(s.warnings, (t) { t.key }))
+    assert-eq(["address_verification", "name", "tin", "watchlist"], map(s.review-tasks, (t) { t.key }), "sorted by category then key")
+    assert-eq({verified: true, mismatch: false, unknown: false, issued: true}, s.tin)
+    assert-eq(1, s.watchlist-hits)
+    assert-eq({count: 3, active: 2, inactive: 1, states: ["CA", "DE"]}, s.registrations)
+    assert-eq({liens: 1, litigations: 0, bankruptcies: 0}, s.records)
+    assert-eq(["business_verification_verify", "website"], map(s.orders, (o) { o.product }))
+}
+
+test-summarize-has-no-pii
+meta ["test"] fn () {
+    text to-json(::decisions/summarize(BUSINESS))
+    assert(not(contains(text, "123410000")), "no TIN")
+    assert(not(contains(text, "123456789")), "no SSN")
+    assert(not(contains(text, "1990-01-31")), "no DOB")
+    assert(not(contains(text, "sources")), "sources are dropped")
+}
+
+test-summarize-is-deterministic
+meta ["test"] fn () {
+    shuffled {...BUSINESS, review: {tasks: reverse(BUSINESS.review.tasks)}, orders: reverse(BUSINESS.orders)}
+    assert-eq(::decisions/summarize(BUSINESS), ::decisions/summarize(shuffled))
+}
+
+test-needs-review-flag
+meta ["test"] fn () {
+    assert-eq(false, ::decisions/summarize({...BUSINESS, status: "approved"}).needs-review, "decided businesses don't need review")
+    assert-eq(true, ::decisions/summarize({...BUSINESS, status: "pending"}).needs-review, "failures while pending")
+    clean {id: "biz_2", status: "pending", review: {tasks: [{key: "name", category: "name", status: "success"}]}}
+    assert-eq(false, ::decisions/summarize(clean).needs-review, "nothing failed yet")
+    assert-eq("pending", ::decisions/summarize(clean).decision)
+    assert-eq(true, ::decisions/summarize({...clean, status: "mystery"}).needs-review, "unknown status")
+    assert-eq(0, ::decisions/summarize(clean).watchlist-hits)
+    assert(is-null(::decisions/summarize(clean).tin), "no TIN checked")
+}
+
+test-watchlist-hit-count
+meta ["test"] fn () {
+    assert-eq(4, ::decisions/watchlist-hits({watchlist: {hit_count: 4, lists: []}}))
+    assert-eq(0, ::decisions/watchlist-hits({}))
+}
+
+test-reasons
+meta ["test"] fn () {
+    assert-eq([
+      "failure tin: TIN Match - Not Found",
+      "warning address_verification: Office Address - Similar Match",
+      "watchlist hits: 1"
+    ], ::decisions/reasons(::decisions/summarize(BUSINESS)))
+}
+
+// ============================================================================
+// Resolver
+// ============================================================================
+
+CTX {"middesk.api.key": "mk_test_ctx", "middesk.env": "sandbox"}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    assert-eq({api-key: "mk_live_tenant_b", env: "production"}, ::api/resolve-from({api-key: "mk_live_tenant_b", env: "production"}, CTX))
+    assert-eq({api-key: "mk_test_ctx", env: "sandbox"}, ::api/resolve-from({}, CTX), "ctx when options are empty")
+    assert-eq({api-key: "mk_live_x", env: "production"}, ::api/resolve-from({api-key: "mk_live_x"}, {"middesk.api.key": "mk_test_ctx"}), "the key's prefix picks the host")
+}
+
+test-resolve-errors
+meta ["test"] fn () {
+    missing ::api/resolve-from({}, {})
+    assert(is-err(missing), "no key is an Err")
+    assert(contains(Str(err-value(missing)), "middesk.api.key"), "the error names the context variable")
+    assert(is-err(::api/resolve-from({api-key: "mk_live_x"}, {"middesk.env": "sandbox"})), "a live key with a sandbox env errs")
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    assert-eq("mk_test_tenant_c", ::api/resolve({api-key: "mk_test_tenant_c"}).api-key, "plain Map options")
+    assert-eq("mk_test_tenant_d", ::api/resolve(RequestOptions({api-key: "mk_test_tenant_d"})).api-key, "typed options")
+    assert(is-null(::hot::ctx/get("middesk.api.key")), "per-call keys are not written to ctx")
+}

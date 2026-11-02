@@ -1,0 +1,46 @@
+::modern-treasury::incoming-payment-details ns
+meta {
+    doc: """Incoming payment details: payments arriving at your internal accounts (ACH credits and debits, wires, RTP, checks, ...) as Modern Treasury learns of them, before and after they post. They carry the originator's account details: don't log them. Follow `incoming_payment_detail.*` webhooks."""
+}
+
+::api ::modern-treasury::api
+seg ::modern-treasury::api/seg
+
+list-incoming-payment-details
+meta {
+    doc: """GET /api/incoming_payment_details: one page. Filters: `type`, `direction`, `status` (`"pending"`, `"completed"`, `"returned"`, `"failed"`, `"held"`), `subtype`, `virtual_account_id`, `as_of_date_start`, `as_of_date_end`, `metadata`, `per_page`, `after_cursor`."""
+}
+fn
+(): Map {
+  list-incoming-payment-details({})
+},
+(params: Map): Map {
+  list-incoming-payment-details(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/incoming_payment_details", params, opts)
+}
+
+get-incoming-payment-detail
+meta {
+    doc: """GET /api/incoming_payment_details/{id}: retrieve an incoming payment detail."""
+}
+fn
+(incoming-payment-detail-id: Str): Map {
+  get-incoming-payment-detail(incoming-payment-detail-id, {})
+},
+(incoming-payment-detail-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/incoming_payment_details/${seg(incoming-payment-detail-id)}`, {}, opts)
+}
+
+update-incoming-payment-detail
+meta {
+    doc: """PATCH /api/incoming_payment_details/{id}: set `metadata` (the only writable field)."""
+}
+fn
+(incoming-payment-detail-id: Str, metadata: Map): Map {
+  update-incoming-payment-detail(incoming-payment-detail-id, metadata, {})
+},
+(incoming-payment-detail-id: Str, metadata: Map, opts: Map): Map {
+  ::api/call("PATCH", `/api/incoming_payment_details/${seg(incoming-payment-detail-id)}`, {metadata: metadata}, opts)
+}

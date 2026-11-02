@@ -1,0 +1,485 @@
+::xero::oauth ns
+meta {
+    ctx: {
+        "xero.client.id": {required: false, secret: false},
+        "xero.client.secret": {required: false}
+    },
+    doc: """
+    Xero OAuth 2.0, built on `hot.dev/oauth2`.
+
+    **Flow (authorization code)**
+
+    1. Redirect the user to `authorize-url(...)` with the scopes you need
+       (include `offline_access` to get a refresh token; see
+       `::xero/SCOPES_FINANCE_OPS`).
+    2. In the callback, check `state`, then `exchange-code(code,
+       redirect-uri)` returns a `TokenSet`.
+    3. `connections(tokens.access-token)` lists the organisations the
+       user authorised; each has a `tenantId` to send as `xero-tenant-id`.
+    4. Persist the refresh token. Access tokens last 30 minutes.
+
+    **Rotation.** Xero rotates the refresh token on *every* refresh: the
+    response carries a new one, and the old one stops working (Xero
+    allows a 30-minute grace period to retry with it). An unused refresh
+    token expires after 60 days. Every `TokenSet` carries the token to
+    keep in `refresh-token`; always persist it, or let the
+    `::xero::auth` token keeper do it in a `::hot::store`. One refresh
+    token covers every organisation the user connected.
+
+    **Custom Connections.** A Custom Connection is a paid, single-
+    organisation machine-to-machine app: `client-credentials(scopes)`
+    gets a 30-minute token with no refresh token and no tenant header.
+
+    Token calls authenticate with HTTP Basic (`client_secret_basic`).
+    PKCE apps (no client secret) send `client_id` in the body instead.
+    """
+}
+
+::ctx ::hot::ctx
+::b64 ::hot::base64
+::time ::hot::time
+::uri ::hot::uri
+::oauth2 ::oauth2
+
+http-request ::hot::http/request
+HttpRequest ::hot::http/HttpRequest
+
+pkce-verifier ::oauth2/pkce-verifier
+pkce-challenge ::oauth2/pkce-challenge
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+TokenError
+meta {
+    doc: """
+    A credential or token-endpoint failure. `message` is readable, e.g.
+    `"xero: token refresh failed: invalid_grant"`; `error-code` and
+    `error-description` carry the OAuth `error` / `error_description`.
+    Token values never appear in messages.
+    """
+}
+type {
+    message: Str,
+    status: Int?,
+    error-code: Str?,
+    error-description: Str?
+}
+
+TokenSet
+meta {
+    doc: """
+    The result of a code exchange, refresh or client-credentials grant.
+
+    - `access-token` - the bearer token (30 minutes)
+    - `refresh-token` - **the refresh token to persist** (a new one on
+      every refresh; null for Custom Connections)
+    - `rotated` - true when `refresh-token` differs from the one sent
+    - `expires-in`, `expires-at` - lifetime (seconds) and expiry (epoch ms)
+    - `token-type`, `id-token` (OpenID scopes), `scope`
+    """
+}
+type {
+    access-token: Str,
+    refresh-token: Str?,
+    rotated: Bool,
+    expires-in: Int?,
+    expires-at: Int?,
+    token-type: Str?,
+    id-token: Str?,
+    scope: Str?
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+is-blank
+meta {doc: """True for null, `""` and whitespace-only strings."""}
+fn (value: Any): Bool {
+  or(is-null(value), and(is-str(value), is-empty(trim(value))))
+}
+
+int-or-null
+meta {
+    doc: """An Int from an Int or digit-only Str; null otherwise. Guards `Int()` so bad input never halts a run."""
+}
+fn (value: Any): Int? {
+  // WORKAROUND(hot-bug-6): match digits before Int() so a bad value returns null instead of halting.
+  cond {
+    is-int(value) => { value }
+    and(is-str(value), ::hot::regex/is-match(trim(Str(value)), "^-?[0-9]{1,15}$")) => { Int(trim(value)) }
+    => { null }
+  }
+}
+
+now-ms fn (): Int {
+  ::time/epoch-millis(::time/now())
+}
+
+token-error
+meta {
+    doc: """Build a `TokenError` from a message, or from a prefix and a failed token response (`{status, body}`) or transport error."""
+}
+fn
+(message: Str): TokenError {
+  TokenError({message: message})
+},
+(prefix: Str, payload: Any): TokenError {
+  body if(is-map(payload), get(payload, "body"), null)
+  status if(is-map(payload), get(payload, "status"), null)
+  code if(is-map(body), get(body, "error"), null)
+  desc if(is-map(body), get(body, "error_description"), null)
+  detail cond {
+    and(is-some(code), is-some(desc)) => { `${code} (${desc})` }
+    is-some(code) => { Str(code) }
+    is-some(status) => { `HTTP ${status}` }
+    is-str(payload) => { payload }
+    => { err-message(payload) }
+  }
+
+  TokenError({
+    message: `${prefix}: ${detail}`,
+    status: status,
+    error-code: if(is-some(code), Str(code), null),
+    error-description: if(is-some(desc), Str(desc), null)
+  })
+}
+
+basic-auth
+meta {doc: """`Basic base64(client-id:client-secret)` for token calls."""}
+fn (client-id: Str, client-secret: Str): Str {
+  pair `${client-id}:${client-secret}`
+  `Basic ${::b64/encode(Bytes(pair))}`
+}
+
+app-credentials
+meta {
+    ctx: {
+        "xero.client.id": {required: false, secret: false},
+        "xero.client.secret": {required: false}
+    },
+    doc: """The app's `{client-id, client-secret}` from `opts`, else context. The secret may be null for PKCE apps unless `require-secret` is true."""
+}
+fn (opts: Map, require-secret: Bool): Map {
+  id or(get(opts, "client-id"), ::ctx/get("xero.client.id"))
+  secret or(get(opts, "client-secret"), ::ctx/get("xero.client.secret"))
+  cond {
+    is-blank(id) => { err(token-error("xero: the OAuth client id is not set. Set xero.client.id (and xero.client.secret) in Context Variables, or pass client-id in opts.")) }
+    and(require-secret, is-blank(secret)) => { err(token-error("xero: the OAuth client secret is not set. Set xero.client.secret or pass client-secret in opts.")) }
+    => { {client-id: Str(id), client-secret: if(is-blank(secret), null, Str(secret))} }
+  }
+}
+
+normalize-scopes
+meta {
+    doc: """Scopes as a space-separated Str from a Vec or a space/comma-separated Str (duplicates removed); `""` for none."""
+}
+fn (scopes: Any): Str {
+  raw cond {
+    is-null(scopes) => { [] }
+    is-vec(scopes) => { scopes }
+    => { split(replace(Str(scopes), ",", " "), " ") }
+  }
+
+  join(distinct(filter(map(raw, (s) { trim(Str(s)) }), (s) { not(is-empty(s)) })), " ")
+}
+
+// ---------------------------------------------------------------------------
+// Authorization URL and callback
+// ---------------------------------------------------------------------------
+
+authorize-url
+meta {
+    doc: """
+    Build Xero's consent URL. `scopes` is a Vec or space-separated Str
+    (`::xero/SCOPES_FINANCE_OPS` is a good start; include
+    `offline_access` for a refresh token); `state` is your CSRF token.
+    Options: `code-verifier` (its S256 challenge is sent; keep the
+    verifier for `exchange-code`), `code-challenge`, `extra`.
+
+    ```hot
+    url ::xero::oauth/authorize-url("CLIENT-ID", "https://app.example.com/oauth/xero", ::xero/SCOPES_FINANCE_OPS, "csrf-123")
+    ```
+    """
+}
+fn
+(client-id: Str, redirect-uri: Str, scopes: Str | Vec, state: Str): Str {
+  authorize-url(client-id, redirect-uri, scopes, state, {})
+},
+(client-id: Str, redirect-uri: Str, scopes: Str | Vec, state: Str, opts: Map): Str {
+  scope normalize-scopes(scopes)
+  verifier get(opts, "code-verifier")
+  challenge or(get(opts, "code-challenge"), if(is-blank(verifier), null, pkce-challenge(Str(verifier))))
+  cond {
+    is-blank(state) => { err(token-error("xero: authorize-url needs a non-empty state (your CSRF token)")) }
+    is-empty(scope) => { err(token-error("xero: authorize-url needs at least one scope")) }
+    => {
+      ::oauth2/authorize-url(filter-vals({
+        authorize-url: ::xero/AUTHORIZE_URL,
+        client-id: client-id,
+        redirect-uri: redirect-uri,
+        scope: scope,
+        state: state,
+        code-challenge: challenge,
+        extra: get(opts, "extra")
+      }, is-some))
+    }
+  }
+}
+
+callback-params
+meta {
+    doc: """Read Xero's redirect: `{code, state, error, error-description}` from the request query (null when absent)."""
+}
+fn (request: Map): Map {
+  q or(get(request, "query"), {})
+  {
+    code: get(q, "code"),
+    state: get(q, "state"),
+    error: get(q, "error"),
+    error-description: get(q, "error_description")
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Token requests
+// ---------------------------------------------------------------------------
+
+build-token-request
+meta {
+    doc: """
+    Build (without sending) the token-endpoint `HttpRequest` (pure): a
+    form-encoded grant `body`, with HTTP Basic client auth when there is a
+    secret, or `client_id` in the body for PKCE apps.
+    """
+}
+fn (body: Map, client-id: Str, client-secret: Str?): HttpRequest {
+  base-headers {Accept: "application/json", Content-Type: "application/x-www-form-urlencoded"}
+  has-secret not(is-blank(client-secret))
+  headers if(has-secret, {...base-headers, Authorization: basic-auth(client-id, or(client-secret, ""))}, base-headers)
+  form if(has-secret, body, {...body, client_id: client-id})
+  HttpRequest({method: "POST", url: ::xero/TOKEN_URL, headers: headers, body: ::uri/encode-query(form)})
+}
+
+without-client fn (body: Map): Map {
+  delete(delete(body, "client_id"), "client_secret")
+}
+
+build-exchange-body
+meta {
+    doc: """The `authorization_code` grant body; `code-verifier` completes a PKCE flow."""
+}
+fn (code: Str, redirect-uri: Str, code-verifier: Str?): Map {
+  without-client(::oauth2/build-exchange-body(filter-vals({
+    client-id: "",
+    code: code,
+    redirect-uri: redirect-uri,
+    code-verifier: code-verifier
+  }, is-some)))
+}
+
+build-refresh-body
+meta {doc: """The `refresh_token` grant body."""}
+fn (refresh-token: Str): Map {
+  without-client(::oauth2/build-refresh-body({client-id: "", refresh-token: refresh-token}))
+}
+
+build-client-credentials-body
+meta {
+    doc: """The `client_credentials` grant body for a Custom Connection; `scope` may be empty to get every scope the connection was granted."""
+}
+fn (scope: Str): Map {
+  filter-vals({grant_type: "client_credentials", scope: if(is-empty(scope), null, scope)}, is-some)
+}
+
+token-set
+meta {
+    doc: """Turn a token response into a `TokenSet` (pure). `sent-refresh-token` is the token the request used (null otherwise); `now` is epoch ms."""
+}
+fn (body: Map, sent-refresh-token: Str?, now: Int): TokenSet {
+  returned get(body, "refresh_token")
+  refresh-token if(is-blank(returned), sent-refresh-token, Str(returned))
+  expires-in int-or-null(get(body, "expires_in"))
+  TokenSet({
+    access-token: Str(get(body, "access_token")),
+    refresh-token: refresh-token,
+    rotated: and(is-some(sent-refresh-token), is-some(refresh-token), ne(refresh-token, sent-refresh-token)),
+    expires-in: expires-in,
+    expires-at: if(is-some(expires-in), add(now, mul(or(expires-in, 0), 1000)), null),
+    token-type: get(body, "token_type"),
+    id-token: get(body, "id_token"),
+    scope: get(body, "scope")
+  })
+}
+
+send-token-request fn (req: HttpRequest, prefix: Str): Map {
+  response http-request(req)
+  cond {
+    is-err(response) => { err(token-error(prefix, err-message(response))) }
+    and(::hot::http/is-ok-response(response), is-map(response.body), is-some(get(response.body, "access_token"))) => { response.body }
+    => { err(token-error(prefix, {status: response.status, body: response.body})) }
+  }
+}
+
+exchange-code
+meta {
+    doc: """Exchange the authorization `code` for a `TokenSet`. Options: `client-id`, `client-secret` (else context; omit the secret for PKCE apps), `code-verifier`."""
+}
+fn
+(code: Str, redirect-uri: Str): TokenSet {
+  exchange-code(code, redirect-uri, {})
+},
+(code: Str, redirect-uri: Str, opts: Map): TokenSet {
+  app app-credentials(opts, false)
+  cond {
+    is-err(app) => { app }
+    => {
+      body send-token-request(
+        build-token-request(build-exchange-body(code, redirect-uri, get(opts, "code-verifier")), app.client-id, app.client-secret),
+        "xero: code exchange failed"
+      )
+      if(is-err(body), body, token-set(body, null, now-ms()))
+    }
+  }
+}
+
+refresh
+meta {
+    doc: """
+    Exchange a refresh token for a new `TokenSet` (no cache). Xero
+    returns a **new refresh token every time**: persist
+    `tokens.refresh-token` before using the access token. A reused or
+    expired refresh token gives `error-code: "invalid_grant"`; the user
+    must connect again. Options: `client-id`, `client-secret`.
+    """
+}
+fn
+(refresh-token: Str): TokenSet {
+  refresh(refresh-token, {})
+},
+(refresh-token: Str, opts: Map): TokenSet {
+  app app-credentials(opts, false)
+  cond {
+    is-err(app) => { app }
+    is-blank(refresh-token) => { err(token-error("xero: refresh needs a non-empty refresh token")) }
+    => {
+      body send-token-request(build-token-request(build-refresh-body(refresh-token), app.client-id, app.client-secret), "xero: token refresh failed")
+      if(is-err(body), body, token-set(body, refresh-token, now-ms()))
+    }
+  }
+}
+
+client-credentials
+meta {
+    doc: """
+    Get a Custom Connection token (client credentials grant). `scopes`
+    (Vec or Str) may be empty to receive every scope the connection was
+    granted. No refresh token; ask again when it expires (30 minutes).
+    Options: `client-id`, `client-secret`.
+    """
+}
+fn
+(scopes: Str | Vec): TokenSet {
+  client-credentials(scopes, {})
+},
+(scopes: Str | Vec, opts: Map): TokenSet {
+  app app-credentials(opts, true)
+  cond {
+    is-err(app) => { app }
+    => {
+      body send-token-request(
+        build-token-request(build-client-credentials-body(normalize-scopes(scopes)), app.client-id, app.client-secret),
+        "xero: client credentials grant failed"
+      )
+      if(is-err(body), body, token-set(body, null, now-ms()))
+    }
+  }
+}
+
+build-revoke-request
+meta {
+    doc: """Build the revocation `HttpRequest` (RFC 7009: form `token=...`, Basic client auth). Pure."""
+}
+fn (token: Str, client-id: Str, client-secret: Str): HttpRequest {
+  HttpRequest({
+    method: "POST",
+    url: ::xero/REVOKE_URL,
+    headers: {Authorization: basic-auth(client-id, client-secret), Content-Type: "application/x-www-form-urlencoded"},
+    body: ::uri/encode-query({token: token})
+  })
+}
+
+revoke
+meta {
+    doc: """Revoke a refresh token: every connection it authorised is removed. Returns true, or a `TokenError`."""
+}
+fn
+(refresh-token: Str): Bool {
+  revoke(refresh-token, {})
+},
+(refresh-token: Str, opts: Map): Bool {
+  app app-credentials(opts, true)
+  cond {
+    is-err(app) => { app }
+    => {
+      response http-request(build-revoke-request(refresh-token, app.client-id, or(app.client-secret, "")))
+      cond {
+        is-err(response) => { err(token-error("xero: token revocation failed", err-message(response))) }
+        ::hot::http/is-ok-response(response) => { true }
+        => { err(token-error("xero: token revocation failed", {status: response.status, body: response.body})) }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Connections (tenants)
+// ---------------------------------------------------------------------------
+
+connections
+meta {
+    doc: """
+    GET /connections - the organisations (tenants) an access token can
+    reach: `[{id, tenantId, tenantType, tenantName, authEventId,
+    createdDateUtc, updatedDateUtc}]`. Send a `tenantId` as
+    `xero-tenant-id` (`xero.tenant.id` or `opts.tenant-id`).
+    `auth-event-id` (from the access token's `authentication_event_id`
+    claim) limits the list to the organisations just connected.
+    """
+}
+fn
+(access-token: Str): Vec {
+  connections(access-token, null)
+},
+(access-token: Str, auth-event-id: Str?): Vec {
+  url if(is-blank(auth-event-id), ::xero/CONNECTIONS_URL, `${::xero/CONNECTIONS_URL}?authEventId=${::uri/encode(Str(auth-event-id))}`)
+  response http-request(HttpRequest({
+    method: "GET",
+    url: url,
+    headers: {Authorization: `Bearer ${access-token}`, Accept: "application/json"}
+  }))
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { or(response.body, []) }
+    => { err(token-error("xero: listing connections failed", {status: response.status, body: response.body})) }
+  }
+}
+
+delete-connection
+meta {
+    doc: """DELETE /connections/{id} - disconnect one organisation (the connection `id`, not the tenant id). Returns true, or a `TokenError`."""
+}
+fn (access-token: Str, connection-id: Str): Bool {
+  response http-request(HttpRequest({
+    method: "DELETE",
+    url: `${::xero/CONNECTIONS_URL}/${::uri/encode(connection-id)}`,
+    headers: {Authorization: `Bearer ${access-token}`}
+  }))
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { true }
+    => { err(token-error("xero: deleting the connection failed", {status: response.status, body: response.body})) }
+  }
+}

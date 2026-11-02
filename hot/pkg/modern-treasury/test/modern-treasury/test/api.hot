@@ -1,0 +1,296 @@
+::modern-treasury::test::api ns
+meta ["test"]
+
+::api ::modern-treasury::api
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Auth and environment
+// ============================================================================
+
+test-auth-header
+meta ["test"] fn () {
+    // base64("org_123:key_abc"), computed with Python
+    assert-eq("Basic b3JnXzEyMzprZXlfYWJj", ::api/auth-header("org_123", "key_abc"))
+}
+
+test-normalize-environment
+meta ["test"] fn () {
+    assert-eq("sandbox", ::api/normalize-environment(" Sandbox "))
+    assert-eq("production", ::api/normalize-environment("production"))
+    assert(is-err(::api/normalize-environment("test")), "unknown values err")
+    assert(is-err(::api/normalize-environment("live")))
+}
+
+test-current-environment
+meta ["test"] fn () {
+    assert-eq("production", ::api/current-environment(), "unset is treated as production, so simulations stay locked")
+    ::hot::ctx/set({"modern-treasury.environment": "sandbox"})
+    sandbox ::api/current-environment()
+    ::hot::ctx/set({"modern-treasury.environment": "sandbx"})
+    typo ::api/current-environment()
+    ::hot::ctx/set({"modern-treasury.environment": ""})
+    assert-eq("sandbox", sandbox)
+    assert(is-err(typo), "a typo errs")
+}
+
+test-require-sandbox
+meta ["test"] fn () {
+    assert-eq(true, ::api/require-sandbox("sandbox", "simulate"))
+    out ::api/require-sandbox("production", "create-incoming-payment-detail")
+    assert(is-err(out))
+    assert(contains(err-message(out), "create-incoming-payment-detail"))
+}
+
+test-call-without-credentials-errs-before-sending
+meta ["test"] fn () {
+    out ::api/call("GET", "/api/ping")
+    assert(is-err(out), "no credentials, no request")
+    assert(contains(err-message(out), "modern-treasury.api.key"))
+}
+
+test-call-with-bad-environment-errs-before-sending
+meta ["test"] fn () {
+    ::hot::ctx/set({"modern-treasury.environment": "staging"})
+    out ::api/call("GET", "/api/ping", {}, {organization-id: "org", api-key: "key"})
+    ::hot::ctx/set({"modern-treasury.environment": ""})
+    assert(is-err(out), "an invalid environment blocks every call")
+}
+
+// ============================================================================
+// Resolver: opts first, then context, then defaults
+// ============================================================================
+
+test-resolve-uses-context-when-opts-are-empty
+meta ["test"] fn () {
+    ::hot::ctx/set({"modern-treasury.organization.id": "org_123", "modern-treasury.api.key": "key_abc", "modern-treasury.environment": "sandbox"})
+    settings ::api/resolve({})
+    ::hot::ctx/set({"modern-treasury.organization.id": "", "modern-treasury.api.key": "", "modern-treasury.environment": ""})
+    assert-eq("org_123", settings.organization-id)
+    assert-eq("Basic b3JnXzEyMzprZXlfYWJj", settings.authorization)
+    assert-eq("sandbox", settings.environment)
+}
+
+test-resolve-opts-override-context
+meta ["test"] fn () {
+    ::hot::ctx/set({"modern-treasury.organization.id": "org_123", "modern-treasury.api.key": "key_abc"})
+    settings ::api/resolve({organization-id: "org_b", api-key: "key_b", environment: "sandbox", idempotency-key: "k1"})
+    key-only ::api/resolve({api-key: "key_b"})
+    after-org ::hot::ctx/get("modern-treasury.organization.id")
+    after-key ::hot::ctx/get("modern-treasury.api.key")
+    ::hot::ctx/set({"modern-treasury.organization.id": "", "modern-treasury.api.key": ""})
+    // base64("org_b:key_b"), computed with Python
+    assert-eq("Basic b3JnX2I6a2V5X2I=", settings.authorization, "opts credentials replace context")
+    assert-eq("sandbox", settings.environment)
+    assert-eq("k1", settings.idempotency-key)
+    assert(is-err(key-only), "an api-key in opts never pairs with the context organization")
+    assert-eq("org_123", after-org, "resolve never writes per-call credentials to context")
+    assert-eq("key_abc", after-key)
+}
+
+test-resolve-defaults-and-errors
+meta ["test"] fn () {
+    missing ::api/resolve({})
+    assert(is-err(missing), "no credentials anywhere is an error")
+    assert(contains(err-message(missing), "modern-treasury.api.key"), "and says where to set them")
+    defaulted ::api/resolve({organization-id: "o", api-key: "k"})
+    assert-eq("production", defaulted.environment, "production by default")
+    assert(is-err(::api/resolve({organization-id: "o", api-key: "k", environment: "test"})), "a bad environment in opts errs")
+    assert-eq("sandbox", ::api/environment-of({environment: "Sandbox"}))
+}
+
+// ============================================================================
+// Idempotency and fields
+// ============================================================================
+
+test-option-headers
+meta ["test"] fn () {
+    assert-eq({Idempotency-Key: "k1"}, ::api/option-headers({idempotency-key: "k1"}))
+    assert-eq({}, ::api/option-headers({}))
+    assert-eq({}, ::api/option-headers({idempotency-key: ""}))
+}
+
+test-require-idempotency-key
+meta ["test"] fn () {
+    assert-eq("k1", get(::api/require-idempotency-key({idempotency-key: "k1"}, "x"), "idempotency-key"))
+    missing ::api/require-idempotency-key({}, "create-payment-order")
+    assert(is-err(missing))
+    assert(contains(err-message(missing), "create-payment-order"))
+    assert(is-err(::api/require-idempotency-key({idempotency-key: " "}, "x")), "blank keys err")
+}
+
+test-require-fields
+meta ["test"] fn () {
+    assert-eq(["direction", "originating_account_id"], ::api/missing-fields({type: "ach", amount: 1}, ["type", "direction", "amount", "originating_account_id"]))
+    out ::api/require-fields({routing_number: "021000021"}, ["type"], "op")
+    assert(is-err(out))
+    assert(not(contains(err-message(out), "021000021")), "never echoes values")
+}
+
+// ============================================================================
+// Bodies and query strings
+// ============================================================================
+
+test-compact
+meta ["test"] fn () {
+    body ::api/compact({
+        type: "ach",
+        amount: 0,
+        nsf_protected: false,
+        description: null,
+        metadata: {a: "1", b: null},
+        line_items: [{amount: 1, description: null}]
+    })
+    assert-eq({type: "ach", amount: 0, nsf_protected: false, metadata: {a: "1"}, line_items: [{amount: 1}]}, body)
+    assert(not(contains(to-json(body), "null")))
+}
+
+test-query-string-brackets
+meta ["test"] fn () {
+    assert-eq("", ::api/query-string({}))
+    assert-eq("", ::api/query-string({after_cursor: null}))
+    assert-eq("?status=needs_approval&per_page=50", ::api/query-string({status: "needs_approval", per_page: 50, after_cursor: null}))
+    assert-eq("?metadata%5BType%5D=Loan", ::api/query-string({metadata: {Type: "Loan"}}), "the documented metadata[Type]=Loan form")
+    assert-eq("?id%5B%5D=a&id%5B%5D=b", ::api/query-string({id: ["a", "b"]}), "vectors repeat with []")
+    assert-eq("?id%5B%5D=a", ::api/query-string({"id[]": ["a"]}), "a key that already ends in [] isn't doubled")
+    assert-eq("?balances%5Bas_of_date%5D=2026-11-01", ::api/query-string({balances: {as_of_date: "2026-11-01"}}))
+    assert-eq("?posted=true", ::api/query-string({posted: true}))
+    assert-eq("?name=a%26b", ::api/query-string({name: "a&b"}))
+}
+
+test-seg
+meta ["test"] fn () {
+    assert-eq("0f8e3719-3dfd-4613-9bbf-c0333781b59f", ::api/seg("0f8e3719-3dfd-4613-9bbf-c0333781b59f"))
+    assert-eq("..%2Fpayment_orders", ::api/seg("../payment_orders"))
+}
+
+test-build-request
+meta ["test"] fn () {
+    req ::api/build-request("post", "https://app.moderntreasury.com/api/payment_orders",
+        {type: "ach", amount: 100, description: null}, {Idempotency-Key: "k1"}, "Basic abc")
+    assert-eq("POST", req.method)
+    assert-eq("Basic abc", req.headers.Authorization)
+    assert-eq("application/json", req.headers.Content-Type)
+    assert-eq("k1", get(req.headers, "Idempotency-Key"))
+    assert-eq({type: "ach", amount: 100}, from-json(req.body))
+
+    del ::api/build-request("DELETE", "https://app.moderntreasury.com/api/counterparties/x", {}, {}, "Basic abc")
+    assert-eq("", del.body)
+    assert(is-null(get(del.headers, "Content-Type")))
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-http-error
+meta ["test"] fn () {
+    e ::api/http-error(HttpResponse({
+        status: 422,
+        headers: {content-type: "application/json"},
+        body: {errors: {code: "parameter_invalid", message: "Amount must be greater than 0", parameter: "amount"}}
+    }))
+    assert-eq(422, e.status)
+    assert-eq("parameter_invalid", e.code)
+    assert-eq("amount", e.parameter)
+    assert-eq("Amount must be greater than 0", e.detail)
+    assert-eq("modern-treasury: HTTP 422 parameter_invalid (amount): Amount must be greater than 0", e.message)
+    wrapped err(e)
+    assert(::api/is-error-code(wrapped, "parameter_invalid"))
+    assert(not(::api/is-error-code(wrapped, "resource_not_found")))
+}
+
+test-http-error-redacts
+meta ["test"] fn () {
+    e ::api/http-error(HttpResponse({
+        status: 422,
+        headers: {},
+        body: "{\"errors\":{\"code\":\"parameter_invalid\",\"message\":\"Account number 123456789012 is invalid\",\"parameter\":\"account_number\"},\"account_number\":\"123456789012\"}"
+    }))
+    assert-eq("parameter_invalid", e.code, "a JSON text body is decoded")
+    assert-eq("Account number ****9012 is invalid", e.detail)
+    assert-eq("[redacted]", e.body.account_number)
+    assert(not(contains(to-json(untype(e)), "123456789012")), "the full number appears nowhere")
+}
+
+test-http-error-rate-limit-and-plain-text
+meta ["test"] fn () {
+    limited ::api/http-error(HttpResponse({status: 429, headers: {Retry-After: "2"}, body: {errors: {code: "too_many_requests", message: "Too many requests"}}}))
+    assert-eq(2, limited.retry_after, "Retry-After is read case-insensitively")
+    assert-eq("modern-treasury: HTTP 429 too_many_requests: Too many requests", limited.message)
+
+    gateway ::api/http-error(HttpResponse({status: 503, headers: {}, body: "Service Unavailable"}))
+    assert-eq("modern-treasury: HTTP 503: Service Unavailable", gateway.message)
+    assert(is-null(gateway.code))
+}
+
+test-redact
+meta ["test"] fn () {
+    out ::api/redact({account_details: [{account_number: "123456789", account_number_safe: "6789", id: "ad_1"}], routing_details: [{routing_number: "021000021", routing_number_type: "aba"}]})
+    assert-eq("[redacted]", out.account_details[0].account_number)
+    assert-eq("ad_1", out.account_details[0].id)
+    assert-eq("[redacted]", out.routing_details[0].routing_number)
+    assert-eq("aba", out.routing_details[0].routing_number_type)
+}
+
+test-parse-int
+meta ["test"] fn () {
+    assert-eq(3, ::api/parse-int("3"))
+    assert(is-null(::api/parse-int("soon")))
+    assert(is-null(::api/parse-int(null)))
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-header-is-case-insensitive
+meta ["test"] fn () {
+    assert-eq("abc", ::api/header({X-After-Cursor: "abc"}, "x-after-cursor"))
+    assert-eq("abc", ::api/header({x-after-cursor: "abc"}, "X-After-Cursor"))
+    assert(is-null(::api/header({}, "x-after-cursor")))
+    assert(is-null(::api/header(null, "x-after-cursor")))
+}
+
+test-page-from-response
+meta ["test"] fn () {
+    page ::api/page-from-response(HttpResponse({status: 200, headers: {x-after-cursor: "cur_2", x-per-page: "2"}, body: [{id: "a"}, {id: "b"}]}))
+    assert-eq([{id: "a"}, {id: "b"}], page.items)
+    assert-eq("cur_2", page.after_cursor)
+    assert-eq(2, page.per_page)
+
+    last ::api/page-from-response(HttpResponse({status: 200, headers: {x-per-page: "2"}, body: [{id: "c"}]}))
+    assert(is-null(last.after_cursor), "no header on the last page")
+
+    empty-cursor ::api/page-from-response(HttpResponse({status: 200, headers: {x-after-cursor: ""}, body: []}))
+    assert(is-null(empty-cursor.after_cursor))
+}
+
+test-next-page-params
+meta ["test"] fn () {
+    params {status: "completed", per_page: 2}
+    assert-eq({status: "completed", per_page: 2, after_cursor: "cur_2"}, ::api/next-page-params(params, {items: [{id: "a"}], after_cursor: "cur_2"}))
+    assert(is-null(::api/next-page-params(params, {items: [{id: "a"}], after_cursor: null})))
+    assert(is-null(::api/next-page-params(params, {items: [], after_cursor: "cur_2"})), "an empty page ends the walk")
+}
+
+fake-pages fn (params: Map): Map {
+    cursor get(params, "after_cursor")
+    cond {
+        is-null(cursor) => { {items: [{id: "a"}, {id: "b"}], after_cursor: "b"} }
+        eq(cursor, "b") => { {items: [{id: "c"}], after_cursor: "c"} }
+        => { {items: [{id: "d"}], after_cursor: null} }
+    }
+}
+
+test-collect-pages
+meta ["test"] fn () {
+    assert-eq(["a", "b", "c", "d"], map(::api/collect-pages(fake-pages, {}, 0, [], 0), %.id))
+    assert-eq(["a", "b", "c"], map(::api/collect-pages(fake-pages, {}, 3, [], 0), %.id), "stops at the limit")
+    failing (params) {
+        if(is-null(get(params, "after_cursor")), {items: [{id: "a"}], after_cursor: "a"}, err("modern-treasury: HTTP 500"))
+    }
+
+    assert(is-err(::api/collect-pages(failing, {}, 0, [], 0)), "a page Err is returned")
+}

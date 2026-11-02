@@ -1,0 +1,353 @@
+::cipherowl::monitoring ns
+meta {
+    doc: """
+    Continuous monitoring: pools of addresses that CipherOwl rescans,
+    and the feed of risk-level changes it records for them.
+
+    CipherOwl documents no webhooks for monitoring: changes are polled.
+    Run `poll-risk-changes` from a schedule, persist the returned
+    `page-token` (for example in a Hot store) and pass it back next time;
+    an empty page means you are caught up. Treat each record's
+    `changeId` as an idempotency key, since a resumed poll can return a
+    record twice. Records appear a couple of minutes after detection.
+    When a pool's `openCaseRiskLevels` are reached, CipherOwl also opens
+    a case (see `::cipherowl::cases`).
+
+    Risk levels, lowest to highest: `LOW` (the "no risk" floor),
+    `MEDIUM`, `HIGH`, `SEVERE`.
+    """
+}
+
+::api ::cipherowl::api
+
+seg ::cipherowl::api/seg
+query ::cipherowl::api/query
+
+POOLS_PATH "/api/monitoring/v1/pools"
+
+// Enrolment requests take at most this many addresses.
+MAX_ADDRESSES_PER_CALL 1000
+
+// ---------------------------------------------------------------------------
+// Pools
+// ---------------------------------------------------------------------------
+
+create-pool-request
+meta {
+    doc: """The spec for creating a pool. `pool` takes `name` (required, unique in your organization), `description`, `riskConfigs` (1 to 3 `{riskConfig, riskLevel}` bindings, e.g. `{riskConfig: "co-vasp", riskLevel: "HIGH"}`) and `openCaseRiskLevels` (levels that open a case). Exposed for testing."""
+}
+fn (pool: Map): Map {
+  body ::api/compact(untype(pool))
+  configs or(get(body, "riskConfigs"), [])
+  cond {
+    is-empty(trim(Str(or(get(body, "name"), "")))) => { err("cipherowl: a pool needs a name") }
+    or(lt(length(configs), 1), gt(length(configs), 3)) => { err("cipherowl: a pool needs 1 to 3 riskConfigs") }
+    => { {method: "POST", path: POOLS_PATH, body: body} }
+  }
+}
+
+create-pool
+meta {
+    doc: """
+    Create a monitoring pool. Returns `{pool: {id, name, riskConfigs, openCaseRiskLevels, ...}}`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::monitoring/create-pool({
+      name: "hot-wallets",
+      riskConfigs: [{riskConfig: "co-vasp", riskLevel: "HIGH"}],
+      openCaseRiskLevels: ["SEVERE"]
+    })
+    out.pool.id
+    ```
+    """
+}
+fn
+(pool: Map): Map {
+  create-pool(pool, {})
+},
+(pool: Map, opts: Map): Map {
+  ::api/call(create-pool-request(pool), opts)
+}
+
+list-pools
+meta {
+    doc: """One page of pools: `{pools, nextPageToken}`. `options` takes `pageSize` and `pageToken`."""
+}
+fn
+(): Map {
+  list-pools({}, {})
+},
+(options: Map): Map {
+  list-pools(options, {})
+},
+(options: Map, opts: Map): Map {
+  ::api/request("GET", `${POOLS_PATH}${query({pageSize: get(options, "pageSize"), pageToken: get(options, "pageToken")})}`, "", opts)
+}
+
+list-all-pools
+meta {doc: """Collect up to `limit` pools across pages."""}
+fn
+(limit: Int): Vec {
+  list-all-pools(limit, {})
+},
+(limit: Int, opts: Map): Vec {
+  ::api/collect-pages((token) { list-pools({pageToken: token}, opts) }, "pools", null, limit, [])
+}
+
+get-pool
+meta {doc: """A pool by id: `{pool}`."""}
+fn
+(pool-id: Str): Map {
+  get-pool(pool-id, {})
+},
+(pool-id: Str, opts: Map): Map {
+  ::api/request("GET", `${POOLS_PATH}/${seg(pool-id)}`, "", opts)
+}
+
+update-pool-request
+meta {
+    doc: """The spec for renaming a pool and/or replacing its `openCaseRiskLevels` (sent as `{levels: [...]}`); omitted fields are unchanged. Exposed for testing."""
+}
+fn (pool-id: Str, changes: Map): Map {
+  levels get(changes, "openCaseRiskLevels")
+  {
+    method: "PATCH",
+    path: `${POOLS_PATH}/${seg(pool-id)}`,
+    body: ::api/compact({name: get(changes, "name"), openCaseRiskLevels: if(is-vec(levels), {levels: levels}, null)})
+  }
+}
+
+update-pool
+meta {doc: """Rename a pool or replace its `openCaseRiskLevels`. Returns `{pool}`."""}
+fn
+(pool-id: Str, changes: Map): Map {
+  update-pool(pool-id, changes, {})
+},
+(pool-id: Str, changes: Map, opts: Map): Map {
+  ::api/call(update-pool-request(pool-id, changes), opts)
+}
+
+delete-pool
+meta {doc: """Delete a pool and stop monitoring its addresses. Returns `{success}`."""}
+fn
+(pool-id: Str): Map {
+  delete-pool(pool-id, {})
+},
+(pool-id: Str, opts: Map): Map {
+  ::api/request("DELETE", `${POOLS_PATH}/${seg(pool-id)}`, "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Members
+// ---------------------------------------------------------------------------
+
+address-entries
+meta {
+    doc: """Validate `[{chain, address, riskLevel?}]` entries for enrolment calls: each chain must be a known chain and each EVM address well-formed; 1 to 1000 entries. Exposed for testing."""
+}
+fn (entries: Vec<Map>): Vec<Map> {
+  cond {
+    is-empty(entries) => { err("cipherowl: at least one address is required") }
+    gt(length(entries), MAX_ADDRESSES_PER_CALL) => { err(`cipherowl: at most ${MAX_ADDRESSES_PER_CALL} addresses per call`) }
+    => {
+      problems filter(map(entries, (e) { entry-problem(e) }), is-some)
+      cond {
+        not(is-empty(problems)) => { err(first(problems)) }
+        => {
+          map(entries, (e) {
+            c lowercase(trim(Str(or(get(e, "chain"), ""))))
+            ::api/compact({chain: c, address: trim(Str(or(get(e, "address"), ""))), riskLevel: get(e, "riskLevel")})
+          })
+        }
+      }
+    }
+  }
+}
+
+members-request
+meta {
+    doc: """The spec for an enrolment call (`addresses`, `addresses:batchDelete` or `addresses:rebaseline`; the colon is part of the path) with validated entries. Exposed for testing."""
+}
+fn (pool-id: Str, leaf: Str, entries: Vec<Map>): Map {
+  checked address-entries(entries)
+  cond {
+    is-err(checked) => { checked }
+    => { {method: "POST", path: `${POOLS_PATH}/${seg(pool-id)}/${leaf}`, body: {addresses: checked}} }
+  }
+}
+
+entry-problem fn (entry: Map): Str? {
+  c ::api/validate-chain(Str(or(get(entry, "chain"), "")))
+  a if(is-err(c), c, ::api/validate-address(lowercase(trim(Str(or(get(entry, "chain"), "")))), Str(or(get(entry, "address"), ""))))
+  if(is-err(a), Str(err-value(a)), null)
+}
+
+list-addresses
+meta {
+    doc: """One page of a pool's members: `{members: [{chain, address, addedAt, initialRisk, currentRisk}], nextPageToken, totalCount}`. `options` takes `pageSize` (default 50, max 1000) and `pageToken`."""
+}
+fn
+(pool-id: Str): Map {
+  list-addresses(pool-id, {}, {})
+},
+(pool-id: Str, options: Map): Map {
+  list-addresses(pool-id, options, {})
+},
+(pool-id: Str, options: Map, opts: Map): Map {
+  ::api/request("GET", `${POOLS_PATH}/${seg(pool-id)}/addresses${query({pageSize: get(options, "pageSize"), pageToken: get(options, "pageToken")})}`, "", opts)
+}
+
+list-all-addresses
+meta {doc: """Collect up to `limit` members of a pool across pages."""}
+fn
+(pool-id: Str, limit: Int): Vec {
+  list-all-addresses(pool-id, limit, {})
+},
+(pool-id: Str, limit: Int, opts: Map): Vec {
+  ::api/collect-pages((token) { list-addresses(pool-id, {pageSize: 1000, pageToken: token}, opts) }, "members", null, limit, [])
+}
+
+add-addresses
+meta {
+    doc: """
+    Enrol addresses (`[{chain, address}]`, at most 1000) in a pool.
+    Returns `{addedCount, results: [{address, outcome}]}` with outcomes
+    `ADDED`, `RESURRECTED`, `SKIPPED_DUPLICATE` or `INVALID`. The call
+    has a 25-second budget: on a 504, list the pool before retrying.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::monitoring/add-addresses("3f2b9c1e-0000-4000-8000-000000000001", [
+      {chain: "evm", address: "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704"}
+    ])
+    ```
+    """
+}
+fn
+(pool-id: Str, entries: Vec<Map>): Map {
+  add-addresses(pool-id, entries, {})
+},
+(pool-id: Str, entries: Vec<Map>, opts: Map): Map {
+  ::api/call(members-request(pool-id, "addresses", entries), opts)
+}
+
+remove-addresses
+meta {
+    doc: """Stop monitoring addresses (`[{chain, address}]`). Returns `{removedCount, results}`."""
+}
+fn
+(pool-id: Str, entries: Vec<Map>): Map {
+  remove-addresses(pool-id, entries, {})
+},
+(pool-id: Str, entries: Vec<Map>, opts: Map): Map {
+  ::api/call(members-request(pool-id, "addresses:batchDelete", entries), opts)
+}
+
+rebaseline-addresses
+meta {
+    doc: """Move the baseline risk of members (`[{chain, address, riskLevel?}]`) so only future changes are reported. Returns `{rebaselinedCount, results: [{outcome: APPLIED | NOT_FOUND | NO_OP, newBaseline}]}`."""
+}
+fn
+(pool-id: Str, entries: Vec<Map>): Map {
+  rebaseline-addresses(pool-id, entries, {})
+},
+(pool-id: Str, entries: Vec<Map>, opts: Map): Map {
+  ::api/call(members-request(pool-id, "addresses:rebaseline", entries), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Risk changes (polled)
+// ---------------------------------------------------------------------------
+
+risk-changes-request
+meta {
+    doc: """The spec for one page of a pool's risk-change feed. `options` takes `pageSize` (default 50, max 1000), `pageToken` (resume position) and `since` (RFC 3339; ignored when a page token is given). Exposed for testing."""
+}
+fn (pool-id: Str, options: Map): Map {
+  token get(options, "pageToken")
+  {
+    method: "GET",
+    path: `${POOLS_PATH}/${seg(pool-id)}/risk-changes${query({
+      pageSize: get(options, "pageSize"),
+      pageToken: if(is-empty(or(token, "")), null, token),
+      since: get(options, "since")
+    })}`,
+    body: ""
+  }
+}
+
+list-risk-changes
+meta {
+    doc: """One page of risk-change records, oldest first: `{changes: [{changeId, chain, address, kind (SCAN | ENROLL | REBASELINE), previousRisk, currentRisk, initialRisk, detectedAt}], nextPageToken}`."""
+}
+fn
+(pool-id: Str, options: Map): Map {
+  list-risk-changes(pool-id, options, {})
+},
+(pool-id: Str, options: Map, opts: Map): Map {
+  ::api/call(risk-changes-request(pool-id, options), opts)
+}
+
+drain-pages
+meta {
+    doc: """Follow the risk-change feed from `token`, collecting `changes`, until an empty page or `max-pages`. Returns `{changes, page-token}`, where `page-token` is the position to resume from next time (the last non-empty page's `nextPageToken`, or the starting token when nothing was new). `fetch` takes a token and returns one page. Exposed for testing."""
+}
+fn (fetch: Fn, token: Str?, max-pages: Int, acc: Vec): Map {
+  cond {
+    lte(max-pages, 0) => { {changes: acc, page-token: token} }
+    => {
+      page fetch(token)
+      changes or(get(page, "changes"), [])
+      next ::api/next-page-token(page)
+      cond {
+        is-empty(changes) => { {changes: acc, page-token: token} }
+        is-null(next) => { {changes: concat(acc, changes), page-token: token} }
+        => { drain-pages(fetch, next, sub(max-pages, 1), concat(acc, changes)) }
+      }
+    }
+  }
+}
+
+poll-risk-changes
+meta {
+    doc: """
+    Read everything new in a pool's risk-change feed since `page-token`
+    (null the first time), up to `max-pages` pages of 1000. Returns
+    `{changes, page-token}`: handle `changes`, then persist `page-token`
+    for the next poll.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::monitoring/poll-risk-changes("3f2b9c1e-0000-4000-8000-000000000001", null, 5)
+    escalations filter(out.changes, (c) { in(c.currentRisk, ["HIGH", "SEVERE"]) })
+    ```
+    """
+}
+fn
+(pool-id: Str, page-token: Str?, max-pages: Int): Map {
+  poll-risk-changes(pool-id, page-token, max-pages, {})
+},
+(pool-id: Str, page-token: Str?, max-pages: Int, opts: Map): Map {
+  drain-pages((token) { list-risk-changes(pool-id, {pageSize: 1000, pageToken: token}, opts) }, page-token, max-pages, [])
+}
+
+risk-history
+meta {
+    doc: """The risk history of one pool member. `options` takes `pageSize` and `pageToken`."""
+}
+fn
+(pool-id: Str, chain: Str, address: Str, options: Map): Map {
+  risk-history(pool-id, chain, address, options, {})
+},
+(pool-id: Str, chain: Str, address: Str, options: Map, opts: Map): Map {
+  c ::api/validate-chain(chain)
+  a if(is-err(c), c, ::api/validate-address(c, address))
+  cond {
+    is-err(a) => { a }
+    => { ::api/request("GET", `${POOLS_PATH}/${seg(pool-id)}/chains/${seg(c)}/addresses/${seg(a)}/risk-history${query({pageSize: get(options, "pageSize"), pageToken: get(options, "pageToken")})}`, "", opts) }
+  }
+}

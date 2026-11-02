@@ -1,0 +1,598 @@
+::middesk::api ns
+meta {
+    ctx: {
+        "middesk.api.key": {required: true},
+        "middesk.env": {required: false, secret: false}
+    },
+    doc: """
+    Transport for the Middesk API: environment selection from the key
+    prefix, Basic auth with the API key as the username, JSON bodies with
+    unset fields dropped, page-number pagination (`page`, `per_page`,
+    `has_more`), and errors parsed into `HttpError` with TINs, SSNs and
+    birth dates redacted.
+
+    **No retries.** Nothing here retries or waits. Middesk allows about
+    20 requests per second per key (and 5 per 15 seconds for
+    `PATCH /businesses/{id}`); a 429 comes back as `err(HttpError)`. Check
+    `is-retryable` and let a handler or schedule `retry` policy back off.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+::b64 ::hot::base64
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+USER_AGENT "hot-dev-middesk/0.1.0"
+
+// Safety stop for `collect`.
+MAX_PAGES 1000
+
+RETRYABLE_STATUSES [408, 429, 500, 502, 503, 504]
+
+// Keys whose values are never kept in an `HttpError`, compared after
+// lowercasing and dropping `-` and `_`.
+SENSITIVE_KEYS ["tin", "ssn", "dob", "socialsecuritynumber", "dateofbirth", "birthdate", "secret", "apikey", "authorization", "downloadurl"]
+
+// ---------------------------------------------------------------------------
+// Redaction
+// ---------------------------------------------------------------------------
+
+redact-text
+meta {
+    doc: """Mask what could be PII in free text: runs of four or more digits (allowing spaces, dots, slashes and dashes inside, so TINs, SSNs and birth dates) become `[redacted]`, and email addresses become `[redacted-email]`. Exposed for testing."""
+}
+fn (text: Str): Str {
+  text
+    |> ::re/replace-all("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", "[redacted-email]")
+    |> ::re/replace-all("[0-9][0-9 ./-]{2,}[0-9]", "[redacted]")
+}
+
+is-sensitive-key
+meta {
+    doc: """True for an attribute name in `SENSITIVE_KEYS` in any casing (`tin`, `ssn`, `dob`, `download_url`, ...). Exposed for testing."""
+}
+fn (key: Any): Bool {
+  normalized lowercase(Str(key)) |> replace("-", "") |> replace("_", "")
+  in(normalized, SENSITIVE_KEYS)
+}
+
+redact
+meta {
+    doc: """Remove PII from a decoded body: values under sensitive keys become `"[redacted]"`, other strings are masked by `redact-text`. Applied to every `HttpError`. Exposed for testing."""
+}
+fn (value: Any): Any {
+  cond {
+    is-map(value) => {
+      reduce(keys(value), (acc, k) {
+        v get(value, k)
+        assoc(acc, k, if(and(is-sensitive-key(k), is-some(v)), "[redacted]", redact(v)))
+      }, {})
+    }
+
+    is-vec(value) => { map(value, (item) { redact(item) }) }
+    is-str(value) => { redact-text(value) }
+    => { value }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx Middesk response.
+
+    - `status`: the HTTP status (422 for validation errors, 429 for rate
+      limits)
+    - `errors`: Middesk's `errors` array, each `{message, parameter?}`
+      (redacted)
+    - `parameter`: the first error's `parameter`, e.g. `"name"`
+    - `retry-after`: the `Retry-After` header in seconds, else null (only
+      the sandbox creation limit sends it)
+    - `message`: one readable line, e.g.
+      `"middesk: HTTP 422: Name is required (name)"`
+    - `headers`, `body`: the response, with the body redacted
+
+    TINs, SSNs, birth dates and long digit runs are redacted from `body`,
+    `errors` and `message`, so an `HttpError` is safe to log.
+    """
+}
+type {
+    status: Int,
+    headers: Map,
+    body: Any,
+    message: Str,
+    errors: Vec,
+    parameter: Str?,
+    retry-after: Int?
+}
+
+parse-int
+meta {
+    doc: """An Int from an Int or a decimal-digit Str; null for anything else. Never errs on bad input. Exposed for testing."""
+}
+fn (value: Any): Int? {
+  cond {
+    is-int(value) => { value }
+    not(is-str(value)) => { null }
+    // WORKAROUND(hot-bug-6): Int("abc") halts the run; match the digits first.
+    ::re/is-match(trim(value), "^-?[0-9]{1,15}$") => { Int(trim(value)) }
+    => { null }
+  }
+}
+
+decode-body fn (body: Any): Any {
+  cond {
+    is-bytes(body) => {
+      parsed from-json(Str(body))
+      if(is-err(parsed), Str(body), parsed)
+    }
+
+    is-str(body) => {
+      trimmed trim(body)
+      cond {
+        or(starts-with(trimmed, "{"), starts-with(trimmed, "[")) => {
+          parsed from-json(trimmed)
+          if(is-err(parsed), body, parsed)
+        }
+        => { body }
+      }
+    }
+    => { body }
+  }
+}
+
+error-entries
+meta {
+    doc: """Middesk's `errors` from a decoded error body as `{message, parameter}` entries (absent parts null). Exposed for testing."""
+}
+fn (body: Any): Vec {
+  errors if(is-map(body), get(body, "errors"), null)
+  cond {
+    not(is-vec(errors)) => { [] }
+    => {
+      map(filter(errors, is-map), (e) {
+        {
+          message: if(is-str(get(e, "message")), get(e, "message"), null),
+          parameter: if(is-str(get(e, "parameter")), get(e, "parameter"), null)
+        }
+      })
+    }
+  }
+}
+
+error-message
+meta {
+    doc: """The readable `message` for an error: `middesk: HTTP {status}: {message} ({parameter}); ...`, or a short excerpt of a text body (Middesk's 429 body is `Retry later`). Passed through `redact-text`. Exposed for testing."""
+}
+fn (status: Int, body: Any): Str {
+  entries error-entries(body)
+  described filter(map(entries, (e) {
+    text or(e.message, "")
+    if(is-some(e.parameter), `${text} (${e.parameter})`, text)
+  }), (s) { not(is-empty(trim(s))) })
+
+  text cond {
+    not(is-empty(described)) => { join(described, "; ") }
+    and(is-str(body), not(is-empty(trim(or(body, ""))))) => {
+      t trim(body)
+      if(gt(length(t), 200), `${slice(t, 0, 200)}...`, t)
+    }
+    => { "no error details" }
+  }
+
+  `middesk: HTTP ${status}: ${redact-text(text)}`
+}
+
+http-error
+meta {
+    doc: """Build the `HttpError` for a non-2xx response: decode and redact the body, lift the first error's `parameter`, read `Retry-After`. Exposed for testing; every request uses it."""
+}
+fn (response: Map): HttpError {
+  headers or(get(response, "headers"), {})
+  body redact(decode-body(get(response, "body")))
+  entries error-entries(body)
+  raw-errors if(is-map(body), get(body, "errors"), null)
+  // WORKAROUND(hot-bug-1): build HttpError in an explicit function, never via T(response) or an arrow.
+  HttpError({
+    status: response.status,
+    headers: headers,
+    body: body,
+    message: error-message(response.status, body),
+    errors: if(is-vec(raw-errors), raw-errors, []),
+    parameter: if(is-empty(entries), null, first(entries).parameter),
+    retry-after: parse-int(get(headers, "retry-after"))
+  })
+}
+
+// WORKAROUND(hot-bug-1): HttpError(response) ignores this arrow and copies
+// fields, so the package always calls `http-error` directly. The arrow is
+// kept for callers that coerce a response themselves.
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  http-error(response)
+}
+
+plain-error fn (error: Result): Any {
+  payload if(is-err(error), err-value(error), error)
+  if(or(is-null(payload), is-str(payload)), payload, untype(payload))
+}
+
+error-status
+meta {
+    doc: """The HTTP status of a failed call (an `HttpError` or a `Result.Err` holding one), or null for transport errors."""
+}
+fn (error: Result): Int? {
+  payload plain-error(error)
+  if(is-map(payload), get(payload, "status"), null)
+}
+
+is-retryable
+meta {
+    doc: """True when a failed call is worth retrying later: HTTP 408, 429, 500, 502, 503 or 504."""
+}
+fn (error: Result): Bool {
+  status error-status(error)
+  and(is-some(status), in(status, RETRYABLE_STATUSES))
+}
+
+// ---------------------------------------------------------------------------
+// Environment and auth
+// ---------------------------------------------------------------------------
+
+key-env
+meta {
+    doc: """The environment a key belongs to by prefix: `mk_test_` is `"sandbox"`, `mk_live_` is `"production"`, anything else null. Exposed for testing."""
+}
+fn (api-key: Str): Str? {
+  cond {
+    starts-with(api-key, "mk_test_") => { "sandbox" }
+    starts-with(api-key, "mk_live_") => { "production" }
+    => { null }
+  }
+}
+
+resolve-env
+meta {
+    doc: """
+    The environment for a key and an optional configured name: the key's
+    prefix decides; a configured `"sandbox"`/`"production"` must agree with
+    it (Middesk rejects a key on the other host) and is used for keys
+    without a known prefix; neither gives `"sandbox"`. An unknown name or
+    a mismatch is an Err. Exposed for testing.
+    """
+}
+fn (api-key: Str, configured: Str?): Str {
+  from-key key-env(api-key)
+  name if(is-some(configured), lowercase(trim(configured)), "")
+  cond {
+    and(not(is-empty(name)), not(in(name, ["sandbox", "production"]))) => {
+      err(`middesk: middesk.env must be "sandbox" or "production" (got '${configured}')`)
+    }
+
+    and(is-some(from-key), not(is-empty(name)), ne(from-key, name)) => {
+      err(`middesk: middesk.env is "${name}" but the API key is a ${from-key} key; Middesk keys only work on their own host`)
+    }
+
+    is-some(from-key) => { from-key }
+    not(is-empty(name)) => { name }
+    => { ::middesk/DEFAULT_ENV }
+  }
+}
+
+base-url
+meta {
+    doc: """The base URL for an environment name (see `::middesk/ENVIRONMENTS`)."""
+}
+fn (env: Str): Str {
+  get(::middesk/ENVIRONMENTS, env)
+}
+
+auth-header
+meta {
+    doc: """Middesk Basic auth: the API key as the username and an empty password, `Basic base64("{key}:")`. Exposed for testing."""
+}
+fn (api-key: Str): Str {
+  credentials `${api-key}:`
+  `Basic ${::b64/encode(Bytes(credentials))}`
+}
+
+RequestOptions
+meta {
+    doc: """
+    Per-request options, the optional last argument of every function
+    that calls the API. A plain Map with the same keys works too.
+
+    - `api-key`: overrides `middesk.api.key` for this call
+    - `env`: overrides `middesk.env` for this call
+
+    Middesk has no idempotency keys. To make a create safe to retry, set
+    `unique_external_id` on the business: Middesk refuses a second
+    business with the same value.
+    """
+}
+type {
+    api-key: Str?,
+    env: Str?
+}
+
+non-blank fn (value: Any): Str? {
+  if(and(is-str(value), not(is-empty(trim(or(value, ""))))), trim(value), null)
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: `{api-key, env}` for a call from `options`
+    first (`api-key`, `env`), then `ctx-values` (a Map of context
+    variables), then defaults. An `api-key` in `options` means the
+    context key is never read for that call. An Err when no key is set or
+    the environment is invalid (see `resolve-env`). Nothing is written to
+    ctx. Exposed for testing; `resolve` feeds it the context.
+    """
+}
+fn (options: Map, ctx-values: Map): Map {
+  key or(non-blank(get(options, "api-key")), non-blank(get(ctx-values, "middesk.api.key")))
+  configured or(non-blank(get(options, "env")), non-blank(get(ctx-values, "middesk.env")))
+  cond {
+    is-null(key) => { err("middesk: middesk.api.key is not set. Add your Middesk API key in Context Variables, or pass {api-key: ...} in the call's options.") }
+    => {
+      env resolve-env(key, configured)
+      if(is-err(env), env, {api-key: key, env: env})
+    }
+  }
+}
+
+resolve
+meta {
+    ctx: {
+        "middesk.api.key": {required: true},
+        "middesk.env": {required: false, secret: false}
+    },
+    doc: """
+    Credentials for one call: `options` (a `RequestOptions` or a plain Map
+    with `api-key`, `env`) over the context variables (see
+    `resolve-from`). Per-call keys stay in the call; nothing is written to
+    ctx, so parallel flows and tenants never share them.
+    """
+}
+fn (options: Any): Map {
+  opts if(is-null(options), {}, untype(options))
+  resolve-from(opts, {"middesk.api.key": ::ctx/get("middesk.api.key"), "middesk.env": ::ctx/get("middesk.env")})
+}
+
+// ---------------------------------------------------------------------------
+// Bodies and query strings
+// ---------------------------------------------------------------------------
+
+compact
+meta {
+    doc: """Drop null values recursively through maps and the maps inside vectors. `false`, `0` and `""` are kept. Exposed for testing."""
+}
+fn (value: Any): Any {
+  cond {
+    is-map(value) => {
+      reduce(keys(value), (acc, k) {
+        v get(value, k)
+        if(is-null(v), acc, assoc(acc, k, compact(v)))
+      }, {})
+    }
+
+    is-vec(value) => { map(filter(value, is-some), (item) { compact(item) }) }
+    => { value }
+  }
+}
+
+query-string
+meta {
+    doc: """`?a=1&b=2` from `params`, dropping nulls; Vec values are comma-joined (Middesk's `tags=a,b` style). `""` when nothing remains. Exposed for testing."""
+}
+fn (params: Map): Str {
+  kept filter-vals(untype(params), is-some)
+  pairs map(keys(kept), (k) {
+    v get(kept, k)
+    text if(is-vec(v), join(map(v, (x) { Str(x) }), ","), Str(v))
+    `${::uri/encode(Str(k))}=${::uri/encode(text)}`
+  })
+  if(is-empty(pairs), "", `?${join(pairs, "&")}`)
+}
+
+seg
+meta {
+    doc: """Percent-encode one path segment (an id)."""
+}
+fn (id: Any): Str {
+  ::uri/encode(Str(id))
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+build-request
+meta {
+    doc: """Build (without sending) the `HttpRequest` for a Middesk call. A non-empty Map `body` is compacted and JSON-encoded; otherwise no body is sent. Exposed for testing."""
+}
+fn (method: Str, url: Str, body: Any, api-key: Str): HttpRequest {
+  payload if(is-map(body), compact(untype(body)), null)
+  has-body and(is-map(payload), not(is-empty(payload)))
+  base {Authorization: auth-header(api-key), Accept: "application/json", User-Agent: USER_AGENT}
+  HttpRequest({
+    method: uppercase(method),
+    url: url,
+    headers: if(has-body, {...base, Content-Type: "application/json"}, base),
+    body: if(has-body, to-json(payload), "")
+  })
+}
+
+response-body fn (body: Any): Any {
+  cond {
+    and(is-str(body), is-empty(trim(or(body, "")))) => { null }
+    => { body }
+  }
+}
+
+send
+meta {
+    doc: """
+    Send one Middesk request: `path` is relative to `/v1`, `query` becomes
+    the query string, a Map `body` the JSON body (`null` sends none).
+    Returns the decoded body on 2xx, or an Err: `HttpError` for non-2xx,
+    or the transport error.
+    """
+}
+fn (method: Str, path: Str, query: Map, body: Any, options: RequestOptions): Any {
+  creds resolve(options)
+  cond {
+    is-err(creds) => { creds }
+    => {
+      url `${base-url(creds.env)}${path}${query-string(query)}`
+      response ::hot::http/request(build-request(method, url, body, creds.api-key))
+      cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { response-body(response.body) }
+        => { err(http-error(response)) }
+      }
+    }
+  }
+}
+
+call
+meta {
+    doc: """
+    Call a Middesk endpoint by path (relative to `/v1`) and return the
+    decoded JSON, or an Err carrying `HttpError`. `params` become the
+    query string for GET and DELETE and the JSON body otherwise. The
+    escape hatch for endpoints without a typed wrapper.
+
+    **Example**
+
+    ```hot
+    ::middesk::api/call("GET", "/tin_match/availability")
+    ::middesk::api/call("POST", "/identities/autocomplete", {name: "Acme Robotics"})
+    ```
+    """
+}
+fn
+(method: Str, path: Str): Any {
+  call(method, path, {}, RequestOptions({}))
+},
+(method: Str, path: Str, params: Map): Any {
+  call(method, path, params, RequestOptions({}))
+},
+(method: Str, path: Str, params: Map, options: RequestOptions): Any {
+  m uppercase(method)
+  in-query or(eq(m, "GET"), eq(m, "DELETE"))
+  send(m, path, if(in-query, params, {}), if(in-query, null, params), options)
+}
+
+get-bytes
+meta {
+    doc: """GET a binary endpoint (e.g. `/businesses/{id}/pdf`) and return the body as `Bytes`, or an Err carrying `HttpError`. The bytes are never put into errors or logs."""
+}
+fn (path: Str, options: RequestOptions): Bytes {
+  creds resolve(options)
+  cond {
+    is-err(creds) => { creds }
+    => {
+      req build-request("GET", `${base-url(creds.env)}${path}`, null, creds.api-key)
+      response ::hot::http/request(HttpRequest({...untype(req), headers: {...req.headers, Accept: "application/pdf, */*"}}))
+      cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { or(response.body-bytes, Bytes("")) }
+        => { err(http-error(response)) }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+next-page
+meta {
+    doc: """The page number after `page` when the list response says `has_more: true`, else null. `current` is the page that was requested (1 when unset)."""
+}
+fn (response: Any, current: Int): Int? {
+  more if(is-map(response), get(response, "has_more"), null)
+  if(eq(more, true), add(current, 1), null)
+}
+
+list-page
+meta {
+    doc: """
+    GET one page of a list endpoint. `params` takes `page` (from 1) and
+    `per_page`, plus the endpoint's filters. Returns `{object: "list",
+    data, has_more, total_count}`; continue with `next-page`.
+
+    **Example**
+
+    ```hot
+    page ::middesk::api/list-page("/businesses", {page: 1, per_page: 10, status: "in_review"})
+    ```
+    """
+}
+fn
+(path: Str, params: Map): Any {
+  list-page(path, params, RequestOptions({}))
+},
+(path: Str, params: Map, options: RequestOptions): Any {
+  send("GET", path, params, null, options)
+}
+
+collect-pages
+meta {
+    doc: """Follow page numbers, concatenating each page's `data`, until `limit` items, `has_more: false`, an empty page, or `MAX_PAGES`. `fetch` takes the page number and returns one list page; the first Err is returned. Exposed for testing; `collect` uses it."""
+}
+fn (fetch: Fn, page-number: Int, limit: Int, acc: Vec): Vec {
+  page fetch(page-number)
+  cond {
+    is-err(page) => { page }
+    => {
+      items or(get(page, "data"), [])
+      combined concat(acc, items)
+      next next-page(page, page-number)
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        is-null(next) => { combined }
+        gte(page-number, MAX_PAGES) => { combined }
+        => { collect-pages(fetch, next, limit, combined) }
+      }
+    }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Collect up to `limit` objects from a list endpoint, following
+    `has_more`. `params` takes the endpoint's filters (and `per_page`).
+
+    **Example**
+
+    ```hot
+    in-review ::middesk::api/collect("/businesses", {status: "in_review"}, 200)
+    ```
+    """
+}
+fn
+(path: Str, params: Map, limit: Int): Vec {
+  collect(path, params, limit, RequestOptions({}))
+},
+(path: Str, params: Map, limit: Int, options: RequestOptions): Vec {
+  cond {
+    lte(limit, 0) => { [] }
+    => {
+      per-page or(get(params, "per_page"), ::middesk/DEFAULT_PER_PAGE)
+      collect-pages((n) { list-page(path, {...params, page: n, per_page: per-page}, options) }, 1, limit, [])
+    }
+  }
+}

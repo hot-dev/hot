@@ -1,0 +1,646 @@
+::xero::api ns
+meta {
+    ctx: {"xero.tenant.id": {required: false, secret: false}},
+    doc: """
+    The authenticated request helpers for the Xero Accounting API, plus
+    `HttpError` with validation errors and rate limits, retry
+    classification, paging, and Xero date parsing.
+
+    **Tenant.** Every call sends `xero-tenant-id`: `opts.tenant-id`, else
+    the `xero.tenant.id` context variable (from
+    `::xero::oauth/connections`). Custom Connections reach one
+    organisation and may omit it. Tenant ids must be GUIDs.
+
+    **Per-call options** (besides credentials): `tenant-id`,
+    `if-modified-since` (only records changed since; a timestamp such as
+    `2026-10-01T00:00:00`, UTC), `idempotency-key` (up to 128
+    characters; Xero returns the original result for a repeated key on a
+    write, and the call becomes eligible for the one immediate retry),
+    and `retry: false`.
+
+    **Rate limits.** Per organisation: 60 calls a minute and 5,000 a day
+    (1,000 a day on the free Starter tier), 5 concurrent calls; 10,000 a
+    minute across the app. Xero reports what is left in
+    `X-MinLimit-Remaining`, `X-DayLimit-Remaining` and
+    `X-AppMinLimit-Remaining`. `rate-limits(headers)` reads them;
+    `last-rate-limits(opts)` returns the latest for a tenant in this run,
+    and `HttpError.rate-limits` carries them. A 429 has `Retry-After`
+    (seconds) and `X-Rate-Limit-Problem` (`minute`, `day` or
+    `appminute`). This package never waits: check `is-retryable` and let
+    a Hot `retry` policy back off; for a `day` problem, retry tomorrow.
+    """
+}
+
+::auth ::xero::auth
+::ctx ::hot::ctx
+::re ::hot::regex
+::uri ::hot::uri
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+is-blank ::xero::oauth/is-blank
+int-or-null ::xero::oauth/int-or-null
+
+RETRY_STATUSES [408, 429, 500, 502, 503, 504]
+GUID_PATTERN "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+MAX_PAGES 10000
+
+// ---------------------------------------------------------------------------
+// Rate limits and errors
+// ---------------------------------------------------------------------------
+
+rate-limits
+meta {
+    doc: """
+    Rate-limit state from response headers (pure): `{minute-remaining,
+    day-remaining, app-minute-remaining, retry-after, problem}`, each
+    null when absent. `problem` is Xero's `X-Rate-Limit-Problem`
+    (`minute`, `day`, `appminute`) on a 429.
+    """
+}
+fn (headers: Map?): Map {
+  h or(headers, {})
+  {
+    minute-remaining: int-or-null(get(h, "x-minlimit-remaining")),
+    day-remaining: int-or-null(get(h, "x-daylimit-remaining")),
+    app-minute-remaining: int-or-null(get(h, "x-appminlimit-remaining")),
+    retry-after: int-or-null(get(h, "retry-after")),
+    problem: get(h, "x-rate-limit-problem")
+  }
+}
+
+HttpError
+meta {
+    doc: """
+    A non-2xx Xero response.
+
+    - `status`, `headers`, `body` - the raw response
+    - `message` - readable, e.g. `"xero: HTTP 400 ValidationException:
+      A validation exception occurred: Email address must be valid."`
+    - `error-type`, `error-number` - Xero's `Type` / `ErrorNumber`
+      (`ValidationException`, `QueryParseException`, ...)
+    - `validation-errors` - every `Elements[].ValidationErrors[].Message`
+      (and top-level `ValidationErrors`), de-duplicated
+    - `rate-limits` - see `rate-limits`; `retry-after` - seconds on a 429
+    - `correlation-id` - the `xero-correlation-id` header, for Xero support
+    """
+}
+type {
+    status: Int,
+    headers: Map?,
+    body: Any,
+    message: Str,
+    error-type: Str?,
+    error-number: Int?,
+    validation-errors: Vec?,
+    rate-limits: Map?,
+    retry-after: Int?,
+    correlation-id: Str?
+}
+
+decode-body fn (body: Any): Any {
+  text cond {
+    is-bytes(body) => { Str(body) }
+    is-str(body) => { body }
+    => { null }
+  }
+
+  cond {
+    is-null(text) => { body }
+    or(starts-with(trim(text), "{"), starts-with(trim(text), "[")) => {
+      parsed from-json(trim(text))
+      if(is-err(parsed), text, parsed)
+    }
+    => { text }
+  }
+}
+
+messages-of fn (errors: Any): Vec {
+  map(filter(or(errors, []), (e) { and(is-map(e), is-some(get(e, "Message"))) }), (e) { Str(get(e, "Message")) })
+}
+
+validation-messages
+meta {
+    doc: """Every validation message in an error body (pure): top-level `ValidationErrors` and each `Elements[].ValidationErrors`, de-duplicated, in order."""
+}
+fn (body: Any): Vec {
+  cond {
+    not(is-map(body)) => { [] }
+    => {
+      elements if(is-vec(get(body, "Elements")), get(body, "Elements"), [])
+      nested mapcat(filter(elements, is-map), (el) { messages-of(get(el, "ValidationErrors")) })
+      distinct(concat(messages-of(get(body, "ValidationErrors")), nested))
+    }
+  }
+}
+
+body-excerpt fn (body: Any): Str {
+  text cond {
+    is-null(body) => { "" }
+    is-str(body) => { body }
+    is-bytes(body) => { Str(body) }
+    => { to-json(untype(body)) }
+  }
+
+  if(gt(length(text), 300), `${slice(text, 0, 300)}...`, text)
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` with a readable `message` from a response (`{status, headers, body}`). Pure; exposed for testing."""
+}
+fn (response: Map): HttpError {
+  headers or(get(response, "headers"), {})
+  body decode-body(get(response, "body"))
+  m if(is-map(body), body, {})
+  vmsgs validation-messages(body)
+  limits rate-limits(headers)
+  error-type or(get(m, "Type"), get(m, "Title"))
+  base cond {
+    is-some(get(m, "Message")) => { Str(get(m, "Message")) }
+    is-some(get(m, "Detail")) => { Str(get(m, "Detail")) }
+    is-some(get(m, "error")) => { Str(get(m, "error")) }
+    => { body-excerpt(body) }
+  }
+
+  rate-part cond {
+    eq(response.status, 429) => {
+      problem if(is-some(limits.problem), ` (${limits.problem} limit)`, "")
+      wait if(is-some(limits.retry-after), `; retry after ${limits.retry-after}s`, "")
+      `rate limited${problem}${wait}`
+    }
+    => { "" }
+  }
+
+  detail cond {
+    not(is-empty(vmsgs)) => { `${base}: ${join(vmsgs, "; ")}` }
+    and(eq(response.status, 429), is-empty(trim(base))) => { rate-part }
+    eq(response.status, 429) => { `${base} (${rate-part})` }
+    => { base }
+  }
+
+  type-part if(is-some(error-type), ` ${error-type}`, "")
+  // WORKAROUND(hot-bug-1): build HttpError in an explicit function, never via T(response) or an arrow.
+  HttpError({
+    status: response.status,
+    headers: headers,
+    body: body,
+    message: `xero: HTTP ${response.status}${type-part}: ${detail}`,
+    error-type: error-type,
+    error-number: int-or-null(get(m, "ErrorNumber")),
+    validation-errors: vmsgs,
+    rate-limits: limits,
+    retry-after: limits.retry-after,
+    correlation-id: get(headers, "xero-correlation-id")
+  })
+}
+
+plain-payload fn (value: Result): Any {
+  payload if(is-err(value), err-value(value), value)
+  if(or(is-null(payload), is-str(payload)), payload, untype(payload))
+}
+
+is-connection-failure
+meta {
+    doc: """True when a transport error message is a connection or read failure, not a size-limit or URL error."""
+}
+fn (message: Str): Bool {
+  and(
+    or(contains(message, "request failed"), contains(message, "failed to read body")),
+    not(contains(message, "exceeds"))
+  )
+}
+
+is-retryable
+meta {
+    doc: """
+    True when a failed call is worth retrying later: an `HttpError` (or
+    Err holding one) with status 408, 429 or 5xx, or a connection
+    failure. False for successes and permanent errors (400 validation,
+    401, 403, 404). A 429 with `rate-limits.problem: "day"` is retryable
+    only after the daily reset; schedule accordingly.
+
+    ```hot
+    sync-xero
+    meta {schedule: "every 30 minutes", retry: {attempts: 5, delay: 5000, backoff: "exponential", max_delay: 120000}}
+    fn (event) {
+      page ::xero::accounting/list-page("Invoices", {page: 1})
+      cond {
+        ::xero::api/is-retryable(page) => { fail(`xero: retrying later: ${err-message(page)}`) }
+        is-err(page) => { println(`xero: giving up: ${err-message(page)}`) }
+        => { length(page.items) }
+      }
+    }
+    ```
+    """
+}
+fn (error: Result): Bool {
+  payload plain-payload(error)
+  cond {
+    is-str(payload) => { is-connection-failure(payload) }
+    not(is-map(payload)) => { false }
+    is-int(get(payload, "status")) => { in(payload.status, RETRY_STATUSES) }
+    is-str(get(payload, "message")) => { is-connection-failure(payload.message) }
+    => { false }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dates
+// ---------------------------------------------------------------------------
+
+parse-date
+meta {
+    doc: """
+    Xero's JSON date (`"/Date(1761955200000+0000)/"`) as epoch
+    milliseconds (Int), or null for anything else. Xero also sends ISO
+    strings in fields such as `DateString`; read those directly.
+    """
+}
+fn (value: Any): Int? {
+  cond {
+    not(is-str(value)) => { null }
+    => {
+      m ::re/capture(value, "^/Date\\((-?[0-9]{1,15})([+-][0-9]{4})?\\)/$")
+      groups if(is-map(m), or(get(m, "groups"), []), [])
+      if(is-empty(groups), null, int-or-null(first(groups)))
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tenant and URLs (pure apart from context reads)
+// ---------------------------------------------------------------------------
+
+validate-tenant-id
+meta {doc: """A tenant id (GUID) or null when blank; anything else is an Err. Pure."""}
+fn (value: Any): Str? {
+  cond {
+    is-blank(value) => { null }
+    ::re/is-match(trim(Str(value)), GUID_PATTERN) => { trim(Str(value)) }
+    => { err(`xero: a tenant id must be a GUID (got '${value}')`) }
+  }
+}
+
+tenant-id
+meta {
+    doc: """The tenant for a call: `opts.tenant-id`, else `xero.tenant.id`; null when neither is set."""
+}
+fn (opts: Map): Str? {
+  validate-tenant-id(or(get(opts, "tenant-id"), ::ctx/get("xero.tenant.id")))
+}
+
+encode-param fn (value: Any): Str {
+  cond {
+    is-bool(value) => { if(value, "true", "false") }
+    is-vec(value) => { join(map(filter(value, is-some), encode-param), ",") }
+    => { ::uri/encode(Str(value)) }
+  }
+}
+
+query-string
+meta {
+    doc: """
+    Build a `?a=1&b=2` suffix (pure): nulls dropped, Bools as
+    `true`/`false`, Vecs comma-joined (`IDs`, `Statuses`, `ContactIDs`),
+    keys and values percent-encoded (spaces as `%20`, `"` as `%22`).
+    `""` when nothing remains.
+    """
+}
+fn (params: Map): Str {
+  present filter-vals(params, is-some)
+  parts map(keys(present), (k) { `${::uri/encode(Str(k))}=${encode-param(get(present, k))}` })
+  if(is-empty(parts), "", `?${join(parts, "&")}`)
+}
+
+segment
+meta {doc: """Percent-encode one path segment (an id or file name)."""}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+api-url
+meta {
+    doc: """The full Accounting API URL for `path` (starting with `/`) and `params` (pure)."""
+}
+fn (path: Str, params: Map): Str {
+  `${::xero/API_ROOT}${path}${query-string(params)}`
+}
+
+check-idempotency-key fn (value: Any): Str? {
+  cond {
+    is-blank(value) => { null }
+    gt(length(Str(value)), 128) => { err("xero: idempotency-key must be at most 128 characters") }
+    => { Str(value) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+build-headers
+meta {
+    doc: """
+    Request headers (pure): Bearer auth, `Accept` (default
+    `application/json`), `xero-tenant-id` when set, `If-Modified-Since`
+    and `Idempotency-Key` from `opts`, `Content-Type: application/json`
+    for a Map/Vec body. `extra` headers win.
+    """
+}
+fn (token: Str, tenant: Str?, opts: Map, json-body: Bool, extra: Map): Map {
+  filter-vals({
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
+    xero-tenant-id: tenant,
+    If-Modified-Since: if(is-blank(get(opts, "if-modified-since")), null, Str(get(opts, "if-modified-since"))),
+    Idempotency-Key: if(is-blank(get(opts, "idempotency-key")), null, Str(get(opts, "idempotency-key"))),
+    Content-Type: if(json-body, "application/json", null),
+    ...extra
+  }, is-some)
+}
+
+build-request
+meta {
+    doc: """Build the outgoing `HttpRequest` (pure). Map/Vec bodies are JSON; Str/Bytes bodies are sent verbatim (set `Content-Type` in `extra`); `""`/null send none."""
+}
+fn (method: Str, url: Str, token: Str, tenant: Str?, body: Any, opts: Map, extra: Map): HttpRequest {
+  no-body or(is-null(body), and(is-str(body), is-empty(body)))
+  is-raw or(is-str(body), is-bytes(body))
+  encoded cond {
+    no-body => { "" }
+    is-raw => { body }
+    => { to-json(untype(body)) }
+  }
+
+  HttpRequest({
+    method: method,
+    url: url,
+    headers: build-headers(token, tenant, opts, not(or(no-body, is-raw)), extra),
+    body: encoded
+  })
+}
+
+retry-budget
+meta {
+    doc: """Immediate retries for a call (0 or 1): none when `opts.retry` is false/0 or the call is not idempotent (GET, or a write with `idempotency-key`). Pure."""
+}
+fn (opts: Map, method: Str): Int {
+  r get(opts, "retry")
+  idempotent or(in(uppercase(method), ["GET", "HEAD", "DELETE"]), not(is-blank(get(opts, "idempotency-key"))))
+  cond {
+    not(idempotent) => { 0 }
+    or(eq(r, false), eq(r, 0)) => { 0 }
+    => { 1 }
+  }
+}
+
+send-with-retry fn (req: HttpRequest, budget: Int): HttpResponse {
+  response http-request(req)
+  cond {
+    and(is-err(response), gt(budget, 0), is-connection-failure(err-message(response))) => { send-with-retry(req, sub(budget, 1)) }
+    => { response }
+  }
+}
+
+not-modified
+meta {
+    doc: """Map a transport result for a conditional request (pure): with `If-Modified-Since` set, the Err a bodiless 304 comes back as becomes `{status: 304, headers: {}, body: ""}`."""
+}
+fn (response: Result, conditional: Bool): HttpResponse {
+  cond {
+    // WORKAROUND(hot-bug-2): a 3xx without Location (Xero's 304 Not Modified) comes back as an Err.
+    and(conditional, is-err(response), contains(err-message(response), "redirect missing valid Location")) => {
+      HttpResponse({status: 304, headers: {}, body: ""})
+    }
+    => { response }
+  }
+}
+
+rate-limits-key
+meta {
+    doc: """The context key the latest rate limits for a tenant are kept under: `xero.rate-limits.{tenant-id}` (`.default` without a tenant)."""
+}
+fn (tenant: Str?): Str {
+  `xero.rate-limits.${or(tenant, "default")}`
+}
+
+// Rate-limit counts are not credentials: plain `ctx/set` is fine, and the
+// key is per tenant so parallel flows for different organisations do not
+// overwrite each other's numbers.
+record-limits fn (response: Result, tenant: Str?): Bool {
+  cond {
+    is-err(response) => { false }
+    => {
+      ::ctx/set(rate-limits-key(tenant), rate-limits(response.headers))
+      true
+    }
+  }
+}
+
+last-rate-limits
+meta {
+    doc: """The rate limits from the most recent call in this run for the tenant in `opts` / context (see `rate-limits`), or null before any call."""
+}
+fn
+(): Map? {
+  last-rate-limits({})
+},
+(opts: Map): Map? {
+  tenant tenant-id(opts)
+  if(is-err(tenant), null, ::ctx/get(rate-limits-key(tenant)))
+}
+
+resolve
+meta {
+    doc: """
+    The package's single resolver: everything a call needs from `opts`,
+    then context, then defaults. Returns `{credentials, tenant-id,
+    idempotency-key}` (`credentials` as `::xero::auth/credentials-from`
+    describes), or the first Err (malformed tenant id, over-long
+    idempotency key, no credentials). It only reads context; per-call
+    values are never written to it, so parallel flows for different
+    users and organisations stay apart.
+
+    ```hot
+    r ::xero::api/resolve({tenant-id: "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f", refresh-token: user-refresh-token})
+    r.credentials.kind   // "refresh"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  tenant tenant-id(opts)
+  key check-idempotency-key(get(opts, "idempotency-key"))
+  creds ::auth/resolve-credentials(opts)
+  cond {
+    is-err(tenant) => { tenant }
+    is-err(key) => { key }
+    is-err(creds) => { creds }
+    => { {credentials: creds, tenant-id: tenant, idempotency-key: key} }
+  }
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated Accounting API request and return the raw
+    `HttpResponse` (non-2xx included), or an Err for credential, config
+    and transport failures. `path` is relative to `/api.xro/2.0` (e.g.
+    `/Invoices`); `params` go in the query string; `body` is a Map/Vec
+    (JSON), Str/Bytes (verbatim; set `Content-Type` in `extra-headers`) or
+    `""`. See the namespace doc for `opts`.
+    """
+}
+fn
+(method: Str, path: Str, params: Map, body: Any, opts: Map): HttpResponse {
+  request(method, path, params, body, {}, opts)
+},
+(method: Str, path: Str, params: Map, body: Any, extra-headers: Map, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  url api-url(path, params)
+  budget retry-budget(opts, method)
+  conditional not(is-blank(get(opts, "if-modified-since")))
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      creds resolved.credentials
+      tenant resolved.tenant-id
+      auth ::auth/bearer(creds)
+      cond {
+        is-err(auth) => { auth }
+        => {
+          response not-modified(send-with-retry(build-request(method, url, auth.token, tenant, body, opts, extra-headers), budget), conditional)
+          record-limits(response, tenant)
+          cond {
+            and(auth.cached, not(is-err(response)), eq(response.status, 401)) => {
+              ::auth/evict(creds, auth.cache-key)
+              fresh ::auth/bearer(creds)
+              if(is-err(fresh), fresh,
+                not-modified(send-with-retry(build-request(method, url, fresh.token, tenant, body, opts, extra-headers), budget), conditional))
+            }
+            => { response }
+          }
+        }
+      }
+    }
+  }
+}
+
+unwrap
+meta {
+    doc: """The decoded body of a 2xx response (null for 204, `{not-modified: true}` for 304), the Err of a failed request, or `err(HttpError)`."""
+}
+fn (response: Result): Any {
+  cond {
+    is-err(response) => { response }
+    eq(response.status, 304) => { {not-modified: true} }
+    is-ok-response(response) => {
+      decoded decode-body(response.body)
+      if(and(is-str(decoded), is-empty(trim(decoded))), null, decoded)
+    }
+    => { err(http-error(response)) }
+  }
+}
+
+json
+meta {
+    doc: """
+    Like `request`, but unwrapped (see `unwrap`). Use it for endpoints
+    the typed modules do not cover.
+
+    ```hot
+    currencies ::xero::api/json("GET", "/Currencies", {}, "", {})
+    ```
+    """
+}
+fn
+(method: Str, path: Str): Any {
+  json(method, path, {}, "", {})
+},
+(method: Str, path: Str, params: Map, body: Any, opts: Map): Any {
+  unwrap(request(method, path, params, body, opts))
+},
+(method: Str, path: Str, params: Map, body: Any, extra-headers: Map, opts: Map): Any {
+  unwrap(request(method, path, params, body, extra-headers, opts))
+}
+
+bytes
+meta {
+    doc: """GET `path` as binary with `Accept: accept` (e.g. a PDF or an attachment). Returns `Bytes`, or an Err carrying `HttpError`."""
+}
+fn (path: Str, accept: Str, opts: Map): Bytes {
+  response request("GET", path, {}, "", {Accept: accept}, opts)
+  cond {
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err(http-error({status: response.status, headers: response.headers, body: or(response.body-bytes, response.body)})) }
+    => { or(response.body-bytes, Bytes([])) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Paging (pure)
+// ---------------------------------------------------------------------------
+
+next-page
+meta {
+    doc: """
+    The page number after `page`, or null when it was the last (pure).
+    Uses the response's `pagination.pageCount` when Xero sends it (the
+    endpoints that accept `pageSize`), else whether the page was full
+    (`count` rows for page size `size`).
+    """
+}
+fn (page: Int, size: Int, count: Int, pagination: Any): Int? {
+  page-count if(is-map(pagination), int-or-null(get(pagination, "pageCount")), null)
+  cond {
+    eq(count, 0) => { null }
+    is-some(page-count) => { if(lt(page, or(page-count, 0)), add(page, 1), null) }
+    lt(count, size) => { null }
+    => { add(page, 1) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Connections with resolved credentials
+// ---------------------------------------------------------------------------
+
+connections
+meta {
+    doc: """GET /connections with the credentials from `opts` / context (see `::xero::oauth/connections` for the fields). No tenant header is needed. `opts.auth-event-id` narrows the list."""
+}
+fn
+(): Vec {
+  connections({})
+},
+(opts: Map): Vec {
+  creds ::auth/resolve-credentials(opts)
+  cond {
+    is-err(creds) => { creds }
+    => {
+      auth ::auth/bearer(creds)
+      if(is-err(auth), auth, ::xero::oauth/connections(auth.token, get(opts, "auth-event-id")))
+    }
+  }
+}
+
+delete-connection
+meta {
+    doc: """DELETE /connections/{id} with the credentials from `opts` / context: disconnect one organisation (the connection `id`, not the tenant id). Returns true."""
+}
+fn
+(connection-id: Str): Bool {
+  delete-connection(connection-id, {})
+},
+(connection-id: Str, opts: Map): Bool {
+  creds ::auth/resolve-credentials(opts)
+  cond {
+    is-err(creds) => { creds }
+    => {
+      auth ::auth/bearer(creds)
+      if(is-err(auth), auth, ::xero::oauth/delete-connection(auth.token, connection-id))
+    }
+  }
+}

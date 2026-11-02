@@ -1,0 +1,155 @@
+::xero::test::reports-webhooks ns
+meta ["test"]
+
+::r ::xero::reports
+::wh ::xero::webhooks
+
+// A trimmed ProfitAndLoss in the shape Xero returns (Reports[0]).
+PNL {
+    ReportID: "ProfitAndLoss",
+    ReportName: "Profit and Loss",
+    ReportTitles: ["Profit & Loss", "Demo Company (US)", "1 July 2026 to 30 September 2026"],
+    Rows: [
+        {RowType: "Header", Cells: [{Value: ""}, {Value: "30 Sep 26"}, {Value: "30 Jun 26"}]},
+        {RowType: "Section", Title: "Income", Rows: [
+            {RowType: "Row", Cells: [
+                {Value: "Sales", Attributes: [{Value: "e2bacdc6-2006-43c2-a5da-3c0e5f43b452", Id: "account"}]},
+                {Value: "1,200.00", Attributes: [{Value: "e2bacdc6-2006-43c2-a5da-3c0e5f43b452", Id: "account"}]},
+                {Value: "950.00"}
+            ]},
+            {RowType: "SummaryRow", Cells: [{Value: "Total Income"}, {Value: "1,200.00"}, {Value: "950.00"}]}
+        ]},
+        {RowType: "Section", Title: "", Rows: [
+            {RowType: "Row", Cells: [{Value: "Net Profit"}, {Value: "300.00"}, {Value: "-50.00"}]}
+        ]}
+    ]
+}
+
+// Vectors generated independently with Python:
+//   base64(hmac.new(KEY, body, sha256).digest())
+KEY "xero-webhook-key-AbC123=="
+BODY """{"events":[{"resourceUrl":"https://api.xero.com/api.xro/2.0/Invoices/0a9b8c7d-1111-2222-3333-444455556666","resourceId":"0a9b8c7d-1111-2222-3333-444455556666","eventDateUtc":"2026-10-31T21:15:43.787","eventType":"UPDATE","eventCategory":"INVOICE","tenantId":"c2cc9b6e-9458-4c7d-93cc-f02b81b0594f","tenantType":"ORGANISATION"}],"lastEventSequence":2,"firstEventSequence":2,"entropy":"S0m3r4Nd0mt3xt"}"""
+BODY_SIG "DsOfSrNN7k9lr3N0wq9vxCs1CsCLRNwXASoLtqukd5M="
+INTENT """{"events":[],"firstEventSequence":0,"lastEventSequence":0,"entropy":"YSXWYMLPTEFFOVBXIYAQ"}"""
+INTENT_SIG "L3lcZUuQkdEv/GGk6aMJbrDxIKYG/6Ltzfx4dnhnhg4="
+
+req fn (body: Str, sig: Str?): Map {
+    {method: "POST", headers: filter-vals({x-xero-signature: sig}, is-some), body-raw: body}
+}
+
+// ---------------------------------------------------------------------------
+// Reports
+// ---------------------------------------------------------------------------
+
+test-column-keys
+meta ["test"] fn () {
+    assert-eq(["col0", "30 Sep 26", "30 Jun 26"], ::r/column-keys(PNL))
+    assert-eq(["A", "A_1"], ::r/column-keys({Rows: [{RowType: "Header", Cells: [{Value: "A"}, {Value: "A"}]}]}), "keys are unique")
+    assert-eq([], ::r/column-keys({}))
+}
+
+test-flatten-report
+meta ["test"] fn () {
+    rows ::r/flatten-report(PNL)
+    assert-eq(3, length(rows), "header rows are not returned")
+    sales rows[0]
+    assert-eq("Row", sales.type)
+    assert-eq("Income", sales.section)
+    assert-eq("Sales", sales.label)
+    assert-eq("e2bacdc6-2006-43c2-a5da-3c0e5f43b452", sales.account-id)
+    assert-eq({col0: "Sales", "30 Sep 26": "1,200.00", "30 Jun 26": "950.00"}, sales.values)
+    assert-eq("SummaryRow", rows[1].type)
+    assert-eq("Total Income", rows[1].label)
+    net rows[2]
+    assert(is-null(get(net, "section")), "blank section titles are dropped")
+    assert-eq("Net Profit", net.label)
+    assert-eq([], ::r/flatten-report({}))
+}
+
+test-parse-amount
+meta ["test"] fn () {
+    assert-eq(Dec("1200.00"), ::r/parse-amount("1,200.00"), "thousands separators are removed")
+    assert-eq(Dec("-50.00"), ::r/parse-amount("-50.00"))
+    assert(is-null(::r/parse-amount("")))
+    assert(is-null(::r/parse-amount("n/a")))
+}
+
+test-report-guards
+meta ["test"] fn () {
+    assert(is-err(::r/run-report("../Invoices")), "report names are checked before any call")
+    assert(is-err(::r/aged-receivables("", {})), "aged reports need a contact")
+    assert(in("BankSummary", ::r/REPORTS))
+}
+
+// ---------------------------------------------------------------------------
+// Webhooks
+// ---------------------------------------------------------------------------
+
+test-verify-valid
+meta ["test"] fn () {
+    assert(::wh/verify-request(req(BODY, BODY_SIG), KEY))
+    assert(::wh/verify-request(req(INTENT, INTENT_SIG), KEY), "intent-to-receive payloads verify too")
+}
+
+test-verify-tampered
+meta ["test"] fn () {
+    assert(not(::wh/verify-request(req(replace(BODY, "UPDATE", "CREATE"), BODY_SIG), KEY)), "a changed body fails")
+    assert(not(::wh/verify-request(req(BODY, INTENT_SIG), KEY)), "another body's signature fails")
+    assert(not(::wh/verify-request(req(BODY, BODY_SIG), "other-key")), "the wrong key fails")
+    assert(not(::wh/verify-request(req(BODY, "%%%"), KEY)), "garbage fails")
+}
+
+test-verify-missing-and-empty
+meta ["test"] fn () {
+    assert(not(::wh/verify-request(req(BODY, null), KEY)), "no header fails")
+    assert(not(::wh/verify-request(req(BODY, ""), KEY)), "an empty header fails")
+    assert(not(::wh/verify-request(req(BODY, BODY_SIG), "")), "an empty key fails closed")
+    assert(not(::wh/verify-request(req(BODY, BODY_SIG), "  ")), "a blank key fails closed")
+}
+
+test-verify-raw-bytes
+meta ["test"] fn () {
+    request {method: "POST", headers: {x-xero-signature: BODY_SIG}, body-raw: "lossy", body-bytes: Bytes(BODY)}
+    assert(::wh/verify-request(request, KEY), "body-bytes wins over body-raw")
+}
+
+test-intent-to-receive-responses
+meta ["test"] fn () {
+    good ::wh/respond(req(INTENT, INTENT_SIG), KEY)
+    assert-eq(200, good.status, "a valid signature gets 200")
+    assert-eq("", good.body, "with an empty body")
+    bad ::wh/respond(req(INTENT, BODY_SIG), KEY)
+    assert-eq(401, bad.status, "an invalid signature gets 401")
+    assert-eq("", bad.body)
+    assert-eq(401, ::wh/respond(req(INTENT, INTENT_SIG), "").status, "an empty key fails closed")
+}
+
+test-parse-events
+meta ["test"] fn () {
+    parsed ::wh/parse-events(BODY)
+    assert-eq(1, length(parsed.events))
+    e parsed.events[0]
+    assert-eq("0a9b8c7d-1111-2222-3333-444455556666", e.resource-id)
+    assert-eq("INVOICE", e.event-category)
+    assert-eq("UPDATE", e.event-type)
+    assert-eq("c2cc9b6e-9458-4c7d-93cc-f02b81b0594f", e.tenant-id)
+    assert-eq(2, parsed.last-sequence)
+    assert(not(parsed.is-intent))
+    assert(::wh/parse-events(INTENT).is-intent, "an empty events list is the intent-to-receive test")
+    assert(is-err(::wh/parse-events("{nope")))
+}
+
+test-receive
+meta ["test"] fn () {
+    ok ::wh/receive(req(BODY, BODY_SIG), KEY)
+    assert(ok.verified)
+    assert-eq(200, ok.response.status)
+    assert-eq(1, length(ok.events))
+    intent ::wh/receive(req(INTENT, INTENT_SIG), KEY)
+    assert(intent.is-intent)
+    assert-eq(200, intent.response.status)
+    bad ::wh/receive(req(BODY, INTENT_SIG), KEY)
+    assert(not(bad.verified))
+    assert-eq(401, bad.response.status)
+    assert-eq([], bad.events)
+}

@@ -1,0 +1,248 @@
+::sumsub::test::requests ns
+meta ["test"]
+
+::api ::sumsub::api
+::applicants ::sumsub::applicants
+::sdk ::sumsub::sdk
+::kyb ::sumsub::kyb
+::kyt ::sumsub::kyt
+
+SECRET "Hej2ch71kG2kTd1iIUDZFNsO5C1lh5Gq"
+
+// ============================================================================
+// Applicants
+// ============================================================================
+
+test-create-applicant-request
+meta ["test"] fn () {
+    spec ::applicants/create-applicant-request("basic kyc", {
+        externalUserId: "user-42",
+        email: null,
+        type: "individual",
+        fixedInfo: {firstName: "Ada", dob: null, country: "GBR"}
+    })
+    assert-eq("POST", spec.method)
+    assert-eq("/resources/applicants?levelName=basic+kyc", spec.path)
+    assert-eq({externalUserId: "user-42", type: "individual", fixedInfo: {firstName: "Ada", country: "GBR"}}, spec.body, "unset optionals are omitted")
+}
+
+test-create-applicant-needs-external-id
+meta ["test"] fn () {
+    assert(is-err(::applicants/create-applicant-request("basic-kyc-level", {email: "a@b.c"})))
+    assert(is-err(::applicants/create-applicant-request("basic-kyc-level", {externalUserId: ""})))
+}
+
+test-level-or-default
+meta ["test"] fn () {
+    assert-eq("kyc", ::applicants/level-or-default("kyc"))
+    assert(is-err(::applicants/level-or-default(null)), "no level and no sumsub.level.name errs")
+}
+
+test-external-user-path
+meta ["test"] fn () {
+    assert-eq("/resources/applicants/-;externalUserId=user-42/one", ::applicants/external-user-path("user-42"))
+    assert-eq("/resources/applicants/-;externalUserId=ada%40example.com%2F1/one", ::applicants/external-user-path("ada@example.com/1"))
+}
+
+test-move-to-level-request
+meta ["test"] fn () {
+    spec ::applicants/move-to-level-request("abc", "advanced level", [])
+    assert-eq("/resources/applicants/abc/moveToLevel?name=advanced+level", spec.path, "the query parameter is name")
+    assert-eq("", spec.body, "no body without doc sets")
+    with-sets ::applicants/move-to-level-request("abc", "x", [{idDocSetType: "IDENTITY", resetOnlyIfUnsuitable: true}])
+    assert-eq({docSets: [{idDocSetType: "IDENTITY", resetOnlyIfUnsuitable: true}]}, with-sets.body)
+}
+
+test-request-check-request
+meta ["test"] fn () {
+    assert-eq("/resources/applicants/abc/status/pending", ::applicants/request-check-request("abc", null).path)
+    assert-eq("/resources/applicants/abc/status/pending?reason=docs+uploaded", ::applicants/request-check-request("abc", "docs uploaded").path)
+}
+
+test-update-applicant-request
+meta ["test"] fn () {
+    spec ::applicants/update-applicant-request("abc", {email: "new@example.com", phone: null})
+    assert-eq("PATCH", spec.method)
+    assert-eq({email: "new@example.com", id: "abc"}, spec.body)
+}
+
+test-list-notes-request
+meta ["test"] fn () {
+    assert-eq("/resources/api/applicants/notes?applicantId=abc&offset=100&limit=50", ::applicants/list-notes-request("abc", 100, 50).path)
+}
+
+test-simulate-review-request
+meta ["test"] fn () {
+    green ::applicants/simulate-review-request("abc", {reviewAnswer: "GREEN"})
+    assert-eq("/resources/applicants/abc/status/testCompleted", green.path)
+    assert-eq({rejectLabels: [], reviewAnswer: "GREEN"}, green.body)
+    red ::applicants/simulate-review-request("abc", {reviewAnswer: "RED", reviewRejectType: "RETRY", rejectLabels: ["BAD_SELFIE"], clientComment: null})
+    assert-eq({rejectLabels: ["BAD_SELFIE"], reviewAnswer: "RED", reviewRejectType: "RETRY"}, red.body)
+}
+
+// ============================================================================
+// ID document multipart
+// ============================================================================
+
+// Built and signed independently with Python (see the package's test notes):
+// metadata {"idDocType":"PASSPORT","country":"GBR"}, a PNG header plus
+// non-UTF-8 bytes as the file, boundary "BOUNDARY".
+MULTIPART_HEX "2d2d424f554e444152590d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d226d65746164617461220d0a0d0a7b226964446f6354797065223a2250415353504f5254222c22636f756e747279223a22474252227d0d0a2d2d424f554e444152590d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d22636f6e74656e74223b2066696c656e616d653d2270617373706f72742e706e67220d0a436f6e74656e742d547970653a20696d6167652f706e670d0a0d0a89504e470d0a1a0aff00fe0d0a2d2d424f554e444152592d2d0d0a"
+MULTIPART_SIG "49788b8c363de001e4365c3b65dc1a488982228d8c324faec5b133b80776ccea"
+
+test-id-doc-body-bytes
+meta ["test"] fn () {
+    file {filename: "passport.png", content: ::hot::hex/decode("89504e470d0a1a0aff00fe"), content_type: "image/png"}
+    body ::applicants/id-doc-body({idDocType: "PASSPORT", country: "GBR", number: null}, file, "BOUNDARY")
+    assert(is-bytes(body))
+    assert-eq(MULTIPART_HEX, ::hot::hex/encode(body), "binary file bytes survive and unset metadata is omitted")
+}
+
+test-id-doc-body-is-signed-byte-for-byte
+meta ["test"] fn () {
+    body ::hot::hex/decode(MULTIPART_HEX)
+    assert-eq(MULTIPART_SIG, ::api/sign(SECRET, 1700000000, "POST", "/resources/applicants/abc/info/idDoc", body))
+    req ::api/build-request("POST", "/resources/applicants/abc/info/idDoc", body, "multipart/form-data; boundary=BOUNDARY", {}, {app-token: "tok", secret-key: SECRET}, 1700000000)
+    assert-eq(MULTIPART_SIG, get(req.headers, "X-App-Access-Sig"))
+    assert-eq("multipart/form-data; boundary=BOUNDARY", get(req.headers, "Content-Type"))
+}
+
+test-id-doc-body-metadata-only
+meta ["test"] fn () {
+    body ::applicants/id-doc-body({idDocType: "PASSPORT", country: "GBR"}, null, "B")
+    text Str(body)
+    assert(contains(text, "name=\"metadata\""))
+    assert(not(contains(text, "name=\"content\"")), "no content part without a file")
+    assert(ends-with(text, "--B--\r\n"))
+}
+
+test-id-doc-filename-is-sanitized
+meta ["test"] fn () {
+    body ::applicants/id-doc-body({idDocType: "PASSPORT", country: "GBR"}, {filename: "a\"b\r\n.png", content: Bytes("x")}, "B")
+    assert(contains(Str(body), "filename=\"a%22b.png\""))
+}
+
+test-add-id-document-validates-metadata
+meta ["test"] fn () {
+    assert(is-err(::applicants/add-id-document("abc", {country: "GBR"}, null)), "idDocType is required")
+}
+
+// ============================================================================
+// SDK
+// ============================================================================
+
+test-access-token-request
+meta ["test"] fn () {
+    spec ::sdk/access-token-request("user-42", "basic-kyc-level", {})
+    assert-eq("/resources/accessTokens/sdk", spec.path)
+    assert-eq({userId: "user-42", levelName: "basic-kyc-level"}, spec.body, "unset options are omitted")
+    full ::sdk/access-token-request("user-42", "basic-kyc-level", {ttlInSecs: 1200, applicantIdentifiers: {email: "a@b.c", phone: null}})
+    assert-eq({userId: "user-42", levelName: "basic-kyc-level", ttlInSecs: 1200, applicantIdentifiers: {email: "a@b.c"}}, full.body)
+}
+
+test-websdk-link-request
+meta ["test"] fn () {
+    spec ::sdk/websdk-link-request("basic-kyc-level", {
+        userId: "user-42",
+        lang: "en",
+        ttlInSecs: 3600,
+        redirect: {successUrl: "https://app.example.com/done", rejectUrl: null},
+        customizationName: null
+    })
+    assert-eq("/resources/sdkIntegrations/levels/-/websdkLink?lang=en", spec.path, "query options go in the query")
+    assert-eq({userId: "user-42", ttlInSecs: 3600, redirect: {successUrl: "https://app.example.com/done"}, levelName: "basic-kyc-level"}, spec.body)
+    bare ::sdk/websdk-link-request("lvl", {})
+    assert-eq("/resources/sdkIntegrations/levels/-/websdkLink", bare.path)
+    assert-eq({levelName: "lvl"}, bare.body)
+}
+
+// ============================================================================
+// KYB
+// ============================================================================
+
+test-create-company-request
+meta ["test"] fn () {
+    spec ::kyb/create-company-request("kyb-level", "acme-ltd", {companyName: "Acme Ltd", country: "GBR", taxId: null}, {lang: "en"})
+    assert-eq("/resources/applicants?levelName=kyb-level", spec.path)
+    assert-eq({lang: "en", externalUserId: "acme-ltd", type: "company", fixedInfo: {companyInfo: {companyName: "Acme Ltd", country: "GBR"}}}, spec.body)
+    assert(is-err(::kyb/create-company-request("kyb", "acme", {companyName: "Acme"}, {})), "country is required")
+}
+
+test-beneficiary-request
+meta ["test"] fn () {
+    spec ::kyb/beneficiary-request("co1", {types: ["ubo"], shareSize: 60, beneficiaryInfo: {firstName: "Ada", dob: null}, applicantId: null})
+    assert-eq("/resources/applicants/co1/fixedInfo/companyInfo/beneficiaries", spec.path)
+    assert-eq({types: ["ubo"], shareSize: 60, beneficiaryInfo: {firstName: "Ada"}}, spec.body)
+    assert(is-err(::kyb/beneficiary-request("co1", {types: [], applicantId: "a1"})), "types required")
+    assert(is-err(::kyb/beneficiary-request("co1", {types: ["director"]})), "applicantId or beneficiaryInfo required")
+    assert(is-err(::kyb/beneficiary-request("co1", {types: ["director"], applicantId: "a1", beneficiaryInfo: {firstName: "x"}})), "not both")
+}
+
+test-beneficiaries
+meta ["test"] fn () {
+    assert-eq([{id: "b1"}], ::kyb/beneficiaries({fixedInfo: {companyInfo: {beneficiaries: [{id: "b1"}]}}}))
+    assert-eq([{id: "b2"}], ::kyb/beneficiaries({fixedInfo: {companyInfo: {}}, info: {companyInfo: {beneficiaries: [{id: "b2"}]}}}))
+    assert-eq([], ::kyb/beneficiaries({}))
+}
+
+// ============================================================================
+// KYT
+// ============================================================================
+
+FINANCE_TXN {
+    txnId: "wd-1001",
+    type: "finance",
+    txnDate: "2026-11-01 12:00:00+0000",
+    info: {direction: "out", amount: 2500, currencyCode: "USD", currencyType: "fiat", paymentTxnId: null},
+    applicant: {},
+    counterparty: {type: "individual", fullName: "Grace Hopper", institutionInfo: null}
+}
+
+test-submit-request
+meta ["test"] fn () {
+    spec ::kyt/submit-request("abc", FINANCE_TXN)
+    assert-eq("POST", spec.method)
+    assert-eq("/resources/applicants/abc/kyt/txns/-/data", spec.path)
+    assert-eq({direction: "out", amount: 2500, currencyCode: "USD", currencyType: "fiat"}, spec.body.info, "unset optionals omitted")
+    assert-eq({}, spec.body.applicant, "an empty applicant object is kept")
+    assert-eq({type: "individual", fullName: "Grace Hopper"}, spec.body.counterparty)
+}
+
+test-validate-txn
+meta ["test"] fn () {
+    assert(is-err(::kyt/validate-txn({type: "finance", applicant: {}, info: {}})), "txnId required")
+    assert(is-err(::kyt/validate-txn({txnId: "1", applicant: {}})), "type required")
+    assert(is-err(::kyt/validate-txn({txnId: "1", type: "kyc"})), "applicant required")
+    assert(is-err(::kyt/validate-txn({txnId: "1", type: "finance", applicant: {}})), "finance needs info")
+    assert-eq({txnId: "1", type: "kyc", applicant: {}}, ::kyt/validate-txn({txnId: "1", type: "kyc", applicant: {}}))
+}
+
+test-submit-new-applicant-request
+meta ["test"] fn () {
+    txn {...FINANCE_TXN, applicant: {externalUserId: "user-42", fullName: "Ada Lovelace"}}
+    spec ::kyt/submit-new-applicant-request("kyc-level", txn)
+    assert-eq("/resources/applicants/-/kyt/txns/-/data?levelName=kyc-level", spec.path)
+    assert-eq("/resources/applicants/-/kyt/txns/-/data", ::kyt/submit-new-applicant-request(null, txn).path)
+    assert(is-err(::kyt/submit-new-applicant-request("kyc-level", FINANCE_TXN)), "externalUserId and fullName required")
+}
+
+test-txn-id-path
+meta ["test"] fn () {
+    assert-eq("/resources/kyt/txns/-;data.txnId=wd-1001/one", ::kyt/txn-id-path("wd-1001"))
+}
+
+test-travel-rule-status
+meta ["test"] fn () {
+    assert-eq("awaitingCounterparty", ::kyt/travel-rule-status({travelRuleInfo: {status: "awaitingCounterparty"}}))
+    assert(is-null(::kyt/travel-rule-status({id: "t1"})))
+}
+
+test-invalid-input-returns-err-without-a-request
+meta ["test"] fn () {
+    tenant {app-token: "unused", secret-key: "unused"}
+    assert(is-err(::applicants/create-applicant(null, {externalUserId: "u1"}, tenant)), "no level anywhere")
+    assert(is-err(::applicants/create-applicant("kyc", {email: "x"}, tenant)), "no externalUserId")
+    assert(is-err(::kyt/submit-transaction("abc", {type: "finance"}, tenant)))
+    assert(is-err(::kyb/add-beneficiary("co1", {types: []}, tenant)))
+    assert(is-err(::kyt/review-transaction("t1", "YELLOW", tenant)))
+}

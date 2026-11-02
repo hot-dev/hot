@@ -1,0 +1,166 @@
+::sumsub::test::webhooks ns
+meta ["test"]
+
+::webhooks ::sumsub::webhooks
+::decisions ::sumsub::decisions
+
+// Vectors computed independently with Python's hmac module.
+// "someText" / SoMe_SeCrEt_KeY is Sumsub's documented testDigest example
+// (the documented digest is the SHA-1 one, though the docs label it SHA-256).
+SECRET "SoMe_SeCrEt_KeY"
+
+SOME_TEXT_SHA1 "f6e92ffe371718694d46e28436f76589312df8db"
+SOME_TEXT_SHA256 "7f3beedce7529616a9d6bba59dc1b054a7247cef67f6acff2600864399f47fe0"
+SOME_TEXT_SHA512 "3aae08986027051ca0656d87c4c95f1f15d3ecaf23cf239e5a43fd03a8af28223a06be1f97624caefd55475c84673773dc10e895a1ab885a3548c58bd7af9ebf"
+
+// Sumsub's example applicantReviewed payload, compacted.
+PAYLOAD "{\"applicantId\":\"5cb56e8e0a975a35f333cb83\",\"inspectionId\":\"5cb56e8e0a975a35f333cb84\",\"correlationId\":\"req-ec508a2a-fa33-4dd2-b93d-fcade2967e03\",\"externalUserId\":\"12672\",\"type\":\"applicantReviewed\",\"reviewResult\":{\"reviewAnswer\":\"GREEN\"},\"reviewStatus\":\"completed\",\"createdAtMs\":\"2020-02-21 13:23:19.111\",\"clientId\":\"SumsubClient\"}"
+PAYLOAD_SHA1 "9f056b4ed25e502a29b5cd803c22159545879a98"
+PAYLOAD_SHA256 "1d57ccec5cd633a772127fe6dcb9962ae164ae16f7e840fe2c30e821ef65c697"
+PAYLOAD_SHA512 "5af67e90d0bfdf6d1af745bfc8c8592aab2ddd19cf0944d2d8907e67139f4b4af24d7ba77695d66ad4dac3d1e4202576c2a4343c78e5bec483c846fad42f3480"
+
+request-with fn (body: Str, digest: Str?, alg: Str?): Map {
+    headers filter-vals({"x-payload-digest": digest, "x-payload-digest-alg": alg}, is-some)
+    {method: "POST", url: "/sumsub/webhook", headers: headers, body-raw: body}
+}
+
+// ============================================================================
+// Digest verification
+// ============================================================================
+
+test-digest-algorithm
+meta ["test"] fn () {
+    assert-eq("sha256", ::webhooks/digest-algorithm("HMAC_SHA256_HEX"))
+    assert-eq("sha512", ::webhooks/digest-algorithm(" hmac_sha512_hex "))
+    assert-eq("sha1", ::webhooks/digest-algorithm("HMAC_SHA1_HEX"))
+    assert(is-null(::webhooks/digest-algorithm("MD5")))
+    assert(is-null(::webhooks/digest-algorithm(null)))
+}
+
+test-verify-documented-test-digest
+meta ["test"] fn () {
+    all keys(::webhooks/ALGORITHMS)
+    assert(::webhooks/verify-digest(SECRET, "someText", SOME_TEXT_SHA1, "HMAC_SHA1_HEX", all))
+    assert(::webhooks/verify-digest(SECRET, "someText", SOME_TEXT_SHA256, "HMAC_SHA256_HEX", all))
+    assert(::webhooks/verify-digest(SECRET, "someText", SOME_TEXT_SHA512, "HMAC_SHA512_HEX", all))
+    assert(::webhooks/verify-digest(SECRET, "someText", uppercase(SOME_TEXT_SHA256), "HMAC_SHA256_HEX", all), "hex case doesn't matter")
+    assert(not(::webhooks/verify-digest(SECRET, "someText", SOME_TEXT_SHA1, "HMAC_SHA256_HEX", all)), "a digest only verifies under its own algorithm")
+}
+
+test-verify-request-valid
+meta ["test"] fn () {
+    assert(::webhooks/verify-request(request-with(PAYLOAD, PAYLOAD_SHA256, "HMAC_SHA256_HEX"), SECRET))
+    assert(::webhooks/verify-request(request-with(PAYLOAD, PAYLOAD_SHA512, "HMAC_SHA512_HEX"), SECRET))
+    assert(::webhooks/verify-request(request-with(PAYLOAD, PAYLOAD_SHA1, "HMAC_SHA1_HEX"), SECRET), "legacy SHA-1 accepted by default")
+}
+
+test-verify-request-mixed-case-headers
+meta ["test"] fn () {
+    req {method: "POST", url: "/h", headers: {"X-Payload-Digest": PAYLOAD_SHA256, "X-Payload-Digest-Alg": "HMAC_SHA256_HEX"}, body-raw: PAYLOAD}
+    assert(::webhooks/verify-request(req, SECRET))
+}
+
+test-verify-request-tampered
+meta ["test"] fn () {
+    tampered replace(PAYLOAD, "GREEN", "RED")
+    assert(not(::webhooks/verify-request(request-with(tampered, PAYLOAD_SHA256, "HMAC_SHA256_HEX"), SECRET)), "tampered body")
+    assert(not(::webhooks/verify-request(request-with(PAYLOAD, replace(PAYLOAD_SHA256, "1d57", "1d58"), "HMAC_SHA256_HEX"), SECRET)), "tampered digest")
+    assert(not(::webhooks/verify-request(request-with(PAYLOAD, PAYLOAD_SHA256, "HMAC_SHA256_HEX"), "other-secret")), "wrong secret")
+    assert(not(::webhooks/verify-request(request-with(PAYLOAD, "zz-not-hex", "HMAC_SHA256_HEX"), SECRET)), "garbage digest")
+}
+
+test-verify-request-missing
+meta ["test"] fn () {
+    assert(not(::webhooks/verify-request(request-with(PAYLOAD, null, "HMAC_SHA256_HEX"), SECRET)), "missing digest")
+    assert(not(::webhooks/verify-request(request-with(PAYLOAD, "", "HMAC_SHA256_HEX"), SECRET)), "empty digest")
+    assert(not(::webhooks/verify-request(request-with(PAYLOAD, PAYLOAD_SHA256, null), SECRET)), "missing algorithm fails closed")
+    assert(not(::webhooks/verify-request(request-with(PAYLOAD, PAYLOAD_SHA256, "HMAC_MD5_HEX"), SECRET)), "unknown algorithm")
+    assert(not(::webhooks/verify-request({method: "POST", url: "/h"}, SECRET)), "no headers at all")
+}
+
+test-verify-request-empty-secret
+meta ["test"] fn () {
+    // HMAC with an empty key is still computable; it must never verify.
+    empty-key-digest ::hot::hmac/hmac-sha256("", PAYLOAD)
+    assert(not(::webhooks/verify-request(request-with(PAYLOAD, empty-key-digest, "HMAC_SHA256_HEX"), "")), "empty secret fails closed")
+}
+
+test-verify-request-allowed-algorithms
+meta ["test"] fn () {
+    strict {algorithms: ["HMAC_SHA256_HEX", "HMAC_SHA512_HEX"]}
+    assert(not(::webhooks/verify-request(request-with(PAYLOAD, PAYLOAD_SHA1, "HMAC_SHA1_HEX"), SECRET, strict)), "SHA-1 refused when not allowed")
+    assert(::webhooks/verify-request(request-with(PAYLOAD, PAYLOAD_SHA256, "HMAC_SHA256_HEX"), SECRET, strict))
+}
+
+test-verify-request-raw-bytes
+meta ["test"] fn () {
+    // A body that is not valid UTF-8 is verified over body-bytes.
+    raw ::hot::hex/decode("7b2274797065223a22a0ff227d")
+    req {method: "POST", url: "/h", headers: {"x-payload-digest": "60744de1c62d7511628580daef8c7f2c09d03489dc48606fbaf4a0b0b65a3124", "x-payload-digest-alg": "HMAC_SHA256_HEX"}, body-raw: "lossy", body-bytes: raw}
+    assert(::webhooks/verify-request(req, SECRET))
+}
+
+// ============================================================================
+// Event parsing
+// ============================================================================
+
+test-parse-event-from-raw
+meta ["test"] fn () {
+    event ::webhooks/parse-event(request-with(PAYLOAD, PAYLOAD_SHA256, "HMAC_SHA256_HEX"))
+    assert-eq("applicantReviewed", event.type)
+    assert-eq("5cb56e8e0a975a35f333cb83", event.applicant-id)
+    assert-eq("12672", event.external-user-id)
+    assert-eq("completed", event.review-status)
+    assert-eq("GREEN", event.review-answer)
+    assert-eq([], event.reject-labels)
+    assert-eq(false, event.sandbox)
+    assert-eq(false, event.test)
+    assert(::webhooks/is-final-review(event))
+    assert(not(::webhooks/is-kyt-event(event)))
+}
+
+test-parse-event-red
+meta ["test"] fn () {
+    body {
+        type: "applicantReviewed",
+        applicantId: "a1",
+        reviewStatus: "completed",
+        sandboxMode: true,
+        reviewResult: {reviewAnswer: "RED", reviewRejectType: "RETRY", rejectLabels: ["BAD_SELFIE"], moderationComment: "Retake the selfie", clientComment: "internal"}
+    }
+
+    event ::webhooks/parse-event({body: body, body-raw: to-json(body)})
+    assert-eq("RED", event.review-answer)
+    assert-eq("RETRY", event.reject-type)
+    assert-eq(["BAD_SELFIE"], event.reject-labels)
+    assert-eq("Retake the selfie", event.moderation-comment)
+    assert-eq(true, event.sandbox)
+}
+
+test-parse-event-pending-and-kyt
+meta ["test"] fn () {
+    pending ::webhooks/parse-event("{\"type\":\"applicantPending\",\"applicantId\":\"a1\",\"reviewStatus\":\"pending\"}")
+    assert-eq("applicantPending", pending.type)
+    assert(not(::webhooks/is-final-review(pending)))
+    kyt ::webhooks/parse-event({type: "applicantKytOnHold", kytTxnId: "t1", kytDataTxnId: "wd-1001", kytTxnType: "finance", reviewStatus: "onHold"})
+    assert(::webhooks/is-kyt-event(kyt))
+    assert-eq("wd-1001", kyt.kyt-data-txn-id)
+}
+
+test-parse-event-garbage
+meta ["test"] fn () {
+    event ::webhooks/parse-event("not json")
+    assert(is-null(event.type))
+    assert-eq({}, event.payload)
+}
+
+test-dedupe-key
+meta ["test"] fn () {
+    event ::webhooks/parse-event(PAYLOAD)
+    assert-eq("applicantReviewed|5cb56e8e0a975a35f333cb83|req-ec508a2a-fa33-4dd2-b93d-fcade2967e03|2020-02-21 13:23:19.111", ::webhooks/dedupe-key(event))
+}
+
+test-event-feeds-decision
+meta ["test"] fn () {
+    assert(::decisions/is-approved(::webhooks/parse-event(PAYLOAD)))
+}
