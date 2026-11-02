@@ -1,0 +1,117 @@
+::hubspot::properties ns
+meta {
+    doc: """Property definitions: discover the fields an object type has (including custom properties and enumeration options) and create new ones."""
+}
+
+::api ::hubspot::api
+crm-path ::hubspot::api/crm-path
+segment ::hubspot::api/segment
+query-string ::hubspot::api/query-string
+
+list-properties
+meta {
+    doc: """GET /crm/properties/{version}/{objectType} - Every property definition for an object type: `{results: [{name, label, type, fieldType, groupName, options, hasUniqueValue, calculated, ...}]}`. `params`: `archived`, `properties` (Vec of names to return), `locale`."""
+}
+fn
+(object-type: Str): Map {
+  list-properties(object-type, {})
+},
+(object-type: Str, params: Map): Map {
+  list-properties(object-type, params, {})
+},
+(object-type: Str, params: Map, opts: Map): Map {
+  ::api/json("GET", crm-path("properties", `/${segment(object-type)}${query-string(params)}`, opts), opts)
+}
+
+get-property
+meta {
+    doc: """GET /crm/properties/{version}/{objectType}/{propertyName} - One property definition, including `options` for enumeration properties (the valid values to write)."""
+}
+fn
+(object-type: Str, name: Str): Map {
+  get-property(object-type, name, {})
+},
+(object-type: Str, name: Str, opts: Map): Map {
+  ::api/json("GET", crm-path("properties", `/${segment(object-type)}/${segment(name)}`, opts), opts)
+}
+
+build-property-body
+meta {
+    doc: """
+    Validate and build a create-property payload. Required: `name`
+    (internal, lowercase), `label`, `type` (`string`, `number`, `date`,
+    `datetime`, `enumeration`, `bool`, `phone_number`), `fieldType`
+    (`text`, `textarea`, `number`, `date`, `select`, `radio`,
+    `checkbox`, `booleancheckbox`, `phonenumber`, `file`, `html`,
+    `calculation_equation`), and `groupName` (e.g. `"contactinformation"`).
+    Optional: `description`, `options` (Vec of `{label, value,
+    displayOrder, hidden}` for enumerations), `hasUniqueValue`, `hidden`,
+    `formField`, `displayOrder`. Unset keys are omitted. Exposed for
+    testing.
+    """
+}
+fn (definition: Map): Map {
+  missing filter(["name", "label", "type", "fieldType", "groupName"], (k) { is-null(get(definition, k)) })
+  cond {
+    not(is-empty(missing)) => { err(`hubspot: create-property needs ${join(missing, ", ")}`) }
+    => { filter-vals(untype(definition), is-some) }
+  }
+}
+
+create-property
+meta {
+    doc: """
+    POST /crm/properties/{version}/{objectType} - Create a custom property. See `build-property-body` for the fields.
+
+    **Example**
+
+    ```hot
+    ::hubspot::properties/create-property("contacts", {
+      name: "favorite_product",
+      label: "Favorite product",
+      type: "enumeration",
+      fieldType: "select",
+      groupName: "contactinformation",
+      options: [
+        {label: "Widgets", value: "widgets", displayOrder: 0, hidden: false},
+        {label: "Gadgets", value: "gadgets", displayOrder: 1, hidden: false}
+      ]
+    })
+    ```
+    """
+}
+fn
+(object-type: Str, definition: Map): Map {
+  create-property(object-type, definition, {})
+},
+(object-type: Str, definition: Map, opts: Map): Map {
+  body build-property-body(definition)
+  cond {
+    is-err(body) => { body }
+    => { ::api/json("POST", crm-path("properties", `/${segment(object-type)}`, opts), {}, body, opts) }
+  }
+}
+
+update-property
+meta {
+    doc: """PATCH /crm/properties/{version}/{objectType}/{propertyName} - Change a property's `label`, `description`, `options`, `groupName`, `hidden`, and similar fields."""
+}
+fn
+(object-type: Str, name: Str, changes: Map): Map {
+  update-property(object-type, name, changes, {})
+},
+(object-type: Str, name: Str, changes: Map, opts: Map): Map {
+  ::api/json("PATCH", crm-path("properties", `/${segment(object-type)}/${segment(name)}`, opts), {}, filter-vals(untype(changes), is-some), opts)
+}
+
+archive-property
+meta {
+    doc: """DELETE /crm/properties/{version}/{objectType}/{propertyName} - Archive a custom property (HubSpot default properties cannot be archived)."""
+}
+fn
+(object-type: Str, name: Str): Any {
+  archive-property(object-type, name, {})
+},
+(object-type: Str, name: Str, opts: Map): Any {
+  ::api/json("DELETE", crm-path("properties", `/${segment(object-type)}/${segment(name)}`, opts), opts)
+}

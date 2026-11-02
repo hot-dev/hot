@@ -1,45 +1,62 @@
 ::web-search::brave ns
 meta {
-    doc: """Brave Search API (https://api-dashboard.search.brave.com). Context variable: `brave.api.key` (the X-Subscription-Token)."""
+    doc: """Brave Search API (https://api-dashboard.search.brave.com). Context variable: `brave.api.key`, or `brave-api-key` in a call's trailing `opts` (see `::web-search::api`); sent as `X-Subscription-Token`."""
 }
 
-::ctx ::hot::ctx
+::api ::web-search::api
 ::uri ::hot::uri
+::http ::web-search::http
 
-http-request ::hot::http/request
-is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
 
 BASE_URL "https://api.search.brave.com/res/v1"
 
-get-json fn
-(path: Str): Any {
-  get-json(path, ::ctx/get("brave.api.key"))
-},
-// 2-arity: explicit API key override
-(path: Str, api-key: Str): Any {
-  response ::hot::http/request(HttpRequest({
+// Brave's documented maximum `count` per request.
+MAX_RESULTS 20
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` for a key. Pure; exposed for testing."""
+}
+fn (path: Str, api-key: Str): HttpRequest {
+  HttpRequest({
     method: "GET",
     url: `${BASE_URL}${path}`,
     headers: {
       X-Subscription-Token: api-key,
       Accept: "application/json"
     }
-  }))
+  })
+}
+
+get-json fn
+(path: Str): Any {
+  get-json(path, {})
+},
+// 2-arity: explicit API key override
+(path: Str, api-key: Str?): Any {
+  get-json(path, {brave-api-key: api-key})
+},
+// 2-arity: per-call credentials (see `::web-search::api`)
+(path: Str, opts: Map): Any {
+  api-key ::api/api-key("brave", opts)
   cond {
-    is-err(response) => { response }
-    is-ok-response(response) => { response.body }
-    => { err({status: response.status, body: response.body}) }
+    is-err(api-key) => { api-key }
+    => { ::http/send("brave", "Brave", build-request(path, api-key)) }
   }
 }
 
 search
 meta {
-    ctx: {"brave.api.key": {required: true}},
+    ctx: {"brave.api.key": {required: false}},
     doc: """
-    GET /web/search - Brave web search. `options` supports `count`
-    (max 20), `offset`, `country`, `search_lang`, `freshness`
-    ("pd"/"pw"/"pm"/"py").
+    GET /web/search - Brave web search. `options`: `count` (max 20),
+    `offset` (page index, max 9), `country`, `search_lang`,
+    `safesearch` ("off"/"moderate"/"strict"), `freshness` ("pd", "pw",
+    "pm", "py", or a range like "2026-01-01to2026-06-30"),
+    `extra_snippets`. Restrict sites with operators in the query
+    (`site:example.com`, `NOT site:example.com`). Null options are
+    dropped. Snippets contain `<strong>` markup; `normalize` strips it.
 
     **Example**
 
@@ -54,31 +71,55 @@ fn
   search(query, {})
 },
 (query: Str, options: Map): Map {
-  params filter-vals({q: query, ...options}, is-some)
-  get-json(`/web/search?${::uri/encode-query(params)}`)
+  search(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Map {
+  params filter-vals({...options, q: query}, is-some)
+  get-json(`/web/search?${::uri/encode-query(params)}`, opts)
+}
+
+FRESHNESS {day: "pd", week: "pw", month: "pm", year: "py"}
+
+build-query
+meta {
+    doc: """The query with Brave search operators appended for domain filters: `site:a` (several joined with `OR`) for `include-domains`, `NOT site:x` for each of `exclude-domains`. Exposed for testing."""
+}
+fn (query: Str, filters: Map): Str {
+  include or(get(filters, "include-domains"), [])
+  exclude or(get(filters, "exclude-domains"), [])
+  sites join(map(include, (d) { concat("site:", d) }), " OR ")
+  excluded join(map(exclude, (d) { concat("NOT site:", d) }), " ")
+  with-include if(is-empty(include), query, `${query} ${sites}`)
+  if(is-empty(exclude), with-include, `${with-include} ${excluded}`)
+}
+
+build-search-options
+meta {
+    doc: """Brave search options for the normalized `search`: `count` clamped to 1-20 and `freshness` mapped from day/week/month/year. Exposed for testing."""
+}
+fn (max-results: Int, filters: Map): Map {
+  filter-vals({
+    count: ::http/clamp(max-results, 1, MAX_RESULTS),
+    freshness: get(FRESHNESS, or(get(filters, "freshness"), ""))
+  }, is-some)
 }
 
 normalize
 meta {
-    doc: """Normalize a Brave web-search response into `Vec<::web-search/SearchResult>`. Brave has no relevance score; results keep rank order. Exposed for testing."""
+    doc: """Normalize a Brave web-search response into `Vec<::web-search/SearchResult>`, with HTML markup stripped and entities decoded in titles and snippets. Brave has no relevance score; results keep rank order. Exposed for testing."""
 }
 fn (body: Map): Vec {
-  results get(or(get(body, "web"), {}), "results", [])
+  results or(get(or(get(body, "web"), {}), "results"), [])
   map(results, (r) {
     ::web-search/SearchResult({
-      title: get(r, "title", ""),
-      url: get(r, "url", ""),
-      content: get(r, "description"),
+      title: or(::http/clean-text(get(r, "title")), ""),
+      url: or(get(r, "url"), ""),
+      content: ::http/clean-text(get(r, "description")),
       score: null
     })
   })
 }
 
-search-normalized fn (query: Str, max-results: Int): Vec {
-  out search(query, {count: max-results})
-  match out {
-    Result.Err => { err(out) }
-
-    _ => { normalize(out) }
-  }
+search-normalized fn (query: Str, max-results: Int, filters: Map, opts: Map): Vec {
+  search(build-query(query, filters), build-search-options(max-results, filters), opts) |> if-ok((body) { normalize(body) })
 }

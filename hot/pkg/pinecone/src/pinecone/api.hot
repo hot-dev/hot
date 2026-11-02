@@ -1,67 +1,302 @@
 ::pinecone::api ns
-meta {ctx: {"pinecone.api.key": {required: true}}}
+meta {
+    ctx: {
+        "pinecone.api.key": {required: false},
+        "pinecone.api.version": {required: false, secret: false}
+    },
+    doc: """
+    Low-level Pinecone HTTP client: `Api-Key` auth, the
+    `X-Pinecone-Api-Version` header, error decoding, and the pure URL
+    helpers the other modules share.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then context, then the defaults. Nothing from `opts` is written
+    to ctx, so one run can act for many projects and parallel flows don't
+    share credentials. Credentials in `opts` are masked in call records. An
+    `api-key` present but blank or null is an error, never a fallback to
+    context.
+
+    - `api-key`: the API key for this call
+    - `api-version`: the `X-Pinecone-Api-Version` for this call
+
+    An index `host` is a per-call URL. `pinecone.api.key` only goes to
+    `https://*.pinecone.io`, such as the `host` from `describe-index`: any
+    other host, like Pinecone Local, needs an `api-key` in the call's `opts`.
+    """
+}
 
 ::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
 
-http-request ::hot::http/request
 is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
 HttpResponse ::hot::http/HttpResponse
 
-HttpError type {
+// =============================================================================
+// Errors
+// =============================================================================
+
+HttpError
+meta {
+    doc: """
+    A non-2xx Pinecone response. `message` is readable text built from
+    Pinecone's error body (`{error: {code, message}, status}` on the
+    control plane, `{code, message}` on the data plane); the raw body
+    is kept in `body`.
+    """
+}
+type {
     status: Int,
+    message: Str,
     headers: Map,
     body: Any
+}
+
+error-message
+meta {
+    doc: """Readable text for a failed response, e.g. `Pinecone API error 400 (INVALID_ARGUMENT): Index name must ...`. Exposed for testing."""
+}
+fn (status: Int, body: Any): Str {
+  inner if(and(is-map(body), is-map(get(body, "error"))), get(body, "error"), body)
+  message cond {
+    is-map(inner) => { text-or-null(get(inner, "message")) }
+    is-str(inner) => { text-or-null(inner) }
+    => { null }
+  }
+
+  code if(is-map(inner), get(inner, "code"), null)
+  label if(is-str(code), `Pinecone API error ${status} (${code})`, `Pinecone API error ${status}`)
+  if(is-some(message), `${label}: ${message}`, label)
+}
+
+text-or-null fn (value: Any): Any {
+  if(and(is-str(value), not(is-blank(value))), value, null)
 }
 
 HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   HttpError({
     status: response.status,
-    headers: response.headers,
+    message: error-message(response.status, response.body),
+    headers: or(response.headers, {}),
     body: response.body
   })
 }
 
+// =============================================================================
+// Credentials
+// =============================================================================
+
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-blank(value), null, trim(value)), null)
+}
+
+is-pinecone-url
+meta {
+    doc: """True for an `https://` URL on a `pinecone.io` host: the only place a context key is sent. Exposed for testing."""
+}
+fn (url: Str): Bool {
+  ::re/is-match(url, "^https://([A-Za-z0-9-]+\\.)+pinecone\\.io(:[0-9]+)?(/.*)?$")
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: `{api-key, api-version}` for a call from `opts`
+    first, then `ctx-values` (a Map of context variables), then defaults.
+    An Err when no API key is set, or when `api-key` is in `opts` but blank
+    or null (that never falls back to context). With a `url`, also an Err
+    when it isn't a Pinecone URL and `opts` has no `api-key`. Exposed for
+    testing; `resolve` feeds it the context.
+    """
+}
+fn
+(opts: Map, ctx-values: Map): Map {
+  opt-key non-blank(get(opts, "api-key"))
+  api-key or(opt-key, non-blank(get(ctx-values, "pinecone.api.key")))
+  cond {
+    and(in("api-key", keys(opts)), is-null(opt-key)) => {
+      err("pinecone: api-key is in the call's opts but is blank or null. Pass a value, or leave api-key out to use pinecone.api.key.")
+    }
+
+    is-null(api-key) => { err("pinecone: pinecone.api.key is not set. Add it in Context Variables, or pass {api-key: ...} in the call's opts.") }
+    => {
+      {
+        api-key: api-key,
+        api-version: or(non-blank(get(opts, "api-version")), non-blank(get(ctx-values, "pinecone.api.version")), ::pinecone/API_VERSION)
+      }
+    }
+  }
+},
+(opts: Map, ctx-values: Map, url: Str): Map {
+  cond {
+    in("api-key", keys(opts)) => { resolve-from(opts, ctx-values) }
+    not(is-pinecone-url(url)) => {
+      err("pinecone: the index host is not on pinecone.io and the call's opts have no api-key. Pass api-key with it. Context credentials are only sent to https://*.pinecone.io.")
+    }
+    => { resolve-from(opts, ctx-values) }
+  }
+}
+
+ctx-values fn (): Map {
+  {
+    "pinecone.api.key": ::ctx/get("pinecone.api.key"),
+    "pinecone.api.version": ::ctx/get("pinecone.api.version")
+  }
+}
+
+resolve
+meta {
+    ctx: {
+        "pinecone.api.key": {required: false},
+        "pinecone.api.version": {required: false, secret: false}
+    },
+    doc: """
+    Credentials and settings for one call (see `resolve-from`), optionally
+    for a `url`. An `api-key` from `opts` is masked in this run's records
+    and never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::pinecone::api/resolve({api-key: "tenant-b-key"}).api-version  // "2026-07"
+    ```
+    """
+}
+fn
+(opts: Map): Map {
+  ::ctx/mark-secret(non-blank(get(opts, "api-key")))
+  resolve-from(opts, ctx-values())
+},
+(opts: Map, url: Str): Map {
+  ::ctx/mark-secret(non-blank(get(opts, "api-key")))
+  resolve-from(opts, ctx-values(), url)
+}
+
+// =============================================================================
+// Requests
+// =============================================================================
+
+json
+meta {
+    doc: """
+    Make an authenticated Pinecone request against a full URL and
+    unwrap it: the decoded JSON body on 2xx (null for an empty body),
+    an Err carrying `HttpError` otherwise, or the transport Err. Pass
+    `""` as `body` for requests without one. Sends `Api-Key` and
+    `X-Pinecone-Api-Version` (see `resolve`).
+    """
+}
+fn
+(method: Str, url: Str, body: Any): Any {
+  json(method, url, body, {})
+},
+// 4-arity: explicit API key override
+(method: Str, url: Str, body: Any, api-key: Str?): Any {
+  json(method, url, body, {api-key: api-key})
+},
+// 4-arity: per-call credentials and settings (see `resolve`)
+(method: Str, url: Str, body: Any, opts: Map): Any {
+  encoded if(eq(body, ""), "", to-json(untype(body)))
+  send(method, url, encoded, if(eq(body, ""), null, "application/json"), opts)
+}
+
+ndjson
+meta {
+    doc: """POST newline-delimited JSON (one record per line), as the Records upsert endpoint requires. Returns like `json`."""
+}
+fn
+(url: Str, records: Vec): Any {
+  ndjson(url, records, {})
+},
+(url: Str, records: Vec, api-key: Str?): Any {
+  ndjson(url, records, {api-key: api-key})
+},
+(url: Str, records: Vec, opts: Map): Any {
+  send("POST", url, ndjson-body(records), "application/x-ndjson", opts)
+}
+
+ndjson-body
+meta {
+    doc: """Encode records as newline-delimited JSON. Exposed for testing."""
+}
+fn (records: Vec): Str {
+  join(map(records, (r) { to-json(untype(r)) }), "\n")
+}
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). Pure; exposed for testing."""
+}
+fn (method: Str, url: Str, encoded: Str, content-type: Any, resolved: Map): HttpRequest {
+  base {
+    Api-Key: resolved.api-key,
+    X-Pinecone-Api-Version: resolved.api-version,
+    Accept: "application/json"
+  }
+
+  HttpRequest({
+    method,
+    url,
+    headers: if(is-some(content-type), {...base, Content-Type: content-type}, base),
+    body: encoded
+  })
+}
+
+send fn (method: Str, url: Str, encoded: Str, content-type: Any, opts: Map): Any {
+  resolved resolve(opts, url)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      response ::hot::http/request(build-request(method, url, encoded, content-type, resolved))
+      cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { if(eq(response.body, ""), null, response.body) }
+        => { err(HttpError(response)) }
+      }
+    }
+  }
+}
+
+// =============================================================================
+// URLs
+// =============================================================================
+
 normalize-host
 meta {
-    doc: """Accept a bare index host (`docs-abc123.svc...pinecone.io`) or a full URL and return the `https://` base. Exposed for testing."""
+    doc: """Accept a bare index host (`docs-abc123.svc...pinecone.io`) or a full URL and return the `https://` base, without a trailing slash. Exposed for testing."""
 }
 fn (host: Str): Str {
-  cond {
+  base cond {
     starts-with(host, "https://") => { host }
     starts-with(host, "http://") => { host }
     => { `https://${host}` }
   }
+
+  if(ends-with(base, "/"), slice(base, 0, sub(length(base), 1)), base)
 }
 
-json
+control-url
 meta {
-    doc: """Make an authenticated Pinecone request against a full URL and unwrap: decoded JSON on 2xx, Err carrying `HttpError` otherwise. Sends `Api-Key` and the pinned `X-Pinecone-API-Version`."""
+    doc: """A control-plane URL: `::pinecone/CONTROL_URL` plus the path, with each path segment URL-encoded. Exposed for testing."""
 }
-fn
-(method: Str, url: Str, body: Any): Any {
-  json(method, url, body, ::ctx/get("pinecone.api.key"))
-},
-// 4-arity: explicit API key override
-(method: Str, url: Str, body: Any, api-key: Str): Any {
-  default-headers {
-    Api-Key: api-key,
-    X-Pinecone-API-Version: ::pinecone/API_VERSION,
-    Accept: "application/json"
-  }
+fn (...segments: Str): Str {
+  `${::pinecone/CONTROL_URL}/${join(map(segments, (s) { ::uri/encode(s) }), "/")}`
+}
 
-  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
-  encoded-body if(eq(body, ""), "", to-json(untype(body)))
+data-url
+meta {
+    doc: """A data-plane URL on an index host: `segments` are URL-encoded and joined, then the optional query (a Map; nulls dropped) is appended. Exposed for testing."""
+}
+fn (host: Str, segments: Vec, query: Map): Str {
+  `${normalize-host(host)}/${join(map(segments, (s) { ::uri/encode(s) }), "/")}${::uri/query-string(query)}`
+}
 
-  response ::hot::http/request(HttpRequest({
-    method,
-    url,
-    headers: headers,
-    body: encoded-body
-  }))
-  cond {
-    is-err(response) => { response }
-    is-ok-response(response) => { response.body }
-    => { err(HttpError(response)) }
-  }
+compact
+meta {
+    doc: """Drop null values from a Map, so unset options are omitted instead of sent as JSON null. Exposed for testing."""
+}
+fn (m: Map): Map {
+  filter-vals(m, is-some)
 }

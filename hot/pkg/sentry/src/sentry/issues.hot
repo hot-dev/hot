@@ -1,0 +1,306 @@
+::sentry::issues ns
+meta {
+    doc: """
+    Sentry issues over the organization-scoped endpoints: search with
+    Sentry's query syntax, read, update one or many, list events, read
+    the latest event's stack trace, and comment.
+    """,
+    ctx: {"sentry.token": {required: false}, "sentry.org": {required: false, secret: false}}
+}
+
+::api ::sentry::api
+
+Page ::sentry::api/Page
+ConfigError ::sentry::api/ConfigError
+
+// Sentry's bulk mutate accepts at most this many issue ids per request.
+MAX_BULK_IDS 1000
+
+issue-suffix fn (issue-id: Any): Str {
+  `/issues/${::api/seg(issue-id)}/`
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+list-issues
+meta {
+    doc: """
+    GET /organizations/{org}/issues/ - One page of issues. `params`:
+    - `project` — a project slug or numeric id, or a Vec of them (omit for all projects)
+    - `query` — Sentry search syntax, e.g. `"is:unresolved level:error firstSeen:-24h"`
+      (Sentry defaults to `is:unresolved`; `""` returns everything)
+    - `statsPeriod` (`"24h"`, `"14d"`) or `start` / `end` (ISO-8601)
+    - `environment` — a name or Vec of names
+    - `sort` — `date`, `new`, `freq`, `user`, `trends`, `inbox`, `recommended`
+    - `limit` (max 100), `cursor`, `expand`, `collapse`
+
+    The 2-arity form is a shorthand for `{project, query}`. Returns a
+    `Page` (`.items`, `.next_cursor`).
+
+    **Example**
+
+    ```hot
+    page ::sentry::issues/list-issues({project: "my-api", query: "is:unresolved", sort: "freq", limit: 25})
+    map(page.items, %.title)
+    ```
+    """
+}
+fn
+(): Page {
+  list-issues({})
+},
+(params: Map): Page {
+  list-issues(params, {})
+},
+(project: Str, query: Str): Page {
+  list-issues({project: project, query: query})
+},
+(params: Map, opts: Map): Page {
+  ::api/org-page("/issues/", params, opts)
+},
+(project: Str, query: Str, opts: Map): Page {
+  list-issues({project: project, query: query}, opts)
+}
+
+list-all-issues
+meta {
+    doc: """Every issue matching `params`, following cursors (100 per request) up to `max` (default 1000)."""
+}
+fn
+(params: Map): Vec {
+  list-all-issues(params, ::api/DEFAULT_MAX_ITEMS)
+},
+(params: Map, max: Int): Vec {
+  list-all-issues(params, max, {})
+},
+(params: Map, opts: Map): Vec {
+  list-all-issues(params, ::api/DEFAULT_MAX_ITEMS, opts)
+},
+(params: Map, max: Int, opts: Map): Vec {
+  ::api/collect-pages((p) { list-issues(p, opts) }, {limit: 100, ...params}, max)
+}
+
+get-issue
+meta {
+    doc: """GET /organizations/{org}/issues/{id}/ - One issue: title, culprit, status, level, counts, assignee, first/last seen."""
+}
+fn
+(issue-id: Any): Map {
+  get-issue(issue-id, {})
+},
+(issue-id: Any, opts: Map): Map {
+  ::api/org-json("GET", issue-suffix(issue-id), "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Updates
+// ---------------------------------------------------------------------------
+
+update-issue
+meta {
+    doc: """
+    PUT /organizations/{org}/issues/{id}/ - Change only the given fields:
+    `status` (`resolved`, `unresolved`, `ignored`, `resolvedInNextRelease`),
+    `substatus`, `statusDetails` (e.g. `{inRelease: "1.4.0"}`),
+    `assignedTo` (`"user:<id>"`, `"team:<id>"`, a username or email; `""`
+    unassigns), `priority` (`low`, `medium`, `high`), `hasSeen`,
+    `isBookmarked`, `isSubscribed`, `isPublic`. Null fields are dropped.
+    """
+}
+fn
+(issue-id: Any, changes: Map): Map {
+  update-issue(issue-id, changes, {})
+},
+(issue-id: Any, changes: Map, opts: Map): Map {
+  ::api/org-json("PUT", issue-suffix(issue-id), filter-vals(untype(changes), is-some), opts)
+}
+
+resolve-issue
+meta {
+    doc: """Mark an issue resolved. The 2-arity form resolves it in a release (`statusDetails.inRelease`), so a regression in a later release reopens it."""
+}
+fn
+(issue-id: Any): Map {
+  resolve-issue(issue-id, null, {})
+},
+(issue-id: Any, release: Str): Map {
+  resolve-issue(issue-id, release, {})
+},
+(issue-id: Any, opts: Map): Map {
+  resolve-issue(issue-id, null, opts)
+},
+(issue-id: Any, release: Str?, opts: Map): Map {
+  update-issue(issue-id, {status: "resolved", statusDetails: if(is-some(release), {inRelease: release}, null)}, opts)
+}
+
+ignore-issue
+meta {
+    doc: """Archive (ignore) an issue. The 2-arity form archives it for `minutes`, after which it returns."""
+}
+fn
+(issue-id: Any): Map {
+  ignore-issue(issue-id, {})
+},
+(issue-id: Any, minutes: Int): Map {
+  ignore-issue(issue-id, minutes, {})
+},
+(issue-id: Any, opts: Map): Map {
+  update-issue(issue-id, {status: "ignored", substatus: "archived_forever"}, opts)
+},
+(issue-id: Any, minutes: Int, opts: Map): Map {
+  update-issue(issue-id, {status: "ignored", substatus: "archived_until_condition_met", statusDetails: {ignoreDuration: minutes}}, opts)
+}
+
+unresolve-issue
+meta {
+    doc: """Reopen an issue."""
+}
+fn
+(issue-id: Any): Map {
+  unresolve-issue(issue-id, {})
+},
+(issue-id: Any, opts: Map): Map {
+  update-issue(issue-id, {status: "unresolved"}, opts)
+}
+
+assign-issue
+meta {
+    doc: """Assign an issue: `"user:<id>"`, `"team:<id>"`, a username, or an email. Pass `""` to unassign."""
+}
+fn
+(issue-id: Any, assignee: Str): Map {
+  assign-issue(issue-id, assignee, {})
+},
+(issue-id: Any, assignee: Str, opts: Map): Map {
+  update-issue(issue-id, {assignedTo: assignee}, opts)
+}
+
+bulk-query
+meta {
+    doc: """The query string for a bulk update: one `id=` per issue, plus optional `project`/`environment` filters. Exposed for testing."""
+}
+fn (issue-ids: Vec, params: Map): Str {
+  ::api/query({...untype(params), id: issue-ids})
+}
+
+bulk-update-issues
+meta {
+    doc: """
+    PUT /organizations/{org}/issues/?id=… - Apply the same `changes` (as
+    in `update-issue`, plus `merge: true` / `discard: true`) to up to
+    1000 issues. `issue-ids` must be non-empty: without ids Sentry would
+    update every issue matching the filters, so this function refuses.
+    Returns Sentry's summary of the change (null when nothing matched).
+
+    **Example**
+
+    ```hot
+    ::sentry::issues/bulk-update-issues(["4501", "4502"], {status: "resolved"})
+    ```
+    """
+}
+fn
+(issue-ids: Vec, changes: Map): Any {
+  bulk-update-issues(issue-ids, changes, {})
+},
+(issue-ids: Vec, changes: Map, params: Map): Any {
+  bulk-update-issues(issue-ids, changes, params, {})
+},
+(issue-ids: Vec, changes: Map, params: Map, opts: Map): Any {
+  cond {
+    is-empty(issue-ids) => { err(ConfigError({message: "bulk-update-issues needs at least one issue id; refusing to update every matching issue."})) }
+    gt(length(issue-ids), MAX_BULK_IDS) => { err(ConfigError({message: `bulk-update-issues accepts at most ${MAX_BULK_IDS} ids per call.`})) }
+    => { ::api/org-json("PUT", `/issues/${bulk-query(issue-ids, params)}`, filter-vals(untype(changes), is-some), opts) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+list-issue-events
+meta {
+    doc: """
+    GET /organizations/{org}/issues/{id}/events/ - One page of an issue's
+    events, newest first. `params`: `full` (true for stack traces and
+    breadcrumbs), `environment`, `statsPeriod` or `start`/`end`, `query`,
+    `per_page`, `cursor`. Returns a `Page`.
+    """
+}
+fn
+(issue-id: Any): Page {
+  list-issue-events(issue-id, {})
+},
+(issue-id: Any, params: Map): Page {
+  list-issue-events(issue-id, params, {})
+},
+(issue-id: Any, params: Map, opts: Map): Page {
+  ::api/org-page(`${issue-suffix(issue-id)}events/`, params, opts)
+}
+
+get-event
+meta {
+    doc: """GET /organizations/{org}/issues/{id}/events/{event_id}/ - One event of an issue, with stack trace `entries`, tags, and context. `event-id` may be `"latest"`, `"oldest"`, or `"recommended"`."""
+}
+fn
+(issue-id: Any, event-id: Str): Map {
+  get-event(issue-id, event-id, {})
+},
+(issue-id: Any, event-id: Str, params: Map): Map {
+  get-event(issue-id, event-id, params, {})
+},
+(issue-id: Any, event-id: Str, params: Map, opts: Map): Map {
+  ::api/org-json("GET", `${issue-suffix(issue-id)}events/${::api/seg(event-id)}/${::api/query(params)}`, "", opts)
+}
+
+get-latest-event
+meta {
+    doc: """The issue's most recent event, including the stack trace entries. The 2-arity form filters by `environment`."""
+}
+fn
+(issue-id: Any): Map {
+  get-latest-event(issue-id, null, {})
+},
+(issue-id: Any, environment: Str): Map {
+  get-latest-event(issue-id, environment, {})
+},
+(issue-id: Any, opts: Map): Map {
+  get-latest-event(issue-id, null, opts)
+},
+(issue-id: Any, environment: Str?, opts: Map): Map {
+  get-event(issue-id, "latest", {environment: environment}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Comments
+// ---------------------------------------------------------------------------
+
+list-comments
+meta {
+    doc: """GET /organizations/{org}/issues/{id}/comments/ - An issue's comments (notes), newest first: `[{id, data: {text}, user, dateCreated}]`."""
+}
+fn
+(issue-id: Any): Vec {
+  list-comments(issue-id, {})
+},
+(issue-id: Any, opts: Map): Vec {
+  ::api/org-json("GET", `${issue-suffix(issue-id)}comments/`, "", opts)
+}
+
+add-comment
+meta {
+    doc: """
+    POST /organizations/{org}/issues/{id}/comments/ - Comment on an issue.
+    Sentry attributes comments to a user, so this needs a user auth token
+    (organization auth tokens are rejected with 403).
+    """
+}
+fn
+(issue-id: Any, text: Str): Map {
+  add-comment(issue-id, text, {})
+},
+(issue-id: Any, text: Str, opts: Map): Map {
+  ::api/org-json("POST", `${issue-suffix(issue-id)}comments/`, {text: text}, opts)
+}

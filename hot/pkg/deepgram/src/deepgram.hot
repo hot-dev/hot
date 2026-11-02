@@ -1,62 +1,152 @@
 ::deepgram ns
 meta {
     doc: """
-    Deepgram bindings: fast speech-to-text (prerecorded) and Aura
-    text-to-speech. Pairs with `elevenlabs` (premium voices), `whisper`
-    (batch STT in a Hot Box), and the messaging packages for voice
-    agents.
+    Deepgram bindings: pre-recorded speech-to-text (`transcribe-url`,
+    `transcribe-audio`), asynchronous transcription with callbacks, Aura
+    and Flux text-to-speech (`speak`, `speak-flux`), the public model
+    list, and helpers that pull transcript text, words, utterances, and
+    paragraphs out of a `/v1/listen` response. Callback verification
+    lives in `::deepgram::callbacks`.
 
-    Live websocket streaming is not covered yet — use prerecorded
-    transcription on audio chunks for near-real-time flows.
+    Live websocket streaming (`wss://api.deepgram.com/v1/listen`) is not
+    covered. For near-real-time flows, transcribe short audio chunks
+    with `transcribe-audio`.
 
-    **Setup** — context variable `deepgram.api.key`.
+    **Setup**: context variable `deepgram.api.key`, or a per-call `api-key`
+    in the trailing `opts` Map of any API-calling function (see
+    `::deepgram::api`).
 
     **Quick start**
 
     ```hot
-    ::dg ::deepgram
+    out ::deepgram/transcribe-url("https://static.deepgram.com/examples/Bueller-Life-moves-pretty-fast.wav", {diarize_model: "latest", utterances: true})
+    ::deepgram/transcript(out)          // best transcript of the first channel
+    ::deepgram/format-utterances(out)   // "[Speaker 0] ..." lines
 
-    out ::dg/transcribe-url("https://static.deepgram.com/examples/interview_speech-analytics.wav")
-    ::dg/transcript(out)  // => "another big problem ..."
+    audio ::deepgram/speak("Your build is green.")
+    ::hot::file/write-file-bytes("build.mp3", audio)
     ```
     """
 }
 
-::ctx ::hot::ctx
-::uri ::hot::uri
+::api ::deepgram::api
 
-BASE_URL "https://api.deepgram.com/v1"
+BASE_URL "https://api.deepgram.com"
 
-request fn
-(path: Str, content-type: Str, body: Any): Any {
-  request(path, content-type, body, ::ctx/get("deepgram.api.key"))
+// Current flagship models. Override per call with `{model: ...}`.
+DEFAULT_STT_MODEL "nova-3"
+DEFAULT_TTS_MODEL "aura-2-thalia-en"
+
+// Defaults applied to every transcription; pass `{smart_format: null}` to
+// drop one.
+DEFAULT_LISTEN_OPTIONS {model: DEFAULT_STT_MODEL, smart_format: true}
+
+// ============================================================================
+// Option building
+// ============================================================================
+
+listen-params
+meta {
+    doc: """
+    Merge `options` over the transcription defaults (`model: "nova-3"`,
+    `smart_format: true`). A Map `extra` becomes Deepgram's repeated
+    `extra=key:value` form. Exposed for testing.
+    """
+}
+fn (options: Map): Map {
+  merged {...DEFAULT_LISTEN_OPTIONS, ...options}
+  extra get(merged, "extra")
+  if(is-map(extra), {...merged, extra: extra-pairs(extra)}, merged)
+}
+
+// {job: "42", user: "ada"} => ["job:42", "user:ada"]
+extra-pairs fn (extra: Map): Vec {
+  reduce(extra, (acc, entry) {
+    value entry[1]
+    if(is-null(value), acc, concat(acc, [`${first(entry)}:${value}`]))
+  }, [])
+}
+
+listen-path
+meta {
+    doc: """The `/v1/listen` path with query string for `options` (defaults applied). Exposed for testing."""
+}
+fn (options: Map): Str {
+  `/v1/listen${::api/query-string(listen-params(options))}`
+}
+
+callback-params
+meta {
+    doc: """
+    Options that turn a transcription asynchronous: `callback` (the URL
+    Deepgram POSTs results to) plus, when `secret` is non-empty, an
+    `extra` entry `callback_secret:<secret>` that Deepgram echoes back in
+    the callback body's `metadata.extra` for
+    `::deepgram::callbacks/verify-callback`. Exposed for testing.
+    """
+}
+fn (callback-url: Str, secret: Any): Map {
+  base {callback: callback-url}
+  if(or(is-null(secret), is-empty(Str(secret))), base, {...base, extra: [`callback_secret:${secret}`]})
+}
+
+// Append callback params to options, keeping any `extra` the caller set.
+with-callback fn
+(options: Map, callback-url: Str): Map {
+  with-callback(options, callback-url, ::hot::ctx/get("deepgram.callback.secret"))
 },
-// 4-arity: explicit API key override
-(path: Str, content-type: Str, body: Any, api-key: Str): Any {
-  response ::hot::http/request(::hot::http/HttpRequest({
-    method: "POST",
-    url: `${BASE_URL}${path}`,
-    headers: {
-      Authorization: `Token ${api-key}`,
-      Content-Type: content-type
-    },
-    body: body
-  }))
+(options: Map, callback-url: Str, secret: Str?): Map {
+  params listen-params(options)
+  cb callback-params(callback-url, secret)
+  existing or(get(params, "extra"), [])
+  existing-vec if(is-vec(existing), existing, [existing])
+  cb-extra or(get(cb, "extra"), [])
+  extra concat(existing-vec, cb-extra)
+  {...params, callback: cb.callback, extra: if(is-empty(extra), null, extra)}
+}
+
+// Start an async transcription and return its request id.
+post-async fn (body: Any, content-type: Str, callback-url: Str, options: Map, opts: Map): Str {
+  resolved ::api/resolve(opts)
   cond {
-    is-err(response) => { response }
-    ::hot::http/is-ok-response(response) => { response.body }
-    => { err({status: response.status, body: response.body}) }
+    is-err(resolved) => { resolved }
+    => {
+      params with-callback(options, callback-url, resolved.callback-secret)
+      out ::api/json("POST", `/v1/listen${::api/query-string(params)}`, content-type, body, opts)
+      if-ok(out, request-id)
+    }
   }
 }
 
+// ============================================================================
+// Pre-recorded transcription
+// ============================================================================
+
 transcribe-url
 meta {
-    ctx: {"deepgram.api.key": {required: true}},
+    ctx: {"deepgram.api.key": {required: false}},
     doc: """
-    POST /listen with a URL source. `options` map to Deepgram query
-    params: `model` (default "nova-3"), `language`, `smart_format`
-    (default true), `diarize`, `punctuate`, `detect_language`. Returns
-    the full response; use `transcript` for the text.
+    POST /v1/listen with a hosted audio URL. `options` map to Deepgram
+    query params and are merged over `model: "nova-3"` and
+    `smart_format: true`. Common ones: `language` (or `"multi"`),
+    `detect_language`, `diarize_model` (`"latest"`; replaces the
+    deprecated `diarize`), `utterances`, `paragraphs`, `punctuate`,
+    `keyterm` (Vec, Nova-3), `keywords` (Vec, older models), `search`,
+    `replace`, `redact`, `summarize`, `topics`, `intents`, `sentiment`,
+    `multichannel`, `tag`, `extra`. Vec values repeat the key.
+
+    Returns the full response Map; use `transcript`, `words`,
+    `utterances`, or `paragraphs` to read it.
+
+    **Example**
+
+    ```hot
+    out ::deepgram/transcribe-url("https://static.deepgram.com/examples/Bueller-Life-moves-pretty-fast.wav", {
+      keyterm: ["Bueller", "Ferris"],
+      paragraphs: true
+    })
+    ::deepgram/paragraph-transcript(out)
+    ```
     """
 }
 fn
@@ -64,62 +154,295 @@ fn
   transcribe-url(audio-url, {})
 },
 (audio-url: Str, options: Map): Map {
-  params {model: "nova-3", smart_format: true, ...options}
-  request(`/listen${::uri/query-string(params)}`, "application/json", to-json({url: audio-url}))
+  transcribe-url(audio-url, options, {})
+},
+(audio-url: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", listen-path(options), "application/json", to-json({url: audio-url}), opts)
 }
 
 transcribe-audio
 meta {
-    ctx: {"deepgram.api.key": {required: true}},
-    doc: """POST /listen with raw audio Bytes (wav/mp3/ogg/webm...). Same `options` as `transcribe-url`; pass the audio's MIME type (3-arity, default "audio/wav")."""
+    ctx: {"deepgram.api.key": {required: false}},
+    doc: """
+    POST /v1/listen with raw audio `Bytes` (wav, mp3, ogg, flac, webm,
+    m4a, ...). Same `options` as `transcribe-url`. Deepgram detects
+    containerized formats itself, so the body goes up as
+    `application/octet-stream` unless you pass a MIME type (3-arity).
+    Headerless audio needs `encoding` and `sample_rate` options
+    (e.g. `{encoding: "linear16", sample_rate: 16000}`).
+
+    **Example**
+
+    ```hot
+    audio ::hot::file/read-file-bytes("call.mp3")
+    ::deepgram/transcript(::deepgram/transcribe-audio(audio))
+    ```
+    """
 }
 fn
+(audio: Bytes): Map {
+  transcribe-audio(audio, {})
+},
 (audio: Bytes, options: Map): Map {
-  transcribe-audio(audio, options, "audio/wav")
+  transcribe-audio(audio, options, "application/octet-stream")
 },
 (audio: Bytes, options: Map, mime-type: Str): Map {
-  params {model: "nova-3", smart_format: true, ...options}
-  request(`/listen${::uri/query-string(params)}`, mime-type, audio)
+  transcribe-audio(audio, options, mime-type, {})
+},
+(audio: Bytes, options: Map, opts: Map): Map {
+  transcribe-audio(audio, options, "application/octet-stream", opts)
+},
+(audio: Bytes, options: Map, mime-type: Str, opts: Map): Map {
+  ::api/json("POST", listen-path(options), mime-type, audio, opts)
+}
+
+transcribe-url-async
+meta {
+    ctx: {
+        "deepgram.api.key": {required: false},
+        "deepgram.callback.secret": {required: false}
+    },
+    doc: """
+    Asynchronous `transcribe-url`: Deepgram answers at once with a
+    `request_id` (returned here) and later POSTs the full transcription
+    response to `callback-url`. When `deepgram.callback.secret` is set it
+    is sent as `extra=callback_secret:<secret>` so your handler can check
+    it with `::deepgram::callbacks/verify-callback`. Use
+    `{callback_method: "PUT"}` to receive a PUT instead.
+
+    Deepgram only calls back on ports 80, 443, 8080, and 8443, and
+    retries a non-2xx answer up to 10 times, 30 seconds apart.
+
+    **Example**
+
+    ```hot
+    request-id ::deepgram/transcribe-url-async("https://static.deepgram.com/examples/Bueller-Life-moves-pretty-fast.wav", "https://example.com/hooks/deepgram", {utterances: true})
+    ```
+    """
+}
+fn
+(audio-url: Str, callback-url: Str): Str {
+  transcribe-url-async(audio-url, callback-url, {})
+},
+(audio-url: Str, callback-url: Str, options: Map): Str {
+  transcribe-url-async(audio-url, callback-url, options, {})
+},
+(audio-url: Str, callback-url: Str, options: Map, opts: Map): Str {
+  post-async(to-json({url: audio-url}), "application/json", callback-url, options, opts)
+}
+
+transcribe-audio-async
+meta {
+    ctx: {
+        "deepgram.api.key": {required: false},
+        "deepgram.callback.secret": {required: false}
+    },
+    doc: """Asynchronous `transcribe-audio`: uploads the `Bytes`, returns Deepgram's `request_id`, and delivers the result to `callback-url`. See `transcribe-url-async`."""
+}
+fn
+(audio: Bytes, callback-url: Str): Str {
+  transcribe-audio-async(audio, callback-url, {})
+},
+(audio: Bytes, callback-url: Str, options: Map): Str {
+  transcribe-audio-async(audio, callback-url, options, {})
+},
+(audio: Bytes, callback-url: Str, options: Map, opts: Map): Str {
+  post-async(audio, "application/octet-stream", callback-url, options, opts)
+}
+
+// ============================================================================
+// Response helpers
+// ============================================================================
+
+alternative fn (response: Map, channel: Int): Map {
+  or(get-in(response, ["results", "channels", channel, "alternatives", 0]), {})
 }
 
 transcript
 meta {
-    doc: """Pull the best transcript text out of a `/listen` response. Exposed for testing."""
+    doc: """The best transcript text of the first channel (`""` when the response has none)."""
 }
 fn (response: Map): Str {
-  channels get(or(get(response, "results"), {}), "channels", [])
+  or(get(alternative(response, 0), "transcript"), "")
+}
+
+transcripts
+meta {
+    doc: """The best transcript of every channel, in channel order (for `multichannel: true`)."""
+}
+fn (response: Map): Vec {
+  channels or(get-in(response, ["results", "channels"]), [])
+  map(channels, (channel) { or(get-in(channel, ["alternatives", 0, "transcript"]), "") })
+}
+
+words
+meta {
+    doc: """Word objects of the first channel's best alternative: `{word, start, end, confidence, punctuated_word?, speaker?}`."""
+}
+fn (response: Map): Vec {
+  or(get(alternative(response, 0), "words"), [])
+}
+
+utterances
+meta {
+    doc: """Utterances (`{start, end, confidence, channel, transcript, speaker?, words, id}`), present when the request set `utterances: true`; `[]` otherwise."""
+}
+fn (response: Map): Vec {
+  or(get-in(response, ["results", "utterances"]), [])
+}
+
+format-utterances
+meta {
+    doc: """
+    Utterances as readable lines, one per turn: `[Speaker 0] Hello there.`
+    (speaker labels need diarization, e.g. `diarize_model: "latest"`;
+    without them lines carry only the text). Falls back to `transcript`
+    when the response has no utterances.
+    """
+}
+fn (response: Map): Str {
+  items utterances(response)
   cond {
-    is-empty(channels) => { "" }
+    is-empty(items) => { transcript(response) }
     => {
-      alternatives get(first(channels), "alternatives", [])
-      cond {
-        is-empty(alternatives) => { "" }
-        => { get(first(alternatives), "transcript", "") }
-      }
+      join(map(items, (u) {
+        speaker get(u, "speaker")
+        text or(get(u, "transcript"), "")
+        if(is-some(speaker), `[Speaker ${speaker}] ${text}`, text)
+      }), "\n")
     }
   }
 }
 
+paragraphs
+meta {
+    doc: """Paragraph objects (`{sentences: [{text, start, end}], speaker?, num_words, start, end}`) of the first channel, present when the request set `paragraphs: true`; `[]` otherwise."""
+}
+fn (response: Map): Vec {
+  or(get-in(alternative(response, 0), ["paragraphs", "paragraphs"]), [])
+}
+
+paragraph-transcript
+meta {
+    doc: """The paragraph-formatted transcript (blank lines between paragraphs) when the request set `paragraphs: true`, otherwise the plain `transcript`."""
+}
+fn (response: Map): Str {
+  or(get-in(alternative(response, 0), ["paragraphs", "transcript"]), transcript(response))
+}
+
+request-id
+meta {
+    doc: """The request id of a `/v1/listen` response: `metadata.request_id` for a finished transcription, or the top-level `request_id` of an async acknowledgement."""
+}
+fn (response: Map): Str? {
+  or(get-in(response, ["metadata", "request_id"]), get(response, "request_id"))
+}
+
+is-accepted
+meta {
+    doc: """True for the acknowledgement of an async (callback) request: a `request_id` with no `results` yet."""
+}
+fn (response: Map): Bool {
+  and(is-some(get(response, "request_id")), is-null(get(response, "results")))
+}
+
+// ============================================================================
+// Text to speech
+// ============================================================================
+
+speak-path
+meta {
+    doc: """The `/v1/speak` path with query string for `options` (default model applied). Exposed for testing."""
+}
+fn (options: Map): Str {
+  `/v1/speak${::api/query-string({model: DEFAULT_TTS_MODEL, ...options})}`
+}
+
 speak
 meta {
-    ctx: {"deepgram.api.key": {required: true}},
+    ctx: {"deepgram.api.key": {required: false}},
     doc: """
-    POST /speak - Aura text-to-speech. Returns audio Bytes (mp3 by
-    default). `options`: `model` (default "aura-2-thalia-en"),
-    `encoding`/`container` for telephony formats.
+    POST /v1/speak: Aura text-to-speech. Returns the audio as `Bytes`
+    (mp3 by default). `options`: `model` (default "aura-2-thalia-en";
+    Aura-2 voices are named `aura-2-<voice>-<lang>`, e.g.
+    "aura-2-orion-en", "aura-2-celeste-es"), `encoding` (`linear16`,
+    `mulaw`, `alaw`, `mp3`, `opus`, `flac`, `aac`), `container`,
+    `sample_rate`, `bit_rate`, `speed` (0.7-1.5), `tag`.
 
     **Example**
 
     ```hot
     audio ::deepgram/speak("Your build is green.", {model: "aura-2-orion-en"})
+    phone ::deepgram/speak("Press one to continue.", {encoding: "mulaw", sample_rate: 8000, container: "none"})
     ```
     """
 }
 fn
-(text: Str): Any {
+(text: Str): Bytes {
   speak(text, {})
 },
-(text: Str, options: Map): Any {
-  params {model: "aura-2-thalia-en", ...options}
-  request(`/speak${::uri/query-string(params)}`, "application/json", to-json({text: text}))
+(text: Str, options: Map): Bytes {
+  speak(text, options, {})
+},
+(text: Str, options: Map, opts: Map): Bytes {
+  ::api/bytes("POST", speak-path(options), "application/json", to-json({text: text}), opts)
+}
+
+speak-flux
+meta {
+    ctx: {"deepgram.api.key": {required: false}},
+    doc: """
+    POST /v2/speak: Flux text-to-speech (batch). `model` is required and
+    must be a Flux voice (e.g. "flux-alexis-en"). Takes the same audio
+    `options` as `speak` plus `expressivity` (-2 to 2). Returns `Bytes`.
+
+    **Example**
+
+    ```hot
+    audio ::deepgram/speak-flux("Welcome back.", "flux-alexis-en", {expressivity: 1})
+    ```
+    """
+}
+fn
+(text: Str, model: Str): Bytes {
+  speak-flux(text, model, {})
+},
+(text: Str, model: Str, options: Map): Bytes {
+  speak-flux(text, model, options, {})
+},
+(text: Str, model: Str, options: Map, opts: Map): Bytes {
+  ::api/bytes("POST", `/v2/speak${::api/query-string({...options, model: model})}`, "application/json", to-json({text: text}), opts)
+}
+
+// ============================================================================
+// Models
+// ============================================================================
+
+list-models
+meta {
+    ctx: {"deepgram.api.key": {required: false}},
+    doc: """
+    GET /v1/models: the latest public models as `{stt: [...], tts: [...]}`
+    (each with `name`, `canonical_name`, `languages`, ...; TTS entries
+    carry voice `metadata`). Pass `true` to include outdated versions.
+
+    **Example**
+
+    ```hot
+    voices map(::deepgram/list-models().tts, (m) { m.canonical_name })
+    ```
+    """
+}
+fn
+(): Map {
+  list-models(false)
+},
+(include-outdated: Bool): Map {
+  list-models(include-outdated, {})
+},
+(opts: Map): Map {
+  list-models(false, opts)
+},
+(include-outdated: Bool, opts: Map): Map {
+  ::api/json("GET", `/v1/models${::api/query-string({include_outdated: if(include-outdated, true, null)})}`, "", "", opts)
 }

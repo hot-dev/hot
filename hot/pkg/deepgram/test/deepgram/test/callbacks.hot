@@ -1,0 +1,55 @@
+::deepgram::test::callbacks ns
+meta ["test"]
+
+::cb ::deepgram::callbacks
+
+SECRET "4f1c2a9be07d3a5c"
+
+callback-request fn (body: Str): Map {
+    {headers: {"content-type": "application/json"}, body-raw: body}
+}
+
+test-verify-callback-accepts-matching-secret
+meta ["test"] fn () {
+    body `{"metadata":{"request_id":"r1","extra":{"callback_secret":"${SECRET}","job":"7"}},"results":{"channels":[]}}`
+    assert(::cb/verify-callback(callback-request(body), SECRET))
+}
+
+test-verify-callback-rejects-tampered-and-missing
+meta ["test"] fn () {
+    wrong `{"metadata":{"extra":{"callback_secret":"not-the-secret"}}}`
+    assert(not(::cb/verify-callback(callback-request(wrong), SECRET)), "wrong secret fails")
+
+    missing `{"metadata":{"request_id":"r1"},"results":{}}`
+    assert(not(::cb/verify-callback(callback-request(missing), SECRET)), "missing secret fails")
+
+    assert(not(::cb/verify-callback(callback-request("not json"), SECRET)), "malformed body fails")
+    assert(not(::cb/verify-callback({headers: {}}, SECRET)), "no body fails")
+    numeric `{"metadata":{"extra":{"callback_secret":42}}}`
+    assert(not(::cb/verify-callback(callback-request(numeric), SECRET)), "non-string secret fails")
+}
+
+test-verify-callback-empty-secret-fails-closed
+meta ["test"] fn () {
+    body `{"metadata":{"extra":{"callback_secret":""}}}`
+    assert(not(::cb/verify-callback(callback-request(body), "")), "empty secret never verifies")
+}
+
+test-verify-basic-auth
+meta ["test"] fn () {
+    // base64("deepgram:s3cret") = "ZGVlcGdyYW06czNjcmV0"
+    good {headers: {authorization: "Basic ZGVlcGdyYW06czNjcmV0"}}
+    assert(::cb/verify-basic-auth(good, "deepgram", "s3cret"))
+    assert(not(::cb/verify-basic-auth(good, "deepgram", "other")), "wrong password fails")
+    assert(not(::cb/verify-basic-auth({headers: {}}, "deepgram", "s3cret")), "missing header fails")
+    assert(not(::cb/verify-basic-auth({headers: {authorization: "Basic Og=="}}, "", "")), "empty credentials fail closed")
+}
+
+test-verify-dg-token
+meta ["test"] fn () {
+    request {headers: {dg-token: "key-id-123"}}
+    assert(::cb/verify-dg-token(request, "key-id-123"))
+    assert(not(::cb/verify-dg-token(request, "key-id-999")), "different key id fails")
+    assert(not(::cb/verify-dg-token({headers: {}}, "key-id-123")), "missing header fails")
+    assert(not(::cb/verify-dg-token({headers: {dg-token: ""}}, "")), "empty id fails closed")
+}

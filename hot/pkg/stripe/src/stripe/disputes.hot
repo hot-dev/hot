@@ -1,0 +1,96 @@
+::stripe::disputes ns
+meta {
+    doc: """Disputes (chargebacks): list, inspect, submit evidence, or accept. Respond before `evidence_details.due_by`. See https://docs.stripe.com/api/disputes."""
+}
+
+api-call ::stripe::api/call
+seg ::stripe::api/encode-id
+RequestOptions ::stripe::api/RequestOptions
+
+ListDisputesRequest type {
+  charge: Str?,
+  payment_intent: Str?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?,
+  expand: Vec<Str>?
+}
+
+list-disputes
+meta {
+    doc: """GET /v1/disputes - List disputes, most recent first. Filter by `charge` or `payment_intent`. Check each dispute's `status` ("needs_response", "under_review", "won", "lost", ...)."""
+}
+fn
+(): Map {
+  list-disputes(ListDisputesRequest({}))
+},
+(request: ListDisputesRequest): Map {
+  list-disputes(request, {})
+},
+(request: ListDisputesRequest, opts: Map): Map {
+  api-call("GET", "/v1/disputes", request, opts)
+}
+
+get-dispute
+meta {
+    doc: """GET /v1/disputes/{dispute} - Retrieve a dispute by ID."""
+}
+fn
+(dispute: Str): Map {
+  get-dispute(dispute, {})
+},
+(dispute: Str, params: Map): Map {
+  get-dispute(dispute, params, {})
+},
+(dispute: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/disputes/${seg(dispute)}`, params, opts)
+}
+
+UpdateDisputeRequest type {
+  evidence: Map?,
+  submit: Bool?,
+  metadata: Map?,
+  expand: Vec<Str>?
+}
+
+update-dispute
+meta {
+    doc: """
+POST /v1/disputes/{dispute} - Stage or submit evidence. Evidence fields are text or File IDs (`customer_name`, `product_description`, `shipping_tracking_number`, `uncategorized_text`, `receipt`, ...). `submit` defaults to true, which sends the evidence to the bank immediately and allows no further edits; pass `submit: false` to stage it.
+
+**Example**
+
+```hot
+::disputes ::stripe::disputes
+
+::disputes/update-dispute("dp_...", ::disputes/UpdateDisputeRequest({
+  evidence: {
+    customer_email_address: "alice@example.com",
+    product_description: "Pro plan, monthly",
+    uncategorized_text: "Customer used the service through the disputed period."
+  },
+  submit: false
+}))
+```
+"""
+}
+fn
+(dispute: Str, request: UpdateDisputeRequest): Map {
+  update-dispute(dispute, request, RequestOptions({}))
+},
+(dispute: Str, request: UpdateDisputeRequest, options: RequestOptions | Map): Map {
+  api-call("POST", `/v1/disputes/${seg(dispute)}`, request, options)
+}
+
+close-dispute
+meta {
+    doc: """POST /v1/disputes/{dispute}/close - Accept the dispute (concede it as lost). Irreversible."""
+}
+fn
+(dispute: Str): Map {
+  close-dispute(dispute, RequestOptions({}))
+},
+(dispute: Str, options: RequestOptions | Map): Map {
+  api-call("POST", `/v1/disputes/${seg(dispute)}/close`, {}, options)
+}

@@ -136,9 +136,17 @@ meta {
     ```
     """
 }
-fn (request: SearchOutboundMessagesRequest): SearchOutboundMessagesResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/messages/outbound?count=${request.count}&offset=${request.offset}&recipient=${request.recipient}&fromemail=${request.fromemail}&tag=${request.tag}&status=${request.status}&todate=${request.todate}&fromdate=${request.fromdate}`)
-  if(is-ok-response(response), SearchOutboundMessagesResponse(response.body), err(HttpError(response)))
+fn
+(request: SearchOutboundMessagesRequest): SearchOutboundMessagesResponse {
+  outbound-message-search(request, {})
+},
+(request: SearchOutboundMessagesRequest, opts: Map): SearchOutboundMessagesResponse {
+  response api-request("GET", `${::postmark/BASE_URL}/messages/outbound?count=${request.count}&offset=${request.offset}&recipient=${request.recipient}&fromemail=${request.fromemail}&tag=${request.tag}&status=${request.status}&todate=${request.todate}&fromdate=${request.fromdate}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { SearchOutboundMessagesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 SearchInboundMessagesRequest type {
@@ -184,9 +192,17 @@ meta {
     ```
     """
 }
-fn (request: SearchInboundMessagesRequest): SearchInboundMessagesResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/messages/inbound?count=${request.count}&offset=${request.offset}&recipient=${request.recipient}&fromemail=${request.fromemail}&subject=${request.subject}&mailboxhash=${request.mailboxhash}&tag=${request.tag}&status=${request.status}&todate=${request.todate}&fromdate=${request.fromdate}`)
-  if(is-ok-response(response), SearchInboundMessagesResponse(response.body), err(HttpError(response)))
+fn
+(request: SearchInboundMessagesRequest): SearchInboundMessagesResponse {
+  inbound-message-search(request, {})
+},
+(request: SearchInboundMessagesRequest, opts: Map): SearchInboundMessagesResponse {
+  response api-request("GET", `${::postmark/BASE_URL}/messages/inbound?count=${request.count}&offset=${request.offset}&recipient=${request.recipient}&fromemail=${request.fromemail}&subject=${request.subject}&mailboxhash=${request.mailboxhash}&tag=${request.tag}&status=${request.status}&todate=${request.todate}&fromdate=${request.fromdate}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { SearchInboundMessagesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 SearchOpensForOutboundMessagesRequest type {
@@ -216,9 +232,17 @@ opens-all-messages
 meta {
     doc: """Search open events across all outbound messages with filters for recipient, tag, client, OS, platform, and geography."""
 }
-fn (request: SearchOpensForOutboundMessagesRequest): SearchOpensForOutboundMessagesResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/messages/outbound/opens?count=${request.count}&offset=${request.offset}&recipient=${request.recipient}&tag=${request.tag}&client_name=${request.client-name}&client_company=${request.client-company}&client_family=${request.client-family}&os_name=${request.os-name}&os_family=${request.os-family}&os_company=${request.os-company}&platform=${request.platform}&country=${request.country}&region=${request.region}&city=${request.city}`)
-  if(is-ok-response(response), SearchOpensForOutboundMessagesResponse(response.body), err(HttpError(response)))
+fn
+(request: SearchOpensForOutboundMessagesRequest): SearchOpensForOutboundMessagesResponse {
+  opens-all-messages(request, {})
+},
+(request: SearchOpensForOutboundMessagesRequest, opts: Map): SearchOpensForOutboundMessagesResponse {
+  response api-request("GET", `${::postmark/BASE_URL}/messages/outbound/opens?count=${request.count}&offset=${request.offset}&recipient=${request.recipient}&tag=${request.tag}&client_name=${request.client-name}&client_company=${request.client-company}&client_family=${request.client-family}&os_name=${request.os-name}&os_family=${request.os-family}&os_company=${request.os-company}&platform=${request.platform}&country=${request.country}&region=${request.region}&city=${request.city}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { SearchOpensForOutboundMessagesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 SearchClicksForOutboundMessagesRequest type {
@@ -248,7 +272,15 @@ clicks-all-messages
 meta {
     doc: """Search click events across all outbound messages with filters for recipient, tag, client, OS, platform, and geography."""
 }
-fn (request: SearchClicksForOutboundMessagesRequest): SearchClicksForOutboundMessagesResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/messages/outbound/clicks?count=${request.count}&offset=${request.offset}&recipient=${request.recipient}&tag=${request.tag}&client_name=${request.client-name}&client_company=${request.client-company}&client_family=${request.client-family}&os_name=${request.os-name}&os_family=${request.os-family}&os_company=${request.os-company}&platform=${request.platform}&country=${request.country}&region=${request.region}&city=${request.city}`)
-  if(is-ok-response(response), SearchClicksForOutboundMessagesResponse(response.body), err(HttpError(response)))
+fn
+(request: SearchClicksForOutboundMessagesRequest): SearchClicksForOutboundMessagesResponse {
+  clicks-all-messages(request, {})
+},
+(request: SearchClicksForOutboundMessagesRequest, opts: Map): SearchClicksForOutboundMessagesResponse {
+  response api-request("GET", `${::postmark/BASE_URL}/messages/outbound/clicks?count=${request.count}&offset=${request.offset}&recipient=${request.recipient}&tag=${request.tag}&client_name=${request.client-name}&client_company=${request.client-company}&client_family=${request.client-family}&os_name=${request.os-name}&os_family=${request.os-family}&os_company=${request.os-company}&platform=${request.platform}&country=${request.country}&region=${request.region}&city=${request.city}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { SearchClicksForOutboundMessagesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

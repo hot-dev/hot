@@ -24,8 +24,12 @@ response.is_bot      // => true
 ```
 """
 }
-fn (): Map {
-  api-request("getMe")
+fn
+(): Map {
+  get-me({})
+},
+(opts: Map): Map {
+  api-request("getMe", {}, opts)
 }
 
 GetMyNameRequest type {
@@ -36,8 +40,12 @@ get-my-name
 meta {
     doc: """getMyName - Get the bot's name for the given language. Returns `{name: "Bot Name"}`."""
 }
-fn (request: GetMyNameRequest): Map {
-  api-request("getMyName", untype(request))
+fn
+(request: GetMyNameRequest): Map {
+  get-my-name(request, {})
+},
+(request: GetMyNameRequest, opts: Map): Map {
+  api-request("getMyName", untype(request), opts)
 }
 
 SetMyNameRequest type {
@@ -49,8 +57,12 @@ set-my-name
 meta {
     doc: """setMyName - Change the bot's name. Max 64 characters."""
 }
-fn (request: SetMyNameRequest): Bool {
-  api-request("setMyName", untype(request))
+fn
+(request: SetMyNameRequest): Bool {
+  set-my-name(request, {})
+},
+(request: SetMyNameRequest, opts: Map): Bool {
+  api-request("setMyName", untype(request), opts)
 }
 
 GetMyDescriptionRequest type {
@@ -61,8 +73,12 @@ get-my-description
 meta {
     doc: """getMyDescription - Get the bot's description (shown on the bot's profile and share page)."""
 }
-fn (request: GetMyDescriptionRequest): Map {
-  api-request("getMyDescription", untype(request))
+fn
+(request: GetMyDescriptionRequest): Map {
+  get-my-description(request, {})
+},
+(request: GetMyDescriptionRequest, opts: Map): Map {
+  api-request("getMyDescription", untype(request), opts)
 }
 
 SetMyDescriptionRequest type {
@@ -74,8 +90,12 @@ set-my-description
 meta {
     doc: """setMyDescription - Change the bot's description. Max 512 characters. Shown on the bot's profile page."""
 }
-fn (request: SetMyDescriptionRequest): Bool {
-  api-request("setMyDescription", untype(request))
+fn
+(request: SetMyDescriptionRequest): Bool {
+  set-my-description(request, {})
+},
+(request: SetMyDescriptionRequest, opts: Map): Bool {
+  api-request("setMyDescription", untype(request), opts)
 }
 
 GetMyShortDescriptionRequest type {
@@ -86,8 +106,12 @@ get-my-short-description
 meta {
     doc: """getMyShortDescription - Get the bot's short description (shown on the start screen)."""
 }
-fn (request: GetMyShortDescriptionRequest): Map {
-  api-request("getMyShortDescription", untype(request))
+fn
+(request: GetMyShortDescriptionRequest): Map {
+  get-my-short-description(request, {})
+},
+(request: GetMyShortDescriptionRequest, opts: Map): Map {
+  api-request("getMyShortDescription", untype(request), opts)
 }
 
 SetMyShortDescriptionRequest type {
@@ -99,8 +123,12 @@ set-my-short-description
 meta {
     doc: """setMyShortDescription - Change the bot's short description. Max 120 characters. Shown when users open a chat with the bot."""
 }
-fn (request: SetMyShortDescriptionRequest): Bool {
-  api-request("setMyShortDescription", untype(request))
+fn
+(request: SetMyShortDescriptionRequest): Bool {
+  set-my-short-description(request, {})
+},
+(request: SetMyShortDescriptionRequest, opts: Map): Bool {
+  api-request("setMyShortDescription", untype(request), opts)
 }
 
 // ============================================================================
@@ -127,8 +155,12 @@ commands ::bot/get-my-commands(::bot/GetMyCommandsRequest({}))
 ```
 """
 }
-fn (request: GetMyCommandsRequest): Vec<Map> {
-  api-request("getMyCommands", untype(request))
+fn
+(request: GetMyCommandsRequest): Vec<Map> {
+  get-my-commands(request, {})
+},
+(request: GetMyCommandsRequest, opts: Map): Vec<Map> {
+  api-request("getMyCommands", untype(request), opts)
 }
 
 SetMyCommandsRequest type {
@@ -157,8 +189,12 @@ setMyCommands - Set the bot's command list. Each command is `{command: "name", d
 ```
 """
 }
-fn (request: SetMyCommandsRequest): Bool {
-  api-request("setMyCommands", untype(request))
+fn
+(request: SetMyCommandsRequest): Bool {
+  set-my-commands(request, {})
+},
+(request: SetMyCommandsRequest, opts: Map): Bool {
+  api-request("setMyCommands", untype(request), opts)
 }
 
 DeleteMyCommandsRequest type {
@@ -170,6 +206,10 @@ delete-my-commands
 meta {
     doc: """deleteMyCommands - Delete the bot's command list for the given scope and language."""
 }
-fn (request: DeleteMyCommandsRequest): Bool {
-  api-request("deleteMyCommands", untype(request))
+fn
+(request: DeleteMyCommandsRequest): Bool {
+  delete-my-commands(request, {})
+},
+(request: DeleteMyCommandsRequest, opts: Map): Bool {
+  api-request("deleteMyCommands", untype(request), opts)
 }

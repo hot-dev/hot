@@ -1,0 +1,165 @@
+::firecrawl::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no firecrawl.* context.
+
+::fc ::firecrawl
+::api ::firecrawl::api
+::wh ::firecrawl::webhooks
+
+OFFLINE {api-key: "fc-tenant-key", base-url: "http://127.0.0.1:1"}
+
+// Nothing listens on port 1, so a call fails at the socket, with the URL
+// in the error. That error proves the call got past the credential check
+// and used this `opts`, without any network traffic.
+reaches fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "127.0.0.1:1"))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({api-key: "opt-key", base-url: "https://fc.example/v2/"}, {"firecrawl.api.key": "ctx-key"})
+    assert-eq("opt-key", r.api-key)
+    assert-eq("https://fc.example/v2", r.base-url, "the trailing slash goes")
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    r ::api/resolve-from({}, {"firecrawl.api.key": "ctx-key"})
+    assert-eq("ctx-key", r.api-key)
+    assert-eq("https://api.firecrawl.dev/v2", r.base-url)
+}
+
+test-resolve-missing-credential-is-a-clear-error
+meta ["test"] fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "firecrawl.api.key"))
+}
+
+test-resolve-returns-marked-value-unchanged
+meta ["test"] fn () {
+    assert-eq("call-key-value", ::api/resolve({api-key: "call-key-value"}).api-key)
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("firecrawl.api.key")
+    assert-eq("call-key", ::api/resolve({api-key: "call-key"}).api-key)
+    assert(reaches(::fc/credit-usage(OFFLINE)))
+    assert-eq(before, ::hot::ctx/get("firecrawl.api.key"))
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    ctx {"firecrawl.api.key": "ctx-key"}
+    results map([{api-key: ""}, {api-key: "   "}, {api-key: null}], (o) {
+        out ::api/resolve-from(o, ctx)
+        assert(is-err(out), "never falls back to firecrawl.api.key")
+        assert(contains(err-message(out), "api-key"))
+        true
+    })
+    assert-eq(3, length(results))
+    assert(is-err(::fc/get-crawl("id", {api-key: ""})), "the error reaches the caller")
+    assert(is-err(::fc/get-crawl-all("id", {api-key: ""})), "the error reaches the caller")
+}
+
+test-base-url-without-credential-is-an-error
+meta ["test"] fn () {
+    out ::api/resolve-from({base-url: "https://collector.example"}, {"firecrawl.api.key": "ctx_secret_key"})
+    assert(is-err(out), "the context key must not go to a per-call URL")
+    assert(contains(err-message(out), "base-url"))
+    assert(contains(err-message(out), "api-key"))
+    assert(not(contains(err-message(out), "ctx_secret_key")), "the key stays out of messages")
+    assert-eq("https://collector.example", ::api/resolve-from({base-url: "https://collector.example", api-key: "tenant"}, {"firecrawl.api.key": "ctx_secret_key"}).base-url)
+    assert-eq("ctx_secret_key", ::api/resolve-from({base-url: ""}, {"firecrawl.api.key": "ctx_secret_key"}).api-key, "a blank base-url is the default root")
+}
+
+test-base-url-without-credential-sends-nothing
+meta ["test"] fn () {
+    before ::hot::ctx/get("firecrawl.api.key")
+    ::hot::ctx/set-secret("firecrawl.api.key", "ctx_secret_key")
+    assert-eq("ctx_secret_key", ::api/resolve({}).api-key, "control: the live context key is set")
+    out ::fc/get-crawl("id", {base-url: "http://127.0.0.1:1"})
+    assert(is-err(out))
+    assert(contains(err-message(out), "base-url"))
+    assert(not(reaches(out)), "no request was attempted: the failure isn't the socket")
+    assert(reaches(::fc/get-crawl("id", OFFLINE)), "control: with a credential it reaches the socket")
+    ::hot::ctx/set-secret("firecrawl.api.key", before)
+}
+
+test-build-request
+meta ["test"] fn () {
+    bare ::api/build-request("GET", "/crawl/active", "", ::api/resolve-from({api-key: "a"}, {}))
+    assert-eq("https://api.firecrawl.dev/v2/crawl/active", bare.url)
+    assert-eq("Bearer a", bare.headers.Authorization)
+    assert(is-null(get(bare.headers, "Content-Type")))
+    posted ::api/build-request("POST", "/scrape", {url: "u"}, {api-key: "b", base-url: "https://fc.example/v2"})
+    assert-eq("https://fc.example/v2/scrape", posted.url)
+    assert-eq("application/json", get(posted.headers, "Content-Type"))
+    assert-eq({url: "u"}, from-json(posted.body))
+}
+
+test-next-path-follows-only-the-call-root
+meta ["test"] fn () {
+    root "https://fc.example/v2"
+    assert-eq("/crawl/abc?skip=10", ::api/next-path("https://fc.example/v2/crawl/abc?skip=10", root))
+    assert(is-null(::api/next-path("https://api.firecrawl.dev/v2/crawl/abc", root)), "another root is never followed")
+    assert(is-null(::api/next-path("https://fc.example.attacker.example/v2/crawl/abc", root)), "the prefix includes the path separator")
+}
+
+test-collect-pages-uses-the-given-root
+meta ["test"] fn () {
+    root "https://fc.example/v2"
+    first-page {status: "completed", data: [{n: 1}], next: `${root}/crawl/a?skip=1`}
+    out ::api/collect-pages(first-page, (path) { {status: "completed", data: [{n: 2}]} }, root)
+    assert-eq(2, length(out.data))
+    stopped ::api/collect-pages(first-page, (path) { fail("must not fetch") })
+    assert-eq(1, length(stopped.data), "the default root doesn't follow a link to another root")
+}
+
+test-opts-reach-every-function
+meta ["test"] fn () {
+    assert(reaches(::api/request("GET", "/crawl/active", "", OFFLINE)))
+    assert(reaches(::fc/scrape("https://example.com", {}, OFFLINE)))
+    assert(reaches(::fc/map-site("https://example.com", {}, OFFLINE)))
+    assert(reaches(::fc/search("q", {}, OFFLINE)))
+    assert(reaches(::fc/crawl("https://example.com", {}, OFFLINE)))
+    assert(reaches(::fc/get-crawl("id", OFFLINE)))
+    assert(reaches(::fc/get-crawl-all("id", OFFLINE)))
+    assert(reaches(::fc/cancel-crawl("id", OFFLINE)))
+    assert(reaches(::fc/get-crawl-errors("id", OFFLINE)))
+    assert(reaches(::fc/list-active-crawls(OFFLINE)))
+    assert(reaches(::fc/batch-scrape(["https://example.com"], {}, OFFLINE)))
+    assert(reaches(::fc/get-batch-scrape("id", OFFLINE)))
+    assert(reaches(::fc/get-batch-scrape-all("id", OFFLINE)))
+    assert(reaches(::fc/cancel-batch-scrape("id", OFFLINE)))
+    assert(reaches(::fc/get-batch-scrape-errors("id", OFFLINE)))
+    assert(reaches(::fc/extract(["https://example.com"], {}, OFFLINE)))
+    assert(reaches(::fc/get-extract("id", OFFLINE)))
+    assert(reaches(::fc/credit-usage(OFFLINE)))
+}
+
+test-explicit-key-arity-still-works
+meta ["test"] fn () {
+    out ::api/request("GET", "/crawl/active", "", "")
+    assert(is-err(out), "a blank explicit key is an error")
+    assert(contains(err-message(out), "api-key"))
+}
+
+test-existing-arity-reads-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("firecrawl.api.key")
+    ::hot::ctx/set("firecrawl.api.key", "")
+    out ::fc/credit-usage()
+    assert(is-err(out))
+    assert(contains(err-message(out), "firecrawl.api.key"))
+    ::hot::ctx/set("firecrawl.api.key", before)
+}
+
+test-webhook-null-or-blank-secret-never-verifies
+meta ["test"] fn () {
+    request {headers: {x-firecrawl-signature: "sha256=abc"}, body-raw: "{}"}
+    assert(not(::wh/verify-request(request, null)))
+    assert(not(::wh/verify-request(request, "   ")))
+}

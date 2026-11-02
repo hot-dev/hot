@@ -19,8 +19,12 @@ meta {
     ```
     """
 }
-fn (properties: Map): Map {
-  ::objects/create-object("contacts", properties)
+fn
+(properties: Map): Map {
+  create-contact(properties, {})
+},
+(properties: Map, opts: Map): Map {
+  ::objects/create-object("contacts", properties, opts)
 }
 
 get-contact
@@ -29,29 +33,43 @@ meta {
 }
 fn
 (id: Str): Map {
-  ::objects/get-object("contacts", id)
+  get-contact(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::objects/get-object("contacts", id, opts)
 },
 (id: Str, properties: Vec): Map {
-  ::objects/get-object("contacts", id, properties)
+  get-contact(id, properties, {})
+},
+(id: Str, properties: Vec, opts: Map): Map {
+  ::objects/get-object("contacts", id, properties, {}, opts)
 }
 
 update-contact
 meta {
     doc: """Update a contact's properties."""
 }
-fn (id: Str, properties: Map): Map {
-  ::objects/update-object("contacts", id, properties)
+fn
+(id: Str, properties: Map): Map {
+  update-contact(id, properties, {})
+},
+(id: Str, properties: Map, opts: Map): Map {
+  ::objects/update-object("contacts", id, properties, opts)
 }
 
 find-by-email
 meta {
     doc: """Search for a contact by exact email. Returns the contact or null."""
 }
-fn (email: Str): Any {
+fn
+(email: Str): Any {
+  find-by-email(email, {})
+},
+(email: Str, opts: Map): Any {
   out ::objects/search-objects("contacts", {
     filters: [{propertyName: "email", operator: "EQ", value: email}],
     limit: 1
-  })
+  }, opts)
   cond {
     is-err(out) => { out }
     is-empty(out.results) => { null }
@@ -63,6 +81,48 @@ search-contacts
 meta {
     doc: """Search contacts — see `::hubspot::objects/build-search-body` for the options."""
 }
-fn (options: Map): Map {
-  ::objects/search-objects("contacts", options)
+fn
+(options: Map): Map {
+  search-contacts(options, {})
+},
+(options: Map, opts: Map): Map {
+  ::objects/search-objects("contacts", options, opts)
+}
+
+upsert-by-email
+meta {
+    doc: """
+    Create or update contacts keyed by email in one batch call (max 100):
+    `records` is a Vec of properties Maps that each include `email`.
+    Returns `{status, results}`; each result's `new` says whether it was
+    created. Unlike search-then-write, this is not affected by search
+    indexing delay.
+
+    **Example**
+
+    ```hot
+    ::hubspot::contacts/upsert-by-email([
+      {email: "ada@example.com", firstname: "Ada", lifecyclestage: "lead"}
+    ])
+    ```
+    """
+}
+fn
+(records: Vec): Map {
+  upsert-by-email(records, {})
+},
+(records: Vec, opts: Map): Map {
+  ::objects/batch-upsert("contacts", "email", map(records, (r) { {id: r.email, properties: r} }), opts)
+}
+
+archive-contact
+meta {
+    doc: """Archive a contact (recycle bin, restorable for 90 days)."""
+}
+fn
+(id: Str): Any {
+  archive-contact(id, {})
+},
+(id: Str, opts: Map): Any {
+  ::objects/archive-object("contacts", id, opts)
 }

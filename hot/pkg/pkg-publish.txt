@@ -14,7 +14,7 @@ hot-ai
 hot-ai-agent
 mcp
 openai
-#qwen
+qwen
 xai
 
 # AWS Services
@@ -30,17 +30,17 @@ aws-sns
 aws-sqs
 
 # Communication
-#discord
+discord
 
 slack
-#slack-admin
+slack-admin
 
 # Email
 postmark
 resend
 
 # Payments
-#stripe
+stripe
 
 # Backend-as-a-Service
 supabase
@@ -65,47 +65,47 @@ linear
 
 # CRM
 attio
-#crm
-#hubspot
-#intercom
-#salesforce
-#zendesk
+crm
+hubspot
+intercom
+salesforce
+zendesk
 
 # Knowledge & Retrieval
 airtable
-#firecrawl
+firecrawl
 notion
-#pinecone
+pinecone
 qdrant
-#web-search
+web-search
 
 # Voice AI
-#deepgram
-#elevenlabs
+deepgram
+elevenlabs
 
 # Business & Fintech
-#cal-com
-#plaid
-#shopify
+cal-com
+plaid
+shopify
 
 # Infrastructure & Platform
-#cloudflare
-#sentry
+cloudflare
+sentry
 
 # Model Routers
-#openai-compatible
+openai-compatible
 
 # Google Workspace
-#google-core
-#google-gmail
-#google-drive
-#google-sheets
-#google-calendar
+google-core
+google-gmail
+google-drive
+google-sheets
+google-calendar
 
 # Communication (SMS/Voice)
-#twilio
-#telegram
-#whatsapp
+twilio
+telegram
+whatsapp
 
 # Protocols
 json-rpc

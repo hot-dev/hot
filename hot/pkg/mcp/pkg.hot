@@ -2,7 +2,7 @@
 
 hot.pkg.mcp {
   name: "hot.dev/mcp",
-  version: "1.4.0",
+  version: "1.5.0",
   hot-min-version: "2.0.3",
   description: "MCP 2026-07-28 and legacy client with discovery, tools, resources, prompts, subscriptions, multi-round input, SSE streaming, and an AI tool bridge.",
   author: "Hot Dev",
@@ -10,7 +10,7 @@ hot.pkg.mcp {
   license: "Apache-2.0",
   tags: ["ai", "protocols"],
   deps: {
-    "hot.dev/json-rpc": "1.2.0",
+    "hot.dev/json-rpc": "1.3.0",
     "hot.dev/hot-ai": "1.4.0"
   },
   src-paths: ["src/"],

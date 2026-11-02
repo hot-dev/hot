@@ -23,7 +23,15 @@ retry-failed-inbound-message-processing
 meta {
     doc: """Retry processing of a failed inbound message, re-triggering the inbound webhook."""
 }
-fn (request: RetryInboundMessageProcessingRequest): RetryInboundMessageProcessingResponse {
-  response api-request("PUT", `${::postmark/BASE_URL}/messages/inbound/${request.messageid}/retry`)
-  if(is-ok-response(response), RetryInboundMessageProcessingResponse(response.body), err(HttpError(response)))
+fn
+(request: RetryInboundMessageProcessingRequest): RetryInboundMessageProcessingResponse {
+  retry-failed-inbound-message-processing(request, {})
+},
+(request: RetryInboundMessageProcessingRequest, opts: Map): RetryInboundMessageProcessingResponse {
+  response api-request("PUT", `${::postmark/BASE_URL}/messages/inbound/${request.messageid}/retry`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RetryInboundMessageProcessingResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

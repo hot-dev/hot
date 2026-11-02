@@ -1,0 +1,126 @@
+::intercom::companies ns
+meta {
+    ctx: {"intercom.token": {required: false}},
+    doc: """
+    Companies: create or update by your `company_id`, update by Intercom
+    `id`, look up, list, and attach contacts. A company only shows in
+    Intercom's UI once at least one contact is attached.
+    """
+}
+
+::api ::intercom::api
+
+upsert-company
+meta {
+    doc: """
+    POST /companies - Create or update a company, matched on your
+    `company_id`. `fields`: `company_id` (or Intercom `id`), `name`,
+    `plan`, `size`, `website`, `industry`, `monthly_spend`,
+    `remote_created_at`, `custom_attributes` (must already exist). Unset
+    fields are omitted.
+
+    **Example**
+
+    ```hot
+    company ::intercom::companies/upsert-company({company_id: "acme-42", name: "Acme", plan: "enterprise"})
+    ::intercom::companies/attach-contact(company.id, contact-id)
+    ```
+    """
+}
+fn
+(fields: Map): Any {
+  upsert-company(fields, {})
+},
+(fields: Map, opts: Map): Any {
+  ::api/request("POST", "/companies", ::api/compact(fields), opts)
+}
+
+update-company
+meta {
+    doc: """PUT /companies/{id} - Update a company by Intercom `id`. `company_id` cannot change after creation. Unset fields are omitted."""
+}
+fn
+(id: Str, fields: Map): Any {
+  update-company(id, fields, {})
+},
+(id: Str, fields: Map, opts: Map): Any {
+  ::api/request("PUT", `/companies/${::api/path-segment(id)}`, ::api/compact(fields), opts)
+}
+
+get-company
+meta {
+    doc: """GET /companies/{id} - One company by Intercom `id`."""
+}
+fn
+(id: Str): Any {
+  get-company(id, {})
+},
+(id: Str, opts: Map): Any {
+  ::api/request("GET", `/companies/${::api/path-segment(id)}`, "", opts)
+}
+
+find-company
+meta {
+    doc: """GET /companies?company_id= - The company with your `company_id`, or an Err with status 404."""
+}
+fn
+(company-id: Str): Any {
+  find-company(company-id, {})
+},
+(company-id: Str, opts: Map): Any {
+  ::api/request("GET", `/companies${::api/query-string({company_id: company-id})}`, "", opts)
+}
+
+list-companies
+meta {
+    doc: """GET /companies - Companies by page number: `{data, pages, total_count}`. `options`: `page`, `per_page`, `tag_id`, `segment_id`. Capped at 10,000 companies; beyond that Intercom requires the scroll API (`GET /companies/scroll` via `::intercom::api/request`)."""
+}
+fn
+(): Any {
+  list-companies({})
+},
+(options: Map): Any {
+  list-companies(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/request("GET", `/companies${::api/query-string(options)}`, "", opts)
+}
+
+attach-contact
+meta {
+    doc: """Attach a contact to a company (Intercom ids). Same as `::intercom::contacts/attach-company`, argument order company-first."""
+}
+fn
+(company-id: Str, contact-id: Str): Any {
+  attach-contact(company-id, contact-id, {})
+},
+(company-id: Str, contact-id: Str, opts: Map): Any {
+  ::intercom::contacts/attach-company(contact-id, company-id, opts)
+}
+
+detach-contact
+meta {
+    doc: """Detach a contact from a company (Intercom ids)."""
+}
+fn
+(company-id: Str, contact-id: Str): Any {
+  detach-contact(company-id, contact-id, {})
+},
+(company-id: Str, contact-id: Str, opts: Map): Any {
+  ::intercom::contacts/detach-company(contact-id, company-id, opts)
+}
+
+list-contacts
+meta {
+    doc: """GET /companies/{id}/contacts - The contacts attached to a company: `{data, pages, total_count}`. `options`: `page`, `per_page`."""
+}
+fn
+(company-id: Str): Any {
+  list-contacts(company-id, {})
+},
+(company-id: Str, options: Map): Any {
+  list-contacts(company-id, options, {})
+},
+(company-id: Str, options: Map, opts: Map): Any {
+  ::api/request("GET", `/companies/${::api/path-segment(company-id)}/contacts${::api/query-string(options)}`, "", opts)
+}

@@ -35,9 +35,17 @@ meta {
     ```
     """
 }
-fn (request: DeleteTemplateRequest): DeleteTemplateResponse {
-  response api-request("DELETE", `${::postmark/BASE_URL}/templates/${request.template-id-or-alias}`)
-  if(is-ok-response(response), DeleteTemplateResponse(response.body), err(HttpError(response)))
+fn
+(request: DeleteTemplateRequest): DeleteTemplateResponse {
+  delete-template(request, {})
+},
+(request: DeleteTemplateRequest, opts: Map): DeleteTemplateResponse {
+  response api-request("DELETE", `${::postmark/BASE_URL}/templates/${request.template-id-or-alias}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DeleteTemplateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteInboundRuleRequest type {
@@ -52,7 +60,15 @@ DeleteInboundRuleResponse type {
 
 delete-single-trigger
 meta {doc: """Delete a single inbound rule trigger by its ID."""}
-fn (request: DeleteInboundRuleRequest): DeleteInboundRuleResponse {
-  response api-request("DELETE", `${::postmark/BASE_URL}/triggers/inboundrules/${request.triggerid}`)
-  if(is-ok-response(response), DeleteInboundRuleResponse(response.body), err(HttpError(response)))
+fn
+(request: DeleteInboundRuleRequest): DeleteInboundRuleResponse {
+  delete-single-trigger(request, {})
+},
+(request: DeleteInboundRuleRequest, opts: Map): DeleteInboundRuleResponse {
+  response api-request("DELETE", `${::postmark/BASE_URL}/triggers/inboundrules/${request.triggerid}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DeleteInboundRuleResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

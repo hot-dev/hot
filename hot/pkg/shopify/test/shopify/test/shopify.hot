@@ -1,13 +1,269 @@
 ::shopify::test ns
 meta ["test"]
 
+::api ::shopify::api
+::orders ::shopify::orders
+::fulfillments ::shopify::fulfillments
+::inventory ::shopify::inventory
+::metafields ::shopify::metafields
+::customers ::shopify::customers
+::draft-orders ::shopify::draft-orders
+::webhooks ::shopify::webhooks
+
+// ============================================================================
+// Shop, version and URL building
+// ============================================================================
+
+test-normalize-shop-accepts-handle-and-domain
+meta ["test"] fn () {
+    assert-eq("acme", ::api/normalize-shop("acme"))
+    assert-eq("acme", ::api/normalize-shop("acme.myshopify.com"), "myshopify domain is reduced to the handle")
+    assert-eq("acme", ::api/normalize-shop("https://Acme.myshopify.com/admin"), "scheme, case and path are stripped")
+    assert-eq("acme-2", ::api/normalize-shop("  acme-2.myshopify.com/ "))
+}
+
+test-normalize-shop-rejects-other-hosts
+meta ["test"] fn () {
+    assert(is-err(::api/normalize-shop("shop.acme.com")), "custom domains don't serve the Admin API")
+    assert(is-err(::api/normalize-shop("")), "empty shop errs")
+    assert(is-err(::api/normalize-shop("acme.myshopify.com.evil.com")), "a suffix-lookalike host errs")
+    assert(is-err(::api/normalize-shop("evil.com/acme.myshopify.com")), "only the host part counts")
+    assert-eq("acme", ::api/normalize-shop("acme/../evil"), "paths are dropped, never put in the host")
+}
+
+test-graphql-url
+meta ["test"] fn () {
+    assert-eq("https://acme.myshopify.com/admin/api/2026-10/graphql.json", ::api/graphql-url("acme", "2026-10"))
+    assert-eq(
+        "https://acme.myshopify.com/admin/api/2026-10/graphql.json",
+        ::api/graphql-url("acme.myshopify.com", "2026-10"),
+        "a full domain no longer doubles the suffix"
+    )
+    assert-eq("https://acme.myshopify.com/admin/api/unstable/graphql.json", ::api/graphql-url("acme", "unstable"))
+    assert(is-err(::api/graphql-url("acme", "latest")), "malformed versions err")
+}
+
+test-api-version-default-and-override
+meta ["test"] fn () {
+    assert-eq("2026-10", ::shopify/API_VERSION)
+    assert-eq(::shopify/API_VERSION, ::api/api-version(), "pinned version when ctx is unset")
+    assert-eq(
+        "https://acme.myshopify.com/admin/api/2026-10/graphql.json",
+        ::api/graphql-url("acme"),
+        "1-arity uses the pinned version"
+    )
+
+    ::hot::ctx/set("shopify.api.version", "2027-01")
+    overridden ::api/graphql-url("acme")
+    ::hot::ctx/set("shopify.api.version", "")
+    assert-eq("https://acme.myshopify.com/admin/api/2027-01/graphql.json", overridden, "shopify.api.version overrides the pin")
+    assert-eq(::shopify/API_VERSION, ::api/api-version(), "an empty override falls back to the pin")
+}
+
+// ============================================================================
+// GraphQL response handling
+// ============================================================================
+
 test-parse-graphql-response
 meta ["test"] fn () {
-    ok ::shopify/parse-graphql-response({data: {shop: {name: "Acme"}}})
+    ok ::api/parse-graphql-response({data: {shop: {name: "Acme"}}})
     assert-eq("Acme", ok.shop.name)
-    bad ::shopify/parse-graphql-response({errors: [{message: "syntax"}], data: null})
+
+    bad ::api/parse-graphql-response({errors: [{message: "syntax"}], data: null})
     assert(is-err(bad))
+    e if-err(bad, (x) { x })
+    assert-eq("syntax", first(e.errors).message)
+    assert(not(e.throttled), "plain errors are not throttles")
+    assert(is-null(e.retry-after-ms))
 }
+
+test-parse-graphql-response-throttled
+meta ["test"] fn () {
+    body {
+        errors: [{message: "Throttled", extensions: {code: "THROTTLED"}}],
+        extensions: {
+            cost: {
+                requestedQueryCost: 752,
+                actualQueryCost: null,
+                throttleStatus: {maximumAvailable: 2000, currentlyAvailable: 2, restoreRate: 100}
+            }
+        }
+    }
+
+    out ::api/parse-graphql-response(body)
+    assert(is-err(out))
+    e if-err(out, (x) { x })
+    assert(e.throttled, "THROTTLED code is flagged")
+    assert-eq(7500, e.retry-after-ms, "(752 - 2) / 100 per second = 7.5s")
+    assert-eq(752, e.cost.requestedQueryCost, "cost extension is carried")
+}
+
+test-throttle-wait-ms
+meta ["test"] fn () {
+    assert-eq(1000, ::api/throttle-wait-ms(null), "no cost info: Shopify's one-second advice")
+    assert-eq(1000, ::api/throttle-wait-ms({requestedQueryCost: 10, throttleStatus: {currentlyAvailable: 500, restoreRate: 50}}), "floor of one second")
+    assert-eq(3000, ::api/throttle-wait-ms({requestedQueryCost: 200, throttleStatus: {currentlyAvailable: 50, restoreRate: 50}}))
+    assert-eq(1000, ::api/throttle-wait-ms({requestedQueryCost: 200, throttleStatus: {currentlyAvailable: 0, restoreRate: 0}}), "zero restore rate doesn't divide by zero")
+}
+
+test-mutation-payload-user-errors
+meta ["test"] fn () {
+    clean ::api/mutation-payload({productCreate: {product: {id: "p1"}, userErrors: []}}, "productCreate")
+    assert-eq("p1", clean.product.id)
+
+    rejected ::api/mutation-payload({productCreate: {product: null, userErrors: [{field: ["title"], message: "Title can't be blank"}]}}, "productCreate")
+    assert(is-err(rejected), "userErrors become an Err")
+    e if-err(rejected, (x) { x })
+    assert-eq("productCreate", e.mutation)
+    assert-eq("Title can't be blank", first(e.user-errors).message)
+
+    cancel ::api/mutation-payload({orderCancel: {job: null, orderCancelUserErrors: [{message: "already cancelled", code: "ORDER_ALREADY_CANCELLED"}]}}, "orderCancel", "orderCancelUserErrors")
+    assert(is-err(cancel), "custom errors key is honoured")
+
+    missing ::api/mutation-payload({}, "productCreate")
+    assert(is-null(missing), "absent payload is null, not a crash")
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-connection-variables
+meta ["test"] fn () {
+    defaults ::api/connection-variables({})
+    assert-eq({first: 50}, defaults, "only first is set by default; unset options are omitted")
+
+    capped ::api/connection-variables({first: 1000, after: "c1", query: "status:active", reverse: false})
+    assert-eq(250, capped.first, "first is capped at 250")
+    assert-eq("c1", capped.after)
+    assert-eq("status:active", capped.query)
+    assert-eq(false, capped.reverse, "false is kept, only null is dropped")
+    assert(not(in("sortKey", keys(capped))))
+}
+
+// A fake connection: 5 items, 2 per page, cursors are item offsets.
+fake-page fn (options: Map): Map {
+    items ["a", "b", "c", "d", "e"]
+    start if(is-null(get(options, "after")), 0, Int(options.after))
+    size options.first
+    stop min(add(start, size), length(items))
+    {
+        nodes: slice(items, start, stop),
+        pageInfo: {hasNextPage: lt(stop, length(items)), endCursor: Str(stop)}
+    }
+}
+
+test-collect-follows-cursors
+meta ["test"] fn () {
+    assert-eq(["a", "b", "c", "d", "e"], ::api/collect(fake-page, {first: 2}, 100), "walks every page")
+    assert-eq(["a", "b", "c"], ::api/collect(fake-page, {first: 2}, 3), "stops at max-items")
+    assert-eq(["a"], ::api/collect(fake-page, {first: 2}, 1), "page size shrinks to the remaining limit")
+    assert-eq([], ::api/collect(fake-page, {}, 0), "zero limit fetches nothing")
+}
+
+// ============================================================================
+// Variable and input builders (unset optionals are omitted)
+// ============================================================================
+
+test-cancel-variables
+meta ["test"] fn () {
+    minimal ::orders/build-cancel-variables("gid://shopify/Order/1", "CUSTOMER", true, {})
+    assert-eq({orderId: "gid://shopify/Order/1", reason: "CUSTOMER", restock: true}, minimal)
+
+    full ::orders/build-cancel-variables("gid://shopify/Order/1", "FRAUD", false, {
+        notifyCustomer: true,
+        refundMethod: {originalPaymentMethodsRefund: true}
+    })
+    assert-eq(true, full.notifyCustomer)
+    assert-eq(true, full.refundMethod.originalPaymentMethodsRefund)
+    assert(not(in("staffNote", keys(full))))
+}
+
+test-fulfillment-input
+meta ["test"] fn () {
+    all-items ::fulfillments/build-fulfillment-input("gid://shopify/FulfillmentOrder/9", {company: "UPS", number: "1Z999"}, {})
+    assert-eq([{fulfillmentOrderId: "gid://shopify/FulfillmentOrder/9"}], all-items.lineItemsByFulfillmentOrder, "an id fulfils every remaining item")
+    assert-eq({company: "UPS", number: "1Z999"}, all-items.trackingInfo)
+    assert(not(in("notifyCustomer", keys(all-items))))
+
+    partial ::fulfillments/build-fulfillment-input([
+        {fulfillmentOrderId: "fo1", fulfillmentOrderLineItems: [{id: "li1", quantity: 1}]}
+    ], null, {notifyCustomer: true})
+    assert-eq(1, first(first(partial.lineItemsByFulfillmentOrder).fulfillmentOrderLineItems).quantity)
+    assert(not(in("trackingInfo", keys(partial))), "no tracking means no trackingInfo key")
+    assert-eq(true, partial.notifyCustomer)
+}
+
+test-tracking-input
+meta ["test"] fn () {
+    assert(is-null(::fulfillments/build-tracking-input({})), "empty tracking is null")
+    assert(is-null(::fulfillments/build-tracking-input(null)))
+    multi ::fulfillments/build-tracking-input({company: "DHL", numbers: ["a", "b"], url: null})
+    assert-eq({company: "DHL", numbers: ["a", "b"]}, multi)
+}
+
+test-inventory-adjust-input
+meta ["test"] fn () {
+    input ::inventory/build-adjust-input([
+        {inventoryItemId: "ii1", locationId: "l1", delta: -2},
+        {inventoryItemId: "ii2", locationId: "l1", delta: 5, changeFromQuantity: 10}
+    ], {})
+    assert-eq("available", input.name)
+    assert-eq("correction", input.reason)
+    assert(not(in("referenceDocumentUri", keys(input))))
+    assert(in("changeFromQuantity", keys(first(input.changes))), "changeFromQuantity is required since 2026-04")
+    assert(is-null(first(input.changes).changeFromQuantity), "and defaults to an explicit null (skip the check)")
+    assert-eq(10, input.changes[1].changeFromQuantity, "a given expected quantity is kept")
+    assert(contains(to-json(input), "\"changeFromQuantity\":null"), "the null reaches the wire")
+}
+
+test-inventory-set-input
+meta ["test"] fn () {
+    input ::inventory/build-set-input([{inventoryItemId: "ii1", locationId: "l1", quantity: 7}], {name: "on_hand", reason: "received", referenceDocumentUri: "logistics://po/42"})
+    assert-eq("on_hand", input.name)
+    assert-eq("received", input.reason)
+    assert-eq("logistics://po/42", input.referenceDocumentUri)
+    assert-eq(7, first(input.quantities).quantity)
+    assert(in("changeFromQuantity", keys(first(input.quantities))))
+}
+
+test-metafield-input
+meta ["test"] fn () {
+    text ::metafields/build-metafield-input({ownerId: "p1", namespace: "custom", key: "care", type: "single_line_text_field", value: "Hand wash"})
+    assert-eq("Hand wash", text.value)
+    assert(not(in("compareDigest", keys(text))))
+
+    json ::metafields/build-metafield-input({ownerId: "p1", namespace: "custom", key: "specs", type: "json", value: {weight: 2}})
+    assert-eq("{\"weight\":2}", json.value, "non-string values are JSON-encoded")
+
+    untyped ::metafields/build-metafield-input({ownerId: "p1", namespace: "custom", key: "n", value: "3"})
+    assert(not(in("type", keys(untyped))), "type may be omitted when a definition exists")
+}
+
+test-email-query-is-quoted
+meta ["test"] fn () {
+    assert-eq("email:\"ada@example.com\"", ::customers/email-query("ada@example.com"))
+    assert-eq("email:\"a OR email:*\"", ::customers/email-query("a OR email:*"), "operators stay inside the quoted term")
+    assert-eq("\"say \\\"hi\\\"\"", ::api/quote-search-term("say \"hi\""), "embedded quotes escaped")
+}
+
+test-draft-order-complete-variables
+meta ["test"] fn () {
+    assert-eq({id: "d1"}, ::draft-orders/build-complete-variables("d1", {}))
+    assert-eq({id: "d1", sourceName: "pos"}, ::draft-orders/build-complete-variables("d1", {sourceName: "pos"}))
+}
+
+test-subscription-input
+meta ["test"] fn () {
+    assert-eq({uri: "https://example.com/hook"}, ::webhooks/build-subscription-input("https://example.com/hook", {}))
+    full ::webhooks/build-subscription-input("https://example.com/hook", {includeFields: ["id"], filter: "status:active"})
+    assert-eq(["id"], full.includeFields)
+    assert-eq("status:active", full.filter)
+}
+
+// ============================================================================
+// Webhook verification and delivery headers
+// ============================================================================
 
 test-webhook-vector
 meta ["test"] fn () {
@@ -17,15 +273,17 @@ meta ["test"] fn () {
         body-raw: """{"id":820982911946154508}"""
     }
 
-    assert(::shopify/verify-request(request, "shpss_test_secret"))
-    assert(not(::shopify/verify-request({headers: {x-shopify-hmac-sha256: "AU5n5C4JV1EbE8g4yEzV+ZHbqkXpM29HXkzNAa5zicA="}, body-raw: "tampered"}, "shpss_test_secret")))
+    assert(::webhooks/verify-request(request, "shpss_test_secret"), "valid signature verifies")
 }
 
-test-quote-search-term
+test-webhook-rejects-tampered-and-missing
 meta ["test"] fn () {
-    assert-eq("\"ada@example.com\"", ::shopify/quote-search-term("ada@example.com"))
-    assert-eq("\"a OR email:*\"", ::shopify/quote-search-term("a OR email:*"), "operators stay inside the quoted term")
-    assert-eq("\"say \\\"hi\\\"\"", ::shopify/quote-search-term("say \"hi\""), "embedded quotes escaped")
+    tampered {headers: {x-shopify-hmac-sha256: "AU5n5C4JV1EbE8g4yEzV+ZHbqkXpM29HXkzNAa5zicA="}, body-raw: "tampered"}
+    assert(not(::webhooks/verify-request(tampered, "shpss_test_secret")), "tampered body fails")
+    missing {headers: {}, body-raw: """{"id":820982911946154508}"""}
+    assert(not(::webhooks/verify-request(missing, "shpss_test_secret")), "missing header fails")
+    wrong-secret {headers: {x-shopify-hmac-sha256: "AU5n5C4JV1EbE8g4yEzV+ZHbqkXpM29HXkzNAa5zicA="}, body-raw: """{"id":820982911946154508}"""}
+    assert(not(::webhooks/verify-request(wrong-secret, "other_secret")), "wrong secret fails")
 }
 
 test-webhook-empty-secret-fails-closed
@@ -35,5 +293,32 @@ meta ["test"] fn () {
     body """{"id":820982911946154508}"""
     sig ::hot::base64/encode(::hot::hex/decode(::hot::hmac/hmac-sha256("", body)))
     request {headers: {x-shopify-hmac-sha256: sig}, body-raw: body}
-    assert(not(::shopify/verify-request(request, "")), "empty secret fails closed")
+    assert(not(::webhooks/verify-request(request, "")), "empty secret fails closed")
+}
+
+test-delivery-headers
+meta ["test"] fn () {
+    request {
+        headers: {
+            x-shopify-topic: "orders/create",
+            x-shopify-shop-domain: "acme.myshopify.com",
+            x-shopify-webhook-id: "b54557e4-bdd9-4b37-8a5f-bf7d70bcd043",
+            x-shopify-event-id: "98880550-7158-44d4-b7cd-2c97c8a091b5",
+            x-shopify-api-version: "2026-10"
+        },
+        body-raw: "{}"
+    }
+
+    assert-eq("orders/create", ::webhooks/topic(request))
+    assert-eq("acme.myshopify.com", ::webhooks/shop-domain(request))
+    assert-eq("b54557e4-bdd9-4b37-8a5f-bf7d70bcd043", ::webhooks/webhook-id(request))
+    assert-eq("98880550-7158-44d4-b7cd-2c97c8a091b5", ::webhooks/event-id(request))
+
+    d ::webhooks/delivery(request)
+    assert-eq("2026-10", d.api-version)
+    assert-eq("", d.triggered-at, "absent headers are empty strings")
+
+    mixed {headers: {X-Shopify-Topic: "products/update"}}
+    assert-eq("products/update", ::webhooks/topic(mixed), "header lookup is case-insensitive")
+    assert-eq("", ::webhooks/topic({}), "no headers at all")
 }

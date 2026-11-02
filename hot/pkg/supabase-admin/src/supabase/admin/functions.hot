@@ -31,16 +31,24 @@ fns ::functions/list-functions("my-project-ref")
 ```
 """
 }
-fn (project-ref: Str): Vec<EdgeFunction> {
-  ::api/request("GET", `/projects/${project-ref}/functions`)
+fn
+(project-ref: Str): Vec<EdgeFunction> {
+  list-functions(project-ref, {})
+},
+(project-ref: Str, opts: Map): Vec<EdgeFunction> {
+  ::api/request("GET", `/projects/${project-ref}/functions`, {}, {}, opts)
 }
 
 get-function
 meta {
     doc: """Get details for a specific edge function by slug."""
 }
-fn (project-ref: Str, function-slug: Str): EdgeFunction {
-  ::api/request("GET", `/projects/${project-ref}/functions/${function-slug}`)
+fn
+(project-ref: Str, function-slug: Str): EdgeFunction {
+  get-function(project-ref, function-slug, {})
+},
+(project-ref: Str, function-slug: Str, opts: Map): EdgeFunction {
+  ::api/request("GET", `/projects/${project-ref}/functions/${function-slug}`, {}, {}, opts)
 }
 
 CreateFunctionRequest type {
@@ -74,7 +82,11 @@ fn-result ::functions/create-function(::functions/CreateFunctionRequest({
 ```
 """
 }
-fn (request: CreateFunctionRequest): EdgeFunction {
+fn
+(request: CreateFunctionRequest): EdgeFunction {
+  create-function(request, {})
+},
+(request: CreateFunctionRequest, opts: Map): EdgeFunction {
   body {
     slug: request.slug,
     name: request.name,
@@ -85,7 +97,7 @@ fn (request: CreateFunctionRequest): EdgeFunction {
     |> assoc-some("entrypoint_path", request.entrypoint_path)
     |> assoc-some("import_map_path", request.import_map_path)
 
-  ::api/request("POST", `/projects/${request.project_ref}/functions`, {}, body)
+  ::api/request("POST", `/projects/${request.project_ref}/functions`, {}, body, opts)
 }
 
 UpdateFunctionRequest type {
@@ -103,7 +115,11 @@ update-function
 meta {
     doc: """Update an existing edge function. Only provided fields are updated."""
 }
-fn (request: UpdateFunctionRequest): Map {
+fn
+(request: UpdateFunctionRequest): Map {
+  update-function(request, {})
+},
+(request: UpdateFunctionRequest, opts: Map): Map {
   body {}
     |> assoc-some("body", request.body)
     |> assoc-some("name", request.name)
@@ -112,37 +128,53 @@ fn (request: UpdateFunctionRequest): Map {
     |> assoc-some("entrypoint_path", request.entrypoint_path)
     |> assoc-some("import_map_path", request.import_map_path)
 
-  ::api/request("PATCH", `/projects/${request.project_ref}/functions/${request.function_slug}`, {}, body)
+  ::api/request("PATCH", `/projects/${request.project_ref}/functions/${request.function_slug}`, {}, body, opts)
 }
 
 deploy-function
 meta {
     doc: """Deploy a function bundle through the Management API deploy endpoint."""
 }
-fn (project-ref: Str, body: Any): Map {
-  ::api/request("POST", `/projects/${project-ref}/functions/deploy`, {}, body)
+fn
+(project-ref: Str, body: Any): Map {
+  deploy-function(project-ref, body, {})
+},
+(project-ref: Str, body: Any, opts: Map): Map {
+  ::api/request("POST", `/projects/${project-ref}/functions/deploy`, {}, body, opts)
 }
 
 bulk-update-functions
 meta {
     doc: """Bulk update edge functions for a project."""
 }
-fn (project-ref: Str, body: Any): Map {
-  ::api/request("PUT", `/projects/${project-ref}/functions`, {}, body)
+fn
+(project-ref: Str, body: Any): Map {
+  bulk-update-functions(project-ref, body, {})
+},
+(project-ref: Str, body: Any, opts: Map): Map {
+  ::api/request("PUT", `/projects/${project-ref}/functions`, {}, body, opts)
 }
 
 delete-function
 meta {
     doc: """Delete an edge function by slug."""
 }
-fn (project-ref: Str, function-slug: Str): Map {
-  ::api/request("DELETE", `/projects/${project-ref}/functions/${function-slug}`)
+fn
+(project-ref: Str, function-slug: Str): Map {
+  delete-function(project-ref, function-slug, {})
+},
+(project-ref: Str, function-slug: Str, opts: Map): Map {
+  ::api/request("DELETE", `/projects/${project-ref}/functions/${function-slug}`, {}, {}, opts)
 }
 
 get-function-body
 meta {
     doc: """Get the source code of an edge function."""
 }
-fn (project-ref: Str, function-slug: Str): Any {
-  ::api/request("GET", `/projects/${project-ref}/functions/${function-slug}/body`)
+fn
+(project-ref: Str, function-slug: Str): Any {
+  get-function-body(project-ref, function-slug, {})
+},
+(project-ref: Str, function-slug: Str, opts: Map): Any {
+  ::api/request("GET", `/projects/${project-ref}/functions/${function-slug}/body`, {}, {}, opts)
 }

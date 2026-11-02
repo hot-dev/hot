@@ -1,0 +1,294 @@
+::salesforce::composite ns
+meta {
+    doc: """
+    Multi-record calls. sObject collections (`create-records`,
+    `update-records`, `upsert-records`, `delete-records`, `get-records`)
+    write up to 200 records per API call; larger inputs are split into
+    200-record chunks unless `all-or-none` is set, which needs every
+    record in one call. `composite` runs up to 25 dependent
+    subrequests in one round trip, with `@{referenceId.field}`
+    references between them.
+
+    Collection calls return one result per record, in order:
+    `{id, success, errors: [{statusCode, message, fields}]}` (plus
+    `created` for upserts). With `all-or-none` false (the default) a
+    failing record does not roll back the others, so check `success`.
+    """
+}
+
+::api ::salesforce::api
+
+MAX_COLLECTION 200
+MAX_RETRIEVE 2000
+MAX_SUBREQUESTS 25
+
+// ---------------------------------------------------------------------------
+// Body builders (pure, exposed for testing)
+// ---------------------------------------------------------------------------
+
+with-type
+meta {
+    doc: """Add `attributes: {type}` to each record (collections need it) unless the record already carries one. Exposed for testing."""
+}
+fn (sobject-type: Str, records: Vec): Vec {
+  map(records, (r) {
+    cond {
+      is-some(get(r, "attributes")) => { untype(r) }
+      => { {...untype(r), attributes: {type: sobject-type}} }
+    }
+  })
+}
+
+build-collection-body
+meta {
+    doc: """The `{allOrNone, records}` body for collection create/update/upsert. Exposed for testing."""
+}
+fn (sobject-type: Str, records: Vec, all-or-none: Bool): Map {
+  {allOrNone: all-or-none, records: with-type(sobject-type, records)}
+}
+
+chunks
+meta {
+    doc: """Split `items` into groups of at most `size`; an Err when `all-or-none` is set and they do not fit in one group (an all-or-none call cannot span requests). Exposed for testing."""
+}
+fn (items: Vec, size: Int, all-or-none: Bool): Vec {
+  cond {
+    is-empty(items) => { [] }
+    and(all-or-none, gt(length(items), size)) => {
+      err(`salesforce: all-or-none collections take at most ${size} records per call (got ${length(items)}); split them yourself or drop all-or-none`)
+    }
+    => { partition(items, size) }
+  }
+}
+
+all-or-none-of fn (options: Map): Bool {
+  Bool(get(options, "all-or-none", false))
+}
+
+run-groups fn (groups: Vec, call: Fn, acc: Vec): Vec {
+  cond {
+    is-empty(groups) => { acc }
+    => {
+      out call(first(groups))
+      cond {
+        is-err(out) => { out }
+        => { run-groups(rest(groups), call, concat(acc, out)) }
+      }
+    }
+  }
+}
+
+run-chunks fn (groups: Result, call: Fn): Vec {
+  cond {
+    is-err(groups) => { groups }
+    => { run-groups(groups, call, []) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// sObject collections
+// ---------------------------------------------------------------------------
+
+create-records
+meta {
+    doc: """
+    POST /composite/sobjects - Create records of one type, 200 per call.
+    `options`: `all-or-none` (roll back the whole call on any failure).
+
+    **Example**
+
+    ```hot
+    results ::salesforce::composite/create-records("Contact", [
+      {LastName: "Lovelace", Email: "ada@example.com"},
+      {LastName: "Hopper", Email: "grace@example.com"}
+    ])
+    map(results, (r) { r.id })
+    ```
+    """
+}
+fn
+(sobject-type: Str, records: Vec): Vec {
+  create-records(sobject-type, records, {})
+},
+(sobject-type: Str, records: Vec, options: Map): Vec {
+  create-records(sobject-type, records, options, {})
+},
+(sobject-type: Str, records: Vec, options: Map, opts: Map): Vec {
+  aon all-or-none-of(options)
+  run-chunks(chunks(records, MAX_COLLECTION, aon), (group) {
+    ::api/json("POST", "/composite/sobjects", build-collection-body(sobject-type, group, aon), opts)
+  })
+}
+
+update-records
+meta {
+    doc: """PATCH /composite/sobjects - Update records of one type by `Id` (each record must carry `Id`), 200 per call. `options`: `all-or-none`."""
+}
+fn
+(sobject-type: Str, records: Vec): Vec {
+  update-records(sobject-type, records, {})
+},
+(sobject-type: Str, records: Vec, options: Map): Vec {
+  update-records(sobject-type, records, options, {})
+},
+(sobject-type: Str, records: Vec, options: Map, opts: Map): Vec {
+  aon all-or-none-of(options)
+  run-chunks(chunks(records, MAX_COLLECTION, aon), (group) {
+    ::api/json("PATCH", "/composite/sobjects", build-collection-body(sobject-type, group, aon), opts)
+  })
+}
+
+upsert-records
+meta {
+    doc: """
+    PATCH /composite/sobjects/{type}/{externalIdField} - Create or update
+    records by an external id field (each record must carry that
+    field), 200 per call. Results include `created`. `options`:
+    `all-or-none`.
+
+    **Example**
+
+    ```hot
+    ::salesforce::composite/upsert-records("Account", "External_Id__c", [
+      {External_Id__c: "acme", Name: "Acme"},
+      {External_Id__c: "globex", Name: "Globex"}
+    ])
+    ```
+    """
+}
+fn
+(sobject-type: Str, external-id-field: Str, records: Vec): Vec {
+  upsert-records(sobject-type, external-id-field, records, {})
+},
+(sobject-type: Str, external-id-field: Str, records: Vec, options: Map): Vec {
+  upsert-records(sobject-type, external-id-field, records, options, {})
+},
+(sobject-type: Str, external-id-field: Str, records: Vec, options: Map, opts: Map): Vec {
+  aon all-or-none-of(options)
+  path `/composite/sobjects/${::api/segment(sobject-type)}/${::api/segment(external-id-field)}`
+  run-chunks(chunks(records, MAX_COLLECTION, aon), (group) {
+    ::api/json("PATCH", path, build-collection-body(sobject-type, group, aon), opts)
+  })
+}
+
+delete-path
+meta {
+    doc: """The `/composite/sobjects?ids=...&allOrNone=...` path for a delete. Exposed for testing."""
+}
+fn (ids: Vec, all-or-none: Bool): Str {
+  `/composite/sobjects${::api/query-string({ids: ids, allOrNone: if(all-or-none, "true", "false")})}`
+}
+
+delete-records
+meta {
+    doc: """DELETE /composite/sobjects?ids= - Delete records (of any types) by id, 200 per call; they go to the recycle bin. `options`: `all-or-none`."""
+}
+fn
+(ids: Vec): Vec {
+  delete-records(ids, {})
+},
+(ids: Vec, options: Map): Vec {
+  delete-records(ids, options, {})
+},
+(ids: Vec, options: Map, opts: Map): Vec {
+  aon all-or-none-of(options)
+  run-chunks(chunks(ids, MAX_COLLECTION, aon), (group) {
+    ::api/json("DELETE", delete-path(group, aon), null, opts)
+  })
+}
+
+get-records
+meta {
+    doc: """POST /composite/sobjects/{type} - Retrieve up to 2000 records of one type by id with the given `fields`, in id order (null for ids that do not exist). Larger id lists are split."""
+}
+fn
+(sobject-type: Str, ids: Vec, fields: Vec): Vec {
+  get-records(sobject-type, ids, fields, {})
+},
+(sobject-type: Str, ids: Vec, fields: Vec, opts: Map): Vec {
+  run-chunks(chunks(ids, MAX_RETRIEVE, false), (group) {
+    ::api/json("POST", `/composite/sobjects/${::api/segment(sobject-type)}`, {ids: group, fields: fields}, opts)
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Composite
+// ---------------------------------------------------------------------------
+
+subrequest
+meta {
+    doc: """
+    One composite subrequest: `method`, `path` (relative to the data API
+    root, like `::salesforce::api/json`; it is expanded to the full
+    `/services/data/vXX.X/...` URL), a `reference-id` later subrequests
+    can cite as `@{reference-id.id}`, and an optional `body`. The 5-arity
+    form builds the URL with the `api-version` in `opts`; pass the same
+    `opts` to `composite`.
+    """
+}
+fn
+(method: Str, path: Str, reference-id: Str): Map {
+  {method: method, url: ::api/data-path(path), referenceId: reference-id}
+},
+(method: Str, path: Str, reference-id: Str, body: Any): Map {
+  subrequest(method, path, reference-id, body, {})
+},
+(method: Str, path: Str, reference-id: Str, body: Any, opts: Map): Map {
+  base {method: method, url: ::api/data-path(path, ::api/api-version(opts)), referenceId: reference-id}
+  if(is-null(body), base, {...base, body: untype(body)})
+}
+
+build-composite-body
+meta {
+    doc: """The `/composite` body: `{allOrNone, collateSubrequests?, compositeRequest}`; an Err over 25 subrequests. Exposed for testing."""
+}
+fn (subrequests: Vec, options: Map): Map {
+  cond {
+    gt(length(subrequests), MAX_SUBREQUESTS) => {
+      err(`salesforce: a composite request takes at most ${MAX_SUBREQUESTS} subrequests (got ${length(subrequests)})`)
+    }
+    => {
+      filter-vals({
+        allOrNone: all-or-none-of(options),
+        collateSubrequests: get(options, "collate-subrequests"),
+        compositeRequest: subrequests
+      }, is-some)
+    }
+  }
+}
+
+composite
+meta {
+    doc: """
+    POST /composite - Run up to 25 subrequests in order in one call.
+    Returns `{compositeResponse: [{body, httpStatusCode, referenceId}]}`.
+    `options`: `all-or-none` (roll back everything if any subrequest
+    fails), `collate-subrequests`.
+
+    **Example**
+
+    ```hot
+    ::c ::salesforce::composite
+
+    out ::c/composite([
+      ::c/subrequest("POST", "/sobjects/Account", "acct", {Name: "Acme"}),
+      ::c/subrequest("POST", "/sobjects/Contact", "ada", {LastName: "Lovelace", AccountId: "@{acct.id}"})
+    ], {all-or-none: true})
+    map(out.compositeResponse, (r) { r.httpStatusCode })
+    ```
+    """
+}
+fn
+(subrequests: Vec): Map {
+  composite(subrequests, {})
+},
+(subrequests: Vec, options: Map): Map {
+  composite(subrequests, options, {})
+},
+(subrequests: Vec, options: Map, opts: Map): Map {
+  body build-composite-body(subrequests, options)
+  cond {
+    is-err(body) => { body }
+    => { ::api/json("POST", "/composite", body, opts) }
+  }
+}

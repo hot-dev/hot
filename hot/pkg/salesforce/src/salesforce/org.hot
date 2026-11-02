@@ -1,0 +1,59 @@
+::salesforce::org ns
+meta {
+    doc: """Org-level resources: API limits, the available API versions, and parsing the `Sforce-Limit-Info` usage header."""
+}
+
+::api ::salesforce::api
+
+limits
+meta {
+    doc: """
+    GET /limits - The org's limits, each `{Max, Remaining}`:
+    `DailyApiRequests`, `DailyBulkV2QueryJobs`, `DataStorageMB`, and
+    many more.
+
+    **Example**
+
+    ```hot
+    l ::salesforce::org/limits()
+    l.DailyApiRequests.Remaining
+    ```
+    """
+}
+fn
+(): Map {
+  limits({})
+},
+(opts: Map): Map {
+  ::api/json("GET", "/limits", null, opts)
+}
+
+versions
+meta {
+    doc: """GET /services/data - The REST API versions the org supports (`[{version, label, url}]`), oldest first. Use it to pick `salesforce.api.version` for an older org."""
+}
+fn
+(): Vec {
+  versions({})
+},
+(opts: Map): Vec {
+  ::api/json("GET", "/services/data", null, opts)
+}
+
+api-usage
+meta {
+    doc: """Parse a `Sforce-Limit-Info` header value (`api-usage=25/15000`) into `{used, max}`, or null when it does not match. Exposed for testing."""
+}
+fn (header: Any): Any {
+  cond {
+    not(is-str(header)) => { null }
+    => {
+      found ::hot::regex/capture(header, "(?:^|[^-])api-usage=(\\d+)/(\\d+)")
+      groups if(is-map(found), get(found, "groups"), null)
+      cond {
+        or(is-null(groups), lt(length(groups), 2)) => { null }
+        => { {used: Int(groups[0]), max: Int(groups[1])} }
+      }
+    }
+  }
+}

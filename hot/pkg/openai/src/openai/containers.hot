@@ -69,9 +69,17 @@ list-containers
 meta {
     doc: """GET /containers - List all containers. Supports pagination with limit, order, and after parameters."""
 }
-fn (request: ListContainersRequest): ListContainersResponse {
-  response api-request("GET", `${::openai/BASE_URL}/containers?limit=${request.limit}&order=${request.order}&after=${request.after}`)
-  if(is-ok-response(response), ListContainersResponse(response.body), err(HttpError(response)))
+fn
+(request: ListContainersRequest): ListContainersResponse {
+  list-containers(request, {})
+},
+(request: ListContainersRequest, opts: Map): ListContainersResponse {
+  response api-request("GET", `/containers?limit=${request.limit}&order=${request.order}&after=${request.after}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListContainersResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CreateContainerRequest type {
@@ -92,9 +100,17 @@ CreateContainerResponse type {
 
 create-container
 meta {doc: """POST /containers - Create a new container for storing files."""}
-fn (request: CreateContainerRequest): CreateContainerResponse {
-  response api-request("POST", `${::openai/BASE_URL}/containers`, {}, request)
-  if(is-ok-response(response), CreateContainerResponse(response.body), err(HttpError(response)))
+fn
+(request: CreateContainerRequest): CreateContainerResponse {
+  create-container(request, {})
+},
+(request: CreateContainerRequest, opts: Map): CreateContainerResponse {
+  response api-request("POST", "/containers", {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CreateContainerResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 RetrieveContainerRequest type {
@@ -113,9 +129,17 @@ RetrieveContainerResponse type {
 
 retrieve-container
 meta {doc: """GET /containers/{container_id} - Retrieve a container by its ID."""}
-fn (request: RetrieveContainerRequest): RetrieveContainerResponse {
-  response api-request("GET", `${::openai/BASE_URL}/containers/${request.container-id}`)
-  if(is-ok-response(response), RetrieveContainerResponse(response.body), err(HttpError(response)))
+fn
+(request: RetrieveContainerRequest): RetrieveContainerResponse {
+  retrieve-container(request, {})
+},
+(request: RetrieveContainerRequest, opts: Map): RetrieveContainerResponse {
+  response api-request("GET", `/containers/${request.container-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RetrieveContainerResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteContainerRequest type {
@@ -130,9 +154,17 @@ delete-container
 meta {
     doc: """DELETE /containers/{container_id} - Permanently delete a container and its contents."""
 }
-fn (request: DeleteContainerRequest): DeleteContainerResponse {
-  response api-request("DELETE", `${::openai/BASE_URL}/containers/${request.container-id}`)
-  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+fn
+(request: DeleteContainerRequest): DeleteContainerResponse {
+  delete-container(request, {})
+},
+(request: DeleteContainerRequest, opts: Map): DeleteContainerResponse {
+  response api-request("DELETE", `/containers/${request.container-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ok(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListContainerFilesRequest type {
@@ -153,9 +185,17 @@ ListContainerFilesResponse type {
 
 list-container-files
 meta {doc: """GET /containers/{container_id}/files - List all files in a container."""}
-fn (request: ListContainerFilesRequest): ListContainerFilesResponse {
-  response api-request("GET", `${::openai/BASE_URL}/containers/${request.container-id}/files?limit=${request.limit}&order=${request.order}&after=${request.after}`)
-  if(is-ok-response(response), ListContainerFilesResponse(response.body), err(HttpError(response)))
+fn
+(request: ListContainerFilesRequest): ListContainerFilesResponse {
+  list-container-files(request, {})
+},
+(request: ListContainerFilesRequest, opts: Map): ListContainerFilesResponse {
+  response api-request("GET", `/containers/${request.container-id}/files?limit=${request.limit}&order=${request.order}&after=${request.after}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListContainerFilesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CreateContainerFileRequest type {
@@ -176,9 +216,17 @@ CreateContainerFileResponse type {
 
 create-container-file
 meta {doc: """POST /containers/{container_id}/files - Add a file to a container."""}
-fn (container-id: Str, request: CreateContainerFileRequest): CreateContainerFileResponse {
-  response api-request("POST", `${::openai/BASE_URL}/containers/${container-id}/files`, {}, request)
-  if(is-ok-response(response), CreateContainerFileResponse(response.body), err(HttpError(response)))
+fn
+(container-id: Str, request: CreateContainerFileRequest): CreateContainerFileResponse {
+  create-container-file(container-id, request, {})
+},
+(container-id: Str, request: CreateContainerFileRequest, opts: Map): CreateContainerFileResponse {
+  response api-request("POST", `/containers/${container-id}/files`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CreateContainerFileResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 RetrieveContainerFileRequest type {
@@ -201,9 +249,17 @@ retrieve-container-file
 meta {
     doc: """GET /containers/{container_id}/files/{file_id} - Retrieve metadata for a file in a container."""
 }
-fn (request: RetrieveContainerFileRequest): RetrieveContainerFileResponse {
-  response api-request("GET", `${::openai/BASE_URL}/containers/${request.container-id}/files/${request.file-id}`)
-  if(is-ok-response(response), RetrieveContainerFileResponse(response.body), err(HttpError(response)))
+fn
+(request: RetrieveContainerFileRequest): RetrieveContainerFileResponse {
+  retrieve-container-file(request, {})
+},
+(request: RetrieveContainerFileRequest, opts: Map): RetrieveContainerFileResponse {
+  response api-request("GET", `/containers/${request.container-id}/files/${request.file-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RetrieveContainerFileResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteContainerFileRequest type {
@@ -219,9 +275,17 @@ delete-container-file
 meta {
     doc: """DELETE /containers/{container_id}/files/{file_id} - Delete a container file"""
 }
-fn (request: DeleteContainerFileRequest): DeleteContainerFileResponse {
-  response api-request("DELETE", `${::openai/BASE_URL}/containers/${request.container-id}/files/${request.file-id}`)
-  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+fn
+(request: DeleteContainerFileRequest): DeleteContainerFileResponse {
+  delete-container-file(request, {})
+},
+(request: DeleteContainerFileRequest, opts: Map): DeleteContainerFileResponse {
+  response api-request("DELETE", `/containers/${request.container-id}/files/${request.file-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ok(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 RetrieveContainerFileContentRequest type {
@@ -237,7 +301,15 @@ retrieve-container-file-content
 meta {
     doc: """GET /containers/{container_id}/files/{file_id}/content - Retrieve container file content"""
 }
-fn (request: RetrieveContainerFileContentRequest): RetrieveContainerFileContentResponse {
-  response api-request("GET", `${::openai/BASE_URL}/containers/${request.container-id}/files/${request.file-id}/content`)
-  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+fn
+(request: RetrieveContainerFileContentRequest): RetrieveContainerFileContentResponse {
+  retrieve-container-file-content(request, {})
+},
+(request: RetrieveContainerFileContentRequest, opts: Map): RetrieveContainerFileContentResponse {
+  response api-request("GET", `/containers/${request.container-id}/files/${request.file-id}/content`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ok(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

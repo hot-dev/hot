@@ -1,0 +1,709 @@
+::cloudflare::api ns
+meta {
+    doc: """
+    Cloudflare API v4 plumbing shared by every `::cloudflare::*` module:
+    authentication, the `{success, errors, messages, result}` envelope,
+    readable errors, query strings, and page- and cursor-based pagination.
+    Use `json` / `request` directly for endpoints the curated modules
+    don't cover.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then context. Nothing from `opts` is written to ctx, so one run
+    can act for many accounts and parallel flows don't share credentials.
+    Credentials in `opts` are masked in call records. One of these keys
+    present but blank or null is an error, never a fallback to context.
+
+    - `token`: an API token for this call
+    - `api-key` and `email`: a Global API Key pair for this call. A `token`
+      in the same `opts` wins.
+    - `account-id`: the account for account-scoped calls
+    """,
+    ctx: {
+        "cloudflare.token": {required: false},
+        "cloudflare.api.key": {required: false},
+        "cloudflare.email": {required: false, secret: false},
+        "cloudflare.account.id": {required: false, secret: false}
+    }
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+// Collect-all helpers stop after this many items unless given a limit.
+DEFAULT_MAX_ITEMS 10000
+
+HttpError
+meta {
+    doc: """
+    A failed Cloudflare call: a non-2xx status, or a 2xx envelope with
+    `success: false`. `errors` is Cloudflare's `errors` array
+    (`{code, message, error_chain?}`); `message` joins it into one
+    readable line such as `"10000: Authentication error"`.
+    """
+}
+type {
+    status: Int,
+    headers: Map,
+    body: Any,
+    errors: Vec,
+    message: Str
+}
+
+ConfigError
+meta {
+    doc: """Missing or incomplete configuration (no credentials, no account id). Returned as an Err before any request is sent."""
+}
+type {
+    message: Str
+}
+
+ListPage
+meta {
+    doc: """
+    One page of a list endpoint: `result` is the page's items and
+    `result_info` Cloudflare's paging metadata — `{page, per_page, count,
+    total_count, total_pages}` for page-based endpoints, `{cursor, count}`
+    for cursor-based ones (KV keys, R2 buckets).
+    """
+}
+type {
+    result: Vec,
+    result_info: Map
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+// A context value as a non-empty Str, or null.
+ctx-str fn (key: Str): Str? {
+  value ::ctx/get(key)
+  cond {
+    is-null(value) => { null }
+    is-empty(Str(value)) => { null }
+    => { Str(value) }
+  }
+}
+
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-blank(value), null, trim(value)), null)
+}
+
+// The keys of `opts` that pick who a call acts as.
+IDENTITY_KEYS ["token", "api-key", "email", "account-id"]
+
+blank-credential
+meta {
+    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+}
+
+blank-error fn (name: Str): Any {
+  err(ConfigError({message: `cloudflare: ${name} is in the call's opts but is blank or null. Pass a value, or leave ${name} out to use context.`}))
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: `{token, api-key, email, account-id}` for a
+    call from `opts` first, then `ctx-values` (a Map of context variables);
+    what doesn't apply is null. A `token` wins over an `api-key` + `email`
+    pair, and credentials in `opts` win over any in context. An Err
+    carrying `ConfigError` when there are no credentials, when one of the
+    identity keys is in `opts` but blank or null (that never falls back to
+    context), or when `opts` has only half of the pair. `account-id` may
+    stay null: account-scoped calls check it. Exposed for testing;
+    `resolve` feeds it the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  opt-token non-blank(get(opts, "token"))
+  opt-key non-blank(get(opts, "api-key"))
+  opt-email non-blank(get(opts, "email"))
+  ctx-token non-blank(get(ctx-values, "cloudflare.token"))
+  ctx-key non-blank(get(ctx-values, "cloudflare.api.key"))
+  ctx-email non-blank(get(ctx-values, "cloudflare.email"))
+  account or(non-blank(get(opts, "account-id")), non-blank(get(ctx-values, "cloudflare.account.id")))
+  blank blank-credential(opts, IDENTITY_KEYS)
+  cond {
+    is-some(blank) => { blank-error(blank) }
+    is-some(opt-token) => { {token: opt-token, api-key: null, email: null, account-id: account} }
+    and(is-some(opt-key), is-some(opt-email)) => { {token: null, api-key: opt-key, email: opt-email, account-id: account} }
+    or(is-some(opt-key), is-some(opt-email)) => {
+      err(ConfigError({message: "cloudflare: api-key and email go together in the call's opts. Pass both, or pass token."}))
+    }
+
+    is-some(ctx-token) => { {token: ctx-token, api-key: null, email: null, account-id: account} }
+    and(is-some(ctx-key), is-some(ctx-email)) => { {token: null, api-key: ctx-key, email: ctx-email, account-id: account} }
+    => {
+      err(ConfigError({
+        message: "Cloudflare credentials are not set. Add cloudflare.token (an API token) in Context Variables, or cloudflare.api.key with cloudflare.email for a Global API Key, or pass {token: ...} in the call's opts."
+      }))
+    }
+  }
+}
+
+resolve
+meta {
+    ctx: {
+        "cloudflare.token": {required: false},
+        "cloudflare.api.key": {required: false},
+        "cloudflare.email": {required: false, secret: false},
+        "cloudflare.account.id": {required: false, secret: false}
+    },
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). A `token`
+    or `api-key` from `opts` is masked in this run's records, and nothing
+    from `opts` is written to ctx.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::api/resolve({token: "tenant-b-token", account-id: "acc123"}).account-id  // "acc123"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  ::ctx/mark-secret(filter([non-blank(get(opts, "token")), non-blank(get(opts, "api-key"))], is-some))
+  resolve-from(opts, {
+    "cloudflare.token": ::ctx/get("cloudflare.token"),
+    "cloudflare.api.key": ::ctx/get("cloudflare.api.key"),
+    "cloudflare.email": ::ctx/get("cloudflare.email"),
+    "cloudflare.account.id": ::ctx/get("cloudflare.account.id")
+  })
+}
+
+auth-headers
+meta {
+    doc: """
+    The authentication headers for a request. An API token
+    (`cloudflare.token`, sent as `Authorization: Bearer`) wins; otherwise
+    the legacy Global API Key pair (`cloudflare.api.key` +
+    `cloudflare.email`, sent as `X-Auth-Key` / `X-Auth-Email`). Returns an
+    Err carrying `ConfigError` when neither is configured. The 3-arity
+    form takes the values explicitly (null for unset).
+    """
+}
+fn
+(): Map {
+  auth-headers(ctx-str("cloudflare.token"), ctx-str("cloudflare.api.key"), ctx-str("cloudflare.email"))
+},
+(token: Str?, api-key: Str?, email: Str?): Map {
+  cond {
+    is-some(token) => { {Authorization: `Bearer ${token}`} }
+    and(is-some(api-key), is-some(email)) => { {X-Auth-Email: email, X-Auth-Key: api-key} }
+    => {
+      err(ConfigError({
+        message: "Cloudflare credentials are not set. Add cloudflare.token (an API token) in Context Variables, or cloudflare.api.key with cloudflare.email for a Global API Key."
+      }))
+    }
+  }
+}
+
+account-id
+meta {
+    doc: """The `account-id` in `opts`, else the `cloudflare.account.id` context variable, or an Err carrying `ConfigError` when it is unset — never an empty path segment. An `account-id` in `opts` that is blank or null is an Err too."""
+}
+fn
+(): Str {
+  account-id({})
+},
+(opts: Map): Str {
+  id or(non-blank(get(opts, "account-id")), ctx-str("cloudflare.account.id"))
+  cond {
+    is-some(blank-credential(opts, ["account-id"])) => { blank-error("account-id") }
+    is-null(id) => {
+      err(ConfigError({
+        message: "cloudflare.account.id is not set. Add your account ID (dashboard → Account home → Account ID) in Context Variables, or pass {account-id: ...} in the call's opts; account-scoped APIs (KV, Workers, R2, D1, Pages) need it."
+      }))
+    }
+    => { id }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Paths and queries
+// ---------------------------------------------------------------------------
+
+seg
+meta {
+    doc: """URL-encode one path segment (KV keys, script, bucket and project names)."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+query-pairs fn (prefix: Str, params: Map): Vec {
+  mapcat(keys(params), (k) {
+    name if(is-empty(prefix), Str(k), `${prefix}.${k}`)
+    value get(params, k)
+    cond {
+      is-null(value) => { [] }
+      is-map(value) => { query-pairs(name, value) }
+      is-vec(value) => {
+        map(filter(value, is-some), (item) { `${::uri/encode(name)}=${::uri/encode(Str(item))}` })
+      }
+      => { [`${::uri/encode(name)}=${::uri/encode(Str(value))}`] }
+    }
+  })
+}
+
+query
+meta {
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map, dropping null values (`""` when
+    nothing is left). Nested maps use Cloudflare's dot form
+    (`{name: {contains: "api"}}` → `name.contains=api`) and Vecs repeat
+    the key, matching the official SDKs.
+    """
+}
+fn (params: Map): Str {
+  pairs query-pairs("", untype(params))
+  cond {
+    is-empty(pairs) => { "" }
+    => { `?${join(pairs, "&")}` }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Responses and errors
+// ---------------------------------------------------------------------------
+
+envelope-errors fn (body: Any): Vec {
+  cond {
+    not(is-map(body)) => { [] }
+    is-vec(get(body, "errors")) => { get(body, "errors") }
+    => { [] }
+  }
+}
+
+format-error fn (e: Any): Str {
+  cond {
+    not(is-map(e)) => { Str(e) }
+    => {
+      code get(e, "code")
+      text or(get(e, "message"), "")
+      base if(is-some(code), `${code}: ${text}`, text)
+      chain get(e, "error_chain")
+      cond {
+        not(is-vec(chain)) => { base }
+        is-empty(chain) => { base }
+        => { `${base} (${join(map(chain, format-error), "; ")})` }
+      }
+    }
+  }
+}
+
+error-message
+meta {
+    doc: """One readable line from a failed response: Cloudflare's `errors` joined with `; ` (including any `error_chain`), else the text body, else `HTTP <status>`."""
+}
+fn (status: Int, body: Any): Str {
+  errors envelope-errors(body)
+  cond {
+    not(is-empty(errors)) => { join(map(errors, format-error), "; ") }
+    not(is-str(body)) => { `HTTP ${status}` }
+    is-empty(trim(body)) => { `HTTP ${status}` }
+    => { body }
+  }
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: or(response.headers, {}),
+    body: response.body,
+    errors: envelope-errors(response.body),
+    message: error-message(response.status, response.body)
+  })
+}
+
+is-failed-envelope fn (body: Any): Bool {
+  cond {
+    not(is-map(body)) => { false }
+    => { eq(get(body, "success"), false) }
+  }
+}
+
+check-response
+meta {
+    doc: """Return the response when it succeeded, or an Err carrying `HttpError` for a non-2xx status or a `success: false` envelope."""
+}
+fn (response: Result): HttpResponse {
+  cond {
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err(HttpError(response)) }
+    is-failed-envelope(response.body) => { err(HttpError(response)) }
+    => { response }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from resolved credentials (see `resolve`). Pure; exposed for testing."""
+}
+fn (method: Str, path: Str, headers: Map, body: Any, resolved: Map): HttpRequest {
+  HttpRequest({
+    method,
+    url: `${::cloudflare/BASE_URL}${path}`,
+    headers: {...auth-headers(resolved.token, resolved.api-key, resolved.email), ...headers},
+    body: body
+  })
+}
+
+send
+meta {
+    doc: """
+    Send an authenticated request to `https://api.cloudflare.com/client/v4`
+    plus `path`, with extra `headers` and a raw `body` (`""` for none,
+    Str or Bytes otherwise). Returns the `HttpResponse` on success, or an
+    Err carrying `HttpError` / `ConfigError`. The building block for
+    non-JSON calls (KV values, multipart uploads).
+    """
+}
+fn
+(method: Str, path: Str, headers: Map, body: Any): HttpResponse {
+  send(method, path, headers, body, {})
+},
+(method: Str, path: Str, headers: Map, body: Any, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      response ::hot::http/request(build-request(method, path, headers, body, resolved))
+      cond {
+        is-err(response) => { response }
+        => { check-response(response) }
+      }
+    }
+  }
+}
+
+request
+meta {
+    doc: """Send a JSON request (`body` a Map/Vec, or `""` for none) and return the whole decoded envelope `{success, errors, messages, result, result_info?}`."""
+}
+fn
+(method: Str, path: Str): Map {
+  request(method, path, "")
+},
+(method: Str, path: Str, body: Any): Map {
+  request(method, path, body, {})
+},
+(method: Str, path: Str, body: Any, opts: Map): Map {
+  response cond {
+    eq(body, "") => { send(method, path, {}, "", opts) }
+    => { send(method, path, {Content-Type: "application/json"}, to-json(untype(body)), opts) }
+  }
+
+  cond {
+    is-err(response) => { response }
+    => { or(response.body, {}) }
+  }
+}
+
+json
+meta {
+    doc: """
+    Like `request`, but return only the envelope's `result`.
+
+    **Example**
+
+    ```hot
+    zone ::cloudflare::api/json("GET", "/zones/023e105f4ecef8ad9ca31a8372d0c353")
+    zone.name
+    ```
+    """
+}
+fn
+(method: Str, path: Str): Any {
+  json(method, path, "")
+},
+(method: Str, path: Str, body: Any): Any {
+  json(method, path, body, {})
+},
+(method: Str, path: Str, body: Any, opts: Map): Any {
+  envelope request(method, path, body, opts)
+  cond {
+    is-err(envelope) => { envelope }
+    => { get(envelope, "result") }
+  }
+}
+
+to-page
+meta {
+    doc: """Turn a list envelope into a `ListPage`; `items-key` picks a nested list (R2 nests buckets under `result.buckets`), `""` uses `result` itself."""
+}
+fn (envelope: Map, items-key: Str): ListPage {
+  raw get(envelope, "result")
+  items cond {
+    is-empty(items-key) => { raw }
+    is-map(raw) => { get(raw, items-key) }
+    => { null }
+  }
+
+  ListPage({
+    result: if(is-vec(items), items, []),
+    result_info: or(get(envelope, "result_info"), {})
+  })
+}
+
+json-page
+meta {
+    doc: """GET a list endpoint and return one `ListPage`."""
+}
+fn
+(path: Str): ListPage {
+  json-page(path, "")
+},
+(path: Str, items-key: Str): ListPage {
+  json-page(path, items-key, {})
+},
+(path: Str, items-key: Str, opts: Map): ListPage {
+  envelope request("GET", path, "", opts)
+  cond {
+    is-err(envelope) => { envelope }
+    => { to-page(envelope, items-key) }
+  }
+}
+
+account-path
+meta {
+    doc: """`/accounts/{cloudflare.account.id}` plus `suffix`, or an Err carrying `ConfigError` when the account id is unset."""
+}
+fn
+(suffix: Str): Str {
+  account-path(suffix, {})
+},
+(suffix: Str, opts: Map): Str {
+  id account-id(opts)
+  cond {
+    is-err(id) => { id }
+    => { `/accounts/${seg(id)}${suffix}` }
+  }
+}
+
+account-json
+meta {
+    doc: """`json` against an account-scoped path (`suffix` follows `/accounts/{id}`)."""
+}
+fn
+(method: Str, suffix: Str): Any {
+  account-json(method, suffix, "")
+},
+(method: Str, suffix: Str, body: Any): Any {
+  account-json(method, suffix, body, {})
+},
+(method: Str, suffix: Str, body: Any, opts: Map): Any {
+  path account-path(suffix, opts)
+  cond {
+    is-err(path) => { path }
+    => { json(method, path, body, opts) }
+  }
+}
+
+account-page
+meta {
+    doc: """`json-page` against an account-scoped path."""
+}
+fn
+(suffix: Str): ListPage {
+  account-page(suffix, "")
+},
+(suffix: Str, items-key: Str): ListPage {
+  account-page(suffix, items-key, {})
+},
+(suffix: Str, items-key: Str, opts: Map): ListPage {
+  path account-path(suffix, opts)
+  cond {
+    is-err(path) => { path }
+    => { json-page(path, items-key, opts) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+has-next-page
+meta {
+    doc: """
+    Whether a page-based list has another page after `page`, from its
+    `result_info`: `total_pages` when present, else `total_count` against
+    the `collected` count, else a full page (`count`/items equal to
+    `per_page`). An empty page always ends the walk.
+    """
+}
+fn (info: Map, page: Int, page-items: Int, collected: Int): Bool {
+  total-pages get(info, "total_pages")
+  total-count get(info, "total_count")
+  per-page get(info, "per_page")
+  cond {
+    eq(page-items, 0) => { false }
+    is-some(total-pages) => { lt(page, Int(total-pages)) }
+    is-some(total-count) => { lt(collected, Int(total-count)) }
+    is-some(per-page) => { gte(page-items, Int(per-page)) }
+    => { false }
+  }
+}
+
+next-cursor
+meta {
+    doc: """The `result_info.cursor` of a cursor-based page, or null when it is absent or empty (the last page)."""
+}
+fn (info: Map): Str? {
+  cursor get(info, "cursor")
+  cond {
+    is-null(cursor) => { null }
+    is-empty(Str(cursor)) => { null }
+    => { Str(cursor) }
+  }
+}
+
+take-up-to fn (items: Vec, max: Int): Vec {
+  if(gt(length(items), max), slice(items, 0, max), items)
+}
+
+collect-pages-from fn (fetch: Fn, params: Map, max: Int, page: Int, acc: Vec): Vec {
+  response fetch({...params, page: page})
+  cond {
+    is-err(response) => { response }
+    => {
+      items response.result
+      combined concat(acc, items)
+      cond {
+        gte(length(combined), max) => { take-up-to(combined, max) }
+        has-next-page(response.result_info, page, length(items), length(combined)) => {
+          collect-pages-from(fetch, params, max, add(page, 1), combined)
+        }
+        => { combined }
+      }
+    }
+  }
+}
+
+collect-pages
+meta {
+    doc: """
+    Walk a page-based list: call `fetch(params)` (a function returning a
+    `ListPage`) with `page` = 1, 2, … until the last page or `max` items,
+    and return the items. Pages are fetched serially.
+    """
+}
+fn (fetch: Fn, params: Map, max: Int): Vec {
+  start or(get(params, "page"), 1)
+  collect-pages-from(fetch, params, max, Int(start), [])
+}
+
+collect-cursor-from fn (fetch: Fn, params: Map, max: Int, acc: Vec): Vec {
+  response fetch(params)
+  cond {
+    is-err(response) => { response }
+    => {
+      items response.result
+      combined concat(acc, items)
+      cursor next-cursor(response.result_info)
+      cond {
+        gte(length(combined), max) => { take-up-to(combined, max) }
+        is-null(cursor) => { combined }
+        is-empty(items) => { combined }
+        => { collect-cursor-from(fetch, {...params, cursor: cursor}, max, combined) }
+      }
+    }
+  }
+}
+
+collect-cursor
+meta {
+    doc: """Walk a cursor-based list (KV keys, R2 buckets): call `fetch(params)` and follow `result_info.cursor` until it is empty or `max` items are collected."""
+}
+fn (fetch: Fn, params: Map, max: Int): Vec {
+  collect-cursor-from(fetch, params, max, [])
+}
+
+// ---------------------------------------------------------------------------
+// Multipart bodies (KV metadata writes, Worker uploads, Pages deployments)
+// ---------------------------------------------------------------------------
+
+new-boundary
+meta {
+    doc: """A fresh random multipart boundary."""
+}
+fn (): Str {
+  `hot-cloudflare-${::hot::random/random-string(32)}`
+}
+
+as-bytes fn (value: Any): Bytes {
+  cond {
+    is-bytes(value) => { value }
+    is-str(value) => { Bytes(value) }
+    => { Bytes(to-json(untype(value))) }
+  }
+}
+
+multipart-part
+meta {
+    doc: """
+    One `multipart/form-data` part as Bytes. `part` is
+    `{name, value, filename?, content_type?}`; `value` is Str or Bytes
+    (a Map/Vec is JSON-encoded).
+    """
+}
+fn (boundary: Str, part: Map): Bytes {
+  filename get(part, "filename")
+  content-type get(part, "content_type")
+  disposition if(is-some(filename),
+    `form-data; name="${part.name}"; filename="${filename}"`,
+    `form-data; name="${part.name}"`)
+  type-line if(is-some(content-type), `Content-Type: ${content-type}\r\n`, "")
+  concat(
+    Bytes(`--${boundary}\r\nContent-Disposition: ${disposition}\r\n${type-line}\r\n`),
+    as-bytes(part.value),
+    Bytes("\r\n")
+  )
+}
+
+multipart-body
+meta {
+    doc: """
+    A complete `multipart/form-data` body (Bytes) from a Vec of parts
+    (see `multipart-part`), closed with the final boundary. Send it with
+    `Content-Type: multipart/form-data; boundary=<boundary>`.
+    """
+}
+fn (boundary: Str, parts: Vec): Bytes {
+  reduce(parts, (acc, part) { concat(acc, multipart-part(boundary, part)) }, Bytes(""))
+    |> concat(Bytes(`--${boundary}--\r\n`))
+}
+
+multipart-content-type fn (boundary: Str): Str {
+  `multipart/form-data; boundary=${boundary}`
+}
+
+send-multipart
+meta {
+    doc: """Send a multipart request built from `parts` and return the envelope's `result`."""
+}
+fn
+(method: Str, path: Str, parts: Vec): Any {
+  send-multipart(method, path, parts, {})
+},
+(method: Str, path: Str, parts: Vec, opts: Map): Any {
+  boundary new-boundary()
+  response send(method, path, {Content-Type: multipart-content-type(boundary)}, multipart-body(boundary, parts), opts)
+  cond {
+    is-err(response) => { response }
+    => { get(or(response.body, {}), "result") }
+  }
+}

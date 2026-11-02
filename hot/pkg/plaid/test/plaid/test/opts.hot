@@ -1,0 +1,156 @@
+::plaid::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no plaid.* context. A blank credential stops every
+// call in the resolver with an Err naming the key, which proves that function
+// passes `opts` through.
+
+::api ::plaid::api
+::link ::plaid::link
+::accounts ::plaid::accounts
+::items ::plaid::items
+::transactions ::plaid::transactions
+::institutions ::plaid::institutions
+::investments ::plaid::investments
+::sandbox ::plaid::sandbox
+::webhooks ::plaid::webhooks
+
+BLANK {client-id: "", secret: "tenant-secret-000"}
+TENANT {client-id: "tenant-id-000", secret: "tenant-secret-000"}
+CTX {"plaid.client-id": "ctx-id-000", "plaid.secret": "ctx-secret-000"}
+
+refused fn (result: Result, key: Str): Bool {
+    and(is-err(result), contains(err-message(result), key), contains(err-message(result), "blank or null"))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    resolved ::api/resolve-from({...TENANT, environment: "production", plaid-version: "2099-01-01"}, CTX)
+    assert-eq("tenant-id-000", resolved.client-id)
+    assert-eq("tenant-secret-000", resolved.secret)
+    assert-eq("https://production.plaid.com", resolved.base-url)
+    assert-eq("2099-01-01", resolved.plaid-version)
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    resolved ::api/resolve-from({}, {...CTX, "plaid.env": "production", "plaid.version": "2098-01-01"})
+    assert-eq("ctx-id-000", resolved.client-id)
+    assert-eq("https://production.plaid.com", resolved.base-url)
+    assert-eq("2098-01-01", resolved.plaid-version)
+}
+
+test-resolve-defaults
+meta ["test"] fn () {
+    resolved ::api/resolve-from({}, CTX)
+    assert-eq("https://sandbox.plaid.com", resolved.base-url)
+    assert-eq(::plaid/PLAID_VERSION, resolved.plaid-version)
+}
+
+test-resolve-missing-credentials-is-a-clear-error
+meta ["test"] fn () {
+    result ::api/resolve-from({}, {})
+    assert(is-err(result))
+    assert(contains(err-message(result), "plaid.client-id"))
+    assert(contains(err-message(result), "client-id: ..."))
+}
+
+test-resolve-blank-values-are-errors-not-fallbacks
+meta ["test"] fn () {
+    assert(refused(::api/resolve-from({client-id: "", secret: "s"}, CTX), "client-id"))
+    assert(refused(::api/resolve-from({client-id: "i", secret: null}, CTX), "secret"))
+    assert(refused(::api/resolve-from({environment: "  "}, CTX), "environment"))
+}
+
+test-resolve-half-a-credential-is-an-error
+meta ["test"] fn () {
+    only-id ::api/resolve-from({client-id: "tenant-id-000"}, CTX)
+    only-secret ::api/resolve-from({secret: "tenant-secret-000"}, CTX)
+    assert(is-err(only-id))
+    assert(contains(err-message(only-id), "without secret"))
+    assert(is-err(only-secret))
+    assert(contains(err-message(only-secret), "without client-id"))
+}
+
+test-resolve-unknown-environment-is-an-error
+meta ["test"] fn () {
+    assert(is-err(::api/resolve-from({environment: "development"}, CTX)))
+}
+
+test-resolve-marks-credentials-and-returns-them-unchanged
+meta ["test"] fn () {
+    resolved ::api/resolve(TENANT)
+    assert-eq("tenant-id-000", resolved.client-id)
+    assert-eq("tenant-secret-000", resolved.secret)
+}
+
+test-mark-tokens-returns-the-body-unchanged
+meta ["test"] fn () {
+    body {access_token: "access-sandbox-1", item_id: "item-1"}
+    assert-eq(body, ::api/mark-tokens(body))
+    assert-eq("not a map", ::api/mark-tokens("not a map"))
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    ::api/resolve({...TENANT, environment: "production"})
+    assert(ne("tenant-id-000", ::hot::ctx/get("plaid.client-id")))
+    assert(ne("tenant-secret-000", ::hot::ctx/get("plaid.secret")))
+    assert(ne("production", ::hot::ctx/get("plaid.env")))
+}
+
+test-build-request-from-resolved
+meta ["test"] fn () {
+    resolved ::api/resolve-from({...TENANT, plaid-version: "2099-01-01"}, {})
+    req ::api/build-request("/item/get", {access_token: "a", unset: null}, resolved)
+    assert-eq("https://sandbox.plaid.com/item/get", req.url)
+    assert-eq("2099-01-01", req.headers.Plaid-Version)
+    assert-eq({client_id: "tenant-id-000", secret: "tenant-secret-000", access_token: "a"}, from-json(req.body))
+}
+
+test-explicit-credential-arities-still-resolve
+meta ["test"] fn () {
+    assert(refused(::api/post("/x", {}, "", "tenant-secret-000"), "client-id"))
+    assert(refused(::api/post("/x", {}, "tenant-id-000", "", "sandbox"), "secret"))
+    assert(refused(::api/post("/x", {}, BLANK), "client-id"))
+}
+
+test-opts-reach-endpoint-modules
+meta ["test"] fn () {
+    assert(refused(::link/create-link-token("u", "App", {}, BLANK), "client-id"))
+    assert(refused(::link/get-link-token("link-1", BLANK), "client-id"))
+    assert(refused(::link/exchange-public-token("public-1", BLANK), "client-id"))
+    assert(refused(::accounts/get-accounts("a", null, BLANK), "client-id"))
+    assert(refused(::accounts/get-balances("a", null, BLANK), "client-id"))
+    assert(refused(::accounts/get-auth("a", null, BLANK), "client-id"))
+    assert(refused(::accounts/get-identity("a", null, BLANK), "client-id"))
+    assert(refused(::items/get-item("a", BLANK), "client-id"))
+    assert(refused(::items/remove-item("a", {}, BLANK), "client-id"))
+    assert(refused(::items/update-item-webhook("a", "https://x", BLANK), "client-id"))
+    assert(refused(::transactions/sync-transactions("a", null, {}, BLANK), "client-id"))
+    assert(refused(::transactions/sync-all-transactions("a", null, {}, BLANK), "client-id"))
+    assert(refused(::transactions/get-transactions("a", "2026-01-01", "2026-02-01", null, BLANK), "client-id"))
+    assert(refused(::transactions/refresh-transactions("a", BLANK), "client-id"))
+    assert(refused(::transactions/get-recurring-transactions("a", null, null, BLANK), "client-id"))
+    assert(refused(::institutions/get-institutions(1, 0, ["US"], null, BLANK), "client-id"))
+    assert(refused(::institutions/get-institution("ins_1", ["US"], null, BLANK), "client-id"))
+    assert(refused(::institutions/search-institutions("q", null, ["US"], null, BLANK), "client-id"))
+    assert(refused(::investments/get-holdings("a", null, BLANK), "client-id"))
+    assert(refused(::investments/get-investment-transactions("a", "2026-01-01", "2026-02-01", null, BLANK), "client-id"))
+    assert(refused(::investments/get-liabilities("a", null, BLANK), "client-id"))
+    assert(refused(::sandbox/create-public-token("ins_1", ["transactions"], null, BLANK), "client-id"))
+    assert(refused(::sandbox/fire-webhook("a", "DEFAULT_UPDATE", {}, BLANK), "client-id"))
+    assert(refused(::sandbox/reset-login("a", BLANK), "client-id"))
+    assert(refused(::webhooks/get-verification-key("kid", BLANK), "client-id"))
+    assert(refused(::webhooks/cached-verification-key("kid", BLANK), "client-id"))
+}
+
+test-verify-webhook-bad-credentials-are-an-err
+meta ["test"] fn () {
+    assert(refused(::webhooks/verify-webhook({headers: {}, body: "{}"}, null, {}, BLANK), "client-id"))
+}
+
+test-verify-webhook-no-header-is-false-with-opts
+meta ["test"] fn () {
+    assert-eq(false, ::webhooks/verify-webhook({headers: {}, body: "{}"}, null, {}, TENANT))
+}

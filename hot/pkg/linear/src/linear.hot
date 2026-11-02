@@ -10,6 +10,9 @@ meta {
     (`lin_api_...`) or an OAuth access token (`lin_oauth_...`) — the right
     Authorization form is chosen automatically.
 
+    **Per-call credentials.** Every API-calling function takes an optional
+    trailing `opts` Map (`api-key`, `base-url`). See `::linear::api`.
+
     **Quick start**
 
     ```hot

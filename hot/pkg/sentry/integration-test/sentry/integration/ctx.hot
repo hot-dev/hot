@@ -4,9 +4,11 @@
 
 // Placeholder credentials for the sentry integration suite. Unset
 // environment variables are skipped entirely, so absent credentials
-// behave exactly as if never configured.
+// behave exactly as if never configured. SENTRY_BASE_URL (or the older
+// SENTRY_URL) points the suite at a self-hosted or region host.
 ::hot::ctx/set(filter-vals({
     "sentry.token": ::env/get("SENTRY_TOKEN", ""),
     "sentry.org": ::env/get("SENTRY_ORG", ""),
-    "sentry.url": ::env/get("SENTRY_URL", ""),
+    "sentry.base.url": ::env/get("SENTRY_BASE_URL", ::env/get("SENTRY_URL", "")),
+    "sentry.region": ::env/get("SENTRY_REGION", ""),
 }, (v) { not(is-empty(v)) }))

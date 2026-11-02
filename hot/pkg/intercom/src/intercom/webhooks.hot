@@ -1,0 +1,70 @@
+::intercom::webhooks ns
+meta {
+    ctx: {"intercom.client.secret": {required: false}},
+    doc: """
+    Intercom webhook verification. Intercom signs each notification with
+    `X-Hub-Signature: sha1=<hex>`, the HMAC-SHA1 of the raw JSON body
+    keyed with your app's `client_secret` (Developer Hub → your app →
+    Basic information). Intercom signs no timestamp, so there is no
+    replay window; deduplicate on the notification `id` (Intercom may
+    resend when your endpoint is slow). See
+    https://developers.intercom.com/docs/references/webhooks/webhook-models.
+    """
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+
+signature-from-header
+meta {
+    doc: """Extract the hex digest from an `X-Hub-Signature` value. Only the `sha1=` scheme is accepted; anything else yields `""`, which never verifies. Exposed for testing."""
+}
+fn (header: Str): Str {
+  value trim(header)
+  cond {
+    starts-with(lowercase(value), "sha1=") => { slice(value, 5) }
+    => { "" }
+  }
+}
+
+verify-request
+meta {
+    ctx: {"intercom.client.secret": {required: false}},
+    doc: """
+    Verify an Intercom webhook request: the `x-hub-signature` header
+    must be `sha1=` plus the hex HMAC-SHA1 of the raw body under the
+    app's client secret, compared in constant time. Uses the
+    `intercom.client.secret` context variable by default (failing when it
+    is unset), or accepts an explicit secret. An empty explicit secret
+    never verifies.
+
+    **Example**
+
+    ```hot
+    intercom-webhook
+    meta {webhook: {service: "intercom", path: "/intercom/webhook"}}
+    fn (request) {
+      if(not(::intercom::webhooks/verify-request(request)),
+        ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
+        handle-notification(request.body))
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("intercom.client.secret"), "")
+  if(is-empty(secret),
+    fail("intercom.client.secret is not set. Add your app's client secret in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str): Bool {
+  signature signature-from-header(get(or(request.headers, {}), "x-hub-signature", ""))
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(secret) => { false }
+    is-empty(signature) => { false }
+    => { ::hmac/hmac-verify-hex(::ctx/mark-secret(secret), ::hot::http/raw-body(request), signature, "sha1") }
+  }
+}

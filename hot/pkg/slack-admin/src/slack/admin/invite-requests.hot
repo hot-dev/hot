@@ -1,0 +1,198 @@
+::slack::admin::invite-requests ns
+meta {
+    doc: """
+    `admin.inviteRequests.*`: review workspace invite requests. With an
+    org-level token, `team_id` is required.
+
+    **Example**
+
+    ```hot
+    ::invites ::slack::admin::invite-requests
+
+    pending ::invites/list(::invites/ListRequest({team_id: "T0123ABCDEF"}))
+    ::invites/approve(::invites/ApproveRequest({invite_request_id: first(pending.invite_requests).id, team_id: "T0123ABCDEF"}))
+    ```
+    """
+}
+
+::api ::slack::admin::api
+
+ListRequest type {
+  team_id: Str?,
+  cursor: Str?,
+  limit: Int?
+}
+
+list
+meta {
+    doc: """
+    admin.inviteRequests.list - List pending invite requests (`invite_requests`).
+
+    Scope: `admin.invites:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `list-all`.
+    """
+}
+fn
+(): Map {
+  list(ListRequest({}))
+},
+(request: ListRequest): Map {
+  list(request, {})
+},
+(request: ListRequest, opts: Map): Map {
+  ::api/call("admin.inviteRequests.list", request, opts)
+}
+
+list-all
+meta {
+    doc: """
+    Every `invite_requests` entry from `admin.inviteRequests.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  list-all(ListRequest({}), 1000)
+},
+(request: ListRequest): Vec {
+  list-all(request, 1000)
+},
+(request: ListRequest, max-items: Int): Vec {
+  list-all(request, max-items, {})
+},
+(request: ListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.inviteRequests.list", request, "invite_requests", max-items, opts)
+}
+
+ApproveRequest type {
+  invite_request_id: Str,
+  team_id: Str?
+}
+
+approve
+meta {
+    doc: """
+    admin.inviteRequests.approve - Approve an invite request.
+
+    Scope: `admin.invites:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: ApproveRequest): Map {
+  approve(request, {})
+},
+(request: ApproveRequest, opts: Map): Map {
+  ::api/call("admin.inviteRequests.approve", request, opts)
+}
+
+DenyRequest type {
+  invite_request_id: Str,
+  team_id: Str?
+}
+
+deny
+meta {
+    doc: """
+    admin.inviteRequests.deny - Deny an invite request.
+
+    Scope: `admin.invites:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: DenyRequest): Map {
+  deny(request, {})
+},
+(request: DenyRequest, opts: Map): Map {
+  ::api/call("admin.inviteRequests.deny", request, opts)
+}
+
+ApprovedListRequest type {
+  team_id: Str?,
+  cursor: Str?,
+  limit: Int?
+}
+
+approved-list
+meta {
+    doc: """
+    admin.inviteRequests.approved.list - List approved invite requests (`approved_requests`).
+
+    Scope: `admin.invites:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `approved-list-all`.
+    """
+}
+fn
+(): Map {
+  approved-list(ApprovedListRequest({}))
+},
+(request: ApprovedListRequest): Map {
+  approved-list(request, {})
+},
+(request: ApprovedListRequest, opts: Map): Map {
+  ::api/call("admin.inviteRequests.approved.list", request, opts)
+}
+
+approved-list-all
+meta {
+    doc: """
+    Every `approved_requests` entry from `admin.inviteRequests.approved.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  approved-list-all(ApprovedListRequest({}), 1000)
+},
+(request: ApprovedListRequest): Vec {
+  approved-list-all(request, 1000)
+},
+(request: ApprovedListRequest, max-items: Int): Vec {
+  approved-list-all(request, max-items, {})
+},
+(request: ApprovedListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.inviteRequests.approved.list", request, "approved_requests", max-items, opts)
+}
+
+DeniedListRequest type {
+  team_id: Str?,
+  cursor: Str?,
+  limit: Int?
+}
+
+denied-list
+meta {
+    doc: """
+    admin.inviteRequests.denied.list - List denied invite requests (`denied_requests`).
+
+    Scope: `admin.invites:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `denied-list-all`.
+    """
+}
+fn
+(): Map {
+  denied-list(DeniedListRequest({}))
+},
+(request: DeniedListRequest): Map {
+  denied-list(request, {})
+},
+(request: DeniedListRequest, opts: Map): Map {
+  ::api/call("admin.inviteRequests.denied.list", request, opts)
+}
+
+denied-list-all
+meta {
+    doc: """
+    Every `denied_requests` entry from `admin.inviteRequests.denied.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  denied-list-all(DeniedListRequest({}), 1000)
+},
+(request: DeniedListRequest): Vec {
+  denied-list-all(request, 1000)
+},
+(request: DeniedListRequest, max-items: Int): Vec {
+  denied-list-all(request, max-items, {})
+},
+(request: DeniedListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.inviteRequests.denied.list", request, "denied_requests", max-items, opts)
+}

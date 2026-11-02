@@ -1,108 +1,582 @@
 ::google::api ns
+meta {
+    doc: """
+    The authenticated request helper shared by the google-* packages, plus
+    Google-shaped errors, retry classification, and `nextPageToken`
+    pagination.
+
+    **Retry.** google-core never waits between attempts. A connection
+    failure on an idempotent method (GET, HEAD, PUT, DELETE, OPTIONS) is
+    retried once, immediately (`opts.retry: false` turns that off).
+    Everything else, including 429, 5xx and rate-limit 403s, comes back
+    as `err(HttpError)` with `retry-after` set from the response's
+    `Retry-After` header. Check it with `is-retryable` and let Hot back
+    off: give the handler, schedule or task a `retry` policy and fail the
+    run (see https://hot.dev/docs/retries and `is-retryable`).
+
+    **401 handling.** When a cached token is rejected with 401, it is
+    evicted and the call is retried once with a freshly minted token.
+    """
+}
 
 ::auth ::google::auth
+::ctx ::hot::ctx
+::time ::hot::time
+::uri ::hot::uri
 
 http-request ::hot::http/request
 is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
 HttpResponse ::hot::http/HttpResponse
 
-HttpError type {
+// google-core retries at most once, immediately, and only connection
+// failures of idempotent methods. Backoff for 429/5xx belongs to Hot's
+// run-level retry policies (see `is-retryable`).
+MAX_IMMEDIATE_RETRIES 1
+RETRY_STATUSES [408, 429, 500, 502, 503, 504]
+RETRY_REASONS ["rateLimitExceeded", "userRateLimitExceeded"]
+IDEMPOTENT_METHODS ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"]
+
+// Safety stop for collect-pages when no limit is given.
+MAX_PAGES 10000
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx response from a Google API: `HttpError(response)` builds it
+    from the `HttpResponse` of `request`.
+
+    **Fields**
+    - `status` - HTTP status code
+    - `headers`, `body` - the raw response (body is decoded JSON when JSON)
+    - `message` - readable summary, e.g.
+      `"google: HTTP 404 NOT_FOUND (notFound): File not found: 1AbC."`
+    - `error-message` - Google's `error.message`
+    - `error-status` - Google's `error.status` (e.g. `"PERMISSION_DENIED"`)
+    - `reason` - the first `error.errors[].reason` (e.g. `"notFound"`,
+      `"insufficientFilePermissions"`, `"rateLimitExceeded"`)
+    - `reasons` - every `error.errors[].reason`
+    - `retry-after` - seconds from a numeric `Retry-After` header, else null
+    """
+}
+type {
     status: Int,
-    headers: Map,
-    body: Any
+    headers: Map?,
+    body: Any,
+    message: Str?,
+    reason: Str?,
+    reasons: Vec?,
+    error-status: Str?,
+    error-message: Str?,
+    retry-after: Int?
 }
 
+decode-error-body fn (body: Any): Any {
+  cond {
+    is-bytes(body) => {
+      parsed from-json(Str(body))
+      if(is-err(parsed), Str(body), parsed)
+    }
+    => { body }
+  }
+}
+
+google-error-details
+meta {
+    doc: """
+    Extract Google's error fields from a response body: `{message, status,
+    reasons}`. Handles the standard `{error: {code, message, status,
+    errors: [{reason, ...}]}}` shape and the OAuth-style
+    `{error: "invalid_grant", error_description}` shape. Fields are null
+    (and `reasons` empty) when absent.
+    """
+}
+fn (body: Any): Map {
+  decoded decode-error-body(body)
+  e if(is-map(decoded), decoded.error, null)
+  cond {
+    is-map(e) => {
+      errors if(is-vec(e.errors), e.errors, [])
+      {
+        message: e.message,
+        status: e.status,
+        reasons: filter(map(errors, (x) { if(is-map(x), x.reason, null) }), is-some)
+      }
+    }
+
+    is-str(e) => {
+      {message: or(decoded.error_description, e), status: null, reasons: [e]}
+    }
+    => { {message: null, status: null, reasons: []} }
+  }
+}
+
+body-excerpt
+meta {
+    doc: """A short (at most 300 characters) printable form of a response body, for error messages."""
+}
+fn (body: Any): Str {
+  text cond {
+    is-null(body) => { "" }
+    is-str(body) => { body }
+    is-bytes(body) => { Str(body) }
+    => { to-json(untype(body)) }
+  }
+
+  if(gt(length(text), 300), `${slice(text, 0, 300)}...`, text)
+}
+
+// `HttpError(response)` builds the error, with its readable `message`.
 HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  details google-error-details(response.body)
+  reasons details.reasons
+  reason if(is-empty(reasons), null, first(reasons))
+  status-part if(is-some(details.status), ` ${details.status}`, "")
+  reason-part if(is-some(reason), ` (${reason})`, "")
+  detail if(is-some(details.message), details.message, body-excerpt(response.body))
   HttpError({
     status: response.status,
-    headers: response.headers,
-    body: response.body
+    headers: or(response.headers, {}),
+    body: response.body,
+    message: `google: HTTP ${response.status}${status-part}${reason-part}: ${detail}`,
+    reason: reason,
+    reasons: reasons,
+    error-status: details.status,
+    error-message: details.message,
+    retry-after: retry-after-seconds(response.headers)
+  })
+}
+
+plain-payload
+meta {
+    doc: """The payload of a `Result.Err` (or the value itself), with type tags removed so an `HttpError` / `TokenError` reads like a Map."""
+}
+fn (value: Result): Any {
+  payload if(is-err(value), err-value(value), value)
+  if(or(is-null(payload), is-str(payload)), payload, untype(payload))
+}
+
+has-reason
+meta {
+    doc: """True when `error` (an `HttpError`, a `Result.Err` holding one, or any error payload) carries the given Google `reason`."""
+}
+fn (error: Result, reason: Str): Bool {
+  payload plain-payload(error)
+  and(is-map(payload), is-vec(payload.reasons), in(reason, payload.reasons))
+}
+
+// ---------------------------------------------------------------------------
+// Retry classification (pure) and the one immediate retry
+// ---------------------------------------------------------------------------
+
+parse-int
+meta {
+    doc: """Parse an Int from an Int or a decimal-digit Str (surrounding whitespace allowed); null for anything else."""
+}
+fn (value: Any): Int? {
+  cond {
+    is-int(value) => { value }
+    not(is-str(value)) => { null }
+    => {
+      s trim(value)
+      cond {
+        is-empty(s) => { null }
+        not(::hot::regex/is-match(s, "^-?[0-9]{1,15}$")) => { null }
+        => { Int(s) }
+      }
+    }
+  }
+}
+
+retry-after-seconds
+meta {
+    doc: """The `Retry-After` header of a response's `headers` as whole seconds (Int), or null when absent or given as an HTTP date."""
+}
+fn (headers: Map?): Int? {
+  value get(or(headers, {}), "retry-after")
+  seconds parse-int(value)
+  if(is-some(seconds), max(or(seconds, 0), 0), null)
+}
+
+retry-policy
+meta {
+    doc: """
+    The immediate-retry policy for a call (pure): `{max-retries: 1}`, or
+    `{max-retries: 0}` when `opts.retry` is `false` or `0`. An Int or
+    `{max-retries}` Map is accepted and clamped to 0..1: google-core
+    never waits between attempts, so it never retries more than once.
+    """
+}
+fn (opts: Map): Map {
+  r opts.retry
+  n cond {
+    eq(r, false) => { 0 }
+    is-int(r) => { r }
+    and(is-map(r), is-int(get(or(r, {}), "max-retries"))) => { r.max-retries }
+    => { MAX_IMMEDIATE_RETRIES }
+  }
+  {max-retries: min(max(n, 0), MAX_IMMEDIATE_RETRIES)}
+}
+
+is-retryable-status
+meta {
+    doc: """True for statuses Google asks clients to retry later: 408, 429, 5xx (500/502/503/504), and 403 with reason `rateLimitExceeded` / `userRateLimitExceeded`."""
+}
+fn (status: Int, body: Any): Bool {
+  cond {
+    in(status, RETRY_STATUSES) => { true }
+    eq(status, 403) => {
+      reasons google-error-details(body).reasons
+      gt(length(filter(reasons, (r) { in(r, RETRY_REASONS) })), 0)
+    }
+    => { false }
+  }
+}
+
+is-connection-failure
+meta {
+    doc: """True when a transport error message is a connection or read failure (worth trying again), not a size-limit or URL error."""
+}
+fn (message: Str): Bool {
+  and(
+    or(contains(message, "request failed"), contains(message, "failed to read body")),
+    not(contains(message, "exceeds"))
+  )
+}
+
+is-retryable-transport
+meta {
+    doc: """True when a transport failure may be retried immediately: an idempotent method (GET, HEAD, PUT, DELETE, OPTIONS) and a connection failure."""
+}
+fn (method: Str, message: Str): Bool {
+  and(in(uppercase(method), IDEMPOTENT_METHODS), is-connection-failure(message))
+}
+
+is-retryable
+meta {
+    doc: """
+    True when a failed call is worth retrying later: an `HttpError` (or a
+    `Result.Err` holding one, or a raw `HttpResponse`) with status 408,
+    429, 500, 502, 503 or 504, or a 403 rate-limit reason; a
+    `TokenError` from the token endpoint with one of those statuses; or
+    a connection failure. False for successes and for permanent errors
+    (400, 401, 403 permission, 404, ...).
+
+    google-core does not wait and retry for you: Hot has no in-run sleep.
+    Let Hot reschedule the work instead. Give the handler, schedule or
+    task a `retry` policy (see https://hot.dev/docs/retries) and fail
+    the run when this returns true; `retry-after` on the `HttpError`
+    says how long Google asked you to wait.
+
+    ```hot
+    sync-inbox
+    meta {
+      schedule: "every 15 minutes",
+      retry: {attempts: 5, delay: 2000, backoff: "exponential", max_delay: 60000, jitter: true}
+    }
+    fn (event) {
+      page ::google::api/json("gmail.readonly", "GET", "https://gmail.googleapis.com/gmail/v1/users/me/messages", {}, "")
+      cond {
+        ::google::api/is-retryable(page) => { fail(`google: retrying later: ${err-message(page)}`) }
+        is-err(page) => { println(`google: giving up: ${err-message(page)}`) }
+        => { length(or(page.messages, [])) }
+      }
+    }
+    ```
+
+    A connection failure on a non-idempotent call (sending mail,
+    creating an event) may still have reached Google; retrying it can
+    duplicate the write.
+    """
+}
+fn (error: Result): Bool {
+  payload plain-payload(error)
+  cond {
+    is-str(payload) => { is-connection-failure(payload) }
+    not(is-map(payload)) => { false }
+    is-int(get(payload, "status")) => { is-retryable-status(payload.status, get(payload, "body")) }
+    is-str(get(payload, "message")) => { is-connection-failure(payload.message) }
+    => { false }
+  }
+}
+
+send-with-retry
+meta {
+    doc: """Send an `HttpRequest`; on a connection failure of an idempotent method, send it once more straight away (per `policy`). Never waits. Returns the final response or transport Err."""
+}
+fn
+(req: HttpRequest, policy: Map): HttpResponse {
+  send-with-retry(req, policy, 0)
+},
+(req: HttpRequest, policy: Map, attempt: Int): HttpResponse {
+  response http-request(req)
+  cond {
+    and(is-err(response), lt(attempt, policy.max-retries), is-retryable-transport(req.method, err-message(response))) => {
+      send-with-retry(req, policy, add(attempt, 1))
+    }
+    => { response }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Request building
+// ---------------------------------------------------------------------------
+
+api-params
+meta {
+    doc: """Strip google-core's own keys (`::google::auth/CREDENTIAL_KEYS`: credentials, `scopes`, `retry`) from an `opts` Map, leaving only API parameters."""
+}
+fn (opts: Map): Map {
+  filter-keys(opts, (k) { not(in(k, ::auth/CREDENTIAL_KEYS)) })
+}
+
+credential-opts
+meta {
+    doc: """Keep only google-core's own keys (credentials, `scopes`, `retry`) from an `opts` Map, e.g. to pass them on to a follow-up call."""
+}
+fn (opts: Map): Map {
+  filter-keys(opts, (k) { in(k, ::auth/CREDENTIAL_KEYS) })
+}
+
+with-query
+meta {
+    doc: """
+    Append query parameters to a URL, dropping null values; Bools encode
+    as `true`/`false`. A Vec value repeats the key once per element
+    (`{labelIds: ["INBOX", "UNREAD"]}` gives
+    `labelIds=INBOX&labelIds=UNREAD`), the way Google's repeated
+    parameters expect. Works whether or not the URL already has a query.
+    """
+}
+fn (url: Str, params: Map): Str {
+  present filter-vals(params, is-some)
+  scalars filter-vals(present, (v) { not(is-vec(v)) })
+  repeated filter-vals(present, is-vec)
+  scalar-qs if(is-empty(scalars), "", ::uri/encode-query(scalars))
+  repeated-parts mapcat(keys(repeated), (k) {
+    map(filter(get(repeated, k), is-some), (v) { `${::uri/encode(Str(k))}=${::uri/encode(Str(v))}` })
+  })
+  qs join(filter(concat([scalar-qs], repeated-parts), (part) { not(is-empty(part)) }), "&")
+  cond {
+    eq(qs, "") => { url }
+    contains(url, "?") => { `${url}&${qs}` }
+    => { `${url}?${qs}` }
+  }
+}
+
+build-http-request
+meta {
+    doc: """
+    Build the outgoing `HttpRequest`. `token` (nullable) becomes the
+    Bearer header. Map/Vec bodies are JSON-encoded with a JSON
+    Content-Type; Str/Bytes bodies are sent verbatim (set Content-Type in
+    `headers`); `""` or null sends no body. Caller headers win.
+    """
+}
+fn (method: Str, url: Str, headers: Map, body: Any, token: Str?): HttpRequest {
+  auth-headers if(is-null(token), {}, {Authorization: `Bearer ${token}`})
+  no-body or(is-null(body), and(is-str(body), is-empty(body)))
+  is-raw or(is-str(body), is-bytes(body))
+  encoded-body cond {
+    no-body => { "" }
+    is-raw => { body }
+    => { to-json(untype(body)) }
+  }
+
+  type-headers if(or(no-body, is-raw), {}, {Content-Type: "application/json; charset=UTF-8"})
+  HttpRequest({
+    method: method,
+    url: url,
+    headers: {...auth-headers, ...type-headers, ...headers},
+    body: encoded-body
   })
 }
 
 request
 meta {
     doc: """
-    Make an authenticated request to a Google API. `scope` is the OAuth
-    scope the call needs (service packages pass their own); the token is
-    resolved via `::google::auth/access-token`. JSON bodies are encoded
-    automatically; pass a Bytes/Str body with an explicit Content-Type
-    header for raw uploads.
+    Make an authenticated request to a Google API and return the raw
+    `HttpResponse` (non-2xx included), or an Err for credential and
+    transport failures.
+
+    - `scope` - the scope(s) the call needs (Str or Vec, short names ok);
+      overridden by `opts.scopes` / `google.scopes`
+    - `additional-headers` - extra headers (they win over the defaults)
+    - `body` - a Map/Vec (sent as JSON), Str/Bytes (sent verbatim), or `""`
+    - `opts` (6th argument) - a Map of per-call credentials (`token`,
+      `refresh-token` + `client-id` + `client-secret`, `service-account` +
+      `subject`, `api-key`), `scopes`, and `retry` (`false` disables the
+      one immediate retry of a failed connection). A Str 6th argument is
+      an explicit access token (kept for compatibility). Per-call
+      credentials are masked in call records, and one that is present but
+      blank or null is an Err naming the key.
 
     **Example**
 
     ```hot
-    response ::google::api/request(
-      "https://www.googleapis.com/auth/drive.readonly",
-      "GET", "https://www.googleapis.com/drive/v3/files", {}, "")
+    response ::google::api/request("drive.readonly", "GET",
+      "https://www.googleapis.com/drive/v3/about?fields=user", {}, "")
+
+    // As a specific tenant user, without touching context
+    response2 ::google::api/request("drive.readonly", "GET",
+      "https://www.googleapis.com/drive/v3/about?fields=user", {}, "",
+      {token: "ya29.tenant-access-token"})
     ```
     """
 }
 fn
-(scope: Str, method: Str, url: Str): HttpResponse {
-  request(scope, method, url, {}, "")
+(scope: Str | Vec, method: Str, url: Str): HttpResponse {
+  request(scope, method, url, {}, "", {})
 },
-(scope: Str, method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
-  token ::auth/access-token(scope)
-  match token {
-    Result.Err => { err(token) }
-
-    _ => { request(scope, method, url, additional-headers, body, token) }
-  }
+(scope: Str | Vec, method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(scope, method, url, additional-headers, body, {})
 },
-// 6-arity: explicit access token override — bypasses ::google::auth
-// resolution entirely (`scope` is unused; the token carries its scopes)
-(scope: Str, method: Str, url: Str, additional-headers: Map, body: Any, token: Str): HttpResponse {
-  default-headers {
-    Authorization: `Bearer ${token}`
+(scope: Str | Vec, method: Str, url: Str, additional-headers: Map, body: Any, token: Str): HttpResponse {
+  request(scope, method, url, additional-headers, body, {token: token})
+},
+(scope: Str | Vec, method: Str, url: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  creds ::auth/resolve-credentials(opts)
+  policy retry-policy(opts)
+  cond {
+    is-err(creds) => { creds }
+
+    eq(creds.kind, "api-key") => {
+      send-with-retry(build-http-request(method, with-query(url, {key: creds.api-key}), additional-headers, body, null), policy)
+    }
+
+    => {
+      scopes ::auth/effective-scopes(scope, opts)
+      auth ::auth/bearer(creds, scopes)
+      cond {
+        is-err(auth) => { auth }
+        => {
+          response send-with-retry(build-http-request(method, url, additional-headers, body, auth.token), policy)
+          cond {
+            and(auth.cached, not(is-err(response)), eq(response.status, 401)) => {
+              ::auth/evict-token(auth.cache-key)
+              fresh ::auth/bearer(creds, scopes)
+              if(is-err(fresh), fresh,
+                send-with-retry(build-http-request(method, url, additional-headers, body, fresh.token), policy))
+            }
+            => { response }
+          }
+        }
+      }
+    }
   }
+}
 
-  is-raw or(is-bytes(body), and(is-str(body), not(is-empty(body))))
-  encoded-body cond {
-    eq(body, "") => { "" }
-    is-raw => { body }
-    => { to-json(untype(body)) }
+unwrap
+meta {
+    doc: """The decoded body of a 2xx response, the Err of a failed request, or `err(HttpError)` for a non-2xx response."""
+}
+fn (response: Result): Any {
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
   }
-
-  headers cond {
-    eq(body, "") => { default-headers }
-    is-raw => { default-headers }
-    => { {...default-headers, Content-Type: "application/json"} }
-  }
-
-  final-headers {...headers, ...additional-headers}
-
-  ::hot::http/request(HttpRequest({
-    method,
-    url,
-    headers: final-headers,
-    body: encoded-body
-  }))
 }
 
 json
 meta {
-    doc: """Like `request`, but unwraps the response: returns the decoded JSON body on 2xx, or an Err carrying `HttpError`. The shape used by all google-* endpoint functions."""
+    doc: """Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err carrying `HttpError` (credential failures carry `::google::auth/TokenError`). The shape used by all google-* endpoint functions. Takes the same arities as `request`."""
 }
 fn
-(scope: Str, method: Str, url: Str): Any {
-  json(scope, method, url, {}, "")
+(scope: Str | Vec, method: Str, url: Str): Any {
+  unwrap(request(scope, method, url, {}, "", {}))
 },
-(scope: Str, method: Str, url: Str, additional-headers: Map, body: Any): Any {
-  response request(scope, method, url, additional-headers, body)
+(scope: Str | Vec, method: Str, url: Str, additional-headers: Map, body: Any): Any {
+  unwrap(request(scope, method, url, additional-headers, body, {}))
+},
+(scope: Str | Vec, method: Str, url: Str, additional-headers: Map, body: Any, token: Str): Any {
+  unwrap(request(scope, method, url, additional-headers, body, {token: token}))
+},
+(scope: Str | Vec, method: Str, url: Str, additional-headers: Map, body: Any, opts: Map): Any {
+  unwrap(request(scope, method, url, additional-headers, body, opts))
+}
+
+// ---------------------------------------------------------------------------
+// Pagination over nextPageToken
+// ---------------------------------------------------------------------------
+
+Page
+meta {
+    doc: """One page of a list call: `items` (the list under the endpoint's items key), `next-page-token` (null on the last page), and the full decoded `response`."""
+}
+type {
+    items: Vec,
+    next-page-token: Str?,
+    response: Map
+}
+
+fetch-page
+meta {
+    doc: """
+    Fetch one page. `fetch` is `(page-token: Str?) -> Map` (null for the
+    first page) returning the decoded list response; `items-key` names its
+    list field (`"files"`, `"drives"`, `"permissions"`, ...).
+
+    ```hot
+    page ::google::api/fetch-page((t) { ::google::drive::files/list-files({pageToken: t}) }, "files", null)
+    page.items
+    page.next-page-token
+    ```
+    """
+}
+fn (fetch: Fn, items-key: Str, page-token: Str?): Page {
+  response fetch(page-token)
   cond {
     is-err(response) => { response }
-    is-ok-response(response) => { response.body }
-    => { err(HttpError(response)) }
+    => {
+      token get(response, "nextPageToken")
+      Page({
+        items: or(get(response, items-key), []),
+        next-page-token: if(::auth/is-blank-value(token), null, token),
+        response: response
+      })
+    }
   }
-},
-// 6-arity: explicit access token override (`scope` is unused)
-(scope: Str, method: Str, url: Str, additional-headers: Map, body: Any, token: Str): Any {
-  response request(scope, method, url, additional-headers, body, token)
+}
+
+collect-loop fn (fetch: Fn, items-key: Str, limit: Int?, page-token: Str?, acc: Vec, pages: Int): Vec {
+  page fetch-page(fetch, items-key, page-token)
   cond {
-    is-err(response) => { response }
-    is-ok-response(response) => { response.body }
-    => { err(HttpError(response)) }
+    is-err(page) => { page }
+    => {
+      all concat(acc, page.items)
+      cond {
+        and(is-some(limit), gte(length(all), or(limit, 0))) => { slice(all, 0, limit) }
+        is-null(page.next-page-token) => { all }
+        gte(pages, MAX_PAGES) => { all }
+        => { collect-loop(fetch, items-key, limit, page.next-page-token, all, add(pages, 1)) }
+      }
+    }
   }
+}
+
+collect-pages
+meta {
+    doc: """
+    Follow `nextPageToken` and collect every item, or at most `limit`
+    items (null for no limit). `fetch` and `items-key` are as for
+    `fetch-page`. The first failing page's Err is returned.
+
+    ```hot
+    files ::google::api/collect-pages((t) {
+      ::google::drive::files/list-files({q: "trashed = false", pageToken: t, pageSize: 1000})
+    }, "files", 5000)
+    ```
+    """
+}
+fn
+(fetch: Fn, items-key: Str): Vec {
+  collect-loop(fetch, items-key, null, null, [], 1)
+},
+(fetch: Fn, items-key: Str, limit: Int?): Vec {
+  collect-loop(fetch, items-key, limit, null, [], 1)
 }

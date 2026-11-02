@@ -1,0 +1,59 @@
+::stripe::payouts ns
+meta {
+    doc: """Payouts: transfers from the Stripe balance to your bank account or debit card. Read-only here; automatic payouts need no API calls. See https://docs.stripe.com/api/payouts."""
+}
+
+api-call ::stripe::api/call
+seg ::stripe::api/encode-id
+
+ListPayoutsRequest type {
+  status: Str?,
+  destination: Str?,
+  arrival_date: Any?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?,
+  expand: Vec<Str>?
+}
+
+list-payouts
+meta {
+    doc: """
+GET /v1/payouts - List payouts, most recent first. Filter by `status` ("pending", "paid", "failed", "canceled") or `arrival_date`. List the balance transactions a payout settled with `::stripe::balance/list-balance-transactions(ListBalanceTransactionsRequest({payout: payout.id}))`.
+
+**Example**
+
+```hot
+::payouts ::stripe::payouts
+
+page ::payouts/list-payouts(::payouts/ListPayoutsRequest({status: "paid", limit: 5}))
+page.data[0].arrival_date
+```
+"""
+}
+fn
+(): Map {
+  list-payouts(ListPayoutsRequest({}))
+},
+(request: ListPayoutsRequest): Map {
+  list-payouts(request, {})
+},
+(request: ListPayoutsRequest, opts: Map): Map {
+  api-call("GET", "/v1/payouts", request, opts)
+}
+
+get-payout
+meta {
+    doc: """GET /v1/payouts/{payout} - Retrieve a payout by ID."""
+}
+fn
+(payout: Str): Map {
+  get-payout(payout, {})
+},
+(payout: Str, params: Map): Map {
+  get-payout(payout, params, {})
+},
+(payout: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/payouts/${seg(payout)}`, params, opts)
+}

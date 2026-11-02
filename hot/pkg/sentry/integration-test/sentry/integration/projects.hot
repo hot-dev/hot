@@ -1,9 +1,27 @@
 ::sentry::integration ns
 meta ["test"]
 
-// Requires ctx: sentry.token + sentry.org
+// Read-only. Requires ctx: sentry.token + sentry.org (SENTRY_TOKEN,
+// SENTRY_ORG); skips cleanly when either is unset.
+// Run with: hot test --project pkg-integration-sentry
+
+has-credentials fn (): Bool {
+    and(
+        is-some(::sentry::api/ctx-str("sentry.token")),
+        is-some(::sentry::api/ctx-str("sentry.org"))
+    )
+}
+
 test-list-projects
 meta ["test"] fn () {
-    out ::sentry/list-projects()
-    assert(not(is-err(out)), "token should list projects")
+    cond {
+        not(has-credentials()) => {
+            println("SENTRY_TOKEN / SENTRY_ORG not set - skipping Sentry projects test")
+            assert(true, "Skipped - no credentials")
+        }
+        => {
+            page ::sentry::projects/list-projects({per_page: 5})
+            assert(is-vec(page.items), "token should list projects")
+        }
+    }
 }

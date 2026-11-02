@@ -2,13 +2,12 @@
 
 // SES Email operations using SES v2 API
 
-http-request ::hot::http/request
 HttpResponse ::hot::http/HttpResponse
 is-ok-response ::hot::http/is-ok-response
 
-get-credentials ::aws::core/get-credentials
-get-region ::aws::core/get-region
-sign-request ::aws::core/sign-request
+resolve ::aws::core/resolve
+send-signed ::aws::core/send-signed
+service-url ::aws::core/service-url
 AwsError ::aws::core/AwsError
 
 // Email destination type
@@ -57,6 +56,61 @@ SendEmailResponse type {
     message_id: Str?
 }
 
+// Raw message data for the API: a Base64 blob
+raw-message-data
+meta {
+    doc: """The `RawMessage.Data` value for a MIME message: SES requires the entire message Base64 encoded. A message that is already Base64 (a MIME message has `:` and spaces, so it can't be mistaken for one) passes through."""
+}
+fn (raw_message: Str): Str {
+    cond {
+        ::hot::regex/is-match(raw_message, "^[A-Za-z0-9+/\\r\\n]+={0,2}\\s*$") => { raw_message }
+        => { ::hot::base64/encode(raw_message) }
+    }
+}
+
+// The JSON body for SendEmail
+send-email-body
+meta {
+    doc: """The SendEmail request body for a `SendEmailRequest`. Exposed for testing."""
+}
+fn (request: SendEmailRequest): Map {
+    simple request.content.simple
+    raw request.content.raw
+    template request.content.template
+    non-blank (value: Str?) { if(or(is-null(value), eq(value, "")), null, {Data: value}) }
+
+    // Exactly one kind of content; unset parts are left out, not sent as null
+    content cond {
+        is-some(simple) => {
+            {
+                Simple: {
+                    Subject: {Data: simple.subject},
+                    Body: filter-vals({
+                        Text: non-blank(simple.body.text),
+                        Html: non-blank(simple.body.html)
+                    }, is-some)
+                }
+            }
+        }
+
+        is-some(raw) => { {Raw: {Data: raw-message-data(raw)}} }
+        is-some(template) => { {Template: {TemplateName: template.template_name, TemplateData: to-json(template.template_data)}} }
+        => { {} }
+    }
+
+    filter-vals({
+        FromEmailAddress: request.from_email_address,
+        Destination: {
+            ToAddresses: request.destination.to_addresses,
+            CcAddresses: or(request.destination.cc_addresses, []),
+            BccAddresses: or(request.destination.bcc_addresses, [])
+        },
+        Content: content,
+        ReplyToAddresses: or(request.reply_to_addresses, []),
+        ConfigurationSetName: request.configuration_set_name
+    }, is-some)
+}
+
 // Send a simple email
 send-email
 meta {
@@ -84,58 +138,31 @@ meta {
     ```
     """
 }
-fn (request: SendEmailRequest): SendEmailResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-    url `https://email.${region}.amazonaws.com/v2/email/outbound-emails`
+fn
+(request: SendEmailRequest, opts: Map): SendEmailResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "email")}/v2/email/outbound-emails`
 
-    // Build the destination
-    cc-addrs if(is-null(request.destination.cc_addresses), [], request.destination.cc_addresses)
-    bcc-addrs if(is-null(request.destination.bcc_addresses), [], request.destination.bcc_addresses)
+        // Build the request body
+        body to-json(send-email-body(request))
 
-    // Build simple content if present
-    simple-content cond {
-        is-null(request.content.simple) => { null }
-        => {
-        Subject: { Data: request.content.simple.subject },
-        Body: {
-            Text: if(is-null(request.content.simple.body.text), null, { Data: request.content.simple.body.text }),
-            Html: if(is-null(request.content.simple.body.html), null, { Data: request.content.simple.body.html })
+        headers {
+            "Content-Type": "application/json"
         }
-    }
-    }
 
-    reply-to if(is-null(request.reply_to_addresses), [], request.reply_to_addresses)
+        response send-signed("POST", url, "ses", resolved, headers, body)
 
-    // Build the request body
-    body to-json({
-        FromEmailAddress: request.from_email_address,
-        Destination: {
-            ToAddresses: request.destination.to_addresses,
-            CcAddresses: cc-addrs,
-            BccAddresses: bcc-addrs
-        },
-        Content: {
-            Simple: simple-content
-        },
-        ReplyToAddresses: reply-to
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { SendEmailResponse({
+                message_id: response.body.MessageId
+            }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    headers {
-        "Content-Type": "application/json",
-        "Host": `email.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "ses", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { SendEmailResponse({
-            message_id: response.body.MessageId
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(request: SendEmailRequest): SendEmailResponse | AwsError {
+    send-email(request, {})
 }
 
 // Convenience function to send a simple email
@@ -167,7 +194,33 @@ meta {
     """
 }
 fn
-(from: Str, to: Vec<Str>, subject: Str, body_text: Str, body_html: Str): SendEmailResponse | AwsError {
+(from: Str, to: Vec<Str>, subject: Str, body_text: Str, body_html: Str?, opts: Map): SendEmailResponse | AwsError {
+    send-email(SendEmailRequest({
+        from_email_address: from,
+        destination: Destination({
+            to_addresses: to,
+            cc_addresses: null,
+            bcc_addresses: null
+        }),
+        content: EmailContent({
+            simple: Message({
+                subject: subject,
+                body: Body({
+                    text: body_text,
+                    html: body_html
+                })
+            }),
+            raw: null,
+            template: null
+        }),
+        reply_to_addresses: null,
+        configuration_set_name: null
+    }), opts)
+},
+(from: Str, to: Vec<Str>, subject: Str, body_text: Str, opts: Map): SendEmailResponse | AwsError {
+    send-simple-email(from, to, subject, body_text, "", opts)
+},
+(from: Str, to: Vec<Str>, subject: Str, body_text: Str, body_html: Str?): SendEmailResponse | AwsError {
     send-email(SendEmailRequest({
         from_email_address: from,
         destination: Destination({
@@ -210,34 +263,36 @@ meta {
     ```
     """
 }
-fn (raw_message: Str): SendEmailResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-    url `https://email.${region}.amazonaws.com/v2/email/outbound-emails`
+fn
+(raw_message: Str, opts: Map): SendEmailResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "email")}/v2/email/outbound-emails`
 
-    body to-json({
-        Content: {
-            Raw: {
-                Data: raw_message
+        body to-json({
+            Content: {
+                Raw: {
+                    Data: raw-message-data(raw_message)
+                }
             }
+        })
+
+        headers {
+            "Content-Type": "application/json"
+        }
+
+        response send-signed("POST", url, "ses", resolved, headers, body)
+
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { SendEmailResponse({
+                message_id: response.body.MessageId
+            }) }
+            => { err(AwsError(response)) }
         }
     })
-
-    headers {
-        "Content-Type": "application/json",
-        "Host": `email.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "ses", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { SendEmailResponse({
-            message_id: response.body.MessageId
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(raw_message: Str): SendEmailResponse | AwsError {
+    send-raw-email(raw_message, {})
 }
 
 // Send a templated email
@@ -259,37 +314,39 @@ meta {
     ```
     """
 }
-fn (from: Str, to: Vec<Str>, template_name: Str, template_data: Map): SendEmailResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-    url `https://email.${region}.amazonaws.com/v2/email/outbound-emails`
+fn
+(from: Str, to: Vec<Str>, template_name: Str, template_data: Map, opts: Map): SendEmailResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "email")}/v2/email/outbound-emails`
 
-    body to-json({
-        FromEmailAddress: from,
-        Destination: {
-            ToAddresses: to
-        },
-        Content: {
-            Template: {
-                TemplateName: template_name,
-                TemplateData: to-json(template_data)
+        body to-json({
+            FromEmailAddress: from,
+            Destination: {
+                ToAddresses: to
+            },
+            Content: {
+                Template: {
+                    TemplateName: template_name,
+                    TemplateData: to-json(template_data)
+                }
             }
+        })
+
+        headers {
+            "Content-Type": "application/json"
+        }
+
+        response send-signed("POST", url, "ses", resolved, headers, body)
+
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { SendEmailResponse({
+                message_id: response.body.MessageId
+            }) }
+            => { err(AwsError(response)) }
         }
     })
-
-    headers {
-        "Content-Type": "application/json",
-        "Host": `email.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "ses", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { SendEmailResponse({
-            message_id: response.body.MessageId
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(from: Str, to: Vec<Str>, template_name: Str, template_data: Map): SendEmailResponse | AwsError {
+    send-templated-email(from, to, template_name, template_data, {})
 }

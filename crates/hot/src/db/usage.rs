@@ -316,6 +316,12 @@ run_usage!(
 // counter with its source rows (one snapshot), and the same short transaction
 // adds the difference. No snapshot spans an account, and no repair holds more
 // than one counter row, so repairs cannot deadlock with ordered writers.
+//
+// The sum stays in that one statement because only one snapshot makes the
+// difference exact: summing `call` in batches would compare a counter with rows
+// from several snapshots, and a writer between them would read as drift. Nor do
+// batches read any less. `call_env_start_time_size_idx` is what keeps this from
+// reading the trace heap, whose rows hold each call's arguments and return value.
 
 /// The account's environments, including orphaned counter or store rows, in
 /// environment order. The flag marks environments that still exist.
@@ -691,6 +697,10 @@ pub async fn reconcile_accounts(db: &DatabasePool) -> Result<(), sqlx::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     /// Reconciliation only checks accounts with an enforced limit.
     async fn limit_runs(pool: &sqlx::SqlitePool, org: Uuid) {
@@ -1058,6 +1068,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn storage_check_reads_call_sizes_from_the_covering_index() {
+        let db = super::super::test_db().await;
+        let data = super::super::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN QUERY PLAN {STORAGE_CHECK}"
+        )))
+        .bind(data.env_id)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let plan: Vec<String> = rows
+            .iter()
+            .map(|row| sqlx::Row::get::<String, _>(row, "detail"))
+            .collect();
+        assert!(
+            plan.iter().any(|step| step
+                .contains("SEARCH call USING COVERING INDEX call_env_start_time_size_idx")),
+            "{plan:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn account_task_usage_reads_the_counters_admission_enforces() {
         let db = super::super::test_db().await;
         let data = super::super::insert_test_data(&db).await.unwrap();
@@ -1195,6 +1230,40 @@ mod tests {
             })
         }
 
+        /// Reconciliation only checks accounts with an enforced limit.
+        async fn limit_runs(&self) {
+            sqlx::query(
+                "UPDATE org SET features='{\"runs_per_month\":1000}'::jsonb WHERE org_id=$1",
+            )
+            .bind(self.root)
+            .execute(&self.raw)
+            .await
+            .unwrap();
+        }
+
+        async fn run(&self) -> Uuid {
+            let id = Uuid::now_v7();
+            sqlx::query("INSERT INTO run(run_id,env_id,stream_id,build_id,run_type_id) VALUES($1,$2,$3,$4,1)")
+                .bind(id).bind(self.env).bind(self.stream).bind(self.build)
+                .execute(&self.raw).await.unwrap();
+            id
+        }
+
+        async fn reconcile(&self) -> UsageDrift {
+            reconcile_account(&DatabasePool::Postgres(self.billing.clone()), self.root)
+                .await
+                .unwrap()
+        }
+
+        /// The account's storage counter and the call rows it stands for.
+        async fn call_bytes(&self) -> (i64, i64) {
+            sqlx::query_as("SELECT (SELECT COALESCE(SUM(call_bytes),0)::bigint FROM usage_storage WHERE env_id=$1),(SELECT COALESCE(SUM(GREATEST(size,0)),0)::bigint FROM call WHERE env_id=$1)")
+                .bind(self.env)
+                .fetch_one(&self.raw)
+                .await
+                .unwrap()
+        }
+
         async fn finished_task(&self, units: i64, stop: DateTime<Utc>) -> Uuid {
             let id = Uuid::now_v7();
             sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type,task_status_id,result,duration_ms,stop_time) VALUES($1,$2,$3,$4,'::rollover/task','container',3,$5,1000,$6)")
@@ -1315,6 +1384,126 @@ mod tests {
                 duration_ms: account.truth().await.1
             })
         );
+    }
+
+    /// One writer's calls. Every kind of change a trace writer or retention
+    /// makes, each in its own transaction, so reconciliation runs between them.
+    async fn write_calls(raw: sqlx::PgPool, env: Uuid, run: Uuid, stop: Arc<AtomicBool>) -> usize {
+        let mut writes = 0;
+        let mut sizes = 0_i64;
+        while !stop.load(Ordering::Relaxed) {
+            let call = Uuid::now_v7();
+            sizes += 1;
+            sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES($1,$2,$3,'::counter/test','root','root',0,now(),$4)")
+                .bind(call).bind(run).bind(env).bind(sizes % 90 + 10).execute(&raw).await.unwrap();
+            sqlx::query("UPDATE call SET size=size+7 WHERE call_id=$1")
+                .bind(call)
+                .execute(&raw)
+                .await
+                .unwrap();
+            if sizes % 3 == 0 {
+                sqlx::query("DELETE FROM call WHERE call_id=$1")
+                    .bind(call)
+                    .execute(&raw)
+                    .await
+                    .unwrap();
+            }
+            writes += 1;
+        }
+        writes
+    }
+
+    #[tokio::test]
+    async fn postgres_storage_reconcile_is_exact_under_concurrent_trace_writers() {
+        let Some(account) = PgAccount::new().await else {
+            return;
+        };
+        account.limit_runs().await;
+        let run = account.run().await;
+        // Vacuumed history below whatever the writers add, as on a real table,
+        // so the check reads some of it from the index alone.
+        for _ in 0..50 {
+            sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES($1,$2,$3,'::counter/test','root','root',0,now(),1000)")
+                .bind(Uuid::now_v7()).bind(run).bind(account.env).execute(&account.raw).await.unwrap();
+        }
+        sqlx::query("VACUUM hot.call")
+            .execute(&account.raw)
+            .await
+            .unwrap();
+        assert!(account.reconcile().await.is_empty());
+        let stop = Arc::new(AtomicBool::new(false));
+        let writers: Vec<_> = (0..3)
+            .map(|_| {
+                tokio::spawn(write_calls(
+                    account.raw.clone(),
+                    account.env,
+                    run,
+                    stop.clone(),
+                ))
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // There is no drift yet. A check that mixed snapshots would report a
+        // writer as drift, and its repair would then create some.
+        for _ in 0..20 {
+            assert_eq!(account.reconcile().await, UsageDrift::default());
+        }
+        sqlx::query("UPDATE usage_storage SET call_bytes=call_bytes+73 WHERE env_id=$1 AND slot=(SELECT MIN(slot) FROM usage_storage WHERE env_id=$1)")
+            .bind(account.env)
+            .execute(&account.raw)
+            .await
+            .unwrap();
+        assert_eq!(account.reconcile().await.storage_rows, 1);
+        for _ in 0..20 {
+            assert_eq!(account.reconcile().await, UsageDrift::default());
+        }
+        stop.store(true, Ordering::Relaxed);
+        let mut writes = 0;
+        for writer in writers {
+            writes += writer.await.unwrap();
+        }
+        assert!(writes > 0, "reconciliation should have run beside writers");
+        let (counter, calls) = account.call_bytes().await;
+        assert_eq!(counter, calls);
+        assert!(calls >= 50_000);
+    }
+
+    #[tokio::test]
+    async fn postgres_storage_check_reads_call_sizes_from_the_covering_index() {
+        let Some(account) = PgAccount::new().await else {
+            return;
+        };
+        let run = account.run().await;
+        for size in [100, -5, 300] {
+            sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES($1,$2,$3,'::counter/test','root','root',0,now(),$4)")
+                .bind(Uuid::now_v7()).bind(run).bind(account.env).bind(size).execute(&account.raw).await.unwrap();
+        }
+        let mut tx = account.raw.begin().await.unwrap();
+        // The test table is too small for the planner to prefer any index.
+        sqlx::raw_sql("SET LOCAL enable_seqscan=off; SET LOCAL enable_bitmapscan=off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let plan: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (COSTS OFF) {STORAGE_CHECK}"
+        )))
+        .bind(account.env)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        assert!(
+            plan.iter()
+                .any(|line| line
+                    .contains("Index Only Scan using call_env_start_time_size_idx on call")),
+            "{plan:#?}"
+        );
+        let (_, calls, _, counted): (i64, i64, i64, i64) = sqlx::query_as(STORAGE_CHECK)
+            .bind(account.env)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!((calls, counted), (400, 400), "negative sizes count as zero");
+        tx.rollback().await.unwrap();
     }
 
     #[tokio::test]

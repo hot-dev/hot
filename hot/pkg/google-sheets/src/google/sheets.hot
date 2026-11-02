@@ -1,104 +1,165 @@
 ::google::sheets ns
 meta {
     doc: """
-    Google Sheets API bindings. Authentication is configured once via the
-    `google.*` context variables — see the `google-core` package.
+    Google Sheets API v4 bindings: read and write cell values (single,
+    batch, append, clear) with every render and input option, rows as
+    records (header row to Maps and back), spreadsheet metadata and
+    creation, and `batchUpdate` with builders for sheets, freezing,
+    resizing and basic formatting. Credentials and scopes come from
+    `google-core`.
+
+    **Namespaces**
+
+    - `::google::sheets::values` - get, batch-get, update, batch-update,
+      append, clear, batch-clear, `read-records`, `write-records`,
+      `append-records`
+    - `::google::sheets::spreadsheets` - get, create, `batch-update`,
+      list/add/rename/delete/duplicate sheets, freeze, auto-resize
+    - `::google::sheets::requests` - pure builders for `batchUpdate`
+      requests (sheets, freeze, resize, formatting, rows and columns)
+    - `::google::sheets::records` - pure conversion between value grids
+      and records, A1 notation helpers
+
+    Every function has an options arity taking an `opts` Map. Sheets
+    query parameters use the API's own names (`valueRenderOption`,
+    `valueInputOption`, `fields`, ...); credential keys (`token`,
+    `refresh-token`, `service-account`, `subject`, `scopes`, `retry`) are
+    handled by `google-core` and override context for that call.
 
     **Quick start**
 
     ```hot
-    ::sheets ::google::sheets
+    ::values ::google::sheets::values
 
-    rows ::sheets/get-values(spreadsheet-id, "Sheet1!A1:C10")
-    ::sheets/append-values(spreadsheet-id, "Sheet1!A:C", [["2026-07-09", "signup", 42]])
+    leads ::values/read-records("1AbCspreadsheetId", "Leads!A:D")
+    ::values/append-records("1AbCspreadsheetId", "Leads!A:D", [{name: "Ada", email: "ada@example.com"}], ["name", "email"])
     ```
     """
 }
 
 ::api ::google::api
+::ctx ::hot::ctx
 ::uri ::hot::uri
 
+API_ROOT "https://sheets.googleapis.com"
 BASE_URL "https://sheets.googleapis.com/v4/spreadsheets"
 
+// Scopes. spreadsheets and spreadsheets.readonly are sensitive (OAuth
+// verification for public apps); drive.file is non-sensitive and covers
+// spreadsheets the app created or the user opened with it.
 SCOPE "https://www.googleapis.com/auth/spreadsheets"
 READ_SCOPE "https://www.googleapis.com/auth/spreadsheets.readonly"
+FILE_SCOPE "https://www.googleapis.com/auth/drive.file"
 
-get-values
+// ---------------------------------------------------------------------------
+// URL and parameter helpers (shared by the sub-namespaces)
+// ---------------------------------------------------------------------------
+
+api-root
 meta {
-    doc: """GET /{id}/values/{range} - Read a range in A1 notation. Returns `{range, majorDimension, values: [[...], ...]}` (values absent when the range is empty)."""
+    ctx: {"google.sheets.api-root": {required: false, secret: false}},
+    doc: """The API root, `https://sheets.googleapis.com` unless the `google.sheets.api-root` context variable points at a proxy or emulator."""
 }
-fn (spreadsheet-id: Str, range: Str): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/${spreadsheet-id}/values/${::uri/encode(range)}`)
-}
-
-batch-get-values
-meta {
-    doc: """GET /{id}/values:batchGet - Read several ranges in one call. Returns `{valueRanges: [...]}` in request order."""
-}
-fn (spreadsheet-id: Str, ranges: Vec): Map {
-  params join(map(ranges, (r) { `ranges=${::uri/encode(r)}` }), "&")
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/${spreadsheet-id}/values:batchGet?${params}`)
+fn (): Str {
+  root ::ctx/get("google.sheets.api-root")
+  if(or(is-null(root), eq(root, "")), API_ROOT, root)
 }
 
-update-values
+url
 meta {
     doc: """
-    PUT /{id}/values/{range} - Overwrite a range with a 2D Vec of rows.
-    Values are parsed as if typed by a user (`USER_ENTERED`) — numbers,
-    dates, and formulas work as expected.
+    A Sheets v4 URL: `/v4/spreadsheets` + `path` with non-null `params`
+    (Vec values repeat the key, as `ranges` needs).
+    `url("/abc/values/Sheet1%21A1")`.
     """
 }
-fn (spreadsheet-id: Str, range: Str, values: Vec): Map {
-  ::api/json(SCOPE, "PUT", `${BASE_URL}/${spreadsheet-id}/values/${::uri/encode(range)}?valueInputOption=USER_ENTERED`, {}, {
-    range: range,
-    majorDimension: "ROWS",
-    values: values
-  })
+fn
+(path: Str): Str {
+  url(path, {})
+},
+(path: Str, params: Map): Str {
+  ::api/with-query(`${api-root()}/v4/spreadsheets${path}`, params)
 }
 
-append-values
+encode-id
+meta {doc: """URL-encode a spreadsheet id for a path segment."""}
+fn (id: Str): Str {
+  ::uri/encode(id)
+}
+
+encode-range
+meta {
+    doc: """URL-encode an A1 range for a path segment: `"My Sheet!A1:B2"` becomes `My%20Sheet%21A1%3AB2`."""
+}
+fn (range: Str): Str {
+  ::uri/encode(range)
+}
+
+values-path
+meta {
+    doc: """The path of a values call: `/{id}/values/{range}` plus an optional `:verb` (`append`, `clear`), with id and range encoded."""
+}
+fn
+(spreadsheet-id: Str, range: Str): Str {
+  `/${encode-id(spreadsheet-id)}/values/${encode-range(range)}`
+},
+(spreadsheet-id: Str, range: Str, verb: Str): Str {
+  `/${encode-id(spreadsheet-id)}/values/${encode-range(range)}:${verb}`
+}
+
+query-params
 meta {
     doc: """
-    POST /{id}/values/{range}:append - Append rows after the last row of
-    the table that starts at `range`.
-
-    **Example**
-
-    ```hot
-    ::google::sheets/append-values(id, "Log!A:C", [["2026-07-09", "deploy", "ok"]])
-    ```
+    Build a call's query parameters: `defaults`, overridden by the Sheets
+    parameters in `opts` (credential keys and the function's own
+    `local-keys` are removed), with nulls dropped. Pass a key as null in
+    `opts` to drop a default.
     """
 }
-fn (spreadsheet-id: Str, range: Str, values: Vec): Map {
-  ::api/json(SCOPE, "POST", `${BASE_URL}/${spreadsheet-id}/values/${::uri/encode(range)}:append?valueInputOption=USER_ENTERED`, {}, {
-    range: range,
-    majorDimension: "ROWS",
-    values: values
-  })
+fn
+(defaults: Map, opts: Map): Map {
+  query-params(defaults, opts, [])
+},
+(defaults: Map, opts: Map, local-keys: Vec): Map {
+  params filter-keys(::api/api-params(opts), (k) { not(in(k, local-keys)) })
+  filter-vals({...defaults, ...params}, is-some)
 }
 
-clear-values
+creds
 meta {
-    doc: """POST /{id}/values/{range}:clear - Clear a range's values (formatting is kept)."""
+    doc: """The google-core part of `opts` (credentials, scopes, retry), passed through to `::google::api`."""
 }
-fn (spreadsheet-id: Str, range: Str): Map {
-  ::api/json(SCOPE, "POST", `${BASE_URL}/${spreadsheet-id}/values/${::uri/encode(range)}:clear`, {}, {})
+fn (opts: Map): Map {
+  ::api/credential-opts(opts)
 }
 
-get-spreadsheet
+json
 meta {
-    doc: """GET /{id} - Spreadsheet metadata: title, sheets, named ranges."""
+    doc: """`::google::api/json` with this package's conventions: credential opts and a JSON (or empty) body."""
 }
-fn (spreadsheet-id: Str): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/${spreadsheet-id}`)
+fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
+  ::api/json(scope, method, full-url, {}, body, creds(opts))
 }
 
-create-spreadsheet
+compact
 meta {
-    doc: """POST / - Create a spreadsheet with the given title. Returns the resource including `spreadsheetId` and `spreadsheetUrl`."""
+    doc: """Drop null values from a request body (Sheets bodies never carry JSON null for unset fields)."""
 }
-fn (title: Str): Map {
-  ::api/json(SCOPE, "POST", BASE_URL, {}, {
-    properties: {title: title}
-  })
+fn (body: Map): Map {
+  filter-vals(untype(body), is-some)
 }
+
+// ---------------------------------------------------------------------------
+// Shortcuts to the most used functions
+// ---------------------------------------------------------------------------
+
+get-values ::google::sheets::values/get-values
+batch-get-values ::google::sheets::values/batch-get-values
+update-values ::google::sheets::values/update-values
+append-values ::google::sheets::values/append-values
+clear-values ::google::sheets::values/clear-values
+read-records ::google::sheets::values/read-records
+append-records ::google::sheets::values/append-records
+get-spreadsheet ::google::sheets::spreadsheets/get-spreadsheet
+create-spreadsheet ::google::sheets::spreadsheets/create-spreadsheet
+batch-update ::google::sheets::spreadsheets/batch-update

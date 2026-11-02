@@ -1,11 +1,53 @@
 ::crm::integration ns
 meta ["test"]
 
-// Requires ctx for ONE provider (hubspot.token / salesforce.* / attio.api.key)
+// =============================================================================
+// Integration Tests (live CRM, read-only)
+// =============================================================================
+// Requires ctx for at least one provider (hubspot.token / a salesforce.* auth
+// flow / attio.api.key); set CRM_PROVIDER to choose between several. Without
+// credentials every test skips. Nothing here writes to the CRM.
 // Run with: hot test --project pkg-integration-crm
+
+configured fn (): Bool {
+    provider ::crm/configured-provider()
+    and(not(is-err(provider)), is-some(provider))
+}
+
+skip fn (name: Str): Any {
+    println(`skipping ${name}: no CRM credentials configured`)
+    assert(true, "skipped without credentials")
+}
 
 test-find-nonexistent-contact
 meta ["test"] fn () {
-    out ::crm/find-contact("definitely-not-a-real-contact@hot-dev-itest.example")
-    assert(is-null(out), "unknown email resolves to null across providers")
+    cond {
+        not(configured()) => { skip("test-find-nonexistent-contact") }
+        => {
+            out ::crm/find-contact("definitely-not-a-real-contact@hot-dev-itest.example")
+            assert(is-null(out), "unknown email resolves to null across providers")
+        }
+    }
+}
+
+test-find-nonexistent-company
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip("test-find-nonexistent-company") }
+        => {
+            out ::crm/find-company("https://www.hot-dev-itest-no-such-company.example/")
+            assert(is-null(out), "unknown domain resolves to null")
+        }
+    }
+}
+
+test-find-deals-by-unlikely-name
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip("test-find-deals-by-unlikely-name") }
+        => {
+            out ::crm/find-deals({name: "hot-dev itest no such deal", limit: 1})
+            assert(is-empty(out), "no deals match a made-up name")
+        }
+    }
 }

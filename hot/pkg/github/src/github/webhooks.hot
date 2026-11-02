@@ -37,6 +37,7 @@ fn
   verify-request(request, secret)
 },
 (request: Map, secret: Str): Bool {
+  ::ctx/mark-secret(secret)
   header get(request.headers, "x-hub-signature-256", "")
   // A wrong scheme prefix yields an empty signature, which fails closed.
   signature cond {

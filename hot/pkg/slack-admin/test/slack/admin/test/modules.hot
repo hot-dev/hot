@@ -1,0 +1,79 @@
+::slack::admin::test::modules ns
+meta ["test"]
+
+::api ::slack::admin::api
+::conversations ::slack::admin::conversations
+::roles ::slack::admin::roles
+::barriers ::slack::admin::barriers
+::workflows ::slack::admin::workflows
+::apps ::slack::admin::apps
+::auth ::slack::admin::auth
+::users ::slack::admin::users
+
+form fn (request: Any): Map {
+  ::hot::uri/decode-query(::api/form-body(request))
+}
+
+test-bulk-move-request
+meta ["test"] fn () {
+    assert-eq({channel_ids: "C1,C2", target_team_id: "T2"},
+      form(::conversations/BulkMoveRequest({channel_ids: ["C1", "C2"], target_team_id: "T2"})))
+}
+
+test-custom-retention-request
+meta ["test"] fn () {
+    assert-eq({channel_id: "C1", duration_days: "30"},
+      form(::conversations/SetCustomRetentionRequest({channel_id: "C1", duration_days: 30})))
+}
+
+test-lookup-request
+meta ["test"] fn () {
+    assert-eq({team_ids: "T1", last_message_activity_before: "1735689600", limit: "100"},
+      form(::conversations/LookupRequest({team_ids: ["T1"], last_message_activity_before: 1735689600, limit: 100})))
+}
+
+test-search-request-lists
+meta ["test"] fn () {
+    assert-eq({query: "ops", search_channel_types: "private,exclude_archived"},
+      form(::conversations/SearchRequest({query: "ops", search_channel_types: ["private", "exclude_archived"]})))
+}
+
+test-role-assignment-request
+meta ["test"] fn () {
+    assert-eq({role_id: "Rl0A", entity_ids: "C1", user_ids: "U1,U2"},
+      form(::roles/AddAssignmentsRequest({role_id: "Rl0A", entity_ids: ["C1"], user_ids: ["U1", "U2"]})))
+}
+
+test-barrier-request
+meta ["test"] fn () {
+    assert-eq({primary_usergroup_id: "S1", barriered_from_usergroup_ids: "S2", restricted_subjects: "im,mpim,call"},
+      form(::barriers/CreateRequest({primary_usergroup_id: "S1", barriered_from_usergroup_ids: ["S2"], restricted_subjects: ["im", "mpim", "call"]})))
+}
+
+test-workflow-collaborators-request
+meta ["test"] fn () {
+    assert-eq({workflow_ids: "Wf1,Wf2", collaborator_ids: "U1"},
+      form(::workflows/CollaboratorsAddRequest({workflow_ids: ["Wf1", "Wf2"], collaborator_ids: ["U1"]})))
+}
+
+test-app-uninstall-request
+meta ["test"] fn () {
+    assert-eq({app_id: "A1", team_ids: "T1,T2"}, form(::apps/UninstallRequest({app_id: "A1", team_ids: ["T1", "T2"]})))
+}
+
+test-app-config-set-json-encodes-restrictions
+meta ["test"] fn () {
+    body form(::apps/ConfigSetRequest({app_id: "A1", domain_restrictions: {urls: ["https://example.com"]}}))
+    assert-eq({urls: ["https://example.com"]}, from-json(body.domain_restrictions))
+}
+
+test-auth-policy-request
+meta ["test"] fn () {
+    assert-eq({policy_name: "email_password", entity_type: "USER", entity_ids: "U1"},
+      form(::auth/PolicyAssignEntitiesRequest({policy_name: "email_password", entity_type: "USER", entity_ids: ["U1"]})))
+}
+
+test-session-reset-request
+meta ["test"] fn () {
+    assert-eq({user_id: "U1", mobile_only: "true"}, form(::users/SessionResetRequest({user_id: "U1", mobile_only: true})))
+}

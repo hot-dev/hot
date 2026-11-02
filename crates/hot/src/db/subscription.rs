@@ -1099,7 +1099,7 @@ impl OrgUsageStats {
         .fetch_one(pool);
 
         // Bytes come from the storage counter. Counting calls needs only
-        // call_env_start_time_idx, so neither reads the trace heap.
+        // call_env_start_time_size_idx, so neither reads the trace heap.
         let retention_str = retention_days.to_string();
         let call_fut = async {
             if retention_days < 0 {

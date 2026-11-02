@@ -4,14 +4,16 @@
 
 ::ctx ::hot::ctx
 
-http-request ::hot::http/request
 HttpResponse ::hot::http/HttpResponse
 is-ok-response ::hot::http/is-ok-response
 eq ::hot::cmp/eq
 
-get-credentials ::aws::core/get-credentials
-get-region ::aws::core/get-region
-sign-request ::aws::core/sign-request
+::api ::aws::s3::api
+::xml ::hot::xml
+
+resolve ::aws::core/resolve
+send-signed ::aws::core/send-signed
+uri-encode ::aws::core/uri-encode
 AwsError ::aws::core/AwsError
 
 // S3 Bucket type
@@ -37,6 +39,26 @@ HeadBucketResponse type {
     region: Str?
 }
 
+// Text of a child element, or null when it's absent
+child-text fn (elem: Any, name: Str): Str? {
+    child ::xml/child(elem, name)
+    if(is-null(child), null, ::xml/text(child))
+}
+
+// Parse the ListAllMyBucketsResult XML
+parse-list-buckets-response fn (xml-str: Str): ListBucketsResponse {
+    root ::xml/from-xml(xml-str)
+    owner ::xml/child(root, "Owner")
+    buckets ::xml/child(root, "Buckets")
+
+    ListBucketsResponse({
+        owner: if(is-null(owner), null, {id: child-text(owner, "ID"), display_name: child-text(owner, "DisplayName")}),
+        buckets: if(is-null(buckets), [], map(::xml/children(buckets, "Bucket"), (elem) {
+            S3Bucket({name: child-text(elem, "Name"), creation_date: child-text(elem, "CreationDate")})
+        }))
+    })
+}
+
 // List all buckets
 list-buckets
 meta {
@@ -52,23 +74,23 @@ meta {
     ```
     """
 }
-fn (): ListBucketsResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-    url "https://s3.amazonaws.com/"
+fn
+(opts: Map): ListBucketsResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        // The regional endpoint: the global one only accepts us-east-1 signatures
+        url `${::api/base-url(resolved)}/`
 
-    headers {
-        "Host": "s3.amazonaws.com"
-    }
+        response send-signed("GET", url, "s3", resolved, {}, "")
 
-    signed-headers sign-request("GET", url, region, "s3", credentials, headers, "")
-
-    response http-request("GET", url, signed-headers, "")
-
-    cond {
-        is-ok-response(response) => { ListBucketsResponse(response.body) }
-        => { err(AwsError(response)) }
-    }
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { parse-list-buckets-response(::api/body-text(response.body)) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(): ListBucketsResponse | AwsError {
+    list-buckets({})
 }
 
 // Create a bucket
@@ -89,35 +111,37 @@ meta {
     """
 }
 fn
-(bucket: Str, region: Str): CreateBucketResponse | AwsError {
-    credentials get-credentials()
-    url `https://s3.${region}.amazonaws.com/${bucket}`
+(bucket: Str, region: Str, opts: Map): CreateBucketResponse | AwsError {
+    if-ok(::api/resolve({...opts, region: region}, bucket), (resolved) {
+        url `${::api/base-url(resolved)}/${uri-encode(bucket)}`
 
-    // Create bucket configuration for non-us-east-1 regions
-    body cond {
-        eq(region, "us-east-1") => { "" }
-        => { `<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+        // Create bucket configuration for non-us-east-1 regions
+        body cond {
+            eq(region, "us-east-1") => { "" }
+            => { `<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
             <LocationConstraint>${region}</LocationConstraint>
         </CreateBucketConfiguration>` }
-    }
+        }
 
-    headers {
-        "Host": `s3.${region}.amazonaws.com`
-    }
+        response send-signed("PUT", url, "s3", resolved, {}, body)
 
-    signed-headers sign-request("PUT", url, region, "s3", credentials, headers, body)
-
-    response http-request("PUT", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { CreateBucketResponse({
-            location: response.headers.Location
-        }) }
-        => { err(AwsError(response)) }
-    }
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { CreateBucketResponse({
+                location: ::aws::core/response-header(response, "Location")
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(bucket: Str, opts: Map): CreateBucketResponse | AwsError {
+    if-ok(resolve(opts), (resolved) { create-bucket(bucket, resolved.region, opts) })
+},
+(bucket: Str, region: Str): CreateBucketResponse | AwsError {
+    create-bucket(bucket, region, {})
 },
 (bucket: Str): CreateBucketResponse | AwsError {
-    create-bucket(bucket, get-region())
+    create-bucket(bucket, {})
 }
 
 // Delete a bucket
@@ -134,23 +158,22 @@ meta {
     ```
     """
 }
-fn (bucket: Str): Bool | AwsError {
-    region get-region()
-    credentials get-credentials()
-    url `https://s3.${region}.amazonaws.com/${bucket}`
+fn
+(bucket: Str, opts: Map): Bool | AwsError {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
+        url `${::api/base-url(resolved)}/${uri-encode(bucket)}`
 
-    headers {
-        "Host": `s3.${region}.amazonaws.com`
-    }
+        response send-signed("DELETE", url, "s3", resolved, {}, "")
 
-    signed-headers sign-request("DELETE", url, region, "s3", credentials, headers, "")
-
-    response http-request("DELETE", url, signed-headers, "")
-
-    cond {
-        is-ok-response(response) => { true }
-        => { AwsError(response) }
-    }
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { true }
+            => { AwsError(response) }
+        }
+    })
+},
+(bucket: Str): Bool | AwsError {
+    delete-bucket(bucket, {})
 }
 
 // Head a bucket (check if exists)
@@ -167,24 +190,23 @@ meta {
     ```
     """
 }
-fn (bucket: Str): HeadBucketResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-    url `https://s3.${region}.amazonaws.com/${bucket}`
+fn
+(bucket: Str, opts: Map): HeadBucketResponse | AwsError {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
+        url `${::api/base-url(resolved)}/${uri-encode(bucket)}`
 
-    headers {
-        "Host": `s3.${region}.amazonaws.com`
-    }
+        response send-signed("HEAD", url, "s3", resolved, {}, "")
 
-    signed-headers sign-request("HEAD", url, region, "s3", credentials, headers, "")
-
-    response http-request("HEAD", url, signed-headers, "")
-
-    cond {
-        is-ok-response(response) => { HeadBucketResponse({
-            exists: true,
-            region: null
-        }) }
-        => { err(AwsError(response)) }
-    }
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { HeadBucketResponse({
+                exists: true,
+                region: ::aws::core/response-header(response, "x-amz-bucket-region")
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(bucket: Str): HeadBucketResponse | AwsError {
+    head-bucket(bucket, {})
 }

@@ -1,0 +1,107 @@
+::plaid::link ns
+meta {
+    doc: """
+    The Link flow: create a `link_token` server-side, hand it to Plaid
+    Link in your client, then exchange the `public_token` Link returns
+    for a long-lived `access_token`. Store the access token encrypted and
+    never log it.
+    """
+}
+
+::api ::plaid::api
+
+DEFAULT_PRODUCTS ["transactions"]
+DEFAULT_COUNTRY_CODES ["US"]
+DEFAULT_LANGUAGE "en"
+
+build-link-token-request
+meta {
+    doc: """
+    The `/link/token/create` body (without credentials). `options` are
+    Plaid's top-level fields: `products`, `required_if_supported_products`,
+    `optional_products`, `additional_consented_products`,
+    `country_codes`, `language`, `webhook`, `redirect_uri`,
+    `android_package_name`, `access_token` (update mode), `user`
+    (merged with `client_user_id`: `legal_name`, `email_address`,
+    `phone_number`, ...), `user_id`, `account_filters`,
+    `transactions: {days_requested}`, `link_customization_name`,
+    `hosted_link`, ... `products` defaults to `["transactions"]` except
+    in update mode (when `access_token` is given); `country_codes` to
+    `["US"]`; `language` to `"en"`. Unset fields are omitted. Exposed
+    for testing.
+    """
+}
+fn (user-id: Str, client-name: Str, options: Map): Map {
+  update-mode is-some(get(options, "access_token"))
+  user {...or(get(options, "user"), {}), client_user_id: user-id}
+  defaults {
+    products: if(update-mode, null, DEFAULT_PRODUCTS),
+    country_codes: DEFAULT_COUNTRY_CODES,
+    language: DEFAULT_LANGUAGE
+  }
+
+  ::api/compact({
+    ...defaults,
+    ...options,
+    client_name: client-name,
+    user: user
+  })
+}
+
+create-link-token
+meta {
+    doc: """
+    POST /link/token/create: start a Link session for one of your users.
+    `user-id` is your stable id for the user (`client_user_id`; not an
+    email or other PII). The 2-arity form defaults to transactions in the
+    US, in English; pass options for anything else (see
+    `build-link-token-request`). Returns `{link_token, expiration,
+    request_id}`.
+
+    **Example**
+
+    ```hot
+    link ::plaid::link/create-link-token("user-42", "My App", {
+      products: ["auth", "transactions"],
+      country_codes: ["US", "CA"],
+      webhook: "https://example.com/plaid/webhook",
+      redirect_uri: "https://example.com/plaid/oauth",
+      transactions: {days_requested: 730}
+    })
+    ```
+    """
+}
+fn
+(user-id: Str, client-name: Str): Map {
+  create-link-token(user-id, client-name, {})
+},
+(user-id: Str, client-name: Str, options: Map): Map {
+  create-link-token(user-id, client-name, options, {})
+},
+(user-id: Str, client-name: Str, options: Map, opts: Map): Map {
+  ::api/post("/link/token/create", build-link-token-request(user-id, client-name, options), opts)
+}
+
+get-link-token
+meta {
+    doc: """POST /link/token/get: a Link token's metadata and, for Hosted Link or multi-Item sessions, the session results (public tokens)."""
+}
+fn
+(link-token: Str): Map {
+  get-link-token(link-token, {})
+},
+(link-token: Str, opts: Map): Map {
+  ::api/post("/link/token/get", {link_token: link-token}, opts)
+}
+
+exchange-public-token
+meta {
+    doc: """POST /item/public_token/exchange: trade Link's short-lived `public_token` (30 minutes, single use) for `{access_token, item_id}`. Persist both; the access token doesn't expire."""
+}
+fn
+(public-token: Str): Map {
+  exchange-public-token(public-token, {})
+},
+(public-token: Str, opts: Map): Map {
+  ::api/post("/item/public_token/exchange", {public_token: public-token}, opts)
+}

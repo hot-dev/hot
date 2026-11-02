@@ -1,109 +1,173 @@
 ::openai-compatible::chat ns
-
-api-request ::openai-compatible::api/request
-api-request-stream ::openai-compatible::api/request-stream
-HttpError ::openai-compatible::api/HttpError
-is-ok-response ::hot::http/is-ok-response
-
-// ============================================================================
-// Types (common OpenAI chat surface)
-// ============================================================================
-
-Role type "user" | "system" | "assistant" | "tool"
-
-Message type {
-    role: Role,
-    content: Any,
-    name: Str?,
-    tool_calls: Vec<Map>?,
-    tool_call_id: Str?
-}
-
-Tool type {
-    type: Str,
-    function: FunctionDefinition
-}
-
-FunctionDefinition type {
-    name: Str,
-    description: Str?,
-    parameters: Any?
-}
-
-ChatCompletionRequest type {
-    model: Str,
-    messages: Vec<Message>,
-    max_tokens: Int?,
-    temperature: Dec?,
-    top_p: Dec?,
-    stop: Any?,
-    frequency_penalty: Dec?,
-    presence_penalty: Dec?,
-    seed: Int?,
-    response_format: Map?,
-    tools: Vec<Tool>?,
-    tool_choice: Any?,
-    user: Str?,
-    // OpenRouter routing extensions (ignored by other providers)
-    models: Vec<Str>?,
-    provider: Map?,
-    transforms: Vec<Str>?
-}
-
-// ============================================================================
-// Chat completions
-// ============================================================================
-
-chat-completion
 meta {
     doc: """
-    POST /chat/completions - Create a chat completion. Returns the decoded
-    response Map (`choices`, `usage`, ...), or an Err carrying an
-    `HttpError`.
+    Chat Completions against a configured OpenAI-compatible provider.
+    Request and message shapes are OpenAI's (`::openai::chat/Message`,
+    roles `system`, `developer`, `user`, `assistant`, `tool`); the request
+    is a Map so provider-specific fields pass straight through.
+
+    Every function that calls the API takes a trailing `opts` Map, applied
+    over the provider's endpoint for that call (see
+    `::openai::compatible/resolve`): `api-key`, `base-url`, or `endpoint`.
+    """
+}
+
+::compat ::openai::compatible
+::oai    ::openai::chat
+
+CompatibleProvider ::compat/CompatibleProvider
+StreamingChatResponse ::oai/StreamingChatResponse
+
+user-message      ::oai/user-message
+system-message    ::oai/system-message
+assistant-message ::oai/assistant-message
+extract-chunk-text ::oai/extract-chunk-text
+is-stream-done    ::oai/is-stream-done
+
+prepare-request
+meta {
+    doc: """
+    Prepare a chat request for `p`: strips the routing prefix from
+    `model`, merges the provider's `extra-body`, and sets the provider's
+    output-ceiling field when the request has none. Pure; exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    p ::openai-compatible/configure(::openai-compatible/GROQ, "gsk_test")
+    req ::openai-compatible::chat/prepare-request(p, {model: "groq/llama-3.3-70b-versatile", messages: []})
+    req.model                  // => "llama-3.3-70b-versatile"
+    req.max_completion_tokens  // => 4096
+    ```
+    """
+}
+fn (p: CompatibleProvider, request: Map): Map {
+    options ::compat/request-options(p)
+    param or(options.max-tokens-param, "max_completion_tokens")
+    has-ceiling or(is-some(get(request, "max_tokens")), is-some(get(request, "max_completion_tokens")))
+    with-model assoc(untype(request), "model", ::compat/strip-model-prefix(request.model, p.model-prefix))
+    with-ceiling if(has-ceiling, with-model, assoc(with-model, param, options.max-completion-tokens))
+    {...or(options.extra-body, {}), ...with-ceiling}
+}
+
+complete
+meta {
+    doc: """
+    POST /chat/completions on the provider. Returns the decoded body
+    (`choices`, `usage`, ...) as a Map, or an Err carrying
+    `::openai::api/HttpError` on a non-2xx response.
 
     **Example**
 
     ```hot
     ::chat ::openai-compatible::chat
 
-    response ::chat/chat-completion(::chat/ChatCompletionRequest({
-      model: "anthropic/claude-sonnet-4.5",
-      messages: [
-        {role: "system", content: "You are terse."},
-        {role: "user", content: "Why is the sky blue?"}
-      ],
-      max_tokens: 300
-    }))
+    response ::chat/complete(::openai-compatible/groq(), {
+        model: "llama-3.3-70b-versatile",
+        messages: [
+            ::chat/system-message("You are terse."),
+            ::chat/user-message("Why is the sky blue?")
+        ]
+    })
     response.choices[0].message.content
     ```
     """
 }
-fn (request: ChatCompletionRequest): Map {
-  response api-request("POST", "/chat/completions", {}, request)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(p: CompatibleProvider, request: Map): Map {
+    complete(p, request, {})
+},
+(p: CompatibleProvider, request: Map, opts: Map): Map {
+    ep ::compat/resolve(p, opts)
+    cond {
+        is-err(ep) => { ep }
+        => { ::oai/complete-with(ep, prepare-request(p, request)) }
+    }
 }
 
-chat-completion-stream
+complete-stream
 meta {
     doc: """
     POST /chat/completions with `stream: true`. Returns a
-    `StreamingHttpResponse` whose body iterates SSE events; each event's
-    `data` is a chunk with `choices[0].delta`.
+    `StreamingChatResponse` whose body iterates SSE events, or an Err
+    carrying `::openai::api/HttpError` when the provider answers with an
+    error status.
 
     **Example**
 
     ```hot
-    response ::chat/chat-completion-stream(::chat/ChatCompletionRequest({
-      model: "anthropic/claude-sonnet-4.5",
-      messages: [{role: "user", content: "Count to five."}]
-    }))
-    for-each(response.body, (event) {
-      ...handle event.data.choices[0].delta.content...
+    ::chat ::openai-compatible::chat
+
+    stream ::chat/complete-stream(::openai-compatible/ollama(), {
+        model: "llama3.2",
+        messages: [::chat/user-message("Count to five.")]
     })
+    for-each(stream.body, (event) { print(::chat/extract-chunk-text(event)) })
     ```
     """
 }
-fn (request: ChatCompletionRequest): ::hot::http/StreamingHttpResponse {
-  streaming-request {...untype(request), stream: true}
-  api-request-stream("POST", "/chat/completions", {}, streaming-request)
+fn
+(p: CompatibleProvider, request: Map): StreamingChatResponse {
+    complete-stream(p, request, {})
+},
+(p: CompatibleProvider, request: Map, opts: Map): StreamingChatResponse {
+    ep ::compat/resolve(p, opts)
+    options ::compat/request-options(p)
+    prepared prepare-request(p, request)
+    with-usage cond {
+        and(not(eq(options.stream-usage, false)), is-null(get(prepared, "stream_options"))) => {
+            assoc(prepared, "stream_options", {include_usage: true})
+        }
+        => { prepared }
+    }
+
+    cond {
+        is-err(ep) => { ep }
+        => { ::oai/complete-stream-with(ep, with-usage) }
+    }
+}
+
+chat
+meta {
+    doc: """
+    Send one message and return the reply text.
+
+    **Example**
+
+    ```hot
+    ::openai-compatible::chat/chat(::openai-compatible/ollama(), "llama3.2", "Say hi")
+    ::openai-compatible::chat/chat(::openai-compatible/groq(), "llama-3.3-70b-versatile", "2+2?", "Reply with just the number.")
+    ```
+    """
+}
+fn
+(p: CompatibleProvider, model: Str, message: Str): Str {
+    chat(p, model, message, null, {})
+},
+(p: CompatibleProvider, model: Str, message: Str, opts: Map): Str {
+    chat(p, model, message, null, opts)
+},
+(p: CompatibleProvider, model: Str, message: Str, system: Str?): Str {
+    chat(p, model, message, system, {})
+},
+(p: CompatibleProvider, model: Str, message: Str, system: Str?, opts: Map): Str {
+    messages if(is-null(system), [user-message(message)], [system-message(system), user-message(message)])
+    response complete(p, {model: model, messages: messages}, opts)
+    cond {
+        is-err(response) => { response }
+        => { reply-text(response) }
+    }
+}
+
+reply-text
+meta {
+    doc: """First-choice message text from a chat response body, or `""`."""
+}
+fn (response: Map): Str {
+    choices or(get(response, "choices"), [])
+    cond {
+        is-empty(choices) => { "" }
+        => { or(get-in(choices[0], ["message", "content"]), "") }
+    }
 }

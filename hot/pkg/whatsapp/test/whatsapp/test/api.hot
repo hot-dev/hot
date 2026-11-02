@@ -1,0 +1,103 @@
+::whatsapp::test::api ns
+meta ["test"]
+
+::api ::whatsapp::api
+::core ::whatsapp::core
+
+test-default-version-url
+meta ["test"] fn () {
+    // The integration ctx may set whatsapp.api.version; unit runs use the default.
+    assert-eq(`https://graph.facebook.com/${::core/api-version()}/123/messages`, ::api/url("123/messages"))
+    assert(starts-with(::core/DEFAULT_API_VERSION, "v"))
+}
+
+test-normalize-version
+meta ["test"] fn () {
+    assert-eq("v25.0", ::core/normalize-version("25.0"))
+    assert-eq("v25.0", ::core/normalize-version(" v25.0 "))
+}
+
+test-url-api-version-from-opts
+meta ["test"] fn () {
+    assert-eq("https://graph.facebook.com/v24.0/123/messages", ::api/url("123/messages", {api-version: "24.0"}))
+    assert-eq(`https://graph.facebook.com/${::core/DEFAULT_API_VERSION}/1`, ::api/url("1", {api-version: " "}), "blank falls back")
+}
+
+test-resolve-from-prefers-opts-then-ctx
+meta ["test"] fn () {
+    ctx-values {"whatsapp.access.token": "ctx-token"}
+    out ::api/resolve-from({access-token: " tenant-token ", phone-number-id: "109"}, ctx-values)
+    assert-eq("tenant-token", out.access-token)
+    assert-eq("109", out.phone-number-id)
+    assert-eq({access-token: "ctx-token"}, ::api/resolve-from({}, ctx-values))
+}
+
+test-resolve-from-blank-token-never-falls-back
+meta ["test"] fn () {
+    for-each(["", "  ", null], (blank) {
+        out ::api/resolve-from({access-token: blank}, {"whatsapp.access.token": "ctx-token"})
+        assert(is-err(out), "a blank token is an Err, never ctx")
+        assert(contains(if-err(out, (e) { e }), "access-token"), "names the key")
+    })
+}
+
+test-resolve-from-no-token
+meta ["test"] fn () {
+    assert(contains(if-err(::api/resolve-from({}, {}), (e) { e }), "whatsapp.access.token"))
+}
+
+test-resolve-returns-marked-token-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-token-value", ::api/resolve({access-token: "tenant-token-value"}).access-token)
+}
+
+test-with-phone-number
+meta ["test"] fn () {
+    assert-eq("1%2F2", ::api/with-phone-number("1/2", {phone-number-id: "9"}, (id) { id }), "the request's number wins")
+    assert-eq("9", ::api/with-phone-number(null, {phone-number-id: "9"}, (id) { id }))
+    assert(is-err(::api/with-phone-number(null, {}, (id) { id })), "no number is an Err")
+}
+
+test-opts-arity-errs-before-any-request
+meta ["test"] fn () {
+    text {phone_number_id: "109", to: "1555", text: "hi"}
+    assert(is-err(::whatsapp::messages/send-text(text, {access-token: ""})))
+    assert(is-err(::whatsapp::messages/send-text({to: "1555", text: "hi"}, {access-token: "t"})), "no phone number anywhere")
+    assert(is-err(::whatsapp::media/get-media("1", {access-token: null})))
+    assert(is-err(::whatsapp::media/download-media-by-id("1", {access-token: " "})))
+    assert(is-err(::api/download("https://example.com/x", {access-token: ""})))
+    assert(is-err(::api/request("GET", ::api/url("1"), {}, {}, "")), "an empty explicit token is an Err too")
+    assert(is-err(::whatsapp::business/get-phone-number(null, {access-token: "t"})))
+}
+
+test-segment-encodes
+meta ["test"] fn () {
+    assert-eq("a%2Fb%3Fc", ::api/segment("a/b?c"))
+    assert-eq("123", ::api/segment(123))
+}
+
+test-handle-response-ok
+meta ["test"] fn () {
+    out ::api/handle-response(::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "1"}}))
+    assert-eq({id: "1"}, out)
+}
+
+test-handle-response-error-is-http-error
+meta ["test"] fn () {
+    body {error: {message: "(#100) Invalid parameter", type: "OAuthException", code: 100, fbtrace_id: "Ab"}}
+    out ::api/handle-response(::hot::http/HttpResponse({status: 400, headers: {}, body: body}))
+    assert(is-err(out), "non-2xx is an Err")
+    e if-err(out, (x) { x })
+    assert-eq(400, e.status)
+    assert-eq(100, e.body.error.code)
+    assert-eq("(#100) Invalid parameter", ::api/error-message(e))
+}
+
+test-handle-response-non-map-body
+meta ["test"] fn () {
+    // An HTML or plain-text error page must not crash the unwrapping.
+    out ::api/handle-response(::hot::http/HttpResponse({status: 502, headers: {}, body: "Bad Gateway"}))
+    assert(is-err(out))
+    e if-err(out, (x) { x })
+    assert-eq("Bad Gateway", ::api/error-message(e))
+}

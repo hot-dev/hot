@@ -1,0 +1,380 @@
+::slack::admin::apps ns
+meta {
+    doc: """
+    `admin.apps.*`: approve, restrict or uninstall apps; review install
+    requests; read app activity logs; and read or set app configuration.
+    Approve/restrict take either `app_id` or `request_id`, scoped by
+    `team_id` (workspace) or `enterprise_id` (org).
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    pending ::apps/requests-list(::apps/RequestsListRequest({team_id: "T0123ABCDEF"}))
+    ::apps/approve(::apps/ApproveRequest({request_id: first(pending.app_requests).id, team_id: "T0123ABCDEF"}))
+    ```
+    """
+}
+
+::api ::slack::admin::api
+
+ApproveRequest type {
+  app_id: Str?,
+  request_id: Str?,
+  team_id: Str?,
+  enterprise_id: Str?
+}
+
+approve
+meta {
+    doc: """
+    admin.apps.approve - Approve an app (by `app_id`) or an install request (by `request_id`).
+
+    Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(): Map {
+  approve(ApproveRequest({}))
+},
+(request: ApproveRequest): Map {
+  approve(request, {})
+},
+(request: ApproveRequest, opts: Map): Map {
+  ::api/call("admin.apps.approve", request, opts)
+}
+
+RestrictRequest type {
+  app_id: Str?,
+  request_id: Str?,
+  team_id: Str?,
+  enterprise_id: Str?
+}
+
+restrict
+meta {
+    doc: """
+    admin.apps.restrict - Restrict an app (by `app_id`) or deny an install request (by `request_id`).
+
+    Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(): Map {
+  restrict(RestrictRequest({}))
+},
+(request: RestrictRequest): Map {
+  restrict(request, {})
+},
+(request: RestrictRequest, opts: Map): Map {
+  ::api/call("admin.apps.restrict", request, opts)
+}
+
+ClearResolutionRequest type {
+  app_id: Str,
+  team_id: Str?,
+  enterprise_id: Str?
+}
+
+clear-resolution
+meta {
+    doc: """
+    admin.apps.clearResolution - Clear an app's approved/restricted status.
+
+    Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: ClearResolutionRequest): Map {
+  clear-resolution(request, {})
+},
+(request: ClearResolutionRequest, opts: Map): Map {
+  ::api/call("admin.apps.clearResolution", request, opts)
+}
+
+UninstallRequest type {
+  app_id: Str,
+  team_ids: Vec<Str>?,
+  enterprise_id: Str?
+}
+
+uninstall
+meta {
+    doc: """
+    admin.apps.uninstall - Uninstall an app from workspaces (`team_ids`) or the whole org (`enterprise_id`).
+
+    Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: UninstallRequest): Map {
+  uninstall(request, {})
+},
+(request: UninstallRequest, opts: Map): Map {
+  ::api/call("admin.apps.uninstall", request, opts)
+}
+
+ApprovedListRequest type {
+  team_id: Str?,
+  enterprise_id: Str?,
+  certified: Bool?,
+  cursor: Str?,
+  limit: Int?
+}
+
+approved-list
+meta {
+    doc: """
+    admin.apps.approved.list - List approved apps (`approved_apps`).
+
+    Scope: `admin.apps:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `approved-list-all`.
+    """
+}
+fn
+(): Map {
+  approved-list(ApprovedListRequest({}))
+},
+(request: ApprovedListRequest): Map {
+  approved-list(request, {})
+},
+(request: ApprovedListRequest, opts: Map): Map {
+  ::api/call("admin.apps.approved.list", request, opts)
+}
+
+approved-list-all
+meta {
+    doc: """
+    Every `approved_apps` entry from `admin.apps.approved.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  approved-list-all(ApprovedListRequest({}), 1000)
+},
+(request: ApprovedListRequest): Vec {
+  approved-list-all(request, 1000)
+},
+(request: ApprovedListRequest, max-items: Int): Vec {
+  approved-list-all(request, max-items, {})
+},
+(request: ApprovedListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.apps.approved.list", request, "approved_apps", max-items, opts)
+}
+
+RestrictedListRequest type {
+  team_id: Str?,
+  enterprise_id: Str?,
+  certified: Bool?,
+  cursor: Str?,
+  limit: Int?
+}
+
+restricted-list
+meta {
+    doc: """
+    admin.apps.restricted.list - List restricted apps (`restricted_apps`).
+
+    Scope: `admin.apps:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `restricted-list-all`.
+    """
+}
+fn
+(): Map {
+  restricted-list(RestrictedListRequest({}))
+},
+(request: RestrictedListRequest): Map {
+  restricted-list(request, {})
+},
+(request: RestrictedListRequest, opts: Map): Map {
+  ::api/call("admin.apps.restricted.list", request, opts)
+}
+
+restricted-list-all
+meta {
+    doc: """
+    Every `restricted_apps` entry from `admin.apps.restricted.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  restricted-list-all(RestrictedListRequest({}), 1000)
+},
+(request: RestrictedListRequest): Vec {
+  restricted-list-all(request, 1000)
+},
+(request: RestrictedListRequest, max-items: Int): Vec {
+  restricted-list-all(request, max-items, {})
+},
+(request: RestrictedListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.apps.restricted.list", request, "restricted_apps", max-items, opts)
+}
+
+RequestsListRequest type {
+  team_id: Str?,
+  enterprise_id: Str?,
+  certified: Bool?,
+  cursor: Str?,
+  limit: Int?
+}
+
+requests-list
+meta {
+    doc: """
+    admin.apps.requests.list - List pending install requests (`app_requests`).
+
+    Scope: `admin.apps:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `requests-list-all`.
+    """
+}
+fn
+(): Map {
+  requests-list(RequestsListRequest({}))
+},
+(request: RequestsListRequest): Map {
+  requests-list(request, {})
+},
+(request: RequestsListRequest, opts: Map): Map {
+  ::api/call("admin.apps.requests.list", request, opts)
+}
+
+requests-list-all
+meta {
+    doc: """
+    Every `app_requests` entry from `admin.apps.requests.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  requests-list-all(RequestsListRequest({}), 1000)
+},
+(request: RequestsListRequest): Vec {
+  requests-list-all(request, 1000)
+},
+(request: RequestsListRequest, max-items: Int): Vec {
+  requests-list-all(request, max-items, {})
+},
+(request: RequestsListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.apps.requests.list", request, "app_requests", max-items, opts)
+}
+
+RequestsCancelRequest type {
+  request_id: Str,
+  team_id: Str?,
+  enterprise_id: Str?
+}
+
+requests-cancel
+meta {
+    doc: """
+    admin.apps.requests.cancel - Cancel an install request.
+
+    Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: RequestsCancelRequest): Map {
+  requests-cancel(request, {})
+},
+(request: RequestsCancelRequest, opts: Map): Map {
+  ::api/call("admin.apps.requests.cancel", request, opts)
+}
+
+ActivitiesListRequest type {
+  app_id: Str?,
+  team_id: Str?,
+  component_id: Str?,
+  component_type: Str?,
+  log_event_type: Str?,
+  min_log_level: Str?,
+  min_date_created: Int?,
+  max_date_created: Int?,
+  sort_direction: Str?,
+  source: Str?,
+  trace_id: Str?,
+  cursor: Str?,
+  limit: Int?
+}
+
+activities-list
+meta {
+    doc: """
+    admin.apps.activities.list - Read app activity logs (`activities`). Filter by `component_type` (`events_api`, `workflows`, `functions`, `tables`), `min_log_level`, and a time range in epoch microseconds.
+
+    Scope: `admin.app_activities:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `activities-list-all`.
+    """
+}
+fn
+(): Map {
+  activities-list(ActivitiesListRequest({}))
+},
+(request: ActivitiesListRequest): Map {
+  activities-list(request, {})
+},
+(request: ActivitiesListRequest, opts: Map): Map {
+  ::api/call("admin.apps.activities.list", request, opts)
+}
+
+activities-list-all
+meta {
+    doc: """
+    Every `activities` entry from `admin.apps.activities.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  activities-list-all(ActivitiesListRequest({}), 1000)
+},
+(request: ActivitiesListRequest): Vec {
+  activities-list-all(request, 1000)
+},
+(request: ActivitiesListRequest, max-items: Int): Vec {
+  activities-list-all(request, max-items, {})
+},
+(request: ActivitiesListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.apps.activities.list", request, "activities", max-items, opts)
+}
+
+ConfigLookupRequest type {
+  app_ids: Vec<Str>
+}
+
+config-lookup
+meta {
+    doc: """
+    admin.apps.config.lookup - Read app configuration (domain restrictions, workflow auth strategy).
+
+    Scope: `admin.apps:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: ConfigLookupRequest): Map {
+  config-lookup(request, {})
+},
+(request: ConfigLookupRequest, opts: Map): Map {
+  ::api/call("admin.apps.config.lookup", request, opts)
+}
+
+ConfigSetRequest type {
+  app_id: Str,
+  domain_restrictions: Map?,
+  workflow_auth_strategy: Str?
+}
+
+config-set
+meta {
+    doc: """
+    admin.apps.config.set - Set app configuration. `domain_restrictions: {urls?, emails?}`; `workflow_auth_strategy`: `builder_choice` or `end_user_only`.
+
+    Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: ConfigSetRequest): Map {
+  config-set(request, {})
+},
+(request: ConfigSetRequest, opts: Map): Map {
+  ::api/call("admin.apps.config.set", request, opts)
+}

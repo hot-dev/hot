@@ -357,9 +357,17 @@ list-all-organization-and-project-api-keys
 meta {
     doc: """GET /organization/admin_api_keys - List all organization and project API keys."""
 }
-fn (request: AdminApiKeysListRequest): AdminApiKeysListResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/admin_api_keys?after=${request.after}&order=${request.order}&limit=${request.limit}`)
-  if(is-ok-response(response), AdminApiKeysListResponse(response.body), err(HttpError(response)))
+fn
+(request: AdminApiKeysListRequest): AdminApiKeysListResponse {
+  list-all-organization-and-project-api-keys(request, {})
+},
+(request: AdminApiKeysListRequest, opts: Map): AdminApiKeysListResponse {
+  response api-request("GET", `/organization/admin_api_keys?after=${request.after}&order=${request.order}&limit=${request.limit}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AdminApiKeysListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 AdminApiKeysCreateRequest type {
@@ -380,9 +388,17 @@ AdminApiKeysCreateResponse type {
 
 create-admin-api-key
 meta {doc: """POST /organization/admin_api_keys - Create admin API key"""}
-fn (request: AdminApiKeysCreateRequest): AdminApiKeysCreateResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/admin_api_keys`, {}, request)
-  if(is-ok-response(response), AdminApiKeysCreateResponse(response.body), err(HttpError(response)))
+fn
+(request: AdminApiKeysCreateRequest): AdminApiKeysCreateResponse {
+  create-admin-api-key(request, {})
+},
+(request: AdminApiKeysCreateRequest, opts: Map): AdminApiKeysCreateResponse {
+  response api-request("POST", "/organization/admin_api_keys", {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AdminApiKeysCreateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 AdminApiKeysGetRequest type {
@@ -403,9 +419,17 @@ AdminApiKeysGetResponse type {
 
 retrieve-admin-api-key
 meta {doc: """GET /organization/admin_api_keys/{key_id} - Retrieve admin API key"""}
-fn (request: AdminApiKeysGetRequest): AdminApiKeysGetResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/admin_api_keys/${request.key-id}`)
-  if(is-ok-response(response), AdminApiKeysGetResponse(response.body), err(HttpError(response)))
+fn
+(request: AdminApiKeysGetRequest): AdminApiKeysGetResponse {
+  retrieve-admin-api-key(request, {})
+},
+(request: AdminApiKeysGetRequest, opts: Map): AdminApiKeysGetResponse {
+  response api-request("GET", `/organization/admin_api_keys/${request.key-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AdminApiKeysGetResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 AdminApiKeysDeleteRequest type {
@@ -421,9 +445,17 @@ AdminApiKeysDeleteResponse type {
 
 delete-admin-api-key
 meta {doc: """DELETE /organization/admin_api_keys/{key_id} - Delete admin API key"""}
-fn (request: AdminApiKeysDeleteRequest): AdminApiKeysDeleteResponse {
-  response api-request("DELETE", `${::openai/BASE_URL}/organization/admin_api_keys/${request.key-id}`)
-  if(is-ok-response(response), AdminApiKeysDeleteResponse(response.body), err(HttpError(response)))
+fn
+(request: AdminApiKeysDeleteRequest): AdminApiKeysDeleteResponse {
+  delete-admin-api-key(request, {})
+},
+(request: AdminApiKeysDeleteRequest, opts: Map): AdminApiKeysDeleteResponse {
+  response api-request("DELETE", `/organization/admin_api_keys/${request.key-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AdminApiKeysDeleteResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListAuditLogsRequest type {
@@ -449,9 +481,17 @@ ListAuditLogsResponse type {
 
 list-audit-logs
 meta {doc: """GET /organization/audit_logs - List audit logs"""}
-fn (request: ListAuditLogsRequest): ListAuditLogsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/audit_logs?effective_at=${request.effective-at}&project_ids[]=${request.project-ids}&event_types[]=${request.event-types}&actor_ids[]=${request.actor-ids}&actor_emails[]=${request.actor-emails}&resource_ids[]=${request.resource-ids}&limit=${request.limit}&after=${request.after}&before=${request.before}`)
-  if(is-ok-response(response), ListAuditLogsResponse(response.body), err(HttpError(response)))
+fn
+(request: ListAuditLogsRequest): ListAuditLogsResponse {
+  list-audit-logs(request, {})
+},
+(request: ListAuditLogsRequest, opts: Map): ListAuditLogsResponse {
+  response api-request("GET", `/organization/audit_logs?effective_at=${request.effective-at}&project_ids[]=${request.project-ids}&event_types[]=${request.event-types}&actor_ids[]=${request.actor-ids}&actor_emails[]=${request.actor-emails}&resource_ids[]=${request.resource-ids}&limit=${request.limit}&after=${request.after}&before=${request.before}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListAuditLogsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsageCostsRequest type {
@@ -474,9 +514,17 @@ UsageCostsResponse type {
 
 costs
 meta {doc: """GET /organization/costs - Costs"""}
-fn (request: UsageCostsRequest): UsageCostsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/costs?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
-  if(is-ok-response(response), UsageCostsResponse(response.body), err(HttpError(response)))
+fn
+(request: UsageCostsRequest): UsageCostsResponse {
+  costs(request, {})
+},
+(request: UsageCostsRequest, opts: Map): UsageCostsResponse {
+  response api-request("GET", `/organization/costs?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsageCostsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListInvitesRequest type {
@@ -495,9 +543,17 @@ ListInvitesResponse type {
 
 list-invites
 meta {doc: """GET /organization/invites - List invites"""}
-fn (request: ListInvitesRequest): ListInvitesResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/invites?limit=${request.limit}&after=${request.after}`)
-  if(is-ok-response(response), ListInvitesResponse(response.body), err(HttpError(response)))
+fn
+(request: ListInvitesRequest): ListInvitesResponse {
+  list-invites(request, {})
+},
+(request: ListInvitesRequest, opts: Map): ListInvitesResponse {
+  response api-request("GET", `/organization/invites?limit=${request.limit}&after=${request.after}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListInvitesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 RetrieveInviteRequest type {
@@ -519,9 +575,17 @@ RetrieveInviteResponse type {
 
 retrieve-invite
 meta {doc: """GET /organization/invites/{invite_id} - Retrieve invite"""}
-fn (request: RetrieveInviteRequest): RetrieveInviteResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/invites/${request.invite-id}`)
-  if(is-ok-response(response), RetrieveInviteResponse(response.body), err(HttpError(response)))
+fn
+(request: RetrieveInviteRequest): RetrieveInviteResponse {
+  retrieve-invite(request, {})
+},
+(request: RetrieveInviteRequest, opts: Map): RetrieveInviteResponse {
+  response api-request("GET", `/organization/invites/${request.invite-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RetrieveInviteResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteInviteRequest type {
@@ -537,9 +601,17 @@ DeleteInviteResponse type {
 
 delete-invite
 meta {doc: """DELETE /organization/invites/{invite_id} - Delete invite"""}
-fn (request: DeleteInviteRequest): DeleteInviteResponse {
-  response api-request("DELETE", `${::openai/BASE_URL}/organization/invites/${request.invite-id}`)
-  if(is-ok-response(response), DeleteInviteResponse(response.body), err(HttpError(response)))
+fn
+(request: DeleteInviteRequest): DeleteInviteResponse {
+  delete-invite(request, {})
+},
+(request: DeleteInviteRequest, opts: Map): DeleteInviteResponse {
+  response api-request("DELETE", `/organization/invites/${request.invite-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DeleteInviteResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListProjectsRequest type {
@@ -559,9 +631,17 @@ ListProjectsResponse type {
 
 list-projects
 meta {doc: """GET /organization/projects - List projects"""}
-fn (request: ListProjectsRequest): ListProjectsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/projects?limit=${request.limit}&after=${request.after}&include_archived=${request.include-archived}`)
-  if(is-ok-response(response), ListProjectsResponse(response.body), err(HttpError(response)))
+fn
+(request: ListProjectsRequest): ListProjectsResponse {
+  list-projects(request, {})
+},
+(request: ListProjectsRequest, opts: Map): ListProjectsResponse {
+  response api-request("GET", `/organization/projects?limit=${request.limit}&after=${request.after}&include_archived=${request.include-archived}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListProjectsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CreateProjectRequest type {
@@ -580,9 +660,17 @@ CreateProjectResponse type {
 
 create-project
 meta {doc: """POST /organization/projects - Create project"""}
-fn (request: CreateProjectRequest): CreateProjectResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/projects`, {}, request)
-  if(is-ok-response(response), CreateProjectResponse(response.body), err(HttpError(response)))
+fn
+(request: CreateProjectRequest): CreateProjectResponse {
+  create-project(request, {})
+},
+(request: CreateProjectRequest, opts: Map): CreateProjectResponse {
+  response api-request("POST", "/organization/projects", {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CreateProjectResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 RetrieveProjectRequest type {
@@ -601,9 +689,17 @@ RetrieveProjectResponse type {
 
 retrieve-project
 meta {doc: """GET /organization/projects/{project_id} - Retrieve project"""}
-fn (request: RetrieveProjectRequest): RetrieveProjectResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}`)
-  if(is-ok-response(response), RetrieveProjectResponse(response.body), err(HttpError(response)))
+fn
+(request: RetrieveProjectRequest): RetrieveProjectResponse {
+  retrieve-project(request, {})
+},
+(request: RetrieveProjectRequest, opts: Map): RetrieveProjectResponse {
+  response api-request("GET", `/organization/projects/${request.project-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RetrieveProjectResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModifyProjectRequest type {
@@ -622,9 +718,17 @@ ModifyProjectResponse type {
 
 modify-project
 meta {doc: """POST /organization/projects/{project_id} - Modify project"""}
-fn (project-id: Str, request: ModifyProjectRequest): ModifyProjectResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}`, {}, request)
-  if(is-ok-response(response), ModifyProjectResponse(response.body), err(HttpError(response)))
+fn
+(project-id: Str, request: ModifyProjectRequest): ModifyProjectResponse {
+  modify-project(project-id, request, {})
+},
+(project-id: Str, request: ModifyProjectRequest, opts: Map): ModifyProjectResponse {
+  response api-request("POST", `/organization/projects/${project-id}`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModifyProjectResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListProjectApiKeysRequest type {
@@ -646,9 +750,17 @@ list-project-api-keys
 meta {
     doc: """GET /organization/projects/{project_id}/api_keys - List project API keys"""
 }
-fn (request: ListProjectApiKeysRequest): ListProjectApiKeysResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/api_keys?limit=${request.limit}&after=${request.after}`)
-  if(is-ok-response(response), ListProjectApiKeysResponse(response.body), err(HttpError(response)))
+fn
+(request: ListProjectApiKeysRequest): ListProjectApiKeysResponse {
+  list-project-api-keys(request, {})
+},
+(request: ListProjectApiKeysRequest, opts: Map): ListProjectApiKeysResponse {
+  response api-request("GET", `/organization/projects/${request.project-id}/api_keys?limit=${request.limit}&after=${request.after}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListProjectApiKeysResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 RetrieveProjectApiKeyRequest type {
@@ -671,9 +783,17 @@ retrieve-project-api-key
 meta {
     doc: """GET /organization/projects/{project_id}/api_keys/{key_id} - Retrieve project API key"""
 }
-fn (request: RetrieveProjectApiKeyRequest): RetrieveProjectApiKeyResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/api_keys/${request.key-id}`)
-  if(is-ok-response(response), RetrieveProjectApiKeyResponse(response.body), err(HttpError(response)))
+fn
+(request: RetrieveProjectApiKeyRequest): RetrieveProjectApiKeyResponse {
+  retrieve-project-api-key(request, {})
+},
+(request: RetrieveProjectApiKeyRequest, opts: Map): RetrieveProjectApiKeyResponse {
+  response api-request("GET", `/organization/projects/${request.project-id}/api_keys/${request.key-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RetrieveProjectApiKeyResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteProjectApiKeyRequest type {
@@ -692,9 +812,17 @@ delete-project-api-key
 meta {
     doc: """DELETE /organization/projects/{project_id}/api_keys/{key_id} - Delete project API key"""
 }
-fn (request: DeleteProjectApiKeyRequest): DeleteProjectApiKeyResponse {
-  response api-request("DELETE", `${::openai/BASE_URL}/organization/projects/${request.project-id}/api_keys/${request.key-id}`)
-  if(is-ok-response(response), DeleteProjectApiKeyResponse(response.body), err(HttpError(response)))
+fn
+(request: DeleteProjectApiKeyRequest): DeleteProjectApiKeyResponse {
+  delete-project-api-key(request, {})
+},
+(request: DeleteProjectApiKeyRequest, opts: Map): DeleteProjectApiKeyResponse {
+  response api-request("DELETE", `/organization/projects/${request.project-id}/api_keys/${request.key-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DeleteProjectApiKeyResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ArchiveProjectRequest type {
@@ -713,9 +841,17 @@ ArchiveProjectResponse type {
 
 archive-project
 meta {doc: """POST /organization/projects/{project_id}/archive - Archive project"""}
-fn (request: ArchiveProjectRequest): ArchiveProjectResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${request.project-id}/archive`)
-  if(is-ok-response(response), ArchiveProjectResponse(response.body), err(HttpError(response)))
+fn
+(request: ArchiveProjectRequest): ArchiveProjectResponse {
+  archive-project(request, {})
+},
+(request: ArchiveProjectRequest, opts: Map): ArchiveProjectResponse {
+  response api-request("POST", `/organization/projects/${request.project-id}/archive`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ArchiveProjectResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListProjectRateLimitsRequest type {
@@ -738,9 +874,17 @@ list-project-rate-limits
 meta {
     doc: """GET /organization/projects/{project_id}/rate_limits - List project rate limits"""
 }
-fn (request: ListProjectRateLimitsRequest): ListProjectRateLimitsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/rate_limits?limit=${request.limit}&after=${request.after}&before=${request.before}`)
-  if(is-ok-response(response), ListProjectRateLimitsResponse(response.body), err(HttpError(response)))
+fn
+(request: ListProjectRateLimitsRequest): ListProjectRateLimitsResponse {
+  list-project-rate-limits(request, {})
+},
+(request: ListProjectRateLimitsRequest, opts: Map): ListProjectRateLimitsResponse {
+  response api-request("GET", `/organization/projects/${request.project-id}/rate_limits?limit=${request.limit}&after=${request.after}&before=${request.before}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListProjectRateLimitsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UpdateProjectRateLimitsRequest type {
@@ -769,9 +913,17 @@ modify-project-rate-limit
 meta {
     doc: """POST /organization/projects/{project_id}/rate_limits/{rate_limit_id} - Modify project rate limit"""
 }
-fn (project-id: Str, rate-limit-id: Str, request: UpdateProjectRateLimitsRequest): UpdateProjectRateLimitsResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}/rate_limits/${rate-limit-id}`, {}, request)
-  if(is-ok-response(response), UpdateProjectRateLimitsResponse(response.body), err(HttpError(response)))
+fn
+(project-id: Str, rate-limit-id: Str, request: UpdateProjectRateLimitsRequest): UpdateProjectRateLimitsResponse {
+  modify-project-rate-limit(project-id, rate-limit-id, request, {})
+},
+(project-id: Str, rate-limit-id: Str, request: UpdateProjectRateLimitsRequest, opts: Map): UpdateProjectRateLimitsResponse {
+  response api-request("POST", `/organization/projects/${project-id}/rate_limits/${rate-limit-id}`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UpdateProjectRateLimitsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListProjectServiceAccountsRequest type {
@@ -793,9 +945,17 @@ list-project-service-accounts
 meta {
     doc: """GET /organization/projects/{project_id}/service_accounts - List project service accounts"""
 }
-fn (request: ListProjectServiceAccountsRequest): ListProjectServiceAccountsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/service_accounts?limit=${request.limit}&after=${request.after}`)
-  if(is-ok-response(response), ListProjectServiceAccountsResponse(response.body), err(HttpError(response)))
+fn
+(request: ListProjectServiceAccountsRequest): ListProjectServiceAccountsResponse {
+  list-project-service-accounts(request, {})
+},
+(request: ListProjectServiceAccountsRequest, opts: Map): ListProjectServiceAccountsResponse {
+  response api-request("GET", `/organization/projects/${request.project-id}/service_accounts?limit=${request.limit}&after=${request.after}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListProjectServiceAccountsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CreateProjectServiceAccountRequest type {
@@ -816,9 +976,17 @@ create-project-service-account
 meta {
     doc: """POST /organization/projects/{project_id}/service_accounts - Create project service account"""
 }
-fn (project-id: Str, request: CreateProjectServiceAccountRequest): CreateProjectServiceAccountResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}/service_accounts`, {}, request)
-  if(is-ok-response(response), CreateProjectServiceAccountResponse(response.body), err(HttpError(response)))
+fn
+(project-id: Str, request: CreateProjectServiceAccountRequest): CreateProjectServiceAccountResponse {
+  create-project-service-account(project-id, request, {})
+},
+(project-id: Str, request: CreateProjectServiceAccountRequest, opts: Map): CreateProjectServiceAccountResponse {
+  response api-request("POST", `/organization/projects/${project-id}/service_accounts`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CreateProjectServiceAccountResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 RetrieveProjectServiceAccountRequest type {
@@ -839,9 +1007,17 @@ retrieve-project-service-account
 meta {
     doc: """GET /organization/projects/{project_id}/service_accounts/{service_account_id} - Retrieve project service account"""
 }
-fn (request: RetrieveProjectServiceAccountRequest): RetrieveProjectServiceAccountResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/service_accounts/${request.service-account-id}`)
-  if(is-ok-response(response), RetrieveProjectServiceAccountResponse(response.body), err(HttpError(response)))
+fn
+(request: RetrieveProjectServiceAccountRequest): RetrieveProjectServiceAccountResponse {
+  retrieve-project-service-account(request, {})
+},
+(request: RetrieveProjectServiceAccountRequest, opts: Map): RetrieveProjectServiceAccountResponse {
+  response api-request("GET", `/organization/projects/${request.project-id}/service_accounts/${request.service-account-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RetrieveProjectServiceAccountResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteProjectServiceAccountRequest type {
@@ -860,9 +1036,17 @@ delete-project-service-account
 meta {
     doc: """DELETE /organization/projects/{project_id}/service_accounts/{service_account_id} - Delete project service account"""
 }
-fn (request: DeleteProjectServiceAccountRequest): DeleteProjectServiceAccountResponse {
-  response api-request("DELETE", `${::openai/BASE_URL}/organization/projects/${request.project-id}/service_accounts/${request.service-account-id}`)
-  if(is-ok-response(response), DeleteProjectServiceAccountResponse(response.body), err(HttpError(response)))
+fn
+(request: DeleteProjectServiceAccountRequest): DeleteProjectServiceAccountResponse {
+  delete-project-service-account(request, {})
+},
+(request: DeleteProjectServiceAccountRequest, opts: Map): DeleteProjectServiceAccountResponse {
+  response api-request("DELETE", `/organization/projects/${request.project-id}/service_accounts/${request.service-account-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DeleteProjectServiceAccountResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListProjectUsersRequest type {
@@ -882,9 +1066,17 @@ ListProjectUsersResponse type {
 
 list-project-users
 meta {doc: """GET /organization/projects/{project_id}/users - List project users"""}
-fn (request: ListProjectUsersRequest): ListProjectUsersResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/users?limit=${request.limit}&after=${request.after}`)
-  if(is-ok-response(response), ListProjectUsersResponse(response.body), err(HttpError(response)))
+fn
+(request: ListProjectUsersRequest): ListProjectUsersResponse {
+  list-project-users(request, {})
+},
+(request: ListProjectUsersRequest, opts: Map): ListProjectUsersResponse {
+  response api-request("GET", `/organization/projects/${request.project-id}/users?limit=${request.limit}&after=${request.after}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListProjectUsersResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CreateProjectUserRequest type {
@@ -904,9 +1096,17 @@ CreateProjectUserResponse type {
 
 create-project-user
 meta {doc: """POST /organization/projects/{project_id}/users - Create project user"""}
-fn (project-id: Str, request: CreateProjectUserRequest): CreateProjectUserResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}/users`, {}, request)
-  if(is-ok-response(response), CreateProjectUserResponse(response.body), err(HttpError(response)))
+fn
+(project-id: Str, request: CreateProjectUserRequest): CreateProjectUserResponse {
+  create-project-user(project-id, request, {})
+},
+(project-id: Str, request: CreateProjectUserRequest, opts: Map): CreateProjectUserResponse {
+  response api-request("POST", `/organization/projects/${project-id}/users`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CreateProjectUserResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 RetrieveProjectUserRequest type {
@@ -928,9 +1128,17 @@ retrieve-project-user
 meta {
     doc: """GET /organization/projects/{project_id}/users/{user_id} - Retrieve project user"""
 }
-fn (request: RetrieveProjectUserRequest): RetrieveProjectUserResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/users/${request.user-id}`)
-  if(is-ok-response(response), RetrieveProjectUserResponse(response.body), err(HttpError(response)))
+fn
+(request: RetrieveProjectUserRequest): RetrieveProjectUserResponse {
+  retrieve-project-user(request, {})
+},
+(request: RetrieveProjectUserRequest, opts: Map): RetrieveProjectUserResponse {
+  response api-request("GET", `/organization/projects/${request.project-id}/users/${request.user-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RetrieveProjectUserResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModifyProjectUserRequest type {
@@ -951,9 +1159,17 @@ modify-project-user
 meta {
     doc: """POST /organization/projects/{project_id}/users/{user_id} - Modify project user"""
 }
-fn (project-id: Str, user-id: Str, request: ModifyProjectUserRequest): ModifyProjectUserResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}/users/${user-id}`, {}, request)
-  if(is-ok-response(response), ModifyProjectUserResponse(response.body), err(HttpError(response)))
+fn
+(project-id: Str, user-id: Str, request: ModifyProjectUserRequest): ModifyProjectUserResponse {
+  modify-project-user(project-id, user-id, request, {})
+},
+(project-id: Str, user-id: Str, request: ModifyProjectUserRequest, opts: Map): ModifyProjectUserResponse {
+  response api-request("POST", `/organization/projects/${project-id}/users/${user-id}`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModifyProjectUserResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteProjectUserRequest type {
@@ -972,9 +1188,17 @@ delete-project-user
 meta {
     doc: """DELETE /organization/projects/{project_id}/users/{user_id} - Delete project user"""
 }
-fn (request: DeleteProjectUserRequest): DeleteProjectUserResponse {
-  response api-request("DELETE", `${::openai/BASE_URL}/organization/projects/${request.project-id}/users/${request.user-id}`)
-  if(is-ok-response(response), DeleteProjectUserResponse(response.body), err(HttpError(response)))
+fn
+(request: DeleteProjectUserRequest): DeleteProjectUserResponse {
+  delete-project-user(request, {})
+},
+(request: DeleteProjectUserRequest, opts: Map): DeleteProjectUserResponse {
+  response api-request("DELETE", `/organization/projects/${request.project-id}/users/${request.user-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DeleteProjectUserResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsageAudioSpeechesRequest type {
@@ -1000,9 +1224,17 @@ UsageAudioSpeechesResponse type {
 
 audio-speeches
 meta {doc: """GET /organization/usage/audio_speeches - Audio speeches"""}
-fn (request: UsageAudioSpeechesRequest): UsageAudioSpeechesResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/usage/audio_speeches?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
-  if(is-ok-response(response), UsageAudioSpeechesResponse(response.body), err(HttpError(response)))
+fn
+(request: UsageAudioSpeechesRequest): UsageAudioSpeechesResponse {
+  audio-speeches(request, {})
+},
+(request: UsageAudioSpeechesRequest, opts: Map): UsageAudioSpeechesResponse {
+  response api-request("GET", `/organization/usage/audio_speeches?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsageAudioSpeechesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsageAudioTranscriptionsRequest type {
@@ -1028,9 +1260,17 @@ UsageAudioTranscriptionsResponse type {
 
 audio-transcriptions
 meta {doc: """GET /organization/usage/audio_transcriptions - Audio transcriptions"""}
-fn (request: UsageAudioTranscriptionsRequest): UsageAudioTranscriptionsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/usage/audio_transcriptions?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
-  if(is-ok-response(response), UsageAudioTranscriptionsResponse(response.body), err(HttpError(response)))
+fn
+(request: UsageAudioTranscriptionsRequest): UsageAudioTranscriptionsResponse {
+  audio-transcriptions(request, {})
+},
+(request: UsageAudioTranscriptionsRequest, opts: Map): UsageAudioTranscriptionsResponse {
+  response api-request("GET", `/organization/usage/audio_transcriptions?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsageAudioTranscriptionsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsageCodeInterpreterSessionsRequest type {
@@ -1055,9 +1295,17 @@ code-interpreter-sessions
 meta {
     doc: """GET /organization/usage/code_interpreter_sessions - Code interpreter sessions"""
 }
-fn (request: UsageCodeInterpreterSessionsRequest): UsageCodeInterpreterSessionsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/usage/code_interpreter_sessions?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
-  if(is-ok-response(response), UsageCodeInterpreterSessionsResponse(response.body), err(HttpError(response)))
+fn
+(request: UsageCodeInterpreterSessionsRequest): UsageCodeInterpreterSessionsResponse {
+  code-interpreter-sessions(request, {})
+},
+(request: UsageCodeInterpreterSessionsRequest, opts: Map): UsageCodeInterpreterSessionsResponse {
+  response api-request("GET", `/organization/usage/code_interpreter_sessions?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsageCodeInterpreterSessionsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsageCompletionsRequest type {
@@ -1084,9 +1332,17 @@ UsageCompletionsResponse type {
 
 completions
 meta {doc: """GET /organization/usage/completions - Completions"""}
-fn (request: UsageCompletionsRequest): UsageCompletionsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/usage/completions?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&batch=${request.batch}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
-  if(is-ok-response(response), UsageCompletionsResponse(response.body), err(HttpError(response)))
+fn
+(request: UsageCompletionsRequest): UsageCompletionsResponse {
+  completions(request, {})
+},
+(request: UsageCompletionsRequest, opts: Map): UsageCompletionsResponse {
+  response api-request("GET", `/organization/usage/completions?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&batch=${request.batch}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsageCompletionsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsageEmbeddingsRequest type {
@@ -1112,9 +1368,17 @@ UsageEmbeddingsResponse type {
 
 embeddings
 meta {doc: """GET /organization/usage/embeddings - Embeddings"""}
-fn (request: UsageEmbeddingsRequest): UsageEmbeddingsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/usage/embeddings?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
-  if(is-ok-response(response), UsageEmbeddingsResponse(response.body), err(HttpError(response)))
+fn
+(request: UsageEmbeddingsRequest): UsageEmbeddingsResponse {
+  embeddings(request, {})
+},
+(request: UsageEmbeddingsRequest, opts: Map): UsageEmbeddingsResponse {
+  response api-request("GET", `/organization/usage/embeddings?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsageEmbeddingsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsageImagesRequest type {
@@ -1142,9 +1406,17 @@ UsageImagesResponse type {
 
 images
 meta {doc: """GET /organization/usage/images - Images"""}
-fn (request: UsageImagesRequest): UsageImagesResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/usage/images?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&sources=${request.sources}&sizes=${request.sizes}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
-  if(is-ok-response(response), UsageImagesResponse(response.body), err(HttpError(response)))
+fn
+(request: UsageImagesRequest): UsageImagesResponse {
+  images(request, {})
+},
+(request: UsageImagesRequest, opts: Map): UsageImagesResponse {
+  response api-request("GET", `/organization/usage/images?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&sources=${request.sources}&sizes=${request.sizes}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsageImagesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsageModerationsRequest type {
@@ -1170,9 +1442,17 @@ UsageModerationsResponse type {
 
 moderations
 meta {doc: """GET /organization/usage/moderations - Moderations"""}
-fn (request: UsageModerationsRequest): UsageModerationsResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/usage/moderations?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
-  if(is-ok-response(response), UsageModerationsResponse(response.body), err(HttpError(response)))
+fn
+(request: UsageModerationsRequest): UsageModerationsResponse {
+  moderations(request, {})
+},
+(request: UsageModerationsRequest, opts: Map): UsageModerationsResponse {
+  response api-request("GET", `/organization/usage/moderations?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsageModerationsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsageVectorStoresRequest type {
@@ -1195,9 +1475,17 @@ UsageVectorStoresResponse type {
 
 vector-stores
 meta {doc: """GET /organization/usage/vector_stores - Vector stores"""}
-fn (request: UsageVectorStoresRequest): UsageVectorStoresResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/usage/vector_stores?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
-  if(is-ok-response(response), UsageVectorStoresResponse(response.body), err(HttpError(response)))
+fn
+(request: UsageVectorStoresRequest): UsageVectorStoresResponse {
+  vector-stores(request, {})
+},
+(request: UsageVectorStoresRequest, opts: Map): UsageVectorStoresResponse {
+  response api-request("GET", `/organization/usage/vector_stores?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsageVectorStoresResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListUsersRequest type {
@@ -1217,9 +1505,17 @@ ListUsersResponse type {
 
 list-users
 meta {doc: """GET /organization/users - List users"""}
-fn (request: ListUsersRequest): ListUsersResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/users?limit=${request.limit}&after=${request.after}&emails=${request.emails}`)
-  if(is-ok-response(response), ListUsersResponse(response.body), err(HttpError(response)))
+fn
+(request: ListUsersRequest): ListUsersResponse {
+  list-users(request, {})
+},
+(request: ListUsersRequest, opts: Map): ListUsersResponse {
+  response api-request("GET", `/organization/users?limit=${request.limit}&after=${request.after}&emails=${request.emails}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListUsersResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 RetrieveUserRequest type {
@@ -1238,9 +1534,17 @@ RetrieveUserResponse type {
 
 retrieve-user
 meta {doc: """GET /organization/users/{user_id} - Retrieve user"""}
-fn (request: RetrieveUserRequest): RetrieveUserResponse {
-  response api-request("GET", `${::openai/BASE_URL}/organization/users/${request.user-id}`)
-  if(is-ok-response(response), RetrieveUserResponse(response.body), err(HttpError(response)))
+fn
+(request: RetrieveUserRequest): RetrieveUserResponse {
+  retrieve-user(request, {})
+},
+(request: RetrieveUserRequest, opts: Map): RetrieveUserResponse {
+  response api-request("GET", `/organization/users/${request.user-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RetrieveUserResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModifyUserRequest type {
@@ -1259,9 +1563,17 @@ ModifyUserResponse type {
 
 modify-user
 meta {doc: """POST /organization/users/{user_id} - Modify user"""}
-fn (user-id: Str, request: ModifyUserRequest): ModifyUserResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/users/${user-id}`, {}, request)
-  if(is-ok-response(response), ModifyUserResponse(response.body), err(HttpError(response)))
+fn
+(user-id: Str, request: ModifyUserRequest): ModifyUserResponse {
+  modify-user(user-id, request, {})
+},
+(user-id: Str, request: ModifyUserRequest, opts: Map): ModifyUserResponse {
+  response api-request("POST", `/organization/users/${user-id}`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModifyUserResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteUserRequest type {
@@ -1277,7 +1589,15 @@ DeleteUserResponse type {
 
 delete-user
 meta {doc: """DELETE /organization/users/{user_id} - Delete user"""}
-fn (request: DeleteUserRequest): DeleteUserResponse {
-  response api-request("DELETE", `${::openai/BASE_URL}/organization/users/${request.user-id}`)
-  if(is-ok-response(response), DeleteUserResponse(response.body), err(HttpError(response)))
+fn
+(request: DeleteUserRequest): DeleteUserResponse {
+  delete-user(request, {})
+},
+(request: DeleteUserRequest, opts: Map): DeleteUserResponse {
+  response api-request("DELETE", `/organization/users/${request.user-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DeleteUserResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

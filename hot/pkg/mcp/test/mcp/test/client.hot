@@ -288,3 +288,10 @@ fn () {
         "modern per-request metadata is not added to legacy requests"
     )
 }
+
+test-connect-to-a-closed-port-is-an-err
+meta ["test"] fn () {
+    info ::types/ClientInfo({name: "c", version: "1"})
+    assert(is-err(::mcp::client/connect("http://127.0.0.1:9/mcp", info, null)), "auto mode")
+    assert(is-err(::mcp::client/connect("http://127.0.0.1:9/mcp", info, null, ::types/ConnectionOptions({mode: "legacy"}))), "legacy mode")
+}

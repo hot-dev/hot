@@ -24,8 +24,12 @@ get-check-run
 meta {
     doc: """GET /repos/{owner}/{repo}/check-runs/{check_run_id} - One check run and its structured output summary."""
 }
-fn (owner: Str, repo: Str, check-run-id: Any): Map {
-  ::api/json("GET", check-run-path(owner, repo, check-run-id))
+fn
+(owner: Str, repo: Str, check-run-id: Any): Map {
+  get-check-run(owner, repo, check-run-id, {})
+},
+(owner: Str, repo: Str, check-run-id: Any, opts: Map): Map {
+  ::api/json("GET", check-run-path(owner, repo, check-run-id), {}, "", opts)
 }
 
 list-check-runs-for-ref
@@ -42,8 +46,11 @@ fn
   ::api/json("GET", ref-checks-path(owner, repo, ref, "check-runs"))
 },
 (owner: Str, repo: Str, ref: Str, params: Map): Map {
+  list-check-runs-for-ref(owner, repo, ref, params, {})
+},
+(owner: Str, repo: Str, ref: Str, params: Map, opts: Map): Map {
   path ref-checks-path(owner, repo, ref, "check-runs")
-  ::api/json("GET", `${path}${query-string(params)}`)
+  ::api/json("GET", `${path}${query-string(params)}`, {}, "", opts)
 }
 
 list-check-run-annotations
@@ -59,18 +66,25 @@ fn
   ::api/json("GET", `${check-run-path(owner, repo, check-run-id)}/annotations`)
 },
 (owner: Str, repo: Str, check-run-id: Any, params: Map): Vec {
+  list-check-run-annotations(owner, repo, check-run-id, params, {})
+},
+(owner: Str, repo: Str, check-run-id: Any, params: Map, opts: Map): Vec {
   ::api/json(
     "GET",
     `${check-run-path(owner, repo, check-run-id)}/annotations${query-string(params)}`
-  )
+  , {}, "", opts)
 }
 
 get-check-suite
 meta {
     doc: """GET /repos/{owner}/{repo}/check-suites/{check_suite_id} - One check suite."""
 }
-fn (owner: Str, repo: Str, check-suite-id: Any): Map {
-  ::api/json("GET", check-suite-path(owner, repo, check-suite-id))
+fn
+(owner: Str, repo: Str, check-suite-id: Any): Map {
+  get-check-suite(owner, repo, check-suite-id, {})
+},
+(owner: Str, repo: Str, check-suite-id: Any, opts: Map): Map {
+  ::api/json("GET", check-suite-path(owner, repo, check-suite-id), {}, "", opts)
 }
 
 list-check-suites-for-ref
@@ -86,8 +100,11 @@ fn
   ::api/json("GET", ref-checks-path(owner, repo, ref, "check-suites"))
 },
 (owner: Str, repo: Str, ref: Str, params: Map): Map {
+  list-check-suites-for-ref(owner, repo, ref, params, {})
+},
+(owner: Str, repo: Str, ref: Str, params: Map, opts: Map): Map {
   path ref-checks-path(owner, repo, ref, "check-suites")
-  ::api/json("GET", `${path}${query-string(params)}`)
+  ::api/json("GET", `${path}${query-string(params)}`, {}, "", opts)
 }
 
 list-check-runs-for-suite
@@ -103,8 +120,11 @@ fn
   ::api/json("GET", `${check-suite-path(owner, repo, check-suite-id)}/check-runs`)
 },
 (owner: Str, repo: Str, check-suite-id: Any, params: Map): Map {
+  list-check-runs-for-suite(owner, repo, check-suite-id, params, {})
+},
+(owner: Str, repo: Str, check-suite-id: Any, params: Map, opts: Map): Map {
   ::api/json(
     "GET",
     `${check-suite-path(owner, repo, check-suite-id)}/check-runs${query-string(params)}`
-  )
+  , {}, "", opts)
 }

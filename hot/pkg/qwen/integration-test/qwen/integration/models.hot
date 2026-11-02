@@ -4,25 +4,47 @@ meta ["test"]
 // =============================================================================
 // Integration Tests for Qwen Models API
 // =============================================================================
-// These tests require qwen.api.key (DASHSCOPE_API_KEY) to be set in context.
+// These tests require qwen.api.key (DASHSCOPE_API_KEY) to be set in context. Read-only; every test skips
+// without it. Run with: hot test --project pkg-integration-qwen
+
+skip fn (test-name: Str): Bool {
+    cond {
+        is-some(::hot::ctx/get("qwen.api.key")) => { false }
+        => {
+            tap(`[qwen] skipping ${test-name}: set DASHSCOPE_API_KEY to run`)
+            true
+        }
+    }
+}
+
 
 test-models-list
 meta ["test"]
 fn () {
-    models ::qwen::models/list()
+    cond {
+        skip("test-models-list") => { assert(true) }
+        => {
+            models ::qwen::models/list()
 
-    assert(is-vec(models.data), "Response should have data array")
-    assert(gt(length(models.data), 0), "Should have at least one model")
+            assert(is-vec(models.data), "Response should have data array")
+            assert(gt(length(models.data), 0), "Should have at least one model")
 
-    first-model first(models.data)
-    assert(first-model.id, "Model should have id")
+            first-model first(models.data)
+            assert(first-model.id, "Model should have id")
+        }
+    }
 }
 
 test-models-get
 meta ["test"]
 fn () {
-    model ::qwen::models/get("qwen3.6-plus")
+    cond {
+        skip("test-models-get") => { assert(true) }
+        => {
+            model ::qwen::models/get("qwen3.7-plus")
 
-    assert-eq("qwen3.6-plus", model.id, "Model id should match")
-    assert(model.object, "Model should have object field")
+            assert-eq("qwen3.7-plus", model.id, "Model id should match")
+            assert(model.object, "Model should have object field")
+        }
+    }
 }

@@ -1,0 +1,220 @@
+::sentry::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no sentry.* context.
+
+::api ::sentry::api
+::issues ::sentry::issues
+::projects ::sentry::projects
+::releases ::sentry::releases
+::webhooks ::sentry::webhooks
+
+OFFLINE {token: "tenant-token", org: "tenant-org", base-url: "http://127.0.0.1:1"}
+
+// Nothing listens on port 1, so a call fails at the socket, with the URL
+// in the error. That error proves the call got past the credential check
+// and used this `opts`, without any network traffic.
+reaches fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "127.0.0.1:1"))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({token: "opt", org: "opt-org", base-url: "https://sentry.example/"}, {"sentry.token": "ctx", "sentry.org": "ctx-org", "sentry.region": "de"})
+    assert-eq("opt", r.token)
+    assert-eq("opt-org", r.org)
+    assert-eq("https://sentry.example/api/0", r.base-url, "base-url wins, and the trailing slash goes")
+}
+
+test-resolve-ctx-then-defaults
+meta ["test"] fn () {
+    assert-eq("https://sentry.io/api/0", ::api/resolve-from({}, {"sentry.token": "ctx"}).base-url)
+    r ::api/resolve-from({}, {"sentry.token": "ctx", "sentry.org": "ctx-org", "sentry.base.url": "https://sentry.internal"})
+    assert-eq("ctx", r.token)
+    assert-eq("ctx-org", r.org)
+    assert-eq("https://sentry.internal/api/0", r.base-url)
+    assert-eq("https://de.sentry.io/api/0", ::api/resolve-from({}, {"sentry.token": "ctx", "sentry.region": "de"}).base-url)
+}
+
+test-resolve-per-call-region
+meta ["test"] fn () {
+    assert-eq("https://de.sentry.io/api/0", ::api/resolve-from({region: "de"}, {"sentry.token": "ctx", "sentry.region": "us"}).base-url)
+    assert-eq("https://de.sentry.io/api/0", ::api/resolve-from({token: "t", region: "de"}, {"sentry.base.url": "https://sentry.internal"}).base-url)
+}
+
+test-resolve-region-can-only-name-a-sentry-host
+meta ["test"] fn () {
+    results map(["collector.example/", "evil.example#", "a.b", "a b"], (region) {
+        out ::api/resolve-from({region: region}, {"sentry.token": "ctx_secret_key"})
+        assert(is-err(out), "the context token must not go to a host a region spells out")
+        assert(contains(err-message(out), "region"))
+        true
+    })
+    assert-eq(4, length(results))
+}
+
+test-resolve-region-keeps-a-self-hosted-token-home
+meta ["test"] fn () {
+    out ::api/resolve-from({region: "de"}, {"sentry.token": "ctx_secret_key", "sentry.base.url": "https://sentry.internal"})
+    assert(is-err(out), "that token belongs to the self-hosted instance")
+    assert(contains(err-message(out), "region"))
+    assert(contains(err-message(out), "token"))
+}
+
+test-resolve-missing-credential-is-a-clear-error
+meta ["test"] fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "sentry.token"))
+}
+
+test-resolve-returns-marked-value-unchanged
+meta ["test"] fn () {
+    assert-eq("call-token-value", ::api/resolve({token: "call-token-value"}).token)
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("sentry.token")
+    assert-eq("call-token", ::api/resolve({token: "call-token"}).token)
+    assert(reaches(::projects/list-projects({}, OFFLINE)))
+    assert-eq(before, ::hot::ctx/get("sentry.token"))
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    ctx {"sentry.token": "ctx", "sentry.org": "ctx-org"}
+    results map(["token", "org"], (name) {
+        map(["", "   ", null], (blank) {
+            out ::api/resolve-from(assoc({}, name, blank), ctx)
+            assert(is-err(out), "never falls back to context")
+            assert(contains(err-message(out), name))
+            true
+        })
+    })
+    assert-eq(2, length(results))
+    assert(contains(err-message(::api/org({org: ""})), "org is in the call's opts"))
+    assert(is-err(::issues/get-issue("1", {token: ""})), "the error reaches the caller")
+}
+
+test-base-url-without-credential-is-an-error
+meta ["test"] fn () {
+    out ::api/resolve-from({base-url: "https://collector.example"}, {"sentry.token": "ctx_secret_key"})
+    assert(is-err(out), "the context token must not go to a per-call URL")
+    assert(contains(err-message(out), "base-url"))
+    assert(contains(err-message(out), "token"))
+    assert(not(contains(err-message(out), "ctx_secret_key")), "the token stays out of messages")
+    assert-eq("https://collector.example/api/0", ::api/resolve-from({base-url: "https://collector.example", token: "tenant"}, {"sentry.token": "ctx_secret_key"}).base-url)
+    assert-eq("ctx_secret_key", ::api/resolve-from({base-url: ""}, {"sentry.token": "ctx_secret_key"}).token, "a blank base-url is the default host")
+}
+
+test-base-url-without-credential-sends-nothing
+meta ["test"] fn () {
+    before ::hot::ctx/get("sentry.token")
+    ::hot::ctx/set-secret("sentry.token", "ctx_secret_key")
+    assert-eq("ctx_secret_key", ::api/resolve({}).token, "control: the live context token is set")
+    out ::issues/get-issue("1", {org: "o", base-url: "http://127.0.0.1:1"})
+    assert(is-err(out))
+    assert(contains(err-message(out), "base-url"))
+    assert(not(reaches(out)), "no request was attempted: the failure isn't the socket")
+    assert(reaches(::issues/get-issue("1", OFFLINE)), "control: with a credential it reaches the socket")
+    ::hot::ctx/set-secret("sentry.token", before)
+}
+
+test-build-request
+meta ["test"] fn () {
+    bare ::api/build-request("GET", "/projects/", "", ::api/resolve-from({token: "a"}, {}))
+    assert-eq("https://sentry.io/api/0/projects/", bare.url)
+    assert-eq("Bearer a", bare.headers.Authorization)
+    assert(is-null(get(bare.headers, "Content-Type")))
+    posted ::api/build-request("POST", "/x/", {a: 1}, {token: "b", base-url: "https://sentry.example/api/0"})
+    assert-eq("https://sentry.example/api/0/x/", posted.url)
+    assert-eq("application/json", get(posted.headers, "Content-Type"))
+    assert-eq({a: 1}, from-json(posted.body))
+}
+
+test-opts-reach-the-transport
+meta ["test"] fn () {
+    assert(reaches(::api/request("GET", "/x/", "", OFFLINE)))
+    assert(reaches(::api/json("GET", "/x/", "", OFFLINE)))
+    assert(reaches(::api/org-json("GET", "/x/", "", OFFLINE)))
+    assert(reaches(::api/get-page("/x/", {}, OFFLINE)))
+    assert(reaches(::api/org-page("/x/", {}, OFFLINE)))
+    assert(reaches(::api/collect-all("/x/", {}, OFFLINE)))
+    assert(reaches(::api/collect-all("/x/", {}, 5, OFFLINE)))
+}
+
+test-opts-reach-projects
+meta ["test"] fn () {
+    assert(reaches(::projects/list-projects({}, OFFLINE)))
+    assert(reaches(::projects/list-all-projects(OFFLINE)))
+    assert(reaches(::projects/list-all-projects(5, OFFLINE)))
+    assert(reaches(::projects/get-project("p", OFFLINE)))
+    assert(reaches(::projects/list-teams({}, OFFLINE)))
+    assert(reaches(::projects/list-all-teams(OFFLINE)))
+    assert(reaches(::projects/list-all-teams(5, OFFLINE)))
+}
+
+test-opts-reach-issues
+meta ["test"] fn () {
+    assert(reaches(::issues/list-issues({}, OFFLINE)))
+    assert(reaches(::issues/list-issues("p", "q", OFFLINE)))
+    assert(reaches(::issues/list-all-issues({}, OFFLINE)))
+    assert(reaches(::issues/list-all-issues({}, 5, OFFLINE)))
+    assert(reaches(::issues/get-issue("1", OFFLINE)))
+    assert(reaches(::issues/update-issue("1", {status: "resolved"}, OFFLINE)))
+    assert(reaches(::issues/resolve-issue("1", OFFLINE)))
+    assert(reaches(::issues/resolve-issue("1", "1.4.0", OFFLINE)))
+    assert(reaches(::issues/ignore-issue("1", OFFLINE)))
+    assert(reaches(::issues/ignore-issue("1", 60, OFFLINE)))
+    assert(reaches(::issues/unresolve-issue("1", OFFLINE)))
+    assert(reaches(::issues/assign-issue("1", "user:1", OFFLINE)))
+    assert(reaches(::issues/bulk-update-issues(["1"], {status: "resolved"}, {}, OFFLINE)))
+    assert(reaches(::issues/list-issue-events("1", {}, OFFLINE)))
+    assert(reaches(::issues/get-event("1", "latest", {}, OFFLINE)))
+    assert(reaches(::issues/get-latest-event("1", OFFLINE)))
+    assert(reaches(::issues/get-latest-event("1", "production", OFFLINE)))
+    assert(reaches(::issues/list-comments("1", OFFLINE)))
+    assert(reaches(::issues/add-comment("1", "hi", OFFLINE)))
+}
+
+test-opts-reach-releases
+meta ["test"] fn () {
+    assert(reaches(::releases/create-release("v", "p", {}, OFFLINE)))
+    assert(reaches(::releases/list-releases({}, OFFLINE)))
+    assert(reaches(::releases/list-all-releases({}, OFFLINE)))
+    assert(reaches(::releases/list-all-releases({}, 5, OFFLINE)))
+    assert(reaches(::releases/get-release("v", OFFLINE)))
+    assert(reaches(::releases/update-release("v", {ref: "r"}, OFFLINE)))
+    assert(reaches(::releases/finalize-release("v", OFFLINE)))
+    assert(reaches(::releases/finalize-release("v", "2026-11-02T00:00:00Z", OFFLINE)))
+    assert(reaches(::releases/set-commits("v", [], OFFLINE)))
+    assert(reaches(::releases/delete-release("v", OFFLINE)))
+    assert(reaches(::releases/list-release-commits("v", {}, OFFLINE)))
+    assert(reaches(::releases/create-deploy("v", "production", {}, OFFLINE)))
+    assert(reaches(::releases/list-deploys("v", OFFLINE)))
+}
+
+test-explicit-token-arity-still-works
+meta ["test"] fn () {
+    out ::api/request("GET", "/x/", "", "")
+    assert(is-err(out), "a blank explicit token is an error")
+    assert(contains(err-message(out), "token"))
+}
+
+test-existing-arity-reads-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("sentry.token")
+    ::hot::ctx/set({"sentry.token": "", "sentry.org": "acme"})
+    out ::issues/get-issue("1")
+    assert(is-err(out))
+    assert(contains(err-message(out), "sentry.token"))
+    ::hot::ctx/set({"sentry.token": before, "sentry.org": ""})
+}
+
+test-webhook-null-or-blank-secret-never-verifies
+meta ["test"] fn () {
+    request {headers: {sentry-hook-signature: "abc"}, body-raw: "{}"}
+    assert(not(::webhooks/verify-request(request, null)))
+    assert(not(::webhooks/verify-request(request, "   ")))
+}

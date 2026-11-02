@@ -1,7 +1,257 @@
 ::sentry::test ns
 meta ["test"]
 
-test-base-url-default
+::api ::sentry::api
+::issues ::sentry::issues
+::releases ::sentry::releases
+::webhooks ::sentry::webhooks
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Base URL and configuration
+// ============================================================================
+
+test-instance-url-default
 meta ["test"] fn () {
-    assert-eq("https://sentry.io/api/0", ::sentry/base-url())
+    assert-eq("https://sentry.io", ::api/instance-url(null, null))
+}
+
+test-instance-url-region
+meta ["test"] fn () {
+    assert-eq("https://de.sentry.io", ::api/instance-url(null, "de"))
+    assert-eq("https://us.sentry.io", ::api/instance-url(null, "US"))
+}
+
+test-instance-url-self-hosted-wins
+meta ["test"] fn () {
+    assert-eq("https://sentry.internal.example", ::api/instance-url("https://sentry.internal.example/", "de"))
+}
+
+test-base-url-from-ctx
+meta ["test"] fn () {
+    ::hot::ctx/set({"sentry.base.url": "", "sentry.region": ""})
+    assert-eq("https://sentry.io/api/0", ::api/base-url())
+    ::hot::ctx/set("sentry.base.url", "http://localhost:9000")
+    assert-eq("http://localhost:9000/api/0", ::api/base-url())
+    ::hot::ctx/set("sentry.base.url", "")
+}
+
+test-org-missing-is-config-error
+meta ["test"] fn () {
+    ::hot::ctx/set("sentry.org", "")
+    out ::api/org-path("/issues/")
+    assert(is-err(out))
+    message if-err(out, (e) { e.message })
+    assert(contains(message, "sentry.org"))
+}
+
+test-org-path
+meta ["test"] fn () {
+    ::hot::ctx/set("sentry.org", "acme")
+    assert-eq("/organizations/acme/issues/", ::api/org-path("/issues/"))
+    ::hot::ctx/set("sentry.org", "")
+}
+
+// ============================================================================
+// Query strings
+// ============================================================================
+
+test-query-omits-nulls
+meta ["test"] fn () {
+    assert-eq("", ::api/query({}))
+    assert-eq("?query=is%3Aunresolved", ::api/query({query: "is:unresolved", cursor: null, environment: null}))
+}
+
+test-query-repeats-vecs
+meta ["test"] fn () {
+    q ::api/query({project: ["api", "web"], environment: "production", statsPeriod: "24h"})
+    assert-eq("?project=api&project=web&environment=production&statsPeriod=24h", q)
+}
+
+test-bulk-query-has-ids
+meta ["test"] fn () {
+    assert-eq("?id=1&id=2", ::issues/bulk-query(["1", "2"], {}))
+    assert-eq("?project=api&id=7", ::issues/bulk-query([7], {project: "api"}))
+}
+
+test-bulk-update-refuses-empty-ids
+meta ["test"] fn () {
+    out ::issues/bulk-update-issues([], {status: "resolved"})
+    assert(is-err(out), "no ids would mean every matching issue")
+}
+
+test-seg-encodes-release-versions
+meta ["test"] fn () {
+    assert-eq("my-api%401.4.0%2Bbuild.7", ::api/seg("my-api@1.4.0+build.7"))
+}
+
+// ============================================================================
+// Link-header pagination
+// ============================================================================
+
+LINK_MORE "<https://sentry.io/api/0/organizations/acme/issues/?&cursor=1735689600000:0:1>; rel=\"previous\"; results=\"false\"; cursor=\"1735689600000:0:1\", <https://sentry.io/api/0/organizations/acme/issues/?&cursor=1735689600000:100:0>; rel=\"next\"; results=\"true\"; cursor=\"1735689600000:100:0\""
+
+LINK_LAST "<https://sentry.io/api/0/organizations/acme/issues/?&cursor=0:0:1>; rel=\"previous\"; results=\"true\"; cursor=\"0:0:1\", <https://sentry.io/api/0/organizations/acme/issues/?&cursor=0:200:0>; rel=\"next\"; results=\"false\"; cursor=\"0:200:0\""
+
+test-parse-link-header
+meta ["test"] fn () {
+    entries ::api/parse-link-header(LINK_MORE)
+    assert-eq(2, length(entries))
+    assert-eq("previous", entries[0].rel)
+    assert-eq("next", entries[1].rel)
+    assert-eq("true", entries[1].results)
+    assert-eq("1735689600000:100:0", entries[1].cursor)
+    assert-eq("https://sentry.io/api/0/organizations/acme/issues/?&cursor=1735689600000:100:0", entries[1].url)
+    assert-eq([], ::api/parse-link-header(null))
+    assert-eq([], ::api/parse-link-header(""))
+}
+
+test-next-cursor
+meta ["test"] fn () {
+    assert-eq("1735689600000:100:0", ::api/next-cursor({link: LINK_MORE}))
+    assert-eq(null, ::api/next-cursor({link: LINK_LAST}), "results=false means the last page")
+    assert-eq(null, ::api/next-cursor({}))
+    assert-eq("0:0:1", ::api/link-cursor({link: LINK_LAST}, "previous"))
+}
+
+test-to-page
+meta ["test"] fn () {
+    response HttpResponse({status: 200, headers: {link: LINK_MORE}, body: [{id: "1"}, {id: "2"}]})
+    page ::api/to-page(response)
+    assert-eq(2, length(page.items))
+    assert-eq("1735689600000:100:0", page.next_cursor)
+    assert-eq(null, page.prev_cursor)
+
+    empty ::api/to-page(HttpResponse({status: 204, headers: {}, body: null}))
+    assert-eq([], empty.items)
+    assert-eq(null, empty.next_cursor)
+}
+
+fake-pages fn (params: Map): Map {
+    cursor get(params, "cursor")
+    cond {
+        is-null(cursor) => { {items: [1, 2], next_cursor: "0:2:0"} }
+        eq(cursor, "0:2:0") => { {items: [3, 4], next_cursor: "0:4:0"} }
+        => { {items: [5], next_cursor: null} }
+    }
+}
+
+test-collect-pages
+meta ["test"] fn () {
+    assert-eq([1, 2, 3, 4, 5], ::api/collect-pages(fake-pages, {}, 100))
+    assert-eq([1, 2, 3], ::api/collect-pages(fake-pages, {}, 3), "stops at the limit")
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-error-message
+meta ["test"] fn () {
+    assert-eq("You do not have permission to perform this action.", ::api/error-message(403, {detail: "You do not have permission to perform this action."}))
+    assert-eq("version: This field is required.; projects: This field is required.",
+        ::api/error-message(400, {version: ["This field is required."], projects: ["This field is required."]}))
+    assert-eq("Bad gateway", ::api/error-message(502, "Bad gateway"))
+    assert-eq("HTTP 500", ::api/error-message(500, null))
+    assert-eq("HTTP 404", ::api/error-message(404, {}))
+}
+
+test-http-error-from-response
+meta ["test"] fn () {
+    e ::api/HttpError(HttpResponse({status: 404, headers: {}, body: {detail: "The requested resource does not exist"}}))
+    assert-eq(404, e.status)
+    assert-eq("The requested resource does not exist", e.message)
+}
+
+// ============================================================================
+// Release and deploy bodies
+// ============================================================================
+
+test-create-release-body
+meta ["test"] fn () {
+    body ::releases/create-release-body("my-api@1.4.0", "my-api", {})
+    assert-eq({version: "my-api@1.4.0", projects: ["my-api"]}, body)
+
+    full ::releases/create-release-body("1.4.0", ["api", "web"], {ref: "v1.4.0", url: null})
+    assert-eq(["api", "web"], full.projects)
+    assert-eq("v1.4.0", full.ref)
+    assert(not(in("url", keys(full))), "unset options are omitted, not null")
+}
+
+test-create-deploy-body
+meta ["test"] fn () {
+    assert-eq({environment: "production"}, ::releases/create-deploy-body("production", {}))
+    body ::releases/create-deploy-body("staging", {name: "run-42", dateFinished: null})
+    assert-eq({name: "run-42", environment: "staging"}, body)
+}
+
+// ============================================================================
+// Webhook verification (vectors generated independently with Python)
+// ============================================================================
+
+SECRET "sentry_client_secret_test"
+BODY """{"action":"created","data":{"issue":{"id":"4501","title":"TypeError"}},"installation":{"uuid":"abc"}}"""
+
+test-webhook-accepts-vector
+meta ["test"] fn () {
+    request {
+        headers: {
+            sentry-hook-signature: "5068a39794f18e53859f5c98e5cdd620990e46aac2dd7a15775f9b7598455524",
+            sentry-hook-resource: "issue",
+            sentry-hook-timestamp: "1735689600",
+            request-id: "6f3c0e1e-1d2c-4f0a-9b1e-2a7d9c0e5b11"
+        },
+        body-raw: BODY
+    }
+
+    assert(::webhooks/verify-request(request, SECRET))
+    assert-eq("issue", ::webhooks/hook-resource(request))
+    assert-eq(1735689600, ::webhooks/hook-timestamp(request))
+    assert-eq("6f3c0e1e-1d2c-4f0a-9b1e-2a7d9c0e5b11", ::webhooks/request-id(request))
+}
+
+test-webhook-rejects-tampered
+meta ["test"] fn () {
+    // A valid signature for a different body.
+    tampered {
+        headers: {sentry-hook-signature: "aef8305d292addf7ec19f7b3e67d670fd336d41fcd972e531087c41da0cae835"},
+        body-raw: BODY
+    }
+
+    assert(not(::webhooks/verify-request(tampered, SECRET)), "wrong-body signature fails")
+    assert(not(::webhooks/verify-request(tampered, "other-secret")), "wrong secret fails")
+}
+
+test-webhook-rejects-missing
+meta ["test"] fn () {
+    assert(not(::webhooks/verify-request({headers: {}, body-raw: BODY}, SECRET)), "missing signature fails")
+    assert(not(::webhooks/verify-request({body-raw: BODY}, SECRET)), "missing headers fail")
+    assert(not(::webhooks/verify-request({headers: {sentry-hook-signature: "zz-not-hex"}, body-raw: BODY}, SECRET)), "malformed signature fails")
+}
+
+test-webhook-empty-secret-fails-closed
+meta ["test"] fn () {
+    sig ::hot::hmac/hmac-sha256("", BODY)
+    assert(not(::webhooks/verify-request({headers: {sentry-hook-signature: sig}, body-raw: BODY}, "")))
+}
+
+signed fn (timestamp: Any): Map {
+    {
+        headers: {
+            sentry-hook-signature: ::hot::hmac/hmac-sha256(SECRET, BODY),
+            sentry-hook-timestamp: Str(timestamp)
+        },
+        body-raw: BODY
+    }
+}
+
+test-webhook-timestamp-window
+meta ["test"] fn () {
+    now ::hot::time/epoch-seconds()
+    assert(::webhooks/verify-request(signed(now), SECRET, 300), "fresh delivery passes")
+    assert(not(::webhooks/verify-request(signed(sub(now, 3600)), SECRET, 300)), "stale delivery is rejected")
+    assert(::webhooks/verify-request(signed(sub(now, 3600)), SECRET), "no window by default (the timestamp is unsigned)")
+    assert(not(::webhooks/verify-request(signed("soon"), SECRET, 300)), "malformed timestamp fails closed")
+    assert-eq(null, ::webhooks/hook-timestamp(signed("soon")))
 }

@@ -1,0 +1,129 @@
+::zendesk::users ns
+meta {
+    ctx: {"zendesk.subdomain": {required: false, secret: false}},
+    doc: """Users (end users, agents, admins): look up, search, list with cursor pagination, create, update and upsert."""
+}
+
+::api ::zendesk::api
+
+me
+meta {
+    doc: """GET /users/me - The authenticated user: `{user}`. The cheapest credentials check (an anonymous user with id null means auth failed silently)."""
+}
+fn
+(): Any {
+  me({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/users/me", "", opts)
+}
+
+get-user
+meta {
+    doc: """GET /users/{id} - One user: `{user}`."""
+}
+fn
+(id: Any): Any {
+  get-user(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/users/${::api/path-segment(id)}`, "", opts)
+}
+
+list-users
+meta {
+    doc: """GET /users - One cursor page of users: `{users, meta, links}`. `options`: `role` ("end-user"/"agent"/"admin"), `external_id`, `page_size`, `after`, `sort`."""
+}
+fn
+(): Any {
+  list-users({})
+},
+(options: Map): Any {
+  list-users(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/list-page("/users", options, opts)
+}
+
+search-users
+meta {
+    doc: """
+    GET /users/search?query= - Users matching a search query (name,
+    email, phone, notes, or Zendesk search syntax such as `role:agent`).
+    Offset paging only: `options` takes `page` and `per_page` (max 100),
+    capped at 10,000 results per query. Returns `{users, next_page, count}`.
+    """
+}
+fn
+(query: Str): Any {
+  search-users(query, {})
+},
+(query: Str, options: Map): Any {
+  search-users(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Any {
+  ::api/request("GET", `/users/search${::api/query-string({...options, query: query})}`, "", opts)
+}
+
+find-user-by-email
+meta {
+    doc: """GET /users/search?query= - Find a user by email. Returns the user or null."""
+}
+fn
+(email: Str): Any {
+  find-user-by-email(email, {})
+},
+(email: Str, opts: Map): Any {
+  out search-users(email, {}, opts)
+  cond {
+    is-err(out) => { out }
+    is-empty(or(get(out, "users"), [])) => { null }
+    => { first(out.users) }
+  }
+}
+
+create-user
+meta {
+    doc: """POST /users - Create a user. `fields`: `name` (required), `email`, `role` (end-user by default), `phone`, `external_id`, `organization_id`, `tags`, `user_fields`, `verified`, `skip_verify_email`. Unset fields are omitted. Returns `{user}`."""
+}
+fn
+(fields: Map): Any {
+  create-user(fields, {})
+},
+(fields: Map, opts: Map): Any {
+  ::api/request("POST", "/users", {user: ::api/compact(fields)}, opts)
+}
+
+update-user
+meta {
+    doc: """PUT /users/{id} - Update a user's fields. Unset fields are omitted."""
+}
+fn
+(id: Any, fields: Map): Any {
+  update-user(id, fields, {})
+},
+(id: Any, fields: Map, opts: Map): Any {
+  ::api/request("PUT", `/users/${::api/path-segment(id)}`, {user: ::api/compact(fields)}, opts)
+}
+
+create-or-update-user
+meta {
+    doc: """
+    POST /users/create_or_update - Upsert a user matched on `email` or
+    `external_id`: 201 when created, 200 when updated. Returns `{user}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::users/create-or-update-user({email: "ada@example.com", name: "Ada Lovelace", user_fields: {plan: "enterprise"}})
+    out.user.id
+    ```
+    """
+}
+fn
+(fields: Map): Any {
+  create-or-update-user(fields, {})
+},
+(fields: Map, opts: Map): Any {
+  ::api/request("POST", "/users/create_or_update", {user: ::api/compact(fields)}, opts)
+}

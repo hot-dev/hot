@@ -58,17 +58,23 @@ parse-count fn (headers: Map): Int? {
   }
 }
 
-db-response fn (response: ::api/HttpResponse): DbResponse {
-  DbResponse({
-    status: response.status,
-    headers: response.headers,
-    body: response.body,
-    count: parse-count(response.headers)
-  })
+db-response fn (response: Result): DbResponse {
+  cond {
+    is-err(response) => { response }
+    => {
+      DbResponse({
+        status: response.status,
+        headers: response.headers,
+        body: response.body,
+        count: parse-count(response.headers)
+      })
+    }
+  }
 }
 
-body-or-error fn (response: ::api/HttpResponse): Any {
+body-or-error fn (response: Result): Any {
   cond {
+    is-err(response) => { response }
     not(::api/is-ok-response(response)) => { err(::api/HttpError(response)) }
     => { response.body }
   }
@@ -133,28 +139,52 @@ user ::db/select(::db/SelectRequest({
 ```
 """
 }
-fn (request: SelectRequest): Any {
-  body-or-error(select-response(request))
+fn
+(request: SelectRequest): Any {
+  select(request, {})
+},
+(request: SelectRequest, opts: Map): Any {
+  body-or-error(select-response(request, opts))
 }
 
-select-as fn (request: SelectRequest, access-token: Str): Any {
-  body-or-error(select-response-as(request, access-token))
+select-as fn
+(request: SelectRequest, access-token: Str): Any {
+  select-as(request, access-token, {})
+},
+(request: SelectRequest, access-token: Str, opts: Map): Any {
+  body-or-error(select-response-as(request, access-token, opts))
 }
 
-select-service fn (request: SelectRequest): Any {
-  body-or-error(select-response-service(request))
+select-service fn
+(request: SelectRequest): Any {
+  select-service(request, {})
+},
+(request: SelectRequest, opts: Map): Any {
+  body-or-error(select-response-service(request, opts))
 }
 
-select-response fn (request: SelectRequest): DbResponse {
-  db-response(select-http-response(request))
+select-response fn
+(request: SelectRequest): DbResponse {
+  select-response(request, {})
+},
+(request: SelectRequest, opts: Map): DbResponse {
+  db-response(select-http-response(request, opts))
 }
 
-select-response-as fn (request: SelectRequest, access-token: Str): DbResponse {
-  db-response(select-http-response-as(request, access-token))
+select-response-as fn
+(request: SelectRequest, access-token: Str): DbResponse {
+  select-response-as(request, access-token, {})
+},
+(request: SelectRequest, access-token: Str, opts: Map): DbResponse {
+  db-response(select-http-response-as(request, access-token, opts))
 }
 
-select-response-service fn (request: SelectRequest): DbResponse {
-  db-response(select-http-response-service(request))
+select-response-service fn
+(request: SelectRequest): DbResponse {
+  select-response-service(request, {})
+},
+(request: SelectRequest, opts: Map): DbResponse {
+  db-response(select-http-response-service(request, opts))
 }
 
 select-path fn (request: SelectRequest): Str {
@@ -176,16 +206,28 @@ select-headers fn (request: SelectRequest): Map {
     |> assoc-some("Accept", accept)
 }
 
-select-http-response fn (request: SelectRequest): ::api/HttpResponse {
-  ::api/request-raw("GET", select-path(request), select-headers(request), {})
+select-http-response fn
+(request: SelectRequest): ::api/HttpResponse {
+  select-http-response(request, {})
+},
+(request: SelectRequest, opts: Map): ::api/HttpResponse {
+  ::api/request-raw("GET", select-path(request), select-headers(request), {}, opts)
 }
 
-select-http-response-as fn (request: SelectRequest, access-token: Str): ::api/HttpResponse {
-  ::api/request-raw-as("GET", select-path(request), select-headers(request), {}, access-token)
+select-http-response-as fn
+(request: SelectRequest, access-token: Str): ::api/HttpResponse {
+  select-http-response-as(request, access-token, {})
+},
+(request: SelectRequest, access-token: Str, opts: Map): ::api/HttpResponse {
+  ::api/request-raw-as("GET", select-path(request), select-headers(request), {}, access-token, opts)
 }
 
-select-http-response-service fn (request: SelectRequest): ::api/HttpResponse {
-  ::api/request-raw-service("GET", select-path(request), select-headers(request), {})
+select-http-response-service fn
+(request: SelectRequest): ::api/HttpResponse {
+  select-http-response-service(request, {})
+},
+(request: SelectRequest, opts: Map): ::api/HttpResponse {
+  ::api/request-raw-service("GET", select-path(request), select-headers(request), {}, opts)
 }
 
 // ============================================================================
@@ -231,28 +273,52 @@ rows ::db/insert(::db/InsertRequest({
 ```
 """
 }
-fn (request: InsertRequest): Any {
-  body-or-error(insert-response(request))
+fn
+(request: InsertRequest): Any {
+  insert(request, {})
+},
+(request: InsertRequest, opts: Map): Any {
+  body-or-error(insert-response(request, opts))
 }
 
-insert-as fn (request: InsertRequest, access-token: Str): Any {
-  body-or-error(insert-response-as(request, access-token))
+insert-as fn
+(request: InsertRequest, access-token: Str): Any {
+  insert-as(request, access-token, {})
+},
+(request: InsertRequest, access-token: Str, opts: Map): Any {
+  body-or-error(insert-response-as(request, access-token, opts))
 }
 
-insert-service fn (request: InsertRequest): Any {
-  body-or-error(insert-response-service(request))
+insert-service fn
+(request: InsertRequest): Any {
+  insert-service(request, {})
+},
+(request: InsertRequest, opts: Map): Any {
+  body-or-error(insert-response-service(request, opts))
 }
 
-insert-response fn (request: InsertRequest): ::api/HttpResponse {
-  ::api/request-raw("POST", insert-path(request), insert-headers(request), request.data)
+insert-response fn
+(request: InsertRequest): ::api/HttpResponse {
+  insert-response(request, {})
+},
+(request: InsertRequest, opts: Map): ::api/HttpResponse {
+  ::api/request-raw("POST", insert-path(request), insert-headers(request), request.data, opts)
 }
 
-insert-response-as fn (request: InsertRequest, access-token: Str): ::api/HttpResponse {
-  ::api/request-raw-as("POST", insert-path(request), insert-headers(request), request.data, access-token)
+insert-response-as fn
+(request: InsertRequest, access-token: Str): ::api/HttpResponse {
+  insert-response-as(request, access-token, {})
+},
+(request: InsertRequest, access-token: Str, opts: Map): ::api/HttpResponse {
+  ::api/request-raw-as("POST", insert-path(request), insert-headers(request), request.data, access-token, opts)
 }
 
-insert-response-service fn (request: InsertRequest): ::api/HttpResponse {
-  ::api/request-raw-service("POST", insert-path(request), insert-headers(request), request.data)
+insert-response-service fn
+(request: InsertRequest): ::api/HttpResponse {
+  insert-response-service(request, {})
+},
+(request: InsertRequest, opts: Map): ::api/HttpResponse {
+  ::api/request-raw-service("POST", insert-path(request), insert-headers(request), request.data, opts)
 }
 
 insert-path fn (request: InsertRequest): Str {
@@ -306,31 +372,55 @@ updated ::db/update(::db/UpdateRequest({
 ```
 """
 }
-fn (request: UpdateRequest): Any {
-  body-or-error(update-response(request))
+fn
+(request: UpdateRequest): Any {
+  update(request, {})
+},
+(request: UpdateRequest, opts: Map): Any {
+  body-or-error(update-response(request, opts))
 }
 
-update-as fn (request: UpdateRequest, access-token: Str): Any {
-  body-or-error(update-response-as(request, access-token))
+update-as fn
+(request: UpdateRequest, access-token: Str): Any {
+  update-as(request, access-token, {})
+},
+(request: UpdateRequest, access-token: Str, opts: Map): Any {
+  body-or-error(update-response-as(request, access-token, opts))
 }
 
-update-service fn (request: UpdateRequest): Any {
-  body-or-error(update-response-service(request))
+update-service fn
+(request: UpdateRequest): Any {
+  update-service(request, {})
+},
+(request: UpdateRequest, opts: Map): Any {
+  body-or-error(update-response-service(request, opts))
 }
 
-update-response fn (request: UpdateRequest): ::api/HttpResponse {
+update-response fn
+(request: UpdateRequest): ::api/HttpResponse {
+  update-response(request, {})
+},
+(request: UpdateRequest, opts: Map): ::api/HttpResponse {
   validate-filters(request.filters, "update")
-  ::api/request-raw("PATCH", filtered-table-path(request.table, request.filters), mutation-headers(request.return, request.count, request.schema), request.data)
+  ::api/request-raw("PATCH", filtered-table-path(request.table, request.filters), mutation-headers(request.return, request.count, request.schema), request.data, opts)
 }
 
-update-response-as fn (request: UpdateRequest, access-token: Str): ::api/HttpResponse {
+update-response-as fn
+(request: UpdateRequest, access-token: Str): ::api/HttpResponse {
+  update-response-as(request, access-token, {})
+},
+(request: UpdateRequest, access-token: Str, opts: Map): ::api/HttpResponse {
   validate-filters(request.filters, "update")
-  ::api/request-raw-as("PATCH", filtered-table-path(request.table, request.filters), mutation-headers(request.return, request.count, request.schema), request.data, access-token)
+  ::api/request-raw-as("PATCH", filtered-table-path(request.table, request.filters), mutation-headers(request.return, request.count, request.schema), request.data, access-token, opts)
 }
 
-update-response-service fn (request: UpdateRequest): ::api/HttpResponse {
+update-response-service fn
+(request: UpdateRequest): ::api/HttpResponse {
+  update-response-service(request, {})
+},
+(request: UpdateRequest, opts: Map): ::api/HttpResponse {
   validate-filters(request.filters, "update")
-  ::api/request-raw-service("PATCH", filtered-table-path(request.table, request.filters), mutation-headers(request.return, request.count, request.schema), request.data)
+  ::api/request-raw-service("PATCH", filtered-table-path(request.table, request.filters), mutation-headers(request.return, request.count, request.schema), request.data, opts)
 }
 
 validate-filters fn (filters: Vec<Str>, operation: Str): Bool {
@@ -394,31 +484,55 @@ Delete rows matching the filters. `filters` is required to prevent accidental fu
 ```
 """
 }
-fn (request: DeleteRequest): Any {
-  body-or-error(delete-response(request))
+fn
+(request: DeleteRequest): Any {
+  delete(request, {})
+},
+(request: DeleteRequest, opts: Map): Any {
+  body-or-error(delete-response(request, opts))
 }
 
-delete-as fn (request: DeleteRequest, access-token: Str): Any {
-  body-or-error(delete-response-as(request, access-token))
+delete-as fn
+(request: DeleteRequest, access-token: Str): Any {
+  delete-as(request, access-token, {})
+},
+(request: DeleteRequest, access-token: Str, opts: Map): Any {
+  body-or-error(delete-response-as(request, access-token, opts))
 }
 
-delete-service fn (request: DeleteRequest): Any {
-  body-or-error(delete-response-service(request))
+delete-service fn
+(request: DeleteRequest): Any {
+  delete-service(request, {})
+},
+(request: DeleteRequest, opts: Map): Any {
+  body-or-error(delete-response-service(request, opts))
 }
 
-delete-response fn (request: DeleteRequest): ::api/HttpResponse {
+delete-response fn
+(request: DeleteRequest): ::api/HttpResponse {
+  delete-response(request, {})
+},
+(request: DeleteRequest, opts: Map): ::api/HttpResponse {
   validate-filters(request.filters, "delete")
-  ::api/request-raw("DELETE", filtered-table-path(request.table, request.filters), delete-headers(request.return, request.count, request.schema), {})
+  ::api/request-raw("DELETE", filtered-table-path(request.table, request.filters), delete-headers(request.return, request.count, request.schema), {}, opts)
 }
 
-delete-response-as fn (request: DeleteRequest, access-token: Str): ::api/HttpResponse {
+delete-response-as fn
+(request: DeleteRequest, access-token: Str): ::api/HttpResponse {
+  delete-response-as(request, access-token, {})
+},
+(request: DeleteRequest, access-token: Str, opts: Map): ::api/HttpResponse {
   validate-filters(request.filters, "delete")
-  ::api/request-raw-as("DELETE", filtered-table-path(request.table, request.filters), delete-headers(request.return, request.count, request.schema), {}, access-token)
+  ::api/request-raw-as("DELETE", filtered-table-path(request.table, request.filters), delete-headers(request.return, request.count, request.schema), {}, access-token, opts)
 }
 
-delete-response-service fn (request: DeleteRequest): ::api/HttpResponse {
+delete-response-service fn
+(request: DeleteRequest): ::api/HttpResponse {
+  delete-response-service(request, {})
+},
+(request: DeleteRequest, opts: Map): ::api/HttpResponse {
   validate-filters(request.filters, "delete")
-  ::api/request-raw-service("DELETE", filtered-table-path(request.table, request.filters), delete-headers(request.return, request.count, request.schema), {})
+  ::api/request-raw-service("DELETE", filtered-table-path(request.table, request.filters), delete-headers(request.return, request.count, request.schema), {}, opts)
 }
 
 // ============================================================================
@@ -454,28 +568,52 @@ Insert rows, updating on conflict. `on-conflict` specifies the conflict column(s
 ```
 """
 }
-fn (request: UpsertRequest): Any {
-  body-or-error(upsert-response(request))
+fn
+(request: UpsertRequest): Any {
+  upsert(request, {})
+},
+(request: UpsertRequest, opts: Map): Any {
+  body-or-error(upsert-response(request, opts))
 }
 
-upsert-as fn (request: UpsertRequest, access-token: Str): Any {
-  body-or-error(upsert-response-as(request, access-token))
+upsert-as fn
+(request: UpsertRequest, access-token: Str): Any {
+  upsert-as(request, access-token, {})
+},
+(request: UpsertRequest, access-token: Str, opts: Map): Any {
+  body-or-error(upsert-response-as(request, access-token, opts))
 }
 
-upsert-service fn (request: UpsertRequest): Any {
-  body-or-error(upsert-response-service(request))
+upsert-service fn
+(request: UpsertRequest): Any {
+  upsert-service(request, {})
+},
+(request: UpsertRequest, opts: Map): Any {
+  body-or-error(upsert-response-service(request, opts))
 }
 
-upsert-response fn (request: UpsertRequest): ::api/HttpResponse {
-  ::api/request-raw("POST", upsert-path(request), upsert-headers(request), request.data)
+upsert-response fn
+(request: UpsertRequest): ::api/HttpResponse {
+  upsert-response(request, {})
+},
+(request: UpsertRequest, opts: Map): ::api/HttpResponse {
+  ::api/request-raw("POST", upsert-path(request), upsert-headers(request), request.data, opts)
 }
 
-upsert-response-as fn (request: UpsertRequest, access-token: Str): ::api/HttpResponse {
-  ::api/request-raw-as("POST", upsert-path(request), upsert-headers(request), request.data, access-token)
+upsert-response-as fn
+(request: UpsertRequest, access-token: Str): ::api/HttpResponse {
+  upsert-response-as(request, access-token, {})
+},
+(request: UpsertRequest, access-token: Str, opts: Map): ::api/HttpResponse {
+  ::api/request-raw-as("POST", upsert-path(request), upsert-headers(request), request.data, access-token, opts)
 }
 
-upsert-response-service fn (request: UpsertRequest): ::api/HttpResponse {
-  ::api/request-raw-service("POST", upsert-path(request), upsert-headers(request), request.data)
+upsert-response-service fn
+(request: UpsertRequest): ::api/HttpResponse {
+  upsert-response-service(request, {})
+},
+(request: UpsertRequest, opts: Map): ::api/HttpResponse {
+  ::api/request-raw-service("POST", upsert-path(request), upsert-headers(request), request.data, opts)
 }
 
 upsert-path fn (request: UpsertRequest): Str {
@@ -539,28 +677,52 @@ user ::db/rpc(::db/RpcRequest({
 ```
 """
 }
-fn (request: RpcRequest): Any {
-  body-or-error(rpc-response(request))
+fn
+(request: RpcRequest): Any {
+  rpc(request, {})
+},
+(request: RpcRequest, opts: Map): Any {
+  body-or-error(rpc-response(request, opts))
 }
 
-rpc-as fn (request: RpcRequest, access-token: Str): Any {
-  body-or-error(rpc-response-as(request, access-token))
+rpc-as fn
+(request: RpcRequest, access-token: Str): Any {
+  rpc-as(request, access-token, {})
+},
+(request: RpcRequest, access-token: Str, opts: Map): Any {
+  body-or-error(rpc-response-as(request, access-token, opts))
 }
 
-rpc-service fn (request: RpcRequest): Any {
-  body-or-error(rpc-response-service(request))
+rpc-service fn
+(request: RpcRequest): Any {
+  rpc-service(request, {})
+},
+(request: RpcRequest, opts: Map): Any {
+  body-or-error(rpc-response-service(request, opts))
 }
 
-rpc-response fn (request: RpcRequest): ::api/HttpResponse {
-  ::api/request-raw("POST", rpc-path(request.fn-name), rpc-headers(request), or(request.params, {}))
+rpc-response fn
+(request: RpcRequest): ::api/HttpResponse {
+  rpc-response(request, {})
+},
+(request: RpcRequest, opts: Map): ::api/HttpResponse {
+  ::api/request-raw("POST", rpc-path(request.fn-name), rpc-headers(request), or(request.params, {}), opts)
 }
 
-rpc-response-as fn (request: RpcRequest, access-token: Str): ::api/HttpResponse {
-  ::api/request-raw-as("POST", rpc-path(request.fn-name), rpc-headers(request), or(request.params, {}), access-token)
+rpc-response-as fn
+(request: RpcRequest, access-token: Str): ::api/HttpResponse {
+  rpc-response-as(request, access-token, {})
+},
+(request: RpcRequest, access-token: Str, opts: Map): ::api/HttpResponse {
+  ::api/request-raw-as("POST", rpc-path(request.fn-name), rpc-headers(request), or(request.params, {}), access-token, opts)
 }
 
-rpc-response-service fn (request: RpcRequest): ::api/HttpResponse {
-  ::api/request-raw-service("POST", rpc-path(request.fn-name), rpc-headers(request), or(request.params, {}))
+rpc-response-service fn
+(request: RpcRequest): ::api/HttpResponse {
+  rpc-response-service(request, {})
+},
+(request: RpcRequest, opts: Map): ::api/HttpResponse {
+  ::api/request-raw-service("POST", rpc-path(request.fn-name), rpc-headers(request), or(request.params, {}), opts)
 }
 
 rpc-headers fn (request: RpcRequest): Map {

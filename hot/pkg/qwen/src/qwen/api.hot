@@ -1,140 +1,278 @@
 ::qwen::api ns
+meta {
+    doc: """
+    Low-level authenticated requests to Model Studio's OpenAI-compatible
+    endpoint, through `::openai::api/Endpoint`. Paths are relative to
+    `::qwen/base-url()` (e.g. `/chat/completions`).
+
+    **Per-call credentials.** Every API-calling function in this package takes
+    a trailing `opts` Map, resolved by `resolve`: `opts` first, then ctx, then
+    defaults. Nothing from `opts` is written to ctx, so one run can serve many
+    tenants.
+
+    - `api-key`: overrides `qwen.api.key`. Present but null or blank is an Err,
+      never a fallback to ctx.
+    - `base-url`, `region`, `workspace-id`: where this call goes. Each of them
+      needs `api-key` in `opts` too: `qwen.api.key` is never sent to a per-call
+      host. `region` and `workspace-id` build the hostname, so `region` must be
+      a known one and `workspace-id` a plain DNS label. A per-call
+      `workspace-id` without `region` uses `qwen.region`; a per-call `region`
+      doesn't use `qwen.workspace.id`, because a workspace lives in one region.
+    - `endpoint`: an `::openai::api/Endpoint` to use instead, on its own. Reads
+      no ctx.
+
+    A key from `opts` is masked in the run's call records, including inside
+    strings like `Bearer ${key}`. A key shorter than 8 bytes is masked only as
+    a whole value.
+    """
+}
 
 ::ctx ::hot::ctx
+::oai ::openai::api
 
-http-request ::hot::http/request
-http-request-stream ::hot::http/request-stream
-is-ok-response ::hot::http/is-ok-response
-HttpRequest ::hot::http/HttpRequest
+HttpError ::oai/HttpError
 HttpResponse ::hot::http/HttpResponse
 StreamingHttpResponse ::hot::http/StreamingHttpResponse
 
-HttpError type {
-    status: Int,
-    headers: Map,
-    body: Any
+SITE_KEYS ["base-url", "region", "workspace-id"]
+
+site-opts-from
+meta {
+    doc: """
+    A call's `opts` with `region` and `workspace-id` turned into the `base-url`
+    they mean (pure), so `::openai::api/with-opts` can apply them. `ctx-region`
+    is the region for a `workspace-id` with no `region` of its own. An Err when
+    `api-key` is blank, when any of `base-url`, `region` or `workspace-id` comes
+    without `api-key` (the ctx key is never sent to a per-call host), or when a
+    region or workspace id isn't valid.
+
+    **Example**
+
+    ```hot
+    ::qwen::api/site-opts-from({api-key: "k", region: "us"}, null).base-url
+    // => "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+    ```
+    """
+}
+fn (opts: Map, ctx-region: Str?): Map {
+    has-own-key in("api-key", keys(opts))
+    named filter(SITE_KEYS, (key) { is-some(::oai/non-blank(get(opts, key))) })
+    region ::oai/non-blank(get(opts, "region"))
+    workspace-id ::oai/non-blank(get(opts, "workspace-id"))
+    cond {
+        and(has-own-key, is-null(::oai/non-blank(get(opts, "api-key")))) => {
+            err("qwen: api-key in the call's opts is blank. Pass the key, or leave api-key out to use qwen.api.key.")
+        }
+
+        is-empty(named) => { opts }
+
+        not(has-own-key) => {
+            err(`qwen: ${first(named)} in the call's opts needs api-key in opts too. The qwen.api.key ctx key is never sent to a per-call host.`)
+        }
+        => {
+            url ::qwen/resolve-base-url(get(opts, "base-url"), or(region, if(is-some(workspace-id), ctx-region, null)), workspace-id)
+            cond {
+                is-err(url) => { url }
+                => { assoc(delete(delete(opts, "region"), "workspace-id"), "base-url", url) }
+            }
+        }
+    }
 }
 
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
-  HttpError({
-    status: response.status,
-    headers: response.headers,
-    body: response.body
-  })
+site-opts
+meta {
+    doc: """`site-opts-from` with `qwen.region` from ctx. Also masks a key from `opts` in the run's call records."""
+}
+fn (opts: Map): Map {
+    ::ctx/mark-secret(opts.api-key)
+    ::ctx/mark-secret(opts.endpoint.api-key)
+    site-opts-from(opts, ::ctx/get("qwen.region"))
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: the `Endpoint` for a call from `opts` first, then
+    `ctx-values` (a Map of context variables), then defaults. An Err when no
+    API key is set, or when `site-opts-from` refuses `opts`. `{endpoint: ep}` is
+    the explicit form: `ep` as it is, with no ctx involved.
+    Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::qwen::api/resolve-from({api-key: "k", region: "us"}, {}).base-url
+    // => "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+    ```
+    """
+}
+fn (opts: Map, ctx-values: Map): ::oai/Endpoint {
+    site site-opts-from(opts, get(ctx-values, "qwen.region"))
+    cond {
+        is-err(site) => { site }
+        or(in("endpoint", keys(site)), in("base-url", keys(site))) => { ::oai/with-opts(::oai/Endpoint({base-url: ::qwen/BASE_URL}), site) }
+        => {
+            url ::qwen/resolve-base-url(get(ctx-values, "qwen.base.url"), get(ctx-values, "qwen.region"), get(ctx-values, "qwen.workspace.id"))
+            key or(::oai/non-blank(get(site, "api-key")), ::oai/non-blank(get(ctx-values, "qwen.api.key")))
+            cond {
+                is-err(url) => { url }
+
+                is-null(key) => {
+                    err("qwen: no API key. Set qwen.api.key in Context Variables, or pass {api-key: ...} in the call's opts.")
+                }
+                => { ::oai/Endpoint({base-url: url, api-key: key}) }
+            }
+        }
+    }
+}
+
+resolve
+meta {
+    doc: """
+    The `Endpoint` for one call: `opts` over ctx over defaults (see
+    `resolve-from`). With an `api-key` in `opts`, the ctx key is not read, and a
+    blank one is an Err rather than a fallback to ctx. Nothing is written to
+    ctx, and a key from `opts` is masked in the run's call records.
+
+    **Example**
+
+    ```hot
+    ::qwen::api/resolve({api-key: tenant-key, region: "us", workspace-id: "llm-abc"}).base-url
+    // => "https://llm-abc.us-east-1.maas.aliyuncs.com/compatible-mode/v1"
+    ```
+    """,
+    ctx: {
+        "qwen.api.key": {required: false},
+        "qwen.base.url": {required: false, secret: false},
+        "qwen.region": {required: false, default: "intl", secret: false},
+        "qwen.workspace.id": {required: false, secret: false}
+    }
+}
+fn
+(): ::oai/Endpoint {
+    resolve({})
+},
+(opts: Map): ::oai/Endpoint {
+    ::ctx/mark-secret(opts.api-key)
+    ::ctx/mark-secret(opts.endpoint.api-key)
+    has-own-key or(in("endpoint", keys(opts)), in("api-key", keys(opts)))
+    resolve-from(opts, {
+        "qwen.api.key": if(has-own-key, null, ::ctx/get("qwen.api.key")),
+        "qwen.base.url": ::ctx/get("qwen.base.url"),
+        "qwen.region": ::ctx/get("qwen.region"),
+        "qwen.workspace.id": ::ctx/get("qwen.workspace.id")
+    })
+}
+
+endpoint
+meta {
+    doc: """
+    The ctx-configured Qwen endpoint: `::qwen/base-url()` with the
+    `qwen.api.key` key (your DashScope API key, `DASHSCOPE_API_KEY` in
+    Alibaba's docs). An Err when no key is set. The same as `resolve({})`.
+
+    **Example**
+
+    ```hot
+    ep ::qwen::api/endpoint()
+    ep.base-url  // => "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    ```
+    """,
+    ctx: {"qwen.api.key": {required: false}}
+}
+fn (): ::oai/Endpoint {
+    resolve({})
+}
+
+configured-endpoint
+meta {
+    doc: """
+    The ctx-configured base URL with the `qwen.api.key` key if there is one,
+    for a provider whose calls may bring their own key through `provider-opts`.
+    See `::qwen::ai/provider`.
+    """,
+    ctx: {"qwen.api.key": {required: false}}
+}
+fn (): ::oai/Endpoint {
+    url ::qwen/base-url()
+    cond {
+        is-err(url) => { url }
+        => { ::oai/endpoint(url, ::ctx/get("qwen.api.key")) }
+    }
+}
+
+endpoint-for
+meta {
+    doc: """
+    An explicit Qwen endpoint for a region (and optional workspace id),
+    with an explicit key. Reads no ctx. The key is masked in the run's call
+    records.
+
+    **Example**
+
+    ```hot
+    us ::qwen::api/endpoint-for("us", null, "sk-...")
+    us.base-url  // => "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+    ```
+    """
+}
+fn (region: Str?, workspace-id: Str?, api-key: Str): ::oai/Endpoint {
+    url ::qwen/resolve-base-url(null, region, workspace-id)
+    cond {
+        is-err(url) => { url }
+        => { ::oai/endpoint(url, api-key) }
+    }
 }
 
 request
 meta {
     doc: """
-    Make an authenticated HTTP request to the Qwen (DashScope) API.
-
-    Automatically includes the Authorization header using the qwen.api.key from context
-    (this is your DashScope API key — the same key the Qwen docs refer to as
-    DASHSCOPE_API_KEY). Additional headers can be provided to merge/override defaults.
-    When a body is provided, Content-Type is set to application/json and the body is
-    serialized.
-
-    Supports 2 to 5 arguments: (method, url), (method, url, headers),
-    (method, url, headers, body), or (method, url, headers, body, api-key).
+    Authenticated request to the ctx-configured endpoint, or per the call's
+    `opts` (see `resolve`). Returns the raw `HttpResponse`. A full URL off the
+    endpoint's base URL is an Err.
 
     **Example**
 
     ```hot
-    // Simple GET request
-    response request("GET", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models")
-
-    // POST with body
-    response request("POST", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", {}, {
-        model: "qwen3.6-plus",
+    response ::qwen::api/request("GET", "/models")
+    response ::qwen::api/request("POST", "/chat/completions", {}, {
+        model: "qwen3.7-plus",
         messages: [{role: "user", content: "Hello"}]
     })
+    response ::qwen::api/request("GET", "/models", {}, "", {api-key: tenant-key, region: "us"})
     ```
-    """,
-    ctx: {"qwen.api.key": {}}
+    """
 }
 fn
-(method: Str, url: Str): HttpResponse {
-  request(method, url, {}, "")
+(method: Str, path: Str): HttpResponse {
+    request(method, path, {}, "", {})
 },
-(method: Str, url: Str, additional-headers: Map): HttpResponse {
-  request(method, url, additional-headers, "")
+(method: Str, path: Str, additional-headers: Map): HttpResponse {
+    request(method, path, additional-headers, "", {})
 },
-(method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, url, additional-headers, body, ::ctx/get("qwen.api.key"))
+(method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
+    request(method, path, additional-headers, body, {})
 },
-(method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
-  default-headers {
-    Authorization: `Bearer ${api-key}`
-  }
-
-  match body {
-    "" | Null => {
-      final-headers {...default-headers, ...additional-headers}
-      ::hot::http/request(HttpRequest({
-        method,
-        url,
-        headers: final-headers
-      }))
+(method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+    ep resolve(opts)
+    cond {
+        is-err(ep) => { ep }
+        => { ::oai/endpoint-request(ep, method, path, additional-headers, body) }
     }
-
-    _ => {
-      headers {...default-headers, Content-Type: "application/json"}
-      final-headers {...headers, ...additional-headers}
-      ::hot::http/request(HttpRequest({
-        method,
-        url,
-        headers: final-headers,
-        body: to-json(untype(body))
-      }))
-    }
-  }
 }
 
 request-stream
 meta {
-    doc: """
-    Make an authenticated streaming HTTP request to the Qwen (DashScope) API.
-
-    Returns a StreamingHttpResponse with an iterator body for processing SSE events.
-    Automatically includes the Authorization header using the qwen.api.key from context.
-
-    Supports 4 to 6 arguments: (method, url, headers, body),
-    (method, url, headers, body, format), or (method, url, headers, body, format, api-key).
-
-    **Example**
-
-    ```hot
-    response request-stream("POST", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", {}, {
-        model: "qwen3.6-plus",
-        messages: [{role: "user", content: "Hello"}],
-        stream: true
-    })
-
-    events collect(response.body)
-    // events is a Vec of SSE event objects
-    ```
-    """,
-    ctx: {"qwen.api.key": {}}
+    doc: """Streaming (SSE) request to the ctx-configured endpoint, or per the call's `opts` (see `resolve`). Returns a `StreamingHttpResponse`."""
 }
 fn
-(method: Str, url: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
-  request-stream(method, url, additional-headers, body, "sse")
+(method: Str, path: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
+    request-stream(method, path, additional-headers, body, {})
 },
-(method: Str, url: Str, additional-headers: Map, body: Any, format: Str): StreamingHttpResponse {
-  request-stream(method, url, additional-headers, body, format, ::ctx/get("qwen.api.key"))
-},
-(method: Str, url: Str, additional-headers: Map, body: Any, format: Str, api-key: Str): StreamingHttpResponse {
-  default-headers {
-    Authorization: `Bearer ${api-key}`
-  }
-
-  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
-  final-headers {...headers, ...additional-headers}
-
-  ::hot::http/request-stream(HttpRequest({
-    method,
-    url,
-    headers: final-headers,
-    body: to-json(untype(body))
-  }), format)
+(method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): StreamingHttpResponse {
+    ep resolve(opts)
+    cond {
+        is-err(ep) => { ep }
+        => { ::oai/endpoint-request-stream(ep, method, path, additional-headers, body) }
+    }
 }

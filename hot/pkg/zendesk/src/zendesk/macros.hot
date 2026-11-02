@@ -1,0 +1,118 @@
+::zendesk::macros ns
+meta {
+    ctx: {"zendesk.subdomain": {required: false, secret: false}},
+    doc: """
+    Macros: canned responses and field changes. Zendesk's "apply"
+    endpoints only preview a macro; `apply-macro` previews and then
+    updates the ticket with the result, which is what an agent clicking
+    the macro does.
+    """
+}
+
+::api ::zendesk::api
+
+list-macros
+meta {
+    doc: """GET /macros - One cursor page of macros: `{macros, meta, links}`. `options`: `active` (Bool), `access`, `category`, `group_id`, `include` ("usage_7d"), `page_size`, `after`."""
+}
+fn
+(): Any {
+  list-macros({})
+},
+(options: Map): Any {
+  list-macros(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/list-page("/macros", options, opts)
+}
+
+list-active-macros
+meta {
+    doc: """GET /macros/active - Active macros available to the user: `{macros}`."""
+}
+fn
+(): Any {
+  list-active-macros({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/macros/active", "", opts)
+}
+
+get-macro
+meta {
+    doc: """GET /macros/{id} - One macro with its `actions`."""
+}
+fn
+(id: Any): Any {
+  get-macro(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/macros/${::api/path-segment(id)}`, "", opts)
+}
+
+preview-macro
+meta {
+    doc: """GET /tickets/{ticket_id}/macros/{id}/apply - What the ticket would look like after the macro: `{result: {ticket, comment?}}`. Changes nothing."""
+}
+fn
+(ticket-id: Any, macro-id: Any): Any {
+  preview-macro(ticket-id, macro-id, {})
+},
+(ticket-id: Any, macro-id: Any, opts: Map): Any {
+  ::api/request("GET", `/tickets/${::api/path-segment(ticket-id)}/macros/${::api/path-segment(macro-id)}/apply`, "", opts)
+}
+
+macro-update
+meta {
+    doc: """
+    Turn a macro preview `result` into ticket changes for `PUT
+    /tickets/{id}`: the result's ticket fields, with its comment reduced
+    to `body`, `html_body` and `public` (dropping the read-only
+    `scoped_body`), and the ticket `id` and `url` removed. Exposed for testing.
+    """
+}
+fn (result: Map): Map {
+  ticket or(get(result, "ticket"), {})
+  comment-in or(get(ticket, "comment"), get(result, "comment"))
+  comment match comment-in {
+    Map => {
+      kept ::api/compact({
+        body: get(comment-in, "body"),
+        html_body: get(comment-in, "html_body"),
+        public: get(comment-in, "public")
+      })
+      if(or(is-some(get(kept, "body")), is-some(get(kept, "html_body"))), kept, null)
+    }
+
+    _ => { null }
+  }
+
+  base delete(delete(delete(ticket, "comment"), "id"), "url")
+  ::api/compact({...base, comment: comment})
+}
+
+apply-macro
+meta {
+    doc: """
+    Apply a macro to a ticket: preview it, then `PUT /tickets/{id}` with
+    the resulting changes (fields, tags, assignee, and the macro's
+    comment). Returns `{ticket, audit}`.
+
+    **Example**
+
+    ```hot
+    ::zendesk::macros/apply-macro(ticket-id, 360001234567)
+    ```
+    """
+}
+fn
+(ticket-id: Any, macro-id: Any): Any {
+  apply-macro(ticket-id, macro-id, {})
+},
+(ticket-id: Any, macro-id: Any, opts: Map): Any {
+  preview preview-macro(ticket-id, macro-id, opts)
+  cond {
+    is-err(preview) => { preview }
+    => { ::zendesk::tickets/update-ticket(ticket-id, macro-update(or(get(preview, "result"), {})), opts) }
+  }
+}

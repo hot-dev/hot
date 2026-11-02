@@ -1,0 +1,340 @@
+::twilio::twiml ns
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// TwiML builders
+// ============================================================================
+// TwiML is the XML a voice or messaging webhook answers with. Each verb
+// builder returns an XML fragment (Str); `voice-response` /
+// `messaging-response` wrap fragments in a <Response> document and
+// `http-response` turns that into the webhook's HttpResponse.
+//
+// Text content and attribute values are XML-escaped. Attribute names are
+// the camelCase TwiML names (`numDigits`, `callerId`, `statusCallback`);
+// null attributes are omitted, Vec values are space-joined (as TwiML's
+// `statusCallbackEvent` expects), and booleans render as true/false.
+// Nested verbs and nouns are passed as fragments from these builders and
+// are inserted as-is; never pass untrusted text as a fragment, pass it as
+// text so it is escaped.
+//
+// Verb and attribute names follow twilio-node's VoiceResponse and
+// MessagingResponse (src/twiml) and https://www.twilio.com/docs/voice/twiml.
+
+XML_DECLARATION """<?xml version="1.0" encoding="UTF-8"?>"""
+
+escape-xml
+meta {
+    doc: """
+    Escape text for XML content or attribute values: `&`, `<`, `>`, `"`, and `'`.
+
+    **Example**
+
+    ```hot
+    ::twilio::twiml/escape-xml("Tom & Jerry <3")  // => "Tom &amp; Jerry &lt;3"
+    ```
+    """
+}
+fn (value: Any): Str {
+  `${value}`
+    |> ::hot::str/replace("&", "&amp;")
+    |> ::hot::str/replace("<", "&lt;")
+    |> ::hot::str/replace(">", "&gt;")
+    |> ::hot::str/replace("\"", "&quot;")
+    |> ::hot::str/replace("'", "&apos;")
+}
+
+attr-value fn (value: Any): Str {
+  if(is-vec(value), join(map(value, (v) { `${v}` }), " "), `${value}`)
+}
+
+attrs-string
+meta {
+    doc: """Render an attribute Map as ` name="value"` pairs in key order. Nulls are omitted. Exposed for testing."""
+}
+fn (attrs: Map): Str {
+  filtered filter-vals(attrs, is-some)
+  reduce(keys(filtered), (acc, k) {
+    `${acc} ${k}="${escape-xml(attr-value(get(filtered, k)))}"`
+  }, "")
+}
+
+element
+meta {
+    doc: """
+    Build one TwiML element. `content` is text (escaped), a Vec of nested
+    fragments (inserted as-is), or null/empty for a self-closing element.
+    The building block of every verb here, and the way to emit a verb or
+    noun this module doesn't wrap (e.g. `<Stream>`, `<Pay>`).
+
+    **Example**
+
+    ```hot
+    ::twilio::twiml/element("Leave", {}, null)  // => "<Leave/>"
+    ```
+    """
+}
+fn (tag: Str, attrs: Map, content: Any): Str {
+  open `<${tag}${attrs-string(attrs)}`
+  cond {
+    is-null(content) => { `${open}/>` }
+    is-vec(content) => {
+      if(is-empty(content), `${open}/>`, `${open}>${join(content, "")}</${tag}>`)
+    }
+
+    is-empty(`${content}`) => { `${open}/>` }
+    => { `${open}>${escape-xml(content)}</${tag}>` }
+  }
+}
+
+// ============================================================================
+// Documents
+// ============================================================================
+
+voice-response
+meta {
+    doc: """
+    A voice TwiML document: `<?xml ...?><Response>...</Response>` around the given verb fragments.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    xml ::twiml/voice-response([
+      ::twiml/say("Thanks for calling.", {voice: "Polly.Joanna"}),
+      ::twiml/gather({input: "dtmf speech", numDigits: 1, action: "/twilio/menu"}, [
+        ::twiml/say("Press 1 for sales, 2 for support.")
+      ]),
+      ::twiml/say("We didn't get that. Goodbye."),
+      ::twiml/hangup()
+    ])
+    ```
+    """
+}
+fn (verbs: Vec<Str>): Str {
+  `${XML_DECLARATION}${element("Response", {}, verbs)}`
+}
+
+messaging-response
+meta {
+    doc: """
+    A messaging TwiML document around `message`/`redirect` fragments. An empty Vec answers without replying.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    xml ::twiml/messaging-response([::twiml/message("Got it, thanks!")])
+    ```
+    """
+}
+fn (verbs: Vec<Str>): Str {
+  `${XML_DECLARATION}${element("Response", {}, verbs)}`
+}
+
+http-response
+meta {
+    doc: """
+    Wrap a TwiML document as the webhook's `HttpResponse` (status 200, `Content-Type: text/xml`).
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    on-sms
+    meta {webhook: {service: "twilio", path: "/sms"}}
+    fn (request: ::hot::http/HttpRequest): ::hot::http/HttpResponse {
+      reply ::twiml/message(`You said: ${or(request.body.Body, "")}`)
+      ::twiml/http-response(::twiml/messaging-response([reply]))
+    }
+    ```
+    """
+}
+fn (twiml: Str): HttpResponse {
+  HttpResponse({status: 200, headers: {Content-Type: "text/xml"}, body: twiml})
+}
+
+// ============================================================================
+// Voice verbs
+// ============================================================================
+
+say
+meta {
+    doc: """`<Say>`: speak text. Attributes: `voice` (e.g. `"Polly.Joanna"`, `"Google.en-US-Neural2-F"`), `language`, `loop`."""
+}
+fn
+(text: Str): Str { element("Say", {}, text) },
+(text: Str, attrs: Map): Str { element("Say", attrs, text) }
+
+play
+meta {
+    doc: """`<Play>`: play an audio URL. Attributes: `loop`, `digits` (send DTMF instead; pass `""` as the URL)."""
+}
+fn
+(url: Str): Str { element("Play", {}, url) },
+(url: Str, attrs: Map): Str { element("Play", attrs, url) }
+
+pause
+meta {
+    doc: """`<Pause>`: wait silently for `length` seconds (default 1)."""
+}
+fn
+(): Str { element("Pause", {}, null) },
+(length: Int): Str { element("Pause", {length: length}, null) }
+
+gather
+meta {
+    doc: """
+    `<Gather>`: collect DTMF digits or speech, then POST them (`Digits` /
+    `SpeechResult`) to `action`. Attributes: `input` (`"dtmf"`, `"speech"`,
+    or `"dtmf speech"`), `action`, `method`, `timeout`, `numDigits`,
+    `finishOnKey`, `speechTimeout`, `speechModel`, `language`, `hints`,
+    `actionOnEmptyResult`, `partialResultCallback`, `profanityFilter`,
+    `bargeIn`. `nested` holds the `say`/`play`/`pause` prompts.
+    """
+}
+fn
+(attrs: Map): Str { element("Gather", attrs, null) },
+(attrs: Map, nested: Vec<Str>): Str { element("Gather", attrs, nested) }
+
+dial
+meta {
+    doc: """
+    `<Dial>`: connect the caller to another party. `target` is a phone
+    number or SIP/client text, or a Vec of noun fragments (`number`,
+    `client`, `sip`, `conference`, `queue`) to ring at once. Attributes:
+    `callerId`, `action`, `method`, `timeout`, `timeLimit`, `record`,
+    `recordingStatusCallback`, `answerOnBridge`, `hangupOnStar`,
+    `ringTone`, `trim`, `sequential`.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/dial("+15558675310", {callerId: "+15017122661", timeout: 20})
+    ::twiml/dial([::twiml/number("+15558675310"), ::twiml/client("alice")])
+    ```
+    """
+}
+fn
+(target: Any): Str { dial(target, {}) },
+(target: Any, attrs: Map): Str { element("Dial", attrs, target) }
+
+number
+meta {
+    doc: """`<Number>` noun inside `dial`. Attributes: `sendDigits`, `url`, `method`, `statusCallback`, `statusCallbackEvent`, `machineDetection`."""
+}
+fn
+(phone: Str): Str { element("Number", {}, phone) },
+(phone: Str, attrs: Map): Str { element("Number", attrs, phone) }
+
+client
+meta {
+    doc: """`<Client>` noun inside `dial`: a Twilio Voice SDK identity. Attributes: `url`, `method`, `statusCallback`, `statusCallbackEvent`."""
+}
+fn
+(identity: Str): Str { element("Client", {}, identity) },
+(identity: Str, attrs: Map): Str { element("Client", attrs, identity) }
+
+sip
+meta {
+    doc: """`<Sip>` noun inside `dial`: a SIP URI. Attributes: `username`, `password`, `url`, `method`, `statusCallback`."""
+}
+fn
+(uri: Str): Str { element("Sip", {}, uri) },
+(uri: Str, attrs: Map): Str { element("Sip", attrs, uri) }
+
+conference
+meta {
+    doc: """`<Conference>` noun inside `dial`: join a named room. Attributes: `startConferenceOnEnter`, `endConferenceOnExit`, `muted`, `beep`, `record`, `waitUrl`, `maxParticipants`, `statusCallback`, `statusCallbackEvent`."""
+}
+fn
+(name: Str): Str { element("Conference", {}, name) },
+(name: Str, attrs: Map): Str { element("Conference", attrs, name) }
+
+queue
+meta {
+    doc: """`<Queue>` noun inside `dial`: take the next caller from a queue. Attributes: `url`, `method`."""
+}
+fn
+(name: Str): Str { element("Queue", {}, name) },
+(name: Str, attrs: Map): Str { element("Queue", attrs, name) }
+
+enqueue
+meta {
+    doc: """`<Enqueue>`: place the caller in a named queue. Attributes: `action`, `method`, `waitUrl`, `waitUrlMethod`, `maxQueueSize`, `workflowSid`."""
+}
+fn
+(name: Str): Str { element("Enqueue", {}, name) },
+(name: Str, attrs: Map): Str { element("Enqueue", attrs, name) }
+
+record
+meta {
+    doc: """`<Record>`: record the caller (voicemail). The recording URL is POSTed to `action`. Attributes: `action`, `method`, `timeout`, `finishOnKey`, `maxLength`, `playBeep`, `trim`, `recordingStatusCallback`, `recordingStatusCallbackEvent`, `transcribe`, `transcribeCallback`."""
+}
+fn
+(): Str { element("Record", {}, null) },
+(attrs: Map): Str { element("Record", attrs, null) }
+
+hangup
+meta {
+    doc: """`<Hangup>`: end the call."""
+}
+fn (): Str { element("Hangup", {}, null) }
+
+reject
+meta {
+    doc: """`<Reject>`: decline an incoming call without billing it. Attribute `reason`: `"rejected"` (default) or `"busy"`."""
+}
+fn
+(): Str { element("Reject", {}, null) },
+(attrs: Map): Str { element("Reject", attrs, null) }
+
+redirect
+meta {
+    doc: """`<Redirect>`: continue with the TwiML at another URL (voice or messaging). Attribute `method` (default POST)."""
+}
+fn
+(url: Str): Str { element("Redirect", {}, url) },
+(url: Str, attrs: Map): Str { element("Redirect", attrs, url) }
+
+// ============================================================================
+// Messaging verbs
+// ============================================================================
+
+message
+meta {
+    doc: """
+    `<Message>`: reply to an inbound SMS/MMS/WhatsApp. `content` is the
+    reply text, or a Vec of `body` / `media` fragments for MMS.
+    Attributes: `to`, `from`, `action`, `method`, `statusCallback`.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/message("Thanks!")
+    ::twiml/message([::twiml/body("Here's the map"), ::twiml/media("https://example.com/map.png")])
+    ```
+    """
+}
+fn
+(content: Any): Str { element("Message", {}, content) },
+(content: Any, attrs: Map): Str { element("Message", attrs, content) }
+
+body
+meta {
+    doc: """`<Body>` noun inside `message`: the text of an MMS reply."""
+}
+fn (text: Str): Str { element("Body", {}, text) }
+
+media
+meta {
+    doc: """`<Media>` noun inside `message`: a public URL of an image or file to attach (up to 10)."""
+}
+fn (url: Str): Str { element("Media", {}, url) }

@@ -6,8 +6,12 @@ create-company
 meta {
     doc: """Create a company from a properties Map (`name`, `domain`, `industry`, ...)."""
 }
-fn (properties: Map): Map {
-  ::objects/create-object("companies", properties)
+fn
+(properties: Map): Map {
+  create-company(properties, {})
+},
+(properties: Map, opts: Map): Map {
+  ::objects/create-object("companies", properties, opts)
 }
 
 get-company
@@ -16,29 +20,43 @@ meta {
 }
 fn
 (id: Str): Map {
-  ::objects/get-object("companies", id)
+  get-company(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::objects/get-object("companies", id, opts)
 },
 (id: Str, properties: Vec): Map {
-  ::objects/get-object("companies", id, properties)
+  get-company(id, properties, {})
+},
+(id: Str, properties: Vec, opts: Map): Map {
+  ::objects/get-object("companies", id, properties, {}, opts)
 }
 
 update-company
 meta {
     doc: """Update a company's properties."""
 }
-fn (id: Str, properties: Map): Map {
-  ::objects/update-object("companies", id, properties)
+fn
+(id: Str, properties: Map): Map {
+  update-company(id, properties, {})
+},
+(id: Str, properties: Map, opts: Map): Map {
+  ::objects/update-object("companies", id, properties, opts)
 }
 
 find-by-domain
 meta {
     doc: """Search for a company by exact domain. Returns the company or null."""
 }
-fn (domain: Str): Any {
+fn
+(domain: Str): Any {
+  find-by-domain(domain, {})
+},
+(domain: Str, opts: Map): Any {
   out ::objects/search-objects("companies", {
     filters: [{propertyName: "domain", operator: "EQ", value: domain}],
     limit: 1
-  })
+  }, opts)
   cond {
     is-err(out) => { out }
     is-empty(out.results) => { null }
@@ -50,6 +68,22 @@ search-companies
 meta {
     doc: """Search companies — see `::hubspot::objects/build-search-body` for the options."""
 }
-fn (options: Map): Map {
-  ::objects/search-objects("companies", options)
+fn
+(options: Map): Map {
+  search-companies(options, {})
+},
+(options: Map, opts: Map): Map {
+  ::objects/search-objects("companies", options, opts)
+}
+
+archive-company
+meta {
+    doc: """Archive a company (recycle bin, restorable for 90 days)."""
+}
+fn
+(id: Str): Any {
+  archive-company(id, {})
+},
+(id: Str, opts: Map): Any {
+  ::objects/archive-object("companies", id, opts)
 }

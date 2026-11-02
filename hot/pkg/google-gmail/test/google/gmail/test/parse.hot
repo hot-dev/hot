@@ -1,0 +1,88 @@
+::google::gmail::test::parse ns
+meta ["test"]
+
+::parse ::google::gmail::parse
+::b64 ::hot::base64
+
+MESSAGE {
+    id: "m1",
+    threadId: "t1",
+    labelIds: ["INBOX", "UNREAD"],
+    snippet: "Hello",
+    internalDate: "1793000000000",
+    payload: {
+        mimeType: "multipart/mixed",
+        headers: [
+            {name: "From", value: "Ada Lovelace <ADA@example.com>"},
+            {name: "To", value: "me@example.com, Bob <bob@example.com>"},
+            {name: "Subject", value: "Report"},
+            {name: "Message-ID", value: "<abc@mail.example>"},
+            {name: "Received", value: "one"},
+            {name: "received", value: "two"}
+        ],
+        parts: [
+            {partId: "0", mimeType: "multipart/alternative", filename: "", headers: [], body: {size: 0}, parts: [
+                {partId: "0.0", mimeType: "text/plain", filename: "", headers: [{name: "Content-Type", value: "text/plain; charset=\"UTF-8\""}], body: {size: 6, data: ::b64/encode-url("Grüße")}},
+                {partId: "0.1", mimeType: "text/html", filename: "", headers: [], body: {size: 9, data: ::b64/encode-url("<p>Hi</p>")}}
+            ]},
+            {partId: "1", mimeType: "application/pdf", filename: "q3.pdf", headers: [{name: "Content-Disposition", value: "attachment; filename=\"q3.pdf\""}], body: {size: 1024, attachmentId: "att-9"}},
+            {partId: "2", mimeType: "image/png", filename: "logo.png", headers: [{name: "Content-Disposition", value: "inline"}, {name: "Content-ID", value: "<logo@x>"}], body: {size: 3, data: ::b64/encode-url(Bytes([1, 2, 255]))}}
+        ]
+    }
+}
+
+test-headers
+meta ["test"] fn () {
+    assert-eq("Report", ::parse/header(MESSAGE, "subject"), "names are case-insensitive")
+    assert-eq("one", ::parse/header(MESSAGE, "Received"), "the first occurrence wins")
+    assert-eq(["one", "two"], ::parse/header-values(MESSAGE, "RECEIVED"))
+    assert(is-null(::parse/header(MESSAGE, "Cc")))
+}
+
+test-bodies
+meta ["test"] fn () {
+    assert-eq("Grüße", ::parse/text-body(MESSAGE))
+    assert-eq("<p>Hi</p>", ::parse/html-body(MESSAGE))
+    assert-eq("utf-8", ::parse/charset(MESSAGE))
+    assert-eq(6, length(::parse/all-parts(MESSAGE)), "the parts tree is walked depth first")
+    assert(is-null(::parse/text-body({id: "x", raw: "abc"})), "raw-format messages have no parts")
+}
+
+test-attachments
+meta ["test"] fn () {
+    atts ::parse/attachments(MESSAGE)
+    assert-eq(2, length(atts))
+    pdf first(atts)
+    assert-eq("q3.pdf", pdf.filename)
+    assert-eq("att-9", pdf.attachment-id)
+    assert-eq("m1", pdf.message-id)
+    assert-eq(1024, pdf.size)
+    assert(is-null(pdf.data))
+    logo last(atts)
+    assert-eq(Bytes([1, 2, 255]), logo.data, "inline data is decoded to Bytes")
+    assert-eq("logo@x", logo.content-id)
+    assert(logo.inline)
+}
+
+test-decode-data
+meta ["test"] fn () {
+    assert-eq(Bytes([251, 255]), ::parse/decode-data("-_8"))
+    assert-eq(Bytes([251, 255]), ::parse/decode-data("-_8="), "padding is optional")
+    assert-eq(Bytes([]), ::parse/decode-data(null))
+}
+
+test-to-email
+meta ["test"] fn () {
+    e ::parse/to-email(MESSAGE)
+    assert-eq("m1", e.id)
+    assert-eq("t1", e.thread-id)
+    assert-eq("ada@example.com", e.from-email)
+    assert-eq(["me@example.com", "bob@example.com"], e.to-emails)
+    assert-eq("<abc@mail.example>", e.message-id)
+    assert-eq(1793000000000, e.internal-date)
+    assert(e.unread)
+    assert(e.in-inbox)
+    assert(not(e.starred))
+    assert-eq("Grüße", e.text)
+    assert-eq(2, length(e.attachments))
+}
