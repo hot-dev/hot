@@ -1902,11 +1902,19 @@ run fn (): Vec {
 run()
 run()
 run()"#;
-        let Val::Vec(mut expected) = strs(&["a", "b", "a", "b", "a tri", "b tri", "a", "b"]) else {
-            unreachable!()
-        };
-        expected.extend([Val::Bool(true), Val::Bool(true), Val::Bool(false)]);
-        let expected = Val::Vec(expected);
+        let expected = Val::vec(vec![
+            Val::from("a"),
+            Val::from("b"),
+            Val::from("a"),
+            Val::from("b"),
+            Val::from("a tri"),
+            Val::from("b tri"),
+            Val::from("a"),
+            Val::from("b"),
+            Val::Bool(true),
+            Val::Bool(true),
+            Val::Bool(false),
+        ]);
         for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
             let out = compile_and_run_project_with_std_conf(src, conf)
                 .unwrap_or_else(|e| panic!("run failed: {e}"));
@@ -1948,7 +1956,7 @@ run fn (): Vec {
 run()
 run()
 run()"#;
-        let expected = Val::Vec(vec![
+        let expected = Val::vec(vec![
             Val::from("from a"),
             Val::from("copied"),
             Val::from("core str"),
