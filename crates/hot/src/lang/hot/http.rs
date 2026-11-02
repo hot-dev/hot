@@ -186,7 +186,7 @@ fn is_textual_content_type(content_type: &str) -> bool {
 
 fn response_body_val(bytes: Vec<u8>, content_type: Option<&str>) -> Val {
     if content_type.is_some_and(|ct| !is_textual_content_type(ct)) {
-        return Val::Bytes(bytes);
+        return Val::bytes(bytes);
     }
 
     match String::from_utf8(bytes) {
@@ -194,7 +194,7 @@ fn response_body_val(bytes: Vec<u8>, content_type: Option<&str>) -> Val {
             Ok(json) => serde_json::from_value(json).unwrap_or(Val::from(text)),
             Err(_) => Val::from(text),
         },
-        Err(err) => Val::Bytes(err.into_bytes()),
+        Err(err) => Val::bytes(err.into_bytes()),
     }
 }
 
@@ -232,7 +232,7 @@ async fn send_with_redirect_validation(
 
     let (mut body_bytes, body_is_json) = match body {
         Val::Str(s) if !s.is_empty() => (Some(s.as_bytes().to_vec()), false),
-        Val::Bytes(bytes) if !bytes.is_empty() => (Some(bytes.clone()), false),
+        Val::Bytes(bytes) if !bytes.is_empty() => (Some(bytes.to_vec()), false),
         Val::Map(_) | Val::Vec(_) => {
             let json_value: JsonValue = body.into();
             (Some(json_value.to_string().into_bytes()), true)
@@ -387,7 +387,7 @@ async fn make_http_request(
         body_bytes.extend_from_slice(&chunk);
     }
 
-    let body_bytes_val = Val::Bytes(body_bytes.clone());
+    let body_bytes_val = Val::bytes(body_bytes.clone());
     let body_val = response_body_val(body_bytes, content_type.as_deref());
 
     // Build response map
@@ -585,7 +585,7 @@ impl HotIterator for HttpStreamIterator {
                         // Raw bytes as string
                         match String::from_utf8(bytes.to_vec()) {
                             Ok(s) => Val::from(s),
-                            Err(_) => Val::Bytes(bytes.to_vec()),
+                            Err(_) => Val::bytes(bytes.to_vec()),
                         }
                     }
                 };
@@ -1097,11 +1097,11 @@ mod tests {
 
         if let Val::Map(map) = response {
             let body = map.get(&Val::from("body")).unwrap();
-            assert_eq!(body, &Val::Bytes(vec![0x1a, 0x45, 0xdf, 0xa3, 0x81, 0x42]));
+            assert_eq!(body, &Val::bytes(vec![0x1a, 0x45, 0xdf, 0xa3, 0x81, 0x42]));
             let body_bytes = map.get(&Val::from("body-bytes")).unwrap();
             assert_eq!(
                 body_bytes,
-                &Val::Bytes(vec![0x1a, 0x45, 0xdf, 0xa3, 0x81, 0x42])
+                &Val::bytes(vec![0x1a, 0x45, 0xdf, 0xa3, 0x81, 0x42])
             );
         } else {
             panic!("Expected response to be a map");
@@ -1507,7 +1507,7 @@ mod tests {
                 Val::from("PUT"),
                 Val::from(url),
                 Val::map_empty(),
-                Val::Bytes(payload),
+                Val::bytes(payload),
             ]);
             unwrap_result(result)
         })
@@ -1516,7 +1516,7 @@ mod tests {
 
         if let Val::Map(map) = response {
             let body = map.get(&Val::from("body")).unwrap();
-            assert_eq!(body, &Val::Bytes(expected));
+            assert_eq!(body, &Val::bytes(expected));
         } else {
             panic!("Expected response to be a map");
         }

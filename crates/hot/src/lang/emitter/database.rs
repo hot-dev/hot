@@ -1459,7 +1459,7 @@ mod tests {
             "::hot::test/big".to_string(),
             "run/test".to_string(),
             0,
-            vec![Val::Bytes(big_bytes.clone())],
+            vec![Val::bytes(big_bytes.clone())],
             None,
             chrono::Utc::now(),
             None,
@@ -1522,7 +1522,7 @@ mod tests {
         emitter.emit(EngineEvent::run_start(&execution_context));
         emitter.emit(EngineEvent::run_stop(
             &execution_context,
-            Val::Bytes(vec![9u8; 8192]),
+            Val::bytes(vec![9u8; 8192]),
         ));
         emitter.shutdown().await.unwrap();
 

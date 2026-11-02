@@ -62,14 +62,14 @@ pub fn random_bytes(args: &[Val]) -> HotResult<Val> {
                 use base64::{Engine as _, engine::general_purpose};
                 HotResult::Ok(Val::from(general_purpose::STANDARD.encode(&bytes)))
             }
-            "bytes" => HotResult::Ok(Val::Bytes(bytes)),
+            "bytes" => HotResult::Ok(Val::bytes(bytes)),
             _ => HotResult::Err(Val::from(format!(
                 "::hot::random/random-bytes: unknown encoding '{}'. Use 'hex', 'base64', or 'bytes'",
                 encoding
             ))),
         }
     } else {
-        HotResult::Ok(Val::Bytes(bytes))
+        HotResult::Ok(Val::bytes(bytes))
     }
 }
 
@@ -167,7 +167,7 @@ pub fn secure_compare(args: &[Val]) -> HotResult<Val> {
 fn get_bytes_from_arg(arg: &Val) -> Result<Vec<u8>, String> {
     match arg {
         Val::Str(s) => Ok(s.as_bytes().to_vec()),
-        Val::Bytes(b) => Ok(b.clone()),
+        Val::Bytes(b) => Ok(b.to_vec()),
         Val::Vec(vec) => {
             let mut result = Vec::new();
             for val in vec.iter() {
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_secure_compare_bytes() {
-        let result = secure_compare(&[Val::Bytes(vec![1, 2, 3, 4]), Val::Bytes(vec![1, 2, 3, 4])]);
+        let result = secure_compare(&[Val::bytes(vec![1, 2, 3, 4]), Val::bytes(vec![1, 2, 3, 4])]);
         assert!(matches!(result, HotResult::Ok(Val::Bool(true))));
     }
 }

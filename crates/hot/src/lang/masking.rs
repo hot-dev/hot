@@ -697,7 +697,7 @@ impl<'a> RecordMask<'a> {
                 // part: nothing could read what was left.
                 let holds_secret = self
                     .substrings()
-                    .is_some_and(|matcher| matcher.automaton.is_match(&bytes));
+                    .is_some_and(|matcher| matcher.automaton.is_match(bytes.as_slice()));
                 if holds_secret || bytes_name_a_credential(&bytes) {
                     Val::from(MASK)
                 } else {
@@ -1159,22 +1159,22 @@ mod tests {
         let mask = RecordMask::new(&registry, &hashes);
         let mut body = b"\xff\xfeprefix".to_vec();
         body.extend_from_slice(PLAIN.as_bytes());
-        assert_eq!(mask.mask_val(Val::Bytes(body)), Val::from(MASK));
+        assert_eq!(mask.mask_val(Val::bytes(body)), Val::from(MASK));
         assert_eq!(
-            mask.mask_val(Val::Bytes(b"other".to_vec())),
-            Val::Bytes(b"other".to_vec())
+            mask.mask_val(Val::bytes(b"other".to_vec())),
+            Val::bytes(b"other".to_vec())
         );
     }
 
     #[test]
     fn masks_bytes_holding_a_credential_field() {
         assert_eq!(
-            mask_plain(Val::Bytes(br#"{"access_token":"unregistered"}"#.to_vec())),
+            mask_plain(Val::bytes(br#"{"access_token":"unregistered"}"#.to_vec())),
             Val::from(MASK)
         );
         assert_eq!(
-            mask_plain(Val::Bytes(b"plain body".to_vec())),
-            Val::Bytes(b"plain body".to_vec())
+            mask_plain(Val::bytes(b"plain body".to_vec())),
+            Val::bytes(b"plain body".to_vec())
         );
     }
 
@@ -1194,7 +1194,7 @@ mod tests {
         let hashes = AHashSet::new();
         let mask = RecordMask::new(&registry, &hashes);
         assert_eq!(mask.mask_json(r#"{"a": 1, "max_tokens": 5}"#), None);
-        let bytes = serde_json::to_string(&Val::Bytes(b"password=abc".to_vec())).unwrap();
+        let bytes = serde_json::to_string(&Val::bytes(b"password=abc".to_vec())).unwrap();
         assert_eq!(mask.mask_json(&bytes).unwrap(), format!("\"{MASK}\""));
         assert!(
             mask.mask_json(r#"{"password": "x"}"#)

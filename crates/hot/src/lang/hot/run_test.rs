@@ -174,6 +174,7 @@ f(100)"#,
         let src = r#"::t ns
 same fn (x) { x }
 annotated fn (x: Map): Map { x }
+annotated-bytes fn (x: Bytes): Bytes { x }
 bound fn (x) {
     y x
     z y
@@ -183,22 +184,27 @@ held fn (x) {
     box {x: x}
     box.x
 }
-reads fn (m: Map, v: Vec) {
+reads fn (m: Map, v: Vec, b: Bytes) {
     reader () { m }
+    bytes-reader () { b }
     called map([1, 2], (i) { same(m) })
     mapped map([1], (i) { v })
-    listed [m, v]
+    bytes-mapped map([1], (i) { same(b) })
+    listed [m, v, b]
     {
         m: [same(m), annotated(m), bound(m), reader(), called[0], called[1], listed[0], held(m)],
         v: [same(v), bound(v), mapped[0], listed[1], held(v)],
         child: [m.child, get(m, "child"), same(m).child],
         item: [v[0], first(v), get(v, 0), same(v)[0]],
+        b: [same(b), annotated-bytes(b), bound(b), bytes-reader(), bytes-mapped[0], listed[2], held(b)],
+        data: [m.data, get(m, "data"), same(m).data],
     }
 }
 run fn () {
-    m {child: {a: 1}, other: 2}
+    b Bytes([1, 2, 3])
+    m {child: {a: 1}, other: 2, data: Bytes([4, 5])}
     v [{b: 1}, {b: 2}]
-    {m, v, reads: reads(m, v)}
+    {m, v, b, reads: reads(m, v, b)}
 }
 run()
 run()
@@ -213,7 +219,9 @@ run()"#;
             let reads = field(&out, "reads");
             let m = field(&out, "m");
             let v = field(&out, "v");
+            let b = field(&out, "b");
             let child = field(&m, "child");
+            let data = field(&m, "data");
             let Val::Vec(items) = &v else {
                 panic!("v is {v:?}");
             };
@@ -222,6 +230,8 @@ run()"#;
                 (&v, "v"),
                 (&child, "child"),
                 (&items[0], "item"),
+                (&b, "b"),
+                (&data, "data"),
             ] {
                 let Val::Vec(held) = field(&reads, name) else {
                     panic!("{name} is not a Vec");
@@ -230,6 +240,7 @@ run()"#;
                     let shared = match (expected, value) {
                         (Val::Map(a), Val::Map(b)) => Arc::ptr_eq(a, b),
                         (Val::Vec(a), Val::Vec(b)) => Arc::ptr_eq(a, b),
+                        (Val::Bytes(a), Val::Bytes(b)) => Arc::ptr_eq(a, b),
                         _ => false,
                     };
                     assert!(shared, "{label}: read {index} of {name} was copied: {value:?}");
@@ -257,9 +268,9 @@ grown assoc(m, "b", 1)
     }
 
     /// A read costs the same whatever the size of the collection. One that
-    /// scaled would take thousands of times longer on the large collection, so
-    /// the margin leaves only that able to fail this. `bench-large-reads.hot`
-    /// prints the numbers.
+    /// scaled would take far longer on the large collection, so the margin
+    /// leaves only that able to fail this. `bench-large-reads.hot` prints the
+    /// numbers.
     #[test]
     fn reads_cost_the_same_at_any_size() {
         let src = r#"::t ns
@@ -275,7 +286,7 @@ fastest-ms fn (f: Fn): Int {
 rows fn (n: Int): Vec {
     map(range(n), (i) { {k: `k-${i}`, v: "some text in the value"} })
 }
-timings fn (n: Int): Map {
+timings fn (n: Int, b: Bytes): Map {
     v rows(n)
     m index-by(v, %.k)
     {
@@ -286,9 +297,13 @@ timings fn (n: Int): Map {
         vec-pass: fastest-ms((i) { ignore-it(v, i) }),
         vec-index: fastest-ms((i) { v[0] }),
         vec-first: fastest-ms((i) { first(v) }),
+        bytes-pass: fastest-ms((i) { ignore-it(b, i) }),
+        bytes-length: fastest-ms((i) { length(b) }),
+        bytes-get: fastest-ms((i) { get(b, 0) }),
     }
 }
-{small: timings(10), large: timings(200000)}"#;
+sixty-four-mb reduce(range(6), (acc, _i) { concat(acc, acc) }, random-bytes(1000000))
+{small: timings(10, random-bytes(10)), large: timings(200000, sixty-four-mb)}"#;
         for conf in [
             Some(val!({"jit": {"mode": "off"}})),
             Some(val!({"jit": {"threshold": 1}})),
@@ -305,7 +320,7 @@ timings fn (n: Int): Map {
                 };
                 assert!(
                     *large_ms <= small_ms * 20 + 100,
-                    "{label}: {read} took {small_ms}ms on 10 entries, {large_ms}ms on 200000"
+                    "{label}: {read} took {small_ms}ms small, {large_ms}ms large"
                 );
             }
         }
