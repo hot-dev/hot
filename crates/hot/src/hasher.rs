@@ -31,7 +31,7 @@ impl CacheType {
     /// These are separate because the formats evolve independently
     pub fn format_version(&self) -> u32 {
         match self {
-            CacheType::Bytecode => 15, // Bumped for qualified arrow targets in type_implementations
+            CacheType::Bytecode => 16, // Bumped for resolved namespace aliases in signature keys
             CacheType::Ast => 6,       // Bumped for named call arguments (FnCallArg.name)
         }
     }

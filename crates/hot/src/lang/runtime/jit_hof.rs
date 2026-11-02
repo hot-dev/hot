@@ -1172,6 +1172,50 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
     plans
 }
 
+/// The pipelines in a function's instruction stream that its compiled code can
+/// try a fused run of. Compiled code keeps the stages for a de-opt, and joins
+/// both paths after them, so it has to know what the stages do to its registers.
+/// A pipeline qualifies when its stages are plain calls with their arguments
+/// loaded, which write registers and nothing else, and when it can succeed:
+/// a `reduce` without a constant initial value always de-opts.
+pub fn detect_compilable_pipelines(
+    instrs: &[Instruction],
+    program: &BytecodeProgram,
+) -> Vec<PipelinePlan> {
+    let plans = detect_pipelines(instrs, program);
+    let overlaps = |plan: &PipelinePlan| {
+        plans.iter().any(|other| {
+            !std::ptr::eq(other, plan)
+                && other.first_stage_ip <= plan.last_stage_ip
+                && plan.first_stage_ip <= other.last_stage_ip
+        })
+    };
+    let compilable = |plan: &PipelinePlan| {
+        plan.last_stage_ip + 1 < instrs.len()
+            && !overlaps(plan)
+            && !plan
+                .stages
+                .last()
+                .is_some_and(|last| last.stage == HofStage::Reduce && last.initial.is_none())
+            && instrs[plan.first_stage_ip..=plan.last_stage_ip]
+                .iter()
+                .all(|ins| {
+                    matches!(
+                        ins,
+                        Instruction::Move { .. }
+                            | Instruction::LoadConst { .. }
+                            | Instruction::LoadFunctionRef { .. }
+                            | Instruction::Call { .. }
+                    )
+                })
+    };
+    plans
+        .iter()
+        .filter(|plan| compilable(plan))
+        .cloned()
+        .collect()
+}
+
 fn hof_arity_is_fusible(stage: HofStage, args_count: u8) -> bool {
     match stage {
         // Do not fuse the new 3-arg `map(..., OnErr.*)` form yet. The fused
