@@ -1,9 +1,9 @@
 ::web-search::brave ns
 meta {
-    doc: """Brave Search API (https://api-dashboard.search.brave.com). Context variable: `brave.api.key`, sent as `X-Subscription-Token`."""
+    doc: """Brave Search API (https://api-dashboard.search.brave.com). Context variable: `brave.api.key`, or `brave-api-key` in a call's trailing `opts` (see `::web-search::api`); sent as `X-Subscription-Token`."""
 }
 
-::ctx ::hot::ctx
+::api ::web-search::api
 ::uri ::hot::uri
 ::http ::web-search::http
 
@@ -14,25 +14,41 @@ BASE_URL "https://api.search.brave.com/res/v1"
 // Brave's documented maximum `count` per request.
 MAX_RESULTS 20
 
-get-json fn
-(path: Str): Any {
-  get-json(path, ::ctx/get("brave.api.key"))
-},
-// 2-arity: explicit API key override
-(path: Str, api-key: Str): Any {
-  ::http/send("brave", "Brave", HttpRequest({
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` for a key. Pure; exposed for testing."""
+}
+fn (path: Str, api-key: Str): HttpRequest {
+  HttpRequest({
     method: "GET",
     url: `${BASE_URL}${path}`,
     headers: {
       X-Subscription-Token: api-key,
       Accept: "application/json"
     }
-  }))
+  })
+}
+
+get-json fn
+(path: Str): Any {
+  get-json(path, {})
+},
+// 2-arity: explicit API key override
+(path: Str, api-key: Str?): Any {
+  get-json(path, {brave-api-key: api-key})
+},
+// 2-arity: per-call credentials (see `::web-search::api`)
+(path: Str, opts: Map): Any {
+  api-key ::api/api-key("brave", opts)
+  cond {
+    is-err(api-key) => { api-key }
+    => { ::http/send("brave", "Brave", build-request(path, api-key)) }
+  }
 }
 
 search
 meta {
-    ctx: {"brave.api.key": {required: true}},
+    ctx: {"brave.api.key": {required: false}},
     doc: """
     GET /web/search - Brave web search. `options`: `count` (max 20),
     `offset` (page index, max 9), `country`, `search_lang`,
@@ -55,8 +71,11 @@ fn
   search(query, {})
 },
 (query: Str, options: Map): Map {
+  search(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Map {
   params filter-vals({...options, q: query}, is-some)
-  get-json(`/web/search?${::uri/encode-query(params)}`)
+  get-json(`/web/search?${::uri/encode-query(params)}`, opts)
 }
 
 FRESHNESS {day: "pd", week: "pw", month: "pm", year: "py"}
@@ -101,6 +120,6 @@ fn (body: Map): Vec {
   })
 }
 
-search-normalized fn (query: Str, max-results: Int, filters: Map): Vec {
-  search(build-query(query, filters), build-search-options(max-results, filters)) |> if-ok((body) { normalize(body) })
+search-normalized fn (query: Str, max-results: Int, filters: Map, opts: Map): Vec {
+  search(build-query(query, filters), build-search-options(max-results, filters), opts) |> if-ok((body) { normalize(body) })
 }

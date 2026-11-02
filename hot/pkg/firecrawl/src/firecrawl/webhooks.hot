@@ -36,8 +36,8 @@ meta {
     Verify a Firecrawl webhook request: HMAC-SHA256 of the raw body with
     your webhook secret must match `X-Firecrawl-Signature`, compared in
     constant time. Uses the `firecrawl.webhook.secret` context variable
-    (failing when it is unset), or an explicit secret; an empty explicit
-    secret never verifies.
+    (failing when it is unset), or an explicit secret, which is masked in
+    call records; an empty explicit secret never verifies.
 
     Firecrawl signs no timestamp, so there is no replay window to
     check: deduplicate on the payload's `webhookId` if a replayed
@@ -64,13 +64,13 @@ fn
   )
   verify-request(request, secret)
 },
-(request: Map, secret: Str): Bool {
+(request: Map, secret: Str?): Bool {
   headers or(get(request, "headers"), {})
   signature signature-hex(get(headers, SIGNATURE_HEADER))
   cond {
     // An empty key would make every signature forgeable: fail closed.
-    is-empty(secret) => { false }
+    or(is-null(secret), is-blank(secret)) => { false }
     is-empty(signature) => { false }
-    => { ::hmac/hmac-verify-hex(secret, ::hot::http/raw-body(request), signature, "sha256") }
+    => { ::hmac/hmac-verify-hex(::ctx/mark-secret(secret), ::hot::http/raw-body(request), signature, "sha256") }
   }
 }

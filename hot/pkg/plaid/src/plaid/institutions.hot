@@ -19,12 +19,15 @@ fn
   get-institutions(count, offset, country-codes, null)
 },
 (count: Int, offset: Int, country-codes: Vec<Str>, options: Map?): Map {
+  get-institutions(count, offset, country-codes, options, {})
+},
+(count: Int, offset: Int, country-codes: Vec<Str>, options: Map?, opts: Map): Map {
   ::api/post("/institutions/get", {
     count: count,
     offset: offset,
     country_codes: country-codes,
     options: options
-  })
+  }, opts)
 }
 
 get-institution
@@ -36,11 +39,14 @@ fn
   get-institution(institution-id, country-codes, null)
 },
 (institution-id: Str, country-codes: Vec<Str>, options: Map?): Map {
+  get-institution(institution-id, country-codes, options, {})
+},
+(institution-id: Str, country-codes: Vec<Str>, options: Map?, opts: Map): Map {
   ::api/post("/institutions/get_by_id", {
     institution_id: institution-id,
     country_codes: country-codes,
     options: options
-  })
+  }, opts)
 }
 
 search-institutions
@@ -63,10 +69,13 @@ fn
   search-institutions(query, products, country-codes, null)
 },
 (query: Str, products: Vec<Str>?, country-codes: Vec<Str>, options: Map?): Map {
+  search-institutions(query, products, country-codes, options, {})
+},
+(query: Str, products: Vec<Str>?, country-codes: Vec<Str>, options: Map?, opts: Map): Map {
   ::api/post("/institutions/search", {
     query: query,
     products: products,
     country_codes: country-codes,
     options: options
-  })
+  }, opts)
 }

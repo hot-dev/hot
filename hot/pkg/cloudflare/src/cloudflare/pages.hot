@@ -5,7 +5,7 @@ meta {
     Git-connected project, retry, and roll back. Direct Upload deploys
     (sending built files) are out of scope — use `wrangler pages deploy`.
     """,
-    ctx: {"cloudflare.token": {required: true}, "cloudflare.account.id": {required: true}}
+    ctx: {"cloudflare.token": {required: false}, "cloudflare.account.id": {required: false, secret: false}}
 }
 
 ::api ::cloudflare::api
@@ -29,7 +29,10 @@ fn
   list-projects({})
 },
 (params: Map): ListPage {
-  ::api/account-page(`/pages/projects${::api/query(params)}`)
+  list-projects(params, {})
+},
+(params: Map, opts: Map): ListPage {
+  ::api/account-page(`/pages/projects${::api/query(params)}`, "", opts)
 }
 
 list-all-projects
@@ -41,15 +44,25 @@ fn
   list-all-projects(::api/DEFAULT_MAX_ITEMS)
 },
 (max: Int): Vec {
-  ::api/collect-pages(list-projects, {}, max)
+  list-all-projects(max, {})
+},
+(opts: Map): Vec {
+  list-all-projects(::api/DEFAULT_MAX_ITEMS, opts)
+},
+(max: Int, opts: Map): Vec {
+  ::api/collect-pages((p) { list-projects(p, opts) }, {}, max)
 }
 
 get-project
 meta {
     doc: """GET .../pages/projects/{name} - A project: subdomain, domains, source, build config, latest deployment."""
 }
-fn (project: Str): Map {
-  ::api/account-json("GET", project-suffix(project))
+fn
+(project: Str): Map {
+  get-project(project, {})
+},
+(project: Str, opts: Map): Map {
+  ::api/account-json("GET", project-suffix(project), "", opts)
 }
 
 list-deployments
@@ -65,25 +78,33 @@ fn
   list-deployments(project, {})
 },
 (project: Str, params: Map): ListPage {
-  ::api/account-page(`${project-suffix(project)}/deployments${::api/query(params)}`)
+  list-deployments(project, params, {})
+},
+(project: Str, params: Map, opts: Map): ListPage {
+  ::api/account-page(`${project-suffix(project)}/deployments${::api/query(params)}`, "", opts)
 }
 
 get-deployment
 meta {
     doc: """GET .../deployments/{id} - One deployment: `url`, `environment`, `latest_stage` (`{name, status}`), `deployment_trigger`."""
 }
-fn (project: Str, deployment-id: Str): Map {
-  ::api/account-json("GET", deployment-suffix(project, deployment-id))
+fn
+(project: Str, deployment-id: Str): Map {
+  get-deployment(project, deployment-id, {})
+},
+(project: Str, deployment-id: Str, opts: Map): Map {
+  ::api/account-json("GET", deployment-suffix(project, deployment-id), "", opts)
 }
 
 deployment-parts
 meta {
     doc: """The multipart fields for a Git build trigger: `branch` and the optional commit fields, omitted when unset. Exposed for testing."""
 }
-fn (opts: Map): Vec {
+fn
+(options: Map): Vec {
   fields ["branch", "commit_hash", "commit_message", "commit_dirty"]
-  filter(fields, (f) { is-some(get(opts, f)) })
-    |> map((f) { {name: f, value: Str(get(opts, f))} })
+  filter(fields, (f) { is-some(get(options, f)) })
+    |> map((f) { {name: f, value: Str(get(options, f))} })
 }
 
 create-deployment
@@ -91,7 +112,7 @@ meta {
     doc: """
     POST .../pages/projects/{name}/deployments - Start a new build of a
     Git-connected project: the production branch by default, or
-    `opts.branch` (a preview branch). Returns the new deployment.
+    `options.branch` (a preview branch). Returns the new deployment.
 
     **Example**
 
@@ -105,11 +126,14 @@ fn
 (project: Str): Map {
   create-deployment(project, {})
 },
-(project: Str, opts: Map): Map {
-  path ::api/account-path(`${project-suffix(project)}/deployments`)
+(project: Str, options: Map): Map {
+  create-deployment(project, options, {})
+},
+(project: Str, options: Map, opts: Map): Map {
+  path ::api/account-path(`${project-suffix(project)}/deployments`, opts)
   cond {
     is-err(path) => { path }
-    => { ::api/send-multipart("POST", path, deployment-parts(opts)) }
+    => { ::api/send-multipart("POST", path, deployment-parts(options), opts) }
   }
 }
 
@@ -117,14 +141,22 @@ retry-deployment
 meta {
     doc: """POST .../deployments/{id}/retry - Re-run a deployment's build."""
 }
-fn (project: Str, deployment-id: Str): Map {
-  ::api/account-json("POST", `${deployment-suffix(project, deployment-id)}/retry`, {})
+fn
+(project: Str, deployment-id: Str): Map {
+  retry-deployment(project, deployment-id, {})
+},
+(project: Str, deployment-id: Str, opts: Map): Map {
+  ::api/account-json("POST", `${deployment-suffix(project, deployment-id)}/retry`, {}, opts)
 }
 
 rollback-deployment
 meta {
     doc: """POST .../deployments/{id}/rollback - Make an earlier successful production deployment live again."""
 }
-fn (project: Str, deployment-id: Str): Map {
-  ::api/account-json("POST", `${deployment-suffix(project, deployment-id)}/rollback`, {})
+fn
+(project: Str, deployment-id: Str): Map {
+  rollback-deployment(project, deployment-id, {})
+},
+(project: Str, deployment-id: Str, opts: Map): Map {
+  ::api/account-json("POST", `${deployment-suffix(project, deployment-id)}/rollback`, {}, opts)
 }

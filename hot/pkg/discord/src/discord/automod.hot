@@ -25,8 +25,12 @@ list-auto-moderation-rules
 meta {
     doc: """GET /guilds/{guild_id}/auto-moderation/rules - Every auto-moderation rule in a guild."""
 }
-fn (request: ListAutoModerationRulesRequest): Vec<Map> {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/auto-moderation/rules`)
+fn
+(request: ListAutoModerationRulesRequest): Vec<Map> {
+  list-auto-moderation-rules(request, {})
+},
+(request: ListAutoModerationRulesRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/auto-moderation/rules`, {}, opts)
 }
 
 GetAutoModerationRuleRequest type {
@@ -38,8 +42,12 @@ get-auto-moderation-rule
 meta {
     doc: """GET /guilds/{guild_id}/auto-moderation/rules/{rule_id} - One rule."""
 }
-fn (request: GetAutoModerationRuleRequest): Map {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/auto-moderation/rules/${seg(request.rule_id)}`)
+fn
+(request: GetAutoModerationRuleRequest): Map {
+  get-auto-moderation-rule(request, {})
+},
+(request: GetAutoModerationRuleRequest, opts: Map): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/auto-moderation/rules/${seg(request.rule_id)}`, {}, opts)
 }
 
 CreateAutoModerationRuleRequest type {
@@ -78,11 +86,15 @@ meta {
     ```
     """
 }
-fn (request: CreateAutoModerationRuleRequest): Map {
+fn
+(request: CreateAutoModerationRuleRequest): Map {
+  create-auto-moderation-rule(request, {})
+},
+(request: CreateAutoModerationRuleRequest, opts: Map): Map {
   ::api/call("POST", `/guilds/${seg(request.guild_id)}/auto-moderation/rules`, {
     body: ::api/body(request, ["guild_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 ModifyAutoModerationRuleRequest type {
@@ -102,11 +114,15 @@ modify-auto-moderation-rule
 meta {
     doc: """PATCH /guilds/{guild_id}/auto-moderation/rules/{rule_id} - Change a rule (e.g. `enabled: false` to pause it). Only fields you set are sent; `trigger_type` cannot change."""
 }
-fn (request: ModifyAutoModerationRuleRequest): Map {
+fn
+(request: ModifyAutoModerationRuleRequest): Map {
+  modify-auto-moderation-rule(request, {})
+},
+(request: ModifyAutoModerationRuleRequest, opts: Map): Map {
   ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/auto-moderation/rules/${seg(request.rule_id)}`, {
     body: ::api/body(request, ["guild_id", "rule_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 DeleteAutoModerationRuleRequest type {
@@ -119,6 +135,10 @@ delete-auto-moderation-rule
 meta {
     doc: """DELETE /guilds/{guild_id}/auto-moderation/rules/{rule_id} - Delete a rule."""
 }
-fn (request: DeleteAutoModerationRuleRequest): Bool {
-  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/auto-moderation/rules/${seg(request.rule_id)}`, {reason: request.reason})
+fn
+(request: DeleteAutoModerationRuleRequest): Bool {
+  delete-auto-moderation-rule(request, {})
+},
+(request: DeleteAutoModerationRuleRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/auto-moderation/rules/${seg(request.rule_id)}`, {reason: request.reason}, opts)
 }

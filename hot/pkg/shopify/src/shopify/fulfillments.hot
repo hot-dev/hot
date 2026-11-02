@@ -26,6 +26,9 @@ fn
   list-fulfillment-orders(order-id, {})
 },
 (order-id: Str, options: Map): Map {
+  list-fulfillment-orders(order-id, options, {})
+},
+(order-id: Str, options: Map, opts: Map): Map {
   query """
   query FulfillmentOrders($id: ID!, $first: Int!, $after: String, $query: String) {
     order(id: $id) {
@@ -44,8 +47,9 @@ fn
   }
   """
   vars ::api/connection-variables(options)
-  data ::api/graphql(query, {...vars, id: order-id})
+  data ::api/graphql(query, {...vars, id: order-id}, opts)
   cond {
+    is-err(data) => { data }
     is-null(data.order) => { err(`shopify: order ${order-id} not found`) }
     => { data.order.fulfillmentOrders }
   }
@@ -117,6 +121,9 @@ fn
   create-fulfillment(line-items, tracking, {})
 },
 (line-items: Any, tracking: Map?, options: Map): Map {
+  create-fulfillment(line-items, tracking, options, {})
+},
+(line-items: Any, tracking: Map?, options: Map, opts: Map): Map {
   mutation """
   mutation FulfillmentCreate($fulfillment: FulfillmentInput!, $message: String) {
     fulfillmentCreate(fulfillment: $fulfillment, message: $message) {
@@ -132,8 +139,8 @@ fn
     fulfillment: build-fulfillment-input(line-items, tracking, options),
     message: get(options, "message")
   }, is-some)
-  payload ::api/mutate(mutation, vars, "fulfillmentCreate")
-  payload.fulfillment
+  payload ::api/mutate(mutation, vars, "fulfillmentCreate", opts)
+  if-ok(payload, %(%.fulfillment))
 }
 
 update-tracking
@@ -145,6 +152,9 @@ fn
   update-tracking(fulfillment-id, tracking, false)
 },
 (fulfillment-id: Str, tracking: Map, notify-customer: Bool): Map {
+  update-tracking(fulfillment-id, tracking, notify-customer, {})
+},
+(fulfillment-id: Str, tracking: Map, notify-customer: Bool, opts: Map): Map {
   mutation """
   mutation FulfillmentTrackingInfoUpdate($fulfillmentId: ID!, $trackingInfoInput: FulfillmentTrackingInput!, $notifyCustomer: Boolean) {
     fulfillmentTrackingInfoUpdate(fulfillmentId: $fulfillmentId, trackingInfoInput: $trackingInfoInput, notifyCustomer: $notifyCustomer) {
@@ -157,6 +167,6 @@ fn
     fulfillmentId: fulfillment-id,
     trackingInfoInput: or(build-tracking-input(tracking), {}),
     notifyCustomer: notify-customer
-  }, "fulfillmentTrackingInfoUpdate")
-  payload.fulfillment
+  }, "fulfillmentTrackingInfoUpdate", opts)
+  if-ok(payload, %(%.fulfillment))
 }

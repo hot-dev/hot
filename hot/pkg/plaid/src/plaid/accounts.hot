@@ -23,7 +23,10 @@ fn
   get-accounts(access-token, null)
 },
 (access-token: Str, options: Map?): Map {
-  ::api/post("/accounts/get", with-options(access-token, options))
+  get-accounts(access-token, options, {})
+},
+(access-token: Str, options: Map?, opts: Map): Map {
+  ::api/post("/accounts/get", with-options(access-token, options), opts)
 }
 
 get-balances
@@ -40,7 +43,10 @@ fn
   get-balances(access-token, null)
 },
 (access-token: Str, options: Map?): Map {
-  ::api/post("/accounts/balance/get", with-options(access-token, options))
+  get-balances(access-token, options, {})
+},
+(access-token: Str, options: Map?, opts: Map): Map {
+  ::api/post("/accounts/balance/get", with-options(access-token, options), opts)
 }
 
 get-auth
@@ -52,7 +58,10 @@ fn
   get-auth(access-token, null)
 },
 (access-token: Str, options: Map?): Map {
-  ::api/post("/auth/get", with-options(access-token, options))
+  get-auth(access-token, options, {})
+},
+(access-token: Str, options: Map?, opts: Map): Map {
+  ::api/post("/auth/get", with-options(access-token, options), opts)
 }
 
 get-identity
@@ -64,5 +73,8 @@ fn
   get-identity(access-token, null)
 },
 (access-token: Str, options: Map?): Map {
-  ::api/post("/identity/get", with-options(access-token, options))
+  get-identity(access-token, options, {})
+},
+(access-token: Str, options: Map?, opts: Map): Map {
+  ::api/post("/identity/get", with-options(access-token, options), opts)
 }

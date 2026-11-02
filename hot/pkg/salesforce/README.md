@@ -42,6 +42,32 @@ The token host and the JWT audience are separate settings because Salesforce tre
 
 **Sessions.** The first request in a run mints a session, and later requests reuse it. The cache is keyed on the credentials. A `401 INVALID_SESSION_ID` drops the cached session, mints a fresh one, and retries the request once. An explicit access token is never refreshed: its 401 comes back as an Err.
 
+## Per-call credentials
+
+Every function that calls Salesforce takes an optional trailing `opts` Map, so one run can act for many orgs and parallel flows don't share credentials. Per-call credentials are masked in call records, and nothing from `opts` is written to ctx except the minted session, cached under a hash of the credentials.
+
+| Flow | Keys in `opts` |
+|---|---|
+| Access token | `access-token`, `instance-url` |
+| Refresh token | `refresh-token`, `client-id` (+ `client-secret` for confidential apps, `my-domain-url` for the token host) |
+| JWT bearer | `private-key`, `client-id`, `username` (+ `audience`, `my-domain-url`) |
+| Client credentials | `client-secret`, `client-id`, `my-domain-url` |
+
+`flow`, `sandbox` and `ttl` work like their context variables, and `api-version` picks the REST API version. `opts` always comes last. Where a function also takes `options`, pass `{}` for those.
+
+```hot
+tenant {access-token: "00D...", instance-url: "https://acme.my.salesforce.com"}
+
+lead ::salesforce::sobjects/get-record("Lead", "00Q...", tenant)
+rows ::salesforce::query/soql-records("SELECT Id FROM Contact", {max-records: 500}, tenant)
+limits ::salesforce::org/limits(tenant)
+
+other-org {refresh-token: "5Aep...", client-id: "3MVG...", client-secret: "..."}
+page ::salesforce::query/soql("SELECT Id FROM Lead", {}, other-org)
+```
+
+Credentials in `opts` are a complete identity, and nothing in it falls back to context: `{access-token}` alone is an error, not a token sent to `salesforce.instance.url`. A key that is present but blank or null is an error naming it. `instance-url`, `my-domain-url` or `audience` without a credential in the same `opts` is an error too: context credentials are never sent to a per-call URL. `::salesforce::api/resolve(opts)` is the one place this is decided.
+
 ## Quick start
 
 ```hot

@@ -104,6 +104,74 @@ meta ["test"] fn () {
     assert-eq("?with_counts=true", ::api/query({with_counts: true}), "booleans encode as true")
 }
 
+test-resolve-from-prefers-opts-then-ctx
+meta ["test"] fn () {
+    ctx-values {"discord.bot.token": "ctx-token"}
+    assert-eq("tenant-token", ::api/resolve-from({token: " tenant-token "}, ctx-values).token)
+    assert-eq("ctx-token", ::api/resolve-from({}, ctx-values).token)
+}
+
+test-resolve-from-blank-token-never-falls-back
+meta ["test"] fn () {
+    for-each(["", "  ", null], (blank) {
+        out ::api/resolve-from({token: blank}, {"discord.bot.token": "ctx-token"})
+        assert(is-err(out), "a blank token is an Err, never ctx")
+        assert(contains(if-err(out, (e) { e }), "token"), "names the key")
+    })
+}
+
+test-resolve-from-no-token
+meta ["test"] fn () {
+    assert(contains(if-err(::api/resolve-from({}, {}), (e) { e }), "discord.bot.token"))
+}
+
+test-resolve-returns-marked-token-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-bot-token", ::api/resolve({token: "tenant-bot-token"}).token)
+}
+
+test-token-routes-never-send-a-bot-token
+meta ["test"] fn () {
+    ::hot::ctx/set("discord.bot.token", "ctx-bot-token")
+    plain ::api/build-request("POST", "/webhooks/1/tok", {auth: false})
+    assert(not(in("Authorization", keys(plain.headers))), "no ctx token")
+    with-opts ::api/build-request("POST", "/webhooks/1/tok", {auth: false, token: "tenant-bot-token"})
+    assert(not(in("Authorization", keys(with-opts.headers))), "no token from opts")
+    assert(is-err(::api/build-request("POST", "/webhooks/1/tok", {auth: false, token: ""})), "a blank token is still an Err")
+}
+
+test-token-seg-encodes-and-returns-the-value
+meta ["test"] fn () {
+    assert-eq("a%2Fwebhook-token", ::api/token-seg("a/webhook-token"))
+}
+
+test-webhook-tokens-marked-unchanged
+meta ["test"] fn () {
+    hook {id: "1", token: "webhook-token-value"}
+    assert-eq(hook, ::discord::webhooks/mark-webhook-tokens(hook))
+    assert-eq([hook, {id: "2"}], ::discord::webhooks/mark-webhook-tokens([hook, {id: "2"}]))
+}
+
+test-opts-arity-errs-before-any-request
+meta ["test"] fn () {
+    assert(is-err(::discord::users/get-current-user({token: ""})))
+    assert(is-err(::discord::applications/get-current-application({token: null})))
+    assert(is-err(::discord::webhooks/get-webhook(::discord::webhooks/GetWebhookRequest({webhook_id: "1"}), {token: " "})))
+    assert(is-err(::discord::webhooks/get-webhook-with-token(::discord::webhooks/GetWebhookWithTokenRequest({webhook_id: "1", webhook_token: "tok"}), {token: ""})))
+    assert(is-err(::api/request("GET", "https://discord.com/api/v10/users/@me", {}, "", "")), "an empty explicit token is an Err too")
+    assert(is-err(::api/call("GET", "/users/@me", {token: ""})), "a token in call options goes through resolve")
+    callback {interaction_id: "1", interaction_token: "tok", type: 1}
+    assert(is-err(::discord::interactions/create-interaction-response(callback, {token: ""})), "a failed callback isn't reported as true")
+}
+
+test-retry-after-header-non-numeric-is-null
+meta ["test"] fn () {
+    e ::api/HttpError(::hot::http/HttpResponse({status: 429, headers: {"retry-after": "soon"}, body: "busy"}))
+    assert(is-null(e.retry_after), "a malformed header isn't an Err")
+    ok ::api/HttpError(::hot::http/HttpResponse({status: 429, headers: {"retry-after": "1.5"}, body: "busy"}))
+    assert-eq(1.5, ok.retry_after)
+}
+
 test-build-request-url-and-headers
 meta ["test"] fn () {
     req ::api/build-request("GET", "/channels/123/messages", {query: {limit: 5, before: null}, token: "tkn"})

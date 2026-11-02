@@ -23,32 +23,48 @@ meta {
     probability; `metadata.isClosed` marks closed stages.
     """
 }
-fn (object-type: Str): Map {
-  ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}`))
+fn
+(object-type: Str): Map {
+  list-pipelines(object-type, {})
+},
+(object-type: Str, opts: Map): Map {
+  ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}`, opts), opts)
 }
 
 get-pipeline
 meta {
     doc: """GET /crm/pipelines/{version}/{objectType}/{pipelineId} - One pipeline with its stages. The default deal pipeline's id is `"default"`."""
 }
-fn (object-type: Str, pipeline-id: Str): Map {
-  ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}/${segment(pipeline-id)}`))
+fn
+(object-type: Str, pipeline-id: Str): Map {
+  get-pipeline(object-type, pipeline-id, {})
+},
+(object-type: Str, pipeline-id: Str, opts: Map): Map {
+  ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}/${segment(pipeline-id)}`, opts), opts)
 }
 
 list-stages
 meta {
     doc: """GET /crm/pipelines/{version}/{objectType}/{pipelineId}/stages - The stages of one pipeline: `{results: [{id, label, displayOrder, metadata}]}`."""
 }
-fn (object-type: Str, pipeline-id: Str): Map {
-  ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}/${segment(pipeline-id)}/stages`))
+fn
+(object-type: Str, pipeline-id: Str): Map {
+  list-stages(object-type, pipeline-id, {})
+},
+(object-type: Str, pipeline-id: Str, opts: Map): Map {
+  ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}/${segment(pipeline-id)}/stages`, opts), opts)
 }
 
 get-stage
 meta {
     doc: """GET /crm/pipelines/{version}/{objectType}/{pipelineId}/stages/{stageId} - One stage."""
 }
-fn (object-type: Str, pipeline-id: Str, stage-id: Str): Map {
-  ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}/${segment(pipeline-id)}/stages/${segment(stage-id)}`))
+fn
+(object-type: Str, pipeline-id: Str, stage-id: Str): Map {
+  get-stage(object-type, pipeline-id, stage-id, {})
+},
+(object-type: Str, pipeline-id: Str, stage-id: Str, opts: Map): Map {
+  ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}/${segment(pipeline-id)}/stages/${segment(stage-id)}`, opts), opts)
 }
 
 matches fn (item: Map, wanted: Str): Bool {
@@ -91,8 +107,12 @@ meta {
     ```
     """
 }
-fn (object-type: Str, pipeline: Str, stage: Str): Any {
-  pipelines list-pipelines(object-type)
+fn
+(object-type: Str, pipeline: Str, stage: Str): Any {
+  find-stage(object-type, pipeline, stage, {})
+},
+(object-type: Str, pipeline: Str, stage: Str, opts: Map): Any {
+  pipelines list-pipelines(object-type, opts)
   cond {
     is-err(pipelines) => { pipelines }
     => { find-stage-in(pipelines, pipeline, stage) }

@@ -1,6 +1,6 @@
 ::cal-com::slots ns
 meta {
-    ctx: {"cal-com.api.key": {required: true}},
+    ctx: {"cal-com.api.key": {required: false}},
     doc: """Available slots (`cal-api-version: 2024-09-04`): the bookable start times for an event type."""
 }
 
@@ -43,6 +43,9 @@ fn
   get-slots(event-type-id, start, end, time-zone, {})
 },
 (event-type-id: Any, start: Str, end: Str, time-zone: Str?, options: Map): Any {
+  get-slots(event-type-id, start, end, time-zone, options, {})
+},
+(event-type-id: Any, start: Str, end: Str, time-zone: Str?, options: Map, opts: Map): Any {
   query build-slots-query(event-type-id, start, end, time-zone, options)
-  ::api/request("GET", `/slots${query}`, "", ::cal-com/VERSION_SLOTS)
+  ::api/request("GET", `/slots${query}`, "", ::cal-com/VERSION_SLOTS, opts)
 }

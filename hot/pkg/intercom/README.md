@@ -16,11 +16,34 @@ hot.project.my-app.deps {
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `intercom.token` | yes | Access token from the Developer Hub (your app → Authentication), or an OAuth token |
+| `intercom.token` | yes, unless every call passes `token` | Access token from the Developer Hub (your app → Authentication), or an OAuth token |
 | `intercom.admin.id` | for actions | The admin to act as for replies, notes, assignment, state changes and conversation tags. `::intercom::admins/me().id` is the token's own admin |
 | `intercom.region` | no | `us` (default), `eu` (`api.eu.intercom.io`) or `au` (`api.au.intercom.io`). It must match the region your workspace is hosted in |
 | `intercom.version` | no | Override the pinned `Intercom-Version` (default `2.17`) |
 | `intercom.client.secret` | for webhooks | Your app's client secret (Developer Hub → Basic information). Used by `::intercom::webhooks/verify-request` |
+
+## Per-call credentials
+
+Every function that calls Intercom takes an optional trailing `opts` Map, so one run can act for many workspaces and parallel flows don't share credentials. Nothing from `opts` is written to ctx, and a `token` from `opts` is masked in call records.
+
+| Key | Effect |
+|---|---|
+| `token` | The access token for this call, instead of `intercom.token` |
+| `region` | `us`, `eu` or `au` for this call, instead of `intercom.region` |
+| `version` | The `Intercom-Version` for this call |
+| `admin-id` | The admin to act as, instead of `intercom.admin.id`. Replies, notes, assignment, state changes and conversation tags need it when `opts` has a `token`, because `intercom.admin.id` belongs to the workspace of `intercom.token` |
+
+`opts` always comes last. Where a function already takes `options`, pass `{}` for those.
+
+```hot
+::conversations ::intercom::conversations
+
+tenant {token: "tenant-b-token", region: "eu", admin-id: "991"}
+page ::conversations/list-conversations({per_page: 20}, tenant)
+::conversations/add-note("12345", "Escalated to tier 2.", tenant)
+```
+
+A `token` that is present but blank or null is an error naming the key, never a fallback to `intercom.token`. `::intercom::api/resolve(opts)` is the one place this is decided.
 
 ## Quick start
 
@@ -86,7 +109,7 @@ convo first(page.conversations)
 - `me()`, `list-admins()`, `get-admin(id)`, `find-admin-by-email(email)`, `list-teams()`
 
 **Escape hatch** (`::intercom::api`)
-- `request(method, path, body)` (pass `""` for no body), `next-cursor(page)`, `collect-pages(fetch, key, cursor, limit, acc)`
+- `request(method, path, body, opts?)` (pass `""` for no body), `resolve(opts)`, `next-cursor(page)`, `collect-pages(fetch, key, cursor, limit, acc)`
 
 ## Pagination
 

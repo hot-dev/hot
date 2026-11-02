@@ -10,6 +10,27 @@ Add this to the `deps` in your `hot.hot` file:
 "hot.dev/whatsapp": "1.1.0"
 ```
 
+## Per-call credentials
+
+Every function that calls the Graph API takes an optional trailing `opts` Map, so one run can act for many businesses and parallel flows don't share credentials. Nothing from `opts` is written to ctx, and an `access-token` from `opts` is masked in call records.
+
+| Key | Effect |
+|---|---|
+| `access-token` | The access token for this call, instead of `whatsapp.access.token` |
+| `phone-number-id` | The business number to use when a request has no `phone_number_id` |
+| `api-version` | The Graph API version for this call, instead of `whatsapp.api.version` |
+
+`opts` always comes last.
+
+```hot
+::messages ::whatsapp::messages
+
+tenant {access-token: "tenant-b-token", phone-number-id: "109876543210", api-version: "v25.0"}
+sent ::messages/send-text(::messages/SendTextRequest({to: "15551234567", text: "Hello"}), tenant)
+```
+
+An `access-token` that is present but blank or null is an error naming the key, never a fallback to `whatsapp.access.token`. `::whatsapp::api/resolve(opts)` is the one place this is decided.
+
 ## Functions by area
 
 ### Messages (`::whatsapp::messages`)

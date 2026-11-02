@@ -3,17 +3,22 @@ meta {
     doc: """
     Sandbox-only helpers for testing without a frontend: mint a public
     token for a test institution, fire webhooks on demand, and force an
-    Item into `ITEM_LOGIN_REQUIRED`. Each call errs locally unless
-    `plaid.env` is `"sandbox"`. Sandbox test credentials are `user_good`
+    Item into `ITEM_LOGIN_REQUIRED`. Each call errs locally unless its
+    environment (`environment` in `opts`, else `plaid.env`) is `"sandbox"`. Sandbox test credentials are `user_good`
     / `pass_good`; `ins_109508` is First Platypus Bank.
     """
 }
 
 ::api ::plaid::api
 
-require-sandbox fn (): Bool {
-  env lowercase(::api/current-env())
-  if(eq(env, "sandbox"), true, err(`plaid: sandbox endpoints need plaid.env "sandbox" (current: "${env}")`))
+require-sandbox fn
+(): Bool {
+  require-sandbox({})
+},
+(opts: Map): Bool {
+  ::api/mark-credentials(opts)
+  env lowercase(trim(Str(or(get(opts, "environment"), ::api/current-env()))))
+  if(eq(env, "sandbox"), true, err(`plaid: sandbox endpoints need the "sandbox" environment (current: "${env}")`))
 }
 
 create-public-token
@@ -38,12 +43,20 @@ fn
   create-public-token(institution-id, initial-products, null)
 },
 (institution-id: Str, initial-products: Vec<Str>, options: Map?): Map {
-  require-sandbox()
-  ::api/post("/sandbox/public_token/create", {
-    institution_id: institution-id,
-    initial_products: initial-products,
-    options: options
-  })
+  create-public-token(institution-id, initial-products, options, {})
+},
+(institution-id: Str, initial-products: Vec<Str>, options: Map?, opts: Map): Map {
+  guard require-sandbox(opts)
+  cond {
+    is-err(guard) => { guard }
+    => {
+      ::api/post("/sandbox/public_token/create", {
+        institution_id: institution-id,
+        initial_products: initial-products,
+        options: options
+      }, opts)
+    }
+  }
 }
 
 fire-webhook
@@ -64,20 +77,35 @@ fn
   fire-webhook(access-token, webhook-code, {})
 },
 (access-token: Str, webhook-code: Str, options: Map): Map {
-  require-sandbox()
-  ::api/post("/sandbox/item/fire_webhook", {
-    access_token: access-token,
-    webhook_code: webhook-code,
-    webhook_type: get(options, "webhook_type"),
-    options: filter-vals({new_transactions: get(options, "new_transactions")}, is-some)
-  })
+  fire-webhook(access-token, webhook-code, options, {})
+},
+(access-token: Str, webhook-code: Str, options: Map, opts: Map): Map {
+  guard require-sandbox(opts)
+  cond {
+    is-err(guard) => { guard }
+    => {
+      ::api/post("/sandbox/item/fire_webhook", {
+        access_token: access-token,
+        webhook_code: webhook-code,
+        webhook_type: get(options, "webhook_type"),
+        options: filter-vals({new_transactions: get(options, "new_transactions")}, is-some)
+      }, opts)
+    }
+  }
 }
 
 reset-login
 meta {
     doc: """POST /sandbox/item/reset_login: put a sandbox Item into `ITEM_LOGIN_REQUIRED` to test Link update mode. Returns `{reset_login: true}`."""
 }
-fn (access-token: Str): Map {
-  require-sandbox()
-  ::api/post("/sandbox/item/reset_login", {access_token: access-token})
+fn
+(access-token: Str): Map {
+  reset-login(access-token, {})
+},
+(access-token: Str, opts: Map): Map {
+  guard require-sandbox(opts)
+  cond {
+    is-err(guard) => { guard }
+    => { ::api/post("/sandbox/item/reset_login", {access_token: access-token}, opts) }
+  }
 }

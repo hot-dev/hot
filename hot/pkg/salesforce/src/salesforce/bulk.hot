@@ -162,8 +162,8 @@ body-text fn (response: Any): Str {
   }
 }
 
-send-csv fn (method: Str, path: Str): Any {
-  response ::api/send(method, path, null, {accept: "text/csv"})
+send-csv fn (method: Str, path: Str, opts: Map): Any {
+  response ::api/send(method, path, null, {accept: "text/csv"}, opts)
   cond {
     is-err(response) => { response }
     not(::hot::http/is-ok-response(response)) => { ::api/unwrap(response) }
@@ -171,8 +171,8 @@ send-csv fn (method: Str, path: Str): Any {
   }
 }
 
-csv-result fn (method: Str, path: Str): Str {
-  response send-csv(method, path)
+csv-result fn (method: Str, path: Str, opts: Map): Str {
+  response send-csv(method, path, opts)
   cond {
     is-err(response) => { response }
     => { body-text(response) }
@@ -183,7 +183,7 @@ job-path fn (kind: Str, job-id: Str): Str {
   `/jobs/${kind}/${::api/segment(job-id)}`
 }
 
-poll fn (job: Any): Map {
+poll fn (job: Result): Map {
   cond {
     is-err(job) => { job }
     is-job-finished(job) => { job }
@@ -204,10 +204,13 @@ fn
   create-ingest-job(object, operation, {})
 },
 (object: Str, operation: Str, options: Map): Map {
+  create-ingest-job(object, operation, options, {})
+},
+(object: Str, operation: Str, options: Map, opts: Map): Map {
   body build-ingest-job-body(object, operation, options)
   cond {
     is-err(body) => { body }
-    => { ::api/json("POST", "/jobs/ingest", body) }
+    => { ::api/json("POST", "/jobs/ingest", body, opts) }
   }
 }
 
@@ -215,32 +218,48 @@ upload-job-data
 meta {
     doc: """PUT /jobs/ingest/{id}/batches - Upload the job's CSV (header row of field API names first; see `to-csv`). One upload per job. Returns null on success."""
 }
-fn (job-id: Str, csv: Str): Any {
-  ::api/unwrap(::api/send("PUT", `${job-path("ingest", job-id)}/batches`, csv, {content-type: "text/csv"}))
+fn
+(job-id: Str, csv: Str): Any {
+  upload-job-data(job-id, csv, {})
+},
+(job-id: Str, csv: Str, opts: Map): Any {
+  ::api/unwrap(::api/send("PUT", `${job-path("ingest", job-id)}/batches`, csv, {content-type: "text/csv"}, opts))
 }
 
 close-job
 meta {
     doc: """PATCH /jobs/ingest/{id} with `state: UploadComplete` - Tell Salesforce the data is in so processing starts. Returns the job."""
 }
-fn (job-id: Str): Map {
-  ::api/json("PATCH", job-path("ingest", job-id), {state: "UploadComplete"})
+fn
+(job-id: Str): Map {
+  close-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  ::api/json("PATCH", job-path("ingest", job-id), {state: "UploadComplete"}, opts)
 }
 
 abort-ingest-job
 meta {
     doc: """PATCH /jobs/ingest/{id} with `state: Aborted` - Abort an open or in-progress ingest job."""
 }
-fn (job-id: Str): Map {
-  ::api/json("PATCH", job-path("ingest", job-id), {state: "Aborted"})
+fn
+(job-id: Str): Map {
+  abort-ingest-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  ::api/json("PATCH", job-path("ingest", job-id), {state: "Aborted"}, opts)
 }
 
 get-ingest-job
 meta {
     doc: """GET /jobs/ingest/{id} - Job status: `state` (`Open`, `UploadComplete`, `InProgress`, `JobComplete`, `Failed`, `Aborted`), `numberRecordsProcessed`, `numberRecordsFailed`, `errorMessage`."""
 }
-fn (job-id: Str): Map {
-  ::api/json("GET", job-path("ingest", job-id))
+fn
+(job-id: Str): Map {
+  get-ingest-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  ::api/json("GET", job-path("ingest", job-id), null, opts)
 }
 
 poll-ingest-job
@@ -259,40 +278,60 @@ meta {
     ```
     """
 }
-fn (job-id: Str): Map {
-  poll(get-ingest-job(job-id))
+fn
+(job-id: Str): Map {
+  poll-ingest-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  poll(get-ingest-job(job-id, opts))
 }
 
 delete-ingest-job
 meta {
     doc: """DELETE /jobs/ingest/{id} - Delete a finished job and its data. Returns null."""
 }
-fn (job-id: Str): Any {
-  ::api/json("DELETE", job-path("ingest", job-id))
+fn
+(job-id: Str): Any {
+  delete-ingest-job(job-id, {})
+},
+(job-id: Str, opts: Map): Any {
+  ::api/json("DELETE", job-path("ingest", job-id), null, opts)
 }
 
 successful-results
 meta {
     doc: """GET /jobs/ingest/{id}/successfulResults - CSV of the processed records, with `sf__Id` and `sf__Created` columns first."""
 }
-fn (job-id: Str): Str {
-  csv-result("GET", `${job-path("ingest", job-id)}/successfulResults`)
+fn
+(job-id: Str): Str {
+  successful-results(job-id, {})
+},
+(job-id: Str, opts: Map): Str {
+  csv-result("GET", `${job-path("ingest", job-id)}/successfulResults`, opts)
 }
 
 failed-results
 meta {
     doc: """GET /jobs/ingest/{id}/failedResults - CSV of the failed records, with `sf__Id` and `sf__Error` columns first."""
 }
-fn (job-id: Str): Str {
-  csv-result("GET", `${job-path("ingest", job-id)}/failedResults`)
+fn
+(job-id: Str): Str {
+  failed-results(job-id, {})
+},
+(job-id: Str, opts: Map): Str {
+  csv-result("GET", `${job-path("ingest", job-id)}/failedResults`, opts)
 }
 
 unprocessed-records
 meta {
     doc: """GET /jobs/ingest/{id}/unprocessedrecords - CSV of the records never processed (e.g. after an abort)."""
 }
-fn (job-id: Str): Str {
-  csv-result("GET", `${job-path("ingest", job-id)}/unprocessedrecords`)
+fn
+(job-id: Str): Str {
+  unprocessed-records(job-id, {})
+},
+(job-id: Str, opts: Map): Str {
+  csv-result("GET", `${job-path("ingest", job-id)}/unprocessedrecords`, opts)
 }
 
 ingest
@@ -318,17 +357,20 @@ fn
   ingest(object, operation, csv, {})
 },
 (object: Str, operation: Str, csv: Str, options: Map): Map {
-  job create-ingest-job(object, operation, options)
+  ingest(object, operation, csv, options, {})
+},
+(object: Str, operation: Str, csv: Str, options: Map, opts: Map): Map {
+  job create-ingest-job(object, operation, options, opts)
   cond {
     is-err(job) => { job }
     => {
-      uploaded upload-job-data(job.id, csv)
+      uploaded upload-job-data(job.id, csv, opts)
       cond {
         is-err(uploaded) => {
-          abort-ingest-job(job.id)
+          abort-ingest-job(job.id, opts)
           uploaded
         }
-        => { close-job(job.id) }
+        => { close-job(job.id, opts) }
       }
     }
   }
@@ -357,39 +399,58 @@ fn
   create-query-job(soql, {})
 },
 (soql: Str, options: Map): Map {
-  ::api/json("POST", "/jobs/query", build-query-job-body(soql, options))
+  create-query-job(soql, options, {})
+},
+(soql: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", "/jobs/query", build-query-job-body(soql, options), opts)
 }
 
 get-query-job
 meta {
     doc: """GET /jobs/query/{id} - Query job status (`state`, `numberRecordsProcessed`, ...)."""
 }
-fn (job-id: Str): Map {
-  ::api/json("GET", job-path("query", job-id))
+fn
+(job-id: Str): Map {
+  get-query-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  ::api/json("GET", job-path("query", job-id), null, opts)
 }
 
 poll-query-job
 meta {
     doc: """Fetch a query job and return it once finished, or an Err while it is still running (see `poll-ingest-job`)."""
 }
-fn (job-id: Str): Map {
-  poll(get-query-job(job-id))
+fn
+(job-id: Str): Map {
+  poll-query-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  poll(get-query-job(job-id, opts))
 }
 
 abort-query-job
 meta {
     doc: """PATCH /jobs/query/{id} with `state: Aborted` - Abort a running query job."""
 }
-fn (job-id: Str): Map {
-  ::api/json("PATCH", job-path("query", job-id), {state: "Aborted"})
+fn
+(job-id: Str): Map {
+  abort-query-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  ::api/json("PATCH", job-path("query", job-id), {state: "Aborted"}, opts)
 }
 
 delete-query-job
 meta {
     doc: """DELETE /jobs/query/{id} - Delete a finished query job and its results. Returns null."""
 }
-fn (job-id: Str): Any {
-  ::api/json("DELETE", job-path("query", job-id))
+fn
+(job-id: Str): Any {
+  delete-query-job(job-id, {})
+},
+(job-id: Str, opts: Map): Any {
+  ::api/json("DELETE", job-path("query", job-id), null, opts)
 }
 
 query-results
@@ -413,7 +474,10 @@ fn
   query-results(job-id, {})
 },
 (job-id: Str, options: Map): Map {
-  response send-csv("GET", results-path(job-id, options))
+  query-results(job-id, options, {})
+},
+(job-id: Str, options: Map, opts: Map): Map {
+  response send-csv("GET", results-path(job-id, options), opts)
   cond {
     is-err(response) => { response }
     => {

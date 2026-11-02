@@ -49,7 +49,7 @@ fn
     => {
       signature slice(header, 7)
       raw-body ::hot::http/raw-body(request)
-      ::hmac/hmac-verify-hex(app-secret, raw-body, signature, "sha256")
+      ::hmac/hmac-verify-hex(::ctx/mark-secret(app-secret), raw-body, signature, "sha256")
     }
   }
 }
@@ -95,7 +95,7 @@ fn
     ne(mode, "subscribe") => { err("Invalid hub.mode") }
     // An empty configured token would accept an empty hub.verify_token.
     is-empty(verify-token) => { err("Invalid verify token") }
-    not(secure-compare(Str(token), verify-token)) => { err("Invalid verify token") }
+    not(secure-compare(Str(token), ::ctx/mark-secret(verify-token))) => { err("Invalid verify token") }
     is-empty(challenge) => { err("Missing hub.challenge") }
     => { challenge }
   }

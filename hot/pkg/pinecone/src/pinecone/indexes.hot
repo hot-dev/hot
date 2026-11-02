@@ -17,20 +17,28 @@ meta {
 
 list-indexes
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """GET /indexes - Your indexes: `{indexes: [{name, host, status, deployment, schema, deletion_protection, tags?}]}`."""
 }
-fn (): Map {
-  ::api/json("GET", ::api/control-url("indexes"), "")
+fn
+(): Map {
+  list-indexes({})
+},
+(opts: Map): Map {
+  ::api/json("GET", ::api/control-url("indexes"), "", opts)
 }
 
 describe-index
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """GET /indexes/{name} - One index: `host` (what the data-plane functions take), `status: {ready, state}`, `deployment`, `schema`, `deletion_protection`, `tags`."""
 }
-fn (name: Str): Map {
-  ::api/json("GET", ::api/control-url("indexes", name), "")
+fn
+(name: Str): Map {
+  describe-index(name, {})
+},
+(name: Str, opts: Map): Map {
+  ::api/json("GET", ::api/control-url("indexes", name), "", opts)
 }
 
 build-deployment
@@ -74,7 +82,7 @@ fn (name: Str, schema: Map, options: Map): Map {
 
 create-index
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     POST /indexes - Create a serverless dense vector index. `options`:
     `metric` ("cosine" default, "euclidean", "dotproduct"), `cloud`
@@ -103,12 +111,15 @@ fn
   create-index(name, dimension, {})
 },
 (name: Str, dimension: Int, options: Map): Map {
-  ::api/json("POST", ::api/control-url("indexes"), build-create-index-body(name, dimension, options))
+  create-index(name, dimension, options, {})
+},
+(name: Str, dimension: Int, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/control-url("indexes"), build-create-index-body(name, dimension, options), opts)
 }
 
 create-index-from-schema
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     POST /indexes - Create an index from an explicit `schema`. A schema
     of only `_values` (dense) and/or `_sparse_values` (sparse) makes a
@@ -127,8 +138,12 @@ meta {
     ```
     """
 }
-fn (name: Str, schema: Map, options: Map): Map {
-  ::api/json("POST", ::api/control-url("indexes"), build-schema-index-body(name, schema, options))
+fn
+(name: Str, schema: Map, options: Map): Map {
+  create-index-from-schema(name, schema, options, {})
+},
+(name: Str, schema: Map, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/control-url("indexes"), build-schema-index-body(name, schema, options), opts)
 }
 
 build-create-for-model-body
@@ -156,7 +171,7 @@ fn (name: Str, model: Str, options: Map): Map {
 
 create-index-for-model
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     POST /indexes/create-for-model - Create an index with integrated
     embedding: Pinecone embeds the text field named by `field_map` with
@@ -181,7 +196,10 @@ fn
   create-index-for-model(name, model, {})
 },
 (name: Str, model: Str, options: Map): Map {
-  ::api/json("POST", ::api/control-url("indexes", "create-for-model"), build-create-for-model-body(name, model, options))
+  create-index-for-model(name, model, options, {})
+},
+(name: Str, model: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/control-url("indexes", "create-for-model"), build-create-for-model-body(name, model, options), opts)
 }
 
 build-configure-body
@@ -200,7 +218,7 @@ fn (options: Map): Map {
 
 configure-index
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     PATCH /indexes/{name} - Change an index: `deletion_protection`
     ("enabled"/"disabled"), `tags` (merged; set a key to `""` to remove
@@ -214,17 +232,25 @@ meta {
     ```
     """
 }
-fn (name: Str, options: Map): Map {
-  ::api/json("PATCH", ::api/control-url("indexes", name), build-configure-body(options))
+fn
+(name: Str, options: Map): Map {
+  configure-index(name, options, {})
+},
+(name: Str, options: Map, opts: Map): Map {
+  ::api/json("PATCH", ::api/control-url("indexes", name), build-configure-body(options), opts)
 }
 
 delete-index
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """DELETE /indexes/{name} - Delete an index and all its data. Fails while `deletion_protection` is "enabled"; disable it with `configure-index` first."""
 }
-fn (name: Str): Any {
-  ::api/json("DELETE", ::api/control-url("indexes", name), "")
+fn
+(name: Str): Any {
+  delete-index(name, {})
+},
+(name: Str, opts: Map): Any {
+  ::api/json("DELETE", ::api/control-url("indexes", name), "", opts)
 }
 
 // =============================================================================

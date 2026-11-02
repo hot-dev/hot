@@ -38,6 +38,6 @@ fn
 (request: CreatePortalSessionRequest): Map {
   create-portal-session(request, RequestOptions({}))
 },
-(request: CreatePortalSessionRequest, options: RequestOptions): Map {
+(request: CreatePortalSessionRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/billing_portal/sessions", request, options)
 }

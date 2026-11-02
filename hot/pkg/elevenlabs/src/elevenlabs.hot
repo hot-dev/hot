@@ -11,7 +11,9 @@ meta {
     replies, phone agents (`ulaw_8000` output), narrated summaries.
 
     **Setup**: context variable `elevenlabs.api.key` (from
-    https://elevenlabs.io/app/settings/api-keys).
+    https://elevenlabs.io/app/settings/api-keys), or a per-call `api-key`
+    in the trailing `opts` Map of any API-calling function (see
+    `::elevenlabs::api`).
 
     **Quick start**
 

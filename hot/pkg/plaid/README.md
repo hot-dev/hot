@@ -20,8 +20,8 @@ It depends on `hot.dev/jwt`, which is fetched with it.
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `plaid.client-id` | yes | Your Plaid client id |
-| `plaid.secret` | yes | The secret for the environment you call (sandbox and production secrets differ) |
+| `plaid.client-id` | yes, unless passed per call | Your Plaid client id |
+| `plaid.secret` | yes, unless passed per call | The secret for the environment you call (sandbox and production secrets differ) |
 | `plaid.env` | no | `"sandbox"` (default) or `"production"`. Anything else errs, including the decommissioned `"development"` |
 | `plaid.version` | no | Overrides the `Plaid-Version` header (default `2020-09-14`, the current API version) |
 
@@ -59,6 +59,29 @@ pt ::plaid::sandbox/create-public-token("ins_109508", ["transactions"], {webhook
 tokens ::plaid::link/exchange-public-token(pt.public_token)
 ::plaid::sandbox/fire-webhook(tokens.access_token, "SYNC_UPDATES_AVAILABLE")
 ```
+
+## Per-call credentials
+
+Every function that calls Plaid takes an optional trailing `opts` Map, so one run can act for many Plaid clients and parallel flows don't share credentials. Per-call credentials are masked in call records, and nothing from `opts` is written to ctx.
+
+| Key | Effect |
+|---|---|
+| `client-id`, `secret` | The credentials for this call, instead of `plaid.client-id` and `plaid.secret`. Always together |
+| `environment` | `"sandbox"` or `"production"` for this call, instead of `plaid.env` |
+| `plaid-version` | The `Plaid-Version` for this call, instead of `plaid.version` |
+
+`opts` always comes last. Where a function also takes Plaid's own `options`, pass `null` or `{}` for those.
+
+```hot
+tenant {client-id: "tenant-client-id", secret: "tenant-secret", environment: "production"}
+
+link ::plaid::link/create-link-token("user-42", "My App", {}, tenant)
+tokens ::plaid::link/exchange-public-token(public-token, tenant)
+accounts ::plaid::accounts/get-accounts(tokens.access_token, null, tenant)
+changes ::plaid::transactions/sync-all-transactions(tokens.access_token, null, {}, tenant)
+```
+
+A key that is present but blank or null is an error naming the key, never a fallback to context, and half a credential is an error too. `::plaid::api/resolve(opts)` is the one place this is decided. Item access tokens, and the tokens Plaid mints, are masked in call records as well.
 
 ## Transactions sync
 
@@ -108,6 +131,8 @@ relink ::plaid::link/create-link-token("user-42", "My App", {access_token: acces
 ```
 
 ## Webhooks
+
+The 1-arity `verify-webhook` fetches the key with the context credentials. Pass a null `jwk` and per-call credentials to fetch it with a tenant's: `verify-webhook(request, null, {}, tenant)`.
 
 Plaid signs each webhook with an ES256 JWT in the `Plaid-Verification` header. `verify-webhook` checks the following:
 

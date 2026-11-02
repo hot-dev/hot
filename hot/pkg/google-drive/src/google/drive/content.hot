@@ -227,7 +227,7 @@ fn
   cond {
     and(is-size-limit-error(response), not(is-map(rng))) => { download-file-chunked(id, opts) }
     is-err(response) => { response }
-    not(is-ok-response(response)) => { err(::api/error-from-response(response)) }
+    not(is-ok-response(response)) => { err(::api/HttpError(response)) }
     => { ::drive/content-from-response(id, response, if(is-map(rng), "range", "download")) }
   }
 }
@@ -255,7 +255,7 @@ fetch-ranges fn (full-url: Str, ranges: Vec, index: Int, acc: Bytes, opts: Map):
         eq(response.status, 206) => {
           fetch-ranges(full-url, ranges, add(index, 1), concat(acc, response.body-bytes), opts)
         }
-        => { err(::api/error-from-response(response)) }
+        => { err(::api/HttpError(response)) }
       }
     }
   }
@@ -320,7 +320,7 @@ fn (file-id: Str, link: Str, opts: Map): FileContent {
   response ::api/request(::drive/READ_SCOPE, "GET", link, {}, "", ::drive/creds(opts))
   cond {
     is-err(response) => { response }
-    not(is-ok-response(response)) => { err(::api/error-from-response(response)) }
+    not(is-ok-response(response)) => { err(::api/HttpError(response)) }
     => { ::drive/content-from-response(file-id, response, "export-link") }
   }
 }
@@ -330,7 +330,7 @@ export-direct fn (id: Str, mime-type: Str, opts: Map): FileContent {
   response ::api/request(::drive/READ_SCOPE, "GET", full-url, {}, "", ::drive/creds(opts))
   cond {
     is-err(response) => { response }
-    not(is-ok-response(response)) => { err(::api/error-from-response(response)) }
+    not(is-ok-response(response)) => { err(::api/HttpError(response)) }
     => { ::drive/content-from-response(id, response, "export") }
   }
 }

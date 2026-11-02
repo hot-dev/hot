@@ -1,6 +1,6 @@
 ::zendesk::tickets ns
 meta {
-    ctx: {"zendesk.subdomain": {required: true, secret: false}},
+    ctx: {"zendesk.subdomain": {required: false, secret: false}},
     doc: """
     Tickets: create, read, update, comment, merge and tag; list with
     cursor pagination; ticket fields; satisfaction ratings; and the
@@ -30,7 +30,10 @@ fn
   list-tickets({})
 },
 (options: Map): Any {
-  ::api/list-page("/tickets", options)
+  list-tickets(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/list-page("/tickets", options, opts)
 }
 
 list-all-tickets
@@ -42,23 +45,34 @@ fn
   list-all-tickets(limit, {})
 },
 (limit: Int, options: Map): Vec {
-  ::api/collect("/tickets", "tickets", options, limit)
+  list-all-tickets(limit, options, {})
+},
+(limit: Int, options: Map, opts: Map): Vec {
+  ::api/collect("/tickets", "tickets", options, limit, opts)
 }
 
 get-ticket
 meta {
     doc: """GET /tickets/{id} - One ticket: `{ticket}`."""
 }
-fn (id: Any): Any {
-  ::api/request("GET", `/tickets/${::api/path-segment(id)}`, "")
+fn
+(id: Any): Any {
+  get-ticket(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/tickets/${::api/path-segment(id)}`, "", opts)
 }
 
 show-many-tickets
 meta {
     doc: """GET /tickets/show_many?ids= - Up to 100 tickets by id in one call: `{tickets}`."""
 }
-fn (ids: Vec): Any {
-  ::api/request("GET", `/tickets/show_many${::api/query-string({ids: ids})}`, "")
+fn
+(ids: Vec): Any {
+  show-many-tickets(ids, {})
+},
+(ids: Vec, opts: Map): Any {
+  ::api/request("GET", `/tickets/show_many${::api/query-string({ids: ids})}`, "", opts)
 }
 
 build-create-body
@@ -85,23 +99,34 @@ fn
   create-ticket(subject, body, {})
 },
 (subject: Str, body: Str, options: Map): Any {
-  ::api/request("POST", "/tickets", build-create-body(subject, body, options))
+  create-ticket(subject, body, options, {})
+},
+(subject: Str, body: Str, options: Map, opts: Map): Any {
+  ::api/request("POST", "/tickets", build-create-body(subject, body, options), opts)
 }
 
 update-ticket
 meta {
     doc: """PUT /tickets/{id} - Update ticket fields (`status`, `priority`, `assignee_id`, `group_id`, `tags` (replaces), `custom_fields`, `comment`, ...). Unset fields are omitted. Add `safe_update: true` and `updated_stamp` to fail with 409 on a concurrent change."""
 }
-fn (id: Any, changes: Map): Any {
-  ::api/request("PUT", `/tickets/${::api/path-segment(id)}`, {ticket: ::api/compact(changes)})
+fn
+(id: Any, changes: Map): Any {
+  update-ticket(id, changes, {})
+},
+(id: Any, changes: Map, opts: Map): Any {
+  ::api/request("PUT", `/tickets/${::api/path-segment(id)}`, {ticket: ::api/compact(changes)}, opts)
 }
 
 delete-ticket
 meta {
     doc: """DELETE /tickets/{id} - Move a ticket to Deleted tickets (recoverable for 30 days). Returns null."""
 }
-fn (id: Any): Any {
-  ::api/request("DELETE", `/tickets/${::api/path-segment(id)}`, "")
+fn
+(id: Any): Any {
+  delete-ticket(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("DELETE", `/tickets/${::api/path-segment(id)}`, "", opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +151,10 @@ fn
   add-comment(id, body, public, {})
 },
 (id: Any, body: Str, public: Bool, options: Map): Any {
-  ::api/request("PUT", `/tickets/${::api/path-segment(id)}`, build-comment-body(body, public, options))
+  add-comment(id, body, public, options, {})
+},
+(id: Any, body: Str, public: Bool, options: Map, opts: Map): Any {
+  ::api/request("PUT", `/tickets/${::api/path-segment(id)}`, build-comment-body(body, public, options), opts)
 }
 
 list-comments
@@ -138,7 +166,10 @@ fn
   list-comments(id, {})
 },
 (id: Any, options: Map): Any {
-  ::api/list-page(`/tickets/${::api/path-segment(id)}/comments`, options)
+  list-comments(id, options, {})
+},
+(id: Any, options: Map, opts: Map): Any {
+  ::api/list-page(`/tickets/${::api/path-segment(id)}/comments`, options, opts)
 }
 
 list-all-comments
@@ -150,7 +181,10 @@ fn
   list-all-comments(id, limit, {})
 },
 (id: Any, limit: Int, options: Map): Vec {
-  ::api/collect(`/tickets/${::api/path-segment(id)}/comments`, "comments", options, limit)
+  list-all-comments(id, limit, options, {})
+},
+(id: Any, limit: Int, options: Map, opts: Map): Vec {
+  ::api/collect(`/tickets/${::api/path-segment(id)}/comments`, "comments", options, limit, opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -188,39 +222,58 @@ fn
   merge-tickets(target-id, source-ids, {})
 },
 (target-id: Any, source-ids: Vec, options: Map): Any {
-  ::api/request("POST", `/tickets/${::api/path-segment(target-id)}/merge`, build-merge-body(source-ids, options))
+  merge-tickets(target-id, source-ids, options, {})
+},
+(target-id: Any, source-ids: Vec, options: Map, opts: Map): Any {
+  ::api/request("POST", `/tickets/${::api/path-segment(target-id)}/merge`, build-merge-body(source-ids, options), opts)
 }
 
 list-ticket-tags
 meta {
     doc: """GET /tickets/{id}/tags - A ticket's tags: `{tags}`."""
 }
-fn (id: Any): Any {
-  ::api/request("GET", `/tickets/${::api/path-segment(id)}/tags`, "")
+fn
+(id: Any): Any {
+  list-ticket-tags(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/tickets/${::api/path-segment(id)}/tags`, "", opts)
 }
 
 add-ticket-tags
 meta {
     doc: """PUT /tickets/{id}/tags - Add tags, keeping existing ones. Returns the ticket's tags."""
 }
-fn (id: Any, tags: Vec): Any {
-  ::api/request("PUT", `/tickets/${::api/path-segment(id)}/tags`, {tags: tags})
+fn
+(id: Any, tags: Vec): Any {
+  add-ticket-tags(id, tags, {})
+},
+(id: Any, tags: Vec, opts: Map): Any {
+  ::api/request("PUT", `/tickets/${::api/path-segment(id)}/tags`, {tags: tags}, opts)
 }
 
 set-ticket-tags
 meta {
     doc: """POST /tickets/{id}/tags - Replace all of a ticket's tags."""
 }
-fn (id: Any, tags: Vec): Any {
-  ::api/request("POST", `/tickets/${::api/path-segment(id)}/tags`, {tags: tags})
+fn
+(id: Any, tags: Vec): Any {
+  set-ticket-tags(id, tags, {})
+},
+(id: Any, tags: Vec, opts: Map): Any {
+  ::api/request("POST", `/tickets/${::api/path-segment(id)}/tags`, {tags: tags}, opts)
 }
 
 remove-ticket-tags
 meta {
     doc: """DELETE /tickets/{id}/tags - Remove the given tags from a ticket."""
 }
-fn (id: Any, tags: Vec): Any {
-  ::api/request("DELETE", `/tickets/${::api/path-segment(id)}/tags`, {tags: tags})
+fn
+(id: Any, tags: Vec): Any {
+  remove-ticket-tags(id, tags, {})
+},
+(id: Any, tags: Vec, opts: Map): Any {
+  ::api/request("DELETE", `/tickets/${::api/path-segment(id)}/tags`, {tags: tags}, opts)
 }
 
 list-tags
@@ -232,7 +285,10 @@ fn
   list-tags({})
 },
 (options: Map): Any {
-  ::api/list-page("/tags", options)
+  list-tags(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/list-page("/tags", options, opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +304,10 @@ fn
   list-ticket-fields({})
 },
 (options: Map): Any {
-  ::api/request("GET", `/ticket_fields${::api/query-string(options)}`, "")
+  list-ticket-fields(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/request("GET", `/ticket_fields${::api/query-string(options)}`, "", opts)
 }
 
 list-satisfaction-ratings
@@ -260,7 +319,10 @@ fn
   list-satisfaction-ratings({})
 },
 (options: Map): Any {
-  ::api/list-page("/satisfaction_ratings", options)
+  list-satisfaction-ratings(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/list-page("/satisfaction_ratings", options, opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -291,7 +353,10 @@ fn
   export-tickets(start-time, {})
 },
 (start-time: Int, options: Map): Any {
-  ::api/request("GET", `/incremental/tickets/cursor${::api/query-string({...options, start_time: start-time})}`, "")
+  export-tickets(start-time, options, {})
+},
+(start-time: Int, options: Map, opts: Map): Any {
+  ::api/request("GET", `/incremental/tickets/cursor${::api/query-string({...options, start_time: start-time})}`, "", opts)
 }
 
 export-tickets-next
@@ -303,5 +368,8 @@ fn
   export-tickets-next(cursor, {})
 },
 (cursor: Str, options: Map): Any {
-  ::api/request("GET", `/incremental/tickets/cursor${::api/query-string({...options, cursor: cursor})}`, "")
+  export-tickets-next(cursor, options, {})
+},
+(cursor: Str, options: Map, opts: Map): Any {
+  ::api/request("GET", `/incremental/tickets/cursor${::api/query-string({...options, cursor: cursor})}`, "", opts)
 }

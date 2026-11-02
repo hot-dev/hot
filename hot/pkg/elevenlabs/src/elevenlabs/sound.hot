@@ -28,7 +28,7 @@ fn (options: Map): Str {
 
 sound-effect
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """
     POST /v1/sound-generation: generate a sound effect from a text
     prompt. Returns audio `Bytes` (mp3 by default). `options`:
@@ -50,5 +50,8 @@ fn
   sound-effect(text, {})
 },
 (text: Str, options: Map): Bytes {
-  ::api/bytes("POST", sound-effect-path(options), sound-effect-body(text, options))
+  sound-effect(text, options, {})
+},
+(text: Str, options: Map, opts: Map): Bytes {
+  ::api/bytes("POST", sound-effect-path(options), sound-effect-body(text, options), opts)
 }

@@ -75,6 +75,7 @@ fn
     is-empty(signature) => { false }
     is-empty(url) => { false }
     => {
+      ::ctx/mark-secret(auth-token)
       body-sha or(get(or(get(request, "query", {}), {}), "bodySHA256", ""), "")
       cond {
         not(is-empty(body-sha)) => {

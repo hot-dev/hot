@@ -60,6 +60,26 @@ history ::messages/get-message-history("1100000000000000000", 500)
 members ::guilds/list-all-guild-members("1000000000000000000")
 ```
 
+## Per-call credentials
+
+Every function that calls Discord takes an optional trailing `opts` Map, so one run can act as many bots and parallel flows don't share credentials. Nothing from `opts` is written to ctx, and a `token` from `opts` is masked in call records.
+
+| Key | Effect |
+|---|---|
+| `token` | The bot token for this call, instead of `discord.bot.token` |
+
+`opts` always comes last.
+
+```hot
+::messages ::discord::messages
+
+tenant {token: "tenant-b-bot-token"}
+::messages/create-message(::messages/CreateMessageRequest({channel_id: "1100000000000000000", content: "Deploy finished"}), tenant)
+me ::discord::users/get-current-user(tenant)
+```
+
+A `token` that is present but blank or null is an error naming the key, never a fallback to `discord.bot.token`. `::discord::api/resolve(opts)` is the one place this is decided. Webhook-token and interaction-token routes never send a bot token, even with a `token` in `opts`. The tokens in their paths are masked in call records.
+
 ## Functions by area
 
 | Module | What it covers |

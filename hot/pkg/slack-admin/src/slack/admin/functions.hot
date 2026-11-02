@@ -37,8 +37,12 @@ meta {
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `list-all`.
     """
 }
-fn (request: ListRequest): Map {
-  ::api/call("admin.functions.list", request)
+fn
+(request: ListRequest): Map {
+  list(request, {})
+},
+(request: ListRequest, opts: Map): Map {
+  ::api/call("admin.functions.list", request, opts)
 }
 
 list-all
@@ -52,7 +56,10 @@ fn
   list-all(request, 1000)
 },
 (request: ListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.functions.list", request, "functions", max-items)
+  list-all(request, max-items, {})
+},
+(request: ListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.functions.list", request, "functions", max-items, opts)
 }
 
 PermissionsLookupRequest type {
@@ -67,8 +74,12 @@ meta {
     Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: PermissionsLookupRequest): Map {
-  ::api/call("admin.functions.permissions.lookup", request)
+fn
+(request: PermissionsLookupRequest): Map {
+  permissions-lookup(request, {})
+},
+(request: PermissionsLookupRequest, opts: Map): Map {
+  ::api/call("admin.functions.permissions.lookup", request, opts)
 }
 
 PermissionsSetRequest type {
@@ -85,6 +96,10 @@ meta {
     Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: PermissionsSetRequest): Map {
-  ::api/call("admin.functions.permissions.set", request)
+fn
+(request: PermissionsSetRequest): Map {
+  permissions-set(request, {})
+},
+(request: PermissionsSetRequest, opts: Map): Map {
+  ::api/call("admin.functions.permissions.set", request, opts)
 }

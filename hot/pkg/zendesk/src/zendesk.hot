@@ -26,6 +26,9 @@ meta {
     - or OAuth: `zendesk.oauth.token`, a Bearer access token (wins when
       both are set)
 
+    Every API-calling function also takes a trailing `opts` Map for
+    per-call credentials; see `::zendesk::api`.
+
     **Quick start**
 
     ```hot

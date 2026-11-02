@@ -50,7 +50,7 @@ test-error-classifiers
 meta ["test"] fn () {
     assert(::content/is-size-limit-error(err("::hot::http/request: response Content-Length exceeds 16777216 bytes")))
     assert(not(::content/is-size-limit-error(err("::hot::http/request: request failed"))))
-    too-big err(::google::api/error-from-response({status: 403, headers: {}, body: {error: {code: 403, message: "This file is too large to be exported.", errors: [{reason: "exportSizeLimitExceeded"}]}}}))
+    too-big err(::google::api/HttpError(::hot::http/HttpResponse({status: 403, headers: {}, body: {error: {code: 403, message: "This file is too large to be exported.", errors: [{reason: "exportSizeLimitExceeded"}]}}})))
     assert(::content/is-export-too-large(too-big))
     assert(not(::content/is-export-too-large(err("google: HTTP 404 (notFound): File not found"))))
 }

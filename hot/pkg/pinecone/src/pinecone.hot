@@ -9,7 +9,8 @@ meta {
 
     **Setup**: context variable `pinecone.api.key`. Optionally
     `pinecone.api.version` to pin a different API version than
-    `API_VERSION`.
+    `API_VERSION`. Both can also come per call, in the trailing `opts` Map
+    of any API-calling function (see `::pinecone::api`).
 
     **Quick start**
 

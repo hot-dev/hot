@@ -7,7 +7,7 @@ meta {
 
 list-voices
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """
     GET /v2/voices: the voices available to your account (premade,
     cloned, generated, and saved library voices). Returns `{voices,
@@ -31,41 +31,60 @@ fn
   list-voices({})
 },
 (options: Map): Map {
-  ::api/json("GET", `/v2/voices${::api/query-string(options)}`)
+  list-voices(options, {})
+},
+(options: Map, opts: Map): Map {
+  ::api/json("GET", `/v2/voices${::api/query-string(options)}`, {}, "", opts)
 }
 
 search-voices
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """GET /v2/voices?search=: search your voices by name, description, labels, or category."""
 }
-fn (search: Str): Map {
-  list-voices({search: search})
+fn
+(search: Str): Map {
+  search-voices(search, {})
+},
+(search: Str, opts: Map): Map {
+  list-voices({search: search}, opts)
 }
 
 get-voice
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """GET /v1/voices/{voice_id}: one voice's metadata, labels, preview URL, and settings."""
 }
-fn (voice-id: Str): Map {
-  ::api/json("GET", `/v1/voices/${::api/path-segment(voice-id)}`)
+fn
+(voice-id: Str): Map {
+  get-voice(voice-id, {})
+},
+(voice-id: Str, opts: Map): Map {
+  ::api/json("GET", `/v1/voices/${::api/path-segment(voice-id)}`, {}, "", opts)
 }
 
 get-voice-settings
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """GET /v1/voices/{voice_id}/settings: the voice's saved settings (`stability`, `similarity_boost`, `style`, `use_speaker_boost`, `speed`)."""
 }
-fn (voice-id: Str): Map {
-  ::api/json("GET", `/v1/voices/${::api/path-segment(voice-id)}/settings`)
+fn
+(voice-id: Str): Map {
+  get-voice-settings(voice-id, {})
+},
+(voice-id: Str, opts: Map): Map {
+  ::api/json("GET", `/v1/voices/${::api/path-segment(voice-id)}/settings`, {}, "", opts)
 }
 
 get-default-voice-settings
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """GET /v1/voices/settings/default: the default voice settings, a starting point for tuning."""
 }
-fn (): Map {
-  ::api/json("GET", "/v1/voices/settings/default")
+fn
+(): Map {
+  get-default-voice-settings({})
+},
+(opts: Map): Map {
+  ::api/json("GET", "/v1/voices/settings/default", {}, "", opts)
 }

@@ -38,8 +38,12 @@ meta {
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `policy-get-entities-all`.
     """
 }
-fn (request: PolicyGetEntitiesRequest): Map {
-  ::api/call("admin.auth.policy.getEntities", request)
+fn
+(request: PolicyGetEntitiesRequest): Map {
+  policy-get-entities(request, {})
+},
+(request: PolicyGetEntitiesRequest, opts: Map): Map {
+  ::api/call("admin.auth.policy.getEntities", request, opts)
 }
 
 policy-get-entities-all
@@ -53,7 +57,10 @@ fn
   policy-get-entities-all(request, 1000)
 },
 (request: PolicyGetEntitiesRequest, max-items: Int): Vec {
-  ::api/paginate("admin.auth.policy.getEntities", request, "entities", max-items)
+  policy-get-entities-all(request, max-items, {})
+},
+(request: PolicyGetEntitiesRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.auth.policy.getEntities", request, "entities", max-items, opts)
 }
 
 PolicyAssignEntitiesRequest type {
@@ -70,8 +77,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: PolicyAssignEntitiesRequest): Map {
-  ::api/call("admin.auth.policy.assignEntities", request)
+fn
+(request: PolicyAssignEntitiesRequest): Map {
+  policy-assign-entities(request, {})
+},
+(request: PolicyAssignEntitiesRequest, opts: Map): Map {
+  ::api/call("admin.auth.policy.assignEntities", request, opts)
 }
 
 PolicyRemoveEntitiesRequest type {
@@ -88,6 +99,10 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: PolicyRemoveEntitiesRequest): Map {
-  ::api/call("admin.auth.policy.removeEntities", request)
+fn
+(request: PolicyRemoveEntitiesRequest): Map {
+  policy-remove-entities(request, {})
+},
+(request: PolicyRemoveEntitiesRequest, opts: Map): Map {
+  ::api/call("admin.auth.policy.removeEntities", request, opts)
 }

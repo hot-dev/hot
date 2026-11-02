@@ -106,7 +106,7 @@ fn
     => {
       base build-base-string(method, url, raw-body, timestamp)
       cond {
-        not(::hmac/hmac-verify-base64(client-secret, base, signature, "sha256")) => { false }
+        not(::hmac/hmac-verify-base64(::ctx/mark-secret(client-secret), base, signature, "sha256")) => { false }
         => {
           // Header is milliseconds; the shared tolerance check is seconds.
           parsed Int(timestamp)

@@ -37,8 +37,13 @@ For a self-signed certificate, pass its public key as `certificate: ::telegram::
 ```
 """
 }
-fn (request: SetWebhookRequest): Bool {
-  api-request("setWebhook", untype(request))
+fn
+(request: SetWebhookRequest): Bool {
+  set-webhook(request, {})
+},
+(request: SetWebhookRequest, opts: Map): Bool {
+  if(is-some(request.secret_token), ::hot::ctx/mark-secret(request.secret_token))
+  api-request("setWebhook", untype(request), opts)
 }
 
 DeleteWebhookRequest type {
@@ -49,8 +54,12 @@ delete-webhook
 meta {
     doc: """deleteWebhook - Remove the webhook integration. Set `drop_pending_updates: true` to discard any pending updates."""
 }
-fn (request: DeleteWebhookRequest): Bool {
-  api-request("deleteWebhook", untype(request))
+fn
+(request: DeleteWebhookRequest): Bool {
+  delete-webhook(request, {})
+},
+(request: DeleteWebhookRequest, opts: Map): Bool {
+  api-request("deleteWebhook", untype(request), opts)
 }
 
 get-webhook-info
@@ -70,8 +79,12 @@ response.last_error_date        // => null (no errors)
 ```
 """
 }
-fn (): Map {
-  api-request("getWebhookInfo")
+fn
+(): Map {
+  get-webhook-info({})
+},
+(opts: Map): Map {
+  api-request("getWebhookInfo", {}, opts)
 }
 
 // ============================================================================
@@ -103,8 +116,12 @@ response ::updates/get-updates(::updates/GetUpdatesRequest({
 ```
 """
 }
-fn (request: GetUpdatesRequest): Vec<Map> {
-  api-request("getUpdates", untype(request))
+fn
+(request: GetUpdatesRequest): Vec<Map> {
+  get-updates(request, {})
+},
+(request: GetUpdatesRequest, opts: Map): Vec<Map> {
+  api-request("getUpdates", untype(request), opts)
 }
 
 // ============================================================================
@@ -148,6 +165,6 @@ fn
   cond {
     is-empty(secret) => { false }
     is-empty(token) => { false }
-    => { secure-compare(secret, token) }
+    => { secure-compare(::hot::ctx/mark-secret(secret), token) }
   }
 }

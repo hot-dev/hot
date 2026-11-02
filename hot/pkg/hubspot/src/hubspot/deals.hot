@@ -24,8 +24,12 @@ meta {
     ```
     """
 }
-fn (properties: Map): Map {
-  ::objects/create-object("deals", properties)
+fn
+(properties: Map): Map {
+  create-deal(properties, {})
+},
+(properties: Map, opts: Map): Map {
+  ::objects/create-object("deals", properties, opts)
 }
 
 get-deal
@@ -34,32 +38,50 @@ meta {
 }
 fn
 (id: Str): Map {
-  ::objects/get-object("deals", id)
+  get-deal(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::objects/get-object("deals", id, opts)
 },
 (id: Str, properties: Vec): Map {
-  ::objects/get-object("deals", id, properties)
+  get-deal(id, properties, {})
+},
+(id: Str, properties: Vec, opts: Map): Map {
+  ::objects/get-object("deals", id, properties, {}, opts)
 }
 
 update-deal
 meta {
     doc: """Update a deal's properties (e.g. `{dealstage: "closedwon"}`)."""
 }
-fn (id: Str, properties: Map): Map {
-  ::objects/update-object("deals", id, properties)
+fn
+(id: Str, properties: Map): Map {
+  update-deal(id, properties, {})
+},
+(id: Str, properties: Map, opts: Map): Map {
+  ::objects/update-object("deals", id, properties, opts)
 }
 
 search-deals
 meta {
     doc: """Search deals — see `::hubspot::objects/build-search-body` for the options."""
 }
-fn (options: Map): Map {
-  ::objects/search-objects("deals", options)
+fn
+(options: Map): Map {
+  search-deals(options, {})
+},
+(options: Map, opts: Map): Map {
+  ::objects/search-objects("deals", options, opts)
 }
 
 archive-deal
 meta {
     doc: """Archive a deal (recycle bin, restorable for 90 days)."""
 }
-fn (id: Str): Any {
-  ::objects/archive-object("deals", id)
+fn
+(id: Str): Any {
+  archive-deal(id, {})
+},
+(id: Str, opts: Map): Any {
+  ::objects/archive-object("deals", id, opts)
 }

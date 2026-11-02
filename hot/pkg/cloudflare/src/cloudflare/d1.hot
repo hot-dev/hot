@@ -5,7 +5,7 @@ meta {
     bound parameters. The REST API suits admin jobs, migrations, and
     workflow reads; latency-sensitive traffic belongs in a Worker binding.
     """,
-    ctx: {"cloudflare.token": {required: true}, "cloudflare.account.id": {required: true}}
+    ctx: {"cloudflare.token": {required: false}, "cloudflare.account.id": {required: false, secret: false}}
 }
 
 ::api ::cloudflare::api
@@ -21,7 +21,10 @@ fn
   list-databases({})
 },
 (params: Map): ListPage {
-  ::api/account-page(`/d1/database${::api/query(params)}`)
+  list-databases(params, {})
+},
+(params: Map, opts: Map): ListPage {
+  ::api/account-page(`/d1/database${::api/query(params)}`, "", opts)
 }
 
 list-all-databases
@@ -36,15 +39,25 @@ fn
   list-all-databases(params, ::api/DEFAULT_MAX_ITEMS)
 },
 (params: Map, max: Int): Vec {
-  ::api/collect-pages(list-databases, {per_page: 100, ...params}, max)
+  list-all-databases(params, max, {})
+},
+(params: Map, opts: Map): Vec {
+  list-all-databases(params, ::api/DEFAULT_MAX_ITEMS, opts)
+},
+(params: Map, max: Int, opts: Map): Vec {
+  ::api/collect-pages((p) { list-databases(p, opts) }, {per_page: 100, ...params}, max)
 }
 
 find-database
 meta {
     doc: """The database named exactly `name`, or null."""
 }
-fn (name: Str): Map? {
-  matches list-all-databases({name: name})
+fn
+(name: Str): Map? {
+  find-database(name, {})
+},
+(name: Str, opts: Map): Map? {
+  matches list-all-databases({name: name}, opts)
   cond {
     is-err(matches) => { matches }
     => { find-first(matches, (db) { eq(db.name, name) }) }
@@ -55,8 +68,12 @@ get-database
 meta {
     doc: """GET /accounts/{account_id}/d1/database/{database_id} - One database, including `num_tables` and `file_size`."""
 }
-fn (database-id: Str): Map {
-  ::api/account-json("GET", `/d1/database/${::api/seg(database-id)}`)
+fn
+(database-id: Str): Map {
+  get-database(database-id, {})
+},
+(database-id: Str, opts: Map): Map {
+  ::api/account-json("GET", `/d1/database/${::api/seg(database-id)}`, "", opts)
 }
 
 query-body
@@ -91,7 +108,13 @@ fn
   query(database-id, sql, [])
 },
 (database-id: Str, sql: Str, params: Vec): Vec {
-  ::api/account-json("POST", `/d1/database/${::api/seg(database-id)}/query`, query-body(sql, params))
+  query(database-id, sql, params, {})
+},
+(database-id: Str, sql: Str, opts: Map): Vec {
+  query(database-id, sql, [], opts)
+},
+(database-id: Str, sql: Str, params: Vec, opts: Map): Vec {
+  ::api/account-json("POST", `/d1/database/${::api/seg(database-id)}/query`, query-body(sql, params), opts)
 }
 
 rows
@@ -103,7 +126,13 @@ fn
   rows(database-id, sql, [])
 },
 (database-id: Str, sql: Str, params: Vec): Vec {
-  out query(database-id, sql, params)
+  rows(database-id, sql, params, {})
+},
+(database-id: Str, sql: Str, opts: Map): Vec {
+  rows(database-id, sql, [], opts)
+},
+(database-id: Str, sql: Str, params: Vec, opts: Map): Vec {
+  out query(database-id, sql, params, opts)
   cond {
     is-err(out) => { out }
     is-empty(out) => { [] }

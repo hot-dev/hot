@@ -1,11 +1,20 @@
 ::stripe::api ns
 meta {
     ctx: {
-        "stripe.api.key": {required: true},
-        "stripe.api.version": {required: false}
+        "stripe.api.key": {required: false},
+        "stripe.api.version": {required: false, secret: false}
     },
     doc: """
     Authenticated access to the Stripe REST API: form encoding, the `Stripe-Version` / `Idempotency-Key` / `Stripe-Account` headers, error handling, and auto-pagination. The typed modules (`::stripe::customers`, `::stripe::payment-intents`, ...) are built on `call`; use it directly for any endpoint they don't cover.
+
+    **Per-call credentials.** Every API-calling function takes an optional trailing options argument, a Map or a `RequestOptions`, resolved by `resolve`: options first, then the `stripe.*` context variables, then the defaults. Nothing from it is written to ctx, and a per-call key is masked in call records, so one run can act for many Stripe accounts.
+
+    - `api-key`: the secret or restricted key for this call
+    - `api-version`: the `Stripe-Version` for this call
+    - `stripe-account`: the connected account to act for (Connect)
+    - `idempotency-key`: the `Idempotency-Key` for this write
+
+    An `api-key`, `stripe-account` or `idempotency-key` that is present but blank or null is an Err naming the key, never a fallback: a tenant whose key is missing must not run on the project's account, and a retry whose key is missing must not charge twice.
     """
 }
 
@@ -57,8 +66,9 @@ fn (response: HttpResponse): HttpError {
 RequestOptions
 meta {
     doc: """
-    Per-request options, accepted as the last argument by every typed write function (and by `call`). Field names match Stripe's official SDKs.
+    Per-request options, the typed form of the options Map every API-calling function takes last (see this namespace's doc). Field names match Stripe's official SDKs; in a plain Map use `api-key`, `api-version`, `stripe-account` and `idempotency-key`. The two forms mean the same thing.
 
+    - `api_key`: the secret or restricted key for this call, instead of `stripe.api.key`.
     - `idempotency_key`: sent as `Idempotency-Key`. Stripe returns the stored result for a repeated key (within 24 hours) instead of performing the write again, so a retried create/confirm/capture/refund can never double-charge. Use a value tied to your own record, e.g. `order-42-charge`. Only POST requests use it.
     - `stripe_account`: sent as `Stripe-Account` to act on behalf of a connected account (Connect).
     - `stripe_version`: overrides the `Stripe-Version` for this call.
@@ -68,32 +78,131 @@ meta {
     ```hot
     ::pi ::stripe::payment-intents
 
-    ::pi/create-payment-intent(
-      ::pi/CreatePaymentIntentRequest({amount: 2000, currency: "usd"}),
-      ::stripe::api/RequestOptions({idempotency_key: "order-42-payment"})
-    )
+    request ::pi/CreatePaymentIntentRequest({amount: 2000, currency: "usd"})
+
+    ::pi/create-payment-intent(request, ::stripe::api/RequestOptions({idempotency_key: "order-42-payment"}))
+
+    // The same call for another account, as a Map
+    ::pi/create-payment-intent(request, {api-key: "sk_test_tenant", idempotency-key: "order-42-payment"})
     ```
     """
 }
 type {
+    api_key: Str?,
     idempotency_key: Str?,
     stripe_account: Str?,
     stripe_version: Str?
 }
 
+// Each RequestOptions field's name in the options Map.
+OPTION_KEYS {
+  api_key: "api-key",
+  idempotency_key: "idempotency-key",
+  stripe_account: "stripe-account",
+  stripe_version: "api-version"
+}
+
+// Keys that may not be present and blank: leaving out any of them changes
+// who a call acts for, or whether a retry is safe.
+REQUIRED_WHEN_PRESENT ["api-key", "stripe-account", "idempotency-key"]
+
+to-opts
+meta {
+    doc: """
+    The options Map for a `RequestOptions` or a Map. `RequestOptions` field names become their Map keys. An unset record field is simply absent; a Map key set to null stays present, so `resolve` can refuse it.
+
+    **Example**
+
+    ```hot
+    ::stripe::api/to-opts(::stripe::api/RequestOptions({idempotency_key: "k1"}))
+    // => {idempotency-key: "k1"}
+    ```
+    """
+}
+fn (options: RequestOptions | Map): Map {
+  fields if(is-type(options, RequestOptions), filter-vals(untype(options), is-some(%)), options)
+  map-keys(fields, (key) { get(OPTION_KEYS, key, key) })
+}
+
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+blank-option
+meta {
+    doc: """The first of `names` that `opts` has with a blank or null value, else null."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: `{api-key, api-version}`, plus `stripe-account` and `idempotency-key` when set, from `options` first, then `ctx-values` (a Map of context variables), then `::stripe/API_VERSION`. An Err when no API key is set, or when `api-key`, `stripe-account` or `idempotency-key` is in `options` but blank or null. Exposed for testing; `resolve` feeds it the context.
+    """
+}
+fn (options: RequestOptions | Map, ctx-values: Map): Map {
+  opts to-opts(options)
+  blank blank-option(opts, REQUIRED_WHEN_PRESENT)
+  api-key or(non-blank(get(opts, "api-key")), non-blank(get(ctx-values, "stripe.api.key")))
+  cond {
+    is-some(blank) => {
+      err(`stripe: ${blank} is in the call's options but is blank or null. Pass a value, or leave ${blank} out.`)
+    }
+
+    is-null(api-key) => { err("stripe: stripe.api.key is not set. Add it in Context Variables, or pass {api-key: ...} in the call's options.") }
+    => {
+      version or(non-blank(get(opts, "api-version")), non-blank(get(ctx-values, "stripe.api.version")), ::stripe/API_VERSION)
+      settings {api-key: api-key, api-version: version}
+      settings assoc-some(settings, "stripe-account", non-blank(get(opts, "stripe-account")))
+      assoc-some(settings, "idempotency-key", non-blank(get(opts, "idempotency-key")))
+    }
+  }
+}
+
+resolve
+meta {
+    ctx: {
+        "stripe.api.key": {required: false},
+        "stripe.api.version": {required: false, secret: false}
+    },
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). The API key is masked in this run's call records, and nothing from `options` is written to ctx.
+
+    **Example**
+
+    ```hot
+    ::stripe::api/resolve({api-key: "sk_test_tenant"}).api-version  // => "2026-10-28.endive"
+    ```
+    """
+}
+fn (options: RequestOptions | Map): Map {
+  // First, so even the records of the calls below are masked.
+  ::ctx/mark-secret([options.api-key, options.api_key])
+  resolved resolve-from(options, {
+    "stripe.api.key": ::ctx/get("stripe.api.key"),
+    "stripe.api.version": ::ctx/get("stripe.api.version")
+  })
+  cond {
+    is-err(resolved) => { resolved }
+    => { {...resolved, api-key: ::ctx/mark-secret(resolved.api-key)} }
+  }
+}
+
 api-version
 meta {
+    ctx: {"stripe.api.version": {required: false, secret: false}},
     doc: """The `Stripe-Version` sent when a call doesn't override it: the `stripe.api.version` context variable when set, otherwise `::stripe/API_VERSION`."""
 }
 fn (): Str {
-  configured ::ctx/get("stripe.api.version")
-  if(or(is-null(configured), eq(configured, "")), ::stripe/API_VERSION, configured)
+  or(non-blank(::ctx/get("stripe.api.version")), ::stripe/API_VERSION)
 }
 
 option-headers
 meta {
     doc: """
-    The headers a `RequestOptions` adds to a request: `Idempotency-Key`, `Stripe-Account`, and `Stripe-Version` (only those that are set).
+    The headers an options value adds to a request: `Idempotency-Key`, `Stripe-Account`, and `Stripe-Version` (only those that are set).
 
     **Example**
 
@@ -103,13 +212,13 @@ meta {
     ```
     """
 }
-fn (options: RequestOptions): Map {
-  opts untype(options)
+fn (options: RequestOptions | Map): Map {
+  opts to-opts(options)
   filter-vals({
-    Idempotency-Key: get(opts, "idempotency_key"),
-    Stripe-Account: get(opts, "stripe_account"),
-    Stripe-Version: get(opts, "stripe_version")
-  }, (v) { and(is-some(v), not(eq(v, ""))) })
+    Idempotency-Key: non-blank(get(opts, "idempotency-key")),
+    Stripe-Account: non-blank(get(opts, "stripe-account")),
+    Stripe-Version: non-blank(get(opts, "api-version"))
+  }, is-some(%))
 }
 
 // ============================================================================
@@ -191,10 +300,15 @@ meta {
     ```
     """
 }
-fn (method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpRequest {
+fn
+(method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpRequest {
+  build-request(method, url, additional-headers, body, {api-key: api-key, api-version: api-version()})
+},
+// 5-arity: resolved settings (see `resolve`)
+(method: Str, url: Str, additional-headers: Map, body: Any, resolved: Map): HttpRequest {
   default-headers {
-    Authorization: `Bearer ${api-key}`,
-    Stripe-Version: api-version()
+    Authorization: `Bearer ${resolved.api-key}`,
+    Stripe-Version: resolved.api-version
   }
 
   encoded if(or(is-null(body), eq(body, "")), "", form-encode(untype(body)))
@@ -217,7 +331,9 @@ meta {
     doc: """
     Make an authenticated HTTP request to the Stripe API and return the raw `HttpResponse`. Supports multiple arities for convenience.
 
-    The API key is read from context (`stripe.api.key`) by default, or can be provided explicitly via the 5-arity form. `Stripe-Version` is always sent (see `api-version`). Additional headers are merged over the defaults.
+    The API key comes from `stripe.api.key` by default, or from the 5-arity form: a key, or an options Map or `RequestOptions` (see `resolve`). `Stripe-Version` is always sent. Additional headers are merged over the defaults.
+
+    A `url` outside `::stripe/BASE_URL` needs an `api-key` in the call: `stripe.api.key` is only ever sent to Stripe.
 
     Parameters are form-encoded with Stripe's bracket syntax (see `form-encode`): in the body for POST, in the query string for GET and DELETE.
 
@@ -234,8 +350,9 @@ meta {
     // POST request — create a customer (body is form-encoded automatically)
     response ::stripe::api/request("POST", `${::stripe/BASE_URL}/v1/customers`, {}, {name: "Alice Smith"})
 
-    // With explicit API key override
+    // With an explicit API key
     response ::stripe::api/request("GET", `${::stripe/BASE_URL}/v1/balance`, {}, "", "sk_test_...")
+    response ::stripe::api/request("GET", `${::stripe/BASE_URL}/v1/balance`, {}, "", {api-key: "sk_test_..."})
     ```
     """
 }
@@ -246,19 +363,32 @@ fn
 (method: Str, url: Str, additional-headers: Map): HttpResponse {
   request(method, url, additional-headers, "")
 },
-// 4-arity: use ctx api key (default) — delegates to 5-arity
 (method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, url, additional-headers, body, or(::ctx/get("stripe.api.key"), ""))
+  request(method, url, additional-headers, body, {})
 },
-// 5-arity: explicit api key override
+// 5-arity: explicit api key
 (method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
-  ::hot::http/request(build-request(method, url, additional-headers, body, api-key))
+  request(method, url, additional-headers, body, {api-key: api-key})
+},
+// 5-arity: per-call credentials and settings (see `resolve`)
+(method: Str, url: Str, additional-headers: Map, body: Any, options: RequestOptions | Map): HttpResponse {
+  resolved resolve(options)
+  cond {
+    is-err(resolved) => { resolved }
+    and(not(starts-with(url, `${::stripe/BASE_URL}/`)), is-null(get(to-opts(options), "api-key"))) => {
+      err(`stripe: ${url} is not under ${::stripe/BASE_URL}, and the call has no api-key. Pass api-key with it. stripe.api.key is only sent to Stripe.`)
+    }
+    => {
+      headers {...option-headers(resolved), ...additional-headers}
+      ::hot::http/request(build-request(method, url, headers, body, resolved))
+    }
+  }
 }
 
 call
 meta {
     doc: """
-    Call a Stripe endpoint by path (relative to `::stripe/BASE_URL`) and return the decoded JSON body, or an Err carrying `HttpError` for non-2xx responses. `params` are sent as the query string for GET/DELETE and as the form body for POST; null values are omitted. `options` adds idempotency, Connect, and version headers (see `RequestOptions`).
+    Call a Stripe endpoint by path (relative to `::stripe/BASE_URL`) and return the decoded JSON body, or an Err carrying `HttpError` for non-2xx responses. `params` are sent as the query string for GET/DELETE and as the form body for POST; null values are omitted. `options` is a Map or `RequestOptions` with the call's key, version, Connect account and idempotency key (see `resolve`).
 
     **Example**
 
@@ -270,6 +400,9 @@ meta {
     // With an idempotency key
     ::stripe::api/call("POST", "/v1/customers", {email: "alice@example.com"},
       ::stripe::api/RequestOptions({idempotency_key: "signup-alice"}))
+
+    // For another account
+    ::stripe::api/call("GET", "/v1/balance", "", {api-key: "sk_test_tenant"})
     ```
     """
 }
@@ -280,8 +413,8 @@ fn
 (method: Str, path: Str, params: Any): Any {
   call(method, path, params, RequestOptions({}))
 },
-(method: Str, path: Str, params: Any, options: RequestOptions): Any {
-  response request(method, `${::stripe/BASE_URL}${path}`, option-headers(options), params)
+(method: Str, path: Str, params: Any, options: RequestOptions | Map): Any {
+  response request(method, `${::stripe/BASE_URL}${path}`, {}, params, options)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response.body }
@@ -321,14 +454,19 @@ fn (params: Map, page: Map): Map? {
   }
 }
 
-collect-pages fn (path: Str, params: Map, max-items: Int, acc: Vec): Vec {
-  page call("GET", path, params)
-  items concat(acc, or(page.data, []))
-  next next-page-params(params, page)
+collect-pages fn (path: Str, params: Map, max-items: Int, acc: Vec, options: RequestOptions | Map): Vec {
+  page call("GET", path, params, options)
   cond {
-    and(gt(max-items, 0), gte(length(items), max-items)) => { take(items, max-items) }
-    is-null(next) => { items }
-    => { collect-pages(path, next, max-items, items) }
+    is-err(page) => { page }
+    => {
+      items concat(acc, or(page.data, []))
+      next next-page-params(params, page)
+      cond {
+        and(gt(max-items, 0), gte(length(items), max-items)) => { take(items, max-items) }
+        is-null(next) => { items }
+        => { collect-pages(path, next, max-items, items, options) }
+      }
+    }
   }
 }
 
@@ -345,6 +483,9 @@ meta {
 
     // Search results, capped at 250
     hits ::stripe::api/list-all("/v1/customers/search", {query: `email:"alice@example.com"`}, 250)
+
+    // For another account
+    subs ::stripe::api/list-all("/v1/subscriptions", {}, 1000, {api-key: "sk_test_tenant"})
     ```
     """
 }
@@ -356,6 +497,9 @@ fn
   list-all(path, params, 1000)
 },
 (path: Str, params: Map, max-items: Int): Vec {
+  list-all(path, params, max-items, {})
+},
+(path: Str, params: Map, max-items: Int, options: RequestOptions | Map): Vec {
   p untype(params)
-  collect-pages(path, {...p, limit: or(get(p, "limit"), 100)}, max-items, [])
+  collect-pages(path, {...p, limit: or(get(p, "limit"), 100)}, max-items, [], options)
 }

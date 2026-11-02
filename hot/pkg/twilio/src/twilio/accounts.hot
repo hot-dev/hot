@@ -4,7 +4,7 @@
 
 api-request ::twilio::api/request
 account-url ::twilio::api/account-url
-client-from-ctx ::twilio::api/client-from-ctx
+resolve ::twilio::api/resolve
 Client ::twilio::api/Client
 HttpError ::twilio::api/HttpError
 is-ok-response ::hot::http/is-ok-response
@@ -26,9 +26,18 @@ Account type {
   subresource_uris: Map?
 }
 
+mark-auth-token
+meta {
+    doc: """Mask the `auth_token` of an account response in call records. Returns `body` unchanged. Exposed for testing."""
+}
+fn (body: Map): Map {
+  if(is-str(get(body, "auth_token")), ::hot::ctx/mark-secret(body.auth_token))
+  body
+}
+
 get-account
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 GET /Accounts/{AccountSid}.json - Get the account's details: SID, friendly name, status, type, and subresource URIs. A cheap credentials check.
 
@@ -47,11 +56,18 @@ response.type           // => "Full"
 }
 fn
 (): Account {
-  get-account(client-from-ctx())
+  get-account({})
+},
+(opts: Map): Account {
+  resolve(opts) |> if-ok((client) { get-account(client) })
 },
 (client: Client): Account {
   response api-request(client, "GET", `${account-url(client)}.json`, {}, {})
-  if(is-ok-response(response), Account(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Account(mark-auth-token(response.body)) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UpdateAccountRequest type {
@@ -61,16 +77,23 @@ UpdateAccountRequest type {
 
 update-account
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """POST /Accounts/{AccountSid}.json - Update account settings. Can change the `FriendlyName`, or set `Status` to "active", "suspended", or "closed" (subaccounts; closing is permanent)."""
 }
 fn
 (request: UpdateAccountRequest): Account {
-  update-account(client-from-ctx(), request)
+  update-account(request, {})
+},
+(request: UpdateAccountRequest, opts: Map): Account {
+  resolve(opts) |> if-ok((client) { update-account(client, request) })
 },
 (client: Client, request: UpdateAccountRequest): Account {
   response api-request(client, "POST", `${account-url(client)}.json`, {}, filter-vals(untype(request), is-some))
-  if(is-ok-response(response), Account(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Account(mark-auth-token(response.body)) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -101,7 +124,7 @@ GetIncomingPhoneNumbersResponse type {
 
 get-incoming-phone-numbers
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 GET /Accounts/{AccountSid}/IncomingPhoneNumbers.json - List your Twilio phone numbers. Filter by `PhoneNumber` (matches any part), `FriendlyName`, or `Origin` (`twilio` or `hosted`).
 
@@ -118,12 +141,19 @@ numbers response.incoming_phone_numbers
 }
 fn
 (request: GetIncomingPhoneNumbersRequest): GetIncomingPhoneNumbersResponse {
-  get-incoming-phone-numbers(client-from-ctx(), request)
+  get-incoming-phone-numbers(request, {})
+},
+(request: GetIncomingPhoneNumbersRequest, opts: Map): GetIncomingPhoneNumbersResponse {
+  resolve(opts) |> if-ok((client) { get-incoming-phone-numbers(client, request) })
 },
 (client: Client, request: GetIncomingPhoneNumbersRequest): GetIncomingPhoneNumbersResponse {
   query ::twilio::api/query-string(untype(request))
   response api-request(client, "GET", `${account-url(client)}/IncomingPhoneNumbers.json${query}`, {}, {})
-  if(is-ok-response(response), GetIncomingPhoneNumbersResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetIncomingPhoneNumbersResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetIncomingPhoneNumberRequest type {
@@ -154,16 +184,23 @@ IncomingPhoneNumber type {
 
 get-incoming-phone-number
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """GET /Accounts/{AccountSid}/IncomingPhoneNumbers/{Sid}.json - Get details of a specific phone number by SID."""
 }
 fn
 (request: GetIncomingPhoneNumberRequest): IncomingPhoneNumber {
-  get-incoming-phone-number(client-from-ctx(), request)
+  get-incoming-phone-number(request, {})
+},
+(request: GetIncomingPhoneNumberRequest, opts: Map): IncomingPhoneNumber {
+  resolve(opts) |> if-ok((client) { get-incoming-phone-number(client, request) })
 },
 (client: Client, request: GetIncomingPhoneNumberRequest): IncomingPhoneNumber {
   response api-request(client, "GET", `${account-url(client)}/IncomingPhoneNumbers/${::uri/encode(request.sid)}.json`, {}, {})
-  if(is-ok-response(response), IncomingPhoneNumber(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { IncomingPhoneNumber(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UpdateIncomingPhoneNumberRequest type {
@@ -195,7 +232,7 @@ fn (request: UpdateIncomingPhoneNumberRequest): Map {
 
 update-incoming-phone-number
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 POST /Accounts/{AccountSid}/IncomingPhoneNumbers/{Sid}.json - Update a phone number's settings: point its voice/SMS webhooks at your Hot endpoints, or at a TwiML App.
 
@@ -214,11 +251,18 @@ POST /Accounts/{AccountSid}/IncomingPhoneNumbers/{Sid}.json - Update a phone num
 }
 fn
 (request: UpdateIncomingPhoneNumberRequest): IncomingPhoneNumber {
-  update-incoming-phone-number(client-from-ctx(), request)
+  update-incoming-phone-number(request, {})
+},
+(request: UpdateIncomingPhoneNumberRequest, opts: Map): IncomingPhoneNumber {
+  resolve(opts) |> if-ok((client) { update-incoming-phone-number(client, request) })
 },
 (client: Client, request: UpdateIncomingPhoneNumberRequest): IncomingPhoneNumber {
   response api-request(client, "POST", `${account-url(client)}/IncomingPhoneNumbers/${::uri/encode(request.sid)}.json`, {}, update-incoming-phone-number-body(request))
-  if(is-ok-response(response), IncomingPhoneNumber(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { IncomingPhoneNumber(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteIncomingPhoneNumberRequest type {
@@ -227,12 +271,15 @@ DeleteIncomingPhoneNumberRequest type {
 
 delete-incoming-phone-number
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """DELETE /Accounts/{AccountSid}/IncomingPhoneNumbers/{Sid}.json - Release a phone number. The number is returned to Twilio's inventory and will no longer incur charges. This cannot be undone."""
 }
 fn
 (request: DeleteIncomingPhoneNumberRequest): Bool {
-  delete-incoming-phone-number(client-from-ctx(), request)
+  delete-incoming-phone-number(request, {})
+},
+(request: DeleteIncomingPhoneNumberRequest, opts: Map): Bool {
+  resolve(opts) |> if-ok((client) { delete-incoming-phone-number(client, request) })
 },
 (client: Client, request: DeleteIncomingPhoneNumberRequest): Bool {
   ::twilio::api/delete-request(client, `${account-url(client)}/IncomingPhoneNumbers/${::uri/encode(request.sid)}.json`)

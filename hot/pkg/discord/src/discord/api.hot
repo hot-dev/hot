@@ -1,16 +1,31 @@
 ::discord::api ns
 meta {
-    ctx: {"discord.bot.token": {required: true}},
+    ctx: {"discord.bot.token": {required: false}},
     doc: """
     Low-level Discord REST client shared by every module: request
     building (auth, User-Agent, audit-log reason, JSON or multipart
     bodies), body and query helpers that never send unset fields, and
     error handling that surfaces Discord's rate-limit `retry_after`.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `discord.bot.token` context variable. Nothing from
+    `opts` is written to ctx, so one run can act as many bots and parallel
+    flows don't share credentials. A `token` from `opts` is masked in call
+    records. A `token` present but blank or null is an error, never a
+    fallback to `discord.bot.token`.
+
+    - `token`: the bot token for this call
+
+    Webhook-token and interaction-token routes authenticate with the token
+    in their path and never send a bot token, so they ignore a `token` in
+    `opts`. The tokens in their paths are masked in call records too.
     """
 }
 
 ::ctx ::hot::ctx
 ::uri ::hot::uri
+::re ::hot::regex
 
 HttpRequest ::hot::http/HttpRequest
 HttpResponse ::hot::http/HttpResponse
@@ -52,15 +67,11 @@ type {
 }
 
 retry-after-header fn (headers: Map): Dec? {
-  value get(headers, "retry-after")
-  if(is-empty(or(value, "")), null, Dec(value))
+  value Str(or(get(headers, "retry-after"), ""))
+  if(::re/is-match(value, "^[0-9]+(\\.[0-9]+)?$"), Dec(value), null)
 }
 
-error-from-response
-meta {
-    doc: """Build the `HttpError` for a non-2xx response, parsing rate-limit details on 429."""
-}
-fn (response: HttpResponse): HttpError {
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   headers or(response.headers, {})
   body response.body
   limited eq(response.status, 429)
@@ -73,10 +84,6 @@ fn (response: HttpResponse): HttpError {
     global: if(and(limited, is-map(body)), get(body, "global"), null),
     scope: if(limited, get(headers, "x-ratelimit-scope"), null)
   })
-}
-
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
-  error-from-response(response)
 }
 
 is-rate-limited
@@ -95,7 +102,7 @@ fn (response: HttpResponse): Any {
   cond {
     eq(response.status, 204) => { null }
     is-ok-response(response) => { response.body }
-    => { err(error-from-response(response)) }
+    => { err(HttpError(response)) }
   }
 }
 
@@ -104,7 +111,7 @@ meta {
     doc: """Return `true` for a 2xx response, otherwise an `Err(HttpError)`. Used by endpoints that return 204 No Content."""
 }
 fn (response: HttpResponse): Bool {
-  if(is-ok-response(response), true, err(error-from-response(response)))
+  if(is-ok-response(response), true, err(HttpError(response)))
 }
 
 // ============================================================================
@@ -154,10 +161,18 @@ fn (params: Map): Str {
 
 seg
 meta {
-    doc: """URL-encode one path segment (ids, tokens, emoji)."""
+    doc: """URL-encode one path segment (ids, emoji). Use `token-seg` for tokens."""
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
+}
+
+token-seg
+meta {
+    doc: """URL-encode a webhook or interaction token for the path, and mask it in call records first. These routes carry their credential in the URL."""
+}
+fn (token: Str): Str {
+  seg(::ctx/mark-secret(token))
 }
 
 emoji-segment
@@ -271,18 +286,76 @@ fn (fields: Map, file-field: Str, file: Map, boundary: Str): Bytes {
 // Requests
 // ============================================================================
 
-bot-token fn (opts: Map): Str {
-  token or(get(opts, "token"), ::ctx/get("discord.bot.token"))
-  if(is-empty(or(token, "")),
-    fail("discord.bot.token is not set. Add your bot token in Context Variables."),
-    token)
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+resolve-from
+meta {
+    doc: """The one resolver, pure: `{token}` for a call from `opts` first, then `ctx-values` (a Map of context variables). An Err when no token is set, or when `token` is in `opts` but blank or null (that never falls back to context). Exposed for testing; `resolve` feeds it the context."""
+}
+fn (opts: Map, ctx-values: Map): Map {
+  opts-token non-blank(get(opts, "token"))
+  token or(opts-token, non-blank(get(ctx-values, "discord.bot.token")))
+  cond {
+    and(in("token", keys(opts)), is-null(opts-token)) => {
+      err("discord: token is in the call's opts but is blank or null. Pass a value, or leave token out to use discord.bot.token.")
+    }
+
+    is-null(token) => { err("discord: discord.bot.token is not set. Add your bot token in Context Variables, or pass {token: ...} in the call's opts.") }
+    => { {token: token} }
+  }
+}
+
+resolve
+meta {
+    ctx: {"discord.bot.token": {required: false}},
+    doc: """
+    The bot token for one call (see `resolve-from`). A `token` from `opts`
+    is masked in call records with `::hot::ctx/mark-secret`, and `opts`
+    values are never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::discord::api/resolve({token: "tenant-b-bot-token"}).token
+    ```
+    """
+}
+fn (opts: Map): Map {
+  resolved resolve-from(opts, {"discord.bot.token": ::ctx/get("discord.bot.token")})
+  cond {
+    is-err(resolved) => { resolved }
+    in("token", keys(opts)) => { {token: ::ctx/mark-secret(resolved.token)} }
+    => { resolved }
+  }
+}
+
+auth-headers
+meta {
+    doc: """The `Authorization` header for a call's `options`. With `auth: false` it's always `{}`: a `token` there is still checked and masked, but never sent. An Err when `resolve` has no usable token."""
+}
+fn (options: Map): Map {
+  has-token in("token", keys(options))
+  no-auth eq(get(options, "auth"), false)
+  cond {
+    and(no-auth, not(has-token)) => { {} }
+    => {
+      resolved resolve(if(has-token, {token: get(options, "token")}, {}))
+      cond {
+        is-err(resolved) => { resolved }
+        no-auth => { {} }
+        => { {Authorization: `Bot ${resolved.token}`} }
+      }
+    }
+  }
 }
 
 build-request
 meta {
     doc: """
     Build (without sending) the HttpRequest for `method` and `path`
-    (relative to the API base URL). `opts`:
+    (relative to the API base URL). `options`:
     - `query`: Map of query params; null entries are dropped
     - `body`: JSON body (sent as `payload_json` when `files` is set)
     - `files`: Vec of `FileUpload`; switches to multipart/form-data
@@ -292,6 +365,8 @@ meta {
     - `token`: explicit bot token instead of `discord.bot.token`
     - `boundary`: fixed multipart boundary (tests)
 
+    Returns an Err when the call has no usable bot token.
+
     **Example**
 
     ```hot
@@ -300,61 +375,90 @@ meta {
     ```
     """
 }
-fn (method: Str, path: Str, opts: Map): HttpRequest {
-  files or(get(opts, "files"), [])
-  payload get(opts, "body")
-  auth-headers if(eq(get(opts, "auth"), false), {}, {Authorization: `Bot ${bot-token(opts)}`})
-  boundary or(get(opts, "boundary"), `hot-discord-${Uuid()}`)
+fn (method: Str, path: Str, options: Map): HttpRequest {
+  auth auth-headers(options)
+  cond {
+    is-err(auth) => { auth }
+    => {
+      files or(get(options, "files"), [])
+      payload get(options, "body")
+      boundary or(get(options, "boundary"), `hot-discord-${Uuid()}`)
 
-  encoded cond {
-    is-some(get(opts, "form")) => {
-      form get(opts, "form")
-      {content-type: `multipart/form-data; boundary=${boundary}`, data: multipart-form(form.fields, form.file_field, form.file, boundary)}
+      encoded cond {
+        is-some(get(options, "form")) => {
+          form get(options, "form")
+          {content-type: `multipart/form-data; boundary=${boundary}`, data: multipart-form(form.fields, form.file_field, form.file, boundary)}
+        }
+
+        not(is-empty(files)) => {
+          {content-type: `multipart/form-data; boundary=${boundary}`, data: multipart-body(or(payload, {}), files, boundary)}
+        }
+
+        is-null(payload) => { {content-type: null, data: ""} }
+        => { {content-type: "application/json", data: to-json(untype(payload))} }
+      }
+
+      headers {
+        User-Agent: ::discord::core/USER_AGENT,
+        ...auth,
+        ...reason-headers(get(options, "reason")),
+        ...or(get(options, "headers"), {})
+      }
+
+      HttpRequest({
+        method: method,
+        url: `${::discord::core/BASE_URL}${path}${query(or(get(options, "query"), {}))}`,
+        headers: assoc-some(headers, "Content-Type", encoded.content-type),
+        body: encoded.data
+      })
     }
+  }
+}
 
-    not(is-empty(files)) => {
-      {content-type: `multipart/form-data; boundary=${boundary}`, data: multipart-body(or(payload, {}), files, boundary)}
+send
+meta {
+    doc: """Build and send a call, then return `finish` of the response. `opts` is the caller's per-call credentials. An Err from building or from the transport comes back as is."""
+}
+fn (method: Str, path: Str, options: Map, opts: Map, finish: Fn): Any {
+  merged if(in("token", keys(opts)), {...options, token: get(opts, "token")}, options)
+  req build-request(method, path, merged)
+  cond {
+    is-err(req) => { req }
+    => {
+      response ::hot::http/request(req)
+      cond {
+        is-err(response) => { response }
+        => { finish(response) }
+      }
     }
-
-    is-null(payload) => { {content-type: null, data: ""} }
-    => { {content-type: "application/json", data: to-json(untype(payload))} }
   }
-
-  headers {
-    User-Agent: ::discord::core/USER_AGENT,
-    ...auth-headers,
-    ...reason-headers(get(opts, "reason")),
-    ...or(get(opts, "headers"), {})
-  }
-
-  HttpRequest({
-    method: method,
-    url: `${::discord::core/BASE_URL}${path}${query(or(get(opts, "query"), {}))}`,
-    headers: assoc-some(headers, "Content-Type", encoded.content-type),
-    body: encoded.data
-  })
 }
 
 call
 meta {
     doc: """
     Send a request built by `build-request` and return the parsed body
-    (`null` for 204), or an `Err(HttpError)` for non-2xx responses.
+    (`null` for 204), or an `Err(HttpError)` for non-2xx responses. The
+    last argument is per-call `opts` (see `resolve`).
 
     **Example**
 
     ```hot
     me ::discord::api/call("GET", "/users/@me")
     guilds ::discord::api/call("GET", "/users/@me/guilds", {query: {limit: 50}})
+    other ::discord::api/call("GET", "/users/@me", {}, {token: "tenant-b-bot-token"})
     ```
     """
 }
 fn
 (method: Str, path: Str): Any {
-  call(method, path, {})
+  call(method, path, {}, {})
 },
-(method: Str, path: Str, opts: Map): Any {
-  to-result(::hot::http/request(build-request(method, path, opts)))
+(method: Str, path: Str, options: Map): Any {
+  call(method, path, options, {})
+},
+(method: Str, path: Str, options: Map, opts: Map): Any {
+  send(method, path, options, opts, to-result)
 }
 
 call-ok
@@ -363,18 +467,21 @@ meta {
 }
 fn
 (method: Str, path: Str): Bool {
-  call-ok(method, path, {})
+  call-ok(method, path, {}, {})
 },
-(method: Str, path: Str, opts: Map): Bool {
-  to-ok(::hot::http/request(build-request(method, path, opts)))
+(method: Str, path: Str, options: Map): Bool {
+  call-ok(method, path, options, {})
+},
+(method: Str, path: Str, options: Map, opts: Map): Bool {
+  send(method, path, options, opts, to-ok)
 }
 
 request
 meta {
     doc: """
     Make an authenticated request to an absolute Discord API URL and
-    return the raw HttpResponse. Adds the bot token (from
-    `discord.bot.token` unless passed) and the User-Agent; Map/Vec bodies
+    return the raw HttpResponse. Adds the bot token (from per-call `opts`,
+    or `discord.bot.token` unless passed) and the User-Agent; Map/Vec bodies
     are sent as JSON and Bytes bodies as is (set Content-Type yourself).
     Prefer `call` for new code.
 
@@ -386,6 +493,7 @@ meta {
     response ::api/request("GET", "https://discord.com/api/v10/users/@me")
     response ::api/request("POST", "https://discord.com/api/v10/channels/123/messages", {}, {content: "Hello"})
     response ::api/request("GET", "https://discord.com/api/v10/users/@me", {}, "", "my-bot-token")
+    response ::api/request("GET", "https://discord.com/api/v10/users/@me", {}, "", {token: "my-bot-token"})
     ```
     """
 }
@@ -397,23 +505,32 @@ fn
   request(method, url, additional-headers, "")
 },
 (method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, url, additional-headers, body, bot-token({}))
+  request(method, url, additional-headers, body, {})
 },
 (method: Str, url: Str, additional-headers: Map, body: Any, token: Str): HttpResponse {
-  json-body and(not(eq(body, "")), not(is-bytes(body)))
-  default-headers {
-    Authorization: `Bot ${token}`,
-    User-Agent: ::discord::core/USER_AGENT
+  request(method, url, additional-headers, body, {token: token})
+},
+(method: Str, url: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      json-body and(not(eq(body, "")), not(is-bytes(body)))
+      default-headers {
+        Authorization: `Bot ${resolved.token}`,
+        User-Agent: ::discord::core/USER_AGENT
+      }
+
+      headers if(json-body, {...default-headers, Content-Type: "application/json"}, default-headers)
+
+      ::hot::http/request(HttpRequest({
+        method,
+        url,
+        headers: {...headers, ...additional-headers},
+        body: if(json-body, to-json(untype(body)), body)
+      }))
+    }
   }
-
-  headers if(json-body, {...default-headers, Content-Type: "application/json"}, default-headers)
-
-  ::hot::http/request(HttpRequest({
-    method,
-    url,
-    headers: {...headers, ...additional-headers},
-    body: if(json-body, to-json(untype(body)), body)
-  }))
 }
 
 // ============================================================================
@@ -422,12 +539,17 @@ fn
 
 paginate-loop fn (fetch: Fn, next-cursor: Fn, page-size: Int, max-items: Int, cursor: Any, acc: Vec): Vec {
   page fetch(cursor)
-  all concat(acc, page)
   cond {
-    is-empty(page) => { all }
-    lt(length(page), page-size) => { slice(all, 0, min(length(all), max-items)) }
-    gte(length(all), max-items) => { slice(all, 0, max-items) }
-    => { paginate-loop(fetch, next-cursor, page-size, max-items, next-cursor(page), all) }
+    is-err(page) => { page }
+    => {
+      all concat(acc, page)
+      cond {
+        is-empty(page) => { all }
+        lt(length(page), page-size) => { slice(all, 0, min(length(all), max-items)) }
+        gte(length(all), max-items) => { slice(all, 0, max-items) }
+        => { paginate-loop(fetch, next-cursor, page-size, max-items, next-cursor(page), all) }
+      }
+    }
   }
 }
 
@@ -436,7 +558,8 @@ meta {
     doc: """
     Collect cursor pages until a short page or `max-items`. `fetch` takes
     the cursor (`null` first) and returns one page (Vec); `next-cursor`
-    takes that page and returns the next cursor. The module helpers
+    takes that page and returns the next cursor. A failed page comes back
+    as its Err. The module helpers
     (`::discord::guilds/list-all-guild-members`,
     `::discord::messages/get-message-history`, ...) are built on it.
 

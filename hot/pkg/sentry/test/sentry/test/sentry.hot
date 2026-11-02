@@ -157,9 +157,9 @@ meta ["test"] fn () {
     assert-eq("HTTP 404", ::api/error-message(404, {}))
 }
 
-test-to-error
+test-http-error-from-response
 meta ["test"] fn () {
-    e ::api/to-error(HttpResponse({status: 404, headers: {}, body: {detail: "The requested resource does not exist"}}))
+    e ::api/HttpError(HttpResponse({status: 404, headers: {}, body: {detail: "The requested resource does not exist"}}))
     assert-eq(404, e.status)
     assert-eq("The requested resource does not exist", e.message)
 }

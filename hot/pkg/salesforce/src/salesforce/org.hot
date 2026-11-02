@@ -20,16 +20,24 @@ meta {
     ```
     """
 }
-fn (): Map {
-  ::api/json("GET", "/limits")
+fn
+(): Map {
+  limits({})
+},
+(opts: Map): Map {
+  ::api/json("GET", "/limits", null, opts)
 }
 
 versions
 meta {
     doc: """GET /services/data - The REST API versions the org supports (`[{version, label, url}]`), oldest first. Use it to pick `salesforce.api.version` for an older org."""
 }
-fn (): Vec {
-  ::api/json("GET", "/services/data")
+fn
+(): Vec {
+  versions({})
+},
+(opts: Map): Vec {
+  ::api/json("GET", "/services/data", null, opts)
 }
 
 api-usage

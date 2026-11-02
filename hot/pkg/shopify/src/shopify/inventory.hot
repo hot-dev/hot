@@ -32,6 +32,9 @@ fn
   get-inventory-levels(inventory-item-id, {})
 },
 (inventory-item-id: Str, options: Map): Map? {
+  get-inventory-levels(inventory-item-id, options, {})
+},
+(inventory-item-id: Str, options: Map, opts: Map): Map? {
   query """
   query InventoryLevels($id: ID!, $first: Int!, $after: String, $names: [String!]!) {
     inventoryItem(id: $id) {
@@ -52,8 +55,8 @@ fn
     ...vars,
     id: inventory-item-id,
     names: or(get(options, "names"), DEFAULT_QUANTITY_NAMES)
-  })
-  data.inventoryItem
+  }, opts)
+  if-ok(data, %(%.inventoryItem))
 }
 
 with-change-from fn (change: Map): Map {
@@ -107,6 +110,9 @@ fn
   adjust-quantities(changes, {})
 },
 (changes: Vec, options: Map): Map {
+  adjust-quantities(changes, options, {})
+},
+(changes: Vec, options: Map, opts: Map): Map {
   mutation """
   mutation InventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
     inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
@@ -121,8 +127,8 @@ fn
   payload ::api/mutate(mutation, {
     input: build-adjust-input(changes, options),
     idempotencyKey: idempotency-key(options)
-  }, "inventoryAdjustQuantities")
-  payload.inventoryAdjustmentGroup
+  }, "inventoryAdjustQuantities", opts)
+  if-ok(payload, %(%.inventoryAdjustmentGroup))
 }
 
 build-set-input
@@ -153,6 +159,9 @@ fn
   set-quantities(quantities, {})
 },
 (quantities: Vec, options: Map): Map {
+  set-quantities(quantities, options, {})
+},
+(quantities: Vec, options: Map, opts: Map): Map {
   mutation """
   mutation InventorySetQuantities($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
     inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
@@ -167,8 +176,8 @@ fn
   payload ::api/mutate(mutation, {
     input: build-set-input(quantities, options),
     idempotencyKey: idempotency-key(options)
-  }, "inventorySetQuantities")
-  payload.inventoryAdjustmentGroup
+  }, "inventorySetQuantities", opts)
+  if-ok(payload, %(%.inventoryAdjustmentGroup))
 }
 
 set-on-hand-quantities
@@ -180,5 +189,8 @@ fn
   set-on-hand-quantities(quantities, {})
 },
 (quantities: Vec, options: Map): Map {
-  set-quantities(quantities, {...options, name: "on_hand"})
+  set-on-hand-quantities(quantities, options, {})
+},
+(quantities: Vec, options: Map, opts: Map): Map {
+  set-quantities(quantities, {...options, name: "on_hand"}, opts)
 }

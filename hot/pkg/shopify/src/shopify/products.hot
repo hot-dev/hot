@@ -37,6 +37,9 @@ fn
   list-products({})
 },
 (options: Map): Map {
+  list-products(options, {})
+},
+(options: Map, opts: Map): Map {
   query ```
   query Products($first: Int!, $after: String, $query: String, $sortKey: ProductSortKeys, $reverse: Boolean) {
     products(first: $first, after: $after, query: $query, sortKey: $sortKey, reverse: $reverse) {
@@ -45,8 +48,8 @@ fn
     }
   }
   ```
-  data ::api/graphql(query, ::api/connection-variables(options))
-  data.products
+  data ::api/graphql(query, ::api/connection-variables(options), opts)
+  if-ok(data, %(%.products))
 }
 
 search-products
@@ -58,22 +61,33 @@ fn
   search-products(search-query, {})
 },
 (search-query: Str, options: Map): Map {
-  list-products({...options, query: search-query})
+  search-products(search-query, options, {})
+},
+(search-query: Str, options: Map, opts: Map): Map {
+  list-products({...options, query: search-query}, opts)
 }
 
 collect-products
 meta {
     doc: """Follow cursors and return up to `max-items` products (a Vec of nodes). Options as in `list-products`."""
 }
-fn (options: Map, max-items: Int): Vec {
+fn
+(options: Map, max-items: Int): Vec {
   ::api/collect(list-products, options, max-items)
+},
+(options: Map, max-items: Int, opts: Map): Vec {
+  ::api/collect((page-options) { list-products(page-options, opts) }, options, max-items)
 }
 
 get-product
 meta {
     doc: """One product by GraphQL id with its options and first 100 variants (price, SKU, inventory item id). Returns null when not found."""
 }
-fn (id: Str): Map? {
+fn
+(id: Str): Map? {
+  get-product(id, {})
+},
+(id: Str, opts: Map): Map? {
   query ```
   query Product($id: ID!) {
     product(id: $id) {
@@ -87,8 +101,8 @@ fn (id: Str): Map? {
     }
   }
   ```
-  data ::api/graphql(query, {id: id})
-  data.product
+  data ::api/graphql(query, {id: id}, opts)
+  if-ok(data, %(%.product))
 }
 
 create-product
@@ -107,7 +121,11 @@ meta {
     ```
     """
 }
-fn (product: Map): Map {
+fn
+(product: Map): Map {
+  create-product(product, {})
+},
+(product: Map, opts: Map): Map {
   mutation ```
   mutation ProductCreate($product: ProductCreateInput!) {
     productCreate(product: $product) {
@@ -119,15 +137,19 @@ fn (product: Map): Map {
     }
   }
   ```
-  payload ::api/mutate(mutation, {product: product}, "productCreate")
-  payload.product
+  payload ::api/mutate(mutation, {product: product}, "productCreate", opts)
+  if-ok(payload, %(%.product))
 }
 
 update-product
 meta {
     doc: """Update a product (`productUpdate`) from a `ProductUpdateInput` that includes the product `id` and the fields to change."""
 }
-fn (product: Map): Map {
+fn
+(product: Map): Map {
+  update-product(product, {})
+},
+(product: Map, opts: Map): Map {
   mutation ```
   mutation ProductUpdate($product: ProductUpdateInput!) {
     productUpdate(product: $product) {
@@ -139,8 +161,8 @@ fn (product: Map): Map {
   cond {
     is-null(get(product, "id")) => { err("shopify: update-product needs the product id in the input") }
     => {
-      payload ::api/mutate(mutation, {product: product}, "productUpdate")
-      payload.product
+      payload ::api/mutate(mutation, {product: product}, "productUpdate", opts)
+      if-ok(payload, %(%.product))
     }
   }
 }
@@ -168,6 +190,9 @@ fn
   update-variants(product-id, variants, {})
 },
 (product-id: Str, variants: Vec, options: Map): Vec {
+  update-variants(product-id, variants, options, {})
+},
+(product-id: Str, variants: Vec, options: Map, opts: Map): Vec {
   mutation ```
   mutation ProductVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $allowPartialUpdates: Boolean) {
     productVariantsBulkUpdate(productId: $productId, variants: $variants, allowPartialUpdates: $allowPartialUpdates) {
@@ -181,15 +206,19 @@ fn
     variants: variants,
     allowPartialUpdates: get(options, "allowPartialUpdates")
   }, is-some)
-  payload ::api/mutate(mutation, vars, "productVariantsBulkUpdate")
-  payload.productVariants
+  payload ::api/mutate(mutation, vars, "productVariantsBulkUpdate", opts)
+  if-ok(payload, %(%.productVariants))
 }
 
 delete-product
 meta {
     doc: """Permanently delete a product and its variants (`productDelete`). Returns the deleted product id. Prefer `update-product` with `status: "ARCHIVED"` when the product may be needed again."""
 }
-fn (id: Str): Str {
+fn
+(id: Str): Str {
+  delete-product(id, {})
+},
+(id: Str, opts: Map): Str {
   mutation """
   mutation ProductDelete($input: ProductDeleteInput!) {
     productDelete(input: $input) {
@@ -198,6 +227,6 @@ fn (id: Str): Str {
     }
   }
   """
-  payload ::api/mutate(mutation, {input: {id: id}}, "productDelete")
-  payload.deletedProductId
+  payload ::api/mutate(mutation, {input: {id: id}}, "productDelete", opts)
+  if-ok(payload, %(%.deletedProductId))
 }

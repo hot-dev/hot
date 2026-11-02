@@ -1,6 +1,6 @@
 ::zendesk::views ns
 meta {
-    ctx: {"zendesk.subdomain": {required: true, secret: false}},
+    ctx: {"zendesk.subdomain": {required: false, secret: false}},
     doc: """Views: the ticket queues agents work. List them, run one, or page through its tickets."""
 }
 
@@ -15,23 +15,34 @@ fn
   list-views({})
 },
 (options: Map): Any {
-  ::api/list-page("/views", options)
+  list-views(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/list-page("/views", options, opts)
 }
 
 list-active-views
 meta {
     doc: """GET /views/active - Active views shared with the user: `{views}`."""
 }
-fn (): Any {
-  ::api/request("GET", "/views/active", "")
+fn
+(): Any {
+  list-active-views({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/views/active", "", opts)
 }
 
 get-view
 meta {
     doc: """GET /views/{id} - One view's definition. `id` may also be `"incoming"`, `"my"` or `"my_groups"`."""
 }
-fn (id: Any): Any {
-  ::api/request("GET", `/views/${::api/path-segment(id)}`, "")
+fn
+(id: Any): Any {
+  get-view(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/views/${::api/path-segment(id)}`, "", opts)
 }
 
 execute-view
@@ -43,7 +54,10 @@ fn
   execute-view(id, {})
 },
 (id: Any, options: Map): Any {
-  ::api/list-page(`/views/${::api/path-segment(id)}/execute`, options)
+  execute-view(id, options, {})
+},
+(id: Any, options: Map, opts: Map): Any {
+  ::api/list-page(`/views/${::api/path-segment(id)}/execute`, options, opts)
 }
 
 list-view-tickets
@@ -55,21 +69,32 @@ fn
   list-view-tickets(id, {})
 },
 (id: Any, options: Map): Any {
-  ::api/list-page(`/views/${::api/path-segment(id)}/tickets`, options)
+  list-view-tickets(id, options, {})
+},
+(id: Any, options: Map, opts: Map): Any {
+  ::api/list-page(`/views/${::api/path-segment(id)}/tickets`, options, opts)
 }
 
 list-all-view-tickets
 meta {
     doc: """Collect up to `limit` tickets from a view across cursor pages. Returns a Vec."""
 }
-fn (id: Any, limit: Int): Vec {
-  ::api/collect(`/views/${::api/path-segment(id)}/tickets`, "tickets", {}, limit)
+fn
+(id: Any, limit: Int): Vec {
+  list-all-view-tickets(id, limit, {})
+},
+(id: Any, limit: Int, opts: Map): Vec {
+  ::api/collect(`/views/${::api/path-segment(id)}/tickets`, "tickets", {}, limit, opts)
 }
 
 count-view-tickets
 meta {
     doc: """GET /views/{id}/count - The view's ticket count: `{view_count: {value, pretty, fresh}}`."""
 }
-fn (id: Any): Any {
-  ::api/request("GET", `/views/${::api/path-segment(id)}/count`, "")
+fn
+(id: Any): Any {
+  count-view-tickets(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/views/${::api/path-segment(id)}/count`, "", opts)
 }

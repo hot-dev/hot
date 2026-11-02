@@ -15,16 +15,24 @@ get-sticker
 meta {
     doc: """GET /stickers/{sticker_id} - Any sticker by id."""
 }
-fn (request: GetStickerRequest): Map {
-  ::api/call("GET", `/stickers/${seg(request.sticker_id)}`)
+fn
+(request: GetStickerRequest): Map {
+  get-sticker(request, {})
+},
+(request: GetStickerRequest, opts: Map): Map {
+  ::api/call("GET", `/stickers/${seg(request.sticker_id)}`, {}, opts)
 }
 
 list-sticker-packs
 meta {
     doc: """GET /sticker-packs - Discord's standard sticker packs. Returns `{sticker_packs}`."""
 }
-fn (): Map {
-  ::api/call("GET", "/sticker-packs")
+fn
+(): Map {
+  list-sticker-packs({})
+},
+(opts: Map): Map {
+  ::api/call("GET", "/sticker-packs", {}, opts)
 }
 
 ListGuildStickersRequest type {
@@ -35,8 +43,12 @@ list-guild-stickers
 meta {
     doc: """GET /guilds/{guild_id}/stickers - The guild's custom stickers."""
 }
-fn (request: ListGuildStickersRequest): Vec<Map> {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/stickers`)
+fn
+(request: ListGuildStickersRequest): Vec<Map> {
+  list-guild-stickers(request, {})
+},
+(request: ListGuildStickersRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/stickers`, {}, opts)
 }
 
 GetGuildStickerRequest type {
@@ -48,8 +60,12 @@ get-guild-sticker
 meta {
     doc: """GET /guilds/{guild_id}/stickers/{sticker_id} - One guild sticker."""
 }
-fn (request: GetGuildStickerRequest): Map {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/stickers/${seg(request.sticker_id)}`)
+fn
+(request: GetGuildStickerRequest): Map {
+  get-guild-sticker(request, {})
+},
+(request: GetGuildStickerRequest, opts: Map): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/stickers/${seg(request.sticker_id)}`, {}, opts)
 }
 
 CreateGuildStickerRequest type {
@@ -83,7 +99,11 @@ meta {
     ```
     """
 }
-fn (request: CreateGuildStickerRequest): Map {
+fn
+(request: CreateGuildStickerRequest): Map {
+  create-guild-sticker(request, {})
+},
+(request: CreateGuildStickerRequest, opts: Map): Map {
   ::api/call("POST", `/guilds/${seg(request.guild_id)}/stickers`, {
     form: {
       fields: {name: request.name, description: or(request.description, ""), tags: request.tags},
@@ -91,7 +111,7 @@ fn (request: CreateGuildStickerRequest): Map {
       file: untype(request.file)
     },
     reason: request.reason
-  })
+  }, opts)
 }
 
 ModifyGuildStickerRequest type {
@@ -108,11 +128,15 @@ modify-guild-sticker
 meta {
     doc: """PATCH /guilds/{guild_id}/stickers/{sticker_id} - Change a sticker's name, description or tags. Only fields you set are sent. Needs MANAGE_GUILD_EXPRESSIONS."""
 }
-fn (request: ModifyGuildStickerRequest): Map {
+fn
+(request: ModifyGuildStickerRequest): Map {
+  modify-guild-sticker(request, {})
+},
+(request: ModifyGuildStickerRequest, opts: Map): Map {
   ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/stickers/${seg(request.sticker_id)}`, {
     body: ::api/body(request, ["guild_id", "sticker_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 DeleteGuildStickerRequest type {
@@ -125,6 +149,10 @@ delete-guild-sticker
 meta {
     doc: """DELETE /guilds/{guild_id}/stickers/{sticker_id} - Delete a sticker. Needs MANAGE_GUILD_EXPRESSIONS."""
 }
-fn (request: DeleteGuildStickerRequest): Bool {
-  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/stickers/${seg(request.sticker_id)}`, {reason: request.reason})
+fn
+(request: DeleteGuildStickerRequest): Bool {
+  delete-guild-sticker(request, {})
+},
+(request: DeleteGuildStickerRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/stickers/${seg(request.sticker_id)}`, {reason: request.reason}, opts)
 }

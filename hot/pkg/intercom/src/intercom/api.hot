@@ -1,12 +1,32 @@
 ::intercom::api ns
 meta {
     ctx: {
-        "intercom.token": {required: true},
+        "intercom.token": {required: false},
         "intercom.admin.id": {required: false, secret: false},
         "intercom.region": {required: false, secret: false},
         "intercom.version": {required: false, secret: false}
     },
-    doc: """Low-level Intercom transport: regional base URL, auth and `Intercom-Version` headers, `HttpError` for non-2xx responses, and the cursor (`starting_after`) pagination helpers the endpoint namespaces share."""
+    doc: """
+    Low-level Intercom transport: regional base URL, auth and
+    `Intercom-Version` headers, `HttpError` for non-2xx responses, and the
+    cursor (`starting_after`) pagination helpers the endpoint namespaces
+    share.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then context variables, then defaults. Nothing from `opts` is
+    written to ctx, so one run can act for many workspaces and parallel
+    flows don't share credentials. A `token` from `opts` is masked in call
+    records. A `token` present but blank or null is an error, never a
+    fallback to `intercom.token`.
+
+    - `token`: the access token for this call
+    - `region`: `us`, `eu` or `au` for this call
+    - `version`: the `Intercom-Version` for this call
+    - `admin-id`: the admin to act as. It's required for acting calls that
+      pass a `token`, since `intercom.admin.id` belongs to the workspace of
+      `intercom.token`.
+    """
 }
 
 ::ctx ::hot::ctx
@@ -22,11 +42,7 @@ HttpError type {
     body: Any
 }
 
-http-error
-meta {
-    doc: """Build the `HttpError` for a non-2xx response. A plain `HttpError(response)` would copy fields structurally; this also defaults missing headers to `{}`. Exposed for testing; every request uses it."""
-}
-fn (response: HttpResponse): HttpError {
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   HttpError({
     status: response.status,
     headers: or(response.headers, {}),
@@ -37,6 +53,16 @@ fn (response: HttpResponse): HttpError {
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
+
+non-blank fn (value: Any): Any {
+  cond {
+    is-str(value) => {
+      trimmed trim(value)
+      if(is-empty(trimmed), null, trimmed)
+    }
+    => { value }
+  }
+}
 
 base-url
 meta {
@@ -66,20 +92,114 @@ meta {
     doc: """The `Intercom-Version` to send: `intercom.version` when set, otherwise the pinned `::intercom/API_VERSION`."""
 }
 fn (): Str {
-  or(::ctx/get("intercom.version"), ::intercom/API_VERSION)
+  or(non-blank(::ctx/get("intercom.version")), ::intercom/API_VERSION)
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: `{token, base-url, version}` for a call from
+    `opts` first, then `ctx-values` (a Map of context variables), then
+    defaults. An Err when no token is set, when `token` is in `opts` but
+    blank or null (that never falls back to context), or when the region
+    isn't `us`, `eu` or `au`. Exposed for testing; `resolve` feeds it the
+    context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  token or(non-blank(get(opts, "token")), non-blank(get(ctx-values, "intercom.token")))
+  host base-url(or(non-blank(get(opts, "region")), non-blank(get(ctx-values, "intercom.region"))))
+  cond {
+    and(in("token", keys(opts)), is-null(non-blank(get(opts, "token")))) => {
+      err("intercom: token is in the call's opts but is blank or null. Pass a value, or leave token out to use intercom.token.")
+    }
+
+    is-null(token) => { err("intercom: intercom.token is not set. Add it in Context Variables, or pass {token: ...} in the call's opts.") }
+    is-err(host) => { host }
+    => {
+      {
+        token: token,
+        base-url: host,
+        version: or(non-blank(get(opts, "version")), non-blank(get(ctx-values, "intercom.version")), ::intercom/API_VERSION)
+      }
+    }
+  }
+}
+
+resolve
+meta {
+    ctx: {
+        "intercom.token": {required: false},
+        "intercom.region": {required: false, secret: false},
+        "intercom.version": {required: false, secret: false}
+    },
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). A `token`
+    from `opts` is masked in call records with `::hot::ctx/mark-secret`,
+    and `opts` values are never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::intercom::api/resolve({token: "tenant-b-token", region: "eu"}).base-url  // "https://api.eu.intercom.io"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  resolved resolve-from(opts, {
+    "intercom.token": ::ctx/get("intercom.token"),
+    "intercom.region": ::ctx/get("intercom.region"),
+    "intercom.version": ::ctx/get("intercom.version")
+  })
+  cond {
+    is-err(resolved) => { resolved }
+    in("token", keys(opts)) => { {...resolved, token: ::ctx/mark-secret(resolved.token)} }
+    => { resolved }
+  }
+}
+
+optional-admin-id
+meta {
+    ctx: {"intercom.admin.id": {required: false, secret: false}},
+    doc: """The admin in `opts`, else `intercom.admin.id`, else null. `intercom.admin.id` belongs to the workspace of `intercom.token`, so it isn't used when `opts` has its own `token`."""
+}
+fn (opts: Map): Str? {
+  explicit non-blank(get(opts, "admin-id"))
+  id if(in("token", keys(opts)), explicit, or(explicit, non-blank(::ctx/get("intercom.admin.id"))))
+  if(is-null(id), null, Str(id))
 }
 
 admin-id
 meta {
-    ctx: {"intercom.admin.id": {required: true, secret: false}},
-    doc: """The admin to act as, from `intercom.admin.id`. Halts with a hint when it is unset (look it up with `::intercom::admins/me()`)."""
+    ctx: {"intercom.admin.id": {required: false, secret: false}},
+    doc: """The admin to act as (see `optional-admin-id`), or an Err with a hint when there is none: look it up with `::intercom::admins/me()`."""
 }
-fn (): Str {
-  id ::ctx/get("intercom.admin.id")
-  if(or(is-null(id), is-empty(Str(or(id, "")))),
-    fail("intercom.admin.id is not set. Set it to the admin to act as; ::intercom::admins/me() returns the token's admin.")
-  )
-  Str(id)
+fn
+(): Str {
+  admin-id({})
+},
+(opts: Map): Str {
+  id optional-admin-id(opts)
+  cond {
+    is-null(id) => {
+      err("intercom: no admin to act as. Set intercom.admin.id, or pass {admin-id: ...} in the call's opts; ::intercom::admins/me() returns the token's admin. A token in opts needs its own admin-id.")
+    }
+    => { id }
+  }
+}
+
+with-admin
+meta {
+    doc: """Run `action` with the admin to act as. A problem with the call's credentials, or a missing admin, comes back as an Err before anything is sent."""
+}
+fn (opts: Map, action: Fn): Any {
+  resolved resolve(opts)
+  admin admin-id(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    is-err(admin) => { admin }
+    => { action(admin) }
+  }
 }
 
 build-headers
@@ -111,39 +231,53 @@ fn (body: Any): Any {
 // Requests
 // ---------------------------------------------------------------------------
 
-request
-meta {
-    ctx: {"intercom.token": {required: true}},
-    doc: """
-    Make an authenticated Intercom request. `path` is relative to the
-    regional host (e.g. `/contacts`); `body` is a Map, or `""` for none.
-    Returns the decoded body on 2xx (null when empty), or an Err carrying
-    `HttpError` (Intercom's `errors` list is in `body`).
-
-    **Example**
-
-    ```hot
-    segments ::intercom::api/request("GET", "/segments", "")
-    ```
-    """
-}
-fn
-(method: Str, path: Str, body: Any): Any {
-  request(method, path, body, ::ctx/get("intercom.token"))
-},
-// 4-arity: explicit access token override (e.g. an OAuth token per workspace)
-(method: Str, path: Str, body: Any, token: Str): Any {
+send fn (method: Str, path: Str, body: Any, resolved: Map): Any {
   has-body not(eq(body, ""))
   response ::hot::http/request(HttpRequest({
     method,
-    url: `${base-url()}${path}`,
-    headers: build-headers(token, api-version(), has-body),
+    url: `${resolved.base-url}${path}`,
+    headers: build-headers(resolved.token, resolved.version, has-body),
     body: if(has-body, to-json(untype(body)), "")
   }))
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response-body(response.body) }
-    => { err(http-error(response)) }
+    => { err(HttpError(response)) }
+  }
+}
+
+request
+meta {
+    ctx: {"intercom.token": {required: false}},
+    doc: """
+    Make an authenticated Intercom request. `path` is relative to the
+    regional host (e.g. `/contacts`); `body` is a Map, or `""` for none.
+    Returns the decoded body on 2xx (null when empty), or an Err carrying
+    `HttpError` (Intercom's `errors` list is in `body`). The 4th argument
+    is per-call `opts` (see `resolve`) or an access token.
+
+    **Example**
+
+    ```hot
+    segments ::intercom::api/request("GET", "/segments", "")
+    tenant ::intercom::api/request("GET", "/segments", "", {token: "tenant-b-token", region: "eu"})
+    ```
+    """
+}
+fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, {})
+},
+// 4-arity: explicit access token override (e.g. an OAuth token per workspace)
+(method: Str, path: Str, body: Any, token: Str): Any {
+  request(method, path, body, {token: token})
+},
+// 4-arity: per-call credentials and settings (see `resolve`)
+(method: Str, path: Str, body: Any, opts: Map): Any {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { send(method, path, body, resolved) }
   }
 }
 
@@ -213,7 +347,7 @@ meta {
     Vec (e.g. `"conversations"`, `"contacts"`, `"tickets"`, `"data"`),
     until `limit` items or the last page. `fetch` is a Fn taking the
     cursor (null for the first page) and returning one page. Exposed for
-    testing; the `search-all-*` functions use it.
+    testing; the `search-all-*` functions use it. A failed page comes back as its Err.
     """
 }
 fn (fetch: Fn, key: Str, cursor: Str?, limit: Int, acc: Vec): Vec {
@@ -221,14 +355,19 @@ fn (fetch: Fn, key: Str, cursor: Str?, limit: Int, acc: Vec): Vec {
     lte(limit, length(acc)) => { slice(acc, 0, max(limit, 0)) }
     => {
       page fetch(cursor)
-      items or(get(page, key), [])
-      combined concat(acc, items)
-      next next-cursor(page)
       cond {
-        gte(length(combined), limit) => { slice(combined, 0, limit) }
-        is-empty(items) => { combined }
-        is-null(next) => { combined }
-        => { collect-pages(fetch, key, next, limit, combined) }
+        is-err(page) => { page }
+        => {
+          items or(get(page, key), [])
+          combined concat(acc, items)
+          next next-cursor(page)
+          cond {
+            gte(length(combined), limit) => { slice(combined, 0, limit) }
+            is-empty(items) => { combined }
+            is-null(next) => { combined }
+            => { collect-pages(fetch, key, next, limit, combined) }
+          }
+        }
       }
     }
   }

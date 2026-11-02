@@ -35,6 +35,75 @@ meta ["test"] fn () {
 }
 
 // ============================================================================
+// Per-call credentials
+// ============================================================================
+
+CTX_VALUES {"intercom.token": "ctx-token", "intercom.region": "eu", "intercom.version": "2.11"}
+
+test-resolve-from-prefers-opts
+meta ["test"] fn () {
+    out ::api/resolve-from({token: " tenant-token ", region: "au", version: "2.15"}, CTX_VALUES)
+    assert-eq("tenant-token", out.token)
+    assert-eq("https://api.au.intercom.io", out.base-url)
+    assert-eq("2.15", out.version)
+}
+
+test-resolve-from-falls-back-to-ctx-and-defaults
+meta ["test"] fn () {
+    out ::api/resolve-from({}, CTX_VALUES)
+    assert-eq("ctx-token", out.token)
+    assert-eq("https://api.eu.intercom.io", out.base-url)
+    assert-eq("2.11", out.version)
+
+    defaults ::api/resolve-from({token: "t"}, {})
+    assert-eq("https://api.intercom.io", defaults.base-url)
+    assert-eq(::intercom/API_VERSION, defaults.version)
+}
+
+test-resolve-from-missing-token-is-err
+meta ["test"] fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out), "no token anywhere")
+    assert(contains(if-err(out, (e) { e }), "intercom.token"), "names the context variable")
+}
+
+test-resolve-from-blank-token-never-falls-back
+meta ["test"] fn () {
+    for-each(["", "   ", null], (blank) {
+        out ::api/resolve-from({token: blank}, CTX_VALUES)
+        assert(is-err(out), "blank token is an Err, never ctx")
+        assert(contains(if-err(out, (e) { e }), "token"), "names the key")
+    })
+}
+
+test-resolve-from-bad-region-is-err
+meta ["test"] fn () {
+    assert(is-err(::api/resolve-from({token: "t", region: "mars"}, {})))
+}
+
+test-resolve-returns-marked-token-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-token-value", ::api/resolve({token: "tenant-token-value"}).token)
+}
+
+test-opts-arity-blank-credential-is-err-before-any-request
+meta ["test"] fn () {
+    assert(is-err(::intercom::admins/me({token: ""})))
+    assert(is-err(::conversations/list-conversations({}, {token: null})))
+    assert(is-err(::conversations/add-note("1", "note", {token: ""})), "credentials are checked before the admin")
+    assert(is-err(::events/submit-event("signed-in", {id: "1"}, {}, {token: "  "})))
+    assert(is-err(::conversations/search-all-conversations({field: "open", operator: "=", value: true}, 5, {token: ""})), "a failed page comes back as its Err")
+}
+
+test-admin-id-from-opts
+meta ["test"] fn () {
+    assert-eq("991", ::api/admin-id({admin-id: "991"}))
+    assert-eq("991", ::api/admin-id({token: "t", admin-id: 991}), "ids may be Ints")
+    assert(is-err(::api/admin-id({token: "t"})), "ctx admin isn't used with a token from opts")
+    assert(is-err(::conversations/close-conversation("1", {token: "t"})), "acting without an admin is an Err")
+}
+
+// ============================================================================
 // Headers and response handling
 // ============================================================================
 
@@ -56,7 +125,7 @@ meta ["test"] fn () {
 
 test-http-error-from-response
 meta ["test"] fn () {
-    e ::api/http-error(::hot::http/HttpResponse({status: 401, headers: {}, body: {type: "error.list", errors: [{code: "unauthorized"}]}}))
+    e ::api/HttpError(::hot::http/HttpResponse({status: 401, headers: {}, body: {type: "error.list", errors: [{code: "unauthorized"}]}}))
     assert-eq(401, e.status)
     assert-eq("unauthorized", first(e.body.errors).code)
 }

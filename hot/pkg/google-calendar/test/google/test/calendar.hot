@@ -79,9 +79,9 @@ meta ["test"] fn () {
 
 test-sync-token-expired
 meta ["test"] fn () {
-    gone err(::google::api/error-from-response({status: 410, headers: {}, body: {error: {code: 410, message: "Sync token is no longer valid, a full sync is required.", errors: [{reason: "fullSyncRequired"}]}}}))
+    gone err(::google::api/HttpError(::hot::http/HttpResponse({status: 410, headers: {}, body: {error: {code: 410, message: "Sync token is no longer valid, a full sync is required.", errors: [{reason: "fullSyncRequired"}]}}})))
     assert(::sync/is-sync-token-expired(gone))
-    assert(not(::sync/is-sync-token-expired(err(::google::api/error-from-response({status: 404, headers: {}, body: ""})))))
+    assert(not(::sync/is-sync-token-expired(err(::google::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: ""}))))))
     assert(not(::sync/is-sync-token-expired({items: []})))
 }
 
@@ -113,6 +113,7 @@ meta ["test"] fn () {
     assert(not(::sync/verify-channel-token(request(null), "s1")), "missing header")
     assert(not(::sync/verify-channel-token(request(""), "")), "empty expected token fails closed")
     assert(not(::sync/verify-channel-token(request("x"), null)), "null expected token fails closed")
+    assert(not(::sync/verify-channel-token(request("x"), "  ")), "blank expected token fails closed")
     assert(is-err(::sync/verify-notification(request("bad"), "s1")))
     assert-eq("ch-1", ::sync/verify-notification(request("s1"), "s1").channel-id)
 }

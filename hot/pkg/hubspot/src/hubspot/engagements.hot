@@ -60,8 +60,12 @@ create-activity
 meta {
     doc: """POST /crm/objects/{version}/{activityType} - Create an activity of any type with properties and associated records. `hs_timestamp` defaults to now. The typed helpers below call this."""
 }
-fn (activity-type: Str, properties: Map, targets: Vec): Map {
-  ::api/json("POST", ::api/crm-path("objects", `/${activity-type}`), {}, build-activity-body(activity-type, properties, targets, now-ms()))
+fn
+(activity-type: Str, properties: Map, targets: Vec): Map {
+  create-activity(activity-type, properties, targets, {})
+},
+(activity-type: Str, properties: Map, targets: Vec, opts: Map): Map {
+  ::api/json("POST", ::api/crm-path("objects", `/${activity-type}`, opts), {}, build-activity-body(activity-type, properties, targets, now-ms()), opts)
 }
 
 create-task
@@ -85,38 +89,58 @@ meta {
     ```
     """
 }
-fn (properties: Map, targets: Vec): Map {
-  create-activity("tasks", properties, targets)
+fn
+(properties: Map, targets: Vec): Map {
+  create-task(properties, targets, {})
+},
+(properties: Map, targets: Vec, opts: Map): Map {
+  create-activity("tasks", properties, targets, opts)
 }
 
 create-call
 meta {
     doc: """Log a call. Properties: `hs_call_title`, `hs_call_body`, `hs_timestamp` (defaults to now), `hs_call_direction` (`INBOUND`/`OUTBOUND`), `hs_call_duration` (milliseconds), `hs_call_status` (`COMPLETED`, `NO_ANSWER`, `BUSY`, `FAILED`, ...), `hs_call_disposition` (outcome GUID), `hs_call_from_number`, `hs_call_to_number`, `hs_call_recording_url` (HTTPS), `hubspot_owner_id`."""
 }
-fn (properties: Map, targets: Vec): Map {
-  create-activity("calls", properties, targets)
+fn
+(properties: Map, targets: Vec): Map {
+  create-call(properties, targets, {})
+},
+(properties: Map, targets: Vec, opts: Map): Map {
+  create-activity("calls", properties, targets, opts)
 }
 
 create-meeting
 meta {
     doc: """Log a meeting. Properties: `hs_meeting_title`, `hs_meeting_body`, `hs_internal_meeting_notes`, `hs_timestamp` (defaults to now; set it to the start time), `hs_meeting_start_time`, `hs_meeting_end_time`, `hs_meeting_location`, `hs_meeting_external_url`, `hs_meeting_outcome` (`SCHEDULED`, `COMPLETED`, `RESCHEDULED`, `NO_SHOW`, `CANCELED`), `hubspot_owner_id`. This logs the meeting on the timeline; it does not send calendar invites."""
 }
-fn (properties: Map, targets: Vec): Map {
-  create-activity("meetings", properties, targets)
+fn
+(properties: Map, targets: Vec): Map {
+  create-meeting(properties, targets, {})
+},
+(properties: Map, targets: Vec, opts: Map): Map {
+  create-activity("meetings", properties, targets, opts)
 }
 
 create-email
 meta {
     doc: """Log an email on the timeline (it is not sent). Properties: `hs_email_subject`, `hs_email_text`, `hs_email_html`, `hs_timestamp` (defaults to now), `hs_email_direction` (`EMAIL` outgoing, `INCOMING_EMAIL`, `FORWARDED_EMAIL`), `hs_email_status` (`SENT`, `BOUNCED`, `FAILED`, `SCHEDULED`, `SENDING`), `hs_email_headers` (a JSON string with `from`, `to`, `cc`, `bcc`), `hubspot_owner_id`."""
 }
-fn (properties: Map, targets: Vec): Map {
-  create-activity("emails", properties, targets)
+fn
+(properties: Map, targets: Vec): Map {
+  create-email(properties, targets, {})
+},
+(properties: Map, targets: Vec, opts: Map): Map {
+  create-activity("emails", properties, targets, opts)
 }
 
 create-note
 meta {
     doc: """Create a note. Properties: `hs_note_body` (HTML allowed), `hs_timestamp` (defaults to now), `hubspot_owner_id`, `hs_attachment_ids`. `::hubspot::notes/log-note` is the one-record shorthand."""
 }
-fn (properties: Map, targets: Vec): Map {
-  create-activity("notes", properties, targets)
+fn
+(properties: Map, targets: Vec): Map {
+  create-note(properties, targets, {})
+},
+(properties: Map, targets: Vec, opts: Map): Map {
+  create-activity("notes", properties, targets, opts)
 }

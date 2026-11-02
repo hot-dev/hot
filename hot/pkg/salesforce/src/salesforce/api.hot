@@ -9,6 +9,14 @@ meta {
     `message` flattens Salesforce's `[{message, errorCode, fields}]`
     error array (or an OAuth `{error, error_description}` body) into one
     readable line, with `error-code` set to the first code.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `salesforce.*` context variables, then the defaults.
+    Per-call credentials are masked in call records and only the minted
+    session is cached, keyed by a hash of them, so one run can act for
+    many orgs. `::salesforce::auth` lists the keys; `api-version` picks
+    the REST API version for the call.
     """
 }
 
@@ -33,19 +41,15 @@ type {
     error-code: Str?
 }
 
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
-  to-http-error(response)
-}
-
-to-http-error
+HttpResponse -> HttpError
 meta {
-    doc: """Build an `HttpError` from a response Map (`status`, `headers`, `body`), deriving `message` and `error-code`. Exposed for testing."""
+    doc: """Coerce a response into an `HttpError`, deriving `message` and `error-code` from its body."""
 }
-fn (response: Map): HttpError {
-  body get(response, "body")
+fn (response: HttpResponse): HttpError {
+  body response.body
   HttpError({
-    status: get(response, "status"),
-    headers: or(get(response, "headers"), {}),
+    status: response.status,
+    headers: or(response.headers, {}),
     body: body,
     message: error-message(response.status, body),
     error-code: error-code(body)
@@ -120,7 +124,8 @@ meta {
     doc: """True for a 401 response, which Salesforce returns with `INVALID_SESSION_ID` when a session has expired or been revoked. Exposed for testing."""
 }
 fn (response: Any): Bool {
-  and(is-map(response), eq(get(response, "status"), 401))
+  fields untype(response)
+  and(is-map(fields), eq(get(fields, "status"), 401))
 }
 
 // ---------------------------------------------------------------------------
@@ -130,10 +135,16 @@ fn (response: Any): Bool {
 api-version
 meta {
     ctx: {"salesforce.api.version": {required: false, secret: false}},
-    doc: """The REST API version: `salesforce.api.version` when set ("66.0" and "v66.0" both work), else `::salesforce/DEFAULT_API_VERSION`."""
+    doc: """The REST API version: `api-version` in `opts`, then `salesforce.api.version` ("66.0" and "v66.0" both work), else `::salesforce/DEFAULT_API_VERSION`."""
 }
-fn (): Str {
-  normalize-version(::ctx/get("salesforce.api.version"))
+fn
+(): Str {
+  api-version({})
+},
+(opts: Map): Str {
+  ::auth/mark-credentials(opts)
+  per-call get(opts, "api-version")
+  normalize-version(if(is-blank-value(per-call), ::ctx/get("salesforce.api.version"), per-call))
 }
 
 normalize-version
@@ -228,14 +239,45 @@ encode-body fn (body: Any): Str {
 // Requests
 // ---------------------------------------------------------------------------
 
-send-once fn (method: Str, path: Str, body: Any, options: Map, session: Map): HttpResponse {
+resolve
+meta {
+    ctx: {"salesforce.api.version": {required: false, secret: false}},
+    doc: """
+    The session and settings for one call: `{token, instance-url, flow,
+    expires-at, api-version}` from `opts` first, then context, then
+    defaults (see `::salesforce::auth/resolve-config`), or an Err. A
+    credential in `opts` that is blank or null, or `instance-url` or
+    `my-domain-url` without one, is an Err. Credentials from `opts` are
+    masked in call records and never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::salesforce::api/resolve({access-token: "00D...", instance-url: "https://acme.my.salesforce.com"}).api-version
+    // "v68.0"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  session ::auth/session(opts)
+  cond {
+    is-err(session) => { session }
+    => { {...session, api-version: api-version(opts)} }
+  }
+}
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from a resolved session (see `resolve`). Pure; exposed for testing."""
+}
+fn (method: Str, path: Str, body: Any, options: Map, session: Map): HttpRequest {
   has-body and(is-some(body), not(eq(body, "")))
-  http-request(HttpRequest({
+  HttpRequest({
     method,
-    url: build-url(session.instance-url, path),
+    url: build-url(session.instance-url, path, session.api-version),
     headers: build-headers(session.token, has-body, options),
     body: if(has-body, encode-body(body), "")
-  }))
+  })
 }
 
 send
@@ -245,47 +287,46 @@ meta {
     (any status). `body` is JSON-encoded unless it is already a Str (CSV
     for Bulk uploads); pass null or "" for none. `options`:
     `content-type`, `accept`, `headers`. On a 401 from a minted session,
-    drops the cached session, mints a new one, and retries once.
+    drops the cached session, mints a new one, and retries once. The
+    5-arity form takes per-call credentials (see `resolve`), or a session
+    from `::salesforce::auth/session`, which is used as is with no retry.
     """
 }
 fn
 (method: Str, path: Str, body: Any, options: Map): HttpResponse {
-  session ::auth/session()
-  match session {
-    Result.Err => { err(session) }
-
-    _ => {
-      response send-once(method, path, body, options, session)
+  send(method, path, body, options, {})
+},
+(method: Str, path: Str, body: Any, options: Map, opts: Map): HttpResponse {
+  session resolve(opts)
+  cond {
+    is-err(session) => { session }
+    => {
+      response http-request(build-request(method, path, body, options, session))
       cond {
         is-err(response) => { response }
         and(is-invalid-session(response), ne(session.flow, "access-token")) => {
-          ::auth/invalidate()
-          retry-session ::auth/session()
-          match retry-session {
-            Result.Err => { err(retry-session) }
-
-            _ => { send-once(method, path, body, options, retry-session) }
+          ::auth/invalidate(opts)
+          retry-session resolve(opts)
+          cond {
+            is-err(retry-session) => { retry-session }
+            => { http-request(build-request(method, path, body, options, retry-session)) }
           }
         }
         => { response }
       }
     }
   }
-},
-// 5-arity: explicit session (no cache, no retry)
-(method: Str, path: Str, body: Any, options: Map, session: Map): HttpResponse {
-  send-once(method, path, body, options, session)
 }
 
 unwrap
 meta {
     doc: """The decoded body of a 2xx response (null for 204), or an Err carrying `HttpError`. Exposed for testing."""
 }
-fn (response: Any): Any {
+fn (response: Result): Any {
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { if(eq(response.status, 204), null, response.body) }
-    => { err(to-http-error(response)) }
+    => { err(HttpError(response)) }
   }
 }
 
@@ -295,15 +336,20 @@ meta {
     Make an authenticated JSON request and unwrap the response. `path`
     is relative to the data API root (e.g. `/sobjects/Lead`), or a full
     `/services/...` path. Salesforce returns 204 for updates and deletes:
-    those yield null. The 4-arity form takes an explicit session
-    (`{token, instance-url}`, e.g. from `::salesforce::auth/session()`
-    or managed by the caller) and skips the cache and retry.
+    those yield null. The 4-arity form takes per-call credentials (see
+    `resolve`). A session (`{token, instance-url}`, e.g. from
+    `::salesforce::auth/session()` or managed by the caller) works too,
+    and skips the cache and retry.
 
     **Example**
 
     ```hot
     limits ::salesforce::api/json("GET", "/limits")
     limits.DailyApiRequests.Remaining
+
+    // For another org
+    tenant {refresh-token: "5Aep...", client-id: "3MVG..."}
+    limits ::salesforce::api/json("GET", "/limits", null, tenant)
     ```
     """
 }
@@ -312,8 +358,8 @@ fn
   json(method, path, null)
 },
 (method: Str, path: Str, body: Any): Any {
-  unwrap(send(method, path, body, {}))
+  json(method, path, body, {})
 },
-(method: Str, path: Str, body: Any, session: Map): Any {
-  unwrap(send(method, path, body, {}, session))
+(method: Str, path: Str, body: Any, opts: Map): Any {
+  unwrap(send(method, path, body, {}, opts))
 }

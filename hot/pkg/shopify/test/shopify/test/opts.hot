@@ -1,0 +1,165 @@
+::shopify::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no shopify.* context. A blank token stops every
+// call in the resolver with an Err naming the key, which proves that function
+// passes `opts` through.
+
+::api ::shopify::api
+::orders ::shopify::orders
+::fulfillments ::shopify::fulfillments
+::inventory ::shopify::inventory
+::metafields ::shopify::metafields
+::products ::shopify::products
+::customers ::shopify::customers
+::draft-orders ::shopify::draft-orders
+::webhooks ::shopify::webhooks
+
+BLANK {access-token: ""}
+CTX {"shopify.shop": "ctx-shop", "shopify.access.token": "shpat_ctx"}
+
+refused fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "access-token"), contains(err-message(result), "blank or null"))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    resolved ::api/resolve-from({shop: "tenant", access-token: "shpat_tenant", api-version: "2027-01"}, CTX)
+    assert-eq("shpat_tenant", resolved.access-token)
+    assert-eq("https://tenant.myshopify.com/admin/api/2027-01/graphql.json", resolved.url)
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    resolved ::api/resolve-from({}, {...CTX, "shopify.api.version": "2026-07"})
+    assert-eq("shpat_ctx", resolved.access-token)
+    assert-eq("https://ctx-shop.myshopify.com/admin/api/2026-07/graphql.json", resolved.url)
+}
+
+test-resolve-token-alone-uses-the-ctx-shop
+meta ["test"] fn () {
+    resolved ::api/resolve-from({access-token: "shpat_tenant"}, CTX)
+    assert-eq("https://ctx-shop.myshopify.com/admin/api/2026-10/graphql.json", resolved.url)
+}
+
+test-resolve-shop-without-token-is-an-error
+meta ["test"] fn () {
+    result ::api/resolve-from({shop: "tenant"}, CTX)
+    assert(is-err(result))
+    assert(contains(err-message(result), "shop"))
+    assert(contains(err-message(result), "access-token"))
+    assert(contains(err-message(result), "never sent"))
+}
+
+test-resolve-blank-values-are-errors-not-fallbacks
+meta ["test"] fn () {
+    assert(refused(::api/resolve-from({access-token: ""}, CTX)))
+    assert(refused(::api/resolve-from({access-token: null}, CTX)))
+    assert(refused(::api/resolve-from({shop: "tenant", access-token: "   "}, CTX)))
+    blank-shop ::api/resolve-from({shop: null, access-token: "shpat_tenant"}, CTX)
+    assert(is-err(blank-shop))
+    assert(contains(err-message(blank-shop), "shop is in the call's opts but is blank"))
+}
+
+test-resolve-missing-settings-are-clear-errors
+meta ["test"] fn () {
+    no-shop ::api/resolve-from({}, {"shopify.access.token": "shpat_ctx"})
+    no-token ::api/resolve-from({}, {"shopify.shop": "ctx-shop"})
+    assert(contains(err-message(no-shop), "shopify.shop is not set"))
+    assert(contains(err-message(no-token), "shopify.access.token is not set"))
+}
+
+test-resolve-malformed-shop-and-version-are-errors
+meta ["test"] fn () {
+    assert(is-err(::api/resolve-from({shop: "evil.com/x", access-token: "shpat_tenant"}, {})))
+    assert(is-err(::api/resolve-from({shop: "acme", access-token: "shpat_tenant", api-version: "latest"}, {})))
+}
+
+test-resolve-marks-the-token-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("shpat_tenant_token", ::api/resolve({shop: "acme", access-token: "shpat_tenant_token"}).access-token)
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    ::api/resolve({shop: "acme", access-token: "shpat_tenant_token", api-version: "2027-01"})
+    assert(ne("shpat_tenant_token", ::hot::ctx/get("shopify.access.token")))
+    assert(ne("acme", ::hot::ctx/get("shopify.shop")))
+    assert(ne("2027-01", ::hot::ctx/get("shopify.api.version")))
+}
+
+test-build-request-from-resolved
+meta ["test"] fn () {
+    resolved ::api/resolve-from({shop: "acme", access-token: "shpat_tenant"}, {})
+    req ::api/build-request("{ shop { name } }", {a: 1}, resolved)
+    assert-eq(resolved.url, req.url)
+    assert-eq("shpat_tenant", req.headers.X-Shopify-Access-Token)
+    assert-eq({query: "{ shop { name } }", variables: {a: 1}}, from-json(req.body))
+}
+
+test-explicit-arity-resolves-too
+meta ["test"] fn () {
+    assert(refused(::api/graphql("{ shop { name } }", {}, "acme", "")))
+}
+
+test-opts-reach-the-transport
+meta ["test"] fn () {
+    assert(refused(::api/graphql("{ shop { name } }", {}, BLANK)))
+    assert(refused(::api/mutate("mutation", {}, "field", BLANK)))
+    assert(refused(::api/mutate("mutation", {}, "field", "errors", BLANK)))
+}
+
+test-opts-reach-endpoint-modules
+meta ["test"] fn () {
+    assert(refused(::orders/list-orders({}, BLANK)))
+    assert(refused(::orders/collect-orders({}, 10, BLANK)))
+    assert(refused(::orders/get-order("id", BLANK)))
+    assert(refused(::orders/cancel-order("id", "OTHER", false, {}, BLANK)))
+    assert(refused(::orders/close-order("id", BLANK)))
+    assert(refused(::orders/reopen-order("id", BLANK)))
+    assert(refused(::orders/mark-order-as-paid("id", BLANK)))
+    assert(refused(::orders/add-tags("id", ["a"], BLANK)))
+    assert(refused(::orders/remove-tags("id", ["a"], BLANK)))
+    assert(refused(::fulfillments/list-fulfillment-orders("id", {}, BLANK)))
+    assert(refused(::fulfillments/create-fulfillment("id", null, {}, BLANK)))
+    assert(refused(::fulfillments/update-tracking("id", {number: "1"}, false, BLANK)))
+    assert(refused(::inventory/get-inventory-levels("id", {}, BLANK)))
+    assert(refused(::inventory/adjust-quantities([], {}, BLANK)))
+    assert(refused(::inventory/set-quantities([], {}, BLANK)))
+    assert(refused(::inventory/set-on-hand-quantities([], {}, BLANK)))
+    assert(refused(::products/list-products({}, BLANK)))
+    assert(refused(::products/search-products("q", {}, BLANK)))
+    assert(refused(::products/collect-products({}, 10, BLANK)))
+    assert(refused(::products/get-product("id", BLANK)))
+    assert(refused(::products/create-product({title: "A"}, BLANK)))
+    assert(refused(::products/update-product({id: "id"}, BLANK)))
+    assert(refused(::products/update-variants("id", [], {}, BLANK)))
+    assert(refused(::products/delete-product("id", BLANK)))
+    assert(refused(::customers/list-customers({}, BLANK)))
+    assert(refused(::customers/search-customers("q", {}, BLANK)))
+    assert(refused(::customers/collect-customers({}, 10, BLANK)))
+    assert(refused(::customers/find-customer-by-email("a@b.co", BLANK)))
+    assert(refused(::customers/get-customer("id", BLANK)))
+    assert(refused(::customers/create-customer({email: "a@b.co"}, BLANK)))
+    assert(refused(::customers/update-customer({id: "id"}, BLANK)))
+    assert(refused(::draft-orders/create-draft-order({}, BLANK)))
+    assert(refused(::draft-orders/get-draft-order("id", BLANK)))
+    assert(refused(::draft-orders/complete-draft-order("id", {}, BLANK)))
+    assert(refused(::metafields/set-metafields([], BLANK)))
+    assert(refused(::metafields/set-metafield("id", "n", "k", "t", "v", BLANK)))
+    assert(refused(::metafields/get-metafield("id", "n", "k", BLANK)))
+    assert(refused(::metafields/list-metafields("id", {}, BLANK)))
+    assert(refused(::metafields/delete-metafields([], BLANK)))
+    assert(refused(::webhooks/create-subscription("ORDERS_CREATE", "https://x", {}, BLANK)))
+    assert(refused(::webhooks/list-subscriptions({}, BLANK)))
+    assert(refused(::webhooks/delete-subscription("id", BLANK)))
+}
+
+test-missing-credentials-come-back-as-an-err
+meta ["test"] fn () {
+    // No shopify.* context here. A call consumes its response only after an
+    // is-err check, so the caller gets an Err instead of a halted run.
+    result ::orders/get-order("id")
+    assert(is-err(result))
+    assert(contains(err-message(result), "shopify.shop is not set"))
+}

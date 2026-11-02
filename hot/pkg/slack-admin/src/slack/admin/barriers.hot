@@ -41,7 +41,10 @@ fn
   list(ListRequest({}))
 },
 (request: ListRequest): Map {
-  ::api/call("admin.barriers.list", request)
+  list(request, {})
+},
+(request: ListRequest, opts: Map): Map {
+  ::api/call("admin.barriers.list", request, opts)
 }
 
 list-all
@@ -58,7 +61,10 @@ fn
   list-all(request, 1000)
 },
 (request: ListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.barriers.list", request, "barriers", max-items)
+  list-all(request, max-items, {})
+},
+(request: ListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.barriers.list", request, "barriers", max-items, opts)
 }
 
 CreateRequest type {
@@ -75,8 +81,12 @@ meta {
     Scope: `admin.barriers:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: CreateRequest): Map {
-  ::api/call("admin.barriers.create", request)
+fn
+(request: CreateRequest): Map {
+  create(request, {})
+},
+(request: CreateRequest, opts: Map): Map {
+  ::api/call("admin.barriers.create", request, opts)
 }
 
 UpdateBarrierRequest type {
@@ -94,8 +104,12 @@ meta {
     Scope: `admin.barriers:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: UpdateBarrierRequest): Map {
-  ::api/call("admin.barriers.update", request)
+fn
+(request: UpdateBarrierRequest): Map {
+  update-barrier(request, {})
+},
+(request: UpdateBarrierRequest, opts: Map): Map {
+  ::api/call("admin.barriers.update", request, opts)
 }
 
 DeleteBarrierRequest type {
@@ -110,6 +124,10 @@ meta {
     Scope: `admin.barriers:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: DeleteBarrierRequest): Map {
-  ::api/call("admin.barriers.delete", request)
+fn
+(request: DeleteBarrierRequest): Map {
+  delete-barrier(request, {})
+},
+(request: DeleteBarrierRequest, opts: Map): Map {
+  ::api/call("admin.barriers.delete", request, opts)
 }

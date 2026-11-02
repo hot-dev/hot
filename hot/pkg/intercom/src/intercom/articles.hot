@@ -1,6 +1,6 @@
 ::intercom::articles ns
 meta {
-    ctx: {"intercom.token": {required: true}},
+    ctx: {"intercom.token": {required: false}},
     doc: """Help Center articles: list, read and search. Search is the quickest way for an agent to find the article to link in a reply."""
 }
 
@@ -15,15 +15,22 @@ fn
   list-articles({})
 },
 (options: Map): Any {
-  ::api/request("GET", `/articles${::api/query-string(options)}`, "")
+  list-articles(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/request("GET", `/articles${::api/query-string(options)}`, "", opts)
 }
 
 get-article
 meta {
     doc: """GET /articles/{id} - One article with its `body` (HTML), `url`, `state` and translations."""
 }
-fn (id: Any): Any {
-  ::api/request("GET", `/articles/${::api/path-segment(id)}`, "")
+fn
+(id: Any): Any {
+  get-article(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/articles/${::api/path-segment(id)}`, "", opts)
 }
 
 search-articles
@@ -47,5 +54,8 @@ fn
   search-articles(phrase, {})
 },
 (phrase: Str, options: Map): Any {
-  ::api/request("GET", `/articles/search${::api/query-string({...options, phrase: phrase})}`, "")
+  search-articles(phrase, options, {})
+},
+(phrase: Str, options: Map, opts: Map): Any {
+  ::api/request("GET", `/articles/search${::api/query-string({...options, phrase: phrase})}`, "", opts)
 }

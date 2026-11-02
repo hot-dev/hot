@@ -23,7 +23,8 @@ meta {
     query parameters use Drive's own names (`q`, `pageSize`, `fields`,
     `driveId`, ...); its credential keys (`token`, `refresh-token`,
     `service-account`, `subject`, `scopes`, `retry`, ...) are handled by
-    `google-core` and override context for that call.
+    `google-core`: they override context for that call and are masked in
+    call records.
 
     **Quick start**
 
@@ -67,8 +68,8 @@ FORM_MIME "application/vnd.google-apps.form"
 VID_MIME "application/vnd.google-apps.vid"
 
 // Default metadata fields for files (get, list, create, update, changes).
-FILE_FIELDS "id,name,mimeType,size,modifiedTime,createdTime,parents,md5Checksum,sha256Checksum,driveId,webViewLink,exportLinks,trashed,version,headRevisionId,shortcutDetails"
-LIST_FIELDS "nextPageToken,incompleteSearch,files(id,name,mimeType,size,modifiedTime,createdTime,parents,md5Checksum,sha256Checksum,driveId,webViewLink,exportLinks,trashed,version,headRevisionId,shortcutDetails)"
+FILE_FIELDS "id,name,mimeType,size,modifiedTime,createdTime,parents,md5Checksum,sha1Checksum,sha256Checksum,driveId,webViewLink,exportLinks,trashed,version,headRevisionId,shortcutDetails"
+LIST_FIELDS "nextPageToken,incompleteSearch,files(id,name,mimeType,size,modifiedTime,createdTime,parents,md5Checksum,sha1Checksum,sha256Checksum,driveId,webViewLink,exportLinks,trashed,version,headRevisionId,shortcutDetails)"
 
 // ---------------------------------------------------------------------------
 // URL and parameter helpers (shared by the sub-namespaces)
@@ -194,6 +195,7 @@ meta {
     **Fields**
     - `provider` - `"google-drive"`
     - `id`, `name`, `mime-type`
+    - `path` - always null: Drive addresses files by id and has no path
     - `size` - bytes (Int); null for Google-native files and folders
     - `modified`, `created` - RFC 3339 timestamps
     - `parents` - parent folder ids
@@ -202,6 +204,8 @@ meta {
     - `version` - Drive's monotonically increasing file version (use as an etag)
     - `revision-id` - the head revision id (blob files only)
     - `md5`, `sha256` - content checksums (blob files only)
+    - `hashes` - every checksum Drive gave, under `md5`, `sha1` and
+      `sha256` (blob files only; empty otherwise)
     - `is-folder`, `is-google-native`, `is-shortcut`, `shortcut-target-id`
     - `trashed`
     - `export-formats` - MIME types available via `exportLinks`
@@ -213,6 +217,7 @@ type {
     id: Str,
     name: Str,
     mime-type: Str,
+    path: Str?,
     size: Int?,
     modified: Str?,
     created: Str?,
@@ -223,6 +228,7 @@ type {
     revision-id: Str?,
     md5: Str?,
     sha256: Str?,
+    hashes: Map,
     is-folder: Bool,
     is-google-native: Bool,
     is-shortcut: Bool,
@@ -244,6 +250,7 @@ fn (file: Map): DocFile {
     id: or(file.id, ""),
     name: or(file.name, ""),
     mime-type: mime,
+    path: null,
     size: to-int(file.size),
     modified: file.modifiedTime,
     created: file.createdTime,
@@ -254,6 +261,7 @@ fn (file: Map): DocFile {
     revision-id: file.headRevisionId,
     md5: file.md5Checksum,
     sha256: file.sha256Checksum,
+    hashes: filter-vals({md5: file.md5Checksum, sha1: file.sha1Checksum, sha256: file.sha256Checksum}, is-some),
     is-folder: is-folder(mime),
     is-google-native: is-google-native(mime),
     is-shortcut: eq(mime, SHORTCUT_MIME),

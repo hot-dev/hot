@@ -51,7 +51,7 @@ fn
 (request: CreateSetupIntentRequest): Map {
   create-setup-intent(request, RequestOptions({}))
 },
-(request: CreateSetupIntentRequest, options: RequestOptions): Map {
+(request: CreateSetupIntentRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/setup_intents", request, options)
 }
 
@@ -64,7 +64,10 @@ fn
   get-setup-intent(setup-intent, {})
 },
 (setup-intent: Str, params: Map): Map {
-  api-call("GET", `/v1/setup_intents/${seg(setup-intent)}`, params)
+  get-setup-intent(setup-intent, params, {})
+},
+(setup-intent: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/setup_intents/${seg(setup-intent)}`, params, opts)
 }
 
 UpdateSetupIntentRequest type {
@@ -87,7 +90,7 @@ fn
 (setup-intent: Str, request: UpdateSetupIntentRequest): Map {
   update-setup-intent(setup-intent, request, RequestOptions({}))
 },
-(setup-intent: Str, request: UpdateSetupIntentRequest, options: RequestOptions): Map {
+(setup-intent: Str, request: UpdateSetupIntentRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/setup_intents/${seg(setup-intent)}`, request, options)
 }
 
@@ -122,7 +125,7 @@ fn
 (setup-intent: Str, request: ConfirmSetupIntentRequest): Map {
   confirm-setup-intent(setup-intent, request, RequestOptions({}))
 },
-(setup-intent: Str, request: ConfirmSetupIntentRequest, options: RequestOptions): Map {
+(setup-intent: Str, request: ConfirmSetupIntentRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/setup_intents/${seg(setup-intent)}/confirm`, request, options)
 }
 
@@ -132,10 +135,16 @@ meta {
 }
 fn
 (setup-intent: Str): Map {
-  api-call("POST", `/v1/setup_intents/${seg(setup-intent)}/cancel`, {})
+  cancel-setup-intent(setup-intent, {})
+},
+(setup-intent: Str, opts: Map): Map {
+  api-call("POST", `/v1/setup_intents/${seg(setup-intent)}/cancel`, {}, opts)
 },
 (setup-intent: Str, cancellation-reason: Str): Map {
-  api-call("POST", `/v1/setup_intents/${seg(setup-intent)}/cancel`, {cancellation_reason: cancellation-reason})
+  cancel-setup-intent(setup-intent, cancellation-reason, {})
+},
+(setup-intent: Str, cancellation-reason: Str, opts: Map): Map {
+  api-call("POST", `/v1/setup_intents/${seg(setup-intent)}/cancel`, {cancellation_reason: cancellation-reason}, opts)
 }
 
 ListSetupIntentsRequest type {
@@ -158,5 +167,8 @@ fn
   list-setup-intents(ListSetupIntentsRequest({}))
 },
 (request: ListSetupIntentsRequest): Map {
-  api-call("GET", "/v1/setup_intents", request)
+  list-setup-intents(request, {})
+},
+(request: ListSetupIntentsRequest, opts: Map): Map {
+  api-call("GET", "/v1/setup_intents", request, opts)
 }

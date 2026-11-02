@@ -1,7 +1,7 @@
 ::zendesk::api ns
 meta {
     ctx: {
-        "zendesk.subdomain": {required: true, secret: false},
+        "zendesk.subdomain": {required: false, secret: false},
         "zendesk.email": {required: false, secret: false},
         "zendesk.api.token": {required: false},
         "zendesk.oauth.token": {required: false}
@@ -11,6 +11,23 @@ meta {
     (Basic) or OAuth (Bearer) auth, `HttpError` with a parsed
     `retry-after` for 429s, and cursor pagination (`page[size]`,
     `page[after]`, `meta.has_more`, `meta.after_cursor`).
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then context variables. Nothing from `opts` is written to ctx,
+    so one run can act for many accounts and parallel flows don't share
+    credentials. Credentials from `opts` are masked in call records.
+
+    - `email` and `api-token`: API token auth for this call (both, in the
+      same `opts`)
+    - `oauth-token`: an OAuth access token for this call. It wins over
+      `email` and `api-token`.
+    - `subdomain`: another account's subdomain. It needs credentials in the
+      same `opts`: context credentials are never sent to a per-call account.
+
+    With credentials in `opts`, context credentials are ignored for that
+    call. A credential key present but blank or null is an error, never a
+    fallback to context.
     """
 }
 
@@ -34,11 +51,7 @@ type {
     retry-after: Int?
 }
 
-http-error
-meta {
-    doc: """Build the `HttpError` for a non-2xx response, parsing `Retry-After`. Exposed for testing; every request uses it."""
-}
-fn (response: HttpResponse): HttpError {
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   headers or(response.headers, {})
   HttpError({
     status: response.status,
@@ -108,6 +121,10 @@ fn (email: Str, token: Str): Str {
   `Basic ${::b64/encode(Bytes(credentials))}`
 }
 
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
 resolve-auth
 meta {
     doc: """
@@ -118,25 +135,119 @@ meta {
     """
 }
 fn (oauth-token: Str?, email: Str?, api-token: Str?): Str {
-  present (v) { and(is-some(v), not(is-empty(trim(Str(or(v, "")))))) }
   cond {
-    present(oauth-token) => { `Bearer ${oauth-token}` }
-    and(present(email), present(api-token)) => { auth-header(email, api-token) }
-    => { err("Zendesk auth is not configured: set zendesk.oauth.token, or both zendesk.email and zendesk.api.token.") }
+    is-some(non-blank(oauth-token)) => { `Bearer ${non-blank(oauth-token)}` }
+    and(is-some(non-blank(email)), is-some(non-blank(api-token))) => { auth-header(non-blank(email), non-blank(api-token)) }
+    => { err("Zendesk auth is not configured: set zendesk.oauth.token, or both zendesk.email and zendesk.api.token, or pass {oauth-token: ...} or {email: ..., api-token: ...} in the call's opts.") }
   }
 }
 
-ctx-auth
+CREDENTIAL_KEYS ["email", "api-token", "oauth-token"]
+
+blank-credential
+meta {
+    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+}
+
+has-opts-credentials fn (opts: Map): Bool {
+  some(CREDENTIAL_KEYS, (name) { in(name, keys(opts)) })
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: `{base-url, authorization}` for a call from
+    `opts` first, then `ctx-values` (a Map of context variables). An Err
+    when a credential key in `opts` is blank or null (that never falls back
+    to context), when `opts` has only half of `email` and `api-token`, when
+    `opts` has `subdomain` without credentials, or when no subdomain or
+    credentials are set. Exposed for testing; `resolve` feeds it the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  blank blank-credential(opts, CREDENTIAL_KEYS)
+  subdomain or(non-blank(get(opts, "subdomain")), non-blank(get(ctx-values, "zendesk.subdomain")))
+  oauth-token non-blank(get(opts, "oauth-token"))
+  email non-blank(get(opts, "email"))
+  api-token non-blank(get(opts, "api-token"))
+  handle if(is-null(subdomain), null, normalize-subdomain(subdomain))
+  cond {
+    is-some(blank) => {
+      err(`zendesk: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use context credentials.`)
+    }
+
+    and(is-null(oauth-token), or(is-some(email), is-some(api-token)), or(is-null(email), is-null(api-token))) => {
+      err("zendesk: API token auth needs both email and api-token in the call's opts.")
+    }
+
+    and(in("subdomain", keys(opts)), not(has-opts-credentials(opts))) => {
+      err("zendesk: subdomain is in the call's opts without oauth-token, or email and api-token. Pass credentials with it. Context credentials are never sent to a per-call account.")
+    }
+
+    is-null(subdomain) => { err("zendesk: zendesk.subdomain is not set. Add it in Context Variables, or pass {subdomain: ...} with credentials in the call's opts.") }
+    is-err(handle) => { handle }
+    has-opts-credentials(opts) => {
+      {base-url: base-url(handle), authorization: resolve-auth(oauth-token, email, api-token)}
+    }
+    => {
+      authorization resolve-auth(
+        get(ctx-values, "zendesk.oauth.token"),
+        get(ctx-values, "zendesk.email"),
+        get(ctx-values, "zendesk.api.token")
+      )
+      cond {
+        is-err(authorization) => { authorization }
+        => { {base-url: base-url(handle), authorization: authorization} }
+      }
+    }
+  }
+}
+
+mark-opts-credentials fn (opts: Map): Bool {
+  for-each(["api-token", "oauth-token"], (name) {
+    if(in(name, keys(opts)), ::ctx/mark-secret(non-blank(get(opts, name))))
+  })
+  true
+}
+
+resolve
 meta {
     ctx: {
+        "zendesk.subdomain": {required: false, secret: false},
         "zendesk.email": {required: false, secret: false},
         "zendesk.api.token": {required: false},
         "zendesk.oauth.token": {required: false}
     },
-    doc: """The Authorization header from context (see `resolve-auth`)."""
+    doc: """
+    The base URL and Authorization header for one call (see
+    `resolve-from`). An `api-token` or `oauth-token` from `opts` is masked
+    in call records with `::hot::ctx/mark-secret`, and `opts` values are
+    never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/resolve({subdomain: "tenant-b", oauth-token: "tenant-b-token"}).base-url  // "https://tenant-b.zendesk.com/api/v2"
+    ```
+    """
 }
-fn (): Str {
-  resolve-auth(::ctx/get("zendesk.oauth.token"), ::ctx/get("zendesk.email"), ::ctx/get("zendesk.api.token"))
+fn (opts: Map): Map {
+  resolved resolve-from(opts, {
+    "zendesk.subdomain": ::ctx/get("zendesk.subdomain"),
+    "zendesk.email": ::ctx/get("zendesk.email"),
+    "zendesk.api.token": ::ctx/get("zendesk.api.token"),
+    "zendesk.oauth.token": ::ctx/get("zendesk.oauth.token")
+  })
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      mark-opts-credentials(opts)
+      resolved
+    }
+  }
 }
 
 build-headers
@@ -163,49 +274,66 @@ fn (body: Any): Any {
 // Requests
 // ---------------------------------------------------------------------------
 
-request-with-auth
-meta {
-    doc: """Make a Zendesk request with an explicit subdomain and Authorization header value. `path` is relative to `/api/v2`; `body` is a Map, or `""` for none. Returns the decoded body on 2xx (null when empty), or an Err carrying `HttpError`."""
-}
-fn (method: Str, path: Str, body: Any, subdomain: Str, authorization: Str): Any {
+send fn (method: Str, path: Str, body: Any, resolved: Map): Any {
   has-body not(eq(body, ""))
   response ::hot::http/request(HttpRequest({
     method,
-    url: `${base-url(subdomain)}${path}`,
-    headers: build-headers(authorization, has-body),
+    url: `${resolved.base-url}${path}`,
+    headers: build-headers(resolved.authorization, has-body),
     body: if(has-body, to-json(untype(body)), "")
   }))
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response-body(response.body) }
-    => { err(http-error(response)) }
+    => { err(HttpError(response)) }
+  }
+}
+
+request-with-auth
+meta {
+    doc: """Make a Zendesk request with an explicit subdomain and Authorization header value, which is masked in call records. `path` is relative to `/api/v2`; `body` is a Map, or `""` for none. Returns the decoded body on 2xx (null when empty), or an Err carrying `HttpError`."""
+}
+fn (method: Str, path: Str, body: Any, subdomain: Str, authorization: Str): Any {
+  handle normalize-subdomain(subdomain)
+  cond {
+    is-err(handle) => { handle }
+    => { send(method, path, body, {base-url: base-url(handle), authorization: ::ctx/mark-secret(authorization)}) }
   }
 }
 
 request
 meta {
-    ctx: {"zendesk.subdomain": {required: true, secret: false}},
+    ctx: {"zendesk.subdomain": {required: false, secret: false}},
     doc: """
-    Make an authenticated Zendesk Support request using the context's
-    subdomain and credentials. `path` is relative to `/api/v2` (e.g.
-    `/groups`). Returns the decoded body on 2xx (null when empty), or an
-    Err carrying `HttpError`. The 6-arity form takes an explicit
-    subdomain, email and API token.
+    Make an authenticated Zendesk Support request. `path` is relative to
+    `/api/v2` (e.g. `/groups`). Returns the decoded body on 2xx (null when
+    empty), or an Err carrying `HttpError`. The 4-arity form takes per-call
+    `opts` (see `resolve`); the 6-arity form takes an explicit subdomain,
+    email and API token.
 
     **Example**
 
     ```hot
     groups ::zendesk::api/request("GET", "/groups", "")
+    tenant ::zendesk::api/request("GET", "/groups", "", {subdomain: "tenant-b", oauth-token: "tenant-b-token"})
     ```
     """
 }
 fn
 (method: Str, path: Str, body: Any): Any {
-  request-with-auth(method, path, body, ::ctx/get("zendesk.subdomain"), ctx-auth())
+  request(method, path, body, {})
+},
+// 4-arity: per-call credentials and settings (see `resolve`)
+(method: Str, path: Str, body: Any, opts: Map): Any {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { send(method, path, body, resolved) }
+  }
 },
 // 6-arity: explicit subdomain + API token credential override
 (method: Str, path: Str, body: Any, subdomain: Str, email: Str, api-token: Str): Any {
-  request-with-auth(method, path, body, subdomain, auth-header(email, api-token))
+  request(method, path, body, {subdomain: subdomain, email: email, api-token: api-token})
 }
 
 path-segment
@@ -284,8 +412,12 @@ meta {
     ```
     """
 }
-fn (path: Str, options: Map): Any {
-  request("GET", `${path}${cursor-query(options)}`, "")
+fn
+(path: Str, options: Map): Any {
+  list-page(path, options, {})
+},
+(path: Str, options: Map, opts: Map): Any {
+  request("GET", `${path}${cursor-query(options)}`, "", opts)
 }
 
 collect-pages
@@ -294,7 +426,7 @@ meta {
     Follow cursors, concatenating each page's `key` Vec, until `limit`
     items or `meta.has_more` is false. `fetch` is a Fn taking the cursor
     (null for the first page) and returning one page. Exposed for
-    testing; `collect` uses it.
+    testing; `collect` uses it. A failed page comes back as its Err.
     """
 }
 fn (fetch: Fn, key: Str, cursor: Str?, limit: Int, acc: Vec): Vec {
@@ -302,14 +434,19 @@ fn (fetch: Fn, key: Str, cursor: Str?, limit: Int, acc: Vec): Vec {
     lte(limit, length(acc)) => { slice(acc, 0, max(limit, 0)) }
     => {
       page fetch(cursor)
-      items or(get(page, key), [])
-      combined concat(acc, items)
-      next next-after(page)
       cond {
-        gte(length(combined), limit) => { slice(combined, 0, limit) }
-        is-empty(items) => { combined }
-        is-null(next) => { combined }
-        => { collect-pages(fetch, key, next, limit, combined) }
+        is-err(page) => { page }
+        => {
+          items or(get(page, key), [])
+          combined concat(acc, items)
+          next next-after(page)
+          cond {
+            gte(length(combined), limit) => { slice(combined, 0, limit) }
+            is-empty(items) => { combined }
+            is-null(next) => { combined }
+            => { collect-pages(fetch, key, next, limit, combined) }
+          }
+        }
       }
     }
   }
@@ -329,7 +466,11 @@ meta {
     ```
     """
 }
-fn (path: Str, key: Str, options: Map, limit: Int): Vec {
+fn
+(path: Str, key: Str, options: Map, limit: Int): Vec {
+  collect(path, key, options, limit, {})
+},
+(path: Str, key: Str, options: Map, limit: Int, opts: Map): Vec {
   size min(::zendesk/DEFAULT_PAGE_SIZE, max(1, limit))
-  collect-pages((cursor) { list-page(path, {page_size: size, ...options, after: cursor}) }, key, null, limit, [])
+  collect-pages((cursor) { list-page(path, {page_size: size, ...options, after: cursor}, opts) }, key, null, limit, [])
 }

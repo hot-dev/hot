@@ -16,8 +16,12 @@ get-event
 meta {
     doc: """GET /v1/events/{id} - Retrieve an event by ID. Useful for re-fetching an event referenced by a webhook to confirm its authenticity."""
 }
-fn (event: Str): Map {
-  api-call("GET", `/v1/events/${seg(event)}`)
+fn
+(event: Str): Map {
+  get-event(event, {})
+},
+(event: Str, opts: Map): Map {
+  api-call("GET", `/v1/events/${seg(event)}`, "", opts)
 }
 
 ListEventsRequest type {
@@ -51,5 +55,8 @@ fn
   list-events(ListEventsRequest({}))
 },
 (request: ListEventsRequest): Map {
-  api-call("GET", "/v1/events", request)
+  list-events(request, {})
+},
+(request: ListEventsRequest, opts: Map): Map {
+  api-call("GET", "/v1/events", request, opts)
 }

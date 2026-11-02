@@ -1,6 +1,6 @@
 ::cal-com::schedules ns
 meta {
-    ctx: {"cal-com.api.key": {required: true}},
+    ctx: {"cal-com.api.key": {required: false}},
     doc: """
     Availability schedules (`cal-api-version: 2024-06-11`): the working
     hours and date overrides that event types book against. Each user has
@@ -19,24 +19,36 @@ list-schedules
 meta {
     doc: """GET /schedules - All of the API key owner's schedules (Vec)."""
 }
-fn (): Any {
-  ::api/request("GET", "/schedules", "", v())
+fn
+(): Any {
+  list-schedules({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/schedules", "", v(), opts)
 }
 
 get-default-schedule
 meta {
     doc: """GET /schedules/default - The owner's default schedule."""
 }
-fn (): Any {
-  ::api/request("GET", "/schedules/default", "", v())
+fn
+(): Any {
+  get-default-schedule({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/schedules/default", "", v(), opts)
 }
 
 get-schedule
 meta {
     doc: """GET /schedules/{id} - One schedule."""
 }
-fn (id: Any): Any {
-  ::api/request("GET", `/schedules/${::api/path-segment(id)}`, "", v())
+fn
+(id: Any): Any {
+  get-schedule(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/schedules/${::api/path-segment(id)}`, "", v(), opts)
 }
 
 build-create-body
@@ -67,21 +79,32 @@ fn
   create-schedule(name, time-zone, is-default, {})
 },
 (name: Str, time-zone: Str, is-default: Bool, options: Map): Any {
-  ::api/request("POST", "/schedules", build-create-body(name, time-zone, is-default, options), v())
+  create-schedule(name, time-zone, is-default, options, {})
+},
+(name: Str, time-zone: Str, is-default: Bool, options: Map, opts: Map): Any {
+  ::api/request("POST", "/schedules", build-create-body(name, time-zone, is-default, options), v(), opts)
 }
 
 update-schedule
 meta {
     doc: """PATCH /schedules/{id} - Update `name`, `timeZone`, `isDefault`, `availability` or `overrides`. `availability` and `overrides` replace the existing lists. Unset fields are omitted."""
 }
-fn (id: Any, changes: Map): Any {
-  ::api/request("PATCH", `/schedules/${::api/path-segment(id)}`, ::api/compact(changes), v())
+fn
+(id: Any, changes: Map): Any {
+  update-schedule(id, changes, {})
+},
+(id: Any, changes: Map, opts: Map): Any {
+  ::api/request("PATCH", `/schedules/${::api/path-segment(id)}`, ::api/compact(changes), v(), opts)
 }
 
 delete-schedule
 meta {
     doc: """DELETE /schedules/{id} - Delete a schedule."""
 }
-fn (id: Any): Any {
-  ::api/request("DELETE", `/schedules/${::api/path-segment(id)}`, "", v())
+fn
+(id: Any): Any {
+  delete-schedule(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("DELETE", `/schedules/${::api/path-segment(id)}`, "", v(), opts)
 }

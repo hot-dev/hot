@@ -57,7 +57,11 @@ meta {
     ```
     """
 }
-fn (metafields: Vec): Vec {
+fn
+(metafields: Vec): Vec {
+  set-metafields(metafields, {})
+},
+(metafields: Vec, opts: Map): Vec {
   mutation ```
   mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
     metafieldsSet(metafields: $metafields) {
@@ -71,8 +75,8 @@ fn (metafields: Vec): Vec {
       err(`shopify: metafieldsSet takes at most ${MAX_METAFIELDS_PER_SET} metafields per call (got ${length(metafields)})`)
     }
     => {
-      payload ::api/mutate(mutation, {metafields: map(metafields, build-metafield-input)}, "metafieldsSet")
-      payload.metafields
+      payload ::api/mutate(mutation, {metafields: map(metafields, build-metafield-input)}, "metafieldsSet", opts)
+      if-ok(payload, %(%.metafields))
     }
   }
 }
@@ -81,16 +85,24 @@ set-metafield
 meta {
     doc: """Set one metafield on an owner. Returns the saved metafield."""
 }
-fn (owner-id: Str, namespace: Str, key: Str, value-type: Str, value: Any): Map {
-  saved set-metafields([{ownerId: owner-id, namespace: namespace, key: key, type: value-type, value: value}])
-  first(saved)
+fn
+(owner-id: Str, namespace: Str, key: Str, value-type: Str, value: Any): Map {
+  set-metafield(owner-id, namespace, key, value-type, value, {})
+},
+(owner-id: Str, namespace: Str, key: Str, value-type: Str, value: Any, opts: Map): Map {
+  saved set-metafields([{ownerId: owner-id, namespace: namespace, key: key, type: value-type, value: value}], opts)
+  if-ok(saved, first)
 }
 
 get-metafield
 meta {
     doc: """One metafield on an owner by namespace and key, or null when unset (or the owner doesn't exist)."""
 }
-fn (owner-id: Str, namespace: Str, key: Str): Map? {
+fn
+(owner-id: Str, namespace: Str, key: Str): Map? {
+  get-metafield(owner-id, namespace, key, {})
+},
+(owner-id: Str, namespace: Str, key: Str, opts: Map): Map? {
   query ```
   query Metafield($id: ID!, $namespace: String!, $key: String!) {
     node(id: $id) {
@@ -100,8 +112,8 @@ fn (owner-id: Str, namespace: Str, key: Str): Map? {
     }
   }
   ```
-  data ::api/graphql(query, {id: owner-id, namespace: namespace, key: key})
-  get-in(data, ["node", "metafield"])
+  data ::api/graphql(query, {id: owner-id, namespace: namespace, key: key}, opts)
+  if-ok(data, %(get-in(%, ["node", "metafield"])))
 }
 
 list-metafields
@@ -113,6 +125,9 @@ fn
   list-metafields(owner-id, {})
 },
 (owner-id: Str, options: Map): Map {
+  list-metafields(owner-id, options, {})
+},
+(owner-id: Str, options: Map, opts: Map): Map {
   query ```
   query Metafields($id: ID!, $first: Int!, $after: String, $namespace: String) {
     node(id: $id) {
@@ -126,15 +141,19 @@ fn
   }
   ```
   vars ::api/connection-variables(options)
-  data ::api/graphql(query, filter-vals({...vars, id: owner-id, namespace: get(options, "namespace")}, is-some))
-  or(get-in(data, ["node", "metafields"]), {nodes: [], pageInfo: {hasNextPage: false, endCursor: null}})
+  data ::api/graphql(query, filter-vals({...vars, id: owner-id, namespace: get(options, "namespace")}, is-some), opts)
+  if-ok(data, %(or(get-in(%, ["node", "metafields"]), {nodes: [], pageInfo: {hasNextPage: false, endCursor: null}})))
 }
 
 delete-metafields
 meta {
     doc: """Delete metafields by `{ownerId, namespace, key}` (`metafieldsDelete`). Returns the deleted identifiers (null entries for ones that didn't exist)."""
 }
-fn (identifiers: Vec): Vec {
+fn
+(identifiers: Vec): Vec {
+  delete-metafields(identifiers, {})
+},
+(identifiers: Vec, opts: Map): Vec {
   mutation """
   mutation MetafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
     metafieldsDelete(metafields: $metafields) {
@@ -143,6 +162,6 @@ fn (identifiers: Vec): Vec {
     }
   }
   """
-  payload ::api/mutate(mutation, {metafields: identifiers}, "metafieldsDelete")
-  payload.deletedMetafields
+  payload ::api/mutate(mutation, {metafields: identifiers}, "metafieldsDelete", opts)
+  if-ok(payload, %(%.deletedMetafields))
 }

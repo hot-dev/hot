@@ -31,8 +31,12 @@ meta {
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: AddEmojiRequest): Map {
-  ::api/call("admin.emoji.add", request)
+fn
+(request: AddEmojiRequest): Map {
+  add-emoji(request, {})
+},
+(request: AddEmojiRequest, opts: Map): Map {
+  ::api/call("admin.emoji.add", request, opts)
 }
 
 AddAliasRequest type {
@@ -48,8 +52,12 @@ meta {
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: AddAliasRequest): Map {
-  ::api/call("admin.emoji.addAlias", request)
+fn
+(request: AddAliasRequest): Map {
+  add-alias(request, {})
+},
+(request: AddAliasRequest, opts: Map): Map {
+  ::api/call("admin.emoji.addAlias", request, opts)
 }
 
 ListRequest type {
@@ -70,7 +78,10 @@ fn
   list(ListRequest({}))
 },
 (request: ListRequest): Map {
-  ::api/call("admin.emoji.list", request)
+  list(request, {})
+},
+(request: ListRequest, opts: Map): Map {
+  ::api/call("admin.emoji.list", request, opts)
 }
 
 RemoveEmojiRequest type {
@@ -85,8 +96,12 @@ meta {
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: RemoveEmojiRequest): Map {
-  ::api/call("admin.emoji.remove", request)
+fn
+(request: RemoveEmojiRequest): Map {
+  remove-emoji(request, {})
+},
+(request: RemoveEmojiRequest, opts: Map): Map {
+  ::api/call("admin.emoji.remove", request, opts)
 }
 
 RenameRequest type {
@@ -102,6 +117,10 @@ meta {
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: RenameRequest): Map {
-  ::api/call("admin.emoji.rename", request)
+fn
+(request: RenameRequest): Map {
+  rename(request, {})
+},
+(request: RenameRequest, opts: Map): Map {
+  ::api/call("admin.emoji.rename", request, opts)
 }

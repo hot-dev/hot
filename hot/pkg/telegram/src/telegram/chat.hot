@@ -28,8 +28,12 @@ response.type   // => "supergroup"
 ```
 """
 }
-fn (request: GetChatRequest): Map {
-  api-request("getChat", untype(request))
+fn
+(request: GetChatRequest): Map {
+  get-chat(request, {})
+},
+(request: GetChatRequest, opts: Map): Map {
+  api-request("getChat", untype(request), opts)
 }
 
 GetChatMemberCountRequest type {
@@ -40,8 +44,12 @@ get-chat-member-count
 meta {
     doc: """getChatMemberCount - Get the number of members in a chat."""
 }
-fn (request: GetChatMemberCountRequest): Int {
-  api-request("getChatMemberCount", untype(request))
+fn
+(request: GetChatMemberCountRequest): Int {
+  get-chat-member-count(request, {})
+},
+(request: GetChatMemberCountRequest, opts: Map): Int {
+  api-request("getChatMemberCount", untype(request), opts)
 }
 
 GetChatMemberRequest type {
@@ -53,8 +61,12 @@ get-chat-member
 meta {
     doc: """getChatMember - Get information about a specific member of a chat. Returns their status (creator, administrator, member, restricted, left, kicked)."""
 }
-fn (request: GetChatMemberRequest): Map {
-  api-request("getChatMember", untype(request))
+fn
+(request: GetChatMemberRequest): Map {
+  get-chat-member(request, {})
+},
+(request: GetChatMemberRequest, opts: Map): Map {
+  api-request("getChatMember", untype(request), opts)
 }
 
 GetChatAdministratorsRequest type {
@@ -65,8 +77,12 @@ get-chat-administrators
 meta {
     doc: """getChatAdministrators - Get a list of administrators in a chat. Returns an array of ChatMember objects."""
 }
-fn (request: GetChatAdministratorsRequest): Vec<Map> {
-  api-request("getChatAdministrators", untype(request))
+fn
+(request: GetChatAdministratorsRequest): Vec<Map> {
+  get-chat-administrators(request, {})
+},
+(request: GetChatAdministratorsRequest, opts: Map): Vec<Map> {
+  api-request("getChatAdministrators", untype(request), opts)
 }
 
 // ============================================================================
@@ -84,8 +100,12 @@ ban-chat-member
 meta {
     doc: """banChatMember - Ban a user from a group or channel. `until_date` is a Unix timestamp for a temporary ban (30 seconds to 366 days in the future). Set `revoke_messages: true` to delete all messages from the user."""
 }
-fn (request: BanChatMemberRequest): Bool {
-  api-request("banChatMember", untype(request))
+fn
+(request: BanChatMemberRequest): Bool {
+  ban-chat-member(request, {})
+},
+(request: BanChatMemberRequest, opts: Map): Bool {
+  api-request("banChatMember", untype(request), opts)
 }
 
 UnbanChatMemberRequest type {
@@ -98,8 +118,12 @@ unban-chat-member
 meta {
     doc: """unbanChatMember - Unban a previously banned user. Set `only_if_banned: true` to avoid accidentally unbanning an active member (which would remove them)."""
 }
-fn (request: UnbanChatMemberRequest): Bool {
-  api-request("unbanChatMember", untype(request))
+fn
+(request: UnbanChatMemberRequest): Bool {
+  unban-chat-member(request, {})
+},
+(request: UnbanChatMemberRequest, opts: Map): Bool {
+  api-request("unbanChatMember", untype(request), opts)
 }
 
 RestrictChatMemberRequest type {
@@ -114,8 +138,12 @@ restrict-chat-member
 meta {
     doc: """restrictChatMember - Restrict a user in a supergroup. `permissions` is a ChatPermissions object controlling what the user can do (send messages, media, polls, etc.)."""
 }
-fn (request: RestrictChatMemberRequest): Bool {
-  api-request("restrictChatMember", untype(request))
+fn
+(request: RestrictChatMemberRequest): Bool {
+  restrict-chat-member(request, {})
+},
+(request: RestrictChatMemberRequest, opts: Map): Bool {
+  api-request("restrictChatMember", untype(request), opts)
 }
 
 PromoteChatMemberRequest type {
@@ -142,8 +170,12 @@ promote-chat-member
 meta {
     doc: """promoteChatMember - Promote or demote a user in a supergroup or channel. Pass the specific admin rights to grant. All rights default to false."""
 }
-fn (request: PromoteChatMemberRequest): Bool {
-  api-request("promoteChatMember", untype(request))
+fn
+(request: PromoteChatMemberRequest): Bool {
+  promote-chat-member(request, {})
+},
+(request: PromoteChatMemberRequest, opts: Map): Bool {
+  api-request("promoteChatMember", untype(request), opts)
 }
 
 // ============================================================================
@@ -174,8 +206,12 @@ setChatPermissions - Set the default permissions for all members of a group or s
 ```
 """
 }
-fn (request: SetChatPermissionsRequest): Bool {
-  api-request("setChatPermissions", untype(request))
+fn
+(request: SetChatPermissionsRequest): Bool {
+  set-chat-permissions(request, {})
+},
+(request: SetChatPermissionsRequest, opts: Map): Bool {
+  api-request("setChatPermissions", untype(request), opts)
 }
 
 LeaveChatRequest type {
@@ -186,8 +222,12 @@ leave-chat
 meta {
     doc: """leaveChat - Leave a group, supergroup, or channel."""
 }
-fn (request: LeaveChatRequest): Bool {
-  api-request("leaveChat", untype(request))
+fn
+(request: LeaveChatRequest): Bool {
+  leave-chat(request, {})
+},
+(request: LeaveChatRequest, opts: Map): Bool {
+  api-request("leaveChat", untype(request), opts)
 }
 
 SetChatTitleRequest type {
@@ -199,8 +239,12 @@ set-chat-title
 meta {
     doc: """setChatTitle - Change the title of a group, supergroup, or channel. Titles can be 1-128 characters."""
 }
-fn (request: SetChatTitleRequest): Bool {
-  api-request("setChatTitle", untype(request))
+fn
+(request: SetChatTitleRequest): Bool {
+  set-chat-title(request, {})
+},
+(request: SetChatTitleRequest, opts: Map): Bool {
+  api-request("setChatTitle", untype(request), opts)
 }
 
 SetChatDescriptionRequest type {
@@ -212,8 +256,12 @@ set-chat-description
 meta {
     doc: """setChatDescription - Change the description of a group, supergroup, or channel. Pass empty/null to remove the description."""
 }
-fn (request: SetChatDescriptionRequest): Bool {
-  api-request("setChatDescription", untype(request))
+fn
+(request: SetChatDescriptionRequest): Bool {
+  set-chat-description(request, {})
+},
+(request: SetChatDescriptionRequest, opts: Map): Bool {
+  api-request("setChatDescription", untype(request), opts)
 }
 
 PinChatMessageRequest type {
@@ -227,8 +275,12 @@ pin-chat-message
 meta {
     doc: """pinChatMessage - Pin a message in a chat. Set `disable_notification: true` to silently pin."""
 }
-fn (request: PinChatMessageRequest): Bool {
-  api-request("pinChatMessage", untype(request))
+fn
+(request: PinChatMessageRequest): Bool {
+  pin-chat-message(request, {})
+},
+(request: PinChatMessageRequest, opts: Map): Bool {
+  api-request("pinChatMessage", untype(request), opts)
 }
 
 UnpinChatMessageRequest type {
@@ -241,8 +293,12 @@ unpin-chat-message
 meta {
     doc: """unpinChatMessage - Unpin a message. If `message_id` is not specified, the most recent pinned message is unpinned."""
 }
-fn (request: UnpinChatMessageRequest): Bool {
-  api-request("unpinChatMessage", untype(request))
+fn
+(request: UnpinChatMessageRequest): Bool {
+  unpin-chat-message(request, {})
+},
+(request: UnpinChatMessageRequest, opts: Map): Bool {
+  api-request("unpinChatMessage", untype(request), opts)
 }
 
 UnpinAllChatMessagesRequest type {
@@ -253,8 +309,12 @@ unpin-all-chat-messages
 meta {
     doc: """unpinAllChatMessages - Remove all pinned messages from a chat."""
 }
-fn (request: UnpinAllChatMessagesRequest): Bool {
-  api-request("unpinAllChatMessages", untype(request))
+fn
+(request: UnpinAllChatMessagesRequest): Bool {
+  unpin-all-chat-messages(request, {})
+},
+(request: UnpinAllChatMessagesRequest, opts: Map): Bool {
+  api-request("unpinAllChatMessages", untype(request), opts)
 }
 
 // ============================================================================
@@ -273,8 +333,12 @@ create-chat-invite-link
 meta {
     doc: """createChatInviteLink - Create an additional invite link. `member_limit` (1-99999) limits joins. `expire_date` is a Unix timestamp. Set `creates_join_request: true` to require admin approval."""
 }
-fn (request: CreateChatInviteLinkRequest): Map {
-  api-request("createChatInviteLink", untype(request))
+fn
+(request: CreateChatInviteLinkRequest): Map {
+  create-chat-invite-link(request, {})
+},
+(request: CreateChatInviteLinkRequest, opts: Map): Map {
+  api-request("createChatInviteLink", untype(request), opts)
 }
 
 RevokeChatInviteLinkRequest type {
@@ -286,8 +350,12 @@ revoke-chat-invite-link
 meta {
     doc: """revokeChatInviteLink - Revoke an invite link created by the bot. The link will no longer work."""
 }
-fn (request: RevokeChatInviteLinkRequest): Map {
-  api-request("revokeChatInviteLink", untype(request))
+fn
+(request: RevokeChatInviteLinkRequest): Map {
+  revoke-chat-invite-link(request, {})
+},
+(request: RevokeChatInviteLinkRequest, opts: Map): Map {
+  api-request("revokeChatInviteLink", untype(request), opts)
 }
 
 ExportChatInviteLinkRequest type {
@@ -298,8 +366,12 @@ export-chat-invite-link
 meta {
     doc: """exportChatInviteLink - Generate a new primary invite link. Any previously generated primary link is revoked."""
 }
-fn (request: ExportChatInviteLinkRequest): Str {
-  api-request("exportChatInviteLink", untype(request))
+fn
+(request: ExportChatInviteLinkRequest): Str {
+  export-chat-invite-link(request, {})
+},
+(request: ExportChatInviteLinkRequest, opts: Map): Str {
+  api-request("exportChatInviteLink", untype(request), opts)
 }
 
 // ============================================================================
@@ -315,8 +387,12 @@ approve-chat-join-request
 meta {
     doc: """approveChatJoinRequest - Approve a chat join request. The bot must be an administrator with can_invite_users right."""
 }
-fn (request: ApproveChatJoinRequestRequest): Bool {
-  api-request("approveChatJoinRequest", untype(request))
+fn
+(request: ApproveChatJoinRequestRequest): Bool {
+  approve-chat-join-request(request, {})
+},
+(request: ApproveChatJoinRequestRequest, opts: Map): Bool {
+  api-request("approveChatJoinRequest", untype(request), opts)
 }
 
 DeclineChatJoinRequestRequest type {
@@ -328,6 +404,10 @@ decline-chat-join-request
 meta {
     doc: """declineChatJoinRequest - Decline a chat join request."""
 }
-fn (request: DeclineChatJoinRequestRequest): Bool {
-  api-request("declineChatJoinRequest", untype(request))
+fn
+(request: DeclineChatJoinRequestRequest): Bool {
+  decline-chat-join-request(request, {})
+},
+(request: DeclineChatJoinRequestRequest, opts: Map): Bool {
+  api-request("declineChatJoinRequest", untype(request), opts)
 }

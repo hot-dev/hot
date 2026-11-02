@@ -33,8 +33,12 @@ meta {
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: CreateRequest): Map {
-  ::api/call("admin.teams.create", request)
+fn
+(request: CreateRequest): Map {
+  create(request, {})
+},
+(request: CreateRequest, opts: Map): Map {
+  ::api/call("admin.teams.create", request, opts)
 }
 
 ListRequest type {
@@ -56,7 +60,10 @@ fn
   list(ListRequest({}))
 },
 (request: ListRequest): Map {
-  ::api/call("admin.teams.list", request)
+  list(request, {})
+},
+(request: ListRequest, opts: Map): Map {
+  ::api/call("admin.teams.list", request, opts)
 }
 
 list-all
@@ -73,7 +80,10 @@ fn
   list-all(request, 1000)
 },
 (request: ListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.teams.list", request, "teams", max-items)
+  list-all(request, max-items, {})
+},
+(request: ListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.teams.list", request, "teams", max-items, opts)
 }
 
 AdminsListRequest type {
@@ -91,8 +101,12 @@ meta {
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `admins-list-all`.
     """
 }
-fn (request: AdminsListRequest): Map {
-  ::api/call("admin.teams.admins.list", request)
+fn
+(request: AdminsListRequest): Map {
+  admins-list(request, {})
+},
+(request: AdminsListRequest, opts: Map): Map {
+  ::api/call("admin.teams.admins.list", request, opts)
 }
 
 admins-list-all
@@ -106,7 +120,10 @@ fn
   admins-list-all(request, 1000)
 },
 (request: AdminsListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.teams.admins.list", request, "admin_ids", max-items)
+  admins-list-all(request, max-items, {})
+},
+(request: AdminsListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.teams.admins.list", request, "admin_ids", max-items, opts)
 }
 
 OwnersListRequest type {
@@ -124,8 +141,12 @@ meta {
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `owners-list-all`.
     """
 }
-fn (request: OwnersListRequest): Map {
-  ::api/call("admin.teams.owners.list", request)
+fn
+(request: OwnersListRequest): Map {
+  owners-list(request, {})
+},
+(request: OwnersListRequest, opts: Map): Map {
+  ::api/call("admin.teams.owners.list", request, opts)
 }
 
 owners-list-all
@@ -139,7 +160,10 @@ fn
   owners-list-all(request, 1000)
 },
 (request: OwnersListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.teams.owners.list", request, "owner_ids", max-items)
+  owners-list-all(request, max-items, {})
+},
+(request: OwnersListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.teams.owners.list", request, "owner_ids", max-items, opts)
 }
 
 SettingsInfoRequest type {
@@ -154,8 +178,12 @@ meta {
     Scope: `admin.teams:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SettingsInfoRequest): Map {
-  ::api/call("admin.teams.settings.info", request)
+fn
+(request: SettingsInfoRequest): Map {
+  settings-info(request, {})
+},
+(request: SettingsInfoRequest, opts: Map): Map {
+  ::api/call("admin.teams.settings.info", request, opts)
 }
 
 SettingsSetDefaultChannelsRequest type {
@@ -171,8 +199,12 @@ meta {
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SettingsSetDefaultChannelsRequest): Map {
-  ::api/call("admin.teams.settings.setDefaultChannels", request)
+fn
+(request: SettingsSetDefaultChannelsRequest): Map {
+  settings-set-default-channels(request, {})
+},
+(request: SettingsSetDefaultChannelsRequest, opts: Map): Map {
+  ::api/call("admin.teams.settings.setDefaultChannels", request, opts)
 }
 
 SettingsSetDescriptionRequest type {
@@ -188,8 +220,12 @@ meta {
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SettingsSetDescriptionRequest): Map {
-  ::api/call("admin.teams.settings.setDescription", request)
+fn
+(request: SettingsSetDescriptionRequest): Map {
+  settings-set-description(request, {})
+},
+(request: SettingsSetDescriptionRequest, opts: Map): Map {
+  ::api/call("admin.teams.settings.setDescription", request, opts)
 }
 
 SettingsSetDiscoverabilityRequest type {
@@ -205,8 +241,12 @@ meta {
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SettingsSetDiscoverabilityRequest): Map {
-  ::api/call("admin.teams.settings.setDiscoverability", request)
+fn
+(request: SettingsSetDiscoverabilityRequest): Map {
+  settings-set-discoverability(request, {})
+},
+(request: SettingsSetDiscoverabilityRequest, opts: Map): Map {
+  ::api/call("admin.teams.settings.setDiscoverability", request, opts)
 }
 
 SettingsSetIconRequest type {
@@ -222,8 +262,12 @@ meta {
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SettingsSetIconRequest): Map {
-  ::api/call("admin.teams.settings.setIcon", request)
+fn
+(request: SettingsSetIconRequest): Map {
+  settings-set-icon(request, {})
+},
+(request: SettingsSetIconRequest, opts: Map): Map {
+  ::api/call("admin.teams.settings.setIcon", request, opts)
 }
 
 SettingsSetNameRequest type {
@@ -239,6 +283,10 @@ meta {
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SettingsSetNameRequest): Map {
-  ::api/call("admin.teams.settings.setName", request)
+fn
+(request: SettingsSetNameRequest): Map {
+  settings-set-name(request, {})
+},
+(request: SettingsSetNameRequest, opts: Map): Map {
+  ::api/call("admin.teams.settings.setName", request, opts)
 }

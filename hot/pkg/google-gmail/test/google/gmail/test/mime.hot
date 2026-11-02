@@ -75,6 +75,32 @@ meta ["test"] fn () {
     assert-eq("ASCII stays", ::mime/encode-header-text("ASCII stays"))
 }
 
+decode-word fn (word: Str): Bytes {
+    ::hot::base64/decode(slice(word, 10, sub(length(word), 2)))
+}
+
+test-rfc2047-splits-by-bytes-on-character-boundaries
+meta ["test"] fn () {
+    // 4 bytes per character: counting characters would overflow the word
+    text join(map(range(0, 60), (i) { "😀" }), "")
+    words split(::mime/encode-words(text), "\r\n ")
+    assert(gt(length(words), 1))
+    assert(all(words, (w) { lte(add(length("Subject: "), length(w)), 76) }), "a line with an encoded word fits RFC 2047's 76")
+    decoded map(words, decode-word)
+    assert(all(decoded, (b) { eq(0, mod(length(b), 4)) }), "no character is cut in two")
+    assert-eq(text, join(map(decoded, Str), ""), "the words decode back to the text")
+}
+
+test-long-header-limits-count-bytes
+meta ["test"] fn () {
+    plain join(map(range(0, 900), (i) { "a" }), "")
+    assert-eq(plain, ::mime/encode-header-text(plain), "900 ASCII bytes stay plain")
+    long `${plain}a`
+    assert(starts-with(::mime/encode-header-text(long), "=?UTF-8?B?"), "901 are encoded and folded")
+    addresses map(range(0, 40), (i) { {name: "Zoë Müller-Lüdenscheidt", email: `user-number-${i}@example.com`} })
+    assert(contains(::mime/format-addresses(addresses), ",\r\n "), "a long address list is folded")
+}
+
 test-non-ascii-body-is-base64
 meta ["test"] fn () {
     s text-of({to: "a@example.com", text: "Grüße"})

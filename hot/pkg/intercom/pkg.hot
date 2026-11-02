@@ -3,7 +3,7 @@
 hot.pkg.intercom {
   name: "hot.dev/intercom",
   version: "0.1.0",
-  hot-min-version: "3.0.0",
+  hot-min-version: "3.0.2",
   description: "Intercom REST API bindings for Hot (Intercom-Version 2.17, US/EU/AU regions). Conversations (search, reply, notes, assign, snooze, open, close), contacts, companies, tags, tickets, Help Center articles, data events, admins, and X-Hub-Signature webhook verification.",
   author: "Hot Dev",
   email: "support@hot.dev",

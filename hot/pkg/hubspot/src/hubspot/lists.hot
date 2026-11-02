@@ -56,23 +56,34 @@ fn
   create-list(name, object-type, processing-type, {})
 },
 (name: Str, object-type: Str, processing-type: Str, options: Map): Map {
-  ::api/json("POST", crm-path("lists", ""), {}, build-list-body(name, object-type, processing-type, options))
+  create-list(name, object-type, processing-type, options, {})
+},
+(name: Str, object-type: Str, processing-type: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", crm-path("lists", "", opts), {}, build-list-body(name, object-type, processing-type, options), opts)
 }
 
 get-list
 meta {
     doc: """GET /crm/lists/{version}/{listId} - One list: `{list: {listId, name, processingType, objectTypeId, size?, ...}}`."""
 }
-fn (list-id: Str): Map {
-  ::api/json("GET", crm-path("lists", `/${segment(list-id)}`))
+fn
+(list-id: Str): Map {
+  get-list(list-id, {})
+},
+(list-id: Str, opts: Map): Map {
+  ::api/json("GET", crm-path("lists", `/${segment(list-id)}`, opts), opts)
 }
 
 find-list-by-name
 meta {
     doc: """GET /crm/lists/{version}/object-type-id/{objectTypeId}/name/{listName} - Look up a list by exact name. Returns `{list}`, or an Err (404) when no list has that name."""
 }
-fn (object-type: Str, name: Str): Map {
-  ::api/json("GET", crm-path("lists", `/object-type-id/${segment(object-type-id(object-type))}/name/${segment(name)}`))
+fn
+(object-type: Str, name: Str): Map {
+  find-list-by-name(object-type, name, {})
+},
+(object-type: Str, name: Str, opts: Map): Map {
+  ::api/json("GET", crm-path("lists", `/object-type-id/${segment(object-type-id(object-type))}/name/${segment(name)}`, opts), opts)
 }
 
 search-lists
@@ -84,37 +95,52 @@ fn
   search-lists(query, {})
 },
 (query: Str, options: Map): Map {
+  search-lists(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Map {
   type-id get(options, "objectTypeId")
   body {query: query}
     |> assoc-some("processingTypes", get(options, "processingTypes"))
     |> assoc-some("count", get(options, "count"))
     |> assoc-some("offset", get(options, "offset"))
     |> assoc-some("objectTypeId", if(is-some(type-id), object-type-id(type-id), null))
-  ::api/json("POST", crm-path("lists", "/search"), {}, body)
+  ::api/json("POST", crm-path("lists", "/search", opts), {}, body, opts)
 }
 
 delete-list
 meta {
     doc: """DELETE /crm/lists/{version}/{listId} - Delete a list (restorable for 90 days with HubSpot's restore endpoint). Members are not deleted."""
 }
-fn (list-id: Str): Any {
-  ::api/json("DELETE", crm-path("lists", `/${segment(list-id)}`))
+fn
+(list-id: Str): Any {
+  delete-list(list-id, {})
+},
+(list-id: Str, opts: Map): Any {
+  ::api/json("DELETE", crm-path("lists", `/${segment(list-id)}`, opts), opts)
 }
 
 add-members
 meta {
     doc: """PUT /crm/lists/{version}/{listId}/memberships/add - Add records (Vec of record ids) to a `MANUAL` or `SNAPSHOT` list. Returns `{recordsIdsAdded, recordIdsMissing}`."""
 }
-fn (list-id: Str, record-ids: Vec): Map {
-  ::api/json("PUT", crm-path("lists", `/${segment(list-id)}/memberships/add`), {}, map(record-ids, Str))
+fn
+(list-id: Str, record-ids: Vec): Map {
+  add-members(list-id, record-ids, {})
+},
+(list-id: Str, record-ids: Vec, opts: Map): Map {
+  ::api/json("PUT", crm-path("lists", `/${segment(list-id)}/memberships/add`, opts), {}, map(record-ids, Str), opts)
 }
 
 remove-members
 meta {
     doc: """PUT /crm/lists/{version}/{listId}/memberships/remove - Remove records (Vec of record ids) from a `MANUAL` or `SNAPSHOT` list. Returns `{recordIdsRemoved, recordIdsMissing}`."""
 }
-fn (list-id: Str, record-ids: Vec): Map {
-  ::api/json("PUT", crm-path("lists", `/${segment(list-id)}/memberships/remove`), {}, map(record-ids, Str))
+fn
+(list-id: Str, record-ids: Vec): Map {
+  remove-members(list-id, record-ids, {})
+},
+(list-id: Str, record-ids: Vec, opts: Map): Map {
+  ::api/json("PUT", crm-path("lists", `/${segment(list-id)}/memberships/remove`, opts), {}, map(record-ids, Str), opts)
 }
 
 list-members
@@ -126,5 +152,8 @@ fn
   list-members(list-id, {})
 },
 (list-id: Str, params: Map): Map {
-  ::api/json("GET", crm-path("lists", `/${segment(list-id)}/memberships${query-string(params)}`))
+  list-members(list-id, params, {})
+},
+(list-id: Str, params: Map, opts: Map): Map {
+  ::api/json("GET", crm-path("lists", `/${segment(list-id)}/memberships${query-string(params)}`, opts), opts)
 }

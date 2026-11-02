@@ -63,7 +63,7 @@ fn
 (request: CreateInvoiceRequest): Map {
   create-invoice(request, RequestOptions({}))
 },
-(request: CreateInvoiceRequest, options: RequestOptions): Map {
+(request: CreateInvoiceRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/invoices", request, options)
 }
 
@@ -76,7 +76,10 @@ fn
   get-invoice(invoice, {})
 },
 (invoice: Str, params: Map): Map {
-  api-call("GET", `/v1/invoices/${seg(invoice)}`, params)
+  get-invoice(invoice, params, {})
+},
+(invoice: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/invoices/${seg(invoice)}`, params, opts)
 }
 
 UpdateInvoiceRequest type {
@@ -102,7 +105,7 @@ fn
 (invoice: Str, request: UpdateInvoiceRequest): Map {
   update-invoice(invoice, request, RequestOptions({}))
 },
-(invoice: Str, request: UpdateInvoiceRequest, options: RequestOptions): Map {
+(invoice: Str, request: UpdateInvoiceRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/invoices/${seg(invoice)}`, request, options)
 }
 
@@ -110,8 +113,12 @@ delete-invoice
 meta {
     doc: """DELETE /v1/invoices/{invoice} - Delete a draft invoice. Finalized invoices must be voided instead."""
 }
-fn (invoice: Str): Map {
-  api-call("DELETE", `/v1/invoices/${seg(invoice)}`)
+fn
+(invoice: Str): Map {
+  delete-invoice(invoice, {})
+},
+(invoice: Str, opts: Map): Map {
+  api-call("DELETE", `/v1/invoices/${seg(invoice)}`, "", opts)
 }
 
 FinalizeInvoiceRequest type {
@@ -130,7 +137,7 @@ fn
 (invoice: Str, request: FinalizeInvoiceRequest): Map {
   finalize-invoice(invoice, request, RequestOptions({}))
 },
-(invoice: Str, request: FinalizeInvoiceRequest, options: RequestOptions): Map {
+(invoice: Str, request: FinalizeInvoiceRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/invoices/${seg(invoice)}/finalize`, request, options)
 }
 
@@ -168,7 +175,7 @@ fn
 (invoice: Str, request: PayInvoiceRequest): Map {
   pay-invoice(invoice, request, RequestOptions({}))
 },
-(invoice: Str, request: PayInvoiceRequest, options: RequestOptions): Map {
+(invoice: Str, request: PayInvoiceRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/invoices/${seg(invoice)}/pay`, request, options)
 }
 
@@ -180,7 +187,7 @@ fn
 (invoice: Str): Map {
   send-invoice(invoice, RequestOptions({}))
 },
-(invoice: Str, options: RequestOptions): Map {
+(invoice: Str, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/invoices/${seg(invoice)}/send`, {}, options)
 }
 
@@ -192,7 +199,7 @@ fn
 (invoice: Str): Map {
   void-invoice(invoice, RequestOptions({}))
 },
-(invoice: Str, options: RequestOptions): Map {
+(invoice: Str, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/invoices/${seg(invoice)}/void`, {}, options)
 }
 
@@ -204,7 +211,7 @@ fn
 (invoice: Str): Map {
   mark-invoice-uncollectible(invoice, RequestOptions({}))
 },
-(invoice: Str, options: RequestOptions): Map {
+(invoice: Str, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/invoices/${seg(invoice)}/mark_uncollectible`, {}, options)
 }
 
@@ -217,7 +224,10 @@ fn
   list-invoice-lines(invoice, {})
 },
 (invoice: Str, params: Map): Map {
-  api-call("GET", `/v1/invoices/${seg(invoice)}/lines`, params)
+  list-invoice-lines(invoice, params, {})
+},
+(invoice: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/invoices/${seg(invoice)}/lines`, params, opts)
 }
 
 create-invoice-preview
@@ -239,8 +249,12 @@ preview.amount_due
 ```
 """
 }
-fn (params: Map): Map {
-  api-call("POST", "/v1/invoices/create_preview", params)
+fn
+(params: Map): Map {
+  create-invoice-preview(params, {})
+},
+(params: Map, opts: Map): Map {
+  api-call("POST", "/v1/invoices/create_preview", params, opts)
 }
 
 ListInvoicesRequest type {
@@ -265,7 +279,10 @@ fn
   list-invoices(ListInvoicesRequest({}))
 },
 (request: ListInvoicesRequest): Map {
-  api-call("GET", "/v1/invoices", request)
+  list-invoices(request, {})
+},
+(request: ListInvoicesRequest, opts: Map): Map {
+  api-call("GET", "/v1/invoices", request, opts)
 }
 
 search-invoices
@@ -277,7 +294,10 @@ fn
   search-invoices(query, {})
 },
 (query: Str, params: Map): Map {
-  api-call("GET", "/v1/invoices/search", {...params, query: query})
+  search-invoices(query, params, {})
+},
+(query: Str, params: Map, opts: Map): Map {
+  api-call("GET", "/v1/invoices/search", {...params, query: query}, opts)
 }
 
 // ============================================================================
@@ -330,20 +350,30 @@ fn
 (request: CreateInvoiceItemRequest): Map {
   create-invoice-item(request, RequestOptions({}))
 },
-(request: CreateInvoiceItemRequest, options: RequestOptions): Map {
+(request: CreateInvoiceItemRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/invoiceitems", request, options)
 },
 (customer: Str, amount: Int, currency: Str, description: Str): Map {
-  create-invoice-item(CreateInvoiceItemRequest({customer: customer, amount: amount, currency: currency, description: description}))
+  create-invoice-item(customer, amount, currency, description, {})
+},
+(customer: Str, amount: Int, currency: Str, description: Str, options: RequestOptions | Map): Map {
+  create-invoice-item(CreateInvoiceItemRequest({customer: customer, amount: amount, currency: currency, description: description}), options)
 },
 (customer: Str, amount: Int, currency: Str, description: Str, invoice: Str): Map {
-  create-invoice-item(CreateInvoiceItemRequest({customer: customer, amount: amount, currency: currency, description: description, invoice: invoice}))
+  create-invoice-item(customer, amount, currency, description, invoice, {})
+},
+(customer: Str, amount: Int, currency: Str, description: Str, invoice: Str, options: RequestOptions | Map): Map {
+  create-invoice-item(CreateInvoiceItemRequest({customer: customer, amount: amount, currency: currency, description: description, invoice: invoice}), options)
 }
 
 delete-invoice-item
 meta {
     doc: """DELETE /v1/invoiceitems/{invoiceitem} - Delete an invoice item that isn't yet on a finalized invoice."""
 }
-fn (invoice-item: Str): Map {
-  api-call("DELETE", `/v1/invoiceitems/${seg(invoice-item)}`)
+fn
+(invoice-item: Str): Map {
+  delete-invoice-item(invoice-item, {})
+},
+(invoice-item: Str, opts: Map): Map {
+  api-call("DELETE", `/v1/invoiceitems/${seg(invoice-item)}`, "", opts)
 }

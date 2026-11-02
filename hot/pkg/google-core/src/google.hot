@@ -20,9 +20,11 @@ meta {
     Every request helper also takes an `opts` Map whose credential keys
     (`token`, `refresh-token` + `client-id` + `client-secret`,
     `service-account` + `subject`, `api-key`) override context for that
-    one call, which is how multi-tenant apps act for many users. `scopes`
-    in `opts`, or the `google.scopes` context variable, overrides the
-    scopes a service-account token is minted with.
+    one call, which is how multi-tenant apps act for many users. They are
+    masked in call records; one that is blank or null is an Err naming the
+    key, never a fallback to context. `scopes` in `opts`, or the
+    `google.scopes` context variable, overrides the scopes a
+    service-account token is minted with.
 
     **Namespaces**
 

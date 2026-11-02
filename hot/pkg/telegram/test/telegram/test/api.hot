@@ -72,6 +72,53 @@ fn () {
 }
 
 // ============================================================================
+// Per-call credentials
+// ============================================================================
+
+test-resolve-from-prefers-opts-then-ctx
+meta ["test"]
+fn () {
+    ctx-values {"telegram.bot.token": "ctx-token"}
+    assert-eq("tenant-token", ::api/resolve-from({bot-token: " tenant-token "}, ctx-values).bot-token)
+    assert-eq("ctx-token", ::api/resolve-from({}, ctx-values).bot-token)
+}
+
+test-resolve-from-blank-token-never-falls-back
+meta ["test"]
+fn () {
+    for-each(["", "  ", null], (blank) {
+        out ::api/resolve-from({bot-token: blank}, {"telegram.bot.token": "ctx-token"})
+        assert(is-err(out), "a blank token is an Err, never ctx")
+        assert(contains(if-err(out, (e) { e }), "bot-token"), "names the key")
+    })
+}
+
+test-resolve-from-no-token
+meta ["test"]
+fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out))
+    assert(contains(if-err(out, (e) { e }), "telegram.bot.token"), "names the context variable")
+}
+
+test-resolve-returns-marked-token-unchanged
+meta ["test"]
+fn () {
+    assert-eq("123456:tenant-token", ::api/resolve({bot-token: "123456:tenant-token"}).bot-token)
+}
+
+test-opts-arity-errs-before-any-request
+meta ["test"]
+fn () {
+    assert(is-err(::telegram::bot/get-me({bot-token: ""})))
+    assert(is-err(::messages/send-message(::messages/SendMessageRequest({chat_id: 1, text: "hi"}), {bot-token: null})))
+    assert(is-err(::api/request("getMe", {}, "")), "an empty explicit token is an Err too")
+    assert(is-err(::api/download("photos/a.jpg", {bot-token: " "})))
+    assert(is-err(::telegram::files/get-file("id", {bot-token: ""})))
+    assert(is-err(::telegram::files/download-file("id", {bot-token: ""})))
+}
+
+// ============================================================================
 // Body building
 // ============================================================================
 

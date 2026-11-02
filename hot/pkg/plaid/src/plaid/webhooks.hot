@@ -172,16 +172,24 @@ get-verification-key
 meta {
     doc: """POST /webhook_verification_key/get: the JWK for a `kid`, uncached. Returns the `key` map."""
 }
-fn (key-id: Str): Map {
-  out ::api/post("/webhook_verification_key/get", {key_id: key-id})
-  out.key
+fn
+(key-id: Str): Map {
+  get-verification-key(key-id, {})
+},
+(key-id: Str, opts: Map): Map {
+  out ::api/post("/webhook_verification_key/get", {key_id: key-id}, opts)
+  if(is-err(out), out, out.key)
 }
 
 cached-verification-key
 meta {
     doc: """The JWK for a `kid`, from a persistent store cache (refetched after a day). Falls back to an uncached fetch when stores aren't available."""
 }
-fn (key-id: Str): Map {
+fn
+(key-id: Str): Map {
+  cached-verification-key(key-id, {})
+},
+(key-id: Str, opts: Map): Map {
   cache ::store/Map({name: KEY_CACHE_NAME})
   cached ::store/get(cache, key-id)
   now ::time/epoch-seconds()
@@ -195,10 +203,15 @@ fn (key-id: Str): Map {
   cond {
     is-some(hit) => { hit }
     => {
-      key get-verification-key(key-id)
-      // A cache write that fails (no store in this context) is ignored.
-      written ::store/put(cache, key-id, {key: key, fetched-at: now})
-      key
+      key get-verification-key(key-id, opts)
+      cond {
+        is-err(key) => { key }
+        => {
+          // A cache write that fails (no store in this context) is ignored.
+          written ::store/put(cache, key-id, {key: key, fetched-at: now})
+          key
+        }
+      }
     }
   }
 }
@@ -217,8 +230,9 @@ meta {
     the raw body. The 1-arity form fetches (and caches) the key with
     `plaid.client-id` / `plaid.secret`, failing when they are unset; the
     2- and 3-arity forms take a JWK you fetched yourself, plus options as
-    in `check-webhook`. Use `check-webhook` to learn why a request
-    failed.
+    in `check-webhook`. The 4-arity form takes per-call credentials to
+    fetch the key with: pass a null `jwk`. Use `check-webhook` to learn
+    why a request failed.
 
     **Example**
 
@@ -230,6 +244,9 @@ meta {
         ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
         handle-event(request.body))
     }
+
+    // With a tenant's credentials, fetching and caching the key
+    ::plaid::webhooks/verify-webhook(request, null, {}, {client-id: "tenant-id", secret: "tenant-secret"})
     ```
     """
 }
@@ -261,6 +278,30 @@ fn
 },
 (request: Map, jwk: Map, options: Map): Bool {
   is-ok(check-webhook(request, jwk, options))
+},
+// 4-arity: a null `jwk` fetches the key with the call's credentials. Bad
+// credentials are an Err naming the key, which is falsy like any refusal.
+(request: Map, jwk: Map?, options: Map, opts: Map): Bool {
+  usable ::api/resolve(opts)
+  token verification-token(request)
+  cond {
+    is-err(usable) => { usable }
+    is-some(jwk) => { verify-webhook(request, jwk, options) }
+    is-empty(token) => { false }
+    => {
+      kid token-key-id(token)
+      cond {
+        is-err(kid) => { false }
+        => {
+          fetched cached-verification-key(kid, opts)
+          cond {
+            is-err(fetched) => { false }
+            => { verify-webhook(request, fetched, options) }
+          }
+        }
+      }
+    }
+  }
 }
 
 event

@@ -234,7 +234,11 @@ meta {
     ```
     """
 }
-fn (request: CreateInteractionResponseRequest): Any {
+fn
+(request: CreateInteractionResponseRequest): Any {
+  create-interaction-response(request, {})
+},
+(request: CreateInteractionResponseRequest, opts: Map): Any {
   files or(request.files, [])
   data cond {
     and(not(is-empty(files)), is-null(get(or(request.data, {}), "attachments"))) => {
@@ -243,13 +247,17 @@ fn (request: CreateInteractionResponseRequest): Any {
     => { request.data }
   }
 
-  result ::api/call("POST", `/interactions/${seg(request.interaction_id)}/${seg(request.interaction_token)}/callback`, {
+  result ::api/call("POST", `/interactions/${seg(request.interaction_id)}/${::api/token-seg(request.interaction_token)}/callback`, {
     query: {with_response: request.with_response},
     body: assoc-some({type: request.type}, "data", data),
     files: files,
     auth: false
-  })
-  if(eq(request.with_response, true), result, true)
+  }, opts)
+  cond {
+    is-err(result) => { result }
+    eq(request.with_response, true) => { result }
+    => { true }
+  }
 }
 
 // ============================================================================
@@ -257,7 +265,7 @@ fn (request: CreateInteractionResponseRequest): Any {
 // ============================================================================
 
 original-path fn (application-id: Str, interaction-token: Str): Str {
-  `/webhooks/${seg(application-id)}/${seg(interaction-token)}/messages/@original`
+  `/webhooks/${seg(application-id)}/${::api/token-seg(interaction-token)}/messages/@original`
 }
 
 GetOriginalInteractionResponseRequest type {
@@ -269,8 +277,12 @@ get-original-interaction-response
 meta {
     doc: """GET /webhooks/{application_id}/{interaction_token}/messages/@original - The initial response message."""
 }
-fn (request: GetOriginalInteractionResponseRequest): Map {
-  ::api/call("GET", original-path(request.application_id, request.interaction_token), {auth: false})
+fn
+(request: GetOriginalInteractionResponseRequest): Map {
+  get-original-interaction-response(request, {})
+},
+(request: GetOriginalInteractionResponseRequest, opts: Map): Map {
+  ::api/call("GET", original-path(request.application_id, request.interaction_token), {auth: false}, opts)
 }
 
 EditOriginalInteractionResponseRequest type {
@@ -308,7 +320,11 @@ meta {
     ```
     """
 }
-fn (request: EditOriginalInteractionResponseRequest): Map {
+fn
+(request: EditOriginalInteractionResponseRequest): Map {
+  edit-original-interaction-response(request, {})
+},
+(request: EditOriginalInteractionResponseRequest, opts: Map): Map {
   files or(request.files, [])
   payload ::api/body(request, ["application_id", "interaction_token"])
   final cond {
@@ -320,7 +336,7 @@ fn (request: EditOriginalInteractionResponseRequest): Map {
     body: final,
     files: files,
     auth: false
-  })
+  }, opts)
 }
 
 DeleteOriginalInteractionResponseRequest type {
@@ -332,8 +348,12 @@ delete-original-interaction-response
 meta {
     doc: """DELETE /webhooks/{application_id}/{interaction_token}/messages/@original - Delete the initial response."""
 }
-fn (request: DeleteOriginalInteractionResponseRequest): Bool {
-  ::api/call-ok("DELETE", original-path(request.application_id, request.interaction_token), {auth: false})
+fn
+(request: DeleteOriginalInteractionResponseRequest): Bool {
+  delete-original-interaction-response(request, {})
+},
+(request: DeleteOriginalInteractionResponseRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", original-path(request.application_id, request.interaction_token), {auth: false}, opts)
 }
 
 CreateFollowupMessageRequest type {
@@ -354,7 +374,11 @@ create-followup-message
 meta {
     doc: """POST /webhooks/{application_id}/{interaction_token} - Send a followup message. `flags: 64` makes it ephemeral. Returns the message."""
 }
-fn (request: CreateFollowupMessageRequest): Map {
+fn
+(request: CreateFollowupMessageRequest): Map {
+  create-followup-message(request, {})
+},
+(request: CreateFollowupMessageRequest, opts: Map): Map {
   files or(request.files, [])
   payload ::api/body(request, ["application_id", "interaction_token"])
   final cond {
@@ -362,12 +386,12 @@ fn (request: CreateFollowupMessageRequest): Map {
     => { payload }
   }
 
-  ::api/call("POST", `/webhooks/${seg(request.application_id)}/${seg(request.interaction_token)}`, {
+  ::api/call("POST", `/webhooks/${seg(request.application_id)}/${::api/token-seg(request.interaction_token)}`, {
     query: {wait: true},
     body: final,
     files: files,
     auth: false
-  })
+  }, opts)
 }
 
 GetFollowupMessageRequest type {
@@ -380,8 +404,12 @@ get-followup-message
 meta {
     doc: """GET /webhooks/{application_id}/{interaction_token}/messages/{message_id} - A followup message."""
 }
-fn (request: GetFollowupMessageRequest): Map {
-  ::api/call("GET", `/webhooks/${seg(request.application_id)}/${seg(request.interaction_token)}/messages/${seg(request.message_id)}`, {auth: false})
+fn
+(request: GetFollowupMessageRequest): Map {
+  get-followup-message(request, {})
+},
+(request: GetFollowupMessageRequest, opts: Map): Map {
+  ::api/call("GET", `/webhooks/${seg(request.application_id)}/${::api/token-seg(request.interaction_token)}/messages/${seg(request.message_id)}`, {auth: false}, opts)
 }
 
 EditFollowupMessageRequest type {
@@ -403,12 +431,16 @@ edit-followup-message
 meta {
     doc: """PATCH /webhooks/{application_id}/{interaction_token}/messages/{message_id} - Edit a followup message. Only fields you set are sent."""
 }
-fn (request: EditFollowupMessageRequest): Map {
-  ::api/call("PATCH", `/webhooks/${seg(request.application_id)}/${seg(request.interaction_token)}/messages/${seg(request.message_id)}`, {
+fn
+(request: EditFollowupMessageRequest): Map {
+  edit-followup-message(request, {})
+},
+(request: EditFollowupMessageRequest, opts: Map): Map {
+  ::api/call("PATCH", `/webhooks/${seg(request.application_id)}/${::api/token-seg(request.interaction_token)}/messages/${seg(request.message_id)}`, {
     body: ::api/body(request, ["application_id", "interaction_token", "message_id"]),
     files: or(request.files, []),
     auth: false
-  })
+  }, opts)
 }
 
 DeleteFollowupMessageRequest type {
@@ -421,8 +453,12 @@ delete-followup-message
 meta {
     doc: """DELETE /webhooks/{application_id}/{interaction_token}/messages/{message_id} - Delete a followup message."""
 }
-fn (request: DeleteFollowupMessageRequest): Bool {
-  ::api/call-ok("DELETE", `/webhooks/${seg(request.application_id)}/${seg(request.interaction_token)}/messages/${seg(request.message_id)}`, {auth: false})
+fn
+(request: DeleteFollowupMessageRequest): Bool {
+  delete-followup-message(request, {})
+},
+(request: DeleteFollowupMessageRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/webhooks/${seg(request.application_id)}/${::api/token-seg(request.interaction_token)}/messages/${seg(request.message_id)}`, {auth: false}, opts)
 }
 
 // ============================================================================
@@ -452,8 +488,12 @@ get-global-commands
 meta {
     doc: """GET /applications/{application_id}/commands - Every global command."""
 }
-fn (request: GetGlobalCommandsRequest): Vec<Map> {
-  ::api/call("GET", global-commands-path(request.application_id), {query: {with_localizations: request.with_localizations}})
+fn
+(request: GetGlobalCommandsRequest): Vec<Map> {
+  get-global-commands(request, {})
+},
+(request: GetGlobalCommandsRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", global-commands-path(request.application_id), {query: {with_localizations: request.with_localizations}}, opts)
 }
 
 CreateGlobalCommandRequest type {
@@ -494,8 +534,12 @@ meta {
     ```
     """
 }
-fn (request: CreateGlobalCommandRequest): Map {
-  ::api/call("POST", global-commands-path(request.application_id), {body: ::api/body(request, ["application_id"])})
+fn
+(request: CreateGlobalCommandRequest): Map {
+  create-global-command(request, {})
+},
+(request: CreateGlobalCommandRequest, opts: Map): Map {
+  ::api/call("POST", global-commands-path(request.application_id), {body: ::api/body(request, ["application_id"])}, opts)
 }
 
 GetGlobalCommandRequest type {
@@ -507,8 +551,12 @@ get-global-command
 meta {
     doc: """GET /applications/{application_id}/commands/{command_id} - One global command."""
 }
-fn (request: GetGlobalCommandRequest): Map {
-  ::api/call("GET", `${global-commands-path(request.application_id)}/${seg(request.command_id)}`)
+fn
+(request: GetGlobalCommandRequest): Map {
+  get-global-command(request, {})
+},
+(request: GetGlobalCommandRequest, opts: Map): Map {
+  ::api/call("GET", `${global-commands-path(request.application_id)}/${seg(request.command_id)}`, {}, opts)
 }
 
 EditGlobalCommandRequest type {
@@ -532,10 +580,14 @@ edit-global-command
 meta {
     doc: """PATCH /applications/{application_id}/commands/{command_id} - Change a global command. Only fields you set are sent; `clear: ["default_member_permissions"]` resets permissions to the default."""
 }
-fn (request: EditGlobalCommandRequest): Map {
+fn
+(request: EditGlobalCommandRequest): Map {
+  edit-global-command(request, {})
+},
+(request: EditGlobalCommandRequest, opts: Map): Map {
   ::api/call("PATCH", `${global-commands-path(request.application_id)}/${seg(request.command_id)}`, {
     body: ::api/body(request, ["application_id", "command_id"])
-  })
+  }, opts)
 }
 
 DeleteGlobalCommandRequest type {
@@ -547,8 +599,12 @@ delete-global-command
 meta {
     doc: """DELETE /applications/{application_id}/commands/{command_id} - Delete a global command."""
 }
-fn (request: DeleteGlobalCommandRequest): Bool {
-  ::api/call-ok("DELETE", `${global-commands-path(request.application_id)}/${seg(request.command_id)}`)
+fn
+(request: DeleteGlobalCommandRequest): Bool {
+  delete-global-command(request, {})
+},
+(request: DeleteGlobalCommandRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `${global-commands-path(request.application_id)}/${seg(request.command_id)}`, {}, opts)
 }
 
 BulkOverwriteGlobalCommandsRequest type {
@@ -578,10 +634,14 @@ meta {
     ```
     """
 }
-fn (request: BulkOverwriteGlobalCommandsRequest): Vec<Map> {
+fn
+(request: BulkOverwriteGlobalCommandsRequest): Vec<Map> {
+  bulk-overwrite-global-commands(request, {})
+},
+(request: BulkOverwriteGlobalCommandsRequest, opts: Map): Vec<Map> {
   ::api/call("PUT", global-commands-path(request.application_id), {
     body: map(request.commands, (c) { ::api/body(c, []) })
-  })
+  }, opts)
 }
 
 GetGuildCommandsRequest type {
@@ -594,8 +654,12 @@ get-guild-commands
 meta {
     doc: """GET /applications/{application_id}/guilds/{guild_id}/commands - The app's commands in one guild."""
 }
-fn (request: GetGuildCommandsRequest): Vec<Map> {
-  ::api/call("GET", guild-commands-path(request.application_id, request.guild_id), {query: {with_localizations: request.with_localizations}})
+fn
+(request: GetGuildCommandsRequest): Vec<Map> {
+  get-guild-commands(request, {})
+},
+(request: GetGuildCommandsRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", guild-commands-path(request.application_id, request.guild_id), {query: {with_localizations: request.with_localizations}}, opts)
 }
 
 CreateGuildCommandRequest type {
@@ -615,10 +679,14 @@ create-guild-command
 meta {
     doc: """POST /applications/{application_id}/guilds/{guild_id}/commands - Create (or overwrite by name) a guild command. Available immediately, which makes guild commands the way to test."""
 }
-fn (request: CreateGuildCommandRequest): Map {
+fn
+(request: CreateGuildCommandRequest): Map {
+  create-guild-command(request, {})
+},
+(request: CreateGuildCommandRequest, opts: Map): Map {
   ::api/call("POST", guild-commands-path(request.application_id, request.guild_id), {
     body: ::api/body(request, ["application_id", "guild_id"])
-  })
+  }, opts)
 }
 
 GetGuildCommandRequest type {
@@ -631,8 +699,12 @@ get-guild-command
 meta {
     doc: """GET /applications/{application_id}/guilds/{guild_id}/commands/{command_id} - One guild command."""
 }
-fn (request: GetGuildCommandRequest): Map {
-  ::api/call("GET", `${guild-commands-path(request.application_id, request.guild_id)}/${seg(request.command_id)}`)
+fn
+(request: GetGuildCommandRequest): Map {
+  get-guild-command(request, {})
+},
+(request: GetGuildCommandRequest, opts: Map): Map {
+  ::api/call("GET", `${guild-commands-path(request.application_id, request.guild_id)}/${seg(request.command_id)}`, {}, opts)
 }
 
 EditGuildCommandRequest type {
@@ -653,10 +725,14 @@ edit-guild-command
 meta {
     doc: """PATCH /applications/{application_id}/guilds/{guild_id}/commands/{command_id} - Change a guild command. Only fields you set are sent."""
 }
-fn (request: EditGuildCommandRequest): Map {
+fn
+(request: EditGuildCommandRequest): Map {
+  edit-guild-command(request, {})
+},
+(request: EditGuildCommandRequest, opts: Map): Map {
   ::api/call("PATCH", `${guild-commands-path(request.application_id, request.guild_id)}/${seg(request.command_id)}`, {
     body: ::api/body(request, ["application_id", "guild_id", "command_id"])
-  })
+  }, opts)
 }
 
 DeleteGuildCommandRequest type {
@@ -669,8 +745,12 @@ delete-guild-command
 meta {
     doc: """DELETE /applications/{application_id}/guilds/{guild_id}/commands/{command_id} - Delete a guild command."""
 }
-fn (request: DeleteGuildCommandRequest): Bool {
-  ::api/call-ok("DELETE", `${guild-commands-path(request.application_id, request.guild_id)}/${seg(request.command_id)}`)
+fn
+(request: DeleteGuildCommandRequest): Bool {
+  delete-guild-command(request, {})
+},
+(request: DeleteGuildCommandRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `${guild-commands-path(request.application_id, request.guild_id)}/${seg(request.command_id)}`, {}, opts)
 }
 
 BulkOverwriteGuildCommandsRequest type {
@@ -683,10 +763,14 @@ bulk-overwrite-guild-commands
 meta {
     doc: """PUT /applications/{application_id}/guilds/{guild_id}/commands - Replace every command in one guild."""
 }
-fn (request: BulkOverwriteGuildCommandsRequest): Vec<Map> {
+fn
+(request: BulkOverwriteGuildCommandsRequest): Vec<Map> {
+  bulk-overwrite-guild-commands(request, {})
+},
+(request: BulkOverwriteGuildCommandsRequest, opts: Map): Vec<Map> {
   ::api/call("PUT", guild-commands-path(request.application_id, request.guild_id), {
     body: map(request.commands, (c) { ::api/body(c, []) })
-  })
+  }, opts)
 }
 
 GetGuildCommandPermissionsRequest type {
@@ -698,6 +782,10 @@ get-guild-command-permissions
 meta {
     doc: """GET /applications/{application_id}/guilds/{guild_id}/commands/permissions - Permission overrides for every command in a guild. (Editing them needs a user OAuth2 Bearer token, not a bot token.)"""
 }
-fn (request: GetGuildCommandPermissionsRequest): Vec<Map> {
-  ::api/call("GET", `${guild-commands-path(request.application_id, request.guild_id)}/permissions`)
+fn
+(request: GetGuildCommandPermissionsRequest): Vec<Map> {
+  get-guild-command-permissions(request, {})
+},
+(request: GetGuildCommandPermissionsRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `${guild-commands-path(request.application_id, request.guild_id)}/permissions`, {}, opts)
 }

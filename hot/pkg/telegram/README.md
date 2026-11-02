@@ -21,6 +21,26 @@ Create a bot with [@BotFather](https://t.me/BotFather) (`/newbot`); it gives you
 
 Every function also accepts its parameters as the Bot API names them (`chat_id`, `reply_markup`, ...). `chat_id` is an Int or an `@channelusername` Str.
 
+## Per-call credentials
+
+Every function that calls Telegram takes an optional trailing `opts` Map, so one run can act as many bots and parallel flows don't share credentials. Nothing from `opts` is written to ctx, and a `bot-token` from `opts` is masked in call records, including inside Bot API URLs.
+
+| Key | Effect |
+|---|---|
+| `bot-token` | The bot token for this call, instead of `telegram.bot.token` |
+
+`opts` always comes last.
+
+```hot
+::messages ::telegram::messages
+
+tenant {bot-token: "123456:tenant-b-token"}
+sent ::messages/send-message(::messages/SendMessageRequest({chat_id: 123456789, text: "Hello"}), tenant)
+me ::telegram::bot/get-me(tenant)
+```
+
+A `bot-token` that is present but blank or null is an error naming the key, never a fallback to `telegram.bot.token`. `::telegram::api/resolve(opts)` is the one place this is decided.
+
 ## Quick start
 
 ```hot
@@ -72,7 +92,7 @@ on-voice fn (message: Map): Bytes {
 
 **Updates** (`::telegram::updates`): `set-webhook`, `delete-webhook`, `get-webhook-info`, `get-updates` (long polling), `verify-request`.
 
-**Low level** (`::telegram::api`): `request(method, params)` calls any Bot API method, choosing JSON or multipart automatically; `parse-response`, `download`.
+**Low level** (`::telegram::api`): `request(method, params, opts?)` calls any Bot API method, choosing JSON or multipart automatically; `parse-response`, `download`.
 
 ### Uploads
 

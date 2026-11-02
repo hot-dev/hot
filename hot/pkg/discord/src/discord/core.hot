@@ -10,6 +10,9 @@ meta {
     the Developer Portal's **Bot** tab. For an interactions endpoint, also
     set `discord.public.key` to the application's public key.
 
+    Every API-calling function also takes a trailing `opts` Map for a
+    per-call bot token; see `::discord::api`.
+
     **Quick start**
 
     ```hot

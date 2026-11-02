@@ -40,6 +40,18 @@ All Calendar scopes are sensitive (Google verifies public apps that request them
 
 Every function has an options arity. Calendar parameters use the API's own names (`timeMin`, `singleEvents`, `orderBy`, `sendUpdates`, ...); credential keys (`token`, `refresh-token`, `service-account`, `subject`, `scopes`, `retry`) are handled by `google-core`. Calendar ids (`primary`, `team@group.calendar.google.com`, `en.usa#holiday@group.v.calendar.google.com`) and event ids are URL-encoded in every path.
 
+### Per-call credentials
+
+Credentials in `opts` override context for that call only, so one app can act for many users; see the [google-core README](../google-core/README.md#per-call-credentials-multi-tenant) for every key.
+
+```hot
+::events ::google::calendar::events
+
+upcoming ::events/list-events("primary", {singleEvents: true, token: "ya29.tenant-access-token"})
+```
+
+Per-call credentials are masked in call records and never written to context. A credential key that is present but blank or null is an error naming the key, never a fallback to context.
+
 ## Quick start
 
 ```hot

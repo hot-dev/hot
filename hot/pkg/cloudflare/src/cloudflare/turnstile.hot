@@ -4,10 +4,12 @@ meta {
     Cloudflare Turnstile server-side validation. A widget token is valid
     for 300 seconds and can be verified once; always verify on the server
     before trusting a form submission. Uses the widget's secret key, not
-    the API token. See
+    the API token: `cloudflare.turnstile.secret`, or `secret-key` in the
+    call's `opts`, masked in call records. A `secret-key` present but blank
+    or null is an error, never a fallback to context. See
     https://developers.cloudflare.com/turnstile/get-started/server-side-validation/.
     """,
-    ctx: {"cloudflare.turnstile.secret": {required: true}}
+    ctx: {"cloudflare.turnstile.secret": {required: false}}
 }
 
 ::ctx ::hot::ctx
@@ -20,11 +22,19 @@ SITEVERIFY_URL "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 // Turnstile rejects tokens longer than this without a network round trip.
 MAX_TOKEN_LENGTH 2048
 
-secret fn (): Str {
-  value ::cloudflare::api/ctx-str("cloudflare.turnstile.secret")
+secret
+meta {
+    ctx: {"cloudflare.turnstile.secret": {required: false}},
+    doc: """The widget secret for a call: `secret-key` in `opts`, masked in this run's records, else `cloudflare.turnstile.secret`. An Err carrying `ConfigError` when it is unset, or when `secret-key` is in `opts` but blank or null. Exposed for testing."""
+}
+fn (opts: Map): Str {
+  explicit ::cloudflare::api/non-blank(get(opts, "secret-key"))
+  value or(explicit, ::cloudflare::api/ctx-str("cloudflare.turnstile.secret"))
   cond {
+    and(in("secret-key", keys(opts)), is-null(explicit)) => { ::cloudflare::api/blank-error("secret-key") }
+    is-some(explicit) => { ::ctx/mark-secret(explicit) }
     is-null(value) => {
-      err(ConfigError({message: "cloudflare.turnstile.secret is not set. Add the widget's secret key in Context Variables to verify Turnstile tokens."}))
+      err(ConfigError({message: "cloudflare.turnstile.secret is not set. Add the widget's secret key in Context Variables, or pass {secret-key: ...} in the call's opts, to verify Turnstile tokens."}))
     }
     => { value }
   }
@@ -47,7 +57,7 @@ meta {
     Validate a widget token and return Cloudflare's answer:
     `{success, challenge_ts, hostname, action, cdata, error-codes, metadata?}`.
     `opts`: `remoteip` (the visitor IP), `idempotency_key` (a UUID, to
-    retry safely), and `secret` to override `cloudflare.turnstile.secret`.
+    retry safely), and `secret-key` to override `cloudflare.turnstile.secret`.
     A failed validation is a normal result (`success: false`); only
     transport errors, non-2xx responses, and a missing secret are Errs.
     """
@@ -57,15 +67,9 @@ fn
   siteverify(token, {})
 },
 (token: Str, opts: Map): Map {
-  explicit get(opts, "secret")
-  key cond {
-    is-some(explicit) => { explicit }
-    => { secret() }
-  }
-
+  key secret(opts)
   cond {
     is-err(key) => { key }
-    is-empty(key) => { err(ConfigError({message: "Turnstile secret is empty."})) }
     => {
       response ::hot::http/request(HttpRequest({
         method: "POST",
@@ -75,7 +79,7 @@ fn
       }))
       cond {
         is-err(response) => { response }
-        not(::hot::http/is-ok-response(response)) => { err(::cloudflare::api/to-error(response)) }
+        not(::hot::http/is-ok-response(response)) => { err(::cloudflare::api/HttpError(response)) }
         => { response.body }
       }
     }
@@ -134,7 +138,7 @@ fn
     is-empty(token) => { false }
     gt(length(token), MAX_TOKEN_LENGTH) => { false }
     => {
-      result siteverify(token, filter-vals(opts, is-some))
+      result siteverify(token, opts)
       cond {
         is-err(result) => { result }
         => { check-result(result, opts) }

@@ -17,7 +17,10 @@ fn
   list-owners({})
 },
 (params: Map): Map {
-  ::api/json("GET", crm-path("owners", query-string(params)))
+  list-owners(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/json("GET", crm-path("owners", query-string(params), opts), opts)
 }
 
 get-owner
@@ -26,10 +29,16 @@ meta {
 }
 fn
 (owner-id: Str): Map {
-  ::api/json("GET", crm-path("owners", `/${segment(owner-id)}`))
+  get-owner(owner-id, {})
+},
+(owner-id: Str, opts: Map): Map {
+  ::api/json("GET", crm-path("owners", `/${segment(owner-id)}`, opts), opts)
 },
 (owner-id: Str, id-property: Str): Map {
-  ::api/json("GET", crm-path("owners", `/${segment(owner-id)}${query-string({idProperty: id-property})}`))
+  get-owner(owner-id, id-property, {})
+},
+(owner-id: Str, id-property: Str, opts: Map): Map {
+  ::api/json("GET", crm-path("owners", `/${segment(owner-id)}${query-string({idProperty: id-property})}`, opts), opts)
 }
 
 find-owner-by-email
@@ -45,8 +54,12 @@ meta {
     ```
     """
 }
-fn (email: Str): Any {
-  page list-owners({email: email, limit: 1})
+fn
+(email: Str): Any {
+  find-owner-by-email(email, {})
+},
+(email: Str, opts: Map): Any {
+  page list-owners({email: email, limit: 1}, opts)
   cond {
     is-err(page) => { page }
     is-empty(or(get(page, "results"), [])) => { null }
