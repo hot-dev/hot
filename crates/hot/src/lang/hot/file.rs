@@ -169,7 +169,7 @@ fn create_direct_file_meta(path: &str, metadata: &std::fs::Metadata) -> Val {
     map.insert(Val::from("created-at"), Val::Int(created_at));
     map.insert(Val::from("updated-at"), Val::Int(updated_at));
 
-    Val::map(map)
+    Val::constructed("::hot::file/FileMeta", map)
 }
 
 // ============================================================================
@@ -230,7 +230,7 @@ fn write_file_direct(path: &str, contents: &str) -> HotResult<Val> {
                     map.insert(Val::from("path"), Val::from(path.to_string()));
                     map.insert(Val::from("size"), Val::Int(contents.len() as i64));
                     map.insert(Val::from("storage-backend"), Val::from("direct"));
-                    HotResult::Ok(Val::map(map))
+                    HotResult::Ok(Val::constructed("::hot::file/FileMeta", map))
                 }
             }
         }
@@ -268,7 +268,7 @@ fn write_file_bytes_direct(path: &str, contents: &[u8]) -> HotResult<Val> {
                     map.insert(Val::from("path"), Val::from(path.to_string()));
                     map.insert(Val::from("size"), Val::Int(contents.len() as i64));
                     map.insert(Val::from("storage-backend"), Val::from("direct"));
-                    HotResult::Ok(Val::map(map))
+                    HotResult::Ok(Val::constructed("::hot::file/FileMeta", map))
                 }
             }
         }
@@ -912,7 +912,7 @@ mod tests {
         match result {
             HotResult::Ok(val) => {
                 // Check metadata returned
-                if let Val::Map(map) = val {
+                if let Val::Map(map) = crate::val::as_fields(&val) {
                     assert!(map.contains_key(&Val::from("path")));
                     assert!(map.contains_key(&Val::from("size")));
                     assert!(map.contains_key(&Val::from("storage-backend")));
@@ -1006,7 +1006,10 @@ mod tests {
 
         let result = file_info_direct(file_path.to_str().unwrap());
         match result {
-            HotResult::Ok(Val::Map(map)) => {
+            HotResult::Ok(value) => {
+                let Val::Map(map) = crate::val::as_fields(&value) else {
+                    panic!("Expected a FileMeta, got {value:?}");
+                };
                 // Check size
                 if let Some(Val::Int(size)) = map.get(&Val::from("size")) {
                     assert_eq!(*size, content.len() as i64);
@@ -1026,7 +1029,6 @@ mod tests {
                     assert!(ct.to_string().contains("text/plain"));
                 }
             }
-            HotResult::Ok(other) => panic!("Expected Map, got {:?}", other),
             HotResult::Err(e) => panic!("Expected success, got error: {:?}", e),
         }
     }
@@ -1081,7 +1083,10 @@ mod tests {
 
         let result = write_file_bytes_direct(file_path.to_str().unwrap(), &content);
         match result {
-            HotResult::Ok(Val::Map(map)) => {
+            HotResult::Ok(value) => {
+                let Val::Map(map) = crate::val::as_fields(&value) else {
+                    panic!("Expected a FileMeta, got {value:?}");
+                };
                 // Verify size
                 if let Some(Val::Int(size)) = map.get(&Val::from("size")) {
                     assert_eq!(*size, content.len() as i64);
@@ -1091,7 +1096,6 @@ mod tests {
                 let written = fs::read(&file_path).unwrap();
                 assert_eq!(written, content);
             }
-            HotResult::Ok(other) => panic!("Expected Map, got {:?}", other),
             HotResult::Err(e) => panic!("Expected success, got error: {:?}", e),
         }
     }
@@ -1108,8 +1112,9 @@ mod tests {
 
         let metadata = fs::metadata(&file_path).unwrap();
         let result = create_direct_file_meta("meta_test.json", &metadata);
+        assert!(result.is_type("::hot::file/FileMeta"));
 
-        if let Val::Map(map) = result {
+        if let Val::Map(map) = crate::val::as_fields(&result) {
             // Check file-id equals path
             if let Some(Val::Str(id)) = map.get(&Val::from("file-id")) {
                 assert_eq!(&**id, "meta_test.json");

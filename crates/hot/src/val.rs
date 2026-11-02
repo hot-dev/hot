@@ -2990,6 +2990,16 @@ impl Val {
     }
 
     /// Create a typed map with given type and content (unified type system)
+    /// The value `Type({...})` builds: `fields` wrapped as `{$type, $val}`.
+    /// A native whose declared return type is a struct returns this, so the
+    /// result has that type's identity for arrows, `match` and `is-type`.
+    pub fn constructed(type_name: &str, fields: IndexMap<Val, Val>) -> Self {
+        let mut map = IndexMap::with_capacity(2);
+        map.insert(Val::from("$type"), Val::from(type_name.to_string()));
+        map.insert(Val::from("$val"), Val::map(fields));
+        Val::map(map)
+    }
+
     pub fn typed_map(type_name: &str, content: IndexMap<Val, Val>) -> Self {
         let mut map = content;
         map.insert(Val::from("$type"), Val::from(type_name.to_string()));

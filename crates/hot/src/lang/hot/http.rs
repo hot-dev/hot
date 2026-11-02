@@ -397,7 +397,7 @@ async fn make_http_request(
     response_map.insert(Val::from("body"), body_val);
     response_map.insert(Val::from("body-bytes"), body_bytes_val);
 
-    HotResult::Ok(Val::map(response_map))
+    HotResult::Ok(Val::constructed("::hot::http/HttpResponse", response_map))
 }
 
 /// Make an HTTP GET request
@@ -984,7 +984,10 @@ async fn make_streaming_request(
     response_map.insert(Val::from("headers"), Val::map(response_headers));
     response_map.insert(Val::from("body"), Val::Box(Box::new(iter_box)));
 
-    HotResult::Ok(Val::map(response_map))
+    HotResult::Ok(Val::constructed(
+        "::hot::http/StreamingHttpResponse",
+        response_map,
+    ))
 }
 
 #[cfg(test)]
@@ -1016,10 +1019,10 @@ mod tests {
         url
     }
 
-    /// Helper to unwrap HotResult
+    /// Helper to unwrap HotResult, down to a response's fields
     fn unwrap_result(result: HotResult<Val>) -> Val {
         match result {
-            HotResult::Ok(v) => v,
+            HotResult::Ok(v) => crate::val::as_fields(&v).clone(),
             HotResult::Err(e) => panic!("Expected Ok, got Err: {:?}", e),
         }
     }
@@ -1255,6 +1258,55 @@ mod tests {
             panic!("TRACE must be refused: {result:?}");
         };
         assert!(error.to_string().contains("unsupported method"), "{error}");
+    }
+
+    // A response carries its declared type, so a `HttpResponse -> T` arrow
+    // applies to it (`T(response)`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn responses_are_tagged_with_their_declared_type() {
+        let app = Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let url = start_mock_server(app).await;
+        let result = make_http_request(
+            "GET",
+            &url,
+            &IndexMap::new(),
+            &Val::Null,
+            DestinationPolicy::AllowPrivate,
+            DEFAULT_MAX_RESPONSE_BYTES,
+        )
+        .await;
+        let HotResult::Ok(Val::Map(response)) = result else {
+            panic!("expected a response: {result:?}");
+        };
+        assert_eq!(
+            crate::val::tagged_type_name(&response),
+            Some("::hot::http/HttpResponse")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_responses_are_tagged_with_their_declared_type() {
+        let app = Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let url = start_mock_server(app).await;
+        let response = tokio::task::spawn_blocking(move || {
+            request_stream(&[
+                Val::from("GET"),
+                Val::from(url),
+                Val::map_empty(),
+                Val::from(""),
+                Val::from("raw"),
+            ])
+        })
+        .await
+        .unwrap();
+        let HotResult::Ok(response) = response else {
+            panic!("expected a response: {response:?}");
+        };
+        assert!(response.is_type("::hot::http/StreamingHttpResponse"));
+        assert!(matches!(
+            crate::val::as_fields(&response).get("status"),
+            Some(Val::Int(200))
+        ));
     }
 
     #[tokio::test]
