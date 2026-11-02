@@ -118,13 +118,12 @@ fn
 (model: Str, query: Str): Str {
     search-web(model, query, null)
 },
-(model: Str, query: Str, instructions: Str): Str {
-    request {
+(model: Str, query: Str, instructions: Str?): Str {
+    request assoc-some({
         model: model,
         input: query,
-        instructions: instructions,
         tools: [web-search-tool()]
-    }
+    }, "instructions", instructions)
 
     response create(CreateResponseRequest(request))
 
@@ -158,13 +157,12 @@ fn
 (model: Str, query: Str): Str {
     search-x(model, query, null)
 },
-(model: Str, query: Str, instructions: Str): Str {
-    request {
+(model: Str, query: Str, instructions: Str?): Str {
+    request assoc-some({
         model: model,
         input: query,
-        instructions: instructions,
         tools: [x-search-tool()]
-    }
+    }, "instructions", instructions)
 
     response create(CreateResponseRequest(request))
 
@@ -194,13 +192,12 @@ fn
 (model: Str, query: Str): Str {
     search-all(model, query, null)
 },
-(model: Str, query: Str, instructions: Str): Str {
-    request {
+(model: Str, query: Str, instructions: Str?): Str {
+    request assoc-some({
         model: model,
         input: query,
-        instructions: instructions,
         tools: [web-search-tool(), x-search-tool()]
-    }
+    }, "instructions", instructions)
 
     response create(CreateResponseRequest(request))
 
