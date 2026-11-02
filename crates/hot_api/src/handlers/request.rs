@@ -212,7 +212,7 @@ pub fn build_request_val(
         request_map.insert(Val::from("body"), request_body.body);
         request_map.insert(Val::from("body-raw"), Val::from(request_body.body_raw));
         if let Some(bytes) = request_body.body_bytes {
-            request_map.insert(Val::from("body-bytes"), Val::Bytes(bytes));
+            request_map.insert(Val::from("body-bytes"), Val::bytes(bytes));
         }
     }
 
@@ -318,7 +318,7 @@ mod tests {
             &Uuid::nil(),
         );
         if let Val::Map(ref map) = val {
-            assert_eq!(map.get(&Val::from("body-bytes")), Some(&Val::Bytes(raw)));
+            assert_eq!(map.get(&Val::from("body-bytes")), Some(&Val::bytes(raw)));
         } else {
             panic!("Expected Map");
         }

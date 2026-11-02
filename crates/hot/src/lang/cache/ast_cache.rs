@@ -137,7 +137,7 @@ impl TryFrom<TaggedVal> for Val {
             TaggedVal::Bytes { v } => {
                 let bytes = crate::lang::hot::base64::decode_base64_to_bytes(&v)
                     .map_err(|e| format!("Failed to decode base64: {}", e))?;
-                Ok(Val::Bytes(bytes))
+                Ok(Val::bytes(bytes))
             }
             TaggedVal::Vec { v } => {
                 let vec: Result<Vec<Val>, String> = v.into_iter().map(Val::try_from).collect();
