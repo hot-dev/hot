@@ -1,7 +1,24 @@
 use crate::lang::hot::r#type::HotResult;
+use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
 use crate::validate_args;
 use aws_lc_rs::hmac;
+
+macro_rules! with_secret_key {
+    ($($name:ident => $native:ident),* $(,)?) => {
+        $(pub fn $name(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+            crate::lang::hot::ctx::with_secret_key(vm, args, $native)
+        })*
+    };
+}
+
+with_secret_key! {
+    hmac_sha256_secret => hmac_sha256,
+    hmac_sha256_bytes_secret => hmac_sha256_bytes,
+    hmac_sha512_secret => hmac_sha512,
+    hmac_sha1_secret => hmac_sha1,
+    hmac_verify_secret => hmac_verify,
+}
 
 /// HMAC-SHA256 - returns hex-encoded string
 pub fn hmac_sha256(args: &[Val]) -> HotResult<Val> {
