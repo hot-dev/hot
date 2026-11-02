@@ -44,7 +44,11 @@ fn
 },
 (request: ChatDeleteRequest, opts: Map): ChatDeleteResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/chat.delete`, {}, request, opts)
-  if(is-ok-response(response), ChatDeleteResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ChatDeleteResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ChatDeleteScheduledMessageRequest type {
@@ -69,7 +73,11 @@ fn
 },
 (request: ChatDeleteScheduledMessageRequest, opts: Map): ChatDeleteScheduledMessageResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/chat.deleteScheduledMessage`, {}, request, opts)
-  if(is-ok-response(response), ChatDeleteScheduledMessageResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ChatDeleteScheduledMessageResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ChatGetPermalinkRequest type {
@@ -107,7 +115,11 @@ fn
 },
 (request: ChatGetPermalinkRequest, opts: Map): ChatGetPermalinkResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/chat.getPermalink?channel=${request.channel}&message_ts=${request.message_ts}`, {}, "", opts)
-  if(is-ok-response(response), ChatGetPermalinkResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ChatGetPermalinkResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ChatMeMessageRequest type {
@@ -133,7 +145,11 @@ fn
 },
 (request: ChatMeMessageRequest, opts: Map): ChatMeMessageResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/chat.meMessage`, {}, request, opts)
-  if(is-ok-response(response), ChatMeMessageResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ChatMeMessageResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ChatPostEphemeralRequest type {
@@ -163,7 +179,11 @@ fn
 },
 (request: ChatPostEphemeralRequest, opts: Map): ChatPostEphemeralResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/chat.postEphemeral`, {}, request, opts)
-  if(is-ok-response(response), ChatPostEphemeralResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ChatPostEphemeralResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ChatPostMessageRequest type {
@@ -211,7 +231,11 @@ fn
 },
 (request: ChatPostMessageRequest, opts: Map): ChatPostMessageResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/chat.postMessage`, {}, request, opts)
-  if(is-ok-response(response), ChatPostMessageResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ChatPostMessageResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ChatScheduleMessageRequest type {
@@ -247,7 +271,11 @@ fn
 },
 (request: ChatScheduleMessageRequest, opts: Map): ChatScheduleMessageResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/chat.scheduleMessage`, {}, request, opts)
-  if(is-ok-response(response), ChatScheduleMessageResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ChatScheduleMessageResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ChatUnfurlRequest type {
@@ -272,7 +300,11 @@ fn
 },
 (request: ChatUnfurlRequest, opts: Map): ChatUnfurlResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/chat.unfurl`, {}, request, opts)
-  if(is-ok-response(response), ChatUnfurlResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ChatUnfurlResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ChatUpdateRequest type {
@@ -318,7 +350,11 @@ fn
 },
 (request: ChatUpdateRequest, opts: Map): ChatUpdateResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/chat.update`, {}, request, opts)
-  if(is-ok-response(response), ChatUpdateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ChatUpdateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ChatScheduledMessagesListRequest type {
@@ -347,7 +383,11 @@ fn
 },
 (request: ChatScheduledMessagesListRequest, opts: Map): ChatScheduledMessagesListResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/chat.scheduledMessages.list`, {}, request, opts)
-  if(is-ok-response(response), ChatScheduledMessagesListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ChatScheduledMessagesListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -388,7 +428,11 @@ fn
 },
 (request: ReactionsAddRequest, opts: Map): ReactionsAddResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/reactions.add`, {}, request, opts)
-  if(is-ok-response(response), ReactionsAddResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ReactionsAddResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ReactionsGetRequest type {
@@ -419,7 +463,11 @@ fn
 },
 (request: ReactionsGetRequest, opts: Map): ReactionsGetResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/reactions.get?channel=${or(request.channel, "")}&file=${or(request.file, "")}&file_comment=${or(request.file_comment, "")}&full=${or(request.full, "")}&timestamp=${or(request.timestamp, "")}`, {}, "", opts)
-  if(is-ok-response(response), ReactionsGetResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ReactionsGetResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ReactionsListRequest type {
@@ -450,7 +498,11 @@ fn
 },
 (request: ReactionsListRequest, opts: Map): ReactionsListResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/reactions.list?user=${or(request.user, "")}&full=${or(request.full, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}&cursor=${or(request.cursor, "")}&limit=${or(request.limit, "")}`, {}, "", opts)
-  if(is-ok-response(response), ReactionsListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ReactionsListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ReactionsRemoveRequest type {
@@ -489,7 +541,11 @@ fn
 },
 (request: ReactionsRemoveRequest, opts: Map): ReactionsRemoveResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/reactions.remove`, {}, request, opts)
-  if(is-ok-response(response), ReactionsRemoveResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ReactionsRemoveResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -523,7 +579,11 @@ fn
 },
 (request: SearchMessagesRequest, opts: Map): SearchMessagesResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/search.messages?query=${request.query}&count=${or(request.count, "")}&highlight=${or(request.highlight, "")}&page=${or(request.page, "")}&sort=${or(request.sort, "")}&sort_dir=${or(request.sort_dir, "")}`, {}, "", opts)
-  if(is-ok-response(response), SearchMessagesResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { SearchMessagesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -553,7 +613,11 @@ fn
 },
 (request: RemindersAddRequest, opts: Map): RemindersAddResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/reminders.add`, {}, request, opts)
-  if(is-ok-response(response), RemindersAddResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RemindersAddResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 RemindersCompleteRequest type {
@@ -576,7 +640,11 @@ fn
 },
 (request: RemindersCompleteRequest, opts: Map): RemindersCompleteResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/reminders.complete`, {}, request, opts)
-  if(is-ok-response(response), RemindersCompleteResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RemindersCompleteResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 RemindersDeleteRequest type {
@@ -599,7 +667,11 @@ fn
 },
 (request: RemindersDeleteRequest, opts: Map): RemindersDeleteResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/reminders.delete`, {}, request, opts)
-  if(is-ok-response(response), RemindersDeleteResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RemindersDeleteResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 RemindersInfoRequest type {
@@ -623,7 +695,11 @@ fn
 },
 (request: RemindersInfoRequest, opts: Map): RemindersInfoResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/reminders.info?reminder=${request.reminder}`, {}, "", opts)
-  if(is-ok-response(response), RemindersInfoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RemindersInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // No parameters required for this request
@@ -646,7 +722,11 @@ fn
 },
 (request: RemindersListRequest, opts: Map): RemindersListResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/reminders.list`, {}, "", opts)
-  if(is-ok-response(response), RemindersListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RemindersListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -685,7 +765,11 @@ fn
 },
 (request: PinsAddRequest, opts: Map): PinsAddResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/pins.add`, {}, request, opts)
-  if(is-ok-response(response), PinsAddResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { PinsAddResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 PinsListRequest type {
@@ -720,7 +804,11 @@ fn
 },
 (request: PinsListRequest, opts: Map): PinsListResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/pins.list?channel=${request.channel}`, {}, "", opts)
-  if(is-ok-response(response), PinsListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { PinsListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 PinsRemoveRequest type {
@@ -755,7 +843,11 @@ fn
 },
 (request: PinsRemoveRequest, opts: Map): PinsRemoveResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/pins.remove`, {}, request, opts)
-  if(is-ok-response(response), PinsRemoveResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { PinsRemoveResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -785,7 +877,11 @@ fn
 },
 (request: StarsAddRequest, opts: Map): StarsAddResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/stars.add`, {}, request, opts)
-  if(is-ok-response(response), StarsAddResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { StarsAddResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 StarsListRequest type {
@@ -813,7 +909,11 @@ fn
 },
 (request: StarsListRequest, opts: Map): StarsListResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/stars.list?count=${or(request.count, "")}&page=${or(request.page, "")}&cursor=${or(request.cursor, "")}&limit=${or(request.limit, "")}`, {}, "", opts)
-  if(is-ok-response(response), StarsListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { StarsListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 StarsRemoveRequest type {
@@ -839,5 +939,9 @@ fn
 },
 (request: StarsRemoveRequest, opts: Map): StarsRemoveResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/stars.remove`, {}, request, opts)
-  if(is-ok-response(response), StarsRemoveResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { StarsRemoveResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

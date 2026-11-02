@@ -117,7 +117,11 @@ fn
 
     response api-call("POST", `/v1/models/${IMAGEN_MODEL}:predict`, {}, body, opts)
 
-    if(is-ok-response(response), GenerateImageResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { GenerateImageResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -168,6 +172,9 @@ fn
 (path: Str, request: GenerateImageRequest, opts: Map): AIMedia | HttpError {
     response generate(request, opts)
 
+    cond {
+        is-err(response) => { response }
+        => {
     match response {
         HttpError => { response }
         GenerateImageResponse => {
@@ -219,6 +226,8 @@ fn
             }
         }
     }
+        }
+    }
 }
 
 generate-batch-to-files
@@ -247,6 +256,9 @@ fn
 (directory: Str, request: GenerateImageRequest, opts: Map): AIMediaBatch | HttpError {
     response generate(request, opts)
 
+    cond {
+        is-err(response) => { response }
+        => {
     match response {
         HttpError => { response }
         GenerateImageResponse => {
@@ -306,6 +318,8 @@ fn
             }
         }
     }
+        }
+    }
 }
 
 // ============================================================================
@@ -344,7 +358,11 @@ fn
 
     response api-call("POST", `/v1beta/models/${FLASH_IMAGE_MODEL}:generateContent`, {}, body, opts)
 
-    if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ok(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 generate-inline-to-file
@@ -372,6 +390,9 @@ fn
 (path: Str, prompt: Str, opts: Map): AIMedia | HttpError {
     response generate-inline(prompt, opts)
 
+    cond {
+        is-err(response) => { response }
+        => {
     match response {
         HttpError => { response }
         => {
@@ -434,6 +455,8 @@ fn
                     }
                 }
             }
+        }
+    }
         }
     }
 }

@@ -104,7 +104,11 @@ fn (request: CreateImageRequest): CreateImageResponse | HttpError {
     }
 
     response api-call("POST", `/images/generations`, {}, final-request, opts)
-    if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { CreateImageResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -163,6 +167,9 @@ fn
 
     response generate(CreateImageRequest(final-request), opts)
 
+    cond {
+        is-err(response) => { response }
+        => {
     match response {
         HttpError => { response }
         CreateImageResponse => {
@@ -208,6 +215,8 @@ fn
             }
         }
     }
+        }
+    }
 }
 
 generate-batch-to-files
@@ -244,6 +253,9 @@ fn
         response_format: "b64_json"
     }), opts)
 
+    cond {
+        is-err(response) => { response }
+        => {
     match response {
         HttpError => {
             AIMediaBatch({
@@ -303,6 +315,8 @@ fn
             })
         }
     }
+        }
+    }
 }
 
 // ============================================================================
@@ -349,6 +363,9 @@ fn (prompt: Str): Str | HttpError {
 
     response generate(CreateImageRequest(final-request), opts)
 
+    cond {
+        is-err(response) => { response }
+        => {
     match response {
         HttpError => { response }
         CreateImageResponse => {
@@ -357,6 +374,8 @@ fn (prompt: Str): Str | HttpError {
                 or(is-null(data), is-zero(length(data))) => { "" }
                 => { or(data[0].url, "") }
             }
+        }
+    }
         }
     }
 }

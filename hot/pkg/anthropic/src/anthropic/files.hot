@@ -64,14 +64,22 @@ fn
 },
 (opts: Map): FilesListResponse {
     response api-call("GET", `/v1/files`, {anthropic-beta: BETA_HEADER}, "", opts)
-    if(is-ok-response(response), FilesListResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { FilesListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 },
 (limit: Int): FilesListResponse {
     list(limit, {})
 },
 (limit: Int, opts: Map): FilesListResponse {
     response api-call("GET", `/v1/files?limit=${limit}`, {anthropic-beta: BETA_HEADER}, "", opts)
-    if(is-ok-response(response), FilesListResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { FilesListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -95,7 +103,11 @@ fn (file_id: Str): FileMetadata {
 },
 (file_id: Str, opts: Map): FileMetadata {
     response api-call("GET", `/v1/files/${file_id}`, {anthropic-beta: BETA_HEADER}, "", opts)
-    if(is-ok-response(response), FileMetadata(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { FileMetadata(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 delete
@@ -117,7 +129,11 @@ fn (file_id: Str): Map {
 },
 (file_id: Str, opts: Map): Map {
     response api-call("DELETE", `/v1/files/${file_id}`, {anthropic-beta: BETA_HEADER}, "", opts)
-    if(is-ok-response(response), response.body, err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { response.body }
+      => { err(HttpError(response)) }
+    }
 }
 
 download
@@ -139,7 +155,11 @@ fn (file_id: Str): Any {
 },
 (file_id: Str, opts: Map): Any {
     response api-call("GET", `/v1/files/${file_id}/content`, {anthropic-beta: BETA_HEADER}, "", opts)
-    if(is-ok-response(response), response.body, err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { response.body }
+      => { err(HttpError(response)) }
+    }
 }
 
 // Note: upload requires multipart/form-data which needs special handling

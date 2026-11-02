@@ -91,6 +91,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { PublishResponse({
                 message_id: response.body.MessageId,
                 sequence_number: response.body.SequenceNumber
@@ -163,6 +164,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { PublishBatchResponse({
                 successful: cond {
                     is-null(response.body.Successful) => { [] }
@@ -313,6 +315,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { PublishResponse({
                 message_id: response.body.MessageId,
                 sequence_number: response.body.SequenceNumber

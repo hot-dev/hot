@@ -47,7 +47,11 @@ fn
 },
 (request: AuthTestRequest, opts: Map): AuthTestResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/auth.test`, {}, request, opts)
-  if(is-ok-response(response), AuthTestResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AuthTestResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 AuthRevokeRequest type {
@@ -71,7 +75,11 @@ fn
 },
 (request: AuthRevokeRequest, opts: Map): AuthRevokeResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/auth.revoke?test=${or(request.test, "")}`, {}, "", opts)
-  if(is-ok-response(response), AuthRevokeResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AuthRevokeResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -112,7 +120,11 @@ fn
 },
 (request: ApiTestRequest, opts: Map): ApiTestResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/api.test?error=${or(request.error, "")}&foo=${or(request.foo, "")}`, {}, "", opts)
-  if(is-ok-response(response), ApiTestResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ApiTestResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -151,7 +163,11 @@ fn
 },
 (request: TeamInfoRequest, opts: Map): TeamInfoResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/team.info?team=${or(request.team, "")}`, {}, "", opts)
-  if(is-ok-response(response), TeamInfoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { TeamInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 TeamAccessLogsRequest type {
@@ -178,7 +194,11 @@ fn
 },
 (request: TeamAccessLogsRequest, opts: Map): TeamAccessLogsResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/team.accessLogs?before=${or(request.before, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}`, {}, "", opts)
-  if(is-ok-response(response), TeamAccessLogsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { TeamAccessLogsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 TeamBillableInfoRequest type {
@@ -202,7 +222,11 @@ fn
 },
 (request: TeamBillableInfoRequest, opts: Map): TeamBillableInfoResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/team.billableInfo?user=${or(request.user, "")}`, {}, "", opts)
-  if(is-ok-response(response), TeamBillableInfoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { TeamBillableInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 TeamIntegrationLogsRequest type {
@@ -232,7 +256,11 @@ fn
 },
 (request: TeamIntegrationLogsRequest, opts: Map): TeamIntegrationLogsResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/team.integrationLogs?app_id=${or(request.app_id, "")}&change_type=${or(request.change_type, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}&service_id=${or(request.service_id, "")}&user=${or(request.user, "")}`, {}, "", opts)
-  if(is-ok-response(response), TeamIntegrationLogsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { TeamIntegrationLogsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 TeamProfileGetRequest type {
@@ -256,7 +284,11 @@ fn
 },
 (request: TeamProfileGetRequest, opts: Map): TeamProfileGetResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/team.profile.get?visibility=${or(request.visibility, "")}`, {}, "", opts)
-  if(is-ok-response(response), TeamProfileGetResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { TeamProfileGetResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -289,7 +321,11 @@ fn
 },
 (opts: Map): EmojiListResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/emoji.list`, {}, "", opts)
-  if(is-ok-response(response), EmojiListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { EmojiListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -317,7 +353,11 @@ fn
 },
 (request: DialogOpenRequest, opts: Map): DialogOpenResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/dialog.open?dialog=${request.dialog}&trigger_id=${request.trigger_id}`, {}, "", opts)
-  if(is-ok-response(response), DialogOpenResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DialogOpenResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -350,7 +390,11 @@ fn
 },
 (request: MigrationExchangeRequest, opts: Map): MigrationExchangeResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/migration.exchange?users=${request.users}&team_id=${or(request.team_id, "")}&to_old=${or(request.to_old, "")}`, {}, "", opts)
-  if(is-ok-response(response), MigrationExchangeResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { MigrationExchangeResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -379,7 +423,11 @@ fn
 },
 (request: ViewsOpenRequest, opts: Map): ViewsOpenResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/views.open`, {}, request, opts)
-  if(is-ok-response(response), ViewsOpenResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ViewsOpenResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ViewsPublishRequest type {
@@ -405,7 +453,11 @@ fn
 },
 (request: ViewsPublishRequest, opts: Map): ViewsPublishResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/views.publish`, {}, request, opts)
-  if(is-ok-response(response), ViewsPublishResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ViewsPublishResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ViewsPushRequest type {
@@ -430,7 +482,11 @@ fn
 },
 (request: ViewsPushRequest, opts: Map): ViewsPushResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/views.push`, {}, request, opts)
-  if(is-ok-response(response), ViewsPushResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ViewsPushResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ViewsUpdateRequest type {
@@ -457,7 +513,11 @@ fn
 },
 (request: ViewsUpdateRequest, opts: Map): ViewsUpdateResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/views.update`, {}, request, opts)
-  if(is-ok-response(response), ViewsUpdateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ViewsUpdateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -498,6 +558,7 @@ fn
   ::hot::ctx/mark-secret(request.client_secret)
   response api-request("POST", `${::slack::core/BASE_URL}/oauth.v2.access`, {}, request, opts)
   cond {
+    is-err(response) => { response }
     is-ok-response(response) => {
       user or(response.body.authed_user, {})
       ::hot::ctx/mark-secret([

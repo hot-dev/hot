@@ -58,6 +58,7 @@ fn
         response send-signed("POST", url, "dynamodb", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { BatchGetResponse({
                 responses: if(is-null(response.body.Responses), {}, response.body.Responses),
                 unprocessed_keys: response.body.UnprocessedKeys,
@@ -113,6 +114,7 @@ fn
         response send-signed("POST", url, "dynamodb", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { BatchWriteResponse({
                 unprocessed_items: response.body.UnprocessedItems,
                 consumed_capacity: response.body.ConsumedCapacity

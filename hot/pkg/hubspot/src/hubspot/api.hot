@@ -218,8 +218,9 @@ handle-response
 meta {
     doc: """Unwrap a response: the decoded body on 2xx (null for an empty 204), an Err carrying `HttpError` otherwise. Exposed for testing."""
 }
-fn (response: HttpResponse): Any {
+fn (response: Result): Any {
   cond {
+    is-err(response) => { response }
     is-ok-response(response) => { if(eq(response.body, ""), null, response.body) }
     => { err(HttpError(response)) }
   }

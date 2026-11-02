@@ -252,7 +252,10 @@ meta {
     testing.
     """
 }
-fn (response: HttpResponse): Any {
+fn (response: Result): Any {
+  cond {
+    is-err(response) => { response }
+    => {
   body response.body
   ok-flag cond {
     is-map(body) => { get(body, "ok") }
@@ -274,6 +277,8 @@ fn (response: HttpResponse): Any {
       }))
     }
     => { err(HttpError(response)) }
+  }
+    }
   }
 }
 

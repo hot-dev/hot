@@ -18,9 +18,10 @@ file-result
 meta {
     doc: """Turn a getFile response into its result: the gzip bytes on success, otherwise the `Err(SlackError)` from the JSON error body. Exposed for testing."""
 }
-fn (response: ::hot::http/HttpResponse): Any {
+fn (response: Result): Any {
   content-type lowercase(or(get(or(response.headers, {}), "content-type"), ""))
   cond {
+    is-err(response) => { response }
     and(::hot::http/is-ok-response(response), contains(content-type, "gzip")) => { response.body-bytes }
     => { ::api/parse-response("admin.analytics.getFile", response) }
   }

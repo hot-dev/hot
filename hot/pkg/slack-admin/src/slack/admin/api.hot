@@ -96,9 +96,10 @@ meta {
     usual failure, sent with HTTP 200). Exposed for testing.
     """
 }
-fn (method: Str, response: HttpResponse): Any {
+fn (method: Str, response: Result): Any {
   body response.body
   cond {
+    is-err(response) => { response }
     not(is-ok-response(response)) => { err(slack-error(method, response)) }
     and(is-map(body), not(eq(get(body, "ok"), true))) => { err(slack-error(method, response)) }
     => { body }

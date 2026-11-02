@@ -28,7 +28,11 @@ fn
 },
 (request: ConversationsArchiveRequest, opts: Map): ConversationsArchiveResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.archive`, {}, request, opts)
-  if(is-ok-response(response), ConversationsArchiveResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsArchiveResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsCloseRequest type {
@@ -53,7 +57,11 @@ fn
 },
 (request: ConversationsCloseRequest, opts: Map): ConversationsCloseResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.close`, {}, request, opts)
-  if(is-ok-response(response), ConversationsCloseResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsCloseResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsCreateRequest type {
@@ -79,7 +87,11 @@ fn
 },
 (request: ConversationsCreateRequest, opts: Map): ConversationsCreateResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.create`, {}, request, opts)
-  if(is-ok-response(response), ConversationsCreateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsCreateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsHistoryRequest type {
@@ -124,7 +136,11 @@ fn
 },
 (request: ConversationsHistoryRequest, opts: Map): ConversationsHistoryResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/conversations.history?channel=${request.channel}&latest=${or(request.latest, "")}&oldest=${or(request.oldest, "")}&inclusive=${or(request.inclusive, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
-  if(is-ok-response(response), ConversationsHistoryResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsHistoryResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsInfoRequest type {
@@ -162,7 +178,11 @@ fn
 },
 (request: ConversationsInfoRequest, opts: Map): ConversationsInfoResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/conversations.info?channel=${request.channel}&include_locale=${or(request.include_locale, "")}&include_num_members=${or(request.include_num_members, "")}`, {}, "", opts)
-  if(is-ok-response(response), ConversationsInfoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsInviteRequest type {
@@ -187,7 +207,11 @@ fn
 },
 (request: ConversationsInviteRequest, opts: Map): ConversationsInviteResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.invite`, {}, request, opts)
-  if(is-ok-response(response), ConversationsInviteResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsInviteResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsJoinRequest type {
@@ -212,7 +236,11 @@ fn
 },
 (request: ConversationsJoinRequest, opts: Map): ConversationsJoinResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.join`, {}, request, opts)
-  if(is-ok-response(response), ConversationsJoinResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsJoinResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsKickRequest type {
@@ -236,7 +264,11 @@ fn
 },
 (request: ConversationsKickRequest, opts: Map): ConversationsKickResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.kick`, {}, request, opts)
-  if(is-ok-response(response), ConversationsKickResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsKickResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsLeaveRequest type {
@@ -259,7 +291,11 @@ fn
 },
 (request: ConversationsLeaveRequest, opts: Map): ConversationsLeaveResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.leave`, {}, request, opts)
-  if(is-ok-response(response), ConversationsLeaveResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsLeaveResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsListRequest type {
@@ -303,7 +339,11 @@ fn
 },
 (request: ConversationsListRequest, opts: Map): ConversationsListResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/conversations.list?exclude_archived=${or(request.exclude_archived, "")}&types=${or(request.types, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}&team_id=${or(request.team_id, "")}`, {}, "", opts)
-  if(is-ok-response(response), ConversationsListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsMarkRequest type {
@@ -327,7 +367,11 @@ fn
 },
 (request: ConversationsMarkRequest, opts: Map): ConversationsMarkResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.mark`, {}, request, opts)
-  if(is-ok-response(response), ConversationsMarkResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsMarkResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsMembersRequest type {
@@ -366,7 +410,11 @@ fn
 },
 (request: ConversationsMembersRequest, opts: Map): ConversationsMembersResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/conversations.members?channel=${request.channel}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
-  if(is-ok-response(response), ConversationsMembersResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsMembersResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsOpenRequest type {
@@ -395,7 +443,11 @@ fn
 },
 (request: ConversationsOpenRequest, opts: Map): ConversationsOpenResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.open`, {}, request, opts)
-  if(is-ok-response(response), ConversationsOpenResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsOpenResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsRenameRequest type {
@@ -420,7 +472,11 @@ fn
 },
 (request: ConversationsRenameRequest, opts: Map): ConversationsRenameResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.rename`, {}, request, opts)
-  if(is-ok-response(response), ConversationsRenameResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsRenameResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsRepliesRequest type {
@@ -452,7 +508,11 @@ fn
 },
 (request: ConversationsRepliesRequest, opts: Map): ConversationsRepliesResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/conversations.replies?channel=${request.channel}&ts=${request.ts}&latest=${or(request.latest, "")}&oldest=${or(request.oldest, "")}&inclusive=${or(request.inclusive, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
-  if(is-ok-response(response), ConversationsRepliesResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsRepliesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsSetPurposeRequest type {
@@ -477,7 +537,11 @@ fn
 },
 (request: ConversationsSetPurposeRequest, opts: Map): ConversationsSetPurposeResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.setPurpose`, {}, request, opts)
-  if(is-ok-response(response), ConversationsSetPurposeResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsSetPurposeResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsSetTopicRequest type {
@@ -502,7 +566,11 @@ fn
 },
 (request: ConversationsSetTopicRequest, opts: Map): ConversationsSetTopicResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.setTopic`, {}, request, opts)
-  if(is-ok-response(response), ConversationsSetTopicResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsSetTopicResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ConversationsUnarchiveRequest type {
@@ -525,5 +593,9 @@ fn
 },
 (request: ConversationsUnarchiveRequest, opts: Map): ConversationsUnarchiveResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/conversations.unarchive`, {}, request, opts)
-  if(is-ok-response(response), ConversationsUnarchiveResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ConversationsUnarchiveResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

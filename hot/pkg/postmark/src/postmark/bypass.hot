@@ -29,5 +29,9 @@ fn
 },
 (request: BypassRulesForInboundMessageRequest, opts: Map): BypassRulesForInboundMessageResponse {
   response api-request("PUT", `${::postmark/BASE_URL}/messages/inbound/${request.messageid}/bypass`, {}, "", opts)
-  if(is-ok-response(response), BypassRulesForInboundMessageResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { BypassRulesForInboundMessageResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

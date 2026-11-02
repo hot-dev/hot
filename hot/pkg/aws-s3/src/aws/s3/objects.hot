@@ -159,6 +159,7 @@ fn
         response send-signed("PUT", url, "s3", resolved, headers, body-wire)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { PutObjectResponse({
                 etag: response-header(response, "ETag"),
                 version_id: response-header(response, "x-amz-version-id")
@@ -200,6 +201,7 @@ fn
         response send-signed("GET", ::api/object-url(bucket, key, resolved), "s3", resolved, {}, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { GetObjectResponse({
                 body: response.body,
                 body-bytes: response.body-bytes,
@@ -235,6 +237,7 @@ fn
         response send-signed("DELETE", ::api/object-url(bucket, key, resolved), "s3", resolved, {}, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { DeleteObjectResponse({
                 delete_marker: if(is-null(response-header(response, "x-amz-delete-marker")), null, eq(response-header(response, "x-amz-delete-marker"), "true")),
                 version_id: response-header(response, "x-amz-version-id")
@@ -303,6 +306,7 @@ fn
         response send-signed("GET", url, "s3", resolved, {}, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { parse-list-objects-response(::api/body-text(response.body)) }
             => { err(AwsError(response)) }
         }
@@ -364,9 +368,10 @@ fn
         }
 
         response send-signed("PUT", url, "s3", resolved, headers, "")
-        body if(is-ok-response(response), ::api/body-text(response.body), "")
+        body if(and(not(is-err(response)), is-ok-response(response)), ::api/body-text(response.body), "")
 
         cond {
+            is-err(response) => { response }
             and(is-ok-response(response), is-str(body), ne(body, "")) => {
                 // Parse XML response
                 xml ::xml/from-xml(body)
@@ -412,6 +417,7 @@ fn
         response send-signed("HEAD", ::api/object-url(bucket, key, resolved), "s3", resolved, {}, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { HeadObjectResponse({
                 content_type: response-header(response, "Content-Type"),
                 content_length: parse-int(response-header(response, "Content-Length")),
@@ -480,6 +486,7 @@ fn
         response send-signed("POST", url, "s3", resolved, {"Content-Type": content_type}, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => {
                 root ::xml/from-xml(::api/body-text(response.body))
                 CreateMultipartUploadResponse({
@@ -525,6 +532,7 @@ fn
         response send-signed("PUT", url, "s3", resolved, {}, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { UploadPartResponse({
                 part_number: part_number,
                 etag: response-header(response, "ETag")
@@ -580,6 +588,7 @@ fn
         response send-signed("POST", url, "s3", resolved, {"Content-Type": "application/xml"}, complete-multipart-body(parts))
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => {
                 root ::xml/from-xml(::api/body-text(response.body))
                 cond {
@@ -623,6 +632,7 @@ fn
         response send-signed("DELETE", url, "s3", resolved, {}, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { true }
             => { err(AwsError(response)) }
         }
