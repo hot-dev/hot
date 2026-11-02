@@ -25,7 +25,10 @@ fn
   ::api/json("GET", commit-path(owner, repo, ref))
 },
 (owner: Str, repo: Str, ref: Str, params: Map): Map {
-  ::api/json("GET", `${commit-path(owner, repo, ref)}${query-string(params)}`)
+  get-commit(owner, repo, ref, params, {})
+},
+(owner: Str, repo: Str, ref: Str, params: Map, opts: Map): Map {
+  ::api/json("GET", `${commit-path(owner, repo, ref)}${query-string(params)}`, {}, "", opts)
 }
 
 compare-commits
@@ -41,7 +44,10 @@ fn
   ::api/json("GET", compare-path(owner, repo, base, head))
 },
 (owner: Str, repo: Str, base: Str, head: Str, params: Map): Map {
-  ::api/json("GET", `${compare-path(owner, repo, base, head)}${query-string(params)}`)
+  compare-commits(owner, repo, base, head, params, {})
+},
+(owner: Str, repo: Str, base: Str, head: Str, params: Map, opts: Map): Map {
+  ::api/json("GET", `${compare-path(owner, repo, base, head)}${query-string(params)}`, {}, "", opts)
 }
 
 get-combined-status
@@ -51,8 +57,12 @@ meta {
     status and its latest status for every context.
     """
 }
-fn (owner: Str, repo: Str, ref: Str): Map {
-  ::api/json("GET", `${commit-path(owner, repo, ref)}/status`)
+fn
+(owner: Str, repo: Str, ref: Str): Map {
+  get-combined-status(owner, repo, ref, {})
+},
+(owner: Str, repo: Str, ref: Str, opts: Map): Map {
+  ::api/json("GET", `${commit-path(owner, repo, ref)}/status`, {}, "", opts)
 }
 
 list-statuses
@@ -67,5 +77,8 @@ fn
   ::api/json("GET", `${commit-path(owner, repo, ref)}/statuses`)
 },
 (owner: Str, repo: Str, ref: Str, params: Map): Vec {
-  ::api/json("GET", `${commit-path(owner, repo, ref)}/statuses${query-string(params)}`)
+  list-statuses(owner, repo, ref, params, {})
+},
+(owner: Str, repo: Str, ref: Str, params: Map, opts: Map): Vec {
+  ::api/json("GET", `${commit-path(owner, repo, ref)}/statuses${query-string(params)}`, {}, "", opts)
 }

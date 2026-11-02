@@ -1,0 +1,318 @@
+::xai::test::api ns
+meta ["test"]
+
+::api         ::xai::api
+::ctx         ::hot::ctx
+::responses   ::xai::responses
+::models      ::xai::models
+::images      ::xai::images
+::search      ::xai::search
+::collections ::xai::collections
+
+// Port 1 refuses connections, so a call that resolved these opts fails at the
+// connection, naming this URL, and no request leaves the machine.
+OFFLINE {
+    api-key: "tenant-key",
+    base-url: "http://127.0.0.1:1",
+    management-api-key: "tenant-mgmt-key",
+    management-base-url: "http://127.0.0.1:1"
+}
+
+assert-reached-offline-url
+meta {
+    doc: """The call got as far as the HTTP layer, against the `base-url` from opts."""
+}
+fn (call: Fn, label: Str) {
+    result ::hot::internal::exec/contain(call)
+    assert(is-err(result), `${label}: a refused connection is an Err`)
+    message Str(err-value(result))
+    assert(contains(message, "http://127.0.0.1:1/"), `${label}: reached the opts base-url, got ${message}`)
+}
+
+// ============================================================================
+// Resolvers
+// ============================================================================
+
+CTX {
+    "xai.api.key": "ctx-key",
+    "xai.base.url": "https://ctx.example.com/v1/",
+    "xai.management.api.key": "ctx-mgmt",
+    "xai.management.base.url": "https://mgmt.example.com/"
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({api-key: "tenant-key", base-url: "https://opts.example.com/v1"}, CTX)
+    assert-eq("tenant-key", r.api-key)
+    assert-eq("https://opts.example.com/v1", r.base-url)
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    r ::api/resolve-from({}, CTX)
+    assert-eq("ctx-key", r.api-key)
+    assert-eq("https://ctx.example.com/v1", r.base-url, "the trailing slash is dropped")
+}
+
+test-resolve-defaults
+meta ["test"] fn () {
+    assert-eq("https://api.x.ai/v1", ::api/resolve-from({api-key: "k"}, {}).base-url)
+    assert-eq("https://management-api.x.ai", ::api/resolve-management-from({management-api-key: "k"}, {}).base-url)
+}
+
+test-resolve-missing-key-is-a-clear-error
+meta ["test"] fn () {
+    r ::api/resolve-from({}, {})
+    assert(is-err(r), "no key is an Err")
+    assert(contains(err-value(r), "xai.api.key"), "the error names the ctx key")
+    assert(contains(err-value(r), "api-key"), "and the opts key")
+}
+
+test-resolve-management-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-management-from({management-api-key: "tenant-mgmt", management-base-url: "https://opts.example.com"}, CTX)
+    assert-eq("tenant-mgmt", r.api-key)
+    assert-eq("https://opts.example.com", r.base-url)
+    fallback ::api/resolve-management-from({}, CTX)
+    assert-eq("ctx-mgmt", fallback.api-key)
+    assert-eq("https://mgmt.example.com", fallback.base-url)
+}
+
+test-resolve-keeps-the-two-keys-apart
+meta ["test"] fn () {
+    assert-eq("ctx-key", ::api/resolve-from({management-api-key: "tenant-mgmt"}, CTX).api-key, "a management key is not an API key")
+    assert-eq("ctx-mgmt", ::api/resolve-management-from({api-key: "tenant-key"}, CTX).api-key, "an API key is not a management key")
+    missing ::api/resolve-management-from({api-key: "tenant-key"}, {})
+    assert(is-err(missing), "no management key is an Err even with an API key")
+    assert(contains(err-value(missing), "xai.management.api.key"), "and names the ctx key")
+}
+
+test-resolve-live-ctx-and-no-ctx-writes
+meta ["test"] fn () {
+    before ::ctx/get("xai.api.key")
+    ::ctx/set("xai.api.key", "ctx-live")
+    assert-eq("ctx-live", ::api/resolve().api-key, "ctx is used when opts is empty")
+    assert-eq("tenant-key", ::api/resolve({api-key: "tenant-key"}).api-key, "opts win over ctx")
+    assert-eq("ctx-live", ::ctx/get("xai.api.key"), "a per-call key is not written to ctx")
+    ::api/resolve-management({management-api-key: "tenant-mgmt"})
+    assert(is-null(::ctx/get("xai.management.api.key")), "nor a per-call management key")
+    ::ctx/set("xai.api.key", before)
+}
+
+test-base-url
+meta ["test"] fn () {
+    assert-eq("https://gw.example.com/v1", ::api/base-url({base-url: "https://gw.example.com/v1/"}))
+    assert-eq("https://api.x.ai/v1", ::api/normalize-base-url(null))
+}
+
+test-resolve-blank-opts-key-is-an-error-not-a-fallback
+meta ["test"] fn () {
+    for-each([null, "", "   "], (blank) {
+        r ::api/resolve-from({api-key: blank}, CTX)
+        assert(is-err(r), "a blank key in opts is an Err, with a ctx key available")
+        assert(contains(err-value(r), "api-key"), "that names the opts key")
+    })
+}
+
+test-resolve-blank-opts-key-does-not-use-live-ctx
+meta ["test"] fn () {
+    before ::ctx/get("xai.api.key")
+    ::ctx/set("xai.api.key", "ctx-live")
+    for-each([null, ""], (blank) {
+        result ::hot::internal::exec/contain(() { ::api/resolve({api-key: blank}) })
+        assert(is-err(result), "a blank key in opts is an Err")
+        assert(not(contains(Str(err-value(result)), "ctx-live")), "the ctx key is not used or shown")
+    })
+    ::ctx/set("xai.api.key", before)
+}
+
+test-typed-call-with-blank-key-sends-nothing
+meta ["test"] fn () {
+    before ::ctx/get("xai.api.key")
+    ::ctx/set("xai.api.key", "ctx-live")
+    result ::hot::internal::exec/contain(() { ::models/list({api-key: null, base-url: "http://127.0.0.1:1"}) })
+    assert(is-err(result), "a blank key in opts is an Err")
+    assert(contains(Str(err-value(result)), "is blank"), `it stops at the resolver, got ${Str(err-value(result))}`)
+    ::ctx/set("xai.api.key", before)
+}
+
+test-resolve-management-blank-opts-key-is-an-error-not-a-fallback
+meta ["test"] fn () {
+    for-each([null, "", "   "], (blank) {
+        r ::api/resolve-management-from({management-api-key: blank}, CTX)
+        assert(is-err(r), "a blank management key in opts is an Err, with a ctx key available")
+        assert(contains(err-value(r), "management-api-key"), "that names the opts key")
+    })
+}
+
+test-resolve-opts-base-url-without-key-never-gets-the-ctx-key
+meta ["test"] fn () {
+    r ::api/resolve-from({base-url: "https://tenant.example.com"}, CTX)
+    assert(is-err(r), "a per-call base URL without a per-call key is an Err, with a ctx key available")
+    assert(contains(err-value(r), "base-url"), "that names base-url")
+    assert(contains(err-value(r), "api-key"), "and api-key")
+    assert(not(contains(err-value(r), "ctx-key")), "and doesn't show the ctx key's value")
+    with-key ::api/resolve-from({base-url: "https://tenant.example.com", api-key: "tenant-key"}, CTX)
+    assert-eq("tenant-key", with-key.api-key, "with both in opts it works")
+    assert-eq("https://tenant.example.com", with-key.base-url)
+}
+
+test-ctx-base-url-with-ctx-key-still-works
+meta ["test"] fn () {
+    r ::api/resolve-from({}, CTX)
+    assert-eq("ctx-key", r.api-key)
+    assert-eq("https://ctx.example.com/v1", r.base-url)
+}
+
+test-typed-call-with-base-url-and-no-key-sends-nothing
+meta ["test"] fn () {
+    before ::ctx/get("xai.api.key")
+    ::ctx/set("xai.api.key", "ctx-live")
+    result ::hot::internal::exec/contain(() { ::models/list({base-url: "http://127.0.0.1:1"}) })
+    assert(is-err(result), "a per-call base URL without a per-call key is an Err")
+    text Str(err-value(result))
+    assert(contains(text, "needs api-key"), `it stops at the resolver, got ${text}`)
+    assert(not(contains(text, "127.0.0.1")), "before any connection")
+    ::ctx/set("xai.api.key", before)
+}
+
+test-resolve-management-base-url-without-key-never-gets-the-ctx-key
+meta ["test"] fn () {
+    r ::api/resolve-management-from({management-base-url: "https://tenant.example.com"}, CTX)
+    assert(is-err(r), "a per-call management URL without a per-call management key is an Err")
+    assert(contains(err-value(r), "management-base-url"), "that names management-base-url")
+    assert(contains(err-value(r), "management-api-key"), "and management-api-key")
+    other ::api/resolve-management-from({management-base-url: "https://tenant.example.com", api-key: "tenant-key"}, CTX)
+    assert(is-err(other), "an API key doesn't stand in for the management key")
+    fallback ::api/resolve-management-from({}, CTX)
+    assert-eq("ctx-mgmt", fallback.api-key, "both set in ctx still works")
+    assert-eq("https://mgmt.example.com", fallback.base-url)
+}
+
+// ============================================================================
+// Outgoing request
+// ============================================================================
+
+test-explicit-key-reaches-request-headers
+meta ["test"] fn () {
+    resolved ::api/resolve-from({api-key: "tenant-key"}, CTX)
+    req ::api/build-request("POST", "https://x/v1/responses", {}, {model: "m"}, resolved)
+    assert-eq("Bearer tenant-key", get(req.headers, "Authorization"))
+    assert-eq("application/json", get(req.headers, "Content-Type"))
+    assert-eq({model: "m"}, from-json(req.body))
+}
+
+test-management-key-reaches-request-headers
+meta ["test"] fn () {
+    resolved ::api/resolve-management-from({management-api-key: "tenant-mgmt"}, CTX)
+    req ::api/build-request("GET", "https://x/v1/collections", {}, "", resolved)
+    assert-eq("Bearer tenant-mgmt", get(req.headers, "Authorization"))
+    assert(is-null(req.body), "no body for an empty string")
+    assert(not(in("Content-Type", keys(req.headers))), "and no Content-Type")
+}
+
+// ============================================================================
+// The opts arity reaches the request, without ctx
+// ============================================================================
+
+REQUEST ::responses/CreateResponseRequest({model: "m", input: "hi"})
+
+test-existing-explicit-key-arity-still-works
+meta ["test"] fn () {
+    assert-reached-offline-url(() { ::api/request("GET", "http://127.0.0.1:1/v1/models", {}, "", "tenant-key") }, "request 5-arity key")
+    assert-reached-offline-url(() { ::api/request("GET", "http://127.0.0.1:1/v1/models", {}, "", {api-key: "tenant-key"}) }, "request 5-arity opts")
+    assert-reached-offline-url(() { ::api/request-stream("POST", "http://127.0.0.1:1/v1/x", {}, {a: 1}, "sse", "tenant-key") }, "request-stream 6-arity key")
+}
+
+test-opts-reach-responses
+meta ["test"] fn () {
+    assert-reached-offline-url(() { ::responses/create(REQUEST, OFFLINE) }, "create")
+    assert-reached-offline-url(() { ::responses/create-stream(REQUEST, OFFLINE) }, "create-stream")
+    assert-reached-offline-url(() { ::responses/get("r", OFFLINE) }, "get")
+    assert-reached-offline-url(() { ::responses/delete("r", OFFLINE) }, "delete")
+    assert-reached-offline-url(() { ::responses/chat("m", "hi", OFFLINE) }, "chat")
+    assert-reached-offline-url(() { ::responses/chat("m", "hi", "be brief", OFFLINE) }, "chat system")
+    assert-reached-offline-url(() { ::responses/chat("m", "hi", null, 5, OFFLINE) }, "chat max-tokens")
+}
+
+test-opts-reach-models
+meta ["test"] fn () {
+    assert-reached-offline-url(() { ::models/list(OFFLINE) }, "list")
+    assert-reached-offline-url(() { ::models/get("m", OFFLINE) }, "get")
+}
+
+test-opts-reach-images
+meta ["test"] fn () {
+    request ::images/CreateImageRequest({prompt: "p"})
+    assert-reached-offline-url(() { ::images/generate(request, OFFLINE) }, "generate")
+    assert-reached-offline-url(() { ::images/generate-to-file("/nonexistent/x.png", "p", OFFLINE) }, "generate-to-file prompt")
+    assert-reached-offline-url(() { ::images/generate-to-file("/nonexistent/x.png", request, OFFLINE) }, "generate-to-file request")
+    assert-reached-offline-url(() { ::images/generate-batch-to-files("/nonexistent/{n}.png", "p", 2, OFFLINE) }, "generate-batch-to-files")
+    assert-reached-offline-url(() { ::images/create-image("p", OFFLINE) }, "create-image")
+    assert-reached-offline-url(() { ::images/create-image("p", "512x512", OFFLINE) }, "create-image size")
+}
+
+test-opts-reach-search
+meta ["test"] fn () {
+    assert-reached-offline-url(() { ::search/search-web("m", "q", OFFLINE) }, "search-web")
+    assert-reached-offline-url(() { ::search/search-web("m", "q", "brief", OFFLINE) }, "search-web instructions")
+    assert-reached-offline-url(() { ::search/search-x("m", "q", OFFLINE) }, "search-x")
+    assert-reached-offline-url(() { ::search/search-all("m", "q", OFFLINE) }, "search-all")
+}
+
+test-search-tools-are-sent-as-bare-built-in-tools
+meta ["test"] fn () {
+    request ::responses/CreateResponseRequest({model: "m", input: "q", tools: [::search/web-search-tool(), ::search/x-search-tool()]})
+    resolved ::api/resolve-from({api-key: "k"}, {})
+    body from-json(::api/build-request("POST", "https://x", {}, request, resolved).body)
+    assert-eq([{type: "web_search"}, {type: "x_search"}], body.tools)
+}
+
+test-unset-optionals-are-not-sent-as-null
+meta ["test"] fn () {
+    resolved ::api/resolve-from({api-key: "k"}, {})
+    body from-json(::api/build-request("POST", "https://x", {}, REQUEST, resolved).body)
+    assert-eq({model: "m", input: "hi"}, body)
+}
+
+test-opts-reach-collections
+meta ["test"] fn () {
+    assert-reached-offline-url(() { ::collections/create(::collections/CreateCollectionRequest({name: "c"}), OFFLINE) }, "create")
+    assert-reached-offline-url(() { ::collections/list(OFFLINE) }, "list")
+    assert-reached-offline-url(() { ::collections/get("c", OFFLINE) }, "get")
+    assert-reached-offline-url(() { ::collections/update("c", ::collections/UpdateCollectionRequest({name: "n"}), OFFLINE) }, "update")
+    assert-reached-offline-url(() { ::collections/delete("c", OFFLINE) }, "delete")
+    assert-reached-offline-url(() { ::collections/add-document("c", "f", {}, OFFLINE) }, "add-document")
+    assert-reached-offline-url(() { ::collections/remove-document("c", "f", OFFLINE) }, "remove-document")
+    assert-reached-offline-url(() { ::collections/management-request("GET", "http://127.0.0.1:1/v1/collections", {}, "", OFFLINE) }, "management-request")
+}
+
+test-opts-reach-collection-search
+meta ["test"] fn () {
+    assert-reached-offline-url(() { ::collections/search(::collections/SearchRequest({query: "q", collection_ids: ["c"]}), OFFLINE) }, "search")
+    assert-reached-offline-url(() { ::collections/search-simple("q", ["c"], OFFLINE) }, "search-simple")
+    assert-reached-offline-url(() { ::collections/keyword-search("q", ["c"], OFFLINE) }, "keyword-search")
+    assert-reached-offline-url(() { ::collections/semantic-search("q", ["c"], OFFLINE) }, "semantic-search")
+}
+
+test-collection-search-uses-the-api-key-not-the-management-key
+meta ["test"] fn () {
+    before ::ctx/get("xai.api.key")
+    ::ctx/set("xai.api.key", null)
+    result ::hot::internal::exec/contain(() {
+        ::collections/search-simple("q", ["c"], {management-api-key: "tenant-mgmt"})
+    })
+    assert(is-err(result), "a management key alone is not enough")
+    assert(contains(Str(err-value(result)), "xai.api.key"), "that names the API key")
+    ::ctx/set("xai.api.key", before)
+}
+
+test-opts-arity-without-a-key-fails-clearly
+meta ["test"] fn () {
+    before ::ctx/get("xai.management.api.key")
+    ::ctx/set("xai.management.api.key", null)
+    result ::hot::internal::exec/contain(() { ::collections/list({}) })
+    assert(is-err(result), "no key anywhere is an Err")
+    assert(contains(Str(err-value(result)), "xai.management.api.key"), "that names the ctx key")
+    ::ctx/set("xai.management.api.key", before)
+}

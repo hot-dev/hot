@@ -41,8 +41,12 @@ response.bot_id    // => "B1234567"
 ```
 """
 }
-fn (request: AuthTestRequest): AuthTestResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/auth.test`, {}, request)
+fn
+(request: AuthTestRequest): AuthTestResponse {
+  auth-test(request, {})
+},
+(request: AuthTestRequest, opts: Map): AuthTestResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/auth.test`, {}, request, opts)
   if(is-ok-response(response), AuthTestResponse(response.body), err(HttpError(response)))
 }
 
@@ -61,8 +65,12 @@ auth-revoke
 meta {
     doc: """GET /auth.revoke - Revoke a token. Pass `test: true` to check revocation without actually revoking."""
 }
-fn (request: AuthRevokeRequest): AuthRevokeResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/auth.revoke?test=${or(request.test, "")}`)
+fn
+(request: AuthRevokeRequest): AuthRevokeResponse {
+  auth-revoke(request, {})
+},
+(request: AuthRevokeRequest, opts: Map): AuthRevokeResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/auth.revoke?test=${or(request.test, "")}`, {}, "", opts)
   if(is-ok-response(response), AuthRevokeResponse(response.body), err(HttpError(response)))
 }
 
@@ -98,8 +106,12 @@ response.args.foo  // => "bar"
 ```
 """
 }
-fn (request: ApiTestRequest): ApiTestResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/api.test?error=${or(request.error, "")}&foo=${or(request.foo, "")}`)
+fn
+(request: ApiTestRequest): ApiTestResponse {
+  api-test(request, {})
+},
+(request: ApiTestRequest, opts: Map): ApiTestResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/api.test?error=${or(request.error, "")}&foo=${or(request.foo, "")}`, {}, "", opts)
   if(is-ok-response(response), ApiTestResponse(response.body), err(HttpError(response)))
 }
 
@@ -133,8 +145,12 @@ response.team.domain  // => "myteam"
 ```
 """
 }
-fn (request: TeamInfoRequest): TeamInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/team.info?team=${or(request.team, "")}`)
+fn
+(request: TeamInfoRequest): TeamInfoResponse {
+  team-info(request, {})
+},
+(request: TeamInfoRequest, opts: Map): TeamInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/team.info?team=${or(request.team, "")}`, {}, "", opts)
   if(is-ok-response(response), TeamInfoResponse(response.body), err(HttpError(response)))
 }
 
@@ -156,8 +172,12 @@ team-access-logs
 meta {
     doc: """GET /team.accessLogs - Get the access logs for the current team. Requires an admin or owner token. Returns login records with user, IP, and user agent info."""
 }
-fn (request: TeamAccessLogsRequest): TeamAccessLogsResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/team.accessLogs?before=${or(request.before, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}`)
+fn
+(request: TeamAccessLogsRequest): TeamAccessLogsResponse {
+  team-access-logs(request, {})
+},
+(request: TeamAccessLogsRequest, opts: Map): TeamAccessLogsResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/team.accessLogs?before=${or(request.before, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}`, {}, "", opts)
   if(is-ok-response(response), TeamAccessLogsResponse(response.body), err(HttpError(response)))
 }
 
@@ -176,8 +196,12 @@ team-billable-info
 meta {
     doc: """GET /team.billableInfo - Get billable user information for the current team. Optionally filter by a specific user ID."""
 }
-fn (request: TeamBillableInfoRequest): TeamBillableInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/team.billableInfo?user=${or(request.user, "")}`)
+fn
+(request: TeamBillableInfoRequest): TeamBillableInfoResponse {
+  team-billable-info(request, {})
+},
+(request: TeamBillableInfoRequest, opts: Map): TeamBillableInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/team.billableInfo?user=${or(request.user, "")}`, {}, "", opts)
   if(is-ok-response(response), TeamBillableInfoResponse(response.body), err(HttpError(response)))
 }
 
@@ -202,8 +226,12 @@ team-integration-logs
 meta {
     doc: """GET /team.integrationLogs - Get the integration activity logs for the current team. Filter by app_id, change_type, service_id, or user."""
 }
-fn (request: TeamIntegrationLogsRequest): TeamIntegrationLogsResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/team.integrationLogs?app_id=${or(request.app_id, "")}&change_type=${or(request.change_type, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}&service_id=${or(request.service_id, "")}&user=${or(request.user, "")}`)
+fn
+(request: TeamIntegrationLogsRequest): TeamIntegrationLogsResponse {
+  team-integration-logs(request, {})
+},
+(request: TeamIntegrationLogsRequest, opts: Map): TeamIntegrationLogsResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/team.integrationLogs?app_id=${or(request.app_id, "")}&change_type=${or(request.change_type, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}&service_id=${or(request.service_id, "")}&user=${or(request.user, "")}`, {}, "", opts)
   if(is-ok-response(response), TeamIntegrationLogsResponse(response.body), err(HttpError(response)))
 }
 
@@ -222,8 +250,12 @@ team-profile-get
 meta {
     doc: """GET /team.profile.get - Get the team profile field definitions. Optionally filter by visibility level."""
 }
-fn (request: TeamProfileGetRequest): TeamProfileGetResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/team.profile.get?visibility=${or(request.visibility, "")}`)
+fn
+(request: TeamProfileGetRequest): TeamProfileGetResponse {
+  team-profile-get(request, {})
+},
+(request: TeamProfileGetRequest, opts: Map): TeamProfileGetResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/team.profile.get?visibility=${or(request.visibility, "")}`, {}, "", opts)
   if(is-ok-response(response), TeamProfileGetResponse(response.body), err(HttpError(response)))
 }
 
@@ -251,8 +283,12 @@ response.emoji  // => {shipit: "https://...", bowtie: "alias:bow"}
 ```
 """
 }
-fn (): EmojiListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/emoji.list`)
+fn
+(): EmojiListResponse {
+  emoji-list({})
+},
+(opts: Map): EmojiListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/emoji.list`, {}, "", opts)
   if(is-ok-response(response), EmojiListResponse(response.body), err(HttpError(response)))
 }
 
@@ -275,8 +311,12 @@ dialog-open
 meta {
     doc: """GET /dialog.open - Open a dialog with a user. Requires a valid `trigger_id` from an interactive event. The `dialog` parameter is a JSON-encoded dialog definition."""
 }
-fn (request: DialogOpenRequest): DialogOpenResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/dialog.open?dialog=${request.dialog}&trigger_id=${request.trigger_id}`)
+fn
+(request: DialogOpenRequest): DialogOpenResponse {
+  dialog-open(request, {})
+},
+(request: DialogOpenRequest, opts: Map): DialogOpenResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/dialog.open?dialog=${request.dialog}&trigger_id=${request.trigger_id}`, {}, "", opts)
   if(is-ok-response(response), DialogOpenResponse(response.body), err(HttpError(response)))
 }
 
@@ -304,8 +344,12 @@ migration-exchange
 meta {
     doc: """GET /migration.exchange - Exchange legacy user IDs to new Enterprise Grid format. Pass a comma-separated list of user IDs. Set `to_old: true` to convert in the reverse direction."""
 }
-fn (request: MigrationExchangeRequest): MigrationExchangeResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/migration.exchange?users=${request.users}&team_id=${or(request.team_id, "")}&to_old=${or(request.to_old, "")}`)
+fn
+(request: MigrationExchangeRequest): MigrationExchangeResponse {
+  migration-exchange(request, {})
+},
+(request: MigrationExchangeRequest, opts: Map): MigrationExchangeResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/migration.exchange?users=${request.users}&team_id=${or(request.team_id, "")}&to_old=${or(request.to_old, "")}`, {}, "", opts)
   if(is-ok-response(response), MigrationExchangeResponse(response.body), err(HttpError(response)))
 }
 
@@ -329,8 +373,12 @@ views-open
 meta {
     doc: """POST /views.open - Open a modal view for a user. Requires a valid `trigger_id` from an interactive event and a JSON-encoded view payload."""
 }
-fn (request: ViewsOpenRequest): ViewsOpenResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/views.open`, {}, request)
+fn
+(request: ViewsOpenRequest): ViewsOpenResponse {
+  views-open(request, {})
+},
+(request: ViewsOpenRequest, opts: Map): ViewsOpenResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/views.open`, {}, request, opts)
   if(is-ok-response(response), ViewsOpenResponse(response.body), err(HttpError(response)))
 }
 
@@ -351,8 +399,12 @@ views-publish
 meta {
     doc: """POST /views.publish - Publish a static view to the App Home tab for a user. Use `hash` to avoid overwriting concurrent updates."""
 }
-fn (request: ViewsPublishRequest): ViewsPublishResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/views.publish`, {}, request)
+fn
+(request: ViewsPublishRequest): ViewsPublishResponse {
+  views-publish(request, {})
+},
+(request: ViewsPublishRequest, opts: Map): ViewsPublishResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/views.publish`, {}, request, opts)
   if(is-ok-response(response), ViewsPublishResponse(response.body), err(HttpError(response)))
 }
 
@@ -372,8 +424,12 @@ views-push
 meta {
     doc: """POST /views.push - Push a new view onto the stack of an existing root view. Requires a valid `trigger_id` from a view interaction."""
 }
-fn (request: ViewsPushRequest): ViewsPushResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/views.push`, {}, request)
+fn
+(request: ViewsPushRequest): ViewsPushResponse {
+  views-push(request, {})
+},
+(request: ViewsPushRequest, opts: Map): ViewsPushResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/views.push`, {}, request, opts)
   if(is-ok-response(response), ViewsPushResponse(response.body), err(HttpError(response)))
 }
 
@@ -395,8 +451,12 @@ views-update
 meta {
     doc: """POST /views.update - Update an existing view by `view_id` or `external_id`. Use `hash` to avoid overwriting concurrent updates."""
 }
-fn (request: ViewsUpdateRequest): ViewsUpdateResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/views.update`, {}, request)
+fn
+(request: ViewsUpdateRequest): ViewsUpdateResponse {
+  views-update(request, {})
+},
+(request: ViewsUpdateRequest, opts: Map): ViewsUpdateResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/views.update`, {}, request, opts)
   if(is-ok-response(response), ViewsUpdateResponse(response.body), err(HttpError(response)))
 }
 
@@ -430,7 +490,11 @@ oauth-v2-access
 meta {
     doc: """POST /oauth.v2.access - Exchange a temporary OAuth verifier code for an access token. Used during the OAuth 2.0 flow to complete app installation."""
 }
-fn (request: OauthV2AccessRequest): OauthV2AccessResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/oauth.v2.access`, {}, request)
+fn
+(request: OauthV2AccessRequest): OauthV2AccessResponse {
+  oauth-v2-access(request, {})
+},
+(request: OauthV2AccessRequest, opts: Map): OauthV2AccessResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/oauth.v2.access`, {}, request, opts)
   if(is-ok-response(response), OauthV2AccessResponse(response.body), err(HttpError(response)))
 }

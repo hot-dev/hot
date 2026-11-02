@@ -29,6 +29,10 @@ meta {
 
   // With explicit signing secret (2-arity, for multi-app)
   is-valid ::slack::webhooks/verify-request(request, "your-signing-secret")
+
+  // With opts (2-arity): `signing-secret` decides the call when present,
+  // and a blank one is rejected rather than replaced by the context secret
+  is-valid ::slack::webhooks/verify-request(request, {signing-secret: "your-signing-secret"})
   ```
   """
 }
@@ -44,6 +48,13 @@ fn
 // 2-arity: explicit signing secret (override for multi-app)
 (request: HttpRequest, signing-secret: Str): Bool {
   verify-request(request, signing-secret, 300)
+},
+// 2-arity: per-call opts ({signing-secret}), then ctx
+(request: HttpRequest, opts: Map): Bool {
+  cond {
+    in("signing-secret", keys(opts)) => { verify-request(request, or(get(opts, "signing-secret"), "")) }
+    => { verify-request(request) }
+  }
 },
 // 3-arity: explicit replay tolerance in seconds (0 disables the check)
 (request: HttpRequest, signing-secret: Str, tolerance-seconds: Int): Bool {

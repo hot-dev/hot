@@ -1,0 +1,192 @@
+::postmark::test::opts ns
+meta ["test"]
+
+// Hermetic. These tests never send an HTTP request: a credential with a
+// newline is not a legal header value, so the HTTP client refuses to build
+// the request. An error from ::hot::http/request therefore proves that the
+// credential got through the function to the client, and the "not set" error
+// proves the function went through the resolver. A host-name lookup can still
+// happen first; when it fails, the error comes from the same place.
+
+::api ::postmark::api
+::activate ::postmark::activate
+::bounces ::postmark::bounces
+::bypass ::postmark::bypass
+::create ::postmark::create
+::delete ::postmark::delete
+::edit ::postmark::edit
+::get ::postmark::get
+::list ::postmark::list
+::retry ::postmark::retry
+::search ::postmark::search
+::send ::postmark::send
+::templates ::postmark::templates
+::test ::postmark::test
+::update ::postmark::update
+
+CTX_KEY "postmark.server.token"
+UNSENDABLE "opts\ncredential"
+
+// One valid call to every function that calls the API, without its opts.
+every-call fn (): Vec {
+  [
+    {f: ::activate/activate-bounce, args: [::activate/ActivateBounceRequest({bounceid: "x"})]},
+    {f: ::bounces/get-bounce-dump, args: [::bounces/GETBouncesBounceidDumpRequest({bounceid: "x"})]},
+    {f: ::bypass/bypass-rules-blocked-inbound-message, args: [::bypass/BypassRulesForInboundMessageRequest({messageid: "x"})]},
+    {f: ::create/create-inbound-rule-trigger, args: [::create/CreateInboundRuleRequest({})]},
+    {f: ::delete/delete-template, args: [::delete/DeleteTemplateRequest({template-id-or-alias: "x"})]},
+    {f: ::delete/delete-single-trigger, args: [::delete/DeleteInboundRuleRequest({triggerid: "x"})]},
+    {f: ::edit/edit-server-configuration, args: [::edit/EditCurrentServerConfigurationRequest({})]},
+    {f: ::get/get-delivery-stats, args: [::get/GetDeliveryStatsRequest({})]},
+    {f: ::get/get-bounces, args: [::get/GetBouncesRequest({count: "x", offset: "x", type-param: "x", inactive: "x", email-filter: "x", message-id: "x", tag: "x", todate: "x", fromdate: "x"})]},
+    {f: ::get/get-single-bounce, args: [::get/GetSingleBounceRequest({bounceid: "x"})]},
+    {f: ::get/outbound-message-details, args: [::get/GetOutboundMessageDetailsRequest({messageid: "x"})]},
+    {f: ::get/outbound-message-dump, args: [::get/GetOutboundMessageDumpRequest({messageid: "x"})]},
+    {f: ::get/inbound-message-details, args: [::get/GetInboundMessageDetailsRequest({messageid: "x"})]},
+    {f: ::get/retrieve-message-opens, args: [::get/GetOpensForSingleOutboundMessageRequest({messageid: "x", count: "x", offset: "x"})]},
+    {f: ::get/retrieve-message-clicks, args: [::get/GetClicksForSingleOutboundMessageRequest({messageid: "x", count: "x", offset: "x"})]},
+    {f: ::get/get-template, args: [::get/GetSingleTemplateRequest({template-id-or-alias: "x"})]},
+    {f: ::get/get-outbound-overview, args: [::get/GetOutboundOverviewStatisticsRequest({tag: "x", fromdate: "x", todate: "x"})]},
+    {f: ::get/get-sent-counts, args: [::get/GetSentCountsRequest({tag: "x", fromdate: "x", todate: "x"})]},
+    {f: ::get/get-bounce-counts, args: [::get/GetBounceCountsRequest({tag: "x", fromdate: "x", todate: "x"})]},
+    {f: ::get/get-spam-complaints, args: [::get/GetSpamComplaintsRequest({tag: "x", fromdate: "x", todate: "x"})]},
+    {f: ::get/get-tracked-email-counts, args: [::get/GetTrackedEmailCountsRequest({tag: "x", fromdate: "x", todate: "x"})]},
+    {f: ::get/get-email-open-counts, args: [::get/GetOutboundOpenCountsRequest({tag: "x", fromdate: "x", todate: "x"})]},
+    {f: ::get/get-email-platform-usage, args: [::get/GetOutboundOpenCountsByPlatformRequest({tag: "x", fromdate: "x", todate: "x"})]},
+    {f: ::get/get-email-client-usage, args: [::get/GetOutboundOpenCountsByEmailClientRequest({tag: "x", fromdate: "x", todate: "x"})]},
+    {f: ::get/get-click-counts, args: [::get/GetOutboundClickCountsRequest({tag: "x", fromdate: "x", todate: "x"})]},
+    {f: ::get/get-browser-usage-by-family, args: [::get/GetOutboundClickCountsByBrowserFamilyRequest({tag: "x", fromdate: "x", todate: "x"})]},
+    {f: ::get/get-browser-plaform-usage, args: [::get/GetOutboundClickCountsByPlatformRequest({tag: "x", fromdate: "x", todate: "x"})]},
+    {f: ::get/get-clicks-by-body-location, args: [::get/GetOutboundClickCountsByLocationRequest({tag: "x", fromdate: "x", todate: "x"})]},
+    {f: ::get/get-server-configuration, args: [::get/GetCurrentServerConfigurationRequest({})]},
+    {f: ::list/get-templates-associated-with-this-server, args: [::list/ListTemplatesRequest({count: "x", offset: "x"})]},
+    {f: ::list/list-inbound-rule-triggers, args: [::list/ListInboundRulesRequest({count: "x", offset: "x"})]},
+    {f: ::retry/retry-failed-inbound-message-processing, args: [::retry/RetryInboundMessageProcessingRequest({messageid: "x"})]},
+    {f: ::search/outbound-message-search, args: [::search/SearchOutboundMessagesRequest({count: "x", offset: "x", recipient: "x", fromemail: "x", tag: "x", status: "x", todate: "x", fromdate: "x"})]},
+    {f: ::search/inbound-message-search, args: [::search/SearchInboundMessagesRequest({count: "x", offset: "x", recipient: "x", fromemail: "x", subject: "x", mailboxhash: "x", tag: "x", status: "x", todate: "x", fromdate: "x"})]},
+    {f: ::search/opens-all-messages, args: [::search/SearchOpensForOutboundMessagesRequest({count: "x", offset: "x", recipient: "x", tag: "x", client-name: "x", client-company: "x", client-family: "x", os-name: "x", os-family: "x", os-company: "x", platform: "x", country: "x", region: "x", city: "x"})]},
+    {f: ::search/clicks-all-messages, args: [::search/SearchClicksForOutboundMessagesRequest({count: "x", offset: "x", recipient: "x", tag: "x", client-name: "x", client-company: "x", client-family: "x", os-name: "x", os-family: "x", os-company: "x", platform: "x", country: "x", region: "x", city: "x"})]},
+    {f: ::send/send-single-email, args: [::send/SendEmailRequest({})]},
+    {f: ::send/send-batch-emails, args: [::send/SendEmailBatchRequest([])]},
+    {f: ::send/send-email-using-template, args: [::send/SendEmailWithTemplateRequest({TemplateId: 1, TemplateAlias: "x", TemplateModel: {}, From: "x", To: "x"})]},
+    {f: ::send/send-batch-email-using-templates, args: [::send/SendEmailBatchWithTemplatesRequest({})]},
+    {f: ::templates/create-template, args: [::templates/POSTTemplatesRequest({Name: "x", Subject: "x"})]},
+    {f: ::test/test-template-content, args: [::test/TestTemplateContentRequest({})]},
+    {f: ::update/update-template, args: ["x", ::update/UpdateTemplateRequest({})]}
+  ]
+}
+
+failure fn (f: Any, args: Vec): Str {
+  attempt ::hot::internal::exec/contain(f, args)
+  cond {
+    is-err(attempt) => { ::hot::type/err-message(err-value(attempt)) }
+    => { "no error" }
+  }
+}
+
+reached-http fn (message: Str): Bool {
+  contains(message, "::hot::http/request")
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+  r ::api/resolve-from({server-token: "from-opts"}, {"postmark.server.token": "from-ctx"})
+  assert-eq("from-opts", r.server-token)
+}
+
+test-resolve-ctx-when-opts-empty
+meta ["test"] fn () {
+  r ::api/resolve-from({}, {"postmark.server.token": "from-ctx"})
+  assert-eq("from-ctx", r.server-token)
+}
+
+test-resolve-missing-credential
+meta ["test"] fn () {
+  missing ::api/resolve-from({}, {})
+  assert(is-err(missing), "no credential is an Err")
+  assert(contains(err-value(missing), "postmark.server.token"), "the error names the context variable")
+  assert(contains(err-value(missing), "server-token"), "the error names the opts key")
+  assert(is-err(::api/resolve-from({}, {"postmark.server.token": "  "})), "a blank context value counts as missing")
+}
+
+test-resolve-blank-opts-credential-never-falls-back-to-ctx
+meta ["test"] fn () {
+  assert(is-err(::api/resolve-from({server-token: null}, {"postmark.server.token": "from-ctx"})), "null")
+  assert(is-err(::api/resolve-from({server-token: ""}, {"postmark.server.token": "from-ctx"})), "empty")
+  assert(is-err(::api/resolve-from({server-token: "  "}, {"postmark.server.token": "from-ctx"})), "blank")
+}
+
+test-resolve-reads-ctx-and-never-writes-it
+meta ["test"] fn () {
+  assert(is-err(::api/resolve({})), "no context in tests")
+  assert-eq("tenant-b", ::api/resolve({server-token: "tenant-b"}).server-token)
+  assert(is-null(::hot::ctx/get("postmark.server.token")), "a per-call credential is not written to ctx")
+  ::hot::ctx/set("postmark.server.token", "from-ctx")
+  from-ctx ::api/resolve({})
+  overridden ::api/resolve({server-token: "tenant-b"})
+  still ::hot::ctx/get("postmark.server.token")
+  ::hot::ctx/set("postmark.server.token", null)
+  assert-eq("from-ctx", from-ctx.server-token)
+  assert-eq("tenant-b", overridden.server-token, "opts win over the real context")
+  assert-eq("from-ctx", still, "the override leaves ctx alone")
+}
+
+test-raw-request-opts-and-missing-credential
+meta ["test"] fn () {
+  missing ::api/request("GET", "https://example.invalid/x", {}, "", {})
+  assert(is-err(missing), "raw request returns an Err")
+  assert(contains(err-value(missing), "postmark.server.token"))
+  assert(is-err(::api/request("GET", "https://example.invalid/x", {}, "", {server-token: "k"})), "reaches the client, which can't resolve the host")
+  assert(contains(failure(::api/request, ["GET", "https://example.invalid/x"]), "postmark.server.token"), "the ctx arities report it too")
+}
+
+test-every-function-reports-a-missing-credential
+meta ["test"] fn () {
+  for-each(every-call(), (call) {
+    assert(contains(failure(call.f, concat(call.args, [{}])), "postmark.server.token is not set"), `${call.f} with empty opts`)
+    assert(contains(failure(call.f, call.args), "postmark.server.token is not set"), `${call.f} without opts`)
+  })
+}
+
+test-every-opts-arity-takes-its-credential-from-opts
+meta ["test"] fn () {
+  for-each(every-call(), (call) {
+    assert(reached-http(failure(call.f, concat(call.args, [{server-token: UNSENDABLE}]))), `${call.f} with a credential in opts`)
+  })
+}
+
+test-every-opts-arity-rejects-a-blank-credential-even-with-ctx-set
+meta ["test"] fn () {
+  ::hot::ctx/set("postmark.server.token", UNSENDABLE)
+  results map(every-call(), (call) {
+    {f: call.f, message: failure(call.f, concat(call.args, [{server-token: ""}]))}
+  })
+  ::hot::ctx/set("postmark.server.token", null)
+  for-each(results, (r) {
+    assert(contains(r.message, "is empty"), `${r.f} with a blank credential`)
+  })
+}
+
+test-every-existing-arity-still-uses-ctx
+meta ["test"] fn () {
+  ::hot::ctx/set("postmark.server.token", UNSENDABLE)
+  results map(every-call(), (call) {
+    {f: call.f, message: failure(call.f, call.args)}
+  })
+  ::hot::ctx/set("postmark.server.token", null)
+  for-each(results, (r) {
+    assert(reached-http(r.message), `${r.f} with the credential in ctx`)
+  })
+}
+
+test-encode-body-sends-nothing-for-no-body
+meta ["test"] fn () {
+  assert-eq("", ::api/encode-body(""), "a body-less request has no body, not the two characters \"\"")
+  assert-eq("{\"a\":1}", ::api/encode-body({a: 1}))
+}
+
+test-unset-optionals-are-not-sent-as-null
+meta ["test"] fn () {
+  body ::api/encode-body(::send/SendEmailRequest({To: "a@example.com"}))
+  assert-eq("{\"To\":\"a@example.com\"}", body)
+}

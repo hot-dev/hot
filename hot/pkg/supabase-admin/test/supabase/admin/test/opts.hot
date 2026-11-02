@@ -1,0 +1,127 @@
+::supabase::admin::test::opts ns
+meta ["test"]
+
+// Hermetic: no network.
+
+::api ::supabase::admin::api
+::branches ::supabase::admin::branches
+::databases ::supabase::admin::databases
+::domains ::supabase::admin::domains
+::functions ::supabase::admin::functions
+::orgs ::supabase::admin::organizations
+::projects ::supabase::admin::projects
+
+OFFLINE {access-token: "sbp_tenant", base-url: "http://127.0.0.1:1"}
+
+// Nothing listens on port 1, so a call fails at the socket, with the URL
+// in the error. That error proves the call got past the credential check
+// and used this `opts`, without any network traffic.
+reaches fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "127.0.0.1:1"))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({access-token: "sbp_opt", base-url: "https://proxy.example/v1/"}, {"supabase.access.token": "sbp_ctx"})
+    assert-eq("sbp_opt", r.access-token)
+    assert-eq("https://proxy.example/v1", r.base-url, "the trailing slash goes")
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    r ::api/resolve-from({}, {"supabase.access.token": "sbp_ctx"})
+    assert-eq("sbp_ctx", r.access-token)
+    assert-eq("https://api.supabase.com/v1", r.base-url)
+}
+
+test-resolve-missing-credential-is-a-clear-error
+meta ["test"] fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "supabase.access.token"))
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("supabase.access.token")
+    assert-eq("sbp_call", ::api/resolve({access-token: "sbp_call"}).access-token)
+    assert(reaches(::projects/list-projects(OFFLINE)))
+    assert-eq(before, ::hot::ctx/get("supabase.access.token"))
+}
+
+test-build-request
+meta ["test"] fn () {
+    bare ::api/build-request("GET", "/projects", {}, {}, ::api/resolve-from({access-token: "a"}, {}))
+    assert-eq("https://api.supabase.com/v1/projects", bare.url)
+    assert-eq("Bearer a", bare.headers.Authorization)
+    assert-eq("", bare.body)
+    assert(is-null(get(bare.headers, "Content-Type")))
+    posted ::api/build-request("POST", "/x", {X-Extra: "1"}, {name: "n", plan: null}, {access-token: "b", base-url: "https://proxy.example"})
+    assert-eq("https://proxy.example/x", posted.url)
+    assert-eq("Bearer b", posted.headers.Authorization)
+    assert-eq("1", get(posted.headers, "X-Extra"))
+    assert-eq("application/json", get(posted.headers, "Content-Type"))
+}
+
+test-opts-reach-every-module
+meta ["test"] fn () {
+    assert(reaches(::api/request("GET", "/projects", {}, {}, OFFLINE)))
+    assert(reaches(::api/request-raw("GET", "/projects", {}, {}, OFFLINE)))
+    assert(reaches(::projects/get-project("r", OFFLINE)))
+    assert(reaches(::projects/get-database-openapi("r", null, OFFLINE)))
+    assert(reaches(::projects/get-project-health("r", ["db"], OFFLINE)))
+    assert(reaches(::projects/create-project(::projects/CreateProjectRequest({name: "n", organization_id: "o", region: "us-east-1"}), OFFLINE)))
+    assert(reaches(::orgs/list-organizations(OFFLINE)))
+    assert(reaches(::orgs/list-members("s", OFFLINE)))
+    assert(reaches(::databases/run-query(::databases/RunQueryRequest({project_ref: "r", query: "select 1"}), OFFLINE)))
+    assert(reaches(::databases/list-backups("r", OFFLINE)))
+    assert(reaches(::functions/list-functions("r", OFFLINE)))
+    assert(reaches(::functions/deploy-function("r", {}, OFFLINE)))
+    assert(reaches(::branches/list-branches("r", OFFLINE)))
+    assert(reaches(::branches/merge-branch("b", OFFLINE)))
+    assert(reaches(::domains/get-custom-hostname("r", OFFLINE)))
+    assert(reaches(::domains/activate-vanity-subdomain(::domains/ActivateVanitySubdomainRequest({project_ref: "r", vanity_subdomain: "s"}), OFFLINE)))
+}
+
+test-transport-failure-is-an-err
+meta ["test"] fn () {
+    out ::api/request("GET", "/projects", {}, {}, OFFLINE)
+    assert(is-err(out), "body-or-error passes a failed request through")
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    ctx {"supabase.access.token": "sbp_ctx"}
+    results map([{access-token: ""}, {access-token: "   "}, {access-token: null}], (o) {
+        out ::api/resolve-from(o, ctx)
+        assert(is-err(out), "never falls back to supabase.access.token")
+        assert(contains(err-message(out), "access-token"))
+        true
+    })
+    assert-eq(3, length(results))
+    assert(is-err(::projects/list-projects({access-token: ""})), "the error reaches the caller")
+}
+
+test-base-url-without-credential-is-an-error
+meta ["test"] fn () {
+    out ::api/resolve-from({base-url: "https://collector.example"}, {"supabase.access.token": "sbp_ctx_secret"})
+    assert(is-err(out), "the context key must not go to a per-call URL")
+    assert(contains(err-message(out), "base-url"))
+    assert(contains(err-message(out), "access-token"))
+    assert(not(contains(err-message(out), "sbp_ctx_secret")), "the key stays out of messages")
+    assert-eq("https://collector.example", ::api/resolve-from({base-url: "https://collector.example", access-token: "tenant"}, {"supabase.access.token": "sbp_ctx_secret"}).base-url, "with a credential it works")
+    assert-eq("sbp_ctx_secret", ::api/resolve-from({base-url: ""}, {"supabase.access.token": "sbp_ctx_secret"}).access-token, "a blank base-url is the default root")
+}
+
+test-base-url-without-credential-sends-nothing
+meta ["test"] fn () {
+    before ::hot::ctx/get("supabase.access.token")
+    ::hot::ctx/set-secret("supabase.access.token", "sbp_ctx_secret")
+    assert-eq("sbp_ctx_secret", ::api/resolve({}).access-token, "control: the live context key is set")
+    out ::projects/get-project("r", {base-url: "http://127.0.0.1:1"})
+    assert(is-err(out))
+    assert(contains(err-message(out), "base-url"))
+    assert(not(reaches(out)), "no request was attempted: the failure isn't the socket")
+    assert(reaches(::projects/get-project("r", {access-token: "tenant", base-url: "http://127.0.0.1:1"})), "control: with a credential it reaches the socket")
+    ::hot::ctx/set-secret("supabase.access.token", before)
+}

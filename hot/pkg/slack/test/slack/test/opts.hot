@@ -1,0 +1,251 @@
+::slack::test::opts ns
+meta ["test"]
+
+// Hermetic. These tests never send an HTTP request: a credential with a
+// newline is not a legal header value, so the HTTP client refuses to build
+// the request. An error from ::hot::http/request therefore proves that the
+// credential got through the function to the client, and the "not set" error
+// proves the function went through the resolver. A host-name lookup can still
+// happen first; when it fails, the error comes from the same place.
+
+::api ::slack::api
+::apps ::slack::apps
+::calls ::slack::calls
+::channels ::slack::channels
+::files ::slack::files
+::messaging ::slack::messaging
+::misc ::slack::misc
+::users ::slack::users
+
+CTX_KEY "slack.api.key"
+UNSENDABLE "opts\ncredential"
+
+// One valid call to every function that calls the API, without its opts.
+every-call fn (): Vec {
+  [
+    {f: ::apps/apps-permissions-info, args: []},
+    {f: ::apps/apps-permissions-request, args: [::apps/AppsPermissionsRequestRequest({scopes: "x", trigger_id: "x"})]},
+    {f: ::apps/apps-permissions-resources-list, args: [::apps/AppsPermissionsResourcesListRequest({})]},
+    {f: ::apps/apps-permissions-scopes-list, args: []},
+    {f: ::apps/apps-uninstall, args: [::apps/AppsUninstallRequest({client_id: "x", client_secret: "x"})]},
+    {f: ::apps/apps-event-authorizations-list, args: [::apps/AppsEventAuthorizationsListRequest({event_context: "x"})]},
+    {f: ::apps/bots-info, args: [::apps/BotsInfoRequest({})]},
+    {f: ::calls/calls-add, args: [::calls/CallsAddRequest({external_unique_id: "x", join_url: "x"})]},
+    {f: ::calls/calls-end, args: [::calls/CallsEndRequest({id: "x"})]},
+    {f: ::calls/calls-info, args: [::calls/CallsInfoRequest({id: "x"})]},
+    {f: ::calls/calls-update, args: [::calls/CallsUpdateRequest({id: "x"})]},
+    {f: ::calls/calls-participants-add, args: [::calls/CallsParticipantsAddRequest({id: "x", users: []})]},
+    {f: ::calls/calls-participants-remove, args: [::calls/CallsParticipantsRemoveRequest({id: "x", users: []})]},
+    {f: ::calls/rtm-connect, args: [::calls/RtmConnectRequest({})]},
+    {f: ::channels/conversations-archive, args: [::channels/ConversationsArchiveRequest({channel: "x"})]},
+    {f: ::channels/conversations-close, args: [::channels/ConversationsCloseRequest({channel: "x"})]},
+    {f: ::channels/conversations-create, args: [::channels/ConversationsCreateRequest({name: "x"})]},
+    {f: ::channels/conversations-history, args: [::channels/ConversationsHistoryRequest({channel: "x"})]},
+    {f: ::channels/conversations-info, args: [::channels/ConversationsInfoRequest({channel: "x"})]},
+    {f: ::channels/conversations-invite, args: [::channels/ConversationsInviteRequest({channel: "x", users: "x"})]},
+    {f: ::channels/conversations-join, args: [::channels/ConversationsJoinRequest({channel: "x"})]},
+    {f: ::channels/conversations-kick, args: [::channels/ConversationsKickRequest({channel: "x", user: "x"})]},
+    {f: ::channels/conversations-leave, args: [::channels/ConversationsLeaveRequest({channel: "x"})]},
+    {f: ::channels/conversations-list, args: [::channels/ConversationsListRequest({})]},
+    {f: ::channels/conversations-mark, args: [::channels/ConversationsMarkRequest({channel: "x", ts: "x"})]},
+    {f: ::channels/conversations-members, args: [::channels/ConversationsMembersRequest({channel: "x"})]},
+    {f: ::channels/conversations-open, args: [::channels/ConversationsOpenRequest({})]},
+    {f: ::channels/conversations-rename, args: [::channels/ConversationsRenameRequest({channel: "x", name: "x"})]},
+    {f: ::channels/conversations-replies, args: [::channels/ConversationsRepliesRequest({channel: "x", ts: "x"})]},
+    {f: ::channels/conversations-set-purpose, args: [::channels/ConversationsSetPurposeRequest({channel: "x", purpose: "x"})]},
+    {f: ::channels/conversations-set-topic, args: [::channels/ConversationsSetTopicRequest({channel: "x", topic: "x"})]},
+    {f: ::channels/conversations-unarchive, args: [::channels/ConversationsUnarchiveRequest({channel: "x"})]},
+    {f: ::files/files-delete, args: [::files/FilesDeleteRequest({file: "x"})]},
+    {f: ::files/files-info, args: [::files/FilesInfoRequest({file: "x"})]},
+    {f: ::files/files-list, args: [::files/FilesListRequest({})]},
+    {f: ::files/files-revoke-public-url, args: [::files/FilesRevokePublicURLRequest({file: "x"})]},
+    {f: ::files/files-shared-public-url, args: [::files/FilesSharedPublicURLRequest({file: "x"})]},
+    {f: ::files/files-upload, args: [::files/FilesUploadRequest({})]},
+    {f: ::files/files-comments-delete, args: [::files/FilesCommentsDeleteRequest({file: "x", id: "x"})]},
+    {f: ::files/files-remote-add, args: [::files/FilesRemoteAddRequest({external_id: "x", external_url: "x", title: "x"})]},
+    {f: ::files/files-remote-info, args: [::files/FilesRemoteInfoRequest({})]},
+    {f: ::files/files-remote-list, args: [::files/FilesRemoteListRequest({})]},
+    {f: ::files/files-remote-remove, args: [::files/FilesRemoteRemoveRequest({})]},
+    {f: ::files/files-remote-share, args: [::files/FilesRemoteShareRequest({channels: "x"})]},
+    {f: ::files/files-remote-update, args: [::files/FilesRemoteUpdateRequest({})]},
+    {f: ::messaging/chat-delete, args: [::messaging/ChatDeleteRequest({channel: "x", ts: "x"})]},
+    {f: ::messaging/chat-delete-scheduled-message, args: [::messaging/ChatDeleteScheduledMessageRequest({channel: "x", scheduled_message_id: "x"})]},
+    {f: ::messaging/chat-get-permalink, args: [::messaging/ChatGetPermalinkRequest({channel: "x", message_ts: "x"})]},
+    {f: ::messaging/chat-me-message, args: [::messaging/ChatMeMessageRequest({channel: "x", text: "x"})]},
+    {f: ::messaging/chat-post-ephemeral, args: [::messaging/ChatPostEphemeralRequest({channel: "x", user: "x"})]},
+    {f: ::messaging/chat-post-message, args: [::messaging/ChatPostMessageRequest({channel: "x"})]},
+    {f: ::messaging/chat-schedule-message, args: [::messaging/ChatScheduleMessageRequest({channel: "x", post_at: 1})]},
+    {f: ::messaging/chat-unfurl, args: [::messaging/ChatUnfurlRequest({channel: "x", ts: "x", unfurls: {}})]},
+    {f: ::messaging/chat-update, args: [::messaging/ChatUpdateRequest({channel: "x", ts: "x"})]},
+    {f: ::messaging/chat-scheduled-messages-list, args: [::messaging/ChatScheduledMessagesListRequest({})]},
+    {f: ::messaging/reactions-add, args: [::messaging/ReactionsAddRequest({channel: "x", timestamp: "x", name: "x"})]},
+    {f: ::messaging/reactions-get, args: [::messaging/ReactionsGetRequest({})]},
+    {f: ::messaging/reactions-list, args: [::messaging/ReactionsListRequest({})]},
+    {f: ::messaging/reactions-remove, args: [::messaging/ReactionsRemoveRequest({name: "x"})]},
+    {f: ::messaging/search-messages, args: [::messaging/SearchMessagesRequest({query: "x"})]},
+    {f: ::messaging/reminders-add, args: [::messaging/RemindersAddRequest({text: "x", time: "x"})]},
+    {f: ::messaging/reminders-complete, args: [::messaging/RemindersCompleteRequest({reminder: "x"})]},
+    {f: ::messaging/reminders-delete, args: [::messaging/RemindersDeleteRequest({reminder: "x"})]},
+    {f: ::messaging/reminders-info, args: [::messaging/RemindersInfoRequest({reminder: "x"})]},
+    {f: ::messaging/reminders-list, args: [::messaging/RemindersListRequest({})]},
+    {f: ::messaging/pins-add, args: [::messaging/PinsAddRequest({channel: "x"})]},
+    {f: ::messaging/pins-list, args: [::messaging/PinsListRequest({channel: "x"})]},
+    {f: ::messaging/pins-remove, args: [::messaging/PinsRemoveRequest({channel: "x"})]},
+    {f: ::messaging/stars-add, args: [::messaging/StarsAddRequest({})]},
+    {f: ::messaging/stars-list, args: [::messaging/StarsListRequest({})]},
+    {f: ::messaging/stars-remove, args: [::messaging/StarsRemoveRequest({})]},
+    {f: ::misc/auth-test, args: [::misc/AuthTestRequest({})]},
+    {f: ::misc/auth-revoke, args: [::misc/AuthRevokeRequest({})]},
+    {f: ::misc/api-test, args: [::misc/ApiTestRequest({})]},
+    {f: ::misc/team-info, args: [::misc/TeamInfoRequest({})]},
+    {f: ::misc/team-access-logs, args: [::misc/TeamAccessLogsRequest({})]},
+    {f: ::misc/team-billable-info, args: [::misc/TeamBillableInfoRequest({})]},
+    {f: ::misc/team-integration-logs, args: [::misc/TeamIntegrationLogsRequest({})]},
+    {f: ::misc/team-profile-get, args: [::misc/TeamProfileGetRequest({})]},
+    {f: ::misc/emoji-list, args: []},
+    {f: ::misc/dialog-open, args: [::misc/DialogOpenRequest({dialog: "x", trigger_id: "x"})]},
+    {f: ::misc/migration-exchange, args: [::misc/MigrationExchangeRequest({users: "x"})]},
+    {f: ::misc/views-open, args: [::misc/ViewsOpenRequest({trigger_id: "x", view: "x"})]},
+    {f: ::misc/views-publish, args: [::misc/ViewsPublishRequest({user_id: "x", view: "x"})]},
+    {f: ::misc/views-push, args: [::misc/ViewsPushRequest({trigger_id: "x", view: "x"})]},
+    {f: ::misc/views-update, args: [::misc/ViewsUpdateRequest({view: "x"})]},
+    {f: ::misc/oauth-v2-access, args: [::misc/OauthV2AccessRequest({client_id: "x", client_secret: "x", code: "x"})]},
+    {f: ::users/users-conversations, args: [::users/UsersConversationsRequest({})]},
+    {f: ::users/users-delete-photo, args: [::users/UsersDeletePhotoRequest({})]},
+    {f: ::users/users-get-presence, args: [::users/UsersGetPresenceRequest({user: "x"})]},
+    {f: ::users/users-identity, args: []},
+    {f: ::users/users-info, args: [::users/UsersInfoRequest({user: "x"})]},
+    {f: ::users/users-list, args: [::users/UsersListRequest({})]},
+    {f: ::users/users-lookup-by-email, args: [::users/UsersLookupByEmailRequest({email: "x"})]},
+    {f: ::users/users-set-active, args: [::users/UsersSetActiveRequest({})]},
+    {f: ::users/users-set-photo, args: [::users/UsersSetPhotoRequest({image: "x"})]},
+    {f: ::users/users-set-presence, args: [::users/UsersSetPresenceRequest({presence: "x"})]},
+    {f: ::users/dnd-end-dnd, args: [::users/DndEndDndRequest({})]},
+    {f: ::users/dnd-end-snooze, args: [::users/DndEndSnoozeRequest({})]},
+    {f: ::users/dnd-info, args: [::users/DndInfoRequest({})]},
+    {f: ::users/dnd-set-snooze, args: [::users/DndSetSnoozeRequest({num_minutes: 1})]},
+    {f: ::users/dnd-team-info, args: [::users/DndTeamInfoRequest({users: "x"})]},
+    {f: ::users/usergroups-create, args: [::users/UsergroupsCreateRequest({name: "x"})]},
+    {f: ::users/usergroups-disable, args: [::users/UsergroupsDisableRequest({usergroup: "x"})]},
+    {f: ::users/usergroups-enable, args: [::users/UsergroupsEnableRequest({usergroup: "x"})]},
+    {f: ::users/usergroups-list, args: [::users/UsergroupsListRequest({})]},
+    {f: ::users/usergroups-update, args: [::users/UsergroupsUpdateRequest({usergroup: "x"})]},
+    {f: ::users/usergroups-users-list, args: [::users/UsergroupsUsersListRequest({usergroup: "x"})]},
+    {f: ::users/usergroups-users-update, args: [::users/UsergroupsUsersUpdateRequest({usergroup: "x", users: "x"})]},
+    {f: ::users/users-profile-get, args: [::users/UsersProfileGetRequest({})]},
+    {f: ::users/users-profile-set, args: [::users/UsersProfileSetRequest({})]}
+  ]
+}
+
+failure fn (f: Any, args: Vec): Str {
+  attempt ::hot::internal::exec/contain(f, args)
+  cond {
+    is-err(attempt) => { ::hot::type/err-message(err-value(attempt)) }
+    => { "no error" }
+  }
+}
+
+reached-http fn (message: Str): Bool {
+  contains(message, "::hot::http/request")
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+  r ::api/resolve-from({api-key: "from-opts"}, {"slack.api.key": "from-ctx"})
+  assert-eq("from-opts", r.api-key)
+}
+
+test-resolve-ctx-when-opts-empty
+meta ["test"] fn () {
+  r ::api/resolve-from({}, {"slack.api.key": "from-ctx"})
+  assert-eq("from-ctx", r.api-key)
+}
+
+test-resolve-missing-credential
+meta ["test"] fn () {
+  missing ::api/resolve-from({}, {})
+  assert(is-err(missing), "no credential is an Err")
+  assert(contains(err-value(missing), "slack.api.key"), "the error names the context variable")
+  assert(contains(err-value(missing), "api-key"), "the error names the opts key")
+  assert(is-err(::api/resolve-from({}, {"slack.api.key": "  "})), "a blank context value counts as missing")
+}
+
+test-resolve-blank-opts-credential-never-falls-back-to-ctx
+meta ["test"] fn () {
+  assert(is-err(::api/resolve-from({api-key: null}, {"slack.api.key": "from-ctx"})), "null")
+  assert(is-err(::api/resolve-from({api-key: ""}, {"slack.api.key": "from-ctx"})), "empty")
+  assert(is-err(::api/resolve-from({api-key: "  "}, {"slack.api.key": "from-ctx"})), "blank")
+}
+
+test-resolve-reads-ctx-and-never-writes-it
+meta ["test"] fn () {
+  assert(is-err(::api/resolve({})), "no context in tests")
+  assert-eq("tenant-b", ::api/resolve({api-key: "tenant-b"}).api-key)
+  assert(is-null(::hot::ctx/get("slack.api.key")), "a per-call credential is not written to ctx")
+  ::hot::ctx/set("slack.api.key", "from-ctx")
+  from-ctx ::api/resolve({})
+  overridden ::api/resolve({api-key: "tenant-b"})
+  still ::hot::ctx/get("slack.api.key")
+  ::hot::ctx/set("slack.api.key", null)
+  assert-eq("from-ctx", from-ctx.api-key)
+  assert-eq("tenant-b", overridden.api-key, "opts win over the real context")
+  assert-eq("from-ctx", still, "the override leaves ctx alone")
+}
+
+test-raw-request-opts-and-missing-credential
+meta ["test"] fn () {
+  missing ::api/request("GET", "https://example.invalid/x", {}, "", {})
+  assert(is-err(missing), "raw request returns an Err")
+  assert(contains(err-value(missing), "slack.api.key"))
+  assert(is-err(::api/request("GET", "https://example.invalid/x", {}, "", {api-key: "k"})), "reaches the client, which can't resolve the host")
+  assert(contains(failure(::api/request, ["GET", "https://example.invalid/x"]), "slack.api.key"), "the ctx arities report it too")
+}
+
+test-every-function-reports-a-missing-credential
+meta ["test"] fn () {
+  for-each(every-call(), (call) {
+    assert(contains(failure(call.f, concat(call.args, [{}])), "slack.api.key is not set"), `${call.f} with empty opts`)
+    assert(contains(failure(call.f, call.args), "slack.api.key is not set"), `${call.f} without opts`)
+  })
+}
+
+test-every-opts-arity-takes-its-credential-from-opts
+meta ["test"] fn () {
+  for-each(every-call(), (call) {
+    assert(reached-http(failure(call.f, concat(call.args, [{api-key: UNSENDABLE}]))), `${call.f} with a credential in opts`)
+  })
+}
+
+test-every-opts-arity-rejects-a-blank-credential-even-with-ctx-set
+meta ["test"] fn () {
+  ::hot::ctx/set("slack.api.key", UNSENDABLE)
+  results map(every-call(), (call) {
+    {f: call.f, message: failure(call.f, concat(call.args, [{api-key: ""}]))}
+  })
+  ::hot::ctx/set("slack.api.key", null)
+  for-each(results, (r) {
+    assert(contains(r.message, "is empty"), `${r.f} with a blank credential`)
+  })
+}
+
+test-every-existing-arity-still-uses-ctx
+meta ["test"] fn () {
+  ::hot::ctx/set("slack.api.key", UNSENDABLE)
+  results map(every-call(), (call) {
+    {f: call.f, message: failure(call.f, call.args)}
+  })
+  ::hot::ctx/set("slack.api.key", null)
+  for-each(results, (r) {
+    assert(reached-http(r.message), `${r.f} with the credential in ctx`)
+  })
+}
+
+test-base-url-is-kept-for-slack-admin
+meta ["test"] fn () {
+  assert-eq("https://slack.com/api", ::slack::core/BASE_URL)
+}
+
+test-sanitize-url-still-strips-token-params-on-the-opts-path
+meta ["test"] fn () {
+  assert-eq("https://slack.com/api/x?a=1", ::api/sanitize-url("https://slack.com/api/x?token=t&a=1"))
+}

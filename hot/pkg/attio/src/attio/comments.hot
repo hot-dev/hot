@@ -38,8 +38,12 @@ meta {
     ```
     """
 }
-fn (target: Map, content: Str, author-member-id: Str): Map {
-  out ::api/json("POST", "/comments", build-comment-payload(target, content, author-member-id))
+fn
+(target: Map, content: Str, author-member-id: Str): Map {
+  create-comment(target, content, author-member-id, {})
+},
+(target: Map, content: Str, author-member-id: Str, opts: Map): Map {
+  out ::api/json("POST", "/comments", build-comment-payload(target, content, author-member-id), opts)
   match out {
     Result.Err => { err(out) }
 
@@ -51,6 +55,10 @@ list-threads
 meta {
     doc: """GET /threads?record_id=&object= - The comment threads on a record (each thread carries its comments)."""
 }
-fn (object: Str, record-id: Str): Map {
-  ::api/json("GET", `/threads?record_id=${record-id}&object=${object}`)
+fn
+(object: Str, record-id: Str): Map {
+  list-threads(object, record-id, {})
+},
+(object: Str, record-id: Str, opts: Map): Map {
+  ::api/json("GET", `/threads?record_id=${record-id}&object=${object}`, "", opts)
 }

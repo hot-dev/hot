@@ -22,8 +22,12 @@ conversations-archive
 meta {
     doc: """POST /conversations.archive - Archive a conversation. The channel will be read-only but its history is preserved."""
 }
-fn (request: ConversationsArchiveRequest): ConversationsArchiveResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.archive`, {}, request)
+fn
+(request: ConversationsArchiveRequest): ConversationsArchiveResponse {
+  conversations-archive(request, {})
+},
+(request: ConversationsArchiveRequest, opts: Map): ConversationsArchiveResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.archive`, {}, request, opts)
   if(is-ok-response(response), ConversationsArchiveResponse(response.body), err(HttpError(response)))
 }
 
@@ -43,8 +47,12 @@ conversations-close
 meta {
     doc: """POST /conversations.close - Close a direct message or multi-person direct message. Returns `already_closed: true` if the conversation was not open."""
 }
-fn (request: ConversationsCloseRequest): ConversationsCloseResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.close`, {}, request)
+fn
+(request: ConversationsCloseRequest): ConversationsCloseResponse {
+  conversations-close(request, {})
+},
+(request: ConversationsCloseRequest, opts: Map): ConversationsCloseResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.close`, {}, request, opts)
   if(is-ok-response(response), ConversationsCloseResponse(response.body), err(HttpError(response)))
 }
 
@@ -65,8 +73,12 @@ conversations-create
 meta {
     doc: """POST /conversations.create - Create a new channel. Set `is_private: true` for a private channel. Returns the new channel object."""
 }
-fn (request: ConversationsCreateRequest): ConversationsCreateResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.create`, {}, request)
+fn
+(request: ConversationsCreateRequest): ConversationsCreateResponse {
+  conversations-create(request, {})
+},
+(request: ConversationsCreateRequest, opts: Map): ConversationsCreateResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.create`, {}, request, opts)
   if(is-ok-response(response), ConversationsCreateResponse(response.body), err(HttpError(response)))
 }
 
@@ -106,8 +118,12 @@ response.has_more  // => true
 ```
 """
 }
-fn (request: ConversationsHistoryRequest): ConversationsHistoryResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/conversations.history?channel=${request.channel}&latest=${or(request.latest, "")}&oldest=${or(request.oldest, "")}&inclusive=${or(request.inclusive, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`)
+fn
+(request: ConversationsHistoryRequest): ConversationsHistoryResponse {
+  conversations-history(request, {})
+},
+(request: ConversationsHistoryRequest, opts: Map): ConversationsHistoryResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/conversations.history?channel=${request.channel}&latest=${or(request.latest, "")}&oldest=${or(request.oldest, "")}&inclusive=${or(request.inclusive, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
   if(is-ok-response(response), ConversationsHistoryResponse(response.body), err(HttpError(response)))
 }
 
@@ -140,8 +156,12 @@ response.channel.name  // => "general"
 ```
 """
 }
-fn (request: ConversationsInfoRequest): ConversationsInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/conversations.info?channel=${request.channel}&include_locale=${or(request.include_locale, "")}&include_num_members=${or(request.include_num_members, "")}`)
+fn
+(request: ConversationsInfoRequest): ConversationsInfoResponse {
+  conversations-info(request, {})
+},
+(request: ConversationsInfoRequest, opts: Map): ConversationsInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/conversations.info?channel=${request.channel}&include_locale=${or(request.include_locale, "")}&include_num_members=${or(request.include_num_members, "")}`, {}, "", opts)
   if(is-ok-response(response), ConversationsInfoResponse(response.body), err(HttpError(response)))
 }
 
@@ -161,8 +181,12 @@ conversations-invite
 meta {
     doc: """POST /conversations.invite - Invite users to a conversation. Pass a comma-separated list of user IDs in the `users` field."""
 }
-fn (request: ConversationsInviteRequest): ConversationsInviteResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.invite`, {}, request)
+fn
+(request: ConversationsInviteRequest): ConversationsInviteResponse {
+  conversations-invite(request, {})
+},
+(request: ConversationsInviteRequest, opts: Map): ConversationsInviteResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.invite`, {}, request, opts)
   if(is-ok-response(response), ConversationsInviteResponse(response.body), err(HttpError(response)))
 }
 
@@ -182,8 +206,12 @@ conversations-join
 meta {
     doc: """POST /conversations.join - Join an existing conversation. Only works for public channels unless the bot has been invited."""
 }
-fn (request: ConversationsJoinRequest): ConversationsJoinResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.join`, {}, request)
+fn
+(request: ConversationsJoinRequest): ConversationsJoinResponse {
+  conversations-join(request, {})
+},
+(request: ConversationsJoinRequest, opts: Map): ConversationsJoinResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.join`, {}, request, opts)
   if(is-ok-response(response), ConversationsJoinResponse(response.body), err(HttpError(response)))
 }
 
@@ -202,8 +230,12 @@ conversations-kick
 meta {
     doc: """POST /conversations.kick - Remove a user from a conversation. Requires appropriate permissions in the channel."""
 }
-fn (request: ConversationsKickRequest): ConversationsKickResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.kick`, {}, request)
+fn
+(request: ConversationsKickRequest): ConversationsKickResponse {
+  conversations-kick(request, {})
+},
+(request: ConversationsKickRequest, opts: Map): ConversationsKickResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.kick`, {}, request, opts)
   if(is-ok-response(response), ConversationsKickResponse(response.body), err(HttpError(response)))
 }
 
@@ -221,8 +253,12 @@ conversations-leave
 meta {
     doc: """POST /conversations.leave - Leave a conversation. The bot/user will no longer receive messages from this channel."""
 }
-fn (request: ConversationsLeaveRequest): ConversationsLeaveResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.leave`, {}, request)
+fn
+(request: ConversationsLeaveRequest): ConversationsLeaveResponse {
+  conversations-leave(request, {})
+},
+(request: ConversationsLeaveRequest, opts: Map): ConversationsLeaveResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.leave`, {}, request, opts)
   if(is-ok-response(response), ConversationsLeaveResponse(response.body), err(HttpError(response)))
 }
 
@@ -261,8 +297,12 @@ channel.name  // => "general"
 ```
 """
 }
-fn (request: ConversationsListRequest): ConversationsListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/conversations.list?exclude_archived=${or(request.exclude_archived, "")}&types=${or(request.types, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}&team_id=${or(request.team_id, "")}`)
+fn
+(request: ConversationsListRequest): ConversationsListResponse {
+  conversations-list(request, {})
+},
+(request: ConversationsListRequest, opts: Map): ConversationsListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/conversations.list?exclude_archived=${or(request.exclude_archived, "")}&types=${or(request.types, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}&team_id=${or(request.team_id, "")}`, {}, "", opts)
   if(is-ok-response(response), ConversationsListResponse(response.body), err(HttpError(response)))
 }
 
@@ -281,8 +321,12 @@ conversations-mark
 meta {
     doc: """POST /conversations.mark - Set the read cursor in a channel. Pass the message `ts` to mark the conversation as read up to that point."""
 }
-fn (request: ConversationsMarkRequest): ConversationsMarkResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.mark`, {}, request)
+fn
+(request: ConversationsMarkRequest): ConversationsMarkResponse {
+  conversations-mark(request, {})
+},
+(request: ConversationsMarkRequest, opts: Map): ConversationsMarkResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.mark`, {}, request, opts)
   if(is-ok-response(response), ConversationsMarkResponse(response.body), err(HttpError(response)))
 }
 
@@ -316,8 +360,12 @@ response.members  // => ["U1234567", "U2345678", ...]
 ```
 """
 }
-fn (request: ConversationsMembersRequest): ConversationsMembersResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/conversations.members?channel=${request.channel}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`)
+fn
+(request: ConversationsMembersRequest): ConversationsMembersResponse {
+  conversations-members(request, {})
+},
+(request: ConversationsMembersRequest, opts: Map): ConversationsMembersResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/conversations.members?channel=${request.channel}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
   if(is-ok-response(response), ConversationsMembersResponse(response.body), err(HttpError(response)))
 }
 
@@ -341,8 +389,12 @@ conversations-open
 meta {
     doc: """POST /conversations.open - Open or resume a direct message or multi-person direct message. Pass either a `channel` ID or a comma-separated list of `users`. Set `prevent_creation: true` to avoid creating a new conversation."""
 }
-fn (request: ConversationsOpenRequest): ConversationsOpenResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.open`, {}, request)
+fn
+(request: ConversationsOpenRequest): ConversationsOpenResponse {
+  conversations-open(request, {})
+},
+(request: ConversationsOpenRequest, opts: Map): ConversationsOpenResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.open`, {}, request, opts)
   if(is-ok-response(response), ConversationsOpenResponse(response.body), err(HttpError(response)))
 }
 
@@ -362,8 +414,12 @@ conversations-rename
 meta {
     doc: """POST /conversations.rename - Rename a conversation. Channel names must be lowercase, without spaces, and 80 characters or fewer."""
 }
-fn (request: ConversationsRenameRequest): ConversationsRenameResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.rename`, {}, request)
+fn
+(request: ConversationsRenameRequest): ConversationsRenameResponse {
+  conversations-rename(request, {})
+},
+(request: ConversationsRenameRequest, opts: Map): ConversationsRenameResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.rename`, {}, request, opts)
   if(is-ok-response(response), ConversationsRenameResponse(response.body), err(HttpError(response)))
 }
 
@@ -390,8 +446,12 @@ conversations-replies
 meta {
     doc: """GET /conversations.replies - Retrieve a thread of messages. Pass the parent message `ts` to fetch all replies in the thread. Supports cursor-based pagination."""
 }
-fn (request: ConversationsRepliesRequest): ConversationsRepliesResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/conversations.replies?channel=${request.channel}&ts=${request.ts}&latest=${or(request.latest, "")}&oldest=${or(request.oldest, "")}&inclusive=${or(request.inclusive, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`)
+fn
+(request: ConversationsRepliesRequest): ConversationsRepliesResponse {
+  conversations-replies(request, {})
+},
+(request: ConversationsRepliesRequest, opts: Map): ConversationsRepliesResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/conversations.replies?channel=${request.channel}&ts=${request.ts}&latest=${or(request.latest, "")}&oldest=${or(request.oldest, "")}&inclusive=${or(request.inclusive, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
   if(is-ok-response(response), ConversationsRepliesResponse(response.body), err(HttpError(response)))
 }
 
@@ -411,8 +471,12 @@ conversations-set-purpose
 meta {
     doc: """POST /conversations.setPurpose - Set the purpose for a conversation. The purpose appears in the channel details panel."""
 }
-fn (request: ConversationsSetPurposeRequest): ConversationsSetPurposeResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.setPurpose`, {}, request)
+fn
+(request: ConversationsSetPurposeRequest): ConversationsSetPurposeResponse {
+  conversations-set-purpose(request, {})
+},
+(request: ConversationsSetPurposeRequest, opts: Map): ConversationsSetPurposeResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.setPurpose`, {}, request, opts)
   if(is-ok-response(response), ConversationsSetPurposeResponse(response.body), err(HttpError(response)))
 }
 
@@ -432,8 +496,12 @@ conversations-set-topic
 meta {
     doc: """POST /conversations.setTopic - Set the topic for a conversation. The topic appears at the top of the channel."""
 }
-fn (request: ConversationsSetTopicRequest): ConversationsSetTopicResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.setTopic`, {}, request)
+fn
+(request: ConversationsSetTopicRequest): ConversationsSetTopicResponse {
+  conversations-set-topic(request, {})
+},
+(request: ConversationsSetTopicRequest, opts: Map): ConversationsSetTopicResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.setTopic`, {}, request, opts)
   if(is-ok-response(response), ConversationsSetTopicResponse(response.body), err(HttpError(response)))
 }
 
@@ -451,7 +519,11 @@ conversations-unarchive
 meta {
     doc: """POST /conversations.unarchive - Reverse archiving of a conversation. The channel will be restored and members can post messages again."""
 }
-fn (request: ConversationsUnarchiveRequest): ConversationsUnarchiveResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/conversations.unarchive`, {}, request)
+fn
+(request: ConversationsUnarchiveRequest): ConversationsUnarchiveResponse {
+  conversations-unarchive(request, {})
+},
+(request: ConversationsUnarchiveRequest, opts: Map): ConversationsUnarchiveResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/conversations.unarchive`, {}, request, opts)
   if(is-ok-response(response), ConversationsUnarchiveResponse(response.body), err(HttpError(response)))
 }

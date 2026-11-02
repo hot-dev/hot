@@ -1,0 +1,167 @@
+::linear::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no linear.* context.
+
+::api ::linear::api
+::issues ::linear::issues
+::teams ::linear::teams
+::webhooks ::linear::webhooks
+
+OFFLINE {api-key: "lin_api_tenant", base-url: "http://127.0.0.1:1"}
+
+// Nothing listens on port 1, so a call fails at the socket, with the URL
+// in the error. That error proves the call got past the credential check
+// and used this `opts`, without any network traffic.
+reaches fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "127.0.0.1:1"))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({api-key: "lin_api_opt", base-url: "https://proxy.example/graphql"}, {"linear.api.key": "lin_api_ctx"})
+    assert-eq("lin_api_opt", r.api-key)
+    assert-eq("https://proxy.example/graphql", r.base-url)
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    r ::api/resolve-from({}, {"linear.api.key": "lin_api_ctx"})
+    assert-eq("lin_api_ctx", r.api-key)
+    assert-eq("https://api.linear.app/graphql", r.base-url)
+}
+
+test-resolve-missing-credential-is-a-clear-error
+meta ["test"] fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "linear.api.key"))
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("linear.api.key")
+    assert-eq("lin_api_call", ::api/resolve({api-key: "lin_api_call"}).api-key)
+    assert(reaches(::teams/viewer(OFFLINE)))
+    assert-eq(before, ::hot::ctx/get("linear.api.key"))
+}
+
+test-existing-arity-reads-ctx
+meta ["test"] fn () {
+    cond {
+        is-some(::hot::ctx/get("linear.api.key")) => { assert(true) }
+        => {
+            out ::teams/viewer()
+            assert(is-err(out))
+            assert(contains(err-message(out), "linear.api.key"))
+        }
+    }
+}
+
+test-build-request
+meta ["test"] fn () {
+    personal ::api/build-request("query { viewer { id } }", {a: 1}, {api-key: "lin_api_x", base-url: "https://api.linear.app/graphql"})
+    assert-eq("https://api.linear.app/graphql", personal.url)
+    assert-eq("lin_api_x", personal.headers.Authorization, "personal keys go raw")
+    assert-eq({query: "query { viewer { id } }", variables: {a: 1}}, from-json(personal.body))
+    oauth ::api/build-request("q", {}, ::api/resolve-from({api-key: "lin_oauth_y"}, {}))
+    assert-eq("Bearer lin_oauth_y", oauth.headers.Authorization)
+}
+
+test-opts-reach-every-module
+meta ["test"] fn () {
+    assert(reaches(::api/graphql("query { viewer { id } }", {}, OFFLINE)))
+    assert(reaches(::teams/list-teams(OFFLINE)))
+    assert(reaches(::teams/get-team-by-key("ENG", OFFLINE)))
+    assert(reaches(::teams/list-states("t", OFFLINE)))
+    assert(reaches(::issues/list-issues({first: 1}, OFFLINE)))
+    assert(reaches(::issues/create-issue("t", "Title", {priority: 2}, OFFLINE)))
+    assert(reaches(::issues/get-issue("ENG-1", OFFLINE)))
+    assert(reaches(::issues/search-issues("term", OFFLINE)))
+}
+
+// ============================================================================
+// Webhook verification with a per-call secret
+// ============================================================================
+
+signed fn (secret: Str, body: Str): Map {
+    {headers: {linear-signature: ::hot::hmac/hmac-sha256(secret, body)}, body-raw: body}
+}
+
+test-webhook-opts-secret
+meta ["test"] fn () {
+    now ::hot::time/epoch-millis(::hot::time/now())
+    request signed("tenant-secret", `{"action":"create","webhookTimestamp":${now}}`)
+    assert(::webhooks/verify-request(request, {webhook-secret: "tenant-secret"}))
+    assert(not(::webhooks/verify-request(request, {webhook-secret: "other-secret"})))
+    assert(::webhooks/verify-request(request, "tenant-secret"), "the explicit Str arity is unchanged")
+}
+
+test-webhook-opts-max-age
+meta ["test"] fn () {
+    stale sub(::hot::time/epoch-millis(::hot::time/now()), 120000)
+    request signed("tenant-secret", `{"action":"create","webhookTimestamp":${stale}}`)
+    assert(not(::webhooks/verify-request(request, {webhook-secret: "tenant-secret"})), "the default window rejects it")
+    assert(::webhooks/verify-request(request, {webhook-secret: "tenant-secret", max-age-ms: 300000}))
+    assert(::webhooks/verify-request(request, {webhook-secret: "tenant-secret", max-age-ms: 0}), "0 turns the replay check off")
+}
+
+test-webhook-malformed-timestamp-fails-closed
+meta ["test"] fn () {
+    malformed signed("tenant-secret", """{"action":"create","webhookTimestamp":"soon"}""")
+    assert(not(::webhooks/verify-request(malformed, "tenant-secret")), "a signed but unreadable timestamp is rejected, not a halt")
+    now ::hot::time/epoch-millis(::hot::time/now())
+    quoted signed("tenant-secret", `{"action":"create","webhookTimestamp":"${now}"}`)
+    assert(::webhooks/verify-request(quoted, "tenant-secret"), "digits in a string still parse")
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    ctx {"linear.api.key": "lin_api_ctx"}
+    results map([{api-key: ""}, {api-key: "   "}, {api-key: null}], (o) {
+        out ::api/resolve-from(o, ctx)
+        assert(is-err(out), "never falls back to linear.api.key")
+        assert(contains(err-message(out), "api-key"))
+        true
+    })
+    assert-eq(3, length(results))
+    assert(is-err(::teams/viewer({api-key: ""})), "the error reaches the caller")
+}
+
+test-webhook-blank-opts-secret-is-an-error
+meta ["test"] fn () {
+    now ::hot::time/epoch-millis(::hot::time/now())
+    request signed("tenant-secret", `{"action":"create","webhookTimestamp":${now}}`)
+    results map([{webhook-secret: ""}, {webhook-secret: "  "}, {webhook-secret: null}], (o) {
+        out ::webhooks/verify-request(request, o)
+        assert(is-err(out), "never falls back to linear.webhook.secret")
+        assert(contains(err-message(out), "webhook-secret"))
+        true
+    })
+    assert-eq(3, length(results))
+    assert(not(::webhooks/verify-request(request, "")), "an empty Str secret still returns false")
+}
+
+test-base-url-without-credential-is-an-error
+meta ["test"] fn () {
+    out ::api/resolve-from({base-url: "https://collector.example"}, {"linear.api.key": "lin_api_ctx_secret"})
+    assert(is-err(out), "the context key must not go to a per-call URL")
+    assert(contains(err-message(out), "base-url"))
+    assert(contains(err-message(out), "api-key"))
+    assert(not(contains(err-message(out), "lin_api_ctx_secret")), "the key stays out of messages")
+    assert-eq("https://collector.example", ::api/resolve-from({base-url: "https://collector.example", api-key: "tenant"}, {"linear.api.key": "lin_api_ctx_secret"}).base-url, "with a credential it works")
+    assert-eq("lin_api_ctx_secret", ::api/resolve-from({base-url: ""}, {"linear.api.key": "lin_api_ctx_secret"}).api-key, "a blank base-url is the default root")
+}
+
+test-base-url-without-credential-sends-nothing
+meta ["test"] fn () {
+    before ::hot::ctx/get("linear.api.key")
+    ::hot::ctx/set-secret("linear.api.key", "lin_api_ctx_secret")
+    assert-eq("lin_api_ctx_secret", ::api/resolve({}).api-key, "control: the live context key is set")
+    out ::teams/viewer({base-url: "http://127.0.0.1:1"})
+    assert(is-err(out))
+    assert(contains(err-message(out), "base-url"))
+    assert(not(reaches(out)), "no request was attempted: the failure isn't the socket")
+    assert(reaches(::teams/viewer({api-key: "tenant", base-url: "http://127.0.0.1:1"})), "control: with a credential it reaches the socket")
+    ::hot::ctx/set-secret("linear.api.key", before)
+}

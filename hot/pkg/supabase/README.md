@@ -7,7 +7,7 @@ Supabase client SDK for Hot. Query your database (PostgREST), authenticate users
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/supabase": "1.0.1"
+"hot.dev/supabase": "1.1.0"
 ```
 
 ## Configuration
@@ -228,6 +228,29 @@ result ::functions/invoke(::functions/InvokeFunctionRequest({
   access-token: session.access_token
 }))
 ```
+
+## Per-call credentials
+
+Every function that sends a request takes an optional trailing `opts` Map, so one run can reach many projects and parallel flows don't share credentials. Nothing from `opts` is written to ctx. Filters and `*Request` types stay pure: `opts` goes on the call that sends the request, including the `*-as`, `*-service`, `*-response` and `*-http-response` variants.
+
+| Key | Replaces |
+|---|---|
+| `url` | `supabase.url` (not secret; shown in call logs) |
+| `anon-key` (or `api-key`) | `supabase.anon.key`, then `supabase.api.key`, `SUPABASE_ANON_KEY`, `SUPABASE_API_KEY` |
+| `service-key` (or `service-role-key`) | `supabase.service.key`, then `supabase.service.role.key`, `SUPABASE_SERVICE_KEY`, `SUPABASE_SERVICE_ROLE_KEY` |
+
+```hot
+::db ::supabase::db
+::storage ::supabase::storage
+
+tenant {url: "https://tenant-b.supabase.co", anon-key: "tenant-b-anon", service-key: "tenant-b-service"}
+
+rows ::db/select(::db/SelectRequest({table: "users", limit: 10}), tenant)
+mine ::db/select-as(::db/SelectRequest({table: "profiles"}), "user-access-token", tenant)
+buckets ::storage/list-buckets(tenant)
+```
+
+With a `url` or key in `opts`, no key comes from context or the environment for that call, so a project's key is never sent to another project's URL. Pass every key the call needs: `::storage/list-buckets` needs `service-key`, and the `*-as` variants still send `anon-key` as `apikey`. A `url` left out of `opts` still comes from context. Any of these keys present but blank or null is an error naming the key, never a fallback. `::supabase::api/resolve(opts)` is the one place this is decided, and with an empty `opts` the precedence is unchanged.
 
 ## Modules
 

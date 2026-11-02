@@ -1,0 +1,280 @@
+::anthropic::test::api ns
+meta ["test"]
+
+::api      ::anthropic::api
+::ctx      ::hot::ctx
+::messages ::anthropic::messages
+::models   ::anthropic::models
+::batches  ::anthropic::batches
+::files    ::anthropic::files
+::skills   ::anthropic::skills
+::complete ::anthropic::complete
+::beta     ::anthropic::beta::messages
+::caching  ::anthropic::prompt::caching
+::ct       ::anthropic::chat-tools
+::ai-chat  ::ai::chat
+
+// Port 1 refuses connections, so a call that resolved these opts fails at the
+// connection, naming this URL, and no request leaves the machine.
+OFFLINE {api-key: "sk-tenant", base-url: "http://127.0.0.1:1"}
+
+assert-reached-offline-url
+meta {
+    doc: """The call got as far as the HTTP layer, against the `base-url` from opts."""
+}
+fn (call: Fn, label: Str) {
+    result ::hot::internal::exec/contain(call)
+    assert(is-err(result), `${label}: a refused connection is an Err`)
+    assert(contains(Str(err-value(result)), "http://127.0.0.1:1/"), `${label}: reached the opts base-url, got ${Str(err-value(result))}`)
+}
+
+// ============================================================================
+// Resolver
+// ============================================================================
+
+CTX {"anthropic.api.key": "sk-ctx", "anthropic.base.url": "https://ctx.example.com/", "anthropic.api.version": "2024-01-01"}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({api-key: "sk-tenant", base-url: "https://opts.example.com", api-version: "2099-01-01"}, CTX)
+    assert-eq("sk-tenant", r.api-key)
+    assert-eq("https://opts.example.com", r.base-url)
+    assert-eq("2099-01-01", r.api-version)
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    r ::api/resolve-from({}, CTX)
+    assert-eq("sk-ctx", r.api-key)
+    assert-eq("https://ctx.example.com", r.base-url, "the trailing slash is dropped")
+    assert-eq("2024-01-01", r.api-version)
+}
+
+test-resolve-defaults
+meta ["test"] fn () {
+    r ::api/resolve-from({api-key: "k"}, {})
+    assert-eq("https://api.anthropic.com", r.base-url)
+    assert-eq("2023-06-01", r.api-version)
+}
+
+test-resolve-blank-settings-fall-through
+meta ["test"] fn () {
+    assert-eq("https://ctx.example.com", ::api/resolve-from({base-url: ""}, CTX).base-url)
+}
+
+test-resolve-missing-key-is-a-clear-error
+meta ["test"] fn () {
+    r ::api/resolve-from({}, {})
+    assert(is-err(r), "no key is an Err")
+    assert(contains(err-value(r), "anthropic.api.key"), "the error names the ctx key")
+    assert(contains(err-value(r), "api-key"), "and the opts key")
+}
+
+test-resolve-live-ctx-and-no-ctx-writes
+meta ["test"] fn () {
+    before ::ctx/get("anthropic.api.key")
+    ::ctx/set("anthropic.api.key", "sk-ctx-live")
+    assert-eq("sk-ctx-live", ::api/resolve().api-key, "ctx is used when opts is empty")
+    assert-eq("sk-tenant", ::api/resolve({api-key: "sk-tenant"}).api-key, "opts win over ctx")
+    assert-eq("sk-ctx-live", ::ctx/get("anthropic.api.key"), "a per-call key is not written to ctx")
+    ::ctx/set("anthropic.api.key", before)
+}
+
+test-base-url
+meta ["test"] fn () {
+    assert-eq("https://gw.example.com", ::api/base-url({base-url: "https://gw.example.com/"}))
+    assert-eq("https://api.anthropic.com", ::api/normalize-base-url(null))
+    assert-eq("https://api.anthropic.com", ::api/normalize-base-url("  "))
+}
+
+test-resolve-blank-opts-key-is-an-error-not-a-fallback
+meta ["test"] fn () {
+    for-each([null, "", "   "], (blank) {
+        r ::api/resolve-from({api-key: blank}, CTX)
+        assert(is-err(r), "a blank key in opts is an Err, with a ctx key available")
+        assert(contains(err-value(r), "api-key"), "that names the opts key")
+    })
+}
+
+test-resolve-blank-opts-key-does-not-use-live-ctx
+meta ["test"] fn () {
+    before ::ctx/get("anthropic.api.key")
+    ::ctx/set("anthropic.api.key", "ctx-live")
+    for-each([null, ""], (blank) {
+        result ::hot::internal::exec/contain(() { ::api/resolve({api-key: blank}) })
+        assert(is-err(result), "a blank key in opts is an Err")
+        assert(not(contains(Str(err-value(result)), "ctx-live")), "the ctx key is not used or shown")
+    })
+    ::ctx/set("anthropic.api.key", before)
+}
+
+test-typed-call-with-blank-key-sends-nothing
+meta ["test"] fn () {
+    before ::ctx/get("anthropic.api.key")
+    ::ctx/set("anthropic.api.key", "ctx-live")
+    result ::hot::internal::exec/contain(() { ::models/list({api-key: null, base-url: "http://127.0.0.1:1"}) })
+    assert(is-err(result), "a blank key in opts is an Err")
+    assert(contains(Str(err-value(result)), "is blank"), `it stops at the resolver, got ${Str(err-value(result))}`)
+    ::ctx/set("anthropic.api.key", before)
+}
+
+test-resolve-opts-base-url-without-key-never-gets-the-ctx-key
+meta ["test"] fn () {
+    r ::api/resolve-from({base-url: "https://tenant.example.com"}, CTX)
+    assert(is-err(r), "a per-call base URL without a per-call key is an Err, with a ctx key available")
+    assert(contains(err-value(r), "base-url"), "that names base-url")
+    assert(contains(err-value(r), "api-key"), "and api-key")
+    assert(not(contains(err-value(r), "sk-ctx")), "and doesn't show the ctx key's value")
+    with-key ::api/resolve-from({base-url: "https://tenant.example.com", api-key: "tenant-key"}, CTX)
+    assert-eq("tenant-key", with-key.api-key, "with both in opts it works")
+    assert-eq("https://tenant.example.com", with-key.base-url)
+}
+
+test-ctx-base-url-with-ctx-key-still-works
+meta ["test"] fn () {
+    r ::api/resolve-from({}, CTX)
+    assert-eq("sk-ctx", r.api-key)
+    assert-eq("https://ctx.example.com", r.base-url)
+}
+
+test-typed-call-with-base-url-and-no-key-sends-nothing
+meta ["test"] fn () {
+    before ::ctx/get("anthropic.api.key")
+    ::ctx/set("anthropic.api.key", "ctx-live")
+    result ::hot::internal::exec/contain(() { ::models/list({base-url: "http://127.0.0.1:1"}) })
+    assert(is-err(result), "a per-call base URL without a per-call key is an Err")
+    text Str(err-value(result))
+    assert(contains(text, "needs api-key"), `it stops at the resolver, got ${text}`)
+    assert(not(contains(text, "127.0.0.1")), "before any connection")
+    ::ctx/set("anthropic.api.key", before)
+}
+
+// ============================================================================
+// Outgoing request
+// ============================================================================
+
+test-explicit-key-reaches-request-headers
+meta ["test"] fn () {
+    resolved ::api/resolve-from({api-key: "sk-tenant", api-version: "2099-01-01"}, CTX)
+    req ::api/build-request("POST", "https://x/v1/messages", {}, {model: "m"}, resolved)
+    assert-eq("sk-tenant", get(req.headers, "x-api-key"))
+    assert-eq("2099-01-01", get(req.headers, "anthropic-version"))
+    assert-eq("application/json", get(req.headers, "Content-Type"))
+    assert-eq("POST", req.method)
+    assert-eq({model: "m"}, from-json(req.body))
+}
+
+test-additional-headers-override-defaults
+meta ["test"] fn () {
+    resolved ::api/resolve-from({api-key: "k"}, {})
+    req ::api/build-request("GET", "https://x", {anthropic-beta: "b", anthropic-version: "v"}, "", resolved)
+    assert-eq("b", get(req.headers, "anthropic-beta"))
+    assert-eq("v", get(req.headers, "anthropic-version"))
+}
+
+test-empty-body-sends-no-body
+meta ["test"] fn () {
+    resolved ::api/resolve-from({api-key: "k"}, {})
+    req ::api/build-request("GET", "https://x", {}, "", resolved)
+    assert(is-null(req.body), "no body for an empty string")
+    assert(not(in("Content-Type", keys(req.headers))), "and no Content-Type")
+    assert(is-null(::api/build-request("GET", "https://x", {}, null, resolved).body), "no body for null")
+}
+
+test-unset-optionals-are-not-sent-as-null
+meta ["test"] fn () {
+    resolved ::api/resolve-from({api-key: "k"}, {})
+    request ::messages/MessagesPostRequest({
+        model: "m",
+        max_tokens: 1,
+        messages: [{role: "user", content: "hi"}]
+    })
+    body from-json(::api/build-request("POST", "https://x", {}, request, resolved).body)
+    assert(not(in("system", keys(body))), "unset fields are left out")
+    assert(not(in("temperature", keys(body))), "unset fields are left out")
+}
+
+// ============================================================================
+// The opts arity reaches the request, without ctx
+// ============================================================================
+
+test-existing-explicit-key-arity-still-works
+meta ["test"] fn () {
+    assert-reached-offline-url(() { ::api/request("GET", "http://127.0.0.1:1/v1/models", {}, "", "sk-explicit") }, "request 5-arity key")
+    assert-reached-offline-url(() { ::api/request("GET", "http://127.0.0.1:1/v1/models", {}, "", {api-key: "sk-tenant"}) }, "request 5-arity opts")
+}
+
+test-opts-reach-messages
+meta ["test"] fn () {
+    request ::messages/MessagesPostRequest({model: "m", max_tokens: 1, messages: [{role: "user", content: "hi"}]})
+    assert-reached-offline-url(() { ::messages/post(request, OFFLINE) }, "post")
+    assert-reached-offline-url(() { ::messages/post-stream(request, OFFLINE) }, "post-stream")
+    assert-reached-offline-url(() { ::messages/chat("m", "hi", null, null, OFFLINE) }, "chat")
+}
+
+test-opts-reach-models
+meta ["test"] fn () {
+    assert-reached-offline-url(() { ::models/list(OFFLINE) }, "list")
+    assert-reached-offline-url(() { ::models/list(5, OFFLINE) }, "list limit")
+    assert-reached-offline-url(() { ::models/list(5, "after", OFFLINE) }, "list page")
+    assert-reached-offline-url(() { ::models/get("m", OFFLINE) }, "get")
+}
+
+test-opts-reach-batches
+meta ["test"] fn () {
+    request ::batches/CreateBatchRequest({requests: []})
+    assert-reached-offline-url(() { ::batches/create(request, OFFLINE) }, "create")
+    assert-reached-offline-url(() { ::batches/list(OFFLINE) }, "list")
+    assert-reached-offline-url(() { ::batches/list(5, OFFLINE) }, "list limit")
+    assert-reached-offline-url(() { ::batches/get("b", OFFLINE) }, "get")
+    assert-reached-offline-url(() { ::batches/cancel("b", OFFLINE) }, "cancel")
+    assert-reached-offline-url(() { ::batches/results("b", OFFLINE) }, "results")
+}
+
+test-opts-reach-files
+meta ["test"] fn () {
+    assert-reached-offline-url(() { ::files/list(OFFLINE) }, "list")
+    assert-reached-offline-url(() { ::files/list(5, OFFLINE) }, "list limit")
+    assert-reached-offline-url(() { ::files/get("f", OFFLINE) }, "get")
+    assert-reached-offline-url(() { ::files/delete("f", OFFLINE) }, "delete")
+    assert-reached-offline-url(() { ::files/download("f", OFFLINE) }, "download")
+}
+
+test-opts-reach-skills
+meta ["test"] fn () {
+    assert-reached-offline-url(() { ::skills/list(OFFLINE) }, "list")
+    assert-reached-offline-url(() { ::skills/list(5, OFFLINE) }, "list limit")
+    assert-reached-offline-url(() { ::skills/get("s", OFFLINE) }, "get")
+    assert-reached-offline-url(() { ::skills/create(::skills/CreateSkillRequest({display_title: "t", name: "n", definition: {}}), OFFLINE) }, "create")
+    assert-reached-offline-url(() { ::skills/delete("s", OFFLINE) }, "delete")
+}
+
+test-opts-reach-the-other-message-endpoints
+meta ["test"] fn () {
+    request {model: "m", max_tokens: 1, messages: [{role: "user", content: "hi"}]}
+    assert-reached-offline-url(() { ::beta/post(::beta/BetaMessagesPostRequest(request), OFFLINE) }, "beta post")
+    assert-reached-offline-url(() { ::beta/count-tokens-post(::beta/BetaMessagesCountTokensPostRequest({model: "m", messages: request.messages}), OFFLINE) }, "count tokens")
+    assert-reached-offline-url(() { ::caching/beta-messages-post(::caching/PromptCachingBetaMessagesPostRequest(request), OFFLINE) }, "prompt caching")
+    assert-reached-offline-url(() { ::complete/post(::complete/CompletePostRequest({model: "m", prompt: "p", max_tokens_to_sample: 1}), OFFLINE) }, "complete")
+}
+
+test-opts-reach-chat-tools
+meta ["test"] fn () {
+    history [::ai-chat/user-message("hi")]
+    opts ::ct/ChatRequestOptions({max-tokens: 16})
+    assert-reached-offline-url(() { ::ct/chat-with-tools("m", history, null, null, OFFLINE) }, "chat-with-tools")
+    assert-reached-offline-url(() { ::ct/chat-with-tools-options("m", history, null, null, opts, OFFLINE) }, "chat-with-tools-options")
+    assert-reached-offline-url(() { ::ct/chat-with-tools-stream("m", history, null, null, ::ai-chat/noop-on-delta, OFFLINE) }, "chat-with-tools-stream")
+    assert-reached-offline-url(() { ::ct/chat-with-tools-stream-options("m", history, null, null, ::ai-chat/noop-on-delta, opts, OFFLINE) }, "chat-with-tools-stream-options")
+    assert-reached-offline-url(() { ::ct/count-tokens(history, "m", OFFLINE) }, "count-tokens")
+}
+
+test-opts-arity-without-a-key-fails-clearly
+meta ["test"] fn () {
+    before ::ctx/get("anthropic.api.key")
+    ::ctx/set("anthropic.api.key", null)
+    result ::hot::internal::exec/contain(() { ::models/list({}) })
+    assert(is-err(result), "no key anywhere is an Err")
+    assert(contains(Str(err-value(result)), "anthropic.api.key"), "that names the ctx key")
+    ::ctx/set("anthropic.api.key", before)
+}

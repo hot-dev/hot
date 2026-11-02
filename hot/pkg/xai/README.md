@@ -7,7 +7,7 @@ xAI API bindings for Hot.
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/xai": "1.1.4"
+"hot.dev/xai": "1.2.0"
 ```
 
 ## Configuration
@@ -19,6 +19,26 @@ ctx: {
   "xai.api.key": env("XAI_API_KEY")
 }
 ```
+
+## Per-call credentials
+
+Every typed function takes a trailing `opts` Map that wins over ctx for that call, so one run can serve many tenants. Nothing is written to ctx.
+
+| `opts` key | ctx key | Notes |
+| --- | --- | --- |
+| `api-key` | `xai.api.key` | Sent as `Authorization: Bearer ...` |
+| `base-url` | `xai.base.url` | For proxies and gateways. In `opts` it needs `api-key` in `opts` too: the ctx key is never sent to a per-call URL |
+| `management-api-key` | `xai.management.api.key` | Used by the `::xai::collections` management calls |
+| `management-base-url` | `xai.management.base.url` | Same, for the Management API. In `opts` it needs `management-api-key` in `opts` too |
+
+```hot
+answer ::xai::responses/chat("grok-3", "Hello!", {api-key: tenant-key})
+models ::xai::models/list({api-key: tenant-key})
+```
+
+A blank or null key in `opts` is an error, never a fallback to ctx, so a tenant with a missing key can't run on your project's key. Leave the key out of `opts` to use ctx.
+
+Hot stores the arguments of every function call in the run's call records and only masks ctx secrets, so a key passed in `opts` is stored there as plain text.
 
 ## Usage
 

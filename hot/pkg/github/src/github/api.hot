@@ -1,8 +1,34 @@
 ::github::api ns
-meta {ctx: {"github.token": {required: true}}}
+meta {
+    ctx: {"github.token": {required: false}},
+    doc: """
+    Transport for the GitHub REST API.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `github.token` context variable, then the defaults.
+    Nothing from `opts` is written to ctx, so one run can act for many
+    tenants and parallel flows don't share credentials.
+
+    - `token`: a PAT or installation token for this call
+    - `app-id`, `private-key`, `installation-id`: act as a GitHub App
+      installation. The token is minted once and cached for the run by
+      `::github::app/cached-installation-token`.
+    - `base-url`: another API root, such as GitHub Enterprise Server's
+      `https://ghe.example.com/api/v3`. It needs a credential in the same
+      `opts`: `github.token` is never sent to a per-call URL.
+    - `api-version`: the `X-GitHub-Api-Version` for this call
+
+    When `opts` has a `token` or App identity, `github.token` is ignored
+    for that call. A token in `opts` wins over an App identity. One of
+    those keys present but blank or null is an error, never a fallback to
+    `github.token`.
+    """
+}
 
 ::ctx ::hot::ctx
 ::uri ::hot::uri
+::re ::hot::regex
 
 http-request ::hot::http/request
 is-ok-response ::hot::http/is-ok-response
@@ -37,6 +63,136 @@ github-response fn (response: HttpResponse): GitHubResponse {
   })
 }
 
+present
+meta {
+    doc: """`value` with surrounding whitespace removed when it's a Str, null when it's blank or null. Ids may be Ints and pass through."""
+}
+fn (value: Any): Any {
+  cond {
+    is-str(value) => {
+      trimmed trim(value)
+      if(is-empty(trimmed), null, trimmed)
+    }
+    => { value }
+  }
+}
+
+CREDENTIAL_KEYS ["token", "app-id", "private-key", "installation-id"]
+
+blank-credential
+meta {
+    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(present(get(opts, name)))) })
+}
+
+settings-from
+meta {
+    doc: """The non-credential settings of a call (pure): `{base-url, api-version}` from `opts`, else the package defaults. `base-url` loses any trailing slash."""
+}
+fn (opts: Map): Map {
+  base-url or(present(get(opts, "base-url")), ::github/BASE_URL)
+  {
+    base-url: ::re/replace-all(base-url, "/+$", ""),
+    api-version: or(present(get(opts, "api-version")), ::github/API_VERSION)
+  }
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: credentials and settings for a call from
+    `opts` first, then `ctx-values` (a Map of context variables), then
+    defaults. Returns `{token, base-url, api-version}`, or
+    `{app: {app-id, private-key, installation-id}, base-url, api-version}`
+    for a GitHub App identity that `resolve` still has to exchange for a
+    token. An Err when there is no credential, the App identity is
+    incomplete, a credential key in `opts` is blank or null, or `opts` has
+    `base-url` without a credential. Exposed for testing; `resolve` feeds it the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  token present(get(opts, "token"))
+  app-id present(get(opts, "app-id"))
+  private-key present(get(opts, "private-key"))
+  installation-id present(get(opts, "installation-id"))
+  ctx-token present(get(ctx-values, "github.token"))
+  settings settings-from(opts)
+  has-app or(is-some(app-id), is-some(private-key), is-some(installation-id))
+  blank blank-credential(opts, CREDENTIAL_KEYS)
+  cond {
+    is-some(blank) => {
+      err(`github: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use github.token.`)
+    }
+
+    is-some(token) => { {...settings, token: token} }
+    and(has-app, or(is-null(app-id), is-null(private-key), is-null(installation-id))) => {
+      err("github: a GitHub App identity needs app-id, private-key and installation-id in the call's opts.")
+    }
+
+    has-app => { {...settings, app: {app-id: app-id, private-key: private-key, installation-id: installation-id}} }
+    is-some(present(get(opts, "base-url"))) => {
+      err("github: base-url is in the call's opts without token (or app-id, private-key and installation-id). Pass a credential with it. Context credentials are never sent to a per-call URL.")
+    }
+
+    is-some(ctx-token) => { {...settings, token: ctx-token} }
+    => { err("github: github.token is not set. Add it in Context Variables, or pass {token: ...} or {app-id, private-key, installation-id} in the call's opts.") }
+  }
+}
+
+resolve
+meta {
+    ctx: {"github.token": {required: false}},
+    doc: """
+    Credentials and settings for one call (see `resolve-from`): returns
+    `{token, base-url, api-version}` or an Err. A GitHub App identity in
+    `opts` is exchanged for an installation token here, cached by a hash
+    of the identity. `opts` values are never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::github::api/resolve({token: "ghp_tenant_b"}).api-version  // "2026-03-10"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  resolved resolve-from(opts, {"github.token": ::ctx/get("github.token")})
+  cond {
+    is-err(resolved) => { resolved }
+    is-some(get(resolved, "app")) => {
+      token ::github::app/cached-installation-token(resolved.app, resolved)
+      if(is-err(token), token, {base-url: resolved.base-url, api-version: resolved.api-version, token: token})
+    }
+    => { resolved }
+  }
+}
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). `additional-headers` win over the defaults, and a `""` body sends no `Content-Type`. Pure; exposed for testing."""
+}
+fn (method: Str, path: Str, additional-headers: Map, body: Any, resolved: Map): HttpRequest {
+  default-headers {
+    Authorization: `Bearer ${resolved.token}`,
+    Accept: "application/vnd.github+json",
+    X-GitHub-Api-Version: resolved.api-version,
+    User-Agent: "hot-dev-github-pkg"
+  }
+
+  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
+  final-headers {...headers, ...additional-headers}
+
+  encoded-body if(eq(body, ""), "", to-json(untype(body)))
+  HttpRequest({
+    method,
+    url: `${resolved.base-url}${path}`,
+    headers: final-headers,
+    body: encoded-body
+  })
+}
+
 request
 meta {
     doc: """
@@ -50,6 +206,9 @@ meta {
     ```hot
     response ::github::api/request("GET", "/user")
     response.body.login
+
+    // Per-call credentials
+    other ::github::api/request("GET", "/user", {}, "", {token: "ghp_tenant_b"})
     ```
     """
 }
@@ -61,26 +220,18 @@ fn
   request(method, path, additional-headers, "")
 },
 (method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, path, additional-headers, body, ::ctx/get("github.token"))
+  request(method, path, additional-headers, body, {})
 },
 (method: Str, path: Str, additional-headers: Map, body: Any, token: Str): HttpResponse {
-  default-headers {
-    Authorization: `Bearer ${token}`,
-    Accept: "application/vnd.github+json",
-    X-GitHub-Api-Version: ::github/API_VERSION,
-    User-Agent: "hot-dev-github-pkg"
+  ::hot::http/request(build-request(method, path, additional-headers, body, {...settings-from({}), token: token}))
+},
+// 5-arity: per-call credentials and settings (see `resolve`)
+(method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { ::hot::http/request(build-request(method, path, additional-headers, body, resolved)) }
   }
-
-  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
-  final-headers {...headers, ...additional-headers}
-
-  encoded-body if(eq(body, ""), "", to-json(untype(body)))
-  ::hot::http/request(HttpRequest({
-    method,
-    url: `${::github/BASE_URL}${path}`,
-    headers: final-headers,
-    body: encoded-body
-  }))
 }
 
 json-response-body fn (response: HttpResponse): Any {
@@ -118,6 +269,15 @@ fn
     is-ok-response(response) => { github-response(response) }
     => { err(HttpError(response)) }
   }
+},
+// 5-arity: per-call credentials and settings (see `resolve`)
+(method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): GitHubResponse {
+  response request(method, path, additional-headers, body, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { github-response(response) }
+    => { err(HttpError(response)) }
+  }
 }
 
 json
@@ -139,6 +299,15 @@ fn
 // 5-arity: explicit token override (App JWTs, installation tokens)
 (method: Str, path: Str, additional-headers: Map, body: Any, token: Str): Any {
   response request(method, path, additional-headers, body, token)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { json-response-body(response) }
+    => { err(HttpError(response)) }
+  }
+},
+// 5-arity: per-call credentials and settings (see `resolve`)
+(method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): Any {
+  response request(method, path, additional-headers, body, opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { json-response-body(response) }
@@ -172,33 +341,43 @@ next-page-path
 meta {
     doc: """
     Return the relative API path from a GitHub response's `rel="next"` link,
-    or null on the final page. Rejects pagination links outside api.github.com.
+    or null on the final page. Rejects pagination links outside `base-url`
+    (api.github.com by default).
     """
 }
-fn (headers: Map): Str? {
+fn
+(headers: Map): Str? {
+  next-page-path(headers, ::github/BASE_URL)
+},
+(headers: Map, base-url: Str): Str? {
   url link-url(headers, "next")
   match url {
     Null => { null }
     Str => {
       if(
-        starts-with(url, `${::github/BASE_URL}/`),
-        slice(url, length(::github/BASE_URL)),
-        err(`GitHub pagination link is outside ${::github/BASE_URL}: ${url}`)
+        starts-with(url, `${base-url}/`),
+        slice(url, length(base-url)),
+        err(`GitHub pagination link is outside ${base-url}: ${url}`)
       )
     }
   }
 }
 
-next-page-with-token fn (response: GitHubResponse, token: Str?): GitHubResponse? {
-  path next-page-path(response.headers)
-  match path {
-    Null => { null }
-    Str => {
-      match token {
-        Null => { json-response("GET", path) }
-        Str => { json-response("GET", path, {}, "", token) }
-      }
-    }
+// `auth` is null (context), an explicit token Str, or an opts Map.
+auth-base-url fn (auth: Any): Str {
+  if(is-map(auth), settings-from(auth).base-url, ::github/BASE_URL)
+}
+
+fetch-page fn (path: Str, auth: Any): GitHubResponse {
+  if(is-null(auth), json-response("GET", path), json-response("GET", path, {}, "", auth))
+}
+
+next-page-with-token fn (response: GitHubResponse, auth: Any): GitHubResponse? {
+  path next-page-path(response.headers, auth-base-url(auth))
+  cond {
+    is-err(path) => { path }
+    is-null(path) => { null }
+    => { fetch-page(path, auth) }
   }
 }
 
@@ -207,8 +386,8 @@ meta {
     doc: """
     Fetch the next page represented by a `GitHubResponse`, preserving the next
     response's metadata. Returns null when the supplied page is the last one.
-    Pass an explicit token as the second argument when the first page used a
-    token override.
+    Pass an explicit token or the same `opts` Map as the second argument when
+    the first page used one. A pagination link outside the API root is an Err.
     """
 }
 fn
@@ -217,29 +396,31 @@ fn
 },
 (response: GitHubResponse, token: Str): GitHubResponse? {
   next-page-with-token(response, token)
+},
+(response: GitHubResponse, opts: Map): GitHubResponse? {
+  next-page-with-token(response, opts)
 }
 
-fetch-page fn (path: Str, token: Str?): GitHubResponse {
-  match token {
-    Null => { json-response("GET", path) }
-    Str => { json-response("GET", path, {}, "", token) }
-  }
-}
+collect-list-pages fn (path: Str, accumulated: Vec, auth: Any): Vec {
+  page fetch-page(path, auth)
+  cond {
+    is-err(page) => { page }
+    => {
+      items match page.data {
+        Null => { [] }
+        Vec => { page.data }
+        => { err("GitHub paginate-list expected a Vec response body") }
+      }
 
-collect-list-pages fn (path: Str, accumulated: Vec, token: Str?): Vec {
-  page fetch-page(path, token)
-  items match page.data {
-    Null => { [] }
-    Vec => { page.data }
-    => { err("GitHub paginate-list expected a Vec response body") }
-  }
+      combined concat(accumulated, items)
+      next next-page-path(page.headers, auth-base-url(auth))
 
-  combined concat(accumulated, items)
-  next next-page-path(page.headers)
-
-  match next {
-    Null => { combined }
-    Str => { collect-list-pages(next, combined, token) }
+      cond {
+        is-err(next) => { next }
+        is-null(next) => { combined }
+        => { collect-list-pages(next, combined, auth) }
+      }
+    }
   }
 }
 
@@ -248,8 +429,8 @@ meta {
     doc: """
     Fetch every page for an endpoint whose body is a Vec. Pagination follows
     GitHub's `link` header serially. Prefer manual `json-response`/`next-page`
-    when the result may be very large. Pass an explicit token as the second
-    argument when using a token override.
+    when the result may be very large. Pass an explicit token or an `opts` Map
+    as the second argument for a per-call identity.
     """
 }
 fn
@@ -258,22 +439,31 @@ fn
 },
 (path: Str, token: Str): Vec {
   collect-list-pages(path, [], token)
+},
+(path: Str, opts: Map): Vec {
+  collect-list-pages(path, [], opts)
 }
 
-collect-key-pages fn (path: Str, key: Str, accumulated: Vec, token: Str?): Vec {
-  page fetch-page(path, token)
-  items get(page.data, key, [])
-  checked match items {
-    Vec => { items }
-    => { err(`GitHub paginate-key expected '${key}' to be a Vec`) }
-  }
+collect-key-pages fn (path: Str, key: Str, accumulated: Vec, auth: Any): Vec {
+  page fetch-page(path, auth)
+  cond {
+    is-err(page) => { page }
+    => {
+      items get(page.data, key, [])
+      checked match items {
+        Vec => { items }
+        => { err(`GitHub paginate-key expected '${key}' to be a Vec`) }
+      }
 
-  combined concat(accumulated, checked)
-  next next-page-path(page.headers)
+      combined concat(accumulated, checked)
+      next next-page-path(page.headers, auth-base-url(auth))
 
-  match next {
-    Null => { combined }
-    Str => { collect-key-pages(next, key, combined, token) }
+      cond {
+        is-err(next) => { next }
+        is-null(next) => { combined }
+        => { collect-key-pages(next, key, combined, auth) }
+      }
+    }
   }
 }
 
@@ -281,8 +471,8 @@ paginate-key
 meta {
     doc: """
     Fetch every page for an endpoint whose item Vec is nested under `key`,
-    such as `"check_runs"` or `"items"`. Pass an explicit token as the third
-    argument when using a token override.
+    such as `"check_runs"` or `"items"`. Pass an explicit token or an `opts`
+    Map as the third argument for a per-call identity.
     """
 }
 fn
@@ -291,6 +481,9 @@ fn
 },
 (path: Str, key: Str, token: Str): Vec {
   collect-key-pages(path, key, [], token)
+},
+(path: Str, key: Str, opts: Map): Vec {
+  collect-key-pages(path, key, [], opts)
 }
 
 response-body
@@ -317,8 +510,12 @@ meta {
     redirect for Actions logs and artifacts.
     """
 }
-fn (path: Str): Any {
-  response request("GET", path)
+fn
+(path: Str): Any {
+  download(path, {})
+},
+(path: Str, opts: Map): Any {
+  response request("GET", path, {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response-body(response) }

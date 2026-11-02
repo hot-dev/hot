@@ -1,0 +1,74 @@
+::qdrant::api ns
+meta {
+    ctx: {"qdrant.url": {required: false, secret: false}, "qdrant.api.key": {required: false}},
+    doc: """Per-call credentials for the Qdrant package: `resolve(opts)` is the one place opts, context and the local default are merged."""
+}
+
+::ctx ::hot::ctx
+
+DEFAULT_URL "http://localhost:6333"
+
+is-blank fn (value: Any): Bool {
+  cond {
+    is-str(value) => { is-empty(trim(value)) }
+    => { true }
+  }
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: `{url, api-key}` for a call from `opts` first,
+    then `ctx-values` (a Map of context variables), then the local default
+    URL. `api-key` is `""` when the call sends no auth header, which is
+    valid for a local Qdrant, so a missing key is not an error here.
+
+    A key is never sent anywhere it wasn't meant for: when `opts` has a
+    `url` and no `api-key`, the context key is not used, because it belongs
+    to the context instance. `{url: ..., api-key: ""}` and `{url: ...}`
+    both mean "no auth". An `api-key` in `opts` always replaces the context
+    key. Nothing is written to ctx. Exposed for testing; `resolve` feeds it
+    the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  opts-url get(opts, "url")
+  ctx-url get(ctx-values, "qdrant.url")
+  url cond {
+    not(is-blank(opts-url)) => { opts-url }
+    not(is-blank(ctx-url)) => { ctx-url }
+    => { DEFAULT_URL }
+  }
+
+  api-key cond {
+    in("api-key", keys(opts)) => { or(get(opts, "api-key"), "") }
+    not(is-blank(opts-url)) => { "" }
+    => { or(get(ctx-values, "qdrant.api.key"), "") }
+  }
+
+  {url: url, api-key: api-key}
+}
+
+resolve
+meta {
+    ctx: {"qdrant.url": {required: false, secret: false}, "qdrant.api.key": {required: false}},
+    doc: """
+    The instance and key for one call: `opts` over the context variables
+    over the default URL (see `resolve-from`). Per-call credentials stay in
+    the call; nothing is written to ctx, so parallel flows and tenants
+    never share them.
+
+    **Example**
+
+    ```hot
+    ::qdrant::api/resolve({url: "https://tenant-b.qdrant.example", api-key: "tenant-b-key"}).url
+    // "https://tenant-b.qdrant.example"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  resolve-from(opts, {
+    "qdrant.url": ::ctx/get("qdrant.url"),
+    "qdrant.api.key": ::ctx/get("qdrant.api.key")
+  })
+}

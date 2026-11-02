@@ -1,0 +1,337 @@
+::github::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no github.* context.
+
+::api ::github::api
+::app ::github::app
+::actions ::github::actions
+::artifacts ::github::artifacts
+::checks ::github::checks
+::commits ::github::commits
+::issues ::github::issues
+::pulls ::github::pulls
+::rate-limit ::github::rate-limit
+::repos ::github::repos
+::search ::github::search
+::users ::github::users
+GitHubResponse ::github::api/GitHubResponse
+
+OFFLINE {token: "ghp_tenant", base-url: "http://127.0.0.1:1"}
+
+// Throwaway test key from hot/pkg/jwt's tests.
+TEST_RSA_PEM """-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCrYPuXclov+8mi
+QdHLEqzPRBYk680SEdPgKvJYB3ennG7GuR1KXk3i9pvVHqtN+g2sfvSYxd2IZubt
+Z0cfBDG6a8idkH9tZDqfOB48BABntG3Kxkjjm5OUXcLu48VN+TLpl0j1jVr9jy/a
+Zhci+YJNOox+GqZJ7YiDJKXgMrRGMwChPuK0A++p1DJteS2Kv9lGZdYcH6I4CHLR
+xOXuyFYL/3KWWxCWf3xORTXgHCLcTT+gdKm1rnkUAkVE5J7fgWBcT8tvwJ44lZ/U
+mzhbId2El1TmTkjfil+813QxZRJbkPDrDQWJT/9Zh389hcP5jffaLI6fzjXMX27/
+e1yKC/dfAgMBAAECggEADywl/TzEZRTtDBgfEaDEu0RwLQxrp0rI9iktmgNU1OCu
+fAB3UK/nRFpustNx+Uegi0hIF/hrvWY8a2f/1DkKVmwX1djgamTIiqasvCwWHxhK
+huLyhz556W8HN+zi+TbAcUBecLYQu3vZ3p0em9v47PGe7sRZB+WA9vjsVVxLBbkP
+O76TRYU+kQU6gxOCS7bZ2TbIxvCTFzzi4AObeDy493jQe49HJJF31BWfWQnd61aC
+Fe5ipcmfEVuuzqWpNIYfq8f/O/+4EKRrxPNAkF9cWDMLUiUFr6uRrIDHqwjfPtb5
+jVuyfaJpgCrshVIc5KSd38GERzQfGoQMpzgtBNaP9QKBgQDhS/Orc+2wMt9Knx1J
+tee9+GcqT88p3prgI2abKI3bMTegnrkbJUfxjmh6p94JqvFHUQ97nM4qucvaOXXD
+MX8Yf/HvKc4NiNnJRzGvi41I+J5ewK1xKfEJhuCT+iZulTPpTZpZXTs1Wz0WVQa+
+xGmY/RL405kpR57t8aYEF+dHdQKBgQDCu/g545bEVKbtZWjXS5wNzOxkSeD0dr5g
+mkoJUmU5ntv+p7mhTLXAxAHoNUpIR5CLbbwZ6+CpN9JZ4B/UOChrgbgwzWCkaSKD
+h4VhEJEIN/k/VkQ1C5g6NBLVMYiVqOOX3syYaJgm25HsVRDKM2l8oktrXV0zFpzG
+iMTkBmp9AwKBgAJoCUY/ir5jDLeDU5DB/KOuz4tIJvJPil/ygNoPaNR6hhmVGG0N
+zOLrnnoQ6PI5fTJBz2SGnD0glujRzEw1byIX28GuNKE4YPshY4p4dx3cafShIjkf
+NY/gfO2Xsmlj9pX7WjayJDvBqblfVx8agfY8XcOCnxQty6jG9/r7NmExAoGBAKUG
+zNaqI5OgNZKLVSzW+5nKZy6aWVRy6OVO+50owXXyRXdqxmqGaqTAtukFeD0GwN0Y
+EsdY2RwunUnjILYlHUP2O5TIB7VtD32ttH/MnUv8u3JMdiMJ/2ibxrX7c0d5R97l
+RjeGtCKCAwjoEgF5TlT76LRE+/2WlSe+sjSXp1jnAoGAYC+BiprgvwdVfGuWzvcf
+KU1nCqCFUaY4zu6FYeHCss2skbLb2fJf5XcNRc6KxdTwc0iVyxVTtth6YqraCPyG
+vpgguFcjN8C7xIYtsVn/Vl0ehcacqupv7NdBeFbLXR3dalZHhnQyOInT8+b6BGLO
+iv1mq913odV3grjJZoH4zkk=
+-----END PRIVATE KEY-----"""
+
+// Nothing listens on port 1, so a call fails at the socket, with the URL
+// in the error. That error proves the call got past the credential check
+// and used this `opts`, without any network traffic.
+reaches fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "127.0.0.1:1"))
+}
+
+// ============================================================================
+// Resolver
+// ============================================================================
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({token: "opt-token"}, {"github.token": "ctx-token"})
+    assert-eq("opt-token", r.token)
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    r ::api/resolve-from({}, {"github.token": "ctx-token"})
+    assert-eq("ctx-token", r.token)
+    assert-eq("https://api.github.com", r.base-url)
+    assert-eq(::github/API_VERSION, r.api-version)
+}
+
+test-resolve-settings
+meta ["test"] fn () {
+    r ::api/resolve-from({token: "t", base-url: "https://ghe.example.com/api/v3/", api-version: "2022-11-28"}, {"github.token": "ctx-token"})
+    assert-eq("https://ghe.example.com/api/v3", r.base-url, "the trailing slash goes")
+    assert-eq("2022-11-28", r.api-version)
+}
+
+test-resolve-missing-credential-is-a-clear-error
+meta ["test"] fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "github.token"))
+    assert(contains(err-message(out), "opts"))
+}
+
+test-resolve-app-identity
+meta ["test"] fn () {
+    identity {app-id: 12, private-key: "pem", installation-id: 34}
+    r ::api/resolve-from(identity, {"github.token": "ctx-token"})
+    assert-eq(identity, r.app, "an App identity beats the context token")
+    assert(is-null(get(r, "token")))
+    assert-eq("explicit", ::api/resolve-from({...identity, token: "explicit"}, {}).token, "a token beats an App identity")
+}
+
+test-resolve-partial-app-identity-is-an-error
+meta ["test"] fn () {
+    out ::api/resolve-from({app-id: 12}, {"github.token": "ctx-token"})
+    assert(is-err(out), "never falls back to the context token")
+    assert(contains(err-message(out), "installation-id"))
+    assert(not(contains(err-message(::api/resolve-from({private-key: "secret-pem"}, {})), "secret-pem")), "the key stays out of messages")
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("github.token")
+    assert-eq("ghp_call", ::api/resolve({token: "ghp_call"}).token)
+    assert(reaches(::users/get-authenticated(OFFLINE)))
+    assert-eq(before, ::hot::ctx/get("github.token"))
+}
+
+test-existing-arity-reads-ctx
+meta ["test"] fn () {
+    cond {
+        is-some(::hot::ctx/get("github.token")) => { assert(true) }
+        => {
+            out ::users/get-authenticated()
+            assert(is-err(out))
+            assert(contains(err-message(out), "github.token"))
+        }
+    }
+}
+
+// ============================================================================
+// Request building
+// ============================================================================
+
+test-build-request-from-resolved
+meta ["test"] fn () {
+    a ::api/build-request("GET", "/user", {}, "", ::api/resolve-from({token: "tenant-a"}, {}))
+    b ::api/build-request("POST", "/x", {X-Extra: "1"}, {y: 2}, ::api/resolve-from({token: "tenant-b", base-url: "https://ghe.example.com/api/v3"}, {}))
+    assert-eq("https://api.github.com/user", a.url)
+    assert-eq("Bearer tenant-a", a.headers.Authorization)
+    assert-eq(::github/API_VERSION, get(a.headers, "X-GitHub-Api-Version"))
+    assert-eq("", a.body)
+    assert(is-null(get(a.headers, "Content-Type")))
+    assert-eq("https://ghe.example.com/api/v3/x", b.url)
+    assert-eq("Bearer tenant-b", b.headers.Authorization)
+    assert-eq("1", get(b.headers, "X-Extra"))
+    assert-eq("application/json", get(b.headers, "Content-Type"))
+    assert-eq({y: 2}, from-json(b.body))
+}
+
+test-dispatch-omits-empty-inputs
+meta ["test"] fn () {
+    assert-eq({ref: "main"}, ::actions/dispatch-body("main", {}))
+    assert-eq({ref: "main", inputs: {env: "staging"}}, ::actions/dispatch-body("main", {env: "staging"}))
+}
+
+// ============================================================================
+// Every module threads opts to the request
+// ============================================================================
+
+test-opts-reach-the-transport
+meta ["test"] fn () {
+    assert(reaches(::api/request("GET", "/user", {}, "", OFFLINE)))
+    assert(reaches(::api/json("GET", "/user", {}, "", OFFLINE)))
+    assert(reaches(::api/json-response("GET", "/user", {}, "", OFFLINE)))
+    assert(reaches(::api/download("/x", OFFLINE)))
+    assert(reaches(::api/paginate-list("/x", OFFLINE)))
+    assert(reaches(::api/paginate-key("/x", "items", OFFLINE)))
+}
+
+test-opts-reach-endpoint-modules
+meta ["test"] fn () {
+    assert(reaches(::users/get-user("ada", OFFLINE)))
+    assert(reaches(::rate-limit/get(OFFLINE)))
+    assert(reaches(::search/search-issues("is:open", {}, OFFLINE)))
+    assert(reaches(::issues/list-issues("a", "b", {state: "open"}, OFFLINE)))
+    assert(reaches(::issues/close-issue("a", "b", 1, OFFLINE)))
+    assert(reaches(::pulls/merge-pull("a", "b", 1, {}, OFFLINE)))
+    assert(reaches(::artifacts/download-artifact("a", "b", 7, OFFLINE)))
+    assert(reaches(::commits/get-commit("a", "b", "main", {}, OFFLINE)))
+    assert(reaches(::checks/get-check-run("a", "b", 42, OFFLINE)))
+    assert(reaches(::repos/get-repo("a", "b", OFFLINE)))
+    assert(reaches(::actions/dispatch-workflow("a", "b", "ci.yml", "main", {}, OFFLINE)))
+    assert(reaches(::actions/download-workflow-job-logs("a", "b", 9, OFFLINE)))
+}
+
+test-same-arity-overloads-keep-their-meaning
+meta ["test"] fn () {
+    assert(reaches(::repos/get-content("a", "b", "f.txt", OFFLINE)), "a Map is opts")
+    assert(reaches(::repos/get-content("a", "b", "f.txt", "main", OFFLINE)), "a Str is the ref")
+    assert(reaches(::pulls/create-review("a", "b", 1, {event: "COMMENT", body: "x"}, OFFLINE)), "review Map, then opts")
+    assert(reaches(::pulls/create-review("a", "b", 1, "COMMENT", "x", OFFLINE)), "event and body, then opts")
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+page-with-link fn (url: Str): GitHubResponse {
+    GitHubResponse({status: 200, headers: {link: `<${url}>; rel="next"`}, data: []})
+}
+
+test-next-page-with-opts
+meta ["test"] fn () {
+    assert(reaches(::api/next-page(page-with-link("http://127.0.0.1:1/x?page=2"), OFFLINE)), "stays on the per-call API root")
+    assert-eq("/x?page=2", ::api/next-page-path({link: "<http://127.0.0.1:1/x?page=2>; rel=\"next\""}, "http://127.0.0.1:1"))
+}
+
+test-next-page-refuses-another-origin
+meta ["test"] fn () {
+    out ::api/next-page(page-with-link("https://evil.example/x?page=2"), OFFLINE)
+    assert(is-err(out), "the token never goes to another origin, and the caller hears about it")
+    assert(contains(err-message(out), "outside"))
+    assert(is-err(::api/next-page(page-with-link("https://evil.example/x"), "a-token")), "the explicit-token arity too")
+}
+
+// ============================================================================
+// GitHub App tokens
+// ============================================================================
+
+test-token-cache-key-hashes-the-identity
+meta ["test"] fn () {
+    identity {app-id: 12, private-key: "super-secret-pem", installation-id: 34}
+    key ::app/token-cache-key(identity, "https://api.github.com")
+    assert(starts-with(key, "github.app-token."))
+    assert(not(contains(key, "super-secret-pem")), "the key is hashed")
+    assert-eq(81, length(key), "prefix plus a SHA-256 in hex")
+    assert-eq(key, ::app/token-cache-key(identity, "https://api.github.com"), "stable")
+    assert(ne(key, ::app/token-cache-key({...identity, installation-id: 35}, "https://api.github.com")), "per installation")
+    assert(ne(key, ::app/token-cache-key({...identity, app-id: 13}, "https://api.github.com")), "per App")
+    assert(ne(key, ::app/token-cache-key({...identity, private-key: "other"}, "https://api.github.com")), "per key")
+    assert(ne(key, ::app/token-cache-key(identity, "https://ghe.example.com/api/v3")), "per API root")
+}
+
+test-is-fresh
+meta ["test"] fn () {
+    assert(::app/is-fresh({token: "t", expires-at: 100}, 99))
+    assert(not(::app/is-fresh({token: "t", expires-at: 100}, 100)), "expired")
+    assert(not(::app/is-fresh(null, 0)), "nothing cached")
+}
+
+test-resolve-uses-the-cached-installation-token
+meta ["test"] fn () {
+    identity {app-id: 501, private-key: "not a pem: minting would fail", installation-id: 601}
+    key ::app/token-cache-key(identity, ::github/BASE_URL)
+    ::hot::ctx/set-secret(key, {token: "ghs_cached", expires-at: 99999999999999})
+    before ::hot::ctx/get("github.token")
+
+    r ::api/resolve(identity)
+    assert-eq("ghs_cached", r.token)
+    assert(is-null(get(r, "app")), "the App identity is gone once there's a token")
+    assert-eq(before, ::hot::ctx/get("github.token"), "github.token is left alone")
+
+    other ::api/resolve({...identity, installation-id: 602})
+    assert(is-err(other), "another installation doesn't share the entry; it tries to mint and the bad key fails")
+}
+
+test-resolve-expired-token-mints-again
+meta ["test"] fn () {
+    identity {app-id: 502, private-key: "not a pem", installation-id: 603}
+    ::hot::ctx/set-secret(::app/token-cache-key(identity, ::github/BASE_URL), {token: "ghs_old", expires-at: 1})
+    assert(is-err(::api/resolve(identity)), "expired, so it signs a new JWT with the bad key")
+}
+
+test-app-identity-mints-against-the-per-call-root
+meta ["test"] fn () {
+    identity {app-id: 503, private-key: TEST_RSA_PEM, installation-id: 604, base-url: "http://127.0.0.1:1"}
+    assert(reaches(::users/get-authenticated(identity)), "signs the JWT, then the mint call hits the socket")
+    key ::app/token-cache-key(identity, "http://127.0.0.1:1")
+    assert(is-null(::hot::ctx/get(key)), "a failed mint caches nothing")
+    assert(reaches(::app/installation-token(503, TEST_RSA_PEM, 604, {base-url: "http://127.0.0.1:1"})))
+    assert(reaches(::app/list-installations(503, TEST_RSA_PEM, {base-url: "http://127.0.0.1:1"})))
+}
+
+test-webhook-explicit-secret-arity-still-there
+meta ["test"] fn () {
+    body """{"action":"opened"}"""
+    sig ::hot::hmac/hmac-sha256("tenant-secret", body)
+    request {headers: {x-hub-signature-256: `sha256=${sig}`}, body-raw: body}
+    assert(::github::webhooks/verify-request(request, "tenant-secret"))
+    assert(not(::github::webhooks/verify-request(request, "other-secret")))
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    ctx {"github.token": "ctx-token"}
+    full {app-id: 12, private-key: "pem", installation-id: 34}
+    cases [
+        ["token", {token: ""}],
+        ["token", {token: "   "}],
+        ["token", {token: null}],
+        ["token", {...full, token: ""}],
+        ["app-id", {...full, app-id: null}],
+        ["private-key", {...full, private-key: "  "}],
+        ["installation-id", {...full, installation-id: ""}],
+        ["app-id", {app-id: null}],
+        ["private-key", {private-key: ""}]
+    ]
+    results map(cases, (c) {
+        out ::api/resolve-from(c[1], ctx)
+        assert(is-err(out), `${c[0]}: never falls back to github.token`)
+        assert(contains(err-message(out), c[0]), `names ${c[0]}`)
+        true
+    })
+    assert-eq(9, length(results))
+    assert(is-err(::users/get-authenticated({token: ""})), "the error reaches the caller")
+    assert(not(is-err(::api/resolve-from({base-url: "", api-version: null}, ctx))), "blank settings are not credentials")
+}
+
+test-base-url-without-credential-is-an-error
+meta ["test"] fn () {
+    out ::api/resolve-from({base-url: "https://collector.example"}, {"github.token": "ghp_ctx_secret"})
+    assert(is-err(out), "the context key must not go to a per-call URL")
+    assert(contains(err-message(out), "base-url"))
+    assert(contains(err-message(out), "token"))
+    assert(not(contains(err-message(out), "ghp_ctx_secret")), "the key stays out of messages")
+    assert-eq("https://collector.example", ::api/resolve-from({base-url: "https://collector.example", token: "tenant"}, {"github.token": "ghp_ctx_secret"}).base-url, "with a credential it works")
+    assert-eq("ghp_ctx_secret", ::api/resolve-from({base-url: ""}, {"github.token": "ghp_ctx_secret"}).token, "a blank base-url is the default root")
+}
+
+test-base-url-without-credential-sends-nothing
+meta ["test"] fn () {
+    before ::hot::ctx/get("github.token")
+    ::hot::ctx/set-secret("github.token", "ghp_ctx_secret")
+    assert-eq("ghp_ctx_secret", ::api/resolve({}).token, "control: the live context key is set")
+    out ::users/get-user("ada", {base-url: "http://127.0.0.1:1"})
+    assert(is-err(out))
+    assert(contains(err-message(out), "base-url"))
+    assert(not(reaches(out)), "no request was attempted: the failure isn't the socket")
+    assert(reaches(::users/get-user("ada", {token: "tenant", base-url: "http://127.0.0.1:1"})), "control: with a credential it reaches the socket")
+    ::hot::ctx/set-secret("github.token", before)
+}
+
+test-base-url-with-app-identity-is-a-credential
+meta ["test"] fn () {
+    identity {app-id: 12, private-key: "pem", installation-id: 34, base-url: "https://ghe.example.com/api/v3"}
+    assert-eq("https://ghe.example.com/api/v3", ::api/resolve-from(identity, {"github.token": "ctx-token"}).base-url)
+    assert(is-null(get(::api/resolve-from(identity, {"github.token": "ctx-token"}), "token")), "the context token stays out")
+}

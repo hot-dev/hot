@@ -1,0 +1,171 @@
+::resend::test::opts ns
+meta ["test"]
+
+// Hermetic. These tests never send an HTTP request: a credential with a
+// newline is not a legal header value, so the HTTP client refuses to build
+// the request. An error from ::hot::http/request therefore proves that the
+// credential got through the function to the client, and the "not set" error
+// proves the function went through the resolver. A host-name lookup can still
+// happen first; when it fails, the error comes from the same place.
+
+::api ::resend::api
+::api-keys ::resend::api::keys
+::audiences ::resend::audiences
+::broadcasts ::resend::broadcasts
+::domains ::resend::domains
+::emails ::resend::emails
+
+CTX_KEY "resend.api.key"
+UNSENDABLE "opts\ncredential"
+
+// One valid call to every function that calls the API, without its opts.
+every-call fn (): Vec {
+  [
+    {f: ::api-keys/retrieve-list-api-keys, args: [::api-keys/GETApiKeysRequest({})]},
+    {f: ::api-keys/create-new-api-key, args: [::api-keys/POSTApiKeysRequest({name: "x"})]},
+    {f: ::api-keys/remove-existing-api-key, args: [::api-keys/DELETEApiKeysApiKeyIdRequest({api-key-id: "x"})]},
+    {f: ::audiences/retrieve-list-audiences, args: [::audiences/GETAudiencesRequest({})]},
+    {f: ::audiences/create-list-contacts, args: [::audiences/POSTAudiencesRequest({name: "x"})]},
+    {f: ::audiences/retrieve-single-audience, args: [::audiences/GETAudiencesIdRequest({id: "x"})]},
+    {f: ::audiences/remove-existing-audience, args: [::audiences/DELETEAudiencesIdRequest({id: "x"})]},
+    {f: ::audiences/retrieve-list-contacts, args: [::audiences/GETAudiencesAudienceIdContactsRequest({audience-id: "x"})]},
+    {f: ::audiences/create-new-contact, args: ["x", ::audiences/POSTAudiencesAudienceIdContactsRequest({email: "x"})]},
+    {f: ::audiences/retrieves-single-contact-by-email, args: [::audiences/GETAudiencesAudienceIdContactsEmailRequest({email: "x", audience-id: "x"})]},
+    {f: ::audiences/update-single-contact-by-email, args: [::audiences/PATCHAudiencesAudienceIdContactsEmailRequest({email: "x", audience-id: "x"})]},
+    {f: ::audiences/remove-existing-contact-by-email, args: [::audiences/DELETEAudiencesAudienceIdContactsEmailRequest({email: "x", audience-id: "x"})]},
+    {f: ::audiences/retrieve-single-contact-by-id, args: [::audiences/GETAudiencesAudienceIdContactsIdRequest({id: "x", audience-id: "x"})]},
+    {f: ::audiences/update-single-contact-by-id, args: ["x", "x", ::audiences/PATCHAudiencesAudienceIdContactsIdRequest({})]},
+    {f: ::audiences/remove-existing-contact-by-id, args: [::audiences/DELETEAudiencesAudienceIdContactsIdRequest({id: "x", audience-id: "x"})]},
+    {f: ::broadcasts/retrieve-list-broadcasts, args: [::broadcasts/GETBroadcastsRequest({})]},
+    {f: ::broadcasts/create-broadcast, args: [::broadcasts/POSTBroadcastsRequest({audience_id: "x", from: "x", subject: "x"})]},
+    {f: ::broadcasts/retrieve-single-broadcast, args: [::broadcasts/GETBroadcastsIdRequest({id: "x"})]},
+    {f: ::broadcasts/remove-existing-broadcast-that-is-draft-status, args: [::broadcasts/DELETEBroadcastsIdRequest({id: "x"})]},
+    {f: ::broadcasts/send-or-schedule-broadcast, args: ["x", ::broadcasts/POSTBroadcastsIdSendRequest({})]},
+    {f: ::domains/retrieve-list-domains, args: [::domains/GETDomainsRequest({})]},
+    {f: ::domains/create-new-domain, args: [::domains/POSTDomainsRequest({name: "x"})]},
+    {f: ::domains/retrieve-single-domain, args: [::domains/GETDomainsDomainIdRequest({domain-id: "x"})]},
+    {f: ::domains/update-existing-domain, args: ["x", ::domains/PATCHDomainsDomainIdRequest({})]},
+    {f: ::domains/remove-existing-domain, args: [::domains/DELETEDomainsDomainIdRequest({domain-id: "x"})]},
+    {f: ::domains/verify-existing-domain, args: [::domains/POSTDomainsDomainIdVerifyRequest({domain-id: "x"})]},
+    {f: ::emails/send-email, args: [::emails/POSTEmailsRequest({from: "x", to: [], subject: "x"})]},
+    {f: ::emails/retrieve-single-email, args: [::emails/GETEmailsEmailIdRequest({email-id: "x"})]},
+    {f: ::emails/update-single-email, args: [::emails/PATCHEmailsEmailIdRequest({email-id: "x"})]},
+    {f: ::emails/cancel-schedule-email, args: [::emails/POSTEmailsEmailIdCancelRequest({email-id: "x"})]},
+    {f: ::emails/send-batch-emails, args: [[]]}
+  ]
+}
+
+failure fn (f: Any, args: Vec): Str {
+  attempt ::hot::internal::exec/contain(f, args)
+  cond {
+    is-err(attempt) => { ::hot::type/err-message(err-value(attempt)) }
+    => { "no error" }
+  }
+}
+
+reached-http fn (message: Str): Bool {
+  contains(message, "::hot::http/request")
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+  r ::api/resolve-from({api-key: "from-opts"}, {"resend.api.key": "from-ctx"})
+  assert-eq("from-opts", r.api-key)
+}
+
+test-resolve-ctx-when-opts-empty
+meta ["test"] fn () {
+  r ::api/resolve-from({}, {"resend.api.key": "from-ctx"})
+  assert-eq("from-ctx", r.api-key)
+}
+
+test-resolve-missing-credential
+meta ["test"] fn () {
+  missing ::api/resolve-from({}, {})
+  assert(is-err(missing), "no credential is an Err")
+  assert(contains(err-value(missing), "resend.api.key"), "the error names the context variable")
+  assert(contains(err-value(missing), "api-key"), "the error names the opts key")
+  assert(is-err(::api/resolve-from({}, {"resend.api.key": "  "})), "a blank context value counts as missing")
+}
+
+test-resolve-blank-opts-credential-never-falls-back-to-ctx
+meta ["test"] fn () {
+  assert(is-err(::api/resolve-from({api-key: null}, {"resend.api.key": "from-ctx"})), "null")
+  assert(is-err(::api/resolve-from({api-key: ""}, {"resend.api.key": "from-ctx"})), "empty")
+  assert(is-err(::api/resolve-from({api-key: "  "}, {"resend.api.key": "from-ctx"})), "blank")
+}
+
+test-resolve-reads-ctx-and-never-writes-it
+meta ["test"] fn () {
+  assert(is-err(::api/resolve({})), "no context in tests")
+  assert-eq("tenant-b", ::api/resolve({api-key: "tenant-b"}).api-key)
+  assert(is-null(::hot::ctx/get("resend.api.key")), "a per-call credential is not written to ctx")
+  ::hot::ctx/set("resend.api.key", "from-ctx")
+  from-ctx ::api/resolve({})
+  overridden ::api/resolve({api-key: "tenant-b"})
+  still ::hot::ctx/get("resend.api.key")
+  ::hot::ctx/set("resend.api.key", null)
+  assert-eq("from-ctx", from-ctx.api-key)
+  assert-eq("tenant-b", overridden.api-key, "opts win over the real context")
+  assert-eq("from-ctx", still, "the override leaves ctx alone")
+}
+
+test-raw-request-opts-and-missing-credential
+meta ["test"] fn () {
+  missing ::api/request("GET", "https://example.invalid/x", {}, "", {})
+  assert(is-err(missing), "raw request returns an Err")
+  assert(contains(err-value(missing), "resend.api.key"))
+  assert(is-err(::api/request("GET", "https://example.invalid/x", {}, "", {api-key: "k"})), "reaches the client, which can't resolve the host")
+  assert(contains(failure(::api/request, ["GET", "https://example.invalid/x"]), "resend.api.key"), "the ctx arities report it too")
+}
+
+test-every-function-reports-a-missing-credential
+meta ["test"] fn () {
+  for-each(every-call(), (call) {
+    assert(contains(failure(call.f, concat(call.args, [{}])), "resend.api.key is not set"), `${call.f} with empty opts`)
+    assert(contains(failure(call.f, call.args), "resend.api.key is not set"), `${call.f} without opts`)
+  })
+}
+
+test-every-opts-arity-takes-its-credential-from-opts
+meta ["test"] fn () {
+  for-each(every-call(), (call) {
+    assert(reached-http(failure(call.f, concat(call.args, [{api-key: UNSENDABLE}]))), `${call.f} with a credential in opts`)
+  })
+}
+
+test-every-opts-arity-rejects-a-blank-credential-even-with-ctx-set
+meta ["test"] fn () {
+  ::hot::ctx/set("resend.api.key", UNSENDABLE)
+  results map(every-call(), (call) {
+    {f: call.f, message: failure(call.f, concat(call.args, [{api-key: ""}]))}
+  })
+  ::hot::ctx/set("resend.api.key", null)
+  for-each(results, (r) {
+    assert(contains(r.message, "is empty"), `${r.f} with a blank credential`)
+  })
+}
+
+test-every-existing-arity-still-uses-ctx
+meta ["test"] fn () {
+  ::hot::ctx/set("resend.api.key", UNSENDABLE)
+  results map(every-call(), (call) {
+    {f: call.f, message: failure(call.f, call.args)}
+  })
+  ::hot::ctx/set("resend.api.key", null)
+  for-each(results, (r) {
+    assert(reached-http(r.message), `${r.f} with the credential in ctx`)
+  })
+}
+
+test-encode-body-sends-nothing-for-no-body
+meta ["test"] fn () {
+  assert-eq("", ::api/encode-body(""), "a body-less request has no body, not the two characters \"\"")
+  assert-eq("{\"a\":1}", ::api/encode-body({a: 1}))
+}
+
+test-unset-optionals-are-not-sent-as-null
+meta ["test"] fn () {
+  body ::api/encode-body(::emails/POSTEmailsRequest({from: "a@example.com", to: ["b@example.com"], subject: "s"}))
+  assert-eq({from: "a@example.com", to: ["b@example.com"], subject: "s"}, from-json(body))
+}

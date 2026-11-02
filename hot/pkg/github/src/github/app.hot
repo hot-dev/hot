@@ -15,11 +15,24 @@ meta {
     // every ::github wrapper then authenticates with it.
     ::hot::ctx/set-secret("github.token", token.token)
     issues ::github::issues/list-issues("acme", "api")
+
+    // Or act for one installation on one call. The token is minted once
+    // and cached for the run, keyed by a hash of the identity.
+    tenant {app-id: app-id, private-key: private-key-pem, installation-id: installation-id}
+    issues ::github::issues/list-issues("acme", "api", {}, tenant)
     ```
     """
 }
 
 ::jwt ::jwt
+::ctx ::hot::ctx
+::hash ::hot::hash
+::time ::hot::time
+
+TOKEN_CACHE_PREFIX "github.app-token."
+
+// GitHub installation tokens last one hour; stop using a cached one 5 minutes early.
+TOKEN_TTL_MS 3300000
 
 build-app-claims
 meta {
@@ -42,6 +55,12 @@ fn (app-id: Any, private-key-pem: Str): Str {
   ::jwt/sign(build-app-claims(app-id), private-key-pem, "RS256")
 }
 
+// Authenticate an App-level call with its JWT, keeping only the settings
+// of `opts`: an App call never uses a tenant's token.
+bearer-opts fn (bearer: Str, opts: Map): Map {
+  {token: bearer, base-url: get(opts, "base-url"), api-version: get(opts, "api-version")}
+}
+
 installation-token
 meta {
     doc: """
@@ -51,15 +70,70 @@ meta {
     (`::hot::ctx/set-secret("github.token", token.token)` for
     runtime-minted tokens) so the endpoint wrappers pick it up, or pass
     it explicitly via the final arity of `::github::api/request`/`json`.
+    To act for many installations in one run, pass `app-id`, `private-key`
+    and `installation-id` in any function's `opts` instead. `opts` here
+    takes `base-url` and `api-version`.
     """
 }
-fn (app-id: Any, private-key-pem: Str, installation-id: Any): Map {
+fn
+(app-id: Any, private-key-pem: Str, installation-id: Any): Map {
+  installation-token(app-id, private-key-pem, installation-id, {})
+},
+(app-id: Any, private-key-pem: Str, installation-id: Any, opts: Map): Map {
   bearer app-jwt(app-id, private-key-pem)
   match bearer {
     Result.Err => { err(bearer) }
 
     _ => {
-      ::github::api/json("POST", `/app/installations/${installation-id}/access_tokens`, {}, {}, bearer)
+      ::github::api/json("POST", `/app/installations/${installation-id}/access_tokens`, {}, {}, bearer-opts(bearer, opts))
+    }
+  }
+}
+
+token-cache-key
+meta {
+    doc: """The context key an installation token is cached under: a SHA-256 of the App id, installation id, private key and API root, so neither the key nor any id appears in it."""
+}
+fn (identity: Map, base-url: Str): Str {
+  material join([Str(identity.app-id), Str(identity.installation-id), identity.private-key, base-url], "\n")
+  `${TOKEN_CACHE_PREFIX}${::hash/sha256(material)}`
+}
+
+is-fresh
+meta {
+    doc: """True when a cache entry holds a token that has not reached its expiry."""
+}
+fn (entry: Any, now: Int): Bool {
+  and(is-map(entry), is-some(get(entry, "token")), lt(now, or(get(entry, "expires-at"), 0)))
+}
+
+cached-installation-token
+meta {
+    doc: """
+    An installation token for `identity` (`{app-id, private-key,
+    installation-id}`), minted once and cached with
+    `::hot::ctx/set-secret` under `token-cache-key` until 5 minutes before
+    it expires. Each identity has its own entry, so tenants and parallel
+    flows can't pick up each other's token, and `github.token` is left
+    alone. `settings` carries `base-url` and `api-version`. Returns the
+    token, or the Err from signing or minting.
+    """
+}
+fn (identity: Map, settings: Map): Str {
+  key token-cache-key(identity, settings.base-url)
+  now ::time/epoch-millis(::time/now())
+  hit ::ctx/get(key)
+  cond {
+    is-fresh(hit, now) => { hit.token }
+    => {
+      minted installation-token(identity.app-id, identity.private-key, identity.installation-id, settings)
+      cond {
+        is-err(minted) => { minted }
+        => {
+          ::ctx/set-secret(key, {token: minted.token, expires-at: add(now, TOKEN_TTL_MS)})
+          minted.token
+        }
+      }
     }
   }
 }
@@ -68,11 +142,15 @@ list-installations
 meta {
     doc: """GET /app/installations - The installations of your App (authenticated with the app JWT)."""
 }
-fn (app-id: Any, private-key-pem: Str): Any {
+fn
+(app-id: Any, private-key-pem: Str): Any {
+  list-installations(app-id, private-key-pem, {})
+},
+(app-id: Any, private-key-pem: Str, opts: Map): Any {
   bearer app-jwt(app-id, private-key-pem)
   match bearer {
     Result.Err => { err(bearer) }
 
-    _ => { ::github::api/json("GET", "/app/installations", {}, "", bearer) }
+    _ => { ::github::api/json("GET", "/app/installations", {}, "", bearer-opts(bearer, opts)) }
   }
 }

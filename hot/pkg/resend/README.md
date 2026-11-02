@@ -7,7 +7,28 @@ resend API bindings for Hot.
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/resend": "1.1.0"
+"hot.dev/resend": "1.2.0"
+```
+
+## Configuration
+
+Set the `resend.api.key` context variable to your Resend API key, or pass a key per call.
+
+## Per-call credentials
+
+Every function that calls Resend takes an optional trailing `opts` Map, so one run can send for several accounts. `api-key` replaces `resend.api.key` for that call only. Nothing is written to ctx, so parallel flows can't see each other's keys. A null or blank `api-key` is an error, never a fallback to the context key.
+
+```hot
+::emails ::resend::emails
+
+send-for-tenant fn (tenant: Map, to: Str): Any {
+  ::emails/send-email(::emails/POSTEmailsRequest({
+    from: tenant.from,
+    to: [to],
+    subject: "Hello from Hot!",
+    text: "Welcome!"
+  }), {api-key: tenant.resend-key})
+}
 ```
 
 ## API Base URL

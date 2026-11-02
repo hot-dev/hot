@@ -1,6 +1,25 @@
 ::supabase::admin::api ns
+meta {
+    doc: """
+    Transport for the Supabase Management API.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `supabase.access.token` context variable, then the
+    defaults. Nothing from `opts` is written to ctx, so one run can act for
+    many accounts and parallel flows don't share credentials. An
+    `access-token` present but blank or null is an error, never a fallback
+    to context.
+
+    - `access-token`: the Personal Access Token for this call
+    - `base-url`: another API root, such as a proxy. It needs an
+      `access-token` in the same `opts`: `supabase.access.token` is never
+      sent to a per-call URL.
+    """
+}
 
 ::ctx ::hot::ctx
+::re ::hot::regex
 
 http-request ::hot::http/request
 is-ok-response ::hot::http/is-ok-response
@@ -38,16 +57,90 @@ encode-body fn (body: Any): Str {
   }
 }
 
-body-or-error fn (response: HttpResponse): Any {
+body-or-error fn (response: Result): Any {
   cond {
+    is-err(response) => { response }
     not(is-ok-response(response)) => { err(HttpError(response)) }
     => { response.body }
   }
 }
 
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+blank-credential
+meta {
+    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+}
+
+resolve-from
+meta {
+    doc: """The one resolver, pure: `{access-token, base-url}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no token is set, when `access-token` is in `opts` but blank or null (that never falls back to context), or when `opts` has `base-url` without `access-token`. Exposed for testing; `resolve` feeds it the context."""
+}
+fn (opts: Map, ctx-values: Map): Map {
+  access-token or(non-blank(get(opts, "access-token")), non-blank(get(ctx-values, "supabase.access.token")))
+  base-url or(non-blank(get(opts, "base-url")), ::supabase::admin::core/BASE_URL)
+  blank blank-credential(opts, ["access-token"])
+  cond {
+    is-some(blank) => {
+      err(`supabase-admin: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use supabase.access.token.`)
+    }
+
+    and(is-some(non-blank(get(opts, "base-url"))), is-null(non-blank(get(opts, "access-token")))) => {
+      err("supabase-admin: base-url is in the call's opts without access-token. Pass access-token with it. Context credentials are never sent to a per-call URL.")
+    }
+
+    is-null(access-token) => { err("supabase-admin: supabase.access.token is not set. Add it in Context Variables, or pass {access-token: ...} in the call's opts.") }
+    => { {access-token: access-token, base-url: ::re/replace-all(base-url, "/+$", "")} }
+  }
+}
+
+resolve
+meta {
+    ctx: {"supabase.access.token": {required: false}},
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). `opts`
+    values are never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::supabase::admin::api/resolve({access-token: "sbp_tenant_b"}).base-url  // "https://api.supabase.com/v1"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  resolve-from(opts, {"supabase.access.token": ::ctx/get("supabase.access.token")})
+}
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). `additional-headers` win over the defaults, and an empty body sends no `Content-Type`. Pure; exposed for testing."""
+}
+fn (method: Str, path: Str, additional-headers: Map, body: Any, resolved: Map): HttpRequest {
+  default-headers {
+    Authorization: `Bearer ${resolved.access-token}`
+  }
+
+  has-request-body has-body(body)
+  headers if(has-request-body, {...default-headers, Content-Type: "application/json"}, default-headers)
+  final-headers {...headers, ...additional-headers}
+
+  HttpRequest({
+    method,
+    url: `${resolved.base-url}${path}`,
+    headers: final-headers,
+    body: encode-body(body)
+  })
+}
+
 request
 meta {
-    ctx: {"supabase.access.token": {required: true}},
+    ctx: {"supabase.access.token": {required: false}},
     doc: """
     Call the Supabase Management API. Authentication uses a Personal Access Token (PAT) as a Bearer token.
 
@@ -57,6 +150,9 @@ meta {
     ::api ::supabase::admin::api
 
     response ::api/request("GET", "/projects")
+
+    // Per-call credentials
+    other ::api/request("GET", "/projects", {}, {}, {access-token: "sbp_tenant_b"})
     ```
     """
 }
@@ -69,11 +165,15 @@ fn
 },
 (method: Str, path: Str, additional-headers: Map, body: Any, access-token: Str): Any {
   body-or-error(request-raw(method, path, additional-headers, body, access-token))
+},
+// 5-arity: per-call credentials and settings (see `resolve`)
+(method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): Any {
+  body-or-error(request-raw(method, path, additional-headers, body, opts))
 }
 
 request-raw
 meta {
-    ctx: {"supabase.access.token": {required: true}},
+    ctx: {"supabase.access.token": {required: false}},
     doc: """Call the Supabase Management API and return the full `HttpResponse` including status and headers."""
 }
 fn
@@ -81,23 +181,16 @@ fn
   request-raw(method, path, {}, {})
 },
 (method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
-  request-raw(method, path, additional-headers, body, ::ctx/get("supabase.access.token"))
+  request-raw(method, path, additional-headers, body, {})
 },
 (method: Str, path: Str, additional-headers: Map, body: Any, access-token: Str): HttpResponse {
-  url `${::supabase::admin::core/BASE_URL}${path}`
-
-  default-headers {
-    Authorization: `Bearer ${access-token}`
+  http-request(build-request(method, path, additional-headers, body, {access-token: access-token, base-url: ::supabase::admin::core/BASE_URL}))
+},
+// 5-arity: per-call credentials and settings (see `resolve`)
+(method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { http-request(build-request(method, path, additional-headers, body, resolved)) }
   }
-
-  has-request-body has-body(body)
-  headers if(has-request-body, {...default-headers, Content-Type: "application/json"}, default-headers)
-  final-headers {...headers, ...additional-headers}
-
-  http-request(HttpRequest({
-    method,
-    url,
-    headers: final-headers,
-    body: encode-body(body)
-  }))
 }

@@ -40,10 +40,14 @@ result.users  // => [{id: "...", email: "...", ...}, ...]
 ```
 """
 }
-fn (request: ListUsersRequest): ListUsersResponse {
+fn
+(request: ListUsersRequest): ListUsersResponse {
+  list-users(request, {})
+},
+(request: ListUsersRequest, opts: Map): ListUsersResponse {
   page or(request.page, 1)
   per-page or(request.per_page, 50)
-  ::api/request-service("GET", `/auth/v1/admin/users?page=${page}&per_page=${per-page}`)
+  ::api/request-service("GET", `/auth/v1/admin/users?page=${page}&per_page=${per-page}`, {}, {}, opts)
 }
 
 get-user-by-id
@@ -61,8 +65,12 @@ user.email  // => "alice@example.com"
 ```
 """
 }
-fn (user-id: Str): AuthUser {
-  ::api/request-service("GET", `/auth/v1/admin/users/${user-id}`)
+fn
+(user-id: Str): AuthUser {
+  get-user-by-id(user-id, {})
+},
+(user-id: Str, opts: Map): AuthUser {
+  ::api/request-service("GET", `/auth/v1/admin/users/${user-id}`, {}, {}, opts)
 }
 
 CreateUserRequest type {
@@ -97,7 +105,11 @@ user.id  // => "uuid-..."
 ```
 """
 }
-fn (request: CreateUserRequest): AuthUser {
+fn
+(request: CreateUserRequest): AuthUser {
+  create-user(request, {})
+},
+(request: CreateUserRequest, opts: Map): AuthUser {
   body {}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
@@ -109,7 +121,7 @@ fn (request: CreateUserRequest): AuthUser {
     |> assoc-some("role", request.role)
     |> assoc-some("ban_duration", request.ban_duration)
 
-  ::api/request-service("POST", "/auth/v1/admin/users", {}, body)
+  ::api/request-service("POST", "/auth/v1/admin/users", {}, body, opts)
 }
 
 UpdateUserByIdRequest type {
@@ -142,7 +154,11 @@ updated ::admin/update-user-by-id(::admin/UpdateUserByIdRequest({
 ```
 """
 }
-fn (request: UpdateUserByIdRequest): AuthUser {
+fn
+(request: UpdateUserByIdRequest): AuthUser {
+  update-user-by-id(request, {})
+},
+(request: UpdateUserByIdRequest, opts: Map): AuthUser {
   body {}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
@@ -154,7 +170,7 @@ fn (request: UpdateUserByIdRequest): AuthUser {
     |> assoc-some("role", request.role)
     |> assoc-some("ban_duration", request.ban_duration)
 
-  ::api/request-service("PUT", `/auth/v1/admin/users/${request.user_id}`, {}, body)
+  ::api/request-service("PUT", `/auth/v1/admin/users/${request.user_id}`, {}, body, opts)
 }
 
 delete-user
@@ -171,8 +187,12 @@ Delete a user by their UUID (requires service role key).
 ```
 """
 }
-fn (user-id: Str): Any {
-  ::api/request-service("DELETE", `/auth/v1/admin/users/${user-id}`)
+fn
+(user-id: Str): Any {
+  delete-user(user-id, {})
+},
+(user-id: Str, opts: Map): Any {
+  ::api/request-service("DELETE", `/auth/v1/admin/users/${user-id}`, {}, {}, opts)
 }
 
 GenerateLinkRequest type {
@@ -202,11 +222,15 @@ result.action_link  // => "https://..."
 ```
 """
 }
-fn (request: GenerateLinkRequest): GenerateLinkResponse {
+fn
+(request: GenerateLinkRequest): GenerateLinkResponse {
+  generate-link(request, {})
+},
+(request: GenerateLinkRequest, opts: Map): GenerateLinkResponse {
   body {type: request.type, email: request.email}
     |> assoc-some("password", request.password)
     |> assoc-some("redirect_to", request.redirect_to)
     |> assoc-some("data", request.data)
 
-  ::api/request-service("POST", "/auth/v1/admin/generate_link", {}, body)
+  ::api/request-service("POST", "/auth/v1/admin/generate_link", {}, body, opts)
 }

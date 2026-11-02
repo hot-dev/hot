@@ -6,6 +6,18 @@ Airtable bindings for Hot: records CRUD with `filterByFormula`, batch upsert and
 
 Context variable `airtable.token`: a personal access token (`pat...`) with the scopes and base access it needs — `data.records:read/write`, `data.recordComments:read/write`, and `schema.bases:read` cover this package.
 
+## Per-call credentials
+
+Every function that calls Airtable takes an optional trailing `opts` Map, so one run can use several tokens. `token` replaces `airtable.token` for that call only. Nothing is written to ctx, so parallel flows can't see each other's tokens. A null or blank `token` is an error, never a fallback to the context token. Where a function has an optional `params` Map (`list-records`, `list-comments`), `opts` comes after it, so pass `{}` when there are no params.
+
+```hot
+::at ::airtable
+
+leads-for-tenant fn (tenant: Map): Map {
+  ::at/list-records(tenant.base-id, "Leads", {}, {token: tenant.airtable-token})
+}
+```
+
 ## Usage
 
 ```hot

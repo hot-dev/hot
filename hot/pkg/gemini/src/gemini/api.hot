@@ -1,4 +1,26 @@
 ::gemini::api ns
+meta {
+    doc: """
+    Transport for the Gemini API: the `x-goog-api-key` header, the base URL,
+    and the one credential resolver.
+
+    **Per-call credentials.** Every typed function takes a trailing
+    `opts: Map`, which wins over ctx for that call. Nothing is kept in ctx,
+    so one run can serve many tenants and parallel flows don't share keys.
+
+    - `api-key`: overrides `gemini.api.key`.
+    - `base-url`: overrides `gemini.base.url`, for a proxy or gateway. It
+      needs `api-key` in `opts` too: the ctx key is never sent to a per-call
+      URL. A base URL and key both set in ctx work as usual.
+
+    The key goes in a header, never the URL, so it can't end up in a logged
+    URL or an error message.
+
+    **Call records.** Hot stores the arguments of every function call in the
+    run's call records and only masks ctx secrets, so a key passed in `opts`
+    is stored there as plain text.
+    """
+}
 
 // Namespace alias for ctx module
 ::ctx ::hot::ctx
@@ -24,12 +46,230 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
+non-blank
+meta { doc: """`value`, or null when it is null or a blank Str.""" }
+fn (value: Any): Any {
+  cond {
+    is-str(value) => { if(is-empty(trim(value)), null, value) }
+    => { value }
+  }
+}
+
+normalize-base-url
+meta {
+    doc: """
+    Normalize a base URL: trims whitespace, drops trailing slashes, and falls
+    back to `::gemini/BASE_URL` when the value is null or empty.
+
+    **Example**
+
+    ```hot
+    ::gemini::api/normalize-base-url("https://gateway.example.com/")  // => "https://gateway.example.com"
+    ::gemini::api/normalize-base-url(null)                            // => "https://generativelanguage.googleapis.com"
+    ```
+    """
+}
+fn (url: Str?): Str {
+  trimmed trim(or(url, ""))
+  cond {
+    is-empty(trimmed) => { ::gemini/BASE_URL }
+    ends-with(trimmed, "/") => { normalize-base-url(slice(trimmed, 0, sub(length(trimmed), 1))) }
+    => { trimmed }
+  }
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: settings for a call from `opts` first, then
+    `ctx-values` (a Map of context variables), then defaults. Returns
+    `{api-key, base-url}`, or an Err when no API key is set, when `api-key` in `opts` is
+    blank (never a fallback to ctx, so a tenant with a missing key can't run
+    on the project's key), or when `opts` has a `base-url` but no `api-key`
+    (the ctx key is never sent to a per-call URL). Exposed for
+    testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::gemini::api/resolve-from({api-key: "k"}, {}).base-url  // => "https://generativelanguage.googleapis.com"
+    ```
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  pick (key, ctx-key) { or(non-blank(get(opts, key)), non-blank(get(ctx-values, ctx-key))) }
+  has-explicit-key in("api-key", keys(opts))
+  api-key if(has-explicit-key, non-blank(get(opts, "api-key")), non-blank(get(ctx-values, "gemini.api.key")))
+  cond {
+    and(has-explicit-key, is-null(api-key)) => {
+      err("gemini: api-key in the call's opts is blank. Pass the key, or leave api-key out to use gemini.api.key.")
+    }
+
+    and(not(has-explicit-key), not(is-null(non-blank(get(opts, "base-url"))))) => {
+      err("gemini: base-url in the call's opts needs api-key in opts too. The gemini.api.key ctx key is never sent to a per-call base URL.")
+    }
+
+    is-null(api-key) => {
+      err("gemini: no API key. Set gemini.api.key in Context Variables, or pass {api-key: ...} in the call's opts.")
+    }
+    => {
+      {
+        api-key: api-key,
+        base-url: normalize-base-url(pick("base-url", "gemini.base.url"))
+      }
+    }
+  }
+}
+
+resolve
+meta {
+    doc: """
+    Settings for one call: `opts` over ctx over defaults (see `resolve-from`).
+    With an `api-key` in `opts`, the ctx key is not read, and a blank one is
+    an Err rather than a fallback to ctx. Nothing is written to ctx.
+
+    **Example**
+
+    ```hot
+    ::gemini::api/resolve({api-key: "tenant-key"}).base-url  // => "https://generativelanguage.googleapis.com"
+    ```
+    """,
+    ctx: {
+        "gemini.api.key": {required: false},
+        "gemini.base.url": {required: false, default: "https://generativelanguage.googleapis.com", secret: false}
+    }
+}
+fn
+(): Map {
+  resolve({})
+},
+(opts: Map): Map {
+  options or(opts, {})
+  has-explicit-key in("api-key", keys(options))
+  resolve-from(options, {
+    "gemini.api.key": if(has-explicit-key, null, ::ctx/get("gemini.api.key")),
+    "gemini.base.url": ::ctx/get("gemini.base.url")
+  })
+}
+
+base-url
+meta {
+    doc: """
+    The base URL calls go to: `opts.base-url`, then the `gemini.base.url` ctx
+    variable, then `https://generativelanguage.googleapis.com`. Set it to
+    route calls through a proxy or gateway.
+
+    **Example**
+
+    ```hot
+    ::gemini::api/base-url()                                     // => "https://generativelanguage.googleapis.com"
+    ::gemini::api/base-url({base-url: "https://gw.example.com"}) // => "https://gw.example.com"
+    ```
+    """,
+    ctx: {"gemini.base.url": {required: false, default: "https://generativelanguage.googleapis.com", secret: false}}
+}
+fn
+(): Str {
+  base-url({})
+},
+(opts: Map): Str {
+  normalize-base-url(or(non-blank(get(or(opts, {}), "base-url")), ::ctx/get("gemini.base.url")))
+}
+
+build-headers
+meta {
+    doc: """
+    Request headers from resolved settings (see `resolve`), pure:
+    `x-goog-api-key`, and `Content-Type` when there is a body. Exposed for
+    testing.
+    """
+}
+fn (resolved: Map, has-body: Bool): Map {
+  auth {x-goog-api-key: resolved.api-key}
+  if(has-body, {...auth, Content-Type: "application/json"}, auth)
+}
+
+build-request
+meta {
+    doc: """
+    The outgoing `HttpRequest` for resolved settings, pure. `additional-headers`
+    override the defaults. An empty or null `body` sends no body at all.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    resolved ::gemini::api/resolve-from({api-key: "k"}, {})
+    req ::gemini::api/build-request("GET", "https://example.com/v1/models", {}, "", resolved)
+    req.headers  // {x-goog-api-key: "k"}
+    ```
+    """
+}
+fn (method: Str, url: Str, additional-headers: Map, body: Any, resolved: Map): HttpRequest {
+  match body {
+    "" | Null => {
+      HttpRequest({
+        method,
+        url,
+        headers: {...build-headers(resolved, false), ...additional-headers}
+      })
+    }
+
+    _ => {
+      HttpRequest({
+        method,
+        url,
+        headers: {...build-headers(resolved, true), ...additional-headers},
+        body: to-json(untype(body))
+      })
+    }
+  }
+}
+
+call
+meta {
+    doc: """
+    Resolve `opts` and send a request to `path` under the resolved base URL.
+    The typed functions in this package go through here.
+
+    **Example**
+
+    ```hot
+    response ::gemini::api/call("GET", "/v1/models", {}, "", {api-key: "tenant-key"})
+    ```
+    """,
+    ctx: {
+        "gemini.api.key": {required: false},
+        "gemini.base.url": {required: false, default: "https://generativelanguage.googleapis.com", secret: false}
+    }
+}
+fn (method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  ::hot::http/request(build-request(method, `${resolved.base-url}${path}`, additional-headers, body, resolved))
+}
+
+call-stream
+meta {
+    doc: """
+    Streaming counterpart to `call`. Returns a `StreamingHttpResponse` whose
+    body is an iterator of parsed SSE or NDJSON events.
+    """,
+    ctx: {
+        "gemini.api.key": {required: false},
+        "gemini.base.url": {required: false, default: "https://generativelanguage.googleapis.com", secret: false}
+    }
+}
+fn (method: Str, path: Str, additional-headers: Map, body: Any, format: Str, opts: Map): StreamingHttpResponse {
+  resolved resolve(opts)
+  ::hot::http/request-stream(build-request(method, `${resolved.base-url}${path}`, additional-headers, body, resolved), format)
+}
+
 request
 meta {
     doc: """
-    Make an authenticated HTTP request to the Gemini API. Automatically appends the API key from context. Additional headers can be provided to merge/override defaults.
+    Make an authenticated HTTP request to the Gemini API. Automatically sends the API key from context in the `x-goog-api-key` header. Additional headers can be provided to merge/override defaults.
 
-    Supports 2 to 5 arguments: method and URL (minimum), plus optional headers, body, and explicit API key override.
+    Supports 2 to 5 arguments: method and URL (minimum), plus optional headers, body, and an explicit API key or `opts` Map (see `resolve`).
 
     **Example**
 
@@ -45,7 +285,7 @@ meta {
     response ::gemini::api/request("POST", url, {}, {contents: [...]})
     ```
     """,
-    ctx: {"gemini.api.key": {}}
+    ctx: {"gemini.api.key": {required: false}}
 }
 fn
 (method: Str, url: Str): HttpResponse {
@@ -54,37 +294,17 @@ fn
 (method: Str, url: Str, additional-headers: Map): HttpResponse {
   request(method, url, additional-headers, "")
 },
-// 4-arity: use ctx api key (default) — delegates to 5-arity
+// 4-arity: use ctx api key (default)
 (method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, url, additional-headers, body, ::ctx/get("gemini.api.key"))
+  request(method, url, additional-headers, body, {})
 },
 // 5-arity: explicit api key override
 (method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
-  url-with-key if(contains(url, "?"), `${url}&key=${api-key}`, `${url}?key=${api-key}`)
-
-  default-headers {}
-
-  match body {
-    "" | Null => {
-      final-headers {...default-headers, ...additional-headers}
-      ::hot::http/request(HttpRequest({
-        method,
-        url: url-with-key,
-        headers: final-headers
-      }))
-    }
-
-    _ => {
-      headers {...default-headers, Content-Type: "application/json"}
-      final-headers {...headers, ...additional-headers}
-      ::hot::http/request(HttpRequest({
-        method,
-        url: url-with-key,
-        headers: final-headers,
-        body: to-json(untype(body))
-      }))
-    }
-  }
+  request(method, url, additional-headers, body, {api-key: api-key})
+},
+// 5-arity: per-call opts; `url` is used as given
+(method: Str, url: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  ::hot::http/request(build-request(method, url, additional-headers, body, resolve(opts)))
 }
 
 request-stream
@@ -92,7 +312,7 @@ meta {
     doc: """
     Make a streaming HTTP request to the Gemini API. Returns a response with an iterator body for consuming SSE or NDJSON streams.
 
-    Supports 4 to 6 arguments: method, URL, headers, body (minimum), plus optional format and explicit API key override.
+    Supports 4 to 6 arguments: method, URL, headers, body (minimum), plus optional format and an explicit API key or `opts` Map (see `resolve`).
 
     **Example**
 
@@ -103,29 +323,21 @@ meta {
     })
     ```
     """,
-    ctx: {"gemini.api.key": {}}
+    ctx: {"gemini.api.key": {required: false}}
 }
 fn
 (method: Str, url: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
   request-stream(method, url, additional-headers, body, "sse")
 },
-// 5-arity: use ctx api key (default) — delegates to 6-arity
+// 5-arity: use ctx api key (default)
 (method: Str, url: Str, additional-headers: Map, body: Any, format: Str): StreamingHttpResponse {
-  request-stream(method, url, additional-headers, body, format, ::ctx/get("gemini.api.key"))
+  request-stream(method, url, additional-headers, body, format, {})
 },
 // 6-arity: explicit api key override
 (method: Str, url: Str, additional-headers: Map, body: Any, format: Str, api-key: Str): StreamingHttpResponse {
-  url-with-key if(contains(url, "?"), `${url}&key=${api-key}`, `${url}?key=${api-key}`)
-
-  default-headers {}
-
-  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
-  final-headers {...headers, ...additional-headers}
-
-  ::hot::http/request-stream(HttpRequest({
-    method,
-    url: url-with-key,
-    headers: final-headers,
-    body: to-json(untype(body))
-  }), format)
+  request-stream(method, url, additional-headers, body, format, {api-key: api-key})
+},
+// 6-arity: per-call opts; `url` is used as given
+(method: Str, url: Str, additional-headers: Map, body: Any, format: Str, opts: Map): StreamingHttpResponse {
+  ::hot::http/request-stream(build-request(method, url, additional-headers, body, resolve(opts)), format)
 }

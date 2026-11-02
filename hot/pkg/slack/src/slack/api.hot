@@ -37,11 +37,66 @@ fn (url: Str): Str {
       |> ::regex/replace-all("[?&]$", "")
 }
 
+is-blank fn (value: Any): Bool {
+  cond {
+    is-str(value) => { is-empty(trim(value)) }
+    => { true }
+  }
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: the credential for a call from `opts` first,
+    then `ctx-values` (a Map of context variables). Returns `{api-key: ...}`, or
+    an Err when there is none.
+
+    A `api-key` key in `opts` always decides the call. If its value is null or
+    blank that is an Err, never a fallback to context, so a tenant whose
+    stored credential is missing can't silently run on the project's
+    credential. Nothing is written to ctx. Exposed for testing; `resolve`
+    feeds it the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  cond {
+    in("api-key", keys(opts)) => {
+      value get(opts, "api-key")
+      cond {
+        is-blank(value) => { err("slack: the api-key in this call's opts is empty. Context is not used in its place.") }
+        => { {api-key: value} }
+      }
+    }
+
+    is-blank(get(ctx-values, "slack.api.key")) => { err("slack: slack.api.key is not set. Add your Slack token in Context Variables, or pass {api-key: ...} in the call's opts.") }
+    => { {api-key: get(ctx-values, "slack.api.key")} }
+  }
+}
+
+resolve
+meta {
+    ctx: {"slack.api.key": {required: false}},
+    doc: """
+    The credential for one call: `opts` over the `slack.api.key` context variable
+    (see `resolve-from`). Per-call credentials stay in the call; nothing is
+    written to ctx, so parallel flows and tenants never share them.
+
+    **Example**
+
+    ```hot
+    ::slack::api/resolve({api-key: "tenant-b-credential"}).api-key  // "tenant-b-credential"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  resolve-from(opts, {"slack.api.key": ::ctx/get("slack.api.key")})
+}
+
 request
 meta {
-    ctx: {"slack.api.key": {required: true}},
+    ctx: {"slack.api.key": {required: false}},
     doc: """
-    Make an authenticated HTTP request to the Slack API. Automatically adds the Bearer token from the `slack.api.key` context variable and sets Content-Type for JSON bodies. Additional headers can be provided to merge/override defaults.
+    Make an authenticated HTTP request to the Slack API. Automatically adds the Bearer token from the `slack.api.key` context variable and sets Content-Type for JSON bodies. Additional headers can be provided to merge/override defaults. With no key from either place, the call returns an Err (see `resolve`).
 
     **Example**
 
@@ -56,6 +111,9 @@ meta {
 
     // With explicit API key override
     response ::api/request("POST", url, {}, body, "SLACK_API_KEY_PLACEHOLDER")
+
+    // With per-call opts
+    response ::api/request("POST", url, {}, body, {api-key: "SLACK_API_KEY_PLACEHOLDER"})
     ```
     """
 }
@@ -68,7 +126,15 @@ fn
 },
 // 4-arity: use ctx api key (default) — delegates to 5-arity
 (method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, url, additional-headers, body, ::ctx/get("slack.api.key"))
+  request(method, url, additional-headers, body, {})
+},
+// 5-arity: per-call opts ({api-key}), then ctx
+(method: Str, url: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { request(method, url, additional-headers, body, resolved.api-key) }
+  }
 },
 // 5-arity: explicit api key override
 (method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {

@@ -8,7 +8,6 @@
 // It's implemented as a built-in tool in the Responses API.
 // ============================================================================
 
-api-request ::xai::api/request
 HttpError ::xai::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 CreateResponseRequest ::xai::responses/CreateResponseRequest
@@ -119,14 +118,21 @@ fn
     search-web(model, query, null)
 },
 (model: Str, query: Str, instructions: Str): Str {
-    request {
+    search-web(model, query, instructions, {})
+},
+(model: Str, query: Str, opts: Map): Str {
+    search-web(model, query, null, opts)
+},
+(model: Str, query: Str, instructions: Str?, opts: Map): Str {
+    base {
         model: model,
         input: query,
-        instructions: instructions,
         tools: [web-search-tool()]
     }
 
-    response create(CreateResponseRequest(request))
+    request if(is-null(instructions), base, assoc(base, "instructions", instructions))
+
+    response create(CreateResponseRequest(request), opts)
 
     match response {
         Result.Err => { err(response) }
@@ -159,14 +165,21 @@ fn
     search-x(model, query, null)
 },
 (model: Str, query: Str, instructions: Str): Str {
-    request {
+    search-x(model, query, instructions, {})
+},
+(model: Str, query: Str, opts: Map): Str {
+    search-x(model, query, null, opts)
+},
+(model: Str, query: Str, instructions: Str?, opts: Map): Str {
+    base {
         model: model,
         input: query,
-        instructions: instructions,
         tools: [x-search-tool()]
     }
 
-    response create(CreateResponseRequest(request))
+    request if(is-null(instructions), base, assoc(base, "instructions", instructions))
+
+    response create(CreateResponseRequest(request), opts)
 
     match response {
         Result.Err => { err(response) }
@@ -195,14 +208,21 @@ fn
     search-all(model, query, null)
 },
 (model: Str, query: Str, instructions: Str): Str {
-    request {
+    search-all(model, query, instructions, {})
+},
+(model: Str, query: Str, opts: Map): Str {
+    search-all(model, query, null, opts)
+},
+(model: Str, query: Str, instructions: Str?, opts: Map): Str {
+    base {
         model: model,
         input: query,
-        instructions: instructions,
         tools: [web-search-tool(), x-search-tool()]
     }
 
-    response create(CreateResponseRequest(request))
+    request if(is-null(instructions), base, assoc(base, "instructions", instructions))
+
+    response create(CreateResponseRequest(request), opts)
 
     match response {
         Result.Err => { err(response) }

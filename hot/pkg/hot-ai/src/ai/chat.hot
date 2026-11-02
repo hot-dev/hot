@@ -26,6 +26,27 @@ meta {
     The legacy `(model, prompt, system) -> Str` shape used by `::ai::rag`
     is still supported as-is — only `run-loop` callers must adopt the
     new shape.
+
+    **Per-call provider credentials.** `ChatOptions.provider-opts` carries a
+    provider's `opts` (`api-key`, `base-url`, ...) so one run can serve many
+    tenants without touching ctx. It is handed to the `chat-opts-fn` and
+    `chat-stream-opts-fn` slots, on `ChatOptions` or on a
+    `ProviderRegistration`:
+
+    ```hot
+    chat-opts-fn(model: Str, messages: Vec<Message>, system: Str?, tools: Vec<Tool>?, provider-opts: Map): ChatReply
+    chat-stream-opts-fn(model: Str, messages: Vec<Message>, system: Str?, tools: Vec<Tool>?, on-delta: Fn, provider-opts: Map): ChatReply
+    ```
+
+    A plain `chat-fn` keeps working without `provider-opts`, but can't receive
+    it, so setting `provider-opts` for one is a failure naming the provider. A
+    null or blank credential is a failure too, as is a `base-url` without a
+    credential: a tenant's call never falls back to the project's ctx key.
+
+    The run loop never puts `provider-opts` in chat history, step or delta
+    stream records, skill context or failure payloads. Hot does store function
+    arguments in the run's call records, and only masks ctx secrets, so
+    `provider-opts` is stored there as plain text.
     """
 }
 
@@ -90,6 +111,12 @@ meta {
     - `chat-fn` — tools-aware chat function matching the
       `(model, messages, system, tools) -> ChatReply` contract.
     - `chat-stream-fn` — optional streaming variant.
+    - `chat-opts-fn` — optional `chat-fn` that also takes
+      `ChatOptions.provider-opts` as a fifth argument. Preferred over
+      `chat-fn` when set.
+    - `chat-stream-opts-fn` — optional `chat-stream-fn` that also takes
+      `provider-opts` as a sixth argument. Preferred over `chat-stream-fn`
+      when set.
     - `embed-fn` — optional embeddings function for RAG.
     - `meta` — open map for capability flags (`vision`, `audio`, `tool-choice`, etc.).
     """
@@ -102,6 +129,8 @@ type {
     chat-stream-fn: Any,
     embed-fn: Any,
     meta: Map?,
+    chat-opts-fn: Any?,
+    chat-stream-opts-fn: Any?,
 }
 
 prefix-detector
@@ -280,15 +309,84 @@ fn (opts: ChatOptions): Any {
     }
 }
 
+PROVIDER_SETTING_KEYS ["base-url", "management-base-url", "api-version", "region", "environment"]
+
+is-blank-opt
+meta { doc: """Internal: true for null and for a blank Str.""" }
+fn (value: Any): Bool {
+    or(is-null(value), and(is-str(value), is-empty(trim(value))))
+}
+
+check-provider-opts
+meta {
+    doc: """
+    Fail when a credential in `provider-opts` is null or blank: a tenant with a
+    missing key must never fall back to the provider's ctx key. Any key other
+    than the settings in `PROVIDER_SETTING_KEYS` counts as a credential. Leave
+    a key out to use ctx.
+
+    Also fail when `management-base-url` comes without `management-api-key`,
+    or `base-url` without a credential, so a ctx key is never sent to a
+    per-call URL. Provider names for the credential differ (`api-key`,
+    `token`, ...), so for `base-url` any credential other than
+    `management-api-key` passes here, and the provider's own resolver checks
+    the exact key. Failures name keys, never values.
+    """
+}
+fn (provider-opts: Map?): Null {
+    for-each(keys(or(provider-opts, {})), (key) {
+        cond {
+            and(is-blank-opt(get(provider-opts, key)), not(in(key, PROVIDER_SETTING_KEYS))) => {
+                fail(`ChatOptions.provider-opts.${key} is blank. Pass the credential, or leave ${key} out to use the provider's default.`)
+            }
+            => { null }
+        }
+    })
+    opts or(provider-opts, {})
+    has-value (key) { not(is-blank-opt(get(opts, key))) }
+    credentials filter(keys(opts), (key) { and(not(in(key, PROVIDER_SETTING_KEYS)), not(eq(key, "management-api-key"))) })
+    cond {
+        and(has-value("management-base-url"), not(has-value("management-api-key"))) => {
+            fail("ChatOptions.provider-opts has management-base-url but no management-api-key. A ctx key is never sent to a per-call base URL.")
+        }
+
+        and(has-value("base-url"), is-empty(credentials)) => {
+            fail("ChatOptions.provider-opts has base-url but no api-key. A ctx key is never sent to a per-call base URL.")
+        }
+        => { null }
+    }
+}
+
+reject-provider-opts
+meta {
+    doc: """
+    Internal: fail when `provider-opts` is set but `label`, the chat function
+    about to be called, has no way to receive it. Running anyway would use the
+    provider's defaults, usually the project's ctx key, for a tenant's call.
+    Without `provider-opts` it does nothing. Names the provider, never values.
+    """
+}
+fn (opts: ChatOptions, label: Str): Null {
+    cond {
+        is-empty(or(opts.provider-opts, {})) => { null }
+        => {
+            fail(`${label} does not support per-call credentials: ChatOptions.provider-opts is set for model '${opts.model}', but it has no opts-taking function. Use chat-opts-fn or chat-stream-opts-fn, or remove provider-opts.`)
+        }
+    }
+}
+
 dispatch-chat
 meta {
     doc: """
     Dispatch a chat call using `opts`. Resolution order:
 
-    1. If `opts.chat-fn` is set, call it directly.
-    2. Otherwise resolve a `ProviderRegistration` via `opts.providers`
-       (or built-ins) and call `reg.chat-fn` if populated.
-    3. Otherwise `fail` with a clear message.
+    1. If `opts.chat-opts-fn` is set, call it with `opts.provider-opts`
+       (`{}` when unset).
+    2. If `opts.chat-fn` is set, call it directly.
+    3. Otherwise resolve a `ProviderRegistration` via `opts.providers`
+       (or built-ins) and call its `chat-opts-fn` with `opts.provider-opts`,
+       or else its `chat-fn`.
+    4. Otherwise `fail` with a clear message.
 
     Use this helper in any code that wants to honor
     `ChatOptions.providers` without bypassing `chat-fn`'s
@@ -296,8 +394,14 @@ meta {
     """
 }
 fn (opts: ChatOptions, messages: Any, tools: Any): Any {
+    check-provider-opts(opts.provider-opts)
     cond {
+        not(is-null(opts.chat-opts-fn)) => {
+            opts.chat-opts-fn(opts.model, messages, opts.system, tools, or(opts.provider-opts, {}))
+        }
+
         not(is-null(opts.chat-fn)) => {
+            reject-provider-opts(opts, "ChatOptions.chat-fn")
             opts.chat-fn(opts.model, messages, opts.system, tools)
         }
         => {
@@ -307,10 +411,15 @@ fn (opts: ChatOptions, messages: Any, tools: Any): Any {
                     fail(`No provider matched model '${opts.model}' in ChatOptions.providers or built-ins`)
                 }
 
+                not(is-null(reg.chat-opts-fn)) => {
+                    reg.chat-opts-fn(opts.model, messages, opts.system, tools, or(opts.provider-opts, {}))
+                }
+
                 is-null(reg.chat-fn) => {
                     fail(`Provider '${reg.display-name}' has no chat-fn wired; pass an explicit chat-fn or supply a registration with chat-fn populated`)
                 }
                 => {
+                    reject-provider-opts(opts, `Provider '${reg.display-name}'`)
                     reg.chat-fn(opts.model, messages, opts.system, tools)
                 }
             }
@@ -322,12 +431,20 @@ dispatch-chat-stream
 meta {
     doc: """
     Streaming counterpart to `dispatch-chat`. Honors explicit
-    `opts.chat-stream-fn` first, then `opts.providers[*].chat-stream-fn`.
+    `opts.chat-stream-opts-fn` and `opts.chat-stream-fn` first, then the
+    same two slots on `opts.providers[*]`. `chat-stream-opts-fn` receives
+    `opts.provider-opts` (`{}` when unset).
     """
 }
 fn (opts: ChatOptions, messages: Any, tools: Any, on-delta: Fn): Any {
+    check-provider-opts(opts.provider-opts)
     cond {
+        not(is-null(opts.chat-stream-opts-fn)) => {
+            opts.chat-stream-opts-fn(opts.model, messages, opts.system, tools, on-delta, or(opts.provider-opts, {}))
+        }
+
         not(is-null(opts.chat-stream-fn)) => {
+            reject-provider-opts(opts, "ChatOptions.chat-stream-fn")
             opts.chat-stream-fn(opts.model, messages, opts.system, tools, on-delta)
         }
         => {
@@ -337,13 +454,41 @@ fn (opts: ChatOptions, messages: Any, tools: Any, on-delta: Fn): Any {
                     fail(`No provider matched model '${opts.model}' in ChatOptions.providers or built-ins`)
                 }
 
+                not(is-null(reg.chat-stream-opts-fn)) => {
+                    reg.chat-stream-opts-fn(opts.model, messages, opts.system, tools, on-delta, or(opts.provider-opts, {}))
+                }
+
                 is-null(reg.chat-stream-fn) => {
                     fail(`Provider '${reg.display-name}' has no chat-stream-fn wired; pass an explicit chat-stream-fn or supply a registration with chat-stream-fn populated`)
                 }
                 => {
+                    reject-provider-opts(opts, `Provider '${reg.display-name}'`)
                     reg.chat-stream-fn(opts.model, messages, opts.system, tools, on-delta)
                 }
             }
+        }
+    }
+}
+
+complete-prompt
+meta {
+    doc: """
+    One prompt in, one Str out, for helpers such as `::ai::rag` that don't
+    run a tool loop. With `opts.chat-opts-fn`, sends the prompt as a single
+    user message along with `opts.provider-opts`. Otherwise calls the legacy
+    `chat-fn` contract, `(model, prompt, system) -> Str`.
+    """
+}
+fn (opts: ChatOptions, prompt: Str, system: Str?): Any {
+    check-provider-opts(opts.provider-opts)
+    cond {
+        not(is-null(opts.chat-opts-fn)) => {
+            reply opts.chat-opts-fn(opts.model, [user-message(prompt)], system, null, or(opts.provider-opts, {}))
+            or(reply.text, "")
+        }
+        => {
+            reject-provider-opts(opts, "ChatOptions.chat-fn")
+            opts.chat-fn(opts.model, prompt, system)
         }
     }
 }
@@ -855,8 +1000,22 @@ meta {
       event in turn order and returns the same `ChatReply` shape
       as the non-streaming version.
 
+    - `chat-opts-fn` — `chat-fn` (tools-aware contract) that also takes
+      `provider-opts` as a fifth argument. Preferred over `chat-fn`.
+    - `chat-stream-opts-fn` — `chat-stream-fn` that also takes
+      `provider-opts` as a sixth argument. Preferred over `chat-stream-fn`.
+
     Optional
 
+    - `provider-opts` — per-call provider credentials and settings
+      (`api-key`, `base-url`, ...), so one run can serve many tenants
+      without touching ctx. Handed to `chat-opts-fn` and
+      `chat-stream-opts-fn` as is, on `ChatOptions` or on the matching
+      `ProviderRegistration`. Plain `chat-fn` and `chat-stream-fn` can't
+      receive it, so setting it for them is a failure naming the provider. So
+      is a null or blank credential, or a `base-url` without a credential: a
+      tenant's call never falls back to the project's ctx key. Stored as plain text in the run's call records, like
+      any function argument, but in nothing else the run loop stores or emits.
     - `system` — system prompt prepended to every call.
     - `tools` — tools the model is allowed to call from `run-loop`.
     - `skills` — vector of skill-meta'd functions to advertise to the
@@ -893,7 +1052,8 @@ meta {
       `emit-stream-deltas` is on. Defaults to `"ai:chat:delta"`.
     - `count-tokens-fn` — provider's `(messages, model) -> Int`
       counter used by pre-call budget checks. When unset, falls
-      back to `count-tokens-heuristic`.
+      back to `count-tokens-heuristic`. It doesn't receive
+      `provider-opts`; bind per-call credentials in a closure.
     - `model-context-window` — explicit context-window size in
       tokens. When unset, the budget check uses
       `max-context-tokens` directly without computing a percentage.
@@ -935,7 +1095,10 @@ type {
     emit-stream-deltas: Bool?,
     delta-data-type: Str?,
     count-tokens-fn: Fn?,
-    model-context-window: Int?
+    model-context-window: Int?,
+    chat-opts-fn: Fn?,
+    chat-stream-opts-fn: Fn?,
+    provider-opts: Map?
 }
 
 // ============================================================================
@@ -1228,6 +1391,22 @@ fn (opts: ChatOptions, user-on-delta: Fn?): Fn {
     }
 }
 
+step-payload
+meta {
+    doc: """Internal: the per-turn step record `emit-step` publishes. Lists its fields, so `provider-opts` can't reach the stream."""
+}
+fn (opts: ChatOptions, iteration: Int, reply: ChatReply, tool-results: Vec<Any>?): Map {
+    {
+        iteration: iteration,
+        model: opts.model,
+        text: reply.text,
+        tool-calls: reply.tool-calls,
+        tool-results: tool-results,
+        stop-reason: reply.stop-reason,
+        usage: reply.usage,
+    }
+}
+
 emit-step
 meta {
     doc: """
@@ -1241,17 +1420,7 @@ fn (opts: ChatOptions, iteration: Int, reply: ChatReply, tool-results: Vec<Any>?
         not(or(opts.emit-steps, false)) => { null }
         => {
             data-type or(opts.step-data-type, ::ai::stream-labels/CHAT_STEP)
-            payload {
-                iteration: iteration,
-                model: opts.model,
-                text: reply.text,
-                tool-calls: reply.tool-calls,
-                tool-results: tool-results,
-                stop-reason: reply.stop-reason,
-                usage: reply.usage,
-            }
-
-            if-err(::hot::stream/data(data-type, payload), null)
+            if-err(::hot::stream/data(data-type, step-payload(opts, iteration, reply, tool-results)), null)
             null
         }
     }

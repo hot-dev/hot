@@ -1,7 +1,7 @@
 ::postmark::api ns
 meta {
     doc: """Internal HTTP request utilities for Postmark API.""",
-    ctx: {"postmark.server.token": {required: true}}
+    ctx: {"postmark.server.token": {required: false}}
 }
 
 // Namespace alias for ctx module
@@ -26,13 +26,85 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
+is-blank fn (value: Any): Bool {
+  cond {
+    is-str(value) => { is-empty(trim(value)) }
+    => { true }
+  }
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: the credential for a call from `opts` first,
+    then `ctx-values` (a Map of context variables). Returns `{server-token: ...}`, or
+    an Err when there is none.
+
+    A `server-token` key in `opts` always decides the call. If its value is null or
+    blank that is an Err, never a fallback to context, so a tenant whose
+    stored credential is missing can't silently run on the project's
+    credential. Nothing is written to ctx. Exposed for testing; `resolve`
+    feeds it the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  cond {
+    in("server-token", keys(opts)) => {
+      value get(opts, "server-token")
+      cond {
+        is-blank(value) => { err("postmark: the server-token in this call's opts is empty. Context is not used in its place.") }
+        => { {server-token: value} }
+      }
+    }
+
+    is-blank(get(ctx-values, "postmark.server.token")) => { err("postmark: postmark.server.token is not set. Add your Server API Token in Context Variables, or pass {server-token: ...} in the call's opts.") }
+    => { {server-token: get(ctx-values, "postmark.server.token")} }
+  }
+}
+
+resolve
+meta {
+    ctx: {"postmark.server.token": {required: false}},
+    doc: """
+    The credential for one call: `opts` over the `postmark.server.token` context variable
+    (see `resolve-from`). Per-call credentials stay in the call; nothing is
+    written to ctx, so parallel flows and tenants never share them.
+
+    **Example**
+
+    ```hot
+    ::postmark::api/resolve({server-token: "tenant-b-credential"}).server-token  // "tenant-b-credential"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  resolve-from(opts, {"postmark.server.token": ::ctx/get("postmark.server.token")})
+}
+
+encode-body
+meta {
+    doc: """The wire form of a request body: `""` means no body at all, anything else is JSON. Exposed for testing."""
+}
+fn (body: Any): Str {
+  if(eq(body, ""), "", to-json(untype(body)))
+}
+
 request
 meta {
-    doc: """Make an HTTP request with pre-filled service headers. Additional headers can be provided to merge/override defaults."""
+    ctx: {"postmark.server.token": {required: false}},
+    doc: """Make an HTTP request with pre-filled service headers. Additional headers can be provided to merge/override defaults. With no token from either place, the call returns an Err (see `resolve`)."""
 }
 fn
 (method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, url, additional-headers, body, ::ctx/get("postmark.server.token"))
+  request(method, url, additional-headers, body, {})
+},
+// 5-arity: per-call opts ({server-token}), then ctx
+(method: Str, url: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { request(method, url, additional-headers, body, resolved.server-token) }
+  }
 },
 // 5-arity: explicit server token override
 (method: Str, url: Str, additional-headers: Map, body: Any, server-token: Str): HttpResponse {
@@ -51,7 +123,7 @@ fn
     method: method,
     url: url,
     headers: final-headers,
-    body: to-json(untype(body))
+    body: encode-body(body)
   }))
 },
 (method: Str, url: Str, additional-headers: Map): HttpResponse {

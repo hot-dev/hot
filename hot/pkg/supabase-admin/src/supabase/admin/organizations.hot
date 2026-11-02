@@ -34,16 +34,24 @@ orgs ::orgs/list-organizations()
 ```
 """
 }
-fn (): Vec<Organization> {
-  ::api/request("GET", "/organizations")
+fn
+(): Vec<Organization> {
+  list-organizations({})
+},
+(opts: Map): Vec<Organization> {
+  ::api/request("GET", "/organizations", {}, {}, opts)
 }
 
 get-organization
 meta {
     doc: """Get details for a specific organization by slug."""
 }
-fn (slug: Str): Organization {
-  ::api/request("GET", `/organizations/${slug}`)
+fn
+(slug: Str): Organization {
+  get-organization(slug, {})
+},
+(slug: Str, opts: Map): Organization {
+  ::api/request("GET", `/organizations/${slug}`, {}, {}, opts)
 }
 
 CreateOrganizationRequest type {
@@ -67,8 +75,12 @@ org.id  // => "org-abc-123"
 ```
 """
 }
-fn (request: CreateOrganizationRequest): Organization {
-  ::api/request("POST", "/organizations", {}, untype(request))
+fn
+(request: CreateOrganizationRequest): Organization {
+  create-organization(request, {})
+},
+(request: CreateOrganizationRequest, opts: Map): Organization {
+  ::api/request("POST", "/organizations", {}, untype(request), opts)
 }
 
 // ============================================================================
@@ -90,8 +102,12 @@ members ::orgs/list-members("my-org-slug")
 ```
 """
 }
-fn (slug: Str): Vec<OrganizationMember> {
-  ::api/request("GET", `/organizations/${slug}/members`)
+fn
+(slug: Str): Vec<OrganizationMember> {
+  list-members(slug, {})
+},
+(slug: Str, opts: Map): Vec<OrganizationMember> {
+  ::api/request("GET", `/organizations/${slug}/members`, {}, {}, opts)
 }
 
 // ============================================================================
@@ -102,6 +118,10 @@ list-organization-projects
 meta {
     doc: """List all projects belonging to an organization."""
 }
-fn (slug: Str): Vec<Map> {
-  ::api/request("GET", `/organizations/${slug}/projects`)
+fn
+(slug: Str): Vec<Map> {
+  list-organization-projects(slug, {})
+},
+(slug: Str, opts: Map): Vec<Map> {
+  ::api/request("GET", `/organizations/${slug}/projects`, {}, {}, opts)
 }

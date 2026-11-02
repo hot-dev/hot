@@ -102,6 +102,35 @@ Workflow control is explicit: `dispatch-workflow`, `enable-workflow`,
 `rerun-failed-workflow-jobs`, and `rerun-workflow-job`. Re-run functions accept
 an optional `{enable_debug_logging: true}` options Map.
 
+## Per-call credentials
+
+Every function that calls GitHub takes an optional trailing `opts` Map, so one run can act for many tenants and parallel flows don't share credentials. Nothing from `opts` is written to ctx.
+
+| Key | Effect |
+|---|---|
+| `token` | A PAT or installation token for this call, instead of `github.token` |
+| `app-id`, `private-key`, `installation-id` | Act as a GitHub App installation. The token is minted once and cached for the run under a SHA-256 of the identity |
+| `base-url` | Another API root, such as `https://ghe.example.com/api/v3`. Needs a `token` or App identity in the same `opts`; `github.token` is never sent to a per-call URL |
+| `api-version` | `X-GitHub-Api-Version` for this call |
+
+`opts` always comes last. Where a function already takes `params` or `options`, pass `{}` for those.
+
+```hot
+tenant-a {token: "ghp_tenant_a"}
+issues ::github::issues/list-issues("acme", "api", {state: "open"}, tenant-a)
+repo ::github::repos/get-repo("acme", "api", tenant-a)
+
+// A GitHub App installation
+tenant-b {app-id: 12345, private-key: "-----PEM from your secrets store-----", installation-id: 67890}
+pulls ::github::pulls/list-pulls("acme", "web", {}, tenant-b)
+
+// Pass the same opts to keep paging
+page ::github::api/json-response("GET", "/repos/acme/api/issues", {}, "", tenant-a)
+next ::github::api/next-page(page, tenant-a)
+```
+
+With a `token` or App identity in `opts`, `github.token` is ignored for that call. A credential key that is present but blank or null is an error naming the key, never a fallback to `github.token`. `::github::api/resolve(opts)` is the one place this is decided.
+
 ## Pagination and rate limits
 
 Endpoint wrappers return one GitHub page and accept `per_page`/`page` where

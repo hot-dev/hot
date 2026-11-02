@@ -27,8 +27,12 @@ config ::domains/get-custom-hostname("my-project-ref")
 ```
 """
 }
-fn (project-ref: Str): DomainConfig {
-  ::api/request("GET", `/projects/${project-ref}/custom-hostname`)
+fn
+(project-ref: Str): DomainConfig {
+  get-custom-hostname(project-ref, {})
+},
+(project-ref: Str, opts: Map): DomainConfig {
+  ::api/request("GET", `/projects/${project-ref}/custom-hostname`, {}, {}, opts)
 }
 
 UpdateCustomHostnameRequest type {
@@ -53,34 +57,50 @@ Configure a custom hostname for a project. You must set up DNS records (CNAME) b
 ```
 """
 }
-fn (request: UpdateCustomHostnameRequest): Map {
+fn
+(request: UpdateCustomHostnameRequest): Map {
+  update-custom-hostname(request, {})
+},
+(request: UpdateCustomHostnameRequest, opts: Map): Map {
   ::api/request("POST", `/projects/${request.project_ref}/custom-hostname/initialize`, {}, {
     custom_hostname: request.custom_hostname
-  })
+  }, opts)
 }
 
 verify-custom-hostname
 meta {
     doc: """Verify DNS configuration for a custom hostname."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("POST", `/projects/${project-ref}/custom-hostname/reverify`, {}, {})
+fn
+(project-ref: Str): Map {
+  verify-custom-hostname(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("POST", `/projects/${project-ref}/custom-hostname/reverify`, {}, {}, opts)
 }
 
 activate-custom-hostname
 meta {
     doc: """Activate a verified custom hostname. DNS must be verified first."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("POST", `/projects/${project-ref}/custom-hostname/activate`, {}, {})
+fn
+(project-ref: Str): Map {
+  activate-custom-hostname(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("POST", `/projects/${project-ref}/custom-hostname/activate`, {}, {}, opts)
 }
 
 delete-custom-hostname
 meta {
     doc: """Remove the custom hostname configuration for a project."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("DELETE", `/projects/${project-ref}/custom-hostname`)
+fn
+(project-ref: Str): Map {
+  delete-custom-hostname(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("DELETE", `/projects/${project-ref}/custom-hostname`, {}, {}, opts)
 }
 
 // ============================================================================
@@ -91,8 +111,12 @@ get-vanity-subdomain
 meta {
     doc: """Get the vanity subdomain configuration for a project."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("GET", `/projects/${project-ref}/vanity-subdomain`)
+fn
+(project-ref: Str): Map {
+  get-vanity-subdomain(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("GET", `/projects/${project-ref}/vanity-subdomain`, {}, {}, opts)
 }
 
 CheckVanitySubdomainRequest type {
@@ -118,10 +142,14 @@ result.available  // => true
 ```
 """
 }
-fn (request: CheckVanitySubdomainRequest): Map {
+fn
+(request: CheckVanitySubdomainRequest): Map {
+  check-vanity-subdomain(request, {})
+},
+(request: CheckVanitySubdomainRequest, opts: Map): Map {
   ::api/request("POST", `/projects/${request.project_ref}/vanity-subdomain/check-availability`, {}, {
     vanity_subdomain: request.vanity_subdomain
-  })
+  }, opts)
 }
 
 ActivateVanitySubdomainRequest type {
@@ -133,16 +161,24 @@ activate-vanity-subdomain
 meta {
     doc: """Activate a vanity subdomain for a project (e.g. `myapp.supabase.co`)."""
 }
-fn (request: ActivateVanitySubdomainRequest): Map {
+fn
+(request: ActivateVanitySubdomainRequest): Map {
+  activate-vanity-subdomain(request, {})
+},
+(request: ActivateVanitySubdomainRequest, opts: Map): Map {
   ::api/request("POST", `/projects/${request.project_ref}/vanity-subdomain/activate`, {}, {
     vanity_subdomain: request.vanity_subdomain
-  })
+  }, opts)
 }
 
 delete-vanity-subdomain
 meta {
     doc: """Remove the vanity subdomain for a project."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("DELETE", `/projects/${project-ref}/vanity-subdomain`)
+fn
+(project-ref: Str): Map {
+  delete-vanity-subdomain(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("DELETE", `/projects/${project-ref}/vanity-subdomain`, {}, {}, opts)
 }

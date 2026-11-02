@@ -7,7 +7,7 @@ Supabase Management API bindings for Hot. Manage projects, organizations, databa
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/supabase-admin": "1.0.0"
+"hot.dev/supabase-admin": "1.1.0"
 ```
 
 ## Configuration
@@ -137,6 +137,24 @@ branches ::branches/list-branches("my-project-ref")
 ::domains/verify-custom-hostname("my-project-ref")
 ::domains/activate-custom-hostname("my-project-ref")
 ```
+
+## Per-call credentials
+
+Every function that calls the Management API takes an optional trailing `opts` Map, so one run can act for many accounts and parallel flows don't share credentials. Nothing from `opts` is written to ctx.
+
+| Key | Effect |
+|---|---|
+| `access-token` | The Personal Access Token for this call, instead of `supabase.access.token` |
+| `base-url` | Another API root, such as a proxy. Needs an `access-token` in the same `opts`; `supabase.access.token` is never sent to a per-call URL |
+
+```hot
+tenant {access-token: "sbp_tenant_b"}
+projects ::supabase::admin::projects/list-projects(tenant)
+orgs ::supabase::admin::organizations/list-organizations(tenant)
+openapi ::supabase::admin::projects/get-database-openapi("my-project-ref", null, tenant)
+```
+
+`opts` always comes last, so pass `null` or the default value for an optional argument before it. An `access-token` that is present but blank or null is an error naming the key, never a fallback to `supabase.access.token`. `::supabase::admin::api/resolve(opts)` is the one place this is decided.
 
 ## API Base URL
 

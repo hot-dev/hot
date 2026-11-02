@@ -1,4 +1,25 @@
 ::anthropic::api ns
+meta {
+    doc: """
+    Transport for the Anthropic API: `x-api-key` and `anthropic-version`
+    headers, the base URL, and the one credential resolver.
+
+    **Per-call credentials.** Every typed function takes a trailing
+    `opts: Map`, which wins over ctx for that call. Nothing is kept in ctx,
+    so one run can serve many tenants and parallel flows don't share keys.
+
+    - `api-key`: overrides `anthropic.api.key`.
+    - `base-url`: overrides `anthropic.base.url`, for a proxy or gateway. It
+      needs `api-key` in `opts` too: the ctx key is never sent to a per-call
+      URL. A base URL and key both set in ctx work as usual.
+    - `api-version`: overrides `anthropic.api.version` (the
+      `anthropic-version` header).
+
+    **Call records.** Hot stores the arguments of every function call in the
+    run's call records and only masks ctx secrets, so a key passed in `opts`
+    is stored there as plain text.
+    """
+}
 
 // Namespace alias for ctx module
 ::ctx ::hot::ctx
@@ -24,15 +45,245 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
+DEFAULT_API_VERSION "2023-06-01"
+
+non-blank
+meta { doc: """`value`, or null when it is null or a blank Str.""" }
+fn (value: Any): Any {
+  cond {
+    is-str(value) => { if(is-empty(trim(value)), null, value) }
+    => { value }
+  }
+}
+
+normalize-base-url
+meta {
+    doc: """
+    Normalize a base URL: trims whitespace, drops trailing slashes, and falls
+    back to `::anthropic/BASE_URL` when the value is null or empty.
+
+    **Example**
+
+    ```hot
+    ::anthropic::api/normalize-base-url("https://gateway.example.com/")  // => "https://gateway.example.com"
+    ::anthropic::api/normalize-base-url(null)                            // => "https://api.anthropic.com"
+    ```
+    """
+}
+fn (url: Str?): Str {
+  trimmed trim(or(url, ""))
+  cond {
+    is-empty(trimmed) => { ::anthropic/BASE_URL }
+    ends-with(trimmed, "/") => { normalize-base-url(slice(trimmed, 0, sub(length(trimmed), 1))) }
+    => { trimmed }
+  }
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: settings for a call from `opts` first, then
+    `ctx-values` (a Map of context variables), then defaults. Returns
+    `{api-key, base-url, api-version}`, or an Err when no API key is set, when `api-key` in `opts` is
+    blank (never a fallback to ctx, so a tenant with a missing key can't run
+    on the project's key), or when `opts` has a `base-url` but no `api-key`
+    (the ctx key is never sent to a per-call URL).
+    Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::anthropic::api/resolve-from({api-key: "k"}, {}).api-version  // => "2023-06-01"
+    ```
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  pick (key, ctx-key) { or(non-blank(get(opts, key)), non-blank(get(ctx-values, ctx-key))) }
+  has-explicit-key in("api-key", keys(opts))
+  api-key if(has-explicit-key, non-blank(get(opts, "api-key")), non-blank(get(ctx-values, "anthropic.api.key")))
+  cond {
+    and(has-explicit-key, is-null(api-key)) => {
+      err("anthropic: api-key in the call's opts is blank. Pass the key, or leave api-key out to use anthropic.api.key.")
+    }
+
+    and(not(has-explicit-key), not(is-null(non-blank(get(opts, "base-url"))))) => {
+      err("anthropic: base-url in the call's opts needs api-key in opts too. The anthropic.api.key ctx key is never sent to a per-call base URL.")
+    }
+
+    is-null(api-key) => {
+      err("anthropic: no API key. Set anthropic.api.key in Context Variables, or pass {api-key: ...} in the call's opts.")
+    }
+    => {
+      {
+        api-key: api-key,
+        base-url: normalize-base-url(pick("base-url", "anthropic.base.url")),
+        api-version: or(pick("api-version", "anthropic.api.version"), DEFAULT_API_VERSION)
+      }
+    }
+  }
+}
+
+resolve
+meta {
+    doc: """
+    Settings for one call: `opts` over ctx over defaults (see `resolve-from`).
+    With an `api-key` in `opts`, the ctx key is not read, and a blank one is
+    an Err rather than a fallback to ctx. Nothing is written to ctx.
+
+    **Example**
+
+    ```hot
+    ::anthropic::api/resolve({api-key: "tenant-key"}).base-url  // => "https://api.anthropic.com"
+    ```
+    """,
+    ctx: {
+        "anthropic.api.key": {required: false},
+        "anthropic.base.url": {required: false, default: "https://api.anthropic.com", secret: false},
+        "anthropic.api.version": {required: false, default: "2023-06-01", secret: false}
+    }
+}
+fn
+(): Map {
+  resolve({})
+},
+(opts: Map): Map {
+  options or(opts, {})
+  has-explicit-key in("api-key", keys(options))
+  resolve-from(options, {
+    "anthropic.api.key": if(has-explicit-key, null, ::ctx/get("anthropic.api.key")),
+    "anthropic.base.url": ::ctx/get("anthropic.base.url"),
+    "anthropic.api.version": ::ctx/get("anthropic.api.version")
+  })
+}
+
+base-url
+meta {
+    doc: """
+    The base URL calls go to: `opts.base-url`, then the `anthropic.base.url`
+    ctx variable, then `https://api.anthropic.com`. Set it to route calls
+    through a proxy or gateway.
+
+    **Example**
+
+    ```hot
+    ::anthropic::api/base-url()                                     // => "https://api.anthropic.com"
+    ::anthropic::api/base-url({base-url: "https://gw.example.com"}) // => "https://gw.example.com"
+    ```
+    """,
+    ctx: {"anthropic.base.url": {required: false, default: "https://api.anthropic.com", secret: false}}
+}
+fn
+(): Str {
+  base-url({})
+},
+(opts: Map): Str {
+  normalize-base-url(or(non-blank(get(or(opts, {}), "base-url")), ::ctx/get("anthropic.base.url")))
+}
+
+build-headers
+meta {
+    doc: """
+    Request headers from resolved settings (see `resolve`), pure:
+    `x-api-key`, `anthropic-version`, and `Content-Type` when there is a body.
+    Exposed for testing.
+    """
+}
+fn (resolved: Map, has-body: Bool): Map {
+  auth {
+    x-api-key: resolved.api-key,
+    anthropic-version: resolved.api-version
+  }
+
+  if(has-body, {...auth, Content-Type: "application/json"}, auth)
+}
+
+build-request
+meta {
+    doc: """
+    The outgoing `HttpRequest` for resolved settings, pure. `additional-headers`
+    override the defaults. An empty or null `body` sends no body at all.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    resolved ::anthropic::api/resolve-from({api-key: "k"}, {})
+    req ::anthropic::api/build-request("GET", "https://api.anthropic.com/v1/models", {}, "", resolved)
+    req.headers  // includes x-api-key: "k"
+    ```
+    """
+}
+fn (method: Str, url: Str, additional-headers: Map, body: Any, resolved: Map): HttpRequest {
+  match body {
+    "" | Null => {
+      HttpRequest({
+        method,
+        url,
+        headers: {...build-headers(resolved, false), ...additional-headers}
+      })
+    }
+
+    _ => {
+      HttpRequest({
+        method,
+        url,
+        headers: {...build-headers(resolved, true), ...additional-headers},
+        body: to-json(untype(body))
+      })
+    }
+  }
+}
+
+call
+meta {
+    doc: """
+    Resolve `opts` and send a request to `path` under the resolved base URL.
+    The typed functions in this package go through here.
+
+    **Example**
+
+    ```hot
+    response ::anthropic::api/call("GET", "/v1/models", {}, "", {api-key: "tenant-key"})
+    ```
+    """,
+    ctx: {
+        "anthropic.api.key": {required: false},
+        "anthropic.base.url": {required: false, default: "https://api.anthropic.com", secret: false},
+        "anthropic.api.version": {required: false, default: "2023-06-01", secret: false}
+    }
+}
+fn (method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  ::hot::http/request(build-request(method, `${resolved.base-url}${path}`, additional-headers, body, resolved))
+}
+
+call-stream
+meta {
+    doc: """
+    Streaming counterpart to `call`. Returns a `StreamingHttpResponse` whose
+    body is an iterator of parsed SSE or NDJSON events.
+    """,
+    ctx: {
+        "anthropic.api.key": {required: false},
+        "anthropic.base.url": {required: false, default: "https://api.anthropic.com", secret: false},
+        "anthropic.api.version": {required: false, default: "2023-06-01", secret: false}
+    }
+}
+fn (method: Str, path: Str, additional-headers: Map, body: Any, format: Str, opts: Map): StreamingHttpResponse {
+  resolved resolve(opts)
+  ::hot::http/request-stream(build-request(method, `${resolved.base-url}${path}`, additional-headers, body, resolved), format)
+}
+
 request
 meta {
     doc: """
     Make an HTTP request with pre-filled Anthropic service headers.
 
     Automatically includes the `x-api-key` and `anthropic-version` headers.
-    The API key is read from context (`anthropic.api.key`) by default, or can
-    be passed explicitly as the 5th argument. Additional headers can be
-    provided to merge/override defaults (e.g. beta feature headers).
+    The API key is read from context (`anthropic.api.key`) by default. The 5th
+    argument can be an explicit API key, or an `opts` Map (see `resolve`).
+    Additional headers can be provided to merge/override defaults (e.g. beta
+    feature headers).
 
     **Example**
 
@@ -53,7 +304,10 @@ meta {
     })
     ```
     """,
-    ctx: {"anthropic.api.key": {}}
+    ctx: {
+        "anthropic.api.key": {required: false},
+        "anthropic.api.version": {required: false, default: "2023-06-01", secret: false}
+    }
 }
 fn
 (method: Str, url: Str): HttpResponse {
@@ -62,26 +316,17 @@ fn
 (method: Str, url: Str, additional-headers: Map): HttpResponse {
   request(method, url, additional-headers, "")
 },
-// 4-arity: use ctx api key (default) — delegates to 5-arity
+// 4-arity: use ctx api key (default)
 (method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, url, additional-headers, body, ::ctx/get("anthropic.api.key"))
+  request(method, url, additional-headers, body, {})
 },
 // 5-arity: explicit api key override
 (method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
-  default-headers {
-    x-api-key: api-key,
-    anthropic-version: "2023-06-01"
-  }
-
-  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
-  final-headers {...headers, ...additional-headers}
-
-  ::hot::http/request(HttpRequest({
-    method,
-    url,
-    headers: final-headers,
-    body: to-json(untype(body))
-  }))
+  request(method, url, additional-headers, body, {api-key: api-key})
+},
+// 5-arity: per-call opts (api-key, api-version); `url` is used as given
+(method: Str, url: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  ::hot::http/request(build-request(method, url, additional-headers, body, resolve(opts)))
 }
 
 request-stream
@@ -91,7 +336,8 @@ meta {
 
     Returns a `StreamingHttpResponse` whose body is an iterator that yields
     parsed SSE or NDJSON events. The default format is `"sse"`. API key is
-    read from context by default, or can be passed explicitly as the 6th argument.
+    read from context by default. The 6th argument can be an explicit API key,
+    or an `opts` Map (see `resolve`).
 
     **Example**
 
@@ -106,30 +352,24 @@ meta {
     events collect(response.body)
     ```
     """,
-    ctx: {"anthropic.api.key": {}}
+    ctx: {
+        "anthropic.api.key": {required: false},
+        "anthropic.api.version": {required: false, default: "2023-06-01", secret: false}
+    }
 }
 fn
 (method: Str, url: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
   request-stream(method, url, additional-headers, body, "sse")
 },
-// 5-arity: use ctx api key (default) — delegates to 6-arity
+// 5-arity: use ctx api key (default)
 (method: Str, url: Str, additional-headers: Map, body: Any, format: Str): StreamingHttpResponse {
-  request-stream(method, url, additional-headers, body, format, ::ctx/get("anthropic.api.key"))
+  request-stream(method, url, additional-headers, body, format, {})
 },
 // 6-arity: explicit api key override
 (method: Str, url: Str, additional-headers: Map, body: Any, format: Str, api-key: Str): StreamingHttpResponse {
-  default-headers {
-    x-api-key: api-key,
-    anthropic-version: "2023-06-01"
-  }
-
-  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
-  final-headers {...headers, ...additional-headers}
-
-  ::hot::http/request-stream(HttpRequest({
-    method,
-    url,
-    headers: final-headers,
-    body: to-json(untype(body))
-  }), format)
+  request-stream(method, url, additional-headers, body, format, {api-key: api-key})
+},
+// 6-arity: per-call opts (api-key, api-version); `url` is used as given
+(method: Str, url: Str, additional-headers: Map, body: Any, format: Str, opts: Map): StreamingHttpResponse {
+  ::hot::http/request-stream(build-request(method, url, additional-headers, body, resolve(opts)), format)
 }
