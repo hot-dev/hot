@@ -179,9 +179,12 @@ history is meaningful.
 When a change touches `resources/ai/skills`, merge its `hot-skills` mirror in
 this order: open the `hot` pull request, sync the mirror into a `hot-skills`
 branch with `scripts/sync-ai-assets.sh` and open that pull request, merge the
-`hot-skills` one, then re-run the `hot` pull request's sync check and merge it.
-The `hot` check compares against `hot-skills` main, so this order keeps both
-repositories' CI green.
+`hot-skills` one, then re-run the `hot` pull request's `ai-skills-mirror` check
+and merge it. That check compares against `hot-skills` main and only runs when
+the skills change. It isn't required, so it won't hold up a merge, and the
+required `hot` check only compares the skills with the manifest hashes that sync
+records. If `hot` merges first, re-run the check on `main` once the mirror
+merges, or let the daily run clear it.
 
 Publishing jobs are gated to the upstream `hot-dev/hot` repository. Depending
 on repository configuration, the pipeline publishes the GitHub release,
