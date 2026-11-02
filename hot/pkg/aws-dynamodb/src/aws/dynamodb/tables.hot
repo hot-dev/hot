@@ -58,7 +58,7 @@ meta {
     """
 }
 fn
-(limit: Int, exclusive_start_table_name: Str): ListTablesResponse | AwsError {
+(limit: Int?, exclusive_start_table_name: Str?): ListTablesResponse | AwsError {
     region get-region()
     credentials get-credentials()
 

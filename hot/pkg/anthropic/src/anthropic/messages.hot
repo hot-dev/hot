@@ -209,15 +209,14 @@ fn
 (model: Str, message: Str, system: Str): Str {
     chat(model, message, system, null)
 },
-(model: Str, message: Str, system: Str, max-tokens: Int): Str {
+(model: Str, message: Str, system: Str?, max-tokens: Int?): Str {
     messages [InputMessage({role: "user", content: message})]
 
-    request {
+    request assoc-some({
         model: model,
         messages: messages,
-        max_tokens: or(max-tokens, 1024),
-        system: system
-    }
+        max_tokens: or(max-tokens, 1024)
+    }, "system", system)
 
     result post(MessagesPostRequest(request))
 

@@ -238,7 +238,7 @@ meta {
     ```
     """
 }
-fn (specs: Vec<Any>): Vec<::ai-tool/Tool> {
+fn (specs: Vec<Any>?): Vec<::ai-tool/Tool> {
     cond {
         or(is-null(specs), is-empty(specs)) => { [] }
         => { reduce(specs, (acc, spec) {

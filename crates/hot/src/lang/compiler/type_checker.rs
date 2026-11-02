@@ -286,6 +286,9 @@ pub struct TypeContext {
     /// parameter holds a thunk, which a call by its name skips, so it does
     /// not shadow a function of the same name.
     lazy_names: Vec<AHashSet<String>>,
+    /// Parameter names per scope (parallel to `scopes`). Rebinding a name
+    /// drops it: the binding's value isn't what the caller passed.
+    param_names: Vec<AHashSet<String>>,
     functions: AHashMap<String, Vec<FunctionSignature>>,
     types: AHashMap<String, TypeDefinition>,
     implementations: AHashMap<String, Vec<Implementation>>, // Type -> [Implementation]
@@ -309,6 +312,7 @@ impl TypeContext {
             // lambda body scopes are pushed on top.
             scopes: vec![AHashMap::new()],
             lazy_names: vec![AHashSet::new()],
+            param_names: vec![AHashSet::new()],
             functions: AHashMap::new(),
             types: AHashMap::new(),
             implementations: AHashMap::new(),
@@ -326,6 +330,7 @@ impl TypeContext {
     pub fn push_scope(&mut self) {
         self.scopes.push(AHashMap::new());
         self.lazy_names.push(AHashSet::new());
+        self.param_names.push(AHashSet::new());
     }
 
     /// Pop the topmost lexical scope. No-op if only the global scope is left.
@@ -333,6 +338,7 @@ impl TypeContext {
         if self.scopes.len() > 1 {
             self.scopes.pop();
             self.lazy_names.pop();
+            self.param_names.pop();
         }
     }
 
@@ -344,6 +350,8 @@ impl TypeContext {
         self.scopes.push(AHashMap::new());
         self.lazy_names.clear();
         self.lazy_names.push(AHashSet::new());
+        self.param_names.clear();
+        self.param_names.push(AHashSet::new());
         self.current_namespace = namespace;
     }
 
@@ -470,6 +478,9 @@ impl TypeContext {
             .scopes
             .last_mut()
             .expect("TypeContext always has at least one scope");
+        if let Some(params) = self.param_names.last_mut() {
+            params.remove(&name);
+        }
         top.insert(name, type_expr);
     }
 
@@ -524,6 +535,32 @@ impl TypeContext {
         if let Some(top) = self.lazy_names.last_mut() {
             top.insert(name.to_string());
         }
+    }
+
+    /// Bind `name` in the topmost scope as a parameter of the function or
+    /// lambda being checked.
+    pub fn add_parameter(&mut self, name: String, type_expr: TypeExpr) {
+        self.add_variable(name.clone(), type_expr);
+        if let Some(params) = self.param_names.last_mut() {
+            params.insert(name);
+        }
+    }
+
+    /// The declared type of `name`, when it names a parameter and no binding
+    /// shadows it. Lazy parameters hold a thunk, so they don't count.
+    pub fn get_parameter_type(&self, name: &str) -> Option<&TypeExpr> {
+        for ((scope, params), lazy) in self
+            .scopes
+            .iter()
+            .zip(&self.param_names)
+            .zip(&self.lazy_names)
+            .rev()
+        {
+            if let Some(ty) = scope.get(name) {
+                return (params.contains(name) && !lazy.contains(name)).then_some(ty);
+            }
+        }
+        None
     }
 
     /// Whether `name` is bound by a function or lambda body (a parameter or
@@ -3178,8 +3215,8 @@ impl TypeChecker {
         // Payload-to-enum: if `expected` is an enum and `src` is the
         // declared payload type of one of its variants, accept the call.
         // The runtime applies the variant's wrap function at the
-        // `CallUserFunction` opcode boundary (see `lookup_typed_param_signature`
-        // and `apply_coercion_plan` in `vm.rs`) so the callee receives
+        // `CallUserFunction` opcode boundary (see `coerce_call_args` in
+        // `vm.rs`) so the callee receives
         // the properly tagged enum value. Test coverage:
         // `hot/test/docs/coercion-implicit.hot::test-runtime-coerces-to-variant`.
         //
@@ -3433,7 +3470,7 @@ impl TypeChecker {
                     };
                     parameter_types.push(param_type.clone());
                     let name = arg.var.sym.name().to_string();
-                    self.context.add_variable(name, param_type);
+                    self.context.add_parameter(name, param_type);
                 }
 
                 self.in_fn_body += 1;
@@ -4374,6 +4411,167 @@ impl TypeChecker {
         });
     }
 
+    /// Whether a value of type `ty` can't be null, as declared. Anything that
+    /// might admit null, such as `Any` or a type this can't resolve, is left
+    /// out so neither null warning fires on a guess.
+    fn rejects_null(&self, ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Str
+            | TypeExpr::Int
+            | TypeExpr::Dec
+            | TypeExpr::Bool
+            | TypeExpr::Bytes
+            | TypeExpr::Byte
+            | TypeExpr::Vec(_)
+            | TypeExpr::Map(_, _)
+            | TypeExpr::Function(_, _)
+            | TypeExpr::Record { .. } => true,
+            TypeExpr::Literal(lit) => *lit != LiteralType::Null,
+            TypeExpr::Union(members) => members.iter().all(|m| self.rejects_null(m)),
+            TypeExpr::Constrained(inner, _) => self.rejects_null(inner),
+            // A `Result` parameter takes any value as it is, null included.
+            TypeExpr::Named(name) if Self::short_type_name(name) == "Result" => false,
+            TypeExpr::Named(name) => {
+                if let Some(td) = self.literal_union_def(name) {
+                    return !td.is_open && !td.literal_members.contains(&LiteralType::Null);
+                }
+                self.context
+                    .get_type_definition(&Self::short_type_name(name))
+                    .is_some_and(|td| td.is_struct || td.is_enum)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `name` is the core function `short`, not a local definition
+    /// that shadows it. `home` is the namespace defining the core function.
+    fn calls_core_function(&self, name: &str, short: &str, home: &str) -> bool {
+        if name == short {
+            let local = format!("{}/{}", self.context.current_namespace, short);
+            return self.context.current_namespace == home
+                || self.context.get_function_signature(&local).is_none();
+        }
+        name == format!("{home}/{short}")
+    }
+
+    /// Whether a warning with `code` was already reported at `location`:
+    /// argument types are inferred more than once for some calls.
+    fn warned_at(&self, code: &str, location: &Option<ErrorLocation>) -> bool {
+        self.errors.warnings.iter().any(|w| {
+            matches!(w, CompilerError::Constraint { code: c, location: l, .. } if *c == code && l == location)
+        })
+    }
+
+    /// `null-check-on-non-nullable`: `is-null(x)` or `is-some(x)` on a
+    /// parameter declared without `?`. Either the parameter should be
+    /// nullable or the check does nothing for a caller following its type.
+    fn check_null_check(&mut self, name: &str, fn_call: &FnCall) {
+        if self.in_pipe_flow {
+            return;
+        }
+        let Some(check) = ["is-null", "is-some"]
+            .into_iter()
+            .find(|short| self.calls_core_function(name, short, "::hot::type"))
+        else {
+            return;
+        };
+        let [arg] = fn_call.args.as_slice() else {
+            return;
+        };
+        let Value::Ref(Ref::Var(var_ref)) = &arg.value else {
+            return;
+        };
+        if var_ref.var.deep_path.is_some() {
+            return;
+        }
+        let param = var_ref.var.sym.name().to_string();
+        let Some(declared) = self.context.get_parameter_type(&param).cloned() else {
+            return;
+        };
+        if !self.rejects_null(&declared) {
+            return;
+        }
+        let location = arg
+            .src
+            .as_ref()
+            .or(fn_call.src.as_ref())
+            .map(|s| self.source_to_error_location(s));
+        if self.warned_at("null-check-on-non-nullable", &location) {
+            return;
+        }
+        self.errors.add_warning(CompilerError::Constraint {
+            code: "null-check-on-non-nullable",
+            message: format!(
+                "`{check}({param})` checks a parameter declared `{declared}`, which doesn't accept null"
+            ),
+            help: Some(format!(
+                "declare it `{param}: {declared}?` if null is allowed, or remove the check"
+            )),
+            warning: true,
+            location,
+        });
+    }
+
+    /// `null-for-non-nullable`: a literal `null` argument where every
+    /// signature of that arity declares a type without `?`.
+    fn check_null_arguments(&mut self, fn_call: &FnCall, signatures: &[FunctionSignature]) {
+        let offset = usize::from(self.in_pipe_flow);
+        let arity = fn_call.args.len() + offset;
+        for (i, arg) in fn_call.args.iter().enumerate() {
+            // A spread makes the later positions unknown.
+            if arg.spread {
+                return;
+            }
+            if !matches!(arg.value, Value::Val(Val::Null, _)) {
+                continue;
+            }
+            let position = i + offset;
+            let mut declared = None;
+            let mut rejected = true;
+            for sig in signatures {
+                let count = sig.parameter_types.len();
+                let fits = if sig.variadic {
+                    arity + 1 >= count
+                } else {
+                    arity == count
+                };
+                if !fits {
+                    continue;
+                }
+                let param = sig
+                    .parameter_types
+                    .get(position)
+                    .or_else(|| sig.parameter_types.last().filter(|_| sig.variadic));
+                let param = match param {
+                    Some(TypeExpr::Lazy(inner) | TypeExpr::Variadic(inner)) => Some(&**inner),
+                    other => other,
+                };
+                rejected &= param.is_some_and(|p| self.rejects_null(p));
+                declared = declared.or(param);
+            }
+            let Some(declared) = declared.filter(|_| rejected).map(|d| d.to_string()) else {
+                continue;
+            };
+            let location = arg
+                .src
+                .as_ref()
+                .or(fn_call.src.as_ref())
+                .map(|s| self.source_to_error_location(s));
+            if self.warned_at("null-for-non-nullable", &location) {
+                continue;
+            }
+            self.errors.add_warning(CompilerError::Constraint {
+                code: "null-for-non-nullable",
+                message: format!("`null` passed to a parameter declared `{declared}`"),
+                help: Some(format!(
+                    "declare the parameter `{declared}?` if null is allowed, or pass a value"
+                )),
+                warning: true,
+                location,
+            });
+        }
+    }
+
     /// Infer the return type of a function call
     /// Precise result types for `and`, `or`, `if` and `not`. `and` and `or`
     /// return one of their arguments and `if` one of its branches, so the
@@ -4635,6 +4833,8 @@ impl TypeChecker {
                     .map(|arg| self.infer_argument_type(&arg.value))
                     .collect();
 
+                self.check_null_arguments(fn_call, &signatures);
+
                 // Validate argument types against parameter types for all arities
                 // Find the first matching arity signature
                 let matching_sig = self.find_matching_signature(fn_call, &arg_types, &signatures);
@@ -4642,6 +4842,7 @@ impl TypeChecker {
                 if let Some(sig) = matching_sig {
                     let declared = sig.return_type.clone();
                     self.check_literal_comparison(lookup_name, fn_call, &arg_types);
+                    self.check_null_check(lookup_name, fn_call);
                     if let Some(precise) = self.logic_result_type(lookup_name, fn_call, &arg_types)
                     {
                         return precise;
@@ -4734,7 +4935,7 @@ impl TypeChecker {
                 if arg.lazy {
                     self.context.mark_lazy_param(&name);
                 }
-                self.context.add_variable(name, param_type);
+                self.context.add_parameter(name, param_type);
             }
 
             // The return annotation is read below from inside the body,

@@ -57,7 +57,7 @@ meta {
     """
 }
 fn
-(topic_arn: Str, message: Str, options: Map): PublishResponse | AwsError {
+(topic_arn: Str?, message: Str, options: Map): PublishResponse | AwsError {
     region get-region()
     credentials get-credentials()
 

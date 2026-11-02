@@ -57,7 +57,7 @@ meta {
     """
 }
 fn
-(by_provider: Str, by_customization_type: Str, by_output_modality: Str, by_inference_type: Str): ListFoundationModelsResponse | AwsError {
+(by_provider: Str?, by_customization_type: Str?, by_output_modality: Str?, by_inference_type: Str?): ListFoundationModelsResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
