@@ -756,7 +756,7 @@ fn () {
     cond {
         is-zero(tests-total) => { println(`\n${bright-yellow("no tests ran.\n")}`) }
         is-zero(tests-failed) => { println(`\n${bright-green("all tests passed!\n")}`) }
-        => { println(`\n${::hot::term/bright-red(tests-failed)} tests failed.\n`) }
+        => { println(`\n${::hot::term/bright-red(Str(tests-failed))} tests failed.\n`) }
     }
 
     // Print total duration

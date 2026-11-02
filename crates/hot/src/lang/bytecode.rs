@@ -524,6 +524,61 @@ pub enum Instruction {
     /// its parameters' constraints: bit `i` for parameter `i`. Its prologue
     /// skips those checks.
     ProvenArgs { function_id: FunctionId, mask: u64 },
+    /// Check parameter `var_name` against a primitive annotation. A value
+    /// whose kind is in `mask` passes as it is, and with `each`, a variadic
+    /// parameter's values are checked instead. Any other value takes the
+    /// checked path with `spec`, which may rebind it to an exactly converted
+    /// number; a failure returns the `ConstraintError` from the function.
+    CheckParam {
+        var_name: ConstantId,
+        spec: ConstantId,
+        mask: u32,
+        each: bool,
+    },
+}
+
+/// The runtime kinds a primitive parameter annotation accepts, as a mask for
+/// `CheckParam`.
+pub mod param_mask {
+    use crate::val::Val;
+
+    pub const NULL: u32 = 1;
+    pub const BOOL: u32 = 1 << 1;
+    pub const INT: u32 = 1 << 2;
+    pub const DEC: u32 = 1 << 3;
+    pub const STR: u32 = 1 << 4;
+    pub const VEC: u32 = 1 << 5;
+    pub const MAP: u32 = 1 << 6;
+    pub const BYTES: u32 = 1 << 7;
+    pub const BYTE: u32 = 1 << 8;
+
+    /// Whether `value`'s kind is in `mask`, reading it in place. A tagged
+    /// value is a `Map`.
+    #[inline]
+    pub fn accepts(value: &Val, mask: u32) -> bool {
+        let bit = match value {
+            Val::Null => NULL,
+            Val::Bool(_) => BOOL,
+            Val::Int(_) => INT,
+            Val::Dec(_) => DEC,
+            Val::Str(_) => STR,
+            Val::Vec(_) => VEC,
+            Val::Map(_) => MAP,
+            Val::Bytes(_) => BYTES,
+            Val::Byte(_) => BYTE,
+            Val::Box(_) => return false,
+        };
+        mask & bit != 0
+    }
+
+    /// `accepts` for a `CheckParam`: with `each`, of each value in a Vec.
+    #[inline]
+    pub fn passes(value: &Val, mask: u32, each: bool) -> bool {
+        if !each {
+            return accepts(value, mask);
+        }
+        matches!(value, Val::Vec(items) if items.iter().all(|item| accepts(item, mask)))
+    }
 }
 
 /// Constant pool entry for storing literal values
@@ -1471,6 +1526,19 @@ impl fmt::Display for Instruction {
                 src,
                 spec,
                 if *test { " test" } else { "" }
+            ),
+            Instruction::CheckParam {
+                var_name,
+                spec,
+                mask,
+                each,
+            } => write!(
+                f,
+                "CHECK_PARAM c{} c{} mask={:#x}{}",
+                var_name,
+                spec,
+                mask,
+                if *each { " each" } else { "" }
             ),
             Instruction::ProvenArgs { function_id, mask } => {
                 write!(f, "PROVEN_ARGS fn{} {:b}", function_id, mask)

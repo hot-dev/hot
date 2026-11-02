@@ -244,8 +244,10 @@ meta ["test"] fn () {
     assert-eq(443, open-port(body.b), "an integral Dec")
     assert-eq("violation", constraint-kind(open-port(body.c)), "never truncated")
     assert-eq("violation", constraint-kind(open-port(body.d)), "no string parsing")
-    assert-eq(443.5, plain-port(body.c), "an unrefined parameter doesn't truncate")
-    assert-eq("443", plain-port(body.d), "or parse strings: primitive arrows are for explicit calls")
+    assert-eq(443, plain-port(body.a), "an unrefined parameter takes the base type")
+    assert-eq(443, plain-port(body.b), "and an integral Dec")
+    assert-eq("violation", constraint-kind(plain-port(body.c)), "and doesn't truncate")
+    assert-eq("violation", constraint-kind(plain-port(body.d)), "or parse strings: primitive arrows are for explicit calls")
 }
 
 test-literal-unions

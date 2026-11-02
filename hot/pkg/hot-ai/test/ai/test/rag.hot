@@ -204,7 +204,7 @@ meta ["test"] fn () {
     // `recent` filters to a recent window (default 24h), so use current
     // timestamps rather than arbitrary fixtures or the records get
     // filtered out before formatting.
-    now-secs div(::time/epoch-millis(::time/now()), 1000)
+    now-secs floor(div(::time/epoch-millis(::time/now()), 1000))
     ::mem/remember(mem, test-message("m1", "first note",  now-secs))
     ::mem/remember(mem, test-message("m2", "second note", now-secs))
     out ::rag/recent-text(mem, {limit: 5})
@@ -227,7 +227,7 @@ test-roled-message fn (id: Str, content: Str, role: Str, ts: Int): ::msg/Message
 test-recent-text-exclude-roles-drops-matches
 meta ["test"] fn () {
     mem test-memory()
-    now-secs div(::time/epoch-millis(::time/now()), 1000)
+    now-secs floor(div(::time/epoch-millis(::time/now()), 1000))
     ::mem/remember(mem, test-roled-message("u1", "user line",      "user",      now-secs))
     ::mem/remember(mem, test-roled-message("a1", "assistant chat", "assistant", now-secs))
     ::mem/remember(mem, test-roled-message("u2", "another user",   "user",      now-secs))
@@ -241,7 +241,7 @@ meta ["test"] fn () {
 test-recent-text-include-roles-keeps-only-matches
 meta ["test"] fn () {
     mem test-memory()
-    now-secs div(::time/epoch-millis(::time/now()), 1000)
+    now-secs floor(div(::time/epoch-millis(::time/now()), 1000))
     ::mem/remember(mem, test-roled-message("u1", "user line",      "user",      now-secs))
     ::mem/remember(mem, test-roled-message("a1", "assistant chat", "assistant", now-secs))
 
@@ -253,7 +253,7 @@ meta ["test"] fn () {
 test-recent-text-include-roles-drops-untagged
 meta ["test"] fn () {
     mem test-memory()
-    now-secs div(::time/epoch-millis(::time/now()), 1000)
+    now-secs floor(div(::time/epoch-millis(::time/now()), 1000))
     ::mem/remember(mem, test-message("m1", "untagged note", now-secs))
     ::mem/remember(mem, test-roled-message("u1", "user line", "user", now-secs))
 
@@ -265,7 +265,7 @@ meta ["test"] fn () {
 test-recent-text-exclude-roles-keeps-untagged
 meta ["test"] fn () {
     mem test-memory()
-    now-secs div(::time/epoch-millis(::time/now()), 1000)
+    now-secs floor(div(::time/epoch-millis(::time/now()), 1000))
     ::mem/remember(mem, test-message("m1", "untagged note", now-secs))
     ::mem/remember(mem, test-roled-message("a1", "assistant chat", "assistant", now-secs))
 

@@ -22,7 +22,9 @@
 //! function-name strings here. A literal name is only ever used as a registry
 //! lookup key.
 
-use crate::lang::bytecode::{BytecodeProgram, Constant, Instruction, LambdaInfo, RegisterId};
+use crate::lang::bytecode::{
+    BytecodeProgram, Constant, Instruction, LambdaInfo, RegisterId, param_mask,
+};
 use crate::lang::hot::libmap::{self, HofExecution, HofStage, PureOp};
 use crate::lang::hot::r#type::{HotResult, str_internal};
 use crate::val::Val;
@@ -148,6 +150,8 @@ pub struct LoweredLambda {
     /// `Other`/`Int`). Used only as a hint; evaluation dispatches on the runtime
     /// value.
     pub result_type: ExprType,
+    /// Whether `code` starts with parameter checks, which `expr` doesn't show.
+    pub guarded: bool,
 }
 
 impl LoweredLambda {
@@ -158,7 +162,21 @@ impl LoweredLambda {
             expr,
             code,
             result_type,
+            guarded: false,
         }
+    }
+
+    /// Check parameters before the body: a value outside its mask de-opts, so
+    /// the interpreter converts it or reports the failure.
+    fn with_param_guards(mut self, guards: Vec<(usize, u32)>) -> Self {
+        self.guarded = !guards.is_empty();
+        let body = std::mem::take(&mut self.code);
+        self.code = guards
+            .into_iter()
+            .map(|(index, mask)| MicroOp::GuardParam { index, mask })
+            .chain(body)
+            .collect();
+        self
     }
 }
 
@@ -352,9 +370,24 @@ fn lower_callable_body(
 
     let mut regs: HashMap<RegisterId, RegContent> = HashMap::new();
     let mut result: Option<(PureExpr, ExprType)> = None;
+    let mut param_guards = Vec::new();
 
     for ins in instructions {
         match ins {
+            Instruction::CheckParam {
+                var_name,
+                mask,
+                each: false,
+                ..
+            } => {
+                let name = const_str(program, *var_name)
+                    .ok_or(Bailout::UnsupportedInstruction("CheckParam:badname"))?;
+                let index = param_index
+                    .get(name.as_str())
+                    .copied()
+                    .ok_or(Bailout::UnknownCapture(name))?;
+                param_guards.push((index, *mask));
+            }
             Instruction::LoadConst { dest, constant } => {
                 match program.constants.get(*constant as usize) {
                     Some(Constant::Val(Val::Int(i))) => {
@@ -511,7 +544,7 @@ fn lower_callable_body(
     }
 
     let (expr, result_type) = result.ok_or(Bailout::UnsupportedInstruction("no-return"))?;
-    Ok(LoweredLambda::new(params.len(), expr, result_type))
+    Ok(LoweredLambda::new(params.len(), expr, result_type).with_param_guards(param_guards))
 }
 
 fn lower_binop(
@@ -761,6 +794,10 @@ fn fast_op(op: PureOp, vals: &[PureValue]) -> Option<Scalar> {
 /// operands and push one result; `Field` consumes one and pushes one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MicroOp {
+    GuardParam {
+        index: usize,
+        mask: u32,
+    },
     PushParam(usize),
     PushInt(i64),
     PushBool(bool),
@@ -824,6 +861,12 @@ fn flatten_into(expr: &PureExpr, out: &mut Vec<MicroOp>) {
     }
 }
 
+/// A `GuardParam` on a value that isn't in a register's kind.
+#[inline(never)]
+fn other_param_accepted(value: &PureValue, mask: u32) -> bool {
+    matches!(value, PureValue::Other(value) if param_mask::accepts(value, mask))
+}
+
 /// Evaluate a flat program against `args`, reusing `stack` (cleared on entry).
 /// Returns the single result where it sits on top of `stack`, or `None` for a
 /// de-opt.
@@ -839,6 +882,12 @@ fn run_program<'s>(
     stack.clear();
     for mop in code {
         match mop {
+            MicroOp::GuardParam { index, mask } => match args.get(*index)? {
+                PureValue::Int(_) if mask & param_mask::INT != 0 => {}
+                PureValue::Bool(_) if mask & param_mask::BOOL != 0 => {}
+                other if other_param_accepted(other, *mask) => {}
+                _ => return None,
+            },
             MicroOp::PushParam(i) => match args.get(*i)? {
                 PureValue::Int(i) => stack.push(PureValue::Int(*i)),
                 PureValue::Bool(b) => stack.push(PureValue::Bool(*b)),
@@ -1550,7 +1599,8 @@ where
 }
 
 fn string_reduce_builder(terminal: &FusedStage) -> Option<(String, StringAppendPlan)> {
-    if terminal.stage != HofStage::Reduce {
+    // String building reads the body's expression, without the guards in `code`.
+    if terminal.stage != HofStage::Reduce || terminal.lambda.guarded {
         return None;
     }
 
