@@ -2217,6 +2217,110 @@ tail-any fn (x: Any): Any { tail(x) }
         }
     }
 
+    /// A function's tail call to itself gets its implicit arrows as any call
+    /// does, in both tiers, and goes on looping: a compiled loop that nested a
+    /// call per conversion would hit the recursion limit here. The self call
+    /// used to pass the value unconverted.
+    #[test]
+    fn self_tail_calls_get_the_implicit_arrow() {
+        let src = r#"::t ns
+Payload type { secret: Str }
+Label type { text: Str }
+Count type { n: Int }
+E1 type { from: Str }
+E2 type { from: Str }
+Payload -> E1 fn (p: Payload): E1 { E1({from: "e1"}) }
+Payload -> E2 fn (p: Payload): E2 { E2({from: "e2"}) }
+Label -> Str fn (l: Label): Str { l.text }
+Count -> Int fn (c: Count): Int { c.n }
+walk fn (x: E1, n: Int, q: Any): Any {
+    if(eq(n, 0), x.from, walk(q, sub(n, 1), q))
+}
+walk-cond fn cond (x: E1, n: Int, q: Any): Any {
+    eq(n, 0) => { x.from }
+    => { walk-cond(q, sub(n, 1), q) }
+}
+two fn (x: E1, y: E2, n: Int, q: Any): Any {
+    if(eq(n, 0), `${x.from} ${y.from}`, two(q, q, sub(n, 1), q))
+}
+to-str fn (s: Str, n: Int, q: Any): Any {
+    if(eq(n, 0), s, to-str(q, sub(n, 1), q))
+}
+to-int fn (i: Int, n: Int, q: Any): Any {
+    if(eq(n, 0), i, to-int(q, sub(n, 1), q))
+}
+same-object fn (x: E1, n: Int): Any {
+    if(eq(n, 0), x.from, same-object(x, sub(n, 1)))
+}
+wrapped fn (x: Any): Any { x }
+through-ok fn (x: E1, n: Int, q: Any): Any {
+    if(eq(n, 0), x.from, through-ok(wrapped(q), sub(n, 1), q))
+}
+run fn (): Vec {
+    p Payload({secret: "s"})
+    start E1({from: "start"})
+    [
+        walk(start, 10000, p), walk-cond(start, 10000, p), walk(start, 0, p),
+        two(start, E2({from: "other"}), 3, p),
+        to-str("start", 3, Label({text: "label"})),
+        to-int(0, 3, Count({n: 7})),
+        same-object(start, 1000),
+        through-ok(start, 3, p)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("e1"),
+            Val::from("e1"),
+            Val::from("start"),
+            Val::from("e1 e2"),
+            Val::from("label"),
+            Val::Int(7),
+            Val::from("start"),
+            Val::from("e1"),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// An arrow's failure on a self tail call halts the run, in both tiers:
+    /// an Err once it's consumed, as on any call, and a `fail` at once, after
+    /// an earlier argument's arrow has run.
+    #[test]
+    fn self_tail_call_arrow_failure_halts() {
+        let declarations = r#"::t ns
+Good type { n: Int }
+Bad type { n: Int }
+E1 type { from: Str }
+E2 type { from: Str }
+Good -> E1 fn (g: Good): E1 { E1({from: "good"}) }
+Bad -> E1 fn (b: Bad): E1 { err("arrow failed") }
+Bad -> E2 fn (b: Bad): E2 { fail("arrow failed") }
+walk fn (x: E1, n: Int, q: Any): Any {
+    if(eq(n, 0), x.from, walk(q, sub(n, 1), q))
+}
+two fn (x: E1, y: E2, n: Int, p: Any, q: Any): Any {
+    if(eq(n, 0), x.from, two(p, q, sub(n, 1), p, q))
+}
+"#;
+        for call in [
+            r#"walk(E1({from: "start"}), 2, Bad({n: 1}))"#,
+            r#"two(E1({from: "a"}), E2({from: "b"}), 2, Good({n: 1}), Bad({n: 1}))"#,
+        ] {
+            let src = format!("{declarations}{call}");
+            for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+                let err = compile_and_run_project_with_std_conf(&src, conf)
+                    .expect_err("the arrow's failure halts");
+                assert!(err.contains("arrow failed"), "{call}: {err}");
+            }
+        }
+    }
+
     /// An arrow's source is its qualified type too: a value doesn't run the
     /// arrow declared for a same-named type in another namespace, and a local
     /// type named like a core one has arrows of its own, wherever it's declared.

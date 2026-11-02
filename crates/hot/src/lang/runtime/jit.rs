@@ -578,6 +578,7 @@ struct JitHelperRefs {
     failure_err: FuncRef,
     consume_err: FuncRef,
     owned_raw_arg: FuncRef,
+    self_tail_owned_arg: FuncRef,
     call_vm_by_name: FuncRef,
     promote_to_owned: FuncRef,
     make_vec: FuncRef,
@@ -629,7 +630,7 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 43] {
+    fn scope_free(&self) -> [FuncRef; 44] {
         [
             self.call_vm,
             self.template_interpolate,
@@ -659,6 +660,7 @@ impl JitHelperRefs {
             self.failure_err,
             self.consume_err,
             self.owned_raw_arg,
+            self.self_tail_owned_arg,
             self.promote_to_owned,
             self.make_vec,
             self.merge_maps,
@@ -1930,6 +1932,10 @@ fn compile_with_return_kind(
     builder.symbol("hot_jit_consume_err", hot_jit_consume_err as *const u8);
     builder.symbol("hot_jit_owned_raw_arg", hot_jit_owned_raw_arg as *const u8);
     builder.symbol(
+        "hot_jit_self_tail_owned_arg",
+        hot_jit_self_tail_owned_arg as *const u8,
+    );
+    builder.symbol(
         "hot_jit_call_vm_by_name",
         hot_jit_call_vm_by_name as *const u8,
     );
@@ -2907,6 +2913,34 @@ unsafe extern "C" fn hot_jit_owned_raw_arg(raw: i64, kind: i64, out: *mut u8) ->
         (HELPER_VAL_KIND_NULL, Ok(Val::Null)) => 0,
         _ => 1,
     }
+}
+
+/// A self tail call passes an owned value to a parameter the compiled loop
+/// holds owned, and an arrow can reach that parameter: apply it, as the
+/// interpreter's call would, without nesting a call per iteration. `tagged_only`
+/// says only a tagged value can need one (`ParamArrows::FromTagged`). Returns an
+/// owned handle to the value the loop goes on with, or `HALT_SENTINEL` if the
+/// arrow fails. Borrows `raw`.
+unsafe extern "C" fn hot_jit_self_tail_owned_arg(
+    function_id: i64,
+    index: i64,
+    tagged_only: i64,
+    raw: i64,
+) -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if raw != 0 && !vm_ptr.is_null() {
+        let value = unsafe { &*(raw as *const Val) };
+        if tagged_only != 0 && !matches!(value, Val::Map(_)) {
+            return unsafe { hot_jit_clone_owned_val(raw) };
+        }
+        let vm = unsafe { &mut *vm_ptr };
+        match vm.coerce_self_tail_arg(function_id as u32, index as usize, value) {
+            Ok(Some(coerced)) => return new_owned_val(coerced),
+            Ok(None) => {}
+            Err(err) => return vm_runtime_error_to_halt(vm, err),
+        }
+    }
+    unsafe { hot_jit_clone_owned_val(raw) }
 }
 
 unsafe extern "C" fn hot_jit_drop_owned_val(raw: i64) {
@@ -4265,6 +4299,14 @@ fn declare_jit_helpers(
             ptr_ty,
             "hot_jit_owned_raw_arg",
             &[types::I64, types::I64, ptr_ty],
+            &[types::I64],
+        )?,
+        self_tail_owned_arg: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_self_tail_owned_arg",
+            &[types::I64, types::I64, types::I64, types::I64],
             &[types::I64],
         )?,
         call_vm_by_name: declare_helper_func(
@@ -8949,6 +8991,37 @@ fn build_supported_body(
                     };
                     unboxed.insert(idx, value);
                 }
+                // An owned argument that an arrow can reach gets it here,
+                // before the loop lets go of anything. A later arrow's failure
+                // releases what the earlier ones made.
+                let mut arrow_halts = Vec::new();
+                let mut coerced = Vec::new();
+                for (idx, &(_, param_kind)) in param_locals
+                    .iter()
+                    .enumerate()
+                    .take(usize::from(*args_count))
+                {
+                    let arrows = ctx.call_scope.names.param_arrows.get(idx);
+                    let arrows = arrows.copied().unwrap_or(ParamArrows::None);
+                    if param_kind != RawKind::OwnedVal || arrows == ParamArrows::None {
+                        continue;
+                    }
+                    let reg = *args_start + idx as u32;
+                    let raw = ctx.reg_value(builder, reg)?;
+                    let callee = builder.ins().iconst(types::I64, i64::from(function_id));
+                    let index = builder.ins().iconst(types::I64, idx as i64);
+                    let tagged_only = builder
+                        .ins()
+                        .iconst(types::I64, i64::from(arrows == ParamArrows::FromTagged));
+                    let call = builder.ins().call(
+                        ctx.helper_refs.self_tail_owned_arg,
+                        &[callee, index, tagged_only, raw],
+                    );
+                    let value = builder.inst_results(call)[0];
+                    arrow_halts.push((emit_halt_check(builder, value), coerced.clone()));
+                    coerced.push(value);
+                    unboxed.insert(idx, value);
+                }
                 let mut new_values = Vec::with_capacity(param_locals.len());
                 for (idx, &(param_var, param_kind)) in param_locals
                     .iter()
@@ -9012,6 +9085,16 @@ fn build_supported_body(
                 builder.ins().jump(ctx.blocks[0], &[]);
                 for halt_block in halts {
                     ctx.emit_halt_return(builder, halt_block);
+                }
+                for (halt_block, earlier) in arrow_halts {
+                    builder.switch_to_block(halt_block);
+                    builder.seal_block(halt_block);
+                    for value in earlier {
+                        drop_owned_raw(builder, &ctx.helper_refs, value);
+                    }
+                    let return_block = builder.create_block();
+                    builder.ins().jump(return_block, &[]);
+                    ctx.emit_halt_return(builder, return_block);
                 }
                 if let Some(other_block) = through_vm {
                     builder.switch_to_block(other_block);
@@ -11206,6 +11289,18 @@ fn emit_self_recursive_call(
     }
 }
 
+/// The implicit arrows that can reach a parameter, known when the function is
+/// compiled so that a compiled loop only pays for the check it needs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ParamArrows {
+    /// No arrow has this parameter's type as its target.
+    None,
+    /// A builtin type: only a tagged value can get an arrow.
+    FromTagged,
+    /// A custom type: any value can.
+    FromAny,
+}
+
 /// What the VM knows of the names a call can reach beyond the caller's own
 /// frame: the namespaces' bindings and the core functions. Compiled code
 /// resolves a call name through them as the interpreter does (see
@@ -11213,6 +11308,9 @@ fn emit_self_recursive_call(
 /// goes through the VM by name.
 #[derive(Clone, Copy, Default)]
 pub struct CallNames<'a> {
+    /// What a self tail call can need for each parameter (see
+    /// [`CallNames::param_arrows`]).
+    param_arrows: &'a [ParamArrows],
     namespace_variables: Option<&'a indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>>,
     core_functions: Option<&'a indexmap::IndexMap<String, FunctionId>>,
     native_shadows: Option<&'a crate::lang::runtime::native_core::NativeCoreShadows>,
@@ -11227,10 +11325,20 @@ impl<'a> CallNames<'a> {
         native_shadows: &'a crate::lang::runtime::native_core::NativeCoreShadows,
     ) -> Self {
         Self {
+            param_arrows: &[],
             namespace_variables: Some(namespace_variables),
             core_functions: Some(core_functions),
             native_shadows: Some(native_shadows),
             traced: false,
+        }
+    }
+
+    /// The implicit arrows that can reach each parameter of the function being
+    /// compiled. A loop passes an argument straight on when none can.
+    pub fn param_arrows(self, param_arrows: &'a [ParamArrows]) -> Self {
+        Self {
+            param_arrows,
+            ..self
         }
     }
 
