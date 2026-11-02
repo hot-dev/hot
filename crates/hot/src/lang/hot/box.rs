@@ -1074,7 +1074,7 @@ pub fn allowed_images(_args: &[Val]) -> HotResult<Val> {
     result.insert(Val::from("policy"), Val::from("open"));
     result.insert(Val::from("denied"), Val::Vec(denied));
     result.insert(Val::from("denied-prefixes"), Val::Vec(prefixes));
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::constructed("::hot::box/BoxImagePolicy", result))
 }
 
 /// Check whether box (container execution) is enabled via conf. The task
@@ -1132,7 +1132,7 @@ pub fn stats(vm: &mut crate::lang::runtime::vm::VirtualMachine, _args: &[Val]) -
         Val::from("enabled"),
         Val::from(is_box_enabled_from_conf(vm.get_conf())),
     );
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::constructed("::hot::box/BoxStats", result))
 }
 
 /// Get remaining container task quota for the current org.

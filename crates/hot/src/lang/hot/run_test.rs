@@ -417,6 +417,110 @@ probe("abc")"#;
         }
     }
 
+    /// Serve `requests` HTTP requests on a local port with a fixed JSON reply,
+    /// and return the port's base URL.
+    fn serve_json(requests: usize) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(requests) {
+                let Ok(mut stream) = stream else { return };
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => seen.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let body = r#"{"secret":"account-123"}"#;
+                let reply = format!(
+                    "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\nx-trace: abc\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        url
+    }
+
+    /// A real response has its declared type, so `Target(response)` runs the
+    /// `HttpResponse -> Target` arrow instead of copying fields, here dropping
+    /// a body the arrow redacts. It used to be an untagged Map, so the arrow
+    /// only ran for values built with `HttpResponse(...)`.
+    #[test]
+    fn real_http_response_runs_a_declared_arrow() {
+        let src = |url: &str| {
+            format!(
+                r#"::t ns
+::http ::hot::http
+HttpResponse ::http/HttpResponse
+HttpRequest ::http/HttpRequest
+Target type {{ status: Int, body: Any, message: Str? }}
+HttpResponse -> Target fn (r: HttpResponse): Target {{
+    Target({{status: r.status, body: "redacted", message: `arrow ran ${{r.status}}`}})
+}}
+typed-param fn (x: HttpResponse): Target {{ Target(x) }}
+describe fn match (r: Any): Str {{
+    HttpResponse => {{ "a response" }}
+    => {{ "something else" }}
+}}
+probe fn (): Vec {{
+    r ::http/request("GET", "{url}", {{}}, "")
+    fetched ::http/get("{url}")
+    sent ::http/request(HttpRequest({{method: "GET", url: "{url}"}}))
+    direct Target(r)
+    via-param typed-param(r)
+    via-get Target(fetched)
+    via-request Target(sent)
+    tagged from-json(to-json(r))
+    plain from-json(to-json(untype(r)))
+    spread {{...r, extra: 1}}
+    [
+        direct.message, direct.body, via-param.message,
+        via-get.message, via-request.message,
+        r.status, r.body.secret, get(r.headers, "x-trace"),
+        get(r, "status"), is-type(r, HttpResponse), describe(r),
+        ::http/is-ok-response(r), is-map(untype(r)),
+        get(tagged, "$type"), plain.status,
+        spread.status, get(assoc(r, "status", 201), "status"),
+    ]
+}}
+probe()
+probe()
+probe()"#
+            )
+        };
+        let expected = Val::Vec(vec![
+            Val::from("arrow ran 404"),
+            Val::from("redacted"),
+            Val::from("arrow ran 404"),
+            Val::from("arrow ran 404"),
+            Val::from("arrow ran 404"),
+            Val::Int(404),
+            Val::from("account-123"),
+            Val::from("abc"),
+            Val::Int(404),
+            Val::Bool(true),
+            Val::from("a response"),
+            Val::Bool(false),
+            Val::Bool(true),
+            Val::from("::hot::http/HttpResponse"),
+            Val::Int(404),
+            Val::Int(404),
+            Val::Int(201),
+        ]);
+        for conf in [
+            crate::val!({"jit": {"mode": "disabled"}}),
+            crate::val!({"jit": {"threshold": 1}}),
+        ] {
+            let out = compile_and_run_with_std_conf(&src(&serve_json(9)), Some(conf.clone()))
+                .unwrap_or_else(|e| panic!("{conf:?}: {e}"));
+            assert_eq!(out, expected, "{conf:?}");
+        }
+    }
+
     /// A lambda bound at top level and called by name receives an Err in a
     /// `Result` parameter. The by-name call found only functions named `f`,
     /// not the lambda its dispatch runs, so the argument was consumed.
