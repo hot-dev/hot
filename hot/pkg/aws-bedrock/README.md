@@ -20,6 +20,33 @@ models ::bedrock/list-foundation-models()
 model ::bedrock/get-foundation-model("anthropic.claude-3-haiku-20240307-v1:0")
 ```
 
+## Per-call credentials
+
+Pass `opts` as the last argument of any function to use other credentials for that call, so one run can serve many tenants. Nothing is written to context, so this is safe in parallel flows.
+
+```hot
+::bedrock ::aws::bedrock
+
+opts {
+    access-key-id: "AKIAEXAMPLE",
+    secret-access-key: "tenant-secret",
+    session-token: "optional-for-temporary-credentials",
+    region: "eu-west-1"
+}
+
+::bedrock/converse("us.amazon.nova-micro-v1:0", "What is 2+2?", opts)
+::bedrock/converse-stream("us.amazon.nova-micro-v1:0", [{role: "user", content: [{text: "Hi"}]}], opts)
+::aws::bedrock::chat/chat("us.amazon.nova-micro-v1:0", "What is 2+2?", opts)
+```
+
+`opts` also takes `credentials` (a ready `::aws::core/Credentials` value) and `endpoint` (a base URL such as LocalStack). Without credentials in `opts`, the `aws.*` context variables are used. These are errors, returned before anything is sent:
+
+- `access-key-id`, `secret-access-key` or `credentials` in `opts` but null or blank (leave it out instead); a null or blank `session-token` just means no session token
+- half a key pair
+- an `endpoint` in `opts` without credentials in `opts`
+
+Where a function's last parameter is already a Map, `opts` comes after it, and a shorter form without that Map isn't offered: pass `{}` or `null` for it.
+
 ## Supported Models
 
 - **Anthropic Claude**: claude-3-opus, claude-3-sonnet, claude-3-haiku, claude-3-5-sonnet

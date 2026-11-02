@@ -1,0 +1,529 @@
+::aws::test::core ns
+meta ["test"]
+
+// Hermetic: no network, no aws.* context.
+//
+// Expected signatures come from an independent SigV4 written with Python's
+// hmac and hashlib, or from AWS's published examples where noted. Shared inputs:
+AK "AKIDEXAMPLE"
+SK "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
+DATE "20150830T123600Z"
+BUCKET_HOST "https://examplebucket.s3.us-east-1.amazonaws.com"
+
+CTX {
+    "aws.access-key-id": "AKIDCTX",
+    "aws.secret-access-key": "ctx-secret",
+    "aws.session-token": "ctx-token",
+    "aws.region": "ap-south-1"
+}
+
+creds fn (): Any {
+    ::aws::core/Credentials({access_key_id: AK, secret_access_key: SK})
+}
+
+signature-of fn (headers: Map): Str {
+    last(split(get(headers, "Authorization"), "Signature="))
+}
+
+// ---------------------------------------------------------------------------
+// Encoding
+// ---------------------------------------------------------------------------
+
+test-uri-encode
+meta ["test"] fn () {
+    assert-eq("AZaz09-_.~", ::aws::core/uri-encode("AZaz09-_.~"), "unreserved characters pass through")
+    assert-eq("a%20b%2Fc%2Bd%3De%26f%3Fg%23h%25i", ::aws::core/uri-encode("a b/c+d=e&f?g#h%i"))
+    assert-eq("%E6%97%A5%E6%9C%AC%C3%A9%F0%9F%98%80", ::aws::core/uri-encode("日本é😀"), "UTF-8, uppercase hex")
+    assert-eq("%21%27%28%29%2A%3A%40%2C%3B%24", ::aws::core/uri-encode("!'()*:@,;$"), "sub-delimiters are reserved too")
+}
+
+test-uri-encode-path-keeps-slashes
+meta ["test"] fn () {
+    assert-eq("/a%20b/c%3Ad/%C3%A9.txt", ::aws::core/uri-encode-path("/a b/c:d/é.txt"))
+    assert-eq("a//b/", ::aws::core/uri-encode-path("a//b/"), "empty segments are kept: they are part of an S3 key")
+}
+
+test-normalize-encoding-keeps-escapes
+meta ["test"] fn () {
+    assert-eq("a%20b", ::aws::core/normalize-encoding("a b"))
+    assert-eq("a%20b", ::aws::core/normalize-encoding("a%20b"), "not encoded twice")
+    assert-eq("a%2Fb", ::aws::core/normalize-encoding("a%2fb"), "hex is uppercased")
+    assert-eq("100%25", ::aws::core/normalize-encoding("100%"), "a lone % is encoded")
+    assert-eq("%25zz", ::aws::core/normalize-encoding("%zz"), "so is one without hex digits")
+    assert-eq("%C3%A9%20%25", ::aws::core/normalize-encoding("é %"))
+}
+
+test-canonical-uri
+meta ["test"] fn () {
+    // S3 signs the path as sent
+    assert-eq("/a%20b/c%3Ad", ::aws::core/canonical-uri("/a%20b/c%3Ad", "s3"))
+    assert-eq("/a%20b/%C3%A9", ::aws::core/canonical-uri("/a b/é", "s3"), "raw input signs as the client sends it")
+
+    // Every other service encodes the sent path again
+    assert-eq("/model/x%253A0/invoke", ::aws::core/canonical-uri("/model/x%3A0/invoke", "bedrock"))
+    assert-eq("/model/x%3A0/invoke", ::aws::core/canonical-uri("/model/x:0/invoke", "bedrock"), "a raw : goes on the wire as :")
+    assert-eq("/a%2520b/%25C3%25A9", ::aws::core/canonical-uri("/a b/é", "lambda"), "the client escapes these before they are encoded again")
+    assert-eq("/", ::aws::core/canonical-uri("/", "lambda"))
+}
+
+test-wire-path
+meta ["test"] fn () {
+    assert-eq("/a%20b/%C3%A9:+%2F", ::aws::core/wire-path("/a b/é:+%2F"))
+    assert-eq("/plain/path", ::aws::core/wire-path("/plain/path"))
+}
+
+test-sort-query-params-by-name-then-value
+meta ["test"] fn () {
+    // Sorting whole "k=v" strings puts a-b first, because - sorts before =
+    assert-eq("a=1&a-b=2", ::aws::core/sort-query-params("a-b=2&a=1"))
+    assert-eq("a=1&a-b=2", ::aws::core/sort-query-params("a=1&a-b=2"))
+    assert-eq("a=0&a=1&a-b=2&prefix=x%2Fy%20z", ::aws::core/sort-query-params("a=1&a-b=2&a=0&prefix=x/y z"), "repeated names sort by value")
+    assert-eq("B=1&a=2", ::aws::core/sort-query-params("a=2&B=1"), "byte order: uppercase first")
+    assert-eq("uploads=", ::aws::core/sort-query-params("uploads"), "no value signs as an empty one")
+    assert-eq("partNumber=1&uploadId=u%2Fp%2B1%3D", ::aws::core/sort-query-params("uploadId=u%2Fp%2B1%3D&partNumber=1"), "encoded values aren't encoded again")
+    assert-eq("v=a%3Db", ::aws::core/sort-query-params("v=a=b"), "only the first = separates")
+    assert-eq("", ::aws::core/sort-query-params(""))
+    assert-eq("", ::aws::core/sort-query-params(null))
+}
+
+test-parse-url
+meta ["test"] fn () {
+    p ::aws::core/parse-url("https://h.example.com/a/b?x=1?y=/z#frag")
+    assert-eq("h.example.com", p.host)
+    assert-eq("/a/b", p.path)
+    assert-eq("x=1?y=/z", p.query, "a ? or / in the query stays in the query")
+    assert-eq("/", ::aws::core/parse-url("https://h.example.com").path)
+    assert-eq("localhost:9000", ::aws::core/parse-url("http://localhost:9000/x").host, "other ports stay in the Host")
+    assert-eq("h", ::aws::core/parse-url("https://h:443/").host, "the default port isn't sent")
+    assert-eq("h", ::aws::core/parse-url("http://h:80/").host)
+    assert-eq("h:443", ::aws::core/parse-url("http://h:443/").host)
+}
+
+test-canonical-headers
+meta ["test"] fn () {
+    // Sorted by name: "a-b:" would sort before "a:" as whole lines
+    assert-eq("a:1\na-b:2\nhost:h\n", ::aws::core/canonical-headers({"A-B": "2", Host: "h", a: "1"}))
+    assert-eq("x:a b c\n", ::aws::core/canonical-headers({x: "  a   b  c "}), "trimmed, runs of spaces collapsed")
+    assert-eq("a;a-b;host", ::aws::core/signed-headers({"A-B": "2", Host: "h", a: "1"}))
+}
+
+// ---------------------------------------------------------------------------
+// Signing
+// ---------------------------------------------------------------------------
+
+test-signing-key-published
+meta ["test"] fn () {
+    // AWS's documented example key
+    key ::aws::core/derive-signing-key(SK, "20150830", "us-east-1", "iam")
+    assert-eq("c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9", ::hot::hex/encode(key))
+}
+
+suite-signature fn (method: Str, query: Str, headers: Map): Str {
+    canonical ::aws::core/create-canonical-request(
+        method,
+        "/",
+        ::aws::core/sort-query-params(query),
+        ::aws::core/canonical-headers(headers),
+        ::aws::core/signed-headers(headers),
+        ::hot::hash/sha256("")
+    )
+    ::aws::core/signature-for(canonical, DATE, "us-east-1", "service", SK)
+}
+
+test-aws-sigv4-suite
+meta ["test"] fn () {
+    // aws-sig-v4-test-suite: these sign host and x-amz-date only, so they go through the
+    // building blocks; sign-request always adds x-amz-content-sha256.
+    base {Host: "example.amazonaws.com", "X-Amz-Date": DATE}
+    assert-eq("5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31", suite-signature("GET", "", base), "get-vanilla")
+    assert-eq("5da7c1a2acd57cee7505fc6676e4e544621c30862966e37dddb68e92efbe5d6b", suite-signature("POST", "", base), "post-vanilla")
+    assert-eq("b97d918cfa904a5beff61c982a1b6f458b799221646efd99d3219ec94cdf2500", suite-signature("GET", "Param2=value2&Param1=value1", base), "get-vanilla-query-order-key")
+    assert-eq("b2d5e794bef98267495748a424bab572cf41a5b0a8f196cf86eef7aa3618626e", suite-signature("GET", "", {...base, "My-Header1": "  value2   value3  "}), "get-header-value-multiline spaces")
+}
+
+sign fn (method: Str, url: Str, region: Str, service: Str, headers: Map, body: Str | Bytes, credentials: Any): Map {
+    ::aws::core/sign-request(method, url, region, service, credentials, headers, body, DATE)
+}
+
+test-sign-plain-get
+meta ["test"] fn () {
+    h sign("GET", `${BUCKET_HOST}/test.txt`, "us-east-1", "s3", {}, "", creds())
+    assert-eq("9d7c41147b1dd10c2b4b1b7653be3758be47f23ba775f1b5eb589e0d1ef743a8", signature-of(h))
+    assert-eq(`AWS4-HMAC-SHA256 Credential=${AK}/20150830/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=9d7c41147b1dd10c2b4b1b7653be3758be47f23ba775f1b5eb589e0d1ef743a8`, get(h, "Authorization"))
+    assert-eq(DATE, get(h, "x-amz-date"))
+    assert-eq("examplebucket.s3.us-east-1.amazonaws.com", get(h, "Host"))
+}
+
+test-sign-key-with-spaces-and-unicode
+meta ["test"] fn () {
+    key "photos/my summer/日本 é+&=?.txt"
+    url `${BUCKET_HOST}/${::aws::core/uri-encode-path(key)}`
+    assert-eq(`${BUCKET_HOST}/photos/my%20summer/%E6%97%A5%E6%9C%AC%20%C3%A9%2B%26%3D%3F.txt`, url)
+    h sign("GET", url, "us-east-1", "s3", {}, "", creds())
+    assert-eq("9a35844dd1edd58b65a25378fa4880634b6c493706915df0a06e716043fb0519", signature-of(h))
+}
+
+test-sign-repeated-and-prefix-sharing-query
+meta ["test"] fn () {
+    url `${BUCKET_HOST}/?prefix=x%2Fy%20z&a-b=2&a=1&a=0`
+    h sign("GET", url, "us-east-1", "s3", {}, "", creds())
+    assert-eq("e4d81477c4cf4897d7e01745a3e7d87aef99c1741ea3cb2ea79f31c987074459", signature-of(h))
+}
+
+test-sign-valueless-param
+meta ["test"] fn () {
+    h sign("POST", `${BUCKET_HOST}/k?uploads`, "us-east-1", "s3", {}, "", creds())
+    assert-eq("4ac5c3e90d3dbfcdcc5b5b4a156c1acd6e15994690bab7a35db944deba6e289e", signature-of(h))
+}
+
+test-sign-session-token
+meta ["test"] fn () {
+    temporary ::aws::core/Credentials({access_key_id: AK, secret_access_key: SK, session_token: "tok/en+with=chars"})
+    h sign("GET", "https://sqs.eu-west-1.amazonaws.com/", "eu-west-1", "sqs", {}, "", temporary)
+    assert-eq("636e5000fb2d4023430e43a21a7cb65d2e199495d8c1fe81458c8c1d798ef367", signature-of(h))
+    assert-eq("tok/en+with=chars", get(h, "x-amz-security-token"))
+    assert(contains(get(h, "Authorization"), "SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token,"))
+}
+
+test-sign-post-with-body
+meta ["test"] fn () {
+    headers {"Content-Type": "application/x-amz-json-1.0", "X-Amz-Target": "AmazonSQS.SendMessage"}
+    h sign("POST", "https://sqs.us-east-1.amazonaws.com/", "us-east-1", "sqs", headers, "{\"QueueUrl\":\"https://q\",\"MessageBody\":\"hi\"}", creds())
+    assert-eq("5befe1bc716bca445d0d741eb1ec6d201eb95cb07ba8e8098a40add3bc3fa14b", signature-of(h))
+    assert(contains(get(h, "Authorization"), "SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target,"))
+}
+
+test-sign-bytes-body
+meta ["test"] fn () {
+    body Bytes([0, 255, 195, 40])
+    h sign("PUT", `${BUCKET_HOST}/bin?partNumber=1&uploadId=u%2Fp%2B1%3D`, "us-east-1", "s3", {}, body, creds())
+    assert-eq("04a274b09b06d15af5952f0e50fdd43967681d5339a02c281043630729255104", signature-of(h))
+    assert-eq("964f2654baa736d82bff0a92bf9e0fb6aab491d2ffe26d33d162c1f975e07457", get(h, "x-amz-content-sha256"))
+}
+
+test-sign-double-encodes-other-services
+meta ["test"] fn () {
+    model ::aws::core/uri-encode("anthropic.claude-3-5-sonnet-20241022-v2:0")
+    h sign("POST", `https://bedrock-runtime.us-east-1.amazonaws.com/model/${model}/invoke`, "us-east-1", "bedrock", {"Content-Type": "application/json"}, "{}", creds())
+    assert-eq("393d4bc7c678da52f1ed214cd0250d9f9309f5afd4afbe0004cf05c3cfe2947c", signature-of(h))
+}
+
+test-sign-host-comes-from-the-url
+meta ["test"] fn () {
+    // The HTTP client drops a Host header and sends the URL's host, so that is what must be signed
+    wrong sign("GET", `${BUCKET_HOST}/test.txt`, "us-east-1", "s3", {Host: "elsewhere.example.com", host: "other.example.com"}, "", creds())
+    assert-eq("9d7c41147b1dd10c2b4b1b7653be3758be47f23ba775f1b5eb589e0d1ef743a8", signature-of(wrong))
+    assert-eq("examplebucket.s3.us-east-1.amazonaws.com", get(wrong, "Host"))
+    assert(not(in("host", keys(wrong))))
+
+    unset sign("GET", `${BUCKET_HOST}/test.txt`, "us-east-1", "s3", {"x-unset": null}, "", creds())
+    assert-eq("9d7c41147b1dd10c2b4b1b7653be3758be47f23ba775f1b5eb589e0d1ef743a8", signature-of(unset), "null headers aren't sent, so they aren't signed")
+}
+
+test-sign-request-reads-the-clock-without-a-date
+meta ["test"] fn () {
+    h ::aws::core/sign-request("GET", `${BUCKET_HOST}/test.txt`, "us-east-1", "s3", creds(), {}, "")
+    assert-eq(16, length(get(h, "x-amz-date")))
+    assert(ends-with(get(h, "x-amz-date"), "Z"))
+}
+
+test-sign-url-published
+meta ["test"] fn () {
+    // AWS's documented presigned GET example. Its host is the legacy global endpoint.
+    credentials ::aws::core/Credentials({access_key_id: "AKIAIOSFODNN7EXAMPLE", secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"})
+    url ::aws::core/sign-url("GET", "https://examplebucket.s3.amazonaws.com/test.txt", "us-east-1", "s3", credentials, 86400, "20130524T000000Z")
+    assert(ends-with(url, "X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"), url)
+    assert(starts-with(url, "https://examplebucket.s3.amazonaws.com/test.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&"))
+}
+
+test-sign-url-session-token-and-spaces
+meta ["test"] fn () {
+    temporary ::aws::core/Credentials({access_key_id: AK, secret_access_key: SK, session_token: "to/k+en="})
+    url ::aws::core/sign-url("PUT", `${BUCKET_HOST}/a b/c.txt`, "us-east-1", "s3", temporary, 3600, DATE)
+    assert(contains(url, "X-Amz-Security-Token=to%2Fk%2Ben%3D&"), "the whole token is encoded, = included")
+    assert(starts-with(url, `${BUCKET_HOST}/a%20b/c.txt?`), "the path in the URL is the path that was signed")
+    assert(ends-with(url, "X-Amz-Signature=2230f5b316543233b0dea5dec27d53babd6656aaacc6a7ad64dc17a307db2e46"), url)
+}
+
+test-s3-endpoint-is-regional
+meta ["test"] fn () {
+    assert-eq("https://b.s3.us-east-1.amazonaws.com", ::aws::core/s3-endpoint("b", "us-east-1"), "not the legacy global endpoint")
+    assert-eq("https://b.s3.eu-west-1.amazonaws.com", ::aws::core/s3-endpoint("b", "eu-west-1"))
+}
+
+// ---------------------------------------------------------------------------
+// resolve
+// ---------------------------------------------------------------------------
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::aws::core/resolve-from({"access-key-id": "AKIDOPTS", "secret-access-key": "opts-secret", region: "eu-west-1", endpoint: "http://localhost:9000/"}, CTX)
+    assert-eq("AKIDOPTS", r.credentials.access_key_id)
+    assert-eq("opts-secret", r.credentials.secret_access_key)
+    assert(is-null(r.credentials.session_token), "the context session token never goes with keys from opts")
+    assert-eq("eu-west-1", r.region)
+    assert-eq("http://localhost:9000", r.endpoint, "no trailing slash")
+}
+
+test-resolve-opts-session-token
+meta ["test"] fn () {
+    r ::aws::core/resolve-from({"access-key-id": "AKIDOPTS", "secret-access-key": "s", "session-token": "opts-token"}, CTX)
+    assert-eq("opts-token", r.credentials.session_token)
+}
+
+test-resolve-ctx-when-opts-empty
+meta ["test"] fn () {
+    r ::aws::core/resolve-from({}, CTX)
+    assert-eq("AKIDCTX", r.credentials.access_key_id)
+    assert-eq("ctx-token", r.credentials.session_token)
+    assert-eq("ap-south-1", r.region)
+    assert(is-null(r.endpoint))
+    assert-eq("AKIDCTX", ::aws::core/resolve-from(null, CTX).credentials.access_key_id, "null opts are empty opts")
+
+    settings-only ::aws::core/resolve-from({region: "eu-north-1"}, CTX)
+    assert-eq("AKIDCTX", settings-only.credentials.access_key_id, "settings alone keep the context credentials")
+    assert-eq("eu-north-1", settings-only.region)
+}
+
+test-resolve-default-region
+meta ["test"] fn () {
+    r ::aws::core/resolve-from({"access-key-id": "a", "secret-access-key": "b"}, {})
+    assert-eq("us-east-1", r.region)
+}
+
+test-resolve-credentials-value
+meta ["test"] fn () {
+    from-type ::aws::core/resolve-from({credentials: ::aws::core/Credentials({access_key_id: "AKIDVAL", secret_access_key: "v", session_token: "t"})}, CTX)
+    assert-eq("AKIDVAL", from-type.credentials.access_key_id)
+    assert-eq("t", from-type.credentials.session_token)
+    from-map ::aws::core/resolve-from({credentials: {"access-key-id": "AKIDMAP", "secret-access-key": "m"}}, CTX)
+    assert-eq("AKIDMAP", from-map.credentials.access_key_id)
+    assert(is-err(::aws::core/resolve-from({credentials: {access_key_id: "only"}}, CTX)))
+}
+
+test-resolve-missing-credentials-is-a-clear-error
+meta ["test"] fn () {
+    missing ::aws::core/resolve-from({}, {})
+    assert(is-err(missing))
+    assert(contains(err-value(missing), "aws.access-key-id"), "names what to set")
+    assert(contains(err-value(missing), "access-key-id: ..."), "and the alternative")
+
+    half ::aws::core/resolve-from({}, {"aws.access-key-id": "only"})
+    assert(is-err(half), "half a pair in ctx is missing credentials")
+}
+
+test-resolve-partial-opts-never-mix-with-ctx
+meta ["test"] fn () {
+    no-secret ::aws::core/resolve-from({"access-key-id": "AKIDOPTS"}, CTX)
+    assert(is-err(no-secret))
+    assert(contains(err-value(no-secret), "secret-access-key"))
+
+    no-key ::aws::core/resolve-from({"secret-access-key": "s"}, CTX)
+    assert(is-err(no-key))
+    assert(contains(err-value(no-key), "access-key-id"))
+
+    only-token ::aws::core/resolve-from({"session-token": "t"}, CTX)
+    assert(is-err(only-token))
+}
+
+test-resolve-blank-credential-key-errors-naming-it
+meta ["test"] fn () {
+    // A tenant with a missing key must never run on the project's credentials
+    for-each(["access-key-id", "secret-access-key", "credentials"], (name) {
+        for-each([null, "", "   "], (blank) {
+            out ::aws::core/resolve-from(Map([[name, blank]]), CTX)
+            assert(is-err(out), `${name} blank falls back to ctx`)
+            assert(contains(err-value(out), `opts.${name}`), err-value(out))
+        })
+    })
+
+    // Next to good values too
+    with-good ::aws::core/resolve-from({"access-key-id": "AKIDOPTS", "secret-access-key": null}, CTX)
+    assert(is-err(with-good))
+    assert(contains(err-value(with-good), "opts.secret-access-key"))
+
+    // The message never carries a value
+    secret ::aws::core/resolve-from({"access-key-id": "AKIDVISIBLE", "secret-access-key": " "}, CTX)
+    assert(not(contains(err-value(secret), "AKIDVISIBLE")))
+}
+
+test-resolve-blank-session-token-means-none
+meta ["test"] fn () {
+    // Optional: blank is no token, and keys in opts never take the context token
+    for-each([null, "", "   "], (blank) {
+        r ::aws::core/resolve-from({"access-key-id": "a", "secret-access-key": "b", "session-token": blank}, CTX)
+        assert-eq("a", r.credentials.access_key_id)
+        assert(is-null(r.credentials.session_token), "not the ctx token")
+
+        alone ::aws::core/resolve-from({"session-token": blank}, CTX)
+        assert-eq("AKIDCTX", alone.credentials.access_key_id, "with no keys in opts it is as if unset")
+        assert-eq("ctx-token", alone.credentials.session_token)
+    })
+}
+
+test-resolve-blank-settings-fall-back
+meta ["test"] fn () {
+    r ::aws::core/resolve-from({region: "", endpoint: " "}, CTX)
+    assert-eq("ap-south-1", r.region)
+    assert(is-null(r.endpoint))
+}
+
+test-resolve-bad-endpoint
+meta ["test"] fn () {
+    out ::aws::core/resolve-from({endpoint: "minio.local:9000"}, CTX)
+    assert(is-err(out))
+    assert(contains(err-value(out), "opts.endpoint"))
+}
+
+test-resolve-opts-endpoint-needs-its-own-credentials
+meta ["test"] fn () {
+    // The project's access key id and a signature must not go to a host it didn't configure
+    out ::aws::core/resolve-from({endpoint: "https://elsewhere.example.com"}, CTX)
+    assert(is-err(out))
+    assert(contains(err-value(out), "opts.endpoint"))
+    assert(contains(err-value(out), "opts.access-key-id"))
+    assert(contains(err-value(out), "opts.secret-access-key"))
+
+    no-ctx ::aws::core/resolve-from({endpoint: "https://elsewhere.example.com"}, {})
+    assert(contains(err-value(no-ctx), "opts.endpoint"), "the same error with nothing in ctx")
+
+    with-region ::aws::core/resolve-from({endpoint: "https://elsewhere.example.com", region: "auto"}, CTX)
+    assert(is-err(with-region), "whatever else opts carries")
+
+    keys-given ::aws::core/resolve-from({endpoint: "https://elsewhere.example.com", "access-key-id": "a", "secret-access-key": "b"}, CTX)
+    assert-eq("https://elsewhere.example.com", keys-given.endpoint)
+    assert-eq("a", keys-given.credentials.access_key_id)
+
+    value-given ::aws::core/resolve-from({endpoint: "https://elsewhere.example.com", credentials: {access_key_id: "c", secret_access_key: "d"}}, CTX)
+    assert-eq("c", value-given.credentials.access_key_id)
+}
+
+test-resolve-ctx-endpoint
+meta ["test"] fn () {
+    with-endpoint {...CTX, "aws.endpoint": "http://localhost:9000/"}
+    r ::aws::core/resolve-from({}, with-endpoint)
+    assert-eq("http://localhost:9000", r.endpoint, "an endpoint in ctx works with ctx credentials")
+    assert-eq("AKIDCTX", r.credentials.access_key_id)
+
+    tenant ::aws::core/resolve-from({"access-key-id": "a", "secret-access-key": "b"}, with-endpoint)
+    assert-eq("http://localhost:9000", tenant.endpoint, "and with credentials from opts")
+
+    other ::aws::core/resolve-from({endpoint: "http://other:1", "access-key-id": "a", "secret-access-key": "b"}, with-endpoint)
+    assert-eq("http://other:1", other.endpoint, "opts win")
+
+    bad ::aws::core/resolve-from({}, {...CTX, "aws.endpoint": "nope"})
+    assert(is-err(bad))
+    assert(contains(err-value(bad), "aws.endpoint"))
+}
+
+test-resolve-reads-ctx-and-never-writes-it
+meta ["test"] fn () {
+    missing ::aws::core/resolve({})
+    assert(is-err(missing), "hermetic: nothing in ctx")
+
+    r ::aws::core/resolve({"access-key-id": "AKIDOPTS", "secret-access-key": "opts-secret", "session-token": "t", region: "eu-west-1"})
+    assert-eq("AKIDOPTS", r.credentials.access_key_id)
+    assert(is-null(::hot::ctx/get("aws.access-key-id")), "per-call keys aren't written to ctx")
+    assert(is-null(::hot::ctx/get("aws.secret-access-key")))
+    assert(is-null(::hot::ctx/get("aws.session-token")))
+    assert(is-null(::hot::ctx/get("aws.region")))
+}
+
+test-get-credentials-and-get-region
+meta ["test"] fn () {
+    missing ::aws::core/get-credentials()
+    assert(is-err(missing))
+    assert(contains(err-value(missing), "aws.access-key-id"))
+    assert-eq("us-east-1", ::aws::core/get-region())
+}
+
+test-service-url
+meta ["test"] fn () {
+    assert-eq("https://sqs.eu-west-1.amazonaws.com", ::aws::core/service-url({region: "eu-west-1"}, "sqs"))
+    assert-eq("http://localhost:4566", ::aws::core/service-url({region: "eu-west-1", endpoint: "http://localhost:4566"}, "sqs"))
+}
+
+// ---------------------------------------------------------------------------
+// send-signed
+// ---------------------------------------------------------------------------
+
+test-send-signed-uses-opts-credentials-and-no-ctx
+meta ["test"] fn () {
+    resolved ::aws::core/resolve({
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { ::hot::http/HttpResponse({status: 200, headers: {}, body: req}) }
+    })
+    response ::aws::core/send-signed("POST", "https://sqs.eu-west-1.amazonaws.com/", "sqs", resolved, {"Content-Type": "application/x-amz-json-1.0"}, "{}")
+    sent response.body
+    assert-eq("POST", sent.method)
+    assert-eq("{}", sent.body)
+    assert(contains(get(sent.headers, "Authorization"), "Credential=AKIDOPTS/"), "signed with the opts key")
+    assert(contains(get(sent.headers, "Authorization"), "/eu-west-1/sqs/aws4_request"), "and the opts region")
+    assert(is-null(::hot::ctx/get("aws.access-key-id")), "no ctx writes")
+}
+
+fixed-response fn (headers: Map, body: Any): Map {
+    {"access-key-id": "a", "secret-access-key": "b", transport: (req) { ::hot::http/HttpResponse({status: 200, headers: headers, body: body, body-bytes: if(is-bytes(body), body, null)}) }}
+}
+
+test-send-signed-parses-amz-json
+meta ["test"] fn () {
+    // The runtime hands application/x-amz-json-1.x bodies over as Bytes
+    amz ::aws::core/resolve(fixed-response({"content-type": "application/x-amz-json-1.0"}, Bytes("{\"MessageId\":\"m1\"}")))
+    parsed ::aws::core/send-signed("POST", "https://sqs.us-east-1.amazonaws.com/", "sqs", amz, {}, "{}")
+    assert-eq("m1", parsed.body.MessageId)
+    assert(is-bytes(parsed.body-bytes), "the bytes stay available")
+
+    v11 ::aws::core/resolve(fixed-response({"content-type": "application/x-amz-json-1.1; charset=utf-8"}, Bytes("{\"ARN\":\"a\"}")))
+    assert-eq("a", ::aws::core/send-signed("POST", "https://x.example.com/", "x", v11, {}, "{}").body.ARN)
+
+    bad ::aws::core/resolve(fixed-response({"content-type": "application/x-amz-json-1.0"}, Bytes("not json")))
+    assert(is-bytes(::aws::core/send-signed("POST", "https://x.example.com/", "x", bad, {}, "{}").body), "unparseable bodies pass through")
+
+    binary-body Bytes([0, 255])
+    binary ::aws::core/resolve(fixed-response({"content-type": "application/octet-stream"}, binary-body))
+    assert-eq(binary-body, ::aws::core/send-signed("GET", "https://x.example.com/", "x", binary, {}, "").body, "other Bytes aren't touched")
+}
+
+test-request-opts-arity
+meta ["test"] fn () {
+    opts {"access-key-id": "AKIDOPTS", "secret-access-key": "s", transport: (req) { ::hot::http/HttpResponse({status: 200, headers: {}, body: req}) }}
+    response ::aws::core/request("GET", "https://x.example.com/", "x", "sa-east-1", {}, "", opts)
+    auth get(response.body.headers, "Authorization")
+    assert(contains(auth, "Credential=AKIDOPTS/"))
+    assert(contains(auth, "/sa-east-1/x/aws4_request"), "the region argument wins")
+    assert(is-err(::aws::core/request("GET", "https://x.example.com/", "x", "sa-east-1", {}, "", {"access-key-id": ""})), "a bad opts is a checkable Err")
+}
+
+// ---------------------------------------------------------------------------
+// Response helpers
+// ---------------------------------------------------------------------------
+
+test-response-header
+meta ["test"] fn () {
+    r ::hot::http/HttpResponse({status: 200, headers: {etag: "\"abc\"", "x-amz-function-error": "Unhandled"}})
+    assert-eq("\"abc\"", ::aws::core/response-header(r, "ETag"))
+    assert-eq("Unhandled", ::aws::core/response-header(r, "X-Amz-Function-Error"))
+    assert(is-null(::aws::core/response-header(r, "Missing")))
+    assert(is-null(::aws::core/response-header({status: 200}, "ETag")), "no headers at all")
+}
+
+test-parse-int
+meta ["test"] fn () {
+    assert-eq(12, ::aws::core/parse-int("12"))
+    assert-eq(12, ::aws::core/parse-int(" 12 "))
+    assert-eq(12, ::aws::core/parse-int(12))
+    assert(is-null(::aws::core/parse-int(null)))
+    assert(is-null(::aws::core/parse-int("")))
+    assert(is-null(::aws::core/parse-int("1x")))
+    assert(is-null(::aws::core/parse-int("-1")))
+}
+
+test-opt-str
+meta ["test"] fn () {
+    assert(is-null(::aws::core/opt-str(null)))
+    assert-eq("1523477145.713", ::aws::core/opt-str(1523477145.713))
+    assert-eq("x", ::aws::core/opt-str("x"))
+}

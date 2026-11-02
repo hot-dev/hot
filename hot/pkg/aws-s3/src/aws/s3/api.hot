@@ -1,0 +1,77 @@
+::aws::s3::api ns
+meta {
+    doc: """
+    Where S3 requests go. AWS uses virtual-hosted URLs on the regional endpoint,
+    `https://<bucket>.s3.<region>.amazonaws.com/<key>`, or path-style for a bucket with
+    dots in its name (the TLS wildcard certificate doesn't match those).
+
+    `opts.endpoint` points at an S3-compatible store (Cloudflare R2, MinIO, ...), which
+    defaults to path-style: `<endpoint>/<bucket>/<key>`. Pass `path-style: false` for
+    `https://<bucket>.<endpoint host>/<key>`, or `path-style: true` to force path-style on AWS.
+    """
+}
+
+uri-encode ::aws::core/uri-encode
+uri-encode-path ::aws::core/uri-encode-path
+service-url ::aws::core/service-url
+
+// Base URL of the service itself, for requests that aren't about one bucket
+base-url
+meta {
+    doc: """The S3 service URL (no trailing slash): `resolved.endpoint`, else `https://s3.<region>.amazonaws.com`."""
+}
+fn (resolved: Map): Str {
+    service-url(resolved, "s3")
+}
+
+// Put the bucket at the front of the endpoint's host
+virtual-host-url fn (endpoint: Str, bucket: Str): Str {
+    scheme if(starts-with(endpoint, "http://"), "http://", "https://")
+    `${scheme}${bucket}.${slice(endpoint, length(scheme), length(endpoint))}`
+}
+
+bucket-url
+meta {
+    doc: """The URL of a bucket (no trailing slash) for resolved settings: see the namespace doc for the forms."""
+}
+fn (bucket: Str, resolved: Map): Str {
+    endpoint get(resolved, "endpoint")
+    path-style get(resolved, "path-style")
+    cond {
+        is-some(endpoint) => {
+            if(eq(path-style, false), virtual-host-url(endpoint, bucket), `${endpoint}/${uri-encode(bucket)}`)
+        }
+
+        or(eq(path-style, true), contains(bucket, ".")) => { `${base-url(resolved)}/${uri-encode(bucket)}` }
+        => { ::aws::core/s3-endpoint(bucket, resolved.region) }
+    }
+}
+
+object-url
+meta {
+    doc: """The URL of an object: `bucket-url` plus the key with each path segment encoded. `/` in the key stays a path separator."""
+}
+fn (bucket: Str, key: Str, resolved: Map): Str {
+    `${bucket-url(bucket, resolved)}/${uri-encode-path(key)}`
+}
+
+// S3 lists keys URL-encoded on request, with spaces as "+"
+decode-listed
+meta {
+    doc: """Decode a value from a listing made with `encoding-type=url`: `+` is a space and `%XX` an escape. Null stays null."""
+}
+fn (value: Str?): Str? {
+    cond {
+        is-null(value) => { null }
+        => { ::hot::uri/decode(::aws::core/replace-all-char(value, "+", " ")) }
+    }
+}
+
+// Text of a response body. XML is textual, but a store may label it otherwise.
+body-text
+meta {
+    doc: """A response body as a Str, decoding Bytes."""
+}
+fn (body: Any): Str {
+    if(is-bytes(body), Str(body), body)
+}

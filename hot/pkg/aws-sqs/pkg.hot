@@ -2,8 +2,8 @@
 
 hot.pkg.aws-sqs {
   name: "hot.dev/aws-sqs",
-  version: "1.2.1",
-  hot-min-version: "1.2.0",
+  version: "1.3.0",
+  hot-min-version: "2.6.1",
   description: "AWS SQS API bindings for message queue operations.",
   author: "Hot Dev",
   email: "support@hot.dev",
@@ -11,7 +11,7 @@ hot.pkg.aws-sqs {
   tags: ["cloud", "messaging"],
   deps: {
     "hot.dev/hot-std": {},
-    "hot.dev/aws-core": "1.2.1"
+    "hot.dev/aws-core": "1.3.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

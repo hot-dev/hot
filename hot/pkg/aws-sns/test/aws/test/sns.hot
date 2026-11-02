@@ -1,0 +1,112 @@
+::aws::test::sns ns
+meta ["test"]
+
+// Hermetic: no network, no aws.* context. A `transport` in opts stands in for the network.
+
+::publish ::aws::sns::publish
+::subscriptions ::aws::sns::subscriptions
+::topics ::aws::sns::topics
+
+HttpResponse ::hot::http/HttpResponse
+
+// Every call is answered 418 with the signed request as the body.
+echo fn (): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { HttpResponse({status: 418, headers: {}, body: req}) }
+    }
+}
+
+// The request a call would have sent.
+sent fn (result: Result): Any {
+    if(is-err(result), err-value(result).body, result.body)
+}
+
+// Every call is answered 200 with these headers and body.
+answer fn (headers: Map, body: Any): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { HttpResponse({status: 200, headers: headers, body: body, body-bytes: if(is-bytes(body), body, Bytes(""))}) }
+    }
+}
+
+// Answered 200 with an AWS JSON body, which the runtime hands over as Bytes.
+amz fn (body: Map): Map {
+    answer({"content-type": "application/x-amz-json-1.0"}, Bytes(to-json(body)))
+}
+
+assert-missing-credentials fn (result: Result) {
+    assert(is-err(result))
+    assert(contains(err-value(result), "aws.access-key-id"))
+}
+
+assert-target fn (result: Result, target: Str) {
+    request sent(result)
+    assert-eq("https://sns.eu-west-1.amazonaws.com/", request.url)
+    assert-eq(`AmazonSimpleNotificationService.${target}`, get(request.headers, "X-Amz-Target"))
+    auth get(request.headers, "Authorization")
+    assert(contains(auth, "Credential=AKIDOPTS/"), auth)
+    assert(contains(auth, "/eu-west-1/sns/aws4_request"), auth)
+    assert(is-null(::hot::ctx/get("aws.access-key-id")), "no ctx writes")
+}
+
+test-publish-opts-reach-the-request
+meta ["test"] fn () {
+    assert-target(::publish/publish("t", "m", {}, echo()), "Publish")
+    assert-target(::publish/publish-batch("t", [], echo()), "PublishBatch")
+    assert-target(::publish/publish-with-attributes("t", "m", {}, echo()), "Publish")
+    assert-target(::publish/publish-json("t", {default: "x"}, echo()), "Publish")
+    assert-target(::publish/send-sms("+1", "m", {}, echo()), "Publish")
+}
+
+test-topics-opts-reach-the-request
+meta ["test"] fn () {
+    assert-target(::topics/create-topic("n", {}, echo()), "CreateTopic")
+    assert-target(::topics/create-topic("n", {}, [], echo()), "CreateTopic")
+    assert-target(::topics/delete-topic("t", echo()), "DeleteTopic")
+    assert-target(::topics/list-topics(echo()), "ListTopics")
+    assert-target(::topics/list-topics("tok", echo()), "ListTopics")
+    assert-target(::topics/get-topic-attributes("t", echo()), "GetTopicAttributes")
+    assert-target(::topics/set-topic-attributes("t", "a", "v", echo()), "SetTopicAttributes")
+    assert-target(::topics/tag-resource("t", [], echo()), "TagResource")
+    assert-target(::topics/untag-resource("t", [], echo()), "UntagResource")
+    assert-target(::topics/list-tags-for-resource("t", echo()), "ListTagsForResource")
+}
+
+test-subscriptions-opts-reach-the-request
+meta ["test"] fn () {
+    assert-target(::subscriptions/subscribe("t", "sqs", "e", {}, echo()), "Subscribe")
+    assert-target(::subscriptions/unsubscribe("s", echo()), "Unsubscribe")
+    assert-target(::subscriptions/confirm-subscription("t", "tok", echo()), "ConfirmSubscription")
+    assert-target(::subscriptions/list-subscriptions(echo()), "ListSubscriptions")
+    assert-target(::subscriptions/list-subscriptions("tok", echo()), "ListSubscriptions")
+    assert-target(::subscriptions/list-subscriptions-by-topic("t", echo()), "ListSubscriptionsByTopic")
+    assert-target(::subscriptions/list-subscriptions-by-topic("t", "tok", echo()), "ListSubscriptionsByTopic")
+    assert-target(::subscriptions/get-subscription-attributes("s", echo()), "GetSubscriptionAttributes")
+    assert-target(::subscriptions/set-subscription-attributes("s", "a", "v", echo()), "SetSubscriptionAttributes")
+}
+
+test-options-map-stays-separate-from-opts
+meta ["test"] fn () {
+    body from-json(sent(::publish/publish("t", "m", {subject: "Alert"}, echo())).body)
+    assert-eq("Alert", body.Subject)
+    assert(not(in("access-key-id", keys(body))), "opts never reach the request body")
+    assert-missing-credentials(::publish/publish("t", "m", {subject: "Alert"}))
+}
+
+test-existing-arities-read-ctx
+meta ["test"] fn () {
+    assert-missing-credentials(::publish/publish("t", "m"))
+    assert-missing-credentials(::topics/list-topics())
+    assert-missing-credentials(::subscriptions/list-subscriptions())
+}
+
+test-responses
+meta ["test"] fn () {
+    assert-eq("m1", ::publish/publish("t", "m", {}, amz({MessageId: "m1"})).message_id)
+    assert-eq("t1", ::topics/create-topic("n", {}, amz({TopicArn: "t1"})).topic_arn)
+}

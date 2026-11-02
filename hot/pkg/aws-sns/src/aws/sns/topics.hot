@@ -2,13 +2,12 @@
 
 // SNS Topic operations
 
-http-request ::hot::http/request
 HttpResponse ::hot::http/HttpResponse
 is-ok-response ::hot::http/is-ok-response
 
-get-credentials ::aws::core/get-credentials
-get-region ::aws::core/get-region
-sign-request ::aws::core/sign-request
+resolve ::aws::core/resolve
+send-signed ::aws::core/send-signed
+service-url ::aws::core/service-url
 AwsError ::aws::core/AwsError
 
 // Topic type
@@ -54,43 +53,45 @@ meta {
     """
 }
 fn
+(name: Str, attributes: Map, tags: Vec<Map>, opts: Map): CreateTopicResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        request-body {
+            Name: name
+        }
+
+        with-attributes cond {
+            is-empty(attributes) => { request-body }
+            => { merge(request-body, { Attributes: attributes }) }
+        }
+
+        with-tags merge(with-attributes, filter-vals({
+            Tags: tags
+        }, is-some))
+
+        body to-json(with-tags)
+
+        url `${service-url(resolved, "sns")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSimpleNotificationService.CreateTopic"
+        }
+
+        response send-signed("POST", url, "sns", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { CreateTopicResponse({
+                topic_arn: response.body.TopicArn
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(name: Str, attributes: Map, opts: Map): CreateTopicResponse | AwsError {
+    create-topic(name, attributes, null, opts)
+},
 (name: Str, attributes: Map, tags: Vec<Map>): CreateTopicResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-
-    request-body {
-        Name: name
-    }
-
-    with-attributes cond {
-        is-empty(attributes) => { request-body }
-        => { merge(request-body, { Attributes: attributes }) }
-    }
-
-    with-tags merge(with-attributes, filter-vals({
-        Tags: tags
-    }, is-some))
-
-    body to-json(with-tags)
-
-    url `https://sns.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSimpleNotificationService.CreateTopic",
-        "Host": `sns.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { CreateTopicResponse({
-            topic_arn: response.body.TopicArn
-        }) }
-        => { err(AwsError(response)) }
-    }
+    create-topic(name, attributes, tags, {})
 },
 (name: Str, attributes: Map): CreateTopicResponse | AwsError {
     create-topic(name, attributes, null)
@@ -112,30 +113,30 @@ meta {
     ```
     """
 }
-fn (topic_arn: Str): Map | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(topic_arn: Str, opts: Map): Map | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            TopicArn: topic_arn
+        })
 
-    body to-json({
-        TopicArn: topic_arn
+        url `${service-url(resolved, "sns")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSimpleNotificationService.DeleteTopic"
+        }
+
+        response send-signed("POST", url, "sns", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { { success: true } }
+            => { AwsError(response) }
+        }
     })
-
-    url `https://sns.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSimpleNotificationService.DeleteTopic",
-        "Host": `sns.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { { success: true } }
-        => { AwsError(response) }
-    }
+},
+(topic_arn: Str): Map | AwsError {
+    delete-topic(topic_arn, {})
 }
 
 // List all SNS topics
@@ -154,37 +155,39 @@ meta {
     """
 }
 fn
-(next_token: Str): ListTopicsResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+(next_token: Str?, opts: Map): ListTopicsResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        request-body {}
 
-    request-body {}
+        with-token merge(request-body, filter-vals({
+            NextToken: next_token
+        }, is-some))
 
-    with-token merge(request-body, filter-vals({
-        NextToken: next_token
-    }, is-some))
+        body to-json(with-token)
 
-    body to-json(with-token)
+        url `${service-url(resolved, "sns")}/`
 
-    url `https://sns.${region}.amazonaws.com/`
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSimpleNotificationService.ListTopics"
+        }
 
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSimpleNotificationService.ListTopics",
-        "Host": `sns.${region}.amazonaws.com`
-    }
+        response send-signed("POST", url, "sns", resolved, headers, body)
 
-    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { ListTopicsResponse({
-            topics: if(is-null(response.body.Topics), [], map(response.body.Topics, Topic({ topic_arn: %.TopicArn }))),
-            next_token: response.body.NextToken
-        }) }
-        => { err(AwsError(response)) }
-    }
+        cond {
+            is-ok-response(response) => { ListTopicsResponse({
+                topics: if(is-null(response.body.Topics), [], map(response.body.Topics, Topic({ topic_arn: %.TopicArn }))),
+                next_token: response.body.NextToken
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(opts: Map): ListTopicsResponse | AwsError {
+    list-topics(null, opts)
+},
+(next_token: Str?): ListTopicsResponse | AwsError {
+    list-topics(next_token, {})
 },
 (): ListTopicsResponse | AwsError {
     list-topics(null)
@@ -205,32 +208,32 @@ meta {
     ```
     """
 }
-fn (topic_arn: Str): GetTopicAttributesResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(topic_arn: Str, opts: Map): GetTopicAttributesResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            TopicArn: topic_arn
+        })
 
-    body to-json({
-        TopicArn: topic_arn
+        url `${service-url(resolved, "sns")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSimpleNotificationService.GetTopicAttributes"
+        }
+
+        response send-signed("POST", url, "sns", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { GetTopicAttributesResponse({
+                attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
+            }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    url `https://sns.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSimpleNotificationService.GetTopicAttributes",
-        "Host": `sns.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { GetTopicAttributesResponse({
-            attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(topic_arn: Str): GetTopicAttributesResponse | AwsError {
+    get-topic-attributes(topic_arn, {})
 }
 
 // Set topic attributes
@@ -248,32 +251,32 @@ meta {
     ```
     """
 }
-fn (topic_arn: Str, attribute_name: Str, attribute_value: Str): Map | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(topic_arn: Str, attribute_name: Str, attribute_value: Str, opts: Map): Map | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            TopicArn: topic_arn,
+            AttributeName: attribute_name,
+            AttributeValue: attribute_value
+        })
 
-    body to-json({
-        TopicArn: topic_arn,
-        AttributeName: attribute_name,
-        AttributeValue: attribute_value
+        url `${service-url(resolved, "sns")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSimpleNotificationService.SetTopicAttributes"
+        }
+
+        response send-signed("POST", url, "sns", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { { success: true } }
+            => { AwsError(response) }
+        }
     })
-
-    url `https://sns.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSimpleNotificationService.SetTopicAttributes",
-        "Host": `sns.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { { success: true } }
-        => { AwsError(response) }
-    }
+},
+(topic_arn: Str, attribute_name: Str, attribute_value: Str): Map | AwsError {
+    set-topic-attributes(topic_arn, attribute_name, attribute_value, {})
 }
 
 // Tag a topic
@@ -292,31 +295,31 @@ meta {
     ```
     """
 }
-fn (resource_arn: Str, tags: Vec<Map>): Map | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(resource_arn: Str, tags: Vec<Map>, opts: Map): Map | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            ResourceArn: resource_arn,
+            Tags: tags
+        })
 
-    body to-json({
-        ResourceArn: resource_arn,
-        Tags: tags
+        url `${service-url(resolved, "sns")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSimpleNotificationService.TagResource"
+        }
+
+        response send-signed("POST", url, "sns", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { { success: true } }
+            => { AwsError(response) }
+        }
     })
-
-    url `https://sns.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSimpleNotificationService.TagResource",
-        "Host": `sns.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { { success: true } }
-        => { AwsError(response) }
-    }
+},
+(resource_arn: Str, tags: Vec<Map>): Map | AwsError {
+    tag-resource(resource_arn, tags, {})
 }
 
 // Untag a topic
@@ -332,31 +335,31 @@ meta {
     ```
     """
 }
-fn (resource_arn: Str, tag_keys: Vec<Str>): Map | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(resource_arn: Str, tag_keys: Vec<Str>, opts: Map): Map | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            ResourceArn: resource_arn,
+            TagKeys: tag_keys
+        })
 
-    body to-json({
-        ResourceArn: resource_arn,
-        TagKeys: tag_keys
+        url `${service-url(resolved, "sns")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSimpleNotificationService.UntagResource"
+        }
+
+        response send-signed("POST", url, "sns", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { { success: true } }
+            => { AwsError(response) }
+        }
     })
-
-    url `https://sns.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSimpleNotificationService.UntagResource",
-        "Host": `sns.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { { success: true } }
-        => { AwsError(response) }
-    }
+},
+(resource_arn: Str, tag_keys: Vec<Str>): Map | AwsError {
+    untag-resource(resource_arn, tag_keys, {})
 }
 
 // List tags for a topic
@@ -374,28 +377,28 @@ meta {
     ```
     """
 }
-fn (resource_arn: Str): Map | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(resource_arn: Str, opts: Map): Map | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            ResourceArn: resource_arn
+        })
 
-    body to-json({
-        ResourceArn: resource_arn
+        url `${service-url(resolved, "sns")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSimpleNotificationService.ListTagsForResource"
+        }
+
+        response send-signed("POST", url, "sns", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { { tags: if(is-null(response.body.Tags), [], response.body.Tags) } }
+            => { AwsError(response) }
+        }
     })
-
-    url `https://sns.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSimpleNotificationService.ListTagsForResource",
-        "Host": `sns.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { { tags: if(is-null(response.body.Tags), [], response.body.Tags) } }
-        => { AwsError(response) }
-    }
+},
+(resource_arn: Str): Map | AwsError {
+    list-tags-for-resource(resource_arn, {})
 }

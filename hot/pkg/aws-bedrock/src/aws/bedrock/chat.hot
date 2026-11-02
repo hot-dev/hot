@@ -55,13 +55,13 @@ meta {
     """
 }
 fn
-(model-id: Str, message: Str): Str | AwsError {
-    chat(model-id, message, null, null)
+(model-id: Str, message: Str, opts: Map): Str | AwsError {
+    chat(model-id, message, null, null, opts)
 },
-(model-id: Str, message: Str, system: Str): Str | AwsError {
-    chat(model-id, message, system, null)
+(model-id: Str, message: Str, system: Str?, opts: Map): Str | AwsError {
+    chat(model-id, message, system, null, opts)
 },
-(model-id: Str, message: Str, system: Str, max-tokens: Int): Str | AwsError {
+(model-id: Str, message: Str, system: Str?, max-tokens: Int, opts: Map): Str | AwsError {
     messages [user-message(message)]
 
     system-blocks cond {
@@ -74,9 +74,10 @@ fn
         => { inference-config(max-tokens) }
     }
 
-    response converse(model-id, messages, system-blocks, config)
+    response converse(model-id, messages, system-blocks, config, null, null, opts)
 
     match response {
+        Result.Err => { err(response) }
         AwsError => { response }
         ConverseResponse => {
             // Extract text from response
@@ -102,6 +103,15 @@ fn
             }
         }
     }
+},
+(model-id: Str, message: Str): Str | AwsError {
+    chat(model-id, message, null, null, {})
+},
+(model-id: Str, message: Str, system: Str?): Str | AwsError {
+    chat(model-id, message, system, null, {})
+},
+(model-id: Str, message: Str, system: Str?, max-tokens: Int): Str | AwsError {
+    chat(model-id, message, system, max-tokens, {})
 }
 
 // Multi-turn conversation helper
@@ -134,7 +144,8 @@ meta {
     ```
     """
 }
-fn (model-id: Str, history: Vec, message: Str, system: Str): Map {
+fn
+(model-id: Str, history: Vec, message: Str, system: Str?, opts: Map): Map {
     // Build messages: history + new user message
     new-user-msg user-message(message)
     all-messages concat(history, [new-user-msg])
@@ -146,9 +157,17 @@ fn (model-id: Str, history: Vec, message: Str, system: Str): Map {
 
     config inference-config(4096)
 
-    response converse(model-id, all-messages, system-blocks, config)
+    response converse(model-id, all-messages, system-blocks, config, null, null, opts)
 
     match response {
+        Result.Err => {
+            {
+                error: response,
+                response: "",
+                history: history
+            }
+        }
+
         AwsError => {
             {
                 error: response,
@@ -191,6 +210,9 @@ fn (model-id: Str, history: Vec, message: Str, system: Str): Map {
             }
         }
     }
+},
+(model-id: Str, history: Vec, message: Str, system: Str?): Map {
+    converse-multi(model-id, history, message, system, {})
 }
 
 // Chat with image
@@ -212,10 +234,11 @@ meta {
     ```
     """
 }
-fn (model-id: Str, message: Str, image-format: Str, image-base64: Str): Str | AwsError {
-    chat-with-image(model-id, message, image-format, image-base64, null)
+fn
+(model-id: Str, message: Str, image-format: Str, image-base64: Str, opts: Map): Str | AwsError {
+    chat-with-image(model-id, message, image-format, image-base64, null, opts)
 },
-(model-id: Str, message: Str, image-format: Str, image-base64: Str, system: Str): Str | AwsError {
+(model-id: Str, message: Str, image-format: Str, image-base64: Str, system: Str?, opts: Map): Str | AwsError {
     // Build content with text and image
     content [
         text-content(message),
@@ -231,9 +254,10 @@ fn (model-id: Str, message: Str, image-format: Str, image-base64: Str): Str | Aw
 
     config inference-config(4096)
 
-    response converse(model-id, messages, system-blocks, config)
+    response converse(model-id, messages, system-blocks, config, null, null, opts)
 
     match response {
+        Result.Err => { err(response) }
         AwsError => { response }
         ConverseResponse => {
             output response.output
@@ -258,4 +282,10 @@ fn (model-id: Str, message: Str, image-format: Str, image-base64: Str): Str | Aw
             }
         }
     }
+},
+(model-id: Str, message: Str, image-format: Str, image-base64: Str): Str | AwsError {
+    chat-with-image(model-id, message, image-format, image-base64, null, {})
+},
+(model-id: Str, message: Str, image-format: Str, image-base64: Str, system: Str?): Str | AwsError {
+    chat-with-image(model-id, message, image-format, image-base64, system, {})
 }

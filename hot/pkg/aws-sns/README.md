@@ -7,7 +7,7 @@ AWS Simple Notification Service (SNS) bindings for Hot, providing pub/sub messag
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/aws-sns": "1.2.1"
+"hot.dev/aws-sns": "1.3.0"
 ```
 
 ## Features
@@ -37,11 +37,9 @@ topic-arn response.topic_arn
 
 ## Configuration
 
-Required context variables:
+Context variables, all optional when you pass credentials in `opts` (see [Per-call credentials](#per-call-credentials)):
 - `aws.access-key-id` - AWS access key ID
 - `aws.secret-access-key` - AWS secret access key
-
-Optional context variables:
 - `aws.session-token` - Session token for temporary credentials
 - `aws.region` - AWS region (defaults to `us-east-1`)
 
@@ -231,6 +229,32 @@ tags ::aws::sns/list-tags-for-resource(topic-arn)
 // Remove tags
 ::aws::sns/untag-resource(topic-arn, ["Environment", "Team"])
 ```
+
+## Per-call credentials
+
+Pass `opts` as the last argument of any function to use other credentials for that call, so one run can serve many tenants. Nothing is written to context, so this is safe in parallel flows.
+
+```hot
+::sns ::aws::sns
+
+opts {
+    access-key-id: "AKIAEXAMPLE",
+    secret-access-key: "tenant-secret",
+    session-token: "optional-for-temporary-credentials",
+    region: "eu-west-1"
+}
+
+::sns/publish("my-topic-arn", "Hello, world!", {}, opts)
+::sns/list-topics(opts)
+```
+
+`opts` also takes `credentials` (a ready `::aws::core/Credentials` value) and `endpoint` (a base URL such as LocalStack). Without credentials in `opts`, the `aws.*` context variables are used. These are errors, returned before anything is sent:
+
+- `access-key-id`, `secret-access-key` or `credentials` in `opts` but null or blank (leave it out instead); a null or blank `session-token` just means no session token
+- half a key pair
+- an `endpoint` in `opts` without credentials in `opts`
+
+Where a function's last parameter is already a Map, `opts` comes after it, and a shorter form without that Map isn't offered: pass `{}` or `null` for it.
 
 ## Error Handling
 

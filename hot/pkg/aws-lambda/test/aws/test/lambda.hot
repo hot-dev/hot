@@ -1,0 +1,119 @@
+::aws::test::lambda ns
+meta ["test"]
+
+// Hermetic: no network, no aws.* context. A `transport` in opts stands in for the network.
+
+::invoke ::aws::lambda::invoke
+::functions ::aws::lambda::functions
+
+HttpResponse ::hot::http/HttpResponse
+
+// Every call is answered 418 with the signed request as the body.
+echo fn (): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { HttpResponse({status: 418, headers: {}, body: req}) }
+    }
+}
+
+// The request a call would have sent.
+sent fn (result: Result): Any {
+    if(is-err(result), err-value(result).body, result.body)
+}
+
+// Every call is answered 200 with these headers and body.
+answer fn (headers: Map, body: Any): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { HttpResponse({status: 200, headers: headers, body: body, body-bytes: if(is-bytes(body), body, Bytes(""))}) }
+    }
+}
+
+// Answered 200 with an AWS JSON body, which the runtime hands over as Bytes.
+amz fn (body: Map): Map {
+    answer({"content-type": "application/x-amz-json-1.0"}, Bytes(to-json(body)))
+}
+
+assert-missing-credentials fn (result: Result) {
+    assert(is-err(result))
+    assert(contains(err-value(result), "aws.access-key-id"))
+}
+
+BASE "https://lambda.eu-west-1.amazonaws.com/2015-03-31/functions"
+
+assert-request fn (result: Result, url: Str) {
+    request sent(result)
+    assert-eq(url, request.url)
+    auth get(request.headers, "Authorization")
+    assert(contains(auth, "Credential=AKIDOPTS/"), auth)
+    assert(contains(auth, "/eu-west-1/lambda/aws4_request"), auth)
+    assert(is-null(::hot::ctx/get("aws.access-key-id")), "no ctx writes")
+}
+
+test-opts-reach-the-request
+meta ["test"] fn () {
+    u `${BASE}/f/invocations`
+    assert-request(::invoke/invoke("f", null, echo()), u)
+    assert-request(::invoke/invoke("f", {a: 1}, "Event", echo()), u)
+    assert-request(::invoke/invoke("f", {a: 1}, "Event", "None", echo()), u)
+    assert-request(::invoke/invoke-async("f", {a: 1}, echo()), u)
+    assert-request(::invoke/invoke-with-logs("f", {a: 1}, echo()), u)
+    assert-request(::invoke/invoke-dry-run("f", {a: 1}, echo()), u)
+    assert-request(::functions/list-functions(echo()), `${BASE}?MaxItems=50`)
+    assert-request(::functions/list-functions(5, echo()), `${BASE}?MaxItems=5`)
+    assert-request(::functions/get-function("f", echo()), `${BASE}/f`)
+    assert-request(::functions/get-function-configuration("f", echo()), `${BASE}/f/configuration`)
+}
+
+test-a-map-payload-is-still-a-payload
+meta ["test"] fn () {
+    // invoke(name, payload) keeps its meaning: no invoke(name, opts) next to it
+    assert-missing-credentials(::invoke/invoke("f", {"access-key-id": "looks-like-opts"}))
+    assert-missing-credentials(::invoke/invoke("f"))
+    assert-missing-credentials(::invoke/invoke-async("f"))
+    assert-eq("{\"a\":1}", sent(::invoke/invoke("f", {a: 1}, echo())).body)
+    assert-eq("", sent(::invoke/invoke("f", null, echo())).body)
+}
+
+test-invoke-payloads
+meta ["test"] fn () {
+    assert-eq("[1,2]", sent(::invoke/invoke("f", [1, 2], echo())).body, "a Vec is JSON, not a signing failure")
+    assert-eq("raw", sent(::invoke/invoke("f", "raw", echo())).body)
+    assert-eq("Event", get(sent(::invoke/invoke-async("f", {a: 1}, echo())).headers, "X-Amz-Invocation-Type"))
+    assert-eq("Tail", get(sent(::invoke/invoke-with-logs("f", {a: 1}, echo())).headers, "X-Amz-Log-Type"))
+    assert-eq("DryRun", get(sent(::invoke/invoke-dry-run("f", {a: 1}, echo())).headers, "X-Amz-Invocation-Type"))
+}
+
+test-path-and-query-values-are-encoded
+meta ["test"] fn () {
+    arn "arn:aws:lambda:eu-west-1:1:function:f"
+    request sent(::invoke/invoke(arn, null, echo()))
+    assert-eq(`${BASE}/arn%3Aaws%3Alambda%3Aeu-west-1%3A1%3Afunction%3Af/invocations`, request.url)
+    assert-eq(`${BASE}?MaxItems=5&Marker=a%2Fb%2Bc%3D`, sent(::functions/list-functions(5, "a/b+c=", echo())).url)
+}
+
+test-lowercase-response-headers
+meta ["test"] fn () {
+    out ::invoke/invoke("f", null, answer({
+        "content-type": "application/json",
+        "x-amz-function-error": "Unhandled",
+        "x-amz-log-result": "bG9n",
+        "x-amz-executed-version": "$LATEST"
+    }, {message: "boom"}))
+    assert-eq("Unhandled", out.function_error, "null before: the runtime lowercases header names")
+    assert-eq("bG9n", out.log_result)
+    assert-eq("$LATEST", out.executed_version)
+    assert-eq("boom", out.payload.message)
+}
+
+test-function-responses
+meta ["test"] fn () {
+    listed ::functions/list-functions(answer({}, {Functions: [{FunctionName: "f", Runtime: "nodejs20.x"}], NextMarker: "m"}))
+    assert-eq("f", first(listed.functions).function_name)
+    assert-eq("m", listed.next_marker)
+    assert-eq("f", ::functions/get-function-configuration("f", answer({}, {FunctionName: "f"})).function_name)
+}
