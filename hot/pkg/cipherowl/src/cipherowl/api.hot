@@ -486,7 +486,7 @@ unwrap
 meta {
     doc: """The decoded body of a 2xx response (null when empty), the Err of a failed transport, or `err(HttpError)` for a non-2xx response."""
 }
-fn (response: HttpResponse): Any {
+fn (response: Result): Any {
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response-body(response.body) }
