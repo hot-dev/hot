@@ -5283,6 +5283,7 @@ async fn process_code_task(
         retry_attempt: 0,
         secret_keys: Default::default(),
         secret_value_hashes: Default::default(),
+        secret_values: Default::default(),
         access_id: None,
         agent_type: None,
         queue_timing: None,

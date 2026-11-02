@@ -234,7 +234,7 @@ pub(crate) struct VmHostContext {
     task_id: Option<uuid::Uuid>,
     context_storage: AHashMap<String, Val>,
     secret_keys: AHashSet<String>,
-    secret_value_hashes: AHashSet<u64>,
+    ctx_default_hashes: AHashSet<u64>,
     run_start_time: chrono::DateTime<chrono::Utc>,
     run_start_instant: std::time::Instant,
     native_core_shadows: Arc<NativeCoreShadows>,
@@ -756,10 +756,9 @@ pub struct VirtualMachine {
     pub context_storage: AHashMap<String, Val>,
     /// Set of context keys that are secrets (should be masked in logs/db)
     pub secret_keys: AHashSet<String>,
-    /// Set of secret value hashes that should be masked in call logs
-    /// This is populated when ctx/get returns a secret value
-    /// We store hashes (u64) for efficient comparison and to handle any Val type
-    pub secret_value_hashes: AHashSet<u64>,
+    /// Hashes of the `ctx` defaults this run uses: values in source code, not
+    /// secrets, even under a key declared secret.
+    pub ctx_default_hashes: AHashSet<u64>,
     /// Engine configuration (includes thread count, etc.)
     conf: Val,
     /// Thread count for parallel execution (cached from conf)
@@ -906,7 +905,7 @@ impl VirtualMachine {
             entry_proven: None,
             context_storage: AHashMap::new(),
             secret_keys: AHashSet::new(),
-            secret_value_hashes: AHashSet::new(),
+            ctx_default_hashes: AHashSet::new(),
             conf,
             thread_count,
             dispatch_cache: AHashMap::new(),
@@ -1087,7 +1086,7 @@ impl VirtualMachine {
             task_id: self.task_id,
             context_storage: self.context_storage.clone(),
             secret_keys: self.secret_keys.clone(),
-            secret_value_hashes: self.secret_value_hashes.clone(),
+            ctx_default_hashes: self.ctx_default_hashes.clone(),
             run_start_time: self.run_start_time,
             run_start_instant: self.run_start_instant,
             native_core_shadows: self.native_core_shadows(),
@@ -1109,7 +1108,7 @@ impl VirtualMachine {
         self.task_id = context.task_id;
         self.context_storage = context.context_storage.clone();
         self.secret_keys = context.secret_keys.clone();
-        self.secret_value_hashes = context.secret_value_hashes.clone();
+        self.ctx_default_hashes = context.ctx_default_hashes.clone();
         self.run_start_time = context.run_start_time;
         self.run_start_instant = context.run_start_instant;
         // A worker runs the same program, so it shares what was computed.
@@ -1533,13 +1532,29 @@ impl VirtualMachine {
         }
     }
 
-    /// Sync secret_value_hashes from VM to execution_context for database masking
-    /// This should be called after any ctx/get call that might return a secret
-    pub fn sync_secret_value_hashes_to_execution_context(&mut self) {
-        if let Some(ref mut ctx) = self.execution_context {
-            // Merge new secret value hashes into the execution context
-            for hash in &self.secret_value_hashes {
-                ctx.secret_value_hashes.insert(*hash);
+    /// Register a secret value with this run's context, which shares it with
+    /// every record of the run. Without a context, nothing is recorded.
+    pub fn register_secret_value(&mut self, value: &Val) {
+        if let Some(ctx) = &self.execution_context {
+            ctx.secret_values.register(value);
+        }
+    }
+
+    /// Like [`Self::register_secret_value`], for a value masked only where it
+    /// is the whole value.
+    pub fn register_secret_value_exact(&mut self, value: &Val) {
+        if let Some(ctx) = &self.execution_context {
+            ctx.secret_values.register_exact(value);
+        }
+    }
+
+    /// Fill context keys the run didn't set from their declared defaults.
+    pub fn apply_ctx_defaults(&mut self, defaults: impl IntoIterator<Item = (String, Val)>) {
+        for (key, default_val) in defaults {
+            if !self.context_storage.contains_key(&key) {
+                self.ctx_default_hashes
+                    .insert(crate::lang::masking::value_hash(&default_val));
+                self.context_storage.insert(key, default_val);
             }
         }
     }
@@ -10696,7 +10711,7 @@ impl VirtualMachine {
         // Clear context storage and secret keys
         self.context_storage.clear();
         self.secret_keys.clear();
-        self.secret_value_hashes.clear();
+        self.ctx_default_hashes.clear();
 
         // Reset current namespace
         self.current_namespace = "::hot::main".to_string();

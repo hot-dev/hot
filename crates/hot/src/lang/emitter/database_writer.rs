@@ -221,6 +221,9 @@ impl DatabaseWriterFlushTrigger {
 
 /// All possible database write operations
 #[derive(Debug, Clone)]
+// A run's writes are few and short-lived on the writer's channel: boxing their
+// context would only trade one allocation for another.
+#[allow(clippy::large_enum_variant)]
 pub enum DatabaseWrite {
     /// Insert a new run record
     RunStart {
