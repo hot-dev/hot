@@ -2057,6 +2057,25 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     .fetch_one(&a)
     .await?;
     assert_eq!(actual, expected);
+    // Under the row policy, the check reads sizes from the index alone. The
+    // rows it returns are the proof: without a scope it finds none, and no error.
+    assert!(expected > 0);
+    let mut tx = a.begin().await?;
+    sqlx::raw_sql("SET LOCAL enable_seqscan=off; SET LOCAL enable_bitmapscan=off")
+        .execute(&mut *tx)
+        .await?;
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) SELECT CAST(COALESCE(SUM(CASE WHEN size<0 THEN 0 ELSE size END),0) AS BIGINT) FROM call WHERE env_id=$1",
+    )
+    .bind(env_a)
+    .fetch_all(&mut *tx)
+    .await?;
+    let scan = plan
+        .iter()
+        .find(|line| line.contains("Index Only Scan using call_env_start_time_size_idx"))
+        .unwrap_or_else(|| panic!("{plan:#?}"));
+    assert!(!scan.contains("actual rows=0.00"), "{plan:#?}");
+    tx.rollback().await?;
     // Each counter is checked and repaired in its own short transaction: a
     // writer holding one environment's counter delays only that repair, not
     // the account's other environments, and no snapshot spans them.
@@ -2095,6 +2114,32 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         first_repaired && !reconciling.is_finished(),
         "an earlier environment's repair must commit while a later one waits"
     );
+    // A second reconciler skips the unit the first holds, rather than waiting
+    // for it and then adding the same difference again.
+    let second_reconciler = ScopedPgPool::new(
+        PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    conn.execute("SET search_path=hot,public").await?;
+                    Ok(())
+                })
+            })
+            .connect(runtime_url.as_str())
+            .await?,
+    )
+    .with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Billing,
+        org_id: Some(root),
+    });
+    let second = tokio::time::timeout(
+        Duration::from_secs(20),
+        db::usage::reconcile_account(&db::DatabasePool::Postgres(second_reconciler.clone()), root),
+    )
+    .await??;
+    assert_eq!(second.storage_rows, 0);
+    assert!(!reconciling.is_finished());
+    second_reconciler.close().await;
     holder.rollback().await?;
     assert_eq!(reconciling.await??.storage_rows, 2);
     assert!(store_matches(last).await?);

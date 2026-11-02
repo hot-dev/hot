@@ -146,8 +146,22 @@ async fn hot_path_statements_keep_their_plans_under_rls() -> Result<(), Box<dyn 
     .await?;
     let call_plan = lines.join("\n");
     assert!(
-        call_plan.contains("Index Only Scan using call_env_start_time_idx"),
+        call_plan.contains("Index Only Scan using call_env_start_time_size_idx"),
         "{call_plan}"
+    );
+    // So does reconciliation, which also sums each call's size. The index holds
+    // every column this and the row policy read.
+    let lines: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT CAST(COALESCE(SUM(CASE WHEN size<0 THEN 0 ELSE size END),0) AS BIGINT) \
+         FROM call WHERE env_id = $1",
+    )
+    .bind(Uuid::new_v4())
+    .fetch_all(&scheduler)
+    .await?;
+    let size_plan = lines.join("\n");
+    assert!(
+        size_plan.contains("Index Only Scan using call_env_start_time_size_idx"),
+        "{size_plan}"
     );
     raw.close().await;
     admin.close().await;

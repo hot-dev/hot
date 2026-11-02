@@ -52,6 +52,8 @@ Hot 3.0.2 masks more secrets in call and run records. See [Secret Masking](/docs
 
 **Packages** that call `::hot::ctx/mark-secret` need `hot-min-version: "3.0.2"`.
 
+**On PostgreSQL, the upgrade builds an index on `call`.** Migration 025 replaces `call_env_start_time_idx` with an index that also holds each call's size, so hourly usage reconciliation no longer reads the whole table. Trace writes keep running during the build, though they slow down if they share a disk with it. It reads all of `call` and then waits for every older transaction to finish, so give your migration job room: a 2.4 GB table took about 20 s on a 125 MB/s disk. If the job is interrupted, run `hot db migrate` again.
+
 ## Upgrading from Hot 3.0.0 to 3.0.1 {#upgrading-from-3-0-0-to-3-0-1}
 
 Hot 3.0.1 fixes the issues found in a full review of everything merged after
