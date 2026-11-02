@@ -10,7 +10,7 @@ hot.pkg.anthropic {
   license: "Apache-2.0",
   tags: ["ai"],
   deps: {
-    "hot.dev/hot-ai": "1.8.1"
+    "hot.dev/hot-ai": "1.9.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]
