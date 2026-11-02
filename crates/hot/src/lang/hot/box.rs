@@ -1072,8 +1072,8 @@ pub fn allowed_images(_args: &[Val]) -> HotResult<Val> {
         .map(|s| Val::from(s.to_string()))
         .collect();
     result.insert(Val::from("policy"), Val::from("open"));
-    result.insert(Val::from("denied"), Val::Vec(denied));
-    result.insert(Val::from("denied-prefixes"), Val::Vec(prefixes));
+    result.insert(Val::from("denied"), Val::vec(denied));
+    result.insert(Val::from("denied-prefixes"), Val::vec(prefixes));
     HotResult::Ok(Val::constructed("::hot::box/BoxImagePolicy", result))
 }
 
@@ -1122,7 +1122,7 @@ pub fn sizes(_args: &[Val]) -> HotResult<Val> {
         })
     })
     .collect();
-    HotResult::Ok(Val::Vec(sizes))
+    HotResult::Ok(Val::vec(sizes))
 }
 
 /// Get container execution statistics.
@@ -1263,8 +1263,8 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                 Val::Int(concurrent_remaining),
             );
             val_map.insert(Val::from("overage"), Val::Bool(overage));
-            map.insert(Val::from("$val"), Val::Map(Box::new(val_map)));
-            Ok::<Val, String>(Val::Map(Box::new(map)))
+            map.insert(Val::from("$val"), Val::map(val_map));
+            Ok::<Val, String>(Val::map(map))
         })
         .await
     });
@@ -1334,8 +1334,8 @@ pub fn limits(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             val_map.insert(Val::from("disk-mb"), Val::Int(disk_size_mb));
             val_map.insert(Val::from("timeout-secs"), Val::Int(timeout_secs));
             val_map.insert(Val::from("network"), Val::Bool(network));
-            map.insert(Val::from("$val"), Val::Map(Box::new(val_map)));
-            Ok::<Val, String>(Val::Map(Box::new(map)))
+            map.insert(Val::from("$val"), Val::map(val_map));
+            Ok::<Val, String>(Val::map(map))
         })
         .await
     });

@@ -1669,7 +1669,7 @@ mod tests {
         let mut program = create_test_bytecode_program();
         let mut map = indexmap::IndexMap::new();
         map.insert(crate::val::Val::Int(1), crate::val::Val::from("one"));
-        program.add_constant(Constant::Val(crate::val::Val::Map(Box::new(map))));
+        program.add_constant(Constant::Val(crate::val::Val::map(map)));
         program.add_constant(Constant::Val(crate::val::Val::Bytes(vec![1, 2, 3])));
         program.add_constant(Constant::FunctionRef("::canary/f".into()));
         program.add_constant(Constant::StringRef("branch".into()));
@@ -1858,11 +1858,11 @@ mod tests {
             name: "my_variable".to_string(),
             namespace: "::my::namespace".to_string(),
             static_scope: Some("::my::namespace/my-func".to_string()),
-            meta: Some(Val::Map(Box::new({
+            meta: Some(Val::map({
                 let mut m = indexmap::IndexMap::new();
                 m.insert(Val::from("key"), Val::from("value"));
                 m
-            }))),
+            })),
             source: Some(SourceLocation {
                 file: Some("path/to/file.hot".to_string()),
                 line: 42,

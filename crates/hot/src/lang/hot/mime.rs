@@ -119,9 +119,9 @@ pub fn to_exts(args: &[Val]) -> HotResult<Val> {
     match extensions {
         Some(exts) => {
             let vec: Vec<Val> = exts.iter().map(|e| Val::from(e.to_string())).collect();
-            HotResult::Ok(Val::Vec(vec))
+            HotResult::Ok(Val::vec(vec))
         }
-        None => HotResult::Ok(Val::Vec(vec![])),
+        None => HotResult::Ok(Val::vec(vec![])),
     }
 }
 

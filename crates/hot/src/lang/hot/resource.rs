@@ -182,7 +182,7 @@ pub fn build_registry_from_manifest(
     let mut entries: IndexMap<String, ResourceEntry> = IndexMap::new();
 
     if let Val::Vec(items) = manifest_resources {
-        for item in items {
+        for item in items.iter() {
             let Val::Map(map) = item else {
                 tracing::warn!("resource: manifest entry is not a Map: {:?}", item);
                 continue;
@@ -509,7 +509,7 @@ pub fn list(args: &[Val]) -> HotResult<Val> {
     }
     let registry = get_registry();
     let entries: Vec<Val> = registry.entries.values().map(entry_to_val).collect();
-    HotResult::Ok(Val::Vec(entries))
+    HotResult::Ok(Val::vec(entries))
 }
 
 /// `::hot::resource/list-matching(glob: Str): Vec<{path, hash, size}>`
@@ -543,7 +543,7 @@ pub fn list_matching(args: &[Val]) -> HotResult<Val> {
             out.push(entry_to_val(entry));
         }
     }
-    HotResult::Ok(Val::Vec(out))
+    HotResult::Ok(Val::vec(out))
 }
 
 #[cfg(test)]

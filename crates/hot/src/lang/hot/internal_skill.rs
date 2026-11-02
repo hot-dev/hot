@@ -161,7 +161,7 @@ pub fn meta_from_fn(args: &[Val]) -> HotResult<Val> {
             merged
                 .entry(Val::from("fn-name"))
                 .or_insert_with(|| Val::from(entry.name.as_str()));
-            HotResult::Ok(Val::Map(Box::new(merged)))
+            HotResult::Ok(Val::map(merged))
         }
         None => HotResult::Err(Val::from(format!(
             "::hot::internal::skill/meta-from-fn: no skill registered for '{}' (function may \
@@ -194,10 +194,10 @@ pub fn all_skill_metas(args: &[Val]) -> HotResult<Val> {
                 merged
                     .entry(Val::from("fn-name"))
                     .or_insert_with(|| Val::from(e.name.as_str()));
-                Val::Map(Box::new(merged))
+                Val::map(merged)
             })
             .collect();
-        HotResult::Ok(Val::Vec(out))
+        HotResult::Ok(Val::vec(out))
     })
 }
 
@@ -212,10 +212,10 @@ mod tests {
     fn fixture_entry(name: &str, desc: &str) -> SkillSpecEntry {
         let mut m = IndexMap::new();
         m.insert(Val::from("description"), Val::from(desc));
-        m.insert(Val::from("when"), Val::Vec(vec![Val::from("trigger")]));
+        m.insert(Val::from("when"), Val::vec(vec![Val::from("trigger")]));
         SkillSpecEntry {
             name: name.to_string(),
-            skill_meta: Val::Map(Box::new(m)),
+            skill_meta: Val::map(m),
         }
     }
 
