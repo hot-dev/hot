@@ -2955,6 +2955,62 @@ run()"#;
         }
     }
 
+    /// A parameter's built-in type is checked after its arrow has run: a self
+    /// tail call that converts the value passes the check, one with no arrow
+    /// for the value fails it, in both tiers and on the first iteration or a
+    /// later one.
+    #[test]
+    fn self_tail_call_arrows_run_before_the_parameter_check() {
+        let src = r#"::t ns
+Label type { text: Str }
+Count type { n: Int }
+Plain type { n: Int }
+Label -> Str fn (l: Label): Str { l.text }
+Count -> Int fn (c: Count): Int { c.n }
+to-str fn (s: Str, n: Int, q: Any): Any {
+    if(eq(n, 0), s, to-str(q, sub(n, 1), q))
+}
+to-int fn (i: Int, n: Int, q: Any): Any {
+    if(eq(n, 0), i, to-int(q, sub(n, 1), q))
+}
+to-dec fn (d: Dec, n: Int, q: Any): Any {
+    if(eq(n, 0), d, to-dec(q, sub(n, 1), q))
+}
+overloaded fn
+(v: Vec, n: Int, q: Any): Any { "vec" },
+(s: Str, n: Int, q: Any): Any { if(eq(n, 0), s, overloaded(q, sub(n, 1), q)) }
+run fn (): Vec {
+    plain Plain({n: 1})
+    failed-str to-str("start", 3, plain)
+    failed-int to-int(0, 3, plain)
+    failed-overload overloaded("start", 3, plain)
+    [
+        to-str("start", 3, Label({text: "label"})),
+        to-int(0, 3, Count({n: 7})),
+        to-dec(0.5, 3, 2),
+        overloaded("start", 3, Label({text: "label"})),
+        is-err(failed-str), is-err(failed-int), is-err(failed-overload)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("label"),
+            Val::Int(7),
+            Val::Dec(fastnum::D256::from(2)),
+            Val::from("label"),
+            Val::Bool(true),
+            Val::Bool(true),
+            Val::Bool(true),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
     /// An arrow's failure on a self tail call halts the run, in both tiers:
     /// an Err once it's consumed, as on any call, and a `fail` at once, after
     /// an earlier argument's arrow has run.
