@@ -203,7 +203,7 @@ meta {
     """
 }
 fn
-(next_token: Str): ListSubscriptionsResponse | AwsError {
+(next_token: Str?): ListSubscriptionsResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
@@ -263,7 +263,7 @@ meta {
     """
 }
 fn
-(topic_arn: Str, next_token: Str): ListSubscriptionsResponse | AwsError {
+(topic_arn: Str, next_token: Str?): ListSubscriptionsResponse | AwsError {
     region get-region()
     credentials get-credentials()
 

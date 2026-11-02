@@ -775,7 +775,10 @@ pub struct VirtualMachine {
     /// Used by the `CallUserFunction` opcode handler to apply implicit
     /// `Source -> Target` coercions when the runtime arg types differ from
     /// the declared param types (the type checker has already vetted the call).
-    coercion_param_cache: AHashMap<FunctionId, Option<Vec<String>>>,
+    coercion_param_cache: AHashMap<FunctionId, Option<std::rc::Rc<[String]>>>,
+    /// The arrow `implicit_arrow` found for a value type and parameter type,
+    /// misses included: a scan of the arrows for each call is too slow.
+    coercion_target_cache: AHashMap<String, AHashMap<String, Option<(String, String)>>>,
     /// Per-function-id cache of the same-arity overload set a function belongs
     /// to (`None` when it has no same-arity siblings), used for runtime
     /// overload dispatch (`overload_for_args`).
@@ -826,6 +829,38 @@ pub struct VirtualMachine {
     /// Task ID when this VM is executing inside a task worker.
     /// Used by `::hot::task/checkpoint` and `::hot::task/restore`.
     task_id: Option<uuid::Uuid>,
+}
+
+/// Split the types of a typed signature key, `Map<Str, Int>,Str?`, at the
+/// commas between parameters.
+fn split_param_types(types: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in types.char_indices() {
+        match c {
+            '<' | '(' | '{' | '[' => depth += 1,
+            '>' | ')' | '}' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(types[start..i].to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(types[start..].to_string());
+    parts
+}
+
+/// Whether a parameter's written type is a built-in one, as
+/// `is_primitive_type_expr` in the type checker counts them.
+fn is_primitive_param_type(param_type: &str) -> bool {
+    let base = param_type.strip_suffix('?').unwrap_or(param_type);
+    let base = base.split('<').next().unwrap_or(base).trim();
+    matches!(
+        base,
+        "Str" | "Int" | "Dec" | "Bool" | "Bytes" | "Byte" | "Null" | "Any" | "Vec" | "Map"
+    )
 }
 
 impl VirtualMachine {
@@ -911,6 +946,7 @@ impl VirtualMachine {
             thread_count,
             dispatch_cache: AHashMap::new(),
             coercion_param_cache: AHashMap::new(),
+            coercion_target_cache: AHashMap::new(),
             overload_set_cache: AHashMap::new(),
             overload_choice_cache: AHashMap::new(),
             sorted_key_indices: None,
@@ -2914,44 +2950,14 @@ impl VirtualMachine {
                 // the actual arg types better is called instead (see
                 // `overload_for_args`), with the arguments prepared for its
                 // parameters: one that declares a `Result` receives an Err.
-                // Otherwise, if a typed signature exists and the actual arg
-                // types differ but a unique `Source -> Target` arrow exists,
-                // coerce in place.
-                // The type checker has already vetted the call, so any miss
-                // here just falls back to invoking the function with the
-                // original args (preserves prior behavior).
+                // Otherwise `coerce_call_args` applies any implicit arrows.
                 let dispatched = self.overload_for_args(function_id, &args);
                 if let Some(chosen) = dispatched {
                     function_id = chosen;
                 }
                 let mut args = self.prepare_call_args(CallTarget::Function(function_id), args)?;
-                if dispatched.is_none()
-                    && let Some(expected) = self.lookup_typed_param_signature(function_id)
-                {
-                    let actual: Vec<String> =
-                        args.iter().map(|a| self.get_val_type_name(a)).collect();
-                    if actual != expected {
-                        let actual_full: Vec<String> =
-                            args.iter().map(|a| self.get_value_type_path(a)).collect();
-                        let mut plan: Vec<Option<(String, String)>> =
-                            Vec::with_capacity(args_count as usize);
-                        let mut all_ok = true;
-                        for ((a, a_full), e) in
-                            actual.iter().zip(actual_full.iter()).zip(expected.iter())
-                        {
-                            if a == e {
-                                plan.push(None);
-                            } else if let Some(arrow) = self.find_coercion_target(a_full, a, e) {
-                                plan.push(Some(arrow));
-                            } else {
-                                all_ok = false;
-                                break;
-                            }
-                        }
-                        if all_ok {
-                            args = self.apply_coercion_plan(&args, &plan)?;
-                        }
-                    }
+                if dispatched.is_none() {
+                    args = self.coerce_call_args(function_id, args)?;
                 }
 
                 // Execute the user function directly
@@ -7178,11 +7184,14 @@ impl VirtualMachine {
     /// the compiler picks `function_id` from the arity-only key when arg
     /// types aren't statically known, so the typed param info has to be
     /// recovered here.
-    fn lookup_typed_param_signature(&mut self, function_id: FunctionId) -> Option<Vec<String>> {
+    fn lookup_typed_param_signature(
+        &mut self,
+        function_id: FunctionId,
+    ) -> Option<std::rc::Rc<[String]>> {
         if let Some(cached) = self.coercion_param_cache.get(&function_id) {
             return cached.clone();
         }
-        let mut found: Option<Vec<String>> = None;
+        let mut found: Option<std::rc::Rc<[String]>> = None;
         for (key, &fid) in self.function_mapping.iter() {
             if fid != function_id {
                 continue;
@@ -7198,13 +7207,13 @@ impl VirtualMachine {
             let after_slash = &key[last_slash + 1..];
             if let Some(colon_off) = after_slash.find(':') {
                 let types_str = &after_slash[colon_off + 1..];
-                let types: Vec<String> = types_str.split(',').map(|s| s.to_string()).collect();
+                let types = split_param_types(types_str);
                 // Skip pure-`Any` signatures — they don't constrain dispatch
                 // and would always "match" any arg, causing useless work.
                 if types.iter().all(|t| t == "Any") {
                     continue;
                 }
-                found = Some(types);
+                found = Some(types.into());
                 break;
             }
         }
@@ -7566,38 +7575,84 @@ impl VirtualMachine {
         }
     }
 
-    /// Apply a coercion plan: for each arg whose entry in `plan` is `Some(target)`,
-    /// invoke the registered `Source -> Target` arrow function and substitute the
-    /// coerced value; pass `None` entries through unchanged. Errors from an arrow
+    /// Implicit `Source -> Target` coercion at a static-dispatch call, for
+    /// interpreted and compiled callers alike. An argument whose type differs
+    /// from its parameter's goes through the unique arrow to that type, when
+    /// there is one; any other argument passes unchanged. Errors from an arrow
     /// propagate to the caller — silent arrow-failure would surprise users who
     /// explicitly registered the conversion.
-    fn apply_coercion_plan(
+    pub(crate) fn coerce_call_args(
         &mut self,
-        args: &[Val],
-        plan: &[Option<(String, String)>],
+        function_id: FunctionId,
+        mut args: Vec<Val>,
     ) -> VmResult<Vec<Val>> {
-        let mut coerced: Vec<Val> = Vec::with_capacity(args.len());
-        for (i, arg) in args.iter().enumerate() {
-            if let Some((source_key, target)) = plan.get(i).and_then(|p| p.as_ref()) {
-                let Some(impl_name) = self.resolve_type_implementation(source_key, target) else {
-                    return Err(VmError::runtime_with_ip(
-                        format!(
-                            "Implicit coercion plan referenced missing arrow {} -> {}",
-                            source_key, target
-                        ),
-                        self.instruction_pointer,
-                    ));
-                };
-                let coerced_val = self.execute_function_call_by_qualified_name(
-                    &impl_name,
-                    std::slice::from_ref(arg),
-                )?;
-                coerced.push(coerced_val);
-            } else {
-                coerced.push(arg.clone());
-            }
+        let Some(expected) = self.lookup_typed_param_signature(function_id) else {
+            return Ok(args);
+        };
+        if expected.len() != args.len() {
+            return Ok(args);
         }
-        Ok(coerced)
+        for (arg, param_type) in args.iter_mut().zip(expected.iter()) {
+            let Some((source, target)) = self.implicit_arrow(arg, param_type) else {
+                continue;
+            };
+            let Some(impl_name) = self.resolve_type_implementation(&source, &target) else {
+                return Err(VmError::runtime_with_ip(
+                    format!(
+                        "Implicit coercion referenced missing arrow {} -> {}",
+                        source, target
+                    ),
+                    self.instruction_pointer,
+                ));
+            };
+            *arg = self.execute_function_call_by_qualified_name(
+                &impl_name,
+                std::slice::from_ref(arg),
+            )?;
+        }
+        Ok(args)
+    }
+
+    /// The arrow that implicitly coerces `arg` to `param_type`, if any. Null
+    /// is never coerced, and neither is a primitive to a primitive: those
+    /// arrows back explicit calls like `Str(null)` and `Int("5")`, the same
+    /// rule as `coercion_available` in the type checker.
+    fn implicit_arrow(&mut self, arg: &Val, param_type: &str) -> Option<(String, String)> {
+        let tag = match arg {
+            Val::Map(map) => crate::val::tagged_type_name(map),
+            _ => None,
+        };
+        if matches!(arg, Val::Null | Val::Box(_))
+            || param_type == "Any"
+            || (tag.is_none() && is_primitive_param_type(param_type))
+        {
+            return None;
+        }
+        let path;
+        let source = match tag {
+            Some(tag) => tag,
+            None => {
+                path = self.get_value_type_path(arg);
+                path.as_str()
+            }
+        };
+        let short = source.rsplit('/').next().unwrap_or(source);
+        if short == param_type {
+            return None;
+        }
+        if let Some(cached) = self
+            .coercion_target_cache
+            .get(source)
+            .and_then(|targets| targets.get(param_type))
+        {
+            return cached.clone();
+        }
+        let found = self.find_coercion_target(source, short, param_type);
+        self.coercion_target_cache
+            .entry(source.to_owned())
+            .or_default()
+            .insert(param_type.to_owned(), found.clone());
+        found
     }
 
     /// Execute a function call by qualified name (`::namespace/function`).
@@ -7606,8 +7661,9 @@ impl VirtualMachine {
     /// fallbacks (all delegated through `find_best_function_overload`).
     ///
     /// Implicit `Source -> Target` coercion is **not** applied here. The
-    /// per-call coercion happens inside the `CallUserFunction` opcode
-    /// handler so that compiler-resolved static dispatch (where
+    /// per-call coercion happens in `coerce_call_args`, called by the
+    /// `CallUserFunction` opcode handler and the JIT's call into the VM, so
+    /// that compiler-resolved static dispatch (where
     /// `function_id` may have been picked from the arity-only key)
     /// gets the same treatment without touching this dynamic path —
     /// adding coercion to the dynamic path here previously regressed

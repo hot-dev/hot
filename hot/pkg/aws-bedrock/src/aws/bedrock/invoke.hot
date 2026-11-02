@@ -112,7 +112,7 @@ meta {
     """
 }
 fn
-(model_id: Str, messages: Vec<Map>, max_tokens: Int, system: Str, temperature: Dec, top_p: Dec, stop_sequences: Vec<Str>): ClaudeResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, max_tokens: Int, system: Str?, temperature: Dec?, top_p: Dec?, stop_sequences: Vec<Str>?): ClaudeResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
@@ -199,7 +199,7 @@ meta {
     """
 }
 fn
-(model_id: Str, input_text: Str, max_token_count: Int, temperature: Dec, top_p: Dec, stop_sequences: Vec<Str>): TitanResponse | AwsError {
+(model_id: Str, input_text: Str, max_token_count: Int, temperature: Dec?, top_p: Dec?, stop_sequences: Vec<Str>?): TitanResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
@@ -268,7 +268,7 @@ meta {
     """
 }
 fn
-(model_id: Str, prompt: Str, max_gen_len: Int, temperature: Dec, top_p: Dec): InvokeModelResponse | AwsError {
+(model_id: Str, prompt: Str, max_gen_len: Int, temperature: Dec?, top_p: Dec?): InvokeModelResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
@@ -330,7 +330,7 @@ meta {
     """
 }
 fn
-(model_id: Str, prompt: Str, max_tokens: Int, temperature: Dec, top_p: Dec, stop: Vec<Str>): InvokeModelResponse | AwsError {
+(model_id: Str, prompt: Str, max_tokens: Int, temperature: Dec?, top_p: Dec?, stop: Vec<Str>?): InvokeModelResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
