@@ -1137,6 +1137,33 @@ mod tests {
         );
     }
 
+    // A constructed value (`{$type, $val}`), as a real HTTP response is, masks
+    // like the plain Map it wraps, and keeps its type.
+    #[test]
+    fn masks_fields_inside_a_constructed_value() {
+        let fields = || {
+            let Val::Map(fields) = crate::val!({
+                "status": 200,
+                "headers": {"authorization": "Bearer abc123"},
+                "body": {"password": "hunter2", "note": "kept"},
+            }) else {
+                panic!("a map");
+            };
+            *fields
+        };
+        let masked = mask_plain(Val::constructed("::hot::http/HttpResponse", fields()));
+        assert!(masked.is_type("::hot::http/HttpResponse"));
+        assert_eq!(
+            crate::val::as_fields(&masked),
+            &mask_plain(Val::Map(Box::new(fields()))),
+            "a tagged response masks as its plain fields do"
+        );
+        let text = masked.to_string();
+        assert!(!text.contains("abc123"), "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(text.contains("kept"), "{text}");
+    }
+
     #[test]
     fn masks_map_keys_that_hold_secrets() {
         let (registry, hashes) = mask_for(&[PLAIN]);
