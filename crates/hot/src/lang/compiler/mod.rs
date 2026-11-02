@@ -2448,15 +2448,23 @@ impl Compiler {
     }
 
     /// A parameter's type as a signature key carries it. Namespace aliases
-    /// exist only while compiling, so `::alias/Type` is recorded as the type it
-    /// names, which is how the runtime finds an arrow to the parameter's type.
-    /// Unions, generics and nullables are no arrow's target and stay as written.
+    /// exist only while compiling, so each `::alias/Type` of a type, union or
+    /// nullable is recorded as the type it names, which is how the runtime tells
+    /// the parameter's type apart. Generic arguments stay as written.
     fn signature_param_type(&self, written: &str) -> String {
-        if written.starts_with("::") && !written.contains(['<', '|', '?', ' ']) {
-            self.resolve_type_path(written).0
-        } else {
-            written.to_string()
-        }
+        written
+            .split('|')
+            .map(|member| {
+                let path = member.trim();
+                let path = path.strip_suffix('?').unwrap_or(path);
+                if path.starts_with("::") && !path.contains(['<', '>', ' ']) {
+                    member.replace(path, &self.resolve_type_path(path).0)
+                } else {
+                    member.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("|")
     }
 
     /// Compile a function definition and return the actual function ID

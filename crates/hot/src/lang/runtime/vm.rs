@@ -531,7 +531,8 @@ pub const DEFAULT_ENGINE_THREADS: usize = 4;
 /// One overload in a same-arity overload set (see `OverloadSet`).
 struct OverloadCandidate {
     function_id: FunctionId,
-    /// Declared parameter types as written (`Str`, `Int | Dec`, `Str?`, ...).
+    /// Declared parameter types (`Str`, `Int | Dec`, `Str?`, ...), each member
+    /// resolved in the overload's namespace (`::a/Type`).
     param_types: Vec<String>,
     lazy_params: Vec<bool>,
 }
@@ -572,6 +573,26 @@ impl OverloadCandidate {
     }
 }
 
+/// Whether a declared type names the argument's type or, for an enum, a variant
+/// of it (`Shape.Circle`). Two qualified names must match in full: same-named
+/// types in two namespaces are different types. A builtin or a value carrying a
+/// short `$type` has only its short name to go by.
+fn declared_type_matches(declared: &str, actual: &str) -> bool {
+    let (declared, actual) = if declared.starts_with("::") && actual.starts_with("::") {
+        (declared, actual)
+    } else {
+        (short_type_name(declared), short_type_name(actual))
+    };
+    declared == actual
+        || actual
+            .strip_prefix(declared)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+fn short_type_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
 /// Rank how the declared parameter type `declared` accepts an argument with
 /// dispatch type name `actual`. Only builtin type names reject: a custom name
 /// may be a type alias, a literal union of builtin values, or the target of a
@@ -593,15 +614,11 @@ fn overload_param_rank(declared: &str, actual: &str, is_map: bool) -> Option<u32
     let mut best: Option<u32> = None;
     let mut unknown = false;
     for member in members {
-        let name = member.split('<').next().unwrap_or(member).trim();
-        let name = name.rsplit('/').next().unwrap_or(name);
+        let path = member.split('<').next().unwrap_or(member).trim();
+        let name = short_type_name(path);
         let rank = if name == "Any" {
             Some(OVERLOAD_RANK_ANY)
-        } else if name == actual
-            || actual
-                .strip_prefix(name)
-                .is_some_and(|rest| rest.starts_with('.'))
-        {
+        } else if declared_type_matches(path, actual) {
             // The same type, or a variant of the declared enum (`Shape.Circle`).
             Some(if single {
                 OVERLOAD_RANK_EXACT
@@ -6849,13 +6866,18 @@ impl VirtualMachine {
         }
     }
 
-    /// Public helper to find best user function overload for `call`
+    /// Public helper to find best user function overload for `call` and for
+    /// callbacks, which dispatch on the argument types as a direct call does.
     pub fn find_best_user_function_overload(
-        &self,
+        &mut self,
         function_name: &str,
         args: &[Val],
     ) -> Option<u32> {
-        self.find_best_function_overload(function_name, args)
+        let function_id = self.find_best_function_overload(function_name, args)?;
+        Some(
+            self.overload_for_args(function_id, args)
+                .unwrap_or(function_id),
+        )
     }
 
     /// Public helper to execute a compiled user function by id for `call`
@@ -7395,7 +7417,10 @@ impl VirtualMachine {
                 let overload = self.program.functions.get(id as usize)?;
                 (!overload.is_variadic && param_types.len() == arity).then(|| OverloadCandidate {
                     function_id: id,
-                    param_types,
+                    param_types: param_types
+                        .iter()
+                        .map(|declared| self.dispatch_param_type(&overload.namespace, declared))
+                        .collect(),
                     lazy_params: overload.lazy_params.clone(),
                 })
             })
@@ -7410,10 +7435,40 @@ impl VirtualMachine {
         })
     }
 
+    /// A declared parameter type with each member of a union or nullable type
+    /// resolved in the overload's `namespace`, for `overload_param_rank`, through
+    /// any namespaces that re-export it: a value is tagged with the type's own
+    /// path. Generic arguments play no part in dispatch and are dropped.
+    fn dispatch_param_type(&self, namespace: &str, declared: &str) -> String {
+        // The cap only bounds imports that form a cycle.
+        const MAX_REEXPORTS: usize = 16;
+        let (body, nullable) = match declared.strip_suffix('?') {
+            Some(body) => (body, "?"),
+            None => (declared, ""),
+        };
+        let members: Vec<String> = split_top_level(body, '|')
+            .into_iter()
+            .map(|member| {
+                let written = member.split('<').next().unwrap_or(member).trim();
+                let mut path = self.param_type_path(namespace, written);
+                for _ in 0..MAX_REEXPORTS {
+                    let next = self.param_type_path(namespace, &path);
+                    if next == path {
+                        break;
+                    }
+                    path = next;
+                }
+                path
+            })
+            .collect();
+        format!("{}{nullable}", members.join(" | "))
+    }
+
     /// The type name overload dispatch matches declared parameter types
     /// against, and whether the value is structurally a Map: as
-    /// `get_val_type_name`, but boxed functions, namespaces and iterators are
-    /// told apart so that `Fn` parameters can be selected. An Ok is matched
+    /// `get_value_type_path` for a tagged value, as `get_val_type_name`
+    /// otherwise, but boxed functions, namespaces and iterators are told apart
+    /// so that `Fn` parameters can be selected. An Ok is matched
     /// by its value, which any parameter but a `Result` one receives; an Err
     /// matches `Result`, and isn't a Map.
     fn dispatch_type_name(val: &Val) -> (std::borrow::Cow<'_, str>, bool) {
@@ -7437,9 +7492,7 @@ impl VirtualMachine {
                     // A typed record or variant is structurally a Map; an Err
                     // is not.
                     return (
-                        std::borrow::Cow::Borrowed(
-                            type_name.rsplit('/').next().unwrap_or(type_name),
-                        ),
+                        std::borrow::Cow::Borrowed(type_name),
                         type_name != "::hot::type/Result.Err",
                     );
                 }
@@ -7519,16 +7572,6 @@ impl VirtualMachine {
             return function_id;
         };
         let eligible = |c: &&OverloadCandidate| c.lazy_params == resolved.lazy_params;
-        let exact_key = format!("{}:{}", set.prefix, names.join(","));
-        if let Some(&id) = self.function_mapping.get(&exact_key)
-            && set
-                .candidates
-                .iter()
-                .filter(eligible)
-                .any(|c| c.function_id == id)
-        {
-            return id;
-        }
         let mut best = resolved.rank(names, maps).map(|rank| (rank, function_id));
         for candidate in set.candidates.iter().filter(eligible) {
             if candidate.function_id == function_id {
@@ -7539,6 +7582,21 @@ impl VirtualMachine {
             {
                 best = Some((rank, candidate.function_id));
             }
+        }
+        // The overload whose key spells the argument types settles a tie, but a
+        // short name in that key may be a different type from the argument's.
+        let short_names: Vec<&str> = names.iter().map(|name| short_type_name(name)).collect();
+        let exact_key = format!("{}:{}", set.prefix, short_names.join(","));
+        if let Some(&id) = self.function_mapping.get(&exact_key)
+            && let Some(rank) = set
+                .candidates
+                .iter()
+                .filter(eligible)
+                .find(|c| c.function_id == id)
+                .and_then(|c| c.rank(names, maps))
+            && best.is_none_or(|(best_rank, _)| rank <= best_rank)
+        {
+            return id;
         }
         best.map_or(function_id, |(_, id)| id)
     }
