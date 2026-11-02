@@ -1,0 +1,57 @@
+::cipherowl::integration ns
+meta ["test"]
+
+::ctx ::cipherowl::integration::ctx
+
+// =============================================================================
+// Integration tests (live CipherOwl sandbox, read-only)
+// =============================================================================
+// Requires CIPHEROWL_CLIENT_ID and CIPHEROWL_CLIENT_SECRET (a free-tier
+// account). Every test only reads, under config co-sandbox, with
+// trackAlert false so no screening is recorded as a case. Without
+// credentials each test records a skip and passes.
+// Run with: hot test -p pkg-integration-cipherowl
+
+SANDBOX {config: "co-sandbox", trackAlert: false}
+
+SANDBOX_EVM_ADDRESSES ::cipherowl/SANDBOX_EVM_ADDRESSES
+
+test-chain-capabilities
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            caps ::cipherowl::risk/chain-capabilities()
+            assert(is-map(caps.capabilities), "the token mints and an authenticated GET works")
+            assert(not(is-empty(::cipherowl::risk/networks-for-chain(caps, "evm"))), "at least one EVM network is listed")
+        }
+    }
+}
+
+test-sandbox-screen-risky-and-clean
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            risky ::cipherowl::screening/screen-address("evm", SANDBOX_EVM_ADDRESSES[0], SANDBOX)
+            assert-eq(true, risky.foundRisk, "a curated sandbox address screens risky")
+            assert-eq("evm", risky.requested-chain)
+            clean ::cipherowl::screening/screen-address("evm", ::cipherowl/SANDBOX_CLEAN_ADDRESS, SANDBOX)
+            assert-eq(false, clean.foundRisk, "any other address screens clean under co-sandbox")
+        }
+    }
+}
+
+test-sandbox-score-and-decision
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            score ::cipherowl::risk/risk-score("evm", SANDBOX_EVM_ADDRESSES[0], {config: "co-sandbox"})
+            parsed ::cipherowl::risk/parse-score(score)
+            assert(is-some(parsed.band), "the band is one of low, medium, high, severe")
+            decision ::cipherowl::decisions/decide([{foundRisk: true}, score], {found-risk: "review", block-bands: ["severe"]})
+            assert(in(decision.decision, ["review", "block"]), "a risky address is never clear")
+        }
+    }
+}

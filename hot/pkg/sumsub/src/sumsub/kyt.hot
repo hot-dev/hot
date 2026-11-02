@@ -1,0 +1,237 @@
+::sumsub::kyt ns
+meta {
+    doc: """
+    Transaction monitoring (KYT/AML) and Travel Rule: submit a
+    transaction for an applicant and read back Sumsub's scoring and
+    review, approve or reject it, rescore it, or delete it.
+
+    A submitted transaction is scored synchronously against your rules
+    (`scoringResult`), and its `review.reviewStatus` moves to
+    `completed` (with `reviewAnswer` GREEN/RED), `onHold` or
+    `awaitingUser`. Later changes arrive on the `applicantKytTxn*`
+    webhooks, or poll `get-transaction` from a schedule.
+
+    Travel Rule transfers use the same submit call with `type:
+    "travelRule"` and the counterparty's VASP and wallet details in
+    `counterparty` and `info`.
+
+    Transaction payloads carry counterparty names, account numbers and
+    wallet addresses. This package keeps them out of error messages;
+    Hot's run trace still records them as arguments.
+    """
+}
+
+::api ::sumsub::api
+
+seg ::sumsub::api/seg
+query ::sumsub::api/query
+
+// Transaction `type` values Sumsub documents (open).
+TXN_TYPES ["finance", "kyc", "travelRule", "userPlatformEvent"]
+
+validate-txn
+meta {
+    doc: """Check the fields Sumsub requires before sending: `txnId`, `type`, and `applicant` (a Map; `{}` is fine for an existing applicant); `info` for `finance` and `travelRule`. Returns the compacted payload or an Err that names the missing field (never its value). Exposed for testing."""
+}
+fn (txn: Map): Map {
+  body ::api/compact(untype(txn))
+  kind get(body, "type")
+  cond {
+    is-null(get(body, "txnId")) => { err("sumsub: a transaction needs txnId") }
+    is-null(kind) => { err("sumsub: a transaction needs type (finance, kyc, travelRule, userPlatformEvent)") }
+    not(is-map(get(body, "applicant"))) => { err("sumsub: a transaction needs an applicant object ({} for an existing applicant)") }
+    and(in(kind, ["finance", "travelRule"]), not(is-map(get(body, "info")))) => {
+      err(`sumsub: a ${kind} transaction needs info (direction, amount, currencyCode, currencyType)`)
+    }
+    => { body }
+  }
+}
+
+submit-request
+meta {
+    doc: """
+    The spec for submitting a transaction for an existing applicant
+    (`POST /resources/applicants/{id}/kyt/txns/-/data`). `txn` is
+    Sumsub's payload: `txnId` (your id, unique), `type`, `txnDate`
+    (`"yyyy-MM-dd HH:mm:ss+0000"`), `info` (`{direction: "in" | "out",
+    amount, currencyCode, currencyType: "fiat" | "crypto", paymentTxnId?,
+    cryptoParams?}`), `applicant` and `counterparty` (`{type,
+    externalUserId?, fullName, paymentMethod: {type, accountId},
+    institutionInfo?, ...}`), `props`. Exposed for testing.
+    """
+}
+fn (applicant-id: Str, txn: Map): Map {
+  body validate-txn(txn)
+  cond {
+    is-err(body) => { body }
+    => { {method: "POST", path: `/resources/applicants/${seg(applicant-id)}/kyt/txns/-/data`, body: body} }
+  }
+}
+
+submit-transaction
+meta {
+    doc: """
+    Submit a transaction for an existing applicant. Returns the
+    transaction: `id` (Sumsub's), `data`, `score`, `scoringResult`
+    (`matchedRules`, `action`) and `review`. Map it with
+    `::sumsub::decisions/review-outcome`. A repeated `txnId` is a 409.
+
+    **Example**
+
+    ```hot
+    txn ::sumsub::kyt/submit-transaction("65f0c1e2a3b4c5d6e7f80912", {
+      txnId: "wd-1001",
+      type: "finance",
+      txnDate: "2026-11-01 12:00:00+0000",
+      info: {direction: "out", amount: 2500, currencyCode: "USD", currencyType: "fiat"},
+      applicant: {},
+      counterparty: {type: "individual", fullName: "Grace Hopper", paymentMethod: {type: "bankAccount", accountId: "acct-ref-77"}}
+    })
+    ```
+    """
+}
+fn
+(applicant-id: Str, txn: Map): Map {
+  submit-transaction(applicant-id, txn, {})
+},
+(applicant-id: Str, txn: Map, opts: Map): Map {
+  ::api/call(submit-request(applicant-id, txn), opts)
+}
+
+submit-new-applicant-request
+meta {
+    doc: """The spec for submitting a transaction when the applicant may not exist yet (`POST /resources/applicants/-/kyt/txns/-/data?levelName=`). `txn.applicant.externalUserId` and `txn.applicant.fullName` are required; the transaction attaches to an existing applicant with that id or creates one. Exposed for testing."""
+}
+fn (level-name: Str?, txn: Map): Map {
+  body validate-txn(txn)
+  applicant if(is-err(body), {}, get(body, "applicant"))
+  cond {
+    is-err(body) => { body }
+    or(is-null(get(applicant, "externalUserId")), is-null(get(applicant, "fullName"))) => {
+      err("sumsub: without an applicant id, the transaction needs applicant.externalUserId and applicant.fullName")
+    }
+    => { {method: "POST", path: `/resources/applicants/-/kyt/txns/-/data${query({levelName: level-name})}`, body: body} }
+  }
+}
+
+submit-transaction-for-user
+meta {
+    doc: """Submit a transaction keyed by `applicant.externalUserId`, creating the applicant on `level-name` when it does not exist (null to let Sumsub pick the default)."""
+}
+fn
+(level-name: Str?, txn: Map): Map {
+  submit-transaction-for-user(level-name, txn, {})
+},
+(level-name: Str?, txn: Map, opts: Map): Map {
+  ::api/call(submit-new-applicant-request(level-name, txn), opts)
+}
+
+get-transaction
+meta {
+    doc: """Fetch a transaction by Sumsub's id: scoring, review and Travel Rule status."""
+}
+fn
+(txn-id: Str): Map {
+  get-transaction(txn-id, {})
+},
+(txn-id: Str, opts: Map): Map {
+  ::api/request("GET", `/resources/kyt/txns/${seg(txn-id)}/one`, "", opts)
+}
+
+txn-id-path
+meta {
+    doc: """The path for a transaction addressed by your own `txnId`. Exposed for testing."""
+}
+fn (txn-id: Str): Str {
+  `/resources/kyt/txns/-;data.txnId=${seg(txn-id)}/one`
+}
+
+get-transaction-by-txn-id
+meta {doc: """Fetch a transaction by the `txnId` you submitted."""}
+fn
+(txn-id: Str): Map {
+  get-transaction-by-txn-id(txn-id, {})
+},
+(txn-id: Str, opts: Map): Map {
+  ::api/request("GET", txn-id-path(txn-id), "", opts)
+}
+
+review-transaction
+meta {
+    doc: """Approve (`"GREEN"`) or reject (`"RED"`) a transaction that is on hold. Returns the transaction."""
+}
+fn
+(txn-id: Str, review-answer: Str): Map {
+  review-transaction(txn-id, review-answer, {})
+},
+(txn-id: Str, review-answer: Str, opts: Map): Map {
+  cond {
+    not(in(review-answer, ["GREEN", "RED"])) => { err("sumsub: review-answer must be GREEN or RED") }
+    => { ::api/request("POST", `/resources/kyt/txns/${seg(txn-id)}/review/status/completed`, {reviewAnswer: review-answer}, opts) }
+  }
+}
+
+rescore-transaction
+meta {
+    doc: """Re-run your rules on a transaction (at most 200 times). Returns the transaction."""
+}
+fn
+(txn-id: Str): Map {
+  rescore-transaction(txn-id, {})
+},
+(txn-id: Str, opts: Map): Map {
+  ::api/request("POST", `/resources/kyt/txns/${seg(txn-id)}/-/score`, "", opts)
+}
+
+set-payment-txn-id
+meta {
+    doc: """Attach the on-chain hash (or payment-system id) to a transaction after it settles."""
+}
+fn
+(txn-id: Str, payment-txn-id: Str): Map {
+  set-payment-txn-id(txn-id, payment-txn-id, {})
+},
+(txn-id: Str, payment-txn-id: Str, opts: Map): Map {
+  ::api/request("PATCH", `/resources/kyt/txns/${seg(txn-id)}/data/info`, {paymentTxnId: payment-txn-id}, opts)
+}
+
+delete-transaction
+meta {doc: """Delete a transaction. Returns `{deleted: 1}`."""}
+fn
+(txn-id: Str): Map {
+  delete-transaction(txn-id, {})
+},
+(txn-id: Str, opts: Map): Map {
+  ::api/request("DELETE", `/resources/kyt/txns/${seg(txn-id)}`, "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Travel Rule
+// ---------------------------------------------------------------------------
+
+// Travel Rule `travelRuleInfo.status` values (open).
+TRAVEL_RULE_STATUSES [
+  "awaitingCounterparty", "cancelled", "completed", "counterpartyMismatchedData",
+  "counterpartyVaspNotFound", "counterpartyVaspNotReachable", "expired", "finished",
+  "onHold", "unconfirmedOwnership", "counterpartyVaspGeneralDecline", "notEnoughCounterpartyData"
+]
+
+travel-rule-status
+meta {
+    doc: """A transaction's Travel Rule status (`travelRuleInfo.status`), or null when it is not a Travel Rule transfer. Pure."""
+}
+fn (txn: Any): Str? {
+  get-in(txn, ["travelRuleInfo", "status"])
+}
+
+confirm-wallet-ownership
+meta {
+    doc: """Record whether the applicant confirmed owning the wallet for a Travel Rule transfer (`confirmed` true or false)."""
+}
+fn
+(txn-id: Str, confirmed: Bool): Map {
+  confirm-wallet-ownership(txn-id, confirmed, {})
+},
+(txn-id: Str, confirmed: Bool, opts: Map): Map {
+  ::api/request("POST", `/resources/kyt/txns/${seg(txn-id)}/ownership/${if(confirmed, "confirmed", "unconfirmed")}`, "", opts)
+}

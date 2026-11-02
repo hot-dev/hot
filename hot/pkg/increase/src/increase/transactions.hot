@@ -1,0 +1,107 @@
+::increase::transactions ns
+meta {
+    doc: """
+    The ledger of an account: Transactions (settled, immutable movements
+    of money), Pending Transactions (holds and in-flight transfers, which
+    reduce the available balance) and Declined Transactions (attempts
+    Increase refused, such as a declined card authorization or a
+    returned inbound ACH). Amounts are in the minor unit (cents); each
+    object's `source` says what produced it.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+list-transactions
+meta {
+    doc: """
+    GET /transactions: one page of Transactions, newest first. Filters:
+    `account_id`, `route_id` (an account number or card id),
+    `"category.in"` (e.g. `["ach_transfer_intention", "card_settlement"]`),
+    `created_at: {after, before, on_or_after, on_or_before}`, `limit`,
+    `cursor`.
+
+    **Example**
+
+    ```hot
+    recent ::increase::transactions/list-transactions({account_id: "account_in71c4amph0vgo2qllky", limit: 25})
+    ```
+    """
+}
+fn
+(): Map {
+  list-transactions({})
+},
+(params: Map): Map {
+  list-transactions(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/transactions", params, opts)
+}
+
+get-transaction
+meta {
+    doc: """GET /transactions/{transaction_id}: retrieve a Transaction."""
+}
+fn
+(transaction-id: Str): Map {
+  get-transaction(transaction-id, {})
+},
+(transaction-id: Str, opts: Map): Map {
+  ::api/call("GET", `/transactions/${seg(transaction-id)}`, {}, opts)
+}
+
+list-pending-transactions
+meta {
+    doc: """GET /pending_transactions: one page of Pending Transactions. Filters: `account_id`, `route_id`, `"category.in"`, `"status.in"` (`pending`, `complete`), `created_at`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-pending-transactions({})
+},
+(params: Map): Map {
+  list-pending-transactions(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/pending_transactions", params, opts)
+}
+
+get-pending-transaction
+meta {
+    doc: """GET /pending_transactions/{pending_transaction_id}: retrieve a Pending Transaction."""
+}
+fn
+(pending-transaction-id: Str): Map {
+  get-pending-transaction(pending-transaction-id, {})
+},
+(pending-transaction-id: Str, opts: Map): Map {
+  ::api/call("GET", `/pending_transactions/${seg(pending-transaction-id)}`, {}, opts)
+}
+
+list-declined-transactions
+meta {
+    doc: """GET /declined_transactions: one page of Declined Transactions. Filters: `account_id`, `route_id`, `"category.in"`, `created_at`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-declined-transactions({})
+},
+(params: Map): Map {
+  list-declined-transactions(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/declined_transactions", params, opts)
+}
+
+get-declined-transaction
+meta {
+    doc: """GET /declined_transactions/{declined_transaction_id}: retrieve a Declined Transaction."""
+}
+fn
+(declined-transaction-id: Str): Map {
+  get-declined-transaction(declined-transaction-id, {})
+},
+(declined-transaction-id: Str, opts: Map): Map {
+  ::api/call("GET", `/declined_transactions/${seg(declined-transaction-id)}`, {}, opts)
+}

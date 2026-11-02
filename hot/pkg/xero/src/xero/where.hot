@@ -1,0 +1,191 @@
+::xero::where ns
+meta {
+    doc: """
+    Build Xero `where` filters safely. Xero's filter is an expression
+    over the record's fields, e.g.
+
+    ```
+    Type=="ACCREC" AND Status=="AUTHORISED" AND Date>=DateTime(2026,01,01)
+    Contact.ContactID==guid("6d2b51ce-...")
+    ```
+
+    `condition` checks the field name and operator and writes the value
+    as the right literal: Strs in double quotes, GUIDs with `guid(...)`,
+    dates with `DateTime(y,m,d)`, numbers and Bools bare. Xero documents
+    no escape for a `"` inside a string, so a Str value containing `"` or
+    `\` is an Err rather than a guess: use the dedicated parameters
+    instead (`searchTerm`, `IDs`, `ContactIDs`, `InvoiceNumbers`,
+    `Statuses`), which Xero also recommends because they are indexed and
+    faster on large organisations.
+
+    ```hot
+    ::w ::xero::where
+
+    ::w/all-of([
+      ["Type", "==", "ACCREC"],
+      ["Status", "==", "AUTHORISED"],
+      ["Date", ">=", ::w/date(2026, 1, 1)],
+      ["Contact.ContactID", "==", ::w/guid("6d2b51ce-0a4f-4a8b-9f7a-3c1e2d4b5a69")]
+    ])
+    ```
+
+    Values travel URL-encoded in the `where` query parameter.
+    """
+}
+
+::re ::hot::regex
+
+OPERATORS ["==", "!=", "<", ">", "<=", ">="]
+
+// `guid`, `date` and `raw` return a pre-rendered literal as `{literal: Str}`,
+// which `condition` writes unchanged.
+
+// ---------------------------------------------------------------------------
+// Literals (pure)
+// ---------------------------------------------------------------------------
+
+quote
+meta {
+    doc: """A double-quoted string literal, or an Err when the value contains `"` or `\` (Xero documents no escape for them)."""
+}
+fn (value: Str): Str {
+  cond {
+    or(contains(value, "\""), contains(value, "\\")) => {
+      err("xero: a where string cannot contain \" or \\; use searchTerm or an IDs parameter instead")
+    }
+    => { `"${value}"` }
+  }
+}
+
+guid
+meta {
+    doc: """A `guid("...")` literal for an id field (`ContactID`, `InvoiceID`, ...), or an Err when the value is not a GUID."""
+}
+fn (value: Str): Map {
+  cond {
+    ::re/is-match(trim(value), ::xero::api/GUID_PATTERN) => { {literal: `guid("${trim(value)}")`} }
+    => { err(`xero: '${value}' is not a GUID`) }
+  }
+}
+
+pad2 fn (n: Int): Str {
+  if(lt(n, 10), `0${n}`, Str(n))
+}
+
+date
+meta {
+    doc: """A `DateTime(y,mm,dd)` literal (month and day zero-padded), or an Err for an impossible date."""
+}
+fn (year: Int, month: Int, day: Int): Map {
+  cond {
+    or(lt(year, 1900), gt(year, 9999), lt(month, 1), gt(month, 12), lt(day, 1), gt(day, 31)) => {
+      err(`xero: invalid date ${year}-${month}-${day}`)
+    }
+    => { {literal: `DateTime(${year},${pad2(month)},${pad2(day)})`} }
+  }
+}
+
+raw
+meta {
+    doc: """Wrap an expression you have built and checked yourself so `condition` writes it unchanged."""
+}
+fn (text: Str): Map {
+  {literal: text}
+}
+
+literal
+meta {
+    doc: """The filter literal for a value: a `{literal}` Map from `guid` / `date` / `raw` as is, Strs quoted (see `quote`), Ints and Decs bare, Bools `true`/`false`. Null is an Err."""
+}
+fn (value: Any): Str {
+  cond {
+    is-null(value) => { err("xero: a where value cannot be null") }
+    is-bool(value) => { if(value, "true", "false") }
+    or(is-int(value), is-dec(value)) => { Str(value) }
+    is-str(value) => { quote(value) }
+    and(is-map(value), is-str(get(value, "literal"))) => { get(value, "literal") }
+    => { err("xero: unsupported where value") }
+  }
+}
+
+field
+meta {
+    doc: """Check a field path (`Status`, `Contact.ContactID`): letters, digits, `_` and dots. Returns it, or an Err."""
+}
+fn (name: Str): Str {
+  cond {
+    ::re/is-match(name, "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$") => { name }
+    => { err(`xero: invalid where field '${name}'`) }
+  }
+}
+
+condition
+meta {
+    doc: """
+    One comparison: `field`, an operator (`==`, `!=`, `<`, `>`, `<=`,
+    `>=`) and a value. Returns the expression Str, or an Err for a bad
+    field, operator or value.
+
+    ```hot
+    ::xero::where/condition("AmountDue", ">", 0)   // "AmountDue>0"
+    ```
+    """
+}
+fn (name: Str, op: Str, value: Any): Str {
+  checked field(name)
+  operator trim(op)
+  lit literal(value)
+  cond {
+    is-err(checked) => { checked }
+    not(in(operator, OPERATORS)) => { err(`xero: unsupported where operator '${op}'`) }
+    is-err(lit) => { lit }
+    => { `${checked}${operator}${lit}` }
+  }
+}
+
+clause
+meta {
+    doc: """One part for `all-of` / `any-of`: a `[field, op, value]` Vec becomes `condition(field, op, value)`; a Str (an expression you built) passes through. Anything else is an Err."""
+}
+fn (part: Any): Str {
+  cond {
+    is-str(part) => { part }
+    and(is-vec(part), eq(length(part), 3)) => { condition(Str(part[0]), Str(part[1]), part[2]) }
+    => { err("xero: a where part is a [field, operator, value] Vec or an expression Str") }
+  }
+}
+
+combine fn (parts: Vec, joiner: Str): Str {
+  bad find-first(parts, (p) { is-err(clause(p)) })
+  cond {
+    is-empty(parts) => { err("xero: a where combination needs at least one condition") }
+    is-some(bad) => { clause(bad) }
+    eq(length(parts), 1) => { clause(first(parts)) }
+    => { join(map(parts, (p) { `(${clause(p)})` }), joiner) }
+  }
+}
+
+all-of
+meta {
+    doc: """
+    Join conditions with ` AND ` (each parenthesised). Each part is a
+    `[field, operator, value]` Vec or an expression Str; any invalid part
+    makes the result an Err.
+
+    ```hot
+    ::xero::where/all-of([["Type", "==", "ACCREC"], ["AmountDue", ">", 0]])
+    // (Type=="ACCREC") AND (AmountDue>0)
+    ```
+    """
+}
+fn (conditions: Vec): Str {
+  combine(conditions, " AND ")
+}
+
+any-of
+meta {
+    doc: """Join conditions with ` OR ` (each parenthesised); parts as for `all-of`."""
+}
+fn (conditions: Vec): Str {
+  combine(conditions, " OR ")
+}

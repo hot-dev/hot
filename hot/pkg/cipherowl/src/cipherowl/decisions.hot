@@ -1,0 +1,227 @@
+::cipherowl::decisions ns
+meta {
+    doc: """
+    Normalize CipherOwl results into one decision: `clear`, `review` or
+    `block`, with the reasons and score behind it.
+
+    The thresholds are yours: this module has no built-in defaults, so
+    a policy states every rule it applies (see the README for suggested
+    starting points). `decide` takes any mix of screening, risk-score,
+    risk-breakdown and detail results (one Map or a Vec of them) and a
+    policy:
+
+    - `found-risk` (required): the decision when screening reports
+      `foundRisk: true` and no stricter rule fires, `"review"` or
+      `"block"` (or `"clear"` to rely on the score and categories only).
+    - `review-score` / `block-score`: a `riskScore` (0-100) at or above
+      the value escalates.
+    - `review-bands` / `block-bands`: risk bands that escalate, as
+      `"severe"` or CipherOwl's `"Severe Risk"` spelling (both work).
+    - `review-categories` / `block-categories`: risk categories (e.g.
+      `"ofac"`, `"hack"`, `"jp_sanctioned"`) that escalate when found
+      within `max-hops` (unset: any distance).
+    - `direct-block-categories`: categories that block only on direct
+      exposure (hops 0 or type/direction `DIRECT`).
+
+    Evidence that says nothing (no `foundRisk`, score or reasons) gives
+    `review`, never `clear`.
+    """
+}
+
+::api ::cipherowl::api
+
+DECISIONS ["clear", "review", "block"]
+
+rank fn (decision: Str): Int {
+  cond {
+    eq(decision, "block") => { 2 }
+    eq(decision, "review") => { 1 }
+    => { 0 }
+  }
+}
+
+is-number fn (v: Any): Bool {
+  or(is-int(v), is-dec(v))
+}
+
+score-ok fn (v: Any): Bool {
+  or(is-null(v), and(is-number(v), gte(v, 0), lte(v, 100)))
+}
+
+list-ok fn (v: Any): Bool {
+  or(is-null(v), and(is-vec(v), all(v, is-str)))
+}
+
+validate-policy
+meta {
+    doc: """The policy when it is well formed, otherwise an Err naming the problem: `found-risk` must be one of `DECISIONS`; scores numbers from 0 to 100 with `review-score` not above `block-score`; bands and categories Vecs of Str; `max-hops` an Int from 0 to 8. Exposed for testing."""
+}
+fn (policy: Map): Map {
+  p untype(policy)
+  review get(p, "review-score")
+  block get(p, "block-score")
+  hops get(p, "max-hops")
+  cond {
+    not(in(get(p, "found-risk"), DECISIONS)) => { err("cipherowl: policy.found-risk is required: \"clear\", \"review\" or \"block\"") }
+    not(and(score-ok(review), score-ok(block))) => { err("cipherowl: policy review-score and block-score must be numbers from 0 to 100") }
+    and(is-some(review), is-some(block), gt(review, block)) => { err("cipherowl: policy review-score must not be above block-score") }
+    not(and(list-ok(get(p, "review-bands")), list-ok(get(p, "block-bands")))) => { err("cipherowl: policy bands must be lists of riskBand strings") }
+    not(and(list-ok(get(p, "review-categories")), list-ok(get(p, "block-categories")), list-ok(get(p, "direct-block-categories")))) => {
+      err("cipherowl: policy categories must be lists of category strings")
+    }
+
+    not(or(is-null(hops), and(is-int(hops), gte(hops, 0), lte(hops, 8)))) => { err("cipherowl: policy max-hops must be an integer from 0 to 8") }
+    => { p }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Evidence
+// ---------------------------------------------------------------------------
+
+reason-of
+meta {
+    doc: """One normalized reason `{category, direction, hops, direct, source}` from a detail reason, a score breakdown item or a breakdown risk. Paths, counterparty addresses and USD values are left out. Exposed for testing."""
+}
+fn (item: Map, source: Str): Map {
+  hops-raw ::api/number-or-null(get(item, "hops"))
+  hops if(is-int(hops-raw), hops-raw, 0)
+  direction ::cipherowl::risk/direction-of(get(item, "direction"))
+  kind get(item, "type")
+  {
+    category: lowercase(Str(or(get(item, "category"), "unknown"))),
+    direction: direction,
+    hops: hops,
+    direct: or(eq(kind, "DIRECT"), eq(direction, "direct"), eq(hops, 0)),
+    source: source
+  }
+}
+
+evidence
+meta {
+    doc: """Collect the decision inputs from one or more results: `{found-risk, score, band, config, reasons}`. `found-risk` is true when any result says so; `score` is the highest `riskScore`; `band` the `riskBand` of that score. Exposed for testing."""
+}
+fn (results: Any): Map {
+  rs cond {
+    is-vec(results) => { filter(results, is-map) }
+    is-map(results) => { [results] }
+    => { [] }
+  }
+
+  flags filter(map(rs, (r) { get(r, "foundRisk") }), is-bool)
+  scored filter(rs, (r) { is-number(get(r, "riskScore")) })
+  top reduce(scored, (best, r) { if(or(is-null(best), gt(r.riskScore, best.riskScore)), r, best) }, null)
+  reasons concat(
+    mapcat(rs, (r) { map(filter(or(get(r, "reasons"), []), is-map), (x) { reason-of(x, "detail") }) }),
+    mapcat(rs, (r) { map(filter(or(get(r, "breakdown"), []), is-map), (x) { reason-of(x, "risk-score") }) }),
+    mapcat(rs, (r) { map(filter(or(get(r, "risks"), []), is-map), (x) { reason-of(x, "risk-breakdown") }) })
+  )
+  configs filter(map(rs, (r) { get(r, "config") }), is-str)
+  {
+    found-risk: if(is-empty(flags), null, in(true, flags)),
+    score: if(is-null(top), null, get(top, "riskScore")),
+    band: if(is-null(top), null, ::api/normalize-band(get(top, "riskBand"))),
+    config: if(is-empty(configs), null, first(configs)),
+    reasons: reasons
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Decision
+// ---------------------------------------------------------------------------
+
+bands fn (policy: Map, key: Str): Vec {
+  filter(map(or(get(policy, key), []), (b) { ::api/normalize-band(b) }), is-some)
+}
+
+category-hits fn (reasons: Vec, categories: Any, max-hops: Any, direct-only: Bool): Vec {
+  wanted map(or(categories, []), (c) { lowercase(c) })
+  matched filter(reasons, (r) {
+    and(
+      in(r.category, wanted),
+      or(is-null(max-hops), lte(r.hops, or(max-hops, 0))),
+      or(not(direct-only), r.direct)
+    )
+  })
+  distinct(map(matched, (r) { r.category }))
+}
+
+decide
+meta {
+    doc: """
+    Decide on one address from its results and your policy. Returns
+    `{decision, triggers, score, band ("low" | "medium" | "high" |
+    "severe"), found-risk, config, reasons}`:
+    `triggers` are the rules that fired, e.g. `"block-score>=75"`,
+    `"block-category:ofac"`, `"found-risk"`; `reasons` are the
+    normalized categories (`{category, direction, hops, direct,
+    source}`), without paths or counterparty addresses. An invalid
+    policy is an Err.
+
+    **Example**
+
+    ```hot
+    policy {found-risk: "review", review-score: 40, block-score: 75, block-categories: ["ofac"], max-hops: 2}
+    out ::cipherowl::decisions/decide([
+      {foundRisk: true, config: "co-sandbox"},
+      {riskScore: 100, riskBand: "Severe Risk", breakdown: [{category: "ofac", direction: "RECEIVE", hops: 1}]}
+    ], policy)
+    out.decision
+    ```
+    """
+}
+fn (results: Any, policy: Map): Map {
+  p validate-policy(policy)
+  cond {
+    is-err(p) => { p }
+    => { decide-valid(results, p) }
+  }
+}
+
+decide-valid fn (results: Any, p: Map): Map {
+  e evidence(results)
+  score e.score
+  band e.band
+  max-hops get(p, "max-hops")
+  review-score get(p, "review-score")
+  block-score get(p, "block-score")
+  triggers concat(
+    if(and(is-some(score), is-some(block-score), gte(or(score, 0), or(block-score, 0))), [{level: "block", rule: `block-score>=${block-score}`}], []),
+    if(and(is-some(score), is-some(review-score), gte(or(score, 0), or(review-score, 0))), [{level: "review", rule: `review-score>=${review-score}`}], []),
+    if(and(is-some(band), in(band, bands(p, "block-bands"))), [{level: "block", rule: `block-band:${band}`}], []),
+    if(and(is-some(band), in(band, bands(p, "review-bands"))), [{level: "review", rule: `review-band:${band}`}], []),
+    map(category-hits(e.reasons, get(p, "block-categories"), max-hops, false), (c) { {level: "block", rule: `block-category:${c}`} }),
+    map(category-hits(e.reasons, get(p, "direct-block-categories"), null, true), (c) { {level: "block", rule: `direct-block-category:${c}`} }),
+    map(category-hits(e.reasons, get(p, "review-categories"), max-hops, false), (c) { {level: "review", rule: `review-category:${c}`} }),
+    if(eq(e.found-risk, true), [{level: p.found-risk, rule: "found-risk"}], []),
+    if(and(is-null(e.found-risk), is-null(score), is-empty(e.reasons)), [{level: "review", rule: "no-evidence"}], [])
+  )
+  level reduce(triggers, (acc, t) { if(gt(rank(t.level), rank(acc)), t.level, acc) }, "clear")
+  {
+    decision: level,
+    triggers: map(filter(triggers, (t) { ne(t.level, "clear") }), (t) { t.rule }),
+    score: score,
+    band: band,
+    found-risk: e.found-risk,
+    config: e.config,
+    reasons: e.reasons
+  }
+}
+
+decide-batch
+meta {
+    doc: """Decide on every address in a batch screening result with the same policy (screening alone carries only `foundRisk`, so `found-risk` decides). Returns `[{address, decision, triggers}]`."""
+}
+fn (batch-result: Any, policy: Map): Vec<Map> {
+  p validate-policy(policy)
+  results or(get(or(batch-result, {}), "results"), [])
+  cond {
+    is-err(p) => { p }
+    => {
+      map(results, (r) {
+        d decide-valid(r, p)
+        {address: get(r, "address"), decision: d.decision, triggers: d.triggers}
+      })
+    }
+  }
+}

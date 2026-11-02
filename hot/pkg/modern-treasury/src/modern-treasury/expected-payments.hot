@@ -1,0 +1,113 @@
+::modern-treasury::expected-payments ns
+meta {
+    doc: """
+    Expected payments: money you expect to receive (or to be debited),
+    which Modern Treasury matches against bank transactions to reconcile
+    them. Give amount and date ranges (`amount_lower_bound`,
+    `amount_upper_bound`, `date_lower_bound`, `date_upper_bound`) and
+    optional `reconciliation_rule_variables`; Modern Treasury marks the
+    expected payment `reconciled` when a transaction matches and sends an
+    `expected_payment.reconciled` webhook.
+    """
+}
+
+::api ::modern-treasury::api
+seg ::modern-treasury::api/seg
+
+create-expected-payment
+meta {
+    doc: """
+    POST /api/expected_payments: expect a payment. Common `params`:
+    `internal_account_id`, `direction` (`"credit"` for money in),
+    `type`, `currency`, `amount_lower_bound`, `amount_upper_bound`,
+    `date_lower_bound`, `date_upper_bound`, `counterparty_id`,
+    `description`, `statement_descriptor`, `remittance_information`,
+    `metadata`, `line_items`, `reconciliation_rule_variables`,
+    `reconciliation_filters`, `ledger_transaction`.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::expected-payments/create-expected-payment({
+      internal_account_id: "0f8e3719-3dfd-4613-9bbf-c0333781b59f",
+      direction: "credit",
+      type: "ach",
+      amount_lower_bound: 10000,
+      amount_upper_bound: 10000,
+      date_lower_bound: "2026-11-01",
+      date_upper_bound: "2026-11-05",
+      description: "Invoice 42"
+    }, {idempotency-key: "invoice-42-expected"})
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  create-expected-payment(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/create("/api/expected_payments", params, [], opts, "create-expected-payment")
+}
+
+get-expected-payment
+meta {
+    doc: """GET /api/expected_payments/{id}: retrieve an expected payment, with its `status` (`unreconciled`, `partially_reconciled`, `reconciled`, `archived`) and `transaction_id` once matched."""
+}
+fn
+(expected-payment-id: Str): Map {
+  get-expected-payment(expected-payment-id, {})
+},
+(expected-payment-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/expected_payments/${seg(expected-payment-id)}`, {}, opts)
+}
+
+list-expected-payments
+meta {
+    doc: """GET /api/expected_payments: one page. Filters: `status`, `type`, `direction`, `internal_account_id`, `counterparty_id`, `external_id`, `created_at_lower_bound`, `created_at_upper_bound`, `updated_at_lower_bound`, `updated_at_upper_bound`, `metadata`, `per_page`, `after_cursor`."""
+}
+fn
+(): Map {
+  list-expected-payments({})
+},
+(params: Map): Map {
+  list-expected-payments(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/expected_payments", params, opts)
+}
+
+update-expected-payment
+meta {
+    doc: """PATCH /api/expected_payments/{id}: change the bounds, description, metadata or rule variables of an unreconciled expected payment."""
+}
+fn
+(expected-payment-id: Str, params: Map): Map {
+  update-expected-payment(expected-payment-id, params, {})
+},
+(expected-payment-id: Str, params: Map, opts: Map): Map {
+  ::api/call("PATCH", `/api/expected_payments/${seg(expected-payment-id)}`, params, opts)
+}
+
+reconcile-expected-payment
+meta {
+    doc: """Mark an expected payment reconciled by hand (`PATCH {status: "reconciled"}`), when you have matched it yourself."""
+}
+fn
+(expected-payment-id: Str): Map {
+  reconcile-expected-payment(expected-payment-id, {})
+},
+(expected-payment-id: Str, opts: Map): Map {
+  update-expected-payment(expected-payment-id, {status: "reconciled"}, opts)
+}
+
+delete-expected-payment
+meta {
+    doc: """DELETE /api/expected_payments/{id}: archive an expected payment so it no longer reconciles."""
+}
+fn
+(expected-payment-id: Str): Any {
+  delete-expected-payment(expected-payment-id, {})
+},
+(expected-payment-id: Str, opts: Map): Any {
+  ::api/call("DELETE", `/api/expected_payments/${seg(expected-payment-id)}`, {}, opts)
+}

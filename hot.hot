@@ -71,7 +71,9 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/aws-sqs/test",
     "./hot/pkg/box/test",
     "./hot/pkg/cal-com/test",
+    "./hot/pkg/cipherowl/test",
     "./hot/pkg/cloudflare/test",
+    "./hot/pkg/company-registry/test",
     "./hot/pkg/crm/test",
     "./hot/pkg/deepgram/test",
     "./hot/pkg/discord/test",
@@ -92,6 +94,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/hot-std/test",
     "./hot/pkg/hubspot/test",
     "./hot/pkg/imagemagick/test",
+    "./hot/pkg/increase/test",
     "./hot/pkg/intercom/test",
     "./hot/pkg/json-rpc/test",
     "./hot/pkg/jwt/test",
@@ -101,22 +104,27 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/microsoft-graph/test",
     "./hot/pkg/microsoft-onedrive/test",
     "./hot/pkg/microsoft-sharepoint/test",
+    "./hot/pkg/middesk/test",
+    "./hot/pkg/modern-treasury/test",
     "./hot/pkg/mysql/test",
     "./hot/pkg/notion/test",
     "./hot/pkg/oauth2/test",
     "./hot/pkg/openai-compatible/test",
     "./hot/pkg/openai/test",
     "./hot/pkg/pandoc/test",
+    "./hot/pkg/persona/test",
     "./hot/pkg/pg/test",
     "./hot/pkg/pinecone/test",
     "./hot/pkg/plaid/test",
     "./hot/pkg/playwright/test",
     "./hot/pkg/postmark/test",
     "./hot/pkg/qdrant/test",
+    "./hot/pkg/quickbooks/test",
     "./hot/pkg/qwen/test",
     "./hot/pkg/redis/test",
     "./hot/pkg/resend/test",
     "./hot/pkg/salesforce/test",
+    "./hot/pkg/sanctions/test",
     "./hot/pkg/sentry/test",
     "./hot/pkg/shopify/test",
     "./hot/pkg/slack-admin/test",
@@ -126,6 +134,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/sql-sqlite/test",
     "./hot/pkg/sql/test",
     "./hot/pkg/stripe/test",
+    "./hot/pkg/sumsub/test",
     "./hot/pkg/supabase-admin/test",
     "./hot/pkg/supabase/test",
     "./hot/pkg/telegram/test",
@@ -135,6 +144,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/whatsapp/test",
     "./hot/pkg/whisper/test",
     "./hot/pkg/xai/test",
+    "./hot/pkg/xero/test",
     "./hot/pkg/zendesk/test"
 ]
 hot.project.hot-pkg-all.test.capture true
@@ -158,7 +168,9 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/aws-sqs": { "local": "./hot/pkg/aws-sqs" },
     "hot.dev/box": { "local": "./hot/pkg/box" },
     "hot.dev/cal-com": { "local": "./hot/pkg/cal-com" },
+    "hot.dev/cipherowl": { "local": "./hot/pkg/cipherowl" },
     "hot.dev/cloudflare": { "local": "./hot/pkg/cloudflare" },
+    "hot.dev/company-registry": { "local": "./hot/pkg/company-registry" },
     "hot.dev/crm": { "local": "./hot/pkg/crm" },
     "hot.dev/deepgram": { "local": "./hot/pkg/deepgram" },
     "hot.dev/discord": { "local": "./hot/pkg/discord" },
@@ -178,6 +190,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
     "hot.dev/hubspot": { "local": "./hot/pkg/hubspot" },
     "hot.dev/imagemagick": { "local": "./hot/pkg/imagemagick" },
+    "hot.dev/increase": { "local": "./hot/pkg/increase" },
     "hot.dev/intercom": { "local": "./hot/pkg/intercom" },
     "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" },
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
@@ -187,22 +200,27 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/microsoft-graph": { "local": "./hot/pkg/microsoft-graph" },
     "hot.dev/microsoft-onedrive": { "local": "./hot/pkg/microsoft-onedrive" },
     "hot.dev/microsoft-sharepoint": { "local": "./hot/pkg/microsoft-sharepoint" },
+    "hot.dev/middesk": { "local": "./hot/pkg/middesk" },
+    "hot.dev/modern-treasury": { "local": "./hot/pkg/modern-treasury" },
     "hot.dev/mysql": { "local": "./hot/pkg/mysql" },
     "hot.dev/notion": { "local": "./hot/pkg/notion" },
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" },
     "hot.dev/openai": { "local": "./hot/pkg/openai" },
     "hot.dev/openai-compatible": { "local": "./hot/pkg/openai-compatible" },
     "hot.dev/pandoc": { "local": "./hot/pkg/pandoc" },
+    "hot.dev/persona": { "local": "./hot/pkg/persona" },
     "hot.dev/pg": { "local": "./hot/pkg/pg" },
     "hot.dev/pinecone": { "local": "./hot/pkg/pinecone" },
     "hot.dev/plaid": { "local": "./hot/pkg/plaid" },
     "hot.dev/playwright": { "local": "./hot/pkg/playwright" },
     "hot.dev/postmark": { "local": "./hot/pkg/postmark" },
     "hot.dev/qdrant": { "local": "./hot/pkg/qdrant" },
+    "hot.dev/quickbooks": { "local": "./hot/pkg/quickbooks" },
     "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
     "hot.dev/redis": { "local": "./hot/pkg/redis" },
     "hot.dev/resend": { "local": "./hot/pkg/resend" },
     "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
+    "hot.dev/sanctions": { "local": "./hot/pkg/sanctions" },
     "hot.dev/sentry": { "local": "./hot/pkg/sentry" },
     "hot.dev/shopify": { "local": "./hot/pkg/shopify" },
     "hot.dev/slack": { "local": "./hot/pkg/slack" },
@@ -213,6 +231,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/sql-pg": { "local": "./hot/pkg/sql-pg" },
     "hot.dev/sql-sqlite": { "local": "./hot/pkg/sql-sqlite" },
     "hot.dev/stripe": { "local": "./hot/pkg/stripe" },
+    "hot.dev/sumsub": { "local": "./hot/pkg/sumsub" },
     "hot.dev/supabase": { "local": "./hot/pkg/supabase" },
     "hot.dev/supabase-admin": { "local": "./hot/pkg/supabase-admin" },
     "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
@@ -222,6 +241,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/whatsapp": { "local": "./hot/pkg/whatsapp" },
     "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
     "hot.dev/xai": { "local": "./hot/pkg/xai" },
+    "hot.dev/xero": { "local": "./hot/pkg/xero" },
     "hot.dev/zendesk": { "local": "./hot/pkg/zendesk" }
 
 }
@@ -550,6 +570,134 @@ hot.project.pkg-test-plaid.test.paths ["./hot/pkg/plaid/test"]
 hot.project.pkg-test-plaid.test.capture true
 hot.project.pkg-test-plaid.deps {
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" }
+}
+
+// Persona KYC/KYB unit tests (hermetic)
+hot.project.pkg-test-persona.src.paths ["./hot/pkg/persona/src"]
+hot.project.pkg-test-persona.test.paths ["./hot/pkg/persona/test"]
+hot.project.pkg-test-persona.test.capture true
+hot.project.pkg-test-persona.deps {}
+
+// Persona KYC/KYB integration tests (requires sandbox credentials)
+hot.project.pkg-integration-persona.src.paths ["./hot/pkg/persona/src"]
+hot.project.pkg-integration-persona.test.paths ["./hot/pkg/persona/integration-test"]
+hot.project.pkg-integration-persona.test.capture true
+hot.project.pkg-integration-persona.deps {}
+
+// Middesk KYB unit tests (hermetic)
+hot.project.pkg-test-middesk.src.paths ["./hot/pkg/middesk/src"]
+hot.project.pkg-test-middesk.test.paths ["./hot/pkg/middesk/test"]
+hot.project.pkg-test-middesk.test.capture true
+hot.project.pkg-test-middesk.deps {}
+
+// Middesk KYB integration tests (requires sandbox credentials)
+hot.project.pkg-integration-middesk.src.paths ["./hot/pkg/middesk/src"]
+hot.project.pkg-integration-middesk.test.paths ["./hot/pkg/middesk/integration-test"]
+hot.project.pkg-integration-middesk.test.capture true
+hot.project.pkg-integration-middesk.deps {}
+
+// Sumsub KYC/KYB/AML unit tests (hermetic)
+hot.project.pkg-test-sumsub.src.paths ["./hot/pkg/sumsub/src"]
+hot.project.pkg-test-sumsub.test.paths ["./hot/pkg/sumsub/test"]
+hot.project.pkg-test-sumsub.test.capture true
+hot.project.pkg-test-sumsub.deps {}
+
+// Sumsub KYC/KYB/AML integration tests (requires sandbox credentials)
+hot.project.pkg-integration-sumsub.src.paths ["./hot/pkg/sumsub/src"]
+hot.project.pkg-integration-sumsub.test.paths ["./hot/pkg/sumsub/integration-test"]
+hot.project.pkg-integration-sumsub.test.capture true
+hot.project.pkg-integration-sumsub.deps {}
+
+// CipherOwl blockchain address screening unit tests (hermetic)
+hot.project.pkg-test-cipherowl.src.paths ["./hot/pkg/cipherowl/src"]
+hot.project.pkg-test-cipherowl.test.paths ["./hot/pkg/cipherowl/test"]
+hot.project.pkg-test-cipherowl.test.capture true
+hot.project.pkg-test-cipherowl.deps {}
+
+// CipherOwl blockchain address screening integration tests (requires sandbox credentials)
+hot.project.pkg-integration-cipherowl.src.paths ["./hot/pkg/cipherowl/src"]
+hot.project.pkg-integration-cipherowl.test.paths ["./hot/pkg/cipherowl/integration-test"]
+hot.project.pkg-integration-cipherowl.test.capture true
+hot.project.pkg-integration-cipherowl.deps {}
+
+// sanctions list screening (OFAC, UK, EU, UN) unit tests (hermetic)
+hot.project.pkg-test-sanctions.src.paths ["./hot/pkg/sanctions/src"]
+hot.project.pkg-test-sanctions.test.paths ["./hot/pkg/sanctions/test"]
+hot.project.pkg-test-sanctions.test.capture true
+hot.project.pkg-test-sanctions.deps {}
+
+// sanctions list screening (OFAC, UK, EU, UN) integration tests (requires sandbox credentials)
+hot.project.pkg-integration-sanctions.src.paths ["./hot/pkg/sanctions/src"]
+hot.project.pkg-integration-sanctions.test.paths ["./hot/pkg/sanctions/integration-test"]
+hot.project.pkg-integration-sanctions.test.capture true
+hot.project.pkg-integration-sanctions.deps {}
+
+// company registries (GLEIF, SEC EDGAR, UK Companies House) unit tests (hermetic)
+hot.project.pkg-test-company-registry.src.paths ["./hot/pkg/company-registry/src"]
+hot.project.pkg-test-company-registry.test.paths ["./hot/pkg/company-registry/test"]
+hot.project.pkg-test-company-registry.test.capture true
+hot.project.pkg-test-company-registry.deps {}
+
+// company registries (GLEIF, SEC EDGAR, UK Companies House) integration tests (requires sandbox credentials)
+hot.project.pkg-integration-company-registry.src.paths ["./hot/pkg/company-registry/src"]
+hot.project.pkg-integration-company-registry.test.paths ["./hot/pkg/company-registry/integration-test"]
+hot.project.pkg-integration-company-registry.test.capture true
+hot.project.pkg-integration-company-registry.deps {}
+
+// Increase banking unit tests (hermetic)
+hot.project.pkg-test-increase.src.paths ["./hot/pkg/increase/src"]
+hot.project.pkg-test-increase.test.paths ["./hot/pkg/increase/test"]
+hot.project.pkg-test-increase.test.capture true
+hot.project.pkg-test-increase.deps {}
+
+// Increase banking integration tests (requires sandbox credentials)
+hot.project.pkg-integration-increase.src.paths ["./hot/pkg/increase/src"]
+hot.project.pkg-integration-increase.test.paths ["./hot/pkg/increase/integration-test"]
+hot.project.pkg-integration-increase.test.capture true
+hot.project.pkg-integration-increase.deps {}
+
+// Modern Treasury payments unit tests (hermetic)
+hot.project.pkg-test-modern-treasury.src.paths ["./hot/pkg/modern-treasury/src"]
+hot.project.pkg-test-modern-treasury.test.paths ["./hot/pkg/modern-treasury/test"]
+hot.project.pkg-test-modern-treasury.test.capture true
+hot.project.pkg-test-modern-treasury.deps {}
+
+// Modern Treasury payments integration tests (requires sandbox credentials)
+hot.project.pkg-integration-modern-treasury.src.paths ["./hot/pkg/modern-treasury/src"]
+hot.project.pkg-integration-modern-treasury.test.paths ["./hot/pkg/modern-treasury/integration-test"]
+hot.project.pkg-integration-modern-treasury.test.capture true
+hot.project.pkg-integration-modern-treasury.deps {}
+
+// QuickBooks Online unit tests (hermetic)
+hot.project.pkg-test-quickbooks.src.paths ["./hot/pkg/quickbooks/src"]
+hot.project.pkg-test-quickbooks.test.paths ["./hot/pkg/quickbooks/test"]
+hot.project.pkg-test-quickbooks.test.capture true
+hot.project.pkg-test-quickbooks.deps {
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// QuickBooks Online integration tests (requires sandbox credentials)
+hot.project.pkg-integration-quickbooks.src.paths ["./hot/pkg/quickbooks/src"]
+hot.project.pkg-integration-quickbooks.test.paths ["./hot/pkg/quickbooks/integration-test"]
+hot.project.pkg-integration-quickbooks.test.capture true
+hot.project.pkg-integration-quickbooks.deps {
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// Xero accounting unit tests (hermetic)
+hot.project.pkg-test-xero.src.paths ["./hot/pkg/xero/src"]
+hot.project.pkg-test-xero.test.paths ["./hot/pkg/xero/test"]
+hot.project.pkg-test-xero.test.capture true
+hot.project.pkg-test-xero.deps {
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// Xero accounting integration tests (requires sandbox credentials)
+hot.project.pkg-integration-xero.src.paths ["./hot/pkg/xero/src"]
+hot.project.pkg-integration-xero.test.paths ["./hot/pkg/xero/integration-test"]
+hot.project.pkg-integration-xero.test.capture true
+hot.project.pkg-integration-xero.deps {
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
 }
 
 // qdrant unit tests (hermetic)

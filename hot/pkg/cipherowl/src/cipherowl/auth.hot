@@ -1,0 +1,203 @@
+::cipherowl::auth ns
+meta {
+    doc: """
+    OAuth2 client credentials for CipherOwl, with a per-run token cache.
+
+    `POST https://svc.cipherowl.ai/oauth/token` takes a JSON body
+    `{client_id, client_secret, audience: "svc.cipherowl.ai", grant_type:
+    "client_credentials"}` and returns `{access_token, expires_in,
+    token_type: "Bearer"}` (24 hours by default). There is no refresh
+    token: a new token is minted the same way.
+
+    **Masking.** A minted token is marked as a secret as soon as it comes
+    back, so it is masked in call records.
+
+    **Token cache.** A minted token is stored in the run's execution
+    context as a secret (so it is masked in run logs) and reused until 60
+    seconds before it expires. The cache lives for one run. When the API
+    answers 401, `::cipherowl::api/request` evicts the token, mints a new
+    one and retries the request once.
+    """
+}
+
+::ctx ::hot::ctx
+::hash ::hot::hash
+::time ::hot::time
+
+HttpRequest ::hot::http/HttpRequest
+is-ok-response ::hot::http/is-ok-response
+
+CACHE_PREFIX "cipherowl.token-cache."
+
+// Refresh this many seconds before the token's stated expiry.
+EXPIRY_MARGIN_SECONDS 60
+
+// Used only when a token response omits expires_in.
+FALLBACK_EXPIRES_IN_SECONDS 3600
+
+token-request-body
+meta {doc: """The JSON body of the token request. Exposed for testing."""}
+fn (client-id: Str, client-secret: Str): Map {
+  {
+    client_id: client-id,
+    client_secret: client-secret,
+    audience: ::cipherowl/AUDIENCE,
+    grant_type: "client_credentials"
+  }
+}
+
+token-request
+meta {
+    doc: """The `HttpRequest` that mints a token at `{base-url}/oauth/token`. Exposed for testing."""
+}
+fn (client-id: Str, client-secret: Str, base-url: Str): HttpRequest {
+  HttpRequest({
+    method: "POST",
+    url: `${base-url}/oauth/token`,
+    headers: {Content-Type: "application/json", Accept: "application/json", User-Agent: "hot-dev-cipherowl-pkg"},
+    body: to-json(token-request-body(client-id, client-secret))
+  })
+}
+
+token-error
+meta {
+    doc: """The Err message for a failed token request: the HTTP status and the OAuth `error` code when the body has one. Never includes credentials or the response body. Exposed for testing."""
+}
+fn (status: Int, body: Any): Str {
+  code if(is-map(body), get(body, "error"), null)
+  suffix if(is-str(code), ` (${code})`, "")
+  hint if(in(status, [401, 403]), "; check cipherowl.client.id and cipherowl.client.secret", "")
+  `cipherowl: token request failed with HTTP ${status}${suffix}${hint}`
+}
+
+mint
+meta {
+    doc: """Mint a new access token (no cache). Returns the token response with the token masked in call records, or an Err."""
+}
+fn (client-id: Str, client-secret: Str, base-url: Str): Map {
+  response ::hot::http/request(token-request(client-id, client-secret, base-url))
+  cond {
+    is-err(response) => { response }
+    and(is-ok-response(response), is-map(response.body), is-str(get(response.body, "access_token"))) => {
+      ::ctx/mark-secret(response.body.access_token)
+      response.body
+    }
+
+    is-ok-response(response) => { err("cipherowl: the token response had no access_token") }
+    => { err(token-error(response.status, response.body)) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cache
+// ---------------------------------------------------------------------------
+
+cache-key
+meta {
+    doc: """The context key a token is cached under: a SHA-256 of the credential identity (client id, a hash of the secret, audience and base URL), never the raw credential. Exposed for testing."""
+}
+fn (creds: Map): Str {
+  identity join([
+    or(get(creds, "client-id"), ""),
+    ::hash/sha256(or(get(creds, "client-secret"), "")),
+    ::cipherowl/AUDIENCE,
+    or(get(creds, "base-url"), ::cipherowl/BASE_URL)
+  ], "|")
+  `${CACHE_PREFIX}${::hash/sha256(identity)}`
+}
+
+expires-at
+meta {
+    doc: """Epoch milliseconds at which a token minted at `now-ms` should be treated as expired: `expires_in` minus `EXPIRY_MARGIN_SECONDS`. Exposed for testing."""
+}
+fn (tokens: Map, now-ms: Int): Int {
+  raw get(tokens, "expires_in")
+  seconds if(is-int(raw), raw, FALLBACK_EXPIRES_IN_SECONDS)
+  add(now-ms, mul(max(sub(seconds, EXPIRY_MARGIN_SECONDS), 0), 1000))
+}
+
+is-fresh
+meta {
+    doc: """True when a cached token exists and `now-ms` is before its margin-adjusted expiry. Exposed for testing."""
+}
+fn (token: Any, expiry: Any, now-ms: Int): Bool {
+  and(is-str(token), not(is-empty(or(token, ""))), is-int(expiry), lt(now-ms, or(expiry, 0)))
+}
+
+now-ms fn (): Int {
+  ::time/epoch-millis(::time/now())
+}
+
+evict
+meta {
+    doc: """Drop a cached token (after a 401). No-op for a null key (a caller-supplied access token)."""
+}
+fn (key: Str?): Bool {
+  cond {
+    is-null(key) => { false }
+    => {
+      ::ctx/set-secret(`${key}.token`, null)
+      ::ctx/set-secret(`${key}.expires-at`, null)
+      true
+    }
+  }
+}
+
+bearer
+meta {
+    doc: """
+    A bearer token for resolved credentials (see
+    `::cipherowl::api/resolve`): the `access-token` itself when one was
+    given (never cached), otherwise a cached or freshly minted token.
+    Returns `{token, cache-key, cached}` (`cached` is true when the token
+    came from the cache; `cache-key` is null for a given access token),
+    or an Err.
+    """
+}
+fn (creds: Map): Map {
+  given get(creds, "access-token")
+  cond {
+    is-some(given) => { {token: given, cache-key: null, cached: false} }
+    => {
+      key cache-key(creds)
+      now now-ms()
+      hit ::ctx/get(`${key}.token`)
+      expiry ::ctx/get(`${key}.expires-at`)
+      cond {
+        is-fresh(hit, expiry, now) => { {token: hit, cache-key: key, cached: true} }
+        => {
+          tokens mint(creds.client-id, creds.client-secret, or(get(creds, "base-url"), ::cipherowl/BASE_URL))
+          cond {
+            is-err(tokens) => { tokens }
+            => {
+              // Cached only with set-secret: the token is masked wherever it
+              // appears in the run trace. The key is a hash, never a credential.
+              ::ctx/set-secret(`${key}.token`, tokens.access_token)
+              ::ctx/set-secret(`${key}.expires-at`, expires-at(tokens, now))
+              {token: tokens.access_token, cache-key: key, cached: false}
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+access-token
+meta {
+    doc: """
+    An access token for `opts` or the context credentials (cached for the
+    run). Use it for calls this package does not wrap; prefer
+    `::cipherowl::api/request`, which also re-mints on 401.
+
+    **Example**
+
+    ```hot
+    token ::cipherowl::auth/access-token({})
+    ```
+    """
+}
+fn (opts: Map): Str {
+  creds ::cipherowl::api/resolve(opts)
+  bearer(creds).token
+}

@@ -1,0 +1,167 @@
+::increase::cards ns
+meta {
+    doc: """
+    Cards issued on an Increase account, their sensitive details, and the
+    basics of Physical Cards. Card numbers and verification codes are
+    cardholder data under PCI DSS: prefer `create-details-iframe`, which
+    shows them to the cardholder without them passing through your
+    systems. `get-card-details` returns them in the clear; never log or
+    store that response.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+create-card
+meta {
+    doc: """
+    POST /cards: issue a virtual card on an Account. `params` needs
+    `account_id`; optional `description`, `entity_id`, `billing_address:
+    {line1, city, state, postal_code}`, `cardholder_name: {first, last}`,
+    `digital_wallet: {email, phone, digital_card_profile_id}`,
+    `authorization_controls` and `replacement_for: {card_id, reason}`.
+
+    **Example**
+
+    ```hot
+    card ::increase::cards/create-card({account_id: "account_in71c4amph0vgo2qllky", description: "Travel card"},
+      {idempotency-key: "card-travel-ada"})
+    card.last4   // => "4242"
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  create-card(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/create("/cards", params, ["account_id"], opts, "create-card")
+}
+
+get-card
+meta {
+    doc: """GET /cards/{card_id}: retrieve a Card (its `last4` and expiration, not the full number)."""
+}
+fn
+(card-id: Str): Map {
+  get-card(card-id, {})
+},
+(card-id: Str, opts: Map): Map {
+  ::api/call("GET", `/cards/${seg(card-id)}`, {}, opts)
+}
+
+list-cards
+meta {
+    doc: """GET /cards: one page of Cards. Filters: `account_id`, `"status.in"` (`active`, `disabled`, `canceled`), `created_at`, `idempotency_key`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-cards({})
+},
+(params: Map): Map {
+  list-cards(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/cards", params, opts)
+}
+
+update-card
+meta {
+    doc: """PATCH /cards/{card_id}: change `description`, `status` (`"active"`, `"disabled"`, or `"canceled"`, which is permanent), `billing_address`, `digital_wallet`, `entity_id` or `authorization_controls`."""
+}
+fn
+(card-id: Str, params: Map): Map {
+  update-card(card-id, params, {})
+},
+(card-id: Str, params: Map, opts: Map): Map {
+  ::api/call("PATCH", `/cards/${seg(card-id)}`, params, opts)
+}
+
+get-card-details
+meta {
+    doc: """
+    GET /cards/{card_id}/details: the full `primary_account_number`,
+    `expiration_month`, `expiration_year`, `verification_code` and `pin`.
+    This is cardholder data in the clear: calling it brings your system
+    into PCI scope. Never log, store or show the result to an agent.
+    Prefer `create-details-iframe`.
+    """
+}
+fn
+(card-id: Str): Map {
+  get-card-details(card-id, {})
+},
+(card-id: Str, opts: Map): Map {
+  ::api/call("GET", `/cards/${seg(card-id)}/details`, {}, opts)
+}
+
+create-details-iframe
+meta {
+    doc: """POST /cards/{card_id}/create_details_iframe: a short-lived `iframe_url` that shows the card's details to the cardholder, so the number never touches your servers. `physical-card-id` (or null) picks a physical card's details."""
+}
+fn
+(card-id: Str): Map {
+  create-details-iframe(card-id, null)
+},
+(card-id: Str, physical-card-id: Str?): Map {
+  create-details-iframe(card-id, physical-card-id, {})
+},
+(card-id: Str, physical-card-id: Str?, opts: Map): Map {
+  ::api/call("POST", `/cards/${seg(card-id)}/create_details_iframe`, {physical_card_id: physical-card-id}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Physical cards (basics)
+// ---------------------------------------------------------------------------
+
+create-physical-card
+meta {
+    doc: """POST /physical_cards: print and ship a plastic card for an existing Card. `params` needs `card_id`, `cardholder: {first_name, last_name}` and `shipment: {method, address: {name, line1, city, state, postal_code, country}}`; optional `physical_card_profile_id`."""
+}
+fn
+(params: Map): Map {
+  create-physical-card(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/create("/physical_cards", params, ["card_id", "cardholder", "shipment"], opts, "create-physical-card")
+}
+
+get-physical-card
+meta {
+    doc: """GET /physical_cards/{physical_card_id}: retrieve a Physical Card, including its `shipment.status` and tracking."""
+}
+fn
+(physical-card-id: Str): Map {
+  get-physical-card(physical-card-id, {})
+},
+(physical-card-id: Str, opts: Map): Map {
+  ::api/call("GET", `/physical_cards/${seg(physical-card-id)}`, {}, opts)
+}
+
+list-physical-cards
+meta {
+    doc: """GET /physical_cards: one page of Physical Cards. Filters: `card_id`, `created_at`, `idempotency_key`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-physical-cards({})
+},
+(params: Map): Map {
+  list-physical-cards(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/physical_cards", params, opts)
+}
+
+update-physical-card
+meta {
+    doc: """PATCH /physical_cards/{physical_card_id}: set `status` to `"active"`, `"disabled"` or `"canceled"`."""
+}
+fn
+(physical-card-id: Str, status: Str): Map {
+  update-physical-card(physical-card-id, status, {})
+},
+(physical-card-id: Str, status: Str, opts: Map): Map {
+  ::api/call("PATCH", `/physical_cards/${seg(physical-card-id)}`, {status: status}, opts)
+}

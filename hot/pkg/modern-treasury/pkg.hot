@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.modern-treasury {
+  name: "hot.dev/modern-treasury",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "Modern Treasury API bindings for Hot: counterparties and external accounts with micro-deposit verification, internal accounts and balance reports, payment orders (ACH, wire, RTP, check, book and more) with required idempotency keys, approval, cancellation and reversals, expected payments and reconciliation, transactions, ledgers with balanced ledger transactions, returns, incoming payment details, events, a sandbox-guarded simulation, header-cursor pagination, and X-Signature webhook verification.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["modern-treasury", "payments", "ledger", "ach", "fintech"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

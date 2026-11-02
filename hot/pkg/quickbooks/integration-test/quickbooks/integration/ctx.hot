@@ -1,0 +1,41 @@
+::quickbooks::integration::ctx ns
+
+::env ::hot::env
+
+// Credentials for the QuickBooks Online integration suite: a sandbox
+// company (free with any Intuit developer account). Unset environment
+// variables are skipped entirely, so absent credentials behave exactly
+// as if never configured.
+//
+// QUICKBOOKS_ACCESS_TOKEN (from the OAuth Playground) avoids a refresh.
+// With QUICKBOOKS_REFRESH_TOKEN the suite refreshes once per run; Intuit
+// may rotate the refresh token, so copy a fresh one from the Playground
+// when the old one stops working. QUICKBOOKS_ENVIRONMENT defaults to
+// sandbox here.
+::hot::ctx/set(filter-vals({
+    "quickbooks.client.id": ::env/get("QUICKBOOKS_CLIENT_ID", ""),
+    "quickbooks.client.secret": ::env/get("QUICKBOOKS_CLIENT_SECRET", ""),
+    "quickbooks.refresh.token": ::env/get("QUICKBOOKS_REFRESH_TOKEN", ""),
+    "quickbooks.access.token": ::env/get("QUICKBOOKS_ACCESS_TOKEN", ""),
+    "quickbooks.realm.id": ::env/get("QUICKBOOKS_REALM_ID", ""),
+    "quickbooks.environment": ::env/get("QUICKBOOKS_ENVIRONMENT", "sandbox"),
+}, (v) { not(is-empty(v)) }))
+
+// True when a realm and either an access token or a refresh token with
+// the app credentials are set. Tests call this first and skip (pass with
+// a note) when it is false, so an unconfigured run makes no calls.
+configured fn (): Bool {
+    has (name) { not(is-empty(::env/get(name, ""))) }
+    and(
+        has("QUICKBOOKS_REALM_ID"),
+        or(
+            has("QUICKBOOKS_ACCESS_TOKEN"),
+            and(has("QUICKBOOKS_REFRESH_TOKEN"), has("QUICKBOOKS_CLIENT_ID"), has("QUICKBOOKS_CLIENT_SECRET"))
+        )
+    )
+}
+
+skip fn (): Bool {
+    println("skipped: set QUICKBOOKS_REALM_ID plus QUICKBOOKS_ACCESS_TOKEN, or QUICKBOOKS_REFRESH_TOKEN with QUICKBOOKS_CLIENT_ID and QUICKBOOKS_CLIENT_SECRET, to run the QuickBooks integration tests")
+    assert(true, "skipped: no QuickBooks credentials")
+}

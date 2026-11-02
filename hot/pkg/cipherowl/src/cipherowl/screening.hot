@@ -1,0 +1,157 @@
+::cipherowl::screening ns
+meta {
+    doc: """
+    Address screening (SRR API): a fast yes/no risk verdict for one
+    address or a batch, evaluated per chain under a risk configuration.
+
+    Options (all optional):
+    - `config`: the risk model, e.g. `co-defi`, `co-vasp`,
+      `co-institution`, your organization's own config, or `co-sandbox`
+      for the free sandbox. Omitted, CipherOwl applies your organization's
+      default; the response's `config` says which was used.
+    - `hops`: tracing depth, 0 to 8. Pass it when depth matters: omitted,
+      the docs say the config's own reach applies, but live behavior has
+      been observed to be single-hop.
+    - `reference`: your own label for attribution, e.g.
+      `acme.withdrawals`; lowercased, dot-separated `[a-z0-9_]`.
+    - `trackAlert`: false opts this request out of case creation
+      (CipherOwl's default is true).
+    """
+}
+
+::api ::cipherowl::api
+
+seg ::cipherowl::api/seg
+query ::cipherowl::api/query
+
+// Batch ceiling: the public reference states none; CipherOwl's live API
+// (verified by a production client) caps a batch at 50 addresses.
+MAX_BATCH 50
+
+screen-options
+meta {
+    doc: """Validate and normalize screening options into the query/body fields CipherOwl takes: `config`, `reference` (normalized), `hops` (0 to 8), `trackAlert`. Unset options are dropped. Exposed for testing."""
+}
+fn (options: Map): Map {
+  config get(options, "config")
+  reference ::api/normalize-reference(get(options, "reference"))
+  hops ::api/validate-hops(get(options, "hops"))
+  cond {
+    is-err(reference) => { reference }
+    is-err(hops) => { hops }
+    => {
+      ::api/compact({
+        config: if(is-empty(or(config, "")), null, config),
+        reference: reference,
+        hops: hops,
+        trackAlert: get(options, "trackAlert")
+      })
+    }
+  }
+}
+
+screen-request
+meta {
+    doc: """The spec for screening one address (`GET /api/screen/v1/chains/{chain}/addresses/{address}`). Exposed for testing."""
+}
+fn (chain: Str, address: Str, options: Map): Map {
+  c ::api/validate-chain(chain)
+  a if(is-err(c), c, ::api/validate-address(c, address))
+  q if(is-err(a), a, screen-options(options))
+  cond {
+    is-err(q) => { q }
+    => { {method: "GET", path: `/api/screen/v1/chains/${seg(c)}/addresses/${seg(a)}${query(q)}`, body: ""} }
+  }
+}
+
+screen-address
+meta {
+    doc: """
+    Screen one address. Returns `{config, chain, address, foundRisk,
+    version, reference?, explanations?, requested-chain}`: `chain` is
+    the class CipherOwl answers with (`evm` for a `base` request), so
+    `requested-chain` keeps what you asked for. Screening carries no
+    severity: pair a hit with `::cipherowl::risk/risk-score` for a band. `foundRisk: true` means do not
+    auto-approve: triage with `::cipherowl::risk/risk-score`, or decide
+    with `::cipherowl::decisions/decide`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::screening/screen-address("evm", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", {config: "co-sandbox"})
+    out.foundRisk
+    ```
+    """
+}
+fn
+(chain: Str, address: Str): Map {
+  screen-address(chain, address, {}, {})
+},
+(chain: Str, address: Str, options: Map): Map {
+  screen-address(chain, address, options, {})
+},
+(chain: Str, address: Str, options: Map, opts: Map): Map {
+  spec screen-request(chain, address, options)
+  cond {
+    is-err(spec) => { spec }
+    => { ::api/with-requested-chain(::api/request(spec.method, spec.path, "", opts), chain) }
+  }
+}
+
+batch-request
+meta {
+    doc: """The spec for batch screening (`POST /api/screen/v1/chains/{chain}/batch`). Every address is validated for the chain; an empty list errs. Exposed for testing."""
+}
+fn (chain: Str, addresses: Vec<Str>, options: Map): Map {
+  c ::api/validate-chain(chain)
+  q if(is-err(c), c, screen-options(options))
+  cond {
+    is-err(q) => { q }
+    is-empty(addresses) => { err("cipherowl: batch screening needs at least one address") }
+    gt(length(addresses), MAX_BATCH) => { err(`cipherowl: batch screening takes at most ${MAX_BATCH} addresses; split the list`) }
+    => {
+      checked ::api/check-addresses(c, addresses)
+      cond {
+        is-err(checked) => { checked }
+        => { {method: "POST", path: `/api/screen/v1/chains/${seg(c)}/batch`, body: {...q, addresses: checked}} }
+      }
+    }
+  }
+}
+
+batch-screen
+meta {
+    doc: """
+    Screen several addresses on one chain in one call. Returns `{config,
+    chain, results: [{address, foundRisk}], version, reference?,
+    requested-chain}`. At most 50 addresses per call (`MAX_BATCH`): split
+    longer lists.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::screening/batch-screen("evm", [
+      "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704",
+      "0x0000000000000000000000000000000000000001"
+    ], {config: "co-sandbox"})
+    ```
+    """
+}
+fn
+(chain: Str, addresses: Vec<Str>, options: Map): Map {
+  batch-screen(chain, addresses, options, {})
+},
+(chain: Str, addresses: Vec<Str>, options: Map, opts: Map): Map {
+  spec batch-request(chain, addresses, options)
+  cond {
+    is-err(spec) => { spec }
+    => { ::api/with-requested-chain(::api/request(spec.method, spec.path, spec.body, opts), chain) }
+  }
+}
+
+risky-addresses
+meta {doc: """The addresses in a batch result with `foundRisk: true`. Pure."""}
+fn (batch-result: Any): Vec<Str> {
+  results or(get(or(batch-result, {}), "results"), [])
+  map(filter(results, (r) { eq(get(r, "foundRisk"), true) }), (r) { get(r, "address") })
+}

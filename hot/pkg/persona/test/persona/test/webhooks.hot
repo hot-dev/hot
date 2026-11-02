@@ -1,0 +1,145 @@
+::persona::test::webhooks ns
+meta ["test"]
+
+::webhooks ::persona::webhooks
+::hmac ::hot::hmac
+::time ::hot::time
+
+// Vectors generated independently with Python:
+//   hmac.new(secret, b"1700000000." + BODY, hashlib.sha256).hexdigest()
+BODY """{"data":{"type":"event","id":"evt_123","attributes":{"name":"inquiry.approved"}}}"""
+OLD_SECRET "wbhsec_test_secret_old"
+NEW_SECRET "wbhsec_test_secret_new"
+OLD_SIG "08f0e8863ae7013712ccb694a4bd8ec53b6417f50daeb56c14d7adad6e224228"
+NEW_SIG "e481ae339b0d670bbf2305990ce4554a096e8f18b07555fa1378c6ffce2b3a8a"
+
+now-seconds fn (): Str {
+  `${::time/epoch-seconds()}`
+}
+
+sign fn (timestamp: Str, body: Str, secret: Str): Str {
+  payload `${timestamp}.${body}`
+  sig ::hmac/hmac-sha256(secret, payload)
+  `t=${timestamp},v1=${sig}`
+}
+
+request-with fn (header: Str, body: Str): Map {
+  {headers: {persona-signature: header}, body-raw: body}
+}
+
+test-python-vector
+meta ["test"] fn () {
+    header `t=1700000000,v1=${OLD_SIG}`
+    assert(::webhooks/verify-signature(header, BODY, OLD_SECRET, 0), "independent vector verifies with tolerance 0")
+    assert(not(::webhooks/verify-signature(header, BODY, OLD_SECRET, 300)), "the same vector is stale under the default window")
+}
+
+test-rotation-sets
+meta ["test"] fn () {
+    header `t=1700000000,v1=${OLD_SIG} t=1700000000,v1=${NEW_SIG}`
+    parsed ::webhooks/parse-signature-header(header)
+    assert-eq(2, length(parsed))
+    assert-eq([NEW_SIG], parsed[1].v1)
+    assert(::webhooks/verify-signature(header, BODY, NEW_SECRET, 0), "new secret matches the second set")
+    assert(::webhooks/verify-signature(header, BODY, OLD_SECRET, 0), "old secret matches the first set")
+    assert(not(::webhooks/verify-signature(header, BODY, "wbhsec_other", 0)), "another secret matches neither")
+}
+
+test-valid-fresh-request
+meta ["test"] fn () {
+    ts now-seconds()
+    req request-with(sign(ts, BODY, NEW_SECRET), BODY)
+    assert(::webhooks/verify-request(req, NEW_SECRET), "fresh, valid signature verifies")
+}
+
+test-signing-secrets-pass-through-unchanged
+meta ["test"] fn () {
+    hook {data: {type: "webhook", attributes: {name: "w", secrets: [{value: "wbhsec_returned_secret"}]}}}
+    assert-eq(hook, ::webhooks/mark-signing-secrets(hook))
+    assert-eq("x", err-value(::webhooks/mark-signing-secrets(err("x"))), "an Err passes through")
+}
+
+test-non-ascii-body-signs-its-utf8-bytes
+meta ["test"] fn () {
+    // hmac.new(b"wbhsec_test_secret_new", b"1700000000." + body.encode(), hashlib.sha256).hexdigest()
+    body """{"name":"José 日本"}"""
+    header `t=1700000000,v1=1e630f2280d3e1234754e87ce85c8c0988148fb8dab84cf961076ccae59cc865`
+    assert(::webhooks/verify-signature(header, body, NEW_SECRET, 0), "Str body")
+    assert(::webhooks/verify-signature(header, Bytes(body), NEW_SECRET, 0), "the same bytes")
+}
+
+test-bytes-body
+meta ["test"] fn () {
+    ts now-seconds()
+    req {headers: {persona-signature: sign(ts, BODY, NEW_SECRET)}, body-raw: "lossy", body-bytes: Bytes(BODY)}
+    assert(::webhooks/verify-request(req, NEW_SECRET), "body-bytes are preferred over body-raw")
+}
+
+test-tampered-body
+meta ["test"] fn () {
+    ts now-seconds()
+    req request-with(sign(ts, BODY, NEW_SECRET), replace(BODY, "approved", "declined"))
+    assert(not(::webhooks/verify-request(req, NEW_SECRET)), "tampered body fails")
+}
+
+test-tampered-timestamp
+meta ["test"] fn () {
+    ts now-seconds()
+    sig ::hmac/hmac-sha256(NEW_SECRET, `${ts}.${BODY}`)
+    req request-with(`t=${add(Int(ts), 1)},v1=${sig}`, BODY)
+    assert(not(::webhooks/verify-request(req, NEW_SECRET)), "the timestamp is part of the signed payload")
+}
+
+test-stale-and-future
+meta ["test"] fn () {
+    stale `${sub(::time/epoch-seconds(), 3600)}`
+    future `${add(::time/epoch-seconds(), 3600)}`
+    assert(not(::webhooks/verify-request(request-with(sign(stale, BODY, NEW_SECRET), BODY), NEW_SECRET)), "hour-old delivery fails")
+    assert(not(::webhooks/verify-request(request-with(sign(future, BODY, NEW_SECRET), BODY), NEW_SECRET)), "hour-ahead delivery fails")
+    assert(::webhooks/verify-request(request-with(sign(stale, BODY, NEW_SECRET), BODY), NEW_SECRET, 7200), "a wider window accepts it")
+    assert(::webhooks/verify-request(request-with(sign(stale, BODY, NEW_SECRET), BODY), NEW_SECRET, 0), "0 skips the replay check")
+}
+
+test-missing-and-malformed
+meta ["test"] fn () {
+    assert(not(::webhooks/verify-request({headers: {}, body-raw: BODY}, NEW_SECRET)), "missing header fails")
+    assert(not(::webhooks/verify-request(request-with("garbage", BODY), NEW_SECRET)), "garbage header fails")
+    assert(not(::webhooks/verify-request(request-with(`v1=${NEW_SIG}`, BODY), NEW_SECRET, 0)), "no timestamp fails")
+    assert(not(::webhooks/verify-request(request-with(sign("abc", BODY, NEW_SECRET), BODY), NEW_SECRET)), "non-numeric timestamp fails")
+}
+
+test-empty-secret-fails-closed
+meta ["test"] fn () {
+    ts now-seconds()
+    req request-with(sign(ts, BODY, ""), BODY)
+    assert(not(::webhooks/verify-request(req, "")), "an empty secret never verifies")
+}
+
+test-uppercase-hex
+meta ["test"] fn () {
+    header `t=1700000000,v1=${uppercase(OLD_SIG)}`
+    assert(::webhooks/verify-signature(header, BODY, OLD_SECRET, 0), "hex case is ignored")
+}
+
+test-construct-event
+meta ["test"] fn () {
+    body """{"data":{"type":"event","id":"evt_9","attributes":{"name":"inquiry.completed","created-at":"2026-11-01T00:00:00.000Z","payload":{"data":{"type":"inquiry","id":"inq_1","attributes":{"status":"completed"}},"included":[]}}}}"""
+    ts now-seconds()
+    event ::webhooks/construct-event(request-with(sign(ts, body, NEW_SECRET), body), NEW_SECRET)
+    assert-eq("evt_9", event.id)
+    assert-eq("inquiry.completed", event.name)
+    assert-eq("inquiry", event.object-type)
+    assert-eq("inq_1", event.object-id)
+    assert-eq("needs-review", ::persona::decisions/inquiry-decision(::webhooks/event-document(event)).decision)
+    bad ::webhooks/construct-event(request-with(sign(ts, body, "wbhsec_wrong"), body), NEW_SECRET)
+    assert(is-err(bad), "a bad signature is an Err")
+}
+
+test-parse-event-snake
+meta ["test"] fn () {
+    e ::webhooks/parse-event({data: {type: "event", id: "evt_1", attributes: {name: "report/watchlist.ready", created_at: "t", payload: {data: {type: "report/watchlist", id: "rep_1"}}}}})
+    assert-eq("report/watchlist.ready", e.name)
+    assert-eq("t", e.created-at)
+    assert-eq("rep_1", e.object-id)
+    assert-eq([], e.included)
+}

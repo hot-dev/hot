@@ -1,0 +1,50 @@
+::increase::test::events ns
+meta ["test"]
+
+::events ::increase::events
+
+EVENT_JSON """{"associated_object_id":"ach_transfer_uoxatyh3lt5evrsdvo7q","associated_object_type":"ach_transfer","category":"ach_transfer.updated","created_at":"2026-11-01T12:00:00Z","id":"event_001dzz0r20rzr4zrhrr1364hy80","type":"event"}"""
+
+test-parse-event-from-text
+meta ["test"] fn () {
+    e ::events/parse-event(EVENT_JSON)
+    assert-eq("event_001dzz0r20rzr4zrhrr1364hy80", e.id)
+    assert-eq("ach_transfer.updated", e.category)
+    assert-eq("ach_transfer", e.associated_object_type)
+    assert-eq("ach_transfer_uoxatyh3lt5evrsdvo7q", e.associated_object_id)
+    assert-eq("2026-11-01T12:00:00Z", e.created_at)
+}
+
+test-parse-event-from-map-and-bytes
+meta ["test"] fn () {
+    from-map ::events/parse-event({id: "event_1", category: "account.created", associated_object_type: "account", associated_object_id: "account_1"})
+    assert-eq("account.created", from-map.category)
+    assert(is-null(from-map.created_at), "missing fields are null")
+
+    from-bytes ::events/parse-event(Bytes(EVENT_JSON))
+    assert-eq("ach_transfer.updated", from-bytes.category)
+}
+
+test-parse-event-rejects-bad-bodies
+meta ["test"] fn () {
+    assert(is-err(::events/parse-event("not json")), "invalid JSON errs")
+    assert(is-err(::events/parse-event("[1, 2]")), "a JSON array is not an event")
+}
+
+test-resource-name
+meta ["test"] fn () {
+    assert-eq("ach_transfers", ::events/resource-name("ach_transfer"))
+    assert-eq("entities", ::events/resource-name("entity"))
+    assert-eq("lockbox_addresses", ::events/resource-name("lockbox_address"))
+    assert-eq("real_time_payments_transfers", ::events/resource-name("real_time_payments_transfer"))
+    assert-eq("inbound_real_time_payments_requests_for_payment", ::events/resource-name("inbound_real_time_payments_request_for_payment"))
+    assert-eq("account_statements", ::events/resource-name("account_statement"))
+}
+
+test-object-path
+meta ["test"] fn () {
+    assert-eq("/ach_transfers/ach_transfer_uoxatyh3lt5evrsdvo7q", ::events/object-path(::events/parse-event(EVENT_JSON)))
+    assert-eq("/entities/entity_1", ::events/object-path({associated_object_type: "entity", associated_object_id: "entity_1"}))
+    assert-eq("/accounts/a%2F..", ::events/object-path({associated_object_type: "account", associated_object_id: "a/.."}), "the id is path-encoded")
+    assert(is-err(::events/object-path({category: "account.created"})), "no associated object errs")
+}

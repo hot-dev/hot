@@ -1,0 +1,26 @@
+::cipherowl::integration::ctx ns
+
+::env ::hot::env
+
+// Credentials for the cipherowl integration suite, from the environment.
+// Unset variables are skipped entirely, so absent credentials behave
+// exactly as if never configured. A free-tier account is enough: the tests
+// use the co-sandbox config and its curated addresses.
+::hot::ctx/set(filter-vals({
+    "cipherowl.client.id": ::env/get("CIPHEROWL_CLIENT_ID", ""),
+    "cipherowl.client.secret": ::env/get("CIPHEROWL_CLIENT_SECRET", ""),
+}, (v) { not(is-empty(v)) }))
+
+configured
+meta {doc: """True when both client credential variables are set."""}
+fn (): Bool {
+    has (key) { is-some(::hot::ctx/get(key)) }
+    and(has("cipherowl.client.id"), has("cipherowl.client.secret"))
+}
+
+skip
+meta {doc: """Record a skip for a test that needs credentials."""}
+fn (): Bool {
+    println("CIPHEROWL_CLIENT_ID / CIPHEROWL_CLIENT_SECRET not set - skipping")
+    assert(true, "skipped: no CipherOwl credentials")
+}

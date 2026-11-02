@@ -1,0 +1,46 @@
+::quickbooks::company ns
+meta {
+    doc: """
+    Company-level reads: CompanyInfo (name, address, fiscal year start,
+    country) and Preferences (currency, accounting, sales-form and tax
+    settings an agent should check before writing transactions, e.g.
+    whether multicurrency or class tracking is on).
+
+    ```hot
+    info ::quickbooks::company/company-info()
+    info.CompanyName
+    prefs ::quickbooks::company/preferences()
+    prefs.CurrencyPrefs.HomeCurrency.value
+    ```
+    """
+}
+
+::api ::quickbooks::api
+
+company-info
+meta {doc: """GET /companyinfo/{realmId} - the connected company's CompanyInfo."""}
+fn
+(): Map {
+  company-info({})
+},
+(opts: Map): Map {
+  realm ::api/realm-id(opts)
+  cond {
+    is-err(realm) => { realm }
+    => {
+      body ::api/json("GET", `/companyinfo/${::api/segment(realm)}`, {}, "", opts)
+      if(is-err(body), body, or(get(body, "CompanyInfo"), body))
+    }
+  }
+}
+
+preferences
+meta {doc: """GET /preferences - the company's Preferences."""}
+fn
+(): Map {
+  preferences({})
+},
+(opts: Map): Map {
+  body ::api/json("GET", "/preferences", {}, "", opts)
+  if(is-err(body), body, or(get(body, "Preferences"), body))
+}

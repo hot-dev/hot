@@ -1,0 +1,297 @@
+::cipherowl::test::api ns
+meta ["test"]
+
+::api ::cipherowl::api
+::auth ::cipherowl::auth
+
+HttpError ::cipherowl::api/HttpError
+
+EVM "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704"
+
+// ============================================================================
+// Auth
+// ============================================================================
+
+test-token-request
+meta ["test"] fn () {
+    req ::auth/token-request("client-123", "secret-xyz", "https://svc.cipherowl.ai")
+    assert-eq("POST", req.method)
+    assert-eq("https://svc.cipherowl.ai/oauth/token", req.url)
+    assert-eq("application/json", get(req.headers, "Content-Type"), "JSON, not form-encoded")
+    assert-eq({client_id: "client-123", client_secret: "secret-xyz", audience: "svc.cipherowl.ai", grant_type: "client_credentials"}, from-json(req.body))
+}
+
+test-token-error-never-includes-credentials
+meta ["test"] fn () {
+    msg ::auth/token-error(401, {error: "access_denied", error_description: "Unauthorized client-123"})
+    assert-eq("cipherowl: token request failed with HTTP 401 (access_denied); check cipherowl.client.id and cipherowl.client.secret", msg)
+    assert(not(contains(msg, "client-123")))
+    assert-eq("cipherowl: token request failed with HTTP 500", ::auth/token-error(500, "oops"))
+}
+
+test-cache-key-is-hashed-identity
+meta ["test"] fn () {
+    // sha256("client-123|" + sha256("secret-xyz") + "|svc.cipherowl.ai|https://svc.cipherowl.ai"), computed with Python
+    creds {client-id: "client-123", client-secret: "secret-xyz", base-url: "https://svc.cipherowl.ai"}
+    key ::auth/cache-key(creds)
+    assert-eq("cipherowl.token-cache.bb84ee040664cf67c3f95dead0e58a24a747c1ae0b36be42d25e258a73c9a52f", key)
+    assert(not(contains(key, "client-123")), "never the raw credential")
+    assert(ne(key, ::auth/cache-key({...creds, client-secret: "rotated"})), "a different secret is a different identity")
+    assert(ne(key, ::auth/cache-key({...creds, base-url: "https://other.example"})), "a different base URL is a different identity")
+}
+
+test-expiry
+meta ["test"] fn () {
+    assert-eq(add(1000, mul(86340, 1000)), ::auth/expires-at({expires_in: 86400}, 1000), "refreshed 60s early")
+    assert-eq(add(1000, mul(3540, 1000)), ::auth/expires-at({}, 1000), "fallback lifetime when expires_in is missing")
+    assert(::auth/is-fresh("tok", 5000, 4999))
+    assert(not(::auth/is-fresh("tok", 5000, 5000)), "expired at the margin-adjusted time")
+    assert(not(::auth/is-fresh(null, 5000, 1)), "no token")
+    assert(not(::auth/is-fresh("tok", null, 1)), "no expiry")
+}
+
+test-bearer-with-given-access-token-is-not-cached
+meta ["test"] fn () {
+    out ::auth/bearer({access-token: "minted-elsewhere"})
+    assert-eq("minted-elsewhere", out.token)
+    assert(is-null(out.cache-key))
+    assert-eq(false, out.cached)
+    assert-eq(false, ::auth/evict(null), "nothing to evict")
+}
+
+// ============================================================================
+// Resolver (opts first, then ctx, then defaults; never writes ctx)
+// ============================================================================
+
+test-resolve-missing
+meta ["test"] fn () {
+    assert(is-err(::api/resolve({})), "no credentials anywhere")
+    assert(is-err(::api/resolve({client-id: "only-id"})), "opts client-id without its secret")
+}
+
+test-resolve-blank-credential-is-an-err-naming-the-key
+meta ["test"] fn () {
+    ::hot::ctx/set({"cipherowl.client.id": "ctx-id", "cipherowl.client.secret": "ctx-secret"})
+    for-each(["access-token", "client-id", "client-secret"], (k) {
+      for-each(["", "  ", null], (v) {
+        out ::api/resolve(assoc({client-id: "tenant-id", client-secret: "tenant-secret"}, k, v))
+        assert(is-err(out), `blank ${k} never falls back to context`)
+        assert(contains(err-value(out), k), `the Err names ${k}`)
+      })
+    })
+    ::hot::ctx/set({"cipherowl.client.id": null, "cipherowl.client.secret": null})
+}
+
+test-resolve-per-call-url-needs-a-per-call-credential
+meta ["test"] fn () {
+    ::hot::ctx/set({"cipherowl.client.id": "ctx-id", "cipherowl.client.secret": "ctx-secret"})
+    alone ::api/resolve({base-url: "https://proxy.example"})
+    assert(is-err(alone), "context credentials never go to a per-call URL")
+    assert(contains(err-value(alone), "base-url"), "names base-url")
+    assert(contains(err-value(alone), "client-id"), "names the credential")
+    assert-eq("https://proxy.example", ::api/resolve({base-url: "https://proxy.example", client-id: "i", client-secret: "s"}).base-url)
+    assert-eq("https://svc.cipherowl.ai", ::api/resolve({}).base-url)
+    ::hot::ctx/set({"cipherowl.client.id": null, "cipherowl.client.secret": null})
+}
+
+test-resolve-marks-and-returns-credentials-unchanged
+meta ["test"] fn () {
+    r ::api/resolve({client-id: "marked-client-id", client-secret: "marked-client-secret"})
+    assert-eq("marked-client-id", r.client-id)
+    assert-eq("marked-client-secret", r.client-secret)
+    assert-eq("marked-access-token", ::api/resolve({access-token: "marked-access-token"}).access-token)
+}
+
+test-resolve-opts
+meta ["test"] fn () {
+    r ::api/resolve({client-id: "tenant-id", client-secret: "tenant-secret"})
+    assert-eq("tenant-id", r.client-id)
+    assert-eq("tenant-secret", r.client-secret)
+    assert-eq("https://svc.cipherowl.ai", r.base-url)
+    t ::api/resolve({access-token: "tok", base-url: "https://proxy.example"})
+    assert-eq("tok", t.access-token)
+    assert-eq("https://proxy.example", t.base-url)
+}
+
+test-resolve-opts-override-ctx-without-writing-it
+meta ["test"] fn () {
+    ::hot::ctx/set({"cipherowl.client.id": "ctx-id", "cipherowl.client.secret": "ctx-secret", "cipherowl.base.url": "https://ctx.example"})
+    from-ctx ::api/resolve({})
+    assert-eq("ctx-id", from-ctx.client-id, "ctx is used when opts is empty")
+    assert-eq("ctx-secret", from-ctx.client-secret)
+    assert-eq("https://ctx.example", from-ctx.base-url)
+    from-opts ::api/resolve({client-id: "tenant-id", client-secret: "tenant-secret"})
+    assert-eq("tenant-id", from-opts.client-id, "opts credentials win")
+    assert-eq("tenant-secret", from-opts.client-secret)
+    assert(is-err(::api/resolve({client-id: "tenant-id"})), "ctx secret is not mixed with an opts id")
+    assert-eq("ctx-id", ::hot::ctx/get("cipherowl.client.id"), "resolve never writes ctx")
+    assert-eq("ctx-secret", ::hot::ctx/get("cipherowl.client.secret"))
+    ::hot::ctx/set({"cipherowl.client.id": null, "cipherowl.client.secret": null, "cipherowl.base.url": null})
+}
+
+// ============================================================================
+// Validation
+// ============================================================================
+
+test-validate-chain
+meta ["test"] fn () {
+    for-each(::cipherowl/CHAINS, (c) { assert-eq(c, ::api/validate-chain(c), `${c} is documented`) })
+    assert-eq("evm", ::api/validate-chain(" EVM "))
+    assert-eq("base", ::api/validate-chain("base"), "a specific chain is accepted (verified live; answered with its class)")
+    assert(is-err(::api/validate-chain("")))
+    assert(is-err(::api/validate-chain("evm/../x")), "not an identifier")
+}
+
+test-normalize-band
+meta ["test"] fn () {
+    assert-eq("severe", ::api/normalize-band("Severe Risk"))
+    assert-eq("high", ::api/normalize-band("High Risk"))
+    assert-eq("medium", ::api/normalize-band("medium"))
+    assert-eq("low", ::api/normalize-band(" Low Risk "))
+    assert(is-null(::api/normalize-band("Extreme Risk")), "an unknown band is not guessed")
+    assert(is-null(::api/normalize-band(null)))
+}
+
+test-number-or-null
+meta ["test"] fn () {
+    assert-eq(100, ::api/number-or-null(100))
+    assert-eq(82.32, ::api/number-or-null(82.32))
+    assert-eq(1652499489, ::api/number-or-null("1652499489"), "numbers sent as strings")
+    assert-eq(8244129.05, ::api/number-or-null("8244129.05"))
+    assert(is-null(::api/number-or-null("Infinity")), "non-finite is absent, and never halts")
+    assert(is-null(::api/number-or-null(null)))
+}
+
+test-with-requested-chain
+meta ["test"] fn () {
+    out ::api/with-requested-chain({chain: "evm", foundRisk: false}, "Base")
+    assert-eq("evm", out.chain, "CipherOwl echoes the class")
+    assert-eq("base", out.requested-chain, "the ask is kept")
+}
+
+test-validate-network
+meta ["test"] fn () {
+    assert-eq("ethereum_mainnet", ::api/validate-network(" ethereum_mainnet "))
+    assert-eq("ethereum", ::api/validate-network("ethereum"), "aliases resolve server-side")
+    assert(is-err(::api/validate-network("evm")), "evm is a chain family, not a network")
+    assert(is-err(::api/validate-network("")))
+}
+
+test-validate-address
+meta ["test"] fn () {
+    assert-eq(EVM, ::api/validate-address("evm", EVM))
+    assert-eq("0x93DF2c9c8786242b8fdca3f96b3914b8b4a9f704", ::api/validate-address("evm", " 0x93DF2c9c8786242b8fdca3f96b3914b8b4a9f704 "), "checksummed case kept")
+    assert-eq("TEAqwfMhXLaomXhZ8KeMhx3njGmQEDnsUR", ::api/validate-address("tron", "TEAqwfMhXLaomXhZ8KeMhx3njGmQEDnsUR"), "base58 casing kept")
+    assert(is-err(::api/validate-address("evm", "0x1234")), "short EVM address")
+    assert(is-err(::api/validate-address("evm", "93df2c9c8786242b8fdca3f96b3914b8b4a9f704")), "missing 0x")
+    assert(is-err(::api/validate-address("tron", "")))
+    assert(is-err(::api/validate-address("bitcoin", "bc1 q")), "whitespace")
+}
+
+test-validate-address-error-hides-address
+meta ["test"] fn () {
+    out ::api/validate-address("evm", "0xdeadbeef")
+    msg if-err(out, (e) { Str(e) })
+    assert(not(contains(msg, "deadbeef")), "the address is not echoed in the error")
+}
+
+test-validate-hops
+meta ["test"] fn () {
+    assert(is-null(::api/validate-hops(null)))
+    assert-eq(0, ::api/validate-hops(0))
+    assert-eq(8, ::api/validate-hops(8))
+    assert(is-err(::api/validate-hops(9)))
+    assert(is-err(::api/validate-hops(-1)))
+    assert(is-err(::api/validate-hops("2")))
+}
+
+test-normalize-reference
+meta ["test"] fn () {
+    assert-eq("acme.compliance.apac", ::api/normalize-reference(" Acme.Compliance.APAC "))
+    assert-eq("withdrawals_v2", ::api/normalize-reference("withdrawals_v2"))
+    assert(is-null(::api/normalize-reference("   ")), "blank means unreferenced")
+    assert(is-null(::api/normalize-reference(null)))
+    assert(is-err(::api/normalize-reference("acme..x")), "empty segment")
+    assert(is-err(::api/normalize-reference("acme-team")), "hyphen not allowed")
+    assert(is-err(::api/normalize-reference(join(map(range(0, 300), (i) { "a" }), ""))), "over 256 characters")
+}
+
+// ============================================================================
+// Requests, encoding, errors
+// ============================================================================
+
+test-query-and-compact
+meta ["test"] fn () {
+    assert-eq("?config=co-sandbox&trackAlert=false", ::api/query({config: "co-sandbox", hops: null, trackAlert: false}))
+    assert-eq("", ::api/query({hops: null}))
+    assert-eq({a: 1, c: [{d: 2}]}, ::api/compact({a: 1, b: null, c: [{d: 2, e: null}]}))
+    assert-eq("0x93df%2F..", ::api/seg("0x93df/.."))
+}
+
+test-build-request
+meta ["test"] fn () {
+    get-req ::api/build-request("get", "/api/chain-capabilities/v1", "", "tok", "https://svc.cipherowl.ai")
+    assert-eq("GET", get-req.method)
+    assert-eq("https://svc.cipherowl.ai/api/chain-capabilities/v1", get-req.url)
+    assert-eq("Bearer tok", get(get-req.headers, "Authorization"))
+    assert-eq("application/json", get(get-req.headers, "Accept"))
+    assert(is-null(get(get-req.headers, "Content-Type")), "no content type without a body")
+    post ::api/build-request("POST", "/api/x", {addresses: ["a"], reference: null}, "tok", "https://svc.cipherowl.ai")
+    assert-eq("{\"addresses\":[\"a\"]}", post.body, "unset fields are omitted")
+    assert-eq("application/json", get(post.headers, "Content-Type"))
+}
+
+test-http-error
+meta ["test"] fn () {
+    e HttpError(::hot::http/HttpResponse({status: 400, headers: {}, body: {message: `invalid address ${EVM} for chain evm`}}))
+    assert-eq(400, e.status)
+    assert(not(contains(e.message, EVM)), "no wallet data in the message")
+    assert(contains(e.message, "HTTP 400"))
+    assert(contains(e.detail, EVM), "vendor text kept in detail")
+    assert(::api/is-status(e, 400))
+    assert(not(::api/is-status("x", 400)))
+}
+
+test-http-error-gateway-and-429
+meta ["test"] fn () {
+    gw HttpError(::hot::http/HttpResponse({status: 403, headers: {"content-type": "text/plain"}, body: "Forbidden\n"}))
+    assert-eq("Forbidden", gw.detail, "plain-text gateway body")
+    limited HttpError(::hot::http/HttpResponse({status: 429, headers: {"Retry-After": "12"}, body: ""}))
+    assert-eq(12, limited.retry-after)
+    assert-eq("cipherowl: request failed with HTTP 429: rate limited; retry after 12s", limited.message)
+    dated HttpError(::hot::http/HttpResponse({status: 429, headers: {"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, body: ""}))
+    assert(is-null(dated.retry-after), "an HTTP-date Retry-After is not parsed (and never halts)")
+}
+
+test-unwrap
+meta ["test"] fn () {
+    assert-eq({ok: true}, ::api/unwrap(::hot::http/HttpResponse({status: 200, headers: {}, body: {ok: true}})))
+    assert(is-err(::api/unwrap(::hot::http/HttpResponse({status: 404, headers: {}, body: {message: "not found"}}))))
+}
+
+// ============================================================================
+// Page-token pagination
+// ============================================================================
+
+PAGES {
+    start: {entries: [1, 2], nextPageToken: "t2"},
+    t2: {entries: [3, 4], nextPageToken: "t3"},
+    t3: {entries: [5], nextPageToken: ""}
+}
+
+fetch-page fn (token: Str?): Map {
+    get(PAGES, or(token, "start"))
+}
+
+test-next-page-token
+meta ["test"] fn () {
+    assert-eq("t2", ::api/next-page-token(PAGES.start))
+    assert(is-null(::api/next-page-token(PAGES.t3)), "empty token means no more pages")
+    assert(is-null(::api/next-page-token({})))
+}
+
+test-collect-pages
+meta ["test"] fn () {
+    assert-eq([1, 2, 3, 4, 5], ::api/collect-pages(fetch-page, "entries", null, 100, []))
+    assert-eq([1, 2, 3], ::api/collect-pages(fetch-page, "entries", null, 3, []))
+}

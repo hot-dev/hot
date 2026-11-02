@@ -1,0 +1,114 @@
+::quickbooks::test::webhooks ns
+meta ["test"]
+
+::wh ::quickbooks::webhooks
+
+// Vectors generated independently with Python:
+//   base64(hmac.new(VERIFIER, body, sha256).digest())
+VERIFIER "qbo-verifier-token-123"
+LEGACY_BODY """{"eventNotifications":[{"realmId":"9341453","dataChangeEvent":{"entities":[{"name":"Invoice","id":"130","operation":"Update","lastUpdated":"2026-10-31T14:42:19.000Z"},{"name":"Customer","id":"58","operation":"Merge","lastUpdated":"2026-10-31T14:42:20.000Z","deletedId":"57"}]}}]}"""
+LEGACY_SIG "p8zcISlxXVSdhfgP/lPO2bmp+ZTUGSjZpVRBoaPBGPM="
+CE_BODY """[{"specversion":"1.0","id":"d1a3aedd-9670-41bf-a4f9-c148a1cc4e03","source":"intuit.abc","type":"qbo.invoice.created.v1","datacontenttype":"application/json","time":"2026-10-31T19:59:07.034Z","intuitentityid":"131","intuitaccountid":"9341453","data":{}},{"specversion":"1.0","id":"e2b4","source":"intuit.abc","type":"qbo.billpayment.voided.v1","time":"2026-10-31T20:00:00Z","intuitentityid":"77","intuitaccountid":"9341453"}]"""
+CE_SIG "OBMMKl4qR0bnYsg8dozB/eStyc704IPlI5QFt7UZcs4="
+
+req fn (body: Str, sig: Str?): Map {
+    {method: "POST", headers: filter-vals({intuit-signature: sig}, is-some), body-raw: body}
+}
+
+test-verify-valid
+meta ["test"] fn () {
+    assert(::wh/verify-request(req(LEGACY_BODY, LEGACY_SIG), VERIFIER), "legacy payload verifies")
+    assert(::wh/verify-request(req(CE_BODY, CE_SIG), VERIFIER), "CloudEvents payload verifies")
+}
+
+test-verify-tampered
+meta ["test"] fn () {
+    tampered replace(LEGACY_BODY, "\"130\"", "\"131\"")
+    assert(not(::wh/verify-request(req(tampered, LEGACY_SIG), VERIFIER)), "a changed body fails")
+    assert(not(::wh/verify-request(req(LEGACY_BODY, CE_SIG), VERIFIER)), "another body's signature fails")
+    assert(not(::wh/verify-request(req(LEGACY_BODY, LEGACY_SIG), "other-verifier")), "the wrong verifier fails")
+    assert(not(::wh/verify-request(req(LEGACY_BODY, "not base64!!"), VERIFIER)), "garbage signatures fail")
+}
+
+test-verify-missing-and-empty
+meta ["test"] fn () {
+    assert(not(::wh/verify-request(req(LEGACY_BODY, null), VERIFIER)), "no signature header fails")
+    assert(not(::wh/verify-request(req(LEGACY_BODY, ""), VERIFIER)), "an empty signature fails")
+    assert(not(::wh/verify-request(req(LEGACY_BODY, LEGACY_SIG), "")), "an empty verifier fails closed")
+    assert(not(::wh/verify-request(req(LEGACY_BODY, LEGACY_SIG), "   ")), "a blank verifier fails closed")
+}
+
+test-verify-uses-raw-bytes
+meta ["test"] fn () {
+    request {method: "POST", headers: {intuit-signature: LEGACY_SIG}, body-raw: "lossy", body-bytes: Bytes(LEGACY_BODY)}
+    assert(::wh/verify-request(request, VERIFIER), "body-bytes wins over body-raw")
+}
+
+// Computed with Python over the UTF-8 bytes, and over bytes that aren't UTF-8.
+MULTIBYTE_BODY """{"note":"Café €5 日本語"}"""
+MULTIBYTE_SIG "vxUgefS7Ol6tuAhtqS2+4gikLAxVlgkZrbljYrUDZN4="
+BINARY_SIG "SRyXqQFkKs3L9aVxe4H1g2ienVT7sE1d9ktysK4XIoM="
+
+test-verify-covers-multibyte-and-binary-bodies
+meta ["test"] fn () {
+    assert(::wh/verify-request(req(MULTIBYTE_BODY, MULTIBYTE_SIG), VERIFIER), "a multibyte Str body is signed over its UTF-8 bytes")
+    assert(::wh/verify-request({...req("lossy", MULTIBYTE_SIG), body-bytes: Bytes(MULTIBYTE_BODY)}, VERIFIER), "multibyte body-bytes")
+    assert(::wh/verify-request({...req("lossy", BINARY_SIG), body-bytes: Bytes([123, 255, 254, 0, 125])}, VERIFIER), "a body that isn't UTF-8 verifies")
+}
+
+test-parse-legacy
+meta ["test"] fn () {
+    events ::wh/parse-events(LEGACY_BODY)
+    assert-eq(2, length(events))
+    assert-eq({format: "legacy", realm-id: "9341453", entity: "Invoice", id: "130", operation: "Update", last-updated: "2026-10-31T14:42:19.000Z"}, events[0])
+    assert-eq("Merge", events[1].operation)
+    assert-eq("57", events[1].deleted-id)
+}
+
+test-parse-cloudevents
+meta ["test"] fn () {
+    events ::wh/parse-events(CE_BODY)
+    assert-eq(2, length(events))
+    e events[0]
+    assert-eq("cloudevents", e.format)
+    assert-eq("d1a3aedd-9670-41bf-a4f9-c148a1cc4e03", e.event-id)
+    assert-eq("9341453", e.realm-id)
+    assert-eq("Invoice", e.entity, "entity names are canonical")
+    assert-eq("131", e.id)
+    assert-eq("Create", e.operation, "verbs map to the legacy operation names")
+    assert-eq("BillPayment", events[1].entity)
+    assert-eq("Void", events[1].operation)
+}
+
+test-parse-edge-cases
+meta ["test"] fn () {
+    assert-eq([], ::wh/parse-events(""))
+    assert-eq([], ::wh/parse-events({}))
+    assert(is-err(::wh/parse-events("{not json")), "invalid JSON errs")
+    single ::wh/parse-events({specversion: "1.0", type: "qbo.purchaseorder.updated.v1", intuitentityid: "9", intuitaccountid: "1"})
+    assert-eq("PurchaseOrder", single[0].entity, "entities outside the CRUD table still get canonical names")
+    assert-eq("Update", single[0].operation)
+    odd ::wh/parse-events([{type: "qbo.widget.archived.v2"}])
+    assert-eq("widget", odd[0].entity, "unknown names pass through")
+    assert-eq("Archived", odd[0].operation)
+}
+
+test-construct-and-receive
+meta ["test"] fn () {
+    events ::wh/construct-events(req(CE_BODY, CE_SIG), VERIFIER)
+    assert-eq(2, length(events))
+    assert(is-err(::wh/construct-events(req(CE_BODY, LEGACY_SIG), VERIFIER)), "invalid signatures err")
+
+    ok ::wh/receive(req(LEGACY_BODY, LEGACY_SIG), VERIFIER)
+    assert(ok.verified)
+    assert-eq(200, ok.response.status)
+    assert-eq(2, length(ok.events))
+
+    bad ::wh/receive(req(LEGACY_BODY, "AAAA"), VERIFIER)
+    assert(not(bad.verified))
+    assert-eq(401, bad.response.status)
+    assert-eq([], bad.events)
+
+    empty ::wh/receive(req(LEGACY_BODY, LEGACY_SIG), "")
+    assert-eq(401, empty.response.status, "an empty verifier fails closed")
+}

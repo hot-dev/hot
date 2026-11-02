@@ -1,0 +1,228 @@
+::middesk::decisions ns
+meta {
+    doc: """
+    Decision helpers: turn a Middesk business report into a compact,
+    deterministic record an agent (or a rule) can act on.
+
+    `summarize` gives what passed, what failed, the warnings, every
+    review task, the TIN result, watchlist hits, registration and record
+    counts, the orders, and a `needs-review` flag. The same report always
+    gives the same record: lists are sorted, and nothing depends on time
+    or ordering in the response.
+
+    The summary never carries the TIN, SSNs, birth dates or document
+    links. It does carry what Middesk wrote in task messages (business
+    names, addresses, and sometimes officer names).
+
+    Decisions use the same vocabulary as `::persona::decisions`:
+    `approved | declined | needs-review | pending | failed`.
+    """
+}
+
+// ---------------------------------------------------------------------------
+// Status
+// ---------------------------------------------------------------------------
+
+status-decision
+meta {
+    doc: """Normalize a business status: `approved` → approved, `rejected` → declined, `in_review` → needs-review, `open`/`pending`/`in_audit` → pending, anything else → needs-review (a new status is never read as an approval)."""
+}
+fn (status: Any): Str {
+  s Str(or(status, ""))
+  cond {
+    eq(s, "approved") => { "approved" }
+    eq(s, "rejected") => { "declined" }
+    eq(s, "in_review") => { "needs-review" }
+    in(s, ["open", "pending", "in_audit"]) => { "pending" }
+    => { "needs-review" }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Review tasks
+// ---------------------------------------------------------------------------
+
+review-tasks
+meta {
+    doc: """The business's review tasks as `{key, category, label, sub_label, status, message}` (sources dropped), sorted by category then key. Exposed for testing."""
+}
+fn (business: Map): Vec {
+  review get(business, "review")
+  tasks if(is-map(review), or(get(review, "tasks"), []), [])
+  slim map(filter(tasks, is-map), (t) {
+    {
+      key: get(t, "key"),
+      category: get(t, "category"),
+      label: get(t, "label"),
+      sub_label: get(t, "sub_label"),
+      status: get(t, "status"),
+      message: get(t, "message")
+    }
+  })
+  sort-by(slim, (t) { `${or(t.category, "")}|${or(t.key, "")}|${or(t.label, "")}` })
+}
+
+tasks-with-status fn (tasks: Vec, status: Str): Vec {
+  filter(tasks, (t) { eq(t.status, status) })
+}
+
+brief fn (t: Map): Map {
+  filter-vals({key: t.key, label: t.label, sub_label: t.sub_label, message: t.message}, is-some)
+}
+
+// ---------------------------------------------------------------------------
+// Sections
+// ---------------------------------------------------------------------------
+
+tin-result
+meta {
+    doc: """The TIN match without the TIN: `{verified, mismatch, unknown, issued, error}` (null fields dropped), or null when no TIN was checked. Exposed for testing."""
+}
+fn (business: Map): Map? {
+  tin get(business, "tin")
+  cond {
+    not(is-map(tin)) => { null }
+    => {
+      filter-vals({
+        verified: get(tin, "verified"),
+        mismatch: get(tin, "mismatch"),
+        unknown: get(tin, "unknown"),
+        issued: get(tin, "issued"),
+        error: get(tin, "error")
+      }, is-some)
+    }
+  }
+}
+
+watchlist-hits
+meta {
+    doc: """The number of watchlist hits: `watchlist.hit_count` when present, else the total `results` across `watchlist.lists`. 0 when there is no watchlist. Exposed for testing."""
+}
+fn (business: Map): Int {
+  w get(business, "watchlist")
+  cond {
+    not(is-map(w)) => { 0 }
+    is-int(get(w, "hit_count")) => { get(w, "hit_count") }
+    => {
+      lists or(get(w, "lists"), [])
+      reduce(lists, (acc, l) { add(acc, length(or(if(is-map(l), get(l, "results"), null), []))) }, 0)
+    }
+  }
+}
+
+registration-summary
+meta {
+    doc: """Secretary of State registrations: `{count, active, inactive, states}` with states sorted and distinct. Exposed for testing."""
+}
+fn (business: Map): Map {
+  regs filter(or(get(business, "registrations"), []), is-map)
+  statuses map(regs, (r) { lowercase(Str(or(get(r, "status"), ""))) })
+  {
+    count: length(regs),
+    active: length(filter(statuses, (s) { eq(s, "active") })),
+    inactive: length(filter(statuses, (s) { eq(s, "inactive") })),
+    states: sort(distinct(filter(map(regs, (r) { get(r, "state") }), is-some)))
+  }
+}
+
+count-of fn (business: Map, key: Str): Int {
+  v get(business, key)
+  if(is-vec(v), length(v), 0)
+}
+
+order-summary fn (business: Map): Vec {
+  orders filter(or(get(business, "orders"), []), is-map)
+  sort-by(map(orders, (o) { {product: or(get(o, "product"), get(o, "package")), status: get(o, "status")} }), (o) {
+    `${or(o.product, "")}|${or(o.status, "")}`
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Summary
+// ---------------------------------------------------------------------------
+
+summarize
+meta {
+    doc: """
+    A compact, deterministic record of a business report:
+
+    - `id`, `name`, `status`, `decision` (see `status-decision`), `final`
+      (approved or rejected)
+    - `needs-review`: true when the status is `in_review`, or when the
+      business is not yet approved or rejected and any task failed or
+      warned, or a watchlist hit exists; also true for an unknown status.
+      False once you have approved or rejected the business.
+    - `passed`: the keys of `success` tasks (sorted)
+    - `failed`, `warnings`: `{key, label, sub_label, message}` for
+      `failure` and `warning` tasks
+    - `review-tasks`: every task (see `review-tasks`)
+    - `tin`: see `tin-result`; `watchlist-hits`; `registrations`: see
+      `registration-summary`
+    - `records`: counts of `liens`, `litigations`, `bankruptcies`
+    - `orders`: `[{product, status}]`
+
+    **Example**
+
+    ```hot
+    s ::middesk::decisions/summarize(::middesk::businesses/get-business("biz_..."))
+    s.needs-review  // true
+    s.failed        // [{key: "tin", label: "TIN Match", sub_label: "Not Found", message: "..."}]
+    ```
+    """
+}
+fn (business: Map): Map {
+  b untype(business)
+  status get(b, "status")
+  decision status-decision(status)
+  tasks review-tasks(b)
+  failed tasks-with-status(tasks, "failure")
+  warnings tasks-with-status(tasks, "warning")
+  hits watchlist-hits(b)
+  final in(decision, ["approved", "declined"])
+  known in(Str(or(status, "")), ["open", "pending", "in_audit", "in_review", "approved", "rejected"])
+  needs-review cond {
+    final => { false }
+    not(known) => { true }
+    eq(status, "in_review") => { true }
+    => { or(not(is-empty(failed)), or(not(is-empty(warnings)), gt(hits, 0))) }
+  }
+
+  {
+    id: get(b, "id"),
+    name: get(b, "name"),
+    status: status,
+    decision: decision,
+    final: final,
+    needs-review: needs-review,
+    passed: sort(distinct(filter(map(tasks-with-status(tasks, "success"), (t) { t.key }), is-some))),
+    failed: map(failed, brief),
+    warnings: map(warnings, brief),
+    review-tasks: tasks,
+    tin: tin-result(b),
+    watchlist-hits: hits,
+    registrations: registration-summary(b),
+    records: {
+      liens: count-of(b, "liens"),
+      litigations: count-of(b, "litigations"),
+      bankruptcies: count-of(b, "bankruptcies")
+    },
+    orders: order-summary(b)
+  }
+}
+
+reasons
+meta {
+    doc: """Short reasons for a summary, sorted: one per failed or warning task (`"failure tin: TIN Match - Not Found"`), plus `"watchlist hits: N"` when there are hits."""
+}
+fn (summary: Map): Vec<Str> {
+  line (prefix, t) {
+    label or(t.label, t.key)
+    sub if(is-some(t.sub_label), ` - ${t.sub_label}`, "")
+    `${prefix} ${t.key}: ${label}${sub}`
+  }
+
+  f map(or(summary.failed, []), (t) { line("failure", t) })
+  w map(or(summary.warnings, []), (t) { line("warning", t) })
+  h if(gt(or(summary.watchlist-hits, 0), 0), [`watchlist hits: ${summary.watchlist-hits}`], [])
+  sort(concat(concat(f, w), h))
+}

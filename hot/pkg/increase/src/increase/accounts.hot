@@ -1,0 +1,222 @@
+::increase::accounts ns
+meta {
+    doc: """
+    Accounts, their balances and statements, and Account Numbers (the
+    routing and account numbers that receive money into an account).
+
+    Account Number objects contain the full `account_number` and
+    `routing_number`. Treat them as sensitive: don't log those responses,
+    and show customers only the last four digits.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+// ---------------------------------------------------------------------------
+// Accounts
+// ---------------------------------------------------------------------------
+
+create-account
+meta {
+    doc: """
+    POST /accounts: open an Account. `params` needs `name`; optional
+    `entity_id`, `informational_entity_id`, `program_id`, `funding`
+    (`"deposits"` or `"loan"`) and `loan: {credit_limit, ...}`.
+
+    **Example**
+
+    ```hot
+    ::increase::accounts/create-account({name: "Operating", entity_id: "entity_n8y8tnk2p9339ti393yi"},
+      {idempotency-key: "account-operating"})
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  create-account(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/create("/accounts", params, ["name"], opts, "create-account")
+}
+
+get-account
+meta {
+    doc: """GET /accounts/{account_id}: retrieve an Account."""
+}
+fn
+(account-id: Str): Map {
+  get-account(account-id, {})
+},
+(account-id: Str, opts: Map): Map {
+  ::api/call("GET", `/accounts/${seg(account-id)}`, {}, opts)
+}
+
+list-accounts
+meta {
+    doc: """
+    GET /accounts: one page of Accounts (`{data, next_cursor}`). Filters:
+    `entity_id`, `informational_entity_id`, `program_id`, `"status.in"`
+    (`["open"]`, `["closed"]`), `created_at: {after, before, on_or_after,
+    on_or_before}`, `idempotency_key`, plus `limit` (max 100) and `cursor`.
+    Use `::increase::api/collect-all("/accounts", params)` for every page.
+
+    **Example**
+
+    ```hot
+    page ::increase::accounts/list-accounts({"status.in": ["open"], limit: 10})
+    ```
+    """
+}
+fn
+(): Map {
+  list-accounts({})
+},
+(params: Map): Map {
+  list-accounts(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/accounts", params, opts)
+}
+
+update-account
+meta {
+    doc: """PATCH /accounts/{account_id}: rename an Account (`name`) or change a loan's `loan: {credit_limit}`."""
+}
+fn
+(account-id: Str, params: Map): Map {
+  update-account(account-id, params, {})
+},
+(account-id: Str, params: Map, opts: Map): Map {
+  ::api/call("PATCH", `/accounts/${seg(account-id)}`, params, opts)
+}
+
+close-account
+meta {
+    doc: """POST /accounts/{account_id}/close: close an Account. Its balance must be zero. Irreversible; agents should get a person's approval first."""
+}
+fn
+(account-id: Str): Map {
+  close-account(account-id, {})
+},
+(account-id: Str, opts: Map): Map {
+  ::api/call("POST", `/accounts/${seg(account-id)}/close`, {}, opts)
+}
+
+get-balance
+meta {
+    doc: """
+    GET /accounts/{account_id}/balance: `{account_id, current_balance,
+    available_balance, loan}` in the minor unit (cents). Pass `at-time`
+    (ISO 8601) for the balance at a past moment.
+
+    **Example**
+
+    ```hot
+    balance ::increase::accounts/get-balance("account_in71c4amph0vgo2qllky")
+    balance.available_balance   // => 100
+    ```
+    """
+}
+fn
+(account-id: Str): Map {
+  get-balance(account-id, null)
+},
+(account-id: Str, at-time: Str?): Map {
+  get-balance(account-id, at-time, {})
+},
+(account-id: Str, at-time: Str?, opts: Map): Map {
+  ::api/call("GET", `/accounts/${seg(account-id)}/balance`, {at_time: at-time}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Account Numbers
+// ---------------------------------------------------------------------------
+
+create-account-number
+meta {
+    doc: """
+    POST /account_numbers: issue a new account number on an Account.
+    `params` needs `account_id` and `name`; optional `inbound_ach:
+    {debit_status: "allowed" | "blocked"}` and `inbound_checks: {status:
+    "allowed" | "check_transfers_only"}`. The response holds the full
+    account and routing numbers: don't log it.
+    """
+}
+fn
+(params: Map): Map {
+  create-account-number(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/create("/account_numbers", params, ["account_id", "name"], opts, "create-account-number")
+}
+
+get-account-number
+meta {
+    doc: """GET /account_numbers/{account_number_id}: retrieve an Account Number (includes the full account and routing numbers)."""
+}
+fn
+(account-number-id: Str): Map {
+  get-account-number(account-number-id, {})
+},
+(account-number-id: Str, opts: Map): Map {
+  ::api/call("GET", `/account_numbers/${seg(account-number-id)}`, {}, opts)
+}
+
+list-account-numbers
+meta {
+    doc: """GET /account_numbers: one page of Account Numbers. Filters: `account_id`, `"status.in"` (`active`, `disabled`, `canceled`), `"ach_debit_status.in"`, `created_at`, `idempotency_key`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-account-numbers({})
+},
+(params: Map): Map {
+  list-account-numbers(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/account_numbers", params, opts)
+}
+
+update-account-number
+meta {
+    doc: """PATCH /account_numbers/{account_number_id}: change `name`, `status` (`"active"`, `"disabled"`, `"canceled"`; canceling is permanent), `inbound_ach` or `inbound_checks`."""
+}
+fn
+(account-number-id: Str, params: Map): Map {
+  update-account-number(account-number-id, params, {})
+},
+(account-number-id: Str, params: Map, opts: Map): Map {
+  ::api/call("PATCH", `/account_numbers/${seg(account-number-id)}`, params, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Account Statements
+// ---------------------------------------------------------------------------
+
+list-account-statements
+meta {
+    doc: """GET /account_statements: one page of monthly Account Statements. Filters: `account_id`, `statement_period_start: {after, before, on_or_after, on_or_before}`, `limit`, `cursor`. Each statement's `file_id` names the PDF (fetch it with `/files/{file_id}`)."""
+}
+fn
+(): Map {
+  list-account-statements({})
+},
+(params: Map): Map {
+  list-account-statements(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/account_statements", params, opts)
+}
+
+get-account-statement
+meta {
+    doc: """GET /account_statements/{account_statement_id}: retrieve an Account Statement."""
+}
+fn
+(account-statement-id: Str): Map {
+  get-account-statement(account-statement-id, {})
+},
+(account-statement-id: Str, opts: Map): Map {
+  ::api/call("GET", `/account_statements/${seg(account-statement-id)}`, {}, opts)
+}

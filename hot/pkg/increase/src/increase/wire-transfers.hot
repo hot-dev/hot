@@ -1,0 +1,97 @@
+::increase::wire-transfers ns
+meta {
+    doc: """
+    Wire Transfers over Fedwire. A submitted wire is final and settles
+    within minutes; it can't be canceled once sent (only reversed by the
+    receiving bank, if it agrees). Use `require_approval: true`.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+create-wire-transfer
+meta {
+    doc: """
+    POST /wire_transfers: create a Wire Transfer. Moves money: `opts` must carry an
+    `idempotency-key` (the call errs without one and sends nothing), and
+    the call is never retried. `params` needs `account_id`, `amount`, `creditor`, `remittance`.
+
+    The destination is `external_account_id` or `account_number` plus
+    `routing_number`. `creditor` is `{name, address: {structured: {line1,
+    city, state, postal_code, country}}}`; `remittance` is `{category:
+    "unstructured", unstructured: {message}}` (or `category: "tax"`).
+    Optional: `debtor`, `source_account_number_id`,
+    `inbound_wire_drawdown_request_id`.
+
+    **Example**
+
+    ```hot
+    ::increase::wire-transfers/create-wire-transfer({
+      account_id: "account_in71c4amph0vgo2qllky",
+      external_account_id: "external_account_ukk55lr923a3ac0pp7iv",
+      amount: 250000,
+      creditor: {name: "Ian Crease", address: {structured: {line1: "33 Liberty Street", city: "New York", state: "NY", postal_code: "10045", country: "US"}}},
+      remittance: {category: "unstructured", unstructured: {message: "Invoice 42"}},
+      require_approval: true
+    }, {idempotency-key: "invoice-42-wire"})
+    ```
+
+    Set `require_approval: true` (or the `increase.transfers.require-approval`
+    context variable) so a person approves the transfer before it is sent.
+    """
+}
+fn (params: Map, opts: Map): Map {
+  ::api/move-money("/wire_transfers", params, ["account_id", "amount", "creditor", "remittance"], true, opts, "create-wire-transfer")
+}
+
+get-wire-transfer
+meta {
+    doc: """GET /wire_transfers/{id}: retrieve a Wire Transfer."""
+}
+fn
+(transfer-id: Str): Map {
+  get-wire-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("GET", `/wire_transfers/${seg(transfer-id)}`, {}, opts)
+}
+
+list-wire-transfers
+meta {
+    doc: """GET /wire_transfers: one page of Wire Transfers (`{data, next_cursor}`). Filters: `account_id`, `external_account_id`, `"status.in"`, `idempotency_key`, `created_at: {after, before, on_or_after, on_or_before}`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-wire-transfers({})
+},
+(params: Map): Map {
+  list-wire-transfers(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/wire_transfers", params, opts)
+}
+
+approve-wire-transfer
+meta {
+    doc: """POST /wire_transfers/{id}/approve: approve a Wire Transfer in `pending_approval`. Approving releases the transfer to be sent: agents must not approve on their own; leave it to a person (in the Increase dashboard, or through your own approval step that calls this)."""
+}
+fn
+(transfer-id: Str): Map {
+  approve-wire-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("POST", `/wire_transfers/${seg(transfer-id)}/approve`, {}, opts)
+}
+
+cancel-wire-transfer
+meta {
+    doc: """POST /wire_transfers/{id}/cancel: cancel a Wire Transfer that is still `pending_approval`."""
+}
+fn
+(transfer-id: Str): Map {
+  cancel-wire-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("POST", `/wire_transfers/${seg(transfer-id)}/cancel`, {}, opts)
+}

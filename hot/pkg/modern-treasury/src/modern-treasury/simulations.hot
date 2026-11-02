@@ -1,0 +1,51 @@
+::modern-treasury::simulations ns
+meta {
+    doc: """
+    Sandbox simulations. Modern Treasury uses one host for sandbox and
+    live organizations, so this package can't tell them apart from the
+    URL: every simulation errs before sending anything unless
+    `modern-treasury.environment` (or `environment` in `opts`) is
+    `"sandbox"`. Modern Treasury also
+    rejects simulations made with live credentials.
+    """
+}
+
+::api ::modern-treasury::api
+
+create-incoming-payment-detail
+meta {
+    doc: """
+    POST /api/simulations/incoming_payment_details/create_async: simulate
+    a payment arriving at an internal account. `params` needs `type`
+    (`"ach"`, `"wire"`, `"rtp"`, `"check"`, `"book"`, ...); optional
+    `internal_account_id`, `virtual_account_id`, `amount`, `direction`
+    (`"credit"` for money in), `currency`, `as_of_date`, `description`,
+    `subtype`, `data`. Returns `{object_id, object_type, status}`; the
+    incoming payment detail appears shortly after.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::simulations/create-incoming-payment-detail({
+      type: "ach",
+      direction: "credit",
+      amount: 1000,
+      internal_account_id: "0f8e3719-3dfd-4613-9bbf-c0333781b59f"
+    })
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  create-incoming-payment-detail(params, {})
+},
+(params: Map, opts: Map): Map {
+  env ::api/environment-of(opts)
+  cond {
+    is-err(env) => { env }
+    => {
+      allowed ::api/require-sandbox(env, "create-incoming-payment-detail")
+      if(is-err(allowed), allowed, ::api/create("/api/simulations/incoming_payment_details/create_async", params, ["type"], opts, "create-incoming-payment-detail"))
+    }
+  }
+}

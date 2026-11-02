@@ -1,0 +1,110 @@
+::sanctions::config ns
+meta {
+    ctx: {
+        "sanctions.store": {required: false, secret: false},
+        "sanctions.max-age-days": {required: false, secret: false},
+        "sanctions.opensanctions.api-key": {required: false},
+        "sanctions.opensanctions.base-url": {required: false, secret: false},
+        "sanctions.opensanctions.dataset": {required: false, secret: false}
+    },
+    doc: """
+    The one settings resolver for the package: per-call `opts` first,
+    then context variables, then defaults. Per-call values are never
+    written to context, so parallel flows and tenants in one run don't
+    see each other's keys.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `store` | `sanctions.store` | `"sanctions"` |
+    | `max-age-days` | `sanctions.max-age-days` | `7` |
+    | `api-key` | `sanctions.opensanctions.api-key` | none (OpenSanctions only) |
+    | `base-url` | `sanctions.opensanctions.base-url` | `https://api.opensanctions.org` |
+    | `dataset` | `sanctions.opensanctions.dataset` | `"default"` |
+
+    **Per-call credentials.** An `api-key` in `opts` is masked in call
+    records. Present but blank or null, it is an error, never a fallback
+    to context. The context key is never sent to a per-call `base-url`: a
+    self-hosted yente that needs no key gets none.
+    """
+}
+
+::ctx ::hot::ctx
+
+DEFAULT_STORE "sanctions"
+DEFAULT_MAX_AGE_DAYS 7
+DEFAULT_OPENSANCTIONS_URL "https://api.opensanctions.org"
+DEFAULT_DATASET "default"
+
+given fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+to-int fn (v: Any, default: Int): Int {
+  match v {
+    Int => { v }
+    Str => { if(::hot::regex/is-match(trim(v), "^\\d+$"), Int(trim(v)), default) }
+    _ => { default }
+  }
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{store, max-age-days, api-key,
+    base-url, dataset}`. An `api-key` in `opts` replaces the context key
+    for that call only and comes back unchanged; `api-key` is null when
+    neither is set, and when `opts` has a `base-url` without one. An Err
+    when `api-key` is in `opts` but blank or null.
+
+    **Example**
+
+    ```hot
+    cfg ::sanctions::config/resolve({api-key: tenant.opensanctions-key, dataset: "sanctions"})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  key get(opts, "api-key")
+  if(given(key), ::ctx/mark-secret(key))
+  base pick(opts, "base-url", "sanctions.opensanctions.base-url", DEFAULT_OPENSANCTIONS_URL)
+  cond {
+    and(in("api-key", keys(opts)), not(given(key))) => {
+      err("sanctions: api-key is in the call's opts but is blank or null. Pass a value, or leave api-key out to use sanctions.opensanctions.api-key.")
+    }
+    => {
+      {
+        store: pick(opts, "store", "sanctions.store", DEFAULT_STORE),
+        max-age-days: to-int(pick(opts, "max-age-days", "sanctions.max-age-days", DEFAULT_MAX_AGE_DAYS), DEFAULT_MAX_AGE_DAYS),
+        api-key: if(given(get(opts, "base-url")), key, pick(opts, "api-key", "sanctions.opensanctions.api-key", null)),
+        base-url: ::hot::regex/replace-all(Str(base), "/+$", ""),
+        dataset: pick(opts, "dataset", "sanctions.opensanctions.dataset", DEFAULT_DATASET)
+      }
+    }
+  }
+}
+
+require-api-key
+meta {
+    doc: """The resolved OpenSanctions API key. The hosted API needs one, so its absence there is an Err naming where to set it; a self-hosted yente may need none, which gives null."""
+}
+fn (cfg: Map): Str? {
+  cond {
+    given(cfg.api-key) => { cfg.api-key }
+    ne(cfg.base-url, DEFAULT_OPENSANCTIONS_URL) => { null }
+    => { err("sanctions: no OpenSanctions API key; set sanctions.opensanctions.api-key or pass {api-key: ...} in opts. The context key is never sent to a per-call base-url.") }
+  }
+}

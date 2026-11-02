@@ -1,0 +1,48 @@
+::sumsub::integration ns
+meta ["test"]
+
+::ctx ::sumsub::integration::ctx
+
+// =============================================================================
+// Integration tests (live Sumsub, read-only)
+// =============================================================================
+// Requires SUMSUB_APP_TOKEN and SUMSUB_SECRET_KEY (a sandbox App Token is
+// recommended); SUMSUB_LEVEL_NAME is optional. Every test only reads: no
+// applicant, document or transaction is created. Without credentials each
+// test records a skip and passes.
+// Run with: hot test -p pkg-integration-sumsub
+
+test-signed-get-lists-levels
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            levels ::sumsub::applicants/list-levels()
+            assert(is-some(levels), "a signed GET is accepted (a bad signature would be a 401 Err)")
+        }
+    }
+}
+
+test-unknown-external-user
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            out ::sumsub::applicants/find-applicant-by-external-id(`hot-integration-missing-${::hot::random/random-string(16)}`)
+            assert-eq(false, out.exists, "an unknown externalUserId does not exist")
+        }
+    }
+}
+
+test-configured-level-exists
+meta ["test"] fn () {
+    level ::hot::ctx/get("sumsub.level.name")
+    cond {
+        or(not(::ctx/configured()), is-null(level)) => { ::ctx/skip() }
+        => {
+            levels ::sumsub::applicants/list-levels()
+            names map(::sumsub::api/page-items(levels), (l) { get(l, "name") })
+            assert(in(level, names), "SUMSUB_LEVEL_NAME is one of the account's levels")
+        }
+    }
+}

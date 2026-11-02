@@ -1,0 +1,113 @@
+::increase::check-transfers ns
+meta {
+    doc: """
+    Check Transfers: checks Increase prints and mails, or that you print
+    yourself. `stop-payment` stops a check that has been mailed but not
+    deposited.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+create-check-transfer
+meta {
+    doc: """
+    POST /check_transfers: create a Check Transfer. Moves money: `opts` must carry an
+    `idempotency-key` (the call errs without one and sends nothing), and
+    the call is never retried. `params` needs `account_id`, `amount`, `fulfillment_method`, `source_account_number_id`.
+
+    `fulfillment_method` is `"physical_check"` (Increase prints and mails
+    it; give `physical_check: {recipient_name, memo, mailing_address:
+    {line1, city, state, postal_code}, payer: [...]}`) or `"third_party"`
+    (you print it; `third_party: {recipient_name}`). Optional:
+    `check_number`, `valid_until_date`, `balance_check`.
+
+    **Example**
+
+    ```hot
+    ::increase::check-transfers/create-check-transfer({
+      account_id: "account_in71c4amph0vgo2qllky",
+      source_account_number_id: "account_number_v18nkfqm6afpsrvy82b2",
+      amount: 1750,
+      fulfillment_method: "physical_check",
+      physical_check: {
+        recipient_name: "Ian Crease",
+        memo: "Invoice 42",
+        mailing_address: {line1: "33 Liberty Street", city: "New York", state: "NY", postal_code: "10045"},
+        payer: [{contents: "National Phonograph Company"}]
+      },
+      require_approval: true
+    }, {idempotency-key: "invoice-42-check"})
+    ```
+
+    Set `require_approval: true` (or the `increase.transfers.require-approval`
+    context variable) so a person approves the transfer before it is sent.
+    """
+}
+fn (params: Map, opts: Map): Map {
+  ::api/move-money("/check_transfers", params, ["account_id", "amount", "fulfillment_method", "source_account_number_id"], true, opts, "create-check-transfer")
+}
+
+get-check-transfer
+meta {
+    doc: """GET /check_transfers/{id}: retrieve a Check Transfer."""
+}
+fn
+(transfer-id: Str): Map {
+  get-check-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("GET", `/check_transfers/${seg(transfer-id)}`, {}, opts)
+}
+
+list-check-transfers
+meta {
+    doc: """GET /check_transfers: one page of Check Transfers (`{data, next_cursor}`). Filters: `account_id`, `"status.in"`, `idempotency_key`, `created_at: {after, before, on_or_after, on_or_before}`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-check-transfers({})
+},
+(params: Map): Map {
+  list-check-transfers(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/check_transfers", params, opts)
+}
+
+approve-check-transfer
+meta {
+    doc: """POST /check_transfers/{id}/approve: approve a Check Transfer in `pending_approval`. Approving releases the transfer to be sent: agents must not approve on their own; leave it to a person (in the Increase dashboard, or through your own approval step that calls this)."""
+}
+fn
+(transfer-id: Str): Map {
+  approve-check-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("POST", `/check_transfers/${seg(transfer-id)}/approve`, {}, opts)
+}
+
+cancel-check-transfer
+meta {
+    doc: """POST /check_transfers/{id}/cancel: cancel a Check Transfer that is still `pending_approval`."""
+}
+fn
+(transfer-id: Str): Map {
+  cancel-check-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("POST", `/check_transfers/${seg(transfer-id)}/cancel`, {}, opts)
+}
+
+stop-payment
+meta {
+    doc: """POST /check_transfers/{id}/stop_payment: stop payment on a mailed check that hasn't been deposited. `reason` is `"mail_delivery_failed"`, `"not_authorized"`, `"valid_until_date_passed"` or `"unknown"` (null leaves it unset)."""
+}
+fn
+(transfer-id: Str, reason: Str?): Map {
+  stop-payment(transfer-id, reason, {})
+},
+(transfer-id: Str, reason: Str?, opts: Map): Map {
+  ::api/call("POST", `/check_transfers/${seg(transfer-id)}/stop_payment`, {reason: reason}, opts)
+}

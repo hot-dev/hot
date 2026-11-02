@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.sanctions {
+  name: "hot.dev/sanctions",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "Sanctions screening for Hot over the free official lists: US OFAC SDN and Consolidated, the UK Sanctions List, the EU Consolidated Financial Sanctions List and the UN Security Council Consolidated List. Downloads and parses each list into one normalized Entry record, caches a compact name index in ::hot::store with a scheduled refresh, and screens names with transliteration, token-set and Jaro-Winkler similarity and date-of-birth and country adjustments. Returns explained possible-match or no-match results for human review. Optional OpenSanctions /match backend with your own key.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["sanctions", "compliance", "kyc", "aml", "ofac", "screening"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

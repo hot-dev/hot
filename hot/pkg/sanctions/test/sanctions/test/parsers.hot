@@ -1,0 +1,242 @@
+::sanctions::test::parsers ns
+meta ["test"]
+
+::fx ::sanctions::test::fixtures
+::ofac ::sanctions::ofac
+::uk ::sanctions::uk
+::eu ::sanctions::eu
+::un ::sanctions::un
+::entry ::sanctions::entry
+::sx ::sanctions::xml
+
+by-id fn (entries: Vec, id: Str): Map {
+  untype(find-first(entries, (e) { eq(e.id, id) }))
+}
+
+// ============================================================================
+// OFAC CSV
+// ============================================================================
+
+test-ofac-parse-csv-quoted-and-null-fields
+meta ["test"]
+fn () {
+    rows ::ofac/parse-csv("36,\"AEROCARIBBEAN AIRLINES\",-0- \r\n173,\"ANGLO-CARIBBEAN CO., LTD.\",\"a \"\"b\"\"\"\r\n", 3)
+    assert-eq([["36", "AEROCARIBBEAN AIRLINES", null], ["173", "ANGLO-CARIBBEAN CO., LTD.", "a \"b\""]], rows)
+}
+
+test-ofac-parse-entries
+meta ["test"]
+fn () {
+    es ::ofac/parse("ofac-sdn", ::fx/OFAC_SDN, ::fx/OFAC_ALT, ::fx/OFAC_ADD, ::fx/OFAC_COMMENTS)
+    assert-eq(5, length(es))
+    bank by-id(es, "306")
+    assert-eq("BANCO NACIONAL DE CUBA", bank.name)
+    assert-eq("entity", bank.kind)
+    assert-eq(["NATIONAL BANK OF CUBA"], bank.aliases)
+    assert-eq(["CUBA"], bank.programs)
+    assert-eq(["Zweierstrasse 35, Zurich CH-8022, Switzerland", "Avenida de Concha Espina 8, Madrid E-28036, Spain"], bank.addresses)
+    assert-eq("ofac-sdn", bank.source)
+    assert-eq("OFAC SDN List", bank.list)
+    assert-eq("https://sanctionssearch.ofac.treas.gov/Details.aspx?id=306", bank.url)
+}
+
+test-ofac-individual-dob-from-remarks
+meta ["test"]
+fn () {
+    es ::ofac/parse("ofac-sdn", ::fx/OFAC_SDN, ::fx/OFAC_ALT, ::fx/OFAC_ADD, "")
+    z by-id(es, "2676")
+    assert-eq("individual", z.kind)
+    assert-eq("AL ZAWAHIRI, Dr. Ayman", z.name)
+    assert-eq(["AL-ZAWAHIRI, Ayman", "SALIM, Ahmad Fuad", "AL-ZAWAHIRI, Aiman Muhammad Rabi"], z.aliases)
+    assert-eq(["1951-06-19"], z.dobs)
+    assert-eq([], z.addresses, "an all -0- address row is dropped")
+}
+
+test-ofac-vessel-aircraft-and-programs
+meta ["test"]
+fn () {
+    es ::ofac/parse("ofac-sdn", ::fx/OFAC_SDN, "", "", ::fx/OFAC_COMMENTS)
+    assert-eq("vessel", by-id(es, "4243").kind)
+    assert-eq("aircraft", by-id(es, "15432").kind)
+    gpb by-id(es, "17016")
+    assert-eq(["UKRAINE-EO13662", "RUSSIA-EO14024"], gpb.programs)
+    assert(::hot::str/contains(gpb.remarks, "Legal Entity Number 253400WSS48YWMBUA688"), "comments continue the remarks")
+}
+
+test-ofac-parse-remarks
+meta ["test"]
+fn () {
+    assert-eq({dobs: ["1951-06-19"], nationalities: ["EG"]}, ::ofac/parse-remarks("DOB 19 Jun 1951; POB Giza, Egypt; nationality Egypt."))
+    r ::ofac/parse-remarks("DOB 01 Jan 1960 to 31 Dec 1962; alt. DOB 1959; citizen Iran; alt. nationality Russia (USSR).")
+    assert-eq(["1960/1962", "1959"], r.dobs)
+    assert-eq(["RU", "IR"], r.nationalities, "nationality items, then citizen items")
+    assert-eq({dobs: [], nationalities: []}, ::ofac/parse-remarks(null))
+}
+
+test-ofac-manifest-and-version
+meta ["test"]
+fn () {
+    files ::ofac/parse-manifest(::fx/SLS_MANIFEST)
+    assert-eq("5f240bed79d504e7a5aa0000000000000000000000000000000000000000beef", get(files, "SDN.CSV").sha256)
+    assert-eq(null, get(files, "SDNLIST.PDF").sha256)
+    assert-eq("5f240bed79d504e7", ::ofac/version("ofac-sdn", files))
+    assert-eq(null, ::ofac/version("ofac-cons", files), "no CONS_PRIM.CSV in this listing")
+    assert-eq({}, ::ofac/parse-manifest(null))
+}
+
+test-ofac-export-url-encodes-file
+meta ["test"]
+fn () {
+    assert-eq("https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV", ::ofac/export-url("SDN.CSV"))
+    assert-eq("https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/A%20B.CSV", ::ofac/export-url("A B.CSV"))
+}
+
+// ============================================================================
+// UK
+// ============================================================================
+
+test-uk-individual
+meta ["test"]
+fn () {
+    es ::uk/parse(::fx/UK_XML)
+    assert-eq(3, length(es))
+    a by-id(es, "AFG0007")
+    assert-eq("Abdul Kabir MOHAMMAD JAN", a.name)
+    assert-eq("individual", a.kind)
+    assert-eq(["KABIR MUHAMMAD JAN ABDUL", "A Kabir", "عبد الکبیر محمد جان"], a.aliases)
+    assert-eq(["1963", "1972-01-30"], a.dobs, "dd/mm/1963 is a year; duplicates dropped")
+    assert-eq(["AF"], a.nationalities)
+    assert-eq(["Afghanistan"], a.addresses)
+    assert-eq(["The Afghanistan (Sanctions) (EU Exit) Regulations 2020"], a.programs)
+    assert-eq("Active in terrorist operations in Eastern Afghanistan.", a.remarks)
+}
+
+test-uk-ship-and-entity-with-ampersand
+meta ["test"]
+fn () {
+    es ::uk/parse(::fx/UK_XML)
+    ship by-id(es, "DPR0075")
+    assert-eq("vessel", ship.kind)
+    assert-eq("Petrel 8", ship.name)
+    assert-eq(["Jal Vahini", "Tian Tai 36"], ship.aliases)
+    org by-id(es, "AQD0011")
+    assert-eq("entity", org.kind)
+    assert-eq("AL-HARAMAIN & AL MASJED AL-AQSA CHARITY FOUNDATION", org.name, "&amp; is decoded")
+    assert-eq(["Hamdije Cemerlica 41, Sarajevo, Bosnia and Herzegovina"], org.addresses)
+}
+
+// ============================================================================
+// EU
+// ============================================================================
+
+test-eu-person
+meta ["test"]
+fn () {
+    es ::eu/parse(::fx/EU_XML)
+    assert-eq(3, length(es))
+    s by-id(es, "13")
+    assert-eq("Saddam Hussein Al-Tikriti", s.name)
+    assert-eq("individual", s.kind)
+    assert-eq(["Abu Ali", "Abou Ali"], s.aliases)
+    assert-eq(["1937-04-28"], s.dobs)
+    assert-eq(["IQ"], s.nationalities)
+    assert-eq(["IRQ"], s.programs)
+    assert-eq("EU reference EU.27.28; UNSC RESOLUTION 1483", s.remarks)
+}
+
+test-eu-enterprise-and-quoted-attribute
+meta ["test"]
+fn () {
+    es ::eu/parse(::fx/EU_XML)
+    e by-id(es, "382")
+    assert-eq("entity", e.kind)
+    assert-eq("Asbat al-Ansar", e.name)
+    assert-eq(["Ein el-Hilweh camp, LEBANON"], e.addresses)
+    assert-eq("Umar Muhammad \"Abdallah Ba\" Amar", by-id(es, "9001").name)
+}
+
+// ============================================================================
+// UN
+// ============================================================================
+
+test-un-individuals-and-entity
+meta ["test"]
+fn () {
+    es ::un/parse(::fx/UN_XML)
+    assert-eq(3, length(es))
+    a by-id(es, "IQi.004")
+    assert-eq("ABID HAMID MAHMUD AL-TIKRITI", a.name)
+    assert-eq(["Abid Hamid Bid Hamid Mahmud", "Abed Mahmoud Hammud", "عابد حامد محمود التكريتي"], a.aliases)
+    assert-eq(["1957"], a.dobs)
+    assert-eq(["IQ"], a.nationalities)
+    assert-eq(["Iraq"], a.programs)
+    assert-eq(null, a.remarks)
+    l by-id(es, "CDi.047")
+    assert-eq("MUHAMMED LUMISA", l.name, "trailing spaces trimmed")
+    assert-eq(["1959/1965"], l.dobs)
+    assert-eq(["UG"], l.nationalities)
+    assert-eq("Gender: Male. Commander of the Allied Democratic Forces & logistics.", l.remarks)
+    f by-id(es, "CDe.005")
+    assert-eq("entity", f.kind)
+    assert-eq(["FDLR", "Combatant Force for the Liberation of Rwanda"], f.aliases)
+    assert-eq(["North Kivu, Democratic Republic of the Congo"], f.addresses)
+}
+
+// ============================================================================
+// Shared helpers
+// ============================================================================
+
+test-iso-date-formats
+meta ["test"]
+fn () {
+    assert-eq("1948-12-10", ::entry/iso-date("10 Dec 1948"))
+    assert-eq("1948-12-10", ::entry/iso-date("1948-12-10"))
+    assert-eq("1948-12", ::entry/iso-date("Dec 1948"))
+    assert-eq("1948", ::entry/iso-date("circa 1948"))
+    assert-eq("1963", ::entry/iso-date("dd/mm/1963"))
+    assert-eq("1972-01-30", ::entry/iso-date("30/01/1972"))
+    assert-eq("1959/1962", ::entry/iso-date("1959 to 1962"))
+    assert-eq("1960/1962", ::entry/iso-date("01 Jan 1960 to 31 Dec 1962"))
+    assert-eq(null, ::entry/iso-date("unknown"))
+    assert-eq(null, ::entry/iso-date(null))
+}
+
+test-year-range
+meta ["test"]
+fn () {
+    assert-eq([1959, 1962], ::entry/year-range("1959/1962"))
+    assert-eq([1948, 1948], ::entry/year-range("1948-12-10"))
+    assert-eq(null, ::entry/year-range("n/a"))
+}
+
+test-entry-make-cleans-lists
+meta ["test"]
+fn () {
+    e untype(::entry/make({
+      source: "un", list: "L", id: " X1 ", kind: "entity", name: " ACME ",
+      aliases: ["acme", " Acme Two ", "", null, "Acme Two"], dobs: null, remarks: "  "
+    }))
+    assert-eq("X1", e.id)
+    assert-eq("ACME", e.name)
+    assert-eq(["Acme Two"], e.aliases, "blanks, duplicates and the primary name are dropped")
+    assert-eq([], e.dobs)
+    assert-eq(null, e.remarks)
+}
+
+test-xml-decode-and-attributes
+meta ["test"]
+fn () {
+    assert-eq("Smith & Sons été", ::sx/decode("Smith &amp; Sons &#233;t&#xE9;"))
+    assert-eq("&lt;", ::sx/decode("&amp;lt;"), "&amp; is decoded last")
+    assert-eq("A \"B\" <C>", ::sx/decode("A &quot;B&quot; &lt;C&gt;"))
+    assert-eq("Müller & Söhne", ::sx/decode("M&#xFC;ller &amp; S&#246;hne"), "text around a reference stays in one piece")
+    assert-eq("AT&T", ::sx/decode("AT&T"), "text the parser refuses comes back as it was")
+    assert-eq("a&nbsp;b", ::sx/decode("a&nbsp;b"), "an undeclared entity stays as written")
+    assert-eq("no references", ::sx/decode("no references"))
+    assert-eq(["A & B", "C"], ::sx/texts("<n><v>A &amp; B</v><v/><v> C </v></n>", "v"))
+    assert-eq(["<r>1</r>", "<r a=\"x\">2</r>"], ::sx/records("<a><r>1</r><rs/><r a=\"x\">2</r></a>", "r"))
+    tag first(::sx/start-tags("<x><nameAlias wholeName=\"Abu Ali\" strong=\"true\" title=\"\"/></x>", "nameAlias"))
+    assert-eq("Abu Ali", ::sx/attr(tag, "wholeName"))
+    assert-eq(null, ::sx/attr(tag, "title"), "blank attributes are null")
+    assert-eq(null, ::sx/attr(tag, "missing"))
+}

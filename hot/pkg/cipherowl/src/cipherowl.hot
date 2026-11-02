@@ -1,0 +1,88 @@
+::cipherowl ns
+meta {
+    doc: """
+    CipherOwl bindings: blockchain address compliance. Screen an address
+    for sanctions and illicit-activity exposure, triage it with a risk
+    score and breakdown, pull the evidence, generate a report, keep
+    addresses under continuous monitoring, and record your organization's
+    own allowlist and denylist overrides. The Onchain Service adds
+    balances, transactions and supported-network metadata.
+
+    **Setup**: context variables
+    - `cipherowl.client.id` and `cipherowl.client.secret`: API
+      credentials from https://app.cipherowl.ai. They are exchanged for a
+      Bearer token (OAuth2 client credentials), cached for the run.
+
+    **Quick start**
+
+    ```hot
+    ::screening ::cipherowl::screening
+    ::risk ::cipherowl::risk
+
+    // Gate a withdrawal: a fast yes/no first, the score only when needed
+    screen ::screening/screen-address("evm", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", {config: "co-sandbox"})
+    score ::risk/risk-score("evm", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", {config: "co-sandbox"})
+
+    decision ::cipherowl::decisions/decide([screen, score], {
+      found-risk: "review",
+      review-score: 40,
+      block-score: 75
+    })
+    decision.decision
+    ```
+    """
+}
+
+BASE_URL "https://svc.cipherowl.ai"
+TOKEN_URL "https://svc.cipherowl.ai/oauth/token"
+AUDIENCE "svc.cipherowl.ai"
+
+// The `chain` path parameter "must be one of" these (Parameters page).
+// Use "evm" for every EVM network (Ethereum, Base, Arbitrum, ...).
+CHAINS [
+  "bitcoin", "evm", "tron", "solana", "bitcoin_cash", "bitcoin_gold", "bitcoin_sv",
+  "dash", "litecoin", "monero", "verge", "xrp", "zcash"
+]
+
+// CipherOwl-managed risk configurations. Unprefixed names resolve against
+// your organization's customized configurations.
+CANONICAL_CONFIGS ["co-defi", "co-vasp", "co-institution"]
+
+// The free sandbox config: curated addresses return real risk, every other
+// address returns clean. EVM and Tron only.
+SANDBOX_CONFIG "co-sandbox"
+
+// Sandbox catalog (may change; see README). Each returns foundRisk true
+// under co-sandbox.
+SANDBOX_EVM_ADDRESSES [
+  "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704",
+  "0xab346efef1ffe377cdad686abeab62e83df1099f",
+  "0xf7b31119c2682c88d88d455dbb9d5932c65cf1be",
+  "0xa0e1c89ef1a489c9c7de96311ed5ce5d32c20e4b",
+  "0x6ac5251e07a9cafccec9af39f08222f52ec8c1bc",
+  "0x4f47bc496083c727c5fbe3ce9cdf2b0f6496270c",
+  "0x2ad9790b5116ce19b9cc59c7982a64df0fea84bc",
+  "0x511b9ed0b7ef9dfad519f398fdfbdf6af8356780"
+]
+
+SANDBOX_TRON_ADDRESSES [
+  "TEAqwfMhXLaomXhZ8KeMhx3njGmQEDnsUR",
+  "THrqsvhL6hgMGcsNQibXUCAVXeExy3c1ip",
+  "TV5Wn9L9T7CwrAZhrxyEGunkvQiSnsGy2H",
+  "TCwrBc8fBnLTAQQENwkTLP4UEESM9Ksg6n",
+  "TCSrVLXVvMtaFpE3xjUHveU4P6APan8uBy",
+  "TDt7rX3MjtknAxxYM9y6EowSdudCuuon4o",
+  "TF1SZkPg2vb3owTe7UMi3B7B5wkfquzj8p",
+  "TFa3VWLszsdj16euZ17wzQ63exBLHcorXp",
+  "TBW9RpX1hG9jVFRh4ooGBXSLFmMcAWz4pj"
+]
+
+// Any address outside the catalog screens clean under co-sandbox.
+SANDBOX_CLEAN_ADDRESS "0x0000000000000000000000000000000000000001"
+
+// `riskBand` values from the risk-score endpoint, lowest to highest.
+RISK_BANDS ["Low Risk", "Medium Risk", "High Risk", "Severe Risk"]
+
+// Continuous-monitoring risk levels, lowest to highest. LOW is the
+// "no risk found" floor.
+MONITORING_RISK_LEVELS ["LOW", "MEDIUM", "HIGH", "SEVERE"]

@@ -1,0 +1,399 @@
+::quickbooks::entities ns
+meta {
+    doc: """
+    Create, read, update, delete, void, deactivate, send and PDF for the
+    QuickBooks Online entities this package supports. Every function takes
+    the entity name as Intuit spells it (`"Invoice"`, `"BillPayment"`,
+    `"JournalEntry"`; case-insensitive) and an optional `opts` Map (see
+    `::quickbooks::api`).
+
+    | Entity | Kind | Create / update | Delete | Void | Send / PDF |
+    |---|---|---|---|---|---|
+    | Customer, Vendor, Item, Account, Class, Department, Employee | name list | yes | no: `deactivate-entity` | no | no |
+    | TaxCode | name list | read only | no | no | no |
+    | Invoice | transaction | yes | yes | yes | yes |
+    | Estimate, CreditMemo | transaction | yes | yes | no | yes |
+    | SalesReceipt | transaction | yes | yes | yes | yes |
+    | Payment, BillPayment | transaction | yes | yes | yes | Payment: PDF and send |
+    | Bill, Purchase, JournalEntry, Deposit, Transfer | transaction | yes | yes | no | no |
+
+    **Updates and `SyncToken`.** QuickBooks uses optimistic locking:
+    every update and delete must carry the entity's current `SyncToken`
+    (from the last read). A stale token fails with a `ValidationFault`
+    (code 5010, "Stale Object Error"); read the entity again and retry.
+    `sparse-update` sends only the fields you pass (with `sparse: true`),
+    which is what you almost always want: a full `update-entity` clears
+    every writable field you leave out.
+
+    ```hot
+    ::qb ::quickbooks::entities
+
+    customer ::qb/create-entity("Customer", {DisplayName: "Acme Corp", PrimaryEmailAddr: {Address: "ap@acme.example"}})
+    invoice ::qb/create-entity("Invoice", {
+      CustomerRef: {value: customer.Id},
+      Line: [{DetailType: "SalesItemLineDetail", Amount: 1200.0, SalesItemLineDetail: {ItemRef: {value: "1"}}}]
+    }, {request-id: "order-4411-invoice"})
+    ::qb/sparse-update("Invoice", invoice.Id, invoice.SyncToken, {DueDate: "2026-12-31"})
+    ::qb/send-entity("Invoice", invoice.Id, "ap@acme.example")
+    pdf ::qb/entity-pdf("Invoice", invoice.Id)
+    ```
+    """
+}
+
+::api ::quickbooks::api
+
+is-blank ::quickbooks::oauth/is-blank
+
+ENTITIES
+meta {
+    doc: """
+    The supported entities: canonical name to `{path, kind, ops}`. `ops`
+    lists what the API allows: `create`, `read`, `update`, `delete`,
+    `void`, `send`, `pdf`. Every entity can also be queried
+    (`::quickbooks::query`).
+    """
+}
+{
+  Account: {path: "account", kind: "name-list", ops: ["create", "read", "update"]},
+  Bill: {path: "bill", kind: "transaction", ops: ["create", "read", "update", "delete"]},
+  BillPayment: {path: "billpayment", kind: "transaction", ops: ["create", "read", "update", "delete", "void"]},
+  Class: {path: "class", kind: "name-list", ops: ["create", "read", "update"]},
+  CompanyInfo: {path: "companyinfo", kind: "settings", ops: ["read", "update"]},
+  CreditMemo: {path: "creditmemo", kind: "transaction", ops: ["create", "read", "update", "delete", "send", "pdf"]},
+  Customer: {path: "customer", kind: "name-list", ops: ["create", "read", "update"]},
+  Department: {path: "department", kind: "name-list", ops: ["create", "read", "update"]},
+  Deposit: {path: "deposit", kind: "transaction", ops: ["create", "read", "update", "delete"]},
+  Employee: {path: "employee", kind: "name-list", ops: ["create", "read", "update"]},
+  Estimate: {path: "estimate", kind: "transaction", ops: ["create", "read", "update", "delete", "send", "pdf"]},
+  Invoice: {path: "invoice", kind: "transaction", ops: ["create", "read", "update", "delete", "void", "send", "pdf"]},
+  Item: {path: "item", kind: "name-list", ops: ["create", "read", "update"]},
+  JournalEntry: {path: "journalentry", kind: "transaction", ops: ["create", "read", "update", "delete"]},
+  Payment: {path: "payment", kind: "transaction", ops: ["create", "read", "update", "delete", "void", "send", "pdf"]},
+  Purchase: {path: "purchase", kind: "transaction", ops: ["create", "read", "update", "delete"]},
+  SalesReceipt: {path: "salesreceipt", kind: "transaction", ops: ["create", "read", "update", "delete", "void", "send", "pdf"]},
+  TaxCode: {path: "taxcode", kind: "name-list", ops: ["read"]},
+  Transfer: {path: "transfer", kind: "transaction", ops: ["create", "read", "update", "delete"]},
+  Vendor: {path: "vendor", kind: "name-list", ops: ["create", "read", "update"]}
+}
+
+// Payments and bill payments are voided with a sparse update plus
+// `include=void`; invoices and sales receipts with `operation=void`.
+VOID_BY_UPDATE ["Payment", "BillPayment"]
+
+// ---------------------------------------------------------------------------
+// Entity lookup (pure)
+// ---------------------------------------------------------------------------
+
+canonical-name
+meta {
+    doc: """The canonical entity name for `name` (case-insensitive, e.g. `"invoice"` gives `"Invoice"`), or an Err listing the supported names."""
+}
+fn (name: Str): Str {
+  wanted lowercase(trim(name))
+  hit find-first(keys(ENTITIES), (k) { eq(lowercase(k), wanted) })
+  cond {
+    is-some(hit) => { hit }
+    => { err(`quickbooks: unsupported entity '${name}'. Supported: ${join(sort(keys(ENTITIES)), ", ")}`) }
+  }
+}
+
+entity-info
+meta {doc: """`{name, path, kind, ops}` for an entity, or an Err."""}
+fn (name: Str): Map {
+  canonical canonical-name(name)
+  cond {
+    is-err(canonical) => { canonical }
+    => { {name: canonical, ...get(ENTITIES, canonical)} }
+  }
+}
+
+require-op
+meta {
+    doc: """The entity info when the entity supports `op`, else an Err that says what to do instead."""
+}
+fn (name: Str, op: Str): Map {
+  info entity-info(name)
+  hint cond {
+    and(eq(op, "delete"), is-map(info), eq(get(info, "kind"), "name-list")) => { " Name-list entities cannot be deleted; use deactivate-entity (Active: false)." }
+    => { "" }
+  }
+
+  cond {
+    is-err(info) => { info }
+    in(op, info.ops) => { info }
+    => { err(`quickbooks: ${info.name} does not support ${op}.${hint}`) }
+  }
+}
+
+check-id fn (id: Any, what: Str): Str {
+  cond {
+    is-blank(id) => { err(`quickbooks: ${what} needs an entity Id`) }
+    => { Str(id) }
+  }
+}
+
+check-sync-token fn (sync-token: Any, what: Str): Str {
+  cond {
+    is-blank(sync-token) => { err(`quickbooks: ${what} needs the entity's current SyncToken (read the entity first)`) }
+    => { Str(sync-token) }
+  }
+}
+
+build-sparse-body
+meta {
+    doc: """The body of a sparse update: `fields` plus `Id`, `SyncToken` and `sparse: true` (pure). Null fields are dropped; set a field to `""` or a value to change it."""
+}
+fn (id: Str, sync-token: Str, fields: Map): Map {
+  {...filter-vals(untype(fields), is-some), Id: id, SyncToken: sync-token, sparse: true}
+}
+
+build-delete-body
+meta {doc: """The body of a delete or void: `{Id, SyncToken}` (pure)."""}
+fn (id: Str, sync-token: Str): Map {
+  {Id: id, SyncToken: sync-token}
+}
+
+entity-from
+meta {
+    doc: """The entity object in a write or read response: `body[Name]` (e.g. `body.Invoice`), else the body itself."""
+}
+fn (name: Str, body: Any): Any {
+  cond {
+    is-err(body) => { body }
+    and(is-map(body), is-some(get(body, name))) => { get(body, name) }
+    => { body }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CRUD
+// ---------------------------------------------------------------------------
+
+create-entity
+meta {
+    doc: """POST /{entity} - create an entity and return it (with `Id` and `SyncToken`). Pass `opts.request-id` to make the create safe to retry."""
+}
+fn
+(entity: Str, body: Map): Map {
+  create-entity(entity, body, {})
+},
+(entity: Str, body: Map, opts: Map): Map {
+  info require-op(entity, "create")
+  cond {
+    is-err(info) => { info }
+    => { entity-from(info.name, ::api/json("POST", `/${info.path}`, {}, filter-vals(untype(body), is-some), opts)) }
+  }
+}
+
+get-entity
+meta {doc: """GET /{entity}/{id} - read one entity by `Id`."""}
+fn
+(entity: Str, id: Str | Int): Map {
+  get-entity(entity, id, {})
+},
+(entity: Str, id: Str | Int, opts: Map): Map {
+  info require-op(entity, "read")
+  checked check-id(id, "get-entity")
+  cond {
+    is-err(info) => { info }
+    is-err(checked) => { checked }
+    => { entity-from(info.name, ::api/json("GET", `/${info.path}/${::api/segment(checked)}`, {}, "", opts)) }
+  }
+}
+
+update-entity
+meta {
+    doc: """
+    POST /{entity} - a full update: `body` must carry `Id` and the
+    current `SyncToken`, and every writable field you leave out is
+    cleared. Prefer `sparse-update`. Set `sparse: true` in `body` to make
+    it sparse.
+    """
+}
+fn
+(entity: Str, body: Map): Map {
+  update-entity(entity, body, {})
+},
+(entity: Str, body: Map, opts: Map): Map {
+  info require-op(entity, "update")
+  plain filter-vals(untype(body), is-some)
+  id check-id(get(plain, "Id"), "update-entity")
+  sync check-sync-token(get(plain, "SyncToken"), "update-entity")
+  cond {
+    is-err(info) => { info }
+    is-err(id) => { id }
+    is-err(sync) => { sync }
+    => { entity-from(info.name, ::api/json("POST", `/${info.path}`, {}, plain, opts)) }
+  }
+}
+
+sparse-update
+meta {
+    doc: """
+    POST /{entity} with `sparse: true` - change only `fields`. Needs the
+    entity's current `SyncToken`; a stale one fails with code 5010.
+
+    ```hot
+    ::quickbooks::entities/sparse-update("Customer", "58", "3", {PrimaryPhone: {FreeFormNumber: "+1 555 0100"}})
+    ```
+    """
+}
+fn
+(entity: Str, id: Str | Int, sync-token: Str | Int, fields: Map): Map {
+  sparse-update(entity, id, sync-token, fields, {})
+},
+(entity: Str, id: Str | Int, sync-token: Str | Int, fields: Map, opts: Map): Map {
+  info require-op(entity, "update")
+  checked-id check-id(id, "sparse-update")
+  sync check-sync-token(sync-token, "sparse-update")
+  cond {
+    is-err(info) => { info }
+    is-err(checked-id) => { checked-id }
+    is-err(sync) => { sync }
+    => { entity-from(info.name, ::api/json("POST", `/${info.path}`, {}, build-sparse-body(checked-id, sync, fields), opts)) }
+  }
+}
+
+delete-entity
+meta {
+    doc: """POST /{entity}?operation=delete - delete a transaction. Returns `{Id, status: "Deleted"}`. Name-list entities cannot be deleted: use `deactivate-entity`."""
+}
+fn
+(entity: Str, id: Str | Int, sync-token: Str | Int): Map {
+  delete-entity(entity, id, sync-token, {})
+},
+(entity: Str, id: Str | Int, sync-token: Str | Int, opts: Map): Map {
+  info require-op(entity, "delete")
+  checked-id check-id(id, "delete-entity")
+  sync check-sync-token(sync-token, "delete-entity")
+  cond {
+    is-err(info) => { info }
+    is-err(checked-id) => { checked-id }
+    is-err(sync) => { sync }
+    => { entity-from(info.name, ::api/json("POST", `/${info.path}`, {operation: "delete"}, build-delete-body(checked-id, sync), opts)) }
+  }
+}
+
+void-request
+meta {
+    doc: """The `{params, body}` of a void for an entity (pure): `operation=void` for invoices and sales receipts, `operation=update&include=void` with a sparse body for payments and bill payments."""
+}
+fn (name: Str, id: Str, sync-token: Str): Map {
+  cond {
+    in(name, VOID_BY_UPDATE) => { {params: {operation: "update", include: "void"}, body: build-sparse-body(id, sync-token, {})} }
+    => { {params: {operation: "void"}, body: build-delete-body(id, sync-token)} }
+  }
+}
+
+void-entity
+meta {
+    doc: """Void a transaction (Invoice, SalesReceipt, Payment, BillPayment): amounts become zero and the record stays for the audit trail. Returns the voided entity."""
+}
+fn
+(entity: Str, id: Str | Int, sync-token: Str | Int): Map {
+  void-entity(entity, id, sync-token, {})
+},
+(entity: Str, id: Str | Int, sync-token: Str | Int, opts: Map): Map {
+  info require-op(entity, "void")
+  checked-id check-id(id, "void-entity")
+  sync check-sync-token(sync-token, "void-entity")
+  cond {
+    is-err(info) => { info }
+    is-err(checked-id) => { checked-id }
+    is-err(sync) => { sync }
+    => {
+      req void-request(info.name, checked-id, sync)
+      entity-from(info.name, ::api/json("POST", `/${info.path}`, req.params, req.body, opts))
+    }
+  }
+}
+
+deactivate-entity
+meta {
+    doc: """Make a name-list entity (Customer, Vendor, Item, Account, Class, Department, Employee) inactive with a sparse `Active: false` update. This is how QuickBooks "deletes" them; history is kept."""
+}
+fn
+(entity: Str, id: Str | Int, sync-token: Str | Int): Map {
+  deactivate-entity(entity, id, sync-token, {})
+},
+(entity: Str, id: Str | Int, sync-token: Str | Int, opts: Map): Map {
+  info entity-info(entity)
+  cond {
+    is-err(info) => { info }
+    ne(info.kind, "name-list") => { err(`quickbooks: ${info.name} is not a name-list entity; delete or void it instead`) }
+    => { sparse-update(info.name, id, sync-token, {Active: false}, opts) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Send and PDF
+// ---------------------------------------------------------------------------
+
+send-entity
+meta {
+    doc: """
+    POST /{entity}/{id}/send - email the form (Invoice, Estimate,
+    CreditMemo, SalesReceipt, Payment). `send-to` overrides the address
+    on the entity (its `BillEmail`) and is saved back to it; pass null
+    to use the stored address. Returns the entity with `EmailStatus`
+    and `DeliveryInfo` updated.
+    """
+}
+fn
+(entity: Str, id: Str | Int): Map {
+  send-entity(entity, id, null, {})
+},
+(entity: Str, id: Str | Int, send-to: Str?): Map {
+  send-entity(entity, id, send-to, {})
+},
+(entity: Str, id: Str | Int, send-to: Str?, opts: Map): Map {
+  info require-op(entity, "send")
+  checked check-id(id, "send-entity")
+  cond {
+    is-err(info) => { info }
+    is-err(checked) => { checked }
+    => {
+      params if(is-blank(send-to), {}, {sendTo: trim(send-to)})
+      entity-from(info.name, ::api/json("POST", `/${info.path}/${::api/segment(checked)}/send`, params, "",
+        {Content-Type: "application/octet-stream"}, opts))
+    }
+  }
+}
+
+entity-pdf
+meta {
+    doc: """GET /{entity}/{id}/pdf - the form as PDF `Bytes` (Invoice, Estimate, CreditMemo, SalesReceipt, Payment)."""
+}
+fn
+(entity: Str, id: Str | Int): Bytes {
+  entity-pdf(entity, id, {})
+},
+(entity: Str, id: Str | Int, opts: Map): Bytes {
+  info require-op(entity, "pdf")
+  checked check-id(id, "entity-pdf")
+  cond {
+    is-err(info) => { info }
+    is-err(checked) => { checked }
+    => { ::api/bytes(`/${info.path}/${::api/segment(checked)}/pdf`, "application/pdf", opts) }
+  }
+}
+
+send-invoice
+meta {doc: """Email an invoice; see `send-entity`."""}
+fn
+(id: Str | Int, send-to: Str?): Map {
+  send-entity("Invoice", id, send-to, {})
+},
+(id: Str | Int, send-to: Str?, opts: Map): Map {
+  send-entity("Invoice", id, send-to, opts)
+}
+
+invoice-pdf
+meta {doc: """An invoice as PDF `Bytes`; see `entity-pdf`."""}
+fn
+(id: Str | Int): Bytes {
+  entity-pdf("Invoice", id, {})
+},
+(id: Str | Int, opts: Map): Bytes {
+  entity-pdf("Invoice", id, opts)
+}

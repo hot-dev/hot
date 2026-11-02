@@ -1,0 +1,209 @@
+::cipherowl::private-data ns
+meta {
+    doc: """
+    Private Data API: your organization's own address overrides, an
+    allowlist and a denylist, applied when CipherOwl screens for you.
+
+    Overrides are scoped to the organization of the credentials: another
+    organization's entries are invisible (404). They are recorded on a
+    network (e.g. `ethereum_mainnet`) but applied per chain, so an entry
+    on `ethereum_mainnet` covers every EVM network. Allowlisting an
+    address on one network of a chain while it is denylisted on another
+    is rejected.
+
+    Writes use optimistic concurrency: `expectedVersion` is `"0"` for a
+    new entry, or the entry's current `version` to change it; a 409
+    means the entry exists or changed since you read it.
+    """
+}
+
+::api ::cipherowl::api
+
+seg ::cipherowl::api/seg
+query ::cipherowl::api/query
+
+ALLOWLIST "LIST_TYPE_ALLOWLIST"
+DENYLIST "LIST_TYPE_DENYLIST"
+
+// Wire values for `listType`; LIST_TYPE_UNSPECIFIED means both on reads.
+LIST_TYPES ["LIST_TYPE_UNSPECIFIED", "LIST_TYPE_ALLOWLIST", "LIST_TYPE_DENYLIST"]
+
+list-type
+meta {
+    doc: """The wire `listType` for `"allowlist"`, `"denylist"` or `"both"` (or a wire value as is); an Err for anything else. Exposed for testing."""
+}
+fn (value: Str): Str {
+  v uppercase(trim(value))
+  cond {
+    eq(v, "ALLOWLIST") => { ALLOWLIST }
+    eq(v, "DENYLIST") => { DENYLIST }
+    eq(v, "BOTH") => { "LIST_TYPE_UNSPECIFIED" }
+    in(v, LIST_TYPES) => { v }
+    => { err("cipherowl: listType must be allowlist, denylist or both") }
+  }
+}
+
+overrides-path fn (network: Str): Str {
+  n ::api/validate-network(network)
+  cond {
+    is-err(n) => { n }
+    => { `/api/private-data/v2/overrides/networks/${seg(n)}/addresses` }
+  }
+}
+
+list-request
+meta {
+    doc: """The spec for one page of overrides on a network. `options` takes `listType` (`"allowlist"`, `"denylist"`, `"both"`), `pageSize`, `pageToken`, `includeDeleted` and `sinceTimestamp` (RFC 3339). Exposed for testing."""
+}
+fn (network: Str, options: Map): Map {
+  lt-opt get(options, "listType")
+  base overrides-path(network)
+  kind if(is-err(base), base, if(is-null(lt-opt), null, list-type(lt-opt)))
+  cond {
+    is-err(kind) => { kind }
+    => { list-spec(base, kind, options) }
+  }
+}
+
+list-spec fn (base: Str, kind: Str?, options: Map): Map {
+  {
+    method: "GET",
+    path: `${base}${query({
+      listType: kind,
+      pageSize: get(options, "pageSize"),
+      pageToken: get(options, "pageToken"),
+      includeDeleted: get(options, "includeDeleted"),
+      sinceTimestamp: get(options, "sinceTimestamp")
+    })}`,
+    body: ""
+  }
+}
+
+list-overrides
+meta {
+    doc: """One page of overrides: `{entries: [{listType, network, chain, address, addLabels, removeLabels, notes, version, createdAt, updatedAt, createdBy, updatedBy, deletedAt?}], nextPageToken}`."""
+}
+fn
+(network: Str, options: Map): Map {
+  list-overrides(network, options, {})
+},
+(network: Str, options: Map, opts: Map): Map {
+  ::api/call(list-request(network, options), opts)
+}
+
+list-all-overrides
+meta {
+    doc: """Collect up to `limit` overrides on a network across pages (same `options` as `list-overrides`)."""
+}
+fn
+(network: Str, options: Map, limit: Int): Vec {
+  list-all-overrides(network, options, limit, {})
+},
+(network: Str, options: Map, limit: Int, opts: Map): Vec {
+  ::api/collect-pages((token) { list-overrides(network, {...options, pageToken: token}, opts) }, "entries", null, limit, [])
+}
+
+get-override
+meta {
+    doc: """The override for one address: `{entry}`; a 404 Err when there is none (`::cipherowl::api/is-status(e, 404)`)."""
+}
+fn
+(network: Str, address: Str): Map {
+  get-override(network, address, {})
+},
+(network: Str, address: Str, opts: Map): Map {
+  base overrides-path(network)
+  if(is-err(base), base, ::api/request("GET", `${base}/${seg(trim(address))}`, "", opts))
+}
+
+upsert-request
+meta {
+    doc: """The spec for creating or updating an override. `entry` takes `listType` (`"allowlist"`/`"denylist"` or the wire value, required), `address` (required), `addLabels`, `removeLabels`, `notes` and `expectedVersion` (default `"0"`, a new entry; int64 is sent as a string). Exposed for testing."""
+}
+fn (network: Str, entry: Map): Map {
+  body ::api/compact(untype(entry))
+  address trim(Str(or(get(body, "address"), "")))
+  version get(body, "expectedVersion")
+  base overrides-path(network)
+  kind if(is-null(get(body, "listType")), null, list-type(Str(get(body, "listType"))))
+  cond {
+    is-err(base) => { base }
+    is-null(kind) => { err("cipherowl: an override needs a listType (allowlist or denylist)") }
+    is-err(kind) => { kind }
+    is-empty(address) => { err("cipherowl: an override needs an address") }
+    => {
+      {
+        method: "POST",
+        path: base,
+        body: {
+          ...body,
+          listType: kind,
+          address: address,
+          expectedVersion: if(is-null(version), "0", Str(version))
+        }
+      }
+    }
+  }
+}
+
+upsert-override
+meta {
+    doc: """
+    Create or update an override. Returns `{entry, created}`.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::private-data/upsert-override("ethereum_mainnet", {
+      listType: "allowlist",
+      address: "0x0000000000000000000000000000000000000001",
+      notes: "treasury cold wallet",
+      addLabels: ["internal"]
+    })
+    ```
+    """
+}
+fn
+(network: Str, entry: Map): Map {
+  upsert-override(network, entry, {})
+},
+(network: Str, entry: Map, opts: Map): Map {
+  ::api/call(upsert-request(network, entry), opts)
+}
+
+allowlist-address
+meta {
+    doc: """Add a new address to the allowlist (`expectedVersion` `"0"`), with optional `notes`."""
+}
+fn
+(network: Str, address: Str, notes: Str?): Map {
+  allowlist-address(network, address, notes, {})
+},
+(network: Str, address: Str, notes: Str?, opts: Map): Map {
+  upsert-override(network, {listType: ALLOWLIST, address: address, notes: notes}, opts)
+}
+
+denylist-address
+meta {
+    doc: """Add a new address to the denylist (`expectedVersion` `"0"`), with optional `notes`."""
+}
+fn
+(network: Str, address: Str, notes: Str?): Map {
+  denylist-address(network, address, notes, {})
+},
+(network: Str, address: Str, notes: Str?, opts: Map): Map {
+  upsert-override(network, {listType: DENYLIST, address: address, notes: notes}, opts)
+}
+
+delete-override
+meta {
+    doc: """Remove the override for an address. Returns `{success}`; a 404 Err when there is none."""
+}
+fn
+(network: Str, address: Str): Map {
+  delete-override(network, address, {})
+},
+(network: Str, address: Str, opts: Map): Map {
+  base overrides-path(network)
+  if(is-err(base), base, ::api/request("DELETE", `${base}/${seg(trim(address))}`, "", opts))
+}

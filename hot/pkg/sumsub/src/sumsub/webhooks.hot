@@ -1,0 +1,251 @@
+::sumsub::webhooks ns
+meta {
+    ctx: {"sumsub.webhook.secret": {required: false}},
+    doc: """
+    Sumsub webhook verification and event parsing.
+
+    Sumsub signs each delivery with `X-Payload-Digest`, the hex HMAC of
+    the raw body keyed with the webhook's own secret key (set in the
+    dashboard's Webhook manager; it is not the App Token secret), and
+    names the algorithm in `X-Payload-Digest-Alg`: `HMAC_SHA256_HEX`
+    (default for new webhooks), `HMAC_SHA512_HEX`, or the legacy
+    `HMAC_SHA1_HEX`.
+
+    Sumsub signs no timestamp, so there is no replay window to enforce.
+    Deliveries are retried (up to five times over about a day) and can
+    repeat: make handlers idempotent, keyed on `dedupe-key(event)`.
+    Webhook payloads carry ids and review results, not personal data;
+    fetch the applicant when you need more.
+    """
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+
+header ::sumsub::api/header
+
+// `X-Payload-Digest-Alg` values and the HMAC each one names.
+ALGORITHMS {
+  HMAC_SHA256_HEX: "sha256",
+  HMAC_SHA512_HEX: "sha512",
+  HMAC_SHA1_HEX: "sha1"
+}
+
+// Applicant (KYC/KYB) event types Sumsub documents (open: new ones appear).
+APPLICANT_EVENTS [
+  "applicantCreated", "applicantPending", "applicantReviewed", "applicantOnHold",
+  "applicantPrechecked", "applicantAwaitingService", "applicantAwaitingUser",
+  "applicantActionPending", "applicantActionReviewed", "applicantActionOnHold",
+  "applicantActionLevelChanged", "applicantPersonalInfoChanged", "applicantTagsChanged",
+  "applicantActivated", "applicantDeactivated", "applicantDeleted", "applicantReset",
+  "applicantLevelChanged", "applicantRiskLevelChanged", "applicantStepsReset",
+  "applicantPersonalDataDeleted", "companyStructureChanged", "applicantWorkflowCompleted",
+  "applicantWorkflowFailed", "videoIdentStatusChanged", "videoIdentCompositionCompleted",
+  "applicantVerificationLinkOpened", "verificationLinkSdkEvent",
+  "applicantShareTokenConsumed", "applicantShareTokenFailed"
+]
+
+// Transaction monitoring event types. Note `applicantKytOnHold` (not "KytTxnOnHold").
+KYT_EVENTS [
+  "applicantKytTxnCreated", "applicantKytTxnApproved", "applicantKytTxnRejected",
+  "applicantKytTxnReviewed", "applicantKytTxnDeleted", "applicantKytOnHold",
+  "applicantKytTxnAwaitingUser", "applicantKytTxnDataChanged",
+  "amlCaseApproved", "amlCaseRejected", "amlCaseOnHold"
+]
+
+digest-algorithm
+meta {
+    doc: """The HMAC (`"sha256"`, `"sha512"`, `"sha1"`) named by an `X-Payload-Digest-Alg` value, or null for a missing or unknown value. Exposed for testing."""
+}
+fn (alg-header: Any): Str? {
+  name if(is-str(alg-header), uppercase(trim(alg-header)), "")
+  get(ALGORITHMS, name)
+}
+
+verify-digest
+meta {
+    doc: """
+    Check a hex digest over the raw body in constant time. False for an
+    empty secret, a missing digest, an unknown or missing algorithm, or
+    an algorithm not in `allowed` (a Vec of `X-Payload-Digest-Alg`
+    values). The secret is masked in call records. Exposed for testing;
+    `verify-request` uses it.
+    """
+}
+fn (secret: Str, body: Str | Bytes, digest: Str?, alg-header: Str?, allowed: Vec): Bool {
+  algorithm digest-algorithm(alg-header)
+  name if(is-str(alg-header), uppercase(trim(alg-header)), "")
+  given trim(or(digest, ""))
+  cond {
+    // An empty key would make every digest forgeable: fail closed.
+    is-empty(secret) => { false }
+    is-empty(given) => { false }
+    is-null(algorithm) => { false }
+    not(in(name, allowed)) => { false }
+    => {
+      ::ctx/mark-secret(secret)
+      ::hmac/hmac-verify-hex(secret, body, given, algorithm)
+    }
+  }
+}
+
+verify-request
+meta {
+    ctx: {"sumsub.webhook.secret": {required: false}},
+    doc: """
+    Verify a Sumsub webhook request: `X-Payload-Digest` must be the hex
+    HMAC of `::hot::http/raw-body(request)` with the algorithm in
+    `X-Payload-Digest-Alg`, compared in constant time. Uses the
+    `sumsub.webhook.secret` context variable by default (halting when it
+    is unset), or an explicit secret; an empty explicit secret never
+    verifies. A request with no algorithm header fails. `options.algorithms`
+    restricts the accepted algorithms (default: all three, e.g. pass
+    `["HMAC_SHA256_HEX", "HMAC_SHA512_HEX"]` to refuse legacy SHA-1).
+
+    **Example**
+
+    ```hot
+    sumsub-webhook
+    meta {webhook: {service: "sumsub", path: "/sumsub/webhook"}}
+    fn (request) {
+      cond {
+        not(::sumsub::webhooks/verify-request(request)) => {
+          ::hot::http/HttpResponse({status: 401, body: "invalid digest"})
+        }
+        => {
+          event ::sumsub::webhooks/parse-event(request)
+          ::hot::http/HttpResponse({status: 200, body: event.type})
+        }
+      }
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("sumsub.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("sumsub.webhook.secret is not set. Add the webhook's secret key from Sumsub's Webhook manager in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str): Bool {
+  verify-request(request, secret, {})
+},
+(request: Map, secret: Str, options: Map): Bool {
+  headers or(get(request, "headers"), {})
+  allowed or(get(options, "algorithms"), keys(ALGORITHMS))
+  verify-digest(
+    secret,
+    ::hot::http/raw-body(request),
+    header(headers, "x-payload-digest"),
+    header(headers, "x-payload-digest-alg"),
+    allowed
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+payload-of
+meta {
+    doc: """The decoded payload of a webhook: from a request's parsed `body` (or its raw body when not parsed), a Map, or a JSON Str. `{}` for anything that isn't a JSON object. Exposed for testing."""
+}
+fn (source: Any): Map {
+  cond {
+    is-map(source) => {
+      body get(source, "body")
+      cond {
+        is-some(get(source, "type")) => { source }
+        is-map(body) => { body }
+        is-str(body) => { payload-of(body) }
+        is-some(get(source, "body-raw")) => { payload-of(get(source, "body-raw")) }
+        => { source }
+      }
+    }
+
+    is-str(source) => {
+      parsed from-json(source)
+      match parsed {
+        Result.Err => { {} }
+        Map => { parsed }
+        _ => { {} }
+      }
+    }
+    => { {} }
+  }
+}
+
+parse-event
+meta {
+    doc: """
+    Normalize a webhook into a flat Map: `type`, `applicant-id`,
+    `applicant-type`, `external-user-id`, `level-name`, `correlation-id`,
+    `review-status`, `review-answer` (GREEN/RED), `reject-type`
+    (FINAL/RETRY), `reject-labels`, `button-ids`, `moderation-comment`
+    (may be shown to the applicant), `client-comment` (internal only),
+    `sandbox`, `test`, `created-at-ms`, the transaction fields `kyt-txn-id`,
+    `kyt-data-txn-id`, `kyt-txn-type`, `travel-rule-status`, the action
+    fields `applicant-action-id`, `external-action-id`, and `payload`
+    (the decoded body). Accepts the request, its body Map, or the raw JSON.
+    Verify the request first.
+    """
+}
+fn (source: Any): Map {
+  p payload-of(source)
+  result or(get(p, "reviewResult"), {})
+  {
+    type: get(p, "type"),
+    applicant-id: get(p, "applicantId"),
+    applicant-type: get(p, "applicantType"),
+    external-user-id: get(p, "externalUserId"),
+    level-name: get(p, "levelName"),
+    correlation-id: get(p, "correlationId"),
+    review-status: get(p, "reviewStatus"),
+    review-answer: get(result, "reviewAnswer"),
+    reject-type: get(result, "reviewRejectType"),
+    reject-labels: or(get(result, "rejectLabels"), []),
+    button-ids: or(get(result, "buttonIds"), []),
+    moderation-comment: get(result, "moderationComment"),
+    client-comment: get(result, "clientComment"),
+    sandbox: eq(get(p, "sandboxMode"), true),
+    test: eq(get(p, "testMode"), true),
+    created-at-ms: get(p, "createdAtMs"),
+    kyt-txn-id: get(p, "kytTxnId"),
+    kyt-data-txn-id: get(p, "kytDataTxnId"),
+    kyt-txn-type: get(p, "kytTxnType"),
+    travel-rule-status: get(p, "travelRuleStatus"),
+    applicant-action-id: get(p, "applicantActionId"),
+    external-action-id: get(p, "externalApplicantActionId"),
+    payload: p
+  }
+}
+
+is-kyt-event
+meta {doc: """True for transaction-monitoring and AML case events (`KYT_EVENTS`)."""}
+fn (event: Map): Bool {
+  in(get(event, "type"), KYT_EVENTS)
+}
+
+is-final-review
+meta {
+    doc: """True when the event reports a completed review: `applicantReviewed` (or an action/transaction reviewed event) with `reviewStatus` `completed`. Map it with `::sumsub::decisions/review-outcome`."""
+}
+fn (event: Map): Bool {
+  and(eq(get(event, "review-status"), "completed"), is-some(get(event, "review-answer")))
+}
+
+dedupe-key
+meta {
+    doc: """A stable key for one delivery, for idempotent handling of Sumsub's retries: the event type, applicant or transaction id, `correlationId` and `createdAtMs`, joined with `|`. Pure."""
+}
+fn (event: Map): Str {
+  parts [
+    get(event, "type"),
+    or(get(event, "kyt-txn-id"), get(event, "applicant-id")),
+    get(event, "correlation-id"),
+    get(event, "created-at-ms")
+  ]
+  join(map(filter(parts, is-some), (v) { Str(v) }), "|")
+}
