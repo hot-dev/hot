@@ -640,6 +640,7 @@ async fn webhook_handler_inner(
         retry_attempt: 0,
         secret_keys: AHashSet::new(),
         secret_value_hashes: AHashSet::new(),
+        secret_values: Default::default(),
         access_id: None,
         agent_type: None,
         queue_timing: None,

@@ -14,11 +14,43 @@ Get up and running with Hot in minutes.
 curl -fsSL https://get.hot.dev/install.sh | sh
 ```
 
+This installs Hot for your user, without sudo: `hot` goes in `~/.local/bin`
+and its standard library and resources in `~/.local/share/hot`. If
+`~/.local/bin` isn't on your `PATH`, the installer adds it to your shell's
+startup file, so open a new terminal before running `hot`.
+
+To install Hot for every user of the machine instead, with the macOS or
+Debian package (this needs sudo):
+
+```bash
+curl -fsSL https://get.hot.dev/install.sh | sh -s -- --system
+```
+
+The installer installs for the whole machine on its own when it runs as root
+(as in a Dockerfile), in CI, or when a package install of Hot is already on the
+machine. `--prefix <folder>` installs for your user somewhere other than
+`~/.local`.
+
 ### Windows (PowerShell)
 
 ```powershell
 irm https://get.hot.dev/install.ps1 | iex
 ```
+
+This installs Hot for your user, without administrator rights, in
+`%LOCALAPPDATA%\Programs\Hot Dev`, and adds it to your user `PATH`. Open a new
+terminal before running `hot`.
+
+To install Hot for every user of the machine instead, in Program Files (this
+asks for administrator rights):
+
+```powershell
+$env:HOT_INSTALL_SCOPE = "system"; irm https://get.hot.dev/install.ps1 | iex
+```
+
+The installer installs for the whole machine on its own in CI, or when Hot is
+already installed in Program Files. Windows puts the machine `PATH` before the
+user `PATH`, so if both are installed, the Program Files copy runs.
 
 ### Homebrew
 

@@ -164,3 +164,37 @@ meta ["test"] fn () {
     assert-eq("abc", replace-first("abc", "z", "y"), "no match leaves string unchanged")
     assert-eq("X-b-b", replace-first("b-b-b", "b", "X"), "first occurrence at start")
 }
+
+// A Str's positions and lengths all count characters (code points); only
+// Bytes counts bytes.
+test-non-ascii-strings-count-characters
+meta ["test"] fn () {
+    s "héllo"
+    assert-eq(5, length(s), "length counts characters")
+    assert-eq(5, ::hot::str/length(s), "the str alias too")
+    assert-eq(6, length(Bytes(s)), "Bytes counts bytes")
+    assert-eq(1, length("👋"), "an emoji of one code point")
+    assert-eq(2, length("👋🏽"), "an emoji with a skin tone is two code points")
+    assert-eq(s, slice(s, 0, length(s)), "length is the end position slice takes")
+    assert-eq(length(s), length(Vec(s)), "as many characters as Vec gives")
+
+    assert-eq("**héllo", pad-start(s, 7, "*"), "pad-start counts characters")
+    assert-eq("héllo**", pad-end(s, 7, "*"), "pad-end counts characters")
+    assert-eq("é·éx", pad-start("x", 4, "é·"), "a multi-byte pattern is cut between characters")
+
+    m ::hot::regex/find("héllo wörld", "w\\S+")
+    assert-eq(6, m.start, "regex start counts characters")
+    assert-eq(11, m.end, "regex end counts characters")
+    assert-eq(m.match, slice("héllo wörld", m.start, m.end), "slice with a match's positions gives the match")
+    all ::hot::regex/find-all("é1é22é", "\\d+")
+    assert-eq([1, 3], map(all, %.start), "find-all starts count characters")
+    assert-eq([2, 5], map(all, %.end), "find-all ends count characters")
+}
+
+Short type Str where lte(length(%), 3)
+
+test-length-constraint-counts-characters
+meta ["test"] fn () {
+    assert-eq("héy", Short(concat("hé", "y")), "three characters pass though the Str is four bytes")
+    assert(is-err(Short(concat("hé", "yy"))), "four characters fail")
+}

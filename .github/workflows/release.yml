@@ -864,299 +864,17 @@ jobs:
         exclude-azure-developer-cli-credential: true
         exclude-interactive-browser-credential: true
 
-    - name: Create NSIS installer script
+    - name: Build installers with NSIS
       shell: pwsh
       run: |
         $version = "${{ steps.version.outputs.version }}"
-        $nsiScript = @"
-        !include "MUI2.nsh"
-        !include "WinMessages.nsh"
-        !include "LogicLib.nsh"
-
-        Name "Hot Dev"
-        OutFile "hot_${version}_x86_64_installer.exe"
-        InstallDir "`$PROGRAMFILES64\Hot Dev"
-        RequestExecutionLevel admin
-
-        !define MUI_ABORTWARNING
-        !define MUI_ICON "hot_icon.ico"
-        !define MUI_UNICON "hot_icon.ico"
-
-        ; Header image (top right on most pages)
-        !define MUI_HEADERIMAGE
-        !define MUI_HEADERIMAGE_BITMAP "hot_header.bmp"
-        !define MUI_HEADERIMAGE_RIGHT
-
-        ; Welcome/Finish page image (left panel)
-        !define MUI_WELCOMEFINISHPAGE_BITMAP "hot_welcome.bmp"
-        !define MUI_UNWELCOMEFINISHPAGE_BITMAP "hot_welcome.bmp"
-
-        !insertmacro MUI_PAGE_WELCOME
-        !insertmacro MUI_PAGE_LICENSE "LICENSE.txt"
-        !insertmacro MUI_PAGE_DIRECTORY
-        !insertmacro MUI_PAGE_INSTFILES
-        !insertmacro MUI_PAGE_FINISH
-
-        !insertmacro MUI_UNPAGE_CONFIRM
-        !insertmacro MUI_UNPAGE_INSTFILES
-
-        !insertmacro MUI_LANGUAGE "English"
-
-        ; Check for running processes on init
-        Function .onInit
-            ; Check if hot.exe is running and offer to close it
-            Call CheckAndCloseRunningProcesses
-        FunctionEnd
-
-        ; Function to check for and close running hot.exe processes
-        Function CheckAndCloseRunningProcesses
-            ; Use tasklist to check if hot.exe is running
-            nsExec::ExecToStack 'tasklist /FI "IMAGENAME eq hot.exe" /NH'
-            Pop `$0  ; Exit code
-            Pop `$1  ; Output
-
-            ; Check if "hot.exe" appears in the output (means it's running)
-            Push `$1
-            Push "hot.exe"
-            Call StrContains
-            Pop `$2
-
-            StrCmp `$2 "" ProcessNotRunning
-
-            ; Process is running - notify user and offer to close
-            MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION \
-                "Hot Dev is currently running.`$\r`$\n`$\r`$\nThe installer needs to close all running instances of Hot to continue.`$\r`$\n`$\r`$\nClick OK to close Hot and continue installation, or Cancel to abort." \
-                IDOK CloseProcess IDCANCEL AbortInstall
-
-        CloseProcess:
-            ; Force kill all hot.exe processes
-            nsExec::ExecToLog 'taskkill /F /IM hot.exe'
-
-            ; Brief delay to allow process to fully terminate
-            Sleep 1000
-
-            ; Verify process was closed
-            nsExec::ExecToStack 'tasklist /FI "IMAGENAME eq hot.exe" /NH'
-            Pop `$0
-            Pop `$1
-
-            Push `$1
-            Push "hot.exe"
-            Call StrContains
-            Pop `$2
-
-            StrCmp `$2 "" ProcessClosed
-
-            ; Still running - warn user
-            MessageBox MB_OK|MB_ICONEXCLAMATION \
-                "Unable to close all Hot processes. Please close them manually and try again."
-            Abort
-
-        ProcessClosed:
-            DetailPrint "Closed running Hot processes"
-            Goto ProcessNotRunning
-
-        AbortInstall:
-            Abort
-
-        ProcessNotRunning:
-        FunctionEnd
-
-        ; Helper function: Check if string contains substring
-        Function StrContains
-            Exch `$1 ; needle
-            Exch
-            Exch `$0 ; haystack
-            Push `$2
-            Push `$3
-
-            StrLen `$2 `$1
-            StrLen `$3 `$0
-
-            `${If} `$2 > `$3
-                StrCpy `$0 ""
-                Goto StrContainsDone
-            `${EndIf}
-
-            StrCpy `$3 0
-
-        StrContainsLoop:
-            StrCpy `$4 `$0 `$2 `$3
-            StrCmp `$4 `$1 StrContainsFound
-            IntOp `$3 `$3 + 1
-            StrLen `$4 `$0
-            IntCmp `$3 `$4 0 0 StrContainsNotFound
-            Goto StrContainsLoop
-
-        StrContainsFound:
-            StrCpy `$0 "found"
-            Goto StrContainsDone
-
-        StrContainsNotFound:
-            StrCpy `$0 ""
-
-        StrContainsDone:
-            Pop `$3
-            Pop `$2
-            Exch `$0
-            Exch
-            Pop `$1
-        FunctionEnd
-
-        ; Add install directory to the system PATH without external plugins.
-        Function AddToPath
-            ReadRegStr `$0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path"
-
-            Push `$0
-            Push "`$INSTDIR"
-            Call StrContains
-            Pop `$1
-            StrCmp `$1 "" 0 PathExists
-
-            StrCpy `$1 "`$0;`$INSTDIR"
-            WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" "`$1"
-            SendMessage `${HWND_BROADCAST} `${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
-
-            DetailPrint "Added `$INSTDIR to system PATH"
-            Goto PathDone
-
-        PathExists:
-            DetailPrint "`$INSTDIR is already in PATH"
-
-        PathDone:
-        FunctionEnd
-
-        ; Remove install directory from the system PATH without external plugins.
-        Function un.RemoveFromPath
-            ReadRegStr `$0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path"
-
-            Push `$0
-            Push ";`$INSTDIR"
-            Call un.StrReplace
-            Pop `$1
-
-            Push `$1
-            Push "`$INSTDIR;"
-            Call un.StrReplace
-            Pop `$2
-
-            Push `$2
-            Push "`$INSTDIR"
-            Call un.StrReplace
-            Pop `$3
-
-            WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" "`$3"
-            SendMessage `${HWND_BROADCAST} `${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
-        FunctionEnd
-
-        ; Helper function for uninstaller: Simple string replace.
-        Function un.StrReplace
-            Exch `$1 ; find
-            Exch
-            Exch `$0 ; string
-            Push `$2
-            Push `$3
-            Push `$4
-            Push `$5
-
-            StrLen `$2 `$1
-            StrCpy `$3 0
-
-        StrReplaceLoop:
-            StrCpy `$4 `$0 `$2 `$3
-            StrCmp `$4 `$1 StrReplaceFound
-            IntOp `$3 `$3 + 1
-            StrLen `$5 `$0
-            IntCmp `$3 `$5 0 0 StrReplaceDone
-            Goto StrReplaceLoop
-
-        StrReplaceFound:
-            StrCpy `$4 `$0 `$3
-            IntOp `$5 `$3 + `$2
-            StrCpy `$5 `$0 "" `$5
-            StrCpy `$0 "`$4`$5"
-
-        StrReplaceDone:
-            Pop `$5
-            Pop `$4
-            Pop `$3
-            Pop `$2
-            Exch `$0
-            Exch
-            Pop `$1
-        FunctionEnd
-
-        Section "Install"
-            ; Clean up old installation files to prevent stale files from being found
-            ; Remove old resources directory (will be recreated with fresh files)
-            RMDir /r "`$INSTDIR\resources"
-            ; Remove legacy paths from older installers
-            RMDir /r "`$INSTDIR\pkg"
-            RMDir /r "`$INSTDIR\db"
-            RMDir /r "`$INSTDIR\app"
-            Delete "`$INSTDIR\hot.exe"
-            Delete "`$INSTDIR\hot_icon.ico"
-
-            ; Install fresh files
-            SetOutPath "`$INSTDIR"
-            File "hot.exe"
-            File "hot_icon.ico"
-
-            SetOutPath "`$INSTDIR\resources"
-            File /r "resources\*.*"
-
-            ; Create uninstaller
-            WriteUninstaller "`$INSTDIR\uninstall.exe"
-
-            ; Add to PATH
-            Call AddToPath
-
-            ; Start menu shortcuts
-            CreateDirectory "`$SMPROGRAMS\Hot Dev"
-            CreateShortcut "`$SMPROGRAMS\Hot Dev\Hot Dev.lnk" "`$INSTDIR\hot.exe"
-            CreateShortcut "`$SMPROGRAMS\Hot Dev\Uninstall.lnk" "`$INSTDIR\uninstall.exe"
-
-            ; Registry for Add/Remove Programs
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HotDev" "DisplayName" "Hot Dev"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HotDev" "UninstallString" "`$INSTDIR\uninstall.exe"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HotDev" "DisplayIcon" "`$INSTDIR\hot_icon.ico"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HotDev" "DisplayVersion" "${version}"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HotDev" "Publisher" "Hot Dev, LLC"
-        SectionEnd
-
-        Section "Uninstall"
-            ; Remove all installed files
-            Delete "`$INSTDIR\hot.exe"
-            Delete "`$INSTDIR\hot_icon.ico"
-            Delete "`$INSTDIR\uninstall.exe"
-            RMDir /r "`$INSTDIR\resources"
-            ; Remove legacy paths from older installers
-            RMDir /r "`$INSTDIR\pkg"
-            RMDir /r "`$INSTDIR\db"
-            RMDir /r "`$INSTDIR\app"
-            ; Remove install directory (only if empty)
-            RMDir "`$INSTDIR"
-
-            ; Remove from PATH
-            Call un.RemoveFromPath
-
-            ; Remove shortcuts
-            Delete "`$SMPROGRAMS\Hot Dev\Hot Dev.lnk"
-            Delete "`$SMPROGRAMS\Hot Dev\Uninstall.lnk"
-            RMDir "`$SMPROGRAMS\Hot Dev"
-
-            ; Remove registry
-            DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HotDev"
-        SectionEnd
-        "@
-
-        $nsiScript | Out-File -Encoding UTF8 staging/x86_64/installer.nsi
-
-    - name: Build installer with NSIS
-      shell: pwsh
-      run: |
+        Copy-Item resources/installer/win/installer.nsi staging/x86_64/installer.nsi
         cd staging/x86_64
-        & "C:\Program Files (x86)\NSIS\makensis.exe" /V3 installer.nsi
+        # The machine-wide installer, then the per-user one (PER_USER)
+        & "C:\Program Files (x86)\NSIS\makensis.exe" /V3 "/DVERSION=$version" installer.nsi
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & "C:\Program Files (x86)\NSIS\makensis.exe" /V3 "/DVERSION=$version" /DPER_USER installer.nsi
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         Move-Item *.exe ../../target/packages/
 
     - name: Sign installer with Trusted Signing
@@ -1313,10 +1031,24 @@ jobs:
         declare -A FILE_MAP=(
           ["hot_${VERSION}_aarch64-apple-darwin.pkg"]="macos_arm64.pkg"
           ["hot_${VERSION}_x86_64-apple-darwin.pkg"]="macos_x86_64.pkg"
+          ["hot_${VERSION}_aarch64-apple-darwin_user.pkg"]="macos_arm64_user.pkg"
+          ["hot_${VERSION}_x86_64-apple-darwin_user.pkg"]="macos_x86_64_user.pkg"
           ["hot_${VERSION}_aarch64.deb"]="linux_arm64.deb"
           ["hot_${VERSION}_x86_64.deb"]="linux_x86_64.deb"
           ["hot_${VERSION}_x86_64_installer.exe"]="windows_x86_64.exe"
+          ["hot_${VERSION}_x86_64_user_installer.exe"]="windows_x86_64_user.exe"
         )
+
+        # Upload a file as KEY, then its checksum as KEY.sha256, which
+        # install.sh and `hot update` check downloads against. A user install
+        # needs the checksum, so a release without one can't make one.
+        upload_with_checksum() {
+          local file="$1" key="$2" sum
+          sum=$(sha256sum "$file" | cut -d' ' -f1)
+          aws s3 cp "$file" "s3://${BUCKET}/${key}"
+          printf '%s  %s\n' "$sum" "$(basename "$key")" \
+            | aws s3 cp - "s3://${BUCKET}/${key}.sha256" --content-type "text/plain"
+        }
 
         echo "Uploading installers to s3://${BUCKET}/${VERSION_PREFIX}/"
 
@@ -1329,31 +1061,31 @@ jobs:
               latest_name="hot_${FILE_MAP[$src_filename]}"
 
               echo "Uploading: $src_filename -> $versioned_name"
-              aws s3 cp "$file" "s3://${BUCKET}/${VERSION_PREFIX}/${versioned_name}"
+              upload_with_checksum "$file" "${VERSION_PREFIX}/${versioned_name}"
 
               echo "Uploading: $src_filename -> ${LATEST_PREFIX}/${latest_name}"
-              aws s3 cp "$file" "s3://${BUCKET}/${LATEST_PREFIX}/${latest_name}"
+              upload_with_checksum "$file" "${LATEST_PREFIX}/${latest_name}"
             else
               echo "Warning: Unknown file $src_filename, skipping"
             fi
           fi
         done
 
-        # Upload Homebrew tarballs
+        # Upload the release archives (Homebrew and install.sh's user installs)
         echo ""
-        echo "Uploading Homebrew tarballs..."
+        echo "Uploading release archives..."
         for file in packages/*.tar.gz; do
           if [ -f "$file" ]; then
             filename=$(basename "$file")
-            echo "Uploading Homebrew tarball: $filename"
+            echo "Uploading release archive: $filename"
 
             # Upload versioned tarball
-            aws s3 cp "$file" "s3://${BUCKET}/${VERSION_PREFIX}/${filename}"
+            upload_with_checksum "$file" "${VERSION_PREFIX}/${filename}"
 
             # Upload to latest (strip version from filename for stable URL)
             # hot_0.7.0_macos_arm64.tar.gz -> hot_macos_arm64.tar.gz
             latest_name=$(echo "$filename" | sed "s/_${VERSION}_/_/")
-            aws s3 cp "$file" "s3://${BUCKET}/${LATEST_PREFIX}/${latest_name}"
+            upload_with_checksum "$file" "${LATEST_PREFIX}/${latest_name}"
           fi
         done
 

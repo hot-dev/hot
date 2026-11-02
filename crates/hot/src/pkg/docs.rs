@@ -233,44 +233,12 @@ pub struct PkgVersionsIndex {
 }
 
 /// Find hot-std package path using standard resolution
+/// ([`crate::resources::bundled_pkg_dirs`])
 pub fn find_hot_std_path() -> Option<PathBuf> {
-    // 1. HOT_HOME environment variable
-    if let Ok(home) = std::env::var("HOT_HOME") {
-        let path = PathBuf::from(home).join("pkg").join("hot-std");
-        if path.exists() {
-            return Some(path);
-        }
-    }
-
-    // 2. Development/local path
-    let dev_path = PathBuf::from("./hot/pkg/hot-std");
-    if dev_path.exists() {
-        return Some(dev_path);
-    }
-
-    // 3. Executable-relative
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(exe_dir) = exe.parent()
-    {
-        let exe_relative = exe_dir.join("resources").join("pkg").join("hot-std");
-        if exe_relative.exists() {
-            return Some(exe_relative);
-        }
-    }
-
-    // 4. macOS package install
-    let macos_path = PathBuf::from("/usr/local/share/hot/pkg/hot-std");
-    if macos_path.exists() {
-        return Some(macos_path);
-    }
-
-    // 5. Linux package install
-    let linux_path = PathBuf::from("/usr/share/hot/pkg/hot-std");
-    if linux_path.exists() {
-        return Some(linux_path);
-    }
-
-    None
+    crate::resources::bundled_pkg_dirs()
+        .into_iter()
+        .map(|dir| dir.join("hot-std"))
+        .find(|path| path.exists())
 }
 
 /// Find a package by name
@@ -280,43 +248,10 @@ pub fn find_pkg_path(pkg_name: &str) -> Option<PathBuf> {
         return find_hot_std_path();
     }
 
-    // 1. HOT_HOME environment variable
-    if let Ok(home) = std::env::var("HOT_HOME") {
-        let path = PathBuf::from(home).join("pkg").join(pkg_name);
-        if path.exists() && path.join("pkg.hot").exists() {
-            return Some(path);
-        }
-    }
-
-    // 2. Development/local path
-    let dev_path = PathBuf::from("./hot/pkg").join(pkg_name);
-    if dev_path.exists() && dev_path.join("pkg.hot").exists() {
-        return Some(dev_path);
-    }
-
-    // 3. Executable-relative
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(exe_dir) = exe.parent()
-    {
-        let exe_relative = exe_dir.join("resources").join("pkg").join(pkg_name);
-        if exe_relative.exists() && exe_relative.join("pkg.hot").exists() {
-            return Some(exe_relative);
-        }
-    }
-
-    // 4. macOS package install
-    let macos_path = PathBuf::from("/usr/local/share/hot/pkg").join(pkg_name);
-    if macos_path.exists() && macos_path.join("pkg.hot").exists() {
-        return Some(macos_path);
-    }
-
-    // 5. Linux package install
-    let linux_path = PathBuf::from("/usr/share/hot/pkg").join(pkg_name);
-    if linux_path.exists() && linux_path.join("pkg.hot").exists() {
-        return Some(linux_path);
-    }
-
-    None
+    crate::resources::bundled_pkg_dirs()
+        .into_iter()
+        .map(|dir| dir.join(pkg_name))
+        .find(|path| path.join("pkg.hot").exists())
 }
 
 /// Summary info for a package (lighter than full PkgDocs)

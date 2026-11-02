@@ -216,6 +216,7 @@ async fn send_with_redirect_validation(
             | reqwest::Method::DELETE
             | reqwest::Method::PATCH
             | reqwest::Method::HEAD
+            | reqwest::Method::OPTIONS
     ) {
         return Err(err_val(format!(
             "::hot::http/request: unsupported method: {method}"
@@ -280,7 +281,12 @@ async fn send_with_redirect_validation(
             .send()
             .await
             .map_err(|e| err_val(format!("::hot::http/request: request failed: {e}")))?;
-        if !response.status().is_redirection() {
+        // A 3xx without a `Location` is a final response, not a redirect:
+        // `304 Not Modified`, or `308 Resume Incomplete` from resumable
+        // upload APIs (Google Drive), which carries `Range` instead.
+        if !response.status().is_redirection()
+            || !response.headers().contains_key(reqwest::header::LOCATION)
+        {
             return Ok(response);
         }
         if redirect_count == MAX_REDIRECTS {
@@ -1119,6 +1125,136 @@ mod tests {
         )
         .await;
         assert!(matches!(result, HotResult::Err(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn redirect_status_without_location_is_returned_as_response() {
+        // Google Drive resumable uploads answer `308 Resume Incomplete`
+        // with a `Range` header and no `Location`.
+        let app = Router::new().route(
+            "/upload",
+            axum::routing::put(|| async {
+                (
+                    StatusCode::PERMANENT_REDIRECT,
+                    [(header::RANGE, "bytes=0-524287")],
+                    "partial",
+                )
+            }),
+        );
+        let url = format!("{}/upload", start_mock_server(app).await);
+        let response = unwrap_result(
+            make_http_request(
+                "PUT",
+                &url,
+                &IndexMap::new(),
+                &Val::from("chunk"),
+                DestinationPolicy::AllowPrivate,
+                DEFAULT_MAX_RESPONSE_BYTES,
+            )
+            .await,
+        );
+        assert_eq!(response.get("status"), Some(Val::Int(308)));
+        let headers = response.get("headers").unwrap();
+        assert_eq!(headers.get("range"), Some(Val::from("bytes=0-524287")));
+        assert_eq!(response.get("body"), Some(Val::from("partial")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn redirect_with_location_is_followed() {
+        let app = Router::new()
+            .route(
+                "/old",
+                axum::routing::get(|| async {
+                    (StatusCode::PERMANENT_REDIRECT, [(header::LOCATION, "/new")])
+                }),
+            )
+            .route("/new", axum::routing::get(|| async { "moved here" }));
+        let url = format!("{}/old", start_mock_server(app).await);
+        let response = unwrap_result(
+            make_http_request(
+                "GET",
+                &url,
+                &IndexMap::new(),
+                &Val::Null,
+                DestinationPolicy::AllowPrivate,
+                DEFAULT_MAX_RESPONSE_BYTES,
+            )
+            .await,
+        );
+        assert_eq!(response.get("status"), Some(Val::Int(200)));
+        assert_eq!(response.get("body"), Some(Val::from("moved here")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn options_request_is_sent_and_follows_validated_redirects() {
+        // Box's upload preflight and events long-poll use OPTIONS. A 308
+        // keeps the method, so the redirected hop is OPTIONS too.
+        let app = Router::new()
+            .route(
+                "/files/content",
+                axum::routing::options(|| async {
+                    (
+                        StatusCode::PERMANENT_REDIRECT,
+                        [(header::LOCATION, "/preflight")],
+                    )
+                }),
+            )
+            .route(
+                "/preflight",
+                axum::routing::options(|| async { ([(header::ALLOW, "OPTIONS, POST")], "ok") }),
+            );
+        let url = format!("{}/files/content", start_mock_server(app).await);
+        let response = unwrap_result(
+            make_http_request(
+                "options",
+                &url,
+                &IndexMap::new(),
+                &Val::Null,
+                DestinationPolicy::AllowPrivate,
+                DEFAULT_MAX_RESPONSE_BYTES,
+            )
+            .await,
+        );
+        assert_eq!(response.get("status"), Some(Val::Int(200)));
+        let headers = response.get("headers").unwrap();
+        assert_eq!(headers.get("allow"), Some(Val::from("OPTIONS, POST")));
+    }
+
+    #[tokio::test]
+    async fn public_only_policy_rejects_local_options_destination() {
+        let app = Router::new().route("/", axum::routing::options(|| async { "nope" }));
+        let url = start_mock_server(app).await;
+        let result = make_http_request(
+            "OPTIONS",
+            &url,
+            &IndexMap::new(),
+            &Val::Null,
+            DestinationPolicy::PublicOnly,
+            DEFAULT_MAX_RESPONSE_BYTES,
+        )
+        .await;
+        let HotResult::Err(error) = result else {
+            panic!("a private OPTIONS destination must be refused: {result:?}");
+        };
+        assert!(!error.to_string().contains("unsupported method"), "{error}");
+    }
+
+    #[test]
+    fn unsupported_method_is_still_refused() {
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(make_http_request(
+                "TRACE",
+                "http://127.0.0.1:1/",
+                &IndexMap::new(),
+                &Val::Null,
+                DestinationPolicy::AllowPrivate,
+                DEFAULT_MAX_RESPONSE_BYTES,
+            ));
+        let HotResult::Err(error) = result else {
+            panic!("TRACE must be refused: {result:?}");
+        };
+        assert!(error.to_string().contains("unsupported method"), "{error}");
     }
 
     #[tokio::test]

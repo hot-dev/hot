@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(test)]
 mod native_parity_tests;
 mod numeric_err;
-use numeric_err::{ErrUseScope, NumericErrUse, numeric_err_use};
+use numeric_err::{Consumer, ErrUseScope, NumericErrUse, numeric_err_use};
 #[cfg(test)]
 mod runtime_tests;
 
@@ -2522,6 +2522,11 @@ unsafe extern "C" fn hot_jit_flow_unwind(count: i64) {
 /// 0/1 — never 2.
 const HALT_SENTINEL: i64 = 2;
 
+/// What consumes an Err `hot_jit_consume_err` halts on (see `Consumer`).
+const CONSUMER_OP: i64 = 0;
+const CONSUMER_CORE: i64 = 1;
+const CONSUMER_FUNCTION: i64 = 2;
+
 const NUMERIC_KIND_INT: i64 = 1;
 const NUMERIC_KIND_DEC: i64 = 2;
 const NUMERIC_KIND_OWNED: i64 = 3;
@@ -2548,7 +2553,9 @@ unsafe fn hot_jit_add_numeric_body(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+    let args = match unsafe {
+        decode_strict_operands("add", left_kind, left_raw, right_kind, right_raw)
+    } {
         Ok(args) => args,
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
@@ -2563,7 +2570,9 @@ unsafe fn hot_jit_sub_numeric_body(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+    let args = match unsafe {
+        decode_strict_operands("sub", left_kind, left_raw, right_kind, right_raw)
+    } {
         Ok(args) => args,
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
@@ -2578,7 +2587,9 @@ unsafe fn hot_jit_mul_numeric_body(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+    let args = match unsafe {
+        decode_strict_operands("mul", left_kind, left_raw, right_kind, right_raw)
+    } {
         Ok(args) => args,
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
@@ -2593,7 +2604,9 @@ unsafe fn hot_jit_div_numeric_body(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+    let args = match unsafe {
+        decode_strict_operands("div", left_kind, left_raw, right_kind, right_raw)
+    } {
         Ok(args) => args,
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
@@ -2608,7 +2621,9 @@ unsafe fn hot_jit_mod_numeric_body(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+    let args = match unsafe {
+        decode_strict_operands("mod", left_kind, left_raw, right_kind, right_raw)
+    } {
         Ok(args) => args,
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
@@ -2624,6 +2639,7 @@ unsafe fn hot_jit_ne_numeric_body(
 ) -> i64 {
     eval_numeric_cmp(
         crate::lang::hot::cmp::ne,
+        "ne",
         left_kind,
         left_raw,
         right_kind,
@@ -2639,6 +2655,7 @@ unsafe fn hot_jit_eq_numeric_body(
 ) -> i64 {
     eval_numeric_cmp(
         crate::lang::hot::cmp::eq,
+        "eq",
         left_kind,
         left_raw,
         right_kind,
@@ -2654,6 +2671,7 @@ unsafe fn hot_jit_gt_numeric_body(
 ) -> i64 {
     eval_numeric_cmp(
         crate::lang::hot::cmp::gt,
+        "gt",
         left_kind,
         left_raw,
         right_kind,
@@ -2669,6 +2687,7 @@ unsafe fn hot_jit_gte_numeric_body(
 ) -> i64 {
     eval_numeric_cmp(
         crate::lang::hot::cmp::gte,
+        "gte",
         left_kind,
         left_raw,
         right_kind,
@@ -2684,6 +2703,7 @@ unsafe fn hot_jit_lt_numeric_body(
 ) -> i64 {
     eval_numeric_cmp(
         crate::lang::hot::cmp::lt,
+        "lt",
         left_kind,
         left_raw,
         right_kind,
@@ -2699,6 +2719,7 @@ unsafe fn hot_jit_lte_numeric_body(
 ) -> i64 {
     eval_numeric_cmp(
         crate::lang::hot::cmp::lte,
+        "lte",
         left_kind,
         left_raw,
         right_kind,
@@ -2746,11 +2767,16 @@ unsafe extern "C" fn hot_jit_eq_general(
     // Strict-argument law: Result operands unwrap (Ok) or halt (Err) as at
     // interpreter call boundaries. On halt the failure state is set and 0
     // is the only in-band value for the bare-bool ABI.
-    let left = match strict_prepare_operand(unsafe { decode_helper_val(left_kind, left_raw) }) {
-        Ok(v) => v,
-        Err(_) => return HALT_SENTINEL,
-    };
-    let right = match strict_prepare_operand(unsafe { decode_helper_val(right_kind, right_raw) }) {
+    let left =
+        match strict_prepare_operand(unsafe { decode_helper_val(left_kind, left_raw) }, "eq", 0) {
+            Ok(v) => v,
+            Err(_) => return HALT_SENTINEL,
+        };
+    let right = match strict_prepare_operand(
+        unsafe { decode_helper_val(right_kind, right_raw) },
+        "eq",
+        1,
+    ) {
         Ok(v) => v,
         Err(_) => return HALT_SENTINEL,
     };
@@ -2805,7 +2831,12 @@ unsafe extern "C" fn hot_jit_is_err(raw: i64) -> i64 {
 /// overflow or zero divisor): halt the run as the interpreter does when it
 /// consumes one (`unwrap_result_if_ok`), and return the failure for the frame
 /// to return. Takes ownership of `raw`.
-unsafe extern "C" fn hot_jit_consume_err(raw: i64) -> i64 {
+///
+/// `consumer`, `payload` and `index` say what consumes it, so the halt names
+/// it as the interpreter's would (`emit_consume_err`): `CONSUMER_OP` for the
+/// VM's own operator, `CONSUMER_CORE` with an OwnedVal `Val::Str` naming the
+/// core function, or `CONSUMER_FUNCTION` with a function id.
+unsafe extern "C" fn hot_jit_consume_err(raw: i64, consumer: i64, payload: i64, index: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null()
         || raw == 0
@@ -2817,8 +2848,24 @@ unsafe extern "C" fn hot_jit_consume_err(raw: i64) -> i64 {
     }
     let vm = unsafe { &mut *vm_ptr };
     let value = unsafe { &*(raw as *const Val) }.clone();
-    if vm.unwrap_result_if_ok(&value).is_ok() {
+    if !value.is_err() {
         return raw;
+    }
+    let index = index as usize;
+    match consumer {
+        CONSUMER_CORE => {
+            let name = match unsafe { &*(payload as *const Val) } {
+                Val::Str(name) => name.to_string(),
+                _ => String::new(),
+            };
+            vm.consume_err_for_core(&name, index, &value);
+        }
+        CONSUMER_FUNCTION => {
+            vm.consume_err_for_function(payload as FunctionId, index, &value);
+        }
+        _ => {
+            let _ = vm.unwrap_result_if_ok(&value);
+        }
     }
     // The run now holds the failure. Return it from the frame as an Err, as
     // the halt blocks do (`emit_halt_return`).
@@ -2881,6 +2928,29 @@ const BINOP_MOD: i64 = 4;
 
 /// JIT helper: type-preserving binary arithmetic for operands that include OwnedVal.
 /// Returns an OwnedVal handle wrapping the exact result type (Int stays Int, etc.).
+/// The core function a lowered `BINOP_*` op stands for.
+fn binop_core_name(op: i64) -> &'static str {
+    match op {
+        BINOP_ADD => "add",
+        BINOP_SUB => "sub",
+        BINOP_MUL => "mul",
+        BINOP_DIV => "div",
+        _ => "mod",
+    }
+}
+
+/// The core function a lowered comparison op (`hot_jit_cmp_general`) stands for.
+fn cmp_core_name(op: i64) -> &'static str {
+    match op {
+        0 => "lt",
+        1 => "gt",
+        2 => "lte",
+        3 => "gte",
+        4 => "eq",
+        _ => "ne",
+    }
+}
+
 unsafe fn hot_jit_binop_general_body(
     op: i64,
     left_kind: i64,
@@ -2891,11 +2961,19 @@ unsafe fn hot_jit_binop_general_body(
     // Strict-argument law: Result operands unwrap (Ok) or halt (Err) as at
     // interpreter call boundaries; on halt the failure state is set and the
     // Err reports through the OwnedVal error channel.
-    let left = match strict_prepare_operand(unsafe { decode_helper_val(left_kind, left_raw) }) {
+    let left = match strict_prepare_operand(
+        unsafe { decode_helper_val(left_kind, left_raw) },
+        binop_core_name(op),
+        0,
+    ) {
         Ok(v) => v,
         Err(_) => return HALT_SENTINEL,
     };
-    let right = match strict_prepare_operand(unsafe { decode_helper_val(right_kind, right_raw) }) {
+    let right = match strict_prepare_operand(
+        unsafe { decode_helper_val(right_kind, right_raw) },
+        binop_core_name(op),
+        1,
+    ) {
         Ok(v) => v,
         Err(_) => return HALT_SENTINEL,
     };
@@ -2932,11 +3010,19 @@ unsafe fn hot_jit_cmp_general_body(
     // interpreter call boundaries. On halt the failure state is set and 0
     // is the only in-band value for the bare-bool ABI; the enclosing
     // frame's boundary observes the halt.
-    let left = match strict_prepare_operand(unsafe { decode_helper_val(left_kind, left_raw) }) {
+    let left = match strict_prepare_operand(
+        unsafe { decode_helper_val(left_kind, left_raw) },
+        cmp_core_name(op),
+        0,
+    ) {
         Ok(v) => v,
         Err(_) => return HALT_SENTINEL,
     };
-    let right = match strict_prepare_operand(unsafe { decode_helper_val(right_kind, right_raw) }) {
+    let right = match strict_prepare_operand(
+        unsafe { decode_helper_val(right_kind, right_raw) },
+        cmp_core_name(op),
+        1,
+    ) {
         Ok(v) => v,
         Err(_) => return HALT_SENTINEL,
     };
@@ -3701,14 +3787,7 @@ unsafe fn hot_jit_call_native_body(function_id: i64, args_ptr: *const i64, args_
     for i in 0..count {
         let kind = unsafe { *args_ptr.add(i * 2) };
         let raw = unsafe { *args_ptr.add(i * 2 + 1) };
-        let val = unsafe { decode_helper_val(kind, raw) };
-        let unwrapped = match vm.unwrap_result_if_ok(&val) {
-            Ok(v) => v,
-            Err(e) => {
-                return vm_error_to_owned_val(e, vm.error_capture_active);
-            }
-        };
-        args.push(unwrapped);
+        args.push(unsafe { decode_helper_val(kind, raw) });
     }
     let func_info = match vm.program.functions.get(function_id as usize) {
         Some(info) => info,
@@ -3718,6 +3797,13 @@ unsafe fn hot_jit_call_native_body(function_id: i64, args_ptr: *const i64, args_
         }
     };
     let function_name = format!("{}/{}", func_info.namespace, func_info.name);
+    // Prepared as the interpreter's CallNative prepares them, so a consumed
+    // Err halts with the same message.
+    let target = crate::lang::runtime::vm::CallTarget::Native(&function_name);
+    let args = match vm.prepare_call_args(target, args) {
+        Ok(args) => args,
+        Err(e) => return vm_error_to_owned_val(e, vm.error_capture_active),
+    };
     match vm.call_hotlib_function(&function_name, &args) {
         Ok(v) => new_owned_val(v),
         Err(e) => vm_error_to_owned_val(e, vm.error_capture_active),
@@ -3801,7 +3887,9 @@ fn ok_payload(val: &Val) -> &Val {
 
 /// JIT helper: consuming an Err argument halts, as at an interpreted call.
 /// Returns HALT_SENTINEL (with the halt recorded) for an Err, 0 otherwise.
-unsafe extern "C" fn hot_jit_check_consumable(val_ptr: i64) -> i64 {
+/// `name_ptr` is an OwnedVal `Val::Str` naming the core function, for the
+/// halt message.
+unsafe extern "C" fn hot_jit_check_consumable(val_ptr: i64, name_ptr: i64) -> i64 {
     if val_ptr == 0 {
         return 0;
     }
@@ -3814,10 +3902,12 @@ unsafe extern "C" fn hot_jit_check_consumable(val_ptr: i64) -> i64 {
         return 0;
     }
     let vm = unsafe { &mut *vm_ptr };
-    match vm.unwrap_result_if_ok(val) {
-        Ok(_) => 0,
-        Err(err) => vm_runtime_error_to_halt(vm, err),
-    }
+    let core = match unsafe { &*(name_ptr as *const Val) } {
+        Val::Str(name) => name.to_string(),
+        _ => String::new(),
+    };
+    let err = vm.consume_err_for_core(&core, 0, val);
+    vm_runtime_error_to_halt(vm, err)
 }
 
 /// Call a function by name through the VM. Used when the function isn't in
@@ -4162,7 +4252,7 @@ fn declare_jit_helpers(
             func,
             ptr_ty,
             "hot_jit_consume_err",
-            &[types::I64],
+            &[types::I64, types::I64, types::I64, types::I64],
             &[types::I64],
         )?,
         owned_raw_arg: declare_helper_func(
@@ -4482,7 +4572,7 @@ fn declare_jit_helpers(
             func,
             ptr_ty,
             "hot_jit_check_consumable",
-            &[types::I64],
+            &[types::I64, types::I64],
             &[types::I64],
         )?,
         flow_begin: declare_helper_func(
@@ -4565,7 +4655,7 @@ unsafe fn decode_numeric_val(kind: i64, raw: i64) -> Val {
 /// failure state makes the enclosing frame's boundary observe the halt
 /// (the documented Ok-but-failed JIT-frame pattern). Non-Result values pass
 /// through untouched, keeping the pure-numeric fast path unchanged.
-fn strict_prepare_operand(val: Val) -> Result<Val, String> {
+fn strict_prepare_operand(val: Val, core: &str, index: usize) -> Result<Val, String> {
     if !val.is_ok() && !val.is_err() {
         return Ok(val);
     }
@@ -4574,20 +4664,28 @@ fn strict_prepare_operand(val: Val) -> Result<Val, String> {
         return Ok(val);
     }
     let vm = unsafe { &mut *vm_ptr };
+    if val.is_err() {
+        return Err(vm.consume_err_for_core(core, index, &val).to_string());
+    }
     vm.unwrap_result_if_ok(&val).map_err(|e| e.to_string())
 }
 
 /// Decode a lowered binary intrinsic's operands with `strict_prepare_operand`
 /// applied to each.
 unsafe fn decode_strict_operands(
+    core: &str,
     left_kind: i64,
     left_raw: i64,
     right_kind: i64,
     right_raw: i64,
 ) -> Result<[Val; 2], String> {
     Ok([
-        strict_prepare_operand(unsafe { decode_numeric_val(left_kind, left_raw) })?,
-        strict_prepare_operand(unsafe { decode_numeric_val(right_kind, right_raw) })?,
+        strict_prepare_operand(unsafe { decode_numeric_val(left_kind, left_raw) }, core, 0)?,
+        strict_prepare_operand(
+            unsafe { decode_numeric_val(right_kind, right_raw) },
+            core,
+            1,
+        )?,
     ])
 }
 
@@ -4617,17 +4715,19 @@ fn write_numeric_result(
 
 fn eval_numeric_cmp(
     cmp: fn(&[Val]) -> crate::lang::hot::r#type::HotResult<Val>,
+    core: &str,
     left_kind: i64,
     left_raw: i64,
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
-        Ok(args) => args,
-        // Failure state is set; the emitted sentinel check routes the
-        // frame to its error return.
-        Err(_) => return HALT_SENTINEL,
-    };
+    let args =
+        match unsafe { decode_strict_operands(core, left_kind, left_raw, right_kind, right_raw) } {
+            Ok(args) => args,
+            // Failure state is set; the emitted sentinel check routes the
+            // frame to its error return.
+            Err(_) => return HALT_SENTINEL,
+        };
     match cmp(&args) {
         crate::lang::hot::r#type::HotResult::Ok(Val::Bool(result)) => {
             if result {
@@ -6273,11 +6373,11 @@ impl<'a> EmitCtx<'a> {
                 args_count,
                 self.call_depth,
             )?;
-            let returned = self.numeric_err_use(instructions, ip, dest) == NumericErrUse::Returned;
+            let err_use = self.numeric_err_use(instructions, ip, dest);
             self.define_register(builder, dest, result_kind, raw)?;
             self.jump_to_next(builder, ip)?;
             if let Some((error_block, error_val)) = error_info {
-                self.handle_recursive_call_error(builder, error_block, error_val, returned);
+                self.handle_recursive_call_error(builder, error_block, error_val, err_use);
             }
             return Ok(true);
         }
@@ -6443,11 +6543,11 @@ impl<'a> EmitCtx<'a> {
             args_count,
             self.call_depth,
         )?;
-        let returned = self.numeric_err_use(instructions, ip, dest) == NumericErrUse::Returned;
+        let err_use = self.numeric_err_use(instructions, ip, dest);
         self.define_register(builder, dest, result_kind, raw)?;
         self.jump_to_next(builder, ip)?;
         if let Some((error_block, error_val)) = error_info {
-            self.handle_recursive_call_error(builder, error_block, error_val, returned);
+            self.handle_recursive_call_error(builder, error_block, error_val, err_use);
         }
         Ok(())
     }
@@ -6462,17 +6562,16 @@ impl<'a> EmitCtx<'a> {
         builder: &mut FunctionBuilder<'_>,
         error_block: cranelift_codegen::ir::Block,
         error_val: cranelift_codegen::ir::Value,
-        returned: bool,
+        err_use: NumericErrUse,
     ) {
         builder.switch_to_block(error_block);
         builder.seal_block(error_block);
-        let result = if returned {
-            error_val
-        } else {
-            let call = builder
-                .ins()
-                .call(self.helper_refs.consume_err, &[error_val]);
-            builder.inst_results(call)[0]
+        let result = match err_use {
+            NumericErrUse::Returned => error_val,
+            NumericErrUse::Consumed(consumer) => {
+                emit_consume_err(builder, &self.helper_refs, error_val, consumer)
+            }
+            _ => emit_consume_err(builder, &self.helper_refs, error_val, Consumer::Op),
         };
         self.emit_cleanup_owned(builder);
         builder.ins().return_(&[result]);
@@ -9846,7 +9945,7 @@ fn try_lower_known_core_call(
                 | RawKind::TypeTag => zero,
                 RawKind::OwnedVal => {
                     let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
-                    exits.halt = Some(emit_consume_check(builder, &helper_refs, raw));
+                    exits.halt = Some(emit_consume_check(builder, &helper_refs, raw, callee_name));
                     let call = builder.ins().call(helper_refs.is_null, &[raw]);
                     builder.inst_results(call)[0]
                 }
@@ -9869,7 +9968,7 @@ fn try_lower_known_core_call(
                 | RawKind::TypeTag => one,
                 RawKind::OwnedVal => {
                     let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
-                    exits.halt = Some(emit_consume_check(builder, &helper_refs, raw));
+                    exits.halt = Some(emit_consume_check(builder, &helper_refs, raw, callee_name));
                     let call = builder.ins().call(helper_refs.is_null, &[raw]);
                     let is_null = builder.inst_results(call)[0];
                     let cmp = builder.ins().icmp_imm_s(
@@ -9966,7 +10065,7 @@ fn try_lower_known_core_call(
                 return Ok(None);
             }
             let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
-            exits.halt = Some(emit_consume_check(builder, &helper_refs, raw));
+            exits.halt = Some(emit_consume_check(builder, &helper_refs, raw, callee_name));
             if err_use == NumericErrUse::Kept {
                 // The result is used as a value, so the Err `length` gives a
                 // value that isn't a collection has to be one.
@@ -10048,6 +10147,58 @@ impl NumericExits {
     }
 }
 
+/// Halt on `err`, an owned Err that `consumer` consumes
+/// (`hot_jit_consume_err`), and give the failure to return.
+fn emit_consume_err(
+    builder: &mut FunctionBuilder<'_>,
+    helper_refs: &JitHelperRefs,
+    err: cranelift_codegen::ir::Value,
+    consumer: Consumer,
+) -> cranelift_codegen::ir::Value {
+    let (kind, payload, index) = match consumer {
+        Consumer::Op => (CONSUMER_OP, 0, 0),
+        Consumer::Core(core, index) => (
+            CONSUMER_CORE,
+            new_owned_val(Val::Str(core_call_name(core).into())),
+            index,
+        ),
+        Consumer::Function(function_id, index) => {
+            (CONSUMER_FUNCTION, i64::from(function_id), index)
+        }
+    };
+    let kind = builder.ins().iconst(types::I64, kind);
+    let payload = builder.ins().iconst(types::I64, payload);
+    let index = builder.ins().iconst(types::I64, index as i64);
+    let call = builder
+        .ins()
+        .call(helper_refs.consume_err, &[err, kind, payload, index]);
+    builder.inst_results(call)[0]
+}
+
+/// The bare name a `KnownCoreCall` is called by.
+fn core_call_name(core: KnownCoreCall) -> &'static str {
+    match core {
+        KnownCoreCall::Add => "add",
+        KnownCoreCall::Sub => "sub",
+        KnownCoreCall::Mul => "mul",
+        KnownCoreCall::Div => "div",
+        KnownCoreCall::Mod => "mod",
+        KnownCoreCall::Eq => "eq",
+        KnownCoreCall::Ne => "ne",
+        KnownCoreCall::Gt => "gt",
+        KnownCoreCall::Gte => "gte",
+        KnownCoreCall::Lt => "lt",
+        KnownCoreCall::Lte => "lte",
+        KnownCoreCall::Not => "not",
+        KnownCoreCall::IsZero => "is-zero",
+        KnownCoreCall::IsNull => "is-null",
+        KnownCoreCall::IsSome => "is-some",
+        KnownCoreCall::And => "and",
+        KnownCoreCall::Or => "or",
+        KnownCoreCall::Length => "length",
+    }
+}
+
 /// End the current block by taking `err`, an owned Err a numeric op made,
 /// out of the frame as `err_use` says: consumed, it halts; returned, it is
 /// the frame's result.
@@ -10058,9 +10209,8 @@ fn route_numeric_err(
     err_use: NumericErrUse,
     exits: &mut NumericExits,
 ) {
-    let value = if err_use == NumericErrUse::Consumed {
-        let call = builder.ins().call(helper_refs.consume_err, &[err]);
-        builder.inst_results(call)[0]
+    let value = if let NumericErrUse::Consumed(consumer) = err_use {
+        emit_consume_err(builder, helper_refs, err, consumer)
     } else {
         err
     };
@@ -10495,8 +10645,13 @@ fn emit_consume_check(
     builder: &mut FunctionBuilder<'_>,
     helper_refs: &JitHelperRefs,
     raw: cranelift_codegen::ir::Value,
+    core: &str,
 ) -> cranelift_codegen::ir::Block {
-    let call = builder.ins().call(helper_refs.check_consumable, &[raw]);
+    let name = new_owned_val(Val::Str(core.into()));
+    let name = builder.ins().iconst(types::I64, name);
+    let call = builder
+        .ins()
+        .call(helper_refs.check_consumable, &[raw, name]);
     let checked = builder.inst_results(call)[0];
     emit_halt_check(builder, checked)
 }

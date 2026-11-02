@@ -102,6 +102,11 @@ pub struct ExecutionContext {
     /// We store hashes (u64) for efficient comparison and to handle any Val type
     #[serde(default)]
     pub secret_value_hashes: AHashSet<u64>,
+    /// Secret values this run registered, for masking inside strings. Shared
+    /// by every clone of this context and never serialized: a queue message
+    /// carries the hashes above, not the values.
+    #[serde(skip)]
+    pub secret_values: crate::lang::masking::SecretValues,
     /// Access log ID from the API request that triggered this execution.
     /// Propagated from access_log_middleware → event → execution context → run.
     #[serde(default)]
@@ -159,6 +164,7 @@ impl ExecutionContext {
             retry_attempt: 0,
             secret_keys: AHashSet::new(),
             secret_value_hashes: AHashSet::new(),
+            secret_values: Default::default(),
             access_id: None,
             agent_type: None,
             queue_timing: None,
@@ -197,6 +203,7 @@ impl ExecutionContext {
             retry_attempt: 0,
             secret_keys: AHashSet::new(),
             secret_value_hashes: AHashSet::new(),
+            secret_values: Default::default(),
             access_id: None,
             agent_type: None,
             queue_timing: None,
@@ -239,6 +246,7 @@ impl ExecutionContext {
             retry_attempt: 0,
             secret_keys: AHashSet::new(),
             secret_value_hashes: AHashSet::new(),
+            secret_values: Default::default(),
             access_id: None,
             agent_type: None,
             queue_timing: None,
@@ -266,6 +274,7 @@ impl ExecutionContext {
             retry_attempt: 0,
             secret_keys: AHashSet::new(),
             secret_value_hashes: AHashSet::new(),
+            secret_values: Default::default(),
             access_id: None,
             agent_type: None,
             queue_timing: None,
