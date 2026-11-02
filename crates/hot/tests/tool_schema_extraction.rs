@@ -276,17 +276,9 @@ fn (
     let cents = prop("cents");
     assert_eq!(cents.get(&Val::from("minimum")), Some(&Val::Int(50)));
     assert_eq!(cents.get(&Val::from("maximum")), Some(&Val::Int(1000000)));
-    // Hot's `length` counts UTF-8 bytes and `maxLength` counts characters, so
-    // a string length bound is described rather than given as a keyword.
+    // Hot's `length` and `maxLength` both count characters.
     let memo = prop("memo");
-    assert_eq!(memo.get(&Val::from("maxLength")), None);
-    assert!(
-        matches!(
-            memo.get(&Val::from("description")),
-            Some(Val::Str(text)) if text.contains("length counts UTF-8 bytes")
-        ),
-        "{memo:?}"
-    );
+    assert!(memo.get(&Val::from("maxLength")).is_some(), "{memo:?}");
     let tags = prop("tags");
     assert_eq!(tags.get(&Val::from("minItems")), Some(&Val::Int(1)));
     assert_eq!(tags.get(&Val::from("maxItems")), Some(&Val::Int(5)));

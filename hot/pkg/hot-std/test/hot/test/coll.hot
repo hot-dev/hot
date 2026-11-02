@@ -1580,3 +1580,12 @@ meta ["test"] fn () {
     assert-eq("c", get(idx, 1), "index-by keeps the last element with a key")
     assert-eq({x: 1}, map-keys({a: 1}, (k) { "x" }), "map-keys maps the keys")
 }
+
+// Ints and Decs sort by value together, not grouped by type
+test-sort-mixed-int-and-dec-by-value
+meta ["test"] fn () {
+    assert-eq("[65,70.5,82.32,100]", to-json(sort([82.32, 65, 70.5, 100])), "sort compares Int and Dec by value")
+    rows [{c: 82.32}, {c: 65}, {c: 70.5}, {c: 100}]
+    assert-eq([65, 70.5, 82.32, 100], map(sort-by(rows, %.c), %.c), "sort-by compares Int and Dec keys by value")
+    assert-eq("[-3.5,-3,2,2.0]", to-json(sort([2.0, 2, -3, -3.5])), "equal values keep Int before Dec")
+}

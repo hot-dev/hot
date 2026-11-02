@@ -4335,44 +4335,8 @@ impl VirtualMachine {
                 // construct_typed_recursive sees the Vec wants `Geom`, the
                 // element is a tagged Triangle, and rather than failing variant
                 // inference we look up the arrow and call it.
-                let src_short = existing.rsplit('/').next().unwrap_or(existing);
-                let tgt_short = type_name.rsplit('/').next().unwrap_or(&type_name);
-                // Prefer keys whose source is the value's qualified $type;
-                // fall back to short-form comparison for legacy registry
-                // entries. The single-candidate guard keeps ambiguous
-                // matches from silently picking an arrow.
-                let collect_candidates = |exact: bool| -> Vec<(String, String)> {
-                    self.type_implementations
-                        .keys()
-                        .filter_map(|(s, t)| {
-                            let source_matches = if exact {
-                                s == existing
-                            } else {
-                                s.rsplit('/').next().unwrap_or(s) == src_short
-                            };
-                            if !source_matches {
-                                return None;
-                            }
-                            if t == tgt_short || t.starts_with(&format!("{}.", tgt_short)) {
-                                Some((s.clone(), t.clone()))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                };
-                let mut candidates = collect_candidates(true);
-                if candidates.is_empty() {
-                    candidates = collect_candidates(false);
-                }
-                if candidates.len() == 1
-                    && let Some(impl_name) =
-                        self.resolve_type_implementation(&candidates[0].0, &candidates[0].1)
-                {
-                    return self.execute_function_call_by_qualified_name(
-                        &impl_name,
-                        std::slice::from_ref(data),
-                    );
+                if let Some(coerced) = self.coerce_tagged_via_arrow(data, existing, &type_name)? {
+                    return Ok(coerced);
                 }
             }
 
@@ -4519,6 +4483,18 @@ impl VirtualMachine {
             );
             return self
                 .execute_function_call_by_qualified_name(&type_name, std::slice::from_ref(data));
+        }
+
+        // `T(value)` where `value` carries another type's tag runs a
+        // declared `Source -> T` arrow instead of copying fields across:
+        // the arrow is the author's statement of how to build a T from it.
+        if let Val::Map(m) = data
+            && let Some(existing) = crate::val::tagged_type_name(m)
+            && existing != type_name
+            && !existing.starts_with(&format!("{}.", type_name))
+            && let Some(coerced) = self.coerce_tagged_via_arrow(data, existing, &type_name)?
+        {
+            return Ok(coerced);
         }
 
         // Get all_fields list to check for newtypes
@@ -5507,11 +5483,129 @@ impl VirtualMachine {
             .map(|(index, arg)| {
                 if keeps.get(index).copied().unwrap_or(false) {
                     self.resolve_variable_references_in_val(&arg)
+                } else if arg.is_err() {
+                    Err(self.consume_err_arg(target, index, &arg))
                 } else {
                     self.prepare_call_arg(arg)
                 }
             })
             .collect()
+    }
+
+    /// Halt on an Err passed where the callee consumes it. The message
+    /// names the parameter and its function, lambda or native, so a halt
+    /// far from where the Err was made says why it happened.
+    fn consume_err_arg(&mut self, target: CallTarget<'_>, index: usize, arg: &Val) -> VmError {
+        let err_val = arg.unwrap_err().cloned().unwrap_or(Val::Null);
+        let mut msg = Self::result_err_message(&err_val);
+        if let Some(context) = self.consumed_arg_context(target, index) {
+            msg = format!("{msg} ({context})");
+        }
+        self.set_consumed_failure(msg.clone(), err_val);
+        VmError::runtime(format!("Result error: {}", msg))
+    }
+
+    /// Halt on an Err that compiled code consumes as an argument of a core
+    /// function it runs natively (`add`, `is-null`, ...), with the message
+    /// the interpreter's call to that function gives.
+    pub(crate) fn consume_err_for_core(&mut self, core: &str, index: usize, arg: &Val) -> VmError {
+        // The interpreter calls it by name, as the compiled code was.
+        let callee = Val::from(core);
+        self.consume_err_arg(CallTarget::Value(&callee), index, arg)
+    }
+
+    /// `consume_err_for_core` for an argument of a user function.
+    pub(crate) fn consume_err_for_function(
+        &mut self,
+        function_id: FunctionId,
+        index: usize,
+        arg: &Val,
+    ) -> VmError {
+        self.consume_err_arg(CallTarget::Function(function_id), index, arg)
+    }
+
+    /// Where an argument at `index` of a call to `target` was consumed.
+    fn consumed_arg_context(&mut self, target: CallTarget<'_>, index: usize) -> Option<String> {
+        const DECLARE: &str = "declare the parameter `Result` to receive Errs";
+        let param_name = |names: &[String], variadic: bool| {
+            names
+                .get(index)
+                .or_else(|| names.last().filter(|_| variadic))
+                .map(|name| {
+                    match name
+                        .strip_prefix("__")
+                        .and_then(|n| n.parse::<usize>().ok())
+                    {
+                        // A placeholder lambda's parameters: `%` (`%1`), `%2`, ...
+                        Some(0) => "placeholder `%`".to_string(),
+                        Some(n) => format!("placeholder `%{}`", n + 1),
+                        None => format!("parameter `{name}`"),
+                    }
+                })
+                .unwrap_or_else(|| format!("argument {}", index + 1))
+        };
+        match target {
+            CallTarget::Function(function_id) => {
+                let function = self.program.functions.get(function_id as usize)?;
+                let param = param_name(&function.param_names, function.is_variadic);
+                let name = if function.name.starts_with("::") {
+                    function.name.clone()
+                } else {
+                    format!("{}/{}", function.namespace, function.name)
+                };
+                Some(format!("an Err passed to {param} of {name}; {DECLARE}"))
+            }
+            CallTarget::Lambda(lambda) => {
+                let param = param_name(&lambda.parameters, false);
+                Some(format!("an Err passed to {param} of a lambda; {DECLARE}"))
+            }
+            CallTarget::Native(name) => Some(format!(
+                "an Err passed as argument {} of {name}, which needs a value; test a Result with is-err or is-ok",
+                index + 1
+            )),
+            CallTarget::Value(value) => {
+                let mut value = value;
+                if let Val::Map(map) = value
+                    && crate::val::tagged_type_name(map) == Some("::hot::type/Fn")
+                    && let Some(inner) = map.get(&Val::from("$val"))
+                {
+                    value = inner;
+                }
+                let name = match value {
+                    Val::Box(boxed) => {
+                        if let Some(lambda) = boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                        {
+                            return self.consumed_arg_context(CallTarget::Lambda(lambda), index);
+                        }
+                        boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()?
+                            .name
+                            .clone()
+                    }
+                    Val::Str(name) => name.to_string(),
+                    _ => return None,
+                };
+                if !name.starts_with("::")
+                    && let Ok(Val::Box(boxed)) = self.lookup_variable(&name)
+                    && let Some(lambda) = boxed
+                        .as_any()
+                        .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                    && !lambda.is_lazy_param
+                {
+                    return self.consumed_arg_context(CallTarget::Lambda(lambda), index);
+                }
+                let name = self.resolve_function_name(&name).unwrap_or(name);
+                match self.function_mapping.get(&name).copied() {
+                    Some(function_id) => {
+                        self.consumed_arg_context(CallTarget::Function(function_id), index)
+                    }
+                    None => self.consumed_arg_context(CallTarget::Native(&name), index),
+                }
+            }
+        }
     }
 
     /// Keep a halt that a native saw while running Hot code (a callback, a
@@ -5609,6 +5703,21 @@ impl VirtualMachine {
                 // `call-lib` and `call` hand their arguments on themselves.
                 if name == "call-lib" || name == "call" {
                     return Vec::new();
+                }
+                // A bare name dispatches to a lambda bound in scope before
+                // any function of that name (`unified_function_lookup`), so
+                // that lambda's parameters decide: `f (x: Result) {...}`
+                // bound at top level and called as `f(err(...))`.
+                if !name.starts_with("::")
+                    && let Ok(Val::Box(boxed)) = self.lookup_variable(&name)
+                    && let Some(lambda) = boxed
+                        .as_any()
+                        .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                    && !lambda.is_lazy_param
+                {
+                    return (0..args.len())
+                        .map(|index| lambda.keeps_param(index))
+                        .collect();
                 }
                 let name = self.resolve_function_name(&name).unwrap_or(name);
                 match self.find_best_function_overload(&name, args) {
@@ -7382,6 +7491,31 @@ impl VirtualMachine {
             }
             _ => false,
         })
+    }
+
+    /// Run the registered `Source -> Target` arrow for a value tagged
+    /// `existing`, when exactly one arrow from that source reaches
+    /// `target` (or a variant of it). Prefers registry keys whose source is
+    /// the value's qualified `$type`, falling back to short names for
+    /// legacy entries; ambiguous matches return `None` rather than picking
+    /// an arrow.
+    fn coerce_tagged_via_arrow(
+        &mut self,
+        data: &Val,
+        existing: &str,
+        target: &str,
+    ) -> VmResult<Option<Val>> {
+        let src_short = existing.rsplit('/').next().unwrap_or(existing);
+        let tgt_short = target.rsplit('/').next().unwrap_or(target);
+        let Some((source, target)) = self.find_coercion_target(existing, src_short, tgt_short)
+        else {
+            return Ok(None);
+        };
+        let Some(impl_name) = self.resolve_type_implementation(&source, &target) else {
+            return Ok(None);
+        };
+        self.execute_function_call_by_qualified_name(&impl_name, std::slice::from_ref(data))
+            .map(Some)
     }
 
     /// Look up a coercion arrow whose source type matches `src` and whose

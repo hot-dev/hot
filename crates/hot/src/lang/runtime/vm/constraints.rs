@@ -969,9 +969,9 @@ fn fast_check(value: &Val, fast: &Val) -> Option<bool> {
         Val::Dec(d) => Some(*d),
         _ => None,
     };
-    // Hot's `length`: bytes of a Str, entries of a Vec or Map.
+    // Hot's `length`: characters of a Str, entries of a Vec or Map.
     let length = |v: &Val| match crate::val::as_fields(v) {
-        Val::Str(s) => Some(s.len() as i64),
+        Val::Str(s) => Some(s.chars().count() as i64),
         Val::Vec(items) => Some(items.len() as i64),
         Val::Map(entries) => Some(entries.len() as i64),
         _ => None,
