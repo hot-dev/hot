@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:46b341584f73
+<!-- HOT_LANGUAGE_SECTION_START --> hash:5cbc19fc842a
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -558,7 +558,7 @@ hash ::hot::hash/sha256("data")
 - `::hot::env` — `get(name, default)`, `get-all`
 - `::hot::ctx` — `get(key)`, `set(key, value)`, `set(map)`, `set-secret(key, value)`
 - `::hot::hash` — `sha256`, `blake3`, `sha384`, `sha512`
-- `::hot::hmac` — `hmac-sha512`, `hmac-sha1`
+- `::hot::hmac` — `hmac-sha256`, `hmac-sha256-bytes`, `hmac-sha512`, `hmac-sha1`, `hmac-verify`, `hmac-verify-hex`, `hmac-verify-base64`
 - `::hot::time` — `now`, `now-zoned`, `parse`, `format`, `add`, `subtract`, `year`, `month`, `day`, `days`, `hours`, `minutes`, `seconds`, `with-timezone`, `to-plain-date-time`, `to-plain-date`, `to-plain-time`, `to-instant`
 - `::hot::base64` — `encode`, `decode`, `encode-url`, `decode-url`
 - `::hot::uri` — `Uri` type, `encode`, `decode`, `encode-query`, `decode-query`, `parse`, `build`, `join`, `is-valid`

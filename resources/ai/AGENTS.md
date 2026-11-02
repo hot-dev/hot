@@ -557,7 +557,7 @@ hash ::hot::hash/sha256("data")
 - `::hot::env` — `get(name, default)`, `get-all`
 - `::hot::ctx` — `get(key)`, `set(key, value)`, `set(map)`, `set-secret(key, value)`
 - `::hot::hash` — `sha256`, `blake3`, `sha384`, `sha512`
-- `::hot::hmac` — `hmac-sha512`, `hmac-sha1`
+- `::hot::hmac` — `hmac-sha256`, `hmac-sha256-bytes`, `hmac-sha512`, `hmac-sha1`, `hmac-verify`, `hmac-verify-hex`, `hmac-verify-base64`
 - `::hot::time` — `now`, `now-zoned`, `parse`, `format`, `add`, `subtract`, `year`, `month`, `day`, `days`, `hours`, `minutes`, `seconds`, `with-timezone`, `to-plain-date-time`, `to-plain-date`, `to-plain-time`, `to-instant`
 - `::hot::base64` — `encode`, `decode`, `encode-url`, `decode-url`
 - `::hot::uri` — `Uri` type, `encode`, `decode`, `encode-query`, `decode-query`, `parse`, `build`, `join`, `is-valid`
