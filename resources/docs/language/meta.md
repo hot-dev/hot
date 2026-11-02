@@ -417,7 +417,7 @@ Masking is a safety net for records, not a guarantee. Treat any secret that may 
 - **Payloads handlers need.** Event data (`::hot::event/send` and webhook or MCP requests, in the `event` table) and task arguments and results (the `task` table) are the inputs and outputs of other code, so they are stored as they are. Don't put secrets in event data or task arguments: have the handler or task read them from the context. A value passed to another run this way isn't registered there until that run registers it.
 - **A run's result as delivered.** The waiting webhook or MCP caller receives the run's real result, since it may be what they asked for, and `hot run` prints it. The stored `run.result` is masked, so **a caller that reads a result back through the API sees `<secret>`** for a credential field or registered secret in it.
 - **Stream data.** `::hot::stream/data` and HTTP stream chunks go to their consumers with registered secrets masked, but not credential fields, which may be what a consumer asked for.
-- **Large values spilled to blob storage.** Masking happens before a value is spilled, but a running call's large argument spilled before a secret was registered stays in its blob, though its record is masked and written again without it.
+- **Large values spilled to blob storage.** Masking happens before a value is spilled, but a large value spilled before a secret was registered stays in its blob, though its record is masked and written again without it. That covers a single large string or Bytes, and any argument or return value over 1 MB as JSON.
 - **Trace-level logs.** `HOT_LOG_LEVEL=trace` logs values as the VM handles them. Don't use it where logs are shared.
 
 ### Runtime Functions

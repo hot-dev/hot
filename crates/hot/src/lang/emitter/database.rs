@@ -1,7 +1,7 @@
 use super::database_writer::{DatabaseWrite, DatabaseWriter};
 use super::postgres_safety::{sanitize_json_for_jsonb, sanitize_text_for_postgres};
 use super::{EngineEvent, EngineEventEmitter};
-use crate::blob::{BlobScope, BlobStore, SpillSource};
+use crate::blob::{BlobScope, BlobStore, MAX_INLINE_HARD_LIMIT_BYTES, SpillSource, omitted_val};
 use crate::db::DatabasePool;
 use crate::lang::event::ExecutionContext;
 use crate::lang::masking::RecordMask;
@@ -598,36 +598,58 @@ impl DatabaseEngineEventEmitterProcessor {
         }
     }
 
-    /// Spill large leaves of an already-masked run value to blob storage.
-    /// Observability path: on spill failure, fall back to the inline value.
+    /// Store an already-masked run value's large parts in blob storage: its
+    /// large leaves, or all of it if that wouldn't leave little enough inline.
+    /// Observability path: on spill failure, fall back to the inline value,
+    /// unless it's too large to store at all.
     async fn maybe_spill_run_val(
         &self,
         val: Val,
         ctx: &ExecutionContext,
         source: SpillSource,
     ) -> Val {
-        let Some(store) = &self.blob_store else {
-            return val;
+        let size = crate::blob::estimate_val_size(&val);
+        let inline = |val| {
+            if size > MAX_INLINE_HARD_LIMIT_BYTES {
+                omitted_val(size)
+            } else {
+                val
+            }
         };
-        if !store.config().enabled() {
-            return val;
+        let Some(store) = self.blob_store.as_ref().filter(|s| s.config().enabled()) else {
+            return inline(val);
+        };
+        let threshold = store.config().spill_threshold_bytes;
+        if size < threshold {
+            return inline(val);
         }
         let Some(org_id) = ctx.org_id else {
-            return val;
+            return inline(val);
         };
-        if crate::blob::estimate_val_size(&val) < store.config().spill_threshold_bytes {
-            return val;
-        }
         let scope = BlobScope {
             org_id,
             env_id: ctx.env_id,
             run_id: Some(ctx.run_id),
         };
         let source_id = ctx.run_id.to_string();
-        match store
-            .spill_large_val(val.clone(), scope, source, Some(&source_id))
-            .await
+        let spilled = if crate::blob::val_bytes_outside_large_leaves(&val, threshold)
+            > store.config().max_inline_bytes
         {
+            let json = serde_json::to_string(&val).unwrap_or_default();
+            store
+                .spill_whole_json(
+                    &sanitize_json_for_jsonb(&json),
+                    scope,
+                    source,
+                    Some(&source_id),
+                )
+                .await
+        } else {
+            store
+                .spill_large_val(val.clone(), scope, source, Some(&source_id))
+                .await
+        };
+        match spilled {
             Ok(spilled) => spilled,
             Err(e) => {
                 tracing::warn!(
@@ -636,15 +658,16 @@ impl DatabaseEngineEventEmitterProcessor {
                     error = %e,
                     "blob spill failed for run value; storing inline"
                 );
-                val
+                inline(val)
             }
         }
     }
 
-    /// Mask secrets and then spill large leaves in a serialized call payload.
-    /// Masking MUST precede spill so secret bytes never reach blob storage.
-    /// Observability path: on spill failure, fall back to the masked inline
-    /// JSON.
+    /// Mask a serialized call payload, then store its large parts in blob
+    /// storage: its large leaves, or all of it if that wouldn't leave little
+    /// enough inline. Masking MUST precede spill so secret bytes never reach
+    /// blob storage. Observability path: on spill failure, fall back to the
+    /// masked inline JSON, unless it's too large to store at all.
     async fn finalize_call_payload(
         blob_store: &Option<Arc<BlobStore>>,
         json_value: Option<String>,
@@ -652,34 +675,43 @@ impl DatabaseEngineEventEmitterProcessor {
         source: SpillSource,
         source_id: &str,
     ) -> Option<String> {
-        let masked = Self::mask_call_payload(json_value, ctx);
-
-        let Some(store) = blob_store else {
-            return masked;
+        let masked = Self::mask_call_payload(json_value, ctx)?;
+        let Some(store) = blob_store.as_ref().filter(|s| s.config().enabled()) else {
+            return Some(Self::inline_call_payload(masked));
         };
-        let masked = masked?;
-        if !store.config().enabled() || masked.len() < store.config().spill_threshold_bytes {
-            return Some(masked);
+        let threshold = store.config().spill_threshold_bytes;
+        if masked.len() < threshold {
+            return Some(Self::inline_call_payload(masked));
         }
         let Some(org_id) = ctx.org_id else {
-            return Some(masked);
-        };
-        let Ok(val) = serde_json::from_str::<Val>(&masked) else {
-            return Some(masked);
+            return Some(Self::inline_call_payload(masked));
         };
         let scope = BlobScope {
             org_id,
             env_id: ctx.env_id,
             run_id: Some(ctx.run_id),
         };
-        match store
-            .spill_large_val(val, scope, source, Some(source_id))
-            .await
+        let spilled = if crate::blob::json_bytes_outside_large_strings(&masked, threshold)
+            > store.config().max_inline_bytes
         {
-            Ok(spilled) => match serde_json::to_string(&spilled) {
-                Ok(json) => Some(sanitize_json_for_jsonb(&json).into_owned()),
-                Err(_) => Some(masked),
-            },
+            store
+                .spill_whole_json(&masked, scope, source, Some(source_id))
+                .await
+        } else {
+            match serde_json::from_str::<Val>(&masked) {
+                Ok(val) => {
+                    store
+                        .spill_large_val(val, scope, source, Some(source_id))
+                        .await
+                }
+                Err(_) => return Some(Self::inline_call_payload(masked)),
+            }
+        };
+        match spilled.map(|spilled| serde_json::to_string(&spilled)) {
+            Ok(Ok(json)) => Some(Self::inline_call_payload(
+                sanitize_json_for_jsonb(&json).into_owned(),
+            )),
+            Ok(Err(_)) => Some(Self::inline_call_payload(masked)),
             Err(e) => {
                 tracing::warn!(
                     source = source.as_str(),
@@ -687,8 +719,17 @@ impl DatabaseEngineEventEmitterProcessor {
                     error = %e,
                     "blob spill failed for call payload; storing inline"
                 );
-                Some(masked)
+                Some(Self::inline_call_payload(masked))
             }
+        }
+    }
+
+    /// `json`, unless it's too large to store, which would fail the run's writes.
+    fn inline_call_payload(json: String) -> String {
+        if json.len() > MAX_INLINE_HARD_LIMIT_BYTES {
+            serde_json::to_string(&omitted_val(json.len())).unwrap_or_default()
+        } else {
+            json
         }
     }
 
@@ -1488,6 +1529,248 @@ mod tests {
                 .as_i64()
                 .is_some_and(|value| value >= 0)
         );
+    }
+
+    /// Rows of small cells: nothing in them is large enough to spill alone.
+    fn many_small_rows(rows: usize, cell: &str) -> Val {
+        Val::vec(
+            (0..rows)
+                .map(|i| crate::val!({"id": (i as i64), "note": cell, "zip": "02134"}))
+                .collect(),
+        )
+    }
+
+    /// Run one call returning `returned`, and read back its stored value.
+    async fn record_return(
+        db: &crate::db::DatabasePool,
+        blob_store: Option<Arc<BlobStore>>,
+        execution_context: &ExecutionContext,
+        returned: Val,
+    ) -> Val {
+        let emitter =
+            DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), blob_store);
+        let call_id = Uuid::now_v7();
+        emitter.emit(EngineEvent::call_start(
+            execution_context,
+            call_id,
+            None,
+            "::hot::test/rows".to_string(),
+            "::hot::test/rows".to_string(),
+            "run/test".to_string(),
+            0,
+            vec![],
+            None,
+            chrono::Utc::now(),
+            None,
+        ));
+        emitter.emit(EngineEvent::call_stop(
+            execution_context,
+            call_id,
+            Some(returned),
+            None,
+            chrono::Utc::now(),
+            10,
+        ));
+        emitter.shutdown().await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        let stored: String = sqlx::query_scalar("SELECT return_value FROM call WHERE call_id = ?")
+            .bind(call_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        serde_json::from_str(&stored).unwrap()
+    }
+
+    #[tokio::test]
+    async fn many_small_values_are_stored_whole_in_a_blob() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db);
+        let execution_context = persisted_execution_context(&db).await;
+        let rows = many_small_rows(40_000, "a small cell");
+        let stored = record_return(
+            &db,
+            Some(blob_store.clone()),
+            &execution_context,
+            rows.clone(),
+        )
+        .await;
+
+        let blob_ref = crate::blob::BlobRefVal::from_val(&stored)
+            .unwrap()
+            .expect("the record should hold one reference");
+        assert_eq!(blob_ref.encoding, crate::blob::ENCODING_JSON);
+
+        let scope = BlobScope {
+            org_id: execution_context.org_id.unwrap(),
+            env_id: execution_context.env_id,
+            run_id: Some(execution_context.run_id),
+        };
+        let budget = crate::blob::RehydrateBudget::from_config(blob_store.config());
+        let restored = blob_store
+            .rehydrate_blob_refs(stored, scope, budget)
+            .await
+            .unwrap();
+        assert_eq!(restored, rows);
+    }
+
+    #[tokio::test]
+    async fn secrets_are_masked_before_a_whole_value_is_stored() {
+        const SECRET: &str = "SENTINEL-WHOLE-VALUE-SECRET";
+        let db = crate::db::test_db().await;
+        let (blob_store, tmp) = test_blob_store(&db);
+        let execution_context = persisted_execution_context(&db).await;
+        execution_context.secret_values.register(&Val::from(SECRET));
+        let stored = record_return(
+            &db,
+            Some(blob_store.clone()),
+            &execution_context,
+            many_small_rows(40_000, SECRET),
+        )
+        .await;
+
+        let scope = BlobScope {
+            org_id: execution_context.org_id.unwrap(),
+            env_id: execution_context.env_id,
+            run_id: Some(execution_context.run_id),
+        };
+        let budget = crate::blob::RehydrateBudget::from_config(blob_store.config());
+        let restored = blob_store
+            .rehydrate_blob_refs(stored, scope, budget)
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&restored).unwrap();
+        assert!(!text.contains(SECRET));
+        assert!(text.contains(crate::lang::masking::MASK));
+
+        // And nothing with it reached storage.
+        for entry in walkdir_files(tmp.path()) {
+            let bytes = std::fs::read(&entry).unwrap();
+            assert!(
+                !bytes.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()),
+                "{} holds the secret",
+                entry.display()
+            );
+        }
+    }
+
+    fn walkdir_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(walkdir_files(&path));
+            } else {
+                files.push(path);
+            }
+        }
+        files
+    }
+
+    #[tokio::test]
+    async fn one_large_leaf_is_still_spilled_alone() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db);
+        let execution_context = persisted_execution_context(&db).await;
+        let value = crate::val!({"kept": "inline", "text": ("x".repeat(3_000_000))});
+        let stored = record_return(&db, Some(blob_store), &execution_context, value).await;
+        let Val::Map(map) = &stored else {
+            panic!("expected the Map inline: {stored:?}");
+        };
+        assert_eq!(map.get(&Val::from("kept")), Some(&Val::from("inline")));
+        assert!(crate::blob::is_blob_ref_val(
+            map.get(&Val::from("text")).unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn without_blob_storage_a_value_over_the_limit_is_left_out() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let cell = "x".repeat(1024);
+        let stored = record_return(
+            &db,
+            None,
+            &execution_context,
+            many_small_rows(40_000, &cell),
+        )
+        .await;
+        let Val::Map(map) = &stored else {
+            panic!("expected a marker: {stored:?}");
+        };
+        assert_eq!(
+            map.get(&Val::from("$type")),
+            Some(&Val::from(crate::blob::OMITTED_TYPE))
+        );
+    }
+
+    #[tokio::test]
+    async fn without_blob_storage_a_smaller_value_stays_inline() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let rows = many_small_rows(40_000, "a small cell");
+        let stored = record_return(&db, None, &execution_context, rows.clone()).await;
+        assert_eq!(stored, rows);
+    }
+
+    #[tokio::test]
+    async fn run_results_are_stored_the_same_way() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db);
+        let execution_context = persisted_execution_context(&db).await;
+        let rows = many_small_rows(40_000, "a small cell");
+        let emitter = DatabaseEngineEventEmitter::new_with_pool_and_blob_store(
+            db.clone(),
+            Some(blob_store.clone()),
+        );
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        emitter.emit(EngineEvent::run_stop(&execution_context, rows.clone()));
+        emitter.shutdown().await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should return SQLite");
+        };
+        let stored: String = sqlx::query_scalar("SELECT result FROM run WHERE run_id = ?")
+            .bind(execution_context.run_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        let stored: Val = serde_json::from_str(&stored).unwrap();
+        assert!(crate::blob::is_blob_ref_val(&stored), "{stored:?}");
+        let scope = BlobScope {
+            org_id: execution_context.org_id.unwrap(),
+            env_id: execution_context.env_id,
+            run_id: Some(execution_context.run_id),
+        };
+        let budget = crate::blob::RehydrateBudget::from_config(blob_store.config());
+        let restored = blob_store
+            .rehydrate_blob_refs(stored, scope, budget)
+            .await
+            .unwrap();
+        assert_eq!(restored, rows);
+    }
+
+    #[tokio::test]
+    async fn without_blob_storage_a_run_result_over_the_limit_is_left_out() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let cell = "x".repeat(1024);
+        let emitter = DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), None);
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        emitter.emit(EngineEvent::run_stop(
+            &execution_context,
+            many_small_rows(40_000, &cell),
+        ));
+        emitter.shutdown().await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should return SQLite");
+        };
+        let stored: String = sqlx::query_scalar("SELECT result FROM run WHERE run_id = ?")
+            .bind(execution_context.run_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert!(stored.contains(crate::blob::OMITTED_TYPE), "{stored:.200}");
     }
 
     #[tokio::test]
