@@ -92,6 +92,8 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 # XML parsing for ::hot::xml functions
 quick-xml = { workspace = true }
+# CSV and TSV parsing for ::hot::csv functions
+csv = { workspace = true }
 # DNS resolution for custom domain verification
 hickory-resolver = { workspace = true }
 # WebSocket client for ::hot::ws functions

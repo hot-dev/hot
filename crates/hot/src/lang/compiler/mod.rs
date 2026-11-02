@@ -2433,8 +2433,8 @@ impl Compiler {
             .iter()
             .map(|arg| {
                 arg.type_annotation
-                    .clone()
-                    .unwrap_or_else(|| "Any".to_string())
+                    .as_deref()
+                    .map_or_else(|| "Any".to_string(), |t| self.signature_param_type(t))
             })
             .collect();
 
@@ -2444,6 +2444,18 @@ impl Compiler {
         } else {
             // Include type information for precise overload resolution
             format!("{}/{}:{}", function_name, arity, param_types.join(","))
+        }
+    }
+
+    /// A parameter's type as a signature key carries it. Namespace aliases
+    /// exist only while compiling, so `::alias/Type` is recorded as the type it
+    /// names, which is how the runtime finds an arrow to the parameter's type.
+    /// Unions, generics and nullables are no arrow's target and stay as written.
+    fn signature_param_type(&self, written: &str) -> String {
+        if written.starts_with("::") && !written.contains(['<', '|', '?', ' ']) {
+            self.resolve_type_path(written).0
+        } else {
+            written.to_string()
         }
     }
 
@@ -5525,7 +5537,9 @@ impl Compiler {
                             .cloned()
                             .unwrap_or_else(|| "Any".to_string());
                         // Normalize type annotation to match VM's get_val_type_name format
-                        Self::normalize_type_annotation(&type_annotation)
+                        self.signature_param_type(&Self::normalize_type_annotation(
+                            &type_annotation,
+                        ))
                     })
                     .collect();
                 let typed_key = format!("{}/{}:{}", constructor_name, arity, param_types.join(","));

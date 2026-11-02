@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:cf584d4725b6
+<!-- HOT_LANGUAGE_SECTION_START --> hash:46b341584f73
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -489,8 +489,18 @@ children fn (node: Map, name: Str): Vec<Map>
 text fn (node: Map): Str
 attr fn (node: Map, name: Str): Str
 
+// CSV and TSV (values stay Str; `types` converts named columns)
+from-csv fn (text: Str | Bytes): Vec<Map>
+from-csv fn (text: Str | Bytes, opts: Map): Vec
+to-csv fn (rows: Vec): Str
+to-csv fn (rows: Vec, opts: Map): Str
+iter-csv fn (source: Iter | Str | Bytes): Iter           // One row at a time; use for large files
+iter-csv fn (source: Iter | Str | Bytes, opts: Map): Iter
+// from-tsv, to-tsv and iter-tsv take the same arguments
+
 // File I/O
 read-file fn (path: Str): Str
+read-file-stream fn (path: Str): Iter                    // Bytes chunks, without loading the file
 write-file fn (path: Str, content: Str): Bool
 delete-file fn (path: Str): Bool
 file-exists fn (path: Str): Bool

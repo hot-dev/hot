@@ -698,8 +698,6 @@ process fn (cfg: Config): Int {
 ```
 
 `?` means the value may be `null`; it does **not** make an argument omittable.
-Null at a parameter without `?` returns `Err` at the call, as any other value of
-the wrong type does at a parameter with a built-in type.
 Callers must still pass a value or `null`. Use function overloading when you
 want a shorter call form:
 

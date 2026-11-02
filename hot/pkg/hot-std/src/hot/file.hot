@@ -63,6 +63,38 @@ fn (path: Str): Bytes {
     call-lib(::hot::file/read-file-bytes, [path])
 }
 
+read-file-stream
+meta {
+    core: true,
+    doc: """
+    Open a file as an iterator of `Bytes` chunks, without reading it into
+    memory. The file stays open until the iterator is exhausted or dropped.
+    Chunks can split anywhere, including inside a character. Pass `chunk-size`,
+    in bytes, to change the default of 64 KB.
+
+    **Example**
+
+    ```hot
+    size reduce(read-file-stream("export.bin"), (total, chunk) {
+        add(total, length(chunk))
+    }, 0)
+
+    // Rows of a CSV file too big to load
+    for-each(iter-csv(read-file-stream("customers.csv")), (row) { print(row.id) })
+
+    read-file-stream("export.bin", {chunk-size: 1048576})
+    ```
+    """
+}
+fn
+(path: Str): Iter {
+    call-lib(::hot::file/read-file-stream, [path])
+},
+(path: Str, opts: Map): Iter {
+    call-lib(::hot::file/read-file-stream, [path, opts])
+}
+
+
 write-file
 meta {
     core: true,
