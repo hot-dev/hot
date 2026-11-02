@@ -4,6 +4,7 @@ use super::{EngineEvent, EngineEventEmitter};
 use crate::blob::{BlobScope, BlobStore, SpillSource};
 use crate::db::DatabasePool;
 use crate::lang::event::ExecutionContext;
+use crate::lang::masking::RecordMask;
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
@@ -62,6 +63,11 @@ struct RunCallBudget {
 struct DatabaseEngineEventEmitterProcessor {
     writer: DatabaseWriter,
     pending_calls: IndexMap<(Uuid, Uuid), CallEngineEventBatch>,
+    /// Calls written before they stopped, as the run passed their args: a
+    /// secret the call registers later must still mask its row.
+    open_calls: AHashMap<(Uuid, Uuid), OpenCall>,
+    /// Runs that ended: nothing more will stop their open calls.
+    ended_runs: Vec<Uuid>,
     /// When present, large call/run payload leaves are spilled to blob storage
     /// (after secret masking) before JSON serialization.
     blob_store: Option<Arc<BlobStore>>,
@@ -73,6 +79,12 @@ struct DatabaseEngineEventEmitterProcessor {
 struct ProcessorFlushRequest {
     run_id: Option<Uuid>,
     completion: oneshot::Sender<Result<(), String>>,
+}
+
+/// A call whose row has args masked as of `generation` of its run's secrets.
+struct OpenCall {
+    batch: CallEngineEventBatch,
+    generation: u64,
 }
 
 /// Represents a batched call event that can be start-only, stop-only, or combined
@@ -377,6 +389,8 @@ impl DatabaseEngineEventEmitterProcessor {
         Self {
             writer,
             pending_calls: IndexMap::new(),
+            open_calls: AHashMap::new(),
+            ended_runs: Vec::new(),
             blob_store,
             max_calls_per_run,
             call_budgets: AHashMap::new(),
@@ -436,6 +450,9 @@ impl DatabaseEngineEventEmitterProcessor {
 
     /// Once a run ends, record how many of its calls it didn't.
     fn finish_call_budget(&mut self, run_id: Uuid) {
+        if !self.open_calls.is_empty() {
+            self.ended_runs.push(run_id);
+        }
         let Some(budget) = self.call_budgets.get_mut(&run_id) else {
             return;
         };
@@ -502,10 +519,7 @@ impl DatabaseEngineEventEmitterProcessor {
                 // Critical - send immediately to writer
                 let result = if let Some(r) = event.event_data.get("result") {
                     // Mask any secret values in the result before storing
-                    Self::mask_secrets_in_val(
-                        r.clone(),
-                        &event.execution_context.secret_value_hashes,
-                    )
+                    Self::mask_run_val(&r, &event.execution_context)
                 } else {
                     Val::Null
                 };
@@ -523,10 +537,7 @@ impl DatabaseEngineEventEmitterProcessor {
                 // Critical - send immediately to writer
                 let failure = if let Some(f) = event.event_data.get("failure") {
                     // Mask any secret values in the failure before storing
-                    Self::mask_secrets_in_val(
-                        f.clone(),
-                        &event.execution_context.secret_value_hashes,
-                    )
+                    Self::mask_run_val(&f, &event.execution_context)
                 } else {
                     Val::Null
                 };
@@ -543,10 +554,7 @@ impl DatabaseEngineEventEmitterProcessor {
                 // Critical - send immediately to writer
                 let cancellation = if let Some(c) = event.event_data.get("cancellation") {
                     // Mask any secret values in the cancellation before storing
-                    Self::mask_secrets_in_val(
-                        c.clone(),
-                        &event.execution_context.secret_value_hashes,
-                    )
+                    Self::mask_run_val(&c, &event.execution_context)
                 } else {
                     Val::Null
                 };
@@ -625,12 +633,11 @@ impl DatabaseEngineEventEmitterProcessor {
     async fn finalize_call_payload(
         blob_store: &Option<Arc<BlobStore>>,
         json_value: Option<String>,
-        secret_value_hashes: &AHashSet<u64>,
         ctx: &ExecutionContext,
         source: SpillSource,
         source_id: &str,
     ) -> Option<String> {
-        let masked = Self::maybe_mask_secret_value(json_value, secret_value_hashes);
+        let masked = Self::mask_call_payload(json_value, ctx);
 
         let Some(store) = blob_store else {
             return masked;
@@ -676,16 +683,48 @@ impl DatabaseEngineEventEmitterProcessor {
         self.prune_call_budgets();
     }
 
+    /// Put back the calls whose rows were masked before their run registered
+    /// a secret, as their args were passed, to be masked and written again.
+    /// Writing `args` and `flow` again replaces them: see the writer's UPSERT.
+    fn reopen_stale_calls(&mut self) {
+        let mut done = Vec::new();
+        for (key, open) in &self.open_calls {
+            let pending = self.pending_calls.get_mut(key);
+            let stopped = pending.as_ref().is_some_and(|b| b.stop_time.is_some());
+            let stale = open.batch.execution_context.secret_values.generation() != open.generation;
+            if stale {
+                match pending {
+                    Some(batch) => {
+                        batch.args = open.batch.args.clone();
+                        batch.flow = open.batch.flow.clone();
+                    }
+                    None => {
+                        self.pending_calls.insert(*key, open.batch.clone());
+                    }
+                }
+            }
+            if stopped {
+                done.push(*key);
+            }
+        }
+        for key in done {
+            self.open_calls.remove(&key);
+        }
+    }
+
     /// Flush all pending call events
     /// Uses UPSERT to handle INSERT (on start) and UPDATE (on stop) seamlessly
     /// Sorts by call_depth to ensure parent calls are written before children
     ///
-    /// Spill happens here (not at batch-insert time) on purpose: secret value
-    /// hashes are only complete after `call:stop` merges them into the batch's
-    /// execution context, and masking must precede spill so secret bytes never
-    /// reach blob storage. Payloads therefore sit inline in `pending_calls`
-    /// for at most one BATCH_INTERVAL before being spilled.
+    /// Spill happens here (not at batch-insert time) on purpose: a call's
+    /// secrets are only complete once it stops, and masking must precede spill
+    /// so secret bytes never reach blob storage. Payloads therefore sit inline
+    /// in `pending_calls` for at most one BATCH_INTERVAL before being spilled.
+    ///
+    /// Masking reads the run's registry now, not a snapshot from the event, so
+    /// every record in this flush sees every secret registered so far.
     async fn flush_pending_calls(&mut self) {
+        self.reopen_stale_calls();
         let pending = std::mem::take(&mut self.pending_calls);
 
         // CRITICAL: Sort calls by call_depth to ensure parent calls are written before children
@@ -696,11 +735,22 @@ impl DatabaseEngineEventEmitterProcessor {
         for batch in sorted_batches {
             let call_id_str = batch.call_id.to_string();
 
+            // Read before masking: a secret registered during this write makes
+            // the row stale, and writing it again is harmless.
+            if batch.stop_time.is_none() {
+                self.open_calls.insert(
+                    (batch.execution_context.run_id, batch.call_id),
+                    OpenCall {
+                        batch: batch.clone(),
+                        generation: batch.execution_context.secret_values.generation(),
+                    },
+                );
+            }
+
             // Mask secrets, then spill large leaves (mask-before-spill)
             let args = Self::finalize_call_payload(
                 &self.blob_store,
                 batch.args,
-                &batch.execution_context.secret_value_hashes,
                 &batch.execution_context,
                 SpillSource::CallArgs,
                 &call_id_str,
@@ -710,7 +760,6 @@ impl DatabaseEngineEventEmitterProcessor {
             let return_value = Self::finalize_call_payload(
                 &self.blob_store,
                 batch.return_value,
-                &batch.execution_context.secret_value_hashes,
                 &batch.execution_context,
                 SpillSource::CallReturn,
                 &call_id_str,
@@ -720,12 +769,20 @@ impl DatabaseEngineEventEmitterProcessor {
             let flow = Self::finalize_call_payload(
                 &self.blob_store,
                 batch.flow,
-                &batch.execution_context.secret_value_hashes,
                 &batch.execution_context,
                 SpillSource::CallFlow,
                 &call_id_str,
             )
             .await;
+
+            let error = batch.error.map(|error| {
+                let mask = RecordMask::new(
+                    &batch.execution_context.secret_values,
+                    &batch.execution_context.secret_value_hashes,
+                );
+                let masked = mask.mask_text(&error).into_owned();
+                sanitize_text_for_postgres(&masked).into_owned()
+            });
 
             self.writer.write(DatabaseWrite::Call {
                 execution_context: Box::new(batch.execution_context),
@@ -737,7 +794,7 @@ impl DatabaseEngineEventEmitterProcessor {
                 call_depth: batch.call_depth,
                 args,
                 return_value,
-                error: batch.error,
+                error,
                 flow,
                 file: batch.file,
                 line: batch.line,
@@ -747,6 +804,14 @@ impl DatabaseEngineEventEmitterProcessor {
                 stop_time: batch.stop_time,
                 duration_us: batch.duration_us,
             });
+        }
+
+        // After the writes above, for calls of a run that ended without their
+        // stop: they had this last chance, and hold what the run did.
+        if !self.ended_runs.is_empty() {
+            let ended = std::mem::take(&mut self.ended_runs);
+            self.open_calls
+                .retain(|(run_id, _), _| !ended.contains(run_id));
         }
     }
 
@@ -762,75 +827,27 @@ impl DatabaseEngineEventEmitterProcessor {
         sanitize_json_for_jsonb(&raw).into_owned()
     }
 
-    /// Check if a JSON value contains any secret values (deep scan)
-    /// Uses hash-based matching for efficiency and to handle any Val type
-    /// Recursively scans through Maps and Vecs to find and mask secrets
-    fn maybe_mask_secret_value(
-        json_value: Option<String>,
-        secret_value_hashes: &AHashSet<u64>,
-    ) -> Option<String> {
-        // If no value or no secrets to check, nothing to mask
-        let json_str = match &json_value {
-            Some(v) => v,
-            None => return json_value,
-        };
-
-        // If value is null or no secrets registered, nothing to mask
-        if json_str == "null" || secret_value_hashes.is_empty() {
+    /// Mask a serialized call payload. See [`crate::lang::masking`].
+    fn mask_call_payload(json_value: Option<String>, ctx: &ExecutionContext) -> Option<String> {
+        let json_str = json_value.as_deref()?;
+        if json_str == "null" {
             return json_value;
         }
-
-        // Parse the JSON value into a Val
-        let val: Val = match serde_json::from_str(json_str) {
-            Ok(v) => v,
-            Err(_) => return json_value, // Can't parse, return as-is
-        };
-
-        // Recursively mask secrets in the value
-        let masked_val = Self::mask_secrets_in_val(val, secret_value_hashes);
-
-        // Re-serialize to JSON. Run through the Postgres-jsonb scrubber
-        // again so any NUL/lone-surrogate that was introduced by the
-        // mask pass (or that survived an upstream path that didn't
-        // sanitize) doesn't sneak through.
-        match serde_json::to_string(&masked_val) {
-            Ok(json) => Some(sanitize_json_for_jsonb(&json).into_owned()),
-            Err(_) => json_value, // Serialization failed, return original
+        let mask = RecordMask::new(&ctx.secret_values, &ctx.secret_value_hashes);
+        // Re-serialized, so run through the Postgres-jsonb scrubber again:
+        // nothing NUL or lone-surrogate may survive from the mask pass or from
+        // an upstream path that didn't sanitize.
+        match mask.mask_json(json_str) {
+            Some(masked) => Some(sanitize_json_for_jsonb(&masked).into_owned()),
+            None => json_value,
         }
     }
 
-    /// Recursively scan a Val and replace any values matching secret hashes with "<secret>"
-    fn mask_secrets_in_val(val: Val, secret_hashes: &AHashSet<u64>) -> Val {
-        use std::hash::{Hash, Hasher};
-
-        // First check if this entire value is a secret
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        val.hash(&mut hasher);
-        let hash = hasher.finish();
-
-        if secret_hashes.contains(&hash) {
-            return Val::from("<secret>");
-        }
-
-        // If not a direct match, recursively scan compound types
-        match val {
-            Val::Map(map) => {
-                let masked_map: indexmap::IndexMap<Val, Val> = Arc::unwrap_or_clone(map)
-                    .into_iter()
-                    .map(|(k, v)| (k, Self::mask_secrets_in_val(v, secret_hashes)))
-                    .collect();
-                Val::map(masked_map)
-            }
-            Val::Vec(vec) => {
-                let masked_vec: Vec<Val> = Arc::unwrap_or_clone(vec)
-                    .into_iter()
-                    .map(|v| Self::mask_secrets_in_val(v, secret_hashes))
-                    .collect();
-                Val::vec(masked_vec)
-            }
-            // Leaf values that weren't a direct match - return as-is
-            other => other,
-        }
+    /// Mask a value recorded on a run. Masks its storage form, so that values
+    /// inside a closure's captures, say, aren't missed.
+    fn mask_run_val(val: &Val, ctx: &ExecutionContext) -> Val {
+        RecordMask::new(&ctx.secret_values, &ctx.secret_value_hashes)
+            .mask_val(val.to_hot_data_repr())
     }
 
     fn handle_call_start_batch(&mut self, event: &EngineEvent) {
@@ -1037,14 +1054,6 @@ impl DatabaseEngineEventEmitterProcessor {
                 batch.return_value = return_value;
                 batch.error = error;
                 batch.duration_us = duration_us;
-
-                // CRITICAL: Merge secret_value_hashes from call:stop's execution_context
-                // The call:start event is emitted BEFORE the function runs, so it doesn't
-                // have secret hashes from ctx/get calls made during the function.
-                // The call:stop event is emitted AFTER, so it has the updated hashes.
-                for hash in &event.execution_context.secret_value_hashes {
-                    batch.execution_context.secret_value_hashes.insert(*hash);
-                }
             }
         }
     }
@@ -1611,5 +1620,242 @@ mod tests {
             "secret bytes must never reach blob storage"
         );
         drop(tmp);
+    }
+
+    async fn stored_call(
+        db: &crate::db::DatabasePool,
+        call_id: Uuid,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let crate::db::DatabasePool::Sqlite(pool) = db.clone() else {
+            panic!("test_db should return SQLite");
+        };
+        let row = sqlx::query("SELECT args, return_value, error FROM call WHERE call_id = ?")
+            .bind(call_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        (row.get("args"), row.get("return_value"), row.get("error"))
+    }
+
+    fn start_event(
+        ctx: &ExecutionContext,
+        call_id: Uuid,
+        parent: Option<Uuid>,
+        arg: &str,
+    ) -> EngineEvent {
+        EngineEvent::call_start(
+            ctx,
+            call_id,
+            parent,
+            "::hot::test/call".to_string(),
+            "::hot::test/call".to_string(),
+            "run/test".to_string(),
+            usize::from(parent.is_some()),
+            vec![Val::from(arg)],
+            None,
+            chrono::Utc::now(),
+            None,
+        )
+    }
+
+    fn stop_event(
+        ctx: &ExecutionContext,
+        call_id: Uuid,
+        result: &str,
+        error: Option<&str>,
+    ) -> EngineEvent {
+        EngineEvent::call_stop(
+            ctx,
+            call_id,
+            Some(Val::from(result)),
+            error.map(str::to_string),
+            chrono::Utc::now(),
+            10,
+        )
+    }
+
+    const LATE_SECRET: &str = "registered-late-secret";
+
+    /// A secret registered during a call masks that call's row and its
+    /// parents', though both were written before it existed, in earlier
+    /// batches, and neither has stopped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_secret_registered_later_masks_open_calls_already_written() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        let bearer = format!("Bearer {LATE_SECRET}");
+
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let parent = Uuid::now_v7();
+        let child = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, parent, None, &bearer));
+        emitter.flush_async().await.unwrap();
+        emitter.emit(start_event(
+            &execution_context,
+            child,
+            Some(parent),
+            &bearer,
+        ));
+        emitter.flush_async().await.unwrap();
+        let written = stored_call(&db, parent).await.0.unwrap();
+        assert!(written.contains(LATE_SECRET), "{written}");
+
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+
+        // Neither call has stopped: the next flush masks them all the same.
+        emitter.flush_async().await.unwrap();
+        for call in [parent, child] {
+            let args = stored_call(&db, call).await.0.unwrap();
+            assert!(!args.contains(LATE_SECRET), "{args}");
+            assert!(args.contains("Bearer <secret>"), "{args}");
+        }
+
+        emitter.emit(stop_event(&execution_context, child, LATE_SECRET, None));
+        emitter.emit(stop_event(&execution_context, parent, "done", None));
+        emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
+        emitter.shutdown().await.unwrap();
+        let (args, return_value, _) = stored_call(&db, child).await;
+        assert!(args.unwrap().contains("Bearer <secret>"));
+        assert_eq!(return_value.unwrap(), "\"<secret>\"");
+        let args = stored_call(&db, parent).await.0.unwrap();
+        assert!(args.contains("Bearer <secret>"), "{args}");
+    }
+
+    /// A call that stops after the secret was registered masks its args as it
+    /// stops, even when no flush came between.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_secret_registered_just_before_a_stop_masks_the_args_written_earlier() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let call = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, call, None, LATE_SECRET));
+        emitter.flush_async().await.unwrap();
+
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, call, "done", None));
+        emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
+        emitter.shutdown().await.unwrap();
+
+        let (args, return_value, _) = stored_call(&db, call).await;
+        assert!(!args.unwrap().contains(LATE_SECRET));
+        assert_eq!(return_value.unwrap(), "\"done\"");
+    }
+
+    /// Records in the same flush as the registration are covered, but a call
+    /// that stopped and was written before it keeps what it had: the limit
+    /// `resources/docs/language/meta.md` documents.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_finished_call_is_masked_only_until_it_is_written() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+
+        let written = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, written, None, LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, written, "done", None));
+        emitter.flush_async().await.unwrap();
+
+        let pending = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, pending, None, LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, pending, "done", None));
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
+        emitter.shutdown().await.unwrap();
+
+        let args = stored_call(&db, written).await.0.unwrap();
+        assert!(args.contains(LATE_SECRET), "{args}");
+        let args = stored_call(&db, pending).await.0.unwrap();
+        assert!(!args.contains(LATE_SECRET), "{args}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn masks_call_errors_and_run_failures() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let call = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, call, None, "input"));
+        emitter.emit(stop_event(
+            &execution_context,
+            call,
+            "x",
+            Some(&format!("rejected {LATE_SECRET}, password=hunter2")),
+        ));
+        emitter.emit(EngineEvent::run_fail(
+            &execution_context,
+            Val::from(format!("failed with {LATE_SECRET}")),
+        ));
+        emitter.shutdown().await.unwrap();
+
+        assert_eq!(
+            stored_call(&db, call).await.2.unwrap(),
+            "rejected <secret>, password=<secret>"
+        );
+        let crate::db::DatabasePool::Sqlite(pool) = db.clone() else {
+            panic!("test_db should return SQLite");
+        };
+        let result: String = sqlx::query("SELECT result FROM run WHERE run_id = ?")
+            .bind(execution_context.run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("result");
+        assert!(!result.contains(LATE_SECRET), "{result}");
+    }
+
+    /// Without any secret registered, credential fields go and the rest of a
+    /// record is written as it was.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redacts_credential_fields_and_preserves_the_rest() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let call = Uuid::now_v7();
+        emitter.emit(EngineEvent::call_start(
+            &execution_context,
+            call,
+            None,
+            "::hot::test/call".to_string(),
+            "::hot::test/call".to_string(),
+            "run/test".to_string(),
+            0,
+            vec![
+                crate::val!({
+                    "$type": "::hot::http/HttpRequest",
+                    "$val": {
+                        "headers": {"Authorization": "Bearer unregistered", "Accept": "text/plain"},
+                        "body": "client_secret=unregistered&page=2",
+                    },
+                }),
+                Val::Int(7),
+            ],
+            None,
+            chrono::Utc::now(),
+            None,
+        ));
+        emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
+        emitter.shutdown().await.unwrap();
+
+        let args = stored_call(&db, call).await.0.unwrap();
+        assert!(!args.contains("unregistered"), "{args}");
+        assert!(args.contains("::hot::http/HttpRequest"), "{args}");
+        assert!(args.contains("\"Accept\":\"text/plain\""), "{args}");
+        assert!(args.contains("client_secret=<secret>&page=2"), "{args}");
+        assert!(args.contains(",7]"), "{args}");
     }
 }

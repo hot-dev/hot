@@ -2312,6 +2312,7 @@ async fn handle_tools_call_streaming(
         retry_attempt: 0,
         secret_keys: AHashSet::new(),
         secret_value_hashes: AHashSet::new(),
+        secret_values: Default::default(),
         access_id,
         agent_type: None,
         queue_timing: None,
