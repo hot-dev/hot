@@ -402,6 +402,21 @@ pub fn last(args: &[Val]) -> HotResult<Val> {
 }
 
 /// Get nth element of a collection (0-indexed)
+/// `s` without its first `n` characters, or empty when it has no more than
+/// that. Stops after `n` characters, so it never costs the rest of `s`.
+fn skip_chars(s: &str, n: usize) -> &str {
+    let mut chars = s.chars();
+    if n > 0 && chars.nth(n - 1).is_none() {
+        return "";
+    }
+    chars.as_str()
+}
+
+/// The first `n` characters of `s`, or all of it when it has no more than that.
+fn take_chars(s: &str, n: usize) -> &str {
+    &s[..s.len() - skip_chars(s, n).len()]
+}
+
 pub fn nth(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::coll/nth", args, 2);
 
@@ -418,14 +433,10 @@ pub fn nth(args: &[Val]) -> HotResult<Val> {
                 HotResult::Ok(Val::Null)
             }
         }
-        Val::Str(s) => {
-            let chars: Vec<char> = s.chars().collect();
-            if index < chars.len() {
-                HotResult::Ok(Val::from(chars[index].to_string()))
-            } else {
-                HotResult::Ok(Val::Null)
-            }
-        }
+        Val::Str(s) => match s.chars().nth(index) {
+            Some(c) => HotResult::Ok(Val::from(c.to_string())),
+            None => HotResult::Ok(Val::Null),
+        },
         _ => HotResult::Err(Val::from("nth requires a collection")),
     }
 }
@@ -2287,20 +2298,21 @@ pub fn delete(args: &[Val]) -> HotResult<Val> {
 
     match (collection, key_or_index) {
         (Val::Str(s), Val::Int(target_index)) => {
-            let chars: Vec<char> = s.chars().collect();
-            let len = chars.len() as i64;
             let actual_index = if *target_index < 0 {
-                len + *target_index
+                s.chars().count() as i64 + *target_index
             } else {
                 *target_index
             };
-            if actual_index < 0 || actual_index >= len {
-                HotResult::Ok(Val::from(s.clone()))
-            } else {
-                let mut result_chars = chars;
-                result_chars.remove(actual_index as usize);
-                HotResult::Ok(Val::from(result_chars.into_iter().collect::<String>()))
+            if actual_index < 0 {
+                return HotResult::Ok(Val::from(s.clone()));
             }
+            let from_target = skip_chars(s, actual_index as usize);
+            let mut after_target = from_target.chars();
+            if after_target.next().is_none() {
+                return HotResult::Ok(Val::from(s.clone()));
+            }
+            let before_target = &s[..s.len() - from_target.len()];
+            HotResult::Ok(Val::from([before_target, after_target.as_str()].concat()))
         }
         (Val::Vec(items), Val::Int(target_index)) => {
             let len = items.len() as i64;
@@ -2346,18 +2358,7 @@ pub fn rest(args: &[Val]) -> HotResult<Val> {
                 HotResult::Ok(Val::vec(vec[1..].to_vec()))
             }
         }
-        Val::Str(s) => {
-            if s.is_empty() {
-                HotResult::Ok(Val::from(""))
-            } else {
-                let chars: Vec<char> = s.chars().collect();
-                if chars.len() > 1 {
-                    HotResult::Ok(Val::from(chars[1..].iter().collect::<String>()))
-                } else {
-                    HotResult::Ok(Val::from(""))
-                }
-            }
-        }
+        Val::Str(s) => HotResult::Ok(Val::from(skip_chars(s, 1))),
         Val::Null => HotResult::Ok(Val::vec(Vec::new())),
         _ => HotResult::Err(Val::from("rest requires a collection")),
     }
@@ -2381,18 +2382,9 @@ pub fn butlast(args: &[Val]) -> HotResult<Val> {
             }
         }
         Val::Str(s) => {
-            if s.is_empty() {
-                HotResult::Ok(Val::from(""))
-            } else {
-                let chars: Vec<char> = s.chars().collect();
-                if chars.len() > 1 {
-                    HotResult::Ok(Val::from(
-                        chars[..chars.len() - 1].iter().collect::<String>(),
-                    ))
-                } else {
-                    HotResult::Ok(Val::from(""))
-                }
-            }
+            let mut chars = s.chars();
+            chars.next_back();
+            HotResult::Ok(Val::from(chars.as_str()))
         }
         Val::Null => HotResult::Ok(Val::vec(Vec::new())),
         _ => HotResult::Err(Val::from("butlast requires a collection")),
@@ -3302,16 +3294,16 @@ pub fn slice(args: &[Val]) -> HotResult<Val> {
             }
         }
         Val::Str(s) => {
-            let chars: Vec<char> = s.chars().collect();
-            let len = chars.len();
-            let start_idx = start.min(len);
-            let end_idx = end.unwrap_or(len).min(len);
-
-            if start_idx <= end_idx {
-                let sliced: String = chars[start_idx..end_idx].iter().collect();
-                HotResult::Ok(Val::from(sliced))
+            let from_start = skip_chars(s, start);
+            let sliced = match end {
+                Some(end) if end <= start => "",
+                Some(end) => take_chars(from_start, end - start),
+                None => from_start,
+            };
+            if sliced.len() == s.len() {
+                HotResult::Ok(Val::from(s.clone()))
             } else {
-                HotResult::Ok(Val::from(""))
+                HotResult::Ok(Val::from(sliced))
             }
         }
         Val::Map(map) => {
@@ -4293,5 +4285,111 @@ mod tests {
                 Val::from("b"),
             ])
         );
+    }
+
+    /// What `slice` gave when it collected the string's characters.
+    fn slice_by_collecting(s: &str, start: i64, end: Option<i64>) -> String {
+        let chars: Vec<char> = s.chars().collect();
+        let len = chars.len();
+        let start_idx = (start as usize).min(len);
+        let end_idx = end.map_or(len, |end| (end as usize).min(len));
+        if start_idx <= end_idx {
+            chars[start_idx..end_idx].iter().collect()
+        } else {
+            String::new()
+        }
+    }
+
+    /// The functions that read a string by character position no longer collect
+    /// its characters. Each must still give what collecting gave, at every
+    /// position around both ends, on text whose characters vary in width and
+    /// on strings long enough to take the standard library's chunked skip.
+    #[test]
+    fn str_position_functions_match_collecting_the_characters() {
+        let long_ascii = "0123456789".repeat(12);
+        let long_mixed = "aé日🙂".repeat(30);
+        let samples = [
+            "",
+            "a",
+            "é",
+            "🙂",
+            "héllo",
+            "日本語テキスト",
+            "🙂a🙂",
+            "e\u{301}x",
+            long_ascii.as_str(),
+            long_mixed.as_str(),
+        ];
+        let ok = |result: HotResult<Val>, call: String| match result {
+            HotResult::Ok(value) => value,
+            HotResult::Err(error) => panic!("{call}: {error:?}"),
+        };
+        for s in samples {
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len() as i64;
+            let mut indexes: Vec<i64> = (-len - 2..=len + 2).collect();
+            indexes.extend([i64::MIN, i64::MAX]);
+            for &start in &indexes {
+                let call = format!("slice({s:?}, {start})");
+                assert_eq!(
+                    ok(slice(&[Val::from(s), Val::Int(start)]), call.clone()),
+                    Val::from(slice_by_collecting(s, start, None)),
+                    "{call}"
+                );
+                for &end in &indexes {
+                    let call = format!("slice({s:?}, {start}, {end})");
+                    assert_eq!(
+                        ok(
+                            slice(&[Val::from(s), Val::Int(start), Val::Int(end)]),
+                            call.clone()
+                        ),
+                        Val::from(slice_by_collecting(s, start, Some(end))),
+                        "{call}"
+                    );
+                }
+
+                let call = format!("nth({s:?}, {start})");
+                let by_collecting = chars
+                    .get(start as usize)
+                    .map_or(Val::Null, |c| Val::from(c.to_string()));
+                assert_eq!(
+                    ok(nth(&[Val::from(s), Val::Int(start)]), call.clone()),
+                    by_collecting,
+                    "{call}"
+                );
+
+                let call = format!("delete({s:?}, {start})");
+                let target = if start < 0 {
+                    len.saturating_add(start)
+                } else {
+                    start
+                };
+                let by_collecting: String = chars
+                    .iter()
+                    .enumerate()
+                    .filter(|(position, _)| *position as i64 != target)
+                    .map(|(_, c)| c)
+                    .collect();
+                assert_eq!(
+                    ok(delete(&[Val::from(s), Val::Int(start)]), call.clone()),
+                    Val::from(by_collecting),
+                    "{call}"
+                );
+            }
+
+            let call = format!("rest({s:?})");
+            assert_eq!(
+                ok(rest(&[Val::from(s)]), call.clone()),
+                Val::from(chars.iter().skip(1).collect::<String>()),
+                "{call}"
+            );
+            let call = format!("butlast({s:?})");
+            let kept = chars.len().saturating_sub(1);
+            assert_eq!(
+                ok(butlast(&[Val::from(s)]), call.clone()),
+                Val::from(chars[..kept].iter().collect::<String>()),
+                "{call}"
+            );
+        }
     }
 }

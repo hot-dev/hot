@@ -182,6 +182,52 @@ f(100)"#,
         }
     }
 
+    /// Reading a few characters from the start of a string costs the same at
+    /// any length. A read that copied the string would take far longer on the
+    /// large one, so the margin leaves only that able to fail this.
+    #[test]
+    fn reading_the_start_of_a_string_costs_the_same_at_any_length() {
+        let src = r#"::t ns
+fastest-ms fn (f: Fn): Int {
+    tries map(range(3), (_try) {
+        start ::hot::time/epoch-millis(::hot::time/now())
+        done map(range(500), (i) { f(i) })
+        sub(::hot::time/epoch-millis(::hot::time/now()), start)
+    })
+    reduce(tries, min(%1, %2), first(tries))
+}
+timings fn (s: Str): Map {
+    {
+        slice-start: fastest-ms((i) { slice(s, 0, 5) }),
+        get: fastest-ms((i) { get(s, 3) }),
+        nth: fastest-ms((i) { ::hot::coll/nth(s, 3) }),
+        index: fastest-ms((i) { s[3] }),
+    }
+}
+sixteen-mb reduce(range(20), (acc, _i) { concat(acc, acc) }, "0123456789abcdef")
+{small: timings("0123456789"), large: timings(sixteen-mb)}"#;
+        for conf in [
+            Some(val!({"jit": {"mode": "off"}})),
+            Some(val!({"jit": {"threshold": 1}})),
+        ] {
+            let label = format!("{conf:?}");
+            let out = compile_and_run_with_std_conf(src, conf).expect("run");
+            let (Some(Val::Map(small)), Some(Val::Map(large))) = (out.get("small"), out.get("large"))
+            else {
+                panic!("{label}: unexpected result {out:?}");
+            };
+            for (read, small_ms) in small.iter() {
+                let (Val::Int(small_ms), Some(Val::Int(large_ms))) = (small_ms, large.get(read)) else {
+                    panic!("{label}: {read} has no timing");
+                };
+                assert!(
+                    *large_ms <= small_ms * 20 + 100,
+                    "{label}: {read} took {small_ms}ms on 10 characters, {large_ms}ms on 16 MB"
+                );
+            }
+        }
+    }
+
     /// Reading a Map or Vec shares its storage rather than copying it, which
     /// is what makes a read cost the same at any size. Each entry of the result
     /// holds the same collection, reached by a different read: a copy on any of
