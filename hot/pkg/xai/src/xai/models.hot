@@ -5,7 +5,7 @@
 // https://docs.x.ai/api
 // ============================================================================
 
-api-request ::xai::api/request
+api-call ::xai::api/call
 HttpError ::xai::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -48,8 +48,15 @@ meta {
     """
 }
 fn (): ModelsListResponse | HttpError {
-    response api-request("GET", `${::xai/BASE_URL}/models`)
-    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+    list({})
+},
+(opts: Map): ModelsListResponse | HttpError {
+    response api-call("GET", `/models`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ModelsListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -69,8 +76,15 @@ meta {
     """
 }
 fn (model-id: Str): Model | HttpError {
-    response api-request("GET", `${::xai/BASE_URL}/models/${model-id}`)
-    if(is-ok-response(response), Model(response.body), err(HttpError(response)))
+    get(model-id, {})
+},
+(model-id: Str, opts: Map): Model | HttpError {
+    response api-call("GET", `/models/${model-id}`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Model(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================

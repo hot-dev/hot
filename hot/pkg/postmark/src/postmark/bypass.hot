@@ -23,7 +23,15 @@ bypass-rules-blocked-inbound-message
 meta {
     doc: """Bypass inbound rules for a blocked message, allowing it to be processed by the inbound webhook."""
 }
-fn (request: BypassRulesForInboundMessageRequest): BypassRulesForInboundMessageResponse {
-  response api-request("PUT", `${::postmark/BASE_URL}/messages/inbound/${request.messageid}/bypass`)
-  if(is-ok-response(response), BypassRulesForInboundMessageResponse(response.body), err(HttpError(response)))
+fn
+(request: BypassRulesForInboundMessageRequest): BypassRulesForInboundMessageResponse {
+  bypass-rules-blocked-inbound-message(request, {})
+},
+(request: BypassRulesForInboundMessageRequest, opts: Map): BypassRulesForInboundMessageResponse {
+  response api-request("PUT", `${::postmark/BASE_URL}/messages/inbound/${request.messageid}/bypass`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { BypassRulesForInboundMessageResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

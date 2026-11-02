@@ -51,7 +51,15 @@ meta {
     ```
     """
 }
-fn (template-id-or-alias: Str, request: UpdateTemplateRequest): UpdateTemplateResponse {
-  response api-request("PUT", `${::postmark/BASE_URL}/templates/${template-id-or-alias}`, {}, request)
-  if(is-ok-response(response), UpdateTemplateResponse(response.body), err(HttpError(response)))
+fn
+(template-id-or-alias: Str, request: UpdateTemplateRequest): UpdateTemplateResponse {
+  update-template(template-id-or-alias, request, {})
+},
+(template-id-or-alias: Str, request: UpdateTemplateRequest, opts: Map): UpdateTemplateResponse {
+  response api-request("PUT", `${::postmark/BASE_URL}/templates/${template-id-or-alias}`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UpdateTemplateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

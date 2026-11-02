@@ -29,6 +29,20 @@ AuthResponse type {
   weak_password: Map?
 }
 
+session-with-tokens-masked
+meta {
+    doc: """Mask a session's access and refresh tokens in the run's call records and return the session as is. An Err passes through."""
+}
+fn (session: Result): Any {
+  cond {
+    is-err(session) => { session }
+    => {
+      ::hot::ctx/mark-secret([session.access_token, session.refresh_token])
+      session
+    }
+  }
+}
+
 // ============================================================================
 // Sign Up
 // ============================================================================
@@ -65,7 +79,12 @@ result.user.id  // => "uuid-..."
 ```
 """
 }
-fn (request: SignUpRequest): AuthResponse {
+fn
+(request: SignUpRequest): AuthResponse {
+  sign-up(request, {})
+},
+(request: SignUpRequest, opts: Map): AuthResponse {
+  ::hot::ctx/mark-secret(request.password)
   security if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null)
   body {password: request.password}
     |> assoc-some("email", request.email)
@@ -76,7 +95,7 @@ fn (request: SignUpRequest): AuthResponse {
     |> assoc-some("code_challenge_method", request.code_challenge_method)
     |> assoc-some("gotrue_meta_security", security)
 
-  ::api/request("POST", "/auth/v1/signup", {}, body)
+  session-with-tokens-masked(::api/request("POST", "/auth/v1/signup", {}, body, opts))
 }
 
 // ============================================================================
@@ -110,14 +129,19 @@ session.user.id        // => "uuid-..."
 ```
 """
 }
-fn (request: SignInPasswordRequest): AuthResponse {
+fn
+(request: SignInPasswordRequest): AuthResponse {
+  sign-in-password(request, {})
+},
+(request: SignInPasswordRequest, opts: Map): AuthResponse {
+  ::hot::ctx/mark-secret(request.password)
   security if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null)
   body {password: request.password}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
     |> assoc-some("gotrue_meta_security", security)
 
-  ::api/request("POST", "/auth/v1/token?grant_type=password", {}, body)
+  session-with-tokens-masked(::api/request("POST", "/auth/v1/token?grant_type=password", {}, body, opts))
 }
 
 SignInOtpRequest type {
@@ -153,7 +177,11 @@ Send a magic link (email) or OTP code (phone). The user clicks the link or enter
 ```
 """
 }
-fn (request: SignInOtpRequest): Map {
+fn
+(request: SignInOtpRequest): Map {
+  sign-in-otp(request, {})
+},
+(request: SignInOtpRequest, opts: Map): Map {
   security if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null)
   body {}
     |> assoc-some("email", request.email)
@@ -165,7 +193,7 @@ fn (request: SignInOtpRequest): Map {
     |> assoc-some("code_challenge_method", request.code_challenge_method)
     |> assoc-some("gotrue_meta_security", security)
 
-  ::api/request("POST", "/auth/v1/otp", {}, body)
+  ::api/request("POST", "/auth/v1/otp", {}, body, opts)
 }
 
 // ============================================================================
@@ -202,7 +230,11 @@ session.access_token  // => "eyJ..."
 ```
 """
 }
-fn (request: VerifyOtpRequest): AuthResponse {
+fn
+(request: VerifyOtpRequest): AuthResponse {
+  verify-otp(request, {})
+},
+(request: VerifyOtpRequest, opts: Map): AuthResponse {
   body {type: request.type}
     |> assoc-some("token", request.token)
     |> assoc-some("token_hash", request.token_hash)
@@ -210,7 +242,7 @@ fn (request: VerifyOtpRequest): AuthResponse {
     |> assoc-some("phone", request.phone)
     |> assoc-some("redirect_to", request.redirect_to)
 
-  ::api/request("POST", "/auth/v1/verify", {}, body)
+  session-with-tokens-masked(::api/request("POST", "/auth/v1/verify", {}, body, opts))
 }
 
 // ============================================================================
@@ -233,8 +265,13 @@ session.refresh_token  // => "new-abc..."
 ```
 """
 }
-fn (refresh-token-value: Str): AuthResponse {
-  ::api/request("POST", "/auth/v1/token?grant_type=refresh_token", {}, {refresh_token: refresh-token-value})
+fn
+(refresh-token-value: Str): AuthResponse {
+  refresh-token(refresh-token-value, {})
+},
+(refresh-token-value: Str, opts: Map): AuthResponse {
+  ::hot::ctx/mark-secret(refresh-token-value)
+  session-with-tokens-masked(::api/request("POST", "/auth/v1/token?grant_type=refresh_token", {}, {refresh_token: refresh-token-value}, opts))
 }
 
 ExchangeCodeRequest type {
@@ -246,8 +283,12 @@ exchange-code
 meta {
     doc: """Exchange a PKCE authorization code for a session."""
 }
-fn (request: ExchangeCodeRequest): AuthResponse {
-  ::api/request("POST", "/auth/v1/token?grant_type=pkce", {}, untype(request))
+fn
+(request: ExchangeCodeRequest): AuthResponse {
+  exchange-code(request, {})
+},
+(request: ExchangeCodeRequest, opts: Map): AuthResponse {
+  session-with-tokens-masked(::api/request("POST", "/auth/v1/token?grant_type=pkce", {}, untype(request), opts))
 }
 
 // ============================================================================
@@ -273,7 +314,10 @@ fn
   sign-out(access-token, "local")
 },
 (access-token: Str, scope: SignOutScope): Any {
-  ::api/request-as("POST", `/auth/v1/logout?scope=${scope}`, {}, {}, access-token)
+  sign-out(access-token, scope, {})
+},
+(access-token: Str, scope: SignOutScope, opts: Map): Any {
+  ::api/request-as("POST", `/auth/v1/logout?scope=${scope}`, {}, {}, access-token, opts)
 }
 
 // ============================================================================
@@ -296,8 +340,12 @@ user.email  // => "alice@example.com"
 ```
 """
 }
-fn (access-token: Str): User {
-  ::api/request-as("GET", "/auth/v1/user", {}, {}, access-token)
+fn
+(access-token: Str): User {
+  get-user(access-token, {})
+},
+(access-token: Str, opts: Map): User {
+  ::api/request-as("GET", "/auth/v1/user", {}, {}, access-token, opts)
 }
 
 UpdateUserRequest type {
@@ -324,7 +372,12 @@ updated ::auth/update-user(::auth/UpdateUserRequest({
 ```
 """
 }
-fn (request: UpdateUserRequest, access-token: Str): User {
+fn
+(request: UpdateUserRequest, access-token: Str): User {
+  update-user(request, access-token, {})
+},
+(request: UpdateUserRequest, access-token: Str, opts: Map): User {
+  ::hot::ctx/mark-secret(request.password)
   body {}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
@@ -332,7 +385,7 @@ fn (request: UpdateUserRequest, access-token: Str): User {
     |> assoc-some("data", request.data)
     |> assoc-some("nonce", request.nonce)
 
-  ::api/request-as("PUT", "/auth/v1/user", {}, body, access-token)
+  ::api/request-as("PUT", "/auth/v1/user", {}, body, access-token, opts)
 }
 
 // ============================================================================
@@ -353,6 +406,10 @@ Send a password reset email.
 ```
 """
 }
-fn (email: Str): Map {
-  ::api/request("POST", "/auth/v1/recover", {}, {email: email})
+fn
+(email: Str): Map {
+  recover-password(email, {})
+},
+(email: Str, opts: Map): Map {
+  ::api/request("POST", "/auth/v1/recover", {}, {email: email}, opts)
 }

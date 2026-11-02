@@ -18,15 +18,22 @@ fn
   ::api/json("GET", `/repos/${owner}/${repo}/issues`)
 },
 (owner: Str, repo: Str, params: Map): Vec {
-  ::api/json("GET", `/repos/${owner}/${repo}/issues${query-string(params)}`)
+  list-issues(owner, repo, params, {})
+},
+(owner: Str, repo: Str, params: Map, opts: Map): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/issues${query-string(params)}`, {}, "", opts)
 }
 
 get-issue
 meta {
     doc: """GET /repos/{owner}/{repo}/issues/{number} - One issue."""
 }
-fn (owner: Str, repo: Str, number: Int): Map {
-  ::api/json("GET", `/repos/${owner}/${repo}/issues/${number}`)
+fn
+(owner: Str, repo: Str, number: Int): Map {
+  get-issue(owner, repo, number, {})
+},
+(owner: Str, repo: Str, number: Int, opts: Map): Map {
+  ::api/json("GET", `/repos/${owner}/${repo}/issues/${number}`, {}, "", opts)
 }
 
 create-issue
@@ -51,31 +58,46 @@ fn
   create-issue(owner, repo, title, {})
 },
 (owner: Str, repo: Str, title: Str, options: Map): Map {
-  ::api/json("POST", `/repos/${owner}/${repo}/issues`, {}, {title: title, ...options})
+  create-issue(owner, repo, title, options, {})
+},
+(owner: Str, repo: Str, title: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", `/repos/${owner}/${repo}/issues`, {}, {title: title, ...options}, opts)
 }
 
 update-issue
 meta {
     doc: """PATCH /repos/{owner}/{repo}/issues/{number} - Update fields: `title`, `body`, `state` ("open"/"closed"), `state_reason`, `labels`, `assignees`."""
 }
-fn (owner: Str, repo: Str, number: Int, changes: Map): Map {
-  ::api/json("PATCH", `/repos/${owner}/${repo}/issues/${number}`, {}, changes)
+fn
+(owner: Str, repo: Str, number: Int, changes: Map): Map {
+  update-issue(owner, repo, number, changes, {})
+},
+(owner: Str, repo: Str, number: Int, changes: Map, opts: Map): Map {
+  ::api/json("PATCH", `/repos/${owner}/${repo}/issues/${number}`, {}, changes, opts)
 }
 
 close-issue
 meta {
     doc: """Close an issue (`state: "closed"`, reason "completed")."""
 }
-fn (owner: Str, repo: Str, number: Int): Map {
-  update-issue(owner, repo, number, {state: "closed", state_reason: "completed"})
+fn
+(owner: Str, repo: Str, number: Int): Map {
+  close-issue(owner, repo, number, {})
+},
+(owner: Str, repo: Str, number: Int, opts: Map): Map {
+  update-issue(owner, repo, number, {state: "closed", state_reason: "completed"}, opts)
 }
 
 create-comment
 meta {
     doc: """POST /repos/{owner}/{repo}/issues/{number}/comments - Comment on an issue or pull request."""
 }
-fn (owner: Str, repo: Str, number: Int, body: Str): Map {
-  ::api/json("POST", `/repos/${owner}/${repo}/issues/${number}/comments`, {}, {body: body})
+fn
+(owner: Str, repo: Str, number: Int, body: Str): Map {
+  create-comment(owner, repo, number, body, {})
+},
+(owner: Str, repo: Str, number: Int, body: Str, opts: Map): Map {
+  ::api/json("POST", `/repos/${owner}/${repo}/issues/${number}/comments`, {}, {body: body}, opts)
 }
 
 list-comments
@@ -87,13 +109,20 @@ fn
   ::api/json("GET", `/repos/${owner}/${repo}/issues/${number}/comments`)
 },
 (owner: Str, repo: Str, number: Int, params: Map): Vec {
-  ::api/json("GET", `/repos/${owner}/${repo}/issues/${number}/comments${query-string(params)}`)
+  list-comments(owner, repo, number, params, {})
+},
+(owner: Str, repo: Str, number: Int, params: Map, opts: Map): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/issues/${number}/comments${query-string(params)}`, {}, "", opts)
 }
 
 add-labels
 meta {
     doc: """POST /repos/{owner}/{repo}/issues/{number}/labels - Add labels to an issue."""
 }
-fn (owner: Str, repo: Str, number: Int, labels: Vec): Vec {
-  ::api/json("POST", `/repos/${owner}/${repo}/issues/${number}/labels`, {}, {labels: labels})
+fn
+(owner: Str, repo: Str, number: Int, labels: Vec): Vec {
+  add-labels(owner, repo, number, labels, {})
+},
+(owner: Str, repo: Str, number: Int, labels: Vec, opts: Map): Vec {
+  ::api/json("POST", `/repos/${owner}/${repo}/issues/${number}/labels`, {}, {labels: labels}, opts)
 }

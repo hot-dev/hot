@@ -3,6 +3,9 @@ meta {
     doc: """
 Supabase client SDK for Hot. Includes PostgREST database access, GoTrue auth,
 Storage, Edge Functions, and low-level request helpers.
+
+Every function that sends a request takes an optional trailing `opts` Map
+(`url`, `anon-key`, `service-key`) for per-call credentials. See `::supabase::api`.
 """
 }
 

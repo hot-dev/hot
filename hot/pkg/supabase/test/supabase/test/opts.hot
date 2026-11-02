@@ -1,0 +1,270 @@
+::supabase::test::opts ns
+meta ["test"]
+
+// Hermetic: no network. Every call below carries a key or URL in opts, so
+// nothing is read from context or the environment.
+
+::api ::supabase::api
+::core ::supabase::core
+::admin ::supabase::auth-admin
+::auth ::supabase::auth
+::db ::supabase::db
+::f ::supabase::filters
+::functions ::supabase::functions
+::storage ::supabase::storage
+
+URL "http://127.0.0.1:1"
+ANON {url: URL, anon-key: "tenant-anon"}
+SERVICE {url: URL, service-key: "tenant-service"}
+
+SOURCES {url: "https://ctx.supabase.co", anon-key: "ctx-anon", service-key: "ctx-service"}
+
+// Nothing listens on port 1, so a call fails at the socket, with the URL
+// in the error. That error proves the call got past the credential check
+// and used this `opts`, without any network traffic.
+reaches fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "127.0.0.1:1"))
+}
+
+// ============================================================================
+// Existing precedence
+// ============================================================================
+
+test-sources-keep-the-existing-precedence
+meta ["test"] fn () {
+    all {
+        "supabase.url": "ctx-url",
+        "SUPABASE_URL": "env-url",
+        "supabase.anon.key": "a1",
+        "supabase.api.key": "a2",
+        "SUPABASE_ANON_KEY": "a3",
+        "SUPABASE_API_KEY": "a4",
+        "supabase.service.key": "s1",
+        "supabase.service.role.key": "s2",
+        "SUPABASE_SERVICE_KEY": "s3",
+        "SUPABASE_SERVICE_ROLE_KEY": "s4"
+    }
+
+    assert-eq({url: "ctx-url", anon-key: "a1", service-key: "s1"}, ::core/sources-from(all))
+    next-up ::core/sources-from({...all, "supabase.url": "", "supabase.anon.key": null, "supabase.service.key": null})
+    assert-eq({url: "env-url", anon-key: "a2", service-key: "s2"}, next-up, "empty ctx values are skipped")
+    env-only ::core/sources-from({"SUPABASE_ANON_KEY": "a3", "SUPABASE_API_KEY": "a4", "SUPABASE_SERVICE_KEY": "s3", "SUPABASE_SERVICE_ROLE_KEY": "s4"})
+    assert-eq("a3", env-only.anon-key)
+    assert-eq("s3", env-only.service-key)
+    assert-eq("a4", ::core/sources-from({"SUPABASE_API_KEY": "a4"}).anon-key)
+    assert-eq("s4", ::core/sources-from({"SUPABASE_SERVICE_ROLE_KEY": "s4"}).service-key)
+}
+
+// ============================================================================
+// Resolver
+// ============================================================================
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    assert-eq(SOURCES, ::api/resolve-from({}, SOURCES))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({url: "https://tenant.supabase.co", anon-key: "k", service-key: "s"}, SOURCES)
+    assert-eq({url: "https://tenant.supabase.co", anon-key: "k", service-key: "s"}, r)
+}
+
+test-resolve-aliases
+meta ["test"] fn () {
+    r ::api/resolve-from({api-key: "alias-anon", service-role-key: "alias-service"}, SOURCES)
+    assert-eq("alias-anon", r.anon-key)
+    assert-eq("alias-service", r.service-key)
+    both ::api/resolve-from({anon-key: "anon", api-key: "alias", service-key: "svc", service-role-key: "alias"}, SOURCES)
+    assert-eq("anon", both.anon-key, "same order as the context keys")
+    assert-eq("svc", both.service-key)
+}
+
+test-per-call-url-never-borrows-context-keys
+meta ["test"] fn () {
+    r ::api/resolve-from({url: "https://other.supabase.co"}, SOURCES)
+    assert-eq({url: "https://other.supabase.co"}, r, "a ctx key must not go to another project's URL")
+    assert(is-err(::api/credentials-for(r, "anon")))
+    assert(is-err(::api/credentials-for(r, "service")))
+}
+
+test-per-call-key-keeps-the-context-url-and-drops-the-other-key
+meta ["test"] fn () {
+    r ::api/resolve-from({service-key: "tenant-service"}, SOURCES)
+    assert-eq("https://ctx.supabase.co", r.url)
+    assert-eq("tenant-service", r.service-key)
+    assert(is-null(get(r, "anon-key")), "the ctx anon key is ignored for this call")
+}
+
+test-missing-url-is-a-clear-error
+meta ["test"] fn () {
+    out ::api/resolve-from({anon-key: "k"}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "supabase.url"))
+    assert(not(contains(err-message(out), "\"k\"")))
+}
+
+test-credentials-for-role
+meta ["test"] fn () {
+    assert-eq({url: "https://ctx.supabase.co", key: "ctx-anon"}, ::api/credentials-for(SOURCES, "anon"))
+    assert-eq({url: "https://ctx.supabase.co", key: "ctx-service"}, ::api/credentials-for(SOURCES, "service"))
+    no-anon ::api/credentials-for({url: URL}, "anon")
+    assert(contains(err-message(no-anon), "supabase.anon.key"))
+    no-service ::api/credentials-for({url: URL}, "service")
+    assert(contains(err-message(no-service), "supabase.service.key"))
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("supabase.anon.key")
+    before-url ::hot::ctx/get("supabase.url")
+    assert-eq(URL, ::api/resolve(ANON).url)
+    assert(reaches(::db/select(::db/SelectRequest({table: "t"}), ANON)))
+    assert-eq(before, ::hot::ctx/get("supabase.anon.key"))
+    assert-eq(before-url, ::hot::ctx/get("supabase.url"))
+}
+
+test-build-request
+meta ["test"] fn () {
+    req ::api/build-request("POST", "/rest/v1/t", {Prefer: "x"}, {a: 1}, "the-key", "user-jwt", "https://tenant.supabase.co")
+    assert-eq("https://tenant.supabase.co/rest/v1/t", req.url)
+    assert-eq("the-key", req.headers.apikey)
+    assert-eq("Bearer user-jwt", req.headers.Authorization)
+    assert-eq("x", req.headers.Prefer)
+    assert-eq("application/json", get(req.headers, "Content-Type"))
+    assert-eq({a: 1}, from-json(req.body))
+    bare ::api/build-request("GET", "/x", {}, {}, "k", "k", "https://t")
+    assert-eq("", bare.body, "an empty body is not sent")
+    assert(is-null(get(bare.headers, "Content-Type")))
+}
+
+test-transport-failure-with-explicit-keys-is-an-err
+meta ["test"] fn () {
+    assert(reaches(::api/request-with-keys("GET", "/x", {}, {}, "k", "k", URL)))
+}
+
+// ============================================================================
+// Terminal functions thread opts; query builders stay pure
+// ============================================================================
+
+test-opts-reach-api
+meta ["test"] fn () {
+    assert(reaches(::api/request("GET", "/x", {}, {}, ANON)))
+    assert(reaches(::api/request-raw("GET", "/x", {}, {}, ANON)))
+    assert(reaches(::api/request-as("GET", "/x", {}, {}, "jwt", ANON)))
+    assert(reaches(::api/request-raw-as("GET", "/x", {}, {}, "jwt", ANON)))
+    assert(reaches(::api/request-service("GET", "/x", {}, {}, SERVICE)))
+    assert(reaches(::api/request-raw-service("GET", "/x", {}, {}, SERVICE)))
+    assert(reaches(::api/request-raw-body("POST", "/x", {}, "raw", ANON)))
+    assert(reaches(::api/request-raw-body-as("POST", "/x", {}, "raw", "jwt", ANON)))
+    assert(reaches(::api/request-raw-body-service("POST", "/x", {}, "raw", SERVICE)))
+}
+
+test-opts-reach-db
+meta ["test"] fn () {
+    query ::db/SelectRequest({table: "users", filters: [::f/eq("id", 1)], limit: 1})
+    assert(reaches(::db/select(query, ANON)))
+    assert(reaches(::db/select-as(query, "jwt", ANON)))
+    assert(reaches(::db/select-service(query, SERVICE)))
+    assert(reaches(::db/select-response(query, ANON)))
+    assert(reaches(::db/select-http-response(query, ANON)))
+    assert(reaches(::db/insert(::db/InsertRequest({table: "t", data: {a: 1}}), ANON)))
+    assert(reaches(::db/update(::db/UpdateRequest({table: "t", data: {a: 1}, filters: [::f/eq("id", 1)]}), ANON)))
+    assert(reaches(::db/delete(::db/DeleteRequest({table: "t", filters: [::f/eq("id", 1)]}), ANON)))
+    assert(reaches(::db/upsert(::db/UpsertRequest({table: "t", data: {a: 1}}), ANON)))
+    assert(reaches(::db/rpc(::db/RpcRequest({fn-name: "f"}), ANON)))
+}
+
+test-opts-reach-storage
+meta ["test"] fn () {
+    assert(reaches(::storage/list-buckets(SERVICE)))
+    assert(reaches(::storage/upload("b", "p", "x", "text/plain", false, ANON)))
+    assert(reaches(::storage/upload-as("b", "p", "x", "text/plain", false, "jwt", ANON)))
+    assert(reaches(::storage/upload-service("b", "p", "x", "text/plain", false, SERVICE)))
+    assert(reaches(::storage/download("b", "p", ANON)))
+    assert(reaches(::storage/list-objects(::storage/ListObjectsRequest({bucket: "b"}), ANON)))
+    assert(reaches(::storage/create-signed-url("b", "p", 60, ANON)))
+}
+
+test-public-url-uses-the-per-call-project
+meta ["test"] fn () {
+    url ::storage/get-public-url("b", "a b.png", {url: "https://tenant.supabase.co"})
+    assert-eq("https://tenant.supabase.co/storage/v1/object/public/b/a%20b.png", url)
+}
+
+test-opts-reach-auth
+meta ["test"] fn () {
+    assert(reaches(::auth/sign-in-password(::auth/SignInPasswordRequest({email: "a@b.c", password: "p"}), ANON)))
+    assert(reaches(::auth/refresh-token("r", ANON)))
+    assert(reaches(::auth/get-user("jwt", ANON)))
+    assert(reaches(::auth/update-user(::auth/UpdateUserRequest({data: {}}), "jwt", ANON)))
+    assert(reaches(::auth/sign-out("jwt", "local", ANON)))
+    assert(reaches(::admin/list-users(::admin/ListUsersRequest({page: 1}), SERVICE)))
+    assert(reaches(::admin/get-user-by-id("u", SERVICE)))
+    assert(reaches(::admin/delete-user("u", SERVICE)))
+}
+
+test-opts-reach-functions
+meta ["test"] fn () {
+    call ::functions/InvokeFunctionRequest({name: "hello", body: {a: 1}})
+    assert(reaches(::functions/invoke(call, ANON)))
+    assert(reaches(::functions/invoke-response(call, ANON)))
+    assert(reaches(::functions/invoke-as(call, "jwt", ANON)))
+    assert(reaches(::functions/invoke-service(call, SERVICE)))
+}
+
+test-wrong-role-key-is-a-clear-error
+meta ["test"] fn () {
+    out ::storage/list-buckets(ANON)
+    assert(is-err(out), "bucket management needs the service key, and the ctx one is ignored")
+    assert(contains(err-message(out), "supabase.service.key"))
+    anon ::db/select(::db/SelectRequest({table: "t"}), SERVICE)
+    assert(contains(err-message(anon), "supabase.anon.key"))
+    as-user ::db/select-as(::db/SelectRequest({table: "t"}), "jwt", {url: URL})
+    assert(contains(err-message(as-user), "supabase.anon.key"), "-as still sends the anon key as apikey")
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    cases [
+        ["url", {url: ""}],
+        ["url", {url: "  ", anon-key: "k"}],
+        ["url", {url: null, anon-key: "k"}],
+        ["anon-key", {anon-key: ""}],
+        ["anon-key", {anon-key: "   "}],
+        ["anon-key", {anon-key: null}],
+        ["anon-key", {anon-key: "", api-key: "valid"}],
+        ["api-key", {api-key: ""}],
+        ["service-key", {service-key: null}],
+        ["service-key", {service-key: "", service-role-key: "valid"}],
+        ["service-role-key", {service-role-key: "  "}]
+    ]
+    results map(cases, (c) {
+        out ::api/resolve-from(c[1], SOURCES)
+        assert(is-err(out), `${c[0]}: never falls back to context`)
+        assert(contains(err-message(out), c[0]), `names ${c[0]}`)
+        true
+    })
+    assert-eq(11, length(results))
+    assert(is-err(::db/select(::db/SelectRequest({table: "t"}), {anon-key: ""})), "the error reaches the caller")
+    assert(is-err(::storage/get-public-url("b", "p", {url: ""})))
+}
+
+test-per-call-url-does-not-send-the-live-context-key
+meta ["test"] fn () {
+    before ::hot::ctx/get("supabase.anon.key")
+    ::hot::ctx/set-secret("supabase.anon.key", "ctx_secret_anon")
+    assert-eq("ctx_secret_anon", ::api/resolve({url: URL, anon-key: "ctx_secret_anon"}).anon-key)
+    out ::db/select(::db/SelectRequest({table: "t"}), {url: URL})
+    assert(is-err(out))
+    assert(contains(err-message(out), "supabase.anon.key"))
+    assert(not(reaches(out)), "no request was attempted")
+    ::hot::ctx/set-secret("supabase.anon.key", before)
+}
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    resolved ::api/resolve({url: "https://t.supabase.co", anon-key: "tenant-credential-a", service-key: "tenant-credential-b"})
+    assert-eq("tenant-credential-a", resolved.anon-key)
+    assert-eq("tenant-credential-b", resolved.service-key)
+}

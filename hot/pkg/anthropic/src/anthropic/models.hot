@@ -1,7 +1,7 @@
 ::anthropic::models ns
 meta {doc: """Anthropic Models API - List and retrieve available Claude models."""}
 
-api-request ::anthropic::api/request
+api-call ::anthropic::api/call
 HttpError ::anthropic::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -58,16 +58,37 @@ meta {
 }
 fn
 (): ModelsListResponse {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/models`)
-    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+    list({})
+},
+(opts: Map): ModelsListResponse {
+    response api-call("GET", `/v1/models`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ModelsListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 },
 (limit: Int): ModelsListResponse {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/models?limit=${limit}`)
-    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+    list(limit, {})
+},
+(limit: Int, opts: Map): ModelsListResponse {
+    response api-call("GET", `/v1/models?limit=${limit}`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ModelsListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 },
 (limit: Int, after_id: Str): ModelsListResponse {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/models?limit=${limit}&after_id=${after_id}`)
-    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+    list(limit, after_id, {})
+},
+(limit: Int, after_id: Str, opts: Map): ModelsListResponse {
+    response api-call("GET", `/v1/models?limit=${limit}&after_id=${after_id}`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ModelsListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -89,6 +110,13 @@ meta {
     """
 }
 fn (model_id: Str): Model {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/models/${model_id}`)
-    if(is-ok-response(response), Model(response.body), err(HttpError(response)))
+    get(model_id, {})
+},
+(model_id: Str, opts: Map): Model {
+    response api-call("GET", `/v1/models/${model_id}`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Model(response.body) }
+      => { err(HttpError(response)) }
+    }
 }

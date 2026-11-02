@@ -1,6 +1,6 @@
 ::gemini::models ns
 
-api-request ::gemini::api/request
+api-call ::gemini::api/call
 HttpError ::gemini::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -334,8 +334,15 @@ meta {
     """
 }
 fn (request: ModelsListRequest): ModelsListResponse {
-  response api-request("GET", `${::gemini/BASE_URL}/v1/models?pageSize=${request.page-size}&pageToken=${request.page-token}`)
-  if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+  list(request, {})
+},
+(request: ModelsListRequest, opts: Map): ModelsListResponse {
+  response api-call("GET", `/v1/models?pageSize=${request.page-size}&pageToken=${request.page-token}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModelsGetRequest type {
@@ -378,8 +385,15 @@ meta {
     """
 }
 fn (request: ModelsGetRequest): ModelsGetResponse {
-  response api-request("GET", `${::gemini/BASE_URL}/v1/models/${request.model}`)
-  if(is-ok-response(response), ModelsGetResponse(response.body), err(HttpError(response)))
+  get(request, {})
+},
+(request: ModelsGetRequest, opts: Map): ModelsGetResponse {
+  response api-call("GET", `/v1/models/${request.model}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsGetResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModelsGenerateContentRequest type {
@@ -421,8 +435,15 @@ meta {
     """
 }
 fn (model: Str, request: ModelsGenerateContentRequest): ModelsGenerateContentResponse {
-  response api-request("POST", `${::gemini/BASE_URL}/v1/models/${model}:generateContent`, {}, request)
-  if(is-ok-response(response), ModelsGenerateContentResponse(response.body), err(HttpError(response)))
+  generate-content(model, request, {})
+},
+(model: Str, request: ModelsGenerateContentRequest, opts: Map): ModelsGenerateContentResponse {
+  response api-call("POST", `/v1/models/${model}:generateContent`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsGenerateContentResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModelsStreamGenerateContentRequest type {
@@ -462,8 +483,15 @@ meta {
     """
 }
 fn (model: Str, alt: Str, request: ModelsStreamGenerateContentRequest): ModelsStreamGenerateContentResponse {
-  response api-request("POST", `${::gemini/BASE_URL}/v1/models/${model}:streamGenerateContent?alt=${alt}`, {}, request)
-  if(is-ok-response(response), ModelsStreamGenerateContentResponse(response.body), err(HttpError(response)))
+  stream-generate-content(model, alt, request, {})
+},
+(model: Str, alt: Str, request: ModelsStreamGenerateContentRequest, opts: Map): ModelsStreamGenerateContentResponse {
+  response api-call("POST", `/v1/models/${model}:streamGenerateContent?alt=${alt}`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsStreamGenerateContentResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModelsCountTokensRequest type {
@@ -497,8 +525,15 @@ meta {
     """
 }
 fn (model: Str, request: ModelsCountTokensRequest): ModelsCountTokensResponse {
-  response api-request("POST", `${::gemini/BASE_URL}/v1/models/${model}:countTokens`, {}, request)
-  if(is-ok-response(response), ModelsCountTokensResponse(response.body), err(HttpError(response)))
+  count-tokens(model, request, {})
+},
+(model: Str, request: ModelsCountTokensRequest, opts: Map): ModelsCountTokensResponse {
+  response api-call("POST", `/v1/models/${model}:countTokens`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsCountTokensResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModelsEmbedContentRequest type {
@@ -545,8 +580,15 @@ meta {
     """
 }
 fn (model: Str, request: ModelsEmbedContentRequest): ModelsEmbedContentResponse {
-  response api-request("POST", `${::gemini/BASE_URL}/v1/models/${model}:embedContent`, {}, request)
-  if(is-ok-response(response), ModelsEmbedContentResponse(response.body), err(HttpError(response)))
+  embed-content(model, request, {})
+},
+(model: Str, request: ModelsEmbedContentRequest, opts: Map): ModelsEmbedContentResponse {
+  response api-call("POST", `/v1/models/${model}:embedContent`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsEmbedContentResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModelsBatchEmbedContentsRequest type {
@@ -584,6 +626,13 @@ meta {
     """
 }
 fn (model: Str, request: ModelsBatchEmbedContentsRequest): ModelsBatchEmbedContentsResponse {
-  response api-request("POST", `${::gemini/BASE_URL}/v1/models/${model}:batchEmbedContents`, {}, request)
-  if(is-ok-response(response), ModelsBatchEmbedContentsResponse(response.body), err(HttpError(response)))
+  batch-embed-contents(model, request, {})
+},
+(model: Str, request: ModelsBatchEmbedContentsRequest, opts: Map): ModelsBatchEmbedContentsResponse {
+  response api-call("POST", `/v1/models/${model}:batchEmbedContents`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsBatchEmbedContentsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

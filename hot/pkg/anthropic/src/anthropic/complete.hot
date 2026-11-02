@@ -1,6 +1,6 @@
 ::anthropic::complete ns
 
-api-request ::anthropic::api/request
+api-call ::anthropic::api/call
 HttpError ::anthropic::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -77,6 +77,13 @@ meta {
     """
 }
 fn (request: CompletePostRequest): CompletePostResponse {
-  response api-request("POST", `${::anthropic/BASE_URL}/v1/complete`, {}, request)
-  if(is-ok-response(response), CompletePostResponse(response.body), err(HttpError(response)))
+  post(request, {})
+},
+(request: CompletePostRequest, opts: Map): CompletePostResponse {
+  response api-call("POST", `/v1/complete`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CompletePostResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
