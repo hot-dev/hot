@@ -947,6 +947,108 @@ sq %(mul(%, %))
         );
     }
 
+    /// A null argument reaches a `Str` parameter as null, called directly or
+    /// from a caller typed `Any`. `Null -> Str` is for `Str(null)` and
+    /// interpolation, which still give "".
+    #[test]
+    fn null_stays_null_at_a_str_parameter_with_and_without_jit() {
+        let src = r#"::t ns
+f fn (x: Str): Any { [is-type(x, Null), x] }
+via-any fn (a: Any): Any { f(a) }
+via-any("warm")
+via-any("warm")
+via-any("warm")
+[via-any(null), f(null), f("s"), Str(null), `[${null}]`]"#;
+        let null_pair = Val::Vec(vec![Val::Bool(true), Val::Null]);
+        assert_same_with_and_without_jit(
+            src,
+            &Val::Vec(vec![
+                null_pair.clone(),
+                null_pair,
+                Val::Vec(vec![Val::Bool(false), Val::from("s")]),
+                Val::from(""),
+                Val::from("[]"),
+            ]),
+        );
+    }
+
+    /// Implicit arrows fire the same way in both tiers: one involving a user
+    /// type applies, a primitive to primitive one doesn't. One parameter
+    /// without an arrow, such as a nullable one or a generic with a comma in
+    /// its type, doesn't stop another parameter's arrow.
+    #[test]
+    fn implicit_arrows_match_with_and_without_jit() {
+        let src = r#"::t ns
+Tri type { s: Int }
+Label type { s: Str }
+Geom enum open { Dot }
+Tri -> Geom.Tri
+Label -> Str fn (l: Label): Str { l.s }
+Str -> Label fn (s: Str): Label { Label({s: s}) }
+
+kind fn match (g: Geom): Str {
+    Geom.Tri => { "tri" }
+    _ => { "other" }
+}
+take-str fn (x: Str): Any { x }
+take-label fn (l: Label): Any { l.s }
+typed-call fn (t: Tri): Str { kind(t) }
+any-call fn (a: Any): Str { kind(a) }
+any-str fn (a: Any): Any { take-str(a) }
+any-label fn (a: Any): Any { take-label(a) }
+through-map fn (t: Tri): Vec { map([t], kind) }
+through-lambda fn (t: Tri): Str {
+    call-kind (g: Geom) { kind(g) }
+    call-kind(t)
+}
+beside-nullable fn (a: Str?, g: Geom): Str { kind(g) }
+call-nullable fn (t: Tri): Str { beside-nullable("x", t) }
+beside-generic fn (m: Map<Str, Int>, g: Geom, h: Geom): Str { kind(h) }
+call-generic fn (t: Tri): Str { beside-generic({}, t, t) }
+countdown fn cond (g: Geom, n: Int, t: Tri): Str {
+    eq(n, 0) => { kind(g) }
+    => {
+        result countdown(t, sub(n, 1), t)
+        result
+    }
+}
+tail-countdown fn cond (g: Geom, n: Int, t: Tri): Str {
+    eq(n, 0) => { kind(g) }
+    => { tail-countdown(t, sub(n, 1), t) }
+}
+t Tri({s: 1})
+run fn (): Vec {
+    [
+        typed-call(t), any-call(t),
+        any-str(Label({s: "from-label"})), any-str(5), any-str(true),
+        any-label("from-str"),
+        call-nullable(t), call-generic(t),
+        countdown(Geom.Dot, 2, t), tail-countdown(Geom.Dot, 2, t),
+        through-map(t), through-lambda(t)
+    ]
+}
+run()
+run()
+run()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::Vec(vec![
+                Val::from("tri"),
+                Val::from("tri"),
+                Val::from("from-label"),
+                Val::Int(5),
+                Val::Bool(true),
+                Val::from("from-str"),
+                Val::from("tri"),
+                Val::from("tri"),
+                Val::from("tri"),
+                Val::from("tri"),
+                strs(&["other"]),
+                Val::from("tri"),
+            ]),
+        );
+    }
+
     /// `All<Vec>` and `All<Map>` serial bodies collect their bindings, and an
     /// `All<Vec>` parallel flow collects values, in compiled code too. The JIT
     /// returned `[]` / `{}` for serial bodies and keyed a Vec by name.

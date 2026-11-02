@@ -65,7 +65,7 @@ meta {
     """
 }
 fn
-(max_items: Int, marker: Str): ListFunctionsResponse | AwsError {
+(max_items: Int, marker: Str?): ListFunctionsResponse | AwsError {
     region get-region()
     credentials get-credentials()
 

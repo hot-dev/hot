@@ -88,7 +88,7 @@ meta {
     """
 }
 fn
-(model_id: Str, messages: Vec<Map>, system: Vec<Map>, inference_config: Map, tool_config: Map, guardrail_config: Map): ConverseResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>?, inference_config: Map?, tool_config: Map?, guardrail_config: Map?): ConverseResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
@@ -155,7 +155,7 @@ meta {
     """
 }
 fn
-(model_id: Str, messages: Vec<Map>, system: Vec<Map>, inference_config: Map, tool_config: Map): HttpResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>?, inference_config: Map?, tool_config: Map?): HttpResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
@@ -303,7 +303,7 @@ meta {
     """
 }
 fn
-(max_tokens: Int, temperature: Dec, top_p: Dec, stop_sequences: Vec<Str>): Map {
+(max_tokens: Int, temperature: Dec?, top_p: Dec?, stop_sequences: Vec<Str>?): Map {
     config {
         maxTokens: max_tokens
     }

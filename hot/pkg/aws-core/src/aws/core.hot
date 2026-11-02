@@ -341,7 +341,7 @@ sign-request
 meta {
     doc: """Sign a request using AWS Signature V4. Returns headers map with Authorization header."""
 }
-fn (method: Str, url: Str, region: Str, service: Str, credentials: Credentials, headers: Map, payload: Str | Bytes): Map {
+fn (method: Str, url: Str, region: Str, service: Str, credentials: Credentials, headers: Map, payload: Str | Bytes | Null): Map {
     // Parse URL
     url-parts parse-url(url)
 
