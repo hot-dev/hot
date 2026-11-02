@@ -123,8 +123,8 @@ pub fn str_constructor(
                 .next()
                 .unwrap_or(type_name_full)
                 .to_string();
-            let key = (source_short.clone(), "Str".to_string());
-            let key_full = (type_name_full.to_owned(), "Str".to_string());
+            let key = (source_short.clone(), "::hot::type/Str".to_string());
+            let key_full = (type_name_full.to_owned(), "::hot::type/Str".to_string());
 
             tracing::debug!(
                 "Type dispatch: Looking for implementation for type '{}' (short: '{}') -> Str",
@@ -139,8 +139,8 @@ pub fn str_constructor(
 
             // Use scope-aware type implementation resolution
             if let Some(impl_fn_name) = vm
-                .resolve_type_implementation(type_name_full, "Str")
-                .or_else(|| vm.resolve_type_implementation(&source_short, "Str"))
+                .resolve_type_implementation(type_name_full, "::hot::type/Str")
+                .or_else(|| vm.resolve_type_implementation(&source_short, "::hot::type/Str"))
             {
                 // Check type-dispatch recursion depth before calling the
                 // implementation. This catches buggy T -> Str implementations
@@ -306,8 +306,8 @@ pub fn int_constructor(
 
         // Use scope-aware type implementation resolution
         if let Some(impl_fn_name) = vm
-            .resolve_type_implementation(type_name_full, "Int")
-            .or_else(|| vm.resolve_type_implementation(&source_short, "Int"))
+            .resolve_type_implementation(type_name_full, "::hot::type/Int")
+            .or_else(|| vm.resolve_type_implementation(&source_short, "::hot::type/Int"))
         {
             let qualified = if impl_fn_name.starts_with("::") {
                 // The registry stores namespace-qualified impl names; use
@@ -379,8 +379,8 @@ pub fn dec_constructor(
 
         // Use scope-aware type implementation resolution (same as str_constructor)
         if let Some(impl_fn_name) = vm
-            .resolve_type_implementation(type_name_full, "Dec")
-            .or_else(|| vm.resolve_type_implementation(&source_short, "Dec"))
+            .resolve_type_implementation(type_name_full, "::hot::type/Dec")
+            .or_else(|| vm.resolve_type_implementation(&source_short, "::hot::type/Dec"))
         {
             let qualified = if impl_fn_name.starts_with("::") {
                 // The registry stores namespace-qualified impl names; use
@@ -444,8 +444,8 @@ pub fn bool_constructor(
 
         // Use scope-aware type implementation resolution
         if let Some(impl_fn_name) = vm
-            .resolve_type_implementation(type_name_full, "Bool")
-            .or_else(|| vm.resolve_type_implementation(&source_short, "Bool"))
+            .resolve_type_implementation(type_name_full, "::hot::type/Bool")
+            .or_else(|| vm.resolve_type_implementation(&source_short, "::hot::type/Bool"))
         {
             let qualified = if impl_fn_name.starts_with("::") {
                 // The registry stores namespace-qualified impl names; use

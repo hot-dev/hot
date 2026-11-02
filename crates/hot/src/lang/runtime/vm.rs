@@ -856,11 +856,12 @@ fn split_param_types(types: &str) -> Vec<String> {
     parts
 }
 
-/// Whether a parameter's written type is a built-in one, as
-/// `is_primitive_type_expr` in the type checker counts them.
+/// Whether a parameter's type is a built-in one, as `is_primitive_type_expr`
+/// in the type checker counts them.
 fn is_primitive_param_type(param_type: &str) -> bool {
     let base = param_type.strip_suffix('?').unwrap_or(param_type);
     let base = base.split('<').next().unwrap_or(base).trim();
+    let base = base.strip_prefix("::hot::type/").unwrap_or(base);
     matches!(
         base,
         "Str" | "Int" | "Dec" | "Bool" | "Bytes" | "Byte" | "Null" | "Any" | "Vec" | "Map"
@@ -7262,12 +7263,57 @@ impl VirtualMachine {
                 if types.iter().all(|t| t == "Any") {
                     continue;
                 }
-                found = Some(types.into());
+                let namespace = self
+                    .program
+                    .functions
+                    .get(function_id as usize)
+                    .map_or("", |info| info.namespace.as_str());
+                found = Some(
+                    types
+                        .iter()
+                        .map(|written| self.param_type_path(namespace, written))
+                        .collect(),
+                );
                 break;
             }
         }
         self.coercion_param_cache.insert(function_id, found.clone());
         found
+    }
+
+    /// A parameter's written type as the qualified path arrows register under,
+    /// resolved in the function's `namespace` the way the compiler resolves an
+    /// arrow's target: a short name means something only in its own scope.
+    /// Unions, generics and nullables are no arrow's target, so they stay as
+    /// written.
+    fn param_type_path(&self, namespace: &str, written: &str) -> String {
+        if written == "Any" || written.starts_with("::") || written.contains(['<', '|', '?', ' ']) {
+            return written.to_owned();
+        }
+        let (name, variant) = match written.split_once('.') {
+            Some((name, variant)) => (name, Some(variant)),
+            None => (written, None),
+        };
+        let local = format!("{namespace}/{name}");
+        let variables = self
+            .program
+            .namespaces
+            .namespaces
+            .get(namespace)
+            .map(|info| &info.variables);
+        let path = if variables.is_some_and(|vars| vars.contains_key(&local)) {
+            local
+        } else if let Some(imported) = variables.and_then(|vars| vars.get(name)) {
+            imported.name.clone()
+        } else if let Some(core) = self.core_variables.get(name) {
+            format!("{}/{}", core.namespace_path, name)
+        } else {
+            local
+        };
+        match variant {
+            Some(variant) => format!("{path}.{variant}"),
+            None => path,
+        }
     }
 
     /// The same-arity overload set `function_id` belongs to: the overloads
@@ -7552,11 +7598,9 @@ impl VirtualMachine {
     }
 
     /// Run the registered `Source -> Target` arrow for a value tagged
-    /// `existing`, when exactly one arrow from that source reaches
-    /// `target` (or a variant of it). Prefers registry keys whose source is
-    /// the value's qualified `$type`, falling back to short names for
-    /// legacy entries; ambiguous matches return `None` rather than picking
-    /// an arrow.
+    /// `existing`, when exactly one arrow from that source reaches the
+    /// qualified `target` (or a variant of it); ambiguous matches return
+    /// `None` rather than picking an arrow.
     fn coerce_tagged_via_arrow(
         &mut self,
         data: &Val,
@@ -7564,9 +7608,7 @@ impl VirtualMachine {
         target: &str,
     ) -> VmResult<Option<Val>> {
         let src_short = existing.rsplit('/').next().unwrap_or(existing);
-        let tgt_short = target.rsplit('/').next().unwrap_or(target);
-        let Some((source, target)) = self.find_coercion_target(existing, src_short, tgt_short)
-        else {
+        let Some((source, target)) = self.find_coercion_target(existing, src_short, target) else {
             return Ok(None);
         };
         let Some(impl_name) = self.resolve_type_implementation(&source, &target) else {
@@ -7577,15 +7619,17 @@ impl VirtualMachine {
     }
 
     /// Look up a coercion arrow whose source type matches `src` and whose
-    /// target type is either `tgt` exactly or a variant of it (`tgt.X`).
+    /// target type is either the qualified `tgt` exactly or a variant of it
+    /// (`tgt.X`).
     /// Returns the actual target key (used to resolve the impl function via
     /// `resolve_type_implementation`) when exactly one such arrow exists.
     /// Multiple matches return `None` so the dispatcher can fall through
     /// rather than silently picking one.
     /// `src_full` is the value's qualified type path; the registry is keyed
     /// by scope-resolved qualified source names, so that match is
-    /// authoritative. The short-name comparison runs only when no qualified
-    /// key matches (legacy caches, values carrying short $type strings).
+    /// authoritative. The short-name comparison serves only values carrying a
+    /// short $type string: a qualified one is a different type from a
+    /// same-named source in another namespace.
     fn find_coercion_target(
         &self,
         src_full: &str,
@@ -7593,35 +7637,17 @@ impl VirtualMachine {
         tgt: &str,
     ) -> Option<(String, String)> {
         let dotted_prefix = format!("{}.", tgt);
-        let collect = |exact: bool| -> Vec<(String, String)> {
-            self.type_implementations
-                .keys()
-                .filter_map(|(s, t)| {
-                    let source_matches = if exact {
-                        s == src_full
-                    } else {
-                        s.rsplit('/').next().unwrap_or(s) == src_short
-                    };
-                    if !source_matches {
-                        return None;
-                    }
-                    if t == tgt || t.starts_with(&dotted_prefix) {
-                        Some((s.clone(), t.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-        let mut candidates = collect(true);
-        if candidates.is_empty() {
-            candidates = collect(false);
-        }
-        if candidates.len() == 1 {
-            candidates.into_iter().next()
-        } else {
-            None
-        }
+        let qualified = src_full.starts_with("::");
+        let mut candidates = self.type_implementations.keys().filter(|(s, t)| {
+            let source_matches = if qualified {
+                s == src_full
+            } else {
+                s.rsplit('/').next().unwrap_or(s) == src_short
+            };
+            source_matches && (t == tgt || t.starts_with(&dotted_prefix))
+        });
+        let found = candidates.next()?;
+        candidates.next().is_none().then(|| found.clone())
     }
 
     /// Implicit `Source -> Target` coercion at a static-dispatch call, for
@@ -7660,7 +7686,8 @@ impl VirtualMachine {
         Ok(args)
     }
 
-    /// The arrow that implicitly coerces `arg` to `param_type`, if any. Null
+    /// The arrow that implicitly coerces `arg` to `param_type` (qualified, from
+    /// `lookup_typed_param_signature`), if any. Null
     /// is never coerced, and neither is a primitive to a primitive: those
     /// arrows back explicit calls like `Str(null)` and `Int("5")`, the same
     /// rule as `coercion_available` in the type checker.
@@ -7683,10 +7710,10 @@ impl VirtualMachine {
                 path.as_str()
             }
         };
-        let short = source.rsplit('/').next().unwrap_or(source);
-        if short == param_type {
+        if source == param_type {
             return None;
         }
+        let short = source.rsplit('/').next().unwrap_or(source);
         if let Some(cached) = self
             .coercion_target_cache
             .get(source)

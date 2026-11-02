@@ -311,3 +311,64 @@ fn key_create_works_on_a_fresh_project_and_errors_go_to_stderr() {
         text(&output)
     );
 }
+
+/// A project and its dependency package may each declare a same-named type
+/// and an arrow to it from `HttpResponse`, the shape nearly every API package
+/// has. The project's arrow used to run for the package's type, or the other
+/// way round, so a redacting arrow could be skipped.
+#[test]
+fn a_dependency_keeps_its_own_arrow_to_a_same_named_type() {
+    const API: &str = r#"HttpResponse ::hot::http/HttpResponse
+HttpError type { status: Int, source: Str, body: Any }
+HttpResponse -> HttpError fn (r: HttpResponse): HttpError {
+    HttpError({status: r.status, source: OWNER, body: "redacted"})
+}
+fail fn (): Any {
+    HttpError(HttpResponse({status: 500, headers: {}, body: {ssn: "123"}}))
+}
+take fn (e: HttpError): Any { e.source }
+take-any fn (x: Any): Any { take(x) }
+response fn (): Any { HttpResponse({status: 500, headers: {}, body: {ssn: "123"}}) }
+"#;
+    let lib = tempfile::tempdir().unwrap();
+    write(
+        &lib.path().join("hot/src/lib/api.hot"),
+        &format!("::lib::api ns\nOWNER \"lib\"\n{API}"),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir.path().join("hot.hot"),
+        &format!(
+            "hot.project.app.deps {{\"example.com/lib\": {{\"local\": \"{}\"}}}}\n\
+             hot.project.app.src.paths [\"./hot/src\"]\n\
+             hot.set.project \"app\"\n",
+            lib.path().display()
+        ),
+    );
+    write(
+        &dir.path().join("hot/src/app/api.hot"),
+        &format!("::app::api ns\nOWNER \"app\"\n{API}"),
+    );
+
+    let code = r#"println(to-json(untype(::app::api/fail())))
+println(to-json(untype(::lib::api/fail())))
+println(::app::api/take-any(::app::api/response()))
+println(::lib::api/take-any(::lib::api/response()))
+1"#;
+    for threshold in ["100", "1"] {
+        let output = run_hot(dir.path(), &["eval", "--jit.threshold", threshold, code]);
+        assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+        let out = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines[..4],
+            [
+                r#"{"status":500,"source":"app","body":"redacted"}"#,
+                r#"{"status":500,"source":"lib","body":"redacted"}"#,
+                "app",
+                "lib",
+            ],
+            "threshold {threshold}: {out}"
+        );
+    }
+}
