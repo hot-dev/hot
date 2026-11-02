@@ -79,6 +79,7 @@ fn
         response send-signed("GET", url, "lambda", resolved, headers, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { ListFunctionsResponse({
                 functions: cond {
                     is-null(response.body.Functions) => { [] }
@@ -151,6 +152,7 @@ fn
         response send-signed("GET", url, "lambda", resolved, headers, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { GetFunctionResponse({
                 configuration: cond {
                     is-null(response.body.Configuration) => { null }
@@ -213,6 +215,7 @@ fn
         response send-signed("GET", url, "lambda", resolved, headers, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { FunctionConfiguration({
                 function_name: response.body.FunctionName,
                 function_arn: response.body.FunctionArn,

@@ -72,7 +72,11 @@ fn
 },
 (request: GETBroadcastsRequest, opts: Map): GETBroadcastsResponse {
   response api-request("GET", `${::resend/BASE_URL}/broadcasts`, {}, "", opts)
-  if(is-ok-response(response), GETBroadcastsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETBroadcastsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTBroadcastsRequest type {
@@ -102,7 +106,11 @@ fn
 },
 (request: POSTBroadcastsRequest, opts: Map): POSTBroadcastsResponse {
   response api-request("POST", `${::resend/BASE_URL}/broadcasts`, {}, request, opts)
-  if(is-ok-response(response), POSTBroadcastsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTBroadcastsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GETBroadcastsIdRequest type {
@@ -134,7 +142,11 @@ fn
 },
 (request: GETBroadcastsIdRequest, opts: Map): GETBroadcastsIdResponse {
   response api-request("GET", `${::resend/BASE_URL}/broadcasts/${request.id}`, {}, "", opts)
-  if(is-ok-response(response), GETBroadcastsIdResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETBroadcastsIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DELETEBroadcastsIdRequest type {
@@ -158,7 +170,11 @@ fn
 },
 (request: DELETEBroadcastsIdRequest, opts: Map): DELETEBroadcastsIdResponse {
   response api-request("DELETE", `${::resend/BASE_URL}/broadcasts/${request.id}`, {}, "", opts)
-  if(is-ok-response(response), DELETEBroadcastsIdResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DELETEBroadcastsIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTBroadcastsIdSendRequest type {
@@ -180,5 +196,9 @@ fn
 },
 (id: Str, request: POSTBroadcastsIdSendRequest, opts: Map): POSTBroadcastsIdSendResponse {
   response api-request("POST", `${::resend/BASE_URL}/broadcasts/${id}/send`, {}, request, opts)
-  if(is-ok-response(response), POSTBroadcastsIdSendResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTBroadcastsIdSendResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

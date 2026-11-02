@@ -186,7 +186,11 @@ fn (request: CachedContentsListRequest): CachedContentsListResponse {
 },
 (request: CachedContentsListRequest, opts: Map): CachedContentsListResponse {
   response api-call("GET", `/v1/cachedContents?pageSize=${request.page-size}&pageToken=${request.page-token}`, {}, "", opts)
-  if(is-ok-response(response), CachedContentsListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CachedContentsListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CachedContentsCreateRequest type {
@@ -243,7 +247,11 @@ fn (request: CachedContentsCreateRequest): CachedContentsCreateResponse {
 },
 (request: CachedContentsCreateRequest, opts: Map): CachedContentsCreateResponse {
   response api-call("POST", `/v1/cachedContents`, {}, request, opts)
-  if(is-ok-response(response), CachedContentsCreateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CachedContentsCreateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CachedContentsGetRequest type {
@@ -289,7 +297,11 @@ fn (request: CachedContentsGetRequest): CachedContentsGetResponse {
 },
 (request: CachedContentsGetRequest, opts: Map): CachedContentsGetResponse {
   response api-call("GET", `/v1/cachedContents/${request.name}`, {}, "", opts)
-  if(is-ok-response(response), CachedContentsGetResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CachedContentsGetResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CachedContentsUpdateRequest type {
@@ -334,7 +346,11 @@ fn (name: Str, update-mask: Str, request: CachedContentsUpdateRequest): CachedCo
 },
 (name: Str, update-mask: Str, request: CachedContentsUpdateRequest, opts: Map): CachedContentsUpdateResponse {
   response api-call("PATCH", `/v1/cachedContents/${name}?updateMask=${update-mask}`, {}, request, opts)
-  if(is-ok-response(response), CachedContentsUpdateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CachedContentsUpdateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CachedContentsDeleteRequest type {
@@ -365,5 +381,9 @@ fn (request: CachedContentsDeleteRequest): CachedContentsDeleteResponse {
 },
 (request: CachedContentsDeleteRequest, opts: Map): CachedContentsDeleteResponse {
   response api-call("DELETE", `/v1/cachedContents/${request.name}`, {}, "", opts)
-  if(is-ok-response(response), CachedContentsDeleteResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CachedContentsDeleteResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

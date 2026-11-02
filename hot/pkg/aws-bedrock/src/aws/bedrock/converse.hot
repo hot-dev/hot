@@ -114,6 +114,7 @@ fn
         response send-signed("POST", url, "bedrock", resolved, headers, body-str)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { ConverseResponse({
                 output: response.body.output,
                 stop_reason: response.body.stopReason,
@@ -190,6 +191,7 @@ fn
         response send-signed("POST", url, "bedrock", resolved, headers, body-str)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { response }
             => { AwsError(response) }
         }

@@ -25,7 +25,11 @@ fn
 },
 (opts: Map): AppsPermissionsInfoResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/apps.permissions.info`, {}, "", opts)
-  if(is-ok-response(response), AppsPermissionsInfoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AppsPermissionsInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 AppsPermissionsRequestRequest type {
@@ -49,7 +53,11 @@ fn
 },
 (request: AppsPermissionsRequestRequest, opts: Map): AppsPermissionsRequestResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/apps.permissions.request?scopes=${request.scopes}&trigger_id=${request.trigger_id}`, {}, "", opts)
-  if(is-ok-response(response), AppsPermissionsRequestResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AppsPermissionsRequestResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 AppsPermissionsResourcesListRequest type {
@@ -75,7 +83,11 @@ fn
 },
 (request: AppsPermissionsResourcesListRequest, opts: Map): AppsPermissionsResourcesListResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/apps.permissions.resources.list?cursor=${or(request.cursor, "")}&limit=${or(request.limit, "")}`, {}, "", opts)
-  if(is-ok-response(response), AppsPermissionsResourcesListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AppsPermissionsResourcesListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 AppsPermissionsScopesListResponse type {
@@ -95,7 +107,11 @@ fn
 },
 (opts: Map): AppsPermissionsScopesListResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/apps.permissions.scopes.list`, {}, "", opts)
-  if(is-ok-response(response), AppsPermissionsScopesListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AppsPermissionsScopesListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -124,7 +140,11 @@ fn
 (request: AppsUninstallRequest, opts: Map): AppsUninstallResponse {
   ::hot::ctx/mark-secret(request.client_secret)
   response api-request("GET", `${::slack::core/BASE_URL}/apps.uninstall?client_id=${request.client_id}&client_secret=${request.client_secret}`, {}, "", opts)
-  if(is-ok-response(response), AppsUninstallResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AppsUninstallResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 AppsEventAuthorizationsListRequest type {
@@ -150,7 +170,11 @@ fn
 },
 (request: AppsEventAuthorizationsListRequest, opts: Map): AppsEventAuthorizationsListResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/apps.event.authorizations.list`, {}, request, opts)
-  if(is-ok-response(response), AppsEventAuthorizationsListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { AppsEventAuthorizationsListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -193,5 +217,9 @@ fn
 },
 (request: BotsInfoRequest, opts: Map): BotsInfoResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/bots.info?bot=${or(request.bot, "")}`, {}, "", opts)
-  if(is-ok-response(response), BotsInfoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { BotsInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

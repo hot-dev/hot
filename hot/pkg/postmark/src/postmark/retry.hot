@@ -29,5 +29,9 @@ fn
 },
 (request: RetryInboundMessageProcessingRequest, opts: Map): RetryInboundMessageProcessingResponse {
   response api-request("PUT", `${::postmark/BASE_URL}/messages/inbound/${request.messageid}/retry`, {}, "", opts)
-  if(is-ok-response(response), RetryInboundMessageProcessingResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RetryInboundMessageProcessingResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

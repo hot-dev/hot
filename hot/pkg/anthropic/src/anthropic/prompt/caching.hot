@@ -150,5 +150,9 @@ fn (request: PromptCachingBetaMessagesPostRequest): PromptCachingBetaMessagesPos
 },
 (request: PromptCachingBetaMessagesPostRequest, opts: Map): PromptCachingBetaMessagesPostResponse {
   response api-call("POST", `/v1/messages?beta=prompt_caching`, {}, request, opts)
-  if(is-ok-response(response), PromptCachingBetaMessagesPostResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { PromptCachingBetaMessagesPostResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

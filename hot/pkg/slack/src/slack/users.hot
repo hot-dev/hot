@@ -35,7 +35,11 @@ fn
 },
 (request: UsersConversationsRequest, opts: Map): UsersConversationsResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/users.conversations?user=${or(request.user, "")}&types=${or(request.types, "")}&exclude_archived=${or(request.exclude_archived, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
-  if(is-ok-response(response), UsersConversationsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsersConversationsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // No parameters required for this request
@@ -57,7 +61,11 @@ fn
 },
 (request: UsersDeletePhotoRequest, opts: Map): UsersDeletePhotoResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/users.deletePhoto`, {}, request, opts)
-  if(is-ok-response(response), UsersDeletePhotoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsersDeletePhotoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsersGetPresenceRequest type {
@@ -86,7 +94,11 @@ fn
 },
 (request: UsersGetPresenceRequest, opts: Map): UsersGetPresenceResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/users.getPresence?user=${request.user}`, {}, "", opts)
-  if(is-ok-response(response), UsersGetPresenceResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsersGetPresenceResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsersIdentityResponse type {
@@ -107,7 +119,11 @@ fn
 },
 (opts: Map): UsersIdentityResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/users.identity`, {}, "", opts)
-  if(is-ok-response(response), UsersIdentityResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsersIdentityResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsersInfoRequest type {
@@ -145,7 +161,11 @@ fn
 },
 (request: UsersInfoRequest, opts: Map): UsersInfoResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/users.info?user=${request.user}&include_locale=${or(request.include_locale, "")}`, {}, "", opts)
-  if(is-ok-response(response), UsersInfoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsersInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsersListRequest type {
@@ -187,7 +207,11 @@ fn
 },
 (request: UsersListRequest, opts: Map): UsersListResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/users.list?limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}&include_locale=${or(request.include_locale, "")}`, {}, "", opts)
-  if(is-ok-response(response), UsersListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsersListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsersLookupByEmailRequest type {
@@ -211,7 +235,11 @@ fn
 },
 (request: UsersLookupByEmailRequest, opts: Map): UsersLookupByEmailResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/users.lookupByEmail?email=${request.email}`, {}, "", opts)
-  if(is-ok-response(response), UsersLookupByEmailResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsersLookupByEmailResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // No parameters required for this request
@@ -233,7 +261,11 @@ fn
 },
 (request: UsersSetActiveRequest, opts: Map): UsersSetActiveResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/users.setActive`, {}, request, opts)
-  if(is-ok-response(response), UsersSetActiveResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsersSetActiveResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsersSetPhotoRequest type {
@@ -259,7 +291,11 @@ fn
 },
 (request: UsersSetPhotoRequest, opts: Map): UsersSetPhotoResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/users.setPhoto`, {}, request, opts)
-  if(is-ok-response(response), UsersSetPhotoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsersSetPhotoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsersSetPresenceRequest type {
@@ -282,7 +318,11 @@ fn
 },
 (request: UsersSetPresenceRequest, opts: Map): UsersSetPresenceResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/users.setPresence`, {}, request, opts)
-  if(is-ok-response(response), UsersSetPresenceResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsersSetPresenceResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -308,7 +348,11 @@ fn
 },
 (request: DndEndDndRequest, opts: Map): DndEndDndResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/dnd.endDnd`, {}, request, opts)
-  if(is-ok-response(response), DndEndDndResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DndEndDndResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // No parameters required for this request
@@ -334,7 +378,11 @@ fn
 },
 (request: DndEndSnoozeRequest, opts: Map): DndEndSnoozeResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/dnd.endSnooze`, {}, request, opts)
-  if(is-ok-response(response), DndEndSnoozeResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DndEndSnoozeResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DndInfoRequest type {
@@ -363,7 +411,11 @@ fn
 },
 (request: DndInfoRequest, opts: Map): DndInfoResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/dnd.info?user=${or(request.user, "")}`, {}, "", opts)
-  if(is-ok-response(response), DndInfoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DndInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DndSetSnoozeRequest type {
@@ -389,7 +441,11 @@ fn
 },
 (request: DndSetSnoozeRequest, opts: Map): DndSetSnoozeResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/dnd.setSnooze`, {}, request, opts)
-  if(is-ok-response(response), DndSetSnoozeResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DndSetSnoozeResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DndTeamInfoRequest type {
@@ -413,7 +469,11 @@ fn
 },
 (request: DndTeamInfoRequest, opts: Map): DndTeamInfoResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/dnd.teamInfo?users=${request.users}`, {}, "", opts)
-  if(is-ok-response(response), DndTeamInfoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DndTeamInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -445,7 +505,11 @@ fn
 },
 (request: UsergroupsCreateRequest, opts: Map): UsergroupsCreateResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/usergroups.create`, {}, request, opts)
-  if(is-ok-response(response), UsergroupsCreateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsergroupsCreateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsergroupsDisableRequest type {
@@ -470,7 +534,11 @@ fn
 },
 (request: UsergroupsDisableRequest, opts: Map): UsergroupsDisableResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/usergroups.disable`, {}, request, opts)
-  if(is-ok-response(response), UsergroupsDisableResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsergroupsDisableResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsergroupsEnableRequest type {
@@ -495,7 +563,11 @@ fn
 },
 (request: UsergroupsEnableRequest, opts: Map): UsergroupsEnableResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/usergroups.enable`, {}, request, opts)
-  if(is-ok-response(response), UsergroupsEnableResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsergroupsEnableResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsergroupsListRequest type {
@@ -521,7 +593,11 @@ fn
 },
 (request: UsergroupsListRequest, opts: Map): UsergroupsListResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/usergroups.list?include_users=${or(request.include_users, "")}&include_count=${or(request.include_count, "")}&include_disabled=${or(request.include_disabled, "")}`, {}, "", opts)
-  if(is-ok-response(response), UsergroupsListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsergroupsListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsergroupsUpdateRequest type {
@@ -550,7 +626,11 @@ fn
 },
 (request: UsergroupsUpdateRequest, opts: Map): UsergroupsUpdateResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/usergroups.update`, {}, request, opts)
-  if(is-ok-response(response), UsergroupsUpdateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsergroupsUpdateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsergroupsUsersListRequest type {
@@ -575,7 +655,11 @@ fn
 },
 (request: UsergroupsUsersListRequest, opts: Map): UsergroupsUsersListResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/usergroups.users.list?usergroup=${request.usergroup}&include_disabled=${or(request.include_disabled, "")}`, {}, "", opts)
-  if(is-ok-response(response), UsergroupsUsersListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsergroupsUsersListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsergroupsUsersUpdateRequest type {
@@ -601,7 +685,11 @@ fn
 },
 (request: UsergroupsUsersUpdateRequest, opts: Map): UsergroupsUsersUpdateResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/usergroups.users.update`, {}, request, opts)
-  if(is-ok-response(response), UsergroupsUsersUpdateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsergroupsUsersUpdateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -641,7 +729,11 @@ fn
 },
 (request: UsersProfileGetRequest, opts: Map): UsersProfileGetResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/users.profile.get?user=${or(request.user, "")}&include_labels=${or(request.include_labels, "")}`, {}, "", opts)
-  if(is-ok-response(response), UsersProfileGetResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsersProfileGetResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UsersProfileSetRequest type {
@@ -668,5 +760,9 @@ fn
 },
 (request: UsersProfileSetRequest, opts: Map): UsersProfileSetResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/users.profile.set`, {}, request, opts)
-  if(is-ok-response(response), UsersProfileSetResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { UsersProfileSetResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

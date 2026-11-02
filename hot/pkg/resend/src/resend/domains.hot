@@ -99,7 +99,11 @@ fn
 },
 (request: GETDomainsRequest, opts: Map): GETDomainsResponse {
   response api-request("GET", `${::resend/BASE_URL}/domains`, {}, "", opts)
-  if(is-ok-response(response), GETDomainsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETDomainsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTDomainsRequest type {
@@ -127,7 +131,11 @@ fn
 },
 (request: POSTDomainsRequest, opts: Map): POSTDomainsResponse {
   response api-request("POST", `${::resend/BASE_URL}/domains`, {}, request, opts)
-  if(is-ok-response(response), POSTDomainsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTDomainsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GETDomainsDomainIdRequest type {
@@ -168,7 +176,11 @@ fn
 },
 (request: GETDomainsDomainIdRequest, opts: Map): GETDomainsDomainIdResponse {
   response api-request("GET", `${::resend/BASE_URL}/domains/${request.domain-id}`, {}, "", opts)
-  if(is-ok-response(response), GETDomainsDomainIdResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETDomainsDomainIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 PATCHDomainsDomainIdRequest type {
@@ -193,7 +205,11 @@ fn
 },
 (domain-id: Str, request: PATCHDomainsDomainIdRequest, opts: Map): PATCHDomainsDomainIdResponse {
   response api-request("PATCH", `${::resend/BASE_URL}/domains/${domain-id}`, {}, request, opts)
-  if(is-ok-response(response), PATCHDomainsDomainIdResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { PATCHDomainsDomainIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DELETEDomainsDomainIdRequest type {
@@ -215,7 +231,11 @@ fn
 },
 (request: DELETEDomainsDomainIdRequest, opts: Map): DELETEDomainsDomainIdResponse {
   response api-request("DELETE", `${::resend/BASE_URL}/domains/${request.domain-id}`, {}, "", opts)
-  if(is-ok-response(response), DELETEDomainsDomainIdResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DELETEDomainsDomainIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTDomainsDomainIdVerifyRequest type {
@@ -238,5 +258,9 @@ fn
 },
 (request: POSTDomainsDomainIdVerifyRequest, opts: Map): POSTDomainsDomainIdVerifyResponse {
   response api-request("POST", `${::resend/BASE_URL}/domains/${request.domain-id}/verify`, {}, "", opts)
-  if(is-ok-response(response), POSTDomainsDomainIdVerifyResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTDomainsDomainIdVerifyResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

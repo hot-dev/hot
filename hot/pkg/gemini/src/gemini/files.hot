@@ -87,7 +87,11 @@ fn (request: FilesGetRequest): FilesGetResponse {
 },
 (request: FilesGetRequest, opts: Map): FilesGetResponse {
   response api-call("GET", `/v1/${request.name}`, {}, "", opts)
-  if(is-ok-response(response), FilesGetResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesGetResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesDeleteRequest type {
@@ -118,7 +122,11 @@ fn (request: FilesDeleteRequest): FilesDeleteResponse {
 },
 (request: FilesDeleteRequest, opts: Map): FilesDeleteResponse {
   response api-call("DELETE", `/v1/${request.name}`, {}, "", opts)
-  if(is-ok-response(response), FilesDeleteResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesDeleteResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesListRequest type {
@@ -155,7 +163,11 @@ fn (request: FilesListRequest): FilesListResponse {
 },
 (request: FilesListRequest, opts: Map): FilesListResponse {
   response api-call("GET", `/v1/files?pageSize=${request.page-size}&pageToken=${request.page-token}`, {}, "", opts)
-  if(is-ok-response(response), FilesListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesUploadRequest type {
@@ -191,5 +203,9 @@ fn (request: FilesUploadRequest): FilesUploadResponse {
 },
 (request: FilesUploadRequest, opts: Map): FilesUploadResponse {
   response api-call("POST", `/upload/v1/files`, {}, request, opts)
-  if(is-ok-response(response), FilesUploadResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesUploadResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

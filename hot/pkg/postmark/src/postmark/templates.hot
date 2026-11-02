@@ -60,5 +60,9 @@ fn
 },
 (request: POSTTemplatesRequest, opts: Map): POSTTemplatesResponse {
   response api-request("POST", `${::postmark/BASE_URL}/templates`, {}, request, opts)
-  if(is-ok-response(response), POSTTemplatesResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTTemplatesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

@@ -27,5 +27,9 @@ fn
 },
 (request: GETBouncesBounceidDumpRequest, opts: Map): GETBouncesBounceidDumpResponse {
   response api-request("GET", `${::postmark/BASE_URL}/bounces/${request.bounceid}/dump`, {}, "", opts)
-  if(is-ok-response(response), GETBouncesBounceidDumpResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETBouncesBounceidDumpResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

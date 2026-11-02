@@ -138,7 +138,11 @@ fn
 (model: Str, request: GenerateContentRequest, opts: Map): GenerateContentResponse {
     // Use v1beta for systemInstruction support
     response api-call("POST", `/v1beta/models/${model}:generateContent`, {}, request, opts)
-    if(is-ok-response(response), GenerateContentResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { GenerateContentResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================

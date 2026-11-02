@@ -78,6 +78,7 @@ fn
         response send-signed("POST", url, "dynamodb", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { ListTablesResponse({
                 table_names: if(is-null(response.body.TableNames), [], response.body.TableNames),
                 last_evaluated_table_name: response.body.LastEvaluatedTableName
@@ -135,6 +136,7 @@ fn
         response send-signed("POST", url, "dynamodb", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { DescribeTableResponse({
                 table: cond {
                     is-null(response.body.Table) => { null }
