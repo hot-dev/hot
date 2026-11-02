@@ -186,10 +186,10 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         .unwrap_or_default()
         .as_millis() as u64;
 
-    let request = TaskRequest {
+    let mut request = TaskRequest {
         task_id: task_id.to_string(),
         function_name: function_name.clone(),
-        args: args_json.clone(),
+        args: serde_json::Value::Null,
         stream_id: stream_id.to_string(),
         env_id: env_id.to_string(),
         build_id: build_id.to_string(),
@@ -206,6 +206,7 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     // Insert task row into database and enqueue to task queue
     let db = vm.get_database_pool();
     let task_queue = vm.get_task_queue();
+    let vm_conf = vm.get_conf();
 
     let start_result = tokio::runtime::Handle::current().block_on(async {
         let db =
@@ -246,6 +247,41 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             }
         }
 
+        // Too large to store inline: both the row and the queue message hold a
+        // reference, which the task worker reads back. Not bound by the
+        // timeout, as it's as long as the value takes to write.
+        let might_spill = crate::blob::estimate_val_size(&task_args)
+            > crate::blob::BlobConfig::from_conf(vm_conf).max_inline_bytes
+            || crate::blob::is_blob_ref_val(&task_args);
+        let blob_store = match ctx.org_id.filter(|_| might_spill) {
+            Some(org_id) => crate::blob::blob_store_from_conf(std::sync::Arc::clone(&db), vm_conf)
+                .await
+                .map(|store| (store, org_id)),
+            None => None,
+        };
+        let args_scope = |org_id| crate::blob::BlobScope {
+            org_id,
+            env_id: Some(env_id),
+            run_id: Some(ctx.run_id),
+        };
+        let args_json = match &blob_store {
+            Some((store, org_id)) => store
+                .spill_whole_if_large(
+                    args_json,
+                    args_scope(*org_id),
+                    crate::blob::SpillSource::TaskArgs,
+                    Some(&task_id.to_string()),
+                )
+                .await
+                .map_err(|e| {
+                    err_val(format!(
+                        "::hot::task/start: failed to store arguments in blob storage: {}",
+                        e
+                    ))
+                })?,
+            None => args_json,
+        };
+        request.args = args_json.clone();
         let args_json_opt = if args_json.is_null() {
             None
         } else {
@@ -272,6 +308,23 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
+                // Unless the row made it anyway, as when a connection fails
+                // after a commit, nothing will read the arguments.
+                if let Some((store, org_id)) = &blob_store
+                    && matches!(
+                        crate::db::Task::get(&db, &task_id).await,
+                        Err(crate::db::TaskError::NotFound)
+                    )
+                    && let Err(e) = store
+                        .release_source(
+                            args_scope(*org_id),
+                            crate::blob::SpillSource::TaskArgs,
+                            &task_id.to_string(),
+                        )
+                        .await
+                {
+                    tracing::warn!(task_id = %task_id, error = %e, "failed to release an unstored task's arguments");
+                }
                 return Err(err_val(format!(
                     "::hot::task/start: failed to insert task: {}",
                     e
@@ -382,6 +435,31 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     });
 
     HotResult::Ok(result)
+}
+
+/// A task's result stored in blob storage, for the caller's org and the task's
+/// environment.
+fn read_blob_result(vm: &VirtualMachine, result: Val, env_id: Uuid) -> Result<Val, String> {
+    let db = vm
+        .get_database_pool()
+        .ok_or_else(|| "no database configured".to_string())?;
+    let org_id = vm
+        .get_execution_context()
+        .as_ref()
+        .and_then(|ctx| ctx.org_id)
+        .ok_or_else(|| "no org_id in execution context".to_string())?;
+    let conf = vm.get_conf();
+    tokio::runtime::Handle::current().block_on(async {
+        let store = crate::blob::blob_store_from_conf(db, conf).await;
+        let scope = crate::blob::BlobScope {
+            org_id,
+            env_id: Some(env_id),
+            run_id: None,
+        };
+        crate::blob::rehydrate_whole(store.as_deref(), result, scope)
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -854,6 +932,19 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         result_json
             .map(|j: &serde_json::Value| serde_json::from_value(j.clone()).unwrap_or(Val::Null))
             .unwrap_or(Val::Null)
+    };
+    let result_val = if crate::blob::is_blob_ref_val(&result_val) {
+        match read_blob_result(vm, result_val, task.env_id) {
+            Ok(val) => val,
+            Err(e) => {
+                return HotResult::Err(err_val(format!(
+                    "::hot::task/await: failed to read the result of task {}: {}",
+                    task_id, e
+                )));
+            }
+        }
+    } else {
+        result_val
     };
 
     let exit_code_val = if is_container {

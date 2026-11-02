@@ -890,25 +890,32 @@ impl QueueAndDatabaseEventPublisher {
 
 impl EventPublisher for QueueAndDatabaseEventPublisher {
     fn publish(&self, ctx: &ExecutionContext, event: Event) {
+        let event_id = event.event_id;
+        let event_type = event.event_type.clone();
+        if let Err(e) = self.publish_checked(ctx, event) {
+            tracing::error!(
+                event_id = %event_id,
+                event_type = %event_type,
+                "Failed to write event to database; event will NOT be enqueued: {}",
+                e
+            );
+        }
+    }
+
+    fn publish_checked(&self, ctx: &ExecutionContext, event: Event) -> Result<(), String> {
         // CRITICAL: Database write MUST complete before queue enqueue
         // to prevent race condition where worker dequeues event before
         // the event record exists in the database (causing FK violations on run.event_id)
 
         // Step 1: Write to database and WAIT for completion
-        if let Err(e) = self.database_publisher.publish_and_wait(ctx, event.clone()) {
-            tracing::error!(
-                event_id = %event.event_id,
-                event_type = %event.event_type,
-                "Failed to write event to database; event will NOT be enqueued: {}",
-                e
-            );
-            // Don't enqueue if database write failed - this prevents orphaned queue messages
-            return;
-        }
+        // Don't enqueue if database write failed - this prevents orphaned queue messages
+        self.database_publisher
+            .publish_and_wait(ctx, event.clone())?;
 
         // Step 2: Now that database write is complete, enqueue to queue
         // Worker can now safely process this event knowing the event record exists
         self.queue_publisher.publish(ctx, event);
+        Ok(())
     }
 
     fn shutdown(

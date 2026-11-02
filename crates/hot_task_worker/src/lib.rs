@@ -1046,7 +1046,11 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         .unwrap_or_else(|| "/tmp/hot-data-volumes".to_string());
     let data_vol_base = Arc::new(std::path::PathBuf::from(data_vol_base));
 
-    let event_publisher: Option<Arc<dyn EventPublisher>> = create_event_publisher(&config, &db)?;
+    let event_publisher: Option<Arc<dyn EventPublisher>> = create_event_publisher(
+        &config,
+        &db,
+        hot::blob::blob_store_from_conf(Arc::clone(&db), &config.worker_conf).await,
+    )?;
 
     let usage_stats_cache: UsageStatsCache = Arc::new(Mutex::new(HashMap::new()));
 
@@ -5188,6 +5192,44 @@ async fn process_code_task(
             }
         };
 
+    let blob_store = hot::blob::blob_store_from_conf(Arc::clone(&db), &worker_conf).await;
+
+    // Convert JSON args -> Val. Arguments in blob storage that can't be read
+    // fail the task: it must not run on anything but what it was started with.
+    let args_val: Val = serde_json::from_value(request.args.clone()).unwrap_or(Val::Null);
+    let read_args = read_task_value(&db, blob_store.as_deref(), org_id, env_id, args_val);
+    let args_val = match await_claimed_task_deadline(task_deadline, read_args).await {
+        Ok(Ok(args_val)) => args_val,
+        outcome => {
+            let reason = match outcome {
+                Ok(Err(error_message)) => error_message,
+                _ => "timed out".to_string(),
+            };
+            let error =
+                task_failure_json(&format!("Task arguments could not be read: {reason}"), None);
+            if complete_task_with_event(
+                &db,
+                &stream_publisher,
+                &task_id,
+                env_id,
+                stream_id,
+                &function_name,
+                &task_type,
+                TaskStatus::Failed,
+                Some(&error),
+                None,
+                Some(&worker_id),
+            )
+            .await
+            {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+            }
+            tracing::error!(task_id = %task_id, "Task arguments could not be read: {reason}");
+            return Ok(());
+        }
+    };
+
     // Set up task receive channel (for ::hot::task/receive)
     let (inbox_tx, inbox_rx) = mpsc::channel::<Val>(256);
     let inbox_rx = Arc::new(parking_lot::Mutex::new(inbox_rx));
@@ -5295,10 +5337,7 @@ async fn process_code_task(
 
     let origin_run_id = execution_context.origin_run_id;
 
-    let emitter: Option<Arc<dyn EngineEventEmitter>> = create_emitter(&db);
-
-    // Convert JSON args -> Val
-    let args_val: Val = serde_json::from_value(request.args.clone()).unwrap_or(Val::Null);
+    let emitter: Option<Arc<dyn EngineEventEmitter>> = create_emitter(&db, blob_store.clone());
 
     let db_exec = Arc::clone(&db);
     let sp_exec = Arc::clone(&stream_publisher);
@@ -5472,21 +5511,78 @@ async fn process_code_task(
             } else {
                 let result_json = serde_json::to_value(result_val.to_hot_data_repr())
                     .unwrap_or(serde_json::Value::Null);
-                complete_task_with_event(
+                match store_task_result(
                     &db,
-                    &stream_publisher,
-                    &task_id,
+                    blob_store.as_ref(),
+                    org_id,
                     env_id,
-                    stream_id,
-                    &function_name,
-                    &task_type,
-                    TaskStatus::Completed,
-                    Some(&result_json),
-                    None,
-                    Some(&worker_id),
+                    &task_id,
+                    result_json,
                 )
-                .await;
-                tracing::info!(task_id = %task_id, status = "completed", "Task finished");
+                .await
+                {
+                    Ok(result_json) => {
+                        let persisted = complete_task_with_event(
+                            &db,
+                            &stream_publisher,
+                            &task_id,
+                            env_id,
+                            stream_id,
+                            &function_name,
+                            &task_type,
+                            TaskStatus::Completed,
+                            Some(&result_json),
+                            None,
+                            Some(&worker_id),
+                        )
+                        .await;
+                        if !persisted {
+                            release_unstored_task_result(
+                                &db,
+                                blob_store.as_ref(),
+                                org_id,
+                                env_id,
+                                &task_id,
+                                &result_json,
+                            )
+                            .await;
+                        }
+                        tracing::info!(task_id = %task_id, status = "completed", "Task finished");
+                    }
+                    Err(e) => {
+                        let error = task_failure_json(
+                            &format!("Task finished, but its result could not be stored: {e}"),
+                            None,
+                        );
+                        if complete_task_with_event(
+                            &db,
+                            &stream_publisher,
+                            &task_id,
+                            env_id,
+                            stream_id,
+                            &function_name,
+                            &task_type,
+                            TaskStatus::Failed,
+                            Some(&error),
+                            None,
+                            Some(&worker_id),
+                        )
+                        .await
+                        {
+                            publish_task_alert(
+                                &db,
+                                org_id,
+                                env_id,
+                                &task_id,
+                                "task:failed",
+                                &error,
+                            )
+                            .await;
+                            maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                        }
+                        tracing::error!(task_id = %task_id, "Task result could not be stored: {e}");
+                    }
+                }
             }
         }
         Ok(Ok(Err(e))) => {
@@ -5588,6 +5684,118 @@ fn task_failure_json(msg: &str, err: Option<serde_json::Value>) -> serde_json::V
             "err": err.unwrap_or(serde_json::Value::Null)
         }
     })
+}
+
+/// The organization a task's blobs belong to. A request rebuilt from its row
+/// doesn't carry it.
+async fn task_org_id(
+    db: &DatabasePool,
+    org_id: Option<Uuid>,
+    env_id: Uuid,
+) -> Result<Uuid, String> {
+    match org_id {
+        Some(org_id) => Ok(org_id),
+        None => hot::db::Env::get_env(db, &env_id)
+            .await
+            .map(|env| env.org_id)
+            .map_err(|e| format!("cannot resolve the environment's organization: {e}")),
+    }
+}
+
+/// A task value as code receives it: read from blob storage if that's where it
+/// was stored.
+async fn read_task_value(
+    db: &DatabasePool,
+    blob_store: Option<&hot::blob::BlobStore>,
+    org_id: Option<Uuid>,
+    env_id: Uuid,
+    value: Val,
+) -> Result<Val, String> {
+    if !hot::blob::is_blob_ref_val(&value) {
+        return Ok(value);
+    }
+    let scope = hot::blob::BlobScope {
+        org_id: task_org_id(db, org_id, env_id).await?,
+        env_id: Some(env_id),
+        run_id: None,
+    };
+    hot::blob::rehydrate_whole(blob_store, value, scope)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// A task's result as it's stored: in blob storage if it's large.
+async fn store_task_result(
+    db: &DatabasePool,
+    blob_store: Option<&Arc<hot::blob::BlobStore>>,
+    org_id: Option<Uuid>,
+    env_id: Uuid,
+    task_id: &Uuid,
+    result: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let Some(store) = blob_store else {
+        return Ok(result);
+    };
+    let scope = hot::blob::BlobScope {
+        org_id: task_org_id(db, org_id, env_id).await?,
+        env_id: Some(env_id),
+        run_id: None,
+    };
+    store
+        .spill_whole_if_large(
+            result,
+            scope,
+            hot::blob::SpillSource::TaskResult,
+            Some(&task_id.to_string()),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Release the blob written for a result that lost the race to end the task,
+/// such as to a cancellation. Only once the row is known to hold something
+/// else: a write reported as failed may still have committed.
+async fn release_unstored_task_result(
+    db: &DatabasePool,
+    blob_store: Option<&Arc<hot::blob::BlobStore>>,
+    org_id: Option<Uuid>,
+    env_id: Uuid,
+    task_id: &Uuid,
+    result: &serde_json::Value,
+) {
+    let Some(store) = blob_store else {
+        return;
+    };
+    if !hot::blob::json_contains_blob_ref(result) {
+        return;
+    }
+    let Ok(task) = Task::get(db, task_id).await else {
+        return;
+    };
+    if task.result.as_ref() == Some(result) {
+        return;
+    }
+    let released = match task_org_id(db, org_id, env_id).await {
+        Ok(org_id) => {
+            let scope = hot::blob::BlobScope {
+                org_id,
+                env_id: Some(env_id),
+                run_id: None,
+            };
+            store
+                .release_source(
+                    scope,
+                    hot::blob::SpillSource::TaskResult,
+                    &task_id.to_string(),
+                )
+                .await
+                .map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e),
+    };
+    if let Err(e) = released {
+        tracing::warn!(task_id = %task_id, error = %e, "failed to release an unstored task result");
+    }
 }
 
 /// Build a `::hot::task/Cancellation` typed JSON value.
@@ -5940,6 +6148,39 @@ async fn complete_task_with_event(
         TASK_COMPLETION_ATTEMPTS,
     )
     .await;
+    // Retrying can't store a value the database refuses, and the reaper would
+    // report the task as interrupted. Store a failure that says why instead.
+    let oversized_failure = (!persisted)
+        .then(|| result.map(|result| result.to_string().len()))
+        .flatten()
+        .filter(|size| *size > hot::blob::MAX_INLINE_HARD_LIMIT_BYTES)
+        .map(|size| {
+            task_failure_json(
+                &format!(
+                    "Task finished, but its result of {size} bytes as JSON is too large to \
+                     store without blob storage (blob.mode)"
+                ),
+                None,
+            )
+        });
+    let (status, result, persisted) = match &oversized_failure {
+        Some(failure) => (
+            TaskStatus::Failed,
+            Some(failure),
+            persist_terminal_task(
+                db,
+                task_id,
+                &TaskStatus::Failed,
+                Some(failure),
+                duration_ms_override,
+                fence_worker,
+                TASK_COMPLETION_DB_TIMEOUT,
+                TASK_COMPLETION_ATTEMPTS,
+            )
+            .await,
+        ),
+        None => (status, result, persisted),
+    };
     if !persisted {
         tracing::error!(
             task_id = %task_id,
@@ -7900,16 +8141,26 @@ fn ensure_docker_accessible(path: std::path::PathBuf) -> std::path::PathBuf {
     path
 }
 
-fn create_emitter(db: &DatabasePool) -> Option<Arc<dyn EngineEventEmitter>> {
-    let emitter = hot::lang::emitter::DatabaseEngineEventEmitter::new_with_pool(db.clone());
+fn create_emitter(
+    db: &DatabasePool,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
+) -> Option<Arc<dyn EngineEventEmitter>> {
+    let emitter = hot::lang::emitter::DatabaseEngineEventEmitter::new_with_pool_and_blob_store(
+        db.clone(),
+        blob_store,
+    );
     Some(Arc::new(emitter))
 }
 
 fn create_event_publisher(
     config: &TaskWorkerConfig,
     db: &DatabasePool,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
 ) -> Result<Option<Arc<dyn EventPublisher>>, Box<dyn std::error::Error + Send + Sync>> {
-    let database_publisher = hot::lang::event::DatabaseEventPublisher::new_with_pool(db.clone());
+    let database_publisher = hot::lang::event::DatabaseEventPublisher::new_with_pool_and_blob_store(
+        db.clone(),
+        blob_store,
+    );
 
     let queue_publisher = hot::lang::event::QueueEventPublisher::new_with_cluster(
         config.queue_type,
@@ -9174,6 +9425,185 @@ mod tests {
         let row = Task::get(&db, &task.task_id).await.unwrap();
         assert_eq!(row.task_status_id, TaskStatus::Running.as_id());
         assert_eq!(row.result, None);
+    }
+
+    /// A value the database refuses must end the task with a failure that says
+    /// so, not leave it for the reaper to report as a crash. Needs
+    /// `HOT_TEST_POSTGRES_URI`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_result_too_large_to_store_fails_the_task_and_says_why() {
+        let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
+            return;
+        };
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_uri)
+            .await
+            .unwrap();
+        let name = format!("hot_task_oversized_{}", Uuid::now_v7().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let (server, _) = admin_uri.rsplit_once('/').unwrap();
+        let conf = hot::val!({"uri": format!("{server}/{name}"), "rls": {"enforce": false}});
+        hot::db::run_migrations(&conf).await.unwrap();
+        let db = hot::db::create_db_pool(&conf).await.unwrap();
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let db = db.with_scope(DatabaseScope::Environment {
+            org_id: data.org_id,
+            env_id: data.env_id,
+        });
+        let (_, mut task, _, _, _) = make_task_request_and_row();
+        task.env_id = data.env_id;
+        task.stream_id = data.stream_id;
+        task.build_id = data.build_id;
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        // Past what `jsonb` can hold: about six times the space of its text.
+        let result = serde_json::Value::Array(vec![serde_json::json!(0); 24_000_000]);
+
+        assert!(
+            complete_task_with_event(
+                &db,
+                &publisher,
+                &task.task_id,
+                task.env_id,
+                task.stream_id,
+                &task.function_name,
+                "code",
+                TaskStatus::Completed,
+                Some(&result),
+                None,
+                None,
+            )
+            .await
+        );
+
+        let task = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Failed.as_id());
+        let stored = task.result.unwrap().to_string();
+        assert!(stored.contains("too large to store"), "{stored}");
+    }
+
+    /// A result that lost the race to end its task is released, and one that's
+    /// in the row isn't, however its write was reported.
+    #[tokio::test]
+    async fn only_a_result_the_row_doesnt_hold_is_released() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let dir = std::env::temp_dir().join(format!("hot-task-result-{}", Uuid::now_v7()));
+        let store = Arc::new(hot::blob::BlobStore::new(
+            Arc::new(db.clone()),
+            Arc::new(hot::file_storage::LocalFileStorage::new(dir.clone())),
+            hot::blob::BlobConfig {
+                mode: hot::blob::BlobMode::Service,
+                ..Default::default()
+            },
+        ));
+        let scope = hot::blob::BlobScope {
+            org_id: data.org_id,
+            env_id: Some(data.env_id),
+            run_id: None,
+        };
+        let large = serde_json::json!("x".repeat(2 * 1024 * 1024));
+        let active = || async {
+            let DatabasePool::Sqlite(pool) = &db else {
+                panic!("test_db should return SQLite");
+            };
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM blob_ref WHERE source_kind = 'task_result' AND active = 1",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        };
+        let (_, mut task, _, _, _) = make_task_request_and_row();
+        task.env_id = data.env_id;
+        task.stream_id = data.stream_id;
+        task.build_id = data.build_id;
+        insert_test_task(&db, &task).await;
+        let stored = store
+            .spill_whole_if_large(
+                large,
+                scope,
+                hot::blob::SpillSource::TaskResult,
+                Some(&task.task_id.to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(hot::blob::json_contains_blob_ref(&stored));
+        assert!(
+            Task::complete(
+                &db,
+                &task.task_id,
+                &TaskStatus::Completed,
+                Some(&stored),
+                None,
+                None
+            )
+            .await
+            .unwrap()
+        );
+
+        release_unstored_task_result(
+            &db,
+            Some(&store),
+            Some(data.org_id),
+            data.env_id,
+            &task.task_id,
+            &stored,
+        )
+        .await;
+        assert_eq!(active().await, 1, "the row holds it");
+
+        let other = serde_json::json!({"other": true});
+        let DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should return SQLite");
+        };
+        sqlx::query("UPDATE task SET result = ? WHERE task_id = ?")
+            .bind(other.to_string())
+            .bind(task.task_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        release_unstored_task_result(
+            &db,
+            Some(&store),
+            Some(data.org_id),
+            data.env_id,
+            &task.task_id,
+            &stored,
+        )
+        .await;
+        assert_eq!(active().await, 0, "nothing holds it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn task_arguments_in_blob_storage_that_cant_be_read_are_an_error() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let reference = hot::blob::BlobRefVal {
+            id: Uuid::now_v7(),
+            object_id: Uuid::now_v7(),
+            hash_alg: hot::blob::HASH_ALG_BLAKE3.to_string(),
+            hash: "missing".to_string(),
+            size: 1,
+            content_type: None,
+            preview: None,
+            encoding: hot::blob::ENCODING_JSON.to_string(),
+        }
+        .to_val();
+        let read = read_task_value(&db, None, Some(data.org_id), data.env_id, reference).await;
+        assert!(read.is_err());
+
+        let plain = hot::val!({"id": 1});
+        let read = read_task_value(&db, None, None, data.env_id, plain.clone()).await;
+        assert_eq!(read.unwrap(), plain);
     }
 
     #[tokio::test]

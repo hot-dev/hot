@@ -264,6 +264,8 @@ send("user:created", {id: "usr_12345", email: "alice@example.com"})
 send(Event({type: "user:created", data: {id: "usr_12345", email: "alice@example.com"}}))
 ```
 
+`send` returns an `Err` if the event couldn't be stored, in which case no handler runs. Event data of any size can be sent as long as it fits `blob.rehydrate.max-total-bytes`, 512 MB as JSON by default: data over 1 MB as JSON goes to [blob storage](/docs/configuration/storage). Without blob storage, PostgreSQL refuses a `jsonb` value over 256 MB.
+
 ### Sending Events
 
 **From Hot Code:**

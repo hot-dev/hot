@@ -56,15 +56,17 @@ impl PgStore {
         .await?;
         let mut written = Vec::with_capacity(entries.len());
         for write in entries {
-            let old:Option<i64>=sqlx::query_scalar("SELECT size FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4")
-                .bind(self.org_id).bind(self.env_id).bind(store_name).bind(&write.0).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
+            let current: Option<(i64, Option<serde_json::Value>)> = sqlx::query_as("SELECT size, CASE WHEN size >= $5 THEN value END FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4")
+                .bind(self.org_id).bind(self.env_id).bind(store_name).bind(&write.0).bind(super::SPILLED_ENTRY_MIN_SIZE).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
+            let (old, replaced) = current.unzip();
             if only_missing && old.is_some() {
                 continue;
             }
-            if let Some(entry) = self
+            if let Some(mut entry) = self
                 .write_entry(&mut tx, &mut budget, store_name, write, old, only_missing)
                 .await?
             {
+                entry.replaced = replaced.flatten();
                 written.push(entry);
             }
         }
@@ -118,7 +120,7 @@ impl PgStore {
             .ok_or("Store embedding is too large")?;
         let size = super::quota::entry_size(
             key.to_string().len(),
-            value.to_string().len(),
+            super::stored_value_size(&value),
             text_content.as_ref().map_or(0, |s| s.len()),
             embedding_bytes,
         )?;
@@ -163,6 +165,7 @@ impl PgStore {
             embedding,
             created_at,
             updated_at,
+            replaced: None,
         }))
     }
 
@@ -218,6 +221,7 @@ impl PgStore {
             embedding,
             created_at,
             updated_at,
+            replaced: None,
         })
     }
 
@@ -1019,6 +1023,26 @@ impl Store for PgStore {
 
     fn storage_type(&self) -> &str {
         "postgres"
+    }
+
+    async fn spilled_values(
+        &self,
+        store_name: &str,
+        key: Option<&serde_json::Value>,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        sqlx::query_scalar(
+            "SELECT value FROM store_map_entry
+             WHERE org_id = $1 AND env_id = $2 AND store_name = $3 AND size >= $4
+               AND ($5::jsonb IS NULL OR key = $5)",
+        )
+        .bind(self.org_id)
+        .bind(self.env_id)
+        .bind(store_name)
+        .bind(super::SPILLED_ENTRY_MIN_SIZE)
+        .bind(key)
+        .fetch_all(self.pg_pool()?)
+        .await
+        .map_err(|e| format!("store read failed: {e}"))
     }
 
     async fn list_maps(&self) -> Result<Vec<StoreMapInfo>, String> {

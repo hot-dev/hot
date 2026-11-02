@@ -1,9 +1,10 @@
 pub mod embedding;
 pub mod postgres;
 pub(crate) mod quota;
+pub mod spill;
 pub mod sqlite;
 
-type StoreWrite = (
+pub(crate) type StoreWrite = (
     serde_json::Value,
     serde_json::Value,
     Option<Vec<f32>>,
@@ -104,6 +105,10 @@ pub struct StoreEntry {
     pub embedding: Option<Vec<f32>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// After `put`, the blob reference this write replaced, if the old value
+    /// was large enough to have one.
+    #[serde(skip)]
+    pub replaced: Option<serde_json::Value>,
 }
 
 impl StoreEntry {
@@ -213,6 +218,26 @@ pub(crate) fn stored_value_matches(stored: Option<&JsonValue>, expected: &JsonVa
         None => expected.is_null(),
     }
 }
+
+/// The bytes a stored value counts for toward the store quota: its reference
+/// and the blob it refers to, if it's in blob storage, as it's the same data.
+pub(crate) fn stored_value_size(value: &JsonValue) -> usize {
+    let blob = if spill::is_spilled(value) {
+        value
+            .get("$val")
+            .and_then(|inner| inner.get("size"))
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(0) as usize
+    } else {
+        0
+    };
+    value.to_string().len().saturating_add(blob)
+}
+
+/// An entry at least this large may hold a reference: a value only goes to blob
+/// storage over this size, and counts for its whole size. Lets a write find the
+/// reference it replaces without reading every smaller value.
+pub(crate) const SPILLED_ENTRY_MIN_SIZE: i64 = crate::blob::MAX_INLINE_HARD_LIMIT_BYTES as i64;
 
 /// The counter value after adding `by` to `stored` (`None` for a missing key,
 /// which counts from 0).
@@ -369,6 +394,14 @@ pub trait Store: Send + Sync {
     /// Returned entries include cheap aggregates (entry count, total bytes) so
     /// admin UIs can render summary tables without an extra round-trip.
     async fn list_maps(&self) -> Result<Vec<StoreMapInfo>, String>;
+
+    /// The values large enough to be references to blobs, at `key` or in the
+    /// whole store, read before they're deleted.
+    async fn spilled_values(
+        &self,
+        store_name: &str,
+        key: Option<&serde_json::Value>,
+    ) -> Result<Vec<serde_json::Value>, String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -423,7 +456,7 @@ pub async fn store_from_config_with_db(
         "::hot::store requires an env_id because stores are environment-scoped.".to_string()
     })?;
 
-    match store_type {
+    let (inner, pool, oid): (Box<dyn Store>, _, _) = match store_type {
         StoreBackendType::Sqlite => {
             let pool = db_pool.ok_or_else(|| {
                 "SQLite store requires a DatabasePool. Use store_from_config_with_db() with a pool."
@@ -441,18 +474,25 @@ pub async fn store_from_config_with_db(
                 tracing::warn!("Legacy ::hot::store import skipped: {e}");
             }
 
-            let store = sqlite::SqliteStore::new(pool, oid, eid);
-            Ok(Box::new(store))
+            let store = sqlite::SqliteStore::new(pool.clone(), oid, eid);
+            (Box::new(store), pool, oid)
         }
         StoreBackendType::Postgres => {
             let pool = db_pool.ok_or_else(|| {
                 "Postgres store requires a DatabasePool. Use store_from_config_with_db() with a pool.".to_string()
             })?;
             let oid = org_id.ok_or_else(|| "Postgres store requires an org_id".to_string())?;
-            let store = postgres::PgStore::new(pool, oid, eid);
-            Ok(Box::new(store))
+            let store = postgres::PgStore::new(pool.clone(), oid, eid);
+            (Box::new(store), pool, oid)
         }
-    }
+    };
+    Ok(Box::new(spill::SpillingStore::new(
+        inner,
+        conf.clone(),
+        pool,
+        oid,
+        eid,
+    )))
 }
 
 /// Extract a StoreMapConfig from a Hot `::hot::store/Map` Val.

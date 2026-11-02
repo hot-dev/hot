@@ -211,6 +211,8 @@ record-answer-unsafely fn (case-id: Str, answer-id: Str, answer: Any) {
 }
 ```
 
+A store value over 32 MB as JSON is stored in [blob storage](/docs/configuration/storage), and reads return the value itself. It counts toward your store storage in full, and keyword search in the app sees only its first bytes. It must fit `blob.rehydrate.max-total-bytes`, 512 MB as JSON by default, and so must all the values one call returns, so read large entries with `get` or a small `slice` rather than `filter` or `reduce`. `put` returns an `Err` for a value it can't store, and keeps any value already at that key. Without blob storage, PostgreSQL refuses a `jsonb` value over 256 MB.
+
 The store's atomic writes compare and write in one database transaction that
 holds the entry's lock:
 

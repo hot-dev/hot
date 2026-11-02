@@ -64,15 +64,19 @@ impl SqliteStore {
         let mut written = Vec::with_capacity(entries.len());
         for write in entries {
             let key_data = serde_json::to_string(&write.0).map_err(|e| e.to_string())?;
-            let old:Option<i64>=sqlx::query_scalar("SELECT size FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4")
-                .bind(self.org_id).bind(self.env_id).bind(store_name).bind(&key_data).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
+            let current: Option<(i64, Option<String>)> = sqlx::query_as("SELECT size, CASE WHEN size >= $5 THEN value END FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4")
+                .bind(self.org_id).bind(self.env_id).bind(store_name).bind(&key_data).bind(super::SPILLED_ENTRY_MIN_SIZE).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
+            let (old, replaced) = current.unzip();
             if only_missing && old.is_some() {
                 continue;
             }
-            if let Some(entry) = self
+            if let Some(mut entry) = self
                 .write_entry(&mut tx, &mut budget, store_name, write, old, only_missing)
                 .await?
             {
+                entry.replaced = replaced
+                    .flatten()
+                    .and_then(|value| serde_json::from_str(&value).ok());
                 written.push(entry);
             }
         }
@@ -133,7 +137,7 @@ impl SqliteStore {
             .ok_or("Store embedding is too large")?;
         let size = super::quota::entry_size(
             key.to_string().len(),
-            value.to_string().len(),
+            super::stored_value_size(&value),
             text_content.as_ref().map_or(0, |s| s.len()),
             embedding_bytes,
         )?;
@@ -182,6 +186,7 @@ impl SqliteStore {
             embedding,
             created_at,
             updated_at,
+            replaced: None,
         }))
     }
 
@@ -251,6 +256,7 @@ impl SqliteStore {
             embedding,
             created_at: Self::parse_datetime(&created_at),
             updated_at: Self::parse_datetime(&updated_at),
+            replaced: None,
         })
     }
 
@@ -921,6 +927,34 @@ impl Store for SqliteStore {
 
     fn storage_type(&self) -> &str {
         "sqlite"
+    }
+
+    async fn spilled_values(
+        &self,
+        store_name: &str,
+        key: Option<&serde_json::Value>,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let key_data = key
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let values: Vec<String> = sqlx::query_scalar(
+            "SELECT value FROM store_map_entry
+             WHERE org_id = $1 AND env_id = $2 AND store_name = $3 AND size >= $4
+               AND ($5 IS NULL OR key = $5)",
+        )
+        .bind(self.org_id)
+        .bind(self.env_id)
+        .bind(store_name)
+        .bind(super::SPILLED_ENTRY_MIN_SIZE)
+        .bind(key_data)
+        .fetch_all(self.sqlite_pool()?)
+        .await
+        .map_err(|e| format!("store read failed: {e}"))?;
+        Ok(values
+            .iter()
+            .filter_map(|value| serde_json::from_str(value).ok())
+            .collect())
     }
 
     async fn list_maps(&self) -> Result<Vec<StoreMapInfo>, String> {

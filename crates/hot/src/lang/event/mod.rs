@@ -370,6 +370,13 @@ impl ExecutionContext {
 pub trait EventPublisher: Send + Sync {
     fn publish(&self, ctx: &ExecutionContext, event: Event);
 
+    /// Publish an event, and report whether it was stored. A publisher that
+    /// can't tell reports success, as [`Self::publish`] gives no answer.
+    fn publish_checked(&self, ctx: &ExecutionContext, event: Event) -> Result<(), String> {
+        self.publish(ctx, event);
+        Ok(())
+    }
+
     fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async { Ok(()) })
     }

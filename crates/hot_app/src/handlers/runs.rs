@@ -647,6 +647,32 @@ async fn run_action_handler(
         );
     }
 
+    // The rehydrated data may be too large to store inline.
+    if let (Some(store), Some(org_id)) = (state.blob_store.as_ref(), session.current_org_id()) {
+        let scope = hot::blob::BlobScope {
+            org_id,
+            env_id: Some(run.env_id),
+            run_id: None,
+        };
+        event_data = match store
+            .spill_whole_if_large(
+                event_data,
+                scope,
+                hot::blob::SpillSource::EventData,
+                Some(&new_event_id.to_string()),
+            )
+            .await
+        {
+            Ok(event_data) => event_data,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Failed to create event", "details": e.to_string()})),
+                );
+            }
+        };
+    }
+
     // Insert the event
     if let Err(e) = hot::db::Event::insert_event(
         db,

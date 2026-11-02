@@ -12612,6 +12612,15 @@ handler fn () { initialized }
 
     #[tokio::test]
     async fn hydrate_rehydrates_spilled_event_data_blob_refs() {
+        hydrates_spilled_event_data(false).await;
+    }
+
+    #[tokio::test]
+    async fn hydrate_rehydrates_event_data_stored_whole() {
+        hydrates_spilled_event_data(true).await;
+    }
+
+    async fn hydrates_spilled_event_data(whole: bool) {
         use hot::blob::{BlobConfig, BlobScope, BlobStore, SpillSource};
 
         let (db, db_path) = migrated_sqlite_file_db().await;
@@ -12646,16 +12655,28 @@ handler fn () { initialized }
             env_id: Some(test_data.env_id),
             run_id: None,
         };
-        let spilled = blob_store
-            .spill_large_val(
-                original_event_data.clone(),
-                scope,
-                SpillSource::EventData,
-                Some(&event_id.to_string()),
-            )
-            .await
-            .expect("spill should succeed");
+        let spilled = if whole {
+            blob_store
+                .spill_readable_json(
+                    &serde_json::to_string(&original_event_data).unwrap(),
+                    scope,
+                    SpillSource::EventData,
+                    Some(&event_id.to_string()),
+                )
+                .await
+        } else {
+            blob_store
+                .spill_large_val(
+                    original_event_data.clone(),
+                    scope,
+                    SpillSource::EventData,
+                    Some(&event_id.to_string()),
+                )
+                .await
+        }
+        .expect("spill should succeed");
         assert!(hot::blob::contains_blob_ref(&spilled));
+        assert_eq!(hot::blob::is_blob_ref_val(&spilled), whole);
 
         hot::db::event::Event::insert_event(
             &db,
