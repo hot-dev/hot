@@ -1096,7 +1096,7 @@ mod tests {
     }
 
     fn read_in_chunks(text: &[u8], opts: Val, size: usize) -> Result<Vec<Val>, String> {
-        let chunks = text.chunks(size).map(|c| Val::Bytes(c.to_vec())).collect();
+        let chunks = text.chunks(size).map(|c| Val::bytes(c.to_vec())).collect();
         let source: Box<dyn HotIterator> = Box::new(VecIterator::new(chunks));
         let opts = ReadOpts::parse(Some(&opts), COMMA)?;
         let mut reader = RowReader::new(ChunkInput::new(Arc::new(Mutex::new(source))), opts)?;

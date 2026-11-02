@@ -504,7 +504,7 @@ impl HotIterator for FileChunks {
             return Ok((Val::Null, true));
         }
         chunk.truncate(read);
-        Ok((Val::Bytes(chunk), false))
+        Ok((Val::bytes(chunk), false))
     }
 }
 
