@@ -11,6 +11,9 @@
 //!   credentials, whether or not anything marked their values, in maps and in
 //!   JSON, form-encoded or `name: value` text inside strings.
 //!
+//! Both also look inside Bytes, and inside bytes rendered as decimal numbers,
+//! which is how a failure's message shows them (`Bytes([83, 69, ...])`).
+//!
 //! The first is why registered values are held in the clear: matching a
 //! substring needs the bytes. They are the values the run already holds in its
 //! context, in the same process, for no longer than its records are pending.
@@ -39,6 +42,11 @@ pub const MIN_SUBSTRING_LEN: usize = 8;
 /// No credential is this long.
 const MAX_SUBSTRING_LEN: usize = 64 * 1024;
 
+/// How many keys and results of natives a run matches inside other text. HMACs
+/// can run in a loop: past this, the rest match as whole values, as themselves
+/// or in a common encoding, so that what matching holds stays small.
+const MAX_MINTED_SUBSTRINGS: usize = 64;
+
 /// The hash of `value`, as recorded in `ExecutionContext::secret_value_hashes`.
 pub fn value_hash(value: &Val) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -62,7 +70,9 @@ pub struct SecretValues(Arc<RwLock<Registry>>);
 struct Registry {
     values: AHashSet<Vec<u8>>,
     exact_hashes: AHashSet<u64>,
-    /// Bumped by each new value, so a record can tell it was masked before it.
+    minted_substrings: usize,
+    /// Bumped by each new value that earlier records could hold, so a record
+    /// can tell it was masked before it.
     generation: u64,
     matchers: Option<Arc<Matchers>>,
 }
@@ -101,6 +111,64 @@ impl SecretValues {
         self.add(value, Vec::new());
     }
 
+    /// Mask a credential a native has just made, like a signature. No earlier
+    /// record can hold it, so nothing already written needs masking again.
+    pub fn register_minted(&self, value: &Val) {
+        let mut forms = vec![value.clone()];
+        if let Val::Bytes(bytes) = value {
+            forms.push(Val::from(hex::encode(bytes.as_slice())));
+        }
+        let mut new_hashes = AHashSet::new();
+        crate::lang::hot::ctx::hash_secret_value_recursive(value, &mut new_hashes);
+        if let Val::Bytes(bytes) = value {
+            let bytes = bytes.as_slice();
+            new_hashes.insert(value_hash(&Val::from(hex::encode(bytes))));
+            for encoded in [
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+                base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes),
+                base64::engine::general_purpose::URL_SAFE.encode(bytes),
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
+            ] {
+                new_hashes.insert(value_hash(&Val::from(encoded)));
+            }
+        }
+        let mut new_values = Vec::new();
+        for form in &forms {
+            collect_values(form, &mut new_values);
+        }
+        let mut registry = self.0.write().unwrap_or_else(|error| error.into_inner());
+        if registry.minted_substrings < MAX_MINTED_SUBSTRINGS {
+            registry.minted_substrings += 1;
+            registry.values.extend(new_values);
+        }
+        registry.exact_hashes.extend(new_hashes);
+        registry.matchers = None;
+    }
+
+    /// Mask a key a native was given. One that a native made is known already,
+    /// as chained HMACs are: only a new one could be in earlier records.
+    pub fn register_key(&self, key: &Val) {
+        let (known, over_limit) = {
+            let registry = self.0.read().unwrap_or_else(|error| error.into_inner());
+            (
+                registry.exact_hashes.contains(&value_hash(key)),
+                registry.minted_substrings >= MAX_MINTED_SUBSTRINGS,
+            )
+        };
+        if known {
+            return;
+        }
+        if over_limit {
+            self.register_exact(key);
+        } else {
+            self.0
+                .write()
+                .unwrap_or_else(|error| error.into_inner())
+                .minted_substrings += 1;
+            self.register(key);
+        }
+    }
+
     fn add(&self, value: &Val, new_values: Vec<Vec<u8>>) {
         let mut new_hashes = AHashSet::new();
         crate::lang::hot::ctx::hash_secret_value_recursive(value, &mut new_hashes);
@@ -136,7 +204,7 @@ impl SecretValues {
         }
     }
 
-    /// Changes when a new value is registered.
+    /// Changes when a new value is registered that earlier records could hold.
     pub fn generation(&self) -> u64 {
         self.0
             .read()
@@ -312,17 +380,19 @@ fn is_base64_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'-' | b'_' | b'=')
 }
 
-/// `value` as URL or form encoding or a JSON string would carry it, where that
-/// differs from `value`.
+/// `value` as URL or form encoding, a JSON string or a quoted CSV cell would
+/// carry it, where that differs from `value`.
 fn text_encodings(value: &[u8]) -> Vec<String> {
     let mut variants = vec![
         percent_encoding::percent_encode(value, COMPONENT).to_string(),
         form_urlencoded::byte_serialize(value).collect(),
     ];
-    if let Ok(text) = std::str::from_utf8(value)
-        && let Ok(quoted) = serde_json::to_string(text)
-    {
-        variants.push(quoted[1..quoted.len() - 1].to_string());
+    if let Ok(text) = std::str::from_utf8(value) {
+        if let Ok(quoted) = serde_json::to_string(text) {
+            variants.push(quoted[1..quoted.len() - 1].to_string());
+        }
+        variants.push(text.replace('"', "\"\""));
+        variants.push(text.replace('\'', "''"));
     }
     variants
 }
@@ -581,6 +651,55 @@ fn bytes_name_a_credential(bytes: &[u8]) -> bool {
         )
 }
 
+/// Eight or more comma-separated numbers from 0 to 255: bytes rendered as text,
+/// by `Val`'s `Display` or `Debug`, or as a JSON array. Fewer than eight bytes
+/// can't hold a value that matches inside other text.
+static BYTE_RUN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\b(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[0-9][0-9]?)(?:,\s*(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[0-9][0-9]?)){7,}\b")
+        .expect("byte run pattern is valid")
+});
+
+/// The shortest text [`BYTE_RUN`] matches.
+const MIN_BYTE_RUN_LEN: usize = 15;
+
+fn decode_byte_run(run: &str) -> Vec<u8> {
+    run.split(',')
+        .filter_map(|number| number.trim().parse::<u8>().ok())
+        .collect()
+}
+
+/// Mask each run of rendered bytes that `hides` says holds something. Like
+/// Bytes themselves, they aren't masked in part.
+fn mask_byte_runs<'t>(text: &'t str, hides: impl Fn(&[u8]) -> bool) -> Cow<'t, str> {
+    if text.len() < MIN_BYTE_RUN_LEN {
+        return Cow::Borrowed(text);
+    }
+    BYTE_RUN.replace_all(text, |captures: &Captures<'_>| {
+        let run = &captures[0];
+        if hides(&decode_byte_run(run)) {
+            MASK.to_string()
+        } else {
+            run.to_string()
+        }
+    })
+}
+
+/// The bytes a Vec holds, when every item is a byte and there are enough of
+/// them to hold a value that matches inside other text.
+fn vec_as_bytes(items: &[Val]) -> Option<Vec<u8>> {
+    if items.len() < MIN_SUBSTRING_LEN {
+        return None;
+    }
+    items
+        .iter()
+        .map(|item| match item {
+            Val::Int(number) => u8::try_from(*number).ok(),
+            Val::Byte(byte) => Some(*byte),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Mask credential fields in parsed JSON, and in strings within it. Whether
 /// anything changed.
 fn redact_json_fields(value: &mut serde_json::Value) -> bool {
@@ -628,6 +747,20 @@ fn redact_json_fields(value: &mut serde_json::Value) -> bool {
 // Masking a record
 // ---------------------------------------------------------------------------
 
+/// Apply a further mask to text that may already have been masked.
+fn then_mask<'t>(
+    text: Cow<'t, str>,
+    mask: impl for<'a> FnOnce(&'a str) -> Cow<'a, str>,
+) -> Cow<'t, str> {
+    match text {
+        Cow::Borrowed(text) => mask(text),
+        Cow::Owned(text) => match mask(&text) {
+            Cow::Borrowed(_) => Cow::Owned(text),
+            Cow::Owned(masked) => Cow::Owned(masked),
+        },
+    }
+}
+
 /// What masks one record. Taken fresh for each, so it sees what was registered
 /// up to that moment.
 pub struct RecordMask<'a> {
@@ -660,6 +793,15 @@ impl<'a> RecordMask<'a> {
         }
     }
 
+    fn bytes_hold_secret(&self, bytes: &[u8]) -> bool {
+        self.substrings()
+            .is_some_and(|matcher| matcher.automaton.is_match(bytes))
+    }
+
+    fn bytes_hide_something(&self, bytes: &[u8]) -> bool {
+        self.bytes_hold_secret(bytes) || bytes_name_a_credential(bytes)
+    }
+
     /// Mask a recorded value: registered secrets and credential fields.
     pub fn mask_val(&self, value: Val) -> Val {
         if self.is_exact(&value) {
@@ -682,12 +824,17 @@ impl<'a> RecordMask<'a> {
                     .collect();
                 Val::map(masked)
             }
-            Val::Vec(items) => Val::vec(
-                Arc::unwrap_or_clone(items)
-                    .into_iter()
-                    .map(|v| self.mask_val(v))
-                    .collect(),
-            ),
+            Val::Vec(items) => {
+                if vec_as_bytes(&items).is_some_and(|bytes| self.bytes_hide_something(&bytes)) {
+                    return Val::from(MASK);
+                }
+                Val::vec(
+                    Arc::unwrap_or_clone(items)
+                        .into_iter()
+                        .map(|v| self.mask_val(v))
+                        .collect(),
+                )
+            }
             Val::Str(text) => match self.mask_text(&text) {
                 Cow::Borrowed(_) => Val::Str(text),
                 Cow::Owned(masked) => Val::from(masked),
@@ -695,10 +842,7 @@ impl<'a> RecordMask<'a> {
             Val::Bytes(bytes) => {
                 // A response's bytes repeat its body. They aren't masked in
                 // part: nothing could read what was left.
-                let holds_secret = self
-                    .substrings()
-                    .is_some_and(|matcher| matcher.automaton.is_match(&bytes));
-                if holds_secret || bytes_name_a_credential(&bytes) {
+                if self.bytes_hide_something(&bytes) {
                     Val::from(MASK)
                 } else {
                     Val::Bytes(bytes)
@@ -712,16 +856,14 @@ impl<'a> RecordMask<'a> {
     pub fn mask_text<'t>(&self, text: &'t str) -> Cow<'t, str> {
         // Registered secrets first: a field's value ends at characters that a
         // secret may hold, which would leave the rest of the secret behind.
-        let Some(matcher) = self.substrings() else {
-            return redact_text_fields(text);
+        let masked = match self.substrings() {
+            Some(matcher) => matcher.mask(text),
+            None => Cow::Borrowed(text),
         };
-        match matcher.mask(text) {
-            Cow::Borrowed(text) => redact_text_fields(text),
-            Cow::Owned(masked) => match redact_text_fields(&masked) {
-                Cow::Borrowed(_) => Cow::Owned(masked),
-                Cow::Owned(redacted) => Cow::Owned(redacted),
-            },
-        }
+        let masked = then_mask(masked, |text| {
+            mask_byte_runs(text, |bytes| self.bytes_hide_something(bytes))
+        });
+        then_mask(masked, redact_text_fields)
     }
 
     /// Mask a recorded value serialized as JSON. Most records name no
@@ -733,6 +875,9 @@ impl<'a> RecordMask<'a> {
             && !(json.contains("://") && json.contains('@'))
             // Bytes are in JSON as numbers, so nothing above sees inside them.
             && !json.contains(crate::val::HOT_BYTES_TYPE)
+            && !BYTE_RUN
+                .find_iter(json)
+                .any(|run| bytes_name_a_credential(&decode_byte_run(run.as_str())))
         {
             return None;
         }
@@ -742,6 +887,20 @@ impl<'a> RecordMask<'a> {
             Err(_) => None,
         };
         Some(masked.unwrap_or_else(|| format!("\"{MASK}\"")))
+    }
+
+    /// Mask a stored JSON payload again: what it should now hold, if that
+    /// differs from what it does.
+    pub fn remask_json(&self, json: &str) -> Option<String> {
+        let masked = self.mask_json(json)?;
+        let same = matches!(
+            (
+                serde_json::from_str::<serde_json::Value>(json),
+                serde_json::from_str::<serde_json::Value>(&masked),
+            ),
+            (Ok(stored), Ok(now)) if stored == now
+        );
+        (!same).then_some(masked)
     }
 
     /// Mask a registered secret in a payload delivered to a live consumer,
@@ -757,16 +916,27 @@ impl<'a> RecordMask<'a> {
                     .map(|(key, child)| (self.mask_delivered(key), self.mask_delivered(child)))
                     .collect(),
             ),
-            Val::Vec(items) => Val::vec(
-                Arc::unwrap_or_clone(items)
-                    .into_iter()
-                    .map(|v| self.mask_delivered(v))
-                    .collect(),
-            ),
-            Val::Str(text) => match matcher.mask(&text) {
-                Cow::Borrowed(_) => Val::Str(text),
-                Cow::Owned(masked) => Val::from(masked),
-            },
+            Val::Vec(items) => {
+                if vec_as_bytes(&items).is_some_and(|bytes| self.bytes_hold_secret(&bytes)) {
+                    return Val::from(MASK);
+                }
+                Val::vec(
+                    Arc::unwrap_or_clone(items)
+                        .into_iter()
+                        .map(|v| self.mask_delivered(v))
+                        .collect(),
+                )
+            }
+            Val::Str(text) => {
+                let masked = then_mask(matcher.mask(&text), |text| {
+                    mask_byte_runs(text, |bytes| self.bytes_hold_secret(bytes))
+                });
+                match masked {
+                    Cow::Borrowed(_) => Val::Str(text),
+                    Cow::Owned(masked) => Val::from(masked),
+                }
+            }
+            Val::Bytes(bytes) if self.bytes_hold_secret(&bytes) => Val::from(MASK),
             other => other,
         }
     }
@@ -804,6 +974,10 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(text)
     }
 
+    fn url_b64_bytes(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    }
+
     fn url_b64(text: &str) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text)
     }
@@ -838,6 +1012,19 @@ mod tests {
         let spaced = "two words and more";
         let form: String = form_urlencoded::byte_serialize(spaced.as_bytes()).collect();
         assert_eq!(masked_text(&[spaced], &format!("k={form}")), "k=<secret>");
+    }
+
+    #[test]
+    fn masks_a_value_as_a_quoted_csv_cell_holds_it() {
+        let quoted = "pa\"ss'word,1";
+        assert_eq!(
+            masked_text(&[quoted], "id,key\n1,\"pa\"\"ss'word,1\"\n"),
+            "id,key\n1,\"<secret>\"\n"
+        );
+        assert_eq!(
+            masked_text(&[quoted], "id;key\n1;'pa\"ss''word,1'\n"),
+            "id;key\n1;'<secret>'\n"
+        );
     }
 
     #[test]
@@ -1186,23 +1373,201 @@ mod tests {
         let mask = RecordMask::new(&registry, &hashes);
         let mut body = b"\xff\xfeprefix".to_vec();
         body.extend_from_slice(PLAIN.as_bytes());
-        assert_eq!(mask.mask_val(Val::Bytes(body)), Val::from(MASK));
+        assert_eq!(mask.mask_val(Val::bytes(body)), Val::from(MASK));
         assert_eq!(
-            mask.mask_val(Val::Bytes(b"other".to_vec())),
-            Val::Bytes(b"other".to_vec())
+            mask.mask_val(Val::bytes(b"other".to_vec())),
+            Val::bytes(b"other".to_vec())
         );
     }
 
     #[test]
     fn masks_bytes_holding_a_credential_field() {
         assert_eq!(
-            mask_plain(Val::Bytes(br#"{"access_token":"unregistered"}"#.to_vec())),
+            mask_plain(Val::bytes(br#"{"access_token":"unregistered"}"#.to_vec())),
             Val::from(MASK)
         );
         assert_eq!(
-            mask_plain(Val::Bytes(b"plain body".to_vec())),
-            Val::Bytes(b"plain body".to_vec())
+            mask_plain(Val::bytes(b"plain body".to_vec())),
+            Val::bytes(b"plain body".to_vec())
         );
+    }
+
+    fn decimals(text: &str, separator: &str) -> String {
+        text.bytes()
+            .map(|byte| byte.to_string())
+            .collect::<Vec<_>>()
+            .join(separator)
+    }
+
+    #[test]
+    fn masks_every_rendering_of_bytes_holding_a_secret() {
+        let (registry, hashes) = mask_for(&[PLAIN]);
+        let mask = RecordMask::new(&registry, &hashes);
+        let body = Val::bytes(format!("x {PLAIN} y").into_bytes());
+        // How a failure's message renders an Err that has no `msg` of its own.
+        let map = val!({"status": 400, "body-bytes": body.clone()});
+        for rendered in [
+            body.to_string(),
+            map.to_string(),
+            format!("{body:?}"),
+            format!("{body:#?}"),
+            format!("[{}]", decimals(&format!("x {PLAIN} y"), ",")),
+        ] {
+            let masked = mask.mask_text(&rendered);
+            assert!(masked.contains(MASK), "{rendered} -> {masked}");
+            assert!(
+                !masked.contains(&decimals(PLAIN, ", ")) && !masked.contains(&decimals(PLAIN, ",")),
+                "{rendered} -> {masked}"
+            );
+        }
+        assert_eq!(mask.mask_text("Bytes([1, 2])"), "Bytes([1, 2])");
+        let other = Val::bytes(b"nothing to see here".to_vec()).to_string();
+        assert_eq!(mask.mask_text(&other), other);
+    }
+
+    #[test]
+    fn masks_rendered_bytes_in_a_failure_recorded_as_json() {
+        let (registry, hashes) = mask_for(&[PLAIN]);
+        let mask = RecordMask::new(&registry, &hashes);
+        let body = Val::bytes(format!("x {PLAIN} y").into_bytes());
+        let json = serde_json::to_string(&val!({"msg": body.to_string()})).unwrap();
+        let masked = mask.mask_json(&json).unwrap();
+        assert_eq!(masked, format!(r#"{{"msg":"Bytes([{MASK}])"}}"#));
+    }
+
+    #[test]
+    fn masks_encoded_secrets_and_credential_fields_in_rendered_bytes() {
+        let (registry, hashes) = mask_for(&[SECRET]);
+        let mask = RecordMask::new(&registry, &hashes);
+        let encoded = Val::bytes(format!("token {}", url_b64(SECRET)).into_bytes()).to_string();
+        assert_eq!(mask.mask_text(&encoded), format!("Bytes([{MASK}])"));
+
+        let field = Val::bytes(br#"{"access_token":"unregistered"}"#.to_vec()).to_string();
+        let empty = SecretValues::default();
+        let no_hashes = AHashSet::new();
+        let unregistered = RecordMask::new(&empty, &no_hashes);
+        assert_eq!(unregistered.mask_text(&field), format!("Bytes([{MASK}])"));
+        let json = serde_json::to_string(&val!({"msg": field.clone()})).unwrap();
+        assert_eq!(
+            unregistered.mask_json(&json).unwrap(),
+            format!(r#"{{"msg":"Bytes([{MASK}])"}}"#)
+        );
+    }
+
+    #[test]
+    fn masks_vecs_of_bytes_holding_a_secret() {
+        let (registry, hashes) = mask_for(&[PLAIN]);
+        let mask = RecordMask::new(&registry, &hashes);
+        let ints = Val::vec(
+            PLAIN
+                .bytes()
+                .map(|byte| Val::Int(i64::from(byte)))
+                .collect(),
+        );
+        let bytes = Val::vec(PLAIN.bytes().map(Val::Byte).collect());
+        assert_eq!(mask.mask_val(ints.clone()), Val::from(MASK));
+        assert_eq!(mask.mask_val(bytes), Val::from(MASK));
+        assert_eq!(mask.mask_delivered(ints), Val::from(MASK));
+        let numbers = Val::vec((1..=20).map(Val::Int).collect());
+        assert_eq!(mask.mask_val(numbers.clone()), numbers);
+    }
+
+    #[test]
+    fn leaves_numbers_that_are_not_bytes_or_hold_nothing() {
+        let (registry, hashes) = mask_for(&[PLAIN]);
+        let mask = RecordMask::new(&registry, &hashes);
+        for text in [
+            "1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
+            "1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000",
+            "0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5",
+        ] {
+            assert_eq!(mask.mask_text(text), text);
+        }
+        // A number too large to be a byte ends a run, and what follows is
+        // still checked.
+        let split = format!("1000, {}", decimals(PLAIN, ", "));
+        assert_eq!(mask.mask_text(&split), format!("1000, {MASK}"));
+    }
+
+    #[test]
+    fn minted_values_mask_without_marking_records_stale() {
+        let registry = SecretValues::default();
+        let signature: Vec<u8> = (0u8..32).map(|byte| byte.wrapping_mul(7) ^ 0xa5).collect();
+        registry.register_minted(&Val::bytes(signature.clone()));
+        assert_eq!(registry.generation(), 0);
+
+        let hashes = AHashSet::new();
+        let mask = RecordMask::new(&registry, &hashes);
+        assert_eq!(
+            mask.mask_val(Val::bytes(signature.clone())),
+            Val::from(MASK)
+        );
+        let url = url_b64_bytes(&signature);
+        assert_eq!(mask.mask_text(&format!("a.b.{url}")), format!("a.b.{MASK}"));
+        assert_eq!(
+            mask.mask_text(&format!("sig={}", hex::encode(&signature))),
+            format!("sig={MASK}")
+        );
+    }
+
+    #[test]
+    fn a_key_a_native_made_marks_no_record_stale() {
+        let registry = SecretValues::default();
+        let minted = Val::bytes(vec![0xa5; 32]);
+        registry.register_minted(&minted);
+        registry.register_key(&minted);
+        assert_eq!(registry.generation(), 0);
+        registry.register_key(&Val::from("a-key-given-by-the-program"));
+        assert_eq!(registry.generation(), 1);
+    }
+
+    #[test]
+    fn minted_values_past_the_limit_match_only_whole() {
+        let registry = SecretValues::default();
+        let minted = |n: u32| -> Vec<u8> {
+            (0u8..32)
+                .map(|byte| (n.to_le_bytes()[usize::from(byte) % 4]) ^ byte.wrapping_mul(13))
+                .collect()
+        };
+        for n in 0..=MAX_MINTED_SUBSTRINGS as u32 {
+            registry.register_minted(&Val::bytes(minted(n)));
+        }
+        let hashes = AHashSet::new();
+        let mask = RecordMask::new(&registry, &hashes);
+        let last = minted(MAX_MINTED_SUBSTRINGS as u32);
+        assert_eq!(mask.mask_val(Val::bytes(last.clone())), Val::from(MASK));
+        let url = url_b64_bytes(&last);
+        assert_eq!(mask.mask_val(Val::from(url.clone())), Val::from(MASK));
+        let hex_form = hex::encode(&last);
+        assert_eq!(mask.mask_val(Val::from(hex_form)), Val::from(MASK));
+        let joined = format!("a.b.{url}");
+        assert_eq!(mask.mask_text(&joined), joined);
+    }
+
+    #[test]
+    fn remasking_reports_only_a_payload_that_changes() {
+        let (registry, hashes) = mask_for(&[PLAIN]);
+        let mask = RecordMask::new(&registry, &hashes);
+        let holds = serde_json::to_string(&val!({"note": format!("x {PLAIN}"), "n": 1})).unwrap();
+        let masked = mask.remask_json(&holds).unwrap();
+        assert!(!masked.contains(PLAIN), "{masked}");
+        assert_eq!(mask.remask_json(&masked), None);
+        assert_eq!(mask.remask_json(r#"{"note": "nothing",   "n": 1}"#), None);
+    }
+
+    #[test]
+    fn delivered_payloads_mask_bytes_holding_a_secret() {
+        let (registry, hashes) = mask_for(&[PLAIN]);
+        let mask = RecordMask::new(&registry, &hashes);
+        let body = Val::bytes(format!("x {PLAIN} y").into_bytes());
+        assert_eq!(
+            mask.mask_delivered(Val::from(body.to_string())),
+            Val::from(format!("Bytes([{MASK}])"))
+        );
+        assert_eq!(mask.mask_delivered(body), Val::from(MASK));
+        // Credential fields are what a consumer may have asked for.
+        let field = Val::bytes(br#"{"access_token":"unregistered"}"#.to_vec());
+        assert_eq!(mask.mask_delivered(field.clone()), field);
     }
 
     #[test]
@@ -1221,7 +1586,7 @@ mod tests {
         let hashes = AHashSet::new();
         let mask = RecordMask::new(&registry, &hashes);
         assert_eq!(mask.mask_json(r#"{"a": 1, "max_tokens": 5}"#), None);
-        let bytes = serde_json::to_string(&Val::Bytes(b"password=abc".to_vec())).unwrap();
+        let bytes = serde_json::to_string(&Val::bytes(b"password=abc".to_vec())).unwrap();
         assert_eq!(mask.mask_json(&bytes).unwrap(), format!("\"{MASK}\""));
         assert!(
             mask.mask_json(r#"{"password": "x"}"#)
@@ -1241,6 +1606,8 @@ mod tests {
         let started = std::time::Instant::now();
         let masked = mask.mask_text(&payload);
         assert!(masked.ends_with(MASK));
+        let rendered = Val::bytes(vec![b'x'; 2_000_000]).to_string();
+        assert!(!mask.mask_text(&rendered).contains(MASK));
         // Far above what it takes in practice, even in a debug build: this
         // catches a matcher that went quadratic, not a slow machine.
         assert!(

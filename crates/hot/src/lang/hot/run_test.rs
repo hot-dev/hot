@@ -2,8 +2,10 @@
 
 #[cfg(test)]
 mod run_tests {
+    use crate::lang::bytecode::Instruction;
     use crate::lang::compiler::Compiler;
     use crate::lang::parser;
+    use crate::lang::runtime::jit_hof::{PipelinePlan, detect_compilable_pipelines};
     use crate::lang::runtime::vm::VirtualMachine;
     use crate::val;
     use crate::val::Val;
@@ -108,6 +110,24 @@ f fn (n: Int): Str {
     reduce(range(n), (acc, i) { concat(acc, `item-${i}-`) }, "")
 }
 length(f(200))"#,
+            // --- Results that change kind between Int and Dec, per element ---
+            r#"::t ns
+f fn (n: Int): Dec {
+    range(1, add(n, 1))
+    |> map((x) { div(x, 2) })
+    |> map((d) { mul(d, 3) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+f(50)"#,
+            // --- A Str accumulator replaced for every element, newest first ---
+            r#"::t ns
+f fn (n: Int): Str {
+    range(1, add(n, 1))
+    |> map((i) { `item-${i}` })
+    |> map((s) { concat(s, "!") })
+    |> reduce((acc, s) { concat(s, acc) }, "")
+}
+f(10)"#,
             // --- Some/All terminals ---
             r#"::t ns
 f fn (n: Int): Bool {
@@ -154,6 +174,10 @@ f(100)"#,
             )
             .expect("fusion-off run");
             assert_eq!(on, off, "fusion parity mismatch for:\n{}", src);
+            let compiled =
+                compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+                    .expect("compiled run");
+            assert_eq!(on, compiled, "compiled code differs for:\n{}", src);
             // sanity: never null/error
             assert!(
                 !matches!(on, Val::Null) && !on.is_err(),
@@ -161,6 +185,52 @@ f(100)"#,
                 on,
                 src
             );
+        }
+    }
+
+    /// Reading a few characters from the start of a string costs the same at
+    /// any length. A read that copied the string would take far longer on the
+    /// large one, so the margin leaves only that able to fail this.
+    #[test]
+    fn reading_the_start_of_a_string_costs_the_same_at_any_length() {
+        let src = r#"::t ns
+fastest-ms fn (f: Fn): Int {
+    tries map(range(3), (_try) {
+        start ::hot::time/epoch-millis(::hot::time/now())
+        done map(range(500), (i) { f(i) })
+        sub(::hot::time/epoch-millis(::hot::time/now()), start)
+    })
+    reduce(tries, min(%1, %2), first(tries))
+}
+timings fn (s: Str): Map {
+    {
+        slice-start: fastest-ms((i) { slice(s, 0, 5) }),
+        get: fastest-ms((i) { get(s, 3) }),
+        nth: fastest-ms((i) { ::hot::coll/nth(s, 3) }),
+        index: fastest-ms((i) { s[3] }),
+    }
+}
+sixteen-mb reduce(range(20), (acc, _i) { concat(acc, acc) }, "0123456789abcdef")
+{small: timings("0123456789"), large: timings(sixteen-mb)}"#;
+        for conf in [
+            Some(val!({"jit": {"mode": "off"}})),
+            Some(val!({"jit": {"threshold": 1}})),
+        ] {
+            let label = format!("{conf:?}");
+            let out = compile_and_run_with_std_conf(src, conf).expect("run");
+            let (Some(Val::Map(small)), Some(Val::Map(large))) = (out.get("small"), out.get("large"))
+            else {
+                panic!("{label}: unexpected result {out:?}");
+            };
+            for (read, small_ms) in small.iter() {
+                let (Val::Int(small_ms), Some(Val::Int(large_ms))) = (small_ms, large.get(read)) else {
+                    panic!("{label}: {read} has no timing");
+                };
+                assert!(
+                    *large_ms <= small_ms * 20 + 100,
+                    "{label}: {read} took {small_ms}ms on 10 characters, {large_ms}ms on 16 MB"
+                );
+            }
         }
     }
 
@@ -174,6 +244,7 @@ f(100)"#,
         let src = r#"::t ns
 same fn (x) { x }
 annotated fn (x: Map): Map { x }
+annotated-bytes fn (x: Bytes): Bytes { x }
 bound fn (x) {
     y x
     z y
@@ -183,22 +254,27 @@ held fn (x) {
     box {x: x}
     box.x
 }
-reads fn (m: Map, v: Vec) {
+reads fn (m: Map, v: Vec, b: Bytes) {
     reader () { m }
+    bytes-reader () { b }
     called map([1, 2], (i) { same(m) })
     mapped map([1], (i) { v })
-    listed [m, v]
+    bytes-mapped map([1], (i) { same(b) })
+    listed [m, v, b]
     {
         m: [same(m), annotated(m), bound(m), reader(), called[0], called[1], listed[0], held(m)],
         v: [same(v), bound(v), mapped[0], listed[1], held(v)],
         child: [m.child, get(m, "child"), same(m).child],
         item: [v[0], first(v), get(v, 0), same(v)[0]],
+        b: [same(b), annotated-bytes(b), bound(b), bytes-reader(), bytes-mapped[0], listed[2], held(b)],
+        data: [m.data, get(m, "data"), same(m).data],
     }
 }
 run fn () {
-    m {child: {a: 1}, other: 2}
+    b Bytes([1, 2, 3])
+    m {child: {a: 1}, other: 2, data: Bytes([4, 5])}
     v [{b: 1}, {b: 2}]
-    {m, v, reads: reads(m, v)}
+    {m, v, b, reads: reads(m, v, b)}
 }
 run()
 run()
@@ -213,7 +289,9 @@ run()"#;
             let reads = field(&out, "reads");
             let m = field(&out, "m");
             let v = field(&out, "v");
+            let b = field(&out, "b");
             let child = field(&m, "child");
+            let data = field(&m, "data");
             let Val::Vec(items) = &v else {
                 panic!("v is {v:?}");
             };
@@ -222,6 +300,8 @@ run()"#;
                 (&v, "v"),
                 (&child, "child"),
                 (&items[0], "item"),
+                (&b, "b"),
+                (&data, "data"),
             ] {
                 let Val::Vec(held) = field(&reads, name) else {
                     panic!("{name} is not a Vec");
@@ -230,6 +310,7 @@ run()"#;
                     let shared = match (expected, value) {
                         (Val::Map(a), Val::Map(b)) => Arc::ptr_eq(a, b),
                         (Val::Vec(a), Val::Vec(b)) => Arc::ptr_eq(a, b),
+                        (Val::Bytes(a), Val::Bytes(b)) => Arc::ptr_eq(a, b),
                         _ => false,
                     };
                     assert!(shared, "{label}: read {index} of {name} was copied: {value:?}");
@@ -257,9 +338,9 @@ grown assoc(m, "b", 1)
     }
 
     /// A read costs the same whatever the size of the collection. One that
-    /// scaled would take thousands of times longer on the large collection, so
-    /// the margin leaves only that able to fail this. `bench-large-reads.hot`
-    /// prints the numbers.
+    /// scaled would take far longer on the large collection, so the margin
+    /// leaves only that able to fail this. `bench-large-reads.hot` prints the
+    /// numbers.
     #[test]
     fn reads_cost_the_same_at_any_size() {
         let src = r#"::t ns
@@ -275,7 +356,7 @@ fastest-ms fn (f: Fn): Int {
 rows fn (n: Int): Vec {
     map(range(n), (i) { {k: `k-${i}`, v: "some text in the value"} })
 }
-timings fn (n: Int): Map {
+timings fn (n: Int, b: Bytes): Map {
     v rows(n)
     m index-by(v, %.k)
     {
@@ -286,9 +367,13 @@ timings fn (n: Int): Map {
         vec-pass: fastest-ms((i) { ignore-it(v, i) }),
         vec-index: fastest-ms((i) { v[0] }),
         vec-first: fastest-ms((i) { first(v) }),
+        bytes-pass: fastest-ms((i) { ignore-it(b, i) }),
+        bytes-length: fastest-ms((i) { length(b) }),
+        bytes-get: fastest-ms((i) { get(b, 0) }),
     }
 }
-{small: timings(10), large: timings(200000)}"#;
+sixty-four-mb reduce(range(6), (acc, _i) { concat(acc, acc) }, random-bytes(1000000))
+{small: timings(10, random-bytes(10)), large: timings(200000, sixty-four-mb)}"#;
         for conf in [
             Some(val!({"jit": {"mode": "off"}})),
             Some(val!({"jit": {"threshold": 1}})),
@@ -305,7 +390,7 @@ timings fn (n: Int): Map {
                 };
                 assert!(
                     *large_ms <= small_ms * 20 + 100,
-                    "{label}: {read} took {small_ms}ms on 10 entries, {large_ms}ms on 200000"
+                    "{label}: {read} took {small_ms}ms small, {large_ms}ms large"
                 );
             }
         }
@@ -329,6 +414,377 @@ g()"#;
         let expected = val!([2, [3], 1, [3]]);
         let out = compile_and_run_with_std_ast(src).expect("run");
         assert_eq!(out, expected);
+    }
+
+    /// What `src` gives with `conf`, and how many fused runs compiled code made.
+    fn run_counting_compiled_fused_runs(src: &str, conf: Option<Val>) -> (Val, u64) {
+        let before = crate::lang::runtime::jit::fused_runs_for_test();
+        let out = compile_and_run_with_std_conf(src, conf).expect("run");
+        (out, crate::lang::runtime::jit::fused_runs_for_test() - before)
+    }
+
+    /// A function that crosses the JIT threshold keeps its pipeline fused.
+    /// Compiled code that called each stage on its own ran this about 20x
+    /// slower. A benchmark that stays under the threshold can't see that, so
+    /// this runs past it, at the threshold's default.
+    #[test]
+    fn a_pipeline_stays_fused_once_its_function_is_compiled() {
+        let src = r#"::t ns
+f fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> filter((x) { is-zero(mod(x, 2)) })
+    |> map((x) { mul(x, x) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+run fn (): Int {
+    reduce(range(150), (_acc, _i) { f(20) }, 0)
+}
+run()"#;
+        let (out, runs) = run_counting_compiled_fused_runs(src, None);
+        assert_eq!(out, val!(1540));
+        assert!(runs >= 40, "compiled code made {runs} fused runs");
+
+        // The kill switch reaches compiled code too.
+        let (out, runs) =
+            run_counting_compiled_fused_runs(src, Some(val!({"jit": {"hof": {"fusion": false}}})));
+        assert_eq!(out, val!(1540));
+        assert_eq!(runs, 0, "fusion is off");
+    }
+
+    /// Fusion runs its stages and their operations natively, so a namespace
+    /// that reaches another function by one of their names runs them as
+    /// written, in compiled code as in the interpreter.
+    #[test]
+    fn compiled_code_does_not_fuse_over_a_shadowed_name() {
+        let src = r#"::t ns
+add fn (a: Int, b: Int): Int { 7 }
+f fn (v: Vec): Int {
+    reduce(v, (acc, x) { add(acc, x) }, 0)
+}
+[f([1, 2]), f([1, 2]), f([1, 2])]"#;
+        let (out, runs) = run_counting_compiled_fused_runs(src, Some(val!({"jit": {"threshold": 1}})));
+        assert_eq!(out, val!([7, 7, 7]));
+        assert_eq!(runs, 0);
+    }
+
+    /// Compiled code tries a fused run and keeps the stages for a de-opt, and
+    /// both paths meet with the same registers. So each of these runs with the
+    /// JIT off, where only the stages run, and compiled from the first call:
+    /// work around the pipeline has to read what it left, and a de-opt has to
+    /// reach the stages. Failures have to match as well.
+    #[test]
+    fn compiled_pipelines_give_what_the_stages_give() {
+        let programs = [
+            // Values made before the pipeline, read after it.
+            r#"::t ns
+f fn (v: Vec, label: Str): Map {
+    before {label: label, size: length(v)}
+    total v
+    |> filter((x) { gt(x, 1) })
+    |> map((x) { mul(x, 2) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+    again v |> map((x) { add(x, 1) }) |> reduce((acc, x) { add(acc, x) }, 100)
+    {before, total, again, label, v}
+}
+[f([1, 2, 3], "a"), f([1, 2, 3], "a"), f([4, 5], "b")]"#,
+            // A count held raw, then used.
+            r#"::t ns
+f fn (v: Vec): Int {
+    count v |> filter((x) { gt(x, 1) }) |> length()
+    add(mul(count, 10), 1)
+}
+[f([1, 2, 3]), f([]), f([5])]"#,
+            // A pipeline in each arm of a flow.
+            r#"::t ns
+f fn cond (n: Int): Int {
+    gt(n, 5) => { range(n) |> map((x) { mul(x, 2) }) |> reduce((acc, x) { add(acc, x) }, 0) }
+    eq(n, 5) => { range(n) |> filter((x) { gt(x, 1) }) |> length() }
+    => { add(n, 1) }
+}
+[f(9), f(5), f(1), f(9), f(5)]"#,
+            // Bools from `some` and `all`, branched on.
+            r#"::t ns
+f fn (v: Vec): Str {
+    if(v |> map((x) { mul(x, 2) }) |> some((x) { gt(x, 4) }), "some", "none")
+}
+g fn (v: Vec): Str {
+    if(v |> all((x) { gt(x, 0) }), "all", "not all")
+}
+[f([1, 2, 3]), f([1]), g([1, 2]), g([0, 1]), f([]), g([])]"#,
+            // A pipeline among the arguments of a self tail call.
+            r#"::t ns
+f fn cond (i: Int, acc: Int): Int {
+    eq(i, 0) => { acc }
+    => {
+        f(
+            sub(i, 1),
+            add(acc, range(i) |> map((x) { mul(x, 2) }) |> reduce((a, x) { add(a, x) }, 0)),
+        )
+    }
+}
+[f(5, 0), f(50, 1)]"#,
+            // A pipeline with another call's register live around it.
+            r#"::t ns
+f fn (n: Int, s: Str): Str {
+    `${s}:${add(mul(n, 2), range(n) |> reduce((a, x) { add(a, x) }, 0))}:${s}`
+}
+[f(3, "x"), f(4, "y"), f(5, "z")]"#,
+            // A pipeline in a lambda that gets hot.
+            r#"::t ns
+f fn (ns: Vec): Vec {
+    map(ns, (n) { range(n) |> map((x) { mul(x, 2) }) |> reduce((a, x) { add(a, x) }, 0) })
+}
+f([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])"#,
+            // Results of other types, where a register holds them owned.
+            r#"::t ns
+f fn (n: Int): Vec {
+    dec range(1, n) |> map((x) { div(x, 2) }) |> reduce((a, x) { add(a, x) }, 0)
+    text reduce(range(n), (a, i) { concat(a, `i${i}`) }, "")
+    [dec, text, dec]
+}
+[f(4), f(6), f(4)]"#,
+            // De-opts: a predicate that isn't a Bool, and a source of another type.
+            r#"::t ns
+f fn (v: Vec): Int {
+    v |> filter((x) { x }) |> reduce((a, x) { add(a, x) }, 0)
+}
+g fn (m: Any): Any {
+    reduce(m, (a, x) { add(a, x) }, 0)
+}
+[f([1, 2]), f([]), f([3]), g([1, 2]), g({a: 1, b: 2}), g([3])]"#,
+            // Overflow de-opts, and the stages report it.
+            r#"::t ns
+f fn (v: Vec): Int {
+    reduce(v, (a, x) { mul(a, x) }, 1)
+}
+[f([2, 3]), f([9223372036854775807, 2]), f([4])]"#,
+            // A range the fused run declines.
+            r#"::t ns
+f fn (n: Any): Int {
+    range(n) |> reduce((a, x) { add(a, x) }, 0)
+}
+[f(3), f(1.5), f(3)]"#,
+        ];
+        // Where a failure is reported from differs between the tiers.
+        let comparable = |result: Result<Val, String>| {
+            result.map_err(|err| {
+                err.split("instruction_pointer").next().unwrap().to_string()
+            })
+        };
+        for src in programs {
+            let stages = compile_and_run_with_std_conf(src, Some(val!({"jit": {"mode": "off"}})));
+            let before = crate::lang::runtime::jit::fused_runs_for_test();
+            let compiled =
+                compile_and_run_with_std_conf(src, Some(val!({"jit": {"threshold": 1}})));
+            let runs = crate::lang::runtime::jit::fused_runs_for_test() - before;
+            assert!(runs > 0, "compiled code made no fused run of:\n{src}");
+            assert_eq!(
+                comparable(stages),
+                comparable(compiled),
+                "compiled code differs for:\n{src}"
+            );
+        }
+    }
+
+    /// Runs `src` compiled, with `edit` given the instructions of `::t/f` and
+    /// its one pipeline. Returns the result and how many fused runs it made.
+    fn run_with_pipeline_edited(
+        src: &str,
+        edit: impl FnOnce(&mut Vec<Instruction>, &PipelinePlan),
+    ) -> (Val, u64) {
+        let before = crate::lang::runtime::jit::fused_runs_for_test();
+        let out = run_with_std_edited(
+            src,
+            Some(val!({"jit": {"threshold": 1}})),
+            false,
+            false,
+            |program| {
+                let id = program
+                    .functions
+                    .iter()
+                    .position(|function| function.name == "::t/f")
+                    .expect("the function exists");
+                let plans = detect_compilable_pipelines(&program.functions[id].instructions, program);
+                let [plan] = plans.as_slice() else {
+                    panic!("expected one pipeline, found {plans:?}");
+                };
+                edit(&mut program.functions[id].instructions, plan);
+            },
+        )
+        .expect("run");
+        (out, crate::lang::runtime::jit::fused_runs_for_test() - before)
+    }
+
+    const READS_ITS_ARGUMENT_THROUGH_A_PIPELINE: &str = r#"::t ns
+f fn (v: Vec): Int {
+    v |> filter((x) { gt(x, 1) }) |> reduce((a, x) { add(a, x) }, 0)
+}
+run fn (): Map {
+    v [1, 2, 3]
+    total reduce(range(300), (acc, _i) { add(acc, f(v)) }, 0)
+    {v, total}
+}
+run()"#;
+
+    fn assert_read_argument_released(out: &Val, runs: u64) {
+        assert!(runs >= 200, "compiled code made {runs} fused runs");
+        assert_eq!(out.get("total"), Some(val!(1500)));
+        let Some(Val::Vec(v)) = out.get("v") else {
+            panic!("unexpected result {out:?}");
+        };
+        assert!(
+            Arc::strong_count(&v) < 10,
+            "{} references to the collection remain",
+            Arc::strong_count(&v)
+        );
+    }
+
+    // The compiler writes fresh registers in a pipeline's stages, so these
+    // rewrite the bytecode for the cases it doesn't reach today. A fused run
+    // skips those stages, and what follows treats the registers as they left
+    // them, so it has to leave the same ownership.
+
+    /// The register the source was loaded into, before the stages: the first
+    /// instruction loads it.
+    fn loaded_source_register(instructions: &[Instruction]) -> u32 {
+        let Instruction::LoadVar { dest, .. } = instructions[0] else {
+            panic!("expected the source to load first, found {instructions:?}");
+        };
+        dest
+    }
+
+    /// A stage overwrites a register that owned a value: its value is released.
+    #[test]
+    fn a_fused_run_releases_what_its_stages_overwrite() {
+        let (out, runs) = run_with_pipeline_edited(
+            READS_ITS_ARGUMENT_THROUGH_A_PIPELINE,
+            |instructions, plan| {
+                let source = loaded_source_register(instructions);
+                // The `reduce` initial value, the last argument it loads, goes
+                // through the source's register.
+                let Instruction::Call { args_start, .. } = instructions[plan.last_stage_ip] else {
+                    panic!("expected the last stage's call");
+                };
+                let span = plan.first_stage_ip..plan.last_stage_ip;
+                let initial_move = span
+                    .clone()
+                    .rev()
+                    .find(|&ip| {
+                        matches!(instructions[ip], Instruction::Move { dest, .. } if dest == args_start + 2)
+                    })
+                    .expect("the initial value moves into place");
+                let Instruction::Move { src, .. } = &mut instructions[initial_move] else {
+                    unreachable!();
+                };
+                let loaded = std::mem::replace(src, source);
+                for ins in &mut instructions[span] {
+                    if let Instruction::LoadConst { dest, .. } = ins
+                        && *dest == loaded
+                    {
+                        *dest = source;
+                    }
+                }
+            },
+        );
+        assert_read_argument_released(&out, runs);
+    }
+
+    /// The result lands in a register that owned a value: its value is
+    /// released, and the result takes its place.
+    #[test]
+    fn a_fused_run_releases_what_its_result_replaces() {
+        let (out, runs) = run_with_pipeline_edited(
+            READS_ITS_ARGUMENT_THROUGH_A_PIPELINE,
+            |instructions, plan| {
+                // The first stage's argument register owns its source.
+                let source = plan.source_reg;
+                let Instruction::Call { dest, .. } = &mut instructions[plan.last_stage_ip] else {
+                    panic!("expected the last stage's call");
+                };
+                let result = std::mem::replace(dest, source);
+                for ins in &mut instructions[plan.last_stage_ip + 1..] {
+                    if let Instruction::Return { value } = ins
+                        && *value == result
+                    {
+                        *value = source;
+                    }
+                }
+            },
+        );
+        assert_read_argument_released(&out, runs);
+    }
+
+    /// A stage leaves a value owned in a register that held a raw scalar. What
+    /// follows releases that register, so a fused run mustn't leave the scalar
+    /// there: released as a value, it is a wild pointer.
+    #[test]
+    fn a_fused_run_leaves_no_scalar_where_its_stages_leave_a_value() {
+        let src = r#"::t ns
+f fn (n: Int, v: Vec): Int {
+    k add(n, 7)
+    total v |> filter((x) { gt(x, 1) }) |> reduce((a, x) { add(a, x) }, 0)
+    add(total, k)
+}
+run fn (): Int {
+    v [1, 2, 3]
+    reduce(range(300), (acc, _i) { add(acc, f(1, v)) }, 0)
+}
+run()"#;
+        let (out, runs) = run_with_pipeline_edited(src, |instructions, plan| {
+            // The first stage's result moves to the register that held the 7,
+            // a constant Int, which is held raw.
+            let scalar = instructions[..plan.first_stage_ip]
+                .iter()
+                .find_map(|ins| match ins {
+                    Instruction::LoadConst { dest, .. } => Some(*dest),
+                    _ => None,
+                })
+                .expect("the 7 loads before the pipeline");
+            let Instruction::Call { dest, .. } = &mut instructions[plan.first_stage_ip] else {
+                panic!("expected the first stage's call");
+            };
+            let result = std::mem::replace(dest, scalar);
+            for ins in &mut instructions[plan.first_stage_ip + 1..=plan.last_stage_ip] {
+                if let Instruction::Move { src, .. } = ins
+                    && *src == result
+                {
+                    *src = scalar;
+                }
+            }
+        });
+        assert!(runs >= 200, "compiled code made {runs} fused runs");
+        assert_eq!(out, val!(3900));
+    }
+
+    /// Compiled code owns references to the values it reads. A fused run
+    /// leaves its registers holding what the stages would own, so it has to
+    /// release the same references, on the fused path and on a de-opt's.
+    #[test]
+    fn compiled_pipelines_release_what_they_read() {
+        let src = r#"::t ns
+fused fn (v: Vec): Int {
+    v |> filter((x) { gt(x, 1) }) |> map((x) { mul(x, 2) }) |> reduce((a, x) { add(a, x) }, 0)
+}
+deopts fn (v: Vec): Int {
+    v |> filter((x) { x }) |> reduce((a, x) { add(a, x) }, 0)
+}
+run fn (): Map {
+    v [1, 2, 3]
+    total reduce(range(300), (acc, _i) { add(acc, add(fused(v), deopts(v))) }, 0)
+    {v, total}
+}
+run()"#;
+        let (out, runs) = run_counting_compiled_fused_runs(src, Some(val!({"jit": {"threshold": 1}})));
+        assert!(runs >= 200, "compiled code made {runs} fused runs");
+        assert_eq!(out.get("total"), Some(val!(4800)));
+        let Some(Val::Vec(v)) = out.get("v") else {
+            panic!("unexpected result {out:?}");
+        };
+        assert!(
+            Arc::strong_count(&v) < 10,
+            "{} references to the collection remain",
+            Arc::strong_count(&v)
+        );
     }
 
     /// Helper to compile and execute Hot code with hot-std included
@@ -4351,6 +4807,17 @@ caller(true)"#;
         resolve_imports: bool,
         with_ast: bool,
     ) -> Result<Val, String> {
+        run_with_std_edited(source, conf, resolve_imports, with_ast, |_| {})
+    }
+
+    /// Like [`run_with_std`], with `edit` applied to the compiled program.
+    fn run_with_std_edited(
+        source: &str,
+        conf: Option<Val>,
+        resolve_imports: bool,
+        with_ast: bool,
+        edit: impl FnOnce(&mut crate::lang::bytecode::BytecodeProgram),
+    ) -> Result<Val, String> {
         use crate::lang::ast::Program;
         use std::path::Path;
 
@@ -4398,9 +4865,10 @@ caller(true)"#;
 
         let hot_ast = with_ast
             .then(|| Arc::new(crate::lang::ast::HotAst::from_program(combined_program)));
-        let program_arc = compiler.get_program_arc();
+        let mut program = compiler.get_program_arc();
+        edit(Arc::make_mut(&mut program));
         let mut vm = VirtualMachine::new(
-            program_arc,
+            program,
             hot_ast,
             compiler.get_function_mapping_arc(),
             compiler.get_core_functions_arc(),

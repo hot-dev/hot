@@ -2,6 +2,7 @@ use crate::lang::bytecode::{
     BytecodeProgram, Constant, FlowResultModifier, FlowType, FunctionId, FunctionInfo, Instruction,
     LambdaInfo,
 };
+use crate::lang::runtime::jit_hof::{self, FusedRun, PipelinePlan};
 use crate::lang::runtime::limits;
 use crate::lang::runtime::vm::{
     VirtualMachine, VmError, max_recursion_depth, recursion_limit_message,
@@ -49,6 +50,10 @@ thread_local! {
     /// `owned_flow_trace`).
     static COMPILE_FLOW_TRACES: std::cell::RefCell<Vec<std::pin::Pin<Box<FlowTrace>>>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The fused pipelines of the code being compiled on this thread (see
+    /// `owned_fused_plan`).
+    static COMPILE_FUSED_PLANS: std::cell::RefCell<Vec<std::pin::Pin<Box<PipelinePlan>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Where the code being compiled reads the Dec constant `value`: memory the
@@ -61,6 +66,15 @@ fn owned_flow_trace(trace: FlowTrace) -> *const FlowTrace {
     let trace = Box::pin(trace);
     let ptr: *const FlowTrace = &*trace;
     COMPILE_FLOW_TRACES.with(|traces| traces.borrow_mut().push(trace));
+    ptr
+}
+
+/// Where the code being compiled reads `plan`: memory the compiled function
+/// owns, as for its Dec constants (see `owned_dec_constant`).
+fn owned_fused_plan(plan: PipelinePlan) -> *const PipelinePlan {
+    let plan = Box::pin(plan);
+    let ptr: *const PipelinePlan = &*plan;
+    COMPILE_FUSED_PLANS.with(|plans| plans.borrow_mut().push(plan));
     ptr
 }
 
@@ -582,6 +596,8 @@ struct JitHelperRefs {
     call_vm_by_name: FuncRef,
     promote_to_owned: FuncRef,
     make_vec: FuncRef,
+    run_fused_pipeline: FuncRef,
+    take_owned_int: FuncRef,
     call_lib: FuncRef,
     dot_access: FuncRef,
     dot_access_or_default: FuncRef,
@@ -630,7 +646,7 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 44] {
+    fn scope_free(&self) -> [FuncRef; 46] {
         [
             self.call_vm,
             self.template_interpolate,
@@ -663,6 +679,8 @@ impl JitHelperRefs {
             self.self_tail_owned_arg,
             self.promote_to_owned,
             self.make_vec,
+            self.run_fused_pipeline,
+            self.take_owned_int,
             self.merge_maps,
             self.extract_inner_val,
             self.set_element,
@@ -700,6 +718,20 @@ fn needs_vm_scope(
                 _ => false,
             })
     })
+}
+
+/// A fused run compiled code has tried, while the pipeline's own stages (the
+/// path for a de-opt) are being emitted.
+struct OpenFusedRun {
+    /// The instruction after the last stage, where both paths meet.
+    resume_ip: usize,
+    result_reg: u32,
+    /// The block a produced result goes to, and that result.
+    produced: cranelift_codegen::ir::Block,
+    result: cranelift_codegen::ir::Value,
+    /// The registers as they were before the stages.
+    kinds_before: Vec<Option<RawKind>>,
+    compile_time_owned_before: std::collections::HashSet<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -783,6 +815,9 @@ pub struct JitCompiledFunction {
     /// The inline flow traces the code reads, held for it (see
     /// `owned_flow_trace`).
     _flow_traces: Vec<std::pin::Pin<Box<FlowTrace>>>,
+    /// The fused pipelines the code runs, held for it (see
+    /// `owned_fused_plan`).
+    _fused_plans: Vec<std::pin::Pin<Box<PipelinePlan>>>,
     /// The code opens flow contexts in the VM for the inline flows it
     /// traces; a call closes any an early return left open.
     traces_flows: bool,
@@ -1137,7 +1172,7 @@ impl JitRuntimeState {
             function_id,
             function_info,
             &signature,
-            names,
+            names.fusing(self.config.hof_fusion_enabled()),
         ) {
             Ok(compiled) => compiled,
             Err(err) => {
@@ -1247,7 +1282,7 @@ impl JitRuntimeState {
             u32::MAX,
             &function_info,
             &signature,
-            names,
+            names.fusing(self.config.hof_fusion_enabled()),
         ) {
             Ok(compiled) => {
                 GLOBAL_JIT_COMPILE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -1944,6 +1979,14 @@ fn compile_with_return_kind(
         hot_jit_promote_to_owned as *const u8,
     );
     builder.symbol("hot_jit_make_vec", hot_jit_make_vec as *const u8);
+    builder.symbol(
+        "hot_jit_run_fused_pipeline",
+        hot_jit_run_fused_pipeline as *const u8,
+    );
+    builder.symbol(
+        "hot_jit_take_owned_int",
+        hot_jit_take_owned_int as *const u8,
+    );
     builder.symbol("hot_jit_call_lib", hot_jit_call_lib as *const u8);
     builder.symbol("hot_jit_dot_access", hot_jit_dot_access as *const u8);
     builder.symbol(
@@ -2036,6 +2079,7 @@ fn compile_with_return_kind(
     let mut module = CodeModule::new(JITModule::new(builder));
     COMPILE_DEC_CONSTANTS.with(|constants| constants.borrow_mut().clear());
     COMPILE_FLOW_TRACES.with(|traces| traces.borrow_mut().clear());
+    COMPILE_FUSED_PLANS.with(|plans| plans.borrow_mut().clear());
 
     let ptr_ty = module.target_config().pointer_type();
     let mut sig = module.make_signature();
@@ -2106,6 +2150,7 @@ fn compile_with_return_kind(
     let dec_constants =
         COMPILE_DEC_CONSTANTS.with(|constants| mem::take(&mut *constants.borrow_mut()));
     let flow_traces = COMPILE_FLOW_TRACES.with(|traces| mem::take(&mut *traces.borrow_mut()));
+    let fused_plans = COMPILE_FUSED_PLANS.with(|plans| mem::take(&mut *plans.borrow_mut()));
     Ok(JitCompiledFunction {
         signature: signature.clone(),
         result_kind,
@@ -2114,6 +2159,7 @@ fn compile_with_return_kind(
         _dec_constants: dec_constants,
         traces_flows: !flow_traces.is_empty(),
         _flow_traces: flow_traces,
+        _fused_plans: fused_plans,
         func_id,
         arg_layout,
         result_word_len,
@@ -2325,6 +2371,17 @@ fn hotlib_jit_policy_bails_out(name: &str) -> bool {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many fused runs compiled code on this thread has produced.
+    static FUSED_RUNS_FOR_TEST: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn fused_runs_for_test() -> u64 {
+    FUSED_RUNS_FOR_TEST.with(Cell::get)
+}
+
 thread_local! {
     /// Whether a contained helper's panic is waiting for the compiled code
     /// it interrupted to return (see [`contain_helper_panic`]).
@@ -2384,6 +2441,10 @@ macro_rules! contained_helpers {
 }
 
 contained_helpers! {
+    // A panic reads as a de-opt: the stages' own helpers then return at once.
+    hot_jit_run_fused_pipeline = hot_jit_run_fused_pipeline_body(
+        plan: i64, args_ptr: *const i64, args_count: i64
+    ) -> 0;
     // Arithmetic and comparison in hotlib.
     hot_jit_add_numeric = hot_jit_add_numeric_body(
         out: *mut D256, left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
@@ -3155,6 +3216,49 @@ unsafe extern "C" fn hot_jit_make_vec(args_ptr: *const i64, args_count: i64) -> 
         elements.push(unsafe { decode_helper_val(kind, raw) });
     }
     new_owned_val(Val::vec(elements))
+}
+
+/// JIT helper: run the fused pipeline `plan` over its source, encoded at
+/// `args_ptr` as for [`hot_jit_make_vec`]: the arguments of its `range` call, or
+/// its source collection. Returns an OwnedVal handle to the result, or 0 for a
+/// de-opt, when the compiled code runs the pipeline's stages instead. The run
+/// is pure and writes nothing, so a de-opt loses nothing.
+unsafe fn hot_jit_run_fused_pipeline_body(plan: i64, args_ptr: *const i64, args_count: i64) -> i64 {
+    let plan = unsafe { &*(plan as *const PipelinePlan) };
+    let args: Vec<Val> = (0..args_count as usize)
+        .map(|i| {
+            let kind = unsafe { *args_ptr.add(i * 2) };
+            let raw = unsafe { *args_ptr.add(i * 2 + 1) };
+            unsafe { decode_helper_val(kind, raw) }
+        })
+        .collect();
+    let run = if plan.range_source.is_some() {
+        jit_hof::run_pipeline_range(plan, &args)
+    } else {
+        jit_hof::run_pipeline(plan, &args[0])
+    };
+    match run {
+        FusedRun::Produced(result) => {
+            jit_hof::record_fused_run();
+            #[cfg(test)]
+            FUSED_RUNS_FOR_TEST.with(|runs| runs.set(runs.get() + 1));
+            new_owned_val(result)
+        }
+        FusedRun::Deopt => {
+            jit_hof::record_fused_deopt();
+            0
+        }
+    }
+}
+
+/// JIT helper: the `Int` in the OwnedVal handle `raw`, which it releases. A fused
+/// `length` hands its count back this way to a register that holds it raw.
+unsafe extern "C" fn hot_jit_take_owned_int(raw: i64) -> i64 {
+    let value = unsafe { Arc::from_raw(raw as *const Val) };
+    match *value {
+        Val::Int(n) => n,
+        _ => 0,
+    }
 }
 
 /// JIT helper: call a hotlib (Rust-native) function by name with a Vec of args.
@@ -4331,6 +4435,22 @@ fn declare_jit_helpers(
             ptr_ty,
             "hot_jit_make_vec",
             &[ptr_ty, types::I64],
+            &[types::I64],
+        )?,
+        run_fused_pipeline: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_run_fused_pipeline",
+            &[types::I64, ptr_ty, types::I64],
+            &[types::I64],
+        )?,
+        take_owned_int: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_take_owned_int",
+            &[types::I64],
             &[types::I64],
         )?,
         call_lib: declare_helper_func(
@@ -6274,6 +6394,124 @@ impl<'a> EmitCtx<'a> {
         let halt_block = emit_halt_check(builder, result_handle);
         self.define_register(builder, dest, RawKind::OwnedVal, result_handle)?;
         Ok(Some(halt_block))
+    }
+
+    /// Try a fused run of `plan`, whose first stage is the next instruction,
+    /// and go on in a new block for a de-opt, where the stages are emitted.
+    /// `None` when the run's source isn't in a form the helper reads.
+    fn begin_fused_run(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        plan: &PipelinePlan,
+    ) -> Result<Option<OpenFusedRun>, String> {
+        let source: Vec<u32> = match plan.range_source {
+            Some(range) => (0..u32::from(range.args_count))
+                .map(|i| range.args_start + i)
+                .collect(),
+            None => vec![plan.source_reg],
+        };
+        for &reg in &source {
+            if !matches!(
+                self.register_kind(reg),
+                Ok(RawKind::Int | RawKind::Bool | RawKind::Dec | RawKind::Null | RawKind::OwnedVal)
+            ) {
+                return Ok(None);
+            }
+        }
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (source.len() * 2 * 8) as u32,
+            3,
+        ));
+        for (i, &reg) in source.iter().enumerate() {
+            let (tag, raw) = encode_helper_val_operand(
+                builder,
+                &self.remap,
+                &self.registers,
+                &self.register_kinds,
+                reg,
+            )?;
+            builder
+                .ins()
+                .stack_store(types::I64, tag, slot, (i * 2 * 8) as i32);
+            builder
+                .ins()
+                .stack_store(types::I64, raw, slot, (i * 2 * 8 + 8) as i32);
+        }
+        let plan_ptr = owned_fused_plan(plan.clone());
+        let plan_val = builder.ins().iconst(types::I64, plan_ptr as i64);
+        let args_ptr = builder.ins().stack_addr(self.ptr_ty, slot, 0);
+        let count = builder.ins().iconst(types::I64, source.len() as i64);
+        let call = builder.ins().call(
+            self.helper_refs.run_fused_pipeline,
+            &[plan_val, args_ptr, count],
+        );
+        let result = builder.inst_results(call)[0];
+
+        let produced = builder.create_block();
+        let stages = builder.create_block();
+        builder.ins().brif(result, produced, &[], stages, &[]);
+        builder.switch_to_block(stages);
+        builder.seal_block(stages);
+        Ok(Some(OpenFusedRun {
+            resume_ip: plan.last_stage_ip + 1,
+            result_reg: plan.result_reg,
+            produced,
+            result,
+            kinds_before: self.register_kinds.clone(),
+            compile_time_owned_before: self.compile_time_owned.clone(),
+        }))
+    }
+
+    /// Emit the path of a fused run that produced its result, now that the
+    /// stages are emitted, and join it to theirs. From here on the code treats
+    /// the registers as the stages left them, so this path has to leave the same
+    /// ownership: nothing after the pipeline reads what the stages wrote except
+    /// the result, but it does release what they own.
+    fn finish_fused_run(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        run: OpenFusedRun,
+    ) -> Result<(), String> {
+        builder.switch_to_block(run.produced);
+        builder.seal_block(run.produced);
+        let result_idx = self.remap_reg(run.result_reg)?;
+        let empty = builder.ins().iconst(types::I64, 0);
+        for idx in 0..self.registers.len() {
+            let owned_before = run.kinds_before[idx] == Some(RawKind::OwnedVal)
+                && !run.compile_time_owned_before.contains(&idx);
+            let owned_after = self.register_kinds[idx] == Some(RawKind::OwnedVal)
+                && !self.compile_time_owned.contains(&idx);
+            // The stages replaced what this register owned; here it is still
+            // there. Releasing an empty register does nothing.
+            if owned_before && (!owned_after || idx == result_idx) {
+                drop_owned_var(builder, &self.helper_refs, self.registers[idx]);
+            }
+            if !owned_before && owned_after {
+                builder.def_var(self.registers[idx], empty);
+            }
+        }
+        let owned_result = !self.compile_time_owned.contains(&result_idx);
+        let value = match self.register_kinds[result_idx] {
+            Some(RawKind::OwnedVal) if owned_result => run.result,
+            // `length` over the stages' result is lowered to a raw count.
+            Some(RawKind::Int) => {
+                let call = builder
+                    .ins()
+                    .call(self.helper_refs.take_owned_int, &[run.result]);
+                builder.inst_results(call)[0]
+            }
+            other => {
+                return Err(unsupported_jit_bailout(
+                    "fused_result_kind",
+                    format!("JIT cannot hold a fused pipeline's result as {other:?}"),
+                ));
+            }
+        };
+        builder.def_var(self.registers[result_idx], value);
+        let resume = self.blocks[run.resume_ip];
+        builder.ins().jump(resume, &[]);
+        Ok(())
     }
 
     /// Try all call resolution strategies for a named function call (Call instruction).
@@ -8485,9 +8723,21 @@ fn build_supported_body(
 
     let mut active_flows: Vec<ActiveFlowState> = Vec::new();
     let mut return_kind: Option<JitValueKind> = None;
+    let fused_plans = if call_scope.fuses_pipelines() {
+        jit_hof::detect_compilable_pipelines(instructions, program)
+    } else {
+        Vec::new()
+    };
+    let mut open_fused_run: Option<OpenFusedRun> = None;
 
     for (ip, instruction) in instructions.iter().enumerate() {
+        if let Some(run) = open_fused_run.take_if(|run| run.resume_ip == ip) {
+            ctx.finish_fused_run(builder, run)?;
+        }
         builder.switch_to_block(ctx.blocks[ip]);
+        if let Some(plan) = fused_plans.iter().find(|plan| plan.first_stage_ip == ip) {
+            open_fused_run = ctx.begin_fused_run(builder, plan)?;
+        }
 
         // A collecting serial flow (`All<Vec>` / `All<Map>`) gathers each
         // binding made directly in its body, as the interpreter's StoreVar
@@ -11316,6 +11566,8 @@ pub struct CallNames<'a> {
     native_shadows: Option<&'a crate::lang::runtime::native_core::NativeCoreShadows>,
     /// The VM traces its calls (see [`CallNames::traced`]).
     traced: bool,
+    /// Pipeline fusion is on (see [`CallNames::fusing`]).
+    fusing: bool,
 }
 
 impl<'a> CallNames<'a> {
@@ -11330,6 +11582,7 @@ impl<'a> CallNames<'a> {
             core_functions: Some(core_functions),
             native_shadows: Some(native_shadows),
             traced: false,
+            fusing: false,
         }
     }
 
@@ -11347,6 +11600,12 @@ impl<'a> CallNames<'a> {
     /// interpreted call, rather than straight into the compiled code.
     pub fn traced(self, traced: bool) -> Self {
         Self { traced, ..self }
+    }
+
+    /// Whether pipeline fusion is on: then compiled code tries a fused run of
+    /// each pipeline before its stages, as the interpreter does.
+    fn fusing(self, fusing: bool) -> Self {
+        Self { fusing, ..self }
     }
 
     /// Where the code of `function` (the function with id `function_id`)
@@ -11381,6 +11640,17 @@ impl CallScope<'_> {
     /// (see [`CallNames::traced`]).
     fn native_self_calls(&self) -> bool {
         !self.names.traced
+    }
+
+    /// Whether the body's pipelines run fused, as they do in the interpreter:
+    /// fusion runs its stages and their operations natively, so a namespace
+    /// that reaches another function by one of their names runs them as written.
+    fn fuses_pipelines(&self) -> bool {
+        self.names.fusing
+            && !self
+                .names
+                .native_shadows
+                .is_some_and(|shadows| shadows.shadows_fusion(self.namespace))
     }
 
     /// Whether the body traces its inline flows, as the interpreter does

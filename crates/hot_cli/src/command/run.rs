@@ -387,7 +387,20 @@ pub(crate) async fn run_run(
                 } else {
                     conf.clone()
                 };
-                println!("{}", result.format_with_conf(Some(&display_conf)));
+                // An Err reports a failure, as the case below does. Any other
+                // result is the program's output, and stays whole.
+                let masked = execution_context
+                    .as_ref()
+                    .filter(|_| result.is_err())
+                    .map(|ctx| {
+                        hot::lang::masking::RecordMask::new(
+                            &ctx.secret_values,
+                            &ctx.secret_value_hashes,
+                        )
+                        .mask_val(result.clone())
+                    });
+                let shown = masked.as_ref().unwrap_or(&result);
+                println!("{}", shown.format_with_conf(Some(&display_conf)));
             }
             Ok(result)
         }

@@ -12,7 +12,8 @@ Benchmarks comparing Hot against Python, JavaScript, and TypeScript for common o
 6. **JIT Lazy/Flow Safety Shapes** - Hot-only JIT safety microbenchmarks
 7. **Deep Recursion** - Hot-only regression guards: tail recursion through `if()` (TCO / JIT native loop) and non-tail `cond` recursion (re-entrant register correctness — check the printed result, not just the time)
 8. **Constraints** - Hot-only: the cost of `where` checks at function boundaries, in `bench-constraints.hot`
-9. **Large Reads** - Hot-only regression guard: reading a large Map or Vec must cost the same at every size, in `bench-large-reads.hot`. Compare the lines for each `n`; they should not grow with it
+9. **Large Reads** - Hot-only regression guard: reading a large Map, Vec or Bytes must cost the same at every size, in `bench-large-reads.hot`. Compare the lines for each `n`; they should not grow with it
+10. **Pipelines After JIT Tier-Up** - Hot-only regression guard: `compiled-sum-even-squares(10000)` is the shape of `sum-even-squares`, timed after its function is compiled. It should cost about the same. `sum-even-squares` itself stays under the JIT threshold, so it can't show this.
 
 ## Running the Benchmarks
 
