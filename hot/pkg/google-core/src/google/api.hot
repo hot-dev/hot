@@ -304,17 +304,9 @@ fn (error: Result): Bool {
   }
 }
 
-as-response
-meta {
-    doc: """A transport result as a typed `HttpResponse`, an Err as is. `::hot::http/request` returns a plain Map, and `HttpError(response)` runs its arrow only on the typed value."""
-}
-fn (response: Result): HttpResponse {
-  if(is-err(response), response, HttpResponse(response))
-}
-
 send-with-retry
 meta {
-    doc: """Send an `HttpRequest`; on a connection failure of an idempotent method, send it once more straight away (per `policy`). Never waits. Returns the final response, as a typed `HttpResponse`, or transport Err."""
+    doc: """Send an `HttpRequest`; on a connection failure of an idempotent method, send it once more straight away (per `policy`). Never waits. Returns the final response or transport Err."""
 }
 fn
 (req: HttpRequest, policy: Map): HttpResponse {
@@ -326,7 +318,7 @@ fn
     and(is-err(response), lt(attempt, policy.max-retries), is-retryable-transport(req.method, err-message(response))) => {
       send-with-retry(req, policy, add(attempt, 1))
     }
-    => { as-response(response) }
+    => { response }
   }
 }
 
