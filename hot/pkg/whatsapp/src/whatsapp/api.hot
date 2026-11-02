@@ -56,8 +56,9 @@ handle-response
 meta {
     doc: """Unwrap an HTTP response: the decoded body on 2xx, an Err carrying `HttpError` otherwise. Callers return transport Errs before calling it. Exposed for testing."""
 }
-fn (response: HttpResponse): Any {
+fn (response: Result): Any {
   cond {
+    is-err(response) => { response }
     is-ok-response(response) => { response.body }
     => { err(HttpError(response)) }
   }
