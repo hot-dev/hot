@@ -943,7 +943,7 @@ impl BlobStore {
                     ENCODING_JSON => serde_json::from_slice::<Val>(&bytes).map_err(|_| {
                         BlobError::InvalidRef("json blob is not a valid value".to_string())
                     })?,
-                    _ => Val::Bytes(bytes),
+                    _ => Val::bytes(bytes),
                 };
                 return Ok(());
             }
@@ -1214,7 +1214,7 @@ mod tests {
         let measure = val_bytes_outside_large_leaves;
         let long = Val::from("x".repeat(20));
         assert_eq!(measure(&long, 10), 0);
-        assert_eq!(measure(&Val::Bytes(vec![0; 20]), 10), 0);
+        assert_eq!(measure(&Val::bytes(vec![0; 20]), 10), 0);
         assert_eq!(measure(&Val::from("short"), 10), 5);
         let many = Val::vec(vec![Val::from("short"); 4]);
         assert_eq!(measure(&many, 10), 8 + 4 * 5);
@@ -1224,7 +1224,7 @@ mod tests {
 
     #[test]
     fn test_estimate_val_size() {
-        assert_eq!(estimate_val_size(&Val::Bytes(vec![0u8; 100])), 100);
+        assert_eq!(estimate_val_size(&Val::bytes(vec![0u8; 100])), 100);
         assert_eq!(estimate_val_size(&Val::from("hello")), 5);
         assert!(estimate_val_size(&val!({"k": [1, 2, 3]})) > 8);
     }
@@ -1233,7 +1233,7 @@ mod tests {
     async fn test_spill_below_threshold_stays_inline() {
         let (store, scope, _tmp) = test_store().await;
         let small = val!({
-            "data": Val::Bytes(vec![1u8; 100]),
+            "data": Val::bytes(vec![1u8; 100]),
             "text": "short",
         });
         let result = store
@@ -1250,7 +1250,7 @@ mod tests {
         let payload = large_bytes(3, 4096);
         let spilled = store
             .spill_large_val(
-                val!({"data": Val::Bytes(payload.clone())}),
+                val!({"data": Val::bytes(payload.clone())}),
                 scope,
                 SpillSource::CallArgs,
                 Some("c1"),
@@ -1319,7 +1319,7 @@ mod tests {
         let payload = large_bytes(7, 4096);
         let original = val!({
             "meta": {"name": "x"},
-            "data": Val::Bytes(payload.clone()),
+            "data": Val::bytes(payload.clone()),
         });
 
         let spilled = store
@@ -1428,8 +1428,8 @@ mod tests {
         let (store, scope, _tmp) = test_store().await;
         let original = val!({
             "list": [
-                {"blob": Val::Bytes(large_bytes(1, 2048))},
-                {"blob": Val::Bytes(large_bytes(2, 2048))},
+                {"blob": Val::bytes(large_bytes(1, 2048))},
+                {"blob": Val::bytes(large_bytes(2, 2048))},
             ],
         });
         let spilled = store
@@ -1448,8 +1448,8 @@ mod tests {
         let (store, scope, _tmp) = test_store().await;
         let payload = large_bytes(9, 3000);
         let original = val!({
-            "a": Val::Bytes(payload.clone()),
-            "b": Val::Bytes(payload.clone()),
+            "a": Val::bytes(payload.clone()),
+            "b": Val::bytes(payload.clone()),
         });
         let spilled = store
             .spill_large_val(original, scope, SpillSource::CallArgs, Some("c2"))
@@ -1476,7 +1476,7 @@ mod tests {
     #[tokio::test]
     async fn test_rehydrate_cross_org_rejected() {
         let (store, scope, _tmp) = test_store().await;
-        let original = val!({"data": Val::Bytes(large_bytes(3, 2048))});
+        let original = val!({"data": Val::bytes(large_bytes(3, 2048))});
         let spilled = store
             .spill_large_val(original, scope, SpillSource::CallArgs, Some("c3"))
             .await
@@ -1501,7 +1501,7 @@ mod tests {
     #[tokio::test]
     async fn test_rehydrate_cross_env_rejected() {
         let (store, scope, _tmp) = test_store().await;
-        let original = val!({"data": Val::Bytes(large_bytes(4, 2048))});
+        let original = val!({"data": Val::bytes(large_bytes(4, 2048))});
         let spilled = store
             .spill_large_val(original, scope, SpillSource::CallArgs, Some("c4"))
             .await
@@ -1548,8 +1548,8 @@ mod tests {
     async fn test_rehydrate_ref_budget_enforced() {
         let (store, scope, _tmp) = test_store().await;
         let original = val!({
-            "a": Val::Bytes(large_bytes(5, 2048)),
-            "b": Val::Bytes(large_bytes(6, 2048)),
+            "a": Val::bytes(large_bytes(5, 2048)),
+            "b": Val::bytes(large_bytes(6, 2048)),
         });
         let spilled = store
             .spill_large_val(original, scope, SpillSource::CallArgs, Some("c5"))
@@ -1570,7 +1570,7 @@ mod tests {
     #[tokio::test]
     async fn test_rehydrate_byte_budget_enforced() {
         let (store, scope, _tmp) = test_store().await;
-        let original = val!({"a": Val::Bytes(large_bytes(5, 4096))});
+        let original = val!({"a": Val::bytes(large_bytes(5, 4096))});
         let spilled = store
             .spill_large_val(original, scope, SpillSource::CallArgs, Some("c6"))
             .await
@@ -1604,7 +1604,7 @@ mod tests {
             run_id: None,
         };
 
-        let original = val!({"data": Val::Bytes(large_bytes(1, 8192))});
+        let original = val!({"data": Val::bytes(large_bytes(1, 8192))});
         let result = store
             .spill_large_val(original.clone(), scope, SpillSource::CallArgs, None)
             .await
@@ -1615,7 +1615,7 @@ mod tests {
     #[tokio::test]
     async fn test_spill_applies_to_all_sources_when_enabled() {
         let (store, scope, _tmp) = test_store().await;
-        let original = val!({"result": Val::Bytes(large_bytes(1, 8192))});
+        let original = val!({"result": Val::bytes(large_bytes(1, 8192))});
         for (source, id) in [
             (SpillSource::RunResult, "r9"),
             (SpillSource::CallArgs, "c9"),
@@ -1636,7 +1636,7 @@ mod tests {
     #[tokio::test]
     async fn test_gc_object_lifecycle() {
         let (store, scope, _tmp) = test_store().await;
-        let original = val!({"data": Val::Bytes(large_bytes(8, 2048))});
+        let original = val!({"data": Val::bytes(large_bytes(8, 2048))});
         let spilled = store
             .spill_large_val(original, scope, SpillSource::CallArgs, Some("c7"))
             .await
@@ -1691,7 +1691,7 @@ mod tests {
 
         let call_val = store
             .spill_large_val(
-                val!({"d": Val::Bytes(large_bytes(21, 2048))}),
+                val!({"d": Val::bytes(large_bytes(21, 2048))}),
                 scope,
                 SpillSource::CallArgs,
                 Some("c-ret"),
@@ -1703,7 +1703,7 @@ mod tests {
             .unwrap();
         let manual_val = store
             .spill_large_val(
-                val!({"d": Val::Bytes(large_bytes(22, 2048))}),
+                val!({"d": Val::bytes(large_bytes(22, 2048))}),
                 scope,
                 SpillSource::Manual,
                 Some("m-ret"),
@@ -1758,7 +1758,7 @@ mod tests {
 
         let first = store
             .spill_large_val(
-                val!({"d": Val::Bytes(payload.clone())}),
+                val!({"d": Val::bytes(payload.clone())}),
                 scope,
                 SpillSource::CallArgs,
                 Some("c8"),
@@ -1788,7 +1788,7 @@ mod tests {
         // Same source spills the same content again: the ref row reactivates.
         store
             .spill_large_val(
-                val!({"d": Val::Bytes(payload)}),
+                val!({"d": Val::bytes(payload)}),
                 scope,
                 SpillSource::CallArgs,
                 Some("c8"),

@@ -11245,12 +11245,10 @@ impl VirtualMachine {
             Val::Str(s) => {
                 // String access: try to parse property as an index for character access
                 if let Ok(index) = property.parse::<usize>() {
-                    let chars: Vec<char> = s.chars().collect();
-                    if index < chars.len() {
-                        Ok(Val::from(chars[index].to_string()))
-                    } else {
-                        Ok(Val::Null) // Index out of bounds returns null
-                    }
+                    // Index out of bounds returns null
+                    Ok(s.chars()
+                        .nth(index)
+                        .map_or(Val::Null, |c| Val::from(c.to_string())))
                 } else {
                     // Property is not a valid index
                     Ok(Val::Null)
@@ -12149,7 +12147,7 @@ mod tests {
             crate::val::Val::from("a string that is not a var ref"),
             crate::val::Val::Bool(true),
             crate::val::Val::Byte(0xAB),
-            crate::val::Val::Bytes(vec![1, 2, 3]),
+            crate::val::Val::bytes(vec![1, 2, 3]),
             crate::val::Val::Null,
         ];
 

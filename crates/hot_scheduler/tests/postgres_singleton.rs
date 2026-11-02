@@ -59,6 +59,19 @@ async fn lock_holder(admin: &PgPool) -> Option<i32> {
     .unwrap()
 }
 
+/// Wait for the lock to be free. It outlives the scheduler that held it until
+/// the server has ended that session, and a test's session closes only when
+/// its runtime drops, after `SERIAL` is already released.
+async fn wait_for_free_lock(admin: &PgPool) {
+    for _ in 0..200 {
+        if lock_holder(admin).await.is_none() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the singleton lock was not freed");
+}
+
 async fn wait_for_new_holder(admin: &PgPool, previous: Option<i32>) -> i32 {
     for _ in 0..200 {
         if let Some(pid) = lock_holder(admin).await
@@ -69,6 +82,32 @@ async fn wait_for_new_holder(admin: &PgPool, previous: Option<i32>) -> i32 {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("no scheduler took the singleton lock");
+}
+
+/// Wait for the holder's session to run a periodic lock check. Those begin only
+/// after startup has confirmed the lock, so the scheduler is past failing closed.
+/// Startup's check prepares and runs its statement, which each reset
+/// `query_start`, but one that took a second would have failed startup.
+async fn wait_for_periodic_check(admin: &PgPool, holder: i32) {
+    let mut first_check = None;
+    for _ in 0..800 {
+        let started: Option<f64> = sqlx::query_scalar(
+            "SELECT extract(epoch FROM query_start)::float8 FROM pg_stat_activity \
+             WHERE pid = $1 AND query LIKE '%pg_backend_pid%'",
+        )
+        .bind(holder)
+        .fetch_optional(admin)
+        .await
+        .unwrap()
+        .flatten();
+        if let Some(started) = started
+            && started - *first_check.get_or_insert(started) >= 1.0
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the scheduler ran no periodic lock check");
 }
 
 #[tokio::test]
@@ -82,6 +121,7 @@ async fn a_scheduler_that_loses_its_lock_stops() -> Result<(), Box<dyn std::erro
         .max_connections(2)
         .connect(&uri)
         .await?;
+    wait_for_free_lock(&admin).await;
 
     let first = start_scheduler(&uri).await;
     let holder = wait_for_new_holder(&admin, None).await;
@@ -95,6 +135,7 @@ async fn a_scheduler_that_loses_its_lock_stops() -> Result<(), Box<dyn std::erro
 
     // Failover, `pg_terminate_backend`, or an idle timeout ends the lock's
     // session. The first scheduler must stop within one bounded check.
+    wait_for_periodic_check(&admin, holder).await;
     let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
         .bind(holder)
         .fetch_one(&admin)
@@ -109,6 +150,7 @@ async fn a_scheduler_that_loses_its_lock_stops() -> Result<(), Box<dyn std::erro
     );
 
     // Its replacement acquires the lock afresh.
+    wait_for_free_lock(&admin).await;
     let replacement = start_scheduler(&uri).await;
     wait_for_new_holder(&admin, Some(holder)).await;
     replacement.abort();
@@ -164,13 +206,14 @@ async fn a_scheduler_keeps_its_lock_through_a_brief_database_stall()
         .max_connections(2)
         .connect(&uri)
         .await?;
+    wait_for_free_lock(&admin).await;
     let options = PgConnectOptions::from_str(&uri)?;
     let (port, paused) = stalling_proxy((options.get_host().to_string(), options.get_port())).await;
 
     let scheduler = start_scheduler_with(options.host("127.0.0.1").port(port)).await;
     let holder = wait_for_new_holder(&admin, None).await;
     // Let startup confirm the lock before the stall.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_periodic_check(&admin, holder).await;
 
     // A 3 s stall delays one or two lock checks past their 1 s limit. The
     // scheduler keeps its lock instead of stopping for good.
