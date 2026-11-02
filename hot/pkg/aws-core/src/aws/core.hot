@@ -815,10 +815,10 @@ meta {
     """
 }
 fn
-(method: Str, url: Str, region: Str, service: Str, credentials: Credentials, headers: Map, payload: Str | Bytes): Map {
+(method: Str, url: Str, region: Str, service: Str, credentials: Credentials, headers: Map, payload: Str | Bytes | Null): Map {
     sign-request(method, url, region, service, credentials, headers, payload, get-amz-date())
 },
-(method: Str, url: Str, region: Str, service: Str, credentials: Credentials, headers: Map, payload: Str | Bytes, amz-date: Str): Map {
+(method: Str, url: Str, region: Str, service: Str, credentials: Credentials, headers: Map, payload: Str | Bytes | Null, amz-date: Str): Map {
     ::ctx/mark-secret(untype(credentials))
 
     if-ok(check-signing-target(url, region), (checked) {

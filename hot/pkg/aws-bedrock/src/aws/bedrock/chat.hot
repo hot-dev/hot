@@ -61,7 +61,7 @@ fn
 (model-id: Str, message: Str, system: Str?, opts: Map): Str | AwsError {
     chat(model-id, message, system, null, opts)
 },
-(model-id: Str, message: Str, system: Str?, max-tokens: Int, opts: Map): Str | AwsError {
+(model-id: Str, message: Str, system: Str?, max-tokens: Int?, opts: Map): Str | AwsError {
     messages [user-message(message)]
 
     system-blocks cond {
@@ -110,7 +110,7 @@ fn
 (model-id: Str, message: Str, system: Str?): Str | AwsError {
     chat(model-id, message, system, null, {})
 },
-(model-id: Str, message: Str, system: Str?, max-tokens: Int): Str | AwsError {
+(model-id: Str, message: Str, system: Str?, max-tokens: Int?): Str | AwsError {
     chat(model-id, message, system, max-tokens, {})
 }
 

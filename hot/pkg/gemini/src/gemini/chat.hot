@@ -226,13 +226,13 @@ fn
 (model: Str, message: Str, system: Str): Str {
     chat(model, message, system, null)
 },
-(model: Str, message: Str, system: Str, max-tokens: Int): Str {
+(model: Str, message: Str, system: Str?, max-tokens: Int?): Str {
     chat(model, message, system, max-tokens, {})
 },
 (model: Str, message: Str, opts: Map): Str {
     chat(model, message, null, null, opts)
 },
-(model: Str, message: Str, system: Str, opts: Map): Str {
+(model: Str, message: Str, system: Str?, opts: Map): Str {
     chat(model, message, system, null, opts)
 },
 (model: Str, message: Str, system: Str?, max-tokens: Int?, opts: Map): Str {

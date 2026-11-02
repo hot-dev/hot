@@ -58,7 +58,7 @@ meta {
     """
 }
 fn
-(limit: Int, exclusive_start_table_name: Str?, opts: Map): ListTablesResponse | AwsError {
+(limit: Int?, exclusive_start_table_name: Str?, opts: Map): ListTablesResponse | AwsError {
     if-ok(resolve(opts), (resolved) {
         url `${service-url(resolved, "dynamodb")}/`
 
@@ -86,16 +86,16 @@ fn
         }
     })
 },
-(limit: Int, opts: Map): ListTablesResponse | AwsError {
+(limit: Int?, opts: Map): ListTablesResponse | AwsError {
     list-tables(limit, null, opts)
 },
 (opts: Map): ListTablesResponse | AwsError {
     list-tables(100, null, opts)
 },
-(limit: Int, exclusive_start_table_name: Str?): ListTablesResponse | AwsError {
+(limit: Int?, exclusive_start_table_name: Str?): ListTablesResponse | AwsError {
     list-tables(limit, exclusive_start_table_name, {})
 },
-(limit: Int): ListTablesResponse | AwsError {
+(limit: Int?): ListTablesResponse | AwsError {
     list-tables(limit, null)
 },
 (): ListTablesResponse | AwsError {

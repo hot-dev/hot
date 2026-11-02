@@ -55,7 +55,7 @@ meta {
     """
 }
 fn
-(table_name: Str, item: Map, condition_expression: Str?, expression_attribute_values: Map, opts: Map): PutItemResponse | AwsError {
+(table_name: Str, item: Map, condition_expression: Str?, expression_attribute_values: Map?, opts: Map): PutItemResponse | AwsError {
     if-ok(resolve(opts), (resolved) {
         url `${service-url(resolved, "dynamodb")}/`
 
@@ -92,7 +92,7 @@ fn
 (table_name: Str, item: Map, opts: Map): PutItemResponse | AwsError {
     put-item(table_name, item, null, null, opts)
 },
-(table_name: Str, item: Map, condition_expression: Str?, expression_attribute_values: Map): PutItemResponse | AwsError {
+(table_name: Str, item: Map, condition_expression: Str?, expression_attribute_values: Map?): PutItemResponse | AwsError {
     put-item(table_name, item, condition_expression, expression_attribute_values, {})
 },
 (table_name: Str, item: Map): PutItemResponse | AwsError {
@@ -179,7 +179,7 @@ meta {
     """
 }
 fn
-(table_name: Str, key: Map, condition_expression: Str?, expression_attribute_values: Map, opts: Map): DeleteItemResponse | AwsError {
+(table_name: Str, key: Map, condition_expression: Str?, expression_attribute_values: Map?, opts: Map): DeleteItemResponse | AwsError {
     if-ok(resolve(opts), (resolved) {
         url `${service-url(resolved, "dynamodb")}/`
 
@@ -216,7 +216,7 @@ fn
 (table_name: Str, key: Map, opts: Map): DeleteItemResponse | AwsError {
     delete-item(table_name, key, null, null, opts)
 },
-(table_name: Str, key: Map, condition_expression: Str?, expression_attribute_values: Map): DeleteItemResponse | AwsError {
+(table_name: Str, key: Map, condition_expression: Str?, expression_attribute_values: Map?): DeleteItemResponse | AwsError {
     delete-item(table_name, key, condition_expression, expression_attribute_values, {})
 },
 (table_name: Str, key: Map): DeleteItemResponse | AwsError {
@@ -246,7 +246,7 @@ meta {
     """
 }
 fn
-(table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map, opts: Map): UpdateItemResponse | AwsError {
+(table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map?, opts: Map): UpdateItemResponse | AwsError {
     if-ok(resolve(opts), (resolved) {
         url `${service-url(resolved, "dynamodb")}/`
 
@@ -280,7 +280,7 @@ fn
         }
     })
 },
-(table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map): UpdateItemResponse | AwsError {
+(table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map?): UpdateItemResponse | AwsError {
     update-item(table_name, key, update_expression, expression_attribute_values, expression_attribute_names, {})
 },
 (table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map): UpdateItemResponse | AwsError {

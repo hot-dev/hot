@@ -88,7 +88,7 @@ meta {
     """
 }
 fn
-(model_id: Str, messages: Vec<Map>, system: Vec<Map>, inference_config: Map, tool_config: Map, guardrail_config: Map, opts: Map): ConverseResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>?, inference_config: Map?, tool_config: Map?, guardrail_config: Map?, opts: Map): ConverseResponse | AwsError {
     if-ok(resolve(opts), (resolved) {
         url `${service-url(resolved, "bedrock-runtime")}/model/${uri-encode(model_id)}/converse`
 
@@ -124,7 +124,7 @@ fn
         }
     })
 },
-(model_id: Str, messages: Vec<Map>, system: Vec<Map>, inference_config: Map, opts: Map): ConverseResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>?, inference_config: Map?, opts: Map): ConverseResponse | AwsError {
     converse(model_id, messages, system, inference_config, null, null, opts)
 },
 (model_id: Str, messages: Vec<Map>, opts: Map): ConverseResponse | AwsError {
@@ -135,13 +135,13 @@ fn
         {role: "user", content: [{text: text}]}
     ], null, null, null, null, opts)
 },
-(model_id: Str, messages: Vec<Map>, system: Vec<Map>, inference_config: Map, tool_config: Map, guardrail_config: Map): ConverseResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>?, inference_config: Map?, tool_config: Map?, guardrail_config: Map?): ConverseResponse | AwsError {
     converse(model_id, messages, system, inference_config, tool_config, guardrail_config, {})
 },
-(model_id: Str, messages: Vec<Map>, system: Vec<Map>, inference_config: Map): ConverseResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>?, inference_config: Map?): ConverseResponse | AwsError {
     converse(model_id, messages, system, inference_config, null, null)
 },
-(model_id: Str, messages: Vec<Map>, system: Vec<Map>): ConverseResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>?): ConverseResponse | AwsError {
     converse(model_id, messages, system, null, null, null)
 },
 (model_id: Str, messages: Vec<Map>): ConverseResponse | AwsError {
@@ -165,7 +165,7 @@ meta {
     """
 }
 fn
-(model_id: Str, messages: Vec<Map>, system: Vec<Map>, inference_config: Map, tool_config: Map, opts: Map): HttpResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>?, inference_config: Map?, tool_config: Map?, opts: Map): HttpResponse | AwsError {
     if-ok(resolve(opts), (resolved) {
         url `${service-url(resolved, "bedrock-runtime")}/model/${uri-encode(model_id)}/converse-stream`
 
@@ -195,16 +195,16 @@ fn
         }
     })
 },
-(model_id: Str, messages: Vec<Map>, system: Vec<Map>, opts: Map): HttpResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>?, opts: Map): HttpResponse | AwsError {
     converse-stream(model_id, messages, system, null, null, opts)
 },
 (model_id: Str, messages: Vec<Map>, opts: Map): HttpResponse | AwsError {
     converse-stream(model_id, messages, null, null, null, opts)
 },
-(model_id: Str, messages: Vec<Map>, system: Vec<Map>, inference_config: Map, tool_config: Map): HttpResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>?, inference_config: Map?, tool_config: Map?): HttpResponse | AwsError {
     converse-stream(model_id, messages, system, inference_config, tool_config, {})
 },
-(model_id: Str, messages: Vec<Map>, system: Vec<Map>): HttpResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>?): HttpResponse | AwsError {
     converse-stream(model_id, messages, system, null, null)
 },
 (model_id: Str, messages: Vec<Map>): HttpResponse | AwsError {
@@ -318,7 +318,7 @@ meta {
     """
 }
 fn
-(max_tokens: Int, temperature: Dec, top_p: Dec, stop_sequences: Vec<Str>): Map {
+(max_tokens: Int, temperature: Dec?, top_p: Dec?, stop_sequences: Vec<Str>?): Map {
     config {
         maxTokens: max_tokens
     }

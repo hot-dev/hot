@@ -117,20 +117,18 @@ fn
 (model: Str, query: Str): Str {
     search-web(model, query, null)
 },
-(model: Str, query: Str, instructions: Str): Str {
+(model: Str, query: Str, instructions: Str?): Str {
     search-web(model, query, instructions, {})
 },
 (model: Str, query: Str, opts: Map): Str {
     search-web(model, query, null, opts)
 },
 (model: Str, query: Str, instructions: Str?, opts: Map): Str {
-    base {
+    request assoc-some({
         model: model,
         input: query,
         tools: [web-search-tool()]
-    }
-
-    request if(is-null(instructions), base, assoc(base, "instructions", instructions))
+    }, "instructions", instructions)
 
     response create(CreateResponseRequest(request), opts)
 
@@ -164,20 +162,18 @@ fn
 (model: Str, query: Str): Str {
     search-x(model, query, null)
 },
-(model: Str, query: Str, instructions: Str): Str {
+(model: Str, query: Str, instructions: Str?): Str {
     search-x(model, query, instructions, {})
 },
 (model: Str, query: Str, opts: Map): Str {
     search-x(model, query, null, opts)
 },
 (model: Str, query: Str, instructions: Str?, opts: Map): Str {
-    base {
+    request assoc-some({
         model: model,
         input: query,
         tools: [x-search-tool()]
-    }
-
-    request if(is-null(instructions), base, assoc(base, "instructions", instructions))
+    }, "instructions", instructions)
 
     response create(CreateResponseRequest(request), opts)
 
@@ -207,20 +203,18 @@ fn
 (model: Str, query: Str): Str {
     search-all(model, query, null)
 },
-(model: Str, query: Str, instructions: Str): Str {
+(model: Str, query: Str, instructions: Str?): Str {
     search-all(model, query, instructions, {})
 },
 (model: Str, query: Str, opts: Map): Str {
     search-all(model, query, null, opts)
 },
 (model: Str, query: Str, instructions: Str?, opts: Map): Str {
-    base {
+    request assoc-some({
         model: model,
         input: query,
         tools: [web-search-tool(), x-search-tool()]
-    }
-
-    request if(is-null(instructions), base, assoc(base, "instructions", instructions))
+    }, "instructions", instructions)
 
     response create(CreateResponseRequest(request), opts)
 

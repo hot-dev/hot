@@ -107,7 +107,7 @@ meta {
     """
 }
 fn
-(queue_url: Str, message_body: Str, delay_seconds: Int, message_attributes: Map, opts: Map): SendMessageResponse | AwsError {
+(queue_url: Str, message_body: Str, delay_seconds: Int, message_attributes: Map?, opts: Map): SendMessageResponse | AwsError {
     if-ok(resolve(opts), (resolved) {
         attrs if(is-null(message_attributes), {}, message_attributes)
 
@@ -140,7 +140,7 @@ fn
 (queue_url: Str, message_body: Str, opts: Map): SendMessageResponse | AwsError {
     send-message(queue_url, message_body, 0, {}, opts)
 },
-(queue_url: Str, message_body: Str, delay_seconds: Int, message_attributes: Map): SendMessageResponse | AwsError {
+(queue_url: Str, message_body: Str, delay_seconds: Int, message_attributes: Map?): SendMessageResponse | AwsError {
     send-message(queue_url, message_body, delay_seconds, message_attributes, {})
 },
 (queue_url: Str, message_body: Str, delay_seconds: Int): SendMessageResponse | AwsError {

@@ -166,6 +166,10 @@ greet fn (name: Str, title: Str?): Str {
 
 `Str?` is shorthand for `Str | Null`.
 
+Null isn't converted at a call. A caller can still pass null to a parameter declared without `?` through an `Any` value, and `x: Str` then holds null, not `""`. Only `Str(null)` and template interpolation turn null into `""`. Standard library functions return an `Err` for null unless their parameter is declared `Str?`: `lowercase(null)` fails, and `is-empty(null)` is `true`.
+
+`hot check` warns with `null-check-on-non-nullable` on `is-null(x)` or `is-some(x)` for a parameter declared without `?`, and with `null-for-non-nullable` on a literal `null` argument for one. Declare the parameter `Str?` when null is allowed.
+
 > **Note:** The `?` syntax indicates the *type* accepts null—it does not make the parameter omittable. You must still pass an argument (either a value or `null`). For truly optional parameters, use function overloading.
 
 > **Why no `Option` type?** Languages without null (like Rust) use `Option<T>` with `Some(value)` and `None` to represent optional values. Hot has null to align with JavaScript/JSON data types, so `T?` achieves the same thing more concisely. While `Option` can technically express one extra state (`Some(null)` vs `None`), this distinction is rarely needed in practice and adds complexity for everyone. If an `Option` type is needed, you can define a custom type and make it [core](/docs/language/meta#core-functions) to your codebase.
@@ -485,6 +489,15 @@ Arrow coercions are one-hop. Hot does not search a chain such as
 `A -> B -> C` to satisfy a parameter requiring `C`. If more than one direct
 arrow could satisfy the same conversion, the call is ambiguous rather than
 silently choosing one.
+
+Arrows also apply implicitly when a call passes a value to a typed parameter,
+if either side is a declared type: a `Triangle` passed to `s: Shape` goes through
+`Triangle -> Shape.Tri`, and a `Temperature` passed to `x: Str` goes through
+`Temperature -> Str`. An arrow between two built-in types doesn't apply
+implicitly. `Int -> Str` backs `Str(5)`, so `f(5)` for `x: Str` is a type error,
+and a `5` that reaches `x` through an `Any` value stays `5`. Null is never
+converted at a call. Functions called by `map` and other higher-order functions,
+and lambdas, don't apply arrows.
 
 ## Result Types
 

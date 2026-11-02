@@ -113,7 +113,7 @@ meta {
     """
 }
 fn
-(model_id: Str, messages: Vec<Map>, max_tokens: Int, system: Str?, temperature: Dec, top_p: Dec, stop_sequences: Vec<Str>, opts: Map): ClaudeResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, max_tokens: Int, system: Str?, temperature: Dec?, top_p: Dec?, stop_sequences: Vec<Str>?, opts: Map): ClaudeResponse | AwsError {
     if-ok(resolve(opts), (resolved) {
         url `${service-url(resolved, "bedrock-runtime")}/model/${uri-encode(model_id)}/invoke`
 
@@ -174,7 +174,7 @@ fn
         null
     , opts)
 },
-(model_id: Str, messages: Vec<Map>, max_tokens: Int, system: Str?, temperature: Dec, top_p: Dec, stop_sequences: Vec<Str>): ClaudeResponse | AwsError {
+(model_id: Str, messages: Vec<Map>, max_tokens: Int, system: Str?, temperature: Dec?, top_p: Dec?, stop_sequences: Vec<Str>?): ClaudeResponse | AwsError {
     invoke-claude(model_id, messages, max_tokens, system, temperature, top_p, stop_sequences, {})
 },
 (model_id: Str, messages: Vec<Map>, max_tokens: Int, system: Str?): ClaudeResponse | AwsError {
@@ -219,7 +219,7 @@ meta {
     """
 }
 fn
-(model_id: Str, input_text: Str?, max_token_count: Int, temperature: Dec, top_p: Dec, stop_sequences: Vec<Str>, opts: Map): TitanResponse | AwsError {
+(model_id: Str, input_text: Str?, max_token_count: Int, temperature: Dec?, top_p: Dec?, stop_sequences: Vec<Str>?, opts: Map): TitanResponse | AwsError {
     if-ok(resolve(opts), (resolved) {
         url `${service-url(resolved, "bedrock-runtime")}/model/${uri-encode(model_id)}/invoke`
 
@@ -265,7 +265,7 @@ fn
 (input_text: Str?, opts: Map): TitanResponse | AwsError {
     invoke-titan("amazon.titan-text-express-v1", input_text, 4096, null, null, null, opts)
 },
-(model_id: Str, input_text: Str?, max_token_count: Int, temperature: Dec, top_p: Dec, stop_sequences: Vec<Str>): TitanResponse | AwsError {
+(model_id: Str, input_text: Str?, max_token_count: Int, temperature: Dec?, top_p: Dec?, stop_sequences: Vec<Str>?): TitanResponse | AwsError {
     invoke-titan(model_id, input_text, max_token_count, temperature, top_p, stop_sequences, {})
 },
 (model_id: Str, input_text: Str?, max_token_count: Int): TitanResponse | AwsError {
@@ -296,7 +296,7 @@ meta {
     """
 }
 fn
-(model_id: Str, prompt: Str?, max_gen_len: Int, temperature: Dec, top_p: Dec, opts: Map): InvokeModelResponse | AwsError {
+(model_id: Str, prompt: Str?, max_gen_len: Int, temperature: Dec?, top_p: Dec?, opts: Map): InvokeModelResponse | AwsError {
     if-ok(resolve(opts), (resolved) {
         url `${service-url(resolved, "bedrock-runtime")}/model/${uri-encode(model_id)}/invoke`
 
@@ -335,7 +335,7 @@ fn
 (prompt: Str?, opts: Map): InvokeModelResponse | AwsError {
     invoke-llama("meta.llama3-8b-instruct-v1:0", prompt, 2048, null, null, opts)
 },
-(model_id: Str, prompt: Str?, max_gen_len: Int, temperature: Dec, top_p: Dec): InvokeModelResponse | AwsError {
+(model_id: Str, prompt: Str?, max_gen_len: Int, temperature: Dec?, top_p: Dec?): InvokeModelResponse | AwsError {
     invoke-llama(model_id, prompt, max_gen_len, temperature, top_p, {})
 },
 (model_id: Str, prompt: Str?, max_gen_len: Int): InvokeModelResponse | AwsError {
@@ -366,7 +366,7 @@ meta {
     """
 }
 fn
-(model_id: Str, prompt: Str?, max_tokens: Int, temperature: Dec, top_p: Dec, stop: Vec<Str>, opts: Map): InvokeModelResponse | AwsError {
+(model_id: Str, prompt: Str?, max_tokens: Int, temperature: Dec?, top_p: Dec?, stop: Vec<Str>?, opts: Map): InvokeModelResponse | AwsError {
     if-ok(resolve(opts), (resolved) {
         url `${service-url(resolved, "bedrock-runtime")}/model/${uri-encode(model_id)}/invoke`
 
@@ -409,7 +409,7 @@ fn
 (prompt: Str?, opts: Map): InvokeModelResponse | AwsError {
     invoke-mistral("mistral.mistral-7b-instruct-v0:2", prompt, 4096, null, null, null, opts)
 },
-(model_id: Str, prompt: Str?, max_tokens: Int, temperature: Dec, top_p: Dec, stop: Vec<Str>): InvokeModelResponse | AwsError {
+(model_id: Str, prompt: Str?, max_tokens: Int, temperature: Dec?, top_p: Dec?, stop: Vec<Str>?): InvokeModelResponse | AwsError {
     invoke-mistral(model_id, prompt, max_tokens, temperature, top_p, stop, {})
 },
 (model_id: Str, prompt: Str?, max_tokens: Int): InvokeModelResponse | AwsError {

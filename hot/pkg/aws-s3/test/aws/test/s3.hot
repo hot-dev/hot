@@ -356,6 +356,7 @@ meta ["test"] fn () {
 
 test-list-objects-arities
 meta ["test"] fn () {
+    assert(contains(sent(::objects/list-objects("bkt", null, 5, null, echo())).url, "&prefix=&"), "a null prefix is no prefix")
     url sent(::objects/list-objects("bkt", "p/", 5, "tok=", {...echo(), delimiter: "/"})).url
     assert-eq(`${B}/?list-type=2&prefix=p%2F&max-keys=5&encoding-type=url&continuation-token=tok%3D&delimiter=%2F`, url)
     assert-eq(`${B}/?list-type=2&prefix=p%2F&max-keys=5&encoding-type=url`, sent(::objects/list-objects("bkt", "p/", 5, echo())).url)
@@ -587,6 +588,13 @@ meta ["test"] fn () {
     assert-eq(["photos/"], folder.parents)
     assert-eq("inode/directory", folder.mime-type)
     assert(is-null(folder.version))
+}
+
+test-missing-fields-stay-missing
+meta ["test"] fn () {
+    // Null reaches a Str parameter as null, so these are handled, not coerced
+    assert-eq("", ::objects/to-doc-file({}).id, "a Map with no key")
+    assert(contains(::objects/complete-multipart-body([{part_number: 1}]), "<ETag></ETag>"), "a part with no etag: S3 answers with the error")
 }
 
 test-to-doc-files

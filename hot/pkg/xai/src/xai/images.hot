@@ -330,7 +330,7 @@ meta {
 fn (prompt: Str): Str | HttpError {
     create-image(prompt, null)
 },
-(prompt: Str, size: Str): Str | HttpError {
+(prompt: Str, size: Str?): Str | HttpError {
     create-image(prompt, size, {})
 },
 (prompt: Str, opts: Map): Str | HttpError {

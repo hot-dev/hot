@@ -252,12 +252,12 @@ list-query
 meta {
     doc: """The ListObjectsV2 query string. Exposed for testing. `encoding-type=url` makes S3 URL-encode keys in the response, so any key survives the XML."""
 }
-fn (prefix: Str, max_keys: Int, continuation_token: Str?, opts: Map): Str {
+fn (prefix: Str?, max_keys: Int, continuation_token: Str?, opts: Map): Str {
     delimiter get(opts, "delimiter")
     start-after get(opts, "start-after")
     params [
         "list-type=2",
-        `prefix=${uri-encode(prefix)}`,
+        `prefix=${uri-encode(or(prefix, ""))}`,
         `max-keys=${max_keys}`,
         "encoding-type=url",
         if(is-null(continuation_token), null, `continuation-token=${uri-encode(or(continuation_token, ""))}`),
@@ -296,7 +296,7 @@ meta {
     """
 }
 fn
-(bucket: Str, prefix: Str, max_keys: Int, continuation_token: Str?, opts: Map): ListObjectsResponse | AwsError {
+(bucket: Str, prefix: Str?, max_keys: Int, continuation_token: Str?, opts: Map): ListObjectsResponse | AwsError {
     if-ok(::api/resolve(opts, bucket), (resolved) {
         url `${::api/bucket-url(bucket, resolved)}/?${list-query(prefix, max_keys, continuation_token, opts)}`
 
@@ -308,22 +308,22 @@ fn
         }
     })
 },
-(bucket: Str, prefix: Str, max_keys: Int, opts: Map): ListObjectsResponse | AwsError {
+(bucket: Str, prefix: Str?, max_keys: Int, opts: Map): ListObjectsResponse | AwsError {
     list-objects(bucket, prefix, max_keys, null, opts)
 },
-(bucket: Str, prefix: Str, opts: Map): ListObjectsResponse | AwsError {
+(bucket: Str, prefix: Str?, opts: Map): ListObjectsResponse | AwsError {
     list-objects(bucket, prefix, 1000, null, opts)
 },
 (bucket: Str, opts: Map): ListObjectsResponse | AwsError {
     list-objects(bucket, "", 1000, null, opts)
 },
-(bucket: Str, prefix: Str, max_keys: Int, continuation_token: Str?): ListObjectsResponse | AwsError {
+(bucket: Str, prefix: Str?, max_keys: Int, continuation_token: Str?): ListObjectsResponse | AwsError {
     list-objects(bucket, prefix, max_keys, continuation_token, {})
 },
-(bucket: Str, prefix: Str, max_keys: Int): ListObjectsResponse | AwsError {
+(bucket: Str, prefix: Str?, max_keys: Int): ListObjectsResponse | AwsError {
     list-objects(bucket, prefix, max_keys, null, {})
 },
-(bucket: Str, prefix: Str): ListObjectsResponse | AwsError {
+(bucket: Str, prefix: Str?): ListObjectsResponse | AwsError {
     list-objects(bucket, prefix, 1000, null, {})
 },
 (bucket: Str): ListObjectsResponse | AwsError {
@@ -551,7 +551,7 @@ meta {
 }
 fn (parts: Vec): Str {
     elems sort-by(map(parts, untype), %.part_number)
-        |> map((part) { `<Part><PartNumber>${part.part_number}</PartNumber><ETag>${xml-escape(part.etag)}</ETag></Part>` })
+        |> map((part) { `<Part><PartNumber>${part.part_number}</PartNumber><ETag>${xml-escape(or(part.etag, ""))}</ETag></Part>` })
         |> join("")
     `<CompleteMultipartUpload xmlns="http://s3.amazonaws.com/doc/2006-03-01/">${elems}</CompleteMultipartUpload>`
 }
@@ -720,7 +720,7 @@ meta {
 fn
 (object: Any, bucket: Str?): DocFile {
     o untype(object)
-    key o.key
+    key or(get(o, "key"), "")
     segments key-segments(key)
     name if(is-empty(segments), key, last(segments))
     is-folder ends-with(key, "/")
