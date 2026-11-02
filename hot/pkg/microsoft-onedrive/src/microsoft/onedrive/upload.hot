@@ -171,7 +171,7 @@ fn (response: Result, assumed-offset: Int?): Map {
 
     eq(response.status, 404) => { err("microsoft-onedrive: the upload session has expired or was cancelled; start a new upload") }
     eq(response.status, 416) => { err("microsoft-onedrive: the upload session already has this range; call resume-upload to continue from nextExpectedRanges") }
-    => { err(::api/http-error(response)) }
+    => { err(::api/HttpError(response)) }
   }
 }
 
@@ -293,7 +293,7 @@ fn
   cond {
     is-err(response) => { response }
     eq(response.status, 404) => { err("microsoft-onedrive: the upload session has expired or was cancelled; start a new upload") }
-    not(::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+    not(::http/is-ok-response(response)) => { err(::api/HttpError(response)) }
     => {
       b if(is-map(response.body), response.body, {})
       ranges or(get(b, "nextExpectedRanges"), [])
@@ -339,7 +339,7 @@ fn
   cond {
     is-err(response) => { response }
     or(::http/is-ok-response(response), eq(response.status, 404)) => { true }
-    => { err(::api/http-error(response)) }
+    => { err(::api/HttpError(response)) }
   }
 }
 

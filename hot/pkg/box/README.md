@@ -16,7 +16,20 @@ hot.project.my-app.deps {
 
 ## Auth and context variables
 
-Set credentials once in Context Variables, or pass them per call in `opts` for multi-tenant apps (per-call credentials replace context for that call; your app's `box.client.id` / `box.client.secret` still fill in).
+Set credentials once in Context Variables, or pass them per call in `opts` for multi-tenant apps.
+
+### Per-call credentials
+
+Per-call credentials replace context for that call; your app's `box.client.id` / `box.client.secret` still fill in. They are never written to context, and they are masked in call records, including the secrets inside a `jwt-config`, as is every token Box returns.
+
+```hot
+tenant {account: `tenant:${tenant-id}`}
+items ::box::folders/list-all-items("0", tenant, 200)
+```
+
+A credential key (`token`, `account`, `refresh-token`, `client-id`, `client-secret`, `jwt-config`, `private-key`) that is present but blank or null is an error naming the key, never a fallback to context. `::box::api/resolve(opts)` is the one place this is decided. The `box.api-root` and `box.upload-root` roots are context-only, and `::box::api/request` refuses any other host, and plain http unless the override is itself http, so a call cannot redirect or downgrade credentials.
+
+### Context variables
 
 | Context Variable | `opts` key | Description |
 |---|---|---|
@@ -144,7 +157,7 @@ report ::up/upload-file("q3.csv", "region,total\nwest,42\n", folder.id)
 
 **`::box::auth`** / **`::box::oauth`**: `access-token`, `save-tokens`, `load-tokens`, `forget-tokens`; `authorize-url`, `exchange-code`, `refresh-tokens`, `revoke-token`.
 
-**`::box::api`**: `request`, `json`, `HttpError`, `http-error`, `is-retryable`, `has-code`, `collect-marker`, `collect-offset`, `with-query`.
+**`::box::api`**: `request`, `json`, `resolve`, `HttpError` (`HttpError(response)` builds it from a non-2xx response), `is-retryable`, `has-code`, `collect-marker`, `collect-offset`, `with-query`.
 
 The most used functions are also aliased at the top level (`::box/list-items`, `list-all-items`, `get-folder`, `create-folder`, `get-file`, `search`, `download-file`, `read-document`, `upload-file`).
 
@@ -235,7 +248,7 @@ Box may deliver an event twice or out of order: `sync-events` drops repeated `ev
 
 **Admin logs** (`admin-events`, `admin-events-all`) read the enterprise stream: `stream_type: "admin_logs"` with `created_after` / `created_before` and `event_type` filters, or `"admin_logs_streaming"` for the low-latency last two weeks. They need an enterprise admin token with "Manage enterprise properties", which the free developer plan does not have.
 
-**Long-poll.** `long-poll(url, position)` waits on a Box realtime server until it answers `new_change` or `reconnect`. It is a blocking HTTP call that holds the run for up to Hot's 120-second request timeout, then returns `{message: "timeout"}`. The realtime URL comes from `OPTIONS /events`, and Hot 3.0.x's HTTP client cannot send OPTIONS, so `long-poll-url` currently returns an explanatory Err. A schedule calling `sync-events`, or a webhook that triggers it, is the better fit for Hot.
+**Long-poll.** `long-poll(url, position)` waits on a Box realtime server until it answers `new_change` or `reconnect`. It is a blocking HTTP call that holds the run for up to Hot's 120-second request timeout, then returns `{message: "timeout"}`. `long-poll-url` gets the realtime URL from `OPTIONS /events`. A schedule calling `sync-events`, or a webhook that triggers it, is the better fit for Hot.
 
 ## Webhooks
 
@@ -292,11 +305,11 @@ Folder items, collaborations and webhooks use **marker** paging (`next_marker`);
 
 - **Rate limits:** 1,000 API calls per minute per user; 240 uploads per minute per user; search 6 per second and 60 per minute per user, 12 per second per enterprise. Enterprises also have a monthly API allocation set by their plan.
 - **Search** indexes new content after a few minutes, and offset paging stops at 10,000 results. `scope: "enterprise_content"` must be enabled by Box support.
-- **Preflight:** `preflight-check` needs an `OPTIONS` request, which Hot 3.0.x's HTTP client does not send, so it currently returns an explanatory Err. Uploads still fail cleanly with 409 `item_name_in_use` or 403 `storage_limit_exceeded`.
+- **Preflight:** `preflight-check` and `preflight-version` send `OPTIONS` and return `{upload_url, upload_token}`, or the 409 `item_name_in_use` / 403 `storage_limit_exceeded` an upload would hit, before any bytes move.
 - **Shared links:** removing one sends `{"shared_link": null}`, the only JSON null this package sends (Box's documented way to remove a link). `company` access needs a paid plan, and enterprises may restrict shared links and external collaboration (403).
 - **Trash:** `trash-file` and `trash-folder` move items to the trash, recoverable until the enterprise's retention period (30 days by default). Permanent deletion is not wrapped.
 - **Plans:** version history, admin logs, `enterprise_content` search, Box Shield and similar features need a paid Business or Enterprise plan. Box documents a [free developer plan](https://developer.box.com/platform/free-developer-plan) (10 GB, 250 MB uploads, one file version, OAuth, JWT and CCG, with a pre-authorized default CCG app), but as of November 2026 its signup link redirects to Box's pricing page, so new signups may not be open; a free Individual account with a Developer Console app, or a Business trial, also works for testing.
-- **Data handling:** tokens, refresh tokens, client secrets and private keys are never logged or put into error messages, and the token cache stores them as secrets. The keeper stores live tokens in `::hot::store`; restrict who can read that store. Error messages include Box's `request_id` but not `context_info`, which can contain item names.
+- **Data handling:** tokens, refresh tokens, client secrets and private keys are never logged or put into error messages. Per-call credentials and every token Box returns are marked with `::hot::ctx/mark-secret`, so call records mask them, and the token cache stores them as secrets. The keeper stores live tokens in `::hot::store`; restrict who can read that store. Error messages include Box's `request_id` but not `context_info`, which can contain item names.
 
 ## Integration tests
 

@@ -25,7 +25,6 @@ meta {
 DocFile ::microsoft::onedrive/DocFile
 
 DEFAULT_PAGE_SIZE 200
-RUNTIME_REDIRECT_MESSAGE "redirect missing valid Location"
 
 json fn (method: Str, path: Str, headers: Map, body: Any, opts: Map): Any {
   ::api/json(method, path, headers, body, ::od/creds(opts))
@@ -375,7 +374,7 @@ fn
       response ::api/request("POST", `${::od/item-path(item, opts)}/copy${qs}`, {}, build-copy(dest-parent-id, opts), ::od/creds(opts))
       cond {
         is-err(response) => { response }
-        not(::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+        not(::http/is-ok-response(response)) => { err(::api/HttpError(response)) }
         => {
           monitor ::api/header-value(response.headers, "location")
           if(is-null(monitor), err("microsoft-onedrive: the copy was accepted without a monitor URL"), {monitor-url: monitor, status: "accepted"})
@@ -413,39 +412,34 @@ meta {
     doc: """
     Interpret a monitor-URL response (pure). 200 and 202 carry an
     AsyncOperationStatus body. Personal OneDrive answers a finished copy
-    with `303 See Other`; Hot follows the redirect to the new item, whose
-    API URL needs a token, so a 401/403 there also means completed.
+    with `303 See Other`. `::hot::http/request` follows a 303 that has a
+    `Location` (as a GET, with no Authorization), so the answer is then
+    the new item's URL: a 401 or 403 (its API URL needs a token) or a
+    driveItem both mean completed. A 303 without `Location` arrives as
+    itself and also means completed.
     """
 }
 fn (response: Result): CopyStatus {
   cond {
-    is-err(response) => {
-      cond {
-        // WORKAROUND(hot-bug-2): a 303 without Location comes back as an Err; on a copy monitor that means the job finished.
-        contains(err-message(response), RUNTIME_REDIRECT_MESSAGE) => {
-          CopyStatus({status: "completed", percent: 100, resource-id: null, error: null, done: true})
-        }
-        => { response }
-      }
-    }
+    is-err(response) => { response }
 
     in(response.status, [200, 202]) => {
       b if(is-map(response.body), response.body, {})
       s or(get(b, "status"), "unknown")
-      pct get(b, "percentageComplete")
+      is-item and(is-null(get(b, "status")), is-some(get(b, "id")))
       CopyStatus({
-        status: s,
-        percent: pct,
-        resource-id: get(b, "resourceId"),
+        status: if(is-item, "completed", s),
+        percent: if(is-item, 100, get(b, "percentageComplete")),
+        resource-id: if(is-item, b.id, get(b, "resourceId")),
         error: if(is-map(get(b, "error")), b.error, null),
-        done: in(s, ["completed", "failed"])
+        done: or(is-item, in(s, ["completed", "failed"]))
       })
     }
 
     in(response.status, [303, 401, 403]) => {
       CopyStatus({status: "completed", percent: 100, resource-id: null, error: null, done: true})
     }
-    => { err(::api/http-error(response)) }
+    => { err(::api/HttpError(response)) }
   }
 }
 

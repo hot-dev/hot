@@ -27,7 +27,18 @@ Create an app in the [Dropbox App Console](https://www.dropbox.com/developers/ap
 | `dropbox.path.root` | `path-root` | `Dropbox-API-Path-Root`: a root namespace id for the team space, `ns:<id>` for one namespace, or `home` |
 | `dropbox.api.root` | | Optional: send every route to a proxy or local mock (`{root}/2/{route}`) |
 
-Per-call `opts` win over context: a `token` or `refresh-token` in `opts` replaces the context credentials for that call (a per-call refresh token without `app-key` borrows the context app key and secret). Every function has an options arity; Dropbox arguments use Dropbox's own snake_case names (`recursive`, `limit`, `include_deleted`, `autorename`, ...).
+### Per-call credentials
+
+Per-call `opts` win over context: a `token` or `refresh-token` in `opts` replaces the context credentials for that call (a per-call refresh token without `app-key` borrows the context app key and secret). They are never written to context, and they are masked in call records, as is every token the token endpoint returns.
+
+```hot
+tenant {refresh-token: stored-refresh-token, app-key: "abc123appkey", app-secret: stored-app-secret}
+entries ::dropbox::files/list-folder("/Reports", tenant)
+```
+
+A credential key (`token`, `refresh-token`, `app-key`, `app-secret`) that is present but blank or null is an error naming the key, never a fallback to context. Leave `app-secret` out for a PKCE client. `::dropbox::api/resolve(opts)` is the one place this is decided. The `dropbox.api.root` proxy root is context-only, so a call cannot redirect credentials.
+
+Every function has an options arity; Dropbox arguments use Dropbox's own snake_case names (`recursive`, `limit`, `include_deleted`, `autorename`, ...).
 
 | Scope | Enough for |
 |---|---|

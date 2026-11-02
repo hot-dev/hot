@@ -3,7 +3,7 @@
 hot.pkg.documents {
   name: "hot.dev/documents",
   version: "0.1.0",
-  hot-min-version: "3.0.0",
+  hot-min-version: "3.0.2",
   description: "Provider-neutral document access for workflows and AI agents: one Document record, source descriptors, list/search/get/download, read-text with native export or extraction (Google Docs to Markdown, Dropbox Paper export, Box extracted text, OneDrive conversion), uploads, change feeds with opaque cursors, webhook normalising and per-provider capabilities over Google Drive, OneDrive and SharePoint, Dropbox, Box and Amazon S3.",
   author: "Hot Dev",
   email: "support@hot.dev",
@@ -30,10 +30,10 @@ hot.pkg.documents {
       git: "https://github.com/hot-dev/hot",
       path: "hot/pkg/box"
     },
-    "hot.dev/aws-s3": {
-      local: "../aws-s3",
+    "hot.dev/aws-core": {
+      local: "../aws-core",
       git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/aws-s3"
+      path: "hot/pkg/aws-core"
     }
   },
   src-paths: ["src/"],

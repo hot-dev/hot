@@ -17,6 +17,17 @@ meta {
     Within one source the order is: access token, refresh token,
     certificate, client secret.
 
+    **Per-call rules** (`resolve-from`). A credential key (`token`,
+    `refresh-token`, `client-id`, `client-secret`, `private-key`) that is
+    in `opts` but blank or null is an error naming the key, never a
+    fallback to context: a tenant whose token is missing must not run on
+    the project's credentials. `graph-url` or `login-url` in `opts` need
+    a primary credential in the same `opts`, and a per-call refresh token
+    then borrows nothing from context: context credentials never go to a
+    per-call URL. Credentials from `opts` are marked as secrets
+    (`::hot::ctx/mark-secret`), so call records mask them; they are never
+    written to context.
+
     | Credential | `opts` keys | Context variables |
     |---|---|---|
     | Access token | `token` | `microsoft.access.token` |
@@ -50,7 +61,8 @@ meta {
     context (`::hot::ctx`, stored as secrets) under a key derived from the
     credential identity and the sorted scope set, until `expires_in`
     minus 5 minutes. The cache lives for one run. Explicit access tokens
-    are never cached.
+    are never cached. Every token a token endpoint returns is marked as a
+    secret before it leaves this package.
     """
 }
 
@@ -78,6 +90,13 @@ CREDENTIAL_KEYS ["token", "refresh-token", "client-id", "client-secret", "certif
 PRIMARY_KEYS ["token", "refresh-token", "client-secret", "private-key"]
 IDENTITY_KEYS ["client-id", "tenant-id", "cloud", "graph-url", "login-url"]
 CLIENT_AUTH_KEYS ["client-secret", "private-key", "certificate", "thumbprint", "thumbprint-sha256"]
+// Present but blank in `opts`: an error naming the key, never a fallback to context.
+BLANK_CHECKED_KEYS ["token", "refresh-token", "client-id", "client-secret", "private-key"]
+// Need a primary credential in the same `opts`.
+URL_KEYS ["graph-url", "login-url"]
+// The secret values of `opts` and of a token response.
+SECRET_KEYS ["token", "refresh-token", "client-secret", "private-key"]
+TOKEN_RESPONSE_SECRETS ["access_token", "refresh_token", "id_token"]
 
 TokenError
 meta {
@@ -164,6 +183,31 @@ pick fn (m: Map, ks: Vec): Map {
   filter-keys(m, (k) { in(k, ks) })
 }
 
+mark-values
+meta {
+    doc: """Register the non-blank `values` as secrets for this run's call records (`::hot::ctx/mark-secret`)."""
+}
+fn (values: Vec): Vec {
+  ::ctx/mark-secret(filter(values, (v) { not(is-blank-value(v)) }))
+}
+
+mark-secrets
+meta {
+    doc: """Mark the values of `keys-to-mark` in `m` as secrets and return `m` unchanged."""
+}
+fn (m: Map, keys-to-mark: Vec): Map {
+  mark-values(map(keys-to-mark, (k) { get(m, k) }))
+  m
+}
+
+mark-tokens
+meta {
+    doc: """Mark the access, refresh and id tokens of a token response as secrets and return the response unchanged."""
+}
+fn (tokens: Map): Map {
+  mark-secrets(tokens, TOKEN_RESPONSE_SECRETS)
+}
+
 parse-int
 meta {
     doc: """Parse an Int from an Int or a decimal-digit Str (surrounding whitespace allowed); null for anything else. Never halts on bad input."""
@@ -174,7 +218,7 @@ fn (value: Any): Int? {
     not(is-str(value)) => { null }
     => {
       s trim(value)
-      // WORKAROUND(hot-bug-6): Int("abc") halts the run when its Err is consumed; only parse digit strings.
+      // Retry-After may be an HTTP date, and a consumed Err from Int() halts: parse digits only.
       if(::hot::regex/is-match(s, "^-?[0-9]{1,15}$"), Int(s), null)
     }
   }
@@ -486,7 +530,11 @@ fn (creds: Map, audience: Str): Str {
   header assertion-header(or(get(creds, "thumbprints"), {}))
   cond {
     is-err(header) => { header }
-    => { sign-assertion(header, assertion-claims(get(creds, "client-id"), audience, ::jwt/now-seconds()), get(creds, "private-key")) }
+    => {
+      ::ctx/mark-secret(get(creds, "private-key"))
+      signed sign-assertion(header, assertion-claims(get(creds, "client-id"), audience, ::jwt/now-seconds()), get(creds, "private-key"))
+      if(is-err(signed), signed, ::ctx/mark-secret(signed))
+    }
   }
 }
 
@@ -546,8 +594,9 @@ meta {
     - `opts` with a primary credential: `opts`, plus the context's app
       identity (`client-id`, `tenant-id`, `cloud`, `graph-url`,
       `login-url`) where `opts` omits it; a per-call `refresh-token`
-      with no client credential of its own also borrows the context's
-      client secret or certificate when the client id is the same
+      with no client credential or URL of its own also borrows the
+      context's client secret or certificate when the client id is the
+      same
     """
 }
 fn (opts: Map, ctx: Map): Map {
@@ -557,8 +606,9 @@ fn (opts: Map, ctx: Map): Map {
     => {
       identity pick(ctx, IDENTITY_KEYS)
       own-client-auth gt(length(filter(["client-secret", "private-key"], (k) { not(is-blank-value(get(own, k))) })), 0)
+      own-url gt(length(filter(URL_KEYS, (k) { not(is-blank-value(get(own, k))) })), 0)
       same-app or(is-blank-value(get(own, "client-id")), eq(get(own, "client-id"), get(ctx, "client-id")))
-      borrow and(not(is-blank-value(get(own, "refresh-token"))), not(own-client-auth), same-app)
+      borrow and(not(is-blank-value(get(own, "refresh-token"))), not(own-client-auth), not(own-url), same-app)
       {...identity, ...if(borrow, pick(ctx, CLIENT_AUTH_KEYS), {}), ...own}
     }
   }
@@ -664,16 +714,59 @@ fn (source: Map): Map {
   }
 }
 
+blank-credential
+meta {
+    doc: """The first credential key `opts` has with a blank or null value, else null (pure)."""
+}
+fn (opts: Map): Str? {
+  find-first(BLANK_CHECKED_KEYS, (k) { and(in(k, keys(opts)), is-blank-value(get(opts, k))) })
+}
+
+url-without-credential
+meta {
+    doc: """The first of `graph-url` / `login-url` that `opts` sets without a primary credential in the same `opts`, else null (pure)."""
+}
+fn (opts: Map): Str? {
+  find-first(URL_KEYS, (k) { and(not(is-blank-value(get(opts, k))), not(has-primary-credential(opts))) })
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: credentials for a call from `opts` first,
+    then `ctx` (a source Map, see `ctx-source`). An Err when a credential
+    key is in `opts` but blank or null, or when `graph-url` / `login-url`
+    is in `opts` without a primary credential; otherwise as
+    `credentials-from(merge-sources(opts, ctx))`. Exposed for testing;
+    `resolve-credentials` feeds it the context.
+    """
+}
+fn (opts: Map, ctx: Map): Map {
+  blank blank-credential(opts)
+  url url-without-credential(opts)
+  cond {
+    is-some(blank) => {
+      err(token-error(`microsoft-graph: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use context.`))
+    }
+
+    is-some(url) => {
+      err(token-error(`microsoft-graph: ${url} is in the call's opts without a credential. Pass token, refresh-token, client-secret or private-key with it. Context credentials are never sent to a per-call URL.`))
+    }
+    => { credentials-from(merge-sources(opts, ctx)) }
+  }
+}
+
 resolve-credentials
 meta {
-    doc: """Resolve the credentials for a call from `opts` and context (see the namespace doc for precedence)."""
+    doc: """Resolve the credentials for a call from `opts` and context (see the namespace doc for precedence and the per-call rules). Credentials from `opts` are marked as secrets first, and never written to context."""
 }
 fn
 (): Map {
   resolve-credentials({})
 },
 (opts: Map): Map {
-  credentials-from(merge-sources(opts, ctx-source()))
+  mark-secrets(opts, SECRET_KEYS)
+  resolve-from(opts, ctx-source())
 }
 
 token-scopes
@@ -843,7 +936,7 @@ fn
   cond {
     is-err(creds) => { null }
     ne(creds.kind, "refresh") => { null }
-    => { or(::ctx/get(rotation-key(creds)), get(creds, "refresh-token")) }
+    => { ::ctx/mark-secret(or(::ctx/get(rotation-key(creds)), get(creds, "refresh-token"))) }
   }
 }
 
@@ -856,7 +949,7 @@ token-request fn (url: Str, body: Any, prefix: Str): Map {
     is-err(body) => { body }
     => {
       tokens ::oauth2/token-request(url, body)
-      if(is-err(tokens), err(token-error(prefix, err-value(tokens))), tokens)
+      if(is-err(tokens), err(token-error(prefix, err-value(tokens))), mark-tokens(tokens))
     }
   }
 }

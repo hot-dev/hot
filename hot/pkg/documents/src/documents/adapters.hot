@@ -6,7 +6,7 @@ meta {
 
     | Adapter | Input |
     |---|---|
-    | `from-google` | `::google::drive/DocFile` (`md5`, `sha256`) |
+    | `from-google` | `::google::drive/DocFile` (`md5`, `sha256`, or a `hashes` Map) |
     | `from-onedrive` | `::microsoft::onedrive/DocFile` (its `hashes` Map) |
     | `from-dropbox` | `::dropbox/DocFile` (`path`, `content-hash`) |
     | `from-box` | `::box/DocFile` (`sha1`; the path from `path_collection`) |
@@ -87,12 +87,29 @@ join-path fn (parent: Str?, name: Str): Str {
 // Google Drive
 // ---------------------------------------------------------------------------
 
+// Drive API checksum names to documents hash names.
+GOOGLE_HASH_NAMES {
+    md5Checksum: "md5",
+    sha1Checksum: "sha1",
+    sha256Checksum: "sha256"
+}
+
+google-hashes
+meta {
+    doc: """A Drive `DocFile`'s hashes under documents names (pure): its `md5` / `sha256` fields and its `hashes` Map when it has them, the Map winning. Drive's own `md5Checksum` / `sha1Checksum` / `sha256Checksum` names are accepted in the Map."""
+}
+fn (f: Map): Map {
+  given get(f, "hashes")
+  named if(is-map(given), reduce(keys(given), (acc, k) { assoc(acc, or(get(GOOGLE_HASH_NAMES, k), k), get(given, k)) }, {}), {})
+  compact-hashes({md5: get(f, "md5"), sha256: get(f, "sha256"), ...named})
+}
+
 from-google
 meta {
     doc: """
     A Google Drive `DocFile` as a `Document` (pure). Drive has no paths
     (`path` is null; files can have several parents), `hashes` holds
-    `md5` and `sha256` for blob files, `is-native` marks Google Docs,
+    what Drive reports for blob files (`md5`, `sha1`, `sha256`), `is-native` marks Google Docs,
     Sheets, Slides and the like, and `export-formats` are their export
     MIME types. Shortcuts keep Drive's shortcut MIME type; their target
     id is in `raw.shortcutDetails.targetId`.
@@ -114,7 +131,7 @@ fn (source: Map, f: Map): Document {
     created: f.created,
     modified: f.modified,
     version: f.version,
-    hashes: compact-hashes({md5: f.md5, sha256: f.sha256}),
+    hashes: google-hashes(f),
     web-url: f.web-url,
     deleted: eq(f.trashed, true),
     raw: or(f.raw, {})
@@ -166,7 +183,7 @@ meta {
     A OneDrive / SharePoint `DocFile` as a `Document` (pure). `source`
     adds the item's `drive-id`; `version` is the eTag; `hashes` holds
     `quickXorHash` (work/school and SharePoint) or `sha1` / `crc32`
-    (personal); `export-formats` are Graph's conversions (`application/pdf`,
+    (personal), and `sha256` when Graph sends it; `export-formats` are Graph's conversions (`application/pdf`,
     `text/html`; sources up to 2 MB). Packages (OneNote) count as folders.
     """
 }

@@ -30,9 +30,7 @@ meta {
     `new_change` or `reconnect`. That is a blocking HTTP call: it holds
     the run for up to the request timeout (120 s in Hot) and returns
     `{message: "timeout"}` when nothing happened. A Hot schedule calling
-    `sync-events` every few minutes is usually the better fit. Hot 3.0.x
-    cannot send OPTIONS requests, so `long-poll-url` currently returns an
-    explanatory Err; `long-poll` works with a URL obtained elsewhere.
+    `sync-events` every few minutes is usually the better fit.
     """
 }
 
@@ -42,7 +40,6 @@ MAX_LIMIT 500
 DEFAULT_MAX_PAGES 20
 STREAM_TYPES ["all", "changes", "sync", "admin_logs", "admin_logs_streaming"]
 LOCAL_KEYS ["seen", "max-pages"]
-RUNTIME_OPTIONS_MESSAGE "unsupported method"
 
 as-position
 meta {
@@ -257,8 +254,7 @@ meta {
     doc: """
     OPTIONS /events - the realtime server to long-poll: `{url, ttl,
     max_retries, retry_timeout}`. Ask again after `max_retries` polls or
-    a `reconnect` message. Hot 3.0.x cannot send OPTIONS, so this
-    currently returns an explanatory Err (see the namespace doc).
+    a `reconnect` message.
     """
 }
 fn
@@ -266,15 +262,10 @@ fn
   long-poll-url({})
 },
 (opts: Map): Map {
-  response ::api/request("OPTIONS", ::box/url("/events"), {}, "", {...::box/creds(opts), retry: false})
+  response ::api/request("OPTIONS", ::box/url("/events"), {}, "", ::box/creds(opts))
   cond {
-    // RUNTIME-LIMIT(http-options): ::hot::http/request in Hot 3.0.x refuses the OPTIONS method.
-    and(is-err(response), contains(err-message(response), RUNTIME_OPTIONS_MESSAGE)) => {
-      err("box: long-poll-url needs an OPTIONS request, which this Hot runtime cannot send; poll sync-events from a schedule instead")
-    }
-
     is-err(response) => { response }
-    not(::hot::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+    not(::hot::http/is-ok-response(response)) => { err(::api/HttpError(response)) }
     => {
       server realtime-server(or(response.body, {}))
       if(is-null(server), err("box: OPTIONS /events returned no realtime_server"), server)
@@ -312,7 +303,7 @@ fn
   cond {
     and(is-err(response), is-timeout(err-message(response))) => { {message: "timeout"} }
     is-err(response) => { response }
-    not(::hot::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+    not(::hot::http/is-ok-response(response)) => { err(::api/HttpError(response)) }
     is-map(response.body) => { {message: or(response.body.message, "unknown")} }
     => { {message: "unknown"} }
   }

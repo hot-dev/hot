@@ -11,6 +11,10 @@ meta ["test"]
 ::hooks ::box::webhooks
 ::oauth ::box::oauth
 
+http-err fn (response: Map): Any {
+  ::box::api/HttpError(::hot::http/HttpResponse(response))
+}
+
 test-url-building
 meta ["test"] fn () {
     assert-eq("https://api.box.com/2.0/files/123", ::box/url("/files/123"))
@@ -62,12 +66,12 @@ meta ["test"] fn () {
 
 test-conflict-item
 meta ["test"] fn () {
-    conflict err(::box::api/http-error({status: 409, headers: {}, body: {
+    conflict err(http-err({status: 409, headers: {}, body: {
         type: "error", status: 409, code: "item_name_in_use", message: "Item with the same name already exists",
         context_info: {conflicts: [{type: "folder", id: "777", name: "Reports"}]}
     }}))
     assert-eq("777", ::folders/conflict-item(conflict).id)
-    single err(::box::api/http-error({status: 409, headers: {}, body: {code: "item_name_in_use", context_info: {conflicts: {type: "file", id: "8"}}}}))
+    single err(http-err({status: 409, headers: {}, body: {code: "item_name_in_use", context_info: {conflicts: {type: "file", id: "8"}}}}))
     assert-eq("8", ::folders/conflict-item(single).id, "a single conflict Map works too")
     assert(is-null(::folders/conflict-item(err("other"))))
 }

@@ -162,3 +162,84 @@ meta ["test"] fn () {
     assert(is-err(none), "no opts and no aws.* context: a clear Err")
     assert(is-null(::hot::ctx/get("aws.access-key-id")), "per-call keys are never written to ctx")
 }
+
+CTX_KEYS {"aws.access-key-id": "CTXKEY", "aws.secret-access-key": "ctx-secret", "aws.session-token": "ctx-session"}
+
+test-resolve-from-context-and-opts
+meta ["test"] fn () {
+    s ::source/resolve({provider: "s3", bucket: "acme"})
+    ctx ::s3/resolve-from(s, {}, CTX_KEYS, "us-east-1")
+    assert-eq("CTXKEY", ctx.credentials.access_key_id)
+    assert-eq("ctx-session", ctx.credentials.session_token)
+    assert-eq("us-east-1", ctx.region)
+    own ::s3/resolve-from(s, {access-key-id: "OWN", secret-access-key: "own-secret"}, CTX_KEYS, "us-east-1")
+    assert-eq("OWN", own.credentials.access_key_id)
+    assert(is-null(own.credentials.session_token), "the context session token never pairs with per-call keys")
+}
+
+test-blank-keys-are-errs-naming-the-key
+meta ["test"] fn () {
+    s ::source/resolve({provider: "s3", bucket: "acme"})
+    for-each([null, "", "  "], (blank) {
+        a ::s3/resolve-from(s, {access-key-id: blank, secret-access-key: "x"}, CTX_KEYS, "us-east-1")
+        assert(is-err(a))
+        assert(contains(err-message(a), "access-key-id"))
+        b ::s3/resolve-from(s, {access-key-id: "OWN", secret-access-key: blank}, CTX_KEYS, "us-east-1")
+        assert(is-err(b))
+        assert(contains(err-message(b), "secret-access-key"))
+    })
+    half ::s3/resolve-from(s, {secret-access-key: "x"}, CTX_KEYS, "us-east-1")
+    assert(is-err(half), "a secret alone never pairs with the context key id")
+    assert(contains(err-message(half), "access-key-id"))
+}
+
+test-endpoint-needs-keys-in-the-same-opts
+meta ["test"] fn () {
+    s ::source/resolve({provider: "s3", bucket: "acme"})
+    bad ::s3/resolve-from(s, {endpoint: "https://evil.example.com"}, CTX_KEYS, "us-east-1")
+    assert(is-err(bad), "context credentials never go to a per-call URL")
+    assert(contains(err-message(bad), "endpoint"))
+    assert(contains(err-message(bad), "access-key-id"))
+    good ::s3/resolve-from(s, {endpoint: "http://localhost:9000", access-key-id: "OWN", secret-access-key: "own-secret"}, CTX_KEYS, "us-east-1")
+    assert-eq("http://localhost:9000/acme", good.base)
+    assert(not(is-err(::s3/resolve-from(s, {endpoint: ""}, CTX_KEYS, "us-east-1"))), "a blank endpoint is no endpoint")
+}
+
+test-bucket-and-region-cannot-change-the-host
+meta ["test"] fn () {
+    acme ::source/resolve({provider: "s3", bucket: "acme"})
+    for-each(["evil.example/", "evil.example\\", "evil.example#", "evil.example?", "a@evil.example/", "EU-WEST-1", "eu west 1", "eu-west-1\n"], (region) {
+        r ::s3/resolve-from(acme, {region: region}, CTX_KEYS, "us-east-1")
+        assert(is-err(r), `region ${region}`)
+        assert(contains(err-message(r), "region"))
+        assert(not(contains(err-message(r), "evil.example")), "the value stays out of the Err")
+    })
+    for-each(["evil.example/", "evil.example\\", "evil.example#", "evil.example?", "a@evil.example:443/", "acme\n", ".acme"], (bucket) {
+        r ::s3/resolve-from({provider: "s3", bucket: bucket}, {}, CTX_KEYS, "us-east-1")
+        assert(is-err(r), `bucket ${bucket}`)
+        assert(contains(err-message(r), "bucket"))
+    })
+    assert(is-err(::s3/resolve-from(acme, {}, CTX_KEYS, "evil.example/")), "a bad default region too")
+    assert-eq("https://acme.s3.eu-west-1.amazonaws.com", ::s3/resolve-from(acme, {region: "eu-west-1"}, CTX_KEYS, "us-east-1").base)
+    assert-eq("https://my.dotted_Bucket-1.s3.amazonaws.com", ::s3/resolve-from({provider: "s3", bucket: "my.dotted_Bucket-1"}, {}, CTX_KEYS, "us-east-1").base)
+    // With an endpoint the bucket is an encoded path segment, and the keys are the caller's own.
+    keys {endpoint: "http://localhost:9000", access-key-id: "OWN", secret-access-key: "own-secret"}
+    assert-eq("http://localhost:9000/a%2Fb", ::s3/resolve-from({provider: "s3", bucket: "a/b"}, keys, CTX_KEYS, "us-east-1").base)
+}
+
+test-resolve-returns-marked-keys-unchanged
+meta ["test"] fn () {
+    s ::source/resolve({provider: "s3", bucket: "acme"})
+    t ::s3/resolve(s, {access-key-id: "AKIDEXAMPLE", secret-access-key: "a-per-call-secret", session-token: "a-per-call-session"})
+    assert-eq("a-per-call-secret", t.credentials.secret_access_key)
+    assert-eq("a-per-call-session", t.credentials.session_token)
+}
+
+test-xml-entities-decode
+meta ["test"] fn () {
+    e ::s3/s3-error({status: 400, headers: {}, body-bytes: Bytes("<Error><Code>InvalidArgument</Code><Message>a &amp; b &lt;c&gt;</Message></Error>")})
+    assert-eq("a & b <c>", ::hot::xml/text(::hot::xml/child(::hot::xml/from-xml("<a><b>a &amp; b &lt;c&gt;</b></a>"), "b")))
+    assert-eq("documents: s3 HTTP 400 InvalidArgument: a & b <c>", e.message)
+    p ::s3/parse-list("<R><NextContinuationToken>a&amp;b</NextContinuationToken><IsTruncated>true</IsTruncated></R>")
+    assert-eq("a&b", p.next-token, "continuation tokens are not URL-encoded, only XML-escaped")
+}

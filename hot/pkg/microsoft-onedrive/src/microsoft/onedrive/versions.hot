@@ -62,7 +62,7 @@ fn
   id if(is-map(item), Str(item.id), Str(item))
   cond {
     is-err(response) => { response }
-    not(::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+    not(::http/is-ok-response(response)) => { err(::api/HttpError(response)) }
     => { ::od/content-from-response(id, response, if(is-map(item), get(item, "name"), null), "version") }
   }
 }

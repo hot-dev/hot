@@ -2,7 +2,7 @@
 
 One document layer for workflows and AI agents over Google Drive, OneDrive and SharePoint, Dropbox, Box and Amazon S3: a single `Document` record, source descriptors, `list` / `search` / `get` / `download`, `read-text` with each provider's native export or extraction, `upload`, change feeds behind opaque cursors, webhook normalising, and a capability map agents can plan with. Built for RAG ingestion and file-triggered workflows.
 
-It sits on top of the provider packages ([`google-drive`](../google-drive), [`microsoft-onedrive`](../microsoft-onedrive), [`dropbox`](../dropbox), [`box`](../box), [`aws-s3`](../aws-s3)) and adds no auth of its own: credentials, token caches, retries and error types are theirs.
+It sits on top of the provider packages ([`google-drive`](../google-drive), [`microsoft-onedrive`](../microsoft-onedrive), [`dropbox`](../dropbox), [`box`](../box), [`aws-core`](../aws-core)) and adds no auth of its own: credentials, token caches, retries and error types are theirs, except on the S3 path, which `aws-core` signs (see [Per-provider caveats](#per-provider-caveats)).
 
 **Use a provider package directly** when you need something only that provider has: sharing and permissions, revisions and versions, Drive query syntax, Box metadata search or collaborations, Dropbox team spaces, Graph batch requests, watch-channel and subscription management, resumable-upload control. Everything here returns the provider's resource in `Document.raw`, so you can mix the two.
 
@@ -20,7 +20,16 @@ The provider packages come with it.
 
 ## Auth and ctx variables
 
-This package reads and writes no context itself. Each source's `opts` go straight to its provider package, which takes credentials from `opts` first and its own context variables second. Set the provider's variables once for a single-tenant app, or put credentials in the source's `opts` for many tenants and parallel flows (nothing per-call is ever written to context).
+This package writes no context, and reads only `aws.*` for its own S3 path. Each other source's `opts` go straight to its provider package, which takes credentials from `opts` first and its own context variables second. Set the provider's variables once for a single-tenant app, or put credentials in the source's `opts` for many tenants and parallel flows.
+
+### Per-call credentials
+
+Credentials in a source's `opts`, or in a call's `opts` over them, are never written to context, and they are masked in call records. A credential key that is present but blank or null is an error naming the key, never a fallback to context. A per-call `endpoint` (S3) needs `access-key-id` and `secret-access-key` in the same `opts`, and a per-call `graph-url` or `login-url` (OneDrive) needs a credential in the same `opts`: context credentials never go to a per-call URL.
+
+```hot
+tenant {provider: "box", opts: {account: `tenant:${tenant-id}`}}
+docs ::documents/list-all(tenant, null, 500)
+```
 
 | Provider | Context variables (see the provider README) | Per-source `opts` keys |
 |---|---|---|
@@ -302,7 +311,7 @@ Creating and renewing the subscriptions stays with the provider packages: `::goo
 | Push notifications | watch channels (7 days) | subscriptions (under 30 days) | app webhook | webhooks v2 | via S3 Event Notifications only |
 | Path addressing | no | yes | yes | no | yes (keys) |
 | Single-request upload up to | 5 MiB (then resumable) | 4 MiB (then upload session) | 32 MiB (then upload session) | 20 MB (then chunked) | 5 GB (single PUT only) |
-| Hashes | `md5`, `sha256` | `quickXorHash`, `sha1`, `crc32` | `dropbox-content-hash` | `sha1` | none |
+| Hashes | `md5`, `sha1`, `sha256` as Drive reports them | `quickXorHash`, `sha1`, `crc32`, and `sha256` when Graph sends it | `dropbox-content-hash` | `sha1` | none |
 
 ## Errors and pagination
 
@@ -316,7 +325,7 @@ Page and change cursors are opaque Strs (`doc1.` + base64url JSON of the provide
 - **OneDrive and SharePoint.** Graph converts to PDF or HTML only for sources up to 2 MB, and Office files have no native text. App-only tokens have no `/me`: give the source a `drive`. On work/school drives and SharePoint, delta runs from the drive root only, so `changes` covers the whole drive. `recent` and `sharedWithMe` are deprecated by Microsoft and not used here.
 - **Dropbox.** Deletions are reported by path only, so `deleted-ids` holds lower-cased paths; a deleted folder removes everything below it. Dropbox records no creation time. `files/list_folder/longpoll` (in the dropbox package) holds the run open for up to its timeout; webhooks or a schedule scale better. Content search needs a plan that includes it.
 - **Box.** OAuth refresh tokens are single-use: every refresh returns a new pair, which the box package's keeper stores (use `opts.account`, never a bare refresh token per call). Extracted text is generated on demand and can be `pending`. The event stream is account-wide: with a `folder-id`, items under other folders are filtered out and items moved away are reported as deleted. Box keeps user events for about two weeks, so sync at least weekly.
-- **Amazon S3.** `aws-s3` has no per-call credentials, folder listing, key encoding or `DocFile`, so `::documents::s3` builds its ListObjectsV2 / HEAD / GET / PUT requests itself and signs them with `aws-core`. `changes` lists the whole prefix every time and never sees deletions; S3 Event Notifications are the better route. Uploads are a single PUT (no multipart), bounded by the run's memory and the 5 GB PutObject limit.
+- **Amazon S3.** `::documents::s3` needs per-call credentials, folder listing, key encoding and a `DocFile`, so it builds its ListObjectsV2 / HEAD / GET / PUT requests itself and signs them with `aws-core`. It asks S3 for URL-encoded keys, since XML cannot carry the control characters a key may hold. `changes` lists the whole prefix every time and never sees deletions; S3 Event Notifications are the better route. Uploads are a single PUT (no multipart), bounded by the run's memory and the 5 GB PutObject limit.
 
 ## Notes and limits
 
@@ -326,7 +335,7 @@ Page and change cursors are opaque Strs (`doc1.` + base64url JSON of the provide
 
 ## Data handling
 
-This package stores nothing and writes no context. Credentials stay in the provider packages (secret context variables, or per-call `opts`); they are never put in a `Document`, a cursor or an error message. Document content and extracted text exist only in the run's memory unless you store them. Mark webhook signature headers as `secret-headers` on your handlers (`x-goog-channel-token`, `x-dropbox-signature`).
+This package stores nothing and writes no context. Credentials stay in the provider packages (secret context variables, or per-call `opts`), and the S3 path's keys, like theirs, are masked in call records; they are never put in a `Document`, a cursor or an error message. Document content and extracted text exist only in the run's memory unless you store them. Mark webhook signature headers as `secret-headers` on your handlers (`x-goog-channel-token`, `x-dropbox-signature`).
 
 ## Integration tests
 

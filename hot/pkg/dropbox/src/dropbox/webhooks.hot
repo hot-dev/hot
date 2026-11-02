@@ -78,10 +78,11 @@ meta {
     of the raw body (`::hot::http/raw-body`) keyed with `app-secret`,
     compared in constant time. Fails closed: an empty or null secret, a
     missing or malformed header, or a body that was re-serialised all
-    give false.
+    give false. An explicit `app-secret` is marked as a secret.
     """
 }
 fn (request: Map, app-secret: Str?): Bool {
+  ::dropbox::auth/mark-values([app-secret])
   signature header(request, SIGNATURE_HEADER)
   cond {
     ::dropbox/is-blank(app-secret) => { false }

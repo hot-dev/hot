@@ -10,6 +10,14 @@ meta ["test"]
 NON_ASCII_JSON `{"path":"/Café/naïve ✓ 😀${Str(Bytes([127]))}/日本"}`
 NON_ASCII_ESCAPED "{\"path\":\"/Caf\\u00e9/na\\u00efve \\u2713 \\ud83d\\ude00\\u007f/\\u65e5\\u672c\"}"
 
+http-err fn
+(response: Map): Any {
+  ::dropbox::api/HttpError(::hot::http/HttpResponse(response))
+},
+(response: Map, route: Str?): Any {
+  ::dropbox::api/http-error(response, route)
+}
+
 test-ascii-escape
 meta ["test"] fn () {
     assert-eq(NON_ASCII_ESCAPED, ::api/ascii-escape(NON_ASCII_JSON), "Latin-1, BMP, astral (surrogate pair), DEL and CJK")
@@ -105,7 +113,7 @@ meta ["test"] fn () {
 
 test-http-error-409-path
 meta ["test"] fn () {
-    e ::api/http-error({
+    e http-err({
         status: 409,
         headers: {},
         body: {error_summary: "path/not_found/..", error: {".tag": "path", path: {".tag": "not_found"}}}
@@ -122,7 +130,7 @@ meta ["test"] fn () {
 
 test-http-error-summary-only-and-user-message
 meta ["test"] fn () {
-    e ::api/http-error({
+    e http-err({
         status: 409,
         headers: {},
         body: {error_summary: "to/conflict/file/.,", user_message: {text: "A file already exists.", locale: "en"}}
@@ -134,18 +142,18 @@ meta ["test"] fn () {
 
 test-http-error-400-text-and-401
 meta ["test"] fn () {
-    bad ::api/http-error({status: 400, headers: {}, body: "Error in call to API function \"files/list_folder\": request body: could not decode input as JSON"}, "files/list_folder")
+    bad http-err({status: 400, headers: {}, body: "Error in call to API function \"files/list_folder\": request body: could not decode input as JSON"}, "files/list_folder")
     assert(contains(bad.message, "could not decode input as JSON"), "text bodies are shown")
     assert(is-null(bad.error-tag))
 
-    expired ::api/http-error({status: 401, headers: {}, body: Bytes("{\"error_summary\": \"expired_access_token/..\", \"error\": {\".tag\": \"expired_access_token\"}}")})
+    expired http-err({status: 401, headers: {}, body: Bytes("{\"error_summary\": \"expired_access_token/..\", \"error\": {\".tag\": \"expired_access_token\"}}")})
     assert-eq("expired_access_token", expired.error-tag, "Bytes JSON bodies are decoded")
     assert(not(::api/is-retryable(err(expired))))
 }
 
 test-http-error-429
 meta ["test"] fn () {
-    limited ::api/http-error({
+    limited http-err({
         status: 429,
         headers: {"retry-after": "300"},
         body: {error_summary: "too_many_requests/..", error: {reason: {".tag": "too_many_requests"}, retry_after: 300}}
@@ -154,17 +162,17 @@ meta ["test"] fn () {
     assert-eq(["too_many_requests"], limited.error-tags)
     assert(::api/is-retryable(err(limited)))
 
-    body-only ::api/http-error({status: 429, headers: {}, body: {error: {reason: {".tag": "too_many_write_operations"}, retry_after: 7}}})
+    body-only http-err({status: 429, headers: {}, body: {error: {reason: {".tag": "too_many_write_operations"}, retry_after: 7}}})
     assert-eq(7, body-only.retry-after, "the body's retry_after when there is no header")
 
-    junk ::api/http-error({status: 503, headers: {"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, body: ""})
+    junk http-err({status: 503, headers: {"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, body: ""})
     assert(is-null(junk.retry-after), "HTTP dates are not parsed (and never halt)")
     assert(::api/is-retryable(err(junk)))
 }
 
 test-retry-classification
 meta ["test"] fn () {
-    write-contention ::api/http-error({status: 409, headers: {}, body: {error_summary: "path/too_many_write_operations/", error: {".tag": "path", path: {".tag": "too_many_write_operations"}}}})
+    write-contention http-err({status: 409, headers: {}, body: {error_summary: "path/too_many_write_operations/", error: {".tag": "path", path: {".tag": "too_many_write_operations"}}}})
     assert(::api/is-retryable(err(write-contention)), "409 write contention is transient")
     assert(::api/is-retryable(err("::hot::http/request: request failed: connection reset")))
     assert(not(::api/is-retryable(err("::hot::http/request: response exceeds http.max-response-bytes"))))
@@ -175,10 +183,10 @@ meta ["test"] fn () {
 
 test-transport-limit
 meta ["test"] fn () {
-    limit ::api/http-error({status: 403, headers: {}, body: {error_summary: "invalid_account_type/feature/..", error: {".tag": "invalid_account_type", invalid_account_type: {".tag": "feature"}}}})
+    limit http-err({status: 403, headers: {}, body: {error_summary: "invalid_account_type/feature/..", error: {".tag": "invalid_account_type", invalid_account_type: {".tag": "feature"}}}})
     assert(::api/is-transport-limit(err(limit)))
     assert(not(::api/is-retryable(err(limit))))
-    other ::api/http-error({status: 403, headers: {}, body: {error_summary: "no_permission/..", error: {".tag": "no_permission"}}})
+    other http-err({status: 403, headers: {}, body: {error_summary: "no_permission/..", error: {".tag": "no_permission"}}})
     assert(not(::api/is-transport-limit(err(other))))
 }
 

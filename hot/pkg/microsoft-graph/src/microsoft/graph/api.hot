@@ -8,7 +8,10 @@ meta {
     **Paths.** `path` is either a Graph path (`"/me/drive"`, sent to
     `{graph}/v1.0/me/drive` for the call's cloud; `opts.api-version:
     "beta"` switches version) or a full `https://` URL such as an
-    `@odata.nextLink`.
+    `@odata.nextLink`. A full URL gets credentials only on the call's
+    Graph root or a Microsoft Graph cloud host (see
+    `may-receive-credentials`); anything else is an Err, and nothing is
+    sent or minted.
 
     **Retry.** microsoft-graph never waits between attempts. A connection
     failure on an idempotent method (GET, HEAD, PUT, DELETE, OPTIONS) is
@@ -185,12 +188,8 @@ fn (headers: Any, name: Str): Str? {
   if(or(is-null(v), eq(v, "")), null, Str(v))
 }
 
-// WORKAROUND(hot-bug-1): T(response) ignores a declared `HttpResponse -> HttpError` arrow, so errors are built only through this explicit function.
-http-error
-meta {
-    doc: """Build an `HttpError` (with a readable `message`) from a non-2xx `HttpResponse` (pure). Exposed for testing and for packages that read responses themselves."""
-}
-fn (response: Map): HttpError {
+// `HttpError(response)`: the error for a non-2xx response, with a readable `message` (pure).
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   details graph-error-details(response.body)
   code details.code
   code-part if(is-some(code), ` ${code}`, "")
@@ -504,9 +503,11 @@ meta {
     doc: """
     The package's one credential and settings resolver: per-call `opts`
     first, then context, then defaults (see `::microsoft::graph::auth`).
-    Returns resolved credentials `{kind, cloud, ...}` or a `TokenError`.
-    Pure apart from reading context; it never writes per-call
-    credentials to context.
+    Returns resolved credentials `{kind, cloud, ...}` or a `TokenError`:
+    a credential key in `opts` that is blank or null, and `graph-url` /
+    `login-url` in `opts` without a credential, are errors, never a
+    fallback to context. Credentials from `opts` are marked as secrets
+    (masked in call records) and never written to context.
     """
 }
 fn
@@ -528,10 +529,64 @@ meta {
 fn (path: Str, graph: Str, opts: Map): Str {
   version or(get(opts, "api-version"), ::graph/API_VERSION)
   cond {
-    or(starts-with(path, "https://"), starts-with(path, "http://")) => { path }
+    is-full-url(path) => { path }
     starts-with(path, "/") => { `${graph}/${version}${path}` }
     => { `${graph}/${version}/${path}` }
   }
+}
+
+is-full-url fn (path: Str): Bool {
+  or(starts-with(path, "https://"), starts-with(path, "http://"))
+}
+
+url-parts
+meta {
+    doc: """
+    The lower-cased `{scheme, host}` of an `http(s)` URL (pure), or null
+    unless the authority is plainly a host and optional port. Userinfo,
+    backslashes, extra slashes and control characters all give null: URL
+    parsers disagree on where the host is in those, and a backslash ends
+    the authority in the one that opens the connection, so
+    `https://evil.example\@graph.microsoft.com/` connects to `evil.example`.
+    """
+}
+fn (url: Str): Map? {
+  m ::hot::regex/capture(lowercase(url), "^(https?)://([a-z0-9.-]+|\\[[0-9a-f:.]+\\])(?::[0-9]+)?(?:[/?#]|$)")
+  if(is-map(m), {scheme: first(m.groups), host: last(m.groups)}, null)
+}
+
+may-receive-credentials
+meta {
+    doc: """
+    True when a full URL may receive credentials (pure): `https` on the
+    host of `graph` (the call's resolved Graph root) or of a Microsoft
+    Graph cloud (`::microsoft::graph/CLOUDS`). `http` only on the host of
+    a `graph` root that is itself `http`, for tests and local proxies.
+    Hosts match exactly, so `graph.microsoft.com.evil.example` is refused.
+
+    ```hot
+    ::microsoft::graph::api/may-receive-credentials("https://graph.microsoft.us/v1.0/me", "https://graph.microsoft.com")  // true
+    ::microsoft::graph::api/may-receive-credentials("https://evil.example/v1.0/me", "https://graph.microsoft.com")  // false
+    ```
+    """
+}
+fn (url: Str, graph: Str): Bool {
+  target url-parts(url)
+  root url-parts(graph)
+  cloud-hosts map(vals(::graph/CLOUDS), (c) { url-parts(c.graph).host })
+  cond {
+    is-null(target) => { false }
+    and(is-some(root), eq(target.host, if(is-some(root), root.host, null))) => {
+      or(eq(target.scheme, "https"), eq(root.scheme, "http"))
+    }
+    => { and(eq(target.scheme, "https"), in(target.host, cloud-hosts)) }
+  }
+}
+
+refused-url-error fn (url: Str): Any {
+  parts url-parts(url)
+  destination if(is-some(parts), `${parts.scheme}://${parts.host}`, "a URL whose host cannot be read safely")
+  err(::auth/token-error(`microsoft-graph: refusing to send credentials to ${destination}; a full URL must be on the call's Graph root or a Microsoft Graph cloud host, over https`))
 }
 
 client-request-id
@@ -586,7 +641,9 @@ meta {
     transport failures.
 
     - `method` - `"GET"`, `"POST"`, `"PATCH"`, `"PUT"`, `"DELETE"`
-    - `path` - a Graph path (`"/me/drive/root/children"`) or full URL
+    - `path` - a Graph path (`"/me/drive/root/children"`) or a full URL
+      on the call's Graph root or a Microsoft Graph cloud host; any other
+      host is an Err, with no credentials sent or minted
     - `headers` - extra headers (they win over the defaults and `opts.headers`)
     - `body` - a Map/Vec (sent as JSON), Str/Bytes (sent verbatim), or `""`
     - `opts` - per-call credentials (see `::microsoft::graph::auth`),
@@ -613,6 +670,7 @@ fn
   policy retry-policy(opts)
   cond {
     is-err(creds) => { creds }
+    and(is-full-url(path), not(may-receive-credentials(path, creds.cloud.graph))) => { refused-url-error(path) }
     => {
       url resolve-url(path, creds.cloud.graph, opts)
       all-headers {...or(get(opts, "headers"), {}), ...headers}
@@ -649,7 +707,7 @@ fn (response: Result): Any {
       b response.body
       if(or(is-null(b), and(is-str(b), eq(b, ""))), {}, b)
     }
-    => { err(http-error(response)) }
+    => { err(HttpError(response)) }
   }
 }
 
@@ -904,7 +962,7 @@ fn (r: Map): BatchResponse {
     headers: headers,
     body: r.body,
     ok: ok,
-    error: if(ok, null, http-error({status: status, headers: headers, body: r.body})),
+    error: if(ok, null, HttpError(HttpResponse({status: status, headers: headers, body: r.body}))),
     retry-after: retry-after-seconds(headers)
   })
 }

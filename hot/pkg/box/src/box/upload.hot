@@ -23,10 +23,9 @@ meta {
     file is held in memory.
 
     **Preflight.** `preflight-check` (`OPTIONS /files/content`) checks
-    name conflicts, quota and size limits without sending content. The
-    Hot 3.0.x HTTP client does not send OPTIONS requests, so it currently
-    returns an explanatory Err; the upload itself still fails cleanly with
-    409 `item_name_in_use` or 403 `storage_limit_exceeded`.
+    name conflicts, quota and size limits without sending content: the
+    same 409 `item_name_in_use` or 403 `storage_limit_exceeded` the upload
+    itself would hit.
     """
 }
 
@@ -41,7 +40,6 @@ CHUNKED_THRESHOLD 20000000
 SIMPLE_UPLOAD_LIMIT 50000000
 MAX_PARTS_PAGE 1000
 LOCAL_KEYS ["parent-id", "content-created-at", "content-modified-at", "description", "attributes", "chunked", "keep-session", "if-match", "if-none-match", "boxapi", "name"]
-RUNTIME_OPTIONS_MESSAGE "unsupported method"
 
 // ---------------------------------------------------------------------------
 // Body building (pure)
@@ -266,14 +264,9 @@ fn (name: Str?, parent-id: Str?, size: Int?): Map {
 
 preflight-result fn (response: Result): Map {
   cond {
-    // RUNTIME-LIMIT(http-options): ::hot::http/request in Hot 3.0.x refuses the OPTIONS method.
-    and(is-err(response), contains(err-message(response), RUNTIME_OPTIONS_MESSAGE)) => {
-      err("box: preflight-check needs an OPTIONS request, which this Hot runtime cannot send; upload directly and handle 409 item_name_in_use / 403 storage_limit_exceeded")
-    }
-
     is-err(response) => { response }
     is-ok-response(response) => { if(is-map(response.body), response.body, {}) }
-    => { err(::api/http-error(response)) }
+    => { err(::api/HttpError(response)) }
   }
 }
 
@@ -284,8 +277,6 @@ meta {
     uploaded into `parent-id`: returns `{upload_url, upload_token}` when
     it can, or an `HttpError` (409 `item_name_in_use` with the conflict in
     `context-info`, 403 `storage_limit_exceeded`, `file_size_limit_exceeded`).
-    See the namespace note: Hot 3.0.x cannot send OPTIONS, so this returns
-    an explanatory Err for now.
     """
 }
 fn
@@ -298,7 +289,7 @@ fn
 
 preflight-version
 meta {
-    doc: """OPTIONS /files/{id}/content - the preflight check for a new version (optionally renamed). Same runtime caveat as `preflight-check`."""
+    doc: """OPTIONS /files/{id}/content - the preflight check for a new version (optionally renamed). Answers as `preflight-check` does."""
 }
 fn
 (file-id: Str, size: Int): Map {
@@ -510,7 +501,7 @@ fn
     }
 
     is-ok-response(response) => { ChunkedUpload({...base, state: "committed", file: first-entry(response.body), retry-after: null}) }
-    => { err(::api/http-error(response)) }
+    => { err(::api/HttpError(response)) }
   }
 }
 

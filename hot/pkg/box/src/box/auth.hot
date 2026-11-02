@@ -73,10 +73,21 @@ meta {
     A `refresh-token` in `opts` with neither `account` nor `on-refresh`
     is refused: its replacement would be lost.
 
+    **Per-call rules.** A credential key (`token`, `account`,
+    `refresh-token`, `client-id`, `client-secret`, `jwt-config`,
+    `private-key`) that is in `opts` but blank or null is an error naming
+    the key, never a fallback to context. Credentials from `opts`,
+    including the secrets inside a `jwt-config`, are marked as secrets
+    (`::hot::ctx/mark-secret`), so call records mask them; they are never
+    written to context. The API roots are context-only (`box.api-root`,
+    `box.upload-root`), so a call cannot redirect credentials.
+
     **Token cache.** Minted tokens are cached in the run's execution
     context (`::hot::ctx`, stored as secrets) under a key derived from the
     credential identity and subject, until `expires_in` minus 60 seconds.
     The cache lives for one run. Explicit access tokens are never cached.
+    Every token Box returns, and every token the keeper hands back, is
+    marked as a secret before it leaves this package.
     """
 }
 
@@ -106,6 +117,13 @@ DEFAULT_ACCOUNT "default"
 // As-User header, the immediate-retry switch) rather than to the API
 // being called. Endpoint functions strip these before building queries.
 CREDENTIAL_KEYS ["token", "account", "token-store", "on-refresh", "refresh-token", "client-id", "client-secret", "jwt-config", "private-key", "enterprise-id", "user-id", "as-user", "retry", "force-refresh"]
+// Present but blank in `opts`: an error naming the key, never a fallback to context.
+BLANK_CHECKED_KEYS ["token", "account", "refresh-token", "client-id", "client-secret", "jwt-config", "private-key"]
+SECRET_KEYS ["token", "refresh-token", "client-secret", "private-key"]
+// The secret fields of resolved credentials, of a token response and of a keeper record.
+RESOLVED_SECRETS ["token", "refresh-token", "seed-refresh-token", "client-secret", "private-key"]
+TOKEN_RESPONSE_SECRETS ["access_token", "refresh_token"]
+RECORD_SECRETS ["access-token", "refresh-token"]
 
 TokenError
 meta {
@@ -179,6 +197,50 @@ fn (value: Any): Str? {
 
 now-ms fn (): Int {
   ::time/epoch-millis(::time/now())
+}
+
+mark-values
+meta {
+    doc: """Register the non-blank `values` as secrets for this run's call records (`::hot::ctx/mark-secret`)."""
+}
+fn (values: Vec): Vec {
+  ::ctx/mark-secret(filter(values, (v) { not(is-blank-value(v)) }))
+}
+
+mark-fields
+meta {
+    doc: """Mark the values of `names` in `m` as secrets and return `m` unchanged."""
+}
+fn (m: Map, names: Vec): Map {
+  mark-values(map(names, (k) { get(m, k) }))
+  m
+}
+
+jwt-config-secrets
+meta {
+    doc: """The secret values in a Box app config (a JSON Str or a Map): the whole Str, `boxAppSettings.clientSecret`, `appAuth.privateKey` and `appAuth.passphrase`. A malformed config gives just the Str."""
+}
+fn (config: Any): Vec {
+  parsed if(is-str(config), from-json(config), config)
+  whole if(is-str(config), [config], [])
+  cond {
+    is-err(parsed) => { whole }
+    not(is-map(parsed)) => { whole }
+    => {
+      settings or(get(parsed, "boxAppSettings"), {})
+      app-auth or(get(settings, "appAuth"), {})
+      [...whole, get(settings, "clientSecret"), get(app-auth, "privateKey"), get(app-auth, "passphrase")]
+    }
+  }
+}
+
+mark-opts
+meta {
+    doc: """Mark the credentials in a call's `opts` as secrets and return `opts` unchanged."""
+}
+fn (opts: Map): Map {
+  mark-values(jwt-config-secrets(get(opts, "jwt-config")))
+  mark-fields(opts, SECRET_KEYS)
 }
 
 token-url
@@ -416,16 +478,40 @@ fn (source: Map): Map {
   }
 }
 
+blank-credential
+meta {
+    doc: """The first credential key `opts` has with a blank or null value, else null (pure)."""
+}
+fn (opts: Map): Str? {
+  find-first(BLANK_CHECKED_KEYS, (k) { and(in(k, keys(opts)), is-blank-value(get(opts, k))) })
+}
+
+blank-credential-error fn (name: Str): TokenError {
+  err(token-error(`box: ${name} is in the call's opts but is blank or null. Pass a value, or leave ${name} out to use context.`))
+}
+
+resolve-from
+meta {
+    doc: """The one resolver, pure: credentials for a call from `opts` first, then `ctx` (a source Map, see `ctx-source`). An Err when a credential key is in `opts` but blank or null; otherwise as `credentials-from(merge-sources(opts, ctx))`. Exposed for testing; `resolve-credentials` feeds it the context."""
+}
+fn (opts: Map, ctx: Map): Map {
+  blank blank-credential(opts)
+  if(is-some(blank), blank-credential-error(blank), credentials-from(merge-sources(opts, ctx)))
+}
+
 resolve-credentials
 meta {
-    doc: """Resolve the credentials for a call from `opts` and context (see the namespace doc for precedence)."""
+    doc: """Resolve the credentials for a call from `opts` and context (see the namespace doc for precedence). Credentials from `opts` are marked as secrets first, and never written to context."""
 }
 fn
 (): Map {
   resolve-credentials({})
 },
 (opts: Map): Map {
-  credentials-from(merge-sources(opts, ctx-source()))
+  mark-opts(opts)
+  creds resolve-from(opts, ctx-source())
+  // Resolving normalises values (a PEM's escaped newlines), so mark what will be sent too.
+  if(is-err(creds), creds, mark-fields(creds, RESOLVED_SECRETS))
 }
 
 app-keys
@@ -433,11 +519,17 @@ meta {
     doc: """The app's `{client-id, client-secret}` for a call (the same resolver as credentials): `opts.client-id` / `client-secret` first, else `box.client.id` / `box.client.secret`. A `TokenError` when either is missing."""
 }
 fn (opts: Map): Map {
+  mark-opts(opts)
+  blank find-first(["client-id", "client-secret"], (k) { and(in(k, keys(opts)), is-blank-value(get(opts, k))) })
   own-id present(get(opts, "client-id"))
   id or(own-id, present(::ctx/get("box.client.id")))
   // Another app's id never pairs with this app's context secret.
   secret or(present(get(opts, "client-secret")), if(is-some(own-id), null, present(::ctx/get("box.client.secret"))))
-  if(and(is-some(id), is-some(secret)), {client-id: id, client-secret: secret}, err(app-keys-error("this OAuth call")))
+  cond {
+    is-some(blank) => { blank-credential-error(blank) }
+    and(is-some(id), is-some(secret)) => { {client-id: id, client-secret: secret} }
+    => { err(app-keys-error("this OAuth call")) }
+  }
 }
 
 as-user
@@ -523,11 +615,12 @@ fn (assertion: Str, client-id: Str, client-secret: Str): Map {
 
 request-token
 meta {
-    doc: """POST a grant body to the Box token endpoint. Returns Box's token response or a `TokenError` (the error never echoes the body you sent)."""
+    doc: """POST a grant body to the Box token endpoint. Returns Box's token response, with its tokens marked as secrets, or a `TokenError` (the error never echoes the body you sent)."""
 }
 fn (body: Map): Map {
+  mark-values([get(body, "client_secret"), get(body, "refresh_token"), get(body, "assertion"), get(body, "code")])
   tokens ::oauth2/token-request(token-url(), body)
-  if(is-err(tokens), err(token-error("box: token request failed", err-value(tokens))), tokens)
+  if(is-err(tokens), err(token-error("box: token request failed", err-value(tokens))), mark-fields(tokens, TOKEN_RESPONSE_SECRETS))
 }
 
 refresh-token-grant
@@ -717,6 +810,7 @@ fn
   save-tokens(account, tokens, {})
 },
 (account: Str, tokens: Map, opts: Map): Bool {
+  mark-fields(tokens, TOKEN_RESPONSE_SECRETS)
   cond {
     is-blank-value(tokens.refresh_token) => { err(token-error("box: the token response has no refresh_token to keep")) }
     => {
@@ -728,14 +822,15 @@ fn
 
 load-tokens
 meta {
-    doc: """The keeper record for `account` (`{access-token, expires-at, refresh-token, refresh-expires-at, updated-at}`), or null. It holds live secrets: never log it."""
+    doc: """The keeper record for `account` (`{access-token, expires-at, refresh-token, refresh-expires-at, updated-at}`), or null. It holds live secrets, which are marked here: never log it."""
 }
 fn
 (account: Str): Map? {
   load-tokens(account, {})
 },
 (account: Str, opts: Map): Map? {
-  ::store/get(token-store(or(get(opts, "token-store"), ::ctx/get("box.oauth.store"))), account)
+  record ::store/get(token-store(or(get(opts, "token-store"), ::ctx/get("box.oauth.store"))), account)
+  if(is-map(record), mark-fields(record, RECORD_SECRETS), record)
 }
 
 forget-tokens
@@ -766,6 +861,7 @@ keeper-refresh fn (creds: Map, store: Map, record: Map, now: Int): Map {
     not(won) => {
       // Another run changed the entry between our read and our claim.
       latest ::store/get(store, creds.account)
+      if(is-map(latest), mark-fields(latest, RECORD_SECRETS))
       if(is-fresh(latest, now), {access-token: latest.access-token, expires-at: latest.expires-at, refreshed: false}, err(busy-error(creds.account)))
     }
     => {
@@ -813,6 +909,7 @@ fn (creds: Map, force: Bool): Map {
     => { existing }
   }
 
+  if(is-map(record), mark-fields(record, RECORD_SECRETS))
   plan keeper-plan(record, now, force)
   cond {
     eq(plan, "use") => { {access-token: record.access-token, expires-at: record.expires-at, refreshed: false} }

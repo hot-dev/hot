@@ -22,8 +22,11 @@ meta {
     over the descriptor's `opts` and drops this package's own keys
     (`cursor`, `page-size`, `limit`, `mime-type`, `max-pages`). The
     result goes straight to the provider package, which resolves
-    credentials as it always does: keys in opts first, then context.
-    This package never reads or writes context itself.
+    credentials as it always does: keys in opts first, then context. A
+    credential key that is present but blank is an error from the
+    provider, never a fallback to context. Only the S3 path reads context
+    in this package (`aws.*`, see `::documents::s3`), and nothing here
+    writes it.
     """
 }
 

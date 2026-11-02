@@ -111,14 +111,19 @@ meta ["test"] fn () {
     assert-eq({size: 5}, ::up/preflight-body(null, null, 5))
 }
 
-test-preflight-reports-runtime-limit
+test-preflight-result
 meta ["test"] fn () {
-    // Hot 3.0.x refuses OPTIONS before any network I/O.
-    result ::up/preflight-result(err("::hot::http/request: unsupported method: OPTIONS"))
-    assert(is-err(result))
-    assert(contains(err-message(result), "OPTIONS"))
-    ok ::up/preflight-result({status: 200, headers: {}, body: {upload_url: "https://upload.box.com/api/2.0/files/content", upload_token: "t"}})
+    transport ::up/preflight-result(err("::hot::http/request: request failed: dns"))
+    assert(is-err(transport))
+    assert(contains(err-message(transport), "request failed"))
+    ok ::up/preflight-result(::hot::http/HttpResponse({status: 200, headers: {}, body: {upload_url: "https://upload.box.com/api/2.0/files/content", upload_token: "t"}}))
     assert-eq("https://upload.box.com/api/2.0/files/content", ok.upload_url)
-    conflict ::up/preflight-result({status: 409, headers: {}, body: {type: "error", status: 409, code: "item_name_in_use", message: "Item with the same name already exists"}})
+    conflict ::up/preflight-result(::hot::http/HttpResponse({status: 409, headers: {}, body: {type: "error", status: 409, code: "item_name_in_use", message: "Item with the same name already exists"}}))
     assert(::box::api/has-code(conflict, "item_name_in_use"))
+    assert(contains(err-message(conflict), "HTTP 409 item_name_in_use"))
+}
+
+test-options-is-idempotent
+meta ["test"] fn () {
+    assert(::box::api/is-retryable-transport("OPTIONS", "::hot::http/request: request failed: reset"))
 }

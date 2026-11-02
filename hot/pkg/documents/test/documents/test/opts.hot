@@ -1,0 +1,40 @@
+::documents::test::opts ns
+meta ["test"]
+
+// Blank credentials in a source's opts stop at the provider's resolver, before any network call.
+
+::webhooks ::documents::webhooks
+
+test-blank-credential-in-a-source-is-an-err-naming-the-key
+meta ["test"] fn () {
+    cases [
+        [{provider: "box", opts: {token: ""}}, "token"],
+        [{provider: "box", opts: {account: null}}, "account"],
+        [{provider: "dropbox", opts: {token: ""}}, "token"],
+        [{provider: "dropbox", opts: {app-secret: "  "}}, "app-secret"],
+        [{provider: "onedrive", opts: {token: null}}, "token"],
+        [{provider: "onedrive", opts: {client-secret: ""}}, "client-secret"],
+        [{provider: "onedrive", opts: {graph-url: "https://proxy.example.com"}}, "graph-url"],
+        [{provider: "s3", bucket: "acme", opts: {access-key-id: ""}}, "access-key-id"],
+        [{provider: "s3", bucket: "acme", opts: {endpoint: "https://proxy.example.com"}}, "endpoint"]
+    ]
+    for-each(cases, (c) {
+        r ::documents/list(c[0], null)
+        assert(is-err(r), `${c[1]} on ${c[0].provider} is an Err`)
+        assert(contains(err-message(r), c[1]), `the Err names ${c[1]}`)
+    })
+}
+
+test-call-opts-over-source-opts-are-checked-too
+meta ["test"] fn () {
+    r ::documents/list({provider: "box", opts: {token: "fine-token"}}, null, {token: ""})
+    assert(is-err(r))
+    assert(contains(err-message(r), "token"))
+}
+
+test-explicit-webhook-secret-still-refuses-bad-requests
+meta ["test"] fn () {
+    bad {headers: {}, body-raw: "{}", body: {}, method: "POST"}
+    assert(is-err(::webhooks/normalize("dropbox", bad, "an-explicit-app-secret")))
+    assert(is-err(::webhooks/normalize("box", bad, {primary: "an-explicit-key", secondary: null, max-age-seconds: 600})))
+}

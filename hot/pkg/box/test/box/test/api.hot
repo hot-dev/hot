@@ -14,9 +14,13 @@ NOT_FOUND {
     context_info: {errors: [{reason: "invalid_parameter", name: "file_id"}]}
 }
 
+http-err fn (response: Map): Any {
+  ::box::api/HttpError(::hot::http/HttpResponse(response))
+}
+
 test-http-error-from-box-body
 meta ["test"] fn () {
-    e ::api/http-error({status: 404, headers: {"content-type": "application/json"}, body: NOT_FOUND})
+    e http-err({status: 404, headers: {"content-type": "application/json"}, body: NOT_FOUND})
     assert-eq(404, e.status)
     assert-eq("not_found", e.code)
     assert-eq("Could not find the specified resource", e.error-message)
@@ -29,8 +33,7 @@ meta ["test"] fn () {
 
 test-http-error-fields-survive-construction
 meta ["test"] fn () {
-    // Guards hot-bug-1: the record must not come out empty.
-    e ::api/http-error({status: 409, headers: null, body: {type: "error", status: 409, code: "item_name_in_use", message: "Item with the same name already exists"}})
+    e http-err({status: 409, headers: null, body: {type: "error", status: 409, code: "item_name_in_use", message: "Item with the same name already exists"}})
     plain untype(e)
     assert-eq(409, plain.status)
     assert-eq("item_name_in_use", plain.code)
@@ -40,7 +43,7 @@ meta ["test"] fn () {
 test-http-error-rate-limit
 meta ["test"] fn () {
     body {type: "error", status: 429, code: "rate_limit_exceeded", message: "Request rate limit exceeded, please try again later", request_id: "abc"}
-    e ::api/http-error({status: 429, headers: {"retry-after": "7"}, body: body})
+    e http-err({status: 429, headers: {"retry-after": "7"}, body: body})
     assert-eq(7, e.retry-after)
     assert(::api/is-retryable(err(e)))
     assert(::api/has-code(err(e), "rate_limit_exceeded"))
@@ -48,14 +51,14 @@ meta ["test"] fn () {
 
 test-http-error-oauth-shape-and-raw-bodies
 meta ["test"] fn () {
-    oauth ::api/http-error({status: 400, headers: {}, body: {error: "invalid_grant", error_description: "Refresh token has expired"}})
+    oauth http-err({status: 400, headers: {}, body: {error: "invalid_grant", error_description: "Refresh token has expired"}})
     assert-eq("invalid_grant", oauth.code)
     assert-eq("box: HTTP 400 invalid_grant: Refresh token has expired", oauth.message)
-    bytes ::api/http-error({status: 500, headers: {}, body: Bytes(to-json(NOT_FOUND))})
+    bytes http-err({status: 500, headers: {}, body: Bytes(to-json(NOT_FOUND))})
     assert-eq("not_found", bytes.code, "a JSON body delivered as Bytes is decoded")
-    text ::api/http-error({status: 502, headers: {}, body: "<html>Bad Gateway</html>"})
+    text http-err({status: 502, headers: {}, body: "<html>Bad Gateway</html>"})
     assert-eq("box: HTTP 502: <html>Bad Gateway</html>", text.message)
-    not-ready ::api/http-error({status: 202, headers: {"retry-after": "3"}, body: ""})
+    not-ready http-err({status: 202, headers: {"retry-after": "3"}, body: ""})
     assert(contains(not-ready.message, "not ready yet"))
     assert(::api/is-retryable(err(not-ready)), "202 not-ready is retryable")
 }
@@ -86,7 +89,7 @@ meta ["test"] fn () {
 
 test-is-retryable
 meta ["test"] fn () {
-    mk (status) { err(::api/http-error({status: status, headers: {}, body: ""})) }
+    mk (status) { err(http-err({status: status, headers: {}, body: ""})) }
     assert(::api/is-retryable(mk(429)))
     assert(::api/is-retryable(mk(503)))
     assert(::api/is-retryable(mk(500)))
@@ -136,8 +139,26 @@ meta ["test"] fn () {
 test-url-host
 meta ["test"] fn () {
     assert-eq("api.box.com", ::api/url-host("https://api.box.com/2.0/files/1"))
-    assert-eq("dl.boxcloud.com", ::api/url-host("https://user:pw@DL.BoxCloud.com:443/x?y"))
+    assert-eq("dl.boxcloud.com", ::api/url-host("https://DL.BoxCloud.com:443/x?y"))
+    assert-eq("api.box.com", ::api/url-host("https://api.box.com"))
+    assert-eq("[::1]", ::api/url-host("http://[::1]:9000/x"))
     assert(is-null(::api/url-host("not a url")))
+    for-each([
+        "https://user:pw@dl.boxcloud.com/x",
+        "https://evil.example@api.box.com/x",
+        "https://a@b@api.box.com/x",
+        "https://evil.example\\@api.box.com/x",
+        "https://evil.example\\.api.box.com/x",
+        "https://evil.example%2f@api.box.com/x",
+        "https://evil.example\t@api.box.com/x",
+        "https://api.box.com\t.evil.example/x",
+        "https://api.box.com\n.evil.example/x",
+        "https:///evil.example/api.box.com",
+        "ftp://api.box.com/x",
+        "https://"
+    ], (url) {
+        assert(is-null(::api/url-host(url)), url)
+    })
 }
 
 test-is-box-url
@@ -150,6 +171,34 @@ meta ["test"] fn () {
     assert(not(::api/is-box-url("https://evilbox.com/2.0")), "lookalike hosts are refused")
     assert(not(::api/is-box-url("https://api.box.com.evil.example/2.0")))
     assert(not(::api/is-box-url("https://box.com@evil.example/")), "userinfo tricks are refused")
+    assert(not(::api/is-box-url("https://evil.example@api.box.com/")), "userinfo is refused even before a Box host")
+    assert(not(::api/is-box-url("https://evil.example\\@api.box.com/")), "a backslash ends the authority: this connects to evil.example")
+}
+
+test-override-scheme-is-never-downgraded
+meta ["test"] fn () {
+    ::hot::ctx/set("box.api-root", "https://proxy.example.com")
+    assert(::api/is-box-url("https://proxy.example.com/2.0/users/me"))
+    assert(not(::api/is-box-url("http://proxy.example.com/2.0/users/me")), "an https override never allows http")
+    assert(not(::api/is-box-url("http://api.box.com/2.0/users/me")), "nor on a Box host")
+    refused ::api/request("GET", "http://proxy.example.com/2.0/users/me", {}, "", {token: "secret-token"})
+    assert(is-err(refused))
+    assert(contains(err-message(refused), "refusing to send Box credentials to proxy.example.com"))
+    ::hot::ctx/set("box.api-root", "")
+
+    ::hot::ctx/set("box.upload-root", "https://upload-proxy.example.com:8443")
+    assert(::api/is-box-url("https://upload-proxy.example.com:8443/api/2.0/files/content"))
+    assert(not(::api/is-box-url("http://upload-proxy.example.com:8443/api/2.0/files/content")), "the upload root too")
+    ::hot::ctx/set("box.upload-root", "")
+
+    ::hot::ctx/set("box.api-root", "http://localhost:9000")
+    assert(::api/is-box-url("http://localhost:9000/2.0/users/me"), "an http override keeps http for local test servers")
+    assert(::api/is-box-url("https://localhost:9000/2.0/users/me"))
+    assert(not(::api/is-box-url("http://other.example.com/2.0/users/me")), "only on its own host")
+    assert(not(::api/is-box-url("http://api.box.com/2.0/users/me")), "real Box hosts stay https")
+    ::hot::ctx/set("box.api-root", "")
+
+    assert(not(::api/is-box-url("http://proxy.example.com/2.0/users/me")), "no override: nothing extra is allowed")
 }
 
 test-request-refuses-foreign-hosts
@@ -185,9 +234,9 @@ meta ["test"] fn () {
 
 test-unwrap
 meta ["test"] fn () {
-    assert-eq({}, ::api/unwrap({status: 204, headers: {}, body: null}))
-    assert-eq({id: "1"}, ::api/unwrap({status: 200, headers: {}, body: {id: "1"}}))
-    failed ::api/unwrap({status: 403, headers: {}, body: {type: "error", status: 403, code: "access_denied_insufficient_permissions", message: "Access denied"}})
+    assert-eq({}, ::api/unwrap(::hot::http/HttpResponse({status: 204, headers: {}, body: null})))
+    assert-eq({id: "1"}, ::api/unwrap(::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "1"}})))
+    failed ::api/unwrap(::hot::http/HttpResponse({status: 403, headers: {}, body: {type: "error", status: 403, code: "access_denied_insufficient_permissions", message: "Access denied"}}))
     assert(is-err(failed))
     assert(contains(err-message(failed), "access_denied_insufficient_permissions"))
 }

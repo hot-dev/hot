@@ -33,6 +33,17 @@ Set credentials once in Context Variables (any [`microsoft-graph`](../microsoft-
 
 Application permissions always need admin consent. Every function has an options arity: OData options (`select`, `expand`, `top`, `orderby`, `filter`), this package's own keys (`drive`, `conflict`, `if-match`, `chunk-size`, ...) and microsoft-graph credential keys (`token`, `refresh-token`, `client-id`, `tenant-id`, ...).
 
+### Per-call credentials
+
+Credentials in `opts` replace context for that call. They are never written to context, and they are masked in call records.
+
+```hot
+tenant {refresh-token: stored-refresh-token, client-id: "11111111-2222-3333-4444-555555555555"}
+items ::microsoft::onedrive::items/list-children("root", tenant)
+```
+
+A credential key that is present but blank or null is an error naming the key, never a fallback to context, and `graph-url` or `login-url` needs a credential in the same `opts`. See [microsoft-graph](../microsoft-graph/README.md#per-call-credentials-multi-tenant) for the keys and rules.
+
 ## Drives and items
 
 `opts.drive` picks the drive: `"me"` (default), a drive id (any OneDrive or SharePoint library), or a base path from `::microsoft::onedrive/user-drive(id)`, `site-drive(site-id)`, `group-drive(id)`. An item is an id, `"root"`, a path from the drive root (`"/Reports/Q3 Plan.xlsx"`, each segment percent-encoded for you), or a driveItem / `DocFile` Map (which carries its own drive id, so results from delta, search and shared lists work across drives).

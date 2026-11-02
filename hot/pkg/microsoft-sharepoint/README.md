@@ -32,6 +32,17 @@ Set credentials in Context Variables (any [`microsoft-graph`](../microsoft-graph
 
 Application permissions always need a tenant admin's consent. Every function has an options arity for OData options (`select`, `expand`, `filter`, `top`, `orderby`) and microsoft-graph credential keys.
 
+### Per-call credentials
+
+Credentials in `opts` replace context for that call. They are never written to context, and they are masked in call records.
+
+```hot
+tenant {client-id: "11111111-2222-3333-4444-555555555555", client-secret: stored-client-secret, tenant-id: "fabrikam.onmicrosoft.com"}
+site ::microsoft::sharepoint::sites/get-root-site(tenant)
+```
+
+A credential key that is present but blank or null is an error naming the key, never a fallback to context, and `graph-url` or `login-url` needs a credential in the same `opts`. See [microsoft-graph](../microsoft-graph/README.md#per-call-credentials-multi-tenant) for the keys and rules.
+
 ## Quick start
 
 ```hot

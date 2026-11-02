@@ -137,6 +137,7 @@ fn
   if(is-err(app), app, revoke-token(app.client-id, app.client-secret, token))
 },
 (client-id: Str, client-secret: Str, token: Str): Bool {
+  ::auth/mark-values([client-secret, token])
   response ::http/request(::http/HttpRequest({
     method: "POST",
     url: `${::box/api-root()}/oauth2/revoke`,

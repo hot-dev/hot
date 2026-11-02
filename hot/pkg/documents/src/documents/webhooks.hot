@@ -168,7 +168,8 @@ meta {
     `provider` is a provider name or a source descriptor. The 2-arity
     form reads the secret from context through the provider package (and
     fails the run when it is unset); the 3-arity form takes `secret`: a
-    Str (Drive channel token, Graph clientState, Dropbox app secret), or
+    Str (Drive channel token, Graph clientState, Dropbox app secret,
+    marked as a secret here), or
     a Map `{primary, secondary, max-age-seconds?}` for Box.
     """
 }
@@ -215,6 +216,8 @@ fn
 (provider: Any, request: Map, secret: Any): WebhookEvent {
   name ::source/provider-name(provider)
   text if(is-str(secret), secret, "")
+  given if(is-map(secret), [get(secret, "primary"), get(secret, "secondary")], [text])
+  ::hot::ctx/mark-secret(filter(given, (v) { not(::source/is-blank(v)) }))
   cond {
     is-err(name) => { name }
     eq(name, "google-drive") => {

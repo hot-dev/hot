@@ -3,6 +3,10 @@ meta ["test"]
 
 ::api ::microsoft::graph::api
 
+http-err fn (response: Map): Any {
+  ::api/HttpError(::hot::http/HttpResponse(response))
+}
+
 test-odata-params
 meta ["test"] fn () {
     p ::api/odata-params({select: ["id", "displayName"], top: 50, filter: null, expand: "children", count: true, token: "secret", headers: {a: "b"}})
@@ -84,7 +88,7 @@ meta ["test"] fn () {
 
 test-http-error-graph-shape
 meta ["test"] fn () {
-    e ::api/http-error({status: 404, headers: {"request-id": "hdr-req"}, body: {error: {
+    e http-err({status: 404, headers: {"request-id": "hdr-req"}, body: {error: {
         code: "itemNotFound",
         message: "The resource could not be found.",
         innerError: {date: "2026-11-01T10:00:00", "request-id": "req-1", "client-request-id": "cli-1"}
@@ -100,21 +104,21 @@ meta ["test"] fn () {
 
 test-http-error-inner-code-and-bytes
 meta ["test"] fn () {
-    nested ::api/http-error({status: 400, headers: {}, body: {error: {code: "invalidRequest", message: "Bad", innererror: {code: "outer", innererror: {code: "fileTooLarge"}}}}})
+    nested http-err({status: 400, headers: {}, body: {error: {code: "invalidRequest", message: "Bad", innererror: {code: "outer", innererror: {code: "fileTooLarge"}}}}})
     assert-eq("fileTooLarge", nested.inner-code, "innermost innererror code")
     assert(::api/has-code(nested, "fileTooLarge"))
-    bytes ::api/http-error({status: 403, headers: {}, body: Bytes("{\"error\":{\"code\":\"accessDenied\",\"message\":\"Access denied\"}}")})
+    bytes http-err({status: 403, headers: {}, body: Bytes("{\"error\":{\"code\":\"accessDenied\",\"message\":\"Access denied\"}}")})
     assert-eq("accessDenied", bytes.code, "a Bytes body (downloads) is decoded")
-    oauth ::api/http-error({status: 401, headers: {}, body: {error: "invalid_token", error_description: "Token expired\nmore"}})
+    oauth http-err({status: 401, headers: {}, body: {error: "invalid_token", error_description: "Token expired\nmore"}})
     assert-eq("microsoft-graph: HTTP 401 invalid_token: Token expired", oauth.message)
-    html ::api/http-error({status: 502, headers: {}, body: "<html>Bad Gateway</html>"})
+    html http-err({status: 502, headers: {}, body: "<html>Bad Gateway</html>"})
     assert-eq("microsoft-graph: HTTP 502: <html>Bad Gateway</html>", html.message)
     assert(is-null(html.code))
 }
 
 test-retry-after
 meta ["test"] fn () {
-    e ::api/http-error({status: 429, headers: {"Retry-After": "12"}, body: {error: {code: "TooManyRequests", message: "Slow down"}}})
+    e http-err({status: 429, headers: {"Retry-After": "12"}, body: {error: {code: "TooManyRequests", message: "Slow down"}}})
     assert-eq(12, e.retry-after)
     assert-eq(30, ::api/retry-after-seconds({"retry-after": "30"}))
     assert(is-null(::api/retry-after-seconds({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"})), "HTTP dates are not parsed")
@@ -124,13 +128,13 @@ meta ["test"] fn () {
 
 test-is-retryable
 meta ["test"] fn () {
-    assert(::api/is-retryable(err(::api/http-error({status: 429, headers: {}, body: ""}))))
-    assert(::api/is-retryable(err(::api/http-error({status: 503, headers: {}, body: ""}))))
-    assert(::api/is-retryable(::api/http-error({status: 504, headers: {}, body: ""})))
+    assert(::api/is-retryable(err(http-err({status: 429, headers: {}, body: ""}))))
+    assert(::api/is-retryable(err(http-err({status: 503, headers: {}, body: ""}))))
+    assert(::api/is-retryable(http-err({status: 504, headers: {}, body: ""})))
     assert(::api/is-retryable({status: 500, headers: {}, body: ""}), "a raw response")
-    assert(not(::api/is-retryable(err(::api/http-error({status: 404, headers: {}, body: ""})))))
-    assert(not(::api/is-retryable(err(::api/http-error({status: 410, headers: {}, body: ""})))), "410 resync is not a retry")
-    assert(not(::api/is-retryable(err(::api/http-error({status: 403, headers: {}, body: ""})))))
+    assert(not(::api/is-retryable(err(http-err({status: 404, headers: {}, body: ""})))))
+    assert(not(::api/is-retryable(err(http-err({status: 410, headers: {}, body: ""})))), "410 resync is not a retry")
+    assert(not(::api/is-retryable(err(http-err({status: 403, headers: {}, body: ""})))))
     assert(::api/is-retryable(err("::hot::http/request: request failed: connection reset")))
     assert(not(::api/is-retryable(err("::hot::http/request: response body exceeds http.max-response-bytes"))))
     assert(::api/is-retryable(err(::microsoft::graph::auth/token-error("p", {status: 503, body: "busy"}))), "token endpoint outage")
@@ -150,9 +154,9 @@ meta ["test"] fn () {
 
 test-unwrap
 meta ["test"] fn () {
-    assert-eq({id: "1"}, ::api/unwrap({status: 200, headers: {}, body: {id: "1"}}))
-    assert-eq({}, ::api/unwrap({status: 204, headers: {}, body: ""}), "204 No Content")
-    bad ::api/unwrap({status: 409, headers: {}, body: {error: {code: "nameAlreadyExists", message: "x"}}})
+    assert-eq({id: "1"}, ::api/unwrap(::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "1"}})))
+    assert-eq({}, ::api/unwrap(::hot::http/HttpResponse({status: 204, headers: {}, body: ""})), "204 No Content")
+    bad ::api/unwrap(::hot::http/HttpResponse({status: 409, headers: {}, body: {error: {code: "nameAlreadyExists", message: "x"}}}))
     assert(is-err(bad))
     assert(::api/has-code(bad, "nameAlreadyExists"))
 }

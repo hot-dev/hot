@@ -4,6 +4,10 @@ meta ["test"]
 ::items ::microsoft::onedrive::items
 ::sharing ::microsoft::onedrive::sharing
 
+resp fn (status: Int, body: Any): Any {
+  ::hot::http/HttpResponse({status: status, headers: {}, body: body})
+}
+
 test-search-function
 meta ["test"] fn () {
     assert-eq("search(q='quarterly%20report')", ::items/search-function("quarterly report"))
@@ -22,23 +26,35 @@ meta ["test"] fn () {
 
 test-classify-copy-status
 meta ["test"] fn () {
-    running ::items/classify-copy-status({status: 202, headers: {}, body: {operation: "ItemCopy", percentageComplete: 27.8, status: "inProgress"}})
+    running ::items/classify-copy-status(resp(202, {operation: "ItemCopy", percentageComplete: 27.8, status: "inProgress"}))
     assert-eq("inProgress", running.status)
     assert(not(running.done))
     assert-eq(27.8, running.percent)
-    done ::items/classify-copy-status({status: 200, headers: {}, body: {percentageComplete: 100.0, resourceId: "01MOWKYVJML57KN2ANMBA3JZJS2MBGC7KM", status: "completed"}})
+    done ::items/classify-copy-status(resp(200, {percentageComplete: 100.0, resourceId: "01MOWKYVJML57KN2ANMBA3JZJS2MBGC7KM", status: "completed"}))
     assert(done.done)
     assert-eq("01MOWKYVJML57KN2ANMBA3JZJS2MBGC7KM", done.resource-id)
-    failed ::items/classify-copy-status({status: 200, headers: {}, body: {status: "failed", error: {code: "nameAlreadyExists", message: "exists"}}})
+    failed ::items/classify-copy-status(resp(200, {status: "failed", error: {code: "nameAlreadyExists", message: "exists"}}))
     assert(failed.done)
     assert-eq("nameAlreadyExists", failed.error.code)
-    hidden ::items/classify-copy-status(err("::hot::http/request: redirect missing valid Location"))
-    assert-eq("completed", hidden.status, "a 303 the runtime could not follow means done")
-    redirected ::items/classify-copy-status({status: 401, headers: {}, body: ""})
+    no-location ::items/classify-copy-status(resp(303, ""))
+    assert-eq("completed", no-location.status, "a 303 without Location is a real response, and means done")
+    assert(no-location.done)
+    redirected ::items/classify-copy-status(resp(401, ""))
     assert(redirected.done, "a followed 303 lands on the item API without a token")
     assert(is-null(redirected.resource-id))
-    assert(is-err(::items/classify-copy-status({status: 404, headers: {}, body: ""})))
-    assert(is-err(::items/classify-copy-status(err("request failed: dns"))))
+    item ::items/classify-copy-status(resp(200, {id: "01NEWITEM", name: "copy.docx"}))
+    assert-eq("completed", item.status, "a followed 303 that returned the driveItem")
+    assert-eq("01NEWITEM", item.resource-id)
+    assert(item.done)
+    odd ::items/classify-copy-status(resp(200, {}))
+    assert-eq("unknown", odd.status)
+    assert(not(odd.done))
+    missing ::items/classify-copy-status(resp(404, ""))
+    assert(is-err(missing))
+    assert(contains(err-message(missing), "HTTP 404"), "the HttpError arrow writes the message")
+    failure ::items/classify-copy-status(err("request failed: dns"))
+    assert(is-err(failure))
+    assert-eq("request failed: dns", err-message(failure))
 }
 
 test-build-link

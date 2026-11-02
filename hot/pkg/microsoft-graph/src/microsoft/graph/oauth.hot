@@ -176,8 +176,8 @@ meta {
     doc: """
     Exchange an authorization code for tokens. Returns Entra's token
     response (`access_token`, `expires_in`, `refresh_token`, `scope`,
-    `token_type`, `id_token` when `openid` was requested), or a
-    `::microsoft::graph::auth/TokenError`. `opts.code-verifier`
+    `token_type`, `id_token` when `openid` was requested; the tokens are
+    marked as secrets), or a `::microsoft::graph::auth/TokenError`. `opts.code-verifier`
     completes a PKCE flow; `opts.tenant-id` / `opts.cloud` must match
     `authorize-url`. Pass a null `client-secret` for public clients;
     `opts.private-key` + `opts.certificate` authenticate a confidential
@@ -189,6 +189,7 @@ fn
   exchange-code(client-id, client-secret, code, redirect-uri, {})
 },
 (client-id: Str, client-secret: Str?, code: Str, redirect-uri: Str, opts: Map): Map {
+  ::auth/mark-values([client-secret, code, get(opts, "private-key")])
   cloud endpoints(opts)
   auth ::auth/client-auth-from(::auth/compact({
     client-secret: client-secret,
@@ -244,6 +245,8 @@ fn
   refresh-access-token(client-id, refresh-token, {})
 },
 (client-id: Str, refresh-token: Str, opts: Map): Map {
+  ::auth/mark-secrets(opts, ::auth/SECRET_KEYS)
+  ::auth/mark-values([refresh-token])
   source {...::auth/compact(::auth/pick(opts, ::auth/CREDENTIAL_KEYS)), client-id: client-id, refresh-token: refresh-token, token: null}
   creds ::auth/credentials-from(::auth/compact(source))
   cond {
@@ -263,6 +266,7 @@ meta {
     """
 }
 fn (tenant-id: Str, client-id: Str, opts: Map): Map {
+  ::auth/mark-secrets(opts, ::auth/SECRET_KEYS)
   source ::auth/compact({...::auth/pick(opts, ::auth/CREDENTIAL_KEYS), tenant-id: tenant-id, client-id: client-id, token: null, refresh-token: null})
   creds ::auth/credentials-from(source)
   cond {

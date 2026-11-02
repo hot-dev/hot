@@ -102,7 +102,7 @@ fetch-ranges fn (url: Str, ranges: Vec, index: Int, acc: Bytes): Bytes {
         // A server that ignores Range answers 200 with the whole body.
         eq(response.status, 200) => { ::od/response-bytes(response) }
         eq(response.status, 206) => { fetch-ranges(url, ranges, add(index, 1), concat(acc, ::od/response-bytes(response))) }
-        => { err(::api/http-error(response)) }
+        => { err(::api/HttpError(response)) }
       }
     }
   }
@@ -131,7 +131,7 @@ fn
         in(response.status, [200, 206]) => {
           ::od/content-from-bytes(Str(found.item.id), ::od/response-bytes(response), get(or(found.item.file, {}), "mimeType"), found.item.name, "range")
         }
-        => { err(::api/http-error(response)) }
+        => { err(::api/HttpError(response)) }
       }
     }
   }
@@ -201,7 +201,7 @@ fn
       cond {
         is-size-limit-error(response) => { download-chunked(item, opts) }
         is-err(response) => { response }
-        not(::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+        not(::http/is-ok-response(response)) => { err(::api/HttpError(response)) }
         => { ::od/content-from-response(id, response, name, "download") }
       }
     }
@@ -268,7 +268,7 @@ fn
       name if(is-map(item), get(::od/remote-target(item), "name"), null)
       cond {
         is-err(response) => { response }
-        not(::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+        not(::http/is-ok-response(response)) => { err(::api/HttpError(response)) }
         => {
           content ::od/content-from-response(id, response, name, "convert")
           mime or(content.mime-type, get(CONVERT_MIME, params.format))
@@ -309,7 +309,7 @@ fn
   response ::od/follow-redirect(::api/request("GET", path, {}, "", ::od/creds(opts)))
   cond {
     is-err(response) => { response }
-    not(::http/is-ok-response(response)) => { err(::api/http-error(response)) }
+    not(::http/is-ok-response(response)) => { err(::api/HttpError(response)) }
     => { ::od/content-from-response(if(is-map(item), Str(item.id), Str(item)), response, null, "thumbnail") }
   }
 }

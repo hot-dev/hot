@@ -5,6 +5,14 @@ meta ["test"]
 ::sharing ::dropbox::sharing
 ::users ::dropbox::users
 
+http-err fn
+(response: Map): Any {
+  ::dropbox::api/HttpError(::hot::http/HttpResponse(response))
+},
+(response: Map, route: Str?): Any {
+  ::dropbox::api/http-error(response, route)
+}
+
 test-normalize-path
 meta ["test"] fn () {
     assert-eq("", ::dropbox/normalize-path(null))
@@ -98,7 +106,7 @@ meta ["test"] fn () {
 
 test-existing-link
 meta ["test"] fn () {
-    e ::dropbox::api/http-error({status: 409, headers: {}, body: {
+    e http-err({status: 409, headers: {}, body: {
         error_summary: "shared_link_already_exists/metadata/..",
         error: {".tag": "shared_link_already_exists", shared_link_already_exists: {".tag": "metadata", metadata: {url: "https://www.dropbox.com/scl/fi/abc/a.pdf?dl=0", name: "a.pdf"}}}
     }})

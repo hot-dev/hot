@@ -9,6 +9,12 @@ meta {
     credentials are ignored for that call. Within one source an access
     token wins over a refresh token.
 
+    A credential key (`token`, `refresh-token`, `app-key`, `app-secret`)
+    that is in `opts` but blank or null is an error naming the key, never
+    a fallback to context. Credentials from `opts` are marked as secrets
+    (`::hot::ctx/mark-secret`), so call records mask them; they are never
+    written to context. Leave `app-secret` out for a PKCE client.
+
     | Credential | `opts` keys | Context variables |
     |---|---|---|
     | Access token | `token` | `dropbox.access.token` |
@@ -22,6 +28,8 @@ meta {
     (`::hot::ctx`, stored as secrets) under a key derived from the app
     key and refresh token, until `expires_in` minus 300 seconds. The
     cache lives for one run. Explicit access tokens are never cached.
+    Every token the token endpoint returns is marked as a secret before
+    it leaves this package.
     """
 }
 
@@ -38,6 +46,10 @@ EXPIRY_MARGIN_SECONDS 300
 // route being called. Endpoint functions strip these before building
 // arguments.
 CREDENTIAL_KEYS ["token", "refresh-token", "app-key", "app-secret", "select-user", "select-admin", "path-root", "retry"]
+// Present but blank in `opts`: an error naming the key, never a fallback to context.
+BLANK_CHECKED_KEYS ["token", "refresh-token", "app-key", "app-secret"]
+SECRET_KEYS ["token", "refresh-token", "app-secret"]
+TOKEN_RESPONSE_SECRETS ["access_token", "refresh_token", "id_token"]
 
 TokenError
 meta {
@@ -89,6 +101,23 @@ fn
 
 now-ms fn (): Int {
   ::time/epoch-millis(::time/now())
+}
+
+mark-values
+meta {
+    doc: """Register the non-blank `values` as secrets for this run's call records (`::hot::ctx/mark-secret`)."""
+}
+fn (values: Vec): Vec {
+  ::ctx/mark-secret(filter(values, (v) { not(::dropbox/is-blank(v)) }))
+}
+
+mark-tokens
+meta {
+    doc: """Mark the tokens of a token response as secrets and return the response unchanged."""
+}
+fn (tokens: Map): Map {
+  mark-values(map(TOKEN_RESPONSE_SECRETS, (k) { get(tokens, k) }))
+  tokens
 }
 
 // ---------------------------------------------------------------------------
@@ -172,16 +201,39 @@ fn (source: Map): Map {
   }
 }
 
+blank-credential
+meta {
+    doc: """The first credential key `opts` has with a blank or null value, else null (pure)."""
+}
+fn (opts: Map): Str? {
+  find-first(BLANK_CHECKED_KEYS, (k) { and(in(k, keys(opts)), ::dropbox/is-blank(get(opts, k))) })
+}
+
+resolve-from
+meta {
+    doc: """The one resolver, pure: credentials for a call from `opts` first, then `ctx` (a source Map, see `ctx-source`). An Err when a credential key is in `opts` but blank or null; otherwise as `credentials-from(merge-sources(opts, ctx))`. Exposed for testing; `resolve-credentials` feeds it the context."""
+}
+fn (opts: Map, ctx: Map): Map {
+  blank blank-credential(opts)
+  cond {
+    is-some(blank) => {
+      err(token-error(`dropbox: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use context.`))
+    }
+    => { credentials-from(merge-sources(opts, ctx)) }
+  }
+}
+
 resolve-credentials
 meta {
-    doc: """Resolve the credentials for a call from `opts` and context (see the namespace doc for precedence)."""
+    doc: """Resolve the credentials for a call from `opts` and context (see the namespace doc for precedence). Credentials from `opts` are marked as secrets first, and never written to context."""
 }
 fn
 (): Map {
   resolve-credentials({})
 },
 (opts: Map): Map {
-  credentials-from(merge-sources(opts, ctx-source()))
+  mark-values(map(SECRET_KEYS, (k) { get(opts, k) }))
+  resolve-from(opts, ctx-source())
 }
 
 // ---------------------------------------------------------------------------
@@ -240,12 +292,13 @@ meta {
     doc: """Exchange a refresh token for an access token at `https://api.dropboxapi.com/oauth2/token` (no cache). Returns the token response (`access_token`, `expires_in`, `token_type`) or a `TokenError`."""
 }
 fn (app-key: Str, app-secret: Str?, refresh-token: Str): Map {
+  mark-values([app-secret, refresh-token])
   tokens ::oauth2/refresh(::dropbox/TOKEN_URL, filter-vals({
     client-id: app-key,
     client-secret: app-secret,
     refresh-token: refresh-token
   }, is-some))
-  if(is-err(tokens), err(token-error("dropbox: token refresh failed", err-value(tokens))), tokens)
+  if(is-err(tokens), err(token-error("dropbox: token refresh failed", err-value(tokens))), mark-tokens(tokens))
 }
 
 bearer

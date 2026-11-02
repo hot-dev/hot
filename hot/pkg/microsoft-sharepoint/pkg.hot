@@ -3,7 +3,7 @@
 hot.pkg.microsoft-sharepoint {
   name: "hot.dev/microsoft-sharepoint",
   version: "0.1.0",
-  hot-min-version: "3.0.0",
+  hot-min-version: "3.0.2",
   description: "SharePoint Online bindings for Hot over Microsoft Graph: sites (root, by URL or path, search, subsites), document libraries as drives for microsoft-onedrive, lists and list items with field selection (read, create, update), list change subscriptions, and Sites.Selected / Lists.SelectedOperations.Selected app grants for least-privilege app-only access.",
   author: "Hot Dev",
   email: "support@hot.dev",

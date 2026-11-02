@@ -67,6 +67,18 @@ meta ["test"] fn () {
     assert-eq("file", d.kind)
 }
 
+test-google-hashes-tolerate-both-docfiles
+meta ["test"] fn () {
+    assert-eq({md5: "abc", sha256: "def"}, ::a/google-hashes({md5: "abc", sha256: "def"}), "the fields")
+    assert-eq({md5: "abc", sha1: "s1", sha256: "def"}, ::a/google-hashes({hashes: {md5: "abc", sha1: "s1", sha256: "def"}}), "a hashes Map")
+    assert-eq({md5: "abc", sha1: "s1", sha256: "def"}, ::a/google-hashes({hashes: {md5Checksum: "abc", sha1Checksum: "s1", sha256Checksum: "def"}}), "Drive's own names")
+    assert-eq({md5: "new", sha256: "def"}, ::a/google-hashes({md5: "old", sha256: "def", hashes: {md5: "new", sha1: null}}), "the Map wins, blanks dropped")
+    assert-eq({}, ::a/google-hashes({hashes: {}}))
+    assert-eq({}, ::a/google-hashes({}))
+    typed ::google::drive/to-doc-file({id: "1", name: "a.pdf", mimeType: "application/pdf", md5Checksum: "abc"})
+    assert-eq({md5: "abc"}, ::a/google-hashes(typed), "today's typed DocFile")
+}
+
 test-onedrive-personal-hashes-and-folders
 meta ["test"] fn () {
     d ::a/from-onedrive(src("onedrive"), ::microsoft::onedrive/to-doc-file(::fx/ONEDRIVE_PERSONAL))

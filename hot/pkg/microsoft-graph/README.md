@@ -49,7 +49,8 @@ Every function in this package and in the service packages has an options arity 
 | `refresh-token`, `client-id` (+ `client-secret` or `private-key`) | Delegated refresh token |
 | `client-id`, `client-secret`, `tenant-id` | App-only, client secret |
 | `client-id`, `private-key`, `certificate` or `thumbprint` / `thumbprint-sha256`, `tenant-id` | App-only, certificate |
-| `tenant-id`, `cloud`, `graph-url`, `login-url` | Target another tenant or cloud with the context's app |
+| `tenant-id`, `cloud` | Target another tenant or national cloud with the context's app |
+| `graph-url`, `login-url` | Another Graph or login root, such as a proxy. Needs a credential in the same `opts`: context credentials are never sent to a per-call URL |
 | `scopes` | Delegated scopes for this call |
 | `api-version` | `"beta"` instead of `"v1.0"` |
 | `headers` | Extra request headers |
@@ -66,7 +67,11 @@ alex ::users/me({refresh-token: "0.AXoA-alex-refresh-token"})
 people ::users/list-users({tenant-id: "fabrikam.onmicrosoft.com", select: ["id", "mail"]}, 100)
 ```
 
-When `opts` carries a primary credential (`token`, `refresh-token`, `client-secret` or `private-key`), context user and app credentials are ignored for that call; only the app identity (`client-id`, `tenant-id`, `cloud`) is still read from context when `opts` leaves it out, and a per-call refresh token borrows the context's client secret or certificate for the same app. Per-call credentials are never written to the run's context, so parallel flows and tenants cannot see each other's.
+When `opts` carries a primary credential (`token`, `refresh-token`, `client-secret` or `private-key`), context user and app credentials are ignored for that call; only the app identity (`client-id`, `tenant-id`, `cloud`) is still read from context when `opts` leaves it out, and a per-call refresh token borrows the context's client secret or certificate for the same app. Per-call credentials are never written to the run's context, so parallel flows and tenants cannot see each other's, and they are masked in call records.
+
+A credential key (`token`, `refresh-token`, `client-id`, `client-secret`, `private-key`) that is present but blank or null is an error naming the key, never a fallback to context, so a tenant whose token is missing does not run on the project's credentials. `graph-url` or `login-url` without `token`, `refresh-token`, `client-secret` or `private-key` in the same `opts` is an error naming both, and a per-call refresh token with a per-call URL borrows nothing from context. `::microsoft::graph::api/resolve(opts)` is the one place this is decided.
+
+A full URL passed as `path`, such as an `@odata.nextLink`, gets credentials only over https on the call's Graph root or a Microsoft Graph cloud host (`graph.microsoft.com`, `graph.microsoft.us`, `dod-graph.microsoft.us`, `microsoftgraph.chinacloudapi.cn`). Plain http is allowed only on the host of a Graph root that is itself http, for tests and local proxies. Anything else, including a URL with userinfo, is an error naming the host, and nothing is sent or minted.
 
 ### Certificates
 
@@ -151,7 +156,7 @@ response ::api/request("GET", ::api/with-query("/me/drive", {select: "id,quota"}
 
 ## Functions by area
 
-**`::microsoft::graph::api`**: `request`, `json`, `get-json`, `resolve` (the credential resolver), `odata-params`, `query-string`, `with-query`, `query-headers`, `encode-segment`, `fetch-page`, `collect-pages`, `collect-with`, `to-page`, `batch`, `build-batch`, `batch-chunks`, `http-error`, `has-code`, `is-retryable`, `retry-after-seconds`, `api-params`, `credential-opts`.
+**`::microsoft::graph::api`**: `request`, `json`, `get-json`, `resolve` (the credential resolver), `odata-params`, `query-string`, `with-query`, `query-headers`, `encode-segment`, `fetch-page`, `collect-pages`, `collect-with`, `to-page`, `batch`, `build-batch`, `batch-chunks`, `HttpError` (`HttpError(response)` builds it from a non-2xx response), `has-code`, `is-retryable`, `retry-after-seconds`, `api-params`, `credential-opts`.
 
 **`::microsoft::graph::auth`**: `access-token`, `resolve-credentials`, `latest-refresh-token`, `certificate-thumbprints`, `client-assertion`, `cloud-config`, `normalize-scopes`, `token-url`, `evict-token`, `TokenError`.
 
@@ -257,7 +262,7 @@ fn (event) {
 
 ## Data handling
 
-Tokens, secrets, private keys and `clientState` are never logged or put in error messages; cached tokens live only in the run's secret context. Error messages include Graph's `error.message`, which can name an item but not credential material. Graph data you fetch (user profiles, file contents) is yours to store; keep refresh tokens in a secret store.
+Tokens, secrets, private keys and `clientState` are never logged or put in error messages. Whatever arrives per call or comes back from Entra (access, refresh and id tokens) is marked with `::hot::ctx/mark-secret`, so call records mask it; cached tokens live only in the run's secret context. Error messages include Graph's `error.message`, which can name an item but not credential material. Graph data you fetch (user profiles, file contents) is yours to store; keep refresh tokens in a secret store.
 
 ## Notes and limits
 

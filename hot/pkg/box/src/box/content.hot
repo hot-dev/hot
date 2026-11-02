@@ -143,8 +143,8 @@ fn
   cond {
     and(is-size-limit-error(response), not(is-map(rng))) => { download-file-chunked(file-id, opts) }
     is-err(response) => { response }
-    eq(response.status, 202) => { err(::api/http-error(response)) }
-    not(is-ok-response(response)) => { err(::api/http-error(response)) }
+    eq(response.status, 202) => { err(::api/HttpError(response)) }
+    not(is-ok-response(response)) => { err(::api/HttpError(response)) }
     => { to-content(file-id, response, if(is-map(rng), "range", "download"), opts) }
   }
 }
@@ -172,7 +172,7 @@ fetch-ranges fn (full-url: Str, ranges: Vec, index: Int, acc: Bytes, opts: Map):
         eq(response.status, 206) => {
           fetch-ranges(full-url, ranges, add(index, 1), concat(acc, ::box/response-bytes(response)), opts)
         }
-        => { err(::api/http-error(response)) }
+        => { err(::api/HttpError(response)) }
       }
     }
   }
@@ -332,7 +332,7 @@ fetch-representation-text fn (url: Str, opts: Map): Any {
   cond {
     is-err(response) => { response }
     eq(response.status, 202) => { null }
-    not(is-ok-response(response)) => { err(::api/http-error(response)) }
+    not(is-ok-response(response)) => { err(::api/HttpError(response)) }
     => { Str(::box/response-bytes(response)) }
   }
 }

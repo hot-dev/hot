@@ -259,6 +259,9 @@ fn (): Map {
 // Options
 // ---------------------------------------------------------------------------
 
+// The package's one credential resolver: opts first, then context.
+resolve ::dropbox::auth/resolve-credentials
+
 api-params
 meta {
     doc: """Strip the package's own keys (`::dropbox::auth/CREDENTIAL_KEYS`) from `opts`, leaving Dropbox arguments."""
@@ -323,7 +326,7 @@ type {
     message: Str?,
     route: Str?,
     error-summary: Str?,
-    error: Any,
+    error: Any?,
     error-tag: Str?,
     error-tags: Vec?,
     user-message: Str?,
@@ -409,7 +412,7 @@ fn (value: Any): Int? {
     not(is-str(value)) => { null }
     => {
       s trim(value)
-      // WORKAROUND(hot-bug-6): match digits before Int(); consuming Int("abc")'s Err halts the run.
+      // Retry-After may be an HTTP date, and a consumed Err from Int() halts: parse digits only.
       if(::re/is-match(s, "^-?[0-9]{1,15}$"), Int(s), null)
     }
   }
@@ -427,16 +430,16 @@ fn (headers: Map?, body: Any): Int? {
   if(is-some(seconds), max(or(seconds, 0), 0), null)
 }
 
-// WORKAROUND(hot-bug-1): build HttpError in an explicit function; `HttpError(response)` via an arrow does a field copy.
+// `HttpError(response)`: the error for a non-2xx response when the route is not known.
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  http-error(response, null)
+}
+
 http-error
 meta {
-    doc: """Build an `HttpError` (with a readable `message`) from a non-2xx response and the route that was called. Pure; exposed for testing and for code that reads responses itself."""
+    doc: """Build an `HttpError` (with a readable `message`) from a non-2xx response and the route that was called, which `HttpError(response)` cannot know. Pure; exposed for testing and for code that reads responses itself."""
 }
-fn
-(response: Map): HttpError {
-  http-error(response, null)
-},
-(response: Map, route: Str?): HttpError {
+fn (response: Map, route: Str?): HttpError {
   headers or(response.headers, {})
   body decode-error-body(response.body)
   summary if(is-map(body), get(body, "error_summary"), null)
@@ -738,7 +741,7 @@ meta {
     """
 }
 fn (style: Str, route: Str, arg: Any, body: Any, headers: Map, opts: Map): HttpResponse {
-  creds ::auth/resolve-credentials(opts)
+  creds resolve(opts)
   policy retry-policy(opts)
   extra {...team-headers(opts, ctx-team()), ...headers}
   cond {

@@ -146,8 +146,8 @@ meta {
     `https://api.dropboxapi.com/oauth2/token`. Returns Dropbox's token
     response (`access_token`, `expires_in`, `token_type`, `refresh_token`
     when offline, `scope`, `account_id`, `uid`, `team_id`), or a
-    `::dropbox::auth/TokenError`. `app-secret` may be null for a PKCE
-    flow; `redirect-uri` must match the one sent to `authorize-url`
+    `::dropbox::auth/TokenError`. The tokens are marked as secrets.
+    `app-secret` may be null for a PKCE flow; `redirect-uri` must match the one sent to `authorize-url`
     (null when none was). `opts.code-verifier` completes a PKCE flow.
     """
 }
@@ -156,6 +156,7 @@ fn
   exchange-code(app-key, app-secret, code, redirect-uri, {})
 },
 (app-key: Str, app-secret: Str?, code: Str, redirect-uri: Str?, opts: Map): Map {
+  ::auth/mark-values([app-secret, code])
   tokens ::oauth2/exchange-code(::dropbox/TOKEN_URL, filter-vals({
     client-id: app-key,
     client-secret: if(::dropbox/is-blank(app-secret), null, app-secret),
@@ -163,7 +164,7 @@ fn
     redirect-uri: if(::dropbox/is-blank(redirect-uri), null, redirect-uri),
     code-verifier: get(opts, "code-verifier")
   }, is-some))
-  if(is-err(tokens), err(::auth/token-error("dropbox: code exchange failed", err-value(tokens))), tokens)
+  if(is-err(tokens), err(::auth/token-error("dropbox: code exchange failed", err-value(tokens))), ::auth/mark-tokens(tokens))
 }
 
 refresh-access-token
@@ -185,6 +186,7 @@ meta {
     """
 }
 fn (access-token: Str): Bool {
+  ::auth/mark-values([access-token])
   response ::http/request(::http/HttpRequest({
     method: "POST",
     url: `${::dropbox/API_URL}${REVOKE_PATH}`,

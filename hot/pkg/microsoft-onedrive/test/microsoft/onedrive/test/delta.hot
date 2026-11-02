@@ -13,20 +13,20 @@ meta ["test"] fn () {
 
 test-classify-delta-response
 meta ["test"] fn () {
-    p ::delta/classify-delta-response({status: 200, headers: {}, body: {value: [{id: "a"}], "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=n1"}})
+    p ::delta/classify-delta-response(::hot::http/HttpResponse({status: 200, headers: {}, body: {value: [{id: "a"}], "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=n1"}}))
     assert(not(p.gone))
     assert-eq([{id: "a"}], p.items)
     assert-eq("https://graph.microsoft.com/v1.0/me/drive/root/delta?token=n1", p.next-link)
-    last ::delta/classify-delta-response({status: 200, headers: {}, body: {value: [], "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=d1"}})
+    last ::delta/classify-delta-response(::hot::http/HttpResponse({status: 200, headers: {}, body: {value: [], "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=d1"}}))
     assert-eq("https://graph.microsoft.com/v1.0/me/drive/root/delta?token=d1", last.delta-link)
-    gone ::delta/classify-delta-response({status: 410, headers: {Location: "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=fresh"}, body: {error: {code: "resyncChangesApplyDifferences", message: "Resync required"}}})
+    gone ::delta/classify-delta-response(::hot::http/HttpResponse({status: 410, headers: {Location: "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=fresh"}, body: {error: {code: "resyncChangesApplyDifferences", message: "Resync required"}}}))
     assert(gone.gone)
     assert-eq("resyncChangesApplyDifferences", gone.resync-code)
     assert-eq("https://graph.microsoft.com/v1.0/me/drive/root/delta?token=fresh", gone.restart-link)
-    bare ::delta/classify-delta-response({status: 410, headers: {}, body: ""})
+    bare ::delta/classify-delta-response(::hot::http/HttpResponse({status: 410, headers: {}, body: ""}))
     assert-eq("resyncRequired", bare.resync-code)
     assert(is-null(bare.restart-link))
-    assert(is-err(::delta/classify-delta-response({status: 403, headers: {}, body: {error: {code: "accessDenied", message: "no"}}})))
+    assert(is-err(::delta/classify-delta-response(::hot::http/HttpResponse({status: 403, headers: {}, body: {error: {code: "accessDenied", message: "no"}}}))))
 }
 
 FEED [

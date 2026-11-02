@@ -212,6 +212,7 @@ fn
   create-subscription(resource, change-type, notification-url, {})
 },
 (resource: Str, change-type: Str | Vec, notification-url: Str, opts: Map): Map {
+  ::auth/mark-values([get(opts, "client-state")])
   body build-subscription(resource, change-type, notification-url, opts, now-ms())
   if(is-err(body), body, ::api/json("POST", "/subscriptions", {}, body, ::api/credential-opts(opts)))
 }
@@ -458,7 +459,8 @@ meta {
     `Notification`, or an Err when the body is malformed, empty, or any
     `clientState` is missing or wrong. The 1-arity form checks against
     the `microsoft.graph.client-state` context variable and halts when
-    it is unset, so an unconfigured endpoint never accepts traffic.
+    it is unset, so an unconfigured endpoint never accepts traffic. An
+    explicit `expected` is marked as a secret.
 
     Rich notifications (`includeResourceData`) also carry
     `validationTokens` JWTs; they are not checked here.
@@ -473,6 +475,7 @@ fn
   verify-notifications(request, Str(expected))
 },
 (request: Map, expected: Str): Vec {
+  ::auth/mark-values([expected])
   notes parse-notifications(request)
   cond {
     ::auth/is-blank-value(expected) => { err("microsoft-graph: no expected clientState configured; refusing the notification") }

@@ -1,20 +1,31 @@
 ::documents::s3 ns
 meta {
+    ctx: {
+        "aws.access-key-id": {required: false},
+        "aws.secret-access-key": {required: false},
+        "aws.session-token": {required: false}
+    },
     doc: """
     The Amazon S3 implementation of the `::documents` verbs. Source:
     `{provider: "s3", bucket, prefix?, opts}`.
 
-    `hot.dev/aws-s3` has no per-call credentials, no folder listing
-    (delimiter), no key or token encoding and no `DocFile`, so this
-    namespace builds its few S3 requests (ListObjectsV2, HEAD, GET, PUT)
-    itself and signs them with `hot.dev/aws-core`'s Signature V4.
+    This namespace needs per-call credentials, folder listing
+    (delimiter), key and token encoding and a `DocFile`, so it builds its
+    few S3 requests (ListObjectsV2, HEAD, GET, PUT) itself and signs them
+    with `hot.dev/aws-core`'s Signature V4.
 
     **Options** (in the source's `opts` or per call): `access-key-id` +
     `secret-access-key` (+ `session-token`) override the `aws.*` context
     credentials for the call; `region` overrides `aws.region`; `endpoint`
     (e.g. `https://<account>.r2.cloudflarestorage.com` or
     `http://localhost:9000`) sends path-style requests to an
-    S3-compatible service.
+    S3-compatible service, and needs the keys in the same `opts`: the
+    `aws.*` credentials are never sent to a per-call URL. A key that is
+    present but blank or null, or only one of the pair, is an error
+    naming it, never a fallback to context. Keys in `opts` are masked in
+    call records and never written to context. Without an `endpoint`, the
+    `bucket` and `region` become part of the host name, so they must be
+    plain names: anything else is an error, and nothing is signed or sent.
 
     **Folders** are key prefixes ending in `/` (`list` uses the `/`
     delimiter). **Changes**: S3 has no change feed, so `changes` lists
@@ -33,6 +44,7 @@ meta {
 ::uri ::hot::uri
 ::re ::hot::regex
 ::time ::hot::time
+::ctx ::hot::ctx
 Page ::documents/Page
 ChangeSet ::documents/ChangeSet
 FileContent ::documents/FileContent
@@ -42,7 +54,6 @@ MAX_PAGE_SIZE 1000
 DEFAULT_CHANGE_PAGES 100
 START_SKEW_MS 300000
 MAX_WATERMARK_KEYS 1000
-CREDENTIAL_KEYS ["access-key-id", "secret-access-key", "session-token", "region", "endpoint"]
 
 MONTHS {Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06", Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12"}
 
@@ -109,7 +120,7 @@ fn (etag: Any): Str? {
 parse-size fn (value: Any): Int? {
   cond {
     is-int(value) => { value }
-    // WORKAROUND(hot-bug-6): Int() on a non-numeric Str halts the run, so check the digits first.
+    // A consumed Err from Int() halts: parse digits only.
     and(is-str(value), ::re/is-match(trim(value), "^[0-9]+$")) => { Int(trim(value)) }
     => { null }
   }
@@ -189,7 +200,7 @@ meta {
     """
 }
 fn (base: Str, prefix: Str, delimiter: Str?, max-keys: Int, token: Any): Str {
-  // WORKAROUND(hot-bug-5): ::hot::xml/text drops entity-decoded characters (&amp;), so keys are asked for URL-encoded and decoded here.
+  // Keys come URL-encoded: XML 1.0 cannot carry the control characters an S3 key may hold.
   qs query-string({
     "list-type": "2",
     "encoding-type": "url",
@@ -445,30 +456,113 @@ type {
     base: Str
 }
 
-resolve
+credentials-problem
 meta {
     doc: """
-    Resolve the credentials, region and endpoint for a call: the
-    `access-key-id` / `secret-access-key` / `session-token` / `region` /
-    `endpoint` keys of `popts` first, else aws-core's context lookup
-    (`aws.access-key-id`, `aws.secret-access-key`, `aws.session-token`,
-    `aws.region`). Never writes context. A missing key id or secret is an Err.
+    Why `opts` cannot pick credentials (pure), or null: `access-key-id` or
+    `secret-access-key` present but blank or null, one without the other,
+    or `endpoint` without them. Never a fallback to context.
     """
 }
-fn (source: Map, popts: Map): Target {
-  given get(popts, "access-key-id")
-  creds if(::source/is-blank(given), ::core/get-credentials(), ::core/Credentials({
-    access_key_id: given,
-    secret_access_key: get(popts, "secret-access-key"),
-    session_token: get(popts, "session-token")
-  }))
-  region or(get(popts, "region"), ::core/get-region())
+fn (popts: Map): Str? {
+  has (k) { in(k, keys(popts)) }
+  key-id has("access-key-id")
+  secret has("secret-access-key")
   cond {
+    and(key-id, ::source/is-blank(get(popts, "access-key-id"))) => {
+      "access-key-id is in the call's opts but is blank or null. Pass a value, or leave it out to use aws.access-key-id."
+    }
+
+    and(secret, ::source/is-blank(get(popts, "secret-access-key"))) => {
+      "secret-access-key is in the call's opts but is blank or null. Pass a value, or leave it out to use aws.secret-access-key."
+    }
+
+    and(key-id, not(secret)) => { "access-key-id is in the call's opts without secret-access-key. Pass both." }
+    and(secret, not(key-id)) => { "secret-access-key is in the call's opts without access-key-id. Pass both." }
+    and(not(::source/is-blank(get(popts, "endpoint"))), not(key-id)) => {
+      "endpoint is in the call's opts without access-key-id and secret-access-key. Pass them with it. Context credentials are never sent to a per-call URL."
+    }
+    => { null }
+  }
+}
+
+credentials-from
+meta {
+    doc: """The signing credentials for a call (pure): the keys in `popts` when it has them, else `ctx-values` (the `aws.*` context variables)."""
+}
+fn (popts: Map, ctx-values: Map): Map {
+  cond {
+    in("access-key-id", keys(popts)) => {
+      {
+        access_key_id: get(popts, "access-key-id"),
+        secret_access_key: get(popts, "secret-access-key"),
+        session_token: get(popts, "session-token")
+      }
+    }
+    => {
+      {
+        access_key_id: get(ctx-values, "aws.access-key-id"),
+        secret_access_key: get(ctx-values, "aws.secret-access-key"),
+        session_token: get(ctx-values, "aws.session-token")
+      }
+    }
+  }
+}
+
+host-name-problem
+meta {
+    doc: """Why a virtual-hosted `bucket` or `region` cannot go in a host name (pure), or null. `https://{bucket}.s3.{region}.amazonaws.com` is only an AWS host while both are plain names: a region of `evil.example/` would send the signed request, session token included, to `evil.example`. Values are not echoed."""
+}
+fn (bucket: Any, region: Any): Str? {
+  cond {
+    not(and(is-str(bucket), ::re/is-match(Str(bucket), "^[A-Za-z0-9][A-Za-z0-9._-]*$"))) => { "the S3 bucket is not a valid bucket name" }
+    not(and(is-str(region), ::re/is-match(Str(region), "^[a-z0-9][a-z0-9-]*$"))) => { "the S3 region is not a valid region name" }
+    => { null }
+  }
+}
+
+resolve-from
+meta {
+    doc: """The one S3 resolver, pure: a `Target` from `popts` first, then `ctx-values` and `default-region`. An Err for what `credentials-problem` or `host-name-problem` finds, or when no key id or secret is set anywhere. Exposed for testing; `resolve` feeds it the context."""
+}
+fn (source: Map, popts: Map, ctx-values: Map, default-region: Str): Target {
+  problem credentials-problem(popts)
+  creds credentials-from(popts, ctx-values)
+  region if(::source/is-blank(get(popts, "region")), default-region, Str(get(popts, "region")))
+  name-problem if(::source/is-blank(get(popts, "endpoint")), host-name-problem(source.bucket, region), null)
+  cond {
+    is-some(problem) => { err(`documents: ${problem}`) }
+    is-some(name-problem) => { err(`documents: ${name-problem}`) }
     or(::source/is-blank(creds.access_key_id), ::source/is-blank(creds.secret_access_key)) => {
       err("documents: S3 needs credentials: pass access-key-id and secret-access-key in opts, or set aws.access-key-id and aws.secret-access-key")
     }
-    => { Target({credentials: untype(creds), region: Str(region), base: bucket-url(source.bucket, Str(region), get(popts, "endpoint"))}) }
+    => { Target({credentials: creds, region: region, base: bucket-url(source.bucket, region, get(popts, "endpoint"))}) }
   }
+}
+
+resolve
+meta {
+    ctx: {
+        "aws.access-key-id": {required: false},
+        "aws.secret-access-key": {required: false},
+        "aws.session-token": {required: false}
+    },
+    doc: """
+    Resolve the credentials, region and endpoint for a call (see
+    `resolve-from`): the `access-key-id` / `secret-access-key` /
+    `session-token` / `region` / `endpoint` keys of `popts` first, else
+    the `aws.access-key-id`, `aws.secret-access-key`, `aws.session-token`
+    and `aws.region` context variables. Keys from `popts` are marked as
+    secrets first; nothing is written to context.
+    """
+}
+fn (source: Map, popts: Map): Target {
+  ::ctx/mark-secret(filter([get(popts, "access-key-id"), get(popts, "secret-access-key"), get(popts, "session-token")], (v) { not(::source/is-blank(v)) }))
+  resolve-from(source, popts, {
+    "aws.access-key-id": ::ctx/get("aws.access-key-id"),
+    "aws.secret-access-key": ::ctx/get("aws.secret-access-key"),
+    "aws.session-token": ::ctx/get("aws.session-token")
+  }, ::core/get-region())
 }
 
 s3-request fn (target: Target, method: Str, url: Str, headers: Map, body: Any): Any {

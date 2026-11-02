@@ -97,7 +97,7 @@ fn (response: Result): DeltaPage {
   cond {
     is-err(response) => { response }
     eq(response.status, 410) => {
-      e ::api/http-error(response)
+      e ::api/HttpError(response)
       DeltaPage({
         items: [],
         next-link: null,
@@ -112,7 +112,7 @@ fn (response: Result): DeltaPage {
       page ::api/to-page(if(is-map(response.body), response.body, {}))
       DeltaPage({items: page.items, next-link: page.next-link, delta-link: page.delta-link, gone: false, resync-code: null, restart-link: null})
     }
-    => { err(::api/http-error(response)) }
+    => { err(::api/HttpError(response)) }
   }
 }
 

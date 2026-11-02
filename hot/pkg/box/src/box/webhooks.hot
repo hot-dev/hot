@@ -222,9 +222,11 @@ meta {
     `"bad-signature"`, `"bad-timestamp"`, `"stale"`. The timestamp is
     only trusted after a signature matched. A `max-age-seconds` of 0 or
     less skips the age check (for replaying stored test deliveries only).
+    Explicit keys are marked as secrets.
     """
 }
 fn (request: Map, primary-key: Str?, secondary-key: Str?, max-age-seconds: Int): Str? {
+  ::box::auth/mark-values([primary-key, secondary-key])
   headers or(request.headers, {})
   h (name) { trim(Str(or(get(headers, name), ""))) }
   primary trim(or(primary-key, ""))

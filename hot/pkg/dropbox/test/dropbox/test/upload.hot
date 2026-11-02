@@ -6,6 +6,14 @@ meta ["test"]
 
 BINARY Bytes([0, 1, 255, 254, 195, 40, 0, 10, 13])
 
+http-err fn
+(response: Map): Any {
+  ::dropbox::api/HttpError(::hot::http/HttpResponse(response))
+},
+(response: Map, route: Str?): Any {
+  ::dropbox::api/http-error(response, route)
+}
+
 test-to-bytes
 meta ["test"] fn () {
     assert-eq(BINARY, ::up/to-bytes(BINARY), "Bytes pass through untouched")
@@ -55,12 +63,12 @@ meta ["test"] fn () {
 test-append-outcome
 meta ["test"] fn () {
     assert-eq(150, ::up/append-outcome(null, 100, 50), "success: offset + bytes sent")
-    lost ::dropbox::api/http-error({status: 409, headers: {}, body: {
+    lost http-err({status: 409, headers: {}, body: {
         error_summary: "incorrect_offset/..",
         error: {".tag": "incorrect_offset", correct_offset: 150}
     }})
     assert-eq(150, ::up/append-outcome(err(lost), 100, 50), "the data had arrived: counts as done")
-    behind ::dropbox::api/http-error({status: 409, headers: {}, body: {
+    behind http-err({status: 409, headers: {}, body: {
         error: {".tag": "incorrect_offset", correct_offset: 80}
     }})
     assert(is-err(::up/append-outcome(err(behind), 100, 50)), "a real mismatch is an error")

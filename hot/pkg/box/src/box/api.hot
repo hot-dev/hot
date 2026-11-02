@@ -11,7 +11,7 @@ meta {
 
     **Retry.** box never waits between attempts (Hot has no in-run
     sleep). A connection failure on an idempotent method (GET, HEAD, PUT,
-    DELETE) is retried once, immediately (`opts.retry: false` turns that
+    DELETE, OPTIONS) is retried once, immediately (`opts.retry: false` turns that
     off). Everything else, including 429 and 5xx, comes back as
     `err(HttpError)` with `retry-after` set from the `Retry-After` header.
     Check it with `is-retryable` and let Hot back off: give the handler,
@@ -23,8 +23,9 @@ meta {
 
     **Credential safety.** The bearer token is only sent to `https` hosts
     under `box.com`, `boxcloud.com` and `box.net` (the long-poll realtime
-    servers), and to the `box.api-root` / `box.upload-root` overrides;
-    any other URL is refused.
+    servers), and to the host of a `box.api-root` / `box.upload-root`
+    override, over `http` only when that override is itself `http`; any
+    other URL is refused.
     """
 }
 
@@ -41,7 +42,7 @@ MAX_IMMEDIATE_RETRIES 1
 // 202 is how Box says "not ready yet, come back after Retry-After" for
 // downloads and upload commits; it is surfaced as an HttpError.
 RETRY_STATUSES [202, 408, 429, 500, 502, 503, 504]
-IDEMPOTENT_METHODS ["GET", "HEAD", "PUT", "DELETE"]
+IDEMPOTENT_METHODS ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"]
 BOX_HOST_SUFFIXES [".box.com", ".boxcloud.com", ".box.net"]
 BOX_HOSTS ["box.com", "boxcloud.com", "box.net"]
 
@@ -80,7 +81,7 @@ type {
     error-message: Str?,
     request-id: Str?,
     help-url: Str?,
-    context-info: Any,
+    context-info: Any?,
     retry-after: Int?
 }
 
@@ -166,14 +167,10 @@ fn (status: Int, details: Map, body: Any): Str {
   `box: HTTP ${status}${code-part}: ${detail}${rid}`
 }
 
-http-error
-meta {
-    doc: """Build an `HttpError` (with a readable `message`) from a non-2xx `HttpResponse`. Pure; every request uses it, and it is exposed for testing."""
-}
-fn (response: Map): HttpError {
+// `HttpError(response)`: the error for a non-2xx response, with a readable `message` (pure).
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   headers or(response.headers, {})
   details box-error-details(response.body)
-  // WORKAROUND(hot-bug-1): build the error with an explicit function, never HttpError(response).
   HttpError({
     status: response.status,
     headers: headers,
@@ -230,7 +227,7 @@ fn (value: Any): Int? {
     not(is-str(value)) => { null }
     => {
       s trim(value)
-      // WORKAROUND(hot-bug-6): check the digits before Int() so a bad value never produces a consumed Err.
+      // Retry-After may be an HTTP date, and a consumed Err from Int() halts: parse digits only.
       if(::re/is-match(s, "^-?[0-9]{1,15}$"), Int(s), null)
     }
   }
@@ -280,7 +277,7 @@ fn (message: Str): Bool {
 
 is-retryable-transport
 meta {
-    doc: """True when a transport failure may be retried immediately: an idempotent method (GET, HEAD, PUT, DELETE) and a connection failure."""
+    doc: """True when a transport failure may be retried immediately: an idempotent method (GET, HEAD, PUT, DELETE, OPTIONS) and a connection failure."""
 }
 fn (method: Str, message: Str): Bool {
   and(in(uppercase(method), IDEMPOTENT_METHODS), is-connection-failure(message))
@@ -412,14 +409,18 @@ fn (url: Str, params: Map): Str {
 
 url-host
 meta {
-    doc: """The lowercased host of an absolute URL, or null when it does not parse."""
+    doc: """
+    The lower-cased host of an `http(s)` URL (pure), or null unless the
+    authority is plainly a host and optional port. Userinfo, backslashes,
+    extra slashes and control characters all give null: URL parsers
+    disagree on where the host is in those, and a backslash ends the
+    authority in the one that opens the connection, so
+    `https://evil.example\@api.box.com/` connects to `evil.example`.
+    """
 }
 fn (url: Str): Str? {
-  m ::re/capture(url, "^[A-Za-z][A-Za-z0-9+.-]*://(?:[^/?#@]*@)?([^/?#:]+)")
-  cond {
-    not(is-map(m)) => { null }
-    => { lowercase(first(m.groups)) }
-  }
+  m ::re/capture(lowercase(url), "^https?://([a-z0-9.-]+|\\[[0-9a-f:.]+\\])(?::[0-9]+)?(?:[/?#]|$)")
+  if(is-map(m), first(m.groups), null)
 }
 
 is-box-url
@@ -428,17 +429,20 @@ meta {
     True when `url` may receive Box credentials (pure apart from the
     root overrides): `https://` on `box.com`, `boxcloud.com`, `box.net` or a
     subdomain, or the host of the `box.api-root` / `box.upload-root`
-    override (which may be `http://` for a local test server).
+    override. `http://` is accepted only on the host of an override that
+    is itself `http://` (a local test server), so an `https` override
+    never downgrades.
     """
 }
 fn (url: Str): Bool {
   host url-host(url)
+  secure starts-with(lowercase(url), "https://")
   roots filter([::box/api-root(), ::box/upload-root()], (r) { not(in(r, [::box/API_ROOT, ::box/UPLOAD_ROOT])) })
-  override-hosts filter(map(roots, url-host), is-some)
+  allowed-by-root some(roots, (r) { and(eq(url-host(r), host), or(secure, starts-with(lowercase(r), "http://"))) })
   cond {
     is-null(host) => { false }
-    in(host, override-hosts) => { true }
-    not(starts-with(lowercase(url), "https://")) => { false }
+    allowed-by-root => { true }
+    not(secure) => { false }
     in(host, BOX_HOSTS) => { true }
     => { gt(length(filter(BOX_HOST_SUFFIXES, (s) { ends-with(host, s) })), 0) }
   }
@@ -510,10 +514,10 @@ fn
 (method: Str, url: Str, headers: Map, body: Any, opts: Map): HttpResponse {
   cond {
     not(is-box-url(url)) => {
-      err(::auth/token-error(`box: refusing to send Box credentials to ${or(url-host(url), "an invalid URL")}; only box.com, boxcloud.com and box.net hosts (or the box.api-root override) receive tokens`))
+      err(::auth/token-error(`box: refusing to send Box credentials to ${or(url-host(url), "a URL whose host cannot be read safely")}; only https on box.com, boxcloud.com and box.net hosts, or a box.api-root / box.upload-root override's host on that override's scheme, receives tokens`))
     }
     => {
-      creds ::auth/resolve-credentials(opts)
+      creds resolve(opts)
       policy retry-policy(opts)
       as-user ::auth/as-user(opts)
       cond {
@@ -550,7 +554,7 @@ fn (response: Result): Any {
     is-err(response) => { response }
     eq(response.status, 204) => { {} }
     is-ok-response(response) => { if(is-null(response.body), {}, response.body) }
-    => { err(http-error(response)) }
+    => { err(HttpError(response)) }
   }
 }
 
