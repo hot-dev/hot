@@ -12147,7 +12147,7 @@ mod tests {
             crate::val::Val::from("a string that is not a var ref"),
             crate::val::Val::Bool(true),
             crate::val::Val::Byte(0xAB),
-            crate::val::Val::Bytes(vec![1, 2, 3]),
+            crate::val::Val::bytes(vec![1, 2, 3]),
             crate::val::Val::Null,
         ];
 

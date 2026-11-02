@@ -116,11 +116,12 @@ impl SecretValues {
     pub fn register_minted(&self, value: &Val) {
         let mut forms = vec![value.clone()];
         if let Val::Bytes(bytes) = value {
-            forms.push(Val::from(hex::encode(bytes)));
+            forms.push(Val::from(hex::encode(bytes.as_slice())));
         }
         let mut new_hashes = AHashSet::new();
         crate::lang::hot::ctx::hash_secret_value_recursive(value, &mut new_hashes);
         if let Val::Bytes(bytes) = value {
+            let bytes = bytes.as_slice();
             new_hashes.insert(value_hash(&Val::from(hex::encode(bytes))));
             for encoded in [
                 base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -1357,22 +1358,22 @@ mod tests {
         let mask = RecordMask::new(&registry, &hashes);
         let mut body = b"\xff\xfeprefix".to_vec();
         body.extend_from_slice(PLAIN.as_bytes());
-        assert_eq!(mask.mask_val(Val::Bytes(body)), Val::from(MASK));
+        assert_eq!(mask.mask_val(Val::bytes(body)), Val::from(MASK));
         assert_eq!(
-            mask.mask_val(Val::Bytes(b"other".to_vec())),
-            Val::Bytes(b"other".to_vec())
+            mask.mask_val(Val::bytes(b"other".to_vec())),
+            Val::bytes(b"other".to_vec())
         );
     }
 
     #[test]
     fn masks_bytes_holding_a_credential_field() {
         assert_eq!(
-            mask_plain(Val::Bytes(br#"{"access_token":"unregistered"}"#.to_vec())),
+            mask_plain(Val::bytes(br#"{"access_token":"unregistered"}"#.to_vec())),
             Val::from(MASK)
         );
         assert_eq!(
-            mask_plain(Val::Bytes(b"plain body".to_vec())),
-            Val::Bytes(b"plain body".to_vec())
+            mask_plain(Val::bytes(b"plain body".to_vec())),
+            Val::bytes(b"plain body".to_vec())
         );
     }
 
@@ -1387,7 +1388,7 @@ mod tests {
     fn masks_every_rendering_of_bytes_holding_a_secret() {
         let (registry, hashes) = mask_for(&[PLAIN]);
         let mask = RecordMask::new(&registry, &hashes);
-        let body = Val::Bytes(format!("x {PLAIN} y").into_bytes());
+        let body = Val::bytes(format!("x {PLAIN} y").into_bytes());
         // How a failure's message renders an Err that has no `msg` of its own.
         let map = val!({"status": 400, "body-bytes": body.clone()});
         for rendered in [
@@ -1405,7 +1406,7 @@ mod tests {
             );
         }
         assert_eq!(mask.mask_text("Bytes([1, 2])"), "Bytes([1, 2])");
-        let other = Val::Bytes(b"nothing to see here".to_vec()).to_string();
+        let other = Val::bytes(b"nothing to see here".to_vec()).to_string();
         assert_eq!(mask.mask_text(&other), other);
     }
 
@@ -1413,7 +1414,7 @@ mod tests {
     fn masks_rendered_bytes_in_a_failure_recorded_as_json() {
         let (registry, hashes) = mask_for(&[PLAIN]);
         let mask = RecordMask::new(&registry, &hashes);
-        let body = Val::Bytes(format!("x {PLAIN} y").into_bytes());
+        let body = Val::bytes(format!("x {PLAIN} y").into_bytes());
         let json = serde_json::to_string(&val!({"msg": body.to_string()})).unwrap();
         let masked = mask.mask_json(&json).unwrap();
         assert_eq!(masked, format!(r#"{{"msg":"Bytes([{MASK}])"}}"#));
@@ -1423,10 +1424,10 @@ mod tests {
     fn masks_encoded_secrets_and_credential_fields_in_rendered_bytes() {
         let (registry, hashes) = mask_for(&[SECRET]);
         let mask = RecordMask::new(&registry, &hashes);
-        let encoded = Val::Bytes(format!("token {}", url_b64(SECRET)).into_bytes()).to_string();
+        let encoded = Val::bytes(format!("token {}", url_b64(SECRET)).into_bytes()).to_string();
         assert_eq!(mask.mask_text(&encoded), format!("Bytes([{MASK}])"));
 
-        let field = Val::Bytes(br#"{"access_token":"unregistered"}"#.to_vec()).to_string();
+        let field = Val::bytes(br#"{"access_token":"unregistered"}"#.to_vec()).to_string();
         let empty = SecretValues::default();
         let no_hashes = AHashSet::new();
         let unregistered = RecordMask::new(&empty, &no_hashes);
@@ -1477,13 +1478,13 @@ mod tests {
     fn minted_values_mask_without_marking_records_stale() {
         let registry = SecretValues::default();
         let signature: Vec<u8> = (0u8..32).map(|byte| byte.wrapping_mul(7) ^ 0xa5).collect();
-        registry.register_minted(&Val::Bytes(signature.clone()));
+        registry.register_minted(&Val::bytes(signature.clone()));
         assert_eq!(registry.generation(), 0);
 
         let hashes = AHashSet::new();
         let mask = RecordMask::new(&registry, &hashes);
         assert_eq!(
-            mask.mask_val(Val::Bytes(signature.clone())),
+            mask.mask_val(Val::bytes(signature.clone())),
             Val::from(MASK)
         );
         let url = url_b64_bytes(&signature);
@@ -1497,7 +1498,7 @@ mod tests {
     #[test]
     fn a_key_a_native_made_marks_no_record_stale() {
         let registry = SecretValues::default();
-        let minted = Val::Bytes(vec![0xa5; 32]);
+        let minted = Val::bytes(vec![0xa5; 32]);
         registry.register_minted(&minted);
         registry.register_key(&minted);
         assert_eq!(registry.generation(), 0);
@@ -1514,12 +1515,12 @@ mod tests {
                 .collect()
         };
         for n in 0..=MAX_MINTED_SUBSTRINGS as u32 {
-            registry.register_minted(&Val::Bytes(minted(n)));
+            registry.register_minted(&Val::bytes(minted(n)));
         }
         let hashes = AHashSet::new();
         let mask = RecordMask::new(&registry, &hashes);
         let last = minted(MAX_MINTED_SUBSTRINGS as u32);
-        assert_eq!(mask.mask_val(Val::Bytes(last.clone())), Val::from(MASK));
+        assert_eq!(mask.mask_val(Val::bytes(last.clone())), Val::from(MASK));
         let url = url_b64_bytes(&last);
         assert_eq!(mask.mask_val(Val::from(url.clone())), Val::from(MASK));
         let hex_form = hex::encode(&last);
@@ -1543,14 +1544,14 @@ mod tests {
     fn delivered_payloads_mask_bytes_holding_a_secret() {
         let (registry, hashes) = mask_for(&[PLAIN]);
         let mask = RecordMask::new(&registry, &hashes);
-        let body = Val::Bytes(format!("x {PLAIN} y").into_bytes());
+        let body = Val::bytes(format!("x {PLAIN} y").into_bytes());
         assert_eq!(
             mask.mask_delivered(Val::from(body.to_string())),
             Val::from(format!("Bytes([{MASK}])"))
         );
         assert_eq!(mask.mask_delivered(body), Val::from(MASK));
         // Credential fields are what a consumer may have asked for.
-        let field = Val::Bytes(br#"{"access_token":"unregistered"}"#.to_vec());
+        let field = Val::bytes(br#"{"access_token":"unregistered"}"#.to_vec());
         assert_eq!(mask.mask_delivered(field.clone()), field);
     }
 
@@ -1570,7 +1571,7 @@ mod tests {
         let hashes = AHashSet::new();
         let mask = RecordMask::new(&registry, &hashes);
         assert_eq!(mask.mask_json(r#"{"a": 1, "max_tokens": 5}"#), None);
-        let bytes = serde_json::to_string(&Val::Bytes(b"password=abc".to_vec())).unwrap();
+        let bytes = serde_json::to_string(&Val::bytes(b"password=abc".to_vec())).unwrap();
         assert_eq!(mask.mask_json(&bytes).unwrap(), format!("\"{MASK}\""));
         assert!(
             mask.mask_json(r#"{"password": "x"}"#)
@@ -1590,7 +1591,7 @@ mod tests {
         let started = std::time::Instant::now();
         let masked = mask.mask_text(&payload);
         assert!(masked.ends_with(MASK));
-        let rendered = Val::Bytes(vec![b'x'; 2_000_000]).to_string();
+        let rendered = Val::bytes(vec![b'x'; 2_000_000]).to_string();
         assert!(!mask.mask_text(&rendered).contains(MASK));
         // Far above what it takes in practice, even in a debug build: this
         // catches a matcher that went quadratic, not a slow machine.
