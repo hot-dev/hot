@@ -1,6 +1,6 @@
 ::intercom::tickets ns
 meta {
-    ctx: {"intercom.token": {required: true}},
+    ctx: {"intercom.token": {required: false}},
     doc: """
     Tickets: list ticket types, create, read, update, and search with
     `starting_after` paging. A ticket's type decides its
@@ -15,16 +15,24 @@ list-ticket-types
 meta {
     doc: """GET /ticket_types - The workspace's ticket types (including archived ones) with their attributes: `{type: "list", data: [...]}`."""
 }
-fn (): Any {
-  ::api/request("GET", "/ticket_types", "")
+fn
+(): Any {
+  list-ticket-types({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/ticket_types", "", opts)
 }
 
 get-ticket-type
 meta {
     doc: """GET /ticket_types/{id} - One ticket type with its attribute definitions."""
 }
-fn (id: Str): Any {
-  ::api/request("GET", `/ticket_types/${::api/path-segment(id)}`, "")
+fn
+(id: Str): Any {
+  get-ticket-type(id, {})
+},
+(id: Str, opts: Map): Any {
+  ::api/request("GET", `/ticket_types/${::api/path-segment(id)}`, "", opts)
 }
 
 build-create-body
@@ -54,31 +62,46 @@ fn
   create-ticket(ticket-type-id, contacts, {})
 },
 (ticket-type-id: Str, contacts: Vec, options: Map): Any {
-  ::api/request("POST", "/tickets", build-create-body(ticket-type-id, contacts, options))
+  create-ticket(ticket-type-id, contacts, options, {})
+},
+(ticket-type-id: Str, contacts: Vec, options: Map, opts: Map): Any {
+  ::api/request("POST", "/tickets", build-create-body(ticket-type-id, contacts, options), opts)
 }
 
 get-ticket
 meta {
     doc: """GET /tickets/{id} - One ticket."""
 }
-fn (id: Str): Any {
-  ::api/request("GET", `/tickets/${::api/path-segment(id)}`, "")
+fn
+(id: Str): Any {
+  get-ticket(id, {})
+},
+(id: Str, opts: Map): Any {
+  ::api/request("GET", `/tickets/${::api/path-segment(id)}`, "", opts)
 }
 
 update-ticket
 meta {
     doc: """PUT /tickets/{id} - Update `ticket_attributes`, `ticket_state_id`, `open`, `is_shared`, `snoozed_until`, `company_id`, or assignment (`admin_id` performing it plus `assignee_id`). Unset fields are omitted."""
 }
-fn (id: Str, changes: Map): Any {
-  ::api/request("PUT", `/tickets/${::api/path-segment(id)}`, ::api/compact(changes))
+fn
+(id: Str, changes: Map): Any {
+  update-ticket(id, changes, {})
+},
+(id: Str, changes: Map, opts: Map): Any {
+  ::api/request("PUT", `/tickets/${::api/path-segment(id)}`, ::api/compact(changes), opts)
 }
 
 list-ticket-states
 meta {
     doc: """GET /ticket_states - The workspace's ticket states (ids for `update-ticket`'s `ticket_state_id`)."""
 }
-fn (): Any {
-  ::api/request("GET", "/ticket_states", "")
+fn
+(): Any {
+  list-ticket-states({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/ticket_states", "", opts)
 }
 
 search-tickets
@@ -90,16 +113,23 @@ fn
   search-tickets(query, {})
 },
 (query: Map, options: Map): Any {
-  ::api/request("POST", "/tickets/search", ::api/build-search-body(query, options))
+  search-tickets(query, options, {})
+},
+(query: Map, options: Map, opts: Map): Any {
+  ::api/request("POST", "/tickets/search", ::api/build-search-body(query, options), opts)
 }
 
 search-all-tickets
 meta {
     doc: """Run `search-tickets` across pages until `limit` tickets or the last page. Returns a Vec."""
 }
-fn (query: Map, limit: Int): Vec {
+fn
+(query: Map, limit: Int): Vec {
+  search-all-tickets(query, limit, {})
+},
+(query: Map, limit: Int, opts: Map): Vec {
   ::api/collect-pages(
-    (cursor) { search-tickets(query, {per_page: ::api/page-size(limit), starting_after: cursor}) },
+    (cursor) { search-tickets(query, {per_page: ::api/page-size(limit), starting_after: cursor}, opts) },
     "tickets", null, limit, []
   )
 }

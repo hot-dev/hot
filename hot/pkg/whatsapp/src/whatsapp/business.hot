@@ -25,12 +25,18 @@ response.data[0].description  // => "We build tools for developers"
 ```
 """
 }
-fn (phone-number-id: Str): Map {
-  ::api/request("GET", ::api/url(`${::api/segment(phone-number-id)}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`))
+fn
+(phone-number-id: Str?): Map {
+  get-business-profile(phone-number-id, {})
+},
+(phone-number-id: Str?, opts: Map): Map {
+  ::api/with-phone-number(phone-number-id, opts, (id) {
+    ::api/request("GET", ::api/url(`${id}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`, opts), opts)
+  })
 }
 
 UpdateBusinessProfileRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   about: Str?,
   address: Str?,
   description: Str?,
@@ -61,7 +67,11 @@ Update the WhatsApp Business Profile. All fields are optional -- only provided f
 ```
 """
 }
-fn (request: UpdateBusinessProfileRequest): Map {
+fn
+(request: UpdateBusinessProfileRequest): Map {
+  update-business-profile(request, {})
+},
+(request: UpdateBusinessProfileRequest, opts: Map): Map {
   body {messaging_product: "whatsapp"}
     |> assoc-some("about", request.about)
     |> assoc-some("address", request.address)
@@ -71,7 +81,9 @@ fn (request: UpdateBusinessProfileRequest): Map {
     |> assoc-some("vertical", request.vertical)
     |> assoc-some("profile_picture_handle", request.profile_picture_handle)
 
-  ::api/request("POST", ::api/url(`${::api/segment(request.phone_number_id)}/whatsapp_business_profile`), {}, body)
+  ::api/with-phone-number(request.phone_number_id, opts, (id) {
+    ::api/request("POST", ::api/url(`${id}/whatsapp_business_profile`, opts), {}, body, opts)
+  })
 }
 
 // ============================================================================
@@ -95,8 +107,14 @@ response.quality_rating       // => "GREEN"
 ```
 """
 }
-fn (phone-number-id: Str): Map {
-  ::api/request("GET", ::api/url(`${::api/segment(phone-number-id)}?fields=display_phone_number,verified_name,quality_rating,platform_type,status,name_status,code_verification_status`))
+fn
+(phone-number-id: Str?): Map {
+  get-phone-number(phone-number-id, {})
+},
+(phone-number-id: Str?, opts: Map): Map {
+  ::api/with-phone-number(phone-number-id, opts, (id) {
+    ::api/request("GET", ::api/url(`${id}?fields=display_phone_number,verified_name,quality_rating,platform_type,status,name_status,code_verification_status`, opts), opts)
+  })
 }
 
 ListPhoneNumbersRequest type {
@@ -107,6 +125,10 @@ list-phone-numbers
 meta {
     doc: """GET /{waba-id}/phone_numbers - List the phone numbers registered to a WhatsApp Business Account (`data: [{id, display_phone_number, verified_name, quality_rating, status}]`). The `id` is the `phone_number_id` the send functions take."""
 }
-fn (request: ListPhoneNumbersRequest): Map {
-  ::api/request("GET", ::api/url(`${::api/segment(request.waba_id)}/phone_numbers?fields=display_phone_number,verified_name,quality_rating,status`))
+fn
+(request: ListPhoneNumbersRequest): Map {
+  list-phone-numbers(request, {})
+},
+(request: ListPhoneNumbersRequest, opts: Map): Map {
+  ::api/request("GET", ::api/url(`${::api/segment(request.waba_id)}/phone_numbers?fields=display_phone_number,verified_name,quality_rating,status`, opts), opts)
 }

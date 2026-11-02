@@ -1,15 +1,29 @@
 ::shopify::api ns
 meta {
     ctx: {
-        "shopify.shop": {required: true},
-        "shopify.access.token": {required: true},
-        "shopify.api.version": {required: false}
+        "shopify.shop": {required: false, secret: false},
+        "shopify.access.token": {required: false},
+        "shopify.api.version": {required: false, secret: false}
     },
     doc: """
     Transport for the Shopify GraphQL Admin API: shop and URL building,
     the `graphql` escape hatch, error unwrapping (GraphQL `errors`,
     throttling, mutation `userErrors`) and cursor pagination helpers
     shared by the curated namespaces.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `shopify.*` context variables, then the defaults. A
+    per-call token is masked in call records and never written to ctx, so
+    one run can act for many shops.
+
+    - `access-token`: the Admin API access token for this call
+    - `shop`: the shop for this call. It needs an `access-token` in the
+      same `opts`: `shopify.access.token` is never sent to a per-call shop.
+    - `api-version`: the Admin API version for this call
+
+    An `access-token` or `shop` that is present but blank or null is an
+    Err naming the key, never a fallback to context.
     """
 }
 
@@ -124,10 +138,97 @@ fn
 (shop: Str, version: Str): Str {
   handle normalize-shop(shop)
   cond {
+    is-err(handle) => { handle }
     not(or(::hot::regex/is-match(version, "^[0-9]{4}-[0-9]{2}$"), eq(version, "unstable"))) => {
       err(`shopify: API version '${version}' must look like 2026-10 (or be "unstable")`)
     }
     => { `https://${handle}.myshopify.com/admin/api/${version}/graphql.json` }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Credentials
+// ---------------------------------------------------------------------------
+
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+blank-option
+meta {
+    doc: """The first of `names` that `opts` has with a blank or null value, else null."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: `{access-token, url, api-version}` for a call
+    from `opts` first, then `ctx-values` (a Map of context variables), then
+    defaults. An Err when the shop or token is not set, when `access-token`
+    or `shop` is in `opts` but blank or null, when `opts` has `shop` without
+    `access-token`, or when the shop or version is malformed. Exposed for
+    testing; `resolve` feeds it the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  blank blank-option(opts, ["access-token", "shop"])
+  opts-token non-blank(get(opts, "access-token"))
+  opts-shop non-blank(get(opts, "shop"))
+  token or(opts-token, non-blank(get(ctx-values, "shopify.access.token")))
+  shop or(opts-shop, non-blank(get(ctx-values, "shopify.shop")))
+  version or(non-blank(get(opts, "api-version")), non-blank(get(ctx-values, "shopify.api.version")), ::shopify/API_VERSION)
+  cond {
+    is-some(blank) => {
+      err(`shopify: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out.`)
+    }
+
+    and(is-some(opts-shop), is-null(opts-token)) => {
+      err("shopify: shop is in the call's opts without access-token. Pass access-token with it. shopify.access.token is never sent to a per-call shop.")
+    }
+
+    is-null(shop) => { err("shopify: shopify.shop is not set. Add it in Context Variables, or pass {shop: ..., access-token: ...} in the call's opts.") }
+    is-null(token) => { err("shopify: shopify.access.token is not set. Add it in Context Variables, or pass {access-token: ...} in the call's opts.") }
+    => {
+      url graphql-url(shop, version)
+      if(is-err(url), url, {access-token: token, url: url, api-version: version})
+    }
+  }
+}
+
+resolve
+meta {
+    ctx: {
+        "shopify.shop": {required: false, secret: false},
+        "shopify.access.token": {required: false},
+        "shopify.api.version": {required: false, secret: false}
+    },
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). The token
+    is masked in this run's call records, and nothing from `opts` is
+    written to ctx.
+
+    **Example**
+
+    ```hot
+    ::shopify::api/resolve({shop: "acme", access-token: "shpat_tenant"}).url
+    // "https://acme.myshopify.com/admin/api/2026-10/graphql.json"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  // First, so even the records of the calls below are masked.
+  ::ctx/mark-secret(opts.access-token)
+  resolved resolve-from(opts, {
+    "shopify.shop": ::ctx/get("shopify.shop"),
+    "shopify.access.token": ::ctx/get("shopify.access.token"),
+    "shopify.api.version": ::ctx/get("shopify.api.version")
+  })
+  cond {
+    is-err(resolved) => { resolved }
+    => { {...resolved, access-token: ::ctx/mark-secret(resolved.access-token)} }
   }
 }
 
@@ -208,6 +309,23 @@ fn
 // GraphQL
 // ---------------------------------------------------------------------------
 
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). Pure; exposed for testing."""
+}
+fn (query: Str, variables: Map, resolved: Map): HttpRequest {
+  HttpRequest({
+    method: "POST",
+    url: resolved.url,
+    headers: {
+      X-Shopify-Access-Token: resolved.access-token,
+      Content-Type: "application/json",
+      Accept: "application/json"
+    },
+    body: to-json({query: query, variables: untype(variables)})
+  })
+}
+
 graphql
 meta {
     doc: """
@@ -224,6 +342,10 @@ meta {
     ```hot
     out ::shopify::api/graphql("query { shop { name currencyCode } }")
     out.shop.name
+
+    // For another shop
+    tenant {shop: "acme", access-token: "shpat_tenant"}
+    out ::shopify::api/graphql("query { shop { name } }", {}, tenant)
     ```
     """
 }
@@ -232,38 +354,48 @@ fn
   graphql(query, {})
 },
 (query: Str, variables: Map): Any {
-  graphql(query, variables, ::ctx/get("shopify.shop"), ::ctx/get("shopify.access.token"))
+  graphql(query, variables, {})
+},
+// 3-arity: per-call credentials and settings (see `resolve`)
+(query: Str, variables: Map, opts: Map): Any {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      response ::hot::http/request(build-request(query, variables, resolved))
+      cond {
+        is-err(response) => { response }
+        not(is-ok-response(response)) => { err(HttpError(response)) }
+        => { parse-graphql-response(response.body) }
+      }
+    }
+  }
 },
 // 4-arity: explicit shop (handle or myshopify domain) + access token
 (query: Str, variables: Map, shop: Str, access-token: Str): Any {
-  response ::hot::http/request(HttpRequest({
-    method: "POST",
-    url: graphql-url(shop),
-    headers: {
-      X-Shopify-Access-Token: access-token,
-      Content-Type: "application/json",
-      Accept: "application/json"
-    },
-    body: to-json({query: query, variables: untype(variables)})
-  }))
-  cond {
-    is-err(response) => { response }
-    not(is-ok-response(response)) => { err(HttpError(response)) }
-    => { parse-graphql-response(response.body) }
-  }
+  graphql(query, variables, {shop: shop, access-token: access-token})
 }
 
 mutate
 meta {
-    doc: """Run a mutation and return its payload (`data[field]`), with `userErrors` (or `errors-key`) turned into an Err carrying `UserErrors`."""
+    doc: """Run a mutation and return its payload (`data[field]`), with `userErrors` (or `errors-key`) turned into an Err carrying `UserErrors`. An Err from the request comes back as is."""
 }
 fn
 (query: Str, variables: Map, field: Str): Any {
-  mutate(query, variables, field, "userErrors")
+  mutate(query, variables, field, "userErrors", {})
 },
 (query: Str, variables: Map, field: Str, errors-key: Str): Any {
-  data graphql(query, variables)
-  mutation-payload(data, field, errors-key)
+  mutate(query, variables, field, errors-key, {})
+},
+(query: Str, variables: Map, field: Str, opts: Map): Any {
+  mutate(query, variables, field, "userErrors", opts)
+},
+(query: Str, variables: Map, field: Str, errors-key: Str, opts: Map): Any {
+  data graphql(query, variables, opts)
+  cond {
+    is-err(data) => { data }
+    => { mutation-payload(data, field, errors-key) }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -296,12 +428,17 @@ fn (options: Map): Map {
 collect-pages fn (page-fn: Fn, options: Map, max-items: Int, acc: Vec): Vec {
   remaining sub(max-items, length(acc))
   page page-fn({...options, first: min(page-size(get(options, "first")), remaining)})
-  combined concat(acc, or(page.nodes, []))
-  has-next and(get-in(page, ["pageInfo", "hasNextPage"]), is-some(get-in(page, ["pageInfo", "endCursor"])))
   cond {
-    gte(length(combined), max-items) => { slice(combined, 0, max-items) }
-    not(has-next) => { combined }
-    => { collect-pages(page-fn, {...options, after: page.pageInfo.endCursor}, max-items, combined) }
+    is-err(page) => { page }
+    => {
+      combined concat(acc, or(page.nodes, []))
+      has-next and(get-in(page, ["pageInfo", "hasNextPage"]), is-some(get-in(page, ["pageInfo", "endCursor"])))
+      cond {
+        gte(length(combined), max-items) => { slice(combined, 0, max-items) }
+        not(has-next) => { combined }
+        => { collect-pages(page-fn, {...options, after: page.pageInfo.endCursor}, max-items, combined) }
+      }
+    }
   }
 }
 
@@ -311,7 +448,8 @@ meta {
     Follow a connection's cursors and gather up to `max-items` nodes.
     `page-fn` takes list options (with `first` and `after` filled in) and
     returns a connection `{nodes, pageInfo: {hasNextPage, endCursor}}`,
-    which is what every `list-*` function here returns.
+    which is what every `list-*` function here returns. An Err on any
+    page comes back as that Err.
 
     **Example**
 

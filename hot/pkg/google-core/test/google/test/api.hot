@@ -12,9 +12,9 @@ DRIVE_404 {
     }
 }
 
-test-error-from-response-google-shape
+test-http-error-google-shape
 meta ["test"] fn () {
-    e ::api/error-from-response({status: 404, headers: {}, body: DRIVE_404})
+    e ::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: DRIVE_404}))
     assert-eq(404, e.status)
     assert-eq("notFound", e.reason)
     assert-eq(["notFound"], e.reasons)
@@ -24,35 +24,56 @@ meta ["test"] fn () {
     assert-eq(e.message, err-message(err(e)), "err-message reads the readable message")
 }
 
-test-error-from-response-oauth-and-raw-shapes
+test-http-error-oauth-and-raw-shapes
 meta ["test"] fn () {
-    oauth ::api/error-from-response({status: 400, headers: {}, body: {error: "invalid_grant", error_description: "Bad Request"}})
+    oauth ::api/HttpError(::hot::http/HttpResponse({status: 400, headers: {}, body: {error: "invalid_grant", error_description: "Bad Request"}}))
     assert-eq("invalid_grant", oauth.reason)
     assert-eq("google: HTTP 400 (invalid_grant): Bad Request", oauth.message)
 
-    html ::api/error-from-response({status: 502, headers: {}, body: "<html>Bad Gateway</html>"})
+    html ::api/HttpError(::hot::http/HttpResponse({status: 502, headers: {}, body: "<html>Bad Gateway</html>"}))
     assert(is-null(html.reason))
     assert-eq("google: HTTP 502: <html>Bad Gateway</html>", html.message)
 
-    bytes ::api/error-from-response({status: 403, headers: {}, body: Bytes(to-json(DRIVE_404))})
+    bytes ::api/HttpError(::hot::http/HttpResponse({status: 403, headers: {}, body: Bytes(to-json(DRIVE_404))}))
     assert-eq("notFound", bytes.reason, "a JSON error delivered as Bytes is still decoded")
 }
 
 test-error-message-excerpt-is-bounded
 meta ["test"] fn () {
     long join(map(range(0, 100), (i) { "abcdefgh" }), "")
-    e ::api/error-from-response({status: 500, headers: {}, body: long})
+    e ::api/HttpError(::hot::http/HttpResponse({status: 500, headers: {}, body: long}))
     assert(lt(length(e.message), 340), "long bodies are truncated")
     assert(ends-with(e.message, "..."))
 }
 
+test-http-error-excerpt-counts-characters
+meta ["test"] fn () {
+    long join(map(range(0, 500), (i) { "é" }), "")
+    e ::api/HttpError(::hot::http/HttpResponse({status: 500, headers: {}, body: long}))
+    assert(ends-with(e.message, `${join(map(range(0, 300), (i) { "é" }), "")}...`), "300 characters, none cut in two")
+}
+
+test-http-error-from-a-plain-response-map
+meta ["test"] fn () {
+    // What ::hot::http/request returns: a plain Map, with body-bytes
+    wire {status: 404, headers: {"retry-after": "7"}, body: DRIVE_404, body-bytes: Bytes("raw")}
+    response ::api/as-response(wire)
+    e ::api/HttpError(response)
+    assert-eq("google: HTTP 404 NOT_FOUND (notFound): File not found: 1AbC.", e.message, "the arrow runs")
+    assert-eq(7, e.retry-after)
+    assert-eq(Bytes("raw"), get(response, "body-bytes"), "the raw bytes stay readable")
+    assert-eq("7", get(response.headers, "retry-after"))
+    assert(is-err(::api/as-response(err("::hot::http/request: request failed"))), "an Err stays an Err")
+    assert(contains(err-message(::api/unwrap(response)), "notFound"))
+}
+
 test-has-reason
 meta ["test"] fn () {
-    e err(::api/error-from-response({status: 404, headers: {}, body: DRIVE_404}))
+    e err(::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: DRIVE_404})))
     assert(::api/has-reason(e, "notFound"))
     assert(not(::api/has-reason(e, "rateLimitExceeded")))
     assert(not(::api/has-reason(err("plain"), "notFound")))
-    assert(::api/has-reason(::api/error-from-response({status: 404, headers: {}, body: DRIVE_404}), "notFound"), "a bare HttpError")
+    assert(::api/has-reason(::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: DRIVE_404})), "notFound"), "a bare HttpError")
 }
 
 test-retryable-statuses
@@ -77,11 +98,11 @@ meta ["test"] fn () {
 
 test-retry-after-on-http-error
 meta ["test"] fn () {
-    e ::api/error-from-response({status: 429, headers: {"retry-after": "30"}, body: {error: {code: 429, message: "slow down", status: "RESOURCE_EXHAUSTED"}}})
+    e ::api/HttpError(::hot::http/HttpResponse({status: 429, headers: {"retry-after": "30"}, body: {error: {code: 429, message: "slow down", status: "RESOURCE_EXHAUSTED"}}}))
     assert-eq(30, e.retry-after, "numeric Retry-After is surfaced in seconds")
-    dated ::api/error-from-response({status: 503, headers: {"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, body: ""})
+    dated ::api/HttpError(::hot::http/HttpResponse({status: 503, headers: {"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, body: ""}))
     assert(is-null(dated.retry-after), "an HTTP-date Retry-After is left null")
-    none ::api/error-from-response({status: 503, headers: {}, body: ""})
+    none ::api/HttpError(::hot::http/HttpResponse({status: 503, headers: {}, body: ""}))
     assert(is-null(none.retry-after))
     assert-eq(0, ::api/retry-after-seconds({"retry-after": "-5"}), "negative values clamp to 0")
     assert(is-null(::api/retry-after-seconds(null)))
@@ -89,15 +110,15 @@ meta ["test"] fn () {
 
 test-is-retryable
 meta ["test"] fn () {
-    rate err(::api/error-from-response({status: 429, headers: {}, body: ""}))
+    rate err(::api/HttpError(::hot::http/HttpResponse({status: 429, headers: {}, body: ""})))
     assert(::api/is-retryable(rate), "429 Err")
-    assert(::api/is-retryable(err(::api/error-from-response({status: 503, headers: {}, body: ""}))), "503 Err")
+    assert(::api/is-retryable(err(::api/HttpError(::hot::http/HttpResponse({status: 503, headers: {}, body: ""})))), "503 Err")
     user-rate {error: {code: 403, message: "User Rate Limit Exceeded", errors: [{reason: "userRateLimitExceeded"}]}}
-    assert(::api/is-retryable(err(::api/error-from-response({status: 403, headers: {}, body: user-rate}))), "rate-limit 403")
-    assert(::api/is-retryable(::api/error-from-response({status: 500, headers: {}, body: ""})), "a bare HttpError")
+    assert(::api/is-retryable(err(::api/HttpError(::hot::http/HttpResponse({status: 403, headers: {}, body: user-rate})))), "rate-limit 403")
+    assert(::api/is-retryable(::api/HttpError(::hot::http/HttpResponse({status: 500, headers: {}, body: ""}))), "a bare HttpError")
     assert(::api/is-retryable({status: 502, headers: {}, body: ""}), "a raw HttpResponse")
-    assert(not(::api/is-retryable(err(::api/error-from-response({status: 404, headers: {}, body: DRIVE_404})))), "404 is permanent")
-    assert(not(::api/is-retryable(err(::api/error-from-response({status: 400, headers: {}, body: {}})))), "400 is permanent")
+    assert(not(::api/is-retryable(err(::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: DRIVE_404}))))), "404 is permanent")
+    assert(not(::api/is-retryable(err(::api/HttpError(::hot::http/HttpResponse({status: 400, headers: {}, body: {}}))))), "400 is permanent")
     assert(::api/is-retryable(err("::hot::http/request: request failed: connection reset")), "connection failure")
     assert(not(::api/is-retryable(err("google: no credentials configured"))), "credential errors are permanent")
     assert(not(::api/is-retryable(err(::google::auth/token-error("google: token exchange failed: invalid_grant")))), "a TokenError without a status")
@@ -151,8 +172,8 @@ meta ["test"] fn () {
 
 test-unwrap
 meta ["test"] fn () {
-    assert-eq({id: "1"}, ::api/unwrap({status: 200, headers: {}, body: {id: "1"}}))
-    failed ::api/unwrap({status: 404, headers: {}, body: DRIVE_404})
+    assert-eq({id: "1"}, ::api/unwrap(::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "1"}})))
+    failed ::api/unwrap(::hot::http/HttpResponse({status: 404, headers: {}, body: DRIVE_404}))
     assert(is-err(failed))
     assert-eq("notFound", err-value(failed).reason)
     passthrough ::api/unwrap(err("google: no credentials configured"))

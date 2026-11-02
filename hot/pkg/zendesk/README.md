@@ -16,11 +16,33 @@ hot.project.my-app.deps {
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `zendesk.subdomain` | yes | `acme`, `acme.zendesk.com` or `https://acme.zendesk.com`, normalised to `acme`. Values that aren't a Zendesk handle are rejected |
+| `zendesk.subdomain` | yes, unless a call's `opts` has it | `acme`, `acme.zendesk.com` or `https://acme.zendesk.com`, normalised to `acme`. Values that aren't a Zendesk handle are rejected |
 | `zendesk.email` | with an API token | The agent or admin the API token acts as |
 | `zendesk.api.token` | with an API token | Admin Center → Apps and integrations → APIs → Zendesk API. Sent as `Basic base64("{email}/token:{token}")` |
 | `zendesk.oauth.token` | or OAuth | An OAuth access token, sent as `Bearer`. It wins when both forms are set |
 | `zendesk.webhook.secret` | for webhooks | The webhook's signing secret. Used by `::zendesk::webhooks/verify-request` |
+
+## Per-call credentials
+
+Every function that calls Zendesk takes an optional trailing `opts` Map, so one run can act for many accounts and parallel flows don't share credentials. Nothing from `opts` is written to ctx, and credentials from `opts` are masked in call records.
+
+| Key | Effect |
+|---|---|
+| `email`, `api-token` | API token auth for this call. Pass both in the same `opts` |
+| `oauth-token` | An OAuth access token for this call. It wins over `email` and `api-token` |
+| `subdomain` | Another account's subdomain. Needs credentials in the same `opts`; context credentials are never sent to a per-call account |
+
+`opts` always comes last. Where a function already takes `options`, pass `{}` for those.
+
+```hot
+::tickets ::zendesk::tickets
+
+tenant {subdomain: "tenant-b", email: "agent@tenant-b.example", api-token: "tenant-b-token"}
+ticket ::tickets/get-ticket(35436, tenant)
+open ::tickets/list-tickets({page_size: 50}, tenant)
+```
+
+With credentials in `opts`, context credentials are ignored for that call. A credential key that is present but blank or null is an error naming the key, never a fallback to context. `::zendesk::api/resolve(opts)` is the one place this is decided.
 
 ## Quick start
 

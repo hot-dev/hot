@@ -35,7 +35,11 @@ meta {
     ```
     """
 }
-fn (input: Map): Map {
+fn
+(input: Map): Map {
+  create-draft-order(input, {})
+},
+(input: Map, opts: Map): Map {
   mutation ```
   mutation DraftOrderCreate($input: DraftOrderInput!) {
     draftOrderCreate(input: $input) {
@@ -44,15 +48,19 @@ fn (input: Map): Map {
     }
   }
   ```
-  payload ::api/mutate(mutation, {input: input}, "draftOrderCreate")
-  payload.draftOrder
+  payload ::api/mutate(mutation, {input: input}, "draftOrderCreate", opts)
+  if-ok(payload, %(%.draftOrder))
 }
 
 get-draft-order
 meta {
     doc: """One draft order by GraphQL id with its line items. Returns null when not found."""
 }
-fn (id: Str): Map? {
+fn
+(id: Str): Map? {
+  get-draft-order(id, {})
+},
+(id: Str, opts: Map): Map? {
   query ```
   query DraftOrder($id: ID!) {
     draftOrder(id: $id) {
@@ -61,8 +69,8 @@ fn (id: Str): Map? {
     }
   }
   ```
-  data ::api/graphql(query, {id: id})
-  data.draftOrder
+  data ::api/graphql(query, {id: id}, opts)
+  if-ok(data, %(%.draftOrder))
 }
 
 build-complete-variables
@@ -92,6 +100,9 @@ fn
   complete-draft-order(id, {})
 },
 (id: Str, options: Map): Map {
+  complete-draft-order(id, options, {})
+},
+(id: Str, options: Map, opts: Map): Map {
   mutation ```
   mutation DraftOrderComplete($id: ID!, $paymentGatewayId: ID, $sourceName: String) {
     draftOrderComplete(id: $id, paymentGatewayId: $paymentGatewayId, sourceName: $sourceName) {
@@ -100,6 +111,6 @@ fn
     }
   }
   ```
-  payload ::api/mutate(mutation, build-complete-variables(id, options), "draftOrderComplete")
-  payload.draftOrder
+  payload ::api/mutate(mutation, build-complete-variables(id, options), "draftOrderComplete", opts)
+  if-ok(payload, %(%.draftOrder))
 }

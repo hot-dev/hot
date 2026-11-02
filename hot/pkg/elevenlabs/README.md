@@ -19,6 +19,8 @@ Add this to the `deps` in your `hot.hot` file:
 
 The free tier includes a monthly character quota that is enough for development.
 
+The API key can also be passed per call; see [Per-call credentials](#per-call-credentials).
+
 ## Quick start
 
 ```hot
@@ -136,7 +138,29 @@ fn (request) {
 
 ## Errors
 
-Non-2xx responses return an Err carrying `::elevenlabs::api/HttpError` with `status`, `headers`, `body`, and a readable `message` built from ElevenLabs' `detail` (for example `ElevenLabs API error (HTTP 401): invalid_api_key: Invalid API key`). An unset `elevenlabs.api.key` returns an Err before any request is sent. `::elevenlabs::api/json` and `::elevenlabs::api/bytes` reach any other endpoint.
+Non-2xx responses return an Err carrying `::elevenlabs::api/HttpError` with `status`, `headers`, `body`, and a readable `message` built from ElevenLabs' `detail` (for example `ElevenLabs API error (HTTP 401): invalid_api_key: Invalid API key`). A missing API key returns an Err before any request is sent. `::elevenlabs::api/json` and `::elevenlabs::api/bytes` reach any other endpoint.
+
+## Per-call credentials
+
+Every function that calls ElevenLabs takes an optional trailing `opts` Map, so one run can act for many tenants and parallel flows don't share credentials. Credentials in `opts` are masked in call records, and nothing from `opts` is written to ctx.
+
+| Key | Effect |
+|---|---|
+| `api-key` | The API key for this call, instead of `elevenlabs.api.key` |
+| `base-url` | Another API root, such as a proxy. Needs an `api-key` in the same `opts`; `elevenlabs.api.key` is never sent to a per-call URL |
+
+`opts` always comes last. Where a function already takes `options` or an output format, pass `{}` or `null` for those.
+
+```hot
+::tts ::elevenlabs::tts
+
+tenant {api-key: "tenant-b-key"}
+audio ::tts/text-to-speech(::elevenlabs/GEORGE_VOICE_ID, ::tts/TextToSpeechRequest({text: "Hello"}), null, tenant)
+voices ::elevenlabs::voices/list-voices({page_size: 50}, tenant)
+quota ::elevenlabs::user/get-subscription(tenant)
+```
+
+An `api-key` that is present but blank or null is an error naming the key, never a fallback to `elevenlabs.api.key`. `::elevenlabs::api/resolve(opts)` is the one place this is decided. `::elevenlabs::webhooks/verify-request` takes an explicit secret too, and masks it the same way.
 
 ## Notes and limits
 

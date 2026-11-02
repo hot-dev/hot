@@ -54,7 +54,7 @@ fn
 (request: CreateCouponRequest): Map {
   create-coupon(request, RequestOptions({}))
 },
-(request: CreateCouponRequest, options: RequestOptions): Map {
+(request: CreateCouponRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/coupons", request, options)
 }
 
@@ -62,8 +62,12 @@ get-coupon
 meta {
     doc: """GET /v1/coupons/{coupon} - Retrieve a coupon by ID."""
 }
-fn (coupon: Str): Map {
-  api-call("GET", `/v1/coupons/${seg(coupon)}`)
+fn
+(coupon: Str): Map {
+  get-coupon(coupon, {})
+},
+(coupon: Str, opts: Map): Map {
+  api-call("GET", `/v1/coupons/${seg(coupon)}`, "", opts)
 }
 
 UpdateCouponRequest type {
@@ -81,7 +85,7 @@ fn
 (coupon: Str, request: UpdateCouponRequest): Map {
   update-coupon(coupon, request, RequestOptions({}))
 },
-(coupon: Str, request: UpdateCouponRequest, options: RequestOptions): Map {
+(coupon: Str, request: UpdateCouponRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/coupons/${seg(coupon)}`, request, options)
 }
 
@@ -89,8 +93,12 @@ delete-coupon
 meta {
     doc: """DELETE /v1/coupons/{coupon} - Delete a coupon so it can't be redeemed again. Existing discounts that use it are unaffected."""
 }
-fn (coupon: Str): Map {
-  api-call("DELETE", `/v1/coupons/${seg(coupon)}`)
+fn
+(coupon: Str): Map {
+  delete-coupon(coupon, {})
+},
+(coupon: Str, opts: Map): Map {
+  api-call("DELETE", `/v1/coupons/${seg(coupon)}`, "", opts)
 }
 
 list-coupons
@@ -102,7 +110,10 @@ fn
   list-coupons({})
 },
 (params: Map): Map {
-  api-call("GET", "/v1/coupons", params)
+  list-coupons(params, {})
+},
+(params: Map, opts: Map): Map {
+  api-call("GET", "/v1/coupons", params, opts)
 }
 
 // ============================================================================
@@ -129,7 +140,7 @@ fn
 (request: CreatePromotionCodeRequest): Map {
   create-promotion-code(request, RequestOptions({}))
 },
-(request: CreatePromotionCodeRequest, options: RequestOptions): Map {
+(request: CreatePromotionCodeRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/promotion_codes", request, options)
 }
 
@@ -137,8 +148,12 @@ get-promotion-code
 meta {
     doc: """GET /v1/promotion_codes/{promotion_code} - Retrieve a promotion code by ID (`promo_...`). To look one up by its customer-facing code, use `list-promotion-codes({code: "LAUNCH25"})`."""
 }
-fn (promotion-code: Str): Map {
-  api-call("GET", `/v1/promotion_codes/${seg(promotion-code)}`)
+fn
+(promotion-code: Str): Map {
+  get-promotion-code(promotion-code, {})
+},
+(promotion-code: Str, opts: Map): Map {
+  api-call("GET", `/v1/promotion_codes/${seg(promotion-code)}`, "", opts)
 }
 
 UpdatePromotionCodeRequest type {
@@ -156,7 +171,7 @@ fn
 (promotion-code: Str, request: UpdatePromotionCodeRequest): Map {
   update-promotion-code(promotion-code, request, RequestOptions({}))
 },
-(promotion-code: Str, request: UpdatePromotionCodeRequest, options: RequestOptions): Map {
+(promotion-code: Str, request: UpdatePromotionCodeRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/promotion_codes/${seg(promotion-code)}`, request, options)
 }
 
@@ -181,5 +196,8 @@ fn
   list-promotion-codes(ListPromotionCodesRequest({}))
 },
 (request: ListPromotionCodesRequest): Map {
-  api-call("GET", "/v1/promotion_codes", request)
+  list-promotion-codes(request, {})
+},
+(request: ListPromotionCodesRequest, opts: Map): Map {
+  api-call("GET", "/v1/promotion_codes", request, opts)
 }

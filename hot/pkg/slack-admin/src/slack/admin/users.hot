@@ -43,7 +43,10 @@ fn
   list(ListRequest({}))
 },
 (request: ListRequest): Map {
-  ::api/call("admin.users.list", request)
+  list(request, {})
+},
+(request: ListRequest, opts: Map): Map {
+  ::api/call("admin.users.list", request, opts)
 }
 
 list-all
@@ -60,7 +63,10 @@ fn
   list-all(request, 1000)
 },
 (request: ListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.users.list", request, "users", max-items)
+  list-all(request, max-items, {})
+},
+(request: ListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.users.list", request, "users", max-items, opts)
 }
 
 InviteRequest type {
@@ -84,8 +90,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: InviteRequest): Map {
-  ::api/call("admin.users.invite", request)
+fn
+(request: InviteRequest): Map {
+  invite(request, {})
+},
+(request: InviteRequest, opts: Map): Map {
+  ::api/call("admin.users.invite", request, opts)
 }
 
 AssignRequest type {
@@ -104,8 +114,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: AssignRequest): Map {
-  ::api/call("admin.users.assign", request)
+fn
+(request: AssignRequest): Map {
+  assign(request, {})
+},
+(request: AssignRequest, opts: Map): Map {
+  ::api/call("admin.users.assign", request, opts)
 }
 
 RemoveUserRequest type {
@@ -121,8 +135,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: RemoveUserRequest): Map {
-  ::api/call("admin.users.remove", request)
+fn
+(request: RemoveUserRequest): Map {
+  remove-user(request, {})
+},
+(request: RemoveUserRequest, opts: Map): Map {
+  ::api/call("admin.users.remove", request, opts)
 }
 
 SetAdminRequest type {
@@ -138,8 +156,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SetAdminRequest): Map {
-  ::api/call("admin.users.setAdmin", request)
+fn
+(request: SetAdminRequest): Map {
+  set-admin(request, {})
+},
+(request: SetAdminRequest, opts: Map): Map {
+  ::api/call("admin.users.setAdmin", request, opts)
 }
 
 SetOwnerRequest type {
@@ -155,8 +177,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SetOwnerRequest): Map {
-  ::api/call("admin.users.setOwner", request)
+fn
+(request: SetOwnerRequest): Map {
+  set-owner(request, {})
+},
+(request: SetOwnerRequest, opts: Map): Map {
+  ::api/call("admin.users.setOwner", request, opts)
 }
 
 SetRegularRequest type {
@@ -172,8 +198,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SetRegularRequest): Map {
-  ::api/call("admin.users.setRegular", request)
+fn
+(request: SetRegularRequest): Map {
+  set-regular(request, {})
+},
+(request: SetRegularRequest, opts: Map): Map {
+  ::api/call("admin.users.setRegular", request, opts)
 }
 
 SetExpirationRequest type {
@@ -190,8 +220,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SetExpirationRequest): Map {
-  ::api/call("admin.users.setExpiration", request)
+fn
+(request: SetExpirationRequest): Map {
+  set-expiration(request, {})
+},
+(request: SetExpirationRequest, opts: Map): Map {
+  ::api/call("admin.users.setExpiration", request, opts)
 }
 
 GetExpirationRequest type {
@@ -212,7 +246,10 @@ fn
   get-expiration(GetExpirationRequest({}))
 },
 (request: GetExpirationRequest): Map {
-  ::api/call("admin.users.getExpiration", request)
+  get-expiration(request, {})
+},
+(request: GetExpirationRequest, opts: Map): Map {
+  ::api/call("admin.users.getExpiration", request, opts)
 }
 
 SessionListRequest type {
@@ -236,7 +273,10 @@ fn
   session-list(SessionListRequest({}))
 },
 (request: SessionListRequest): Map {
-  ::api/call("admin.users.session.list", request)
+  session-list(request, {})
+},
+(request: SessionListRequest, opts: Map): Map {
+  ::api/call("admin.users.session.list", request, opts)
 }
 
 session-list-all
@@ -253,7 +293,10 @@ fn
   session-list-all(request, 1000)
 },
 (request: SessionListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.users.session.list", request, "active_sessions", max-items)
+  session-list-all(request, max-items, {})
+},
+(request: SessionListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.users.session.list", request, "active_sessions", max-items, opts)
 }
 
 SessionResetRequest type {
@@ -270,8 +313,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SessionResetRequest): Map {
-  ::api/call("admin.users.session.reset", request)
+fn
+(request: SessionResetRequest): Map {
+  session-reset(request, {})
+},
+(request: SessionResetRequest, opts: Map): Map {
+  ::api/call("admin.users.session.reset", request, opts)
 }
 
 SessionResetBulkRequest type {
@@ -288,8 +335,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SessionResetBulkRequest): Map {
-  ::api/call("admin.users.session.resetBulk", request)
+fn
+(request: SessionResetBulkRequest): Map {
+  session-reset-bulk(request, {})
+},
+(request: SessionResetBulkRequest, opts: Map): Map {
+  ::api/call("admin.users.session.resetBulk", request, opts)
 }
 
 SessionInvalidateRequest type {
@@ -305,8 +356,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SessionInvalidateRequest): Map {
-  ::api/call("admin.users.session.invalidate", request)
+fn
+(request: SessionInvalidateRequest): Map {
+  session-invalidate(request, {})
+},
+(request: SessionInvalidateRequest, opts: Map): Map {
+  ::api/call("admin.users.session.invalidate", request, opts)
 }
 
 SessionGetSettingsRequest type {
@@ -321,8 +376,12 @@ meta {
     Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SessionGetSettingsRequest): Map {
-  ::api/call("admin.users.session.getSettings", request)
+fn
+(request: SessionGetSettingsRequest): Map {
+  session-get-settings(request, {})
+},
+(request: SessionGetSettingsRequest, opts: Map): Map {
+  ::api/call("admin.users.session.getSettings", request, opts)
 }
 
 SessionSetSettingsRequest type {
@@ -339,8 +398,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SessionSetSettingsRequest): Map {
-  ::api/call("admin.users.session.setSettings", request)
+fn
+(request: SessionSetSettingsRequest): Map {
+  session-set-settings(request, {})
+},
+(request: SessionSetSettingsRequest, opts: Map): Map {
+  ::api/call("admin.users.session.setSettings", request, opts)
 }
 
 SessionClearSettingsRequest type {
@@ -355,8 +418,12 @@ meta {
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SessionClearSettingsRequest): Map {
-  ::api/call("admin.users.session.clearSettings", request)
+fn
+(request: SessionClearSettingsRequest): Map {
+  session-clear-settings(request, {})
+},
+(request: SessionClearSettingsRequest, opts: Map): Map {
+  ::api/call("admin.users.session.clearSettings", request, opts)
 }
 
 UnsupportedVersionsExportRequest type {
@@ -377,5 +444,8 @@ fn
   unsupported-versions-export(UnsupportedVersionsExportRequest({}))
 },
 (request: UnsupportedVersionsExportRequest): Map {
-  ::api/call("admin.users.unsupportedVersions.export", request)
+  unsupported-versions-export(request, {})
+},
+(request: UnsupportedVersionsExportRequest, opts: Map): Map {
+  ::api/call("admin.users.unsupportedVersions.export", request, opts)
 }

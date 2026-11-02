@@ -1,6 +1,6 @@
 ::zendesk::users ns
 meta {
-    ctx: {"zendesk.subdomain": {required: true, secret: false}},
+    ctx: {"zendesk.subdomain": {required: false, secret: false}},
     doc: """Users (end users, agents, admins): look up, search, list with cursor pagination, create, update and upsert."""
 }
 
@@ -10,16 +10,24 @@ me
 meta {
     doc: """GET /users/me - The authenticated user: `{user}`. The cheapest credentials check (an anonymous user with id null means auth failed silently)."""
 }
-fn (): Any {
-  ::api/request("GET", "/users/me", "")
+fn
+(): Any {
+  me({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/users/me", "", opts)
 }
 
 get-user
 meta {
     doc: """GET /users/{id} - One user: `{user}`."""
 }
-fn (id: Any): Any {
-  ::api/request("GET", `/users/${::api/path-segment(id)}`, "")
+fn
+(id: Any): Any {
+  get-user(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/users/${::api/path-segment(id)}`, "", opts)
 }
 
 list-users
@@ -31,7 +39,10 @@ fn
   list-users({})
 },
 (options: Map): Any {
-  ::api/list-page("/users", options)
+  list-users(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/list-page("/users", options, opts)
 }
 
 search-users
@@ -48,15 +59,22 @@ fn
   search-users(query, {})
 },
 (query: Str, options: Map): Any {
-  ::api/request("GET", `/users/search${::api/query-string({...options, query: query})}`, "")
+  search-users(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Any {
+  ::api/request("GET", `/users/search${::api/query-string({...options, query: query})}`, "", opts)
 }
 
 find-user-by-email
 meta {
     doc: """GET /users/search?query= - Find a user by email. Returns the user or null."""
 }
-fn (email: Str): Any {
-  out search-users(email)
+fn
+(email: Str): Any {
+  find-user-by-email(email, {})
+},
+(email: Str, opts: Map): Any {
+  out search-users(email, {}, opts)
   cond {
     is-err(out) => { out }
     is-empty(or(get(out, "users"), [])) => { null }
@@ -68,16 +86,24 @@ create-user
 meta {
     doc: """POST /users - Create a user. `fields`: `name` (required), `email`, `role` (end-user by default), `phone`, `external_id`, `organization_id`, `tags`, `user_fields`, `verified`, `skip_verify_email`. Unset fields are omitted. Returns `{user}`."""
 }
-fn (fields: Map): Any {
-  ::api/request("POST", "/users", {user: ::api/compact(fields)})
+fn
+(fields: Map): Any {
+  create-user(fields, {})
+},
+(fields: Map, opts: Map): Any {
+  ::api/request("POST", "/users", {user: ::api/compact(fields)}, opts)
 }
 
 update-user
 meta {
     doc: """PUT /users/{id} - Update a user's fields. Unset fields are omitted."""
 }
-fn (id: Any, fields: Map): Any {
-  ::api/request("PUT", `/users/${::api/path-segment(id)}`, {user: ::api/compact(fields)})
+fn
+(id: Any, fields: Map): Any {
+  update-user(id, fields, {})
+},
+(id: Any, fields: Map, opts: Map): Any {
+  ::api/request("PUT", `/users/${::api/path-segment(id)}`, {user: ::api/compact(fields)}, opts)
 }
 
 create-or-update-user
@@ -94,6 +120,10 @@ meta {
     ```
     """
 }
-fn (fields: Map): Any {
-  ::api/request("POST", "/users/create_or_update", {user: ::api/compact(fields)})
+fn
+(fields: Map): Any {
+  create-or-update-user(fields, {})
+},
+(fields: Map, opts: Map): Any {
+  ::api/request("POST", "/users/create_or_update", {user: ::api/compact(fields)}, opts)
 }

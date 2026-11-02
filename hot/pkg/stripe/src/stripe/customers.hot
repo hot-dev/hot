@@ -52,7 +52,7 @@ fn
 (request: CreateCustomerRequest): Map {
   create-customer(request, RequestOptions({}))
 },
-(request: CreateCustomerRequest, options: RequestOptions): Map {
+(request: CreateCustomerRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/customers", request, options)
 }
 
@@ -65,7 +65,10 @@ fn
   get-customer(customer, {})
 },
 (customer: Str, params: Map): Map {
-  api-call("GET", `/v1/customers/${seg(customer)}`, params)
+  get-customer(customer, params, {})
+},
+(customer: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/customers/${seg(customer)}`, params, opts)
 }
 
 UpdateCustomerRequest type {
@@ -92,7 +95,7 @@ fn
 (customer: Str, request: UpdateCustomerRequest): Map {
   update-customer(customer, request, RequestOptions({}))
 },
-(customer: Str, request: UpdateCustomerRequest, options: RequestOptions): Map {
+(customer: Str, request: UpdateCustomerRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/customers/${seg(customer)}`, request, options)
 }
 
@@ -100,8 +103,12 @@ delete-customer
 meta {
     doc: """DELETE /v1/customers/{customer} - Permanently delete a customer. Cancels any active subscriptions. Returns `{id, object: "customer", deleted: true}`."""
 }
-fn (customer: Str): Map {
-  api-call("DELETE", `/v1/customers/${seg(customer)}`)
+fn
+(customer: Str): Map {
+  delete-customer(customer, {})
+},
+(customer: Str, opts: Map): Map {
+  api-call("DELETE", `/v1/customers/${seg(customer)}`, "", opts)
 }
 
 ListCustomersRequest type {
@@ -135,7 +142,10 @@ fn
   list-customers(ListCustomersRequest({}))
 },
 (request: ListCustomersRequest): Map {
-  api-call("GET", "/v1/customers", request)
+  list-customers(request, {})
+},
+(request: ListCustomersRequest, opts: Map): Map {
+  api-call("GET", "/v1/customers", request, opts)
 }
 
 search-customers
@@ -149,5 +159,8 @@ fn
   search-customers(query, {})
 },
 (query: Str, params: Map): Map {
-  api-call("GET", "/v1/customers/search", {...params, query: query})
+  search-customers(query, params, {})
+},
+(query: Str, params: Map, opts: Map): Map {
+  api-call("GET", "/v1/customers/search", {...params, query: query}, opts)
 }

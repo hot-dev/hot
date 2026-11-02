@@ -36,7 +36,7 @@ fn
 (request: CreateMeterEventRequest): Map {
   create-meter-event(request, RequestOptions({}))
 },
-(request: CreateMeterEventRequest, options: RequestOptions): Map {
+(request: CreateMeterEventRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/billing/meter_events", request, options)
 }
 
@@ -58,7 +58,7 @@ fn
 (request: CreateMeterRequest): Map {
   create-meter(request, RequestOptions({}))
 },
-(request: CreateMeterRequest, options: RequestOptions): Map {
+(request: CreateMeterRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/billing/meters", request, options)
 }
 
@@ -66,8 +66,12 @@ get-meter
 meta {
     doc: """GET /v1/billing/meters/{id} - Retrieve a meter by ID."""
 }
-fn (meter: Str): Map {
-  api-call("GET", `/v1/billing/meters/${seg(meter)}`)
+fn
+(meter: Str): Map {
+  get-meter(meter, {})
+},
+(meter: Str, opts: Map): Map {
+  api-call("GET", `/v1/billing/meters/${seg(meter)}`, "", opts)
 }
 
 list-meters
@@ -79,15 +83,22 @@ fn
   list-meters({})
 },
 (params: Map): Map {
-  api-call("GET", "/v1/billing/meters", params)
+  list-meters(params, {})
+},
+(params: Map, opts: Map): Map {
+  api-call("GET", "/v1/billing/meters", params, opts)
 }
 
 deactivate-meter
 meta {
     doc: """POST /v1/billing/meters/{id}/deactivate - Deactivate a meter: it stops accepting events and can't be attached to new prices."""
 }
-fn (meter: Str): Map {
-  api-call("POST", `/v1/billing/meters/${seg(meter)}/deactivate`, {})
+fn
+(meter: Str): Map {
+  deactivate-meter(meter, {})
+},
+(meter: Str, opts: Map): Map {
+  api-call("POST", `/v1/billing/meters/${seg(meter)}/deactivate`, {}, opts)
 }
 
 list-meter-event-summaries
@@ -99,5 +110,8 @@ fn
   list-meter-event-summaries(meter, customer, start-time, end-time, {})
 },
 (meter: Str, customer: Str, start-time: Int, end-time: Int, params: Map): Map {
-  api-call("GET", `/v1/billing/meters/${seg(meter)}/event_summaries`, {...params, customer: customer, start_time: start-time, end_time: end-time})
+  list-meter-event-summaries(meter, customer, start-time, end-time, params, {})
+},
+(meter: Str, customer: Str, start-time: Int, end-time: Int, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/billing/meters/${seg(meter)}/event_summaries`, {...params, customer: customer, start_time: start-time, end_time: end-time}, opts)
 }

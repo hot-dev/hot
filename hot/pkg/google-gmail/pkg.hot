@@ -3,7 +3,7 @@
 hot.pkg.google-gmail {
   name: "hot.dev/google-gmail",
   version: "0.1.0",
-  hot-min-version: "3.0.0",
+  hot-min-version: "3.0.2",
   description: "Gmail API v1 bindings for Hot: header-injection-safe MIME email with HTML, attachments and RFC 2047 headers (large messages via the upload endpoint), threaded replies and forwards, search returning plain email records, threads, drafts, labels, and history sync with Pub/Sub push verification.",
   author: "Hot Dev",
   email: "support@hot.dev",

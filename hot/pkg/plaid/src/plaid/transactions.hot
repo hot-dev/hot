@@ -44,7 +44,10 @@ fn
   sync-transactions(access-token, cursor, {})
 },
 (access-token: Str, cursor: Str?, params: Map): Map {
-  ::api/post("/transactions/sync", build-sync-request(access-token, cursor, params))
+  sync-transactions(access-token, cursor, params, {})
+},
+(access-token: Str, cursor: Str?, params: Map, opts: Map): Map {
+  ::api/post("/transactions/sync", build-sync-request(access-token, cursor, params), opts)
 }
 
 empty-sync fn (cursor: Str?): Map {
@@ -132,8 +135,11 @@ fn
   sync-all-transactions(access-token, cursor, {})
 },
 (access-token: Str, cursor: Str?, params: Map): Map {
+  sync-all-transactions(access-token, cursor, params, {})
+},
+(access-token: Str, cursor: Str?, params: Map, opts: Map): Map {
   request-params {count: get(params, "count"), options: get(params, "options")}
-  sync-all-with((c) { sync-transactions(access-token, c, request-params) }, cursor, params)
+  sync-all-with((c) { sync-transactions(access-token, c, request-params, opts) }, cursor, params)
 }
 
 get-transactions
@@ -152,20 +158,27 @@ fn
   get-transactions(access-token, start-date, end-date, null)
 },
 (access-token: Str, start-date: Str, end-date: Str, options: Map?): Map {
+  get-transactions(access-token, start-date, end-date, options, {})
+},
+(access-token: Str, start-date: Str, end-date: Str, options: Map?, opts: Map): Map {
   ::api/post("/transactions/get", {
     access_token: access-token,
     start_date: start-date,
     end_date: end-date,
     options: options
-  })
+  }, opts)
 }
 
 refresh-transactions
 meta {
     doc: """POST /transactions/refresh: ask Plaid to check the institution now (an add-on product). New data arrives through the usual `SYNC_UPDATES_AVAILABLE` webhook."""
 }
-fn (access-token: Str): Map {
-  ::api/post("/transactions/refresh", {access_token: access-token})
+fn
+(access-token: Str): Map {
+  refresh-transactions(access-token, {})
+},
+(access-token: Str, opts: Map): Map {
+  ::api/post("/transactions/refresh", {access_token: access-token}, opts)
 }
 
 get-recurring-transactions
@@ -177,9 +190,12 @@ fn
   get-recurring-transactions(access-token, null, null)
 },
 (access-token: Str, account-ids: Vec?, options: Map?): Map {
+  get-recurring-transactions(access-token, account-ids, options, {})
+},
+(access-token: Str, account-ids: Vec?, options: Map?, opts: Map): Map {
   ::api/post("/transactions/recurring/get", {
     access_token: access-token,
     account_ids: account-ids,
     options: options
-  })
+  }, opts)
 }

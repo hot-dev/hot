@@ -72,7 +72,7 @@ fn
 (request: CreateCheckoutSessionRequest): Map {
   create-checkout-session(request, RequestOptions({}))
 },
-(request: CreateCheckoutSessionRequest, options: RequestOptions): Map {
+(request: CreateCheckoutSessionRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/checkout/sessions", request, options)
 }
 
@@ -85,23 +85,34 @@ fn
   get-checkout-session(session, {})
 },
 (session: Str, params: Map): Map {
-  api-call("GET", `/v1/checkout/sessions/${seg(session)}`, params)
+  get-checkout-session(session, params, {})
+},
+(session: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/checkout/sessions/${seg(session)}`, params, opts)
 }
 
 update-checkout-session
 meta {
     doc: """POST /v1/checkout/sessions/{session} - Update an open Checkout Session. `params` takes the API's fields directly: `metadata`, `line_items`, `shipping_options`, `collected_information`."""
 }
-fn (session: Str, params: Map): Map {
-  api-call("POST", `/v1/checkout/sessions/${seg(session)}`, params)
+fn
+(session: Str, params: Map): Map {
+  update-checkout-session(session, params, {})
+},
+(session: Str, params: Map, opts: Map): Map {
+  api-call("POST", `/v1/checkout/sessions/${seg(session)}`, params, opts)
 }
 
 expire-checkout-session
 meta {
     doc: """POST /v1/checkout/sessions/{session}/expire - Expire an open Checkout Session so it can no longer be used."""
 }
-fn (session: Str): Map {
-  api-call("POST", `/v1/checkout/sessions/${seg(session)}/expire`, {})
+fn
+(session: Str): Map {
+  expire-checkout-session(session, {})
+},
+(session: Str, opts: Map): Map {
+  api-call("POST", `/v1/checkout/sessions/${seg(session)}/expire`, {}, opts)
 }
 
 ListCheckoutSessionsRequest type {
@@ -127,7 +138,10 @@ fn
   list-checkout-sessions(ListCheckoutSessionsRequest({}))
 },
 (request: ListCheckoutSessionsRequest): Map {
-  api-call("GET", "/v1/checkout/sessions", request)
+  list-checkout-sessions(request, {})
+},
+(request: ListCheckoutSessionsRequest, opts: Map): Map {
+  api-call("GET", "/v1/checkout/sessions", request, opts)
 }
 
 list-checkout-session-line-items
@@ -139,5 +153,8 @@ fn
   list-checkout-session-line-items(session, {})
 },
 (session: Str, params: Map): Map {
-  api-call("GET", `/v1/checkout/sessions/${seg(session)}/line_items`, params)
+  list-checkout-session-line-items(session, params, {})
+},
+(session: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/checkout/sessions/${seg(session)}/line_items`, params, opts)
 }

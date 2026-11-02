@@ -178,7 +178,7 @@ meta {
     `::hot::json/to-json` before transmission.
     """
 }
-fn (payload: Any, opts: CallbackOptions): CallbackResult {
+fn (payload: Any, opts: CallbackOptions?): CallbackResult {
     cond {
         is-null(opts) => { CallbackResult({ok: false, status: 0, error: "no-callback-options", attempt-ms: 0}) }
         is-empty(or(opts.url, "")) => { CallbackResult({ok: false, status: 0, error: "no-callback-url", attempt-ms: 0}) }

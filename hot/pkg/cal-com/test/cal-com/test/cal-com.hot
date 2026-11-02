@@ -77,9 +77,77 @@ meta ["test"] fn () {
 
 test-http-error-from-response
 meta ["test"] fn () {
-    e ::api/http-error(::hot::http/HttpResponse({status: 404, headers: {"content-type": "application/json"}, body: {status: "error"}}))
+    e ::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {"content-type": "application/json"}, body: {status: "error"}}))
     assert-eq(404, e.status)
     assert-eq("error", e.body.status)
+}
+
+// ============================================================================
+// Per-call credentials
+// ============================================================================
+
+CTX_VALUES {"cal-com.api.key": "ctx-key", "cal-com.url": "https://cal.example.com/api/v2/"}
+
+err-text fn (out: Result): Str {
+    if-err(out, (e) { e })
+}
+
+test-resolve-from-uses-ctx
+meta ["test"] fn () {
+    out ::api/resolve-from({}, CTX_VALUES)
+    assert-eq("ctx-key", out.api-key)
+    assert-eq("https://cal.example.com/api/v2", out.base-url)
+    assert-eq("https://api.cal.com/v2", ::api/resolve-from({api-key: "k"}, {}).base-url)
+}
+
+test-resolve-from-opts-win
+meta ["test"] fn () {
+    out ::api/resolve-from({api-key: " tenant-key ", base-url: "https://tenant.example.com/v2/"}, CTX_VALUES)
+    assert-eq("tenant-key", out.api-key)
+    assert-eq("https://tenant.example.com/v2", out.base-url)
+}
+
+test-resolve-from-blank-key-never-falls-back
+meta ["test"] fn () {
+    for-each(["", "  ", null], (blank) {
+        out ::api/resolve-from({api-key: blank}, CTX_VALUES)
+        assert(is-err(out), "a blank key is an Err, never ctx")
+        assert(contains(err-text(out), "api-key"), "names the key")
+    })
+}
+
+test-resolve-from-per-call-url-needs-key
+meta ["test"] fn () {
+    out ::api/resolve-from({base-url: "https://evil.example.com"}, CTX_VALUES)
+    assert(is-err(out), "the ctx key never goes to a per-call URL")
+    assert(contains(err-text(out), "base-url"), "names base-url")
+    assert(contains(err-text(out), "api-key"), "names api-key")
+}
+
+test-resolve-from-no-key
+meta ["test"] fn () {
+    assert(contains(err-text(::api/resolve-from({}, {})), "cal-com.api.key"))
+}
+
+test-resolve-returns-marked-key-unchanged
+meta ["test"] fn () {
+    assert-eq("cal_live_tenant_key", ::api/resolve({api-key: "cal_live_tenant_key"}).api-key)
+}
+
+test-opts-arity-errs-before-any-request
+meta ["test"] fn () {
+    assert(is-err(::cal-com::users/me({api-key: ""})))
+    assert(is-err(::bookings/get-booking("uid", {base-url: "https://evil.example.com"})))
+    assert(is-err(::bookings/list-bookings({}, {api-key: null})))
+    assert(is-err(::bookings/list-all-bookings({}, 5, {api-key: " "})), "a failed page comes back as its Err")
+    assert(is-err(::slots/get-slots(1, "2026-07-10", "2026-07-14", "UTC", {}, {api-key: ""})))
+}
+
+test-webhook-secret-marked-unchanged
+meta ["test"] fn () {
+    fields {secret: "webhook-secret-value", active: true}
+    assert-eq(fields, ::webhooks/mark-webhook-secret(fields))
+    assert-eq({active: true}, ::webhooks/mark-webhook-secret({active: true}))
 }
 
 // ============================================================================

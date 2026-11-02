@@ -165,12 +165,12 @@ meta ["test"] fn () {
     })
     key ::auth/fingerprint("client-credentials", ::auth/config())
     cached {token: "cached-tok", instance-url: MY_DOMAIN, flow: "client-credentials", expires-at: add(::jwt/now-seconds(), 600)}
-    ::ctx/set-secret(::auth/CACHE_KEY, {fingerprint: key, expires-at: cached.expires-at, session: cached})
+    ::ctx/set-secret(::auth/cache-key(key), {fingerprint: key, expires-at: cached.expires-at, session: cached})
     s ::auth/session()
     assert-eq("cached-tok", s.token, "served from the run cache, no token exchange")
     assert(::auth/is-configured(), "client credentials + My Domain is a complete config")
     ::auth/invalidate()
-    assert(is-null(::ctx/get(::auth/CACHE_KEY)), "invalidate clears the cache")
+    assert(is-null(::ctx/get(::auth/cache-key(key))), "invalidate clears the cache")
     clear-ctx()
 }
 
@@ -255,7 +255,7 @@ test-unwrap
 meta ["test"] fn () {
     assert(is-null(::api/unwrap({status: 204, headers: {}, body: ""})), "204 is null")
     assert-eq({id: "001"}, ::api/unwrap({status: 201, headers: {}, body: {id: "001"}}))
-    failed ::api/unwrap({status: 401, headers: {}, body: [{message: "Session expired or invalid", errorCode: "INVALID_SESSION_ID"}]})
+    failed ::api/unwrap(::hot::http/HttpResponse({status: 401, headers: {}, body: [{message: "Session expired or invalid", errorCode: "INVALID_SESSION_ID"}]}))
     assert(is-err(failed), "non-2xx is an Err")
     match failed {
         Result.Err => {

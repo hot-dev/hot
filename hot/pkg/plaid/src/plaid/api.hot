@@ -1,15 +1,31 @@
 ::plaid::api ns
 meta {
     ctx: {
-        "plaid.client-id": {required: true},
-        "plaid.secret": {required: true},
-        "plaid.env": {required: false},
-        "plaid.version": {required: false}
+        "plaid.client-id": {required: false},
+        "plaid.secret": {required: false},
+        "plaid.env": {required: false, secret: false},
+        "plaid.version": {required: false, secret: false}
     },
     doc: """
     Transport for the Plaid API: environment selection, the credentialed
     `post` escape hatch, request-body building that drops unset fields,
     and Plaid's error object unwrapped into `HttpError`.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `plaid.*` context variables, then the defaults. They
+    are masked in call records and never written to ctx, so one run can
+    act for many Plaid clients.
+
+    - `client-id`, `secret`: the credentials for this call, always together
+    - `environment`: `"sandbox"` or `"production"` for this call
+    - `plaid-version`: the `Plaid-Version` for this call
+
+    A key that is present but blank or null is an Err naming it, never a
+    fallback to context.
+
+    Item `access_token`s, and the tokens Plaid mints, are masked in call
+    records too.
     """
 }
 
@@ -52,9 +68,9 @@ plaid-field fn (body: Any, key: Str): Any {
   if(is-map(body), get(body, key), null)
 }
 
-http-error
+HttpResponse -> HttpError
 meta {
-    doc: """Build an `HttpError` from a non-2xx response, lifting Plaid's error fields out of the body. Exposed for testing; `post` applies it."""
+    doc: """Coerce a non-2xx response into an `HttpError`, lifting Plaid's error fields out of the body."""
 }
 fn (response: HttpResponse): HttpError {
   body response.body
@@ -70,10 +86,6 @@ fn (response: HttpResponse): HttpError {
     documentation_url: plaid-field(body, "documentation_url"),
     suggested_action: plaid-field(body, "suggested_action")
   })
-}
-
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
-  http-error(response)
 }
 
 is-error-code
@@ -116,10 +128,6 @@ fn (): Str {
   if(is-empty(configured), ::plaid/DEFAULT_ENV, configured)
 }
 
-base-url fn (): Str {
-  env-base-url(current-env())
-}
-
 plaid-version
 meta {
     doc: """The `Plaid-Version` header value: `plaid.version`, or `::plaid/PLAID_VERSION`."""
@@ -155,8 +163,151 @@ fn (body: Map, client-id: Str, secret: Str): Map {
 }
 
 // ---------------------------------------------------------------------------
+// Credentials
+// ---------------------------------------------------------------------------
+
+// Keys that may not be present and blank. `environment` is here too: a
+// tenant's missing value must not silently pick the project's environment.
+REQUIRED_WHEN_PRESENT ["client-id", "secret", "environment"]
+
+// Body fields that are credentials: the Item's access token, and the tokens
+// Plaid mints.
+TOKEN_FIELDS ["access_token", "public_token", "link_token"]
+
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+blank-option
+meta {
+    doc: """The first of `names` that `opts` has with a blank or null value, else null."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: `{client-id, secret, base-url, plaid-version}`
+    for a call from `opts` first, then `ctx-values` (a Map of context
+    variables), then defaults. An Err when a credential is not set, when
+    `client-id`, `secret` or `environment` is in `opts` but blank or null,
+    when `opts` has only one of `client-id` and `secret` (a tenant's id
+    must not go out with the project's secret), or when the environment
+    is unknown. Exposed for testing; `resolve` feeds it the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  blank blank-option(opts, REQUIRED_WHEN_PRESENT)
+  opts-id non-blank(get(opts, "client-id"))
+  opts-secret non-blank(get(opts, "secret"))
+  client-id or(opts-id, non-blank(get(ctx-values, "plaid.client-id")))
+  secret or(opts-secret, non-blank(get(ctx-values, "plaid.secret")))
+  env or(non-blank(get(opts, "environment")), non-blank(get(ctx-values, "plaid.env")), ::plaid/DEFAULT_ENV)
+  url env-base-url(env)
+  cond {
+    is-some(blank) => {
+      err(`plaid: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out.`)
+    }
+
+    and(is-some(opts-id), is-null(opts-secret)) => { err("plaid: client-id is in the call's opts without secret. Pass both.") }
+    and(is-some(opts-secret), is-null(opts-id)) => { err("plaid: secret is in the call's opts without client-id. Pass both.") }
+    or(is-null(client-id), is-null(secret)) => {
+      err("plaid: plaid.client-id and plaid.secret are not set. Add them in Context Variables, or pass {client-id: ..., secret: ...} in the call's opts.")
+    }
+
+    is-err(url) => { url }
+    => {
+      {
+        client-id: client-id,
+        secret: secret,
+        base-url: url,
+        plaid-version: or(non-blank(get(opts, "plaid-version")), non-blank(get(ctx-values, "plaid.version")), ::plaid/PLAID_VERSION)
+      }
+    }
+  }
+}
+
+resolve
+meta {
+    ctx: {
+        "plaid.client-id": {required: false},
+        "plaid.secret": {required: false},
+        "plaid.env": {required: false, secret: false},
+        "plaid.version": {required: false, secret: false}
+    },
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). The
+    credentials are masked in this run's call records, and nothing from
+    `opts` is written to ctx.
+
+    **Example**
+
+    ```hot
+    ::plaid::api/resolve({client-id: "tenant-id", secret: "tenant-secret", environment: "production"}).base-url
+    // "https://production.plaid.com"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  mark-credentials(opts)
+  resolved resolve-from(opts, {
+    "plaid.client-id": ::ctx/get("plaid.client-id"),
+    "plaid.secret": ::ctx/get("plaid.secret"),
+    "plaid.env": ::ctx/get("plaid.env"),
+    "plaid.version": ::ctx/get("plaid.version")
+  })
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      {
+        ...resolved,
+        client-id: ::ctx/mark-secret(resolved.client-id),
+        secret: ::ctx/mark-secret(resolved.secret)
+      }
+    }
+  }
+}
+
+mark-credentials
+meta {
+    doc: """Mask the credentials in `opts` in this run's call records. Called first wherever `opts` arrives, so the records of the calls after it are masked too. Returns null."""
+}
+fn (opts: Map): Any {
+  ::ctx/mark-secret([opts.client-id, opts.secret])
+  null
+}
+
+mark-tokens
+meta {
+    doc: """Mask a request or response body's `access_token`, `public_token` and `link_token` in this run's call records. Returns the body unchanged."""
+}
+fn (body: Any): Any {
+  if(is-map(body), ::ctx/mark-secret(filter-keys(body, in(%, TOKEN_FIELDS))))
+  body
+}
+
+// ---------------------------------------------------------------------------
 // Requests
 // ---------------------------------------------------------------------------
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`), with the credentials in the JSON body. Pure; exposed for testing."""
+}
+fn (path: Str, body: Map, resolved: Map): HttpRequest {
+  HttpRequest({
+    method: "POST",
+    url: `${resolved.base-url}${path}`,
+    headers: {
+      Content-Type: "application/json",
+      Plaid-Version: resolved.plaid-version,
+      User-Agent: "hot-dev-plaid-pkg"
+    },
+    body: to-json(untype(with-credentials(body, resolved.client-id, resolved.secret)))
+  })
+}
 
 post
 meta {
@@ -170,32 +321,37 @@ meta {
 
     ```hot
     out ::plaid::api/post("/categories/get", {})
+
+    // For another Plaid client
+    out ::plaid::api/post("/categories/get", {}, {client-id: "tenant-id", secret: "tenant-secret"})
     ```
     """
 }
 fn
 (path: Str, body: Map): Any {
-  post(path, body, ::ctx/get("plaid.client-id"), ::ctx/get("plaid.secret"))
+  post(path, body, {})
+},
+// 3-arity: per-call credentials and settings (see `resolve`)
+(path: Str, body: Map, opts: Map): Any {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      mark-tokens(body)
+      response ::hot::http/request(build-request(path, body, resolved))
+      cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { mark-tokens(response.body) }
+        => { err(HttpError(response)) }
+      }
+    }
+  }
 },
 // 4-arity: explicit credentials (environment still from `plaid.env`)
 (path: Str, body: Map, client-id: Str, secret: Str): Any {
-  post(path, body, client-id, secret, current-env())
+  post(path, body, {client-id: client-id, secret: secret})
 },
 // 5-arity: explicit credentials and environment ("sandbox" or "production")
 (path: Str, body: Map, client-id: Str, secret: Str, env: Str): Any {
-  response ::hot::http/request(HttpRequest({
-    method: "POST",
-    url: `${env-base-url(env)}${path}`,
-    headers: {
-      Content-Type: "application/json",
-      Plaid-Version: plaid-version(),
-      User-Agent: "hot-dev-plaid-pkg"
-    },
-    body: to-json(untype(with-credentials(body, client-id, secret)))
-  }))
-  cond {
-    is-err(response) => { response }
-    is-ok-response(response) => { response.body }
-    => { err(http-error(response)) }
-  }
+  post(path, body, {client-id: client-id, secret: secret, environment: env})
 }

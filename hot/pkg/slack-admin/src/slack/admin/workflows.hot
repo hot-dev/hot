@@ -45,7 +45,10 @@ fn
   search(SearchRequest({}))
 },
 (request: SearchRequest): Map {
-  ::api/call("admin.workflows.search", request)
+  search(request, {})
+},
+(request: SearchRequest, opts: Map): Map {
+  ::api/call("admin.workflows.search", request, opts)
 }
 
 search-all
@@ -62,7 +65,10 @@ fn
   search-all(request, 1000)
 },
 (request: SearchRequest, max-items: Int): Vec {
-  ::api/paginate("admin.workflows.search", request, "workflows", max-items)
+  search-all(request, max-items, {})
+},
+(request: SearchRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.workflows.search", request, "workflows", max-items, opts)
 }
 
 PermissionsLookupRequest type {
@@ -78,8 +84,12 @@ meta {
     Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: PermissionsLookupRequest): Map {
-  ::api/call("admin.workflows.permissions.lookup", request)
+fn
+(request: PermissionsLookupRequest): Map {
+  permissions-lookup(request, {})
+},
+(request: PermissionsLookupRequest, opts: Map): Map {
+  ::api/call("admin.workflows.permissions.lookup", request, opts)
 }
 
 CollaboratorsAddRequest type {
@@ -95,8 +105,12 @@ meta {
     Scope: `admin.workflows:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: CollaboratorsAddRequest): Map {
-  ::api/call("admin.workflows.collaborators.add", request)
+fn
+(request: CollaboratorsAddRequest): Map {
+  collaborators-add(request, {})
+},
+(request: CollaboratorsAddRequest, opts: Map): Map {
+  ::api/call("admin.workflows.collaborators.add", request, opts)
 }
 
 CollaboratorsRemoveRequest type {
@@ -112,8 +126,12 @@ meta {
     Scope: `admin.workflows:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: CollaboratorsRemoveRequest): Map {
-  ::api/call("admin.workflows.collaborators.remove", request)
+fn
+(request: CollaboratorsRemoveRequest): Map {
+  collaborators-remove(request, {})
+},
+(request: CollaboratorsRemoveRequest, opts: Map): Map {
+  ::api/call("admin.workflows.collaborators.remove", request, opts)
 }
 
 UnpublishRequest type {
@@ -128,6 +146,10 @@ meta {
     Scope: `admin.workflows:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: UnpublishRequest): Map {
-  ::api/call("admin.workflows.unpublish", request)
+fn
+(request: UnpublishRequest): Map {
+  unpublish(request, {})
+},
+(request: UnpublishRequest, opts: Map): Map {
+  ::api/call("admin.workflows.unpublish", request, opts)
 }

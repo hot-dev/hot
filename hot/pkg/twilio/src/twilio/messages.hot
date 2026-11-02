@@ -4,7 +4,7 @@
 
 api-request ::twilio::api/request
 account-url ::twilio::api/account-url
-client-from-ctx ::twilio::api/client-from-ctx
+resolve ::twilio::api/resolve
 Client ::twilio::api/Client
 HttpError ::twilio::api/HttpError
 is-ok-response ::hot::http/is-ok-response
@@ -83,7 +83,7 @@ fn (request: CreateMessageRequest): Map {
 
 create-message
 meta {
-    ctx: {"twilio.account.sid": {required: true}, "twilio.auth.token": {required: false}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}, "twilio.auth.token": {required: false}},
     doc: """
 POST /Accounts/{AccountSid}/Messages.json - Send an SMS, MMS, WhatsApp, or RCS message.
 
@@ -131,11 +131,18 @@ response ::messages/create-message(::messages/CreateMessageRequest({
 }
 fn
 (request: CreateMessageRequest): Message {
-  create-message(client-from-ctx(), request)
+  create-message(request, {})
+},
+(request: CreateMessageRequest, opts: Map): Message {
+  resolve(opts) |> if-ok((client) { create-message(client, request) })
 },
 (client: Client, request: CreateMessageRequest): Message {
   response api-request(client, "POST", `${account-url(client)}/Messages.json`, {}, create-message-body(request))
-  if(is-ok-response(response), Message(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Message(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetMessageRequest type {
@@ -144,7 +151,7 @@ GetMessageRequest type {
 
 get-message
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 GET /Accounts/{AccountSid}/Messages/{Sid}.json - Get details of a specific message by SID. Returns delivery status, price, error info, and timestamps.
 
@@ -163,11 +170,18 @@ response.price   // => "-0.0075"
 }
 fn
 (request: GetMessageRequest): Message {
-  get-message(client-from-ctx(), request)
+  get-message(request, {})
+},
+(request: GetMessageRequest, opts: Map): Message {
+  resolve(opts) |> if-ok((client) { get-message(client, request) })
 },
 (client: Client, request: GetMessageRequest): Message {
   response api-request(client, "GET", `${account-url(client)}/Messages/${::uri/encode(request.sid)}.json`, {}, {})
-  if(is-ok-response(response), Message(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Message(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListMessagesRequest
@@ -222,7 +236,7 @@ fn (request: ListMessagesRequest): Str {
 
 list-messages
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 GET /Accounts/{AccountSid}/Messages.json - List messages, newest first. Filter by `To`, `From`, or send date. Returns one page; follow `next_page_uri` with `::twilio::api/next-page`, or use `list-all-messages`.
 
@@ -240,16 +254,23 @@ response.messages  // => [{sid: "SM...", body: "Hello", status: "delivered", ...
 }
 fn
 (request: ListMessagesRequest): ListMessagesResponse {
-  list-messages(client-from-ctx(), request)
+  list-messages(request, {})
+},
+(request: ListMessagesRequest, opts: Map): ListMessagesResponse {
+  resolve(opts) |> if-ok((client) { list-messages(client, request) })
 },
 (client: Client, request: ListMessagesRequest): ListMessagesResponse {
   response api-request(client, "GET", `${account-url(client)}/Messages.json${list-messages-query(request)}`, {}, {})
-  if(is-ok-response(response), ListMessagesResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListMessagesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 list-all-messages
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 Collect up to `limit` messages matching `request`, following Twilio's page links (PageToken) as needed.
 
@@ -265,10 +286,13 @@ length(recent)  // => up to 250
 }
 fn
 (request: ListMessagesRequest, limit: Int): Vec<Map> {
-  list-all-messages(client-from-ctx(), request, limit)
+  list-all-messages(request, limit, {})
+},
+(request: ListMessagesRequest, limit: Int, opts: Map): Vec<Map> {
+  resolve(opts) |> if-ok((client) { list-all-messages(client, request, limit) })
 },
 (client: Client, request: ListMessagesRequest, limit: Int): Vec<Map> {
-  ::twilio::api/collect-pages(client, untype(list-messages(client, request)), "messages", limit)
+  if-ok(list-messages(client, request), (page) { ::twilio::api/collect-pages(client, untype(page), "messages", limit) })
 }
 
 UpdateMessageRequest type {
@@ -279,12 +303,15 @@ UpdateMessageRequest type {
 
 update-message
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """POST /Accounts/{AccountSid}/Messages/{Sid}.json - Update a message. Set `Body: ""` to redact message content. Set `Status: "canceled"` to cancel a scheduled message."""
 }
 fn
 (request: UpdateMessageRequest): Message {
-  update-message(client-from-ctx(), request)
+  update-message(request, {})
+},
+(request: UpdateMessageRequest, opts: Map): Message {
+  resolve(opts) |> if-ok((client) { update-message(client, request) })
 },
 (client: Client, request: UpdateMessageRequest): Message {
   body {
@@ -293,7 +320,11 @@ fn
   }
 
   response api-request(client, "POST", `${account-url(client)}/Messages/${::uri/encode(request.sid)}.json`, {}, body)
-  if(is-ok-response(response), Message(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Message(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteMessageRequest type {
@@ -302,12 +333,15 @@ DeleteMessageRequest type {
 
 delete-message
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """DELETE /Accounts/{AccountSid}/Messages/{Sid}.json - Delete a message record. The message content is permanently removed."""
 }
 fn
 (request: DeleteMessageRequest): Bool {
-  delete-message(client-from-ctx(), request)
+  delete-message(request, {})
+},
+(request: DeleteMessageRequest, opts: Map): Bool {
+  resolve(opts) |> if-ok((client) { delete-message(client, request) })
 },
 (client: Client, request: DeleteMessageRequest): Bool {
   ::twilio::api/delete-request(client, `${account-url(client)}/Messages/${::uri/encode(request.sid)}.json`)
@@ -338,12 +372,15 @@ ListMediaResponse type {
 
 list-media
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """GET /Accounts/{AccountSid}/Messages/{MessageSid}/Media.json - List media resources attached to a message (e.g. inbound MMS images). Each entry's `sid` and `content_type` feed `get-media-content`."""
 }
 fn
 (request: ListMediaRequest): ListMediaResponse {
-  list-media(client-from-ctx(), request)
+  list-media(request, {})
+},
+(request: ListMediaRequest, opts: Map): ListMediaResponse {
+  resolve(opts) |> if-ok((client) { list-media(client, request) })
 },
 (client: Client, request: ListMediaRequest): ListMediaResponse {
   query ::twilio::api/query-string({
@@ -352,7 +389,11 @@ fn
     PageToken: request.PageToken
   })
   response api-request(client, "GET", `${account-url(client)}/Messages/${::uri/encode(request.message_sid)}/Media.json${query}`, {}, {})
-  if(is-ok-response(response), ListMediaResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListMediaResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetMediaContentRequest type {
@@ -362,7 +403,7 @@ GetMediaContentRequest type {
 
 get-media-content
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 GET /Accounts/{AccountSid}/Messages/{MessageSid}/Media/{Sid} - Download a media file (the URI without `.json`). Returns the raw `Bytes`; the type is the media entry's `content_type`.
 
@@ -381,9 +422,16 @@ image ::messages/get-media-content(::messages/GetMediaContentRequest({
 }
 fn
 (request: GetMediaContentRequest): Bytes {
-  get-media-content(client-from-ctx(), request)
+  get-media-content(request, {})
+},
+(request: GetMediaContentRequest, opts: Map): Bytes {
+  resolve(opts) |> if-ok((client) { get-media-content(client, request) })
 },
 (client: Client, request: GetMediaContentRequest): Bytes {
   response api-request(client, "GET", `${account-url(client)}/Messages/${::uri/encode(request.message_sid)}/Media/${::uri/encode(request.sid)}`, {}, {})
-  if(is-ok-response(response), response.body-bytes, err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body-bytes }
+    => { err(HttpError(response)) }
+  }
 }

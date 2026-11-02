@@ -337,13 +337,12 @@ fn
 (model: Str, message: Str, system: Str): Str {
     chat(model, message, system, null)
 },
-(model: Str, message: Str, system: Str, max-tokens: Int): Str {
-    request {
+(model: Str, message: Str, system: Str?, max-tokens: Int?): Str {
+    request assoc-some({
         model: model,
         input: message,
-        instructions: system,
         max_output_tokens: or(max-tokens, 4096)
-    }
+    }, "instructions", system)
 
     response create(CreateResponseRequest(request))
 

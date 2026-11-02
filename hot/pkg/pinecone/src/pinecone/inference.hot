@@ -19,7 +19,7 @@ fn (model: Str, texts: Vec, parameters: Any): Map {
 
 embed
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     POST /embed - Embed texts with a hosted model, e.g.
     "llama-text-embed-v2" (dense), "multilingual-e5-large" (dense), or
@@ -38,10 +38,13 @@ meta {
 }
 fn
 (model: Str, texts: Vec): Map {
-  ::api/json("POST", ::api/control-url("embed"), build-embed-body(model, texts, null))
+  embed(model, texts, null, {})
 },
 (model: Str, texts: Vec, parameters: Map): Map {
-  ::api/json("POST", ::api/control-url("embed"), build-embed-body(model, texts, parameters))
+  embed(model, texts, parameters, {})
+},
+(model: Str, texts: Vec, parameters: Map?, opts: Map): Map {
+  ::api/json("POST", ::api/control-url("embed"), build-embed-body(model, texts, parameters), opts)
 }
 
 build-rerank-body
@@ -62,7 +65,7 @@ fn (model: Str, query: Str, documents: Vec, options: Map): Map {
 
 rerank
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     POST /rerank - Order `documents` by relevance to `query` with a
     hosted reranker ("bge-reranker-v2-m3", "pinecone-rerank-v0",
@@ -87,5 +90,8 @@ fn
   rerank(model, query, documents, {})
 },
 (model: Str, query: Str, documents: Vec, options: Map): Map {
-  ::api/json("POST", ::api/control-url("rerank"), build-rerank-body(model, query, documents, options))
+  rerank(model, query, documents, options, {})
+},
+(model: Str, query: Str, documents: Vec, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/control-url("rerank"), build-rerank-body(model, query, documents, options), opts)
 }

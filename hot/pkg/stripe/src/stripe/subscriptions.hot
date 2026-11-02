@@ -68,7 +68,7 @@ fn
 (request: CreateSubscriptionRequest): Map {
   create-subscription(request, RequestOptions({}))
 },
-(request: CreateSubscriptionRequest, options: RequestOptions): Map {
+(request: CreateSubscriptionRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/subscriptions", request, options)
 }
 
@@ -81,7 +81,10 @@ fn
   get-subscription(subscription, {})
 },
 (subscription: Str, params: Map): Map {
-  api-call("GET", `/v1/subscriptions/${seg(subscription)}`, params)
+  get-subscription(subscription, params, {})
+},
+(subscription: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/subscriptions/${seg(subscription)}`, params, opts)
 }
 
 UpdateSubscriptionRequest type {
@@ -132,7 +135,7 @@ fn
 (subscription: Str, request: UpdateSubscriptionRequest): Map {
   update-subscription(subscription, request, RequestOptions({}))
 },
-(subscription: Str, request: UpdateSubscriptionRequest, options: RequestOptions): Map {
+(subscription: Str, request: UpdateSubscriptionRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/subscriptions/${seg(subscription)}`, request, options)
 }
 
@@ -165,7 +168,10 @@ fn
   cancel-subscription(subscription, CancelSubscriptionRequest({}))
 },
 (subscription: Str, request: CancelSubscriptionRequest): Map {
-  api-call("DELETE", `/v1/subscriptions/${seg(subscription)}`, request)
+  cancel-subscription(subscription, request, {})
+},
+(subscription: Str, request: CancelSubscriptionRequest, opts: Map): Map {
+  api-call("DELETE", `/v1/subscriptions/${seg(subscription)}`, request, opts)
 }
 
 ResumeSubscriptionRequest type {
@@ -187,7 +193,7 @@ fn
 (subscription: Str, request: ResumeSubscriptionRequest): Map {
   resume-subscription(subscription, request, RequestOptions({}))
 },
-(subscription: Str, request: ResumeSubscriptionRequest, options: RequestOptions): Map {
+(subscription: Str, request: ResumeSubscriptionRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/subscriptions/${seg(subscription)}/resume`, request, options)
 }
 
@@ -209,7 +215,7 @@ fn
 (subscription: Str, request: PauseSubscriptionRequest): Map {
   pause-subscription(subscription, request, RequestOptions({}))
 },
-(subscription: Str, request: PauseSubscriptionRequest, options: RequestOptions): Map {
+(subscription: Str, request: PauseSubscriptionRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/subscriptions/${seg(subscription)}/pause`, request, options)
 }
 
@@ -237,7 +243,10 @@ fn
   list-subscriptions(ListSubscriptionsRequest({}))
 },
 (request: ListSubscriptionsRequest): Map {
-  api-call("GET", "/v1/subscriptions", request)
+  list-subscriptions(request, {})
+},
+(request: ListSubscriptionsRequest, opts: Map): Map {
+  api-call("GET", "/v1/subscriptions", request, opts)
 }
 
 search-subscriptions
@@ -249,7 +258,10 @@ fn
   search-subscriptions(query, {})
 },
 (query: Str, params: Map): Map {
-  api-call("GET", "/v1/subscriptions/search", {...params, query: query})
+  search-subscriptions(query, params, {})
+},
+(query: Str, params: Map, opts: Map): Map {
+  api-call("GET", "/v1/subscriptions/search", {...params, query: query}, opts)
 }
 
 // ============================================================================
@@ -294,7 +306,7 @@ fn
 (request: CreateSubscriptionItemRequest): Map {
   create-subscription-item(request, RequestOptions({}))
 },
-(request: CreateSubscriptionItemRequest, options: RequestOptions): Map {
+(request: CreateSubscriptionItemRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/subscription_items", request, options)
 }
 
@@ -302,8 +314,12 @@ get-subscription-item
 meta {
     doc: """GET /v1/subscription_items/{item} - Retrieve a subscription item by ID."""
 }
-fn (item: Str): Map {
-  api-call("GET", `/v1/subscription_items/${seg(item)}`)
+fn
+(item: Str): Map {
+  get-subscription-item(item, {})
+},
+(item: Str, opts: Map): Map {
+  api-call("GET", `/v1/subscription_items/${seg(item)}`, "", opts)
 }
 
 UpdateSubscriptionItemRequest type {
@@ -328,7 +344,7 @@ fn
 (item: Str, request: UpdateSubscriptionItemRequest): Map {
   update-subscription-item(item, request, RequestOptions({}))
 },
-(item: Str, request: UpdateSubscriptionItemRequest, options: RequestOptions): Map {
+(item: Str, request: UpdateSubscriptionItemRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/subscription_items/${seg(item)}`, request, options)
 }
 
@@ -348,7 +364,10 @@ fn
   delete-subscription-item(item, DeleteSubscriptionItemRequest({}))
 },
 (item: Str, request: DeleteSubscriptionItemRequest): Map {
-  api-call("DELETE", `/v1/subscription_items/${seg(item)}`, request)
+  delete-subscription-item(item, request, {})
+},
+(item: Str, request: DeleteSubscriptionItemRequest, opts: Map): Map {
+  api-call("DELETE", `/v1/subscription_items/${seg(item)}`, request, opts)
 }
 
 ListSubscriptionItemsRequest type {
@@ -367,5 +386,8 @@ fn
   list-subscription-items(subscription, ListSubscriptionItemsRequest({}))
 },
 (subscription: Str, request: ListSubscriptionItemsRequest): Map {
-  api-call("GET", "/v1/subscription_items", {...untype(request), subscription: subscription})
+  list-subscription-items(subscription, request, {})
+},
+(subscription: Str, request: ListSubscriptionItemsRequest, opts: Map): Map {
+  api-call("GET", "/v1/subscription_items", {...untype(request), subscription: subscription}, opts)
 }

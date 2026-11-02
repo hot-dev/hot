@@ -39,7 +39,10 @@ fn
   approve(ApproveRequest({}))
 },
 (request: ApproveRequest): Map {
-  ::api/call("admin.apps.approve", request)
+  approve(request, {})
+},
+(request: ApproveRequest, opts: Map): Map {
+  ::api/call("admin.apps.approve", request, opts)
 }
 
 RestrictRequest type {
@@ -62,7 +65,10 @@ fn
   restrict(RestrictRequest({}))
 },
 (request: RestrictRequest): Map {
-  ::api/call("admin.apps.restrict", request)
+  restrict(request, {})
+},
+(request: RestrictRequest, opts: Map): Map {
+  ::api/call("admin.apps.restrict", request, opts)
 }
 
 ClearResolutionRequest type {
@@ -79,8 +85,12 @@ meta {
     Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: ClearResolutionRequest): Map {
-  ::api/call("admin.apps.clearResolution", request)
+fn
+(request: ClearResolutionRequest): Map {
+  clear-resolution(request, {})
+},
+(request: ClearResolutionRequest, opts: Map): Map {
+  ::api/call("admin.apps.clearResolution", request, opts)
 }
 
 UninstallRequest type {
@@ -97,8 +107,12 @@ meta {
     Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: UninstallRequest): Map {
-  ::api/call("admin.apps.uninstall", request)
+fn
+(request: UninstallRequest): Map {
+  uninstall(request, {})
+},
+(request: UninstallRequest, opts: Map): Map {
+  ::api/call("admin.apps.uninstall", request, opts)
 }
 
 ApprovedListRequest type {
@@ -123,7 +137,10 @@ fn
   approved-list(ApprovedListRequest({}))
 },
 (request: ApprovedListRequest): Map {
-  ::api/call("admin.apps.approved.list", request)
+  approved-list(request, {})
+},
+(request: ApprovedListRequest, opts: Map): Map {
+  ::api/call("admin.apps.approved.list", request, opts)
 }
 
 approved-list-all
@@ -140,7 +157,10 @@ fn
   approved-list-all(request, 1000)
 },
 (request: ApprovedListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.apps.approved.list", request, "approved_apps", max-items)
+  approved-list-all(request, max-items, {})
+},
+(request: ApprovedListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.apps.approved.list", request, "approved_apps", max-items, opts)
 }
 
 RestrictedListRequest type {
@@ -165,7 +185,10 @@ fn
   restricted-list(RestrictedListRequest({}))
 },
 (request: RestrictedListRequest): Map {
-  ::api/call("admin.apps.restricted.list", request)
+  restricted-list(request, {})
+},
+(request: RestrictedListRequest, opts: Map): Map {
+  ::api/call("admin.apps.restricted.list", request, opts)
 }
 
 restricted-list-all
@@ -182,7 +205,10 @@ fn
   restricted-list-all(request, 1000)
 },
 (request: RestrictedListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.apps.restricted.list", request, "restricted_apps", max-items)
+  restricted-list-all(request, max-items, {})
+},
+(request: RestrictedListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.apps.restricted.list", request, "restricted_apps", max-items, opts)
 }
 
 RequestsListRequest type {
@@ -207,7 +233,10 @@ fn
   requests-list(RequestsListRequest({}))
 },
 (request: RequestsListRequest): Map {
-  ::api/call("admin.apps.requests.list", request)
+  requests-list(request, {})
+},
+(request: RequestsListRequest, opts: Map): Map {
+  ::api/call("admin.apps.requests.list", request, opts)
 }
 
 requests-list-all
@@ -224,7 +253,10 @@ fn
   requests-list-all(request, 1000)
 },
 (request: RequestsListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.apps.requests.list", request, "app_requests", max-items)
+  requests-list-all(request, max-items, {})
+},
+(request: RequestsListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.apps.requests.list", request, "app_requests", max-items, opts)
 }
 
 RequestsCancelRequest type {
@@ -241,8 +273,12 @@ meta {
     Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: RequestsCancelRequest): Map {
-  ::api/call("admin.apps.requests.cancel", request)
+fn
+(request: RequestsCancelRequest): Map {
+  requests-cancel(request, {})
+},
+(request: RequestsCancelRequest, opts: Map): Map {
+  ::api/call("admin.apps.requests.cancel", request, opts)
 }
 
 ActivitiesListRequest type {
@@ -275,7 +311,10 @@ fn
   activities-list(ActivitiesListRequest({}))
 },
 (request: ActivitiesListRequest): Map {
-  ::api/call("admin.apps.activities.list", request)
+  activities-list(request, {})
+},
+(request: ActivitiesListRequest, opts: Map): Map {
+  ::api/call("admin.apps.activities.list", request, opts)
 }
 
 activities-list-all
@@ -292,7 +331,10 @@ fn
   activities-list-all(request, 1000)
 },
 (request: ActivitiesListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.apps.activities.list", request, "activities", max-items)
+  activities-list-all(request, max-items, {})
+},
+(request: ActivitiesListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.apps.activities.list", request, "activities", max-items, opts)
 }
 
 ConfigLookupRequest type {
@@ -307,8 +349,12 @@ meta {
     Scope: `admin.apps:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: ConfigLookupRequest): Map {
-  ::api/call("admin.apps.config.lookup", request)
+fn
+(request: ConfigLookupRequest): Map {
+  config-lookup(request, {})
+},
+(request: ConfigLookupRequest, opts: Map): Map {
+  ::api/call("admin.apps.config.lookup", request, opts)
 }
 
 ConfigSetRequest type {
@@ -325,6 +371,10 @@ meta {
     Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: ConfigSetRequest): Map {
-  ::api/call("admin.apps.config.set", request)
+fn
+(request: ConfigSetRequest): Map {
+  config-set(request, {})
+},
+(request: ConfigSetRequest, opts: Map): Map {
+  ::api/call("admin.apps.config.set", request, opts)
 }

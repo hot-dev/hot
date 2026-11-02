@@ -16,6 +16,9 @@ meta {
     - `sentry.region` — optional: `us` or `de`, to call `https://{region}.sentry.io`
     - `sentry.webhook.secret` — an integration's client secret, for `::sentry::webhooks`
 
+    The token, organization, and host can also come per call, in the
+    trailing `opts` Map of any API-calling function (see `::sentry::api`).
+
     **Quick start**
 
     ```hot

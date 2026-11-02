@@ -23,6 +23,8 @@ hot.project.my-app.deps {
 
 A missing token or account id is an Err carrying `ConfigError` with a message that names the variable. Account-scoped calls never send a request to `/accounts//...`.
 
+All of these can also be passed per call; see [Per-call credentials](#per-call-credentials).
+
 ## Quick start
 
 ```hot
@@ -132,6 +134,29 @@ fn (request) {
 ```
 
 `siteverify(token, opts)` returns Cloudflare's full answer (`success`, `error-codes`, `hostname`, `action`, `cdata`). Tokens are single-use and expire after 300 seconds. Cloudflare publishes [test sitekeys and secrets](https://developers.cloudflare.com/turnstile/troubleshooting/testing/) that always pass or always fail.
+
+## Per-call credentials
+
+Every function that calls Cloudflare takes an optional trailing `opts` Map, so one run can act for many accounts and parallel flows don't share credentials. Credentials in `opts` are masked in call records, and nothing from `opts` is written to ctx.
+
+| Key | Effect |
+|---|---|
+| `token` | An API token for this call, instead of `cloudflare.token` |
+| `api-key` + `email` | A Global API Key pair for this call. Pass both; a `token` in the same `opts` wins |
+| `account-id` | The account for account-scoped calls, instead of `cloudflare.account.id` |
+| `secret-key` | Turnstile only: the widget's secret key, instead of `cloudflare.turnstile.secret` |
+
+`opts` always comes last. Where a function already takes `params` or `options`, pass `{}` for those.
+
+```hot
+tenant {token: "tenant-b-token", account-id: "acc123"}
+zone ::cloudflare::zones/find-zone("example.com", tenant)
+::cloudflare::dns/create-dns-record(zone.id, {type: "A", name: "api", content: "203.0.113.7"}, tenant)
+::cloudflare::kv/write("ns-id", "flag:checkout-v2", "on", {}, tenant)
+ok ::cloudflare::turnstile/is-valid("widget-token", {secret-key: "0x4AAA...", remoteip: "203.0.113.9"})
+```
+
+One of these keys present but blank or null is an error naming the key, never a fallback to context. `::cloudflare::api/resolve(opts)` is the one place this is decided, and the Turnstile functions apply the same rules to `secret-key`.
 
 ## Errors
 

@@ -1,10 +1,20 @@
 ::slack::admin::api ns
 meta {
-    ctx: {"slack.admin.token": {required: true}},
+    ctx: {"slack.admin.token": {required: false}},
     doc: """
     Shared client for the Slack Admin API: form-encoded requests with the
     admin user token, `ok: false` and rate-limit handling, and cursor
     pagination.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `slack.admin.token` context variable. Nothing from
+    `opts` is written to ctx, so one run can act for many organizations and
+    parallel flows don't share credentials. A `token` from `opts` is masked
+    in call records. A `token` present but blank or null is an error, never
+    a fallback to `slack.admin.token`.
+
+    - `token`: the org-level admin user token for this call
     """
 }
 
@@ -58,7 +68,7 @@ fn (method: Str, response: HttpResponse): SlackError {
   data if(is-map(body), body, {})
   headers or(response.headers, {})
   limited eq(response.status, 429)
-  retry get(headers, "retry-after")
+  retry Str(or(get(headers, "retry-after"), ""))
   code cond {
     limited => { "ratelimited" }
     is-str(get(data, "error")) => { get(data, "error") }
@@ -73,7 +83,7 @@ fn (method: Str, response: HttpResponse): SlackError {
     warning: get(data, "warning"),
     needed: get(data, "needed"),
     provided: get(data, "provided"),
-    retry_after: if(and(limited, not(is-empty(or(retry, "")))), Int(retry), null),
+    retry_after: if(and(limited, ::hot::regex/is-match(retry, "^[0-9]+$")), Int(retry), null),
     body: body
   })
 }
@@ -141,36 +151,84 @@ fn (request: Any): Str {
   ::uri/encode-query(map-vals(filter-vals(untype(request), is-some), form-value))
 }
 
-admin-token fn (token: Any): Str {
-  value or(token, ::ctx/get("slack.admin.token"))
-  if(is-empty(or(value, "")),
-    fail("slack.admin.token is not set. Add an org-level admin user token (xoxp-...) in Context Variables."),
-    value)
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+resolve-from
+meta {
+    doc: """The one resolver, pure: `{token}` for a call from `opts` first, then `ctx-values` (a Map of context variables). An Err when no token is set, or when `token` is in `opts` but blank or null (that never falls back to context). Exposed for testing; `resolve` feeds it the context."""
+}
+fn (opts: Map, ctx-values: Map): Map {
+  opts-token non-blank(get(opts, "token"))
+  token or(opts-token, non-blank(get(ctx-values, "slack.admin.token")))
+  cond {
+    and(in("token", keys(opts)), is-null(opts-token)) => {
+      err("slack-admin: token is in the call's opts but is blank or null. Pass a value, or leave token out to use slack.admin.token.")
+    }
+
+    is-null(token) => { err("slack-admin: slack.admin.token is not set. Add an org-level admin user token (xoxp-...) in Context Variables, or pass {token: ...} in the call's opts.") }
+    => { {token: token} }
+  }
+}
+
+resolve
+meta {
+    ctx: {"slack.admin.token": {required: false}},
+    doc: """
+    The admin token for one call (see `resolve-from`). A `token` from
+    `opts` is masked in call records with `::hot::ctx/mark-secret`, and
+    `opts` values are never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::slack::admin::api/resolve({token: "xoxp-tenant-b"}).token
+    ```
+    """
+}
+fn (opts: Map): Map {
+  resolved resolve-from(opts, {"slack.admin.token": ::ctx/get("slack.admin.token")})
+  cond {
+    is-err(resolved) => { resolved }
+    in("token", keys(opts)) => { {token: ::ctx/mark-secret(resolved.token)} }
+    => { resolved }
+  }
 }
 
 build-request
 meta {
     doc: """
     Build (without sending) the POST to `https://slack.com/api/<method>`
-    with a form body and `Authorization: Bearer <token>`. The 3-arity form
-    takes an explicit token instead of `slack.admin.token`.
+    with a form body and `Authorization: Bearer <token>`. The 3rd argument
+    is per-call `opts` (see `resolve`), or an explicit token instead of
+    `slack.admin.token`. Returns an Err when the call has no usable token.
     """
 }
 fn
 (method: Str, request: Any): HttpRequest {
-  build-request(method, request, null)
+  build-request(method, request, {})
 },
-(method: Str, request: Any, token: Any): HttpRequest {
-  HttpRequest({
-    method: "POST",
-    url: `${::slack::core/BASE_URL}/${method}`,
-    headers: {
-      Authorization: `Bearer ${admin-token(token)}`,
-      Content-Type: "application/x-www-form-urlencoded",
-      Accept: "application/json"
-    },
-    body: form-body(request)
-  })
+(method: Str, request: Any, token: Str?): HttpRequest {
+  build-request(method, request, if(is-null(token), {}, {token: token}))
+},
+(method: Str, request: Any, opts: Map): HttpRequest {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      HttpRequest({
+        method: "POST",
+        url: `${::slack::core/BASE_URL}/${method}`,
+        headers: {
+          Authorization: `Bearer ${resolved.token}`,
+          Content-Type: "application/x-www-form-urlencoded",
+          Accept: "application/json"
+        },
+        body: form-body(request)
+      })
+    }
+  }
 }
 
 call
@@ -178,22 +236,37 @@ meta {
     doc: """
     Call any Slack admin method with a request record or Map and return
     the response body, or an `Err(SlackError)`. Use it for methods this
-    package doesn't wrap.
+    package doesn't wrap. The 3rd argument is per-call `opts` (see
+    `resolve`) or an explicit token.
 
     **Example**
 
     ```hot
     teams ::slack::admin::api/call("admin.teams.list", {limit: 100})
     teams.teams
+    tenant ::slack::admin::api/call("admin.teams.list", {limit: 100}, {token: "xoxp-tenant-b"})
     ```
     """
 }
 fn
 (method: Str, request: Any): Map {
-  call(method, request, null)
+  call(method, request, {})
 },
-(method: Str, request: Any, token: Any): Map {
-  parse-response(method, ::hot::http/request(build-request(method, request, token)))
+(method: Str, request: Any, token: Str?): Map {
+  call(method, request, if(is-null(token), {}, {token: token}))
+},
+(method: Str, request: Any, opts: Map): Map {
+  http build-request(method, request, opts)
+  cond {
+    is-err(http) => { http }
+    => {
+      response ::hot::http/request(http)
+      cond {
+        is-err(response) => { response }
+        => { parse-response(method, response) }
+      }
+    }
+  }
 }
 
 // ============================================================================
@@ -213,18 +286,23 @@ collect-pages
 meta {
     doc: """
     The paging loop behind `paginate`, with the page fetcher passed in:
-    `fetch` takes the params Map and returns a response body. Exposed for
-    testing.
+    `fetch` takes the params Map and returns a response body. A failed page
+    comes back as its Err. Exposed for testing.
     """
 }
 fn (fetch: Fn, params: Map, items-key: Str, max-items: Int, acc: Vec): Vec {
   page fetch(params)
-  all concat(acc, or(get(page, items-key), []))
-  cursor next-cursor(page)
   cond {
-    gte(length(all), max-items) => { slice(all, 0, max-items) }
-    is-null(cursor) => { all }
-    => { collect-pages(fetch, assoc(params, "cursor", cursor), items-key, max-items, all) }
+    is-err(page) => { page }
+    => {
+      all concat(acc, or(get(page, items-key), []))
+      cursor next-cursor(page)
+      cond {
+        gte(length(all), max-items) => { slice(all, 0, max-items) }
+        is-null(cursor) => { all }
+        => { collect-pages(fetch, assoc(params, "cursor", cursor), items-key, max-items, all) }
+      }
+    }
   }
 }
 
@@ -242,6 +320,10 @@ meta {
     ```
     """
 }
-fn (method: Str, request: Any, items-key: Str, max-items: Int): Vec {
-  collect-pages((params) { call(method, params) }, filter-vals(untype(request), is-some), items-key, max-items, [])
+fn
+(method: Str, request: Any, items-key: Str, max-items: Int): Vec {
+  paginate(method, request, items-key, max-items, {})
+},
+(method: Str, request: Any, items-key: Str, max-items: Int, opts: Map): Vec {
+  collect-pages((params) { call(method, params, opts) }, filter-vals(untype(request), is-some), items-key, max-items, [])
 }

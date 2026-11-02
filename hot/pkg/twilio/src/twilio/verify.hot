@@ -4,7 +4,7 @@
 ::uri ::hot::uri
 
 api-request ::twilio::api/request
-client-from-ctx ::twilio::api/client-from-ctx
+resolve ::twilio::api/resolve
 Client ::twilio::api/Client
 HttpError ::twilio::api/HttpError
 is-ok-response ::hot::http/is-ok-response
@@ -106,7 +106,7 @@ fn (request: StartVerificationRequest): Map {
 
 start-verification
 meta {
-    ctx: {"twilio.account.sid": {required: true}, "twilio.verify.service.sid": {required: false, secret: false}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}, "twilio.verify.service.sid": {required: false, secret: false}},
     doc: """
 POST /v2/Services/{ServiceSid}/Verifications - Send a one-time code. Returns the Verification with `status: "pending"`. Calling it again for the same `To` within the code's lifetime resends the same code.
 
@@ -125,12 +125,19 @@ v.status  // => "pending"
 }
 fn
 (request: StartVerificationRequest): Verification {
-  start-verification(client-from-ctx(), request)
+  start-verification(request, {})
+},
+(request: StartVerificationRequest, opts: Map): Verification {
+  resolve(opts) |> if-ok((client) { start-verification(client, request) })
 },
 (client: Client, request: StartVerificationRequest): Verification {
   url `${service-url(service-sid(request.service_sid))}/Verifications`
   response api-request(client, "POST", url, {}, start-verification-body(request))
-  if(is-ok-response(response), Verification(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Verification(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CheckVerificationRequest
@@ -172,7 +179,7 @@ fn (request: CheckVerificationRequest): Map {
 
 check-verification
 meta {
-    ctx: {"twilio.account.sid": {required: true}, "twilio.verify.service.sid": {required: false, secret: false}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}, "twilio.verify.service.sid": {required: false, secret: false}},
     doc: """
 POST /v2/Services/{ServiceSid}/VerificationCheck - Check a code the user entered. `status` is `"approved"` (and `valid` true) when it matches; a wrong code returns `status: "pending"`. Once a verification is approved, canceled, expired (10 minutes), or out of attempts, Twilio answers 404, which comes back as `err(HttpError)` with status 404.
 
@@ -191,12 +198,19 @@ signed-in eq(check.status, "approved")
 }
 fn
 (request: CheckVerificationRequest): VerificationCheck {
-  check-verification(client-from-ctx(), request)
+  check-verification(request, {})
+},
+(request: CheckVerificationRequest, opts: Map): VerificationCheck {
+  resolve(opts) |> if-ok((client) { check-verification(client, request) })
 },
 (client: Client, request: CheckVerificationRequest): VerificationCheck {
   url `${service-url(service-sid(request.service_sid))}/VerificationCheck`
   response api-request(client, "POST", url, {}, check-verification-body(request))
-  if(is-ok-response(response), VerificationCheck(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { VerificationCheck(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetVerificationRequest type {
@@ -206,17 +220,24 @@ GetVerificationRequest type {
 
 get-verification
 meta {
-    ctx: {"twilio.account.sid": {required: true}, "twilio.verify.service.sid": {required: false, secret: false}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}, "twilio.verify.service.sid": {required: false, secret: false}},
     doc: """GET /v2/Services/{ServiceSid}/Verifications/{Sid} - Fetch a verification (`VE...`) to see its status."""
 }
 fn
 (request: GetVerificationRequest): Verification {
-  get-verification(client-from-ctx(), request)
+  get-verification(request, {})
+},
+(request: GetVerificationRequest, opts: Map): Verification {
+  resolve(opts) |> if-ok((client) { get-verification(client, request) })
 },
 (client: Client, request: GetVerificationRequest): Verification {
   url `${service-url(service-sid(request.service_sid))}/Verifications/${::uri/encode(request.sid)}`
   response api-request(client, "GET", url, {}, {})
-  if(is-ok-response(response), Verification(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Verification(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 UpdateVerificationRequest
@@ -231,7 +252,7 @@ type {
 
 update-verification
 meta {
-    ctx: {"twilio.account.sid": {required: true}, "twilio.verify.service.sid": {required: false, secret: false}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}, "twilio.verify.service.sid": {required: false, secret: false}},
     doc: """
 POST /v2/Services/{ServiceSid}/Verifications/{Sid} - Cancel or approve a pending verification.
 
@@ -246,12 +267,19 @@ POST /v2/Services/{ServiceSid}/Verifications/{Sid} - Cancel or approve a pending
 }
 fn
 (request: UpdateVerificationRequest): Verification {
-  update-verification(client-from-ctx(), request)
+  update-verification(request, {})
+},
+(request: UpdateVerificationRequest, opts: Map): Verification {
+  resolve(opts) |> if-ok((client) { update-verification(client, request) })
 },
 (client: Client, request: UpdateVerificationRequest): Verification {
   url `${service-url(service-sid(request.service_sid))}/Verifications/${::uri/encode(request.sid)}`
   response api-request(client, "POST", url, {}, {Status: request.Status})
-  if(is-ok-response(response), Verification(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Verification(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -296,7 +324,7 @@ Service type {
 
 create-service
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 POST /v2/Services - Create a Verify Service. Its `sid` (`VA...`) goes in `twilio.verify.service.sid`.
 
@@ -312,25 +340,39 @@ service.sid  // => "VA..."
 }
 fn
 (request: CreateServiceRequest): Service {
-  create-service(client-from-ctx(), request)
+  create-service(request, {})
+},
+(request: CreateServiceRequest, opts: Map): Service {
+  resolve(opts) |> if-ok((client) { create-service(client, request) })
 },
 (client: Client, request: CreateServiceRequest): Service {
   response api-request(client, "POST", `${::twilio::core/VERIFY_URL}/Services`, {}, filter-vals(untype(request), is-some))
-  if(is-ok-response(response), Service(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Service(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 get-service
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """GET /v2/Services/{Sid} - Fetch a Verify Service."""
 }
 fn
 (sid: Str): Service {
-  get-service(client-from-ctx(), sid)
+  get-service(sid, {})
+},
+(sid: Str, opts: Map): Service {
+  resolve(opts) |> if-ok((client) { get-service(client, sid) })
 },
 (client: Client, sid: Str): Service {
   response api-request(client, "GET", service-url(sid), {}, {})
-  if(is-ok-response(response), Service(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Service(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListServicesResponse type {
@@ -340,26 +382,36 @@ ListServicesResponse type {
 
 list-services
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """GET /v2/Services - List Verify Services (one page; `meta.next_page_url` feeds `::twilio::api/next-page`)."""
 }
 fn
 (): ListServicesResponse {
-  list-services(client-from-ctx())
+  list-services({})
+},
+(opts: Map): ListServicesResponse {
+  resolve(opts) |> if-ok((client) { list-services(client) })
 },
 (client: Client): ListServicesResponse {
   response api-request(client, "GET", `${::twilio::core/VERIFY_URL}/Services?PageSize=50`, {}, {})
-  if(is-ok-response(response), ListServicesResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListServicesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 delete-service
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """DELETE /v2/Services/{Sid} - Delete a Verify Service."""
 }
 fn
 (sid: Str): Bool {
-  delete-service(client-from-ctx(), sid)
+  delete-service(sid, {})
+},
+(sid: Str, opts: Map): Bool {
+  resolve(opts) |> if-ok((client) { delete-service(client, sid) })
 },
 (client: Client, sid: Str): Bool {
   ::twilio::api/delete-request(client, service-url(sid))

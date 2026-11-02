@@ -37,7 +37,10 @@ fn
   list-payouts(ListPayoutsRequest({}))
 },
 (request: ListPayoutsRequest): Map {
-  api-call("GET", "/v1/payouts", request)
+  list-payouts(request, {})
+},
+(request: ListPayoutsRequest, opts: Map): Map {
+  api-call("GET", "/v1/payouts", request, opts)
 }
 
 get-payout
@@ -49,5 +52,8 @@ fn
   get-payout(payout, {})
 },
 (payout: Str, params: Map): Map {
-  api-call("GET", `/v1/payouts/${seg(payout)}`, params)
+  get-payout(payout, params, {})
+},
+(payout: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/payouts/${seg(payout)}`, params, opts)
 }

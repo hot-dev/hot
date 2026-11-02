@@ -99,7 +99,7 @@ fn
     => {
       signed `${timestamp}${::hot::http/raw-body(request)}`
       cond {
-        not(::hmac/hmac-verify-base64(secret, signed, signature, "sha256")) => { false }
+        not(::hmac/hmac-verify-base64(::ctx/mark-secret(secret), signed, signature, "sha256")) => { false }
         // The signature is what makes the timestamp trustworthy, so the
         // replay check runs only after verification succeeds.
         lte(max-age-seconds, 0) => { true }

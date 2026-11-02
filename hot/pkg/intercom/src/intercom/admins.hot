@@ -1,6 +1,6 @@
 ::intercom::admins ns
 meta {
-    ctx: {"intercom.token": {required: true}},
+    ctx: {"intercom.token": {required: false}},
     doc: """Admins (teammates): find the id to set as `intercom.admin.id`, and the ids to assign conversations to."""
 }
 
@@ -21,32 +21,48 @@ meta {
     ```
     """
 }
-fn (): Any {
-  ::api/request("GET", "/me", "")
+fn
+(): Any {
+  me({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/me", "", opts)
 }
 
 list-admins
 meta {
     doc: """GET /admins - Every admin in the workspace: `{type: "admin.list", admins: [...]}`."""
 }
-fn (): Any {
-  ::api/request("GET", "/admins", "")
+fn
+(): Any {
+  list-admins({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/admins", "", opts)
 }
 
 get-admin
 meta {
     doc: """GET /admins/{id} - One admin."""
 }
-fn (id: Any): Any {
-  ::api/request("GET", `/admins/${::api/path-segment(id)}`, "")
+fn
+(id: Any): Any {
+  get-admin(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/admins/${::api/path-segment(id)}`, "", opts)
 }
 
 find-admin-by-email
 meta {
     doc: """The admin whose `email` matches (case-insensitive), from `list-admins`, or null."""
 }
-fn (email: Str): Any {
-  out list-admins()
+fn
+(email: Str): Any {
+  find-admin-by-email(email, {})
+},
+(email: Str, opts: Map): Any {
+  out list-admins(opts)
   cond {
     is-err(out) => { out }
     => { find-first(or(get(out, "admins"), []), (a) { eq(lowercase(or(a.email, "")), lowercase(email)) }) }
@@ -57,6 +73,10 @@ list-teams
 meta {
     doc: """GET /teams - The workspace's teams (assignment targets for `assign-conversation` with `type: "team"`)."""
 }
-fn (): Any {
-  ::api/request("GET", "/teams", "")
+fn
+(): Any {
+  list-teams({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/teams", "", opts)
 }

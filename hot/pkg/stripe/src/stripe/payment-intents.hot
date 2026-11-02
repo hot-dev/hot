@@ -68,7 +68,7 @@ fn
 (request: CreatePaymentIntentRequest): Map {
   create-payment-intent(request, RequestOptions({}))
 },
-(request: CreatePaymentIntentRequest, options: RequestOptions): Map {
+(request: CreatePaymentIntentRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/payment_intents", request, options)
 }
 
@@ -81,7 +81,10 @@ fn
   get-payment-intent(payment-intent, {})
 },
 (payment-intent: Str, params: Map): Map {
-  api-call("GET", `/v1/payment_intents/${seg(payment-intent)}`, params)
+  get-payment-intent(payment-intent, params, {})
+},
+(payment-intent: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/payment_intents/${seg(payment-intent)}`, params, opts)
 }
 
 UpdatePaymentIntentRequest type {
@@ -112,7 +115,7 @@ fn
 (payment-intent: Str, request: UpdatePaymentIntentRequest): Map {
   update-payment-intent(payment-intent, request, RequestOptions({}))
 },
-(payment-intent: Str, request: UpdatePaymentIntentRequest, options: RequestOptions): Map {
+(payment-intent: Str, request: UpdatePaymentIntentRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/payment_intents/${seg(payment-intent)}`, request, options)
 }
 
@@ -154,7 +157,7 @@ fn
 (payment-intent: Str, request: ConfirmPaymentIntentRequest): Map {
   confirm-payment-intent(payment-intent, request, RequestOptions({}))
 },
-(payment-intent: Str, request: ConfirmPaymentIntentRequest, options: RequestOptions): Map {
+(payment-intent: Str, request: ConfirmPaymentIntentRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/payment_intents/${seg(payment-intent)}/confirm`, request, options)
 }
 
@@ -179,7 +182,7 @@ fn
 (payment-intent: Str, request: CapturePaymentIntentRequest): Map {
   capture-payment-intent(payment-intent, request, RequestOptions({}))
 },
-(payment-intent: Str, request: CapturePaymentIntentRequest, options: RequestOptions): Map {
+(payment-intent: Str, request: CapturePaymentIntentRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/payment_intents/${seg(payment-intent)}/capture`, request, options)
 }
 
@@ -189,12 +192,15 @@ meta {
 }
 fn
 (payment-intent: Str): Map {
-  api-call("POST", `/v1/payment_intents/${seg(payment-intent)}/cancel`, {})
+  cancel-payment-intent(payment-intent, {})
+},
+(payment-intent: Str, options: RequestOptions | Map): Map {
+  api-call("POST", `/v1/payment_intents/${seg(payment-intent)}/cancel`, {}, options)
 },
 (payment-intent: Str, cancellation-reason: Str): Map {
   cancel-payment-intent(payment-intent, cancellation-reason, RequestOptions({}))
 },
-(payment-intent: Str, cancellation-reason: Str, options: RequestOptions): Map {
+(payment-intent: Str, cancellation-reason: Str, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/payment_intents/${seg(payment-intent)}/cancel`, {cancellation_reason: cancellation-reason}, options)
 }
 
@@ -216,7 +222,10 @@ fn
   list-payment-intents(ListPaymentIntentsRequest({}))
 },
 (request: ListPaymentIntentsRequest): Map {
-  api-call("GET", "/v1/payment_intents", request)
+  list-payment-intents(request, {})
+},
+(request: ListPaymentIntentsRequest, opts: Map): Map {
+  api-call("GET", "/v1/payment_intents", request, opts)
 }
 
 search-payment-intents
@@ -228,5 +237,8 @@ fn
   search-payment-intents(query, {})
 },
 (query: Str, params: Map): Map {
-  api-call("GET", "/v1/payment_intents/search", {...params, query: query})
+  search-payment-intents(query, params, {})
+},
+(query: Str, params: Map, opts: Map): Map {
+  api-call("GET", "/v1/payment_intents/search", {...params, query: query}, opts)
 }

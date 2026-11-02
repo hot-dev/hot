@@ -5,7 +5,7 @@ meta {
     Sentry's query syntax, read, update one or many, list events, read
     the latest event's stack trace, and comment.
     """,
-    ctx: {"sentry.token": {required: true}, "sentry.org": {required: true}}
+    ctx: {"sentry.token": {required: false}, "sentry.org": {required: false, secret: false}}
 }
 
 ::api ::sentry::api
@@ -52,10 +52,16 @@ fn
   list-issues({})
 },
 (params: Map): Page {
-  ::api/org-page("/issues/", params)
+  list-issues(params, {})
 },
 (project: Str, query: Str): Page {
   list-issues({project: project, query: query})
+},
+(params: Map, opts: Map): Page {
+  ::api/org-page("/issues/", params, opts)
+},
+(project: Str, query: Str, opts: Map): Page {
+  list-issues({project: project, query: query}, opts)
 }
 
 list-all-issues
@@ -67,15 +73,25 @@ fn
   list-all-issues(params, ::api/DEFAULT_MAX_ITEMS)
 },
 (params: Map, max: Int): Vec {
-  ::api/collect-pages(list-issues, {limit: 100, ...params}, max)
+  list-all-issues(params, max, {})
+},
+(params: Map, opts: Map): Vec {
+  list-all-issues(params, ::api/DEFAULT_MAX_ITEMS, opts)
+},
+(params: Map, max: Int, opts: Map): Vec {
+  ::api/collect-pages((p) { list-issues(p, opts) }, {limit: 100, ...params}, max)
 }
 
 get-issue
 meta {
     doc: """GET /organizations/{org}/issues/{id}/ - One issue: title, culprit, status, level, counts, assignee, first/last seen."""
 }
-fn (issue-id: Any): Map {
-  ::api/org-json("GET", issue-suffix(issue-id))
+fn
+(issue-id: Any): Map {
+  get-issue(issue-id, {})
+},
+(issue-id: Any, opts: Map): Map {
+  ::api/org-json("GET", issue-suffix(issue-id), "", opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -93,8 +109,12 @@ meta {
     `isBookmarked`, `isSubscribed`, `isPublic`. Null fields are dropped.
     """
 }
-fn (issue-id: Any, changes: Map): Map {
-  ::api/org-json("PUT", issue-suffix(issue-id), filter-vals(untype(changes), is-some))
+fn
+(issue-id: Any, changes: Map): Map {
+  update-issue(issue-id, changes, {})
+},
+(issue-id: Any, changes: Map, opts: Map): Map {
+  ::api/org-json("PUT", issue-suffix(issue-id), filter-vals(untype(changes), is-some), opts)
 }
 
 resolve-issue
@@ -103,10 +123,16 @@ meta {
 }
 fn
 (issue-id: Any): Map {
-  update-issue(issue-id, {status: "resolved"})
+  resolve-issue(issue-id, null, {})
 },
 (issue-id: Any, release: Str): Map {
-  update-issue(issue-id, {status: "resolved", statusDetails: {inRelease: release}})
+  resolve-issue(issue-id, release, {})
+},
+(issue-id: Any, opts: Map): Map {
+  resolve-issue(issue-id, null, opts)
+},
+(issue-id: Any, release: Str?, opts: Map): Map {
+  update-issue(issue-id, {status: "resolved", statusDetails: if(is-some(release), {inRelease: release}, null)}, opts)
 }
 
 ignore-issue
@@ -115,26 +141,40 @@ meta {
 }
 fn
 (issue-id: Any): Map {
-  update-issue(issue-id, {status: "ignored", substatus: "archived_forever"})
+  ignore-issue(issue-id, {})
 },
 (issue-id: Any, minutes: Int): Map {
-  update-issue(issue-id, {status: "ignored", substatus: "archived_until_condition_met", statusDetails: {ignoreDuration: minutes}})
+  ignore-issue(issue-id, minutes, {})
+},
+(issue-id: Any, opts: Map): Map {
+  update-issue(issue-id, {status: "ignored", substatus: "archived_forever"}, opts)
+},
+(issue-id: Any, minutes: Int, opts: Map): Map {
+  update-issue(issue-id, {status: "ignored", substatus: "archived_until_condition_met", statusDetails: {ignoreDuration: minutes}}, opts)
 }
 
 unresolve-issue
 meta {
     doc: """Reopen an issue."""
 }
-fn (issue-id: Any): Map {
-  update-issue(issue-id, {status: "unresolved"})
+fn
+(issue-id: Any): Map {
+  unresolve-issue(issue-id, {})
+},
+(issue-id: Any, opts: Map): Map {
+  update-issue(issue-id, {status: "unresolved"}, opts)
 }
 
 assign-issue
 meta {
     doc: """Assign an issue: `"user:<id>"`, `"team:<id>"`, a username, or an email. Pass `""` to unassign."""
 }
-fn (issue-id: Any, assignee: Str): Map {
-  update-issue(issue-id, {assignedTo: assignee})
+fn
+(issue-id: Any, assignee: Str): Map {
+  assign-issue(issue-id, assignee, {})
+},
+(issue-id: Any, assignee: Str, opts: Map): Map {
+  update-issue(issue-id, {assignedTo: assignee}, opts)
 }
 
 bulk-query
@@ -166,10 +206,13 @@ fn
   bulk-update-issues(issue-ids, changes, {})
 },
 (issue-ids: Vec, changes: Map, params: Map): Any {
+  bulk-update-issues(issue-ids, changes, params, {})
+},
+(issue-ids: Vec, changes: Map, params: Map, opts: Map): Any {
   cond {
     is-empty(issue-ids) => { err(ConfigError({message: "bulk-update-issues needs at least one issue id; refusing to update every matching issue."})) }
     gt(length(issue-ids), MAX_BULK_IDS) => { err(ConfigError({message: `bulk-update-issues accepts at most ${MAX_BULK_IDS} ids per call.`})) }
-    => { ::api/org-json("PUT", `/issues/${bulk-query(issue-ids, params)}`, filter-vals(untype(changes), is-some)) }
+    => { ::api/org-json("PUT", `/issues/${bulk-query(issue-ids, params)}`, filter-vals(untype(changes), is-some), opts) }
   }
 }
 
@@ -191,7 +234,10 @@ fn
   list-issue-events(issue-id, {})
 },
 (issue-id: Any, params: Map): Page {
-  ::api/org-page(`${issue-suffix(issue-id)}events/`, params)
+  list-issue-events(issue-id, params, {})
+},
+(issue-id: Any, params: Map, opts: Map): Page {
+  ::api/org-page(`${issue-suffix(issue-id)}events/`, params, opts)
 }
 
 get-event
@@ -203,7 +249,10 @@ fn
   get-event(issue-id, event-id, {})
 },
 (issue-id: Any, event-id: Str, params: Map): Map {
-  ::api/org-json("GET", `${issue-suffix(issue-id)}events/${::api/seg(event-id)}/${::api/query(params)}`)
+  get-event(issue-id, event-id, params, {})
+},
+(issue-id: Any, event-id: Str, params: Map, opts: Map): Map {
+  ::api/org-json("GET", `${issue-suffix(issue-id)}events/${::api/seg(event-id)}/${::api/query(params)}`, "", opts)
 }
 
 get-latest-event
@@ -212,10 +261,16 @@ meta {
 }
 fn
 (issue-id: Any): Map {
-  get-event(issue-id, "latest")
+  get-latest-event(issue-id, null, {})
 },
 (issue-id: Any, environment: Str): Map {
-  get-event(issue-id, "latest", {environment: environment})
+  get-latest-event(issue-id, environment, {})
+},
+(issue-id: Any, opts: Map): Map {
+  get-latest-event(issue-id, null, opts)
+},
+(issue-id: Any, environment: Str?, opts: Map): Map {
+  get-event(issue-id, "latest", {environment: environment}, opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -226,8 +281,12 @@ list-comments
 meta {
     doc: """GET /organizations/{org}/issues/{id}/comments/ - An issue's comments (notes), newest first: `[{id, data: {text}, user, dateCreated}]`."""
 }
-fn (issue-id: Any): Vec {
-  ::api/org-json("GET", `${issue-suffix(issue-id)}comments/`)
+fn
+(issue-id: Any): Vec {
+  list-comments(issue-id, {})
+},
+(issue-id: Any, opts: Map): Vec {
+  ::api/org-json("GET", `${issue-suffix(issue-id)}comments/`, "", opts)
 }
 
 add-comment
@@ -238,6 +297,10 @@ meta {
     (organization auth tokens are rejected with 403).
     """
 }
-fn (issue-id: Any, text: Str): Map {
-  ::api/org-json("POST", `${issue-suffix(issue-id)}comments/`, {text: text})
+fn
+(issue-id: Any, text: Str): Map {
+  add-comment(issue-id, text, {})
+},
+(issue-id: Any, text: Str, opts: Map): Map {
+  ::api/org-json("POST", `${issue-suffix(issue-id)}comments/`, {text: text}, opts)
 }

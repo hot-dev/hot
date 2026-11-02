@@ -10,6 +10,14 @@ Add this to the `deps` in your `hot.hot` file:
 "hot.dev/hubspot": "0.1.0"
 ```
 
+## Setup
+
+| Context Variable | Required | Description |
+|---|---|---|
+| `hubspot.token` | yes, unless passed per call | A private-app or service key access token (`pat-...`) |
+| `hubspot.api.version` | no | Another date-based API version, e.g. `"2026-03"` |
+| `hubspot.client.secret` | for webhooks | The app's client secret, used by `::hubspot::webhooks/verify-request` |
+
 ## Functions by area
 
 ### Records (`::hubspot::objects`)
@@ -95,6 +103,28 @@ valid-values map(status.options, (o) { o.value })
 created ::lists/create-list("Webinar attendees", "contacts", "MANUAL")
 ::lists/add-members(created.list.listId, ["12345", "67890"])
 ```
+
+### Per-call credentials
+
+Every function that calls HubSpot takes an optional trailing `opts` Map, so one run can act for many portals and parallel flows don't share credentials. Per-call credentials are masked in call records, and nothing from `opts` is written to ctx.
+
+| Key | Effect |
+|---|---|
+| `token` | The private app or OAuth access token for this call, instead of `hubspot.token` |
+| `api-version` | The date-based API version for this call, instead of `hubspot.api.version` |
+
+`opts` always comes last. Where a function also takes `params` or `options`, pass `{}` for those.
+
+```hot
+tenant {token: "pat-tenant-b"}
+
+contact ::hubspot::contacts/get-contact("12345", tenant)
+page ::hubspot::objects/list-objects("deals", {limit: 10}, tenant)
+every ::hubspot::objects/list-all-objects("deals", {}, 5, tenant)
+::hubspot::notes/log-note("contacts", "12345", "Demo went well.", tenant)
+```
+
+A `token` that is present but blank or null is an error naming the key, never a fallback to `hubspot.token`. `::hubspot::api/resolve(opts)` is the one place this is decided.
 
 ### Pagination and low level (`::hubspot::api`)
 

@@ -25,9 +25,9 @@ meta {
     matches the shared secret (constant-time compare over the raw body).
     Uses the `deepgram.callback.secret` context variable by default
     (failing when it is unset, the same secret the async transcribe
-    functions send), or an explicit secret; an empty explicit secret
-    never verifies. Use a hex secret (`openssl rand -hex 32`): Deepgram
-    turns `+` into a space.
+    functions send), or an explicit secret, which is masked in call
+    records; an empty explicit secret never verifies. Use a hex secret
+    (`openssl rand -hex 32`): Deepgram turns `+` into a space.
 
     **Example**
 
@@ -50,21 +50,22 @@ fn
   )
   verify-callback(request, secret)
 },
-(request: Map, secret: Str): Bool {
+(request: Map, secret: Str?): Bool {
   raw-body ::hot::http/raw-body(request)
   cond {
     // An empty secret would accept any body that omits one: fail closed.
-    is-empty(secret) => { false }
+    or(is-null(secret), is-blank(secret)) => { false }
     not(is-str(raw-body)) => { false }
     is-empty(raw-body) => { false }
     => {
+      key ::ctx/mark-secret(secret)
       payload ::json/from-json(raw-body)
       cond {
         is-err(payload) => { false }
         not(is-map(payload)) => { false }
         => {
           sent get-in(payload, ["metadata", "extra", "callback_secret"])
-          if(is-str(sent), secure-compare(sent, secret), false)
+          if(is-str(sent), secure-compare(sent, key), false)
         }
       }
     }
@@ -78,16 +79,19 @@ meta {
     credentials matching `username`/`password` (constant-time compare).
     Pair with a callback URL that embeds them,
     `https://user:pass@example.com/hook`, which Deepgram sends as Basic
-    Auth. Empty credentials never verify.
+    Auth. The password is masked in call records. Empty credentials never
+    verify.
     """
 }
-fn (request: Map, username: Str, password: Str): Bool {
+fn (request: Map, username: Str?, password: Str?): Bool {
   header or(get(or(get(request, "headers"), {}), "authorization"), "")
   cond {
+    or(is-null(username), is-null(password)) => { false }
     or(is-empty(username), is-empty(password)) => { false }
     is-empty(header) => { false }
     => {
-      credentials ::hot::base64/encode(`${username}:${password}`)
+      key ::ctx/mark-secret(password)
+      credentials ::hot::base64/encode(`${username}:${key}`)
       expected `Basic ${credentials}`
       secure-compare(header, expected)
     }
@@ -105,9 +109,10 @@ meta {
     `api-key-id` never verifies.
     """
 }
-fn (request: Map, api-key-id: Str): Bool {
+fn (request: Map, api-key-id: Str?): Bool {
   token or(get(or(get(request, "headers"), {}), "dg-token"), "")
   cond {
+    is-null(api-key-id) => { false }
     or(is-empty(api-key-id), is-empty(token)) => { false }
     => { secure-compare(token, api-key-id) }
   }

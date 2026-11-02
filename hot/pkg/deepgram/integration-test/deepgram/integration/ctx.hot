@@ -2,9 +2,27 @@
 
 ::env ::hot::env
 
-// Placeholder credentials for the deepgram integration suite. Unset
-// environment variables are skipped entirely, so absent credentials
-// behave exactly as if never configured.
+// Credentials for the deepgram integration suite. Unset environment
+// variables are skipped entirely, so absent credentials behave exactly as
+// if never configured, and every test then skips (passes with a "skipped"
+// note) instead of calling Deepgram.
 ::hot::ctx/set(filter-vals({
     "deepgram.api.key": ::env/get("DEEPGRAM_API_KEY", ""),
 }, (v) { not(is-empty(v)) }))
+
+configured
+meta {doc: """True when a Deepgram API key is configured."""}
+fn (): Bool {
+    not(is-empty(or(::hot::ctx/get("deepgram.api.key"), "")))
+}
+
+skip
+meta {
+    doc: """Record a skipped test: prints why and passes one assertion so the runner reports it cleanly."""
+}
+fn (reason: Str): Bool {
+    println(`skipped: ${reason}`)
+    assert(true, reason)
+}
+
+UNCONFIGURED "set DEEPGRAM_API_KEY"

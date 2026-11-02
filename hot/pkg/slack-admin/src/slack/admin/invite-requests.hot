@@ -37,7 +37,10 @@ fn
   list(ListRequest({}))
 },
 (request: ListRequest): Map {
-  ::api/call("admin.inviteRequests.list", request)
+  list(request, {})
+},
+(request: ListRequest, opts: Map): Map {
+  ::api/call("admin.inviteRequests.list", request, opts)
 }
 
 list-all
@@ -54,7 +57,10 @@ fn
   list-all(request, 1000)
 },
 (request: ListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.inviteRequests.list", request, "invite_requests", max-items)
+  list-all(request, max-items, {})
+},
+(request: ListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.inviteRequests.list", request, "invite_requests", max-items, opts)
 }
 
 ApproveRequest type {
@@ -70,8 +76,12 @@ meta {
     Scope: `admin.invites:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: ApproveRequest): Map {
-  ::api/call("admin.inviteRequests.approve", request)
+fn
+(request: ApproveRequest): Map {
+  approve(request, {})
+},
+(request: ApproveRequest, opts: Map): Map {
+  ::api/call("admin.inviteRequests.approve", request, opts)
 }
 
 DenyRequest type {
@@ -87,8 +97,12 @@ meta {
     Scope: `admin.invites:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: DenyRequest): Map {
-  ::api/call("admin.inviteRequests.deny", request)
+fn
+(request: DenyRequest): Map {
+  deny(request, {})
+},
+(request: DenyRequest, opts: Map): Map {
+  ::api/call("admin.inviteRequests.deny", request, opts)
 }
 
 ApprovedListRequest type {
@@ -111,7 +125,10 @@ fn
   approved-list(ApprovedListRequest({}))
 },
 (request: ApprovedListRequest): Map {
-  ::api/call("admin.inviteRequests.approved.list", request)
+  approved-list(request, {})
+},
+(request: ApprovedListRequest, opts: Map): Map {
+  ::api/call("admin.inviteRequests.approved.list", request, opts)
 }
 
 approved-list-all
@@ -128,7 +145,10 @@ fn
   approved-list-all(request, 1000)
 },
 (request: ApprovedListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.inviteRequests.approved.list", request, "approved_requests", max-items)
+  approved-list-all(request, max-items, {})
+},
+(request: ApprovedListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.inviteRequests.approved.list", request, "approved_requests", max-items, opts)
 }
 
 DeniedListRequest type {
@@ -151,7 +171,10 @@ fn
   denied-list(DeniedListRequest({}))
 },
 (request: DeniedListRequest): Map {
-  ::api/call("admin.inviteRequests.denied.list", request)
+  denied-list(request, {})
+},
+(request: DeniedListRequest, opts: Map): Map {
+  ::api/call("admin.inviteRequests.denied.list", request, opts)
 }
 
 denied-list-all
@@ -168,5 +191,8 @@ fn
   denied-list-all(request, 1000)
 },
 (request: DeniedListRequest, max-items: Int): Vec {
-  ::api/paginate("admin.inviteRequests.denied.list", request, "denied_requests", max-items)
+  denied-list-all(request, max-items, {})
+},
+(request: DeniedListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.inviteRequests.denied.list", request, "denied_requests", max-items, opts)
 }

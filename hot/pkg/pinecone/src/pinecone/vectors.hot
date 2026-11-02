@@ -14,7 +14,7 @@ meta {
 
 upsert
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     POST {host}/vectors/upsert - Write up to 1000 vectors:
     `[{id, values, metadata?, sparseValues?}]`. The 3-arity form targets
@@ -23,15 +23,21 @@ meta {
 }
 fn
 (host: Str, vectors: Vec): Map {
-  ::api/json("POST", ::api/data-url(host, ["vectors", "upsert"], {}), {vectors: vectors})
+  upsert(host, vectors, null, {})
 },
 (host: Str, vectors: Vec, namespace: Str): Map {
-  ::api/json("POST", ::api/data-url(host, ["vectors", "upsert"], {}), {vectors: vectors, namespace: namespace})
+  upsert(host, vectors, namespace, {})
+},
+(host: Str, vectors: Vec, opts: Map): Map {
+  upsert(host, vectors, null, opts)
+},
+(host: Str, vectors: Vec, namespace: Str?, opts: Map): Map {
+  ::api/json("POST", ::api/data-url(host, ["vectors", "upsert"], {}), ::api/compact({vectors: vectors, namespace: namespace}), opts)
 }
 
 query
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     POST {host}/query - Nearest-neighbor search. `options`: `vector` (or
     `id` to query by an existing vector, or `sparseVector`), `topK`
@@ -41,8 +47,12 @@ meta {
     usage}`.
     """
 }
-fn (host: Str, options: Map): Map {
-  ::api/json("POST", ::api/data-url(host, ["query"], {}), ::api/compact({topK: 10, ...options}))
+fn
+(host: Str, options: Map): Map {
+  query(host, options, {})
+},
+(host: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/data-url(host, ["query"], {}), ::api/compact({topK: 10, ...options}), opts)
 }
 
 fetch-url
@@ -57,24 +67,34 @@ fn (host: Str, ids: Vec, namespace: Any): Str {
 
 fetch
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """GET {host}/vectors/fetch - Fetch up to 1000 vectors by id, from the default namespace or `namespace`. Returns `{vectors: {id: {id, values, metadata?}}, namespace, usage}`."""
 }
 fn
 (host: Str, ids: Vec): Map {
-  ::api/json("GET", fetch-url(host, ids, null), "")
+  fetch(host, ids, null, {})
 },
 (host: Str, ids: Vec, namespace: Str): Map {
-  ::api/json("GET", fetch-url(host, ids, namespace), "")
+  fetch(host, ids, namespace, {})
+},
+(host: Str, ids: Vec, opts: Map): Map {
+  fetch(host, ids, null, opts)
+},
+(host: Str, ids: Vec, namespace: Str?, opts: Map): Map {
+  ::api/json("GET", fetch-url(host, ids, namespace), "", opts)
 }
 
 fetch-by-metadata
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """POST {host}/vectors/fetch_by_metadata - Fetch vectors matching a metadata `filter`. `options`: `namespace`, `limit` (default 100), `paginationToken`. Returns `{vectors, pagination?: {next}}`."""
 }
-fn (host: Str, filter: Map, options: Map): Map {
-  ::api/json("POST", ::api/data-url(host, ["vectors", "fetch_by_metadata"], {}), ::api/compact({...options, filter: filter}))
+fn
+(host: Str, filter: Map, options: Map): Map {
+  fetch-by-metadata(host, filter, options, {})
+},
+(host: Str, filter: Map, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/data-url(host, ["vectors", "fetch_by_metadata"], {}), ::api/compact({...options, filter: filter}), opts)
 }
 
 build-update-body
@@ -93,7 +113,7 @@ fn (id: Str, changes: Map, namespace: Any): Map {
 
 update
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     POST {host}/vectors/update - Change one vector in place. `changes`:
     `values` (replaces the dense values), `sparseValues`, `setMetadata`
@@ -109,24 +129,34 @@ meta {
 }
 fn
 (host: Str, id: Str, changes: Map): Map {
-  ::api/json("POST", ::api/data-url(host, ["vectors", "update"], {}), build-update-body(id, changes, null))
+  update(host, id, changes, null, {})
 },
 (host: Str, id: Str, changes: Map, namespace: Str): Map {
-  ::api/json("POST", ::api/data-url(host, ["vectors", "update"], {}), build-update-body(id, changes, namespace))
+  update(host, id, changes, namespace, {})
+},
+(host: Str, id: Str, changes: Map, opts: Map): Map {
+  update(host, id, changes, null, opts)
+},
+(host: Str, id: Str, changes: Map, namespace: Str?, opts: Map): Map {
+  ::api/json("POST", ::api/data-url(host, ["vectors", "update"], {}), build-update-body(id, changes, namespace), opts)
 }
 
 update-by-filter
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """POST {host}/vectors/update - Merge `set-metadata` into every vector matching `filter`. `options`: `namespace`, `dryRun` (count matches without writing). Returns `{matchedRecords}`."""
 }
-fn (host: Str, filter: Map, set-metadata: Map, options: Map): Map {
+fn
+(host: Str, filter: Map, set-metadata: Map, options: Map): Map {
+  update-by-filter(host, filter, set-metadata, options, {})
+},
+(host: Str, filter: Map, set-metadata: Map, options: Map, opts: Map): Map {
   ::api/json("POST", ::api/data-url(host, ["vectors", "update"], {}), ::api/compact({
     filter: filter,
     setMetadata: set-metadata,
     namespace: get(options, "namespace"),
     dryRun: get(options, "dryRun")
-  }))
+  }), opts)
 }
 
 list-ids-url
@@ -144,7 +174,7 @@ fn (host: Str, options: Map): Str {
 
 list-ids
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     GET {host}/vectors/list - One page of vector IDs (serverless
     indexes). `options`: `prefix` (match IDs that start with it),
@@ -159,7 +189,10 @@ fn
   list-ids(host, {})
 },
 (host: Str, options: Map): Map {
-  ::api/json("GET", list-ids-url(host, options), "")
+  list-ids(host, options, {})
+},
+(host: Str, options: Map, opts: Map): Map {
+  ::api/json("GET", list-ids-url(host, options), "", opts)
 }
 
 // Guard against a pagination loop.
@@ -167,7 +200,7 @@ MAX_LIST_PAGES 1000
 
 list-all-ids
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
     Every vector ID matching `options` (as `list-ids`), following
     `pagination.next` across pages. Returns a Vec of ID strings.
@@ -185,7 +218,10 @@ fn
   list-all-ids(host, {})
 },
 (host: Str, options: Map): Vec {
-  collect-ids((token) { list-ids(host, {...options, paginationToken: token}) }, get(options, "paginationToken"))
+  list-all-ids(host, options, {})
+},
+(host: Str, options: Map, opts: Map): Vec {
+  collect-ids((token) { list-ids(host, {...options, paginationToken: token}, opts) }, get(options, "paginationToken"))
 }
 
 collect-ids
@@ -215,22 +251,29 @@ collect-loop fn (fetch-page: Fn, token: Any, ids: Vec, count: Int): Vec {
 
 delete-vectors
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """POST {host}/vectors/delete - Delete by ids (`{ids: [...]}`, up to 1000), by metadata filter (`{filter: {...}}`), or everything in a namespace (`{deleteAll: true}`). Add `namespace` to target one. Returns `{}`."""
 }
-fn (host: Str, options: Map): Map {
-  ::api/json("POST", ::api/data-url(host, ["vectors", "delete"], {}), ::api/compact(options))
+fn
+(host: Str, options: Map): Map {
+  delete-vectors(host, options, {})
+},
+(host: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/data-url(host, ["vectors", "delete"], {}), ::api/compact(options), opts)
 }
 
 describe-stats
 meta {
-    ctx: {"pinecone.api.key": {required: true}},
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """POST {host}/describe_index_stats - Vector counts per namespace, `dimension`, `metric`, `totalVectorCount`, and fullness. The 2-arity form counts only vectors matching a metadata `filter` (pod-based indexes)."""
 }
 fn
 (host: Str): Map {
-  ::api/json("POST", ::api/data-url(host, ["describe_index_stats"], {}), {})
+  describe-stats(host, null, {})
 },
 (host: Str, filter: Map): Map {
-  ::api/json("POST", ::api/data-url(host, ["describe_index_stats"], {}), {filter: filter})
+  describe-stats(host, filter, {})
+},
+(host: Str, filter: Map?, opts: Map): Map {
+  ::api/json("POST", ::api/data-url(host, ["describe_index_stats"], {}), ::api/compact({filter: filter}), opts)
 }

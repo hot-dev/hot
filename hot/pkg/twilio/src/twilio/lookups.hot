@@ -3,7 +3,7 @@
 ::uri ::hot::uri
 
 api-request ::twilio::api/request
-client-from-ctx ::twilio::api/client-from-ctx
+resolve ::twilio::api/resolve
 Client ::twilio::api/Client
 HttpError ::twilio::api/HttpError
 is-ok-response ::hot::http/is-ok-response
@@ -75,7 +75,7 @@ fn (request: LookupPhoneNumberRequest): Str {
 
 lookup-phone-number
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 GET /v2/PhoneNumbers/{PhoneNumber} - Validate and format a phone number, plus any requested data packages. An invalid number still answers 200 with `valid: false` and `validation_errors`.
 
@@ -96,9 +96,16 @@ info.line_type_intelligence.type    // => "mobile"
 }
 fn
 (request: LookupPhoneNumberRequest): PhoneNumberLookup {
-  lookup-phone-number(client-from-ctx(), request)
+  lookup-phone-number(request, {})
+},
+(request: LookupPhoneNumberRequest, opts: Map): PhoneNumberLookup {
+  resolve(opts) |> if-ok((client) { lookup-phone-number(client, request) })
 },
 (client: Client, request: LookupPhoneNumberRequest): PhoneNumberLookup {
   response api-request(client, "GET", lookup-url(request), {}, {})
-  if(is-ok-response(response), PhoneNumberLookup(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { PhoneNumberLookup(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

@@ -1,6 +1,6 @@
 ::cal-com::users ns
 meta {
-    ctx: {"cal-com.api.key": {required: true}},
+    ctx: {"cal-com.api.key": {required: false}},
     doc: """The API key owner's own profile (`/me`)."""
 }
 
@@ -21,14 +21,22 @@ meta {
     ```
     """
 }
-fn (): Any {
-  ::api/request("GET", "/me", "", "")
+fn
+(): Any {
+  me({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/me", "", "", opts)
 }
 
 update-me
 meta {
     doc: """PATCH /me - Update the profile (`name`, `email`, `timeZone`, `weekStart`, `timeFormat` (12/24), `defaultScheduleId`, `locale`, `avatarUrl`, `bio`, `metadata`). Unset fields are omitted. An email change waits for verification before it takes effect."""
 }
-fn (changes: Map): Any {
-  ::api/request("PATCH", "/me", ::api/compact(changes), "")
+fn
+(changes: Map): Any {
+  update-me(changes, {})
+},
+(changes: Map, opts: Map): Any {
+  ::api/request("PATCH", "/me", ::api/compact(changes), "", opts)
 }

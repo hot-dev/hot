@@ -50,7 +50,7 @@ fn
 (request: CreateProductRequest): Map {
   create-product(request, RequestOptions({}))
 },
-(request: CreateProductRequest, options: RequestOptions): Map {
+(request: CreateProductRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/products", request, options)
 }
 
@@ -63,7 +63,10 @@ fn
   get-product(product, {})
 },
 (product: Str, params: Map): Map {
-  api-call("GET", `/v1/products/${seg(product)}`, params)
+  get-product(product, params, {})
+},
+(product: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/products/${seg(product)}`, params, opts)
 }
 
 UpdateProductRequest type {
@@ -90,7 +93,7 @@ fn
 (product: Str, request: UpdateProductRequest): Map {
   update-product(product, request, RequestOptions({}))
 },
-(product: Str, request: UpdateProductRequest, options: RequestOptions): Map {
+(product: Str, request: UpdateProductRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/products/${seg(product)}`, request, options)
 }
 
@@ -98,8 +101,12 @@ delete-product
 meta {
     doc: """DELETE /v1/products/{id} - Delete a product. Only possible if it has no prices attached; otherwise set `active: false` via `update-product`."""
 }
-fn (product: Str): Map {
-  api-call("DELETE", `/v1/products/${seg(product)}`)
+fn
+(product: Str): Map {
+  delete-product(product, {})
+},
+(product: Str, opts: Map): Map {
+  api-call("DELETE", `/v1/products/${seg(product)}`, "", opts)
 }
 
 ListProductsRequest type {
@@ -123,7 +130,10 @@ fn
   list-products(ListProductsRequest({}))
 },
 (request: ListProductsRequest): Map {
-  api-call("GET", "/v1/products", request)
+  list-products(request, {})
+},
+(request: ListProductsRequest, opts: Map): Map {
+  api-call("GET", "/v1/products", request, opts)
 }
 
 search-products
@@ -135,7 +145,10 @@ fn
   search-products(query, {})
 },
 (query: Str, params: Map): Map {
-  api-call("GET", "/v1/products/search", {...params, query: query})
+  search-products(query, params, {})
+},
+(query: Str, params: Map, opts: Map): Map {
+  api-call("GET", "/v1/products/search", {...params, query: query}, opts)
 }
 
 // ============================================================================
@@ -188,7 +201,7 @@ fn
 (request: CreatePriceRequest): Map {
   create-price(request, RequestOptions({}))
 },
-(request: CreatePriceRequest, options: RequestOptions): Map {
+(request: CreatePriceRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/prices", request, options)
 }
 
@@ -201,7 +214,10 @@ fn
   get-price(price, {})
 },
 (price: Str, params: Map): Map {
-  api-call("GET", `/v1/prices/${seg(price)}`, params)
+  get-price(price, params, {})
+},
+(price: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/prices/${seg(price)}`, params, opts)
 }
 
 UpdatePriceRequest type {
@@ -223,7 +239,7 @@ fn
 (price: Str, request: UpdatePriceRequest): Map {
   update-price(price, request, RequestOptions({}))
 },
-(price: Str, request: UpdatePriceRequest, options: RequestOptions): Map {
+(price: Str, request: UpdatePriceRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/prices/${seg(price)}`, request, options)
 }
 
@@ -250,7 +266,10 @@ fn
   list-prices(ListPricesRequest({}))
 },
 (request: ListPricesRequest): Map {
-  api-call("GET", "/v1/prices", request)
+  list-prices(request, {})
+},
+(request: ListPricesRequest, opts: Map): Map {
+  api-call("GET", "/v1/prices", request, opts)
 }
 
 search-prices
@@ -262,5 +281,8 @@ fn
   search-prices(query, {})
 },
 (query: Str, params: Map): Map {
-  api-call("GET", "/v1/prices/search", {...params, query: query})
+  search-prices(query, params, {})
+},
+(query: Str, params: Map, opts: Map): Map {
+  api-call("GET", "/v1/prices/search", {...params, query: query}, opts)
 }

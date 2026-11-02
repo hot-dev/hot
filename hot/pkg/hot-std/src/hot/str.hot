@@ -213,7 +213,7 @@ meta {
     ```
     """
 }
-fn (s: Str): Bool {
+fn (s: Str?): Bool {
     ::hot::coll/is-empty(s)
 }
 

@@ -65,7 +65,9 @@ a-files ::files/list-files({
 b-files ::files/list-files({q: "trashed = false", subject: "bob@example.com"})
 ```
 
-When `opts` carries a primary credential (`token`, `refresh-token`, `service-account` or `api-key`), context credentials are ignored for that call, so one tenant can never fall back to another's.
+When `opts` carries a primary credential (`token`, `refresh-token`, `service-account` or `api-key`), context credentials are ignored for that call, so one tenant can never fall back to another's. A credential key that is present but blank or null (`{token: ""}`) is an error naming the key, never a fallback to context; leave the key out to use context.
+
+Per-call credentials, and every token Google returns (minted tokens and `exchange-code` results), are masked in call records. Nothing from `opts` is written to context.
 
 ## Scopes
 

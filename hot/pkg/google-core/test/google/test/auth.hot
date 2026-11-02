@@ -124,6 +124,46 @@ meta ["test"] fn () {
     assert(contains(err-message(none), "no credentials"))
 }
 
+test-blank-credential-is-an-error-naming-the-key
+meta ["test"] fn () {
+    map(["token", "api-key", "refresh-token", "client-id", "client-secret", "service-account", "subject"], (key) {
+        map(["", "   ", null], (value) {
+            result ::auth/resolve-credentials(assoc({}, key, value))
+            assert(is-err(result), `${key} blank is an error, not a fallback to context`)
+            assert(contains(err-message(result), key), "the error names the key")
+        })
+    })
+    assert(is-null(::auth/blank-credential({token: "t", scopes: "", retry: null})), "only credential keys are checked")
+    assert(is-null(::auth/blank-credential({})))
+    with-others ::auth/resolve-credentials({token: "t", client-secret: ""})
+    assert(contains(err-message(with-others), "client-secret"), "even beside a usable credential")
+}
+
+test-resolve-returns-marked-credentials-unchanged
+meta ["test"] fn () {
+    assert-eq("ya29.opts-token", ::auth/resolve-credentials({token: "ya29.opts-token"}).token)
+    assert-eq("AIza-opts-key", ::auth/resolve-credentials({api-key: "AIza-opts-key"}).api-key)
+    refresh ::auth/resolve-credentials({refresh-token: "1//opts-refresh", client-id: "cid", client-secret: "GOCSPX-opts"})
+    assert-eq("1//opts-refresh", get(refresh, "refresh-token"))
+    assert-eq("GOCSPX-opts", refresh.client-secret)
+    from-str ::auth/resolve-credentials({service-account: SA_JSON})
+    assert-eq("fake-pem", get(from-str, "service-account").private_key)
+    assert-eq("svc@proj.iam.gserviceaccount.com", get(from-str, "service-account").client_email)
+    from-map ::auth/resolve-credentials({service-account: {client_email: "a@b", private_key: "fake-pem-map"}})
+    assert-eq("fake-pem-map", get(from-map, "service-account").private_key)
+    assert-eq("ya29.opts-token", ::auth/access-token("drive", {token: "ya29.opts-token"}))
+    bad ::auth/resolve-credentials({service-account: "{not json"})
+    assert(contains(err-message(bad), "not valid JSON"), "a malformed key is still reported")
+}
+
+test-mark-helpers-return-their-input
+meta ["test"] fn () {
+    tokens {access_token: "ya29.minted", refresh_token: null, id_token: "", expires_in: 3599}
+    assert-eq(tokens, ::auth/mark-token-response(tokens))
+    opts {token: "ya29.opts-token", q: "x"}
+    assert-eq(opts, ::auth/mark-credentials(opts))
+}
+
 test-token-cache-key
 meta ["test"] fn () {
     sa ::auth/credentials-from({service-account: SA_JSON})

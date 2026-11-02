@@ -115,6 +115,112 @@ fn () {
 }
 
 // ============================================================================
+// Per-call credentials
+// ============================================================================
+
+CTX_VALUES {"twilio.account.sid": "ACctx", "twilio.auth.token": "ctx-token"}
+
+err-text fn (out: Result): Str {
+    if-err(out, (e) { e })
+}
+
+test-resolve-from-uses-ctx
+meta ["test"]
+fn () {
+    c ::api/resolve-from({}, CTX_VALUES)
+    assert-eq("ACctx", c.account-sid)
+    assert-eq("ctx-token", c.password)
+}
+
+test-resolve-from-opts-win
+meta ["test"]
+fn () {
+    token ::api/resolve-from({account-sid: "ACb", auth-token: " tenant-token "}, CTX_VALUES)
+    assert-eq("ACb", token.username)
+    assert-eq("tenant-token", token.password)
+
+    key ::api/resolve-from({account-sid: "ACb", auth-token: "t", api-key-sid: "SKb", api-key-secret: "sec"}, CTX_VALUES)
+    assert-eq("ACb", key.account-sid)
+    assert-eq("SKb", key.username, "an API key wins")
+    assert-eq("sec", key.password)
+}
+
+test-resolve-from-blank-credential-never-falls-back
+meta ["test"]
+fn () {
+    for-each(["account-sid", "auth-token", "api-key-sid", "api-key-secret"], (key) {
+        for-each(["", "  ", null], (blank) {
+            out ::api/resolve-from(assoc({}, key, blank), CTX_VALUES)
+            assert(is-err(out), "a blank credential is an Err, never ctx")
+            assert(contains(err-text(out), key), "names the key")
+        })
+    })
+}
+
+test-resolve-from-per-call-account-needs-credentials
+meta ["test"]
+fn () {
+    out ::api/resolve-from({account-sid: "ACb"}, CTX_VALUES)
+    assert(is-err(out), "context credentials never go to a per-call account")
+    assert(contains(err-text(out), "account-sid"))
+    assert(contains(err-text(out), "auth-token"))
+}
+
+test-resolve-from-credentials-need-account
+meta ["test"]
+fn () {
+    assert(contains(err-text(::api/resolve-from({auth-token: "t"}, CTX_VALUES)), "account-sid"))
+    assert(contains(err-text(::api/resolve-from({api-key-sid: "SK", api-key-secret: "s"}, CTX_VALUES)), "account-sid"))
+}
+
+test-resolve-from-half-an-api-key
+meta ["test"]
+fn () {
+    assert(contains(err-text(::api/resolve-from({account-sid: "ACb", api-key-sid: "SK"}, CTX_VALUES)), "api-key-secret"))
+    assert(contains(err-text(::api/resolve-from({account-sid: "ACb", api-key-secret: "s"}, CTX_VALUES)), "api-key-sid"))
+}
+
+test-resolve-from-nothing-configured
+meta ["test"]
+fn () {
+    assert(contains(err-text(::api/resolve-from({}, {})), "twilio.account.sid"))
+    assert(is-err(::api/resolve-from({}, {"twilio.account.sid": "ACctx"})), "no credential")
+}
+
+test-resolve-opts-and-client-return-values-unchanged
+meta ["test"]
+fn () {
+    from-opts ::api/resolve({account-sid: "ACb", auth-token: "tenant-auth-token"})
+    assert-eq("tenant-auth-token", from-opts.password)
+
+    client ::api/api-key-client("ACb", "SKb", "tenant-key-secret")
+    assert-eq("tenant-key-secret", client.password)
+    assert-eq(client, ::api/resolve(client), "a Client passes through")
+}
+
+test-opts-arity-errs-before-any-request
+meta ["test"]
+fn () {
+    list ::twilio::messages/ListMessagesRequest({PageSize: 1})
+    assert(is-err(::twilio::messages/list-messages(list, {auth-token: ""})))
+    assert(is-err(::twilio::messages/list-messages({PageSize: 1}, {account-sid: "ACb"})), "a plain Map request reaches the opts arity")
+    assert(is-err(::twilio::messages/list-all-messages(list, 5, {auth-token: null})))
+    assert(is-err(::twilio::accounts/get-account({account-sid: " "})))
+    assert(is-err(::twilio::verify/list-services({auth-token: ""})))
+    assert(is-err(::api/request("GET", "https://api.twilio.com/x", {}, {}, {auth-token: ""})))
+    assert(is-err(::api/next-page({next_page_uri: "/x"}, {auth-token: ""})))
+    assert(is-err(::api/delete-request("https://api.twilio.com/x", {auth-token: ""})))
+}
+
+test-account-auth-token-marked-unchanged
+meta ["test"]
+fn () {
+    body {sid: "AC1", auth_token: "account-auth-token"}
+    assert-eq(body, ::twilio::accounts/mark-auth-token(body))
+    assert-eq({sid: "AC1"}, ::twilio::accounts/mark-auth-token({sid: "AC1"}))
+}
+
+// ============================================================================
 // Pagination
 // ============================================================================
 

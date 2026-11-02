@@ -20,8 +20,12 @@ meta {
     ```
     """
 }
-fn (): Map {
-  ::api/call("GET", "/applications/@me")
+fn
+(): Map {
+  get-current-application({})
+},
+(opts: Map): Map {
+  ::api/call("GET", "/applications/@me", {}, opts)
 }
 
 EditCurrentApplicationRequest type {
@@ -60,6 +64,10 @@ meta {
     ```
     """
 }
-fn (request: EditCurrentApplicationRequest): Map {
-  ::api/call("PATCH", "/applications/@me", {body: ::api/body(request, [])})
+fn
+(request: EditCurrentApplicationRequest): Map {
+  edit-current-application(request, {})
+},
+(request: EditCurrentApplicationRequest, opts: Map): Map {
+  ::api/call("PATCH", "/applications/@me", {body: ::api/body(request, [])}, opts)
 }

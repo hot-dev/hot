@@ -50,6 +50,55 @@ meta ["test"] fn () {
     assert-eq("channel_id=C1", req.body)
 }
 
+test-resolve-from-prefers-opts-then-ctx
+meta ["test"] fn () {
+    ctx-values {"slack.admin.token": "xoxp-ctx"}
+    assert-eq("xoxp-tenant", ::api/resolve-from({token: " xoxp-tenant "}, ctx-values).token)
+    assert-eq("xoxp-ctx", ::api/resolve-from({}, ctx-values).token)
+}
+
+test-resolve-from-blank-token-never-falls-back
+meta ["test"] fn () {
+    for-each(["", "  ", null], (blank) {
+        out ::api/resolve-from({token: blank}, {"slack.admin.token": "xoxp-ctx"})
+        assert(is-err(out), "a blank token is an Err, never ctx")
+        assert(contains(if-err(out, (e) { e }), "token"), "names the key")
+    })
+}
+
+test-resolve-from-no-token
+meta ["test"] fn () {
+    assert(contains(if-err(::api/resolve-from({}, {}), (e) { e }), "slack.admin.token"))
+}
+
+test-resolve-returns-marked-token-unchanged
+meta ["test"] fn () {
+    assert-eq("xoxp-tenant-token", ::api/resolve({token: "xoxp-tenant-token"}).token)
+}
+
+test-build-request-with-opts
+meta ["test"] fn () {
+    req ::api/build-request("admin.teams.list", {}, {token: "xoxp-tenant"})
+    assert-eq("Bearer xoxp-tenant", req.headers.Authorization)
+    assert(is-err(::api/build-request("admin.teams.list", {}, {token: ""})))
+}
+
+test-opts-arity-errs-before-any-request
+meta ["test"] fn () {
+    archive ::conversations/ArchiveRequest({channel_id: "C1"})
+    assert(is-err(::conversations/archive(archive, {token: ""})))
+    assert(is-err(::users/list(::users/ListRequest({team_id: "T1"}), {token: null})))
+    assert(is-err(::users/list-all(::users/ListRequest({team_id: "T1"}), 5, {token: " "})), "a failed page comes back as its Err")
+    assert(is-err(::api/call("admin.teams.list", {}, {token: ""})))
+}
+
+test-rate-limit-malformed-retry-after
+meta ["test"] fn () {
+    e ::api/slack-error("admin.teams.list", HttpResponse({status: 429, headers: {retry-after: "soon"}, body: ""}))
+    assert-eq("ratelimited", e.error)
+    assert(is-null(e.retry_after), "a malformed header isn't an Err")
+}
+
 test-build-request-reads-admin-token-from-ctx
 meta ["test"] fn () {
     ::hot::ctx/set("slack.admin.token", "xoxp-from-ctx")

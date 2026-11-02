@@ -22,6 +22,8 @@ Set a key for any provider you have. `::web-search/search` uses the first config
 | `firecrawl.api.key` | [Firecrawl](https://firecrawl.dev) search (`fc-...`), the same key the `firecrawl` package uses |
 | `web-search.provider` | Optional default provider: `tavily`, `brave`, `exa`, or `firecrawl` |
 
+Keys can also be passed per call; see [Per-call credentials](#per-call-credentials).
+
 ## Quick start
 
 ```hot
@@ -57,6 +59,7 @@ recent ::web-search/search("hot.dev release notes", 5, {
 | `freshness` | `"day"`, `"week"`, `"month"`, or `"year"` |
 | `include-domains` / `exclude-domains` | Vecs of hostnames |
 | `max-results` | Used by `search(query, options)`. Default 10 |
+| `tavily-api-key`, `brave-api-key`, `exa-api-key`, `firecrawl-api-key` | The provider's key for this call. See [Per-call credentials](#per-call-credentials) |
 
 How each option maps to the providers:
 
@@ -66,7 +69,7 @@ How each option maps to the providers:
 | `freshness` | `time_range` | `freshness` `pd`/`pw`/`pm`/`py` | `startPublishedDate` (now minus 1/7/31/365 days) | `tbs` `qdr:d`/`w`/`m`/`y` |
 | domains | `include_domains` / `exclude_domains` | `site:` operators in the query (`OR` between includes, `NOT site:` per exclude) | `includeDomains` / `excludeDomains` | `includeDomains` / `excludeDomains` |
 
-Errors come back as an Err. With no provider configured, or with the chosen provider unconfigured or unknown, the Err carries a message naming the context variable to set. A failed provider call carries `::web-search::http/HttpError` (`provider`, `status`, a readable `message`, `body`). When `fallback` runs out of providers, the Err carries `{message, errors: [{provider, error}]}`.
+Errors come back as an Err. With no provider configured, or with the chosen provider unconfigured or unknown, the Err carries a message naming what to set. A failed provider call carries `::web-search::http/HttpError` (`provider`, `status`, a readable `message`, `body`). When `fallback` runs out of providers, the Err carries `{message, errors: [{provider, error}]}`.
 
 ## Provider APIs
 
@@ -90,6 +93,37 @@ fc ::web-search::firecrawl/search("firecrawl changelog", {limit: 3})
 | `::web-search::brave` | `search(query, options?)` (`GET /web/search`) |
 | `::web-search::exa` | `search(query, options?)`, `find-similar(url, options?)`, `get-contents(urls, options?)` |
 | `::web-search::firecrawl` | `search(query, options?)` (`POST /v2/search`). For scraping and crawling, use the `firecrawl` package |
+
+## Per-call credentials
+
+Pass a provider's key in the options of `search`, so one run can act for many tenants and parallel flows don't share credentials. Credentials in the options are masked in call records, and nothing from them is written to ctx.
+
+| Key | Provider |
+|---|---|
+| `tavily-api-key` | Tavily, instead of `tavily.api.key` |
+| `brave-api-key` | Brave, instead of `brave.api.key` |
+| `exa-api-key` | Exa, instead of `exa.api.key` |
+| `firecrawl-api-key` | Firecrawl, instead of `firecrawl.api.key` |
+
+```hot
+results ::web-search/search("hot.dev release notes", 5, {
+  provider: "brave",
+  fallback: true,
+  brave-api-key: "tenant-b-token",
+  tavily-api-key: "tvly-tenant-b"
+})
+```
+
+With any of these keys in the call, only those providers are candidates. Context keys are not used for that call: `fallback` tries only the providers the call passed a key for, `web-search.provider` applies only when it is one of them, and a `provider` without a key in the call is an Err. So a tenant's search never runs on the project's account.
+
+The native provider functions take the same keys in a trailing `opts` Map. `opts` comes last; where a function already takes `options`, pass `{}` for those.
+
+```hot
+tenant {tavily-api-key: "tvly-tenant-b"}
+out ::web-search::tavily/search("qdrant vs pinecone", {max_results: 5}, tenant)
+```
+
+A key that is present but blank or null is an error naming the key, never a fallback to context. `::web-search::api/resolve(opts)` is the one place this is decided.
 
 ## Notes and limits
 

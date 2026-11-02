@@ -174,7 +174,8 @@ meta {
     Build a watch channel body (pure): `{id, type: "web_hook", address,
     token?, expiration?, params?}`. Options: `channel-id` (default a new
     UUID; at most 64 chars), `channel-token` (echoed back as
-    `X-Goog-Channel-Token`; at most 256 chars), `expiration` (epoch ms) or
+    `X-Goog-Channel-Token`; at most 256 chars; masked in call records),
+    `expiration` (epoch ms) or
     `expires-in-ms` (from `now-ms`), `channel-params` (e.g. `{ttl:
     "86400"}`). `address` must be HTTPS with a valid certificate.
     """
@@ -183,6 +184,7 @@ fn (address: Str, opts: Map, now-ms: Int): Map {
   in-ms get(opts, "expires-in-ms")
   expiration or(get(opts, "expiration"), if(is-some(in-ms), add(now-ms, in-ms), null))
   token get(opts, "channel-token")
+  if(is-str(token), ::ctx/mark-secret(token))
   cond {
     not(starts-with(address, "https://")) => { err("google-calendar: watch channel addresses must be https:// URLs") }
     and(is-some(token), gt(length(or(token, "")), 256)) => { err("google-calendar: channel-token is limited to 256 characters") }
@@ -320,13 +322,15 @@ fn (request: Map): Notification {
 
 verify-channel-token
 meta {
-    doc: """True when the request's `X-Goog-Channel-Token` equals `expected` (constant-time compare). Fails closed: an empty `expected` or a missing header is false."""
+    doc: """True when the request's `X-Goog-Channel-Token` equals `expected` (constant-time compare). Fails closed: an empty `expected` or a missing header is false. `expected` is masked in call records."""
 }
 fn (request: Map, expected: Str?): Bool {
   headers map-keys(or(get(request, "headers"), {}), lowercase)
   got header(headers, "x-goog-channel-token")
+  blank or(is-null(expected), eq(trim(or(expected, "")), ""))
+  if(not(blank), ::ctx/mark-secret(expected))
   cond {
-    or(is-null(expected), eq(trim(or(expected, "")), "")) => { false }
+    blank => { false }
     is-null(got) => { false }
     => { ::hot::random/secure-compare(got, expected) }
   }

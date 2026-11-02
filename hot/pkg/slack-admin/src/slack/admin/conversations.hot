@@ -34,8 +34,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: ArchiveRequest): Map {
-  ::api/call("admin.conversations.archive", request)
+fn
+(request: ArchiveRequest): Map {
+  archive(request, {})
+},
+(request: ArchiveRequest, opts: Map): Map {
+  ::api/call("admin.conversations.archive", request, opts)
 }
 
 UnarchiveRequest type {
@@ -50,8 +54,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: UnarchiveRequest): Map {
-  ::api/call("admin.conversations.unarchive", request)
+fn
+(request: UnarchiveRequest): Map {
+  unarchive(request, {})
+},
+(request: UnarchiveRequest, opts: Map): Map {
+  ::api/call("admin.conversations.unarchive", request, opts)
 }
 
 BulkArchiveRequest type {
@@ -66,8 +74,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: BulkArchiveRequest): Map {
-  ::api/call("admin.conversations.bulkArchive", request)
+fn
+(request: BulkArchiveRequest): Map {
+  bulk-archive(request, {})
+},
+(request: BulkArchiveRequest, opts: Map): Map {
+  ::api/call("admin.conversations.bulkArchive", request, opts)
 }
 
 BulkDeleteRequest type {
@@ -82,8 +94,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: BulkDeleteRequest): Map {
-  ::api/call("admin.conversations.bulkDelete", request)
+fn
+(request: BulkDeleteRequest): Map {
+  bulk-delete(request, {})
+},
+(request: BulkDeleteRequest, opts: Map): Map {
+  ::api/call("admin.conversations.bulkDelete", request, opts)
 }
 
 BulkMoveRequest type {
@@ -99,8 +115,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: BulkMoveRequest): Map {
-  ::api/call("admin.conversations.bulkMove", request)
+fn
+(request: BulkMoveRequest): Map {
+  bulk-move(request, {})
+},
+(request: BulkMoveRequest, opts: Map): Map {
+  ::api/call("admin.conversations.bulkMove", request, opts)
 }
 
 ConvertToPrivateRequest type {
@@ -116,8 +136,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: ConvertToPrivateRequest): Map {
-  ::api/call("admin.conversations.convertToPrivate", request)
+fn
+(request: ConvertToPrivateRequest): Map {
+  convert-to-private(request, {})
+},
+(request: ConvertToPrivateRequest, opts: Map): Map {
+  ::api/call("admin.conversations.convertToPrivate", request, opts)
 }
 
 ConvertToPublicRequest type {
@@ -132,8 +156,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: ConvertToPublicRequest): Map {
-  ::api/call("admin.conversations.convertToPublic", request)
+fn
+(request: ConvertToPublicRequest): Map {
+  convert-to-public(request, {})
+},
+(request: ConvertToPublicRequest, opts: Map): Map {
+  ::api/call("admin.conversations.convertToPublic", request, opts)
 }
 
 CreateRequest type {
@@ -152,8 +180,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: CreateRequest): Map {
-  ::api/call("admin.conversations.create", request)
+fn
+(request: CreateRequest): Map {
+  create(request, {})
+},
+(request: CreateRequest, opts: Map): Map {
+  ::api/call("admin.conversations.create", request, opts)
 }
 
 DeleteConversationRequest type {
@@ -168,8 +200,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: DeleteConversationRequest): Map {
-  ::api/call("admin.conversations.delete", request)
+fn
+(request: DeleteConversationRequest): Map {
+  delete-conversation(request, {})
+},
+(request: DeleteConversationRequest, opts: Map): Map {
+  ::api/call("admin.conversations.delete", request, opts)
 }
 
 DisconnectSharedRequest type {
@@ -185,8 +221,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: DisconnectSharedRequest): Map {
-  ::api/call("admin.conversations.disconnectShared", request)
+fn
+(request: DisconnectSharedRequest): Map {
+  disconnect-shared(request, {})
+},
+(request: DisconnectSharedRequest, opts: Map): Map {
+  ::api/call("admin.conversations.disconnectShared", request, opts)
 }
 
 GetConversationPrefsRequest type {
@@ -201,8 +241,12 @@ meta {
     Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: GetConversationPrefsRequest): Map {
-  ::api/call("admin.conversations.getConversationPrefs", request)
+fn
+(request: GetConversationPrefsRequest): Map {
+  get-conversation-prefs(request, {})
+},
+(request: GetConversationPrefsRequest, opts: Map): Map {
+  ::api/call("admin.conversations.getConversationPrefs", request, opts)
 }
 
 SetConversationPrefsRequest type {
@@ -218,8 +262,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SetConversationPrefsRequest): Map {
-  ::api/call("admin.conversations.setConversationPrefs", request)
+fn
+(request: SetConversationPrefsRequest): Map {
+  set-conversation-prefs(request, {})
+},
+(request: SetConversationPrefsRequest, opts: Map): Map {
+  ::api/call("admin.conversations.setConversationPrefs", request, opts)
 }
 
 GetCustomRetentionRequest type {
@@ -234,8 +282,12 @@ meta {
     Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: GetCustomRetentionRequest): Map {
-  ::api/call("admin.conversations.getCustomRetention", request)
+fn
+(request: GetCustomRetentionRequest): Map {
+  get-custom-retention(request, {})
+},
+(request: GetCustomRetentionRequest, opts: Map): Map {
+  ::api/call("admin.conversations.getCustomRetention", request, opts)
 }
 
 SetCustomRetentionRequest type {
@@ -251,8 +303,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SetCustomRetentionRequest): Map {
-  ::api/call("admin.conversations.setCustomRetention", request)
+fn
+(request: SetCustomRetentionRequest): Map {
+  set-custom-retention(request, {})
+},
+(request: SetCustomRetentionRequest, opts: Map): Map {
+  ::api/call("admin.conversations.setCustomRetention", request, opts)
 }
 
 RemoveCustomRetentionRequest type {
@@ -267,8 +323,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: RemoveCustomRetentionRequest): Map {
-  ::api/call("admin.conversations.removeCustomRetention", request)
+fn
+(request: RemoveCustomRetentionRequest): Map {
+  remove-custom-retention(request, {})
+},
+(request: RemoveCustomRetentionRequest, opts: Map): Map {
+  ::api/call("admin.conversations.removeCustomRetention", request, opts)
 }
 
 GetTeamsRequest type {
@@ -286,8 +346,12 @@ meta {
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `get-teams-all`.
     """
 }
-fn (request: GetTeamsRequest): Map {
-  ::api/call("admin.conversations.getTeams", request)
+fn
+(request: GetTeamsRequest): Map {
+  get-teams(request, {})
+},
+(request: GetTeamsRequest, opts: Map): Map {
+  ::api/call("admin.conversations.getTeams", request, opts)
 }
 
 get-teams-all
@@ -301,7 +365,10 @@ fn
   get-teams-all(request, 1000)
 },
 (request: GetTeamsRequest, max-items: Int): Vec {
-  ::api/paginate("admin.conversations.getTeams", request, "team_ids", max-items)
+  get-teams-all(request, max-items, {})
+},
+(request: GetTeamsRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.conversations.getTeams", request, "team_ids", max-items, opts)
 }
 
 SetTeamsRequest type {
@@ -319,8 +386,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: SetTeamsRequest): Map {
-  ::api/call("admin.conversations.setTeams", request)
+fn
+(request: SetTeamsRequest): Map {
+  set-teams(request, {})
+},
+(request: SetTeamsRequest, opts: Map): Map {
+  ::api/call("admin.conversations.setTeams", request, opts)
 }
 
 InviteRequest type {
@@ -336,8 +407,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: InviteRequest): Map {
-  ::api/call("admin.conversations.invite", request)
+fn
+(request: InviteRequest): Map {
+  invite(request, {})
+},
+(request: InviteRequest, opts: Map): Map {
+  ::api/call("admin.conversations.invite", request, opts)
 }
 
 RenameRequest type {
@@ -353,8 +428,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: RenameRequest): Map {
-  ::api/call("admin.conversations.rename", request)
+fn
+(request: RenameRequest): Map {
+  rename(request, {})
+},
+(request: RenameRequest, opts: Map): Map {
+  ::api/call("admin.conversations.rename", request, opts)
 }
 
 LookupRequest type {
@@ -374,8 +453,12 @@ meta {
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `lookup-all`.
     """
 }
-fn (request: LookupRequest): Map {
-  ::api/call("admin.conversations.lookup", request)
+fn
+(request: LookupRequest): Map {
+  lookup(request, {})
+},
+(request: LookupRequest, opts: Map): Map {
+  ::api/call("admin.conversations.lookup", request, opts)
 }
 
 lookup-all
@@ -389,7 +472,10 @@ fn
   lookup-all(request, 1000)
 },
 (request: LookupRequest, max-items: Int): Vec {
-  ::api/paginate("admin.conversations.lookup", request, "channel_ids", max-items)
+  lookup-all(request, max-items, {})
+},
+(request: LookupRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.conversations.lookup", request, "channel_ids", max-items, opts)
 }
 
 SearchRequest type {
@@ -418,7 +504,10 @@ fn
   search(SearchRequest({}))
 },
 (request: SearchRequest): Map {
-  ::api/call("admin.conversations.search", request)
+  search(request, {})
+},
+(request: SearchRequest, opts: Map): Map {
+  ::api/call("admin.conversations.search", request, opts)
 }
 
 search-all
@@ -435,7 +524,10 @@ fn
   search-all(request, 1000)
 },
 (request: SearchRequest, max-items: Int): Vec {
-  ::api/paginate("admin.conversations.search", request, "conversations", max-items)
+  search-all(request, max-items, {})
+},
+(request: SearchRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.conversations.search", request, "conversations", max-items, opts)
 }
 
 RestrictAccessAddGroupRequest type {
@@ -452,8 +544,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: RestrictAccessAddGroupRequest): Map {
-  ::api/call("admin.conversations.restrictAccess.addGroup", request)
+fn
+(request: RestrictAccessAddGroupRequest): Map {
+  restrict-access-add-group(request, {})
+},
+(request: RestrictAccessAddGroupRequest, opts: Map): Map {
+  ::api/call("admin.conversations.restrictAccess.addGroup", request, opts)
 }
 
 RestrictAccessListGroupsRequest type {
@@ -469,8 +565,12 @@ meta {
     Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: RestrictAccessListGroupsRequest): Map {
-  ::api/call("admin.conversations.restrictAccess.listGroups", request)
+fn
+(request: RestrictAccessListGroupsRequest): Map {
+  restrict-access-list-groups(request, {})
+},
+(request: RestrictAccessListGroupsRequest, opts: Map): Map {
+  ::api/call("admin.conversations.restrictAccess.listGroups", request, opts)
 }
 
 RestrictAccessRemoveGroupRequest type {
@@ -487,8 +587,12 @@ meta {
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: RestrictAccessRemoveGroupRequest): Map {
-  ::api/call("admin.conversations.restrictAccess.removeGroup", request)
+fn
+(request: RestrictAccessRemoveGroupRequest): Map {
+  restrict-access-remove-group(request, {})
+},
+(request: RestrictAccessRemoveGroupRequest, opts: Map): Map {
+  ::api/call("admin.conversations.restrictAccess.removeGroup", request, opts)
 }
 
 EkmListOriginalConnectedChannelInfoRequest type {
@@ -512,7 +616,10 @@ fn
   ekm-list-original-connected-channel-info(EkmListOriginalConnectedChannelInfoRequest({}))
 },
 (request: EkmListOriginalConnectedChannelInfoRequest): Map {
-  ::api/call("admin.conversations.ekm.listOriginalConnectedChannelInfo", request)
+  ekm-list-original-connected-channel-info(request, {})
+},
+(request: EkmListOriginalConnectedChannelInfoRequest, opts: Map): Map {
+  ::api/call("admin.conversations.ekm.listOriginalConnectedChannelInfo", request, opts)
 }
 
 ekm-list-original-connected-channel-info-all
@@ -529,5 +636,8 @@ fn
   ekm-list-original-connected-channel-info-all(request, 1000)
 },
 (request: EkmListOriginalConnectedChannelInfoRequest, max-items: Int): Vec {
-  ::api/paginate("admin.conversations.ekm.listOriginalConnectedChannelInfo", request, "channels", max-items)
+  ekm-list-original-connected-channel-info-all(request, max-items, {})
+},
+(request: EkmListOriginalConnectedChannelInfoRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.conversations.ekm.listOriginalConnectedChannelInfo", request, "channels", max-items, opts)
 }

@@ -33,6 +33,9 @@ fn
   list-customers({})
 },
 (options: Map): Map {
+  list-customers(options, {})
+},
+(options: Map, opts: Map): Map {
   query ```
   query Customers($first: Int!, $after: String, $query: String, $sortKey: CustomerSortKeys, $reverse: Boolean) {
     customers(first: $first, after: $after, query: $query, sortKey: $sortKey, reverse: $reverse) {
@@ -41,8 +44,8 @@ fn
     }
   }
   ```
-  data ::api/graphql(query, ::api/connection-variables(options))
-  data.customers
+  data ::api/graphql(query, ::api/connection-variables(options), opts)
+  if-ok(data, %(%.customers))
 }
 
 search-customers
@@ -54,15 +57,22 @@ fn
   search-customers(search-query, {})
 },
 (search-query: Str, options: Map): Map {
-  list-customers({...options, query: search-query})
+  search-customers(search-query, options, {})
+},
+(search-query: Str, options: Map, opts: Map): Map {
+  list-customers({...options, query: search-query}, opts)
 }
 
 collect-customers
 meta {
     doc: """Follow cursors and return up to `max-items` customers (a Vec of nodes). Options as in `list-customers`."""
 }
-fn (options: Map, max-items: Int): Vec {
+fn
+(options: Map, max-items: Int): Vec {
   ::api/collect(list-customers, options, max-items)
+},
+(options: Map, max-items: Int, opts: Map): Vec {
+  ::api/collect((page-options) { list-customers(page-options, opts) }, options, max-items)
 }
 
 email-query
@@ -77,16 +87,24 @@ find-customer-by-email
 meta {
     doc: """Find a customer by exact email. Returns the customer or null."""
 }
-fn (email: Str): Map? {
-  page list-customers({first: 1, query: email-query(email)})
-  if(is-empty(page.nodes), null, first(page.nodes))
+fn
+(email: Str): Map? {
+  find-customer-by-email(email, {})
+},
+(email: Str, opts: Map): Map? {
+  page list-customers({first: 1, query: email-query(email)}, opts)
+  if-ok(page, (found) { if(is-empty(found.nodes), null, first(found.nodes)) })
 }
 
 get-customer
 meta {
     doc: """One customer by GraphQL id, with the default address. Returns null when not found."""
 }
-fn (id: Str): Map? {
+fn
+(id: Str): Map? {
+  get-customer(id, {})
+},
+(id: Str, opts: Map): Map? {
   query ```
   query Customer($id: ID!) {
     customer(id: $id) {
@@ -95,8 +113,8 @@ fn (id: Str): Map? {
     }
   }
   ```
-  data ::api/graphql(query, {id: id})
-  data.customer
+  data ::api/graphql(query, {id: id}, opts)
+  if-ok(data, %(%.customer))
 }
 
 create-customer
@@ -114,7 +132,11 @@ meta {
     ```
     """
 }
-fn (customer: Map): Map {
+fn
+(customer: Map): Map {
+  create-customer(customer, {})
+},
+(customer: Map, opts: Map): Map {
   mutation ```
   mutation CustomerCreate($input: CustomerInput!) {
     customerCreate(input: $input) {
@@ -123,15 +145,19 @@ fn (customer: Map): Map {
     }
   }
   ```
-  payload ::api/mutate(mutation, {input: customer}, "customerCreate")
-  payload.customer
+  payload ::api/mutate(mutation, {input: customer}, "customerCreate", opts)
+  if-ok(payload, %(%.customer))
 }
 
 update-customer
 meta {
     doc: """Update a customer (`customerUpdate`) from a `CustomerInput` that includes the customer `id` and the fields to change."""
 }
-fn (customer: Map): Map {
+fn
+(customer: Map): Map {
+  update-customer(customer, {})
+},
+(customer: Map, opts: Map): Map {
   mutation ```
   mutation CustomerUpdate($input: CustomerInput!) {
     customerUpdate(input: $input) {
@@ -143,8 +169,8 @@ fn (customer: Map): Map {
   cond {
     is-null(get(customer, "id")) => { err("shopify: update-customer needs the customer id in the input") }
     => {
-      payload ::api/mutate(mutation, {input: customer}, "customerUpdate")
-      payload.customer
+      payload ::api/mutate(mutation, {input: customer}, "customerUpdate", opts)
+      if-ok(payload, %(%.customer))
     }
   }
 }

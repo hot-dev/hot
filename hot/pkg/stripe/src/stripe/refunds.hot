@@ -45,7 +45,7 @@ fn
 (request: CreateRefundRequest): Map {
   create-refund(request, RequestOptions({}))
 },
-(request: CreateRefundRequest, options: RequestOptions): Map {
+(request: CreateRefundRequest, options: RequestOptions | Map): Map {
   api-call("POST", "/v1/refunds", request, options)
 }
 
@@ -58,7 +58,10 @@ fn
   get-refund(refund, {})
 },
 (refund: Str, params: Map): Map {
-  api-call("GET", `/v1/refunds/${seg(refund)}`, params)
+  get-refund(refund, params, {})
+},
+(refund: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/refunds/${seg(refund)}`, params, opts)
 }
 
 update-refund
@@ -69,7 +72,7 @@ fn
 (refund: Str, metadata: Map): Map {
   update-refund(refund, metadata, RequestOptions({}))
 },
-(refund: Str, metadata: Map, options: RequestOptions): Map {
+(refund: Str, metadata: Map, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/refunds/${seg(refund)}`, {metadata: metadata}, options)
 }
 
@@ -81,7 +84,7 @@ fn
 (refund: Str): Map {
   cancel-refund(refund, RequestOptions({}))
 },
-(refund: Str, options: RequestOptions): Map {
+(refund: Str, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/refunds/${seg(refund)}/cancel`, {}, options)
 }
 
@@ -104,5 +107,8 @@ fn
   list-refunds(ListRefundsRequest({}))
 },
 (request: ListRefundsRequest): Map {
-  api-call("GET", "/v1/refunds", request)
+  list-refunds(request, {})
+},
+(request: ListRefundsRequest, opts: Map): Map {
+  api-call("GET", "/v1/refunds", request, opts)
 }

@@ -15,6 +15,9 @@ meta {
     - `shopify.api.version`: optional, overrides the pinned `API_VERSION`
     - `shopify.webhook.secret`: for webhook verification
 
+    Every API-calling function also takes them per call in a trailing
+    `opts` Map (see `::shopify::api`).
+
     **Quick start**
 
     ```hot

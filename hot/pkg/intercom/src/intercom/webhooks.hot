@@ -65,6 +65,6 @@ fn
     // An empty key would make every signature forgeable: fail closed.
     is-empty(secret) => { false }
     is-empty(signature) => { false }
-    => { ::hmac/hmac-verify-hex(secret, ::hot::http/raw-body(request), signature, "sha1") }
+    => { ::hmac/hmac-verify-hex(::ctx/mark-secret(secret), ::hot::http/raw-body(request), signature, "sha1") }
   }
 }

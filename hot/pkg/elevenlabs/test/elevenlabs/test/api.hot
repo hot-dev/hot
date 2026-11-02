@@ -161,7 +161,7 @@ meta ["test"] fn () {
 
 test-http-error-from-response
 meta ["test"] fn () {
-    e ::api/http-error(::hot::http/HttpResponse({
+    e ::api/HttpError(::hot::http/HttpResponse({
         status: 401,
         headers: {},
         body: {detail: {status: "quota_exceeded", message: "This request exceeds your quota."}}

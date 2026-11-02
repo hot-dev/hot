@@ -4,7 +4,7 @@
 
 api-request ::twilio::api/request
 account-url ::twilio::api/account-url
-client-from-ctx ::twilio::api/client-from-ctx
+resolve ::twilio::api/resolve
 Client ::twilio::api/Client
 HttpError ::twilio::api/HttpError
 is-ok-response ::hot::http/is-ok-response
@@ -101,7 +101,7 @@ fn (request: CreateCallRequest): Map {
 
 create-call
 meta {
-    ctx: {"twilio.account.sid": {required: true}, "twilio.auth.token": {required: false}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}, "twilio.auth.token": {required: false}},
     doc: """
 POST /Accounts/{AccountSid}/Calls.json - Initiate an outbound phone call. Provide either `Url` (TwiML endpoint), `Twiml` (inline TwiML), or `ApplicationSid`.
 
@@ -137,11 +137,18 @@ response ::calls/create-call(::calls/CreateCallRequest({
 }
 fn
 (request: CreateCallRequest): Call {
-  create-call(client-from-ctx(), request)
+  create-call(request, {})
+},
+(request: CreateCallRequest, opts: Map): Call {
+  resolve(opts) |> if-ok((client) { create-call(client, request) })
 },
 (client: Client, request: CreateCallRequest): Call {
   response api-request(client, "POST", `${account-url(client)}/Calls.json`, {}, create-call-body(request))
-  if(is-ok-response(response), Call(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Call(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetCallRequest type {
@@ -150,7 +157,7 @@ GetCallRequest type {
 
 get-call
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 GET /Accounts/{AccountSid}/Calls/{Sid}.json - Get details of a specific call. Returns status, duration, price, and timestamps.
 
@@ -169,11 +176,18 @@ response.duration  // => "30"
 }
 fn
 (request: GetCallRequest): Call {
-  get-call(client-from-ctx(), request)
+  get-call(request, {})
+},
+(request: GetCallRequest, opts: Map): Call {
+  resolve(opts) |> if-ok((client) { get-call(client, request) })
 },
 (client: Client, request: GetCallRequest): Call {
   response api-request(client, "GET", `${account-url(client)}/Calls/${::uri/encode(request.sid)}.json`, {}, {})
-  if(is-ok-response(response), Call(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Call(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListCallsRequest
@@ -237,29 +251,39 @@ fn (request: ListCallsRequest): Str {
 
 list-calls
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """GET /Accounts/{AccountSid}/Calls.json - List calls, newest first. Filter by `To`, `From`, `Status`, parent call, or date range. Returns one page; follow it with `::twilio::api/next-page`, or use `list-all-calls`."""
 }
 fn
 (request: ListCallsRequest): ListCallsResponse {
-  list-calls(client-from-ctx(), request)
+  list-calls(request, {})
+},
+(request: ListCallsRequest, opts: Map): ListCallsResponse {
+  resolve(opts) |> if-ok((client) { list-calls(client, request) })
 },
 (client: Client, request: ListCallsRequest): ListCallsResponse {
   response api-request(client, "GET", `${account-url(client)}/Calls.json${list-calls-query(request)}`, {}, {})
-  if(is-ok-response(response), ListCallsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListCallsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 list-all-calls
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """Collect up to `limit` calls matching `request`, following Twilio's page links as needed."""
 }
 fn
 (request: ListCallsRequest, limit: Int): Vec<Map> {
-  list-all-calls(client-from-ctx(), request, limit)
+  list-all-calls(request, limit, {})
+},
+(request: ListCallsRequest, limit: Int, opts: Map): Vec<Map> {
+  resolve(opts) |> if-ok((client) { list-all-calls(client, request, limit) })
 },
 (client: Client, request: ListCallsRequest, limit: Int): Vec<Map> {
-  ::twilio::api/collect-pages(client, untype(list-calls(client, request)), "calls", limit)
+  if-ok(list-calls(client, request), (page) { ::twilio::api/collect-pages(client, untype(page), "calls", limit) })
 }
 
 UpdateCallRequest type {
@@ -285,7 +309,7 @@ fn (request: UpdateCallRequest): Map {
 
 update-call
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """
 POST /Accounts/{AccountSid}/Calls/{Sid}.json - Modify a live call. Set `Status: "completed"` to hang up (or `"canceled"` for a queued/ringing call), or provide a new `Url`/`Twiml` to redirect it.
 
@@ -300,11 +324,18 @@ POST /Accounts/{AccountSid}/Calls/{Sid}.json - Modify a live call. Set `Status: 
 }
 fn
 (request: UpdateCallRequest): Call {
-  update-call(client-from-ctx(), request)
+  update-call(request, {})
+},
+(request: UpdateCallRequest, opts: Map): Call {
+  resolve(opts) |> if-ok((client) { update-call(client, request) })
 },
 (client: Client, request: UpdateCallRequest): Call {
   response api-request(client, "POST", `${account-url(client)}/Calls/${::uri/encode(request.sid)}.json`, {}, update-call-body(request))
-  if(is-ok-response(response), Call(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { Call(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteCallRequest type {
@@ -313,12 +344,15 @@ DeleteCallRequest type {
 
 delete-call
 meta {
-    ctx: {"twilio.account.sid": {required: true}},
+    ctx: {"twilio.account.sid": {required: false, secret: false}},
     doc: """DELETE /Accounts/{AccountSid}/Calls/{Sid}.json - Delete a call record. The call log is permanently removed."""
 }
 fn
 (request: DeleteCallRequest): Bool {
-  delete-call(client-from-ctx(), request)
+  delete-call(request, {})
+},
+(request: DeleteCallRequest, opts: Map): Bool {
+  resolve(opts) |> if-ok((client) { delete-call(client, request) })
 },
 (client: Client, request: DeleteCallRequest): Bool {
   ::twilio::api/delete-request(client, `${account-url(client)}/Calls/${::uri/encode(request.sid)}.json`)

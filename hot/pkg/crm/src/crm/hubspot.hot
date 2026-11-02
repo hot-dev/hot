@@ -178,13 +178,17 @@ fn (body: Str, subject: Any): Str {
 
 is-not-found fn (out: Result): Bool {
   match out {
-    Result.Err => { and(is-map(out), eq(get(out, "status"), 404)) }
+    Result.Err => { and(is-map(untype(out)), eq(get(untype(out), "status"), 404)) }
     _ => { false }
   }
 }
 
-find-contact fn (email: Str): Any {
-  out ::objects/get-object("contacts", email, CONTACT_PROPERTIES, {idProperty: "email"})
+find-contact fn
+(email: Str): Any {
+  find-contact(email, {})
+},
+(email: Str, opts: Map): Any {
+  out ::objects/get-object("contacts", email, CONTACT_PROPERTIES, {idProperty: "email"}, opts)
   cond {
     is-not-found(out) => { null }
     is-err(out) => { out }
@@ -192,8 +196,12 @@ find-contact fn (email: Str): Any {
   }
 }
 
-upsert-contact fn (fields: Map): ::crm/Contact {
-  out ::objects/batch-upsert("contacts", "email", [build-contact-upsert(fields)])
+upsert-contact fn
+(fields: Map): ::crm/Contact {
+  upsert-contact(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Contact {
+  out ::objects/batch-upsert("contacts", "email", [build-contact-upsert(fields)], opts)
   results cond {
     is-err(out) => { [] }
     => { or(get(out, "results"), []) }
@@ -205,7 +213,7 @@ upsert-contact fn (fields: Map): ::crm/Contact {
     is-empty(results) => { err({message: "crm: HubSpot upsert returned no contact", body: untype(out)}) }
     => {
       contact first(results)
-      linked if(is-blank-value(company-id), null, ::objects/associate("contacts", Str(contact.id), "companies", Str(company-id)))
+      linked if(is-blank-value(company-id), null, ::objects/associate("contacts", Str(contact.id), "companies", Str(company-id), opts))
       normalized normalize-contact(contact)
       cond {
         is-err(linked) => { linked }
@@ -220,17 +228,25 @@ upsert-contact fn (fields: Map): ::crm/Contact {
 // Activities
 // ============================================================================
 
-log-activity fn (contact-id: Str, body: Str, options: Map): ::crm/Activity {
+log-activity fn
+(contact-id: Str, body: Str, options: Map): ::crm/Activity {
+  log-activity(contact-id, body, options, {})
+},
+(contact-id: Str, body: Str, options: Map, opts: Map): ::crm/Activity {
   subject get(options, "subject")
-  note ::notes/log-note("contacts", contact-id, note-text(body, subject))
+  note ::notes/log-note("contacts", contact-id, note-text(body, subject), opts)
   cond {
     is-err(note) => { note }
     => { normalize-activity(note, subject) }
   }
 }
 
-list-activities fn (contact-id: Str, limit: Int): Vec {
-  out ::objects/search-objects("notes", build-note-search(contact-id, limit))
+list-activities fn
+(contact-id: Str, limit: Int): Vec {
+  list-activities(contact-id, limit, {})
+},
+(contact-id: Str, limit: Int, opts: Map): Vec {
+  out ::objects/search-objects("notes", build-note-search(contact-id, limit), opts)
   cond {
     is-err(out) => { out }
     => { map(out.results, (n) { normalize-activity(n, null) }) }
@@ -241,12 +257,16 @@ list-activities fn (contact-id: Str, limit: Int): Vec {
 // Companies
 // ============================================================================
 
-find-company fn (domain: Str): Any {
+find-company fn
+(domain: Str): Any {
+  find-company(domain, {})
+},
+(domain: Str, opts: Map): Any {
   out ::objects/search-objects("companies", {
     filters: [{propertyName: "domain", operator: "EQ", value: domain}],
     properties: COMPANY_PROPERTIES,
     limit: 1
-  })
+  }, opts)
   cond {
     is-err(out) => { out }
     is-empty(out.results) => { null }
@@ -254,13 +274,17 @@ find-company fn (domain: Str): Any {
   }
 }
 
-upsert-company fn (fields: Map): ::crm/Company {
-  existing find-company(fields.domain)
+upsert-company fn
+(fields: Map): ::crm/Company {
+  upsert-company(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Company {
+  existing find-company(fields.domain, opts)
   props filter-vals({domain: fields.domain, name: get(fields, "name")}, is-some)
   written cond {
     is-err(existing) => { existing }
-    is-null(existing) => { ::companies/create-company(props) }
-    => { ::companies/update-company(existing.id, props) }
+    is-null(existing) => { ::companies/create-company(props, opts) }
+    => { ::companies/update-company(existing.id, props, opts) }
   }
 
   cond {
@@ -273,32 +297,44 @@ upsert-company fn (fields: Map): ::crm/Company {
 // Deals
 // ============================================================================
 
-link-deal fn (deal-id: Str, fields: Map): Any {
+link-deal fn
+(deal-id: Str, fields: Map): Any {
+  link-deal(deal-id, fields, {})
+},
+(deal-id: Str, fields: Map, opts: Map): Any {
   company-id get(fields, "company-id")
   contact-id get(fields, "contact-id")
-  company-link if(is-blank-value(company-id), null, ::objects/associate("deals", deal-id, "companies", Str(company-id)))
+  company-link if(is-blank-value(company-id), null, ::objects/associate("deals", deal-id, "companies", Str(company-id), opts))
   contact-link cond {
     is-err(company-link) => { company-link }
     is-blank-value(contact-id) => { null }
-    => { ::objects/associate("deals", deal-id, "contacts", Str(contact-id)) }
+    => { ::objects/associate("deals", deal-id, "contacts", Str(contact-id), opts) }
   }
 
   contact-link
 }
 
-find-deals fn (criteria: Map): Vec {
-  out ::objects/search-objects("deals", build-deal-search(criteria))
+find-deals fn
+(criteria: Map): Vec {
+  find-deals(criteria, {})
+},
+(criteria: Map, opts: Map): Vec {
+  out ::objects/search-objects("deals", build-deal-search(criteria), opts)
   cond {
     is-err(out) => { out }
     => { map(out.results, (d) { normalize-deal(d, get(criteria, "company-id")) }) }
   }
 }
 
-finish-deal fn (deal: Any, fields: Map): ::crm/Deal {
+finish-deal fn
+(deal: Result, fields: Map): ::crm/Deal {
+  finish-deal(deal, fields, {})
+},
+(deal: Result, fields: Map, opts: Map): ::crm/Deal {
   cond {
     is-err(deal) => { deal }
     => {
-      linked link-deal(Str(deal.id), fields)
+      linked link-deal(Str(deal.id), fields, opts)
       cond {
         is-err(linked) => { linked }
         => { normalize-deal(deal, get(fields, "company-id")) }
@@ -307,23 +343,35 @@ finish-deal fn (deal: Any, fields: Map): ::crm/Deal {
   }
 }
 
-create-deal fn (fields: Map): ::crm/Deal {
+create-deal fn
+(fields: Map): ::crm/Deal {
+  create-deal(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Deal {
   cond {
     is-blank-value(get(fields, "stage")) => { err("crm: a HubSpot deal needs 'stage' (a dealstage id)") }
-    => { finish-deal(::objects/create-object("deals", deal-properties(fields)), fields) }
+    => { finish-deal(::objects/create-object("deals", deal-properties(fields), opts), fields, opts) }
   }
 }
 
-update-deal fn (id: Str, fields: Map): ::crm/Deal {
+update-deal fn
+(id: Str, fields: Map): ::crm/Deal {
+  update-deal(id, fields, {})
+},
+(id: Str, fields: Map, opts: Map): ::crm/Deal {
   props deal-properties(fields)
   written cond {
-    is-empty(props) => { ::objects/get-object("deals", id, DEAL_PROPERTIES) }
-    => { ::objects/update-object("deals", id, props) }
+    is-empty(props) => { ::objects/get-object("deals", id, DEAL_PROPERTIES, {}, opts) }
+    => { ::objects/update-object("deals", id, props, opts) }
   }
 
-  finish-deal(written, fields)
+  finish-deal(written, fields, opts)
 }
 
-move-stage fn (id: Str, stage: Str): ::crm/Deal {
-  update-deal(id, {stage: stage})
+move-stage fn
+(id: Str, stage: Str): ::crm/Deal {
+  move-stage(id, stage, {})
+},
+(id: Str, stage: Str, opts: Map): ::crm/Deal {
+  update-deal(id, {stage: stage}, opts)
 }

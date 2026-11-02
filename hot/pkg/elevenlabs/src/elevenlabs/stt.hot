@@ -87,15 +87,15 @@ stt-path fn (request: SpeechToTextRequest): Str {
   `/v1/speech-to-text${::api/query-string({enable_logging: request.enable_logging})}`
 }
 
-post-multipart fn (request: SpeechToTextRequest, audio: Any, filename: Str): Map {
+post-multipart fn (request: SpeechToTextRequest, audio: Any, filename: Str, opts: Map): Map {
   boundary `hot-elevenlabs-${Uuid()}`
   ::api/json("POST", stt-path(request), {Content-Type: `multipart/form-data; boundary=${boundary}`},
-    multipart-body(request, audio, filename, boundary))
+    multipart-body(request, audio, filename, boundary), opts)
 }
 
 speech-to-text
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """
     POST /v1/speech-to-text: transcribe audio `Bytes` (any common audio
     or video format, up to 5 GB). `filename` (default "audio")
@@ -126,12 +126,18 @@ fn
   speech-to-text(audio, request, "audio")
 },
 (audio: Bytes, request: SpeechToTextRequest, filename: Str): Map {
-  post-multipart(request, audio, filename)
+  speech-to-text(audio, request, filename, {})
+},
+(audio: Bytes, request: SpeechToTextRequest, opts: Map): Map {
+  speech-to-text(audio, request, "audio", opts)
+},
+(audio: Bytes, request: SpeechToTextRequest, filename: Str, opts: Map): Map {
+  post-multipart(request, audio, filename, opts)
 }
 
 speech-to-text-url
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """
     POST /v1/speech-to-text with `source_url`: transcribe a hosted file
     (HTTPS URL, including YouTube and TikTok links) without uploading
@@ -150,30 +156,41 @@ fn
   speech-to-text-url(source-url, SpeechToTextRequest({}))
 },
 (source-url: Str, request: SpeechToTextRequest): Map {
+  speech-to-text-url(source-url, request, {})
+},
+(source-url: Str, request: SpeechToTextRequest, opts: Map): Map {
   boundary `hot-elevenlabs-${Uuid()}`
   body concat(
     ::api/multipart-field(boundary, "source_url", source-url),
     multipart-body(request, null, "", boundary)
   )
-  ::api/json("POST", stt-path(request), {Content-Type: `multipart/form-data; boundary=${boundary}`}, body)
+  ::api/json("POST", stt-path(request), {Content-Type: `multipart/form-data; boundary=${boundary}`}, body, opts)
 }
 
 get-transcript
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """GET /v1/speech-to-text/transcripts/{transcription_id}: fetch a stored transcript (for example one produced through a webhook request)."""
 }
-fn (transcription-id: Str): Map {
-  ::api/json("GET", `/v1/speech-to-text/transcripts/${::api/path-segment(transcription-id)}`)
+fn
+(transcription-id: Str): Map {
+  get-transcript(transcription-id, {})
+},
+(transcription-id: Str, opts: Map): Map {
+  ::api/json("GET", `/v1/speech-to-text/transcripts/${::api/path-segment(transcription-id)}`, {}, "", opts)
 }
 
 delete-transcript
 meta {
-    ctx: {"elevenlabs.api.key": {required: true}},
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """DELETE /v1/speech-to-text/transcripts/{transcription_id}: delete a stored transcript."""
 }
-fn (transcription-id: Str): Any {
-  ::api/json("DELETE", `/v1/speech-to-text/transcripts/${::api/path-segment(transcription-id)}`)
+fn
+(transcription-id: Str): Any {
+  delete-transcript(transcription-id, {})
+},
+(transcription-id: Str, opts: Map): Any {
+  ::api/json("DELETE", `/v1/speech-to-text/transcripts/${::api/path-segment(transcription-id)}`, {}, "", opts)
 }
 
 transcript-text

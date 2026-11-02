@@ -19,6 +19,8 @@ Add this to the `deps` in your `hot.hot` file:
 
 New Deepgram accounts come with free credit, enough to run the integration suite many times.
 
+Both variables can also be passed per call; see [Per-call credentials](#per-call-credentials).
+
 ## Quick start
 
 ```hot
@@ -117,7 +119,28 @@ voices map(models.tts, (m) { m.canonical_name })
 
 ## Errors
 
-Non-2xx responses return an Err carrying `::deepgram::api/HttpError` with `status`, `headers`, `body`, and a readable `message` built from Deepgram's error body (for example `Deepgram API error (HTTP 401): INVALID_AUTH: Invalid credentials.`). An unset `deepgram.api.key` returns an Err before any request is sent.
+Non-2xx responses return an Err carrying `::deepgram::api/HttpError` with `status`, `headers`, `body`, and a readable `message` built from Deepgram's error body (for example `Deepgram API error (HTTP 401): INVALID_AUTH: Invalid credentials.`). A missing API key returns an Err before any request is sent.
+
+## Per-call credentials
+
+Every function that calls Deepgram takes an optional trailing `opts` Map, so one run can act for many tenants and parallel flows don't share credentials. Credentials in `opts` are masked in call records, and nothing from `opts` is written to ctx.
+
+| Key | Effect |
+|---|---|
+| `api-key` | The API key for this call, instead of `deepgram.api.key` |
+| `base-url` | Another API root, such as a proxy. Needs an `api-key` in the same `opts`; context credentials are never sent to a per-call URL |
+| `callback-secret` | The shared secret the async functions send with this call, instead of `deepgram.callback.secret` |
+
+`opts` always comes last. Where a function already takes `options`, pass `{}` for those.
+
+```hot
+tenant {api-key: "tenant-b-key"}
+out ::deepgram/transcribe-url("https://static.deepgram.com/examples/Bueller-Life-moves-pretty-fast.wav", {}, tenant)
+audio ::deepgram/speak("Your build is green.", {}, tenant)
+models ::deepgram/list-models(tenant)
+```
+
+An `api-key` or `callback-secret` that is present but blank or null is an error naming the key, never a fallback to context. `::deepgram::api/resolve(opts)` is the one place this is decided. The verifiers in `::deepgram::callbacks` take an explicit secret too, and mask it the same way.
 
 ## Notes and limits
 

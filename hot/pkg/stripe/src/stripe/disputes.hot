@@ -26,7 +26,10 @@ fn
   list-disputes(ListDisputesRequest({}))
 },
 (request: ListDisputesRequest): Map {
-  api-call("GET", "/v1/disputes", request)
+  list-disputes(request, {})
+},
+(request: ListDisputesRequest, opts: Map): Map {
+  api-call("GET", "/v1/disputes", request, opts)
 }
 
 get-dispute
@@ -38,7 +41,10 @@ fn
   get-dispute(dispute, {})
 },
 (dispute: Str, params: Map): Map {
-  api-call("GET", `/v1/disputes/${seg(dispute)}`, params)
+  get-dispute(dispute, params, {})
+},
+(dispute: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/disputes/${seg(dispute)}`, params, opts)
 }
 
 UpdateDisputeRequest type {
@@ -73,7 +79,7 @@ fn
 (dispute: Str, request: UpdateDisputeRequest): Map {
   update-dispute(dispute, request, RequestOptions({}))
 },
-(dispute: Str, request: UpdateDisputeRequest, options: RequestOptions): Map {
+(dispute: Str, request: UpdateDisputeRequest, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/disputes/${seg(dispute)}`, request, options)
 }
 
@@ -85,6 +91,6 @@ fn
 (dispute: Str): Map {
   close-dispute(dispute, RequestOptions({}))
 },
-(dispute: Str, options: RequestOptions): Map {
+(dispute: Str, options: RequestOptions | Map): Map {
   api-call("POST", `/v1/disputes/${seg(dispute)}/close`, {}, options)
 }

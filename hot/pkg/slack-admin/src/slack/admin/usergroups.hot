@@ -33,8 +33,12 @@ meta {
     Scope: `admin.usergroups:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: AddChannelsRequest): Map {
-  ::api/call("admin.usergroups.addChannels", request)
+fn
+(request: AddChannelsRequest): Map {
+  add-channels(request, {})
+},
+(request: AddChannelsRequest, opts: Map): Map {
+  ::api/call("admin.usergroups.addChannels", request, opts)
 }
 
 AddTeamsRequest type {
@@ -51,8 +55,12 @@ meta {
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: AddTeamsRequest): Map {
-  ::api/call("admin.usergroups.addTeams", request)
+fn
+(request: AddTeamsRequest): Map {
+  add-teams(request, {})
+},
+(request: AddTeamsRequest, opts: Map): Map {
+  ::api/call("admin.usergroups.addTeams", request, opts)
 }
 
 ListChannelsRequest type {
@@ -69,8 +77,12 @@ meta {
     Scope: `admin.usergroups:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: ListChannelsRequest): Map {
-  ::api/call("admin.usergroups.listChannels", request)
+fn
+(request: ListChannelsRequest): Map {
+  list-channels(request, {})
+},
+(request: ListChannelsRequest, opts: Map): Map {
+  ::api/call("admin.usergroups.listChannels", request, opts)
 }
 
 RemoveChannelsRequest type {
@@ -86,6 +98,10 @@ meta {
     Scope: `admin.usergroups:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     """
 }
-fn (request: RemoveChannelsRequest): Map {
-  ::api/call("admin.usergroups.removeChannels", request)
+fn
+(request: RemoveChannelsRequest): Map {
+  remove-channels(request, {})
+},
+(request: RemoveChannelsRequest, opts: Map): Map {
+  ::api/call("admin.usergroups.removeChannels", request, opts)
 }

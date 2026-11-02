@@ -1,6 +1,6 @@
 ::intercom::events ns
 meta {
-    ctx: {"intercom.token": {required: true}},
+    ctx: {"intercom.token": {required: false}},
     doc: """Data events: record what a contact did (`upgraded-plan`, `invited-teammate`) so it shows on their profile and can drive segments and messages."""
 }
 
@@ -45,7 +45,10 @@ fn
   submit-event(event-name, contact, {})
 },
 (event-name: Str, contact: Map, options: Map): Any {
-  ::api/request("POST", "/events", build-event-body(event-name, contact, options))
+  submit-event(event-name, contact, options, {})
+},
+(event-name: Str, contact: Map, options: Map, opts: Map): Any {
+  ::api/request("POST", "/events", build-event-body(event-name, contact, options), opts)
 }
 
 list-events
@@ -57,5 +60,8 @@ fn
   list-events(contact, {})
 },
 (contact: Map, options: Map): Any {
-  ::api/request("GET", `/events${::api/query-string({type: "user", ...contact, ...options})}`, "")
+  list-events(contact, options, {})
+},
+(contact: Map, options: Map, opts: Map): Any {
+  ::api/request("GET", `/events${::api/query-string({type: "user", ...contact, ...options})}`, "", opts)
 }

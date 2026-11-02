@@ -21,32 +21,34 @@ pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             );
         }
         match default_value {
-            Val::Str(default) => return HotResult::Ok(Val::from(default.clone())),
-            _ => return HotResult::Err(Val::from("Default value must be a string")),
+            Val::Str(_) | Val::Null => return HotResult::Ok(default_value.clone()),
+            _ => return HotResult::Err(Val::from("Default value must be a string or null")),
         }
     }
 
     // Normal mode: read from environment. A `HOT_*` setting may come from
     // `<NAME>_FILE`, as it does for the configuration overlay.
     match (name, default_value) {
-        (Val::Str(n), Val::Str(default)) if n.starts_with("HOT_") => {
+        (Val::Str(n), Val::Str(_) | Val::Null) if n.starts_with("HOT_") => {
             match crate::environment::read_optional(n) {
                 Ok(Some(value)) => HotResult::Ok(Val::from(value)),
-                Ok(None) => HotResult::Ok(Val::from(default.clone())),
+                Ok(None) => HotResult::Ok(default_value.clone()),
                 Err(e) => HotResult::Err(Val::from(e)),
             }
         }
-        (Val::Str(n), Val::Str(default)) => match std::env::var(&**n) {
+        (Val::Str(n), Val::Str(_) | Val::Null) => match std::env::var(&**n) {
             Ok(value) => HotResult::Ok(Val::from(value)),
-            Err(_) => HotResult::Ok(Val::from(default.clone())),
+            Err(_) => HotResult::Ok(default_value.clone()),
         },
-        (_, Val::Str(default)) => {
+        (_, Val::Str(_) | Val::Null) => {
             // If name is not a string, return the default
-            HotResult::Ok(Val::from(default.clone()))
+            HotResult::Ok(default_value.clone())
         }
         (_, _) => {
-            // If default is not a string, return error
-            HotResult::Err(Val::from("Both name and default value must be strings"))
+            // If default is neither a string nor null, return error
+            HotResult::Err(Val::from(
+                "Name must be a string and default value a string or null",
+            ))
         }
     }
 }

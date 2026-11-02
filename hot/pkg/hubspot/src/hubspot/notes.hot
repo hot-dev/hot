@@ -35,6 +35,10 @@ meta {
     ```
     """
 }
-fn (object-type: Str, record-id: Str, body: Str): Map {
-  ::engagements/create-note({hs_note_body: body}, [{type: object-type, id: record-id}])
+fn
+(object-type: Str, record-id: Str, body: Str): Map {
+  log-note(object-type, record-id, body, {})
+},
+(object-type: Str, record-id: Str, body: Str, opts: Map): Map {
+  ::engagements/create-note({hs_note_body: body}, [{type: object-type, id: record-id}], opts)
 }

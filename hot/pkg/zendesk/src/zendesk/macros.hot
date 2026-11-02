@@ -1,6 +1,6 @@
 ::zendesk::macros ns
 meta {
-    ctx: {"zendesk.subdomain": {required: true, secret: false}},
+    ctx: {"zendesk.subdomain": {required: false, secret: false}},
     doc: """
     Macros: canned responses and field changes. Zendesk's "apply"
     endpoints only preview a macro; `apply-macro` previews and then
@@ -20,31 +20,46 @@ fn
   list-macros({})
 },
 (options: Map): Any {
-  ::api/list-page("/macros", options)
+  list-macros(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/list-page("/macros", options, opts)
 }
 
 list-active-macros
 meta {
     doc: """GET /macros/active - Active macros available to the user: `{macros}`."""
 }
-fn (): Any {
-  ::api/request("GET", "/macros/active", "")
+fn
+(): Any {
+  list-active-macros({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/macros/active", "", opts)
 }
 
 get-macro
 meta {
     doc: """GET /macros/{id} - One macro with its `actions`."""
 }
-fn (id: Any): Any {
-  ::api/request("GET", `/macros/${::api/path-segment(id)}`, "")
+fn
+(id: Any): Any {
+  get-macro(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/macros/${::api/path-segment(id)}`, "", opts)
 }
 
 preview-macro
 meta {
     doc: """GET /tickets/{ticket_id}/macros/{id}/apply - What the ticket would look like after the macro: `{result: {ticket, comment?}}`. Changes nothing."""
 }
-fn (ticket-id: Any, macro-id: Any): Any {
-  ::api/request("GET", `/tickets/${::api/path-segment(ticket-id)}/macros/${::api/path-segment(macro-id)}/apply`, "")
+fn
+(ticket-id: Any, macro-id: Any): Any {
+  preview-macro(ticket-id, macro-id, {})
+},
+(ticket-id: Any, macro-id: Any, opts: Map): Any {
+  ::api/request("GET", `/tickets/${::api/path-segment(ticket-id)}/macros/${::api/path-segment(macro-id)}/apply`, "", opts)
 }
 
 macro-update
@@ -90,10 +105,14 @@ meta {
     ```
     """
 }
-fn (ticket-id: Any, macro-id: Any): Any {
-  preview preview-macro(ticket-id, macro-id)
+fn
+(ticket-id: Any, macro-id: Any): Any {
+  apply-macro(ticket-id, macro-id, {})
+},
+(ticket-id: Any, macro-id: Any, opts: Map): Any {
+  preview preview-macro(ticket-id, macro-id, opts)
   cond {
     is-err(preview) => { preview }
-    => { ::zendesk::tickets/update-ticket(ticket-id, macro-update(or(get(preview, "result"), {}))) }
+    => { ::zendesk::tickets/update-ticket(ticket-id, macro-update(or(get(preview, "result"), {})), opts) }
   }
 }

@@ -16,11 +16,32 @@ hot.project.my-app.deps {
 
 | Context Variable | Required | Description |
 |---|---|---|
-| `cal-com.api.key` | yes | API key (`cal_live_...` / `cal_test_...`) from Settings → Developer → API keys, or a managed user's access token |
+| `cal-com.api.key` | yes, unless every call passes `api-key` | API key (`cal_live_...` / `cal_test_...`) from Settings → Developer → API keys, or a managed user's access token |
 | `cal-com.url` | no | Base URL override for self-hosted Cal.com, e.g. `https://cal.example.com/api/v2`. Defaults to `https://api.cal.com/v2` |
 | `cal-com.webhook.secret` | for webhooks | The secret you set on the webhook. Used by `::cal-com::webhooks/verify-request` |
 
 Cal.com v2 versions each endpoint family separately with the `cal-api-version` header. Each call sends its family's version: event types `2024-06-14`, slots `2024-09-04`, bookings `2024-08-13`, schedules `2024-06-11`. Webhooks and `/me` take no version header. A self-hosted instance must be recent enough to serve those versions.
+
+## Per-call credentials
+
+Every function that calls Cal.com takes an optional trailing `opts` Map, so one run can act for many accounts and parallel flows don't share credentials. Nothing from `opts` is written to ctx, and an `api-key` from `opts` is masked in call records.
+
+| Key | Effect |
+|---|---|
+| `api-key` | The API key or managed user's access token for this call, instead of `cal-com.api.key` |
+| `base-url` | Another API root, such as a self-hosted instance. Needs an `api-key` in the same `opts`; `cal-com.api.key` is never sent to a per-call URL |
+
+`opts` always comes last. Where a function already takes `options`, pass `{}` for those.
+
+```hot
+::bookings ::cal-com::bookings
+
+tenant {api-key: "cal_live_tenant_b"}
+page ::bookings/list-bookings({status: "upcoming", take: 50}, tenant)
+booking ::bookings/get-booking("bk_123", tenant)
+```
+
+An `api-key` that is present but blank or null is an error naming the key, never a fallback to `cal-com.api.key`. `::cal-com::api/resolve(opts)` is the one place this is decided.
 
 ## Quick start
 
@@ -71,7 +92,7 @@ booking ::bookings/create-booking({
 - Per event type: `list-event-type-webhooks`, `get-event-type-webhook`, `create-event-type-webhook(event-type-id, url, triggers, options?)`, `update-event-type-webhook`, `delete-event-type-webhook`
 
 **Escape hatch** (`::cal-com::api`)
-- `request(method, path, body, api-version)` returns `data`. `request-envelope` returns the whole body. Pass `""` for no body or no version header
+- `request(method, path, body, api-version, opts?)` returns `data`. `request-envelope` returns the whole body. Pass `""` for no body or no version header
 
 ## Webhooks
 

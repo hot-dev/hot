@@ -37,8 +37,12 @@ meta {
     ```
     """
 }
-fn (request: GetChannelRequest): Map {
-  ::api/call("GET", `/channels/${seg(request.channel_id)}`)
+fn
+(request: GetChannelRequest): Map {
+  get-channel(request, {})
+},
+(request: GetChannelRequest, opts: Map): Map {
+  ::api/call("GET", `/channels/${seg(request.channel_id)}`, {}, opts)
 }
 
 ModifyChannelRequest type {
@@ -95,11 +99,15 @@ meta {
     ```
     """
 }
-fn (request: ModifyChannelRequest): Map {
+fn
+(request: ModifyChannelRequest): Map {
+  modify-channel(request, {})
+},
+(request: ModifyChannelRequest, opts: Map): Map {
   ::api/call("PATCH", `/channels/${seg(request.channel_id)}`, {
     body: ::api/body(request, ["channel_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 DeleteChannelRequest type {
@@ -111,8 +119,12 @@ delete-channel
 meta {
     doc: """DELETE /channels/{channel_id} - Delete a guild channel or thread, or close a DM. Returns the deleted channel. Needs MANAGE_CHANNELS (MANAGE_THREADS for threads). Deleting a category leaves its channels in place."""
 }
-fn (request: DeleteChannelRequest): Map {
-  ::api/call("DELETE", `/channels/${seg(request.channel_id)}`, {reason: request.reason})
+fn
+(request: DeleteChannelRequest): Map {
+  delete-channel(request, {})
+},
+(request: DeleteChannelRequest, opts: Map): Map {
+  ::api/call("DELETE", `/channels/${seg(request.channel_id)}`, {reason: request.reason}, opts)
 }
 
 EditChannelPermissionsRequest type {
@@ -147,11 +159,15 @@ meta {
     ```
     """
 }
-fn (request: EditChannelPermissionsRequest): Bool {
+fn
+(request: EditChannelPermissionsRequest): Bool {
+  edit-channel-permissions(request, {})
+},
+(request: EditChannelPermissionsRequest, opts: Map): Bool {
   ::api/call-ok("PUT", `/channels/${seg(request.channel_id)}/permissions/${seg(request.overwrite_id)}`, {
     body: ::api/body(request, ["channel_id", "overwrite_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 DeleteChannelPermissionRequest type {
@@ -164,8 +180,12 @@ delete-channel-permission
 meta {
     doc: """DELETE /channels/{channel_id}/permissions/{overwrite_id} - Remove a role or member permission overwrite. Needs MANAGE_ROLES."""
 }
-fn (request: DeleteChannelPermissionRequest): Bool {
-  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/permissions/${seg(request.overwrite_id)}`, {reason: request.reason})
+fn
+(request: DeleteChannelPermissionRequest): Bool {
+  delete-channel-permission(request, {})
+},
+(request: DeleteChannelPermissionRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/permissions/${seg(request.overwrite_id)}`, {reason: request.reason}, opts)
 }
 
 GetChannelInvitesRequest type {
@@ -176,8 +196,12 @@ get-channel-invites
 meta {
     doc: """GET /channels/{channel_id}/invites - Invites for a channel, with metadata. Needs MANAGE_CHANNELS."""
 }
-fn (request: GetChannelInvitesRequest): Vec<Map> {
-  ::api/call("GET", `/channels/${seg(request.channel_id)}/invites`)
+fn
+(request: GetChannelInvitesRequest): Vec<Map> {
+  get-channel-invites(request, {})
+},
+(request: GetChannelInvitesRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/channels/${seg(request.channel_id)}/invites`, {}, opts)
 }
 
 CreateChannelInviteRequest type {
@@ -216,11 +240,15 @@ meta {
     ```
     """
 }
-fn (request: CreateChannelInviteRequest): Map {
+fn
+(request: CreateChannelInviteRequest): Map {
+  create-channel-invite(request, {})
+},
+(request: CreateChannelInviteRequest, opts: Map): Map {
   ::api/call("POST", `/channels/${seg(request.channel_id)}/invites`, {
     body: ::api/body(request, ["channel_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 FollowAnnouncementChannelRequest type {
@@ -233,11 +261,15 @@ follow-announcement-channel
 meta {
     doc: """POST /channels/{channel_id}/followers - Follow an Announcement channel into `webhook_channel_id`. Needs MANAGE_WEBHOOKS in the target channel."""
 }
-fn (request: FollowAnnouncementChannelRequest): Map {
+fn
+(request: FollowAnnouncementChannelRequest): Map {
+  follow-announcement-channel(request, {})
+},
+(request: FollowAnnouncementChannelRequest, opts: Map): Map {
   ::api/call("POST", `/channels/${seg(request.channel_id)}/followers`, {
     body: {webhook_channel_id: request.webhook_channel_id},
     reason: request.reason
-  })
+  }, opts)
 }
 
 TriggerTypingIndicatorRequest type {
@@ -248,8 +280,12 @@ trigger-typing-indicator
 meta {
     doc: """POST /channels/{channel_id}/typing - Show "typing..." for about 10 seconds or until the bot sends a message."""
 }
-fn (request: TriggerTypingIndicatorRequest): Bool {
-  ::api/call-ok("POST", `/channels/${seg(request.channel_id)}/typing`)
+fn
+(request: TriggerTypingIndicatorRequest): Bool {
+  trigger-typing-indicator(request, {})
+},
+(request: TriggerTypingIndicatorRequest, opts: Map): Bool {
+  ::api/call-ok("POST", `/channels/${seg(request.channel_id)}/typing`, {}, opts)
 }
 
 // ============================================================================
@@ -275,8 +311,12 @@ meta {
     ```
     """
 }
-fn (request: GetGuildChannelsRequest): Vec<Map> {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/channels`)
+fn
+(request: GetGuildChannelsRequest): Vec<Map> {
+  get-guild-channels(request, {})
+},
+(request: GetGuildChannelsRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/channels`, {}, opts)
 }
 
 CreateGuildChannelRequest type {
@@ -325,11 +365,15 @@ meta {
     ```
     """
 }
-fn (request: CreateGuildChannelRequest): Map {
+fn
+(request: CreateGuildChannelRequest): Map {
+  create-guild-channel(request, {})
+},
+(request: CreateGuildChannelRequest, opts: Map): Map {
   ::api/call("POST", `/guilds/${seg(request.guild_id)}/channels`, {
     body: ::api/body(request, ["guild_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 ModifyGuildChannelPositionsRequest type {
@@ -342,11 +386,15 @@ modify-guild-channel-positions
 meta {
     doc: """PATCH /guilds/{guild_id}/channels - Reorder channels. `positions` is `[{id, position?, lock_permissions?, parent_id?}]`. Needs MANAGE_CHANNELS."""
 }
-fn (request: ModifyGuildChannelPositionsRequest): Bool {
+fn
+(request: ModifyGuildChannelPositionsRequest): Bool {
+  modify-guild-channel-positions(request, {})
+},
+(request: ModifyGuildChannelPositionsRequest, opts: Map): Bool {
   ::api/call-ok("PATCH", `/guilds/${seg(request.guild_id)}/channels`, {
     body: map(request.positions, (p) { ::api/body(p, []) }),
     reason: request.reason
-  })
+  }, opts)
 }
 
 // ============================================================================
@@ -366,11 +414,15 @@ start-thread-from-message
 meta {
     doc: """POST /channels/{channel_id}/messages/{message_id}/threads - Start a thread on an existing message. `auto_archive_duration` is 60, 1440, 4320 or 10080 minutes."""
 }
-fn (request: StartThreadFromMessageRequest): Map {
+fn
+(request: StartThreadFromMessageRequest): Map {
+  start-thread-from-message(request, {})
+},
+(request: StartThreadFromMessageRequest, opts: Map): Map {
   ::api/call("POST", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}/threads`, {
     body: ::api/body(request, ["channel_id", "message_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 StartThreadWithoutMessageRequest type {
@@ -387,11 +439,15 @@ start-thread-without-message
 meta {
     doc: """POST /channels/{channel_id}/threads - Start a thread with no starter message. `type` 11 = public, 12 = private (the default is private, so set it)."""
 }
-fn (request: StartThreadWithoutMessageRequest): Map {
+fn
+(request: StartThreadWithoutMessageRequest): Map {
+  start-thread-without-message(request, {})
+},
+(request: StartThreadWithoutMessageRequest, opts: Map): Map {
   ::api/call("POST", `/channels/${seg(request.channel_id)}/threads`, {
     body: ::api/body(request, ["channel_id"]),
     reason: request.reason
-  })
+  }, opts)
 }
 
 StartForumThreadRequest type {
@@ -426,7 +482,11 @@ meta {
     ```
     """
 }
-fn (request: StartForumThreadRequest): Map {
+fn
+(request: StartForumThreadRequest): Map {
+  start-forum-thread(request, {})
+},
+(request: StartForumThreadRequest, opts: Map): Map {
   files or(request.files, [])
   payload ::api/body(request, ["channel_id"])
   message cond {
@@ -440,7 +500,7 @@ fn (request: StartForumThreadRequest): Map {
     body: assoc(payload, "message", message),
     files: files,
     reason: request.reason
-  })
+  }, opts)
 }
 
 JoinThreadRequest type {
@@ -451,8 +511,12 @@ join-thread
 meta {
     doc: """PUT /channels/{channel_id}/thread-members/@me - Join a thread (it must not be archived)."""
 }
-fn (request: JoinThreadRequest): Bool {
-  ::api/call-ok("PUT", `/channels/${seg(request.channel_id)}/thread-members/@me`)
+fn
+(request: JoinThreadRequest): Bool {
+  join-thread(request, {})
+},
+(request: JoinThreadRequest, opts: Map): Bool {
+  ::api/call-ok("PUT", `/channels/${seg(request.channel_id)}/thread-members/@me`, {}, opts)
 }
 
 LeaveThreadRequest type {
@@ -463,8 +527,12 @@ leave-thread
 meta {
     doc: """DELETE /channels/{channel_id}/thread-members/@me - Leave a thread."""
 }
-fn (request: LeaveThreadRequest): Bool {
-  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/thread-members/@me`)
+fn
+(request: LeaveThreadRequest): Bool {
+  leave-thread(request, {})
+},
+(request: LeaveThreadRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/thread-members/@me`, {}, opts)
 }
 
 AddThreadMemberRequest type {
@@ -476,8 +544,12 @@ add-thread-member
 meta {
     doc: """PUT /channels/{channel_id}/thread-members/{user_id} - Add a user to a thread. Needs SEND_MESSAGES_IN_THREADS."""
 }
-fn (request: AddThreadMemberRequest): Bool {
-  ::api/call-ok("PUT", `/channels/${seg(request.channel_id)}/thread-members/${seg(request.user_id)}`)
+fn
+(request: AddThreadMemberRequest): Bool {
+  add-thread-member(request, {})
+},
+(request: AddThreadMemberRequest, opts: Map): Bool {
+  ::api/call-ok("PUT", `/channels/${seg(request.channel_id)}/thread-members/${seg(request.user_id)}`, {}, opts)
 }
 
 RemoveThreadMemberRequest type {
@@ -489,8 +561,12 @@ remove-thread-member
 meta {
     doc: """DELETE /channels/{channel_id}/thread-members/{user_id} - Remove a user from a thread. Needs MANAGE_THREADS, or to be the creator of a private thread."""
 }
-fn (request: RemoveThreadMemberRequest): Bool {
-  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/thread-members/${seg(request.user_id)}`)
+fn
+(request: RemoveThreadMemberRequest): Bool {
+  remove-thread-member(request, {})
+},
+(request: RemoveThreadMemberRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/thread-members/${seg(request.user_id)}`, {}, opts)
 }
 
 GetThreadMemberRequest type {
@@ -503,10 +579,14 @@ get-thread-member
 meta {
     doc: """GET /channels/{channel_id}/thread-members/{user_id} - One thread member; `with_member: true` adds the guild member object."""
 }
-fn (request: GetThreadMemberRequest): Map {
+fn
+(request: GetThreadMemberRequest): Map {
+  get-thread-member(request, {})
+},
+(request: GetThreadMemberRequest, opts: Map): Map {
   ::api/call("GET", `/channels/${seg(request.channel_id)}/thread-members/${seg(request.user_id)}`, {
     query: {with_member: request.with_member}
-  })
+  }, opts)
 }
 
 ListThreadMembersRequest type {
@@ -520,10 +600,14 @@ list-thread-members
 meta {
     doc: """GET /channels/{channel_id}/thread-members - Thread members (up to `limit`, 1-100). Page with `after` (a user id) when `with_member` is true. Needs the GUILD_MEMBERS intent."""
 }
-fn (request: ListThreadMembersRequest): Vec<Map> {
+fn
+(request: ListThreadMembersRequest): Vec<Map> {
+  list-thread-members(request, {})
+},
+(request: ListThreadMembersRequest, opts: Map): Vec<Map> {
   ::api/call("GET", `/channels/${seg(request.channel_id)}/thread-members`, {
     query: {with_member: request.with_member, after: request.after, limit: request.limit}
-  })
+  }, opts)
 }
 
 ListActiveThreadsRequest type {
@@ -534,8 +618,12 @@ list-active-threads
 meta {
     doc: """GET /guilds/{guild_id}/threads/active - Every active thread in a guild the bot can see. Returns `{threads, members}`."""
 }
-fn (request: ListActiveThreadsRequest): Map {
-  ::api/call("GET", `/guilds/${seg(request.guild_id)}/threads/active`)
+fn
+(request: ListActiveThreadsRequest): Map {
+  list-active-threads(request, {})
+},
+(request: ListActiveThreadsRequest, opts: Map): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/threads/active`, {}, opts)
 }
 
 ListArchivedThreadsRequest type {
@@ -548,18 +636,26 @@ list-public-archived-threads
 meta {
     doc: """GET /channels/{channel_id}/threads/archived/public - Archived public threads, newest first. `before` is an ISO8601 timestamp. Returns `{threads, members, has_more}`. Needs READ_MESSAGE_HISTORY."""
 }
-fn (request: ListArchivedThreadsRequest): Map {
+fn
+(request: ListArchivedThreadsRequest): Map {
+  list-public-archived-threads(request, {})
+},
+(request: ListArchivedThreadsRequest, opts: Map): Map {
   ::api/call("GET", `/channels/${seg(request.channel_id)}/threads/archived/public`, {
     query: {before: request.before, limit: request.limit}
-  })
+  }, opts)
 }
 
 list-private-archived-threads
 meta {
     doc: """GET /channels/{channel_id}/threads/archived/private - Archived private threads. `before` is an ISO8601 timestamp. Returns `{threads, members, has_more}`. Needs READ_MESSAGE_HISTORY and MANAGE_THREADS."""
 }
-fn (request: ListArchivedThreadsRequest): Map {
+fn
+(request: ListArchivedThreadsRequest): Map {
+  list-private-archived-threads(request, {})
+},
+(request: ListArchivedThreadsRequest, opts: Map): Map {
   ::api/call("GET", `/channels/${seg(request.channel_id)}/threads/archived/private`, {
     query: {before: request.before, limit: request.limit}
-  })
+  }, opts)
 }

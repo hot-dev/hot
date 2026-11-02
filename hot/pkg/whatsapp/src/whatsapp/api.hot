@@ -1,6 +1,27 @@
 ::whatsapp::api ns
 meta {
-    doc: """Low-level Graph API client for the WhatsApp Business Cloud API: authenticated JSON, multipart, and binary requests, response unwrapping, and URL building."""
+    ctx: {
+        "whatsapp.access.token": {required: false},
+        "whatsapp.api.version": {required: false, secret: false}
+    },
+    doc: """
+    Low-level Graph API client for the WhatsApp Business Cloud API:
+    authenticated JSON, multipart, and binary requests, response unwrapping,
+    and URL building.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then context variables, then defaults. Nothing from `opts` is
+    written to ctx, so one run can act for many businesses and parallel
+    flows don't share credentials. An `access-token` from `opts` is masked
+    in call records. An `access-token` present but blank or null is an
+    error, never a fallback to `whatsapp.access.token`.
+
+    - `access-token`: the access token for this call
+    - `phone-number-id`: the business number to use when a request has no
+      `phone_number_id`
+    - `api-version`: the Graph API version for this call
+    """
 }
 
 ::ctx ::hot::ctx
@@ -74,33 +95,65 @@ auth-headers fn (access-token: Str): Map {
   {Authorization: `Bearer ${access-token}`, User-Agent: USER_AGENT}
 }
 
-request
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+resolve-from
 meta {
-    ctx: {"whatsapp.access.token": {required: true}},
+    doc: """The one resolver, pure: `{access-token}` for a call from `opts` first, then `ctx-values` (a Map of context variables), plus `phone-number-id` when `opts` has one. An Err when no token is set, or when `access-token` is in `opts` but blank or null (that never falls back to context). Exposed for testing; `resolve` feeds it the context."""
+}
+fn (opts: Map, ctx-values: Map): Map {
+  opts-token non-blank(get(opts, "access-token"))
+  token or(opts-token, non-blank(get(ctx-values, "whatsapp.access.token")))
+  cond {
+    and(in("access-token", keys(opts)), is-null(opts-token)) => {
+      err("whatsapp: access-token is in the call's opts but is blank or null. Pass a value, or leave access-token out to use whatsapp.access.token.")
+    }
+
+    is-null(token) => { err("whatsapp: whatsapp.access.token is not set. Add it in Context Variables, or pass {access-token: ...} in the call's opts.") }
+    => { assoc-some({access-token: token}, "phone-number-id", non-blank(get(opts, "phone-number-id"))) }
+  }
+}
+
+resolve
+meta {
+    ctx: {"whatsapp.access.token": {required: false}},
     doc: """
-    Call the Graph API with a JSON body. The access token is read from the `whatsapp.access.token` context variable (or passed explicitly in the 5-arity form) and sent as a Bearer token. Null fields in `body` are not sent. Returns the decoded body on 2xx, or an Err carrying `HttpError`.
+    Credentials for one call (see `resolve-from`). An `access-token` from
+    `opts` is masked in call records with `::hot::ctx/mark-secret`, and
+    `opts` values are never written to ctx. The API version comes from
+    `::whatsapp::core/api-version(opts)`.
 
     **Example**
 
     ```hot
-    ::api ::whatsapp::api
-
-    // GET request
-    profile ::api/request("GET", ::api/url("109876543210/whatsapp_business_profile"))
-
-    // POST request with JSON body
-    sent ::api/request("POST", ::api/url("109876543210/messages"), {}, {messaging_product: "whatsapp", to: "15551234567", type: "text", text: {body: "Hello"}})
+    ::whatsapp::api/resolve({access-token: "tenant-b-token", phone-number-id: "109876543210"}).phone-number-id
     ```
     """
 }
-fn
-(method: Str, url: Str): Any {
-  request(method, url, {}, {}, ::ctx/get("whatsapp.access.token"))
-},
-(method: Str, url: Str, additional-headers: Map, body: Map): Any {
-  request(method, url, additional-headers, body, ::ctx/get("whatsapp.access.token"))
-},
-(method: Str, url: Str, additional-headers: Map, body: Map, access-token: Str): Any {
+fn (opts: Map): Map {
+  resolved resolve-from(opts, {"whatsapp.access.token": ::ctx/get("whatsapp.access.token")})
+  cond {
+    is-err(resolved) => { resolved }
+    in("access-token", keys(opts)) => { {...resolved, access-token: ::ctx/mark-secret(resolved.access-token)} }
+    => { resolved }
+  }
+}
+
+with-phone-number
+meta {
+    doc: """Run `action` with the URL-encoded business number for a call: `phone-number-id` when set, else `phone-number-id` in `opts`. An Err when neither is set."""
+}
+fn (phone-number-id: Str?, opts: Map, action: Fn): Any {
+  id or(non-blank(phone-number-id), non-blank(get(opts, "phone-number-id")))
+  cond {
+    is-null(id) => { err("whatsapp: no phone number id. Set phone_number_id on the request, or pass {phone-number-id: ...} in the call's opts.") }
+    => { action(segment(id)) }
+  }
+}
+
+send-json fn (method: Str, url: Str, additional-headers: Map, body: Map, access-token: Str): Any {
   payload filter-vals(untype(body), is-some)
   has-body not(is-empty(payload))
   base auth-headers(access-token)
@@ -118,56 +171,122 @@ fn
   }
 }
 
+request
+meta {
+    ctx: {"whatsapp.access.token": {required: false}},
+    doc: """
+    Call the Graph API with a JSON body. The access token comes from per-call `opts` (see `resolve`), the `whatsapp.access.token` context variable, or the explicit 5-arity form, and is sent as a Bearer token. Null fields in `body` are not sent. Returns the decoded body on 2xx, or an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    ::api ::whatsapp::api
+
+    // GET request
+    profile ::api/request("GET", ::api/url("109876543210/whatsapp_business_profile"))
+
+    // POST request with JSON body
+    sent ::api/request("POST", ::api/url("109876543210/messages"), {}, {messaging_product: "whatsapp", to: "15551234567", type: "text", text: {body: "Hello"}})
+
+    // With per-call credentials
+    tenant {access-token: "tenant-b-token"}
+    other ::api/request("GET", ::api/url("109876543210/whatsapp_business_profile", tenant), tenant)
+    ```
+    """
+}
+fn
+(method: Str, url: Str): Any {
+  request(method, url, {}, {}, {})
+},
+(method: Str, url: Str, opts: Map): Any {
+  request(method, url, {}, {}, opts)
+},
+(method: Str, url: Str, additional-headers: Map, body: Map): Any {
+  request(method, url, additional-headers, body, {})
+},
+(method: Str, url: Str, additional-headers: Map, body: Map, access-token: Str): Any {
+  request(method, url, additional-headers, body, {access-token: access-token})
+},
+(method: Str, url: Str, additional-headers: Map, body: Map, opts: Map): Any {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { send-json(method, url, additional-headers, body, resolved.access-token) }
+  }
+}
+
 request-bytes
 meta {
-    ctx: {"whatsapp.access.token": {required: true}},
+    ctx: {"whatsapp.access.token": {required: false}},
     doc: """Send a raw body (e.g. a multipart upload built as `Bytes`) with an explicit `Content-Type`. Returns the decoded JSON body on 2xx, or an Err carrying `HttpError`."""
 }
 fn
 (method: Str, url: Str, content-type: Str, body: Bytes): Any {
-  request-bytes(method, url, content-type, body, ::ctx/get("whatsapp.access.token"))
+  request-bytes(method, url, content-type, body, {})
 },
 (method: Str, url: Str, content-type: Str, body: Bytes, access-token: Str): Any {
-  response http-request(HttpRequest({
-    method,
-    url,
-    headers: {...auth-headers(access-token), Content-Type: content-type},
-    body: body
-  }))
+  request-bytes(method, url, content-type, body, {access-token: access-token})
+},
+(method: Str, url: Str, content-type: Str, body: Bytes, opts: Map): Any {
+  resolved resolve(opts)
   cond {
-    is-err(response) => { response }
-    => { handle-response(response) }
+    is-err(resolved) => { resolved }
+    => {
+      response http-request(HttpRequest({
+        method,
+        url,
+        headers: {...auth-headers(resolved.access-token), Content-Type: content-type},
+        body: body
+      }))
+      cond {
+        is-err(response) => { response }
+        => { handle-response(response) }
+      }
+    }
   }
 }
 
 download
 meta {
-    ctx: {"whatsapp.access.token": {required: true}},
+    ctx: {"whatsapp.access.token": {required: false}},
     doc: """Authenticated GET returning the raw response bytes (`Bytes`) on 2xx, or an Err carrying `HttpError`. Used for media downloads."""
 }
 fn
 (url: Str): Bytes {
-  download(url, ::ctx/get("whatsapp.access.token"))
+  download(url, {})
 },
 (url: Str, access-token: Str): Bytes {
-  response http-request(HttpRequest({
-    method: "GET",
-    url,
-    headers: auth-headers(access-token)
-  }))
+  download(url, {access-token: access-token})
+},
+(url: Str, opts: Map): Bytes {
+  resolved resolve(opts)
   cond {
-    is-err(response) => { response }
-    is-ok-response(response) => { response.body-bytes }
-    => { err(HttpError(response)) }
+    is-err(resolved) => { resolved }
+    => {
+      response http-request(HttpRequest({
+        method: "GET",
+        url,
+        headers: auth-headers(resolved.access-token)
+      }))
+      cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { response.body-bytes }
+        => { err(HttpError(response)) }
+      }
+    }
   }
 }
 
 url
 meta {
-    doc: """Build a Graph API URL from a path relative to the versioned base, e.g. `url("123/messages")` gives `https://graph.facebook.com/v26.0/123/messages`. The version follows `::whatsapp::core/api-version`."""
+    doc: """Build a Graph API URL from a path relative to the versioned base, e.g. `url("123/messages")` gives `https://graph.facebook.com/v26.0/123/messages`. The version follows `::whatsapp::core/api-version`, with `opts` when given."""
 }
-fn (path: Str): Str {
-  `${::whatsapp::core/base-url()}/${path}`
+fn
+(path: Str): Str {
+  url(path, {})
+},
+(path: Str, opts: Map): Str {
+  `${::whatsapp::core/base-url(opts)}/${path}`
 }
 
 segment

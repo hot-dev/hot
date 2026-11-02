@@ -47,7 +47,8 @@ MAX_PAGES 10000
 HttpError
 meta {
     doc: """
-    A non-2xx response from a Google API.
+    A non-2xx response from a Google API: `HttpError(response)` builds it
+    from the `HttpResponse` of `request`.
 
     **Fields**
     - `status` - HTTP status code
@@ -129,11 +130,8 @@ fn (body: Any): Str {
   if(gt(length(text), 300), `${slice(text, 0, 300)}...`, text)
 }
 
-error-from-response
-meta {
-    doc: """Build an `HttpError` (with a readable `message`) from a non-2xx `HttpResponse`. Pure; exposed for testing and for packages that read responses themselves."""
-}
-fn (response: Map): HttpError {
+// `HttpError(response)` builds the error, with its readable `message`.
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   details google-error-details(response.body)
   reasons details.reasons
   reason if(is-empty(reasons), null, first(reasons))
@@ -151,10 +149,6 @@ fn (response: Map): HttpError {
     error-message: details.message,
     retry-after: retry-after-seconds(response.headers)
   })
-}
-
-HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
-  error-from-response(response)
 }
 
 plain-payload
@@ -310,9 +304,17 @@ fn (error: Result): Bool {
   }
 }
 
+as-response
+meta {
+    doc: """A transport result as a typed `HttpResponse`, an Err as is. `::hot::http/request` returns a plain Map, and `HttpError(response)` runs its arrow only on the typed value."""
+}
+fn (response: Result): HttpResponse {
+  if(is-err(response), response, HttpResponse(response))
+}
+
 send-with-retry
 meta {
-    doc: """Send an `HttpRequest`; on a connection failure of an idempotent method, send it once more straight away (per `policy`). Never waits. Returns the final response or transport Err."""
+    doc: """Send an `HttpRequest`; on a connection failure of an idempotent method, send it once more straight away (per `policy`). Never waits. Returns the final response, as a typed `HttpResponse`, or transport Err."""
 }
 fn
 (req: HttpRequest, policy: Map): HttpResponse {
@@ -324,7 +326,7 @@ fn
     and(is-err(response), lt(attempt, policy.max-retries), is-retryable-transport(req.method, err-message(response))) => {
       send-with-retry(req, policy, add(attempt, 1))
     }
-    => { response }
+    => { as-response(response) }
   }
 }
 
@@ -417,7 +419,9 @@ meta {
       `refresh-token` + `client-id` + `client-secret`, `service-account` +
       `subject`, `api-key`), `scopes`, and `retry` (`false` disables the
       one immediate retry of a failed connection). A Str 6th argument is
-      an explicit access token (kept for compatibility).
+      an explicit access token (kept for compatibility). Per-call
+      credentials are masked in call records, and one that is present but
+      blank or null is an Err naming the key.
 
     **Example**
 
@@ -482,7 +486,7 @@ fn (response: Result): Any {
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response.body }
-    => { err(error-from-response(response)) }
+    => { err(HttpError(response)) }
   }
 }
 

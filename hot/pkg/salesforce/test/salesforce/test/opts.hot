@@ -1,0 +1,234 @@
+::salesforce::test::opts ns
+meta ["test"]
+
+// Hermetic: no network. A blank credential stops every call in the resolver
+// with an Err naming the key, which proves that function passes `opts` through.
+
+::api ::salesforce::api
+::auth ::salesforce::auth
+::bulk ::salesforce::bulk
+::composite ::salesforce::composite
+::ctx ::hot::ctx
+::org ::salesforce::org
+::query ::salesforce::query
+::search ::salesforce::search
+::sobjects ::salesforce::sobjects
+
+BLANK {access-token: ""}
+INSTANCE "https://acme.my.salesforce.com"
+TENANT {access-token: "00D-tenant-token", instance-url: INSTANCE}
+CTX {
+    access-token: "00D-ctx-token",
+    instance-url: "https://ctx.my.salesforce.com",
+    client-id: "ctx-client",
+    client-secret: "ctx-secret",
+    my-domain: "https://ctx.my.salesforce.com",
+    sandbox: true,
+    ttl: 60
+}
+
+refused fn (result: Result, key: Str): Bool {
+    and(is-err(result), contains(err-message(result), key), contains(err-message(result), "blank or null"))
+}
+
+no-credential fn (result: Result, key: Str): Bool {
+    and(is-err(result), contains(err-message(result), key), contains(err-message(result), "without a credential"))
+}
+
+// ============================================================================
+// Resolver
+// ============================================================================
+
+test-opts-identity-replaces-the-context-identity
+meta ["test"] fn () {
+    cfg ::auth/resolve-config({refresh-token: "r", client-id: "tenant-client"}, CTX)
+    assert-eq("tenant-client", cfg.client-id)
+    assert(is-null(cfg.client-secret), "the context's secret is not mixed in")
+    assert(is-null(cfg.my-domain), "the context's My Domain is not mixed in")
+    assert(is-null(cfg.access-token), "the context's token is not mixed in")
+    assert-eq("refresh-token", ::auth/select-flow(cfg))
+    assert-eq(true, cfg.sandbox, "sandbox still falls back to context")
+    assert-eq(60, cfg.ttl, "ttl still falls back to context")
+}
+
+test-empty-opts-use-the-context
+meta ["test"] fn () {
+    cfg ::auth/resolve-config({}, CTX)
+    assert-eq("00D-ctx-token", cfg.access-token)
+    assert-eq("access-token", ::auth/select-flow(cfg))
+}
+
+test-settings-without-credentials-keep-the-context-identity
+meta ["test"] fn () {
+    cfg ::auth/resolve-config({flow: "client-credentials", sandbox: false}, CTX)
+    assert-eq("ctx-secret", cfg.client-secret)
+    assert-eq("client-credentials", cfg.flow)
+    assert-eq(false, cfg.sandbox)
+}
+
+test-a-session-passes-as-opts
+meta ["test"] fn () {
+    cfg ::auth/resolve-config({token: "t", instance-url: INSTANCE, flow: "refresh-token", expires-at: 1}, {})
+    assert-eq("t", cfg.access-token)
+    assert-eq("access-token", ::auth/select-flow(cfg), "a session's flow doesn't send it to a token endpoint")
+}
+
+test-blank-credentials-are-errors-not-fallbacks
+meta ["test"] fn () {
+    assert(refused(::auth/resolve-config({access-token: ""}, CTX), "access-token"))
+    assert(refused(::auth/resolve-config({access-token: null}, CTX), "access-token"))
+    assert(refused(::auth/resolve-config({refresh-token: "  "}, CTX), "refresh-token"))
+    assert(refused(::auth/resolve-config({client-id: "c", client-secret: ""}, CTX), "client-secret"))
+    assert(refused(::auth/resolve-config({private-key: null}, CTX), "private-key"))
+    assert(refused(::auth/resolve-config({token: ""}, CTX), "token"))
+    assert(refused(::auth/resolve-config({access-token: "t", instance-url: ""}, CTX), "instance-url"))
+}
+
+test-per-call-url-without-credential-is-an-error
+meta ["test"] fn () {
+    assert(no-credential(::auth/resolve-config({instance-url: INSTANCE}, CTX), "instance-url"))
+    assert(no-credential(::auth/resolve-config({my-domain-url: INSTANCE}, CTX), "my-domain-url"))
+    assert(no-credential(::auth/resolve-config({audience: INSTANCE}, CTX), "audience"))
+    assert(no-credential(::api/resolve({instance-url: INSTANCE}), "instance-url"))
+    assert(no-credential(::api/json("GET", "/limits", null, {my-domain-url: INSTANCE}), "my-domain-url"))
+}
+
+test-incomplete-opts-name-the-missing-keys
+meta ["test"] fn () {
+    token-alone ::auth/session({access-token: "00D-tenant-token"})
+    assert(is-err(token-alone))
+    assert(contains(err-message(token-alone), "instance-url"), "not sent to salesforce.instance.url")
+
+    jwt ::auth/session({private-key: "pem", client-id: "c"})
+    assert(contains(err-message(jwt), "username"))
+
+    cc ::auth/session({client-secret: "s", client-id: "c"})
+    assert(contains(err-message(cc), "my-domain-url"))
+
+    only-id ::auth/session({client-id: "c"})
+    assert(contains(err-message(only-id), "no complete credential"))
+}
+
+test-resolve-returns-values-unchanged
+meta ["test"] fn () {
+    resolved ::api/resolve({...TENANT, api-version: "66.0"})
+    assert-eq("00D-tenant-token", resolved.token)
+    assert-eq(INSTANCE, resolved.instance-url)
+    assert-eq("access-token", resolved.flow)
+    assert-eq("v66.0", resolved.api-version)
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    ::api/resolve({...TENANT, api-version: "66.0"})
+    assert(ne("00D-tenant-token", ::ctx/get("salesforce.access.token")))
+    assert(ne(INSTANCE, ::ctx/get("salesforce.instance.url")))
+    assert(ne("66.0", ::ctx/get("salesforce.api.version")))
+}
+
+test-build-request-from-resolved
+meta ["test"] fn () {
+    resolved ::api/resolve({...TENANT, api-version: "66.0"})
+    req ::api/build-request("POST", "/sobjects/Lead", {LastName: "A"}, {}, resolved)
+    assert-eq(`${INSTANCE}/services/data/v66.0/sobjects/Lead`, req.url)
+    assert-eq("Bearer 00D-tenant-token", req.headers.Authorization)
+    assert-eq({LastName: "A"}, from-json(req.body))
+}
+
+// ============================================================================
+// Session cache
+// ============================================================================
+
+test-tenants-keep-their-own-cached-sessions
+meta ["test"] fn () {
+    tenant-a {client-id: "a", client-secret: "sa", my-domain-url: "https://a.my.salesforce.com"}
+    tenant-b {client-id: "b", client-secret: "sb", my-domain-url: "https://b.my.salesforce.com"}
+    key-a ::auth/fingerprint("client-credentials", ::auth/resolve-config(tenant-a, {}))
+    key-b ::auth/fingerprint("client-credentials", ::auth/resolve-config(tenant-b, {}))
+    assert(ne(key-a, key-b))
+    expires add(::jwt/now-seconds(), 600)
+    ::ctx/set-secret(::auth/cache-key(key-a), {fingerprint: key-a, expires-at: expires, session: {token: "tok-a", instance-url: "https://a", flow: "client-credentials"}})
+    ::ctx/set-secret(::auth/cache-key(key-b), {fingerprint: key-b, expires-at: expires, session: {token: "tok-b", instance-url: "https://b", flow: "client-credentials"}})
+    assert-eq("tok-a", ::auth/session(tenant-a).token, "no token exchange")
+    assert-eq("tok-b", ::auth/session(tenant-b).token, "no token exchange")
+    assert-eq("tok-a", ::auth/session(tenant-a).token, "one tenant doesn't evict the other")
+    ::auth/invalidate(tenant-a)
+    assert(is-null(::ctx/get(::auth/cache-key(key-a))))
+    assert(is-some(::ctx/get(::auth/cache-key(key-b))), "invalidate drops only these credentials")
+    ::auth/invalidate(tenant-b)
+}
+
+test-fingerprint-never-holds-a-credential
+meta ["test"] fn () {
+    key ::auth/fingerprint("client-credentials", ::auth/resolve-config({client-id: "a", client-secret: "secret-value-1", my-domain-url: INSTANCE}, {}))
+    assert(not(contains(key, "secret-value-1")))
+    assert(not(contains(::auth/cache-key(key), "secret-value-1")))
+}
+
+// ============================================================================
+// Every module passes opts through
+// ============================================================================
+
+test-opts-reach-the-transport
+meta ["test"] fn () {
+    assert(refused(::api/send("GET", "/limits", null, {}, BLANK), "access-token"))
+    assert(refused(::api/json("GET", "/limits", null, BLANK), "access-token"))
+    assert(refused(::api/unwrap(::api/send("GET", "/limits", null, {}, BLANK)), "access-token"))
+}
+
+test-opts-reach-endpoint-modules
+meta ["test"] fn () {
+    assert(refused(::sobjects/create-record("Lead", {}, BLANK), "access-token"))
+    assert(refused(::sobjects/get-record("Lead", "1", BLANK), "access-token"))
+    assert(refused(::sobjects/get-record("Lead", "1", ["Id"], BLANK), "access-token"))
+    assert(refused(::sobjects/update-record("Lead", "1", {}, BLANK), "access-token"))
+    assert(refused(::sobjects/delete-record("Lead", "1", BLANK), "access-token"))
+    assert(refused(::sobjects/upsert-record("Lead", "X__c", "v", {}, BLANK), "access-token"))
+    assert(refused(::sobjects/get-by-external-id("Lead", "X__c", "v", BLANK), "access-token"))
+    assert(refused(::sobjects/get-by-external-id("Lead", "X__c", "v", ["Id"], BLANK), "access-token"))
+    assert(refused(::sobjects/describe-global(BLANK), "access-token"))
+    assert(refused(::sobjects/describe-object("Lead", BLANK), "access-token"))
+    assert(refused(::query/soql("SELECT Id FROM Lead", {}, BLANK), "access-token"))
+    assert(refused(::query/query-all("SELECT Id FROM Lead", BLANK), "access-token"))
+    assert(refused(::query/next-page("/services/data/v68.0/query/01g", BLANK), "access-token"))
+    assert(refused(::query/soql-records("SELECT Id FROM Lead", {}, BLANK), "access-token"))
+    assert(refused(::search/sosl("FIND {a}", BLANK), "access-token"))
+    assert(refused(::search/find("a", {}, BLANK), "access-token"))
+    assert(refused(::org/limits(BLANK), "access-token"))
+    assert(refused(::org/versions(BLANK), "access-token"))
+    assert(refused(::composite/create-records("Lead", [{}], {}, BLANK), "access-token"))
+    assert(refused(::composite/update-records("Lead", [{}], {}, BLANK), "access-token"))
+    assert(refused(::composite/upsert-records("Lead", "X__c", [{}], {}, BLANK), "access-token"))
+    assert(refused(::composite/delete-records(["1"], {}, BLANK), "access-token"))
+    assert(refused(::composite/get-records("Lead", ["1"], ["Id"], BLANK), "access-token"))
+    assert(refused(::composite/composite([], {}, BLANK), "access-token"))
+    assert(refused(::bulk/create-ingest-job("Lead", "insert", {}, BLANK), "access-token"))
+    assert(refused(::bulk/upload-job-data("j", "a,b", BLANK), "access-token"))
+    assert(refused(::bulk/close-job("j", BLANK), "access-token"))
+    assert(refused(::bulk/abort-ingest-job("j", BLANK), "access-token"))
+    assert(refused(::bulk/get-ingest-job("j", BLANK), "access-token"))
+    assert(refused(::bulk/poll-ingest-job("j", BLANK), "access-token"))
+    assert(refused(::bulk/delete-ingest-job("j", BLANK), "access-token"))
+    assert(refused(::bulk/successful-results("j", BLANK), "access-token"))
+    assert(refused(::bulk/failed-results("j", BLANK), "access-token"))
+    assert(refused(::bulk/unprocessed-records("j", BLANK), "access-token"))
+    assert(refused(::bulk/ingest("Lead", "insert", "a,b", {}, BLANK), "access-token"))
+    assert(refused(::bulk/create-query-job("SELECT Id FROM Lead", {}, BLANK), "access-token"))
+    assert(refused(::bulk/get-query-job("j", BLANK), "access-token"))
+    assert(refused(::bulk/poll-query-job("j", BLANK), "access-token"))
+    assert(refused(::bulk/abort-query-job("j", BLANK), "access-token"))
+    assert(refused(::bulk/delete-query-job("j", BLANK), "access-token"))
+    assert(refused(::bulk/query-results("j", {}, BLANK), "access-token"))
+}
+
+test-subrequest-uses-the-per-call-version
+meta ["test"] fn () {
+    sub ::composite/subrequest("GET", "/limits", "r", null, {api-version: "66.0"})
+    assert-eq("/services/data/v66.0/limits", sub.url)
+}
+
+test-invalid-session-reads-a-typed-response
+meta ["test"] fn () {
+    assert(::api/is-invalid-session(::hot::http/HttpResponse({status: 401, headers: {}, body: ""})))
+    assert(not(::api/is-invalid-session(::hot::http/HttpResponse({status: 403, headers: {}, body: ""}))))
+}

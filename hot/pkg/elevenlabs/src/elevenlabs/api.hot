@@ -1,11 +1,29 @@
 ::elevenlabs::api ns
 meta {
-    doc: """Internal HTTP plumbing for the ElevenLabs API: authenticated requests (`xi-api-key` header), query strings, multipart bodies, and the `HttpError` returned for non-2xx responses.""",
-    ctx: {"elevenlabs.api.key": {required: true}}
+    doc: """
+    Internal HTTP plumbing for the ElevenLabs API: authenticated requests
+    (`xi-api-key` header), query strings, multipart bodies, and the
+    `HttpError` returned for non-2xx responses.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `elevenlabs.api.key` context variable, then the
+    defaults. Nothing from `opts` is written to ctx, so one run can act for
+    many tenants and parallel flows don't share credentials. Credentials
+    in `opts` are masked in call records. An `api-key` present but blank or
+    null is an error, never a fallback to context.
+
+    - `api-key`: the API key for this call
+    - `base-url`: another API root, such as a proxy. It needs an `api-key`
+      in the same `opts`: `elevenlabs.api.key` is never sent to a per-call
+      URL.
+    """,
+    ctx: {"elevenlabs.api.key": {required: false}}
 }
 
 ::ctx ::hot::ctx
 ::uri ::hot::uri
+::re ::hot::regex
 
 is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
@@ -28,11 +46,7 @@ type {
     message: Str
 }
 
-http-error
-meta {
-    doc: """Build an `HttpError` (with its readable `message`) from a non-2xx `HttpResponse`."""
-}
-fn (response: HttpResponse): HttpError {
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   HttpError({
     status: response.status,
     headers: response.headers,
@@ -109,13 +123,49 @@ fn (value: Str): Str {
   ::uri/encode(value)
 }
 
-api-key
-meta {
-    doc: """The configured `elevenlabs.api.key`, or an Err naming the missing context variable."""
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-blank(value), null, trim(value)), null)
 }
-fn (): Str {
-  key or(::ctx/get("elevenlabs.api.key"), "")
-  if(is-empty(key), err("elevenlabs.api.key is not set. Add it in Context Variables to call the ElevenLabs API."), key)
+
+resolve-from
+meta {
+    doc: """The one resolver, pure: `{api-key, base-url}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no API key is set, when `api-key` is in `opts` but blank or null (that never falls back to context), or when `opts` has `base-url` without `api-key`. Exposed for testing; `resolve` feeds it the context."""
+}
+fn (opts: Map, ctx-values: Map): Map {
+  opt-key non-blank(get(opts, "api-key"))
+  opt-url non-blank(get(opts, "base-url"))
+  api-key or(opt-key, non-blank(get(ctx-values, "elevenlabs.api.key")))
+  cond {
+    and(in("api-key", keys(opts)), is-null(opt-key)) => {
+      err("elevenlabs: api-key is in the call's opts but is blank or null. Pass a value, or leave api-key out to use elevenlabs.api.key.")
+    }
+
+    and(is-some(opt-url), is-null(opt-key)) => {
+      err("elevenlabs: base-url is in the call's opts without api-key. Pass api-key with it. Context credentials are never sent to a per-call URL.")
+    }
+
+    is-null(api-key) => { err("elevenlabs: elevenlabs.api.key is not set. Add it in Context Variables, or pass {api-key: ...} in the call's opts.") }
+    => { {api-key: api-key, base-url: ::re/replace-all(or(opt-url, ::elevenlabs/BASE_URL), "/+$", "")} }
+  }
+}
+
+resolve
+meta {
+    ctx: {"elevenlabs.api.key": {required: false}},
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). An `api-key`
+    from `opts` is masked in this run's records and never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::elevenlabs::api/resolve({api-key: "tenant-b-key"}).base-url  // "https://api.elevenlabs.io"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  ::ctx/mark-secret(non-blank(get(opts, "api-key")))
+  resolve-from(opts, {"elevenlabs.api.key": ::ctx/get("elevenlabs.api.key")})
 }
 
 // ============================================================================
@@ -183,23 +233,39 @@ fn
   request(method, path, additional-headers, "")
 },
 (method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, path, additional-headers, body, api-key())
+  request(method, path, additional-headers, body, {})
 },
 // 5-arity: explicit API key override
-(method: Str, path: Str, additional-headers: Map, body: Any, key: Str): HttpResponse {
-  base-headers {xi-api-key: key}
+(method: Str, path: Str, additional-headers: Map, body: Any, key: Str?): HttpResponse {
+  request(method, path, additional-headers, body, {api-key: key})
+},
+// 5-arity: per-call credentials and settings (see `resolve`)
+(method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { ::hot::http/request(build-request(method, path, additional-headers, body, resolved)) }
+  }
+}
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). Pure; exposed for testing."""
+}
+fn (method: Str, path: Str, additional-headers: Map, body: Any, resolved: Map): HttpRequest {
+  base-headers {xi-api-key: resolved.api-key}
   encoded match body {
     "" | Null => { {headers: base-headers, body: ""} }
     Bytes => { {headers: base-headers, body: body} }
     _ => { {headers: {...base-headers, Content-Type: "application/json"}, body: to-json(untype(body))} }
   }
 
-  ::hot::http/request(HttpRequest({
+  HttpRequest({
     method,
-    url: `${::elevenlabs/BASE_URL}${path}`,
+    url: `${resolved.base-url}${path}`,
     headers: {...encoded.headers, ...additional-headers},
     body: encoded.body
-  }))
+  })
 }
 
 json
@@ -214,11 +280,14 @@ fn
   json(method, path, {}, body)
 },
 (method: Str, path: Str, additional-headers: Map, body: Any): Any {
-  response request(method, path, additional-headers, body)
+  json(method, path, additional-headers, body, {})
+},
+(method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): Any {
+  response request(method, path, additional-headers, body, opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response.body }
-    => { err(http-error(response)) }
+    => { err(HttpError(response)) }
   }
 }
 
@@ -231,11 +300,14 @@ fn
   bytes(method, path, "")
 },
 (method: Str, path: Str, body: Any): Bytes {
-  response request(method, path, {}, body)
+  bytes(method, path, body, {})
+},
+(method: Str, path: Str, body: Any, opts: Map): Bytes {
+  response request(method, path, {}, body, opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response.body-bytes }
-    => { err(http-error(response)) }
+    => { err(HttpError(response)) }
   }
 }
 
@@ -245,18 +317,17 @@ meta {
 }
 fn
 (method: Str, path: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
-  request-stream(method, path, additional-headers, body, api-key())
+  request-stream(method, path, additional-headers, body, {})
 },
-(method: Str, path: Str, additional-headers: Map, body: Any, key: Str): StreamingHttpResponse {
-  default-headers {
-    xi-api-key: key,
-    Content-Type: "application/json"
+(method: Str, path: Str, additional-headers: Map, body: Any, key: Str?): StreamingHttpResponse {
+  request-stream(method, path, additional-headers, body, {api-key: key})
+},
+(method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): StreamingHttpResponse {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      ::hot::http/request-stream(build-request(method, path, {Content-Type: "application/json", ...additional-headers}, body, resolved), "raw")
+    }
   }
-
-  ::hot::http/request-stream(HttpRequest({
-    method,
-    url: `${::elevenlabs/BASE_URL}${path}`,
-    headers: {...default-headers, ...additional-headers},
-    body: to-json(untype(body))
-  }), "raw")
 }

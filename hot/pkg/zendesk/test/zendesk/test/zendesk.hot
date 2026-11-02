@@ -36,6 +36,89 @@ meta ["test"] fn () {
 }
 
 // ============================================================================
+// Per-call credentials
+// ============================================================================
+
+CTX_VALUES {
+    "zendesk.subdomain": "ctx-acct",
+    "zendesk.email": "ctx@acme.com",
+    "zendesk.api.token": "ctx-token"
+}
+
+err-text fn (out: Result): Str {
+    if-err(out, (e) { e })
+}
+
+test-resolve-from-uses-ctx
+meta ["test"] fn () {
+    out ::api/resolve-from({}, CTX_VALUES)
+    assert-eq("https://ctx-acct.zendesk.com/api/v2", out.base-url)
+    assert-eq(::api/auth-header("ctx@acme.com", "ctx-token"), out.authorization)
+}
+
+test-resolve-from-opts-win-over-ctx
+meta ["test"] fn () {
+    token ::api/resolve-from({email: "b@tenant.com", api-token: " tenant-token "}, CTX_VALUES)
+    assert-eq("https://ctx-acct.zendesk.com/api/v2", token.base-url)
+    assert-eq(::api/auth-header("b@tenant.com", "tenant-token"), token.authorization)
+
+    oauth ::api/resolve-from({subdomain: "tenant-b", oauth-token: "oauth-b", email: "b@tenant.com", api-token: "t"}, CTX_VALUES)
+    assert-eq("https://tenant-b.zendesk.com/api/v2", oauth.base-url)
+    assert-eq("Bearer oauth-b", oauth.authorization, "OAuth wins")
+}
+
+test-resolve-from-blank-credential-never-falls-back
+meta ["test"] fn () {
+    for-each(["email", "api-token", "oauth-token"], (key) {
+        for-each(["", "  ", null], (blank) {
+            out ::api/resolve-from(assoc({}, key, blank), CTX_VALUES)
+            assert(is-err(out), "a blank credential is an Err, never ctx")
+            assert(contains(err-text(out), key), "names the key")
+        })
+    })
+}
+
+test-resolve-from-half-a-token-credential-is-err
+meta ["test"] fn () {
+    assert(contains(err-text(::api/resolve-from({email: "b@tenant.com"}, CTX_VALUES)), "api-token"))
+    assert(contains(err-text(::api/resolve-from({api-token: "t"}, CTX_VALUES)), "email"))
+}
+
+test-resolve-from-per-call-subdomain-needs-credentials
+meta ["test"] fn () {
+    out ::api/resolve-from({subdomain: "evil"}, CTX_VALUES)
+    assert(is-err(out), "context credentials never go to a per-call account")
+    assert(contains(err-text(out), "subdomain"), "names subdomain")
+    assert(contains(err-text(out), "oauth-token"), "names the credential")
+    assert(is-err(::api/resolve-from({subdomain: null}, CTX_VALUES)), "a null subdomain key is still a per-call subdomain")
+}
+
+test-resolve-from-bad-subdomain-is-err
+meta ["test"] fn () {
+    assert(is-err(::api/resolve-from({subdomain: "evil.com", oauth-token: "t"}, {})))
+}
+
+test-resolve-from-nothing-configured
+meta ["test"] fn () {
+    assert(contains(err-text(::api/resolve-from({}, {})), "zendesk.subdomain"))
+    assert(is-err(::api/resolve-from({}, {"zendesk.subdomain": "acme"})), "no credentials")
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    out ::api/resolve({subdomain: "tenant-b", oauth-token: "oauth-token-value"})
+    assert-eq("Bearer oauth-token-value", out.authorization)
+}
+
+test-opts-arity-errs-before-any-request
+meta ["test"] fn () {
+    assert(is-err(::zendesk::users/me({oauth-token: ""})))
+    assert(is-err(::tickets/get-ticket(1, {subdomain: "evil"})))
+    assert(is-err(::tickets/list-tickets({}, {api-token: null})))
+    assert(is-err(::tickets/list-all-tickets(5, {}, {oauth-token: " "})))
+}
+
+// ============================================================================
 // Subdomain and URLs
 // ============================================================================
 
@@ -89,11 +172,11 @@ meta ["test"] fn () {
 
 test-http-error-surfaces-retry-after
 meta ["test"] fn () {
-    e ::api/http-error(::hot::http/HttpResponse({status: 429, headers: {"retry-after": "12"}, body: "Too Many Requests"}))
+    e ::api/HttpError(::hot::http/HttpResponse({status: 429, headers: {"retry-after": "12"}, body: "Too Many Requests"}))
     assert-eq(429, e.status)
     assert-eq(12, e.retry-after)
 
-    e404 ::api/http-error(::hot::http/HttpResponse({status: 404, headers: {}, body: {error: "RecordNotFound"}}))
+    e404 ::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: {error: "RecordNotFound"}}))
     assert(is-null(e404.retry-after))
 }
 

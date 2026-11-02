@@ -6,7 +6,8 @@ meta {
     collections and composite requests, Bulk API 2.0 ingest and query
     jobs, and org limits.
 
-    **Setup**: set ONE auth flow in context. See `::salesforce::auth`
+    **Setup**: set ONE auth flow in context, or pass credentials per call
+    in a trailing `opts` Map on any API-calling function. See `::salesforce::auth`
     for the full matrix; in short:
 
     | Flow | Context variables |

@@ -1,11 +1,33 @@
 ::deepgram::api ns
 meta {
-    doc: """Internal HTTP plumbing for the Deepgram API: authenticated requests, repeated-key query strings, and the `HttpError` returned for non-2xx responses.""",
-    ctx: {"deepgram.api.key": {required: true}}
+    doc: """
+    Internal HTTP plumbing for the Deepgram API: authenticated requests,
+    repeated-key query strings, and the `HttpError` returned for non-2xx
+    responses.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then context, then the defaults. Nothing from `opts` is written
+    to ctx, so one run can act for many tenants and parallel flows don't
+    share credentials. Credentials in `opts` are masked in call records. A
+    credential key present but blank or null is an error, never a fallback
+    to context.
+
+    - `api-key`: the API key for this call
+    - `base-url`: another API root, such as a proxy. It needs an `api-key`
+      in the same `opts`: `deepgram.api.key` is never sent to a per-call URL.
+    - `callback-secret`: the shared secret the async functions send with
+      this call, instead of `deepgram.callback.secret`
+    """,
+    ctx: {
+        "deepgram.api.key": {required: false},
+        "deepgram.callback.secret": {required: false}
+    }
 }
 
 ::ctx ::hot::ctx
 ::uri ::hot::uri
+::re ::hot::regex
 
 is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
@@ -27,11 +49,7 @@ type {
     message: Str
 }
 
-http-error
-meta {
-    doc: """Build an `HttpError` (with its readable `message`) from a non-2xx `HttpResponse`."""
-}
-fn (response: HttpResponse): HttpError {
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   HttpError({
     status: response.status,
     headers: response.headers,
@@ -94,13 +112,87 @@ fn (params: Map): Str {
   if(is-empty(pairs), "", `?${join(pairs, "&")}`)
 }
 
-api-key
-meta {
-    doc: """The configured `deepgram.api.key`, or an Err naming the missing context variable."""
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-blank(value), null, trim(value)), null)
 }
-fn (): Str {
-  key or(::ctx/get("deepgram.api.key"), "")
-  if(is-empty(key), err("deepgram.api.key is not set. Add it in Context Variables to call the Deepgram API."), key)
+
+CREDENTIAL_KEYS ["api-key", "callback-secret"]
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: `{api-key, base-url, callback-secret}` for a
+    call from `opts` first, then `ctx-values` (a Map of context
+    variables), then defaults. An Err when no API key is set, when a
+    credential key is in `opts` but blank or null (that never falls back
+    to context), or when `opts` has `base-url` without `api-key`. A
+    per-call `base-url` also keeps `deepgram.callback.secret` out of the
+    request. Exposed for testing; `resolve` feeds it the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  opt-key non-blank(get(opts, "api-key"))
+  opt-url non-blank(get(opts, "base-url"))
+  opt-secret non-blank(get(opts, "callback-secret"))
+  api-key or(opt-key, non-blank(get(ctx-values, "deepgram.api.key")))
+  blank find-first(CREDENTIAL_KEYS, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+  cond {
+    is-some(blank) => {
+      err(`deepgram: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use context.`)
+    }
+
+    and(is-some(opt-url), is-null(opt-key)) => {
+      err("deepgram: base-url is in the call's opts without api-key. Pass api-key with it. Context credentials are never sent to a per-call URL.")
+    }
+
+    is-null(api-key) => { err("deepgram: deepgram.api.key is not set. Add it in Context Variables, or pass {api-key: ...} in the call's opts.") }
+    => {
+      {
+        api-key: api-key,
+        base-url: ::re/replace-all(or(opt-url, ::deepgram/BASE_URL), "/+$", ""),
+        callback-secret: or(opt-secret, if(is-some(opt-url), null, non-blank(get(ctx-values, "deepgram.callback.secret"))))
+      }
+    }
+  }
+}
+
+resolve
+meta {
+    ctx: {
+        "deepgram.api.key": {required: false},
+        "deepgram.callback.secret": {required: false}
+    },
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). Credentials
+    from `opts` are masked in this run's records and never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::deepgram::api/resolve({api-key: "tenant-b-key"}).base-url  // "https://api.deepgram.com"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  ::ctx/mark-secret(filter(map(CREDENTIAL_KEYS, (name) { non-blank(get(opts, name)) }), is-some))
+  resolve-from(opts, {
+    "deepgram.api.key": ::ctx/get("deepgram.api.key"),
+    "deepgram.callback.secret": ::ctx/get("deepgram.callback.secret")
+  })
+}
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). An empty `content-type` sends no `Content-Type`. Pure; exposed for testing."""
+}
+fn (method: Str, path: Str, content-type: Str, body: Any, resolved: Map): HttpRequest {
+  auth {Authorization: `Token ${resolved.api-key}`}
+  HttpRequest({
+    method,
+    url: `${resolved.base-url}${path}`,
+    headers: if(is-empty(content-type), auth, {...auth, Content-Type: content-type}),
+    body
+  })
 }
 
 request
@@ -118,19 +210,19 @@ fn
   request(method, path, "", "")
 },
 (method: Str, path: Str, content-type: Str, body: Any): HttpResponse {
-  request(method, path, content-type, body, api-key())
+  request(method, path, content-type, body, {})
 },
 // 5-arity: explicit API key override
-(method: Str, path: Str, content-type: Str, body: Any, key: Str): HttpResponse {
-  headers if(is-empty(content-type),
-    {Authorization: `Token ${key}`},
-    {Authorization: `Token ${key}`, Content-Type: content-type})
-  ::hot::http/request(HttpRequest({
-    method,
-    url: `${::deepgram/BASE_URL}${path}`,
-    headers,
-    body
-  }))
+(method: Str, path: Str, content-type: Str, body: Any, key: Str?): HttpResponse {
+  request(method, path, content-type, body, {api-key: key})
+},
+// 5-arity: per-call credentials and settings (see `resolve`)
+(method: Str, path: Str, content-type: Str, body: Any, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { ::hot::http/request(build-request(method, path, content-type, body, resolved)) }
+  }
 }
 
 json
@@ -142,11 +234,14 @@ fn
   json(method, path, "", "")
 },
 (method: Str, path: Str, content-type: Str, body: Any): Any {
-  response request(method, path, content-type, body)
+  json(method, path, content-type, body, {})
+},
+(method: Str, path: Str, content-type: Str, body: Any, opts: Map): Any {
+  response request(method, path, content-type, body, opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response.body }
-    => { err(http-error(response)) }
+    => { err(HttpError(response)) }
   }
 }
 
@@ -154,11 +249,15 @@ bytes
 meta {
     doc: """Like `request`, but returns the verbatim response `Bytes` on 2xx (for audio), or an Err carrying `HttpError`."""
 }
-fn (method: Str, path: Str, content-type: Str, body: Any): Bytes {
-  response request(method, path, content-type, body)
+fn
+(method: Str, path: Str, content-type: Str, body: Any): Bytes {
+  bytes(method, path, content-type, body, {})
+},
+(method: Str, path: Str, content-type: Str, body: Any, opts: Map): Bytes {
+  response request(method, path, content-type, body, opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response.body-bytes }
-    => { err(http-error(response)) }
+    => { err(HttpError(response)) }
   }
 }

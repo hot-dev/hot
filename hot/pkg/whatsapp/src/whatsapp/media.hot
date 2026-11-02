@@ -37,7 +37,7 @@ fn (boundary: Str, content: Bytes | Str, mime-type: Str, filename: Str): Bytes {
 }
 
 UploadMediaRequest type {
-  phone_number_id: Str,
+  phone_number_id: Str?,
   content: Bytes | Str,
   mime_type: Str,
   filename: Str?
@@ -45,7 +45,7 @@ UploadMediaRequest type {
 
 upload-media
 meta {
-    ctx: {"whatsapp.access.token": {required: true}},
+    ctx: {"whatsapp.access.token": {required: false}},
     doc: """
     POST /{phone-number-id}/media - Upload media for later sending; returns `{id}`. Pass the id as `image_id`, `document_id`, `audio_id`, `video_id`, or `sticker_id` to a send function. `content` is the file as `Bytes` (e.g. from `download-media`, an HTTP response's `body-bytes`, or a file read) or a `Str` for text files. `filename` defaults to `"upload"`.
 
@@ -72,11 +72,16 @@ meta {
     ```
     """
 }
-fn (request: UploadMediaRequest): Map {
+fn
+(request: UploadMediaRequest): Map {
+  upload-media(request, {})
+},
+(request: UploadMediaRequest, opts: Map): Map {
   boundary `hot-whatsapp-${Uuid()}`
   body build-upload-body(boundary, request.content, request.mime_type, or(request.filename, "upload"))
-  ::api/request-bytes("POST", ::api/url(`${::api/segment(request.phone_number_id)}/media`),
-    `multipart/form-data; boundary=${boundary}`, body)
+  ::api/with-phone-number(request.phone_number_id, opts, (id) {
+    ::api/request-bytes("POST", ::api/url(`${id}/media`, opts), `multipart/form-data; boundary=${boundary}`, body, opts)
+  })
 }
 
 // ============================================================================
@@ -87,8 +92,12 @@ media-url
 meta {
     doc: """The URL for a media id, with the optional `phone_number_id` ownership check. Exposed for testing."""
 }
-fn (media-id: Str, phone-number-id: Str?): Str {
-  ::api/url(`${::api/segment(media-id)}${::hot::uri/query-string({phone_number_id: phone-number-id})}`)
+fn
+(media-id: Str, phone-number-id: Str?): Str {
+  media-url(media-id, phone-number-id, {})
+},
+(media-id: Str, phone-number-id: Str?, opts: Map): Str {
+  ::api/url(`${::api/segment(media-id)}${::hot::uri/query-string({phone_number_id: phone-number-id})}`, opts)
 }
 
 get-media
@@ -108,10 +117,16 @@ meta {
 }
 fn
 (media-id: Str): Map {
-  ::api/request("GET", media-url(media-id, null))
+  get-media(media-id, {})
+},
+(media-id: Str, opts: Map): Map {
+  ::api/request("GET", media-url(media-id, null, opts), opts)
 },
 (media-id: Str, phone-number-id: Str): Map {
-  ::api/request("GET", media-url(media-id, phone-number-id))
+  get-media(media-id, phone-number-id, {})
+},
+(media-id: Str, phone-number-id: Str, opts: Map): Map {
+  ::api/request("GET", media-url(media-id, phone-number-id, opts), opts)
 }
 
 download-media
@@ -130,20 +145,28 @@ meta {
     ```
     """
 }
-fn (media-url: Str): Bytes {
-  ::api/download(media-url)
+fn
+(media-url: Str): Bytes {
+  download-media(media-url, {})
+},
+(media-url: Str, opts: Map): Bytes {
+  ::api/download(media-url, opts)
 }
 
 download-media-by-id
 meta {
     doc: """Look up a media id and download it in one step. Returns `{bytes, mime_type, sha256, file_size, id}`, or the first Err. The usual way to fetch media from an inbound webhook message (`message.image.id`, ...)."""
 }
-fn (media-id: Str): Map {
-  info get-media(media-id)
+fn
+(media-id: Str): Map {
+  download-media-by-id(media-id, {})
+},
+(media-id: Str, opts: Map): Map {
+  info get-media(media-id, opts)
   cond {
     is-err(info) => { info }
     => {
-      bytes download-media(info.url)
+      bytes download-media(info.url, opts)
       cond {
         is-err(bytes) => { bytes }
         => {
@@ -176,8 +199,14 @@ meta {
 }
 fn
 (media-id: Str): Map {
-  ::api/request("DELETE", media-url(media-id, null))
+  delete-media(media-id, {})
+},
+(media-id: Str, opts: Map): Map {
+  ::api/request("DELETE", media-url(media-id, null, opts), opts)
 },
 (media-id: Str, phone-number-id: Str): Map {
-  ::api/request("DELETE", media-url(media-id, phone-number-id))
+  delete-media(media-id, phone-number-id, {})
+},
+(media-id: Str, phone-number-id: Str, opts: Map): Map {
+  ::api/request("DELETE", media-url(media-id, phone-number-id, opts), opts)
 }

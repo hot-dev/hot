@@ -24,6 +24,9 @@ meta {
     matching `cal-api-version` header (see the `VERSION_*` constants), so
     a self-hosted instance must be recent enough to serve them.
 
+    Every API-calling function also takes a trailing `opts` Map for
+    per-call credentials and settings; see `::cal-com::api`.
+
     **Quick start**
 
     ```hot
