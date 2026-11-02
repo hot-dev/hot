@@ -91,20 +91,14 @@ jobs:
       - name: Browser scope contract
         run: node --test scripts/test-app-scope.mjs
 
-      - name: Checkout published AI skill mirror
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          repository: hot-dev/hot-skills
-          # Keep the second checkout outside Cargo's disposable target tree so
-          # cache cleanup cannot remove it before the sync check runs.
-          path: .ci/hot-skills-mirror
-          persist-credentials: false
-
       - name: Verify AGENTS.md sync
         run: bash ./scripts/check-agents-sync.sh
 
+      # Checks the skills against the manifest hashes only. The comparison with
+      # the hot-skills repository runs in the ai-skills-mirror workflow, so a
+      # merge there can't fail this one.
       - name: Verify AI skill assets sync
-        run: bash ./scripts/check-ai-assets-sync.sh ./.ci/hot-skills-mirror
+        run: bash ./scripts/check-ai-assets-sync.sh
 
       # `hot-static-checks.sh check` runs the default project check, the package
       # aggregate check, `hot fmt --check` over all Hot source, validates

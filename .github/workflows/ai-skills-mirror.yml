@@ -1,0 +1,52 @@
+name: ai-skills-mirror
+
+# Reports whether the public hot-skills mirror matches resources/ai/skills. On
+# a pull request it only runs when the skills change, so a merge to hot-skills
+# doesn't mark unrelated pull requests red.
+#
+# This is a separate workflow, and intentionally NOT in branch protection's
+# required checks, because the mirror lives in another repository and
+# release.yml requires a successful `hot` run on the tagged commit. The `hot`
+# workflow checks the same skills against the recorded manifest hashes on every
+# pull request.
+#
+# A failure here means the mirror still needs syncing. See CONTRIBUTING.md.
+# This workflow doesn't run on merges to hot-skills, so re-run it after one or
+# wait for the schedule.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'resources/ai/skills/**'
+      - 'resources/ai/hot-skills-mirror.toml'
+      - 'scripts/check-ai-assets-sync.sh'
+      - '.github/workflows/ai-skills-mirror.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'resources/ai/skills/**'
+      - 'resources/ai/hot-skills-mirror.toml'
+      - 'scripts/check-ai-assets-sync.sh'
+      - '.github/workflows/ai-skills-mirror.yml'
+  schedule:
+    - cron: '53 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mirror-sync:
+    name: AI skills mirror sync
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: hot-dev/hot-skills
+          path: .ci/hot-skills-mirror
+          persist-credentials: false
+      - run: bash ./scripts/check-ai-assets-sync.sh ./.ci/hot-skills-mirror

@@ -14,7 +14,9 @@ package documentation, and local integration tests.
   `resources/ai/AGENTS.md` by `cargo run --locked --bin hot -- ai add`.
   `sync-ai-assets.sh` copies every canonical `resources/ai/skills/` skill
   into a sibling `hot-skills` checkout, and `check-ai-assets-sync.sh` verifies
-  every public mirror tree against the recorded manifest hashes. Pass a skill
+  every public mirror tree against the recorded manifest hashes. With no mirror
+  path and no sibling checkout, it verifies only the manifest, which is how the
+  required `hot` check runs it. Pass a skill
   name as the second argument only when intentionally syncing or checking one
   skill; filtered sync preserves every unrelated manifest hash so CI still
   detects unsynchronized source changes. A full sync removes mirror directories
