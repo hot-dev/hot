@@ -6357,9 +6357,6 @@ impl<'a> EmitCtx<'a> {
         Ok(Some(halt_block))
     }
 
-    /// Try all call resolution strategies for a named function call (Call instruction).
-    /// Returns Ok(true) if handled, Ok(false) if unhandled.
-    #[allow(clippy::too_many_arguments)]
     /// Try a fused run of `plan`, whose first stage is the next instruction,
     /// and go on in a new block for a de-opt, where the stages are emitted.
     /// `None` when the run's source isn't in a form the helper reads.
@@ -6478,6 +6475,9 @@ impl<'a> EmitCtx<'a> {
         Ok(())
     }
 
+    /// Try all call resolution strategies for a named function call (Call instruction).
+    /// Returns Ok(true) if handled, Ok(false) if unhandled.
+    #[allow(clippy::too_many_arguments)]
     fn emit_call(
         &mut self,
         builder: &mut FunctionBuilder<'_>,
