@@ -1397,6 +1397,114 @@ m {a: 1}
         );
     }
 
+    /// Same-arity overloads whose parameter types share a short name reach the
+    /// overload of the argument's own type, whichever is declared last and
+    /// however the type is written, on a direct call or as a callback. Dispatch
+    /// used to compare short names, so every value tied and went to the overload
+    /// declared last, and a callback didn't dispatch at all.
+    #[test]
+    fn same_named_parameter_types_dispatch_to_their_own_overload() {
+        let src = r#"::a ns
+E1 type { n: Int }
+Kind enum open { Plain }
+
+::b ns
+E1 type { n: Int }
+Kind enum open { Plain }
+
+::one ns
+E1 ::a/E1
+
+::two ns
+E1 ::one/E1
+
+::imports ns
+Ours ::a/E1
+Theirs ::b/E1
+imported fn
+(x: Ours): Any { "a" },
+(x: Theirs): Any { "b" }
+imported-any fn (x: Any): Any { imported(x) }
+
+::local ns
+E1 type { n: Int }
+mixed fn
+(x: E1): Any { "local" },
+(x: ::a/E1): Any { "a" },
+(x: ::b/E1): Any { "b" }
+mixed-any fn (x: Any): Any { mixed(x) }
+make fn (): Any { E1({n: 1}) }
+
+::c ns
+::first ::a
+::second ::b
+a-last fn
+(x: ::b/E1): Any { "b" },
+(x: ::a/E1): Any { "a" }
+b-last fn
+(x: ::a/E1): Any { "a" },
+(x: ::b/E1): Any { "b" }
+aliased fn
+(x: ::first/E1): Any { "a" },
+(x: ::second/E1): Any { "b" }
+nullable fn
+(x: ::first/E1?): Any { "a" },
+(x: ::second/E1?): Any { "b" }
+union fn
+(x: ::first/E1 | Str): Any { "a" },
+(x: ::second/E1 | Int): Any { "b" }
+two-args fn
+(n: Int, x: ::a/E1): Any { "a" },
+(n: Int, x: ::b/E1): Any { "b" }
+variants fn
+(x: ::a/Kind): Any { "a" },
+(x: ::b/Kind): Any { "b" }
+apply-all fn (x: Any): Vec {
+    [
+        a-last(x), b-last(x), aliased(x), nullable(x), union(x), two-args(1, x),
+        ::imports/imported-any(x), ::local/mixed-any(x)
+    ]
+}
+variants-any fn (x: Any): Any { variants(x) }
+reexported fn
+(x: ::two/E1): Any { "own type" },
+(x: Any): Any { "any" }
+reexported-any fn (x: Any): Any { reexported(x) }
+by-name fn (xs: Vec): Vec { map(xs, b-last) }
+
+::t ns
+a-val ::a/E1({n: 1})
+b-val ::b/E1({n: 1})
+run fn (): Vec {
+    from-a ::c/apply-all(a-val)
+    from-b ::c/apply-all(b-val)
+    named ::c/by-name([a-val, b-val, a-val])
+    [
+        ...from-a, ...from-b,
+        ::c/variants-any(::a/Kind.Plain), ::c/variants-any(::b/Kind.Plain),
+        ...named,
+        ::local/mixed-any(::local/make()),
+        ::c/reexported-any(a-val), ::c/reexported-any(b-val)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = strs(&[
+            "a", "a", "a", "a", "a", "a", "a", "a", //
+            "b", "b", "b", "b", "b", "b", "b", "b", //
+            "a", "b", //
+            "a", "b", "a", //
+            "local", //
+            "own type", "any",
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
     /// An untyped (`Any`) overload is reachable whichever order it is
     /// declared in, and the most specific overload that accepts the arguments
     /// wins: a single type, then a union or nullable type, then `Any`. The
