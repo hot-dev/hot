@@ -67,6 +67,7 @@ fn
   siteverify(token, {})
 },
 (token: Str, opts: Map): Map {
+  ::hot::ctx/mark-secret(token)
   key secret(opts)
   cond {
     is-err(key) => { key }
