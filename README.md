@@ -81,11 +81,13 @@ fn (location: Str): Vec {
 
 ## Install
 
-Install the latest released CLI:
+Install the latest released CLI for your user, in `~/.local`, without sudo:
 
 ```bash
 curl -fsSL https://get.hot.dev/install.sh | sh
 ```
+
+Add `-s -- --system` to install it for every user of the machine instead.
 
 Or build from source:
 

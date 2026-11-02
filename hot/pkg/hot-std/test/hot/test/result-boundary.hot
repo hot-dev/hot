@@ -281,3 +281,59 @@ meta ["test"] fn () {
     out ::exec/contain(() { err("p") |> add(1) })
     assert(is-err(out), "Err piped into a strict argument still halts")
 }
+
+// ----------------------------------------------------------------------------
+// Lambdas, literals, predicates and and/or follow the same rule. (The run's
+// halt message names what consumed the Err; run_test.rs checks it.)
+// ----------------------------------------------------------------------------
+
+result-lambda (x: Result) { is-err(x) }
+
+test-top-level-result-lambda-receives-err
+meta ["test"] fn () {
+    assert(result-lambda(make-err()), "a top-level lambda declared Result receives the Err")
+    assert-eq(false, result-lambda(ok(1)))
+}
+
+test-plain-lambda-err-halts
+meta ["test"] fn () {
+    out ::exec/contain(() {
+        f (x) { 1 }
+        f(make-err())
+    })
+    assert(is-err(out), "an untyped lambda parameter consumes the Err")
+    assert-eq("boundary-payload", err-message(out), "the contained halt keeps the original payload")
+}
+
+test-vec-literal-holds-err
+meta ["test"] fn () {
+    v [1, make-err()]
+    assert-eq(2, length(v), "a Vec literal holds an Err without halting")
+    assert(is-err(v[1]), "the element is the Err")
+}
+
+test-is-null-of-err-halts
+meta ["test"] fn () {
+    out ::exec/contain(() { is-null(make-err()) })
+    assert(is-err(out), "is-null needs a value, so an Err halts")
+}
+
+test-and-or-treat-err-as-falsy
+meta ["test"] fn () {
+    assert(is-err(and(make-err(), true)), "and returns its first falsy value, the Err")
+    assert-eq(5, or(make-err(), 5), "or skips the Err")
+}
+
+test-onerr-preserve-keeps-returned-errs-but-not-consumed-ones
+meta ["test"] fn () {
+    kept map([1, 2], (x) { err("returned") }, OnErr.Preserve)
+    assert-eq(2, length(kept), "returned Errs stay in their slots")
+    assert(is-err(kept[0]), "the slot holds the Err")
+    out ::exec/contain(() {
+        map([1, 2], (x) {
+            y make-err()
+            add(y, 1)
+        }, OnErr.Preserve)
+    })
+    assert(is-err(out), "an Err consumed inside the callback still halts")
+}

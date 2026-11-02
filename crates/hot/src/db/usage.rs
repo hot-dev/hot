@@ -2,86 +2,278 @@
 //! publish usage in the same transaction as the work they count.
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, SqliteConnection};
+use std::time::Duration;
 use uuid::Uuid;
 
-use super::{DatabasePool, DatabaseScope, MaintenanceOperation};
+use super::{DatabasePool, DatabaseScope, MaintenanceOperation, ScopedPgPool};
 
 type TaskTotals = (i64, i64, i64, i64, i64);
 const TASK_TOTALS: &str = "SELECT CAST(COALESCE(SUM(u.active_containers),0) AS BIGINT),CAST(COALESCE(SUM(u.reserved_compute_units),0) AS BIGINT),CAST(COALESCE(SUM(u.compute_units),0) AS BIGINT),CAST(COALESCE(SUM(u.reserved_duration_ms),0) AS BIGINT),CAST(COALESCE(SUM(u.duration_ms),0) AS BIGINT) FROM usage_task u JOIN org o ON o.org_id=u.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1";
 
-/// Recount one environment's usage for `period`. Callers lock the counter row
-/// first; this runs as a new statement, so its snapshot includes every writer
-/// that held the row. The timestamp predicate matches `usage_at` and uses
-/// `task_env_usage_at_idx`, so the cost follows the period, not history.
-const PERIOD_RECOUNT: &str = "WITH totals AS (SELECT t.env_id,SUM(f.compute_units) AS cu,SUM(f.duration_ms) AS ms FROM task t CROSS JOIN LATERAL hot.task_usage(t) f WHERE t.env_id=ANY($1) AND COALESCE(t.stop_time,t.start_time,t.created_at) >= $2 GROUP BY t.env_id) UPDATE usage_task u SET compute_units=COALESCE((SELECT cu FROM totals WHERE env_id=u.env_id),0),duration_ms=COALESCE((SELECT ms FROM totals WHERE env_id=u.env_id),0),period_start=$2 WHERE u.env_id=ANY($1)";
+/// One environment's usage in `period`. The timestamp predicate matches
+/// `usage_at`, which `task_env_usage_at_idx` can serve. Metered results are
+/// read from TOAST, so on a large account this takes seconds. It must never run
+/// while holding a counter row: every task writer in the environment updates
+/// that row, and fails once its lock timeout passes.
+const PERIOD_TOTALS: &str = "SELECT CAST(COALESCE(SUM(f.compute_units),0) AS BIGINT),CAST(COALESCE(SUM(f.duration_ms),0) AS BIGINT) FROM task t CROSS JOIN LATERAL hot.task_usage(t) f WHERE t.env_id=$1 AND COALESCE(t.stop_time,t.start_time,t.created_at) >= $2";
 
-/// Initialize counters for a new billing period before admission takes the
-/// account lock. Each environment commits separately under its own scope, so
-/// a rejected claim cannot discard the work and make every redelivery rescan
-/// history while holding the lock. Admission's in-transaction initialization
-/// only remains for a period that changes in between.
-pub(crate) async fn prepare_task_period(
-    db: &DatabasePool,
-    root: Uuid,
+/// The account's environments whose counter is not on `period`, including
+/// counter rows left by a deleted environment, which admission also reads.
+const STALE_ENVS: &str = "SELECT x.env_id,x.org_id FROM (SELECT e.env_id,e.org_id FROM env e JOIN org o ON o.org_id=e.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1 UNION SELECT u.env_id,u.org_id FROM usage_task u JOIN org o ON o.org_id=u.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1) x LEFT JOIN usage_task u ON u.env_id=x.env_id WHERE u.period_start IS DISTINCT FROM $2 ORDER BY x.env_id";
+
+/// How long a caller waits for counters to reach a new period. Shorter than the
+/// worker's claim timeout, so a slow recount defers the claim with a clear
+/// reason. The recount itself carries on in the background.
+const ROLLOVER_WAIT: Duration = Duration::from_secs(10);
+const ROLLOVER_POLL: Duration = Duration::from_millis(200);
+/// The recount may outlast the pool's statement timeout on a large account.
+/// Reads only, so all it holds back meanwhile is vacuum.
+const ROLLOVER_STATEMENT_TIMEOUT_MS: &str = "600000";
+/// Attempts to start a recount in the moment between its snapshot and its mark.
+const ROLLOVER_ATTEMPTS: usize = 5;
+const ROLLOVER_LOCK: i64 = 0x5553_4147_4552_4f4c;
+
+/// An environment's counter while a new period is recounted without holding its
+/// row. Dropping this before `finish` abandons the recount: the next one starts
+/// over, and its mark discards what this one counted.
+struct PeriodRollover {
+    /// Repeatable read, so the totals are as of the snapshot the mark was
+    /// checked against. Holds the recount's advisory lock until it ends.
+    snapshot: sqlx::Transaction<'static, sqlx::Postgres>,
+    env_id: Uuid,
     period: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
-    let DatabasePool::Postgres(pool) = db else {
-        return Ok(());
-    };
-    let billing = pool.with_scope(DatabaseScope::Maintenance {
-        operation: MaintenanceOperation::Billing,
-        org_id: Some(root),
-    });
-    let stale: Vec<(Uuid, Uuid)> = sqlx::query_as("SELECT e.env_id,e.org_id FROM env e JOIN org o ON o.org_id=e.org_id LEFT JOIN usage_task u ON u.env_id=e.env_id WHERE (o.org_id=$1 OR o.parent_org_id=$1) AND u.period_start IS DISTINCT FROM $2 ORDER BY e.env_id")
-        .bind(root).bind(period).fetch_all(&billing).await?;
-    for (env_id, org_id) in stale {
-        let mut tx = pool
-            .with_scope(DatabaseScope::Environment { org_id, env_id })
-            .begin()
-            .await?;
+}
+
+/// What became of an attempt to start a recount.
+enum RolloverStart {
+    Started(PeriodRollover),
+    /// The counter is already on the period.
+    Current,
+    /// Another worker is recounting, or task writers kept beating the mark.
+    Deferred,
+}
+
+impl PeriodRollover {
+    /// Take a snapshot and mark the counter row, if no writer has changed it
+    /// since. Every change to a task's usage updates that row in the same
+    /// transaction, so an unchanged row means the snapshot holds every writer
+    /// that has committed. A writer still to reach the row finds the mark and
+    /// counts itself in the rollover columns, and is not in the snapshot.
+    async fn start(
+        pool: &ScopedPgPool,
+        env_id: Uuid,
+        org_id: Uuid,
+        period: DateTime<Utc>,
+    ) -> Result<RolloverStart, sqlx::Error> {
         sqlx::query(
             "INSERT INTO usage_task(env_id,org_id) VALUES($1,$2) ON CONFLICT(env_id) DO NOTHING",
         )
         .bind(env_id)
         .bind(org_id)
-        .execute(&mut *tx)
+        .execute(pool)
         .await?;
-        let locked: Option<Uuid> = sqlx::query_scalar("SELECT env_id FROM usage_task WHERE env_id=$1 AND period_start IS DISTINCT FROM $2 FOR UPDATE")
-            .bind(env_id).bind(period).fetch_optional(&mut *tx).await?;
-        if locked.is_some() {
-            sqlx::query(PERIOD_RECOUNT)
-                .bind(vec![env_id])
-                .bind(period)
-                .execute(&mut *tx)
+        for _ in 0..ROLLOVER_ATTEMPTS {
+            let mut snapshot = pool.begin_repeatable_read().await?;
+            // A second recount's mark would discard the changes this one counted.
+            if !lock_unit(&mut snapshot, reconcile_lock(env_id, ROLLOVER_LOCK)).await? {
+                return Ok(RolloverStart::Deferred);
+            }
+            sqlx::query("SELECT set_config('statement_timeout',$1,true)")
+                .bind(ROLLOVER_STATEMENT_TIMEOUT_MS)
+                .execute(&mut *snapshot)
                 .await?;
+            let version: Option<String> = sqlx::query_scalar(
+                "SELECT xmin::text FROM usage_task WHERE env_id=$1 AND period_start IS DISTINCT FROM $2",
+            )
+            .bind(env_id)
+            .bind(period)
+            .fetch_optional(&mut *snapshot)
+            .await?;
+            let Some(version) = version else {
+                return Ok(RolloverStart::Current);
+            };
+            let marked = sqlx::query(
+                "UPDATE usage_task SET rollover_period=$2,rollover_compute_units=0,rollover_duration_ms=0 WHERE env_id=$1 AND xmin::text=$3",
+            )
+            .bind(env_id)
+            .bind(period)
+            .bind(version)
+            .execute(pool)
+            .await?
+            .rows_affected();
+            if marked == 1 {
+                return Ok(RolloverStart::Started(Self {
+                    snapshot,
+                    env_id,
+                    period,
+                }));
+            }
         }
-        tx.commit().await?;
+        Ok(RolloverStart::Deferred)
+    }
+
+    /// Read the period's totals as of the snapshot, holding no row lock.
+    async fn totals(&mut self) -> Result<(i64, i64), sqlx::Error> {
+        sqlx::query_as(PERIOD_TOTALS)
+            .bind(self.env_id)
+            .bind(self.period)
+            .fetch_one(&mut *self.snapshot)
+            .await
+    }
+
+    /// Move the counter to the period in one short update: the snapshot's totals
+    /// plus every change counted since the mark.
+    async fn finish(self, pool: &ScopedPgPool, totals: (i64, i64)) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE usage_task SET compute_units=$3+rollover_compute_units,duration_ms=$4+rollover_duration_ms,period_start=$2,rollover_period=NULL,rollover_compute_units=0,rollover_duration_ms=0 WHERE env_id=$1 AND rollover_period=$2",
+        )
+        .bind(self.env_id)
+        .bind(self.period)
+        .bind(totals.0)
+        .bind(totals.1)
+        .execute(pool)
+        .await?;
+        self.snapshot.commit().await
+    }
+}
+
+async fn recount_period(
+    pool: &ScopedPgPool,
+    stale: Vec<(Uuid, Uuid)>,
+    period: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    for (env_id, org_id) in stale {
+        if let RolloverStart::Started(mut rollover) =
+            PeriodRollover::start(pool, env_id, org_id, period).await?
+        {
+            let totals = rollover.totals().await?;
+            rollover.finish(pool, totals).await?;
+        }
     }
     Ok(())
 }
 
-/// Called under the root lock. Lock stale counter rows before taking the fresh
-/// statement snapshot that initializes a new billing period. Task writers after
-/// that snapshot wait in their trigger and then apply their own deltas.
-/// `prepare_task_period` already created missing rows; an environment still
-/// without one has recorded no usage, so it adds nothing to the totals. Not
-/// touching other environments' rows keeps this claim from waiting on their
-/// in-flight counter changes while it holds the account lock.
+/// Initialize counters for a new billing period before admission takes the
+/// account lock, so neither the account row nor a counter row is held during
+/// the recount. Each environment commits separately under Billing authority,
+/// which also covers a deleted environment's counter, so a rejected claim
+/// cannot discard the work. Returns false while the counters are still moving;
+/// the caller retries later. A caller that gives up leaves the recount running,
+/// otherwise a recount longer than the caller's timeout would never finish.
+pub(crate) async fn prepare_task_period(
+    db: &DatabasePool,
+    root: Uuid,
+    period: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    let DatabasePool::Postgres(pool) = db else {
+        return Ok(true);
+    };
+    let billing = pool.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Billing,
+        org_id: Some(root),
+    });
+    let stale: Vec<(Uuid, Uuid)> = sqlx::query_as(STALE_ENVS)
+        .bind(root)
+        .bind(period)
+        .fetch_all(&billing)
+        .await?;
+    if stale.is_empty() {
+        return Ok(true);
+    }
+    let deadline = tokio::time::Instant::now() + ROLLOVER_WAIT;
+    let recount_pool = billing.clone();
+    let recount = tokio::spawn(async move {
+        let result = recount_period(&recount_pool, stale, period).await;
+        if let Err(error) = &result {
+            tracing::warn!(%root, %error, "Could not move usage counters to a new billing period");
+        }
+        result
+    });
+    match tokio::time::timeout_at(deadline, recount).await {
+        Ok(Ok(result)) => result?,
+        Ok(Err(error)) => return Err(sqlx::Error::Protocol(error.to_string())),
+        Err(_) => return Ok(false),
+    }
+    // Environments another worker was recounting may still be moving.
+    loop {
+        let moving: Vec<(Uuid, Uuid)> = sqlx::query_as(STALE_ENVS)
+            .bind(root)
+            .bind(period)
+            .fetch_all(&billing)
+            .await?;
+        if moving.is_empty() {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() + ROLLOVER_POLL >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(ROLLOVER_POLL).await;
+    }
+}
+
+/// Called under the root lock, after `prepare_task_period`. A counter that is
+/// not on the period now, because the plan's period moved or a new environment
+/// appeared in between, defers this claim to the next delivery's preparation:
+/// admission never recounts tasks, so it cannot hold the account lock or a
+/// counter row across a scan.
 pub(crate) async fn task_usage_postgres(
     conn: &mut PgConnection,
     root: Uuid,
     period: DateTime<Utc>,
 ) -> Result<TaskTotals, sqlx::Error> {
-    let stale: Vec<Uuid> = sqlx::query_scalar("SELECT u.env_id FROM usage_task u JOIN org o ON o.org_id=u.org_id WHERE (o.org_id=$1 OR o.parent_org_id=$1) AND u.period_start IS DISTINCT FROM $2 ORDER BY u.env_id FOR UPDATE OF u")
-        .bind(root).bind(period).fetch_all(&mut *conn).await?;
-    if !stale.is_empty() {
-        sqlx::query(PERIOD_RECOUNT)
-            .bind(stale)
-            .bind(period)
-            .execute(&mut *conn)
-            .await?;
+    let moved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM usage_task u JOIN org o ON o.org_id=u.org_id WHERE (o.org_id=$1 OR o.parent_org_id=$1) AND u.period_start IS DISTINCT FROM $2)")
+        .bind(root).bind(period).fetch_one(&mut *conn).await?;
+    if moved {
+        return Err(sqlx::Error::Protocol(
+            "Usage counters moved to another billing period; retry the claim".into(),
+        ));
     }
     sqlx::query_as(TASK_TOTALS).bind(root).fetch_one(conn).await
+}
+
+/// An account's task usage in one billing period, from the counters admission
+/// enforces. Checks ahead of a claim read this rather than scanning task
+/// history: claim admission remains the authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountTaskUsage {
+    pub compute_units: i64,
+    pub duration_ms: i64,
+}
+
+/// `None` while the account's counters are still moving to `period`.
+pub async fn account_task_usage(
+    db: &DatabasePool,
+    org_id: &Uuid,
+    period: DateTime<Utc>,
+) -> Result<Option<AccountTaskUsage>, sqlx::Error> {
+    let root = super::org::Org::billing_owner_id_for(db, org_id)
+        .await
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    let billing = db.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Billing,
+        org_id: Some(root),
+    });
+    let totals = match &billing {
+        DatabasePool::Postgres(pool) => {
+            if !prepare_task_period(&billing, root, period).await? {
+                return Ok(None);
+            }
+            sqlx::query_as::<_, TaskTotals>(TASK_TOTALS)
+                .bind(root)
+                .fetch_one(pool)
+                .await?
+        }
+        DatabasePool::Sqlite(pool) => {
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+            let totals = task_usage_sqlite(&mut tx, root, period).await?;
+            tx.commit().await?;
+            totals
+        }
+    };
+    Ok(Some(AccountTaskUsage {
+        compute_units: totals.2,
+        duration_ms: totals.4,
+    }))
 }
 
 pub(crate) async fn task_usage_sqlite(
@@ -863,5 +1055,388 @@ mod tests {
                 .storage_rows,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn account_task_usage_reads_the_counters_admission_enforces() {
+        let db = super::super::test_db().await;
+        let data = super::super::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let period = Utc::now() - chrono::Duration::days(1);
+        for (stop, units) in [
+            (Utc::now(), 7),
+            (period - chrono::Duration::days(3), 100),
+            (period + chrono::Duration::hours(1), 5),
+        ] {
+            sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type,task_status_id,result,duration_ms,stop_time) VALUES(?,?,?,?,'::counter/task','container',3,?,1000,?)")
+                .bind(Uuid::now_v7()).bind(data.env_id).bind(data.stream_id).bind(data.build_id)
+                .bind(serde_json::json!({"compute-units":units}).to_string()).bind(stop)
+                .execute(pool).await.unwrap();
+        }
+        // The first read moves the counters onto the period; a task stopped
+        // before it counts for neither figure.
+        assert_eq!(
+            account_task_usage(&db, &data.org_id, period).await.unwrap(),
+            Some(AccountTaskUsage {
+                compute_units: 12,
+                duration_ms: 2000
+            })
+        );
+        let mut tx = pool.begin().await.unwrap();
+        let admitted = task_usage_sqlite(&mut tx, data.org_id, period)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!((admitted.2, admitted.4), (12, 2000));
+        // A later period recounts rather than carrying the old figures over.
+        assert_eq!(
+            account_task_usage(&db, &data.org_id, Utc::now() + chrono::Duration::days(1))
+                .await
+                .unwrap(),
+            Some(AccountTaskUsage {
+                compute_units: 0,
+                duration_ms: 0
+            })
+        );
+    }
+
+    type CounterRow = (
+        i64,
+        i64,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+        i64,
+        i64,
+    );
+
+    /// A disposable account on the privileged PostgreSQL fixture, whose role
+    /// bypasses RLS: `postgres_rls` covers these statements as a restricted login.
+    struct PgAccount {
+        raw: sqlx::PgPool,
+        db: DatabasePool,
+        billing: ScopedPgPool,
+        root: Uuid,
+        env: Uuid,
+        stream: Uuid,
+        build: Uuid,
+        period: DateTime<Utc>,
+    }
+
+    impl PgAccount {
+        async fn new() -> Option<Self> {
+            use sqlx::Executor;
+            let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+                eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
+                return None;
+            };
+            let conf =
+                crate::val!({"uri": uri.clone(), "schema": "hot", "rls": {"enforce": false}});
+            crate::db::run_migrations(&conf).await.unwrap();
+            let raw = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(4)
+                .after_connect(|conn, _| {
+                    Box::pin(async move {
+                        // Task writers here fail rather than wait out a recount.
+                        conn.execute("SET search_path = hot, public; SET lock_timeout = '1s'")
+                            .await?;
+                        Ok(())
+                    })
+                })
+                .connect(&uri)
+                .await
+                .unwrap();
+            let (root, env, user, project, build, stream) = (
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+            );
+            sqlx::query(r#"INSERT INTO "user"(user_id,email,created_by_user_id) VALUES($1,$2,$1)"#)
+                .bind(user)
+                .bind(format!("{user}@rollover.test"))
+                .execute(&raw)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO org(org_id,name,slug,org_type,created_by_user_id) VALUES($1,'Rollover',$2,'organization',$3)")
+                .bind(root).bind(root.to_string()).bind(user).execute(&raw).await.unwrap();
+            sqlx::query("INSERT INTO env(env_id,org_id,name,created_by_user_id) VALUES($1,$2,'development',$3)")
+                .bind(env).bind(root).bind(user).execute(&raw).await.unwrap();
+            sqlx::query("INSERT INTO project(project_id,env_id,name,created_by_user_id) VALUES($1,$2,'rollover',$3)")
+                .bind(project).bind(env).bind(user).execute(&raw).await.unwrap();
+            sqlx::query("INSERT INTO build(build_id,project_id,hash,size,created_by_user_id) VALUES($1,$2,'rollover',0,$3)")
+                .bind(build).bind(project).bind(user).execute(&raw).await.unwrap();
+            sqlx::query("INSERT INTO stream(stream_id,env_id) VALUES($1,$2)")
+                .bind(stream)
+                .bind(env)
+                .execute(&raw)
+                .await
+                .unwrap();
+            let db = crate::db::create_db_pool(&conf).await.unwrap();
+            let DatabasePool::Postgres(pool) = &db else {
+                unreachable!()
+            };
+            let billing = pool.with_scope(DatabaseScope::Maintenance {
+                operation: MaintenanceOperation::Billing,
+                org_id: Some(root),
+            });
+            Some(Self {
+                raw,
+                db,
+                billing,
+                root,
+                env,
+                stream,
+                build,
+                period: Utc::now() - chrono::Duration::days(1),
+            })
+        }
+
+        async fn finished_task(&self, units: i64, stop: DateTime<Utc>) -> Uuid {
+            let id = Uuid::now_v7();
+            sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type,task_status_id,result,duration_ms,stop_time) VALUES($1,$2,$3,$4,'::rollover/task','container',3,$5,1000,$6)")
+                .bind(id).bind(self.env).bind(self.stream).bind(self.build)
+                .bind(serde_json::json!({"compute-units":units})).bind(stop)
+                .execute(&self.raw).await.unwrap();
+            id
+        }
+
+        /// Put the counter on a past period with a figure a recount must replace.
+        async fn age_counter(&self) {
+            sqlx::query("INSERT INTO usage_task(env_id,org_id,period_start,compute_units) VALUES($1,$2,$3,999) ON CONFLICT(env_id) DO UPDATE SET period_start=excluded.period_start,compute_units=excluded.compute_units")
+                .bind(self.env).bind(self.root).bind(self.period - chrono::Duration::days(30))
+                .execute(&self.raw).await.unwrap();
+        }
+
+        async fn start(&self) -> RolloverStart {
+            PeriodRollover::start(&self.billing, self.env, self.root, self.period)
+                .await
+                .unwrap()
+        }
+
+        /// The task table's answer for the period.
+        async fn truth(&self) -> (i64, i64) {
+            sqlx::query_as(
+                "SELECT COALESCE(SUM(f.compute_units),0)::bigint,COALESCE(SUM(f.duration_ms),0)::bigint FROM task t CROSS JOIN LATERAL hot.task_usage(t) f WHERE t.env_id=$1 AND f.usage_at >= $2",
+            )
+            .bind(self.env)
+            .bind(self.period)
+            .fetch_one(&self.raw)
+            .await
+            .unwrap()
+        }
+
+        async fn assert_counter_is_true(&self) {
+            let row: CounterRow =
+                sqlx::query_as("SELECT compute_units,duration_ms,period_start,rollover_period,rollover_compute_units,rollover_duration_ms FROM usage_task WHERE env_id=$1")
+                    .bind(self.env)
+                    .fetch_one(&self.raw)
+                    .await
+                    .unwrap();
+            assert_eq!((row.0, row.1), self.truth().await);
+            // PostgreSQL stores microseconds; the period keeps nanoseconds here.
+            assert_eq!(
+                row.2.map(|at| at.timestamp_micros()),
+                Some(self.period.timestamp_micros())
+            );
+            assert_eq!((row.3, row.4, row.5), (None, 0, 0));
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_rollover_counts_each_concurrent_writer_once_without_blocking_it() {
+        let Some(account) = PgAccount::new().await else {
+            return;
+        };
+        let (now, before) = (Utc::now(), account.period - chrono::Duration::days(5));
+        let kept = account.finished_task(7, now).await;
+        let removed = account.finished_task(11, now).await;
+        let moved_in = account.finished_task(17, before).await;
+        let running = Uuid::now_v7();
+        sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type,task_status_id,reserved_compute_units,reserved_duration_ms,start_time) VALUES($1,$2,$3,$4,'::rollover/task','container',2,100,1000,now())")
+            .bind(running).bind(account.env).bind(account.stream).bind(account.build)
+            .execute(&account.raw).await.unwrap();
+        account.age_counter().await;
+        let RolloverStart::Started(mut rollover) = account.start().await else {
+            panic!("the recount should start");
+        };
+        // Readers still see the old period, so they never read a partial count.
+        let period: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT period_start FROM usage_task WHERE env_id=$1")
+                .bind(account.env)
+                .fetch_one(&account.raw)
+                .await
+                .unwrap();
+        assert!(period.unwrap() < account.period);
+        // Every kind of writer runs to completion mid-recount, under a short
+        // lock timeout: none of them waits for the recount.
+        sqlx::query("UPDATE task SET result=$2 WHERE task_id=$1")
+            .bind(kept)
+            .bind(serde_json::json!({"compute-units":3}))
+            .execute(&account.raw)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM task WHERE task_id=$1")
+            .bind(removed)
+            .execute(&account.raw)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE task SET stop_time=now() WHERE task_id=$1")
+            .bind(moved_in)
+            .execute(&account.raw)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE task SET task_status_id=3,stop_time=now(),duration_ms=400,result=$2 WHERE task_id=$1")
+            .bind(running)
+            .bind(serde_json::json!({"compute-units":5}))
+            .execute(&account.raw)
+            .await
+            .unwrap();
+        account.finished_task(19, now).await;
+        // This one finished outside the period, so it must add nothing.
+        account.finished_task(23, before).await;
+        let totals = rollover.totals().await.unwrap();
+        assert_eq!(totals, (18, 2000), "as of the snapshot, before any writer");
+        rollover.finish(&account.billing, totals).await.unwrap();
+        account.assert_counter_is_true().await;
+        assert_eq!(account.truth().await.0, 44);
+        // Later writers count against the new period as usual.
+        account.finished_task(29, now).await;
+        account.assert_counter_is_true().await;
+        assert_eq!(
+            account_task_usage(&account.db, &account.root, account.period)
+                .await
+                .unwrap(),
+            Some(AccountTaskUsage {
+                compute_units: 73,
+                duration_ms: account.truth().await.1
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_abandoned_rollover_starts_over() {
+        let Some(account) = PgAccount::new().await else {
+            return;
+        };
+        let task = account.finished_task(7, Utc::now()).await;
+        account.age_counter().await;
+        let RolloverStart::Started(abandoned) = account.start().await else {
+            panic!("the recount should start");
+        };
+        // A second recount cannot start: its mark would discard these changes.
+        assert!(matches!(account.start().await, RolloverStart::Deferred));
+        sqlx::query("UPDATE task SET result=$2 WHERE task_id=$1")
+            .bind(task)
+            .bind(serde_json::json!({"compute-units":3}))
+            .execute(&account.raw)
+            .await
+            .unwrap();
+        abandoned.snapshot.rollback().await.unwrap();
+        // The next recount discards the changes the abandoned one counted,
+        // because its own snapshot already holds them.
+        assert!(
+            prepare_task_period(&account.db, account.root, account.period)
+                .await
+                .unwrap()
+        );
+        account.assert_counter_is_true().await;
+        assert_eq!(account.truth().await.0, 3);
+    }
+
+    #[tokio::test]
+    async fn postgres_rollover_retakes_its_snapshot_after_a_writer_in_flight() {
+        let Some(account) = PgAccount::new().await else {
+            return;
+        };
+        let task = account.finished_task(7, Utc::now()).await;
+        account.age_counter().await;
+        // This writer holds the counter row, uncommitted, so the snapshot taken
+        // now cannot see it and the mark must not trust that snapshot.
+        let mut writer = account.raw.begin().await.unwrap();
+        sqlx::query("UPDATE task SET result=$2 WHERE task_id=$1")
+            .bind(task)
+            .bind(serde_json::json!({"compute-units":3}))
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        let (billing, env, root, period) = (
+            account.billing.clone(),
+            account.env,
+            account.root,
+            account.period,
+        );
+        let starting =
+            tokio::spawn(async move { PeriodRollover::start(&billing, env, root, period).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!starting.is_finished(), "the mark waits for the writer");
+        writer.commit().await.unwrap();
+        let RolloverStart::Started(mut rollover) = starting.await.unwrap().unwrap() else {
+            panic!("the recount should start");
+        };
+        let totals = rollover.totals().await.unwrap();
+        assert_eq!(totals.0, 3, "the new snapshot holds the writer");
+        rollover.finish(&account.billing, totals).await.unwrap();
+        account.assert_counter_is_true().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_admission_defers_rather_than_recounting_a_stale_counter() {
+        let Some(account) = PgAccount::new().await else {
+            return;
+        };
+        account.finished_task(7, Utc::now()).await;
+        account.age_counter().await;
+        let mut tx = account.raw.begin().await.unwrap();
+        assert!(matches!(
+            task_usage_postgres(&mut tx, account.root, account.period).await,
+            Err(sqlx::Error::Protocol(_))
+        ));
+        tx.rollback().await.unwrap();
+        assert!(
+            prepare_task_period(&account.db, account.root, account.period)
+                .await
+                .unwrap()
+        );
+        let mut tx = account.raw.begin().await.unwrap();
+        let totals = task_usage_postgres(&mut tx, account.root, account.period)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(totals.2, 7);
+    }
+
+    #[tokio::test]
+    async fn postgres_deleted_environment_counter_cannot_block_admission() {
+        let Some(account) = PgAccount::new().await else {
+            return;
+        };
+        let deleted = Uuid::now_v7();
+        sqlx::query("INSERT INTO usage_task(env_id,org_id,compute_units) VALUES($1,$2,5)")
+            .bind(deleted)
+            .bind(account.root)
+            .execute(&account.raw)
+            .await
+            .unwrap();
+        assert!(
+            prepare_task_period(&account.db, account.root, account.period)
+                .await
+                .unwrap()
+        );
+        let mut tx = account.raw.begin().await.unwrap();
+        assert!(
+            task_usage_postgres(&mut tx, account.root, account.period)
+                .await
+                .is_ok()
+        );
+        tx.rollback().await.unwrap();
+        sqlx::query("DELETE FROM usage_task WHERE env_id=$1")
+            .bind(deleted)
+            .execute(&account.raw)
+            .await
+            .unwrap();
     }
 }

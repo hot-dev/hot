@@ -2,6 +2,7 @@
 // These functions manage execution context state (VM-specific)
 
 use crate::lang::hot::r#type::HotResult;
+use crate::lang::masking::value_hash;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
 use crate::validate_args;
@@ -42,6 +43,9 @@ pub fn set(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                 };
                 vm.context_storage
                     .insert((*key_str).to_owned(), value.clone());
+                if vm.secret_keys.contains(key_str.as_ref()) {
+                    vm.register_secret_value(value);
+                }
                 tracing::debug!("::hot::ctx/set: Set '{}' from map", key_str);
                 count += 1;
             }
@@ -66,6 +70,10 @@ pub fn set(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
             // Store in VM-specific context storage
             vm.context_storage.insert(key.clone(), value.clone());
+            // A declared secret stays one however it got its value.
+            if vm.secret_keys.contains(&key) {
+                register_secret(vm, &value);
+            }
             // Never the value: code may set a secret with `set`.
             tracing::debug!(
                 "::hot::ctx/set: Set '{}' (context size: {})",
@@ -108,17 +116,19 @@ pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                 is_secret
             );
 
-            // If this is a secret key, record value hashes for masking.
-            // For scalar values, hash the value directly.
-            // For Maps and Vecs, recursively hash all leaf values so that
-            // individual extracted fields (via dot access) are also masked.
+            // If this is a secret key, register the value for masking, with
+            // its leaves, so that fields extracted from it are masked too.
+            // A default declared in source isn't one: anything that contains
+            // it is only masked if it is the whole value.
             if is_secret {
-                hash_secret_value_recursive(&value, &mut vm.secret_value_hashes);
-                vm.sync_secret_value_hashes_to_execution_context();
+                if vm.ctx_default_hashes.contains(&value_hash(&value)) {
+                    vm.register_secret_value_exact(&value);
+                } else {
+                    register_secret(vm, &value);
+                }
                 tracing::debug!(
-                    "::hot::ctx/get: Marked return value for key '{}' as secret ({} total hashes)",
-                    key,
-                    vm.secret_value_hashes.len()
+                    "::hot::ctx/get: Marked return value for key '{}' as secret",
+                    key
                 );
             }
 
@@ -145,12 +155,14 @@ pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 ///
 /// The top-level container's own hash is also recorded for completeness.
 pub fn hash_secret_value_recursive(value: &Val, hashes: &mut ahash::AHashSet<u64>) {
-    use std::hash::{Hash, Hasher};
+    // `true`, `null` and "" are in every record, and hold no secret: masking
+    // them because a secret Map has them only hides ordinary values.
+    if matches!(value, Val::Null | Val::Bool(_)) || matches!(value, Val::Str(s) if s.is_empty()) {
+        return;
+    }
 
     // Always hash the value itself (covers scalars and the container as a whole)
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    hashes.insert(hasher.finish());
+    hashes.insert(value_hash(value));
 
     // Recurse into containers to hash leaf values individually
     match value {
@@ -167,6 +179,22 @@ pub fn hash_secret_value_recursive(value: &Val, hashes: &mut ahash::AHashSet<u64
         // Scalars: already hashed above
         _ => {}
     }
+}
+
+/// Register `value` for masking in this run's records from now on: as a whole
+/// value, and, where long enough, inside strings. Registered during a call, it
+/// also masks that call's and its parents' records, which aren't final until
+/// they stop.
+pub fn register_secret(vm: &mut VirtualMachine, value: &Val) {
+    vm.register_secret_value(value);
+}
+
+/// Register a value for masking without storing it in the context, for a
+/// credential that arrives as an ordinary argument.
+pub fn mark_secret(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::ctx/mark-secret", args, 1);
+    register_secret(vm, &args[0]);
+    HotResult::Ok(args[0].clone())
 }
 
 /// Set a secret context variable (value is marked as secret for masking)
@@ -200,6 +228,7 @@ pub fn set_secret(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                 vm.context_storage
                     .insert((*key_str).to_owned(), value.clone());
                 vm.secret_keys.insert((*key_str).to_owned());
+                register_secret(vm, value);
                 tracing::debug!("::hot::ctx/set-secret: Set '{}' from map", key_str);
                 count += 1;
             }
@@ -225,6 +254,7 @@ pub fn set_secret(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             // Store in VM-specific context storage and mark as secret
             vm.context_storage.insert(key.clone(), value.clone());
             vm.secret_keys.insert(key.clone());
+            register_secret(vm, &value);
             tracing::debug!(
                 "::hot::ctx/set-secret: Set '{}' = <secret> (context size: {})",
                 key,

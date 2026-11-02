@@ -539,9 +539,7 @@ impl Engine {
         if let Some(context_storage) = options.context_storage {
             vm.context_storage = context_storage;
         }
-        for (key, default_val) in ctx_requirements.all_defaults() {
-            vm.context_storage.entry(key).or_insert(default_val);
-        }
+        vm.apply_ctx_defaults(ctx_requirements.all_defaults());
         vm.secret_keys = ctx_requirements.all_secret_keys();
         vm.sync_secret_keys_to_execution_context();
 
@@ -708,11 +706,12 @@ impl Engine {
         }
 
         // Extract ctx requirements via call graph and apply defaults + secret keys
-        for (key, default_val) in cached.runtime_ctx_defaults.iter() {
-            vm.context_storage
-                .entry(key.clone())
-                .or_insert_with(|| default_val.clone());
-        }
+        vm.apply_ctx_defaults(
+            cached
+                .runtime_ctx_defaults
+                .iter()
+                .map(|(key, default_val)| (key.clone(), default_val.clone())),
+        );
         vm.secret_keys = cached.runtime_secret_keys.as_ref().clone();
         vm.sync_secret_keys_to_execution_context();
 
@@ -1029,11 +1028,12 @@ impl Engine {
             vm.context_storage = context_storage;
         }
 
-        for (key, default_val) in cached.runtime_ctx_defaults.iter() {
-            vm.context_storage
-                .entry(key.clone())
-                .or_insert_with(|| default_val.clone());
-        }
+        vm.apply_ctx_defaults(
+            cached
+                .runtime_ctx_defaults
+                .iter()
+                .map(|(key, default_val)| (key.clone(), default_val.clone())),
+        );
         vm.secret_keys = cached.runtime_secret_keys.as_ref().clone();
         vm.sync_secret_keys_to_execution_context();
 

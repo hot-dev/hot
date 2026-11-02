@@ -178,7 +178,11 @@ pub fn next(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         && let Some(ctx) = vm.get_execution_context()
     {
         let stream_data_id = Uuid::now_v7();
-        let payload_json: serde_json::Value = (&value).into();
+        // A stream's payload is meant for its consumer, but a run's secret isn't.
+        let delivered =
+            crate::lang::masking::RecordMask::new(&ctx.secret_values, &ctx.secret_value_hashes)
+                .mask_delivered(value.to_hot_data_repr());
+        let payload_json: serde_json::Value = (&delivered).into();
 
         let stream_event = crate::stream::StreamEvent::StreamData {
             stream_data_id,

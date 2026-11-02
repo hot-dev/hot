@@ -848,15 +848,11 @@ async fn enforce_cus_quota_uncached(
             .and_then(|s| s.current_period_end),
     );
 
-    let usage = crate::db::subscription::OrgUsageStats::calculate_account(
-        db,
-        org_id,
-        period_start,
-        features.call_retention_days(),
-    )
-    .await
-    .map(Some)
-    .map_err(|_| "Unable to check account compute usage".to_string())?;
+    // Counters still moving to a new period read as unused: claim admission
+    // enforces both limits below against the same counters.
+    let usage = crate::db::usage::account_task_usage(db, org_id, period_start)
+        .await
+        .map_err(|_| "Unable to check account compute usage".to_string())?;
 
     let cus_used = usage.as_ref().map(|u| u.compute_units).unwrap_or(0);
 
@@ -1190,21 +1186,17 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                     .and_then(|s| s.current_period_end),
             );
 
-            let usage = crate::db::subscription::OrgUsageStats::calculate_account(
-                &db,
-                &org_id,
-                period_start,
-                features.call_retention_days(),
-            )
-            .await
-            .ok();
+            let usage = crate::db::usage::account_task_usage(&db, &org_id, period_start)
+                .await
+                .ok()
+                .flatten();
 
             let minutes_remaining = {
                 let limit = features.task_minutes_per_month();
                 if limit < 0 {
                     -1i64
                 } else {
-                    let used_ms = usage.as_ref().map(|u| u.task_duration_ms).unwrap_or(0);
+                    let used_ms = usage.as_ref().map(|u| u.duration_ms).unwrap_or(0);
                     let used_min = used_ms / 60_000;
                     if is_free {
                         (limit as i64).saturating_sub(used_min).max(0)

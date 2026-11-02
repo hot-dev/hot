@@ -200,13 +200,17 @@ length
 meta {
     core: true,
     doc: """
-    Return the number of elements in `coll`.
+    Return the number of elements in `coll`: a Vec's items, a Map's entries,
+    a Str's characters (Unicode code points, the unit `slice` and `get` use),
+    or a Bytes value's bytes. For a Str's encoded size, use `length(Bytes(s))`.
 
     **Example**
 
     ```hot
     length([1, 2, 3])        // 3
     length("hello")          // 5
+    length("héllo")          // 5
+    length(Bytes("héllo"))   // 6
     length({a: 1, b: 2}) // 2
     length(Bytes([1, 2, 3])) // 3
     ```
