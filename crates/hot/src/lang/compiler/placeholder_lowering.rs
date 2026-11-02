@@ -676,13 +676,15 @@ fn lower_val(
                 Val::Box(b)
             }
         }
-        Val::Map(m) => Val::Map(Box::new(
-            m.into_iter()
+        Val::Map(m) => Val::map(
+            std::sync::Arc::unwrap_or_clone(m)
+                .into_iter()
                 .map(|(k, v)| (k, lower_val(v, current_ns, aliases, registry)))
                 .collect(),
-        )),
-        Val::Vec(v) => Val::Vec(
-            v.into_iter()
+        ),
+        Val::Vec(v) => Val::vec(
+            std::sync::Arc::unwrap_or_clone(v)
+                .into_iter()
                 .map(|x| lower_val(x, current_ns, aliases, registry))
                 .collect(),
         ),
@@ -821,7 +823,7 @@ fn collect_val_placeholder_errors(
             }
         }
         Val::Vec(v) => {
-            for x in v {
+            for x in v.iter() {
                 collect_val_placeholder_errors(x, binding, near, errors);
             }
         }

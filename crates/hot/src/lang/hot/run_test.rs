@@ -164,6 +164,173 @@ f(100)"#,
         }
     }
 
+    /// Reading a Map or Vec shares its storage rather than copying it, which
+    /// is what makes a read cost the same at any size. Each entry of the result
+    /// holds the same collection, reached by a different read: a copy on any of
+    /// those paths gives that entry an allocation of its own. The JIT reads
+    /// values through different code, so both modes run.
+    #[test]
+    fn reads_share_collection_storage() {
+        let src = r#"::t ns
+same fn (x) { x }
+annotated fn (x: Map): Map { x }
+bound fn (x) {
+    y x
+    z y
+    z
+}
+held fn (x) {
+    box {x: x}
+    box.x
+}
+reads fn (m: Map, v: Vec) {
+    reader () { m }
+    called map([1, 2], (i) { same(m) })
+    mapped map([1], (i) { v })
+    listed [m, v]
+    {
+        m: [same(m), annotated(m), bound(m), reader(), called[0], called[1], listed[0], held(m)],
+        v: [same(v), bound(v), mapped[0], listed[1], held(v)],
+        child: [m.child, get(m, "child"), same(m).child],
+        item: [v[0], first(v), get(v, 0), same(v)[0]],
+    }
+}
+run fn () {
+    m {child: {a: 1}, other: 2}
+    v [{b: 1}, {b: 2}]
+    {m, v, reads: reads(m, v)}
+}
+run()
+run()
+run()"#;
+        for conf in [
+            Some(val!({"jit": {"mode": "off"}})),
+            Some(val!({"jit": {"threshold": 1}})),
+        ] {
+            let label = format!("{conf:?}");
+            let out = compile_and_run_with_std_conf(src, conf).expect("run");
+            let field = |value: &Val, name: &str| value.get(name).expect(name);
+            let reads = field(&out, "reads");
+            let m = field(&out, "m");
+            let v = field(&out, "v");
+            let child = field(&m, "child");
+            let Val::Vec(items) = &v else {
+                panic!("v is {v:?}");
+            };
+            for (expected, name) in [
+                (&m, "m"),
+                (&v, "v"),
+                (&child, "child"),
+                (&items[0], "item"),
+            ] {
+                let Val::Vec(held) = field(&reads, name) else {
+                    panic!("{name} is not a Vec");
+                };
+                for (index, value) in held.iter().enumerate() {
+                    let shared = match (expected, value) {
+                        (Val::Map(a), Val::Map(b)) => Arc::ptr_eq(a, b),
+                        (Val::Vec(a), Val::Vec(b)) => Arc::ptr_eq(a, b),
+                        _ => false,
+                    };
+                    assert!(shared, "{label}: read {index} of {name} was copied: {value:?}");
+                }
+            }
+        }
+    }
+
+    /// The other half of sharing: writing one holder of a collection leaves
+    /// every other holder as it was, in both JIT modes. `shared-values.hot`
+    /// covers the language's writes one by one.
+    #[test]
+    fn writes_leave_the_other_holders_of_a_collection() {
+        let src = r#"::t ns
+write fn (m: Map): Map {
+    m.child.a 2
+    m
+}
+m {child: {a: 1}}
+held [m]
+written write(m)
+grown assoc(m, "b", 1)
+[m.child.a, held[0].child.a, written.child.a, length(m), length(grown)]"#;
+        assert_same_with_and_without_jit(src, &val!([1, 1, 2, 1, 2]));
+    }
+
+    /// A read costs the same whatever the size of the collection. One that
+    /// scaled would take thousands of times longer on the large collection, so
+    /// the margin leaves only that able to fail this. `bench-large-reads.hot`
+    /// prints the numbers.
+    #[test]
+    fn reads_cost_the_same_at_any_size() {
+        let src = r#"::t ns
+ignore-it fn (coll, i) { i }
+fastest-ms fn (f: Fn): Int {
+    tries map(range(3), (_try) {
+        start ::hot::time/epoch-millis(::hot::time/now())
+        done map(range(500), (i) { f(i) })
+        sub(::hot::time/epoch-millis(::hot::time/now()), start)
+    })
+    reduce(tries, min(%1, %2), first(tries))
+}
+rows fn (n: Int): Vec {
+    map(range(n), (i) { {k: `k-${i}`, v: "some text in the value"} })
+}
+timings fn (n: Int): Map {
+    v rows(n)
+    m index-by(v, %.k)
+    {
+        map-pass: fastest-ms((i) { ignore-it(m, i) }),
+        map-get: fastest-ms((i) { get(m, "k-0") }),
+        map-dot: fastest-ms((i) { m.k-0 }),
+        map-length: fastest-ms((i) { length(m) }),
+        vec-pass: fastest-ms((i) { ignore-it(v, i) }),
+        vec-index: fastest-ms((i) { v[0] }),
+        vec-first: fastest-ms((i) { first(v) }),
+    }
+}
+{small: timings(10), large: timings(200000)}"#;
+        for conf in [
+            Some(val!({"jit": {"mode": "off"}})),
+            Some(val!({"jit": {"threshold": 1}})),
+        ] {
+            let label = format!("{conf:?}");
+            let out = compile_and_run_with_std_conf(src, conf).expect("run");
+            let (Some(Val::Map(small)), Some(Val::Map(large))) = (out.get("small"), out.get("large"))
+            else {
+                panic!("{label}: unexpected result {out:?}");
+            };
+            for (read, small_ms) in small.iter() {
+                let (Val::Int(small_ms), Some(Val::Int(large_ms))) = (small_ms, large.get(read)) else {
+                    panic!("{label}: {read} has no timing");
+                };
+                assert!(
+                    *large_ms <= small_ms * 20 + 100,
+                    "{label}: {read} took {small_ms}ms on 10 entries, {large_ms}ms on 200000"
+                );
+            }
+        }
+    }
+
+    /// Meta keeps a call written in it unevaluated, and the call runs when the
+    /// value read from meta is passed to a function. That needs a walk over the
+    /// argument, which every other program is spared.
+    #[test]
+    fn a_call_in_meta_runs_when_its_value_is_passed() {
+        let src = r#"::t ns
+bump fn (n: Int): Int { add(n, 1) }
+same fn (x) { x }
+f meta {count: bump(1), list: [bump(2)], plain: 1} fn () { 1 }
+g fn () {
+    m ::hot::meta/get(f)
+    out same(m)
+    [out.count, out.list, out.plain, same(m.list)]
+}
+g()"#;
+        let expected = val!([2, [3], 1, [3]]);
+        let out = compile_and_run_with_std_ast(src).expect("run");
+        assert_eq!(out, expected);
+    }
+
     /// Helper to compile and execute Hot code with hot-std included
     pub(super) fn compile_and_run_with_std(source: &str) -> Result<Val, String> {
         compile_and_run_with_std_conf(source, None)
@@ -221,7 +388,7 @@ make-error(3)"#;
     }
 
     fn strs(values: &[&str]) -> Val {
-        Val::Vec(values.iter().map(|s| Val::from(*s)).collect())
+        Val::vec(values.iter().map(|s| Val::from(*s)).collect())
     }
 
     /// A value imported from another namespace evaluates in its home
@@ -492,7 +659,7 @@ probe()
 probe()"#
             )
         };
-        let expected = Val::Vec(vec![
+        let expected = Val::vec(vec![
             Val::from("arrow ran 404"),
             Val::from("redacted"),
             Val::from("arrow ran 404"),
@@ -540,7 +707,7 @@ r err("boom")
 [f(err("boom")), f(r), f(ok(1))]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![Val::Bool(true), Val::Bool(true), Val::Bool(false)]),
+            &Val::vec(vec![Val::Bool(true), Val::Bool(true), Val::Bool(false)]),
         );
     }
 
@@ -567,7 +734,7 @@ c Email({value: "m@b.com"})
 Point type fn (x: Int, y: Int): Point { Point({x, y}) }
 p Point(10, 20)
 [p.x, p.y]"#;
-        assert_same_with_and_without_jit(point, &Val::Vec(vec![Val::Int(10), Val::Int(20)]));
+        assert_same_with_and_without_jit(point, &Val::vec(vec![Val::Int(10), Val::Int(20)]));
     }
 
     /// A Map that is not a literal (a variable or a call result) selects the
@@ -894,13 +1061,13 @@ lazy-param fn (lazy before: Any): Int { before(7) }
 ]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![
+            &Val::vec(vec![
                 Val::Int(12),
                 Val::Int(12),
                 Val::Int(10),
-                Val::Vec(vec![Val::Int(5), Val::Int(10)]),
+                Val::vec(vec![Val::Int(5), Val::Int(10)]),
                 Val::from("custom"),
-                Val::Vec(vec![Val::Int(101)]),
+                Val::vec(vec![Val::Int(101)]),
                 Val::Int(0),
                 Val::Int(0),
             ]),
@@ -951,7 +1118,7 @@ sq %(mul(%, %))
 [apply-twice(3, add(%, 2)), invoke(4, sq), invoke(4, (v) { mul(v, 3) }), with-local(5)]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![Val::Int(7), Val::Int(16), Val::Int(12), Val::Int(15)]),
+            &Val::vec(vec![Val::Int(7), Val::Int(16), Val::Int(12), Val::Int(15)]),
         );
     }
 
@@ -967,13 +1134,13 @@ via-any("warm")
 via-any("warm")
 via-any("warm")
 [via-any(null), f(null), f("s"), Str(null), `[${null}]`]"#;
-        let null_pair = Val::Vec(vec![Val::Bool(true), Val::Null]);
+        let null_pair = Val::vec(vec![Val::Bool(true), Val::Null]);
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![
+            &Val::vec(vec![
                 null_pair.clone(),
                 null_pair,
-                Val::Vec(vec![Val::Bool(false), Val::from("s")]),
+                Val::vec(vec![Val::Bool(false), Val::from("s")]),
                 Val::from(""),
                 Val::from("[]"),
             ]),
@@ -1040,7 +1207,7 @@ run()
 run()"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![
+            &Val::vec(vec![
                 Val::from("tri"),
                 Val::from("tri"),
                 Val::from("from-label"),
@@ -1089,10 +1256,10 @@ ser-map fn (n: Int): Map {
 [all-vec(), all-map(), par-vec(3), ser-map(3)]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![
-                Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]),
+            &Val::vec(vec![
+                Val::vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]),
                 crate::val!({"a": 1, "b": 2}),
-                Val::Vec(vec![Val::Int(4), Val::Int(6)]),
+                Val::vec(vec![Val::Int(4), Val::Int(6)]),
                 crate::val!({"a": 4, "b": 6}),
             ]),
         );
@@ -1366,7 +1533,7 @@ sizes fn cond-all (n: Int): All<Map> {
 ]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![
+            &Val::vec(vec![
                 strs(&["Critter.Bird"]),
                 strs(&["Critter.Dog"]),
                 strs(&["positive", "big"]),
@@ -1661,6 +1828,140 @@ label fn match (x: ::k/Kind): Str {
 }
 [label(::k/Kind.Extra({n: 2})), label(::geo/Kind.Full(s: "f")), label(::k/Kind.A)]"#;
         let expected = strs(&["2", "f", "a"]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// Two namespaces may each declare a same-named type and an arrow to it
+    /// from one source. Each arrow answers for its own target, whether called
+    /// as a constructor or implicitly at a parameter, and whichever namespace
+    /// loads last. The registry used to key targets by short name, so the last
+    /// arrow declared ran for both, and a redacting arrow never ran.
+    #[test]
+    fn same_named_arrow_targets_keep_to_their_namespaces() {
+        let src = r#"::src ns
+Payload type { secret: Str }
+Tri type { s: Int }
+
+::a ns
+Payload ::src/Payload
+Tri ::src/Tri
+Fail type { from: Str }
+Geom enum open { Dot }
+Payload -> Fail fn (p: Payload): Fail { Fail({from: "a"}) }
+Tri -> Geom.Tri
+build fn (p: Any): Any { Fail(p) }
+take fn (f: Fail): Any { f.from }
+through-any fn (x: Any): Any { take(x) }
+shape fn match (g: Geom): Str {
+    Geom.Tri => { "a tri" }
+    _ => { "a other" }
+}
+shape-any fn (x: Any): Str { shape(x) }
+
+::b ns
+Payload ::src/Payload
+Tri ::src/Tri
+Fail type { from: Str }
+Geom enum open { Dot }
+Payload -> Fail fn (p: Payload): Fail { Fail({from: "b"}) }
+Tri -> Geom.Tri
+build fn (p: Any): Any { Fail(p) }
+take fn (f: Fail): Any { f.from }
+through-any fn (x: Any): Any { take(x) }
+shape fn match (g: Geom): Str {
+    Geom.Tri => { "b tri" }
+    _ => { "b other" }
+}
+shape-any fn (x: Any): Str { shape(x) }
+
+::imports ns
+Fail ::a/Fail
+Other ::b/Fail
+take fn (f: Fail): Any { f.from }
+take-other fn (f: Other): Any { f.from }
+through-any fn (x: Any): Any { take(x) }
+through-any-other fn (x: Any): Any { take-other(x) }
+
+::t ns
+p ::src/Payload({secret: "s"})
+t ::src/Tri({s: 1})
+run fn (): Vec {
+    [
+        ::a/build(p).from, ::b/build(p).from,
+        ::a/through-any(p), ::b/through-any(p),
+        ::a/shape-any(t), ::b/shape-any(t),
+        ::imports/through-any(p), ::imports/through-any-other(p),
+        is-type(::a/build(p), ::a/Fail), is-type(::b/build(p), ::b/Fail),
+        is-type(::a/build(p), ::b/Fail)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("a"),
+            Val::from("b"),
+            Val::from("a"),
+            Val::from("b"),
+            Val::from("a tri"),
+            Val::from("b tri"),
+            Val::from("a"),
+            Val::from("b"),
+            Val::Bool(true),
+            Val::Bool(true),
+            Val::Bool(false),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// An arrow's source is its qualified type too: a value doesn't run the
+    /// arrow declared for a same-named type in another namespace, and a local
+    /// type named like a core one has arrows of its own, wherever it's declared.
+    #[test]
+    fn same_named_arrow_sources_keep_to_their_namespaces() {
+        let src = r#"::a ns
+Secret type { value: Str }
+Out type { kind: Str }
+Secret -> Out fn (s: Secret): Out { Out({kind: "from a"}) }
+Secret -> Str fn (s: Secret): Str { "core str" }
+build fn (x: Any): Any { Out(x) }
+
+::b ns
+Secret type { kind: Str }
+make fn (): Any { Secret({kind: "copied"}) }
+
+::c ns
+Reduced type { text: Str }
+Holder type { n: Int }
+Holder -> Reduced fn (h: Holder): Reduced { Reduced({text: "local type"}) }
+local fn (h: Any): Any { Reduced(h).text }
+
+::t ns
+run fn (): Vec {
+    [
+        ::a/build(::a/Secret({value: "v"})).kind,
+        ::a/build(::b/make()).kind,
+        Str(::a/Secret({value: "v"})),
+        ::c/local(::c/Holder({n: 1}))
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("from a"),
+            Val::from("copied"),
+            Val::from("core str"),
+            Val::from("local type"),
+        ]);
         for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
             let out = compile_and_run_project_with_std_conf(src, conf)
                 .unwrap_or_else(|e| panic!("run failed: {e}"));
@@ -2200,7 +2501,7 @@ probe fn (): Vec {
 probe()
 probe()
 probe()"#;
-        let expected = Val::Vec(vec![
+        let expected = Val::vec(vec![
             Val::Int(610),
             Val::Dec(fastnum::D256::from(5) / fastnum::D256::from(2)),
             Val::Bool(false),
@@ -2827,7 +3128,7 @@ probe()"#;
         let interp =
             compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
                 .expect("interpreted checks");
-        let expected = Val::Vec(vec![
+        let expected = Val::vec(vec![
             Val::Int(80),
             Val::from("err"),
             Val::from("a"),

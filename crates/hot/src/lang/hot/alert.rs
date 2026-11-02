@@ -74,7 +74,7 @@ pub fn alert(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
             let mut result = indexmap::IndexMap::new();
             result.insert(Val::from("channel"), Val::from(channel.as_str()));
             result.insert(Val::from("status"), Val::from("no_context"));
-            return HotResult::Ok(Val::ok(Val::Map(Box::new(result))));
+            return HotResult::Ok(Val::ok(Val::map(result)));
         }
     };
 
@@ -89,7 +89,7 @@ pub fn alert(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
             let mut result = indexmap::IndexMap::new();
             result.insert(Val::from("channel"), Val::from(channel.as_str()));
             result.insert(Val::from("status"), Val::from("no_context"));
-            return HotResult::Ok(Val::ok(Val::Map(Box::new(result))));
+            return HotResult::Ok(Val::ok(Val::map(result)));
         }
     };
 
@@ -105,7 +105,7 @@ pub fn alert(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
             let mut result = indexmap::IndexMap::new();
             result.insert(Val::from("channel"), Val::from(channel.as_str()));
             result.insert(Val::from("status"), Val::from("no_database"));
-            return HotResult::Ok(Val::ok(Val::Map(Box::new(result))));
+            return HotResult::Ok(Val::ok(Val::map(result)));
         }
     };
 
@@ -127,7 +127,7 @@ pub fn alert(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
             result.insert(Val::from("alert_id"), Val::from(alert.alert_id.to_string()));
             result.insert(Val::from("channel"), Val::from(alert.channel.as_str()));
             result.insert(Val::from("status"), Val::from("published"));
-            HotResult::Ok(Val::ok(Val::Map(Box::new(result))))
+            HotResult::Ok(Val::ok(Val::map(result)))
         }
         Err(e) => {
             tracing::error!("::hot::alert/alert: failed to publish alert: {}", e);

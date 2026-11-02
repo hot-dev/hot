@@ -243,7 +243,7 @@ pub fn listen(args: &[Val]) -> HotResult<Val> {
     result_map.insert(Val::from("listening"), Val::Bool(true));
     result_map.insert(Val::from("event_type"), args[0].clone());
 
-    HotResult::Ok(Val::Map(Box::new(result_map)))
+    HotResult::Ok(Val::map(result_map))
 }
 
 /// Create an event
@@ -261,5 +261,5 @@ pub fn create_event(args: &[Val]) -> HotResult<Val> {
         event_map.insert(Val::from("metadata"), args[2].clone());
     }
 
-    HotResult::Ok(Val::Map(Box::new(event_map)))
+    HotResult::Ok(Val::map(event_map))
 }

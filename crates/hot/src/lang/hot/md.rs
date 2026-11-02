@@ -19,7 +19,7 @@ fn yaml_to_val(node: &yaml_rust2::Yaml) -> Val {
         Yaml::Integer(i) => Val::Int(*i),
         Yaml::String(s) => Val::from(s.as_str()),
         Yaml::Boolean(b) => Val::Bool(*b),
-        Yaml::Array(arr) => Val::Vec(arr.iter().map(yaml_to_val).collect()),
+        Yaml::Array(arr) => Val::vec(arr.iter().map(yaml_to_val).collect()),
         Yaml::Hash(h) => {
             let mut map = indexmap::IndexMap::new();
             for (k, v) in h.iter() {
@@ -31,7 +31,7 @@ fn yaml_to_val(node: &yaml_rust2::Yaml) -> Val {
                 };
                 map.insert(key, yaml_to_val(v));
             }
-            Val::Map(Box::new(map))
+            Val::map(map)
         }
         Yaml::Null => Val::Null,
         Yaml::BadValue => Val::Null,

@@ -368,7 +368,7 @@ fn test_value_with_val_map_roundtrip() {
     map.insert(Val::from("key1"), Val::Int(1));
     map.insert(Val::from("key2"), Val::from("value"));
 
-    let value = Value::Val(Val::Map(Box::new(map)), None);
+    let value = Value::Val(Val::map(map), None);
     assert_roundtrip(&value, "Value with Val::Map");
 }
 

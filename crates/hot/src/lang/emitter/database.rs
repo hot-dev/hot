@@ -1179,7 +1179,7 @@ mod tests {
             result_params: Vec::new(),
         };
 
-        let args = Val::Vec(vec![
+        let args = Val::vec(vec![
             Val::Box(Box::new(FunctionRef::new("::hot::math/add".to_string()))),
             Val::Box(Box::new(lazy_thunk)),
         ]);

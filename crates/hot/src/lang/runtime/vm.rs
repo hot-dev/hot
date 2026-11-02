@@ -82,8 +82,9 @@ pub(crate) fn core_function_name<'a>(
 pub(crate) fn merge_map_spread(dest: Val, source: &Val) -> VmResult<Val> {
     match (dest, crate::val::map_spread_entries(source)) {
         (Val::Map(mut dest_map), Some(entries)) => {
+            let dest = Arc::make_mut(&mut dest_map);
             for (k, v) in entries.iter() {
-                dest_map.insert(k.clone(), v.clone());
+                dest.insert(k.clone(), v.clone());
             }
             Ok(Val::Map(dest_map))
         }
@@ -110,10 +111,10 @@ pub(crate) fn merge_map_spread(dest: Val, source: &Val) -> VmResult<Val> {
 pub(crate) fn append_to_vec(target: Val, value: Val) -> VmResult<Val> {
     match target {
         Val::Vec(mut elements) => {
-            elements.push(value);
+            Arc::make_mut(&mut elements).push(value);
             Ok(Val::Vec(elements))
         }
-        Val::Null => Ok(Val::Vec(vec![value])),
+        Val::Null => Ok(Val::vec(vec![value])),
         other => Err(VmError::runtime(format!(
             "Cannot append to {:?}, expected a vector",
             other
@@ -238,6 +239,7 @@ pub(crate) struct VmHostContext {
     run_start_time: chrono::DateTime<chrono::Utc>,
     run_start_instant: std::time::Instant,
     native_core_shadows: Arc<NativeCoreShadows>,
+    meta_calls_read: Arc<AtomicBool>,
 }
 
 /// Thread-safe cancellation state holder
@@ -800,6 +802,9 @@ pub struct VirtualMachine {
     /// Where bare calls to the core functions every tier runs natively reach
     /// another function. Computed on first use, and shared with worker VMs.
     native_core_shadows: std::cell::OnceCell<Arc<NativeCoreShadows>>,
+    /// Whether this run has read a meta value that still holds a call (see
+    /// `note_meta_read`). Shared with worker VMs, which can hand one back.
+    meta_calls_read: Arc<AtomicBool>,
     /// Number of currently-active `execute_user_function` frames per
     /// FunctionId. Register indices are unique per function but shared across
     /// invocations of the *same* function, so a re-entrant (recursive) call
@@ -851,11 +856,12 @@ fn split_param_types(types: &str) -> Vec<String> {
     parts
 }
 
-/// Whether a parameter's written type is a built-in one, as
-/// `is_primitive_type_expr` in the type checker counts them.
+/// Whether a parameter's type is a built-in one, as `is_primitive_type_expr`
+/// in the type checker counts them.
 fn is_primitive_param_type(param_type: &str) -> bool {
     let base = param_type.strip_suffix('?').unwrap_or(param_type);
     let base = base.split('<').next().unwrap_or(base).trim();
+    let base = base.strip_prefix("::hot::type/").unwrap_or(base);
     matches!(
         base,
         "Str" | "Int" | "Dec" | "Bool" | "Bytes" | "Byte" | "Null" | "Any" | "Vec" | "Map"
@@ -952,6 +958,7 @@ impl VirtualMachine {
             jit,
             hof_plan_cache: AHashMap::new(),
             native_core_shadows: std::cell::OnceCell::new(),
+            meta_calls_read: Arc::new(AtomicBool::new(false)),
             function_active_depth: vec![0; function_count],
             function_used_registers_cache: AHashMap::new(),
             failure_state: Arc::new(VmFailureState {
@@ -1126,6 +1133,7 @@ impl VirtualMachine {
             run_start_time: self.run_start_time,
             run_start_instant: self.run_start_instant,
             native_core_shadows: self.native_core_shadows(),
+            meta_calls_read: Arc::clone(&self.meta_calls_read),
         }
     }
 
@@ -1147,6 +1155,7 @@ impl VirtualMachine {
         self.ctx_default_hashes = context.ctx_default_hashes.clone();
         self.run_start_time = context.run_start_time;
         self.run_start_instant = context.run_start_instant;
+        self.meta_calls_read = Arc::clone(&context.meta_calls_read);
         // A worker runs the same program, so it shares what was computed.
         let _ = self
             .native_core_shadows
@@ -2128,7 +2137,7 @@ impl VirtualMachine {
                     // Extract dependency levels from the constant value
                     if let Val::Vec(levels_vec) = &value {
                         let mut dependency_levels = Vec::new();
-                        for level_val in levels_vec {
+                        for level_val in levels_vec.iter() {
                             if let Val::Vec(var_names_vec) = level_val {
                                 let var_names: Vec<String> = var_names_vec
                                     .iter()
@@ -2811,8 +2820,7 @@ impl VirtualMachine {
                     if (spread_mask >> i) & 1 == 1 {
                         // The spread operand is consumed: it must be a Vec.
                         let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                        let resolved_arg =
-                            self.resolve_variable_references_in_val(&unwrapped_arg)?;
+                        let resolved_arg = self.resolve_call_arg(unwrapped_arg)?;
                         match &resolved_arg {
                             Val::Vec(elements) => {
                                 tracing::trace!(
@@ -2820,7 +2828,7 @@ impl VirtualMachine {
                                     elements.len(),
                                     i
                                 );
-                                for elem in elements {
+                                for elem in elements.iter() {
                                     args.push(elem.clone());
                                 }
                             }
@@ -2886,7 +2894,7 @@ impl VirtualMachine {
                         if self.error_capture_active {
                             let mut m = indexmap::IndexMap::new();
                             m.insert(Val::from("error"), Val::from(e.to_string()));
-                            Val::Map(Box::new(m))
+                            Val::map(m)
                         } else {
                             return Err(e);
                         }
@@ -2925,7 +2933,7 @@ impl VirtualMachine {
                         if self.error_capture_active {
                             let mut m = indexmap::IndexMap::new();
                             m.insert(Val::from("error"), Val::from(e.to_string()));
-                            Val::Map(Box::new(m))
+                            Val::map(m)
                         } else {
                             return Err(e);
                         }
@@ -2982,7 +2990,7 @@ impl VirtualMachine {
                         if self.error_capture_active {
                             let mut m = indexmap::IndexMap::new();
                             m.insert(Val::from("error"), Val::from(e.to_string()));
-                            Val::Map(Box::new(m))
+                            Val::map(m)
                         } else {
                             return Err(e);
                         }
@@ -3454,7 +3462,7 @@ impl VirtualMachine {
                     let mut map = indexmap::IndexMap::new();
                     map.insert(Val::from("$type"), Val::from("::hot::type/Result.Ok"));
                     map.insert(Val::from("$val"), val);
-                    Val::Map(Box::new(map))
+                    Val::map(map)
                 };
                 self.set_register(dest, result)?;
                 self.instruction_pointer += 1;
@@ -3498,7 +3506,7 @@ impl VirtualMachine {
                             if self.error_capture_active {
                                 let mut m = indexmap::IndexMap::new();
                                 m.insert(Val::from("error"), Val::from(e.to_string()));
-                                Val::Map(Box::new(m))
+                                Val::map(m)
                             } else {
                                 return Err(e);
                             }
@@ -3538,7 +3546,7 @@ impl VirtualMachine {
                         if self.error_capture_active {
                             let mut m = indexmap::IndexMap::new();
                             m.insert(Val::from("error"), Val::from(e.to_string()));
-                            Val::Map(Box::new(m))
+                            Val::map(m)
                         } else {
                             return Err(e);
                         }
@@ -3579,7 +3587,7 @@ impl VirtualMachine {
                     elements.push(element_val);
                 }
 
-                let vector_val = Val::Vec(elements);
+                let vector_val = Val::vec(elements);
                 self.set_register(dest, vector_val)?;
                 self.instruction_pointer += 1;
             }
@@ -3589,12 +3597,11 @@ impl VirtualMachine {
                 let value = *value;
                 // Push a value onto a vector (modifies vec in place)
                 let value_to_push = self.get_register(value)?.clone();
-                let vec_val = self.get_register(vec)?;
+                let vec_val = self.take_register(vec)?;
 
-                if let Val::Vec(elements) = vec_val {
-                    let mut new_elements = elements.clone();
-                    new_elements.push(value_to_push);
-                    self.set_register(vec, Val::Vec(new_elements))?;
+                if let Val::Vec(mut elements) = vec_val {
+                    Arc::make_mut(&mut elements).push(value_to_push);
+                    self.set_register(vec, Val::Vec(elements))?;
                 } else {
                     return Err(VmError::runtime(format!(
                         "VecPush: expected Vec, got {:?}",
@@ -3625,7 +3632,7 @@ impl VirtualMachine {
                         // Spread this element - it should be a Vec
                         match element_val {
                             Val::Vec(inner_elements) => {
-                                for inner_elem in inner_elements {
+                                for inner_elem in Arc::unwrap_or_clone(inner_elements) {
                                     elements.push(inner_elem);
                                 }
                             }
@@ -3648,7 +3655,7 @@ impl VirtualMachine {
                     }
                 }
 
-                let vector_val = Val::Vec(elements);
+                let vector_val = Val::vec(elements);
                 self.set_register(dest, vector_val)?;
                 self.instruction_pointer += 1;
             }
@@ -3715,21 +3722,21 @@ impl VirtualMachine {
                 let collection = *collection;
                 let index = *index;
                 let value = *value;
-                let collection_val = self.get_register(collection)?.clone();
                 let index_val = self.get_register(index)?.clone();
                 let value_val = self.get_register(value)?.clone();
+                let collection_val = self.take_register(collection)?;
 
                 match collection_val {
                     Val::Map(mut map) => {
                         // Set element in map
-                        map.insert(index_val, value_val);
+                        Arc::make_mut(&mut map).insert(index_val, value_val);
                         self.set_register(collection, Val::Map(map))?;
                     }
                     Val::Vec(mut vec) => {
                         // Set element in vector (if index is an integer)
                         if let Val::Int(idx) = index_val {
                             if idx >= 0 && (idx as usize) < vec.len() {
-                                vec[idx as usize] = value_val;
+                                Arc::make_mut(&mut vec)[idx as usize] = value_val;
                                 self.set_register(collection, Val::Vec(vec))?;
                             } else {
                                 return Err(VmError::runtime(format!(
@@ -3759,7 +3766,7 @@ impl VirtualMachine {
             Instruction::MergeMaps { dest, source } => {
                 let dest = *dest;
                 let source = *source;
-                let dest_val = self.get_register(dest)?.clone();
+                let dest_val = self.take_register(dest)?;
                 // A spread contributes a constructed value's fields, not its
                 // internal `$type`/`$val` wrapper keys.
                 let merged = merge_map_spread(dest_val, self.get_register(source)?)?;
@@ -3797,7 +3804,7 @@ impl VirtualMachine {
                 let val = self.get_register(src)?.clone();
                 let mut m = indexmap::IndexMap::new();
                 m.insert(Val::from("ok"), val);
-                self.set_register(dest, Val::Map(Box::new(m)))?;
+                self.set_register(dest, Val::map(m))?;
                 self.instruction_pointer += 1;
             }
 
@@ -4028,12 +4035,12 @@ impl VirtualMachine {
                     };
                     resolved_map.insert(key.clone(), resolved_value);
                 }
-                Ok(Val::Map(Box::new(resolved_map)))
+                Ok(Val::map(resolved_map))
             }
             Val::Vec(vec) => {
                 // Recursively resolve variable references in vectors
                 let mut resolved_vec = Vec::new();
-                for value in vec {
+                for value in vec.iter() {
                     let resolved_value = if let Val::Box(b) = value {
                         // Check if this is a lazy lambda - if so, preserve it
                         if b.as_any()
@@ -4063,7 +4070,7 @@ impl VirtualMachine {
                     };
                     resolved_vec.push(resolved_value);
                 }
-                Ok(Val::Vec(resolved_vec))
+                Ok(Val::vec(resolved_vec))
             }
             _ => Ok(val.clone()),
         }
@@ -4140,6 +4147,16 @@ impl VirtualMachine {
         self.registers
             .get(reg_id as usize)
             .ok_or(VmError::InvalidRegister(reg_id))
+    }
+
+    /// Move a register's value out, leaving Null. A write to the value it
+    /// returns copies a collection only if something else still holds it.
+    fn take_register(&mut self, reg_id: RegisterId) -> VmResult<Val> {
+        self.get_register(reg_id)?;
+        Ok(std::mem::replace(
+            &mut self.registers[reg_id as usize],
+            Val::Null,
+        ))
     }
 
     fn set_register(&mut self, reg_id: RegisterId, value: Val) -> VmResult<()> {
@@ -4320,7 +4337,7 @@ impl VirtualMachine {
                     }
                     new_vec.push(result);
                 }
-                return Ok(Val::Vec(new_vec));
+                return Ok(Val::vec(new_vec));
             } else {
                 // Not a Vec - return as-is
                 return Ok(data.clone());
@@ -4377,7 +4394,7 @@ impl VirtualMachine {
                 let mut result_map = indexmap::IndexMap::new();
                 result_map.insert(Val::from("$type"), Val::from(type_name.clone()));
                 result_map.insert(Val::from("$val"), data.clone());
-                return Ok(Val::Map(Box::new(result_map)));
+                return Ok(Val::map(result_map));
             }
 
             // Check if this type has a direct constructor (struct types do)
@@ -4566,7 +4583,7 @@ impl VirtualMachine {
             let mut result_map = indexmap::IndexMap::new();
             result_map.insert(Val::from("$type"), Val::from(type_name.clone()));
             result_map.insert(Val::from("$val"), data.clone());
-            return Ok(Val::Map(Box::new(result_map)));
+            return Ok(Val::map(result_map));
         }
 
         // If data is already typed (has $type), extract its $val for reconstruction
@@ -4641,7 +4658,7 @@ impl VirtualMachine {
                     new_map.insert(key.clone(), processed_value);
                 }
 
-                Val::Map(Box::new(new_map))
+                Val::map(new_map)
             }
             Val::Vec(vec) => {
                 // For vector data, check if we have item type info
@@ -4662,7 +4679,7 @@ impl VirtualMachine {
                         }
                         new_vec.push(result);
                     }
-                    Val::Vec(new_vec)
+                    Val::vec(new_vec)
                 } else {
                     raw_data.clone()
                 }
@@ -4692,7 +4709,7 @@ impl VirtualMachine {
         result_map.insert(Val::from("$type"), Val::from(type_name));
         result_map.insert(Val::from("$val"), processed_val);
 
-        Ok(Val::Map(Box::new(result_map)))
+        Ok(Val::map(result_map))
     }
 
     fn construct_union_typed(&mut self, data: &Val, members: &[Val]) -> VmResult<Val> {
@@ -5223,7 +5240,7 @@ impl VirtualMachine {
                         }
 
                         tracing::trace!("VM: collect_flow_result |map -> {:?}", result_map);
-                        Ok(Val::Map(Box::new(result_map)))
+                        Ok(Val::map(result_map))
                     }
                     crate::lang::bytecode::FlowResultModifier::Vec => {
                         // Create a vector of results (ignore branch names)
@@ -5234,7 +5251,7 @@ impl VirtualMachine {
                             .collect();
 
                         tracing::trace!("VM: collect_flow_result |vec -> {:?}", result_vec);
-                        Ok(Val::Vec(result_vec))
+                        Ok(Val::vec(result_vec))
                     }
                     crate::lang::bytecode::FlowResultModifier::One => {
                         // For CondAll/MatchAll, return the last truthy result
@@ -5273,7 +5290,7 @@ impl VirtualMachine {
                         }
 
                         tracing::trace!("VM: Serial/Parallel flow |map -> {:?}", result_map);
-                        Ok(Val::Map(Box::new(result_map)))
+                        Ok(Val::map(result_map))
                     }
                     crate::lang::bytecode::FlowResultModifier::Vec => {
                         // Create a vector from variable references (values only)
@@ -5284,7 +5301,7 @@ impl VirtualMachine {
                             .collect();
 
                         tracing::trace!("VM: Serial/Parallel flow |vec -> {:?}", result_vec);
-                        Ok(Val::Vec(result_vec))
+                        Ok(Val::vec(result_vec))
                     }
                     crate::lang::bytecode::FlowResultModifier::One => {
                         // For |one, return the last referenced variable value, or null if none
@@ -5311,7 +5328,7 @@ impl VirtualMachine {
                         }
 
                         tracing::trace!("VM: Pipe flow |map -> {:?}", result_map);
-                        Ok(Val::Map(Box::new(result_map)))
+                        Ok(Val::map(result_map))
                     }
                     crate::lang::bytecode::FlowResultModifier::Vec => {
                         // Create a vector from pipe step results (values only)
@@ -5322,7 +5339,7 @@ impl VirtualMachine {
                             .collect();
 
                         tracing::trace!("VM: Pipe flow |vec -> {:?}", result_vec);
-                        Ok(Val::Vec(result_vec))
+                        Ok(Val::vec(result_vec))
                     }
                     crate::lang::bytecode::FlowResultModifier::One => {
                         // For |one, return the last pipe step result, or null if none
@@ -5503,7 +5520,7 @@ impl VirtualMachine {
             .enumerate()
             .map(|(index, arg)| {
                 if keeps.get(index).copied().unwrap_or(false) {
-                    self.resolve_variable_references_in_val(&arg)
+                    self.resolve_call_arg(arg)
                 } else if arg.is_err() {
                     Err(self.consume_err_arg(target, index, &arg))
                 } else {
@@ -5766,11 +5783,29 @@ impl VirtualMachine {
             | Val::Bytes(_)
             | Val::Null => Ok(val),
             other => {
-                // Preserve the slower semantic path for Results, boxed AST
-                // references, and nested collections that may need resolution.
                 let unwrapped_arg = self.unwrap_result_if_ok(&other)?;
-                self.resolve_variable_references_in_val(&unwrapped_arg)
+                self.resolve_call_arg(unwrapped_arg)
             }
+        }
+    }
+
+    /// A call argument, with any call written in meta evaluated. Only a value
+    /// read from meta can hold one (see `note_meta_read`), so a program that has
+    /// read none skips the walk over the argument, which would cost a read of a
+    /// collection time in proportion to its size.
+    fn resolve_call_arg(&mut self, arg: Val) -> VmResult<Val> {
+        if self.meta_calls_read.load(Ordering::Relaxed) {
+            self.resolve_variable_references_in_val(&arg)
+        } else {
+            Ok(arg)
+        }
+    }
+
+    /// Note a value `::hot::meta/get` is handing out: meta keeps a call written
+    /// in it unevaluated, and it runs when the value is passed to a function.
+    pub(crate) fn note_meta_read(&self, value: &Val) {
+        if Self::val_needs_resolution(value) {
+            self.meta_calls_read.store(true, Ordering::Relaxed);
         }
     }
 
@@ -7228,12 +7263,57 @@ impl VirtualMachine {
                 if types.iter().all(|t| t == "Any") {
                     continue;
                 }
-                found = Some(types.into());
+                let namespace = self
+                    .program
+                    .functions
+                    .get(function_id as usize)
+                    .map_or("", |info| info.namespace.as_str());
+                found = Some(
+                    types
+                        .iter()
+                        .map(|written| self.param_type_path(namespace, written))
+                        .collect(),
+                );
                 break;
             }
         }
         self.coercion_param_cache.insert(function_id, found.clone());
         found
+    }
+
+    /// A parameter's written type as the qualified path arrows register under,
+    /// resolved in the function's `namespace` the way the compiler resolves an
+    /// arrow's target: a short name means something only in its own scope.
+    /// Unions, generics and nullables are no arrow's target, so they stay as
+    /// written.
+    fn param_type_path(&self, namespace: &str, written: &str) -> String {
+        if written == "Any" || written.starts_with("::") || written.contains(['<', '|', '?', ' ']) {
+            return written.to_owned();
+        }
+        let (name, variant) = match written.split_once('.') {
+            Some((name, variant)) => (name, Some(variant)),
+            None => (written, None),
+        };
+        let local = format!("{namespace}/{name}");
+        let variables = self
+            .program
+            .namespaces
+            .namespaces
+            .get(namespace)
+            .map(|info| &info.variables);
+        let path = if variables.is_some_and(|vars| vars.contains_key(&local)) {
+            local
+        } else if let Some(imported) = variables.and_then(|vars| vars.get(name)) {
+            imported.name.clone()
+        } else if let Some(core) = self.core_variables.get(name) {
+            format!("{}/{}", core.namespace_path, name)
+        } else {
+            local
+        };
+        match variant {
+            Some(variant) => format!("{path}.{variant}"),
+            None => path,
+        }
     }
 
     /// The same-arity overload set `function_id` belongs to: the overloads
@@ -7518,11 +7598,9 @@ impl VirtualMachine {
     }
 
     /// Run the registered `Source -> Target` arrow for a value tagged
-    /// `existing`, when exactly one arrow from that source reaches
-    /// `target` (or a variant of it). Prefers registry keys whose source is
-    /// the value's qualified `$type`, falling back to short names for
-    /// legacy entries; ambiguous matches return `None` rather than picking
-    /// an arrow.
+    /// `existing`, when exactly one arrow from that source reaches the
+    /// qualified `target` (or a variant of it); ambiguous matches return
+    /// `None` rather than picking an arrow.
     fn coerce_tagged_via_arrow(
         &mut self,
         data: &Val,
@@ -7530,9 +7608,7 @@ impl VirtualMachine {
         target: &str,
     ) -> VmResult<Option<Val>> {
         let src_short = existing.rsplit('/').next().unwrap_or(existing);
-        let tgt_short = target.rsplit('/').next().unwrap_or(target);
-        let Some((source, target)) = self.find_coercion_target(existing, src_short, tgt_short)
-        else {
+        let Some((source, target)) = self.find_coercion_target(existing, src_short, target) else {
             return Ok(None);
         };
         let Some(impl_name) = self.resolve_type_implementation(&source, &target) else {
@@ -7543,15 +7619,17 @@ impl VirtualMachine {
     }
 
     /// Look up a coercion arrow whose source type matches `src` and whose
-    /// target type is either `tgt` exactly or a variant of it (`tgt.X`).
+    /// target type is either the qualified `tgt` exactly or a variant of it
+    /// (`tgt.X`).
     /// Returns the actual target key (used to resolve the impl function via
     /// `resolve_type_implementation`) when exactly one such arrow exists.
     /// Multiple matches return `None` so the dispatcher can fall through
     /// rather than silently picking one.
     /// `src_full` is the value's qualified type path; the registry is keyed
     /// by scope-resolved qualified source names, so that match is
-    /// authoritative. The short-name comparison runs only when no qualified
-    /// key matches (legacy caches, values carrying short $type strings).
+    /// authoritative. The short-name comparison serves only values carrying a
+    /// short $type string: a qualified one is a different type from a
+    /// same-named source in another namespace.
     fn find_coercion_target(
         &self,
         src_full: &str,
@@ -7559,35 +7637,17 @@ impl VirtualMachine {
         tgt: &str,
     ) -> Option<(String, String)> {
         let dotted_prefix = format!("{}.", tgt);
-        let collect = |exact: bool| -> Vec<(String, String)> {
-            self.type_implementations
-                .keys()
-                .filter_map(|(s, t)| {
-                    let source_matches = if exact {
-                        s == src_full
-                    } else {
-                        s.rsplit('/').next().unwrap_or(s) == src_short
-                    };
-                    if !source_matches {
-                        return None;
-                    }
-                    if t == tgt || t.starts_with(&dotted_prefix) {
-                        Some((s.clone(), t.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-        let mut candidates = collect(true);
-        if candidates.is_empty() {
-            candidates = collect(false);
-        }
-        if candidates.len() == 1 {
-            candidates.into_iter().next()
-        } else {
-            None
-        }
+        let qualified = src_full.starts_with("::");
+        let mut candidates = self.type_implementations.keys().filter(|(s, t)| {
+            let source_matches = if qualified {
+                s == src_full
+            } else {
+                s.rsplit('/').next().unwrap_or(s) == src_short
+            };
+            source_matches && (t == tgt || t.starts_with(&dotted_prefix))
+        });
+        let found = candidates.next()?;
+        candidates.next().is_none().then(|| found.clone())
     }
 
     /// Implicit `Source -> Target` coercion at a static-dispatch call, for
@@ -7626,7 +7686,8 @@ impl VirtualMachine {
         Ok(args)
     }
 
-    /// The arrow that implicitly coerces `arg` to `param_type`, if any. Null
+    /// The arrow that implicitly coerces `arg` to `param_type` (qualified, from
+    /// `lookup_typed_param_signature`), if any. Null
     /// is never coerced, and neither is a primitive to a primitive: those
     /// arrows back explicit calls like `Str(null)` and `Int("5")`, the same
     /// rule as `coercion_available` in the type checker.
@@ -7649,10 +7710,10 @@ impl VirtualMachine {
                 path.as_str()
             }
         };
-        let short = source.rsplit('/').next().unwrap_or(source);
-        if short == param_type {
+        if source == param_type {
             return None;
         }
+        let short = source.rsplit('/').next().unwrap_or(source);
         if let Some(cached) = self
             .coercion_target_cache
             .get(source)
@@ -7937,7 +7998,7 @@ impl VirtualMachine {
                         };
 
                     match evaluated_vec {
-                        Val::Vec(vec) => vec,
+                        Val::Vec(vec) => Arc::unwrap_or_clone(vec),
                         _ => {
                             return Err(VmError::runtime(format!(
                                 "call-lib: second argument must evaluate to an array, got {:?}",
@@ -7968,7 +8029,7 @@ impl VirtualMachine {
                         Val::Vec(vec) => {
                             // Evaluate any lazy thunks within the vector
                             let mut evaluated_args = Vec::new();
-                            for arg in vec {
+                            for arg in Arc::unwrap_or_clone(vec) {
                                 if let Val::Box(arg_boxed) = &arg {
                                     if arg_boxed
                                         .as_any()
@@ -8048,7 +8109,7 @@ impl VirtualMachine {
                     );
 
                     // Pass arguments as-is (lazy thunk creation is handled at compile time)
-                    vec.clone()
+                    vec.to_vec()
                 }
                 _ => {
                     return Err(VmError::runtime(format!(
@@ -9062,7 +9123,7 @@ impl VirtualMachine {
             vec![], // No args for inline flows
             source,
             start_time,
-            Some(Val::Map(Box::new(flow_map))),
+            Some(Val::map(flow_map)),
         );
         emitter.emit(start_event);
 
@@ -9210,7 +9271,7 @@ impl VirtualMachine {
                     let mut map = IndexMap::new();
                     map.insert(Val::from("type"), Val::from(flow_type_str.to_string()));
                     map.insert(Val::from("fn"), Val::Bool(true)); // Mark as function-level flow
-                    Val::Map(Box::new(map))
+                    Val::map(map)
                 })
             } else {
                 // Check if we're inside an inline flow context
@@ -9231,7 +9292,7 @@ impl VirtualMachine {
                     if let Some(branch) = &ctx.current_branch {
                         map.insert(Val::from("branch"), Val::from(branch.clone()));
                     }
-                    Some(Val::Map(Box::new(map)))
+                    Some(Val::map(map))
                 })
             };
 
@@ -9447,7 +9508,7 @@ impl VirtualMachine {
                     let variadic_len = variadic_args.len();
                     function_scope
                         .variables
-                        .insert(param_name.clone(), Val::Vec(variadic_args));
+                        .insert(param_name.clone(), Val::vec(variadic_args));
                     tracing::trace!(
                         "VM: Bound variadic parameter '{}' with {} args (starting from index {})",
                         param_name,
@@ -9562,7 +9623,7 @@ impl VirtualMachine {
                                     } else {
                                         vec![]
                                     };
-                                    Val::Vec(variadic_args)
+                                    Val::vec(variadic_args)
                                 } else if i < current_args.len() {
                                     current_args[i].clone()
                                 } else {
@@ -9957,9 +10018,9 @@ impl VirtualMachine {
                         .unwrap_or_else(|_| value.clone());
                     resolved.insert(key.clone(), value);
                 }
-                Ok(Val::Map(Box::new(resolved)))
+                Ok(Val::map(resolved))
             }
-            Val::Vec(items) => Ok(Val::Vec(
+            Val::Vec(items) => Ok(Val::vec(
                 items
                     .iter()
                     .map(|item| {
@@ -10953,6 +11014,7 @@ impl VirtualMachine {
         match value {
             Val::Map(map) => {
                 if self.is_tagged_wrapper(map) {
+                    let map = Arc::make_mut(map);
                     if let Some(payload) = map.get_mut(&Val::from("$val")) {
                         self.set_property(payload, property, new_value)?;
                     } else {
@@ -10968,13 +11030,13 @@ impl VirtualMachine {
                 }
 
                 // Map assignment: set the property as a string key
-                map.insert(Val::from(property.to_string()), new_value);
+                Arc::make_mut(map).insert(Val::from(property.to_string()), new_value);
                 Ok(())
             }
             Val::Vec(vec) => {
                 // Vector assignment: try to parse property as index
                 match property.parse::<usize>() {
-                    Ok(index) => Self::set_vector_index(vec, index, new_value),
+                    Ok(index) => Self::set_vector_index(Arc::make_mut(vec), index, new_value),
                     Err(_) => Err(VmError::runtime(format!(
                         "Cannot set property '{}' on vector - property must be a valid index",
                         property
@@ -10985,7 +11047,7 @@ impl VirtualMachine {
                 // Convert null to map and set property
                 let mut new_map = indexmap::IndexMap::new();
                 new_map.insert(Val::from(property.to_string()), new_value);
-                *value = Val::Map(Box::new(new_map));
+                *value = Val::map(new_map);
                 Ok(())
             }
             _ => {
@@ -11051,7 +11113,7 @@ impl VirtualMachine {
 
         match value {
             Val::Map(map) if self.is_tagged_wrapper(map) => {
-                let Some(payload) = map.get_mut(&Val::from("$val")) else {
+                let Some(payload) = Arc::make_mut(map).get_mut(&Val::from("$val")) else {
                     return Err(VmError::runtime(
                         "Cannot dynamically assign through a tagged unit value".to_string(),
                     ));
@@ -11064,7 +11126,7 @@ impl VirtualMachine {
                 Ok(())
             }
             Val::Map(map) => {
-                map.insert(property.clone(), new_value);
+                Arc::make_mut(map).insert(property.clone(), new_value);
                 Ok(())
             }
             Val::Vec(vec) => match property {
@@ -11076,7 +11138,7 @@ impl VirtualMachine {
                     let index = usize::try_from(*index).map_err(|_| {
                         VmError::runtime(format!("Vector index {} is too large to address", index))
                     })?;
-                    Self::set_vector_index(vec, index, new_value)
+                    Self::set_vector_index(Arc::make_mut(vec), index, new_value)
                 }
                 other => Err(VmError::runtime(format!(
                     "Vector index must be an integer, got {:?}",
@@ -11209,7 +11271,7 @@ impl VirtualMachine {
                             let full_type = format!("{}.{}", type_ref.name, property);
                             let mut result_map = indexmap::IndexMap::new();
                             result_map.insert(Val::from("$type"), Val::from(full_type));
-                            return Ok(Val::Map(Box::new(result_map)));
+                            return Ok(Val::map(result_map));
                         } else {
                             // Type-reference variant: return a function reference to the constructor
                             let constructor_name = format!("{}.{}", type_ref.name, property);
@@ -11916,15 +11978,12 @@ mod tests {
         // Map payloads: msg, then message, are preferred
         let mut m = IndexMap::new();
         m.insert(Val::from("msg"), Val::from("boom"));
-        assert_eq!(
-            VirtualMachine::result_err_message(&Val::Map(Box::new(m))),
-            "boom"
-        );
+        assert_eq!(VirtualMachine::result_err_message(&Val::map(m)), "boom");
         let mut m = IndexMap::new();
         m.insert(Val::from("message"), Val::from("pg: relation missing"));
         m.insert(Val::from("code"), Val::from("42P01"));
         assert_eq!(
-            VirtualMachine::result_err_message(&Val::Map(Box::new(m))),
+            VirtualMachine::result_err_message(&Val::map(m)),
             "pg: relation missing"
         );
 
@@ -12628,7 +12687,7 @@ roles fn (): Vec {
             let result = run_recursion_source(source, "::test/roles", &[], jit);
             assert_eq!(
                 result,
-                Val::Vec(vec![
+                Val::vec(vec![
                     Val::from("all"),
                     Val::Null,
                     Val::from("read"),
@@ -12773,7 +12832,7 @@ last fn parallel (i: Int): Int {
         }
         assert_eq!(
             run_recursion_source(source, "::test/listed", &[Val::Int(1)], "off"),
-            Val::Vec(vec![Val::Int(3), Val::Int(2), Val::Int(-2)])
+            Val::vec(vec![Val::Int(3), Val::Int(2), Val::Int(-2)])
         );
         assert_eq!(
             run_recursion_source(source, "::test/last", &[Val::Int(1)], "off"),

@@ -475,7 +475,7 @@ bFnC3vIJb6vFzmYBofuCaGXWbIQ/HnZsZRgEOTBaN3XlJ5J3WUMER9wT\n\
         for (k, v) in pairs {
             m.insert(Val::from(*k), v.clone());
         }
-        Val::Map(Box::new(m))
+        Val::map(m)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
