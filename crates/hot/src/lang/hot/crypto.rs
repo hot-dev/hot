@@ -473,10 +473,10 @@ QXhWy10d3WpWR4Z0MjiJ0/Pm+gRizor9Zqvdd6HVd4K4yWaB+M5J
 
     fn ecdsa_verify(x: Vec<u8>, y: Vec<u8>, message: &str, signature: Vec<u8>) -> HotResult<Val> {
         ecdsa_p256_sha256_verify(&[
-            Val::Bytes(x),
-            Val::Bytes(y),
+            Val::bytes(x),
+            Val::bytes(y),
             Val::from(message),
-            Val::Bytes(signature),
+            Val::bytes(signature),
         ])
     }
 
