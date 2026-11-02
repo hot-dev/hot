@@ -163,6 +163,21 @@ async fn hot_path_statements_keep_their_plans_under_rls() -> Result<(), Box<dyn 
         size_plan.contains("Index Only Scan using call_env_start_time_size_idx"),
         "{size_plan}"
     );
+    // Its store sum reaches the row through the key, so its cost follows the
+    // environment's entries, not the number of organizations or the whole table.
+    let lines: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT CAST(COALESCE(SUM(CASE WHEN size<0 THEN 0 ELSE size END),0) AS BIGINT) \
+         FROM store_map_entry WHERE org_id = $2 AND env_id = $1",
+    )
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .fetch_all(&scheduler)
+    .await?;
+    let store_plan = lines.join("\n");
+    assert!(
+        store_plan.contains("Index Cond") && store_plan.contains("org_id ="),
+        "{store_plan}"
+    );
     raw.close().await;
     admin.close().await;
     Ok(())
