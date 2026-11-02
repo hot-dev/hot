@@ -15,6 +15,7 @@ pub mod cmp;
 pub mod coll;
 pub mod core;
 pub mod crypto;
+pub mod csv;
 pub mod ctx;
 pub mod env;
 pub mod event;
