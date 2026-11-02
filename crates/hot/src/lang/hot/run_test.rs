@@ -645,12 +645,15 @@ run()"#;
     // them, so it has to leave the same ownership.
 
     /// The register the source was loaded into, before the stages: the first
-    /// instruction loads it.
+    /// instruction after the parameter checks loads it.
     fn loaded_source_register(instructions: &[Instruction]) -> u32 {
-        let Instruction::LoadVar { dest, .. } = instructions[0] else {
+        let first = instructions
+            .iter()
+            .find(|ins| !matches!(ins, Instruction::CheckParam { .. }));
+        let Some(Instruction::LoadVar { dest, .. }) = first else {
             panic!("expected the source to load first, found {instructions:?}");
         };
-        dest
+        *dest
     }
 
     /// A stage overwrites a register that owned a value: its value is released.
@@ -990,7 +993,7 @@ probe("abc")"#;
             ),
             (
                 "probe fn (): Any { length(err(\"boom\")) }",
-                "boom (an Err passed as argument 1 of ::hot::str/length, which needs a value;",
+                "boom (an Err passed as argument 1 of ::hot::coll/length, which needs a value;",
             ),
         ];
         for (body, expected) in cases {
@@ -1578,27 +1581,235 @@ sq %(mul(%, %))
         );
     }
 
-    /// A null argument reaches a `Str` parameter as null, called directly or
-    /// from a caller typed `Any`. `Null -> Str` is for `Str(null)` and
-    /// interpolation, which still give "".
+    /// A null argument fails at a `Str` parameter, called directly or from a
+    /// caller typed `Any`, and passes at `Str?`. `Null -> Str` is for `Str(null)`
+    /// and interpolation, which still give "".
     #[test]
-    fn null_stays_null_at_a_str_parameter_with_and_without_jit() {
+    fn null_fails_at_a_str_parameter_with_and_without_jit() {
         let src = r#"::t ns
 f fn (x: Str): Any { [is-type(x, Null), x] }
 via-any fn (a: Any): Any { f(a) }
+nullable fn (x: Str?): Any { x }
 via-any("warm")
 via-any("warm")
 via-any("warm")
-[via-any(null), f(null), f("s"), Str(null), `[${null}]`]"#;
-        let null_pair = Val::vec(vec![Val::Bool(true), Val::Null]);
+[is-err(via-any(null)), is-err(f(null)), f("s"), nullable(null), Str(null), `[${null}]`]"#;
         assert_same_with_and_without_jit(
             src,
             &Val::vec(vec![
-                null_pair.clone(),
-                null_pair,
+                Val::Bool(true),
+                Val::Bool(true),
                 Val::vec(vec![Val::Bool(false), Val::from("s")]),
+                Val::Null,
                 Val::from(""),
                 Val::from("[]"),
+            ]),
+        );
+    }
+
+    /// A primitive parameter rejects a value of another type at the call, in
+    /// both tiers, whether or not the JIT has seen a good value first.
+    #[test]
+    fn primitive_parameters_reject_other_types_with_and_without_jit() {
+        let src = r#"::t ns
+int fn (x: Int): Any { x }
+dec fn (x: Dec): Any { x }
+str fn (x: Str): Any { x }
+bool fn (x: Bool): Any { x }
+mapped fn (x: Map): Any { x }
+vector fn (x: Vec): Any { x }
+bytes fn (x: Bytes): Any { 1 }
+either fn (x: Int | Dec): Any { x }
+maybe fn (x: Int?): Any { x }
+strs fn (x: Vec<Str>): Any { length(x) }
+any fn (json: Str): Any { from-json(json) }
+warm fn (): Any {
+    [int(1), dec(1.5), str("s"), bool(true), mapped({}), vector([]), either(1), maybe(1)]
+}
+warm()
+warm()
+warm()
+[
+    is-err(int(any("\"443\""))), is-err(int(any("443.5"))), is-err(int(any("true"))),
+    is-err(dec(any("\"1.5\""))), is-err(str(any("443"))), is-err(bool(any("\"x\""))),
+    is-err(mapped(any("[]"))), is-err(vector(any("{}"))), is-err(bytes(any("\"x\""))),
+    is-err(either(any("\"x\""))), is-err(maybe(any("\"x\""))), is-err(int(any("null"))),
+    is-err(str(any("null"))), is-err(mapped(any("null"))),
+    maybe(any("null")), either(any("2.0")), strs(any("[1, 2]"))
+]"#;
+        let mut expected = vec![Val::Bool(true); 14];
+        expected.push(Val::Null);
+        expected.push(Val::Dec(fastnum::D256::from(2)));
+        expected.push(Val::Int(2));
+        assert_same_with_and_without_jit(src, &Val::vec(expected));
+    }
+
+    /// An `Int` becomes a `Dec` and a whole `Dec` an `Int`, as at a `where`
+    /// parameter, directly and when a higher-order function makes the call.
+    #[test]
+    fn primitive_parameters_convert_exact_numbers_with_and_without_jit() {
+        let src = r#"::t ns
+int fn (x: Int): Any { [is-int(x), x] }
+dec fn (x: Dec): Any { [is-dec(x), x] }
+maybe fn (x: Dec?): Any { is-dec(x) }
+any fn (json: Str): Any { from-json(json) }
+int(1)
+int(1)
+dec(1.5)
+dec(1.5)
+[int(any("5.0")), dec(any("5")), maybe(any("5")), first(map(any("[5.0]"), int)), first(map(any("[5]"), dec))]"#;
+        let int_pair = Val::vec(vec![Val::Bool(true), Val::Int(5)]);
+        let dec_pair = Val::vec(vec![Val::Bool(true), Val::Dec(fastnum::D256::from(5))]);
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                int_pair.clone(),
+                dec_pair.clone(),
+                Val::Bool(true),
+                int_pair,
+                dec_pair,
+            ]),
+        );
+    }
+
+    /// The check leaves user types alone, keeps a tagged value over an accepted
+    /// kind, and doesn't read a lazy parameter or a `fn match` that takes a
+    /// `Result`.
+    #[test]
+    fn primitive_checks_leave_other_annotations_with_and_without_jit() {
+        let src = r#"::t ns
+User type { id: Str }
+Port type Int
+user fn (x: User): Any { x }
+mapped fn (x: Map): Any { 1 }
+int fn (x: Int): Any { 1 }
+deferred fn (lazy x: Int): Any { 1 }
+kept fn match (x: Str): Any {
+    Result.Err => { "err" }
+    "a" => { "a" }
+    _ => { "other" }
+}
+any fn (json: Str): Any { from-json(json) }
+fails fn (): Str { err("bad") }
+[user(any("\"x\"")), mapped(User({id: "a"})), int(Port(80)), deferred("not an int"), kept(fails()), kept("a")]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("x"),
+                Val::Int(1),
+                Val::Int(1),
+                Val::Int(1),
+                Val::from("err"),
+                Val::from("a"),
+            ]),
+        );
+    }
+
+    /// A failure names the parameter, its function and everything a union
+    /// accepts, and a variadic parameter's failure names the value's position.
+    #[test]
+    fn primitive_check_failures_describe_the_parameter() {
+        for (call, expected) in [
+            ("int(any(\"\\\"x\\\"\"))", "parameter `x` of `::t/int` expected Int, got Str"),
+            ("either(any(\"\\\"x\\\"\"))", "parameter `x` of `::t/either` expected Int | Dec, got Str"),
+            ("rest(1, any(\"\\\"x\\\"\"))", "parameter `xs` of `::t/rest` at `[1]` expected Int, got Str"),
+        ] {
+            let src = format!(
+                "::t ns\nint fn (x: Int): Any {{ x }}\neither fn (x: Int | Dec): Any {{ x }}\nrest fn (...xs: Int): Any {{ xs }}\nany fn (json: Str): Any {{ from-json(json) }}\nadd({call}, 1)"
+            );
+            for conf in [
+                crate::val!({"jit": {"threshold": 1}}),
+                crate::val!({"jit": {"mode": "off"}}),
+            ] {
+                let error = compile_and_run_with_std_conf(&src, Some(conf.clone()))
+                    .expect_err("the Err is consumed");
+                assert!(error.contains(expected), "with {conf:?}: {error}");
+            }
+        }
+    }
+
+    /// Native self calls, self tail calls and fused pipelines check too: a
+    /// compiled body can't assume a later call's argument matches the first.
+    #[test]
+    fn primitive_checks_cover_compiled_call_paths() {
+        let src = r#"::t ns
+to-any fn (x: Any): Any { x }
+count fn (s: Str, n: Int): Any {
+    if(eq(n, 0), s, count(to-any(n), sub(n, 1)))
+}
+doubled fn (x: Int): Int { mul(x, 2) }
+big fn (x: Int): Bool { gt(x, 2) }
+total fn (acc: Int, x: Int): Int { add(acc, x) }
+pipeline fn (xs: Vec): Int {
+    xs |> map(doubled) |> filter(big) |> reduce(total, 0)
+}
+good [1, 2, 3]
+[pipeline(good), pipeline(good), pipeline(good), is-err(count("s", 1))]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::Int(10),
+                Val::Int(10),
+                Val::Int(10),
+                Val::Bool(true),
+            ]),
+        );
+        let bad = r#"::t ns
+doubled fn (x: Int): Int { mul(x, 2) }
+pipeline fn (xs: Vec): Any { xs |> map(doubled) |> reduce(add(%1, %2), 0) }
+pipeline([1, 2, 3])
+pipeline([1, 2, 3])
+pipeline(from-json("[1, \"x\"]"))"#;
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let error = compile_and_run_with_std_conf(bad, Some(conf.clone()))
+                .expect_err("the bad element fails");
+            assert!(
+                error.contains("parameter `x` of `::t/doubled` expected Int, got Str"),
+                "with {conf:?}: {error}"
+            );
+        }
+    }
+
+    /// Overloads with a rest parameter dispatch on their arguments, whatever
+    /// the number of them.
+    #[test]
+    fn variadic_overloads_dispatch_on_their_arguments_with_and_without_jit() {
+        let src = r#"::t ns
+join fn
+(a: Int, ...rest: Int): Str { "ints" },
+(a: Str, ...rest: Str): Str { "strs" },
+(a: Vec, ...rest: Vec): Str { "vecs" }
+[
+    join(1), join("a"), join([]),
+    join(1, 2, 3), join("a", "b", "c"), join([], [], []),
+    concat("a", "b", "c", "d"), concat([1], [2], [3], [4]),
+    concat("n: ", 42, ", ok: ", true), concat(1, ":", 2),
+    slice([1, 2, 3], 1, 2), slice("abc", 1, 2), length([1, 2]), length("abc"),
+    is-empty([]), is-empty(""), is-empty(null)
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("ints"),
+                Val::from("strs"),
+                Val::from("vecs"),
+                Val::from("ints"),
+                Val::from("strs"),
+                Val::from("vecs"),
+                Val::from("abcd"),
+                Val::vec(vec![Val::Int(1), Val::Int(2), Val::Int(3), Val::Int(4)]),
+                Val::from("n: 42, ok: true"),
+                Val::from("1:2"),
+                Val::vec(vec![Val::Int(2)]),
+                Val::from("b"),
+                Val::Int(2),
+                Val::Int(3),
+                Val::Bool(true),
+                Val::Bool(true),
+                Val::Bool(true),
             ]),
         );
     }
@@ -1651,7 +1862,7 @@ t Tri({s: 1})
 run fn (): Vec {
     [
         typed-call(t), any-call(t),
-        any-str(Label({s: "from-label"})), any-str(5), any-str(true),
+        any-str(Label({s: "from-label"})), is-err(any-str(5)), is-err(any-str(true)),
         any-label("from-str"),
         call-nullable(t), call-generic(t),
         countdown(Geom.Dot, 2, t), tail-countdown(Geom.Dot, 2, t),
@@ -1667,7 +1878,7 @@ run()"#;
                 Val::from("tri"),
                 Val::from("tri"),
                 Val::from("from-label"),
-                Val::Int(5),
+                Val::Bool(true),
                 Val::Bool(true),
                 Val::from("from-str"),
                 Val::from("tri"),
@@ -3556,7 +3767,8 @@ show(5)"#;
             let out = compile_and_run_with_std_conf(bad, Some(conf.clone()));
             assert!(
                 out.as_ref()
-                    .is_err_and(|e| e.contains("first requires a collection")),
+                    .is_err_and(|e| e.contains("first requires a collection")
+                        || e.contains("of `::hot::coll/first` expected Str | Vec | Map")),
                 "with {conf:?}, expected a halt, got {out:?}"
             );
         }

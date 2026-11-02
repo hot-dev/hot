@@ -179,7 +179,6 @@ fn (s: Str): Str {
 // alias these to the coll versions
 length
 meta {
-    core: true,
     doc: """
     Get the length of string `s` in characters (Unicode code points, the unit
     `slice` and `get` use). Alias of `::hot::coll/length`. For its encoded
@@ -201,7 +200,6 @@ fn (s: Str): Int {
 
 is-empty
 meta {
-    core: true,
     doc: """
     Return true if string `s` is empty. Alias of `::hot::coll/is-empty`.
 
@@ -219,7 +217,6 @@ fn (s: Str?): Bool {
 
 slice
 meta {
-    core: true,
     doc: """
     Get a slice of string `s` from `start` to `end`. Alias of `::hot::coll/slice`.
 

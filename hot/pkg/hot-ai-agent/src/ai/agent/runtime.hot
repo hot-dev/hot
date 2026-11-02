@@ -57,7 +57,7 @@ fn
 now-epoch-secs
 meta { doc: "Current Unix epoch seconds." }
 fn (): Int {
-    div(::time/epoch-millis(::time/now()), 1000)
+    floor(div(::time/epoch-millis(::time/now()), 1000))
 }
 
 today-bucket

@@ -166,7 +166,7 @@ greet fn (name: Str, title: Str?): Str {
 
 `Str?` is shorthand for `Str | Null`.
 
-Null isn't converted at a call. A caller can still pass null to a parameter declared without `?` through an `Any` value, and `x: Str` then holds null, not `""`. Only `Str(null)` and template interpolation turn null into `""`. Standard library functions return an `Err` for null unless their parameter is declared `Str?`: `lowercase(null)` fails, and `is-empty(null)` is `true`.
+Null isn't converted at a call. Null reaching a parameter declared without `?` through an `Any` value fails at the call (see [Parameter Checks](#parameter-checks)). Only `Str(null)` and template interpolation turn null into `""`. Standard library functions return an `Err` for null unless their parameter is declared `Str?`: `lowercase(null)` fails, and `is-empty(null)` is `true`.
 
 `hot check` warns with `null-check-on-non-nullable` on `is-null(x)` or `is-some(x)` for a parameter declared without `?`, and with `null-for-non-nullable` on a literal `null` argument for one. Declare the parameter `Str?` when null is allowed.
 
@@ -495,9 +495,39 @@ if either side is a declared type: a `Triangle` passed to `s: Shape` goes throug
 `Triangle -> Shape.Tri`, and a `Temperature` passed to `x: Str` goes through
 `Temperature -> Str`. An arrow between two built-in types doesn't apply
 implicitly. `Int -> Str` backs `Str(5)`, so `f(5)` for `x: Str` is a type error,
-and a `5` that reaches `x` through an `Any` value stays `5`. Null is never
-converted at a call. Functions called by `map` and other higher-order functions,
-and lambdas, don't apply arrows.
+and a `5` that reaches `x` through an `Any` value fails at the call. Null is
+never converted at a call. Functions called by `map` and other higher-order
+functions, and lambdas, don't apply arrows.
+
+### Parameter Checks
+
+A parameter annotated with a built-in type is checked when the function is
+called, after any arrow has run. This catches values `hot check` can't see, such
+as a field of parsed JSON, which is `Any`:
+
+```hot
+port-label fn (port: Int): Str { `port ${port}` }
+
+body from-json("{\"port\": \"443\"}")
+port-label(body.port)  // Err: parameter `port` of `::app/port-label` expected Int, got Str
+```
+
+- The right type passes as it is. The check covers `Int`, `Dec`, `Str`, `Bool`,
+  `Vec`, `Map`, `Bytes`, `Byte` and `Null`, and unions and `?` forms of them.
+- Numbers convert only when nothing is lost: an `Int` becomes a `Dec` at `x: Dec`,
+  and a whole `Dec` such as `443.0` becomes an `Int` at `x: Int`. `443.5` and
+  `"443"` fail at `x: Int`. Convert on purpose with `Int(x)`.
+- Null fails unless the annotation allows it, as `x: Str?` does.
+- `Vec<T>` and `Map<K, V>` check the container, not its contents, so a call costs
+  the same at any size. Use a `where` constraint to check the contents.
+- A value of a declared type over a built-in one, such as `Port(80)` from
+  `Port type Int`, passes `x: Int` and keeps its tag.
+- User types, `Any`, `Fn` and `lazy` parameters aren't checked, and neither is the
+  first parameter of a `fn match` with `Result` arms, which holds the `Result`.
+
+A failed check returns `Err(ConstraintError.Violation)` from the call, before the
+body runs. Using that value halts as any `Err` does, but `if`, `and`, `or` and `not`
+treat an `Err` as false, so use `is-err` where a bad value needs its own branch.
 
 ## Result Types
 
