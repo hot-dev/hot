@@ -23,3 +23,29 @@ meta ["test"] fn () {
     result3 ::hot::ctx/get(key2)
     assert-eq(value2, result3, "ctx multiple keys functionality")
 }
+
+
+test-set-secret-map-and-value
+meta ["test"] fn () {
+    assert-eq("set-secret-value", ::hot::ctx/set-secret("test-secret", "set-secret-value"))
+    assert-eq("set-secret-value", ::hot::ctx/get("test-secret"))
+    secrets {"test-secret-map": "from-a-map"}
+    assert-eq(secrets, ::hot::ctx/set-secret(secrets))
+    assert-eq("from-a-map", ::hot::ctx/get("test-secret-map"))
+}
+
+test-mark-secret-returns-the-value
+meta ["test"] fn () {
+    assert-eq("a-credential-value", ::hot::ctx/mark-secret("a-credential-value"))
+    assert-eq("short", ::hot::ctx/mark-secret("short"))
+    assert-eq(12345, ::hot::ctx/mark-secret(12345))
+    assert-eq(null, ::hot::ctx/mark-secret(null))
+    opts {api-key: "a-credential-value", nested: [{token: "another-value"}], retries: 3}
+    assert-eq(opts, ::hot::ctx/mark-secret(opts))
+}
+
+test-mark-secret-stores-nothing
+meta ["test"] fn () {
+    ::hot::ctx/mark-secret("a-credential-value")
+    assert-eq(null, ::hot::ctx/get("a-credential-value"))
+}

@@ -1545,6 +1545,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             "::hot::ctx/set-secret".to_string(),
             HotLibFn::VmAwareFn(ctx::set_secret),
         );
+        map.insert(
+            "::hot::ctx/mark-secret".to_string(),
+            HotLibFn::VmAwareFn(ctx::mark_secret),
+        );
 
         // Comparison functions
         map.insert("::hot::cmp/eq".to_string(), HotLibFn::LibFn(cmp::eq));

@@ -50,7 +50,7 @@ meta {
 
     token exchange-oauth-code(code)
     ::ctx/set-secret("provider.access.token", token)
-    // Later log lines render the value as ****
+    // Records of this call and later ones show the value as <secret>
     ```
     """
 }
@@ -59,6 +59,38 @@ fn (ctx-map: Map) {
 },
 (key: Str | Var, value: Any): Any {
     call-lib(::hot::ctx/set-secret, [key, value])
+}
+
+
+// Register a value for masking without storing it in the execution context
+mark-secret
+meta {
+    doc: """
+    Mask `value` in this run's call records and return it unchanged, without
+    storing it in the execution context. Maps and Vecs register each value
+    inside them.
+
+    Use this for a credential that arrives as an ordinary argument, like a
+    per-call `opts` Map, so that it is masked wherever it appears: inside
+    composed strings like `Bearer ${key}`, and URL-encoded or base64-encoded.
+
+    Values shorter than 8 bytes are masked only where they are the whole value.
+    Records of calls that finished before this call and were already written
+    keep what they had: mark a credential before passing it on.
+
+    **Example**
+
+    ```hot
+    ::ctx ::hot::ctx
+
+    api-key ::ctx/mark-secret(opts.api-key)
+    ::hot::http/request("GET", url, {"Authorization": `Bearer ${api-key}`})
+    // The records of these calls show `Bearer <secret>`
+    ```
+    """
+}
+fn (value: Any): Any {
+    call-lib(::hot::ctx/mark-secret, [value])
 }
 
 
