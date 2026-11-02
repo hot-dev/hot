@@ -926,6 +926,104 @@ async fn backup_sqlite_before_migrating(
 /// granted.
 const MIGRATION_LOCK_TIMEOUT_MS: i64 = 5_000;
 const MIGRATION_LOCK_RETRIES: u32 = 5;
+/// Indexes that `-- no-transaction` migrations build concurrently.
+const CONCURRENT_INDEXES: &[&str] = &["call_env_start_time_size_idx"];
+/// Taken around every migrator's work, and only ever polled for.
+const MIGRATOR_LOCK: i64 = 0x484f_545f_4d49_4752;
+const MIGRATOR_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+async fn set_lock_timeout(conn: &mut sqlx::PgConnection, ms: i64) -> Result<(), sqlx::Error> {
+    conn.execute(sqlx::AssertSqlSafe(format!("set lock_timeout = {ms}")))
+        .await?;
+    Ok(())
+}
+
+/// A concurrent build that fails or is killed leaves its index behind, invalid.
+/// Its migration isn't recorded, so it runs again, and `IF NOT EXISTS` would
+/// accept that index: PostgreSQL would then maintain it and never read it.
+/// Holding `MIGRATOR_LOCK` means no build is still running.
+async fn clear_interrupted_index_builds(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    let invalid: Vec<String> = sqlx::query_scalar(
+        "SELECT c.relname::text FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='hot' AND NOT i.indisvalid AND c.relname::text=ANY($1)",
+    )
+    .bind(CONCURRENT_INDEXES)
+    .fetch_all(&mut *conn)
+    .await?;
+    for index in invalid {
+        tracing::warn!("Dropping invalid index hot.{index} left by an interrupted build");
+        // The name comes from CONCURRENT_INDEXES.
+        let drop = format!("DROP INDEX CONCURRENTLY IF EXISTS hot.{index}");
+        conn.execute(sqlx::AssertSqlSafe(drop)).await?;
+    }
+    Ok(())
+}
+
+/// A concurrent index build blocks no traffic, but it waits for every older
+/// transaction, including read-only ones, and a lock timeout there would throw
+/// away the finished build. So migrations marked `-- no-transaction` run without one.
+async fn run_pending_migrations(
+    migrator: &sqlx::migrate::Migrator,
+    conn: &mut sqlx::PgConnection,
+    lock_timeout_ms: i64,
+) -> Result<(), sqlx::migrate::MigrateError> {
+    set_lock_timeout(conn, 0).await?;
+    clear_interrupted_index_builds(conn).await?;
+    let ledger = no_ledger_yet(sqlx::query_as(LEDGER_QUERY).fetch_all(&mut *conn).await)?;
+    // Consecutive migrations of a kind share a run, under the timeout for that kind.
+    let mut runs: Vec<(i64, bool)> = Vec::new();
+    for migration in migrator.iter() {
+        if !migration.migration_type.is_up_migration() {
+            continue;
+        }
+        match runs.last_mut() {
+            Some((through, no_tx)) if *no_tx == migration.no_tx => *through = migration.version,
+            _ => runs.push((migration.version, migration.no_tx)),
+        }
+    }
+    for (through, no_tx) in runs {
+        if no_tx && ledger.iter().all(|(version, _)| *version != through) {
+            tracing::info!(
+                "Rebuilding an index through migration {through:03}. Traffic keeps running, but \
+                 this reads the whole table and waits for older transactions to finish"
+            );
+        }
+        set_lock_timeout(conn, if no_tx { 0 } else { lock_timeout_ms }).await?;
+        // `run_to` takes `Acquire`, whose future isn't `Send`, and `hot app` runs
+        // this on a spawned task.
+        migrator
+            .run_direct(Some(through), &mut *conn, false)
+            .await?;
+    }
+    set_lock_timeout(conn, lock_timeout_ms).await?;
+    Ok(())
+}
+
+/// Migrators queue here by polling. One blocked in sqlx's `pg_advisory_lock`
+/// would hold a snapshot, which a concurrent index build waits for, while it
+/// waits for the build: PostgreSQL would call that a deadlock and abort the
+/// build. Past this lock, sqlx's is uncontended.
+async fn run_postgres_migrator(
+    migrator: &sqlx::migrate::Migrator,
+    db: &sqlx::PgPool,
+    lock_timeout_ms: i64,
+) -> Result<(), sqlx::migrate::MigrateError> {
+    let mut conn = db.acquire().await?;
+    while !sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+        .bind(MIGRATOR_LOCK)
+        .fetch_one(&mut *conn)
+        .await?
+    {
+        tokio::time::sleep(MIGRATOR_LOCK_POLL).await;
+    }
+    let result = run_pending_migrations(migrator, &mut conn, lock_timeout_ms).await;
+    // This also releases sqlx's lock, which it keeps when a migration fails.
+    let unlocked = sqlx::query("SELECT pg_advisory_unlock_all()")
+        .execute(&mut *conn)
+        .await;
+    result?;
+    unlocked?;
+    Ok(())
+}
 
 /// A lock timeout or deadlock: running traffic, not the migration, is at fault.
 fn is_lock_contention(err: &sqlx::migrate::MigrateError) -> bool {
@@ -1128,7 +1226,7 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
             let latest = migrator.iter().map(|m| m.version).max();
             let mut attempt = 0;
             loop {
-                let Err(e) = migrator.run(&db).await else {
+                let Err(e) = run_postgres_migrator(&migrator, &db, lock_timeout_ms).await else {
                     break;
                 };
                 // Each migration commits on its own, so a retry resumes at

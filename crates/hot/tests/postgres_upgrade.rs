@@ -1078,6 +1078,143 @@ async fn migrations_retry_after_waiting_out_a_lock_timeout() -> TestResult {
     result
 }
 
+const BUILD_SESSION: &str = "SELECT pid FROM pg_stat_activity \
+     WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='active' \
+     AND query LIKE '%CREATE INDEX CONCURRENTLY%'";
+
+/// 025 builds an index that every trace write maintains, on what can be a very
+/// large table. It must neither block those writes nor give up on the build
+/// because an old transaction is open, and a build that died must not count.
+/// Migrators starting together queue for it, rather than deadlocking with it.
+#[tokio::test]
+async fn call_index_build_waits_for_old_transactions_and_replaces_a_dead_build() -> TestResult {
+    let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+        return Ok(());
+    };
+    let fixture = UpgradeDatabase::new(&admin_uri, 24).await?;
+    let result: TestResult = async {
+        let valid = |index: &'static str| {
+            let owner = fixture.owner.clone();
+            async move {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid \
+                     JOIN pg_namespace n ON n.oid=c.relnamespace \
+                     WHERE n.nspname='hot' AND c.relname=$1",
+                )
+                .bind(index)
+                .fetch_optional(&owner)
+                .await
+            }
+        };
+        // An open snapshot holds a concurrent build back until it ends.
+        let mut request = fixture.owner.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *request)
+            .await?;
+        sqlx::query("SELECT 1 FROM hot.org LIMIT 1")
+            .execute(&mut *request)
+            .await?;
+        // A build that gave up on it leaves an invalid index, which 025's
+        // IF NOT EXISTS would otherwise accept.
+        let dead = connect(&fixture.owner_uri).await?;
+        let mut build = dead.acquire().await?;
+        build.execute("SET lock_timeout='100ms'").await?;
+        let error = build
+            .execute("CREATE INDEX CONCURRENTLY call_env_start_time_size_idx ON hot.call(env_id,start_time) INCLUDE (size)")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("lock timeout"), "{error}");
+        drop(build);
+        dead.close().await;
+        assert_eq!(valid("call_env_start_time_size_idx").await?, Some(false));
+        let until_building = |admin: PgPool| async move {
+            for _ in 0..500 {
+                let session: Option<i32> = sqlx::query_scalar(BUILD_SESSION)
+                    .fetch_optional(&admin)
+                    .await?;
+                if let Some(session) = session {
+                    return Ok(session);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(sqlx::Error::Protocol("the index build never started".into()))
+        };
+        let (run, env) = (Uuid::now_v7(), Uuid::now_v7());
+        let during_build = tokio::spawn({
+            let (admin, building) = (fixture.admin.clone(), until_building(fixture.admin.clone()));
+            async move {
+                let builder = building.await?;
+                // Longer than the lock timeout and PostgreSQL's deadlock check.
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                let still_building = sqlx::query_scalar::<_, i32>(BUILD_SESSION)
+                    .fetch_optional(&admin)
+                    .await?
+                    == Some(builder);
+                // A migrator blocked here would hold a snapshot the build waits for.
+                let migrator_blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                     WHERE datname=current_database() AND wait_event='advisory')",
+                )
+                .fetch_one(&admin)
+                .await?;
+                let mut write = admin.begin().await?;
+                sqlx::raw_sql(
+                    "SET LOCAL lock_timeout='1s'; SET LOCAL session_replication_role=replica",
+                )
+                .execute(&mut *write)
+                .await?;
+                sqlx::query("INSERT INTO hot.call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES($1,$2,$3,'::build/test','root','root',0,now(),41)")
+                    .bind(Uuid::now_v7()).bind(run).bind(env).execute(&mut *write).await?;
+                write.commit().await?;
+                request.rollback().await?;
+                Ok::<_, sqlx::Error>((still_building, migrator_blocked))
+            }
+        });
+        let builder = hot::val!({
+            "uri": fixture.runtime_uri.clone(),
+            "migration-uri": fixture.owner_uri.clone(),
+            "migration-lock-timeout-ms": 100,
+        });
+        let queued = hot::val!({
+            "uri": fixture.runtime_uri.clone(),
+            "migration-uri": fixture.owner_uri.clone(),
+        });
+        let building = until_building(fixture.admin.clone());
+        let (first, second) = tokio::join!(db::run_migrations(&builder), async {
+            building.await.expect("the build should start");
+            db::run_migrations(&queued).await
+        });
+        first?;
+        second?;
+        let (still_building, migrator_blocked) = during_build.await??;
+        assert!(still_building, "the build waits out the lock timeout");
+        assert!(!migrator_blocked, "the second migrator queues by polling");
+        assert_latest_ledger(&fixture.owner).await?;
+        assert_eq!(valid("call_env_start_time_size_idx").await?, Some(true));
+        assert_eq!(valid("call_env_start_time_idx").await?, None);
+        // The write made during the build is in the index.
+        let mut read = fixture.admin.begin().await?;
+        sqlx::raw_sql("SET LOCAL enable_seqscan=off; SET LOCAL enable_bitmapscan=off")
+            .execute(&mut *read)
+            .await?;
+        let size: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(size),0)::bigint FROM hot.call WHERE env_id=$1",
+        )
+        .bind(env)
+        .fetch_one(&mut *read)
+        .await?;
+        assert_eq!(size, 41);
+        read.rollback().await?;
+        // Migrating again finds nothing to do, and keeps the settled index.
+        fixture.upgrade().await?;
+        assert_eq!(valid("call_env_start_time_size_idx").await?, Some(true));
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
 /// A runtime that missed re-provisioning, or started before the migration,
 /// used to pass every startup check and fail each request instead.
 #[tokio::test]
